@@ -160,6 +160,11 @@ func SourceURL(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldSourceURL, v))
 }
 
+// SourceCommit applies equality check predicate on the "source_commit" field. It's identical to SourceCommitEQ.
+func SourceCommit(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldSourceCommit, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldCreated, v))
@@ -1723,6 +1728,81 @@ func SourceURLEqualFold(v string) predicate.Template {
 // SourceURLContainsFold applies the ContainsFold predicate on the "source_url" field.
 func SourceURLContainsFold(v string) predicate.Template {
 	return predicate.Template(sql.FieldContainsFold(FieldSourceURL, v))
+}
+
+// SourceCommitEQ applies the EQ predicate on the "source_commit" field.
+func SourceCommitEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldSourceCommit, v))
+}
+
+// SourceCommitNEQ applies the NEQ predicate on the "source_commit" field.
+func SourceCommitNEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldNEQ(FieldSourceCommit, v))
+}
+
+// SourceCommitIn applies the In predicate on the "source_commit" field.
+func SourceCommitIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldIn(FieldSourceCommit, vs...))
+}
+
+// SourceCommitNotIn applies the NotIn predicate on the "source_commit" field.
+func SourceCommitNotIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldNotIn(FieldSourceCommit, vs...))
+}
+
+// SourceCommitGT applies the GT predicate on the "source_commit" field.
+func SourceCommitGT(v string) predicate.Template {
+	return predicate.Template(sql.FieldGT(FieldSourceCommit, v))
+}
+
+// SourceCommitGTE applies the GTE predicate on the "source_commit" field.
+func SourceCommitGTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldGTE(FieldSourceCommit, v))
+}
+
+// SourceCommitLT applies the LT predicate on the "source_commit" field.
+func SourceCommitLT(v string) predicate.Template {
+	return predicate.Template(sql.FieldLT(FieldSourceCommit, v))
+}
+
+// SourceCommitLTE applies the LTE predicate on the "source_commit" field.
+func SourceCommitLTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldLTE(FieldSourceCommit, v))
+}
+
+// SourceCommitContains applies the Contains predicate on the "source_commit" field.
+func SourceCommitContains(v string) predicate.Template {
+	return predicate.Template(sql.FieldContains(FieldSourceCommit, v))
+}
+
+// SourceCommitHasPrefix applies the HasPrefix predicate on the "source_commit" field.
+func SourceCommitHasPrefix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasPrefix(FieldSourceCommit, v))
+}
+
+// SourceCommitHasSuffix applies the HasSuffix predicate on the "source_commit" field.
+func SourceCommitHasSuffix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasSuffix(FieldSourceCommit, v))
+}
+
+// SourceCommitIsNil applies the IsNil predicate on the "source_commit" field.
+func SourceCommitIsNil() predicate.Template {
+	return predicate.Template(sql.FieldIsNull(FieldSourceCommit))
+}
+
+// SourceCommitNotNil applies the NotNil predicate on the "source_commit" field.
+func SourceCommitNotNil() predicate.Template {
+	return predicate.Template(sql.FieldNotNull(FieldSourceCommit))
+}
+
+// SourceCommitEqualFold applies the EqualFold predicate on the "source_commit" field.
+func SourceCommitEqualFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldEqualFold(FieldSourceCommit, v))
+}
+
+// SourceCommitContainsFold applies the ContainsFold predicate on the "source_commit" field.
+func SourceCommitContainsFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldContainsFold(FieldSourceCommit, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

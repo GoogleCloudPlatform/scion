@@ -15,7 +15,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { describeSourceUrl, isTemplateSourceRefreshable } from './source-url.js';
+import {
+  describeSourceUrl,
+  githubCommitTreeUrl,
+  isTemplateSourceRefreshable,
+} from './source-url.js';
 
 describe('isTemplateSourceRefreshable', () => {
   it.each([
@@ -72,5 +76,44 @@ describe('describeSourceUrl', () => {
     expect(shown!.text).not.toContain('secret');
     expect(shown!.href ?? '').not.toContain('secret');
     if (shown!.href) expect(shown!.href).toMatch(/^https?:/);
+  });
+});
+
+describe('githubCommitTreeUrl', () => {
+  const sha = '0123456789abcdef0123456789abcdef01234567';
+
+  it.each([
+    [
+      'https://github.com/acme/repo/tree/main/.scion/templates/my-tpl',
+      sha,
+      `https://github.com/acme/repo/tree/${sha}/.scion/templates/my-tpl`,
+    ],
+    [
+      'https://github.com/acme/repo/tree/dev',
+      sha,
+      `https://github.com/acme/repo/tree/${sha}`,
+    ],
+    [
+      'https://github.com/acme/repo',
+      sha,
+      `https://github.com/acme/repo/tree/${sha}`,
+    ],
+    [
+      'https://github.com/acme/repo.git',
+      sha,
+      `https://github.com/acme/repo/tree/${sha}`,
+    ],
+    [
+      'git+https://github.com/acme/repo/tree/main/templates/a',
+      sha,
+      `https://github.com/acme/repo/tree/${sha}/templates/a`,
+    ],
+    ['https://example.com/acme/repo/tree/main/t', sha, null],
+    ['builtin://scion/1.0/template/default', sha, null],
+    ['https://github.com/acme/repo/tree/main/t', 'abc1234', null],
+    ['https://github.com/acme/repo/tree/main/t', '', null],
+    [undefined, sha, null],
+  ])('%s @ %s -> %s', (url, commit, want) => {
+    expect(githubCommitTreeUrl(url, commit)).toBe(want);
   });
 });

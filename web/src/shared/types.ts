@@ -1247,6 +1247,8 @@ export interface Template {
   contentHash?: string;
   /** URL the template was imported from, when it was imported. */
   sourceUrl?: string;
+  /** Full 40-char git commit SHA the template files were imported from. */
+  sourceCommit?: string;
   files?: TemplateFileInfo[];
   /** Read-only snapshot of the template's own scion-agent.yaml; see TemplateAgentConfig. */
   agentConfig?: TemplateAgentConfig;

@@ -366,6 +366,10 @@ type commitOpts struct {
 	// commit (the file APIs and the bootstrap upload), so they are not
 	// checked again.
 	written map[string]bool
+	// sourceCommit is the commit SHA attested by an import or refresh caller
+	// (only applied when setSourceCommit is true).
+	sourceCommit    string
+	setSourceCommit bool
 }
 
 // errTemplateStorageNotConfigured is returned when a commit has no storage.
@@ -477,6 +481,14 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 	tmpl.DefaultHarnessConfig = idx.DefaultHarnessConfig
 	tmpl.AgentConfig = idx.AgentConfig
 	tmpl.Layout = store.TemplateLayoutBlobs
+	switch {
+	case opts.setSourceCommit:
+		tmpl.SourceCommit = validateSourceCommit(opts.sourceCommit)
+	case opts.copyFrom != nil:
+		tmpl.SourceCommit = ""
+	case !sameManifest(prevState.Files, next):
+		tmpl.SourceCommit = ""
+	}
 	if tmpl.StoragePath != base {
 		tmpl.StoragePath = base
 		bucket := tmpl.StorageBucket
@@ -509,6 +521,41 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 			"template", tmpl.Name, "template_id", tmpl.ID, "scope", tmpl.Scope, "keys", keys)
 	}
 	return nil
+}
+
+// sameManifest reports whether a and b contain the same set of (path, hash,
+// normalized mode) entries regardless of slice order. Comparing manifests
+// rather than ContentHash ensures a hash-version switch with identical files
+// is treated as unchanged.
+func sameManifest(a, b []store.TemplateFile) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	type manifestEntry struct {
+		path string
+		hash string
+		mode string
+	}
+	seen := make(map[manifestEntry]int, len(a))
+	for _, f := range a {
+		seen[manifestEntry{
+			path: f.Path,
+			hash: f.Hash,
+			mode: transfer.NormalizedModeString(f.Mode),
+		}]++
+	}
+	for _, f := range b {
+		k := manifestEntry{
+			path: f.Path,
+			hash: f.Hash,
+			mode: transfer.NormalizedModeString(f.Mode),
+		}
+		if seen[k] == 0 {
+			return false
+		}
+		seen[k]--
+	}
+	return true
 }
 
 // templateCommitPrecondition returns the stored state a commit of tmpl

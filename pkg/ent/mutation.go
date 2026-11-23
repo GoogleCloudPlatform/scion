@@ -109776,6 +109776,7 @@ type TemplateMutation struct {
 	created_by             *string
 	updated_by             *string
 	source_url             *string
+	source_commit          *string
 	created                *time.Time
 	updated                *time.Time
 	clearedFields          map[string]struct{}
@@ -110901,6 +110902,55 @@ func (m *TemplateMutation) ResetSourceURL() {
 	delete(m.clearedFields, template.FieldSourceURL)
 }
 
+// SetSourceCommit sets the "source_commit" field.
+func (m *TemplateMutation) SetSourceCommit(s string) {
+	m.source_commit = &s
+}
+
+// SourceCommit returns the value of the "source_commit" field in the mutation.
+func (m *TemplateMutation) SourceCommit() (r string, exists bool) {
+	v := m.source_commit
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceCommit returns the old "source_commit" field's value of the Template entity.
+// If the Template object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TemplateMutation) OldSourceCommit(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceCommit is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceCommit requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceCommit: %w", err)
+	}
+	return oldValue.SourceCommit, nil
+}
+
+// ClearSourceCommit clears the value of the "source_commit" field.
+func (m *TemplateMutation) ClearSourceCommit() {
+	m.source_commit = nil
+	m.clearedFields[template.FieldSourceCommit] = struct{}{}
+}
+
+// SourceCommitCleared returns if the "source_commit" field was cleared in this mutation.
+func (m *TemplateMutation) SourceCommitCleared() bool {
+	_, ok := m.clearedFields[template.FieldSourceCommit]
+	return ok
+}
+
+// ResetSourceCommit resets all changes to the "source_commit" field.
+func (m *TemplateMutation) ResetSourceCommit() {
+	m.source_commit = nil
+	delete(m.clearedFields, template.FieldSourceCommit)
+}
+
 // SetCreated sets the "created" field.
 func (m *TemplateMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -111007,7 +111057,7 @@ func (m *TemplateMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TemplateMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.name != nil {
 		fields = append(fields, template.FieldName)
 	}
@@ -111074,6 +111124,9 @@ func (m *TemplateMutation) Fields() []string {
 	if m.source_url != nil {
 		fields = append(fields, template.FieldSourceURL)
 	}
+	if m.source_commit != nil {
+		fields = append(fields, template.FieldSourceCommit)
+	}
 	if m.created != nil {
 		fields = append(fields, template.FieldCreated)
 	}
@@ -111132,6 +111185,8 @@ func (m *TemplateMutation) Field(name string) (ent.Value, bool) {
 		return m.UpdatedBy()
 	case template.FieldSourceURL:
 		return m.SourceURL()
+	case template.FieldSourceCommit:
+		return m.SourceCommit()
 	case template.FieldCreated:
 		return m.Created()
 	case template.FieldUpdated:
@@ -111189,6 +111244,8 @@ func (m *TemplateMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldUpdatedBy(ctx)
 	case template.FieldSourceURL:
 		return m.OldSourceURL(ctx)
+	case template.FieldSourceCommit:
+		return m.OldSourceCommit(ctx)
 	case template.FieldCreated:
 		return m.OldCreated(ctx)
 	case template.FieldUpdated:
@@ -111356,6 +111413,13 @@ func (m *TemplateMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetSourceURL(v)
 		return nil
+	case template.FieldSourceCommit:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceCommit(v)
+		return nil
 	case template.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -111451,6 +111515,9 @@ func (m *TemplateMutation) ClearedFields() []string {
 	if m.FieldCleared(template.FieldSourceURL) {
 		fields = append(fields, template.FieldSourceURL)
 	}
+	if m.FieldCleared(template.FieldSourceCommit) {
+		fields = append(fields, template.FieldSourceCommit)
+	}
 	return fields
 }
 
@@ -111515,6 +111582,9 @@ func (m *TemplateMutation) ClearField(name string) error {
 		return nil
 	case template.FieldSourceURL:
 		m.ClearSourceURL()
+		return nil
+	case template.FieldSourceCommit:
+		m.ClearSourceCommit()
 		return nil
 	}
 	return fmt.Errorf("unknown Template nullable field %s", name)
@@ -111589,6 +111659,9 @@ func (m *TemplateMutation) ResetField(name string) error {
 		return nil
 	case template.FieldSourceURL:
 		m.ResetSourceURL()
+		return nil
+	case template.FieldSourceCommit:
+		m.ResetSourceCommit()
 		return nil
 	case template.FieldCreated:
 		m.ResetCreated()

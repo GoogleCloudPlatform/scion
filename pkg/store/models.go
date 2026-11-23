@@ -1770,7 +1770,8 @@ type Template struct {
 	OwnerID   string `json:"ownerId,omitempty"`
 	CreatedBy string `json:"createdBy,omitempty"`
 	UpdatedBy string `json:"updatedBy,omitempty"`
-	SourceURL string `json:"sourceUrl,omitempty"`
+	SourceURL    string `json:"sourceUrl,omitempty"`
+	SourceCommit string `json:"sourceCommit,omitempty"`
 
 	// Timestamps
 	Created time.Time `json:"created"`

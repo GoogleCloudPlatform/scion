@@ -387,6 +387,17 @@ func runTemplateShow(cmd *cobra.Command, args []string) error {
 	return displayHubTemplateShow(match)
 }
 
+// shortCommit returns the first 7 characters of a commit SHA, or "-" when empty.
+func shortCommit(commit string) string {
+	if commit == "" {
+		return "-"
+	}
+	if len(commit) > 7 {
+		return commit[:7]
+	}
+	return commit
+}
+
 func displayHubTemplateShow(match *TemplateMatch) error {
 	t := match.HubTemplate
 
@@ -410,6 +421,9 @@ func displayHubTemplateShow(match *TemplateMatch) error {
 		if t.SourceURL != "" {
 			output["sourceUrl"] = displaySourceURL(t.SourceURL)
 		}
+		if t.SourceCommit != "" {
+			output["sourceCommit"] = t.SourceCommit
+		}
 		return outputJSON(output)
 	}
 
@@ -427,6 +441,9 @@ func displayHubTemplateShow(match *TemplateMatch) error {
 	}
 	if t.SourceURL != "" {
 		fmt.Printf("Source URL: %s\n", displaySourceURL(t.SourceURL))
+	}
+	if t.SourceCommit != "" {
+		fmt.Printf("Source Commit: %s\n", shortCommit(t.SourceCommit))
 	}
 	fmt.Printf("Created:  %s\n", clitime.Format(t.Created, clitime.Full))
 	fmt.Printf("Updated:  %s\n", clitime.Format(t.Updated, clitime.Full))

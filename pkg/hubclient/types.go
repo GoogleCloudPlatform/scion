@@ -592,6 +592,7 @@ type Template struct {
 	Files         []TemplateFile   `json:"files,omitempty"`
 	BaseTemplate  string           `json:"baseTemplate,omitempty"`
 	SourceURL     string           `json:"sourceUrl,omitempty"`
+	SourceCommit  string           `json:"sourceCommit,omitempty"`
 	Locked        bool             `json:"locked,omitempty"`
 	Status        string           `json:"status"`
 	OwnerID       string           `json:"ownerId,omitempty"`

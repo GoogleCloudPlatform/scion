@@ -26,7 +26,11 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Template } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
-import { describeSourceUrl, isTemplateSourceRefreshable } from '../../shared/source-url.js';
+import {
+  describeSourceUrl,
+  githubCommitTreeUrl,
+  isTemplateSourceRefreshable,
+} from '../../shared/source-url.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { cachedProjectLabel } from '../../client/project-label.js';
@@ -336,6 +340,7 @@ export class ScionPageTemplateDetail extends LitElement {
               ></span>`
             : ''}
           ${this.renderSourceUrl(t.sourceUrl)}
+          ${this.renderSourceCommit(t.sourceUrl, t.sourceCommit)}
           ${t.agentConfig?.message_mode
             ? html`<span>
                 Mode:
@@ -383,6 +388,30 @@ export class ScionPageTemplateDetail extends LitElement {
       >Source:
       <a href=${shown.href} target="_blank" rel="noopener noreferrer">${shown.text}</a></span
     >`;
+  }
+
+  private renderSourceCommit(
+    sourceUrl: string | undefined,
+    sourceCommit: string | undefined
+  ): unknown {
+    if (sourceCommit) {
+      const href = githubCommitTreeUrl(sourceUrl, sourceCommit) ?? '';
+      return html`<span class="hash-meta source-commit-meta"
+        >Source commit:
+        <scion-hash-display
+          .hash=${sourceCommit}
+          .displayText=${sourceCommit.slice(0, 7)}
+          .href=${href}
+          max-width="9ch"
+        ></scion-hash-display
+      ></span>`;
+    }
+    if (isTemplateSourceRefreshable(sourceUrl)) {
+      return html`<span class="source-commit-empty"
+        >Source commit: not recorded — refresh from source to record</span
+      >`;
+    }
+    return '';
   }
 
   // ── Refresh from Source ──

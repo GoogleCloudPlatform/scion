@@ -34,6 +34,20 @@ export class ScionHashDisplay extends LitElement {
   hash = '';
 
   /**
+   * Optional visible label override (e.g. 7-char short commit SHA) while
+   * keeping the full `hash` in the title tooltip and copy action.
+   */
+  @property({ type: String, attribute: 'display-text' })
+  displayText = '';
+
+  /**
+   * Optional link URL. When set, the visible hash text is rendered as an
+   * external link while the copy button remains a sibling control.
+   */
+  @property({ type: String })
+  href = '';
+
+  /**
    * CSS max-width applied to the visible hash text. Anything beyond this
    * is clipped with an ellipsis. The full text remains in the DOM so
    * browser find still matches the truncated portion.
@@ -65,6 +79,15 @@ export class ScionHashDisplay extends LitElement {
       white-space: nowrap;
       vertical-align: bottom;
       min-width: 0;
+    }
+
+    a.hash-text {
+      color: var(--scion-primary, var(--sl-color-primary-600, #3b82f6));
+      text-decoration: none;
+    }
+
+    a.hash-text:hover {
+      text-decoration: underline;
     }
 
     .copy-btn {
@@ -111,8 +134,20 @@ export class ScionHashDisplay extends LitElement {
   override render(): unknown {
     if (!this.hash) return nothing;
     const styleAttr = `--scion-hash-max-width: ${this.maxWidth}`;
+    const label = this.displayText || this.hash;
+    const textEl = this.href
+      ? html`<a
+          class="hash-text"
+          style=${styleAttr}
+          href=${this.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          title=${this.hash}
+          >${label}</a
+        >`
+      : html`<span class="hash-text" style=${styleAttr} title=${this.hash}>${label}</span>`;
     return html`
-      <span class="hash-text" style=${styleAttr} title=${this.hash}>${this.hash}</span>
+      ${textEl}
       <sl-tooltip content=${this.copied ? 'Copied!' : 'Copy to clipboard'}>
         <button
           type="button"
