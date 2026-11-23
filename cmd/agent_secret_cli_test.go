@@ -386,6 +386,7 @@ func TestHubSecretSet_StdinDash(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		case r.Method == http.MethodPut && len(r.URL.Path) > len("/api/v1/secrets/"):
 			gotKey = r.URL.Path[len("/api/v1/secrets/"):]
+			gotReq = hubclient.SetSecretRequest{}
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
 			_ = json.NewEncoder(w).Encode(hubclient.SetSecretResponse{
 				Created: true,
@@ -438,10 +439,10 @@ func TestHubSecretSet_StdinDash(t *testing.T) {
 	})
 
 	t.Run("preserves trailing newline when type is file", func(t *testing.T) {
-		secretType = "file"
-		secretTarget = "~/.ssh/id_ed25519"
 		pem := "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123\n-----END OPENSSH PRIVATE KEY-----\n"
 		c := newTestSetCmd(pem)
+		require.NoError(t, c.Flags().Set("type", "file"))
+		require.NoError(t, c.Flags().Set("target", "~/.ssh/id_ed25519"))
 		require.NoError(t, runSecretSet(c, []string{"SSH_KEY", "-"}))
 		assert.Equal(t, "SSH_KEY", gotKey)
 		assert.Equal(t, pem, gotReq.Value)
