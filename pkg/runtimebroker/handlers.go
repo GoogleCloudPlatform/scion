@@ -38,6 +38,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
@@ -49,6 +50,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
@@ -6562,6 +6564,9 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	})
 }
 
+// maxAgentLogBytes bounds the amount of data read from an agent's agent.log file.
+const maxAgentLogBytes int64 = 10 << 20 // 10 MiB
+
 func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
@@ -6593,16 +6598,27 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 		if agentSlug == "" {
 			agentSlug = found.Name
 		}
-		agentLogPath := filepath.Join(config.GetAgentHomePath(
-			found.ProjectPath, agentSlug,
-		), "agent.log")
-		if data, err := os.ReadFile(agentLogPath); err == nil {
+		agentHome := config.GetAgentHomePath(found.ProjectPath, agentSlug)
+		data, err := agenthome.ReadFileAt(agentHome, "agent.log", maxAgentLogBytes)
+		if err == nil {
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(data)
 			return
 		}
-		// Fall through to container logs if agent.log not found
+		if !errors.Is(err, os.ErrNotExist) {
+			if s.agentLifecycleLog != nil {
+				s.agentLifecycleLog.Warn("Refused to read agent.log",
+					"agent_id", id, "error", err)
+			}
+			if errors.Is(err, dirfd.ErrTooLarge) {
+				Unprocessable(w, "Agent log file exceeds maximum readable size")
+				return
+			}
+			Unprocessable(w, "Agent log file could not be read: entry must be a regular file within size limits")
+			return
+		}
+		// Fall through to container logs if agent.log does not exist.
 	}
 
 	// Fallback: read container stdout logs (resolve runtime for auxiliary runtimes)
