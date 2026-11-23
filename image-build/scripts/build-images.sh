@@ -363,8 +363,7 @@ export SHORT_SHA COMMIT_SHA VERSION BUILD_TIME
 # and files copied from the checkout match the downloaded binaries.
 RELEASE_TAG=""
 if [[ "${BINARIES}" == "release" ]]; then
-  release_tag_re='^(v[0-9]+\.[0-9]+\.[0-9]+(-(preview|rc)\.[0-9]+)?|nightly-[0-9]{8})$'
-  if [[ ! "${TAG}" =~ ${release_tag_re} ]]; then
+  if [[ -z "$(release_tag_or_empty "${TAG}" 2>/dev/null)" ]]; then
     echo "Error: --binaries release requires --tag to be a release tag" >&2
     echo "  (vX.Y.Z, vX.Y.Z-preview.N, vX.Y.Z-rc.N, or nightly-YYYYMMDD), got '${TAG}'." >&2
     echo "  In release mode, --tag names the GitHub Release to download and HEAD must" >&2
@@ -378,6 +377,7 @@ if [[ "${BINARIES}" == "release" ]]; then
     echo "  In release mode, --tag must be a release tag and HEAD must sit exactly" >&2
     echo "  on that tag so image labels (VERSION, GIT_COMMIT) and files copied from" >&2
     echo "  the checkout match the downloaded binaries." >&2
+    echo "  If HEAD carries both a v* tag and a nightly tag, use the v* tag (exact_tag_version prefers v*)." >&2
     echo "  Run: git checkout ${TAG}" >&2
     exit 1
   fi

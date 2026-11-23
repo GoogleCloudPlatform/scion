@@ -1396,11 +1396,16 @@ run_bi "${ON}" --binaries release --tag dev-123 --dry-run --target scion-base --
 check_rc "binaries release: non-release tag 'dev-123' rejected" 1 "${RC}"
 check_contains "binaries release: names bad tag" "got 'dev-123'" "${OUT}"
 
+run_bi "${ON}" --binaries release --tag v01.2.3 --dry-run --target scion-base --allow-stale-base
+check_rc "binaries release: leading-zero tag 'v01.2.3' rejected" 1 "${RC}"
+check_contains "binaries release: leading-zero tag error" "requires --tag to be a release tag" "${OUT}"
+
 # Checkout exact-match validation in release mode
 run_bi "${OFF}" --binaries release --tag v9.9.9 --dry-run --target scion-base --allow-stale-base
 check_rc "binaries release: off-tag checkout rejected" 1 "${RC}"
 check_contains "binaries release: off-tag error names tag" "requires the checkout to be exactly at tag 'v9.9.9'" "${OUT}"
 check_contains "binaries release: off-tag error explains labels" "image labels (VERSION, GIT_COMMIT)" "${OUT}"
+check_contains "binaries release: off-tag error notes v* precedence over nightly" "prefers v*" "${OUT}"
 
 run_bi "${PAST}" --binaries release --tag v9.9.9 --dry-run --target scion-base --allow-stale-base
 check_rc "binaries release: commit past tag rejected" 1 "${RC}"

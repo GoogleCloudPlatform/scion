@@ -173,14 +173,14 @@ When two steps in the same run depend on each other, the orchestrator threads `B
 
 By default (`--binaries source`), `scion-base` and `scion-omni` compile `scion` and `sciontool` from source inside the container build. Pass `--binaries release` to instead download the published Linux release tarballs (`scion-linux-<arch>.tar.gz`, `sciontool-linux-<arch>.tar.gz`) and `SHA256SUMS` from GitHub Releases, verify each tarball against its own `SHA256SUMS` line, and extract them directly into `/usr/local/bin` (still running `lib/assert-no-cgo.sh` on `sciontool`).
 
-- **Tag and checkout requirements:** `--tag` names the GitHub Release to download and must match `vX.Y.Z`, `vX.Y.Z-preview.N`, `vX.Y.Z-rc.N`, or `nightly-YYYYMMDD`. The git checkout must sit **exactly** on that tag (`exact_tag_version` equals `--tag`) so image OCI labels (`VERSION`, `GIT_COMMIT`) and files copied from the checkout match the downloaded binaries.
+- **Tag and checkout requirements:** `--tag` names the GitHub Release to download and must match `vX.Y.Z`, `vX.Y.Z-preview.N`, `vX.Y.Z-rc.N`, or `nightly-YYYYMMDD`. The git checkout must sit **exactly** on that tag (`exact_tag_version` equals `--tag`) so image OCI labels (`VERSION`, `GIT_COMMIT`) and files copied from the checkout match the downloaded binaries. If `HEAD` carries both a `v*` tag and a `nightly-*` tag, release mode requires the `v*` tag (`exact_tag_version` prefers `v*`).
 - **Older releases:** releases cut before `sciontool-linux-{amd64,arm64}.tar.gz` assets were added fail with an error stating that the release predates sciontool assets and directing you to re-run with `--binaries source`. There is no automatic fallback to source compilation.
-- **Trade-offs:** release builds skip `go mod download`, `go build`, and (in `omni`) the web frontend build, and carry the exact bytes users download from GitHub Releases. The release `scion` binary embeds the web UI and is built with `CGO_ENABLED=0`, so `scion-base` (and images inheriting from it) grows by the size of the web bundle; no cgo functionality is lost because SQLite uses pure-Go `modernc.org/sqlite`.
+- **Trade-offs:** under BuildKit/buildah, release builds skip `go mod download`, `go build`, and (in `omni`) the web frontend build (the legacy Docker builder still runs the source stages and discards them). The images carry the exact bytes users download from GitHub Releases. The release `scion` binary embeds the web UI and is built with `CGO_ENABLED=0`, so `scion-base` (and images inheriting from it) grows by the size of the web bundle; no cgo functionality is lost because SQLite uses pure-Go `modernc.org/sqlite`.
 - **Scope:** applies to `image-build/scion-base/Dockerfile` (`scion` and `sciontool`; `scion-hub` inherits it) and `image-build/omni/Dockerfile` (`scion` only). The repo-root `Dockerfile` (`hub-gke`) is unchanged. Supported by `local-docker`, `local-podman`, and `cloud-build`.
 
 ```bash
-git checkout v0.4.0-preview.4
-image-build/scripts/build-images.sh --target common --tag v0.4.0-preview.4 --binaries release
+git checkout vX.Y.Z-preview.N
+image-build/scripts/build-images.sh --target common --tag vX.Y.Z-preview.N --binaries release
 ```
 
 ### Base guard, `--allow-stale-base` and `--strict-base`

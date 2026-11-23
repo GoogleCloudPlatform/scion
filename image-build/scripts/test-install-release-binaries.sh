@@ -126,6 +126,16 @@ ln -s /etc/passwd "${TMP}/stage-sym/scion"
 tar -czf "${REL_SYM}/scion-linux-amd64.tar.gz" -C "${TMP}/stage-sym" scion
 printf '%s  scion-linux-amd64.tar.gz\n' "$(sha256_file "${REL_SYM}/scion-linux-amd64.tar.gz")" > "${REL_SYM}/SHA256SUMS"
 
+# 7. Malformed SHA256SUMS entries (short hash, non-hex hash) — no tarball needed
+# because the 64-hex guard must reject them during SHA256SUMS pre-flight.
+REL_SHORT="${RELEASES}/v0.5.0-rc.4"
+mkdir -p "${REL_SHORT}"
+printf 'deadbeef  scion-linux-amd64.tar.gz\n' > "${REL_SHORT}/SHA256SUMS"
+
+REL_NONHEX="${RELEASES}/v0.5.0-rc.5"
+mkdir -p "${REL_NONHEX}"
+printf 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz  scion-linux-amd64.tar.gz\n' > "${REL_NONHEX}/SHA256SUMS"
+
 OUT=""
 RC=0
 run_inst() {
@@ -203,6 +213,16 @@ DEST_SYM="${TMP}/dest-sym"
 run_inst --base-url "${BASE_URL}" --tag v0.5.0-rc.3 --arch amd64 --dest "${DEST_SYM}" scion
 check_rc "symlink in tarball: exit 1" 1 "${RC}"
 check_contains "symlink in tarball: error message" "did not contain regular file" "${OUT}"
+
+DEST_SHORT="${TMP}/dest-short"
+run_inst --base-url "${BASE_URL}" --tag v0.5.0-rc.4 --arch amd64 --dest "${DEST_SHORT}" scion
+check_rc "short hash in SHA256SUMS: exit 1" 1 "${RC}"
+check_contains "short hash in SHA256SUMS: rejected at pre-flight" "has no scion-linux-amd64.tar.gz entry in SHA256SUMS" "${OUT}"
+
+DEST_NONHEX="${TMP}/dest-nonhex"
+run_inst --base-url "${BASE_URL}" --tag v0.5.0-rc.5 --arch amd64 --dest "${DEST_NONHEX}" scion
+check_rc "non-hex hash in SHA256SUMS: exit 1" 1 "${RC}"
+check_contains "non-hex hash in SHA256SUMS: rejected at pre-flight" "has no scion-linux-amd64.tar.gz entry in SHA256SUMS" "${OUT}"
 
 run_inst --base-url "${BASE_URL}" --tag v9.9.9 --arch amd64 --dest "${TMP}/dest-missing" scion
 check_rc "missing release SHA256SUMS: exit 1" 1 "${RC}"
