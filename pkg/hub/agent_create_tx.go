@@ -224,6 +224,7 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 // dispatch failure.
 const (
 	createStageStorage   = "storage"
+	createStageSecrets   = "secrets"
 	createStageUploadURL = "upload_url"
 	// createStageWorkspaceStorage: the project's workspace is on storage the
 	// target broker cannot reach (the remote-broker refusal, 409).

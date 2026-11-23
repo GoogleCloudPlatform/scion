@@ -302,6 +302,11 @@ type CreateAgentRequest struct {
 	// checked at each send. Scheduled creates set the opt-in server-side
 	// rather than from client input.
 	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
+	// Secrets supplies agent-scoped secrets to store at creation time (behind
+	// hub.agent_secrets). Stored directly in the secret backend after commit
+	// and before dispatch; never copied into AppliedConfig, CreateInputs, logs
+	// or audit payloads.
+	Secrets []AgentSecretInput `json:"secrets,omitempty"`
 }
 
 // GCPIdentityAssignment specifies GCP identity configuration for agent creation.
@@ -1654,6 +1659,14 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Validate create-time agent secrets before any persistence or existing-agent
+	// mutation (design §4.5 step 1). Both create routes reach it here.
+	validatedSecrets, secErr := s.validateCreateAgentSecrets(req.Secrets)
+	if secErr != nil {
+		writeError(w, secErr.status, secErr.code, secErr.message, secErr.details)
+		return
+	}
+
 	// Normalize bounded legacy Profile == ManagedAgentsProfile ("managed-agents")
 	// into req.ManagedAgent = true (clearing req.Profile) and reject contradictory
 	// managed-agent + Runtime Broker placement combinations before any broker
@@ -1979,7 +1992,7 @@ func (s *Server) createAgentInProject(
 	}
 
 	var carriedAgentSecrets []*secret.SecretWithValue
-	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy, &carriedAgentSecrets) {
+	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy, &carriedAgentSecrets, validatedSecrets) {
 	case existingAgentStarted, existingAgentErrored:
 		return // Response already written.
 	case existingAgentConflict:
@@ -2683,6 +2696,7 @@ func (s *Server) createAgentInProject(
 		MutationType:      mutationTypeAgentDelegation,
 		CanDelegateResult: "allow",
 		CanDelegateReason: delegateDecision.Reason,
+		AfterSummary:      createAuditAfterSummaryWithSecrets(validatedSecrets),
 	}
 	var subscription *store.NotificationSubscription
 	if req.Notify {
@@ -2784,6 +2798,20 @@ func (s *Server) createAgentInProject(
 		if err := s.restoreCarriedAgentSecrets(ctx, agent, carriedAgentSecrets); err != nil {
 			failCreate(createRollback{Stage: createStageStorage, Cause: err}, func() {
 				writeErrorFromErr(w, err, "")
+			})
+			return
+		}
+	}
+
+	// Store create-time agent secrets after commit and before dispatch (design
+	// §4.5 steps 3–4). On any write failure, best-effort delete what was
+	// written, hard-delete the new agent via failCreate, and return 503.
+	if len(validatedSecrets) > 0 {
+		if err := s.storeCreateAgentSecrets(ctx, agent, validatedSecrets, secretCreatorAttribution(ctx, createdBy), true); err != nil {
+			slog.ErrorContext(ctx, "agent create: failed to store create-time agent secrets; rolling back agent",
+				"agent_id", agent.ID, "error", err)
+			failCreate(createRollback{Stage: createStageSecrets, Cause: err}, func() {
+				writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, createAgentSecretsStoreFailedMessage, nil)
 			})
 			return
 		}

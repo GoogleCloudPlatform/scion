@@ -1463,6 +1463,7 @@ func (s *Server) handleExistingAgent(
 	req CreateAgentRequest,
 	notifySubscriberType, notifySubscriberID, createdBy string,
 	carriedSecrets *[]*secret.SecretWithValue,
+	createSecrets []validatedAgentSecret,
 ) existingAgentResult {
 	if existingAgent == nil {
 		return existingAgentNone
@@ -1573,6 +1574,12 @@ func (s *Server) handleExistingAgent(
 		// Fail fast on a GCP identity the token-mint gate would refuse,
 		// before any quota reservation or run-intent write.
 		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+			return existingAgentErrored
+		}
+
+		// Upsert create-time secrets onto the existing agent (requires agent.update)
+		// before starting/resuming so delivery picks them up (design §4.5).
+		if !s.upsertExistingAgentSecrets(ctx, w, existingAgent, createSecrets, createdBy) {
 			return existingAgentErrored
 		}
 
@@ -1728,6 +1735,12 @@ func (s *Server) handleExistingAgent(
 			// Fail fast on a GCP identity the token-mint gate would refuse,
 			// before any quota reservation or run-intent write.
 			if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+				return existingAgentErrored
+			}
+
+			// Upsert create-time secrets onto the existing agent (requires agent.update)
+			// before starting/resuming so delivery picks them up (design §4.5).
+			if !s.upsertExistingAgentSecrets(ctx, w, existingAgent, createSecrets, createdBy) {
 				return existingAgentErrored
 			}
 
@@ -2004,6 +2017,12 @@ func (s *Server) handleExistingAgent(
 		// Fail fast on a GCP identity the token-mint gate would refuse,
 		// before any quota reservation or run-intent write.
 		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "start") {
+			return existingAgentErrored
+		}
+
+		// Upsert create-time secrets onto the existing agent (requires agent.update)
+		// before starting so delivery picks them up (design §4.5).
+		if !s.upsertExistingAgentSecrets(ctx, w, existingAgent, createSecrets, createdBy) {
 			return existingAgentErrored
 		}
 

@@ -147,6 +147,10 @@ type HeadlessCreate struct {
 	EventEnv  map[string]string // allow-listed keys only: SCION_TRIGGER_EVENT_ID, SCION_TRIGGER_ID
 	EventFile []byte            // ~/.scion/trigger-event.json, <= 16 KiB; nil in Stage 1
 
+	// Secrets supplies optional create-time agent-scoped secrets (behind
+	// hub.agent_secrets), stored after commit and before dispatch.
+	Secrets []AgentSecretInput
+
 	Detached      bool
 	NotifyBlocked func(ctx context.Context, existing *store.Agent, placementRefused bool)
 }
@@ -311,6 +315,10 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}
 	if hc.resolvedRole == nil {
 		return nil, errHeadlessMissingResolvedRole
+	}
+	validatedSecrets, secErr := s.validateCreateAgentSecrets(hc.Secrets)
+	if secErr != nil {
+		return nil, secErr
 	}
 	if hc.Name == "" {
 		return nil, fmt.Errorf("dispatch_agent payload: agentName is required")
@@ -649,6 +657,7 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		ActorPrincipalKind: creatorIdentity.Type(),
 		ActorPrincipalID:   creatorIdentity.ID(),
 		CanDelegateResult:  "allow",
+		AfterSummary:       createAuditAfterSummaryWithSecrets(validatedSecrets),
 	}
 	initiator := s.scheduledInitiator(hc.Authority.Recorded.Attribution)
 	if initiatorMatchesExecutor(initiator, creatorIdentity) {
@@ -703,6 +712,17 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 			return fmt.Errorf("failed to dispatch agent %q: %w (rollback incomplete, correlation ID %s)", slug, rb.Cause, corrID)
 		}
 		return fmt.Errorf("failed to dispatch agent %q: %w", slug, rb.Cause)
+	}
+
+	if len(validatedSecrets) > 0 {
+		if err := s.storeCreateAgentSecrets(ctx, agent, validatedSecrets, headlessSecretCreatorAttribution(hc.Authority), true); err != nil {
+			slog.ErrorContext(ctx, "headless agent create: failed to store create-time agent secrets; rolling back agent",
+				"agent_id", agent.ID, "error", err)
+			if rbErr := rollback(createRollback{Stage: createStageSecrets, Cause: err}); rbErr != nil {
+				return nil, fmt.Errorf("%s: %w", createAgentSecretsStoreFailedMessage, rbErr)
+			}
+			return nil, fmt.Errorf("%s: %w", createAgentSecretsStoreFailedMessage, err)
+		}
 	}
 
 	dispatchExecutor, _ := ExecutorContextFromContext(ctx)
