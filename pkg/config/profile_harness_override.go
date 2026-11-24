@@ -32,7 +32,7 @@ package config
 // profile override's place, with the same rank over the template image;
 // profileName is not used.
 func (vs *VersionedSettings) ProfileHarnessOverrideImage(profileName, harnessConfigName string) string {
-	if vs == nil || harnessConfigName == "" {
+	if vs == nil || harnessConfigName == "" || harnessConfigName == ShellHarnessConfigName {
 		return ""
 	}
 	if vs.flat != nil {
@@ -54,7 +54,7 @@ func (vs *VersionedSettings) ProfileHarnessOverrideImage(profileName, harnessCon
 // profile image (ptone/scion#1799). On a flat instance view it is the
 // instance's agent_defaults.harness_overrides.<harnessConfigName>.image_pull_policy.
 func (vs *VersionedSettings) ProfileHarnessOverrideImagePullPolicy(profileName, harnessConfigName string) string {
-	if vs == nil || harnessConfigName == "" {
+	if vs == nil || harnessConfigName == "" || harnessConfigName == ShellHarnessConfigName {
 		return ""
 	}
 	if vs.flat != nil {

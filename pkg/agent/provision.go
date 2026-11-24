@@ -1612,17 +1612,11 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 	}
 	harnessConfigName := hcResolution.Name
 
-	// If settings/profile resolved harnessConfigName to "shell" after a
-	// template chain was loaded, discard the template chain and rebuild
-	// finalScionCfg from inlineCfg only so no template job keys or paths reach
-	// a shell container.
-	if harnessConfigName == config.ShellHarnessConfigName && len(chain) > 0 {
-		chain = nil
-		templateWarnings = nil
-		finalScionCfg = &api.ScionConfig{}
-		if inlineCfg != nil {
-			finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
-		}
+	// The broker must never resolve "shell" from a template, settings, or
+	// profile default — only when the request explicitly names it
+	// (ptone/scion#8812 §3.2, §14).
+	if harnessConfigName == config.ShellHarnessConfigName && !isShellRequested {
+		return nil, fmt.Errorf("harness-config %q must be requested explicitly and cannot be resolved from %s", config.ShellHarnessConfigName, hcResolution.Source)
 	}
 
 	// Load harness-config from disk (check template dirs first)
@@ -2577,7 +2571,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// See docs-site/src/content/docs/reference/settings-precedence.md.
 	hcImage := hcDir.Config.Image
 	hcPullPolicy := hcDir.Config.ImagePullPolicy
-	if settings != nil {
+	if settings != nil && harnessConfigName != config.ShellHarnessConfigName {
 		if settingsHC, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil {
 			if settingsHC.Image != "" {
 				hcImage = settingsHC.Image
@@ -2834,12 +2828,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// 2e. Merge settings env, volumes and auth if available. The volumes,
 	// like the harness-config image, pull policy and volumes above, are
 	// environment values: kept in the returned config, not persisted
-	// (ptone/scion#4561).
-	if settings != nil {
+	// (ptone/scion#4561). Skipped entirely for the reserved "shell" harness
+	// config so broker settings/profile overlays cannot inject env, volumes,
+	// or auth into an execution container (ptone/scion#8812 §3.2, §14).
+	if settings != nil && harnessConfigName != config.ShellHarnessConfigName {
 		hConfig, err := settings.ResolveHarnessConfig(profileName, harnessConfigName)
 		if err == nil {
 			settingsCfg := &api.ScionConfig{}
-			if hConfig.Env != nil && harnessConfigName != config.ShellHarnessConfigName {
+			if hConfig.Env != nil {
 				settingsCfg.Env, _ = sanitizeHarnessConfigEnv(hConfig.Env, "settings", false)
 			}
 			if hConfig.Volumes != nil {

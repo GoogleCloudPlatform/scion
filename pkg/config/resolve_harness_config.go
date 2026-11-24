@@ -74,11 +74,17 @@ func ResolveHarnessConfigName(inputs HarnessConfigInputs) (*HarnessConfigResolut
 	// 6. Profile's DefaultHarnessConfig (on a flat instance, the instance's
 	// agent_defaults.default_harness_config; TierDefaultHarnessConfig)
 	if name, source := inputs.Settings.TierDefaultHarnessConfig(inputs.ProfileName); name != "" {
+		if name == ShellHarnessConfigName {
+			return nil, fmt.Errorf("harness-config %q cannot be resolved from %s; specify it explicitly", ShellHarnessConfigName, source)
+		}
 		return resolved(name, source), nil
 	}
 
 	// 7. Settings' top-level default
 	if inputs.Settings != nil && inputs.Settings.DefaultHarnessConfig != "" {
+		if inputs.Settings.DefaultHarnessConfig == ShellHarnessConfigName {
+			return nil, fmt.Errorf("harness-config %q cannot be resolved from settings-default; specify it explicitly", ShellHarnessConfigName)
+		}
 		return resolved(inputs.Settings.DefaultHarnessConfig, "settings-default"), nil
 	}
 

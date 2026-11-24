@@ -7483,7 +7483,7 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	if req.Config != nil {
 		cliFlag = req.Config.HarnessConfig
 	}
-	if cliFlag == "" && req.Config != nil && req.Config.Template != "" {
+	if cliFlag == "" && req.Config != nil && req.Config.Template != "" && req.Config.Template != config.ShellHarnessConfigName {
 		tpl := req.Config.Template
 		if req.ProjectPath != "" {
 			if _, err := config.FindHarnessConfigDir(tpl, harnessConfigProjectTier(req.ProjectPath)); err == nil {

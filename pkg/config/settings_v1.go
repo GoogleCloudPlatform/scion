@@ -60,6 +60,13 @@ import (
 // applied over the same harness_configs.<hc> base, and profileName is not
 // used.
 func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName string) (HarnessConfigEntry, error) {
+	// The reserved built-in "shell" execution container ignores all settings
+	// and profile overlays (harness_configs.shell.*, profiles.*.harness_overrides.shell.*,
+	// and profile volumes) so nothing can shadow or inject into it
+	// (ptone/scion#8812 §3.2, §14).
+	if harnessConfigName == ShellHarnessConfigName {
+		return HarnessConfigEntry{}, fmt.Errorf("harness-config %q is reserved and ignores settings/profile overlays", ShellHarnessConfigName)
+	}
 	if vs != nil && vs.flat != nil {
 		result := vs.HarnessConfigs[harnessConfigName]
 		d := vs.flat.Defaults
@@ -1197,7 +1204,10 @@ func (vs *VersionedSettings) TierResources(profileName, harnessConfigName string
 	}
 	if vs.flat != nil {
 		d := vs.flat.Defaults
-		resources, harnessOverrideResources = d.Resources, d.HarnessOverrides[harnessConfigName].Resources
+		resources = d.Resources
+		if harnessConfigName != ShellHarnessConfigName {
+			harnessOverrideResources = d.HarnessOverrides[harnessConfigName].Resources
+		}
 		if resources == nil && harnessOverrideResources == nil {
 			return nil, nil, ""
 		}
@@ -1210,7 +1220,10 @@ func (vs *VersionedSettings) TierResources(profileName, harnessConfigName string
 	if !ok {
 		return nil, nil, ""
 	}
-	return p.Resources, p.HarnessOverrides[harnessConfigName].Resources, "profiles." + profileName
+	if harnessConfigName != ShellHarnessConfigName {
+		harnessOverrideResources = p.HarnessOverrides[harnessConfigName].Resources
+	}
+	return p.Resources, harnessOverrideResources, "profiles." + profileName
 }
 
 // TierSecrets returns the tier's secret declarations (required-env step
@@ -1243,7 +1256,7 @@ func (vs *VersionedSettings) TierSecrets(profileName string) ([]api.RequiredSecr
 // whether it is set, and its settings path. An empty profileName means the
 // active profile.
 func (vs *VersionedSettings) TierHarnessOverride(profileName, harnessConfigName string) (V1HarnessOverride, bool, string) {
-	if vs == nil {
+	if vs == nil || harnessConfigName == ShellHarnessConfigName {
 		return V1HarnessOverride{}, false, ""
 	}
 	if vs.flat != nil {
