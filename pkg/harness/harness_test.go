@@ -86,6 +86,22 @@ func TestGeminiCLIDefaultModel_ResolvesThroughAliases(t *testing.T) {
 	assert.NotEqual(t, "medium", resolved)
 }
 
+// TestAntigravityDefaultModelAlias_ResolvesToConcreteModel guards ptone/scion#9153:
+// harnesses/antigravity/provision.py falls back to model_aliases["medium"] when
+// no explicit model or AGY_MODEL override is set, so the embedded config.yaml
+// must define a concrete, non-empty "medium" alias.
+func TestAntigravityDefaultModelAlias_ResolvesToConcreteModel(t *testing.T) {
+	data, err := fs.ReadFile(HarnessesFS(), "antigravity/config.yaml")
+	require.NoError(t, err)
+	entry, err := config.ParseHarnessConfigYAML(data)
+	require.NoError(t, err)
+	medium := entry.ModelAliases["medium"]
+	assert.NotEmpty(t, medium)
+	assert.NotEqual(t, "medium", medium)
+	assert.NotContains(t, entry.ModelAliases, medium,
+		"medium alias %q must map to a concrete model, not another alias", medium)
+}
+
 // TestDefaultModelAliases_UnknownOrEmptyHarnessReturnsNil is the "nil/empty
 // config" guard test for harness.go's DefaultModelAliases: a harness name
 // with no embedded config.yaml (fs.ReadFile error) and one whose name is
