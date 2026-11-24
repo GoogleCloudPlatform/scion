@@ -53,15 +53,18 @@ type ScheduleResponse struct {
 	Payload string `json:"payload"`
 }
 
-// ExecSummary is an exec run's outcome without its command or output (D2 =
-// b): exit codes, durations and byte counts are not secret.
+// ExecSummary is an exec run's non-secret outcome metadata without its command
+// or captured output bytes: exit codes, durations, byte counts, capture mode
+// and output status are non-secret.
 type ExecSummary struct {
-	Outcome     string     `json:"outcome"`
-	ExitCode    *int       `json:"exitCode,omitempty"`
-	DurationMS  *int64     `json:"durationMs,omitempty"`
-	OutputBytes *int64     `json:"outputBytes,omitempty"`
-	StartedAt   time.Time  `json:"startedAt"`
-	FinishedAt  *time.Time `json:"finishedAt,omitempty"`
+	Outcome      string     `json:"outcome"`
+	ExitCode     *int       `json:"exitCode,omitempty"`
+	DurationMS   *int64     `json:"durationMs,omitempty"`
+	OutputBytes  *int64     `json:"outputBytes,omitempty"`
+	CaptureMode  string     `json:"captureMode,omitempty"`
+	OutputStatus string     `json:"outputStatus,omitempty"`
+	StartedAt    time.Time  `json:"startedAt"`
+	FinishedAt   *time.Time `json:"finishedAt,omitempty"`
 }
 
 // redactedExecPayload is the payload an exec row shows a caller without
@@ -70,6 +73,7 @@ type redactedExecPayload struct {
 	AgentID         string `json:"agentId,omitempty"`
 	AgentName       string `json:"agentName,omitempty"`
 	TimeoutSeconds  int    `json:"timeoutSeconds,omitempty"`
+	CaptureOutput   string `json:"captureOutput,omitempty"`
 	CommandRedacted bool   `json:"commandRedacted"`
 	Argc            int    `json:"argc,omitempty"`
 	CommandSHA256   string `json:"commandSha256,omitempty"`
@@ -83,6 +87,9 @@ func redactExecPayload(raw string) string {
 	var p scheduledExecPayload
 	if err := json.Unmarshal([]byte(raw), &p); err == nil {
 		out.AgentID, out.AgentName, out.TimeoutSeconds = p.AgentID, p.AgentName, p.TimeoutSeconds
+		if p.CaptureOutput != "none" {
+			out.CaptureOutput = p.CaptureOutput
+		}
 		out.Argc = len(p.Command)
 		out.CommandSHA256 = agentcontrol.ExecArgvDigest(p.Command)
 	}
@@ -214,12 +221,14 @@ func buildScheduledEventResponse(rev *execRevealer, evt store.ScheduledEvent, ru
 	resp := ScheduledEventResponse{ScheduledEvent: evt, Payload: payload}
 	if run, ok := runs[evt.ID]; ok && evt.EventType == scheduledEventTypeExec {
 		resp.ExecSummary = &ExecSummary{
-			Outcome:     run.Outcome,
-			ExitCode:    run.ExitCode,
-			DurationMS:  run.DurationMS,
-			OutputBytes: run.OutputBytes,
-			StartedAt:   run.StartedAt,
-			FinishedAt:  run.FinishedAt,
+			Outcome:      run.Outcome,
+			ExitCode:     run.ExitCode,
+			DurationMS:   run.DurationMS,
+			OutputBytes:  run.OutputBytes,
+			CaptureMode:  run.CaptureMode,
+			OutputStatus: run.OutputStatus,
+			StartedAt:    run.StartedAt,
+			FinishedAt:   run.FinishedAt,
 		}
 	}
 	return resp

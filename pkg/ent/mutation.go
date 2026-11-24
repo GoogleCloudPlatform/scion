@@ -52,6 +52,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/execrunoutput"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -180,6 +181,7 @@ const (
 	TypeDurableQueueItem              = "DurableQueueItem"
 	TypeEntitlementBinding            = "EntitlementBinding"
 	TypeEnvVar                        = "EnvVar"
+	TypeExecRunOutput                 = "ExecRunOutput"
 	TypeExternalIdentity              = "ExternalIdentity"
 	TypeGCPServiceAccount             = "GCPServiceAccount"
 	TypeGitHubResolutionCache         = "GitHubResolutionCache"
@@ -50707,6 +50709,554 @@ func (m *EnvVarMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown EnvVar edge %s", name)
 }
 
+// ExecRunOutputMutation represents an operation that mutates the ExecRunOutput nodes in the graph.
+type ExecRunOutputMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	owner_kind    *execrunoutput.OwnerKind
+	project_id    *uuid.UUID
+	capture_mode  *string
+	content       *[]byte
+	created_at    *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*ExecRunOutput, error)
+	predicates    []predicate.ExecRunOutput
+}
+
+var _ ent.Mutation = (*ExecRunOutputMutation)(nil)
+
+// execrunoutputOption allows management of the mutation configuration using functional options.
+type execrunoutputOption func(*ExecRunOutputMutation)
+
+// newExecRunOutputMutation creates new mutation for the ExecRunOutput entity.
+func newExecRunOutputMutation(c config, op Op, opts ...execrunoutputOption) *ExecRunOutputMutation {
+	m := &ExecRunOutputMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeExecRunOutput,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withExecRunOutputID sets the ID field of the mutation.
+func withExecRunOutputID(id uuid.UUID) execrunoutputOption {
+	return func(m *ExecRunOutputMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ExecRunOutput
+		)
+		m.oldValue = func(ctx context.Context) (*ExecRunOutput, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ExecRunOutput.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withExecRunOutput sets the old ExecRunOutput of the mutation.
+func withExecRunOutput(node *ExecRunOutput) execrunoutputOption {
+	return func(m *ExecRunOutputMutation) {
+		m.oldValue = func(context.Context) (*ExecRunOutput, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ExecRunOutputMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ExecRunOutputMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of ExecRunOutput entities.
+func (m *ExecRunOutputMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ExecRunOutputMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ExecRunOutputMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ExecRunOutput.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetOwnerKind sets the "owner_kind" field.
+func (m *ExecRunOutputMutation) SetOwnerKind(ek execrunoutput.OwnerKind) {
+	m.owner_kind = &ek
+}
+
+// OwnerKind returns the value of the "owner_kind" field in the mutation.
+func (m *ExecRunOutputMutation) OwnerKind() (r execrunoutput.OwnerKind, exists bool) {
+	v := m.owner_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOwnerKind returns the old "owner_kind" field's value of the ExecRunOutput entity.
+// If the ExecRunOutput object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ExecRunOutputMutation) OldOwnerKind(ctx context.Context) (v execrunoutput.OwnerKind, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOwnerKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOwnerKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOwnerKind: %w", err)
+	}
+	return oldValue.OwnerKind, nil
+}
+
+// ResetOwnerKind resets all changes to the "owner_kind" field.
+func (m *ExecRunOutputMutation) ResetOwnerKind() {
+	m.owner_kind = nil
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *ExecRunOutputMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *ExecRunOutputMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the ExecRunOutput entity.
+// If the ExecRunOutput object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ExecRunOutputMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *ExecRunOutputMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetCaptureMode sets the "capture_mode" field.
+func (m *ExecRunOutputMutation) SetCaptureMode(s string) {
+	m.capture_mode = &s
+}
+
+// CaptureMode returns the value of the "capture_mode" field in the mutation.
+func (m *ExecRunOutputMutation) CaptureMode() (r string, exists bool) {
+	v := m.capture_mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCaptureMode returns the old "capture_mode" field's value of the ExecRunOutput entity.
+// If the ExecRunOutput object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ExecRunOutputMutation) OldCaptureMode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCaptureMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCaptureMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCaptureMode: %w", err)
+	}
+	return oldValue.CaptureMode, nil
+}
+
+// ResetCaptureMode resets all changes to the "capture_mode" field.
+func (m *ExecRunOutputMutation) ResetCaptureMode() {
+	m.capture_mode = nil
+}
+
+// SetContent sets the "content" field.
+func (m *ExecRunOutputMutation) SetContent(b []byte) {
+	m.content = &b
+}
+
+// Content returns the value of the "content" field in the mutation.
+func (m *ExecRunOutputMutation) Content() (r []byte, exists bool) {
+	v := m.content
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldContent returns the old "content" field's value of the ExecRunOutput entity.
+// If the ExecRunOutput object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ExecRunOutputMutation) OldContent(ctx context.Context) (v []byte, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldContent is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldContent requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldContent: %w", err)
+	}
+	return oldValue.Content, nil
+}
+
+// ResetContent resets all changes to the "content" field.
+func (m *ExecRunOutputMutation) ResetContent() {
+	m.content = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *ExecRunOutputMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *ExecRunOutputMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the ExecRunOutput entity.
+// If the ExecRunOutput object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ExecRunOutputMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *ExecRunOutputMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// Where appends a list predicates to the ExecRunOutputMutation builder.
+func (m *ExecRunOutputMutation) Where(ps ...predicate.ExecRunOutput) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ExecRunOutputMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ExecRunOutputMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ExecRunOutput, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ExecRunOutputMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ExecRunOutputMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ExecRunOutput).
+func (m *ExecRunOutputMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ExecRunOutputMutation) Fields() []string {
+	fields := make([]string, 0, 5)
+	if m.owner_kind != nil {
+		fields = append(fields, execrunoutput.FieldOwnerKind)
+	}
+	if m.project_id != nil {
+		fields = append(fields, execrunoutput.FieldProjectID)
+	}
+	if m.capture_mode != nil {
+		fields = append(fields, execrunoutput.FieldCaptureMode)
+	}
+	if m.content != nil {
+		fields = append(fields, execrunoutput.FieldContent)
+	}
+	if m.created_at != nil {
+		fields = append(fields, execrunoutput.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ExecRunOutputMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case execrunoutput.FieldOwnerKind:
+		return m.OwnerKind()
+	case execrunoutput.FieldProjectID:
+		return m.ProjectID()
+	case execrunoutput.FieldCaptureMode:
+		return m.CaptureMode()
+	case execrunoutput.FieldContent:
+		return m.Content()
+	case execrunoutput.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ExecRunOutputMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case execrunoutput.FieldOwnerKind:
+		return m.OldOwnerKind(ctx)
+	case execrunoutput.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case execrunoutput.FieldCaptureMode:
+		return m.OldCaptureMode(ctx)
+	case execrunoutput.FieldContent:
+		return m.OldContent(ctx)
+	case execrunoutput.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown ExecRunOutput field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ExecRunOutputMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case execrunoutput.FieldOwnerKind:
+		v, ok := value.(execrunoutput.OwnerKind)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOwnerKind(v)
+		return nil
+	case execrunoutput.FieldProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case execrunoutput.FieldCaptureMode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCaptureMode(v)
+		return nil
+	case execrunoutput.FieldContent:
+		v, ok := value.([]byte)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetContent(v)
+		return nil
+	case execrunoutput.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ExecRunOutput field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ExecRunOutputMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ExecRunOutputMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ExecRunOutputMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown ExecRunOutput numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ExecRunOutputMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ExecRunOutputMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ExecRunOutputMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown ExecRunOutput nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ExecRunOutputMutation) ResetField(name string) error {
+	switch name {
+	case execrunoutput.FieldOwnerKind:
+		m.ResetOwnerKind()
+		return nil
+	case execrunoutput.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case execrunoutput.FieldCaptureMode:
+		m.ResetCaptureMode()
+		return nil
+	case execrunoutput.FieldContent:
+		m.ResetContent()
+		return nil
+	case execrunoutput.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown ExecRunOutput field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ExecRunOutputMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ExecRunOutputMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ExecRunOutputMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ExecRunOutputMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ExecRunOutputMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ExecRunOutputMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ExecRunOutputMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown ExecRunOutput unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ExecRunOutputMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown ExecRunOutput edge %s", name)
+}
+
 // ExternalIdentityMutation represents an operation that mutates the ExternalIdentity nodes in the graph.
 type ExternalIdentityMutation struct {
 	config
@@ -100149,6 +100699,8 @@ type ScheduledExecRunMutation struct {
 	addduration_ms            *int64
 	output_bytes              *int64
 	addoutput_bytes           *int64
+	capture_mode              *string
+	output_status             *string
 	runtime                   *string
 	launch_id                 *string
 	last_polled_at            *time.Time
@@ -101246,6 +101798,78 @@ func (m *ScheduledExecRunMutation) ResetOutputBytes() {
 	delete(m.clearedFields, scheduledexecrun.FieldOutputBytes)
 }
 
+// SetCaptureMode sets the "capture_mode" field.
+func (m *ScheduledExecRunMutation) SetCaptureMode(s string) {
+	m.capture_mode = &s
+}
+
+// CaptureMode returns the value of the "capture_mode" field in the mutation.
+func (m *ScheduledExecRunMutation) CaptureMode() (r string, exists bool) {
+	v := m.capture_mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCaptureMode returns the old "capture_mode" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldCaptureMode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCaptureMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCaptureMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCaptureMode: %w", err)
+	}
+	return oldValue.CaptureMode, nil
+}
+
+// ResetCaptureMode resets all changes to the "capture_mode" field.
+func (m *ScheduledExecRunMutation) ResetCaptureMode() {
+	m.capture_mode = nil
+}
+
+// SetOutputStatus sets the "output_status" field.
+func (m *ScheduledExecRunMutation) SetOutputStatus(s string) {
+	m.output_status = &s
+}
+
+// OutputStatus returns the value of the "output_status" field in the mutation.
+func (m *ScheduledExecRunMutation) OutputStatus() (r string, exists bool) {
+	v := m.output_status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutputStatus returns the old "output_status" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldOutputStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutputStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutputStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutputStatus: %w", err)
+	}
+	return oldValue.OutputStatus, nil
+}
+
+// ResetOutputStatus resets all changes to the "output_status" field.
+func (m *ScheduledExecRunMutation) ResetOutputStatus() {
+	m.output_status = nil
+}
+
 // SetRuntime sets the "runtime" field.
 func (m *ScheduledExecRunMutation) SetRuntime(s string) {
 	m.runtime = &s
@@ -101471,7 +102095,7 @@ func (m *ScheduledExecRunMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduledExecRunMutation) Fields() []string {
-	fields := make([]string, 0, 26)
+	fields := make([]string, 0, 28)
 	if m.event != nil {
 		fields = append(fields, scheduledexecrun.FieldEventID)
 	}
@@ -101538,6 +102162,12 @@ func (m *ScheduledExecRunMutation) Fields() []string {
 	if m.output_bytes != nil {
 		fields = append(fields, scheduledexecrun.FieldOutputBytes)
 	}
+	if m.capture_mode != nil {
+		fields = append(fields, scheduledexecrun.FieldCaptureMode)
+	}
+	if m.output_status != nil {
+		fields = append(fields, scheduledexecrun.FieldOutputStatus)
+	}
 	if m.runtime != nil {
 		fields = append(fields, scheduledexecrun.FieldRuntime)
 	}
@@ -101602,6 +102232,10 @@ func (m *ScheduledExecRunMutation) Field(name string) (ent.Value, bool) {
 		return m.DurationMs()
 	case scheduledexecrun.FieldOutputBytes:
 		return m.OutputBytes()
+	case scheduledexecrun.FieldCaptureMode:
+		return m.CaptureMode()
+	case scheduledexecrun.FieldOutputStatus:
+		return m.OutputStatus()
 	case scheduledexecrun.FieldRuntime:
 		return m.Runtime()
 	case scheduledexecrun.FieldLaunchID:
@@ -101663,6 +102297,10 @@ func (m *ScheduledExecRunMutation) OldField(ctx context.Context, name string) (e
 		return m.OldDurationMs(ctx)
 	case scheduledexecrun.FieldOutputBytes:
 		return m.OldOutputBytes(ctx)
+	case scheduledexecrun.FieldCaptureMode:
+		return m.OldCaptureMode(ctx)
+	case scheduledexecrun.FieldOutputStatus:
+		return m.OldOutputStatus(ctx)
 	case scheduledexecrun.FieldRuntime:
 		return m.OldRuntime(ctx)
 	case scheduledexecrun.FieldLaunchID:
@@ -101833,6 +102471,20 @@ func (m *ScheduledExecRunMutation) SetField(name string, value ent.Value) error 
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetOutputBytes(v)
+		return nil
+	case scheduledexecrun.FieldCaptureMode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCaptureMode(v)
+		return nil
+	case scheduledexecrun.FieldOutputStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutputStatus(v)
 		return nil
 	case scheduledexecrun.FieldRuntime:
 		v, ok := value.(string)
@@ -102096,6 +102748,12 @@ func (m *ScheduledExecRunMutation) ResetField(name string) error {
 		return nil
 	case scheduledexecrun.FieldOutputBytes:
 		m.ResetOutputBytes()
+		return nil
+	case scheduledexecrun.FieldCaptureMode:
+		m.ResetCaptureMode()
+		return nil
+	case scheduledexecrun.FieldOutputStatus:
+		m.ResetOutputStatus()
 		return nil
 	case scheduledexecrun.FieldRuntime:
 		m.ResetRuntime()

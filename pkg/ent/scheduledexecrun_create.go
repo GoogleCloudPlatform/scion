@@ -269,6 +269,34 @@ func (_c *ScheduledExecRunCreate) SetNillableOutputBytes(v *int64) *ScheduledExe
 	return _c
 }
 
+// SetCaptureMode sets the "capture_mode" field.
+func (_c *ScheduledExecRunCreate) SetCaptureMode(v string) *ScheduledExecRunCreate {
+	_c.mutation.SetCaptureMode(v)
+	return _c
+}
+
+// SetNillableCaptureMode sets the "capture_mode" field if the given value is not nil.
+func (_c *ScheduledExecRunCreate) SetNillableCaptureMode(v *string) *ScheduledExecRunCreate {
+	if v != nil {
+		_c.SetCaptureMode(*v)
+	}
+	return _c
+}
+
+// SetOutputStatus sets the "output_status" field.
+func (_c *ScheduledExecRunCreate) SetOutputStatus(v string) *ScheduledExecRunCreate {
+	_c.mutation.SetOutputStatus(v)
+	return _c
+}
+
+// SetNillableOutputStatus sets the "output_status" field if the given value is not nil.
+func (_c *ScheduledExecRunCreate) SetNillableOutputStatus(v *string) *ScheduledExecRunCreate {
+	if v != nil {
+		_c.SetOutputStatus(*v)
+	}
+	return _c
+}
+
 // SetRuntime sets the "runtime" field.
 func (_c *ScheduledExecRunCreate) SetRuntime(v string) *ScheduledExecRunCreate {
 	_c.mutation.SetRuntime(v)
@@ -407,6 +435,14 @@ func (_c *ScheduledExecRunCreate) defaults() {
 		v := scheduledexecrun.DefaultOutcome
 		_c.mutation.SetOutcome(v)
 	}
+	if _, ok := _c.mutation.CaptureMode(); !ok {
+		v := scheduledexecrun.DefaultCaptureMode
+		_c.mutation.SetCaptureMode(v)
+	}
+	if _, ok := _c.mutation.OutputStatus(); !ok {
+		v := scheduledexecrun.DefaultOutputStatus
+		_c.mutation.SetOutputStatus(v)
+	}
 	if _, ok := _c.mutation.Runtime(); !ok {
 		v := scheduledexecrun.DefaultRuntime
 		_c.mutation.SetRuntime(v)
@@ -487,6 +523,12 @@ func (_c *ScheduledExecRunCreate) check() error {
 		if err := scheduledexecrun.OutcomeValidator(v); err != nil {
 			return &ValidationError{Name: "outcome", err: fmt.Errorf(`ent: validator failed for field "ScheduledExecRun.outcome": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.CaptureMode(); !ok {
+		return &ValidationError{Name: "capture_mode", err: errors.New(`ent: missing required field "ScheduledExecRun.capture_mode"`)}
+	}
+	if _, ok := _c.mutation.OutputStatus(); !ok {
+		return &ValidationError{Name: "output_status", err: errors.New(`ent: missing required field "ScheduledExecRun.output_status"`)}
 	}
 	if _, ok := _c.mutation.Runtime(); !ok {
 		return &ValidationError{Name: "runtime", err: errors.New(`ent: missing required field "ScheduledExecRun.runtime"`)}
@@ -622,6 +664,14 @@ func (_c *ScheduledExecRunCreate) createSpec() (*ScheduledExecRun, *sqlgraph.Cre
 	if value, ok := _c.mutation.OutputBytes(); ok {
 		_spec.SetField(scheduledexecrun.FieldOutputBytes, field.TypeInt64, value)
 		_node.OutputBytes = &value
+	}
+	if value, ok := _c.mutation.CaptureMode(); ok {
+		_spec.SetField(scheduledexecrun.FieldCaptureMode, field.TypeString, value)
+		_node.CaptureMode = value
+	}
+	if value, ok := _c.mutation.OutputStatus(); ok {
+		_spec.SetField(scheduledexecrun.FieldOutputStatus, field.TypeString, value)
+		_node.OutputStatus = value
 	}
 	if value, ok := _c.mutation.Runtime(); ok {
 		_spec.SetField(scheduledexecrun.FieldRuntime, field.TypeString, value)
@@ -810,6 +860,18 @@ func (u *ScheduledExecRunUpsert) ClearOutputBytes() *ScheduledExecRunUpsert {
 	return u
 }
 
+// SetOutputStatus sets the "output_status" field.
+func (u *ScheduledExecRunUpsert) SetOutputStatus(v string) *ScheduledExecRunUpsert {
+	u.Set(scheduledexecrun.FieldOutputStatus, v)
+	return u
+}
+
+// UpdateOutputStatus sets the "output_status" field to the value that was provided on create.
+func (u *ScheduledExecRunUpsert) UpdateOutputStatus() *ScheduledExecRunUpsert {
+	u.SetExcluded(scheduledexecrun.FieldOutputStatus)
+	return u
+}
+
 // SetLastPolledAt sets the "last_polled_at" field.
 func (u *ScheduledExecRunUpsert) SetLastPolledAt(v time.Time) *ScheduledExecRunUpsert {
 	u.Set(scheduledexecrun.FieldLastPolledAt, v)
@@ -907,6 +969,9 @@ func (u *ScheduledExecRunUpsertOne) UpdateNewValues() *ScheduledExecRunUpsertOne
 		}
 		if _, exists := u.create.mutation.LeaseUntil(); exists {
 			s.SetIgnore(scheduledexecrun.FieldLeaseUntil)
+		}
+		if _, exists := u.create.mutation.CaptureMode(); exists {
+			s.SetIgnore(scheduledexecrun.FieldCaptureMode)
 		}
 		if _, exists := u.create.mutation.Runtime(); exists {
 			s.SetIgnore(scheduledexecrun.FieldRuntime)
@@ -1061,6 +1126,20 @@ func (u *ScheduledExecRunUpsertOne) UpdateOutputBytes() *ScheduledExecRunUpsertO
 func (u *ScheduledExecRunUpsertOne) ClearOutputBytes() *ScheduledExecRunUpsertOne {
 	return u.Update(func(s *ScheduledExecRunUpsert) {
 		s.ClearOutputBytes()
+	})
+}
+
+// SetOutputStatus sets the "output_status" field.
+func (u *ScheduledExecRunUpsertOne) SetOutputStatus(v string) *ScheduledExecRunUpsertOne {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.SetOutputStatus(v)
+	})
+}
+
+// UpdateOutputStatus sets the "output_status" field to the value that was provided on create.
+func (u *ScheduledExecRunUpsertOne) UpdateOutputStatus() *ScheduledExecRunUpsertOne {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.UpdateOutputStatus()
 	})
 }
 
@@ -1333,6 +1412,9 @@ func (u *ScheduledExecRunUpsertBulk) UpdateNewValues() *ScheduledExecRunUpsertBu
 			if _, exists := b.mutation.LeaseUntil(); exists {
 				s.SetIgnore(scheduledexecrun.FieldLeaseUntil)
 			}
+			if _, exists := b.mutation.CaptureMode(); exists {
+				s.SetIgnore(scheduledexecrun.FieldCaptureMode)
+			}
 			if _, exists := b.mutation.Runtime(); exists {
 				s.SetIgnore(scheduledexecrun.FieldRuntime)
 			}
@@ -1487,6 +1569,20 @@ func (u *ScheduledExecRunUpsertBulk) UpdateOutputBytes() *ScheduledExecRunUpsert
 func (u *ScheduledExecRunUpsertBulk) ClearOutputBytes() *ScheduledExecRunUpsertBulk {
 	return u.Update(func(s *ScheduledExecRunUpsert) {
 		s.ClearOutputBytes()
+	})
+}
+
+// SetOutputStatus sets the "output_status" field.
+func (u *ScheduledExecRunUpsertBulk) SetOutputStatus(v string) *ScheduledExecRunUpsertBulk {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.SetOutputStatus(v)
+	})
+}
+
+// UpdateOutputStatus sets the "output_status" field to the value that was provided on create.
+func (u *ScheduledExecRunUpsertBulk) UpdateOutputStatus() *ScheduledExecRunUpsertBulk {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.UpdateOutputStatus()
 	})
 }
 

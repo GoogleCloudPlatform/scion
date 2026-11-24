@@ -56,6 +56,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/execrunoutput"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -215,6 +216,8 @@ type Client struct {
 	EntitlementBinding *EntitlementBindingClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
+	// ExecRunOutput is the client for interacting with the ExecRunOutput builders.
+	ExecRunOutput *ExecRunOutputClient
 	// ExternalIdentity is the client for interacting with the ExternalIdentity builders.
 	ExternalIdentity *ExternalIdentityClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
@@ -410,6 +413,7 @@ func (c *Client) init() {
 	c.DurableQueueItem = NewDurableQueueItemClient(c.config)
 	c.EntitlementBinding = NewEntitlementBindingClient(c.config)
 	c.EnvVar = NewEnvVarClient(c.config)
+	c.ExecRunOutput = NewExecRunOutputClient(c.config)
 	c.ExternalIdentity = NewExternalIdentityClient(c.config)
 	c.GCPServiceAccount = NewGCPServiceAccountClient(c.config)
 	c.GitHubResolutionCache = NewGitHubResolutionCacheClient(c.config)
@@ -614,6 +618,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		DurableQueueItem:              NewDurableQueueItemClient(cfg),
 		EntitlementBinding:            NewEntitlementBindingClient(cfg),
 		EnvVar:                        NewEnvVarClient(cfg),
+		ExecRunOutput:                 NewExecRunOutputClient(cfg),
 		ExternalIdentity:              NewExternalIdentityClient(cfg),
 		GCPServiceAccount:             NewGCPServiceAccountClient(cfg),
 		GitHubResolutionCache:         NewGitHubResolutionCacheClient(cfg),
@@ -745,6 +750,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		DurableQueueItem:              NewDurableQueueItemClient(cfg),
 		EntitlementBinding:            NewEntitlementBindingClient(cfg),
 		EnvVar:                        NewEnvVarClient(cfg),
+		ExecRunOutput:                 NewExecRunOutputClient(cfg),
 		ExternalIdentity:              NewExternalIdentityClient(cfg),
 		GCPServiceAccount:             NewGCPServiceAccountClient(cfg),
 		GitHubResolutionCache:         NewGitHubResolutionCacheClient(cfg),
@@ -857,26 +863,26 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
 		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionKeyCounter,
 		c.DelegationAdoption, c.DelegationEdge, c.DurableQueueItem,
-		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
-		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
-		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MessagePolicy,
-		c.MessagePolicyDecision, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
-		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
-		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
-		c.ScheduledEvent, c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret,
-		c.SecretRequest, c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
-		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
-		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
-		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
-		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
-		c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.EntitlementBinding, c.EnvVar, c.ExecRunOutput, c.ExternalIdentity,
+		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
+		c.GroupMembership, c.HarnessConfig, c.HubEncryptionMigration,
+		c.HubEncryptionPolicy, c.HubInstance, c.HubSetting, c.IntegrationConfig,
+		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
+		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
+		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
+		c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision, c.MutationAudit,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
+		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
+		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
+		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
+		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
+		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.Trigger,
+		c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.UserExecContainer, c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -897,26 +903,26 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
 		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionKeyCounter,
 		c.DelegationAdoption, c.DelegationEdge, c.DurableQueueItem,
-		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
-		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
-		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MessagePolicy,
-		c.MessagePolicyDecision, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
-		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
-		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
-		c.ScheduledEvent, c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret,
-		c.SecretRequest, c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
-		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
-		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
-		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
-		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
-		c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.EntitlementBinding, c.EnvVar, c.ExecRunOutput, c.ExternalIdentity,
+		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
+		c.GroupMembership, c.HarnessConfig, c.HubEncryptionMigration,
+		c.HubEncryptionPolicy, c.HubInstance, c.HubSetting, c.IntegrationConfig,
+		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
+		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
+		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
+		c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision, c.MutationAudit,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
+		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
+		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
+		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
+		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
+		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.Trigger,
+		c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.UserExecContainer, c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1005,6 +1011,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.EntitlementBinding.mutate(ctx, m)
 	case *EnvVarMutation:
 		return c.EnvVar.mutate(ctx, m)
+	case *ExecRunOutputMutation:
+		return c.ExecRunOutput.mutate(ctx, m)
 	case *ExternalIdentityMutation:
 		return c.ExternalIdentity.mutate(ctx, m)
 	case *GCPServiceAccountMutation:
@@ -6695,6 +6703,139 @@ func (c *EnvVarClient) mutate(ctx context.Context, m *EnvVarMutation) (Value, er
 		return (&EnvVarDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown EnvVar mutation op: %q", m.Op())
+	}
+}
+
+// ExecRunOutputClient is a client for the ExecRunOutput schema.
+type ExecRunOutputClient struct {
+	config
+}
+
+// NewExecRunOutputClient returns a client for the ExecRunOutput from the given config.
+func NewExecRunOutputClient(c config) *ExecRunOutputClient {
+	return &ExecRunOutputClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `execrunoutput.Hooks(f(g(h())))`.
+func (c *ExecRunOutputClient) Use(hooks ...Hook) {
+	c.hooks.ExecRunOutput = append(c.hooks.ExecRunOutput, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `execrunoutput.Intercept(f(g(h())))`.
+func (c *ExecRunOutputClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ExecRunOutput = append(c.inters.ExecRunOutput, interceptors...)
+}
+
+// Create returns a builder for creating a ExecRunOutput entity.
+func (c *ExecRunOutputClient) Create() *ExecRunOutputCreate {
+	mutation := newExecRunOutputMutation(c.config, OpCreate)
+	return &ExecRunOutputCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ExecRunOutput entities.
+func (c *ExecRunOutputClient) CreateBulk(builders ...*ExecRunOutputCreate) *ExecRunOutputCreateBulk {
+	return &ExecRunOutputCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ExecRunOutputClient) MapCreateBulk(slice any, setFunc func(*ExecRunOutputCreate, int)) *ExecRunOutputCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ExecRunOutputCreateBulk{err: fmt.Errorf("calling to ExecRunOutputClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ExecRunOutputCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ExecRunOutputCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ExecRunOutput.
+func (c *ExecRunOutputClient) Update() *ExecRunOutputUpdate {
+	mutation := newExecRunOutputMutation(c.config, OpUpdate)
+	return &ExecRunOutputUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ExecRunOutputClient) UpdateOne(_m *ExecRunOutput) *ExecRunOutputUpdateOne {
+	mutation := newExecRunOutputMutation(c.config, OpUpdateOne, withExecRunOutput(_m))
+	return &ExecRunOutputUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ExecRunOutputClient) UpdateOneID(id uuid.UUID) *ExecRunOutputUpdateOne {
+	mutation := newExecRunOutputMutation(c.config, OpUpdateOne, withExecRunOutputID(id))
+	return &ExecRunOutputUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ExecRunOutput.
+func (c *ExecRunOutputClient) Delete() *ExecRunOutputDelete {
+	mutation := newExecRunOutputMutation(c.config, OpDelete)
+	return &ExecRunOutputDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ExecRunOutputClient) DeleteOne(_m *ExecRunOutput) *ExecRunOutputDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ExecRunOutputClient) DeleteOneID(id uuid.UUID) *ExecRunOutputDeleteOne {
+	builder := c.Delete().Where(execrunoutput.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ExecRunOutputDeleteOne{builder}
+}
+
+// Query returns a query builder for ExecRunOutput.
+func (c *ExecRunOutputClient) Query() *ExecRunOutputQuery {
+	return &ExecRunOutputQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeExecRunOutput},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ExecRunOutput entity by its id.
+func (c *ExecRunOutputClient) Get(ctx context.Context, id uuid.UUID) (*ExecRunOutput, error) {
+	return c.Query().Where(execrunoutput.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ExecRunOutputClient) GetX(ctx context.Context, id uuid.UUID) *ExecRunOutput {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ExecRunOutputClient) Hooks() []Hook {
+	return c.hooks.ExecRunOutput
+}
+
+// Interceptors returns the client interceptors.
+func (c *ExecRunOutputClient) Interceptors() []Interceptor {
+	return c.inters.ExecRunOutput
+}
+
+func (c *ExecRunOutputClient) mutate(ctx context.Context, m *ExecRunOutputMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ExecRunOutputCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ExecRunOutputUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ExecRunOutputUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ExecRunOutputDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ExecRunOutput mutation op: %q", m.Op())
 	}
 }
 
@@ -16830,7 +16971,7 @@ type (
 		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch,
 		ConduitSession, Conversation, ConversationParticipant, Decision,
 		DecisionAnswer, DecisionKeyCounter, DelegationAdoption, DelegationEdge,
-		DurableQueueItem, EntitlementBinding, EnvVar, ExternalIdentity,
+		DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity,
 		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
 		GroupMembership, HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy,
 		HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
@@ -16859,7 +17000,7 @@ type (
 		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch,
 		ConduitSession, Conversation, ConversationParticipant, Decision,
 		DecisionAnswer, DecisionKeyCounter, DelegationAdoption, DelegationEdge,
-		DurableQueueItem, EntitlementBinding, EnvVar, ExternalIdentity,
+		DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity,
 		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
 		GroupMembership, HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy,
 		HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,

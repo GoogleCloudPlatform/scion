@@ -143,6 +143,20 @@ func (_u *ScheduledExecRunUpdate) ClearOutputBytes() *ScheduledExecRunUpdate {
 	return _u
 }
 
+// SetOutputStatus sets the "output_status" field.
+func (_u *ScheduledExecRunUpdate) SetOutputStatus(v string) *ScheduledExecRunUpdate {
+	_u.mutation.SetOutputStatus(v)
+	return _u
+}
+
+// SetNillableOutputStatus sets the "output_status" field if the given value is not nil.
+func (_u *ScheduledExecRunUpdate) SetNillableOutputStatus(v *string) *ScheduledExecRunUpdate {
+	if v != nil {
+		_u.SetOutputStatus(*v)
+	}
+	return _u
+}
+
 // SetLastPolledAt sets the "last_polled_at" field.
 func (_u *ScheduledExecRunUpdate) SetLastPolledAt(v time.Time) *ScheduledExecRunUpdate {
 	_u.mutation.SetLastPolledAt(v)
@@ -273,6 +287,9 @@ func (_u *ScheduledExecRunUpdate) sqlSave(ctx context.Context) (_node int, err e
 	}
 	if _u.mutation.OutputBytesCleared() {
 		_spec.ClearField(scheduledexecrun.FieldOutputBytes, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.OutputStatus(); ok {
+		_spec.SetField(scheduledexecrun.FieldOutputStatus, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.LastPolledAt(); ok {
 		_spec.SetField(scheduledexecrun.FieldLastPolledAt, field.TypeTime, value)
@@ -415,6 +432,20 @@ func (_u *ScheduledExecRunUpdateOne) AddOutputBytes(v int64) *ScheduledExecRunUp
 // ClearOutputBytes clears the value of the "output_bytes" field.
 func (_u *ScheduledExecRunUpdateOne) ClearOutputBytes() *ScheduledExecRunUpdateOne {
 	_u.mutation.ClearOutputBytes()
+	return _u
+}
+
+// SetOutputStatus sets the "output_status" field.
+func (_u *ScheduledExecRunUpdateOne) SetOutputStatus(v string) *ScheduledExecRunUpdateOne {
+	_u.mutation.SetOutputStatus(v)
+	return _u
+}
+
+// SetNillableOutputStatus sets the "output_status" field if the given value is not nil.
+func (_u *ScheduledExecRunUpdateOne) SetNillableOutputStatus(v *string) *ScheduledExecRunUpdateOne {
+	if v != nil {
+		_u.SetOutputStatus(*v)
+	}
 	return _u
 }
 
@@ -578,6 +609,9 @@ func (_u *ScheduledExecRunUpdateOne) sqlSave(ctx context.Context) (_node *Schedu
 	}
 	if _u.mutation.OutputBytesCleared() {
 		_spec.ClearField(scheduledexecrun.FieldOutputBytes, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.OutputStatus(); ok {
+		_spec.SetField(scheduledexecrun.FieldOutputStatus, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.LastPolledAt(); ok {
 		_spec.SetField(scheduledexecrun.FieldLastPolledAt, field.TypeTime, value)

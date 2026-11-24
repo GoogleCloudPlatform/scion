@@ -4079,10 +4079,12 @@ type ScheduledExecRun struct {
 	LeaseUntil time.Time
 	FinishedAt *time.Time
 
-	Outcome     string // ScheduledExecOutcome*
-	ExitCode    *int
-	DurationMS  *int64
-	OutputBytes *int64
+	Outcome      string // ScheduledExecOutcome*
+	ExitCode     *int
+	DurationMS   *int64
+	OutputBytes  *int64
+	CaptureMode  string // "", "json", "tail" (immutable after insert)
+	OutputStatus string // "", "captured", "truncated", "too_large", "invalid_json", "empty", "expired", "lost"
 
 	Runtime  string
 	LaunchID string
@@ -4105,15 +4107,27 @@ const (
 	ScheduledExecOutcomeAbandoned = "abandoned"
 )
 
+// MaxExecRunOutputBytes bounds the captured output persisted in exec_run_outputs.
+const MaxExecRunOutputBytes = 64 * 1024
+
+// ExecRunOutputOwnerScheduledExec is the owner_kind of scheduled exec runs in
+// exec_run_outputs.
+const ExecRunOutputOwnerScheduledExec = "scheduled_exec"
+
 // ScheduledExecRunFinish is the final outcome FinishScheduledExecRun records
 // on a run, and the status it records on the run's event.
 type ScheduledExecRunFinish struct {
-	EventID     string
-	FinishedAt  time.Time
-	Outcome     string // a final ScheduledExecOutcome*
-	ExitCode    *int
-	DurationMS  *int64
-	OutputBytes *int64
+	EventID      string
+	FinishedAt   time.Time
+	Outcome      string // a final ScheduledExecOutcome*
+	ExitCode     *int
+	DurationMS   *int64
+	OutputBytes  *int64
+	OutputStatus string
+	// Output, when non-empty, is inserted into exec_run_outputs inside the
+	// same transaction only if the FinishScheduledExecRun CAS wins. Must not
+	// exceed MaxExecRunOutputBytes.
+	Output []byte
 	// EventStatus, when not empty, is written to the run's event (with
 	// EventError) in the same transaction, but only while the event is still
 	// fired or expired: a run's outcome never overwrites a recorded event

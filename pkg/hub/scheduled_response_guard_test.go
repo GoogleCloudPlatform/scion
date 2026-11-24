@@ -42,13 +42,14 @@ import (
 // guardRows are the exec rows one guard pass reads and changes.
 type guardRows struct {
 	eventID        string // one-shot exec event, pending
+	outputEventID  string // one-shot exec event, finished with captured output canary
 	activeSchedule string // exec schedule, active
 	pausedSchedule string // exec schedule, paused
 }
 
-// seedGuardRows stores exec rows carrying sentinel in argv directly: Phase 1
-// cannot author recurring exec, but the serializer must still redact it.
-func seedGuardRows(t *testing.T, f *bypassAgentsFixture, sentinel string) guardRows {
+// seedGuardRows stores exec rows carrying sentinel in argv directly, plus a
+// finished exec event with captured output carrying outputCanary.
+func seedGuardRows(t *testing.T, f *bypassAgentsFixture, sentinel, outputCanary string) guardRows {
 	t.Helper()
 	ctx := context.Background()
 	p := scheduledExecPayload{AgentID: f.sibling.ID, AgentName: f.sibling.Slug, Command: []string{"sh", "-c", "curl -H " + sentinel}}
@@ -60,6 +61,51 @@ func seedGuardRows(t *testing.T, f *bypassAgentsFixture, sentinel string) guardR
 		FireAt: time.Now().Add(time.Hour), Payload: raw, Status: store.ScheduledEventPending, CreatedBy: f.owner.ID,
 	}, f.owner.ID)
 	require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+
+	// A finished one-shot exec event with captured JSON output containing outputCanary.
+	pCap := scheduledExecPayload{
+		AgentID: f.sibling.ID, AgentName: f.sibling.Slug,
+		Command: []string{"sh", "-c", "echo " + sentinel}, CaptureOutput: agentcontrol.ExecCaptureJSON,
+	}
+	rawCap, err := pCap.encode()
+	require.NoError(t, err)
+	firedAt := time.Now().Add(-time.Minute)
+	outEvt := withSessionRevision(store.ScheduledEvent{
+		ID: api.NewUUID(), ProjectID: f.proj.ID, EventType: scheduledEventTypeExec,
+		FireAt: firedAt, Payload: rawCap, Status: store.ScheduledEventPending, CreatedBy: f.owner.ID,
+	}, f.owner.ID)
+	require.NoError(t, f.store.CreateScheduledEvent(ctx, &outEvt))
+	require.NoError(t, f.store.UpdateScheduledEventStatus(ctx, outEvt.ID, store.ScheduledEventFired, &firedAt, ""))
+	run := store.ScheduledExecRun{
+		EventID:        outEvt.ID,
+		ProjectID:      f.proj.ID,
+		TargetAgentID:  f.sibling.ID,
+		CommandSHA256:  agentcontrol.ExecArgvDigest(pCap.Command),
+		Argc:           len(pCap.Command),
+		TimeoutSeconds: 60,
+		StartedAt:      firedAt,
+		NotAfter:       firedAt.Add(time.Minute),
+		LeaseUntil:     firedAt.Add(3 * time.Minute),
+		Outcome:        store.ScheduledExecOutcomeStarting,
+		CaptureMode:    agentcontrol.ExecCaptureJSON,
+		LaunchID:       "launch-guard",
+	}
+	require.NoError(t, f.store.CreateScheduledExecRun(ctx, &run))
+	exitZero := 0
+	dur := int64(5)
+	outBytes := int64(len(outputCanary) + 12)
+	won, err := f.store.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+		EventID:      outEvt.ID,
+		FinishedAt:   time.Now(),
+		Outcome:      store.ScheduledExecOutcomeOK,
+		ExitCode:     &exitZero,
+		DurationMS:   &dur,
+		OutputBytes:  &outBytes,
+		OutputStatus: agentcontrol.ExecOutputCaptured,
+		Output:       []byte(`{"canary":"` + outputCanary + `"}`),
+	})
+	require.NoError(t, err)
+	require.True(t, won)
 
 	mkSchedule := func(status string) string {
 		next := time.Now().Add(time.Hour).UTC()
@@ -84,7 +130,7 @@ func seedGuardRows(t *testing.T, f *bypassAgentsFixture, sentinel string) guardR
 		require.NoError(t, f.store.UpdateScheduledEventStatus(ctx, hist.ID, store.ScheduledEventFired, &fired, ""))
 		return sc.ID
 	}
-	return guardRows{eventID: evt.ID, activeSchedule: mkSchedule(store.ScheduleStatusActive), pausedSchedule: mkSchedule(store.ScheduleStatusPaused)}
+	return guardRows{eventID: evt.ID, outputEventID: outEvt.ID, activeSchedule: mkSchedule(store.ScheduleStatusActive), pausedSchedule: mkSchedule(store.ScheduleStatusPaused)}
 }
 
 // guardCase issues one catalogued route against rows.
@@ -106,7 +152,14 @@ func guardCases() map[string]guardCase {
 			},
 		},
 		"GET /api/v1/projects/{projectId}/scheduled-events/{id}": {
-			path: func(f *bypassAgentsFixture, r guardRows) string { return base(f) + "/scheduled-events/" + r.eventID },
+			path: func(f *bypassAgentsFixture, r guardRows) string {
+				return base(f) + "/scheduled-events/" + r.outputEventID
+			},
+		},
+		"GET /api/v1/projects/{projectId}/scheduled-events/{id}/output": {
+			path: func(f *bypassAgentsFixture, r guardRows) string {
+				return base(f) + "/scheduled-events/" + r.outputEventID + "/output"
+			},
 		},
 		"DELETE /api/v1/projects/{projectId}/scheduled-events/{id}": {
 			path: func(f *bypassAgentsFixture, r guardRows) string { return base(f) + "/scheduled-events/" + r.eventID },
@@ -158,6 +211,7 @@ func guardCases() map[string]guardCase {
 var guardOrder = []string{
 	"GET /api/v1/projects/{projectId}/scheduled-events",
 	"GET /api/v1/projects/{projectId}/scheduled-events/{id}",
+	"GET /api/v1/projects/{projectId}/scheduled-events/{id}/output",
 	"GET /api/v1/projects/{projectId}/schedules",
 	"GET /api/v1/projects/{projectId}/schedules/{id}",
 	"GET /api/v1/projects/{projectId}/schedules/{id}/history",
@@ -256,7 +310,29 @@ func TestScheduledResponses_RouteEnumerationGuard(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := execAuthoringFixture(t)
 			sentinel := "EXECSENTINEL-" + uuid.NewString()
-			rows := seedGuardRows(t, f, sentinel)
+			outputCanary := "EXECOUTPUTCANARY-" + uuid.NewString()
+			rows := seedGuardRows(t, f, sentinel, outputCanary)
+
+			// Positive control (before c.setup potentially revokes f.owner's
+			// attach): attach holder gets 200 on /output with Cache-Control:
+			// no-store, and NEVER sees the output canary on any other GET route (A10).
+			owner := authUser(f.owner)
+			for _, key := range guardOrder {
+				if key == "GET /api/v1/projects/{projectId}/scheduled-events/{id}/output" {
+					rec := requestAsIdentity(t, f.srv, owner, http.MethodGet, cases[key].path(f, rows), nil)
+					assert.Equal(t, http.StatusOK, rec.Code, "attach holder must get 200 on /output: %s", rec.Body.String())
+					assert.Contains(t, rec.Body.String(), outputCanary, "positive control: attach holder receives output canary")
+					assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+					continue
+				}
+				method, _, _ := strings.Cut(key, " ")
+				if method != http.MethodGet {
+					continue
+				}
+				rec := requestAsIdentity(t, f.srv, owner, method, cases[key].path(f, rows), nil)
+				assert.NotContains(t, rec.Body.String(), outputCanary, "catalogued route %s leaked output canary even to attach holder", key)
+			}
+
 			identity := c.setup(t, f)
 			successes := 0
 			for _, key := range guardOrder {
@@ -268,6 +344,10 @@ func TestScheduledResponses_RouteEnumerationGuard(t *testing.T) {
 				}
 				rec := requestAsIdentity(t, f.srv, identity, method, gc.path(f, rows), body)
 				assert.NotContains(t, rec.Body.String(), sentinel, "%s answered %d with the exec argv", key, rec.Code)
+				assert.NotContains(t, rec.Body.String(), outputCanary, "%s answered %d with captured output canary", key, rec.Code)
+				if key == "GET /api/v1/projects/{projectId}/scheduled-events/{id}/output" {
+					assert.Equal(t, http.StatusForbidden, rec.Code, "non-attach caller %s must get 403 on /output", c.name)
+				}
 				if rec.Code < 300 {
 					successes++
 				}
@@ -298,12 +378,13 @@ func TestScheduledResponses_RouteEnumerationGuard(t *testing.T) {
 				{"retarget-own-agent-with-command", map[string]any{"agentId": ownAgent.ID, "command": []string{"true"}}},
 				{"retarget-own-agent-via-payload", map[string]any{"payload": `{"agentId":"` + ownAgent.ID + `","command":["true"]}`}},
 				{"patch-timeout", map[string]any{"timeoutSeconds": 120}},
+				{"patch-capture-output", map[string]any{"captureOutput": "tail"}},
 			}
 			basePath := "/api/v1/projects/" + f.proj.ID + "/schedules"
 			for _, tr := range transitions {
 				f.srv.scheduledExecLimiter()
 				f.srv.scheduledExecAuthoringLimiter = newKeysRateLimiter(scheduledExecAuthoringRate, scheduledExecAuthoringBurst)
-				trRows := seedGuardRows(t, f, sentinel)
+				trRows := seedGuardRows(t, f, sentinel, "TRCANARY-"+uuid.NewString())
 				schedURL := basePath + "/" + trRows.activeSchedule
 				rec := requestAsIdentity(t, f.srv, identity, http.MethodPatch, schedURL, tr.body)
 				assert.GreaterOrEqual(t, rec.Code, http.StatusBadRequest, "transition %s must be refused (%d: %s)", tr.name, rec.Code, rec.Body.String())
@@ -365,7 +446,7 @@ func bindPermsToUser(t *testing.T, st store.Store, userID string, perms []string
 func TestScheduledResponses_RevealAndRedactShape(t *testing.T) {
 	f := execAuthoringFixture(t)
 	sentinel := "EXECSENTINEL-" + uuid.NewString()
-	rows := seedGuardRows(t, f, sentinel)
+	rows := seedGuardRows(t, f, sentinel, "SHAPECANARY-"+uuid.NewString())
 	path := "/api/v1/projects/" + f.proj.ID + "/scheduled-events/" + rows.eventID
 
 	rec := requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodGet, path, nil)

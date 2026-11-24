@@ -217,6 +217,11 @@ func (f *ptyConduitFixture) startControlAgentWithOptions(t *testing.T, hubURL st
 // generation fallback).
 func (f *ptyConduitFixture) startControlAgentAs(t *testing.T, hubURL, launchID string, advertise bool, opts control.Options, wrap func(conduit.RPCHandler) conduit.RPCHandler) *controlAgent {
 	t.Helper()
+	return f.startControlAgentAsWithFeatures(t, hubURL, launchID, advertise, advertise, opts, wrap)
+}
+
+func (f *ptyConduitFixture) startControlAgentAsWithFeatures(t *testing.T, hubURL, launchID string, advertiseRoutes, advertiseFeatures bool, opts control.Options, wrap func(conduit.RPCHandler) conduit.RPCHandler) *controlAgent {
+	t.Helper()
 	guardSciontoolLog()
 	ca := &controlAgent{paths: make(chan string, 16)}
 	opts.KickTokenRefresh = func() { ca.kicks.Add(1) }
@@ -233,9 +238,12 @@ func (f *ptyConduitFixture) startControlAgentAs(t *testing.T, hubURL, launchID s
 		}
 		return h.HandleRPC(ctx, req)
 	})
-	var routes []string
-	if advertise {
+	var routes, features []string
+	if advertiseRoutes {
 		routes = ctl.Routes()
+	}
+	if advertiseFeatures {
+		features = ctl.Features()
 	}
 	tok := f.agentToken(t, f.launched)
 	admitted := make(chan *conduitv1.Welcome, 4)
@@ -251,6 +259,7 @@ func (f *ptyConduitFixture) startControlAgentAs(t *testing.T, hubURL, launchID s
 		NoPTY:     true,
 		Session:   conduit.Config{RPCHandler: counted},
 		RPCRoutes: routes,
+		Features:  features,
 	})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -2949,6 +2949,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{projectId}/scheduled-events/{id}` |
+| http_route | GET | `/api/v1/projects/{projectId}/scheduled-events/{id}/output` |
 | http_route | GET | `/api/v1/projects/{projectId}/schedules/{id}` |
 | http_route | GET | `/api/v1/projects/{projectId}/schedules/{id}/history` |
 

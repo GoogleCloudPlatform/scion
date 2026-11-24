@@ -60,7 +60,7 @@ func (s *Server) createScheduledExecEvent(w http.ResponseWriter, r *http.Request
 
 	var p *scheduledExecPayload
 	if req.Payload != "" {
-		if len(req.Command) > 0 || req.TimeoutSeconds != 0 || req.AgentID != "" || req.AgentName != "" {
+		if len(req.Command) > 0 || req.TimeoutSeconds != 0 || req.CaptureOutput != "" || req.AgentID != "" || req.AgentName != "" {
 			ValidationError(w, "give either payload or the exec convenience fields, not both", nil)
 			return
 		}
@@ -78,6 +78,7 @@ func (s *Server) createScheduledExecEvent(w http.ResponseWriter, r *http.Request
 			AgentName:      req.AgentName,
 			Command:        req.Command,
 			TimeoutSeconds: req.TimeoutSeconds,
+			CaptureOutput:  req.CaptureOutput,
 		}
 		if err := p.validate(); err != nil {
 			ValidationError(w, err.Error(), nil)
@@ -168,7 +169,7 @@ func (s *Server) createExecSchedule(w http.ResponseWriter, r *http.Request, proj
 
 	var p *scheduledExecPayload
 	if req.Payload != "" {
-		if req.Command != nil || req.TimeoutSeconds != 0 || req.AgentID != "" || req.AgentName != "" {
+		if req.Command != nil || req.TimeoutSeconds != 0 || req.CaptureOutput != "" || req.AgentID != "" || req.AgentName != "" {
 			ValidationError(w, "give either payload or the exec convenience fields, not both", nil)
 			return
 		}
@@ -186,6 +187,7 @@ func (s *Server) createExecSchedule(w http.ResponseWriter, r *http.Request, proj
 			AgentName:      req.AgentName,
 			Command:        req.Command,
 			TimeoutSeconds: req.TimeoutSeconds,
+			CaptureOutput:  req.CaptureOutput,
 		}
 		if err := p.validate(); err != nil {
 			ValidationError(w, err.Error(), nil)
@@ -329,6 +331,9 @@ func (s *Server) prepareExecScheduleUpdate(
 		}
 		if req.TimeoutSeconds != nil {
 			base.TimeoutSeconds = *req.TimeoutSeconds
+		}
+		if req.CaptureOutput != nil {
+			base.CaptureOutput = *req.CaptureOutput
 		}
 		if err := base.validate(); err != nil {
 			ValidationError(w, err.Error(), nil)

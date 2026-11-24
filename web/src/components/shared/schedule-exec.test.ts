@@ -117,10 +117,18 @@ describe('parseExecPayload', () => {
       agentName: 'worker',
       command: ['python3', '-c', 'print(1)'],
       timeoutSeconds: 180,
+      captureOutput: '',
       commandRedacted: false,
       argc: undefined,
       commandSha256: undefined,
     });
+  });
+
+  it('parses captureOutput for json and tail and ignores none/unknown', () => {
+    expect(parseExecPayload(JSON.stringify({ captureOutput: 'json' })).captureOutput).toBe('json');
+    expect(parseExecPayload(JSON.stringify({ captureOutput: 'tail' })).captureOutput).toBe('tail');
+    expect(parseExecPayload(JSON.stringify({ captureOutput: 'none' })).captureOutput).toBe('');
+    expect(parseExecPayload(JSON.stringify({ captureOutput: 'other' })).captureOutput).toBe('');
   });
 
   it('parses a redacted exec payload and never exposes command even if malformed JSON carries one', () => {
@@ -148,6 +156,7 @@ describe('parseExecPayload', () => {
       agentName: '',
       command: [],
       timeoutSeconds: 0,
+      captureOutput: '',
       commandRedacted: false,
       argc: undefined,
       commandSha256: undefined,

@@ -229,6 +229,10 @@ func scheduledExecFinalOutcome(res agentcontrol.ExecResult, timeoutSeconds int) 
 // (purged), and needs nothing more. A non-nil error means the write failed:
 // the run is still unfinished and must be retried.
 func (s *Server) finishScheduledExecRun(ctx context.Context, run store.ScheduledExecRun, outcome string, res *agentcontrol.ExecResult, eventStatus, eventError string) (bool, error) {
+	return s.finishScheduledExecRunWithOutputStatus(ctx, run, outcome, res, "", eventStatus, eventError)
+}
+
+func (s *Server) finishScheduledExecRunWithOutputStatus(ctx context.Context, run store.ScheduledExecRun, outcome string, res *agentcontrol.ExecResult, fallbackOutputStatus, eventStatus, eventError string) (bool, error) {
 	fin := store.ScheduledExecRunFinish{
 		EventID:     run.EventID,
 		FinishedAt:  time.Now(),
@@ -239,6 +243,18 @@ func (s *Server) finishScheduledExecRun(ctx context.Context, run store.Scheduled
 	if res != nil && res.Finished() && res.Outcome != agentcontrol.ExecOutcomeStartFailed {
 		code, dur, out := res.ExitCode, res.DurationMS, res.OutputBytes
 		fin.ExitCode, fin.DurationMS, fin.OutputBytes = &code, &dur, &out
+		if run.CaptureMode != "" {
+			if err := agentcontrol.ValidateCapturedOutput(run.CaptureMode, res.OutputStatus, res.Output); err != nil {
+				slog.Warn("Scheduler: captured exec output failed validation; recording lost",
+					"eventID", run.EventID, "capture_mode", run.CaptureMode, "output_status", res.OutputStatus, "error", err)
+				fin.OutputStatus = agentcontrol.ExecOutputLost
+			} else {
+				fin.OutputStatus = res.OutputStatus
+				fin.Output = res.Output
+			}
+		}
+	} else if run.CaptureMode != "" && fallbackOutputStatus != "" {
+		fin.OutputStatus = fallbackOutputStatus
 	}
 	won, err := s.store.FinishScheduledExecRun(ctx, fin)
 	if err != nil {
@@ -251,10 +267,11 @@ func (s *Server) finishScheduledExecRun(ctx context.Context, run store.Scheduled
 	a := newScheduledExecRunAudit(run)
 	a.Outcome = outcome
 	a.ExitCode, a.DurationMS, a.OutputBytes = fin.ExitCode, fin.DurationMS, fin.OutputBytes
+	a.OutputStatus = fin.OutputStatus
 	a.Reason = eventError
 	s.auditScheduledExec(ctx, a)
 	slog.Info("Scheduler: exec run finished", "eventID", run.EventID, "agent_id", run.TargetAgentID,
-		"outcome", outcome, "event_status", eventStatus)
+		"outcome", outcome, "event_status", eventStatus, "capture_mode", run.CaptureMode, "output_status", fin.OutputStatus)
 	return true, nil
 }
 
@@ -302,14 +319,18 @@ func (s *Server) pollScheduledExecRun(ctx context.Context, run store.ScheduledEx
 // returns (R3): a status answer that took most of the call budget can still
 // be recorded.
 func (s *Server) pollScheduledExecRunOnce(ctx context.Context, run *store.ScheduledExecRun, unavailable *bool) bool {
-	record := func(outcome string, res *agentcontrol.ExecResult, eventStatus, reason string) bool {
+	record := func(outcome string, res *agentcontrol.ExecResult, fallbackOutputStatus, eventStatus, reason string) bool {
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancel()
-		_, err := s.finishScheduledExecRun(recordCtx, *run, outcome, res, eventStatus, reason)
+		_, err := s.finishScheduledExecRunWithOutputStatus(recordCtx, *run, outcome, res, fallbackOutputStatus, eventStatus, reason)
 		return err == nil
 	}
 	failed := func(outcome, reason string) bool {
-		return record(outcome, nil, store.ScheduledEventFailed, reason)
+		fallback := ""
+		if run.CaptureMode != "" {
+			fallback = agentcontrol.ExecOutputLost
+		}
+		return record(outcome, nil, fallback, store.ScheduledEventFailed, reason)
 	}
 	if time.Now().After(run.LeaseUntil) {
 		reason := execReasonOutcomeUnknown
@@ -319,7 +340,7 @@ func (s *Server) pollScheduledExecRunOnce(ctx context.Context, run *store.Schedu
 		return failed(store.ScheduledExecOutcomeAbandoned, reason)
 	}
 
-	res, err := s.AgentExecRunStatus(ctx, run.TargetAgentID, run.LaunchID, run.EventID)
+	res, err := s.AgentExecRunStatus(ctx, run.TargetAgentID, run.LaunchID, run.EventID, run.CaptureMode)
 	if err != nil {
 		switch {
 		case ctx.Err() != nil:
@@ -345,7 +366,7 @@ func (s *Server) pollScheduledExecRunOnce(ctx context.Context, run *store.Schedu
 	switch res.State {
 	case agentcontrol.ExecStateFinished:
 		outcome, status, reason := scheduledExecFinalOutcome(res, run.TimeoutSeconds)
-		return record(outcome, &res, status, reason)
+		return record(outcome, &res, "", status, reason)
 	case agentcontrol.ExecStateRunning:
 		if run.Outcome == store.ScheduledExecOutcomeStarting {
 			recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)

@@ -174,6 +174,9 @@ type Options struct {
 	// as Hello.capabilities.rpc. It must be empty when
 	// Session.RPCHandler is nil.
 	RPCRoutes []string
+	// Features lists optional protocol feature tokens advertised in
+	// Hello.capabilities.features alongside core.FeatureStreamRenewal.
+	Features []string
 
 	// ptyBeforeAccept, when set, runs after a PTY stream's client is
 	// spawned and before the stream is accepted (test hook).
@@ -352,6 +355,9 @@ func (a *Agent) Run(ctx context.Context) error {
 // hello builds the Hello. The launch id is presented as the endpoint
 // incarnation; the hub decides the admitted one (Welcome).
 func (a *Agent) hello() *conduitv1.Hello {
+	features := make([]string, 0, 1+len(a.opts.Features))
+	features = append(features, core.FeatureStreamRenewal)
+	features = append(features, a.opts.Features...)
 	return &conduitv1.Hello{
 		PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_AGENT,
 		PrincipalId:   a.opts.AgentID,
@@ -360,7 +366,7 @@ func (a *Agent) hello() *conduitv1.Hello {
 			StreamKinds:         a.streamKinds(),
 			Rpc:                 a.opts.RPCRoutes,
 			EndpointIncarnation: a.opts.LaunchID,
-			Features:            []string{core.FeatureStreamRenewal},
+			Features:            features,
 		},
 	}
 }

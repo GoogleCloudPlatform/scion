@@ -86,7 +86,7 @@ func (r *realExec) waitFinished(t *testing.T, runID string, within time.Duration
 	for {
 		code, resp, raw := postExec(t, r.h, RouteExecStatus, agentcontrol.ExecStatusRequest{V: 1, RunID: runID})
 		if code == http.StatusOK && resp.State == agentcontrol.ExecStateFinished {
-			if _, err := agentcontrol.ParseExecStatusAnswer(code, []byte(raw)); err != nil {
+			if _, err := agentcontrol.ParseExecStatusAnswer(code, []byte(raw), agentcontrol.ExecCaptureNone); err != nil {
 				t.Fatalf("status answer fails the hub schema: %v", err)
 			}
 			return resp, raw

@@ -30,15 +30,16 @@ Both routes follow the §3.7 rules as amended by v2.22: POST only (405 otherwise
 | `argv` | 1..64 elements; `argv[0]` not empty; no NUL; each element ≤ 4096 bytes; total ≤ 16384 bytes (the Hub's payload bounds, checked again here) |
 | `timeout_s` | 1..3600 |
 | `not_after_unix_ms` | set by the Hub to its send time + 60 s |
+| `capture` | optional; absent (default discard) or `"json"` / `"tail"`. Sent by the Hub only when the pinned session's `Hello.capabilities.features` advertises `exec_capture.v1`. Any other value is `400 {"outcome":"invalid","field":"capture"}`. |
 
 | status | body | meaning |
 |---|---|---|
 | 202 | `{"state":"running"}` | started now |
 | 202 | `{"state":"finished","outcome":"start_failed"}` | admitted, but the spawn failed (argv[0] not found on the run's PATH, privilege drop refused, environment unavailable); nothing ran |
-| 200 | `{"state":"running"\|"finished", …, "replayed":true}` | this `run_id` is already known with the same binding; nothing new started |
+| 200 | `{"state":"running"\|"finished", …, "replayed":true}` | this `run_id` is already known with the same binding; nothing new started. Never carries `output_status` or `output` (the Hub polls `exec-status` for capture runs). |
 | 409 | `{"outcome":"overlap"}` | another run of the same `schedule_id` still has a live main process |
 | 409 | `{"outcome":"busy"}` | 2 runs already live in this container, or no tombstone slot can be reserved |
-| 409 | `{"outcome":"mismatch"}` | `run_id` known but bound to another schedule, command digest, timeout or launch |
+| 409 | `{"outcome":"mismatch"}` | `run_id` known but bound to another schedule, command digest, timeout, launch or capture mode |
 | 408 | `{"outcome":"expired_before_start"}` | the start deadline passed (at receipt or before spawn), or the spawn could not begin within 10 s of receipt |
 | 400 | `{"outcome":"invalid","field":…}` | schema or bounds violation |
 
@@ -46,7 +47,9 @@ The `start_failed` 202 is a clarification of the design's response table, which 
 
 ### `POST /v1/control/exec-status`
 
-`{"v":1,"run_id":…}` → 200 `{"state":"running"}`, or 200 `{"state":"finished","outcome":"ok"|"nonzero"|"timeout"|"start_failed","exit_code":N,"duration_ms":N,"output_bytes":N}` (`start_failed` carries no numbers), or 404 `{"state":"unknown"}`. A read; safe to repeat. A status read (and a duplicate `exec-start`) for a run whose spawn decision is still pending waits for the decision, so a caller that waits gets the decided state and never `running` for a start that is then refused. The one exception is a caller that cancels while waiting: it is answered `running` (a replay for `exec-start`) without the decision. That answer goes to a call the Hub has already abandoned (its context ended, which also cancels the RPC), so the Hub never acts on it; the Hub's next status poll waits for the decision as usual.
+`{"v":1,"run_id":…}` → 200 `{"state":"running"}`, or 200 `{"state":"finished","outcome":"ok"|"nonzero"|"timeout"|"start_failed","exit_code":N,"duration_ms":N,"output_bytes":N,"output_status":…,"output":…}` (`start_failed` carries no numbers or output fields; `output_status` and `output` appear **only** on a finished `exec-status` answer for a run started with `capture`), or 404 `{"state":"unknown"}`. A read; safe to repeat. A status read (and a duplicate `exec-start`) for a run whose spawn decision is still pending waits for the decision, so a caller that waits gets the decided state and never `running` for a start that is then refused. The one exception is a caller that cancels while waiting: it is answered `running` (a replay for `exec-start`) without the decision. That answer goes to a call the Hub has already abandoned (its context ended, which also cancels the RPC), so the Hub never acts on it; the Hub's next status poll waits for the decision as usual.
+
+For a capture run (`capture: "json"` or `"tail"`), `output_status` is one of `captured`, `truncated`, `too_large`, `invalid_json`, `empty`, or `expired`. `output` is present iff `output_status ∈ {captured, truncated}`: in `json` mode it is a valid UTF-8 JSON value ≤ 64 KiB; in `tail` mode it is a valid UTF-8 JSON string whose decoded length is ≤ 64 KiB (even worst-case 6× control-byte escaping fits well within `conduit.MaxRPCBody = 768 KiB`).
 
 `exit_code` is the main process's exit status, or 128 plus the signal number when a signal ended it.
 
@@ -61,8 +64,9 @@ sciontool spawns only while `now ≤ not_after_unix_ms + 10 s` (fixed tolerance)
 ## Key store (D9-S2)
 
 - **Live runs** sit in a separate, non-evictable map, bounded by the per-container cap of 2. A `run_id` is reserved in it atomically, under the store lock, before the spawn, together with the run's overlap and capacity checks, so concurrent duplicate starts cannot both spawn. A duplicate that arrives while the first start is between reservation and spawn waits for the spawn decision and then answers as a replay (or `expired_before_start` if the first start was refused).
-- **Binding.** Each `run_id` is bound to (schedule id, sha256 of argv as a canonical JSON array, timeout, the agent's launch id). A start with the same `run_id` and any difference is `mismatch`.
-- **Tombstones.** A finished run moves from the live map to a tombstone atomically (a replay sees one or the other, never neither). Tombstones hold the binding and the outcome only, are kept 60 minutes, at most 256, LRU, and an entry younger than 10 minutes is never evicted.
+- **Binding.** Each `run_id` is bound to (schedule id, sha256 of argv as a canonical JSON array, timeout, the agent's launch id, capture mode). A start with the same `run_id` and any difference is `mismatch`.
+- **Tombstones.** A finished run moves from the live map to a tombstone atomically (a replay sees one or the other, never neither). Tombstones hold the binding and the outcome, are kept 60 minutes, at most 256, LRU, and an entry younger than 10 minutes is never evicted.
+- **Tombstone output budget & TTL.** Captured output bytes held across tombstones are bounded separately to **4 MiB total** (64 full captures) and a **15-minute TTL** from finish. When adding a finished capture would exceed the budget, or after 15 minutes, output is dropped oldest-first (`output_status` becomes `expired`, `output` becomes nil) while the tombstone itself (binding plus outcome) remains under its 60-minute / 256-entry rules.
 - **Capacity is reserved before the spawn.** A start that cannot reserve both a live slot and a future tombstone slot (tombstones under the 10-minute floor plus live runs plus this one must fit in 256) gets `busy`. The store never evicts early and never grows past its bound. Because a start cannot be admitted more than about 70 s after its send (`not_after` + tolerance), a tombstone always outlives any possible replay of its start; a `run_id` whose tombstone has been evicted is refused as expired, never started again.
 - A sciontool restart is a container restart (sciontool is PID 1), so live processes die with the store, and the Hub sees 404 for the run.
 
@@ -73,9 +77,9 @@ sciontool spawns only while `now ≤ not_after_unix_ms + 10 s` (fixed tolerance)
 - Environment: the harness child's environment (the one its tmux session has, secret overrides included), built per run; `PWD` set to the working directory. Working directory `/workspace` if it exists, else the user's home. stdin `/dev/null`.
 - Each run gets its own process group. On timeout sciontool sends SIGTERM to the group, then SIGKILL to the group 5 s later **even if the main process already exited**, so an ordinary child that ignores TERM still dies. The main process is not reaped until that sequence has finished (it is waited for with `waitid(WNOWAIT)` and registered with sciontool's PID 1 reaper the way the PTY client is), so no reused PGID is ever signalled. A daemonized descendant (`setsid`, double fork) escapes the group; that is a stated residual (SEC-P4), and the docs recommend `flock` for strict exclusion.
 - On a normal exit the outcome is recorded at once and the group is left alone, so deliberately backgrounded children survive; `WaitDelay` (2 s) stops a background child that still holds the output pipes from delaying completion.
-- stdout and stderr are drained continuously into a counting discard sink: nothing is buffered, memory stays bounded whatever the output size, and only the byte count is kept (D2 = b).
-- Logs are content-free: run id, schedule id, status, outcome, exit code, duration and byte count. Never argv, output, or the text of an exec error, which can contain paths or argv; `start_failed` carries no error text.
+- **Standard streams & opt-in capture:** Discard by default: when `capture` is absent, stdout and stderr are drained continuously into a counting discard sink so nothing is buffered and only `output_bytes` is kept. With opt-in capture (`capture: "json"` or `"tail"`, fixed 64 KiB cap): `json` buffers up to 64 KiB of stdout only (stderr goes to the counting discard sink; > 64 KiB frees the buffer and reports `too_large`; non-JSON reports `invalid_json`; whitespace-only reports `empty`); `tail` merges stdout and stderr into one 64 KiB ring buffer, advancing past split UTF-8 continuation bytes on truncation (`truncated`). `output_bytes` always counts both streams.
+- Logs are content-free: run id, schedule id, status, outcome, capture mode, output_status, exit code, duration and byte count. Never argv, captured output bytes, or the text of an exec error, which can contain paths or argv; `start_failed` carries no error text.
 
 ## Registration
 
-sciontool registers both routes, and so lists them in `Hello.capabilities.rpc`, only when its launch environment carries `hub.exec_schedules` in `SCION_HUB_EXPERIMENTS`. The Hub sends that entry at dispatch only while `hub.conduit` is served and `hub.exec_schedules` is on (`dispatchExperiments`, `agentExperimentNames`), the rule `deliver-message` uses. The executor needs Linux (`waitid(WNOWAIT)`); elsewhere the routes are never registered.
+sciontool registers both routes, and so lists them in `Hello.capabilities.rpc` (and advertises `exec_capture.v1` in `Hello.capabilities.features`), only when its launch environment carries `hub.exec_schedules` in `SCION_HUB_EXPERIMENTS`. The Hub sends that entry at dispatch only while `hub.conduit` is served and `hub.exec_schedules` is on (`dispatchExperiments`, `agentExperimentNames`), the rule `deliver-message` uses. The executor needs Linux (`waitid(WNOWAIT)`); elsewhere the routes are never registered.

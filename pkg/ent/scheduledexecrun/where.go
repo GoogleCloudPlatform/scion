@@ -161,6 +161,16 @@ func OutputBytes(v int64) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldOutputBytes, v))
 }
 
+// CaptureMode applies equality check predicate on the "capture_mode" field. It's identical to CaptureModeEQ.
+func CaptureMode(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldCaptureMode, v))
+}
+
+// OutputStatus applies equality check predicate on the "output_status" field. It's identical to OutputStatusEQ.
+func OutputStatus(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldOutputStatus, v))
+}
+
 // Runtime applies equality check predicate on the "runtime" field. It's identical to RuntimeEQ.
 func Runtime(v string) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldRuntime, v))
@@ -1244,6 +1254,136 @@ func OutputBytesIsNil() predicate.ScheduledExecRun {
 // OutputBytesNotNil applies the NotNil predicate on the "output_bytes" field.
 func OutputBytesNotNil() predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldNotNull(FieldOutputBytes))
+}
+
+// CaptureModeEQ applies the EQ predicate on the "capture_mode" field.
+func CaptureModeEQ(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldCaptureMode, v))
+}
+
+// CaptureModeNEQ applies the NEQ predicate on the "capture_mode" field.
+func CaptureModeNEQ(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNEQ(FieldCaptureMode, v))
+}
+
+// CaptureModeIn applies the In predicate on the "capture_mode" field.
+func CaptureModeIn(vs ...string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIn(FieldCaptureMode, vs...))
+}
+
+// CaptureModeNotIn applies the NotIn predicate on the "capture_mode" field.
+func CaptureModeNotIn(vs ...string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotIn(FieldCaptureMode, vs...))
+}
+
+// CaptureModeGT applies the GT predicate on the "capture_mode" field.
+func CaptureModeGT(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGT(FieldCaptureMode, v))
+}
+
+// CaptureModeGTE applies the GTE predicate on the "capture_mode" field.
+func CaptureModeGTE(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGTE(FieldCaptureMode, v))
+}
+
+// CaptureModeLT applies the LT predicate on the "capture_mode" field.
+func CaptureModeLT(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLT(FieldCaptureMode, v))
+}
+
+// CaptureModeLTE applies the LTE predicate on the "capture_mode" field.
+func CaptureModeLTE(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLTE(FieldCaptureMode, v))
+}
+
+// CaptureModeContains applies the Contains predicate on the "capture_mode" field.
+func CaptureModeContains(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldContains(FieldCaptureMode, v))
+}
+
+// CaptureModeHasPrefix applies the HasPrefix predicate on the "capture_mode" field.
+func CaptureModeHasPrefix(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldHasPrefix(FieldCaptureMode, v))
+}
+
+// CaptureModeHasSuffix applies the HasSuffix predicate on the "capture_mode" field.
+func CaptureModeHasSuffix(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldHasSuffix(FieldCaptureMode, v))
+}
+
+// CaptureModeEqualFold applies the EqualFold predicate on the "capture_mode" field.
+func CaptureModeEqualFold(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEqualFold(FieldCaptureMode, v))
+}
+
+// CaptureModeContainsFold applies the ContainsFold predicate on the "capture_mode" field.
+func CaptureModeContainsFold(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldContainsFold(FieldCaptureMode, v))
+}
+
+// OutputStatusEQ applies the EQ predicate on the "output_status" field.
+func OutputStatusEQ(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldOutputStatus, v))
+}
+
+// OutputStatusNEQ applies the NEQ predicate on the "output_status" field.
+func OutputStatusNEQ(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNEQ(FieldOutputStatus, v))
+}
+
+// OutputStatusIn applies the In predicate on the "output_status" field.
+func OutputStatusIn(vs ...string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIn(FieldOutputStatus, vs...))
+}
+
+// OutputStatusNotIn applies the NotIn predicate on the "output_status" field.
+func OutputStatusNotIn(vs ...string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotIn(FieldOutputStatus, vs...))
+}
+
+// OutputStatusGT applies the GT predicate on the "output_status" field.
+func OutputStatusGT(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGT(FieldOutputStatus, v))
+}
+
+// OutputStatusGTE applies the GTE predicate on the "output_status" field.
+func OutputStatusGTE(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGTE(FieldOutputStatus, v))
+}
+
+// OutputStatusLT applies the LT predicate on the "output_status" field.
+func OutputStatusLT(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLT(FieldOutputStatus, v))
+}
+
+// OutputStatusLTE applies the LTE predicate on the "output_status" field.
+func OutputStatusLTE(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLTE(FieldOutputStatus, v))
+}
+
+// OutputStatusContains applies the Contains predicate on the "output_status" field.
+func OutputStatusContains(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldContains(FieldOutputStatus, v))
+}
+
+// OutputStatusHasPrefix applies the HasPrefix predicate on the "output_status" field.
+func OutputStatusHasPrefix(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldHasPrefix(FieldOutputStatus, v))
+}
+
+// OutputStatusHasSuffix applies the HasSuffix predicate on the "output_status" field.
+func OutputStatusHasSuffix(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldHasSuffix(FieldOutputStatus, v))
+}
+
+// OutputStatusEqualFold applies the EqualFold predicate on the "output_status" field.
+func OutputStatusEqualFold(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEqualFold(FieldOutputStatus, v))
+}
+
+// OutputStatusContainsFold applies the ContainsFold predicate on the "output_status" field.
+func OutputStatusContainsFold(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldContainsFold(FieldOutputStatus, v))
 }
 
 // RuntimeEQ applies the EQ predicate on the "runtime" field.

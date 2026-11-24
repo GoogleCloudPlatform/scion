@@ -122,6 +122,16 @@ func (ScheduledExecRun) Fields() []ent.Field {
 		field.Int64("output_bytes").
 			Optional().
 			Nillable(),
+		// capture_mode is the output capture mode requested at admission ("",
+		// "json", or "tail"), immutable after insert.
+		field.String("capture_mode").
+			Default("").
+			Immutable(),
+		// output_status records what happened to captured output when
+		// capture_mode is non-empty (captured, truncated, too_large,
+		// invalid_json, empty, expired, lost).
+		field.String("output_status").
+			Default(""),
 		field.String("runtime").
 			Default("").
 			Immutable(),

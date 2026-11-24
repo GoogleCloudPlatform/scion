@@ -126,6 +126,9 @@ type EntitlementBinding func(*sql.Selector)
 // EnvVar is the predicate function for envvar builders.
 type EnvVar func(*sql.Selector)
 
+// ExecRunOutput is the predicate function for execrunoutput builders.
+type ExecRunOutput func(*sql.Selector)
+
 // ExternalIdentity is the predicate function for externalidentity builders.
 type ExternalIdentity func(*sql.Selector)
 

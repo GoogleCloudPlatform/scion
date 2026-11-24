@@ -1289,10 +1289,11 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/harness-configs/{id}/reimport":     {"id": f.harnessConfig},
 
 		// --- schedule family ---
-		"/api/v1/projects/{projectId}/scheduled-events/{id}": {"projectId": f.project, "id": f.scheduledEvent},
-		"/api/v1/projects/{projectId}/schedules/{id}":        {"projectId": f.project, "id": f.schedule},
-		"/api/v1/projects/{projectId}/scheduled-events":      {"projectId": f.project},
-		"/api/v1/projects/{projectId}/schedules":             {"projectId": f.project},
+		"/api/v1/projects/{projectId}/scheduled-events/{id}":        {"projectId": f.project, "id": f.scheduledEvent},
+		"/api/v1/projects/{projectId}/scheduled-events/{id}/output": {"projectId": f.project, "id": f.scheduledEvent},
+		"/api/v1/projects/{projectId}/schedules/{id}":               {"projectId": f.project, "id": f.schedule},
+		"/api/v1/projects/{projectId}/scheduled-events":             {"projectId": f.project},
+		"/api/v1/projects/{projectId}/schedules":                    {"projectId": f.project},
 
 		// Schedule sub-actions on the seeded schedule.
 		"/api/v1/projects/{projectId}/schedules/{id}/history": {"projectId": f.project, "id": f.schedule},

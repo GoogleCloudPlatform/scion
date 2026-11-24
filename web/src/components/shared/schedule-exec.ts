@@ -43,6 +43,8 @@ export interface ExecRunSummary {
   exitCode?: number | undefined;
   durationMs?: number | undefined;
   outputBytes?: number | undefined;
+  captureMode?: string | undefined;
+  outputStatus?: string | undefined;
   startedAt: string;
   finishedAt?: string | undefined;
 }
@@ -70,6 +72,7 @@ export interface ParsedExecPayload {
   agentName: string;
   command: string[];
   timeoutSeconds: number;
+  captureOutput: string;
   commandRedacted: boolean;
   argc: number | undefined;
   commandSha256: string | undefined;
@@ -167,6 +170,7 @@ export function parseExecPayload(raw: string): ParsedExecPayload {
         agentName: '',
         command: [],
         timeoutSeconds: 0,
+        captureOutput: '',
         commandRedacted: false,
         argc: undefined,
         commandSha256: undefined,
@@ -178,6 +182,8 @@ export function parseExecPayload(raw: string): ParsedExecPayload {
       !commandRedacted && Array.isArray(obj.command)
         ? obj.command.filter((x): x is string => typeof x === 'string')
         : [];
+    const rawCapture = typeof obj.captureOutput === 'string' ? obj.captureOutput : '';
+    const captureOutput = rawCapture === 'json' || rawCapture === 'tail' ? rawCapture : '';
     return {
       agentId: typeof obj.agentId === 'string' ? obj.agentId : '',
       agentName: typeof obj.agentName === 'string' ? obj.agentName : '',
@@ -186,6 +192,7 @@ export function parseExecPayload(raw: string): ParsedExecPayload {
         typeof obj.timeoutSeconds === 'number' && Number.isFinite(obj.timeoutSeconds)
           ? obj.timeoutSeconds
           : 0,
+      captureOutput,
       commandRedacted,
       argc: typeof obj.argc === 'number' ? obj.argc : undefined,
       commandSha256:
@@ -197,6 +204,7 @@ export function parseExecPayload(raw: string): ParsedExecPayload {
       agentName: '',
       command: [],
       timeoutSeconds: 0,
+      captureOutput: '',
       commandRedacted: false,
       argc: undefined,
       commandSha256: undefined,
@@ -403,6 +411,32 @@ export const scheduleExecStyles = css`
     color: var(--sl-color-danger-600, #dc2626);
     margin-top: 0.125rem;
   }
+
+  .exec-output-section {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .exec-output-pre {
+    margin: 0;
+    padding: 0.625rem 0.75rem;
+    background: var(--scion-bg-subtle, #f1f5f9);
+    border: 1px solid var(--scion-border, #e2e8f0);
+    border-radius: var(--scion-radius, 0.5rem);
+    font-family: var(--scion-font-mono, monospace);
+    font-size: 0.75rem;
+    max-height: 20rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .exec-output-error {
+    font-size: 0.8125rem;
+    color: var(--sl-color-danger-600, #dc2626);
+  }
 `;
 
 export function renderExecAgentPicker(opts: {
@@ -583,6 +617,11 @@ export function renderExecDetailPayload(parsed: ParsedExecPayload): TemplateResu
 
   return html`
     <div class="detail-row"><strong>Timeout:</strong> ${effectiveTimeout}s</div>
+    ${parsed.captureOutput
+      ? html`<div class="detail-row exec-capture-mode">
+          <strong>Capture Output:</strong> <code>${parsed.captureOutput}</code>
+        </div>`
+      : nothing}
     <div class="detail-row">
       <strong>Command:</strong>
       ${parsed.commandRedacted
@@ -612,7 +651,9 @@ export function renderExecDetailPayload(parsed: ParsedExecPayload): TemplateResu
             </div>
           `}
     </div>
-    <div class="exec-no-output-note">${EXEC_NO_OUTPUT_NOTE}</div>
+    ${!parsed.captureOutput
+      ? html`<div class="exec-no-output-note">${EXEC_NO_OUTPUT_NOTE}</div>`
+      : nothing}
   `;
 }
 
@@ -630,6 +671,16 @@ export function renderExecRunSummaryRows(
     <div class="detail-row exec-summary-duration">
       <strong>Duration:</strong> ${formatExecDuration(summary.durationMs)}
     </div>
+    ${summary.captureMode
+      ? html`<div class="detail-row exec-summary-capture-mode">
+          <strong>Capture Mode:</strong> <code>${summary.captureMode}</code>
+        </div>`
+      : nothing}
+    ${summary.outputStatus
+      ? html`<div class="detail-row exec-summary-output-status">
+          <strong>Output Status:</strong> <code>${summary.outputStatus}</code>
+        </div>`
+      : nothing}
   `;
 }
 

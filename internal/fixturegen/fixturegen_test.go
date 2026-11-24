@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 113
+const expectedTableCount = 114
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -114,6 +114,12 @@ func TestFixtureLoadable(t *testing.T) {
 	require.Equal(t, agentID, execContainer.AgentID)
 	assert.Equal(t, []string{agentID}, workspace.AgentIDs)
 	assert.Equal(t, agentID, workspace.FrontmostAgentID)
+
+	// The exec_run_outputs row must be readable through the real store adapter
+	// (field.UUID run_id and project_id columns).
+	execOut, err := entadapter.NewScheduleStore(client).GetScheduledExecRunOutput(ctx, "5e000000-0000-0000-0000-000000000002")
+	require.NoError(t, err, "exec_run_outputs fixture row must be readable via ScheduleStore")
+	assert.Equal(t, `{"ok":true}`, string(execOut))
 
 	// The thread group rows must be readable through the real store adapter
 	// (field.UUID ids, the stored name_key matching the Go helper, and the

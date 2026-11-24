@@ -79,6 +79,8 @@ var agentAllowed = map[string]bool{
 	"schedule":                    true,
 	"schedule.list":               true,
 	"schedule.get":                true,
+	"schedule.events":             true,
+	"schedule.events.output":      true,
 	"schedule.cancel":             true,
 	"schedule.create":             true,
 	"schedule.create-recurring":   true,

@@ -97,7 +97,7 @@ func waitExecFinished(t *testing.T, f *ptyConduitFixture, runID string) agentcon
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		res, err := f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, runID)
+		res, err := f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, runID, "")
 		require.NoError(t, err)
 		if res.Finished() {
 			return res
@@ -156,7 +156,7 @@ func TestAgentExecClient_RoundTrip(t *testing.T) {
 			assert.Equal(t, http.StatusConflict, res.Status)
 			assert.Equal(t, agentcontrol.ExecOutcomeMismatch, res.Outcome)
 
-			unknown, err := f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, "00000000-0000-4000-8000-0000000000ff")
+			unknown, err := f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, "00000000-0000-4000-8000-0000000000ff", "")
 			require.NoError(t, err)
 			assert.Equal(t, http.StatusNotFound, unknown.Status)
 			assert.Equal(t, agentcontrol.ExecStateUnknown, unknown.State)
@@ -173,7 +173,7 @@ func TestAgentExecClient_NotReached(t *testing.T) {
 	ctx := context.Background()
 	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
 	require.ErrorIs(t, err, router.ErrNoSession)
-	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID)
+	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID, "")
 	require.ErrorIs(t, err, router.ErrNoSession)
 
 	// The real control handler without exec options: exec routes are
@@ -181,7 +181,7 @@ func TestAgentExecClient_NotReached(t *testing.T) {
 	ca := f.startControlAgent(t, f.public.URL, true, nil)
 	_, err = f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
 	require.ErrorIs(t, err, ErrAgentControlNotAdvertised)
-	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID)
+	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID, "")
 	require.ErrorIs(t, err, ErrAgentControlNotAdvertised)
 	assert.Zero(t, ca.rpcs.Load())
 }
@@ -227,7 +227,7 @@ func TestAgentExecClient_SchemaMismatchIsError(t *testing.T) {
 		{404, `404 page not found`},
 	} {
 		set(a.status, a.body)
-		_, err := f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, execTestRunID)
+		_, err := f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, execTestRunID, "")
 		assert.ErrorIs(t, err, agentcontrol.ErrExecSchema, "status %d %s", a.status, a.body)
 	}
 }
@@ -248,7 +248,7 @@ func TestAgentExecClient_InvalidRequestNotSent(t *testing.T) {
 	bad.TimeoutS = agentcontrol.MaxExecTimeoutSec + 1
 	_, err = f.srv.StartAgentExecRun(context.Background(), f.launched.ID, f.launched.RunID, bad)
 	require.ErrorAs(t, err, &fe)
-	_, err = f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, "not-a-uuid")
+	_, err = f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, "not-a-uuid", "")
 	require.ErrorAs(t, err, &fe)
 	assert.Zero(t, ca.rpcs.Load())
 }
@@ -263,9 +263,9 @@ func TestAgentExecClient_LaunchPinned(t *testing.T) {
 	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, "other-launch", execStartReq("true"))
 	var le *AgentExecLaunchChangedError
 	require.ErrorAs(t, err, &le)
-	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "other-launch", execTestRunID)
+	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "other-launch", execTestRunID, "")
 	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
-	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "", execTestRunID)
+	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "", execTestRunID, "")
 	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
 	assert.Zero(t, ca.rpcs.Load(), "nothing sent for another launch")
 }
@@ -332,7 +332,7 @@ func TestAgentExecClient_StaleSnapshotNeverReachesReplacement(t *testing.T) {
 			wrapped.mu.Lock()
 			wrapped.reads = 0
 			wrapped.mu.Unlock()
-			_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "old-launch", execTestRunID)
+			_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "old-launch", execTestRunID, "")
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, ErrAgentExecLaunchChanged) || errors.Is(err, router.ErrNoSession), "err = %v", err)
 
@@ -355,7 +355,7 @@ func TestAgentExecClient_GenerationFallbackSessionRefused(t *testing.T) {
 	ctx := context.Background()
 	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
 	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
-	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID)
+	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID, "")
 	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
 	assert.Zero(t, ca.rpcs.Load(), "nothing sent to a generation-fallback session")
 }

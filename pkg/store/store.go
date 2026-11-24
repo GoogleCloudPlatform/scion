@@ -3676,8 +3676,16 @@ type ScheduledExecRunStore interface {
 	// fin.EventStatus is set, the event's status and error are written in the
 	// same transaction, while the event is still fired or expired; when the
 	// run belongs to a recurring schedule, the parent schedule's run counters
-	// and last-run fields are updated in the same transaction.
+	// and last-run fields are updated in the same transaction. When it wins
+	// and len(fin.Output) > 0, it inserts the captured output into
+	// exec_run_outputs in the same transaction.
 	FinishScheduledExecRun(ctx context.Context, fin ScheduledExecRunFinish) (bool, error)
+
+	// GetScheduledExecRunOutput returns the captured output bytes stored for
+	// runID in exec_run_outputs, or ErrNotFound when no output row exists.
+	// It performs no authorization; callers must enforce their own gate and
+	// are constrained by the TestExecOutputReaders allow-list.
+	GetScheduledExecRunOutput(ctx context.Context, runID string) ([]byte, error)
 
 	// ListExpiredScheduledExecRuns returns up to limit unfinished runs whose
 	// lease ended before now, oldest lease first.

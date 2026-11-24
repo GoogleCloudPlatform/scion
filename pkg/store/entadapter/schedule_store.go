@@ -23,6 +23,7 @@ import (
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/execrunoutput"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
@@ -787,6 +788,14 @@ func (s *ScheduleStore) DeleteSchedulesByProject(ctx context.Context, projectID 
 	// would cascade to any run inserted meanwhile), then the schedules.
 	var n int
 	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		if _, err := c.ExecRunOutput.Delete().
+			Where(
+				execrunoutput.OwnerKindEQ(execrunoutput.OwnerKindScheduledExec),
+				execrunoutput.ProjectIDEQ(uid),
+			).
+			Exec(ctx); err != nil {
+			return err
+		}
 		if _, err := c.ScheduledExecRun.Delete().
 			Where(scheduledexecrun.ProjectIDEQ(uid)).
 			Exec(ctx); err != nil {
@@ -1329,6 +1338,14 @@ func (s *ScheduleStore) PurgeOldScheduledEvents(ctx context.Context, cutoff time
 		for start := 0; start < len(ids); start += scheduledExecRunsByEventChunk {
 			end := min(start+scheduledExecRunsByEventChunk, len(ids))
 			chunk := ids[start:end]
+			if _, err := c.ExecRunOutput.Delete().
+				Where(
+					execrunoutput.OwnerKindEQ(execrunoutput.OwnerKindScheduledExec),
+					execrunoutput.IDIn(chunk...),
+				).
+				Exec(ctx); err != nil {
+				return err
+			}
 			if _, err := c.ScheduledExecRun.Delete().Where(scheduledexecrun.EventIDIn(chunk...)).Exec(ctx); err != nil {
 				return err
 			}

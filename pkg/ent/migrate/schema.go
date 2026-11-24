@@ -1688,6 +1688,28 @@ var (
 			},
 		},
 	}
+	// ExecRunOutputsColumns holds the columns for the "exec_run_outputs" table.
+	ExecRunOutputsColumns = []*schema.Column{
+		{Name: "run_id", Type: field.TypeUUID},
+		{Name: "owner_kind", Type: field.TypeEnum, Enums: []string{"scheduled_exec"}},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "capture_mode", Type: field.TypeString},
+		{Name: "content", Type: field.TypeBytes, Size: 65536},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// ExecRunOutputsTable holds the schema information for the "exec_run_outputs" table.
+	ExecRunOutputsTable = &schema.Table{
+		Name:       "exec_run_outputs",
+		Columns:    ExecRunOutputsColumns,
+		PrimaryKey: []*schema.Column{ExecRunOutputsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "execrunoutput_owner_kind_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{ExecRunOutputsColumns[1], ExecRunOutputsColumns[2]},
+			},
+		},
+	}
 	// ExternalIdentitiesColumns holds the columns for the "external_identities" table.
 	ExternalIdentitiesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -3394,6 +3416,8 @@ var (
 		{Name: "exit_code", Type: field.TypeInt, Nullable: true},
 		{Name: "duration_ms", Type: field.TypeInt64, Nullable: true},
 		{Name: "output_bytes", Type: field.TypeInt64, Nullable: true},
+		{Name: "capture_mode", Type: field.TypeString, Default: ""},
+		{Name: "output_status", Type: field.TypeString, Default: ""},
 		{Name: "runtime", Type: field.TypeString, Default: ""},
 		{Name: "launch_id", Type: field.TypeString, Default: ""},
 		{Name: "last_polled_at", Type: field.TypeTime},
@@ -3408,7 +3432,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "scheduled_exec_runs_scheduled_events_exec_run",
-				Columns:    []*schema.Column{ScheduledExecRunsColumns[26]},
+				Columns:    []*schema.Column{ScheduledExecRunsColumns[28]},
 				RefColumns: []*schema.Column{ScheduledEventsColumns[0]},
 				OnDelete:   schema.Cascade,
 			},
@@ -3427,7 +3451,7 @@ var (
 			{
 				Name:    "scheduledexecrun_target_agent_id_finished_at_poll_seq",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[3], ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[25]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[3], ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[27]},
 			},
 			{
 				Name:    "scheduledexecrun_project_id",
@@ -3442,7 +3466,7 @@ var (
 			{
 				Name:    "scheduledexecrun_finished_at_last_polled_at",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[24]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[26]},
 			},
 		},
 	}
@@ -4566,6 +4590,7 @@ var (
 		DurableQueueItemsTable,
 		EntitlementBindingsTable,
 		EnvVarsTable,
+		ExecRunOutputsTable,
 		ExternalIdentitiesTable,
 		GcpServiceAccountsTable,
 		GithubResolutionCacheTable,
@@ -4738,6 +4763,9 @@ func init() {
 	EntitlementBindingsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	EnvVarsTable.Annotation = &entsql.Annotation{
 		Table: "env_vars",
+	}
+	ExecRunOutputsTable.Annotation = &entsql.Annotation{
+		Table: "exec_run_outputs",
 	}
 	ExternalIdentitiesTable.ForeignKeys[0].RefTable = UsersTable
 	ExternalIdentitiesTable.Annotation = &entsql.Annotation{

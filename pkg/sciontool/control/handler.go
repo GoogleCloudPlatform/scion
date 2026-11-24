@@ -33,6 +33,8 @@ package control
 import (
 	"net/http"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 )
 
 // Prefix is the path prefix of every control route.
@@ -101,6 +103,15 @@ func (h *Handler) add(name string, fn http.HandlerFunc) {
 // advertised as Hello.capabilities.rpc.
 func (h *Handler) Routes() []string {
 	return append([]string(nil), h.names...)
+}
+
+// Features returns the optional protocol feature tokens supported by the
+// registered routes, for Hello.capabilities.features.
+func (h *Handler) Features() []string {
+	if h.exec != nil {
+		return []string{agentcontrol.FeatureExecCapture}
+	}
+	return nil
 }
 
 // ServeHTTP implements http.Handler.

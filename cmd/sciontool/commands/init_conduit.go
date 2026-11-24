@@ -118,6 +118,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 				},
 				Session:   core.Config{RPCHandler: control.RPCHandler(ctl)},
 				RPCRoutes: ctl.Routes(),
+				Features:  ctl.Features(),
 			})
 			if err != nil {
 				return nil, err

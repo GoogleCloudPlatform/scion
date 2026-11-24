@@ -63,6 +63,10 @@ type ScheduledExecRun struct {
 	DurationMs *int64 `json:"duration_ms,omitempty"`
 	// OutputBytes holds the value of the "output_bytes" field.
 	OutputBytes *int64 `json:"output_bytes,omitempty"`
+	// CaptureMode holds the value of the "capture_mode" field.
+	CaptureMode string `json:"capture_mode,omitempty"`
+	// OutputStatus holds the value of the "output_status" field.
+	OutputStatus string `json:"output_status,omitempty"`
 	// Runtime holds the value of the "runtime" field.
 	Runtime string `json:"runtime,omitempty"`
 	// LaunchID holds the value of the "launch_id" field.
@@ -106,7 +110,7 @@ func (*ScheduledExecRun) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case scheduledexecrun.FieldAuthorizationRevision, scheduledexecrun.FieldArgc, scheduledexecrun.FieldTimeoutSeconds, scheduledexecrun.FieldExitCode, scheduledexecrun.FieldDurationMs, scheduledexecrun.FieldOutputBytes, scheduledexecrun.FieldPollSeq:
 			values[i] = new(sql.NullInt64)
-		case scheduledexecrun.FieldInitiatorPrincipalKind, scheduledexecrun.FieldInitiatorPrincipalID, scheduledexecrun.FieldInitiatorCredentialKind, scheduledexecrun.FieldInitiatorCredentialID, scheduledexecrun.FieldExecutorKind, scheduledexecrun.FieldExecutorID, scheduledexecrun.FieldCommandSha256, scheduledexecrun.FieldOutcome, scheduledexecrun.FieldRuntime, scheduledexecrun.FieldLaunchID:
+		case scheduledexecrun.FieldInitiatorPrincipalKind, scheduledexecrun.FieldInitiatorPrincipalID, scheduledexecrun.FieldInitiatorCredentialKind, scheduledexecrun.FieldInitiatorCredentialID, scheduledexecrun.FieldExecutorKind, scheduledexecrun.FieldExecutorID, scheduledexecrun.FieldCommandSha256, scheduledexecrun.FieldOutcome, scheduledexecrun.FieldCaptureMode, scheduledexecrun.FieldOutputStatus, scheduledexecrun.FieldRuntime, scheduledexecrun.FieldLaunchID:
 			values[i] = new(sql.NullString)
 		case scheduledexecrun.FieldStartedAt, scheduledexecrun.FieldNotAfter, scheduledexecrun.FieldLeaseUntil, scheduledexecrun.FieldFinishedAt, scheduledexecrun.FieldLastPolledAt:
 			values[i] = new(sql.NullTime)
@@ -270,6 +274,18 @@ func (_m *ScheduledExecRun) assignValues(columns []string, values []any) error {
 				_m.OutputBytes = new(int64)
 				*_m.OutputBytes = value.Int64
 			}
+		case scheduledexecrun.FieldCaptureMode:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field capture_mode", values[i])
+			} else if value.Valid {
+				_m.CaptureMode = value.String
+			}
+		case scheduledexecrun.FieldOutputStatus:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field output_status", values[i])
+			} else if value.Valid {
+				_m.OutputStatus = value.String
+			}
 		case scheduledexecrun.FieldRuntime:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field runtime", values[i])
@@ -410,6 +426,12 @@ func (_m *ScheduledExecRun) String() string {
 		builder.WriteString("output_bytes=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("capture_mode=")
+	builder.WriteString(_m.CaptureMode)
+	builder.WriteString(", ")
+	builder.WriteString("output_status=")
+	builder.WriteString(_m.OutputStatus)
 	builder.WriteString(", ")
 	builder.WriteString("runtime=")
 	builder.WriteString(_m.Runtime)
