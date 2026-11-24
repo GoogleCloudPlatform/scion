@@ -433,6 +433,7 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 				assert.Equal(t, wantD.Reason, gotD.Reason, "project %s action %s Reason mismatch", p.Slug, act)
 				assert.Equal(t, wantD.BindingID, gotD.BindingID, "project %s action %s BindingID mismatch", p.Slug, act)
 				assert.Equal(t, wantD.RoleName, gotD.RoleName, "project %s action %s RoleName mismatch", p.Slug, act)
+				assert.Equal(t, wantD.MatchedGrant, gotD.MatchedGrant, "project %s action %s MatchedGrant mismatch", p.Slug, act)
 				assert.Equal(t, wantD.Scope, gotD.Scope, "project %s action %s Scope mismatch", p.Slug, act)
 				assert.Equal(t, wantD.DenyCause, gotD.DenyCause, "project %s action %s DenyCause mismatch", p.Slug, act)
 			}
@@ -556,16 +557,98 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 			})
 		}
 	})
+
+	// R2(a): project binding created BEFORE a granting system binding must
+	// still be selected first (preserving BindingID, RoleName, MatchedGrant,
+	// Scope, and Reason).
+	t.Run("project_before_system_binding_order", func(t *testing.T) {
+		u := createUser("proj-before-sys@test.local", store.UserStatusActive, store.UserKindHuman, nil)
+		// Create project-admin on pMember BEFORE hub-admin at system scope.
+		projBind, berr := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: projAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+			ScopeType: store.RoleScopeProject, ScopeID: pMember.ID, CreatedBy: "test",
+		})
+		require.NoError(t, berr)
+		_, berr = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: hubAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+			ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+		})
+		require.NoError(t, berr)
+
+		ident := userIdent(u)
+		checkParity(t, ctx, ident, false)
+
+		got := srv.authzService.CheckAccess(withAuthzInputMemo(ctx), ident, projectResource(pMember), ActionRead)
+		want := srv.authzService.CheckAccess(maskAllAuthzMemo(ctx), ident, projectResource(pMember), ActionRead)
+		assert.True(t, got.Allowed)
+		assert.Equal(t, want.BindingID, got.BindingID)
+		assert.Equal(t, want.RoleName, got.RoleName)
+		assert.Equal(t, want.MatchedGrant, got.MatchedGrant)
+		assert.Equal(t, want.Scope, got.Scope)
+		assert.Equal(t, want.Reason, got.Reason)
+		if want.BindingID == projBind.ID {
+			assert.Equal(t, store.ProjectRoleAdmin, got.RoleName)
+			assert.Equal(t, ScopeTypeProject, got.Scope)
+		}
+	})
+
+	// R2(b): skill, template, and harness_config targets (project- and
+	// user-scoped) for a user with hub-member + bindings on other projects must
+	// match unfiltered deny reasons ("no active binding grants permission ...",
+	// never "no candidate bindings") after applyHubWideScopeFilters strips the
+	// hub-member system binding.
+	t.Run("hub_wide_catalog_scope_filter_deny_reason", func(t *testing.T) {
+		hubMemberRD, rerr := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+		require.NoError(t, rerr)
+		u := createUser("catalog-member@test.local", store.UserStatusActive, store.UserKindHuman, nil)
+		_, berr := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: hubMemberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+			ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+		})
+		require.NoError(t, berr)
+		_, berr = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: projMemberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+			ScopeType: store.RoleScopeProject, ScopeID: pMember.ID, CreatedBy: "test",
+		})
+		require.NoError(t, berr)
+
+		ident := userIdent(u)
+		memoCtx := withAuthzInputMemo(ctx)
+		unfilteredCtx := maskAllAuthzMemo(ctx)
+		otherOwnerID := api.NewUUID()
+
+		targets := []Resource{
+			{Type: "skill", ID: api.NewUUID(), ScopeKind: "project", ParentType: "project", ParentID: pNoGrant.ID},
+			{Type: "skill", ID: api.NewUUID(), ScopeKind: "user", OwnerID: otherOwnerID},
+			{Type: "template", ID: api.NewUUID(), ScopeKind: "project", ParentType: "project", ParentID: pNoGrant.ID},
+			{Type: "template", ID: api.NewUUID(), ScopeKind: "user", OwnerID: otherOwnerID},
+			{Type: "harness_config", ID: api.NewUUID(), ScopeKind: "project", ParentType: "project", ParentID: pNoGrant.ID},
+			{Type: "harness_config", ID: api.NewUUID(), ScopeKind: "user", OwnerID: otherOwnerID},
+		}
+		for _, res := range targets {
+			got := srv.authzService.CheckAccess(memoCtx, ident, res, ActionRead)
+			want := srv.authzService.CheckAccess(unfilteredCtx, ident, res, ActionRead)
+			assert.False(t, want.Allowed, "expected deny for %s (%s)", res.Type, res.ScopeKind)
+			assert.Equal(t, want.Allowed, got.Allowed, "%s (%s) Allowed mismatch", res.Type, res.ScopeKind)
+			assert.Equal(t, want.Reason, got.Reason, "%s (%s) Reason mismatch", res.Type, res.ScopeKind)
+			assert.Equal(t, want.BindingID, got.BindingID, "%s (%s) BindingID mismatch", res.Type, res.ScopeKind)
+			assert.Equal(t, want.RoleName, got.RoleName, "%s (%s) RoleName mismatch", res.Type, res.ScopeKind)
+			assert.Equal(t, want.Scope, got.Scope, "%s (%s) Scope mismatch", res.Type, res.ScopeKind)
+			assert.NotEqual(t, "no candidate bindings", got.Reason,
+				"%s (%s) must not collapse rejected candidates into 'no candidate bindings'", res.Type, res.ScopeKind)
+		}
+	})
 }
 
 // TestAuthzScopePrefilter_RegressionGuard fails if per-project authorization
-// work regresses back to O(P * B) binding evaluation or per-evaluation
-// sortedKeys allocation (ptone/scion#9157).
+// work regresses back to O(P * B) binding evaluation inside decide() (mutant
+// m7) or per-evaluation sortedKeys allocation (mutant m5) (ptone/scion#9157).
 func TestAuthzScopePrefilter_RegressionGuard(t *testing.T) {
-	// 1. BindingsForProject returns O(1) bindings per project, independent of
-	// total project bindings (5 vs 100 projects).
-	t.Run("bindings_for_project_constant_in_project_count", func(t *testing.T) {
-		measure := func(numProjects int) (filteredLen int, storeCalls map[string]int64) {
+	// 1. BindingsForProject returns O(1) capacity-capped bindings per project,
+	// and decide() via ComputeCapabilitiesForActions keeps per-project
+	// allocations constant across 5 vs 100 projects (catches mutant m7).
+	t.Run("decide_and_bindings_constant_in_project_count", func(t *testing.T) {
+		measure := func(numProjects int) (filteredLen, filteredCap int, allocsPerProject float64, storeCalls map[string]int64) {
 			ctx := context.Background()
 			srv, rawStore, _, spy := newBellCountingSQLiteServer(t)
 			_, bob, _ := setupDemoPolicyOn(t, srv, srv.store)
@@ -573,6 +656,7 @@ func TestAuthzScopePrefilter_RegressionGuard(t *testing.T) {
 			memberRole, err := rawStore.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 			require.NoError(t, err)
 
+			resources := make([]Resource, numProjects)
 			var targetProjID string
 			for i := 0; i < numProjects; i++ {
 				p := &store.Project{
@@ -587,6 +671,7 @@ func TestAuthzScopePrefilter_RegressionGuard(t *testing.T) {
 					ScopeType: store.RoleScopeProject, ScopeID: p.ID, CreatedBy: "test",
 				})
 				require.NoError(t, err)
+				resources[i] = projectResource(p)
 				if i == 0 {
 					targetProjID = p.ID
 				}
@@ -596,6 +681,12 @@ func TestAuthzScopePrefilter_RegressionGuard(t *testing.T) {
 			memoCtx := withAuthzInputMemo(ctx)
 
 			spy.Reset(true)
+			caps := srv.authzService.ComputeCapabilitiesForActions(memoCtx, bobIdent, resources, []Action{ActionRead})
+			require.Len(t, caps, numProjects)
+			for i := range resources {
+				require.True(t, capabilityAllows(caps[i], ActionRead))
+			}
+
 			h := srv.authzService.inputsFor(memoCtx, bobIdent)
 			_, err = h.Principals()
 			require.NoError(t, err)
@@ -604,27 +695,27 @@ func TestAuthzScopePrefilter_RegressionGuard(t *testing.T) {
 			_, err = h.RoleDefs()
 			require.NoError(t, err)
 
-			// Calling BindingsForProject across another 20 projects must issue 0 extra store calls.
-			for i := 0; i < 20; i++ {
-				h2 := srv.authzService.inputsFor(memoCtx, bobIdent)
-				_, err = h2.Principals()
-				require.NoError(t, err)
-				_, err = h2.BindingsForProject(targetProjID)
-				require.NoError(t, err)
-				_, err = h2.RoleDefs()
-				require.NoError(t, err)
-			}
-
 			snap := spy.Snapshot()
 			spy.Reset(false)
-			return len(filtered), snap
+
+			// Measure steady-state decide() allocations per project with the
+			// memo warm: O(1) with BindingsForProject, O(P) if decide() reverts
+			// to authzIn.Bindings().
+			totalAllocs := testing.AllocsPerRun(5, func() {
+				_ = srv.authzService.ComputeCapabilitiesForActions(memoCtx, bobIdent, resources, []Action{ActionRead})
+			})
+			return len(filtered), cap(filtered), totalAllocs / float64(numProjects), snap
 		}
 
-		len5, store5 := measure(5)
-		len100, store100 := measure(100)
+		len5, cap5, alloc5, store5 := measure(5)
+		len100, cap100, alloc100, store100 := measure(100)
 
+		assert.Equal(t, len5, cap5, "BindingsForProject slice must be capacity-capped (N1)")
+		assert.Equal(t, len100, cap100, "BindingsForProject slice must be capacity-capped (N1)")
 		assert.Equal(t, len5, len100, "BindingsForProject slice length must be constant across 5 vs 100 projects")
-		assert.LessOrEqual(t, len100, 5, "BindingsForProject must only return system + matching project bindings (got %d for 100 projects)", len100)
+		assert.LessOrEqual(t, len100, 6, "BindingsForProject must only return system + matching project + 1 dropped sentinel (got %d for 100 projects)", len100)
+		assert.LessOrEqual(t, alloc100, alloc5*1.5+10,
+			"decide() allocations per project must stay O(1) across 5 (%.1f/proj) vs 100 (%.1f/proj) projects", alloc5, alloc100)
 		assert.Equal(t, store5["GetEffectiveGroups"], store100["GetEffectiveGroups"])
 		assert.Equal(t, store5["ListRoleBindingsForPrincipals"], store100["ListRoleBindingsForPrincipals"])
 		assert.Equal(t, store5["GetRoleDefinitionsByIDs"], store100["GetRoleDefinitionsByIDs"])
@@ -632,21 +723,35 @@ func TestAuthzScopePrefilter_RegressionGuard(t *testing.T) {
 	})
 
 	// 2. evaluateBinding must not allocate/sort role.Permissions per evaluation
-	// when the role was built with NewRolePermissions.
+	// when the role was built with NewRolePermissions (catches mutant m5).
 	t.Run("evaluateBinding_no_per_eval_sortedKeys_alloc", func(t *testing.T) {
 		perms := make([]string, 30)
+		permMap := make(map[string]struct{}, 30)
 		for i := range perms {
-			perms[i] = fmt.Sprintf("perm.%02d", i)
+			p := fmt.Sprintf("perm.%02d", i)
+			perms[i] = p
+			permMap[p] = struct{}{}
 		}
-		role := NewRolePermissions("r1", "member", ScopeTypeProject, perms)
-		req := KernelRequest{
+		rolePre := NewRolePermissions("r1", "member", ScopeTypeProject, perms)
+		roleUnpre := &RolePermissions{
+			RoleID:            "r1",
+			RoleName:          "member",
+			ScopeType:         ScopeTypeProject,
+			Permissions:       permMap,
+			ConfersMembership: true,
+		}
+		baseReq := KernelRequest{
 			Permission:       "perm.00",
 			PrincipalClosure: map[string]struct{}{"user:u1": {}},
 			MembershipPaths:  map[string][]string{"user:u1": {"u1"}},
 			Resource:         ResourceContext{ResourceType: "project", ResourceID: "p1", ProjectID: "p1"},
-			RoleDefinitions:  map[string]*RolePermissions{"r1": role},
 			Now:              time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC),
 		}
+		reqPre := baseReq
+		reqPre.RoleDefinitions = map[string]*RolePermissions{"r1": rolePre}
+		reqUnpre := baseReq
+		reqUnpre.RoleDefinitions = map[string]*RolePermissions{"r1": roleUnpre}
+
 		cb := &CandidateBinding{
 			BindingID:        "b1",
 			RoleDefinitionID: "r1",
@@ -655,12 +760,15 @@ func TestAuthzScopePrefilter_RegressionGuard(t *testing.T) {
 			ScopeType:        ScopeTypeProject,
 			ScopeID:          "p1",
 		}
-		allocs := testing.AllocsPerRun(100, func() {
-			_ = evaluateBinding(req, cb)
+		allocsPre := testing.AllocsPerRun(100, func() {
+			_ = evaluateBinding(reqPre, cb)
 		})
-		// Before P6, sortedKeys allocated the 30-element slice + sort scratch
-		// on every binding evaluation; with precomputed sortedPerms, only
-		// compositeKey string concat allocates.
-		assert.LessOrEqual(t, allocs, 2.0, "evaluateBinding must not re-allocate/sort role.Permissions (got %.1f allocs)", allocs)
+		allocsUnpre := testing.AllocsPerRun(100, func() {
+			_ = evaluateBinding(reqUnpre, cb)
+		})
+		assert.Less(t, allocsPre, allocsUnpre,
+			"precomputed sortedPerms must allocate strictly fewer objects (%.1f) than unprecomputed sortedKeys (%.1f)", allocsPre, allocsUnpre)
+		assert.LessOrEqual(t, allocsPre, 1.0,
+			"evaluateBinding with precomputed sortedPerms must allocate at most 1 object (compositeKey); got %.1f", allocsPre)
 	})
 }
