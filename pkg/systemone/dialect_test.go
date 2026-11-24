@@ -932,11 +932,30 @@ func TestDialect_ConsumerEnvironmentRegistrationAndCompileMatrix(t *testing.T) {
 			{Name: "doc.body", Kind: spec.FieldKindText, MaxBytes: 16384, Trust: spec.TrustUntrusted},
 			{Name: "doc.meta", Kind: spec.FieldKindJSON, MaxBytes: 4096, Trust: spec.TrustUntrusted},
 		},
-		ChoiceSets: []spec.ChoiceSetDecl{
-			{Name: "reviewers", MaxItems: 16, MaxLabelBytes: 64},
-		},
 		MaxTotalBytes: 18 * 1024,
 	}
+
+	t.Run("choice_sets_refused_fail_closed_at_registration", func(t *testing.T) {
+		eng := ruleengine.NewEngine()
+		d := systemone.NewDialect(systemone.DialectConfig{})
+		require.NoError(t, eng.Register(d))
+		require.NoError(t, eng.AllowConsumerDialects("cs_consumer", ruleengine.GrantIO(systemone.DialectName)))
+
+		envWithCS := customEnv.Clone()
+		envWithCS.Name = "test_cs_env"
+		envWithCS.ChoiceSets = []spec.ChoiceSetDecl{
+			{Name: "reviewers", MaxItems: 16, MaxLabelBytes: 64},
+		}
+		err := systemone.RegisterConsumerEnvironment(eng, "cs_consumer", envWithCS)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dynamic choice sets are not yet supported")
+		_, exists := d.Environment("test_cs_env")
+		assert.False(t, exists, "refused environment must not be registered")
+
+		// Probe environment remains registered and unaffected.
+		_, probeOK := d.Environment(spec.ProbeEnvironmentName)
+		assert.True(t, probeOK)
+	})
 
 	t.Run("consumer_grant_enforced_when_binding_environment", func(t *testing.T) {
 		eng := ruleengine.NewEngine()
@@ -1444,7 +1463,7 @@ func TestDialect_RequireProjectEveryInputShapeAndEnvironmentOwnership(t *testing
 		})
 	}
 
-	// Authorized allowlisted project succeeds on both environments.
+	// Authorized allowlisted project succeeds on the consumer-owned environment.
 	dec, err := eng.Evaluate(ctx, compiledConsumer, ruleengine.Input{
 		Payload: systemone.Request{Input: consumerInput, ProjectID: "proj-allowed"},
 	}, ruleengine.Budget{})

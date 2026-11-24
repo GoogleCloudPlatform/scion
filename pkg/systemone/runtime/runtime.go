@@ -580,7 +580,11 @@ func (r *Runtime) ValidateCompiled(ctx context.Context, compiled *spec.Compiled)
 					Message:  fmt.Sprintf("no enabled System One instance is allowed for project %q", projectID),
 				}
 			}
-			return nil
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  "no enabled System One instance is available",
+			}
 		}
 	}
 

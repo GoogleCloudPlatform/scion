@@ -229,16 +229,15 @@ func TestEnvironmentRegistry_ValidationAndConcurrency(t *testing.T) {
 	assert.Equal(t, spec.ProbeEnvironment(), probe)
 	require.Error(t, reg.Register(spec.ProbeEnvironment()), "duplicate probe registration must fail")
 
-	// Register custom environment and verify defensive copies.
+	// Register custom environment without ChoiceSets and verify defensive copies.
 	msgEnv := sampleMessageEnv()
+	msgEnv.ChoiceSets = nil
 	require.NoError(t, reg.Register(msgEnv))
 	msgEnv.Fields[0].MaxBytes = 1 // mutate caller copy
-	msgEnv.ChoiceSets[0].MaxItems = 1
 
 	got, ok := reg.Get("test_message_env")
 	require.True(t, ok)
 	assert.Equal(t, 16384, got.Fields[0].MaxBytes, "registry must store a defensive copy")
-	assert.Equal(t, 32, got.ChoiceSets[0].MaxItems, "registry must copy ChoiceSets")
 
 	got.Fields[0].MaxBytes = 2
 	gotAgain, ok := reg.Get("test_message_env")
@@ -246,7 +245,21 @@ func TestEnvironmentRegistry_ValidationAndConcurrency(t *testing.T) {
 	assert.Equal(t, 16384, gotAgain.Fields[0].MaxBytes, "Get must return a defensive copy")
 
 	// Duplicate registration fails.
-	require.Error(t, reg.Register(sampleMessageEnv()))
+	dupEnv := sampleMessageEnv()
+	dupEnv.ChoiceSets = nil
+	require.Error(t, reg.Register(dupEnv))
+
+	// Environments declaring ChoiceSets are refused fail-closed in both
+	// Register and RegisterForConsumer (probe remains unaffected).
+	csEnv := sampleMessageEnv()
+	csEnv.Name = "env_with_choicesets"
+	err := reg.Register(csEnv)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dynamic choice sets are not yet supported")
+
+	err = reg.RegisterForConsumer("test_consumer", csEnv)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dynamic choice sets are not yet supported")
 
 	// Concurrent Register, Get, and Names must be race-free.
 	var wg sync.WaitGroup

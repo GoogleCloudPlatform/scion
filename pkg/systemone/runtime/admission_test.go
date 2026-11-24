@@ -16,7 +16,8 @@ package runtime
 
 import (
 	"context"
-	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
@@ -46,6 +48,10 @@ func (a *admissionFakeAdapter) Capabilities(provider.InstanceView) (provider.Cap
 		Truncation:             provider.TruncationNever,
 		SideEffectFree:         true,
 		AuthScheme:             provider.AuthScheme{Kind: provider.AuthKindNone},
+		SupportedAuth: map[string]provider.AuthScheme{
+			"none":    {Kind: provider.AuthKindNone},
+			"api_key": {Kind: provider.AuthKindBearer},
+		},
 	}, nil
 }
 func (a *admissionFakeAdapter) Validate(provider.InstanceView, spec.Spec) error { return nil }
@@ -598,10 +604,26 @@ func TestRuntime_ProjectAllowlistCompileEvaluateAndCredentialIndependence(t *tes
 		providerCalls atomic.Int32
 		credCalls     atomic.Int32
 	)
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		assert.Equal(t, "Bearer sk-test-allow-key", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
 	adapter := &admissionFakeAdapter{
 		name: "adm_allow",
-		invoke: func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
-			providerCalls.Add(1)
+		invoke: func(ctx context.Context, tr provider.Transport, iv provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, iv.Endpoint+"/eval", nil)
+			if err != nil {
+				return provider.ModelResult{}, err
+			}
+			resp, err := tr.Do(httpReq)
+			if err != nil {
+				return provider.ModelResult{}, err
+			}
+			_ = resp.Body.Close()
 			return binarySuccessResult(), nil
 		},
 	}
@@ -609,12 +631,13 @@ func TestRuntime_ProjectAllowlistCompileEvaluateAndCredentialIndependence(t *tes
 	require.NoError(t, reg.Register(adapter))
 
 	inst := Instance{
-		ID:      "inst-allow",
-		Name:    "inst-a",
-		Adapter: "adm_allow",
-		Model:   "test-model-1",
-		Auth:    InstanceAuth{Kind: "none"},
-		Enabled: true,
+		ID:       "inst-allow",
+		Name:     "inst-a",
+		Adapter:  "adm_allow",
+		Model:    "test-model-1",
+		Endpoint: tlsSrv.URL,
+		Auth:     InstanceAuth{Kind: "api_key", SecretName: "test-allow-secret"},
+		Enabled:  true,
 	}
 	allowlist := &mutableProjectAllowlist{}
 
@@ -624,9 +647,9 @@ func TestRuntime_ProjectAllowlistCompileEvaluateAndCredentialIndependence(t *tes
 		ProjectAllowlist: allowlist,
 		Credentials: func(context.Context, Instance) (string, error) {
 			credCalls.Add(1)
-			return "", errors.New("credential should not be read")
+			return "sk-test-allow-key", nil
 		},
-	})
+	}, WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client())))
 	compiled := compileAdmissionTestRule(t, "inst-a")
 
 	// 1. Default empty allowlist: Compile with project context refuses with CategoryBinding.
@@ -663,22 +686,42 @@ func TestRuntime_ProjectAllowlistCompileEvaluateAndCredentialIndependence(t *tes
 	assert.Equal(t, provider.FailNoEligibleInstance, pe.Reason)
 
 	// 5. Add inst-a to proj-1's allowlist -> Compile, Evaluate, and ListModels succeed.
+	// Evaluate resolves the api_key credential exactly once (proving the 0-read
+	// assertions above are non-vacuous).
 	allowlist.set("proj-1", []string{"inst-a"})
 	require.NoError(t, rt.ValidateCompiled(WithEvalProjectID(context.Background(), "proj-1"), compiled))
+	assert.Equal(t, int32(0), credCalls.Load(), "compile validation must not read credentials")
 	dec, err := rt.Evaluate(context.Background(), compiled, ProbeInput("hello"), EvalOptions{ProjectID: "proj-1"})
 	require.NoError(t, err)
 	assert.True(t, dec.Bool)
 	assert.Equal(t, int32(1), providerCalls.Load())
+	assert.Equal(t, int32(1), credCalls.Load(), "allowed api_key evaluation must resolve credential once")
 	models, err := rt.ListModels(WithEvalProjectID(context.Background(), "proj-1"), inst)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"model-a"}, models)
 
-	// 6. Remove inst-a from proj-1's allowlist -> takes effect immediately on next evaluation.
+	// 6. Remove inst-a from proj-1's allowlist -> takes effect immediately on next evaluation
+	// with 0 additional provider requests and 0 additional credential reads.
 	allowlist.set("proj-1", nil)
+	credBeforeRemoval := credCalls.Load()
 	_, err = rt.Evaluate(context.Background(), compiled, ProbeInput("hello"), EvalOptions{ProjectID: "proj-1"})
 	require.Error(t, err)
 	evalRemoved, ok := EvaluationFrom(err)
 	require.True(t, ok)
 	assert.Equal(t, string(provider.FailNoEligibleInstance), evalRemoved.Reason)
 	assert.Equal(t, int32(1), providerCalls.Load(), "no additional provider request after removal")
+	assert.Equal(t, credBeforeRemoval, credCalls.Load(), "no additional credential read after removal")
+
+	// 7. Unbound rule with zero enabled instances fails ValidateCompiled with CategoryBinding
+	// even when no project allowlist is configured (rev2-runtime O2).
+	rtEmpty := New(Config{
+		Registry:  reg,
+		Instances: StaticInstances(),
+	})
+	unboundCompiled := compileAdmissionTestRule(t, "")
+	err = rtEmpty.ValidateCompiled(context.Background(), unboundCompiled)
+	require.Error(t, err)
+	ceEmpty, ok := spec.AsCompileError(err)
+	require.True(t, ok)
+	assert.Equal(t, spec.CategoryBinding, ceEmpty.Category)
 }

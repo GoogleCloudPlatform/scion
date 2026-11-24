@@ -106,21 +106,6 @@ func NewDialect(cfg DialectConfig) *Dialect {
 	}
 }
 
-// RegisterEnvironment validates and registers a consumer ContentEnvironment on d.
-// Callers wired through a shared ruleengine.Engine should prefer
-// RegisterConsumerEnvironment so the consumer's system_one grant (with AllowIO)
-// is verified before binding.
-func (d *Dialect) RegisterEnvironment(env spec.ContentEnvironment) error {
-	if d == nil || d.environments == nil {
-		return &spec.CompileError{
-			Path:     "environment",
-			Category: spec.CategoryInput,
-			Message:  "system_one dialect environment registry is not initialized",
-		}
-	}
-	return d.environments.Register(env)
-}
-
 // Environment returns a defensive copy of the registered ContentEnvironment
 // named name.
 func (d *Dialect) Environment(name string) (spec.ContentEnvironment, bool) {
@@ -182,7 +167,14 @@ func (d *Dialect) Declares() ruleengine.Capabilities {
 }
 
 // Compile validates and compiles raw JSON rule text via pkg/systemone/spec.
-// EnvironmentRef.Name selects the content environment ("probe" only in P1);
+// EnvironmentRef.Name selects the registered content environment (owned by
+// EnvironmentRef.Consumer).
+//
+// Caller obligation: consumer authoring paths that compile rules in a project
+// context MUST attach the project ID to ctx via WithProjectID(ctx, projectID)
+// so authoring-time allowlist validation runs against that project's allowlist.
+// Evaluation independently enforces RequireProject: true regardless of compile
+// context.
 // EnvironmentRef.ResultType is ignored.
 func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
 	if !d.isEnabled() {

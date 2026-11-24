@@ -48,7 +48,9 @@ const (
 	DefaultAdmissionWait = 100 * time.Millisecond
 	// DefaultMaxInFlightPerProject is the default per-replica concurrency limit
 	// per project so one project cannot starve others on a shared instance
-	// (runtime-design §§4.2, 7.2).
+	// (runtime-design §§4.2, 7.2). Per-project isolation only prevents a single
+	// project from holding every permit when the instance's MaxInFlight has
+	// headroom above the configured per-project cap.
 	DefaultMaxInFlightPerProject = 4
 	// BytesPerTokenPrecheck is the loose bytes-per-token upper-bound guard used
 	// for the pre-call MaxInputTokens check on non-silent adapters

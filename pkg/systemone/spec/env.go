@@ -290,6 +290,13 @@ func (r *EnvironmentRegistry) registerWithOwner(owner string, env ContentEnviron
 	if err := env.Validate(); err != nil {
 		return err
 	}
+	if len(env.ChoiceSets) > 0 {
+		return &CompileError{
+			Path:     "environment.choice_sets",
+			Category: CategoryInput,
+			Message:  "dynamic choice sets are not yet supported for consumer environments",
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.envs[env.Name]; exists {
