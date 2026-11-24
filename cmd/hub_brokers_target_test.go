@@ -193,22 +193,29 @@ func TestRunHubBrokers_TableAndJSON(t *testing.T) {
 		assert.Contains(t, stdout, "legacy (2 profiles)")
 	})
 
-	t.Run("json format preserves broker records unchanged", func(t *testing.T) {
+	t.Run("json format wraps broker records with pagination metadata", func(t *testing.T) {
 		outputFormat = "json"
 		hubOutputJSON = false
 		var err error
-		stdout, _ := captureStdIO(t, func() {
+		stdout, stderr := captureStdIO(t, func() {
 			err = runHubBrokers(hubBrokersCmd, nil)
 		})
 		require.NoError(t, err)
-		var decoded []hubclient.RuntimeBroker
+		var decoded struct {
+			Brokers   []hubclient.RuntimeBroker `json:"brokers"`
+			Total     int                       `json:"total"`
+			Truncated bool                      `json:"truncated"`
+		}
 		require.NoError(t, json.Unmarshal([]byte(stdout), &decoded))
-		require.Len(t, decoded, 3)
-		require.NotNil(t, decoded[0].RuntimeTarget)
-		assert.Equal(t, "docker", decoded[0].RuntimeTarget.Type)
-		require.NotNil(t, decoded[1].RuntimeTargetPresentation)
-		assert.Equal(t, "agents", decoded[1].RuntimeTargetPresentation.Target.Namespace)
-		assert.Len(t, decoded[2].Profiles, 2)
+		require.Len(t, decoded.Brokers, 3)
+		assert.Equal(t, 3, decoded.Total)
+		assert.False(t, decoded.Truncated)
+		assert.Empty(t, stderr)
+		require.NotNil(t, decoded.Brokers[0].RuntimeTarget)
+		assert.Equal(t, "docker", decoded.Brokers[0].RuntimeTarget.Type)
+		require.NotNil(t, decoded.Brokers[1].RuntimeTargetPresentation)
+		assert.Equal(t, "agents", decoded.Brokers[1].RuntimeTargetPresentation.Target.Namespace)
+		assert.Len(t, decoded.Brokers[2].Profiles, 2)
 	})
 }
 

@@ -53,6 +53,8 @@ var (
 	scheduleCron          string
 	scheduleTimeZone      string
 	scheduleListType      string // "events", "recurring", "all"
+	scheduleListLimit     = 50
+	scheduleListAll       bool
 )
 
 // scheduleCmd is the top-level command group for schedule management.
@@ -322,6 +324,10 @@ func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefi
 }
 
 func scheduleHubContext() (*HubContext, string, context.Context, context.CancelFunc, error) {
+	return scheduleHubContextWithTimeout(defaultListTimeout)
+}
+
+func scheduleHubContextWithTimeout(timeout time.Duration) (*HubContext, string, context.Context, context.CancelFunc, error) {
 	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return nil, "", nil, nil, err
@@ -335,12 +341,20 @@ func scheduleHubContext() (*HubContext, string, context.Context, context.CancelF
 		return nil, "", nil, nil, wrapHubError(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	return hubCtx, projectID, ctx, cancel, nil
 }
 
 func runScheduleList(cmd *cobra.Command, args []string) error {
-	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
+	if err := validateListLimitFlags(cmd, scheduleListLimit, scheduleListAll, "limit", "all"); err != nil {
+		return err
+	}
+
+	timeout := defaultListTimeout
+	if scheduleListAll {
+		timeout = allPagesTimeout
+	}
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContextWithTimeout(timeout)
 	if err != nil {
 		return err
 	}
@@ -353,59 +367,147 @@ func scheduleListViaHub(ctx context.Context, hubCtx *HubContext, projectID strin
 	showEvents := scheduleListType == "" || scheduleListType == "all" || scheduleListType == "events"
 	showRecurring := scheduleListType == "" || scheduleListType == "all" || scheduleListType == "recurring"
 
+	limit := scheduleListLimit
+	if !scheduleListAll && limit <= 0 {
+		limit = 50
+	}
+
+	type scheduleEventsListJSON struct {
+		*hubclient.ListScheduledEventsResponse
+		Truncated bool `json:"truncated"`
+	}
+	type schedulesListJSON struct {
+		*hubclient.ListSchedulesResponse
+		Truncated bool `json:"truncated"`
+	}
 	type listOutput struct {
-		Scope     string                                 `json:"scope,omitempty"`
-		Events    *hubclient.ListScheduledEventsResponse `json:"events,omitempty"`
-		Schedules *hubclient.ListSchedulesResponse       `json:"schedules,omitempty"`
+		Scope     string                  `json:"scope,omitempty"`
+		Events    *scheduleEventsListJSON `json:"events,omitempty"`
+		Schedules *schedulesListJSON      `json:"schedules,omitempty"`
 	}
 	output := listOutput{}
 
-	if showEvents {
-		opts := &hubclient.ListScheduledEventsOptions{}
-		if scheduleStatus != "" {
-			opts.Status = scheduleStatus
-		}
-		if scheduleType != "" {
-			opts.EventType = scheduleType
-		}
+	var (
+		eventsResp    *hubclient.ListScheduledEventsResponse
+		schedulesResp *hubclient.ListSchedulesResponse
+		eventsRes     listPageResult[hubclient.ScheduledEvent]
+		schedulesRes  listPageResult[hubclient.Schedule]
+	)
 
-		resp, err := hubCtx.Client.ScheduledEvents(projectID).List(ctx, opts)
+	if showEvents {
+		var scope string
+		var serverTime time.Time
+		var err error
+		eventsRes, err = fetchListPages(ctx, limit, scheduleListAll, 200, func(ctx context.Context, pageLimit int, cursor string) ([]hubclient.ScheduledEvent, string, int, error) {
+			opts := &hubclient.ListScheduledEventsOptions{
+				Page: apiclient.PageOptions{
+					Limit:  pageLimit,
+					Cursor: cursor,
+				},
+			}
+			if scheduleStatus != "" {
+				opts.Status = scheduleStatus
+			}
+			if scheduleType != "" {
+				opts.EventType = scheduleType
+			}
+			resp, err := hubCtx.Client.ScheduledEvents(projectID).List(ctx, opts)
+			if err != nil {
+				return nil, "", 0, err
+			}
+			if resp.Scope != "" {
+				scope = resp.Scope
+			}
+			if !resp.ServerTime.IsZero() {
+				serverTime = resp.ServerTime
+			}
+			return resp.Events, resp.NextCursor, resp.TotalCount, nil
+		})
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to list scheduled events: %w", err))
 		}
-		output.Events = resp
+		eventsResp = &hubclient.ListScheduledEventsResponse{
+			Scope:      scope,
+			Events:     eventsRes.Items,
+			NextCursor: eventsRes.NextCursor,
+			TotalCount: eventsRes.TotalCount,
+			ServerTime: serverTime,
+		}
+		output.Events = &scheduleEventsListJSON{
+			ListScheduledEventsResponse: eventsResp,
+			Truncated:                   eventsRes.Truncated,
+		}
 	}
 
 	if showRecurring {
-		opts := &hubclient.ListSchedulesOptions{}
-		if scheduleStatus != "" {
-			opts.Status = scheduleStatus
-		}
-
-		resp, err := hubCtx.Client.Schedules(projectID).List(ctx, opts)
+		var scope string
+		var serverTime time.Time
+		var err error
+		schedulesRes, err = fetchListPages(ctx, limit, scheduleListAll, 200, func(ctx context.Context, pageLimit int, cursor string) ([]hubclient.Schedule, string, int, error) {
+			opts := &hubclient.ListSchedulesOptions{
+				Page: apiclient.PageOptions{
+					Limit:  pageLimit,
+					Cursor: cursor,
+				},
+			}
+			if scheduleStatus != "" {
+				opts.Status = scheduleStatus
+			}
+			resp, err := hubCtx.Client.Schedules(projectID).List(ctx, opts)
+			if err != nil {
+				return nil, "", 0, err
+			}
+			if resp.Scope != "" {
+				scope = resp.Scope
+			}
+			if !resp.ServerTime.IsZero() {
+				serverTime = resp.ServerTime
+			}
+			return resp.Schedules, resp.NextCursor, resp.TotalCount, nil
+		})
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to list recurring schedules: %w", err))
 		}
-		output.Schedules = resp
+		schedulesResp = &hubclient.ListSchedulesResponse{
+			Scope:      scope,
+			Schedules:  schedulesRes.Items,
+			NextCursor: schedulesRes.NextCursor,
+			TotalCount: schedulesRes.TotalCount,
+			ServerTime: serverTime,
+		}
+		output.Schedules = &schedulesListJSON{
+			ListSchedulesResponse: schedulesResp,
+			Truncated:             schedulesRes.Truncated,
+		}
 	}
 
-	callerScoped := isCallerScopedScheduleView(hubCtx, output.Events, output.Schedules)
+	callerScoped := isCallerScopedScheduleView(hubCtx, eventsResp, schedulesResp)
 	if callerScoped {
 		output.Scope = hubclient.ScheduleListScopeCaller
 	}
 
-	if isJSONOutput() {
-		return outputJSON(output)
+	emitNotices := func() {
+		printListTruncationNotice(os.Stderr, len(eventsRes.Items), eventsRes.TotalCount, eventsRes.Truncated, "scheduled events", "limit", "all")
+		printListTruncationNotice(os.Stderr, len(schedulesRes.Items), schedulesRes.TotalCount, schedulesRes.Truncated, "recurring schedules", "limit", "all")
 	}
 
-	hasEvents := showEvents && output.Events != nil && len(output.Events.Events) > 0
-	hasSchedules := showRecurring && output.Schedules != nil && len(output.Schedules.Schedules) > 0
+	if isJSONOutput() {
+		if err := outputJSON(output); err != nil {
+			return err
+		}
+		emitNotices()
+		return nil
+	}
+
+	hasEvents := showEvents && eventsResp != nil && len(eventsResp.Events) > 0
+	hasSchedules := showRecurring && schedulesResp != nil && len(schedulesResp.Schedules) > 0
 	if !hasEvents && !hasSchedules {
 		if callerScoped {
 			fmt.Println("No scheduled events or recurring schedules held by this agent (other project schedules are hidden).")
 		} else {
 			fmt.Println("No scheduled events or recurring schedules found.")
 		}
+		emitNotices()
 		return nil
 	}
 
@@ -418,7 +520,7 @@ func scheduleListViaHub(ctx context.Context, hubCtx *HubContext, projectID strin
 
 	// Print one-shot events
 	if hasEvents {
-		events := output.Events.Events
+		events := eventsResp.Events
 		fmt.Printf("SCHEDULED EVENTS (one-shot)\n")
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		_, _ = fmt.Fprintln(w, "ID\tTYPE\tSTATUS\tFIRE AT\tCREATED")
@@ -437,7 +539,7 @@ func scheduleListViaHub(ctx context.Context, hubCtx *HubContext, projectID strin
 
 	// Print recurring schedules
 	if hasSchedules {
-		schedules := output.Schedules.Schedules
+		schedules := schedulesResp.Schedules
 		if printed {
 			fmt.Println()
 		}
@@ -458,6 +560,7 @@ func scheduleListViaHub(ctx context.Context, hubCtx *HubContext, projectID strin
 		_ = w.Flush()
 	}
 
+	emitNotices()
 	return nil
 }
 
@@ -1363,6 +1466,8 @@ func init() {
 	scheduleListCmd.Flags().StringVar(&scheduleStatus, "status", "", "Filter by status (pending, firing, fired, skipped, cancelled, expired, failed, active, paused)")
 	scheduleListCmd.Flags().StringVar(&scheduleType, "type", "", "Filter by event type (message, dispatch_agent, exec)")
 	scheduleListCmd.Flags().StringVar(&scheduleListType, "show", "", "Filter by resource type: events, recurring, or all (default: all)")
+	scheduleListCmd.Flags().IntVar(&scheduleListLimit, "limit", 50, "Maximum number of events and schedules to show per section")
+	scheduleListCmd.Flags().BoolVar(&scheduleListAll, "all", false, "Return all events and schedules without a limit")
 
 	// Create one-shot flags
 	registerScheduleCreateFlags(scheduleCreateCmd)

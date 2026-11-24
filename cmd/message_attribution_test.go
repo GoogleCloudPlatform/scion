@@ -147,16 +147,16 @@ func newAttributionHub(t *testing.T, msgs []store.Message) *attributionHub {
 func useAttributionHub(t *testing.T, h *attributionHub) {
 	t.Helper()
 	origProjectPath, origOutputFormat := projectPath, outputFormat
-	origMsgJSON, origMsgLimit, origMsgBefore, origMsgAfter := convMsgJSON, convMsgLimit, convMsgBefore, convMsgAfter
+	origMsgJSON, origMsgLimit, origMsgAll, origMsgBefore, origMsgAfter := convMsgJSON, convMsgLimit, convMsgAll, convMsgBefore, convMsgAfter
 	origGetJSON, origGetBody := convGetMessageJSON, convGetMessageBody
-	origCatchUpJSON, origCatchUpSince := convCatchUpJSON, convCatchUpSince
-	origInboxJSON, origInboxAll, origInboxAgent := messagesJSON, messagesShowAll, messagesAgent
+	origCatchUpJSON, origCatchUpSince, origCatchUpLimit, origCatchUpAll := convCatchUpJSON, convCatchUpSince, convCatchUpLimit, convCatchUpAll
+	origInboxJSON, origInboxIncludeRead, origInboxLimit, origInboxAll, origInboxAgent := messagesJSON, messagesIncludeRead, messagesLimit, messagesAll, messagesAgent
 	t.Cleanup(func() {
 		projectPath, outputFormat = origProjectPath, origOutputFormat
-		convMsgJSON, convMsgLimit, convMsgBefore, convMsgAfter = origMsgJSON, origMsgLimit, origMsgBefore, origMsgAfter
+		convMsgJSON, convMsgLimit, convMsgAll, convMsgBefore, convMsgAfter = origMsgJSON, origMsgLimit, origMsgAll, origMsgBefore, origMsgAfter
 		convGetMessageJSON, convGetMessageBody = origGetJSON, origGetBody
-		convCatchUpJSON, convCatchUpSince = origCatchUpJSON, origCatchUpSince
-		messagesJSON, messagesShowAll, messagesAgent = origInboxJSON, origInboxAll, origInboxAgent
+		convCatchUpJSON, convCatchUpSince, convCatchUpLimit, convCatchUpAll = origCatchUpJSON, origCatchUpSince, origCatchUpLimit, origCatchUpAll
+		messagesJSON, messagesIncludeRead, messagesLimit, messagesAll, messagesAgent = origInboxJSON, origInboxIncludeRead, origInboxLimit, origInboxAll, origInboxAgent
 	})
 
 	isolateHubEnvForTest(t, h.server.URL, "")
@@ -164,10 +164,10 @@ func useAttributionHub(t *testing.T, h *attributionHub) {
 	t.Setenv("HOME", tmpHome)
 	projectPath = setupConversationCreateProject(t, tmpHome, h.server.URL, "")
 	outputFormat = ""
-	convMsgJSON, convMsgLimit, convMsgBefore, convMsgAfter = false, 0, "", ""
+	convMsgJSON, convMsgLimit, convMsgAll, convMsgBefore, convMsgAfter = false, 25, false, "", ""
 	convGetMessageJSON, convGetMessageBody = false, false
-	convCatchUpJSON, convCatchUpSince = false, "1h"
-	messagesJSON, messagesShowAll, messagesAgent = false, true, ""
+	convCatchUpJSON, convCatchUpSince, convCatchUpLimit, convCatchUpAll = false, "1h", 50, false
+	messagesJSON, messagesIncludeRead, messagesLimit, messagesAll, messagesAgent = false, true, 50, false, ""
 }
 
 func newAttributionCmd() *cobra.Command {

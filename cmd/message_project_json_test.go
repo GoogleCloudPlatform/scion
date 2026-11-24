@@ -59,13 +59,17 @@ func TestMessagesAndConversationJSON_NoLegacyGroveKey(t *testing.T) {
 	t.Run("scion messages --json", func(t *testing.T) {
 		origProjectPath := projectPath
 		origJSON := messagesJSON
-		origShowAll := messagesShowAll
+		origIncludeRead := messagesIncludeRead
+		origLimit := messagesLimit
+		origAll := messagesAll
 		origAgent := messagesAgent
 		origFormat := outputFormat
 		t.Cleanup(func() {
 			projectPath = origProjectPath
 			messagesJSON = origJSON
-			messagesShowAll = origShowAll
+			messagesIncludeRead = origIncludeRead
+			messagesLimit = origLimit
+			messagesAll = origAll
 			messagesAgent = origAgent
 			outputFormat = origFormat
 		})
@@ -88,7 +92,9 @@ func TestMessagesAndConversationJSON_NoLegacyGroveKey(t *testing.T) {
 		projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "")
 		projectPath = projectDir
 		messagesJSON = true
-		messagesShowAll = true
+		messagesIncludeRead = true
+		messagesLimit = 50
+		messagesAll = false
 		messagesAgent = ""
 
 		cmd := &cobra.Command{}

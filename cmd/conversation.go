@@ -43,6 +43,7 @@ var (
 	convAll     bool
 
 	convMsgLimit  int
+	convMsgAll    bool
 	convMsgBefore string
 	convMsgAfter  string
 	convMsgJSON   bool
@@ -57,6 +58,8 @@ var (
 	convParticipantsJSON bool
 
 	convCatchUpSince string
+	convCatchUpLimit int
+	convCatchUpAll   bool
 	convCatchUpJSON  bool
 	convCatchUpFull  bool
 )
@@ -296,6 +299,7 @@ func init() {
 
 	// Messages flags
 	conversationMessagesCmd.Flags().IntVar(&convMsgLimit, "limit", 25, "Maximum number of messages to show")
+	conversationMessagesCmd.Flags().BoolVar(&convMsgAll, "all", false, "Return all messages without a limit")
 	conversationMessagesCmd.Flags().StringVar(&convMsgBefore, "before", "", "Show messages before this time (RFC3339)")
 	conversationMessagesCmd.Flags().StringVar(&convMsgAfter, "after", "", "Show messages after this time (RFC3339)")
 	conversationMessagesCmd.Flags().BoolVar(&convMsgJSON, "json", false, "Output in JSON format")
@@ -315,24 +319,15 @@ func init() {
 
 	// Catch-up flags
 	conversationCatchUpCmd.Flags().StringVar(&convCatchUpSince, "since", "1h", "Show messages from this duration ago (e.g. 30m, 2h)")
+	conversationCatchUpCmd.Flags().IntVar(&convCatchUpLimit, "limit", 50, "Maximum number of messages to show")
+	conversationCatchUpCmd.Flags().BoolVar(&convCatchUpAll, "all", false, "Return all messages without a limit")
 	conversationCatchUpCmd.Flags().BoolVar(&convCatchUpJSON, "json", false, "Output in JSON format")
 	conversationCatchUpCmd.Flags().BoolVar(&convCatchUpFull, "full", false, "Show full untruncated message text and message IDs")
 }
 
-func printConversationTruncationNotice(result *hubclient.ConversationListResult) {
-	if result == nil || !result.Truncated {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "Showing %d of %d conversations; use --limit or --all to see more.\n",
-		len(result.Conversations), result.Total)
-}
-
 func runConversationList(cmd *cobra.Command, args []string) error {
-	if convAll && cmd.Flags().Changed("limit") {
-		return fmt.Errorf("cannot use --all together with --limit")
-	}
-	if !convAll && convLimit <= 0 {
-		return fmt.Errorf("--limit must be a positive integer (got %d); use --all to list all conversations", convLimit)
+	if err := validateListLimitFlags(cmd, convLimit, convAll, "limit", "all"); err != nil {
+		return err
 	}
 
 	if convJSON {
@@ -344,7 +339,7 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	ctx, cancel := listRequestContext(cmdContext(cmd), convAll)
 	defer cancel()
 
 	limit := convLimit
@@ -383,7 +378,7 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 		if err := outputJSON(result); err != nil {
 			return err
 		}
-		printConversationTruncationNotice(result)
+		printListTruncationNotice(os.Stderr, len(result.Conversations), result.Total, result.Truncated, "conversations", "limit", "all")
 		return nil
 	}
 
@@ -409,11 +404,15 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	printConversationTruncationNotice(result)
+	printListTruncationNotice(os.Stderr, len(result.Conversations), result.Total, result.Truncated, "conversations", "limit", "all")
 	return nil
 }
 
 func runConversationMessages(cmd *cobra.Command, args []string) error {
+	if err := validateListLimitFlags(cmd, convMsgLimit, convMsgAll, "limit", "all"); err != nil {
+		return err
+	}
+
 	if convMsgJSON {
 		outputFormat = "json"
 	}
@@ -423,7 +422,7 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	ctx, cancel := listRequestContext(cmdContext(cmd), convMsgAll)
 	defer cancel()
 
 	conversationID, err := resolveConversationRef(ctx, client, args[0])
@@ -431,30 +430,44 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	opts := &hubclient.ConversationMessagesOptions{
-		Limit:  convMsgLimit,
-		Before: convMsgBefore,
-		After:  convMsgAfter,
-	}
-
-	result, err := client.Conversations().ListMessages(ctx, conversationID, opts)
+	pageRes, err := fetchListPages(ctx, convMsgLimit, convMsgAll, 200, func(ctx context.Context, pageLimit int, cursor string) ([]store.Message, string, int, error) {
+		opts := &hubclient.ConversationMessagesOptions{
+			Limit:  pageLimit,
+			Cursor: cursor,
+			Before: convMsgBefore,
+			After:  convMsgAfter,
+		}
+		res, err := client.Conversations().ListMessages(ctx, conversationID, opts)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		return res.Items, res.NextCursor, res.TotalCount, nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to list messages: %w", err)
 	}
 
 	if isJSONOutput() {
-		return outputJSON(result)
+		if err := outputJSON(messageListJSONOutput(pageRes)); err != nil {
+			return err
+		}
+		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
+		return nil
 	}
 
-	if len(result.Items) == 0 {
+	if len(pageRes.Items) == 0 {
 		fmt.Println("No messages found.")
 		return nil
 	}
 
-	items := chronologicalMessages(result.Items)
+	items := chronologicalMessages(pageRes.Items)
 	label := newUserLabeler(ctx, client)
 	if convMsgFull {
-		return writeConversationMessagesFull(os.Stdout, items, label)
+		if err := writeConversationMessagesFull(os.Stdout, items, label); err != nil {
+			return err
+		}
+		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
+		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
@@ -468,7 +481,11 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 			_, _ = fmt.Fprintf(tw, "\t\t%s\n", authorizedBy)
 		}
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
+	return nil
 }
 
 func runConversationCreate(cmd *cobra.Command, args []string) error {
@@ -874,6 +891,10 @@ func runConversationLeave(cmd *cobra.Command, args []string) error {
 }
 
 func runConversationCatchUp(cmd *cobra.Command, args []string) error {
+	if err := validateListLimitFlags(cmd, convCatchUpLimit, convCatchUpAll, "limit", "all"); err != nil {
+		return err
+	}
+
 	if convCatchUpJSON {
 		outputFormat = "json"
 	}
@@ -883,7 +904,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	ctx, cancel := listRequestContext(cmdContext(cmd), convCatchUpAll)
 	defer cancel()
 
 	conversationID, err := resolveConversationRef(ctx, client, args[0])
@@ -898,28 +919,43 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 
 	afterTime := time.Now().UTC().Add(-since).Format(time.RFC3339)
 
-	opts := &hubclient.ConversationMessagesOptions{
-		After: afterTime,
-	}
-
-	result, err := client.Conversations().ListMessages(ctx, conversationID, opts)
+	pageRes, err := fetchListPages(ctx, convCatchUpLimit, convCatchUpAll, 200, func(ctx context.Context, pageLimit int, cursor string) ([]store.Message, string, int, error) {
+		opts := &hubclient.ConversationMessagesOptions{
+			Limit:  pageLimit,
+			Cursor: cursor,
+			After:  afterTime,
+		}
+		res, err := client.Conversations().ListMessages(ctx, conversationID, opts)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		return res.Items, res.NextCursor, res.TotalCount, nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to list messages: %w", err)
 	}
 
 	if isJSONOutput() {
-		return outputJSON(result)
+		if err := outputJSON(messageListJSONOutput(pageRes)); err != nil {
+			return err
+		}
+		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
+		return nil
 	}
 
-	if len(result.Items) == 0 {
+	if len(pageRes.Items) == 0 {
 		fmt.Printf("No messages in the last %s.\n", convCatchUpSince)
 		return nil
 	}
 
-	items := chronologicalMessages(result.Items)
+	items := chronologicalMessages(pageRes.Items)
 	label := newUserLabeler(ctx, client)
 	if convCatchUpFull {
-		return writeConversationMessagesFull(os.Stdout, items, label)
+		if err := writeConversationMessagesFull(os.Stdout, items, label); err != nil {
+			return err
+		}
+		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
+		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
@@ -939,7 +975,11 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 			_, _ = fmt.Fprintf(tw, "\t\t%s\n", messaging.AttachmentNotDeliveredLine(a.Name, a.Size, "the message was deferred"))
 		}
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
+	return nil
 }
 
 // chronologicalMessages returns a copy of msgs sorted from oldest to newest

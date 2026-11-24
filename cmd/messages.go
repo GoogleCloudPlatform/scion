@@ -17,18 +17,21 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"time"
+	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
 )
 
 var (
-	messagesShowAll bool
-	messagesJSON    bool
-	messagesReadAll bool
-	messagesAgent   string
+	messagesIncludeRead bool
+	messagesLimit       = 50
+	messagesAll         bool
+	messagesJSON        bool
+	messagesReadAll     bool
+	messagesAgent       string
 )
 
 // messagesCmd is the top-level command group for message inbox management.
@@ -44,7 +47,8 @@ or add a remote one with 'scion hub add <name> <url>' and select it with
 
 Commands:
   scion messages                            List your unread messages
-  scion messages --all                      List all messages (including read)
+  scion messages --include-read             Include read messages
+  scion messages --all                      Return all matching messages without a limit
   scion messages --agent <name>             Filter by agent
   scion messages read [id]                  Mark message(s) as read
   scion messages read --all                 Mark all messages as read`,
@@ -73,7 +77,9 @@ func init() {
 	messagesCmd.AddCommand(messagesReadCmd)
 
 	// List flags (on the parent command)
-	messagesCmd.Flags().BoolVar(&messagesShowAll, "all", false, "Include read messages")
+	messagesCmd.Flags().BoolVar(&messagesIncludeRead, "include-read", false, "Include read messages")
+	messagesCmd.Flags().IntVar(&messagesLimit, "limit", 50, "Maximum number of messages to show")
+	messagesCmd.Flags().BoolVar(&messagesAll, "all", false, "Return all messages without a limit")
 	messagesCmd.Flags().BoolVar(&messagesJSON, "json", false, "Output in JSON format")
 	messagesCmd.Flags().StringVar(&messagesAgent, "agent", "", "Filter by agent name or ID")
 
@@ -82,6 +88,10 @@ func init() {
 }
 
 func runMessagesList(cmd *cobra.Command, args []string) error {
+	if err := validateListLimitFlags(cmd, messagesLimit, messagesAll, "limit", "all"); err != nil {
+		return err
+	}
+
 	if messagesJSON {
 		outputFormat = "json"
 	}
@@ -91,24 +101,35 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := listRequestContext(cmdContext(cmd), messagesAll)
 	defer cancel()
 
-	opts := &hubclient.ListMessagesOptions{
-		OnlyUnread: !messagesShowAll,
-		AgentID:    messagesAgent,
-	}
-
-	result, err := client.Messages().List(ctx, opts)
+	pageRes, err := fetchListPages(ctx, messagesLimit, messagesAll, 200, func(ctx context.Context, pageLimit int, cursor string) ([]store.Message, string, int, error) {
+		opts := &hubclient.ListMessagesOptions{
+			OnlyUnread: !messagesIncludeRead,
+			AgentID:    messagesAgent,
+			Limit:      pageLimit,
+			Cursor:     cursor,
+		}
+		res, err := client.Messages().List(ctx, opts)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		return res.Items, res.NextCursor, res.TotalCount, nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to list messages: %w", err)
 	}
 
 	if isJSONOutput() {
-		return outputJSON(result)
+		if err := outputJSON(messageListJSONOutput(pageRes)); err != nil {
+			return err
+		}
+		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
+		return nil
 	}
 
-	msgs := result.Items
+	msgs := pageRes.Items
 	if len(msgs) == 0 {
 		fmt.Println("No messages")
 		return nil
@@ -150,6 +171,7 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 			shortID, agentDisplay, truncate(m.Type, 14), timeStr, msgText, dispatchInfo)
 	}
 
+	printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
 	return nil
 }
 

@@ -48,7 +48,11 @@ import (
 )
 
 var (
-	hubOutputJSON bool
+	hubOutputJSON    bool
+	hubProjectsLimit = 500
+	hubProjectsAll   bool
+	hubBrokersLimit  = 50
+	hubBrokersAll    bool
 )
 
 // hubCmd represents the hub command
@@ -388,7 +392,11 @@ func init() {
 	// Common flags
 	hubStatusCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
 	hubProjectsCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
+	hubProjectsCmd.Flags().IntVar(&hubProjectsLimit, "limit", 500, "Maximum number of projects to show")
+	hubProjectsCmd.Flags().BoolVar(&hubProjectsAll, "all", false, "Return all projects without a limit")
 	hubBrokersCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
+	hubBrokersCmd.Flags().IntVar(&hubBrokersLimit, "limit", 50, "Maximum number of runtime brokers to show")
+	hubBrokersCmd.Flags().BoolVar(&hubBrokersAll, "all", false, "Return all runtime brokers without a limit")
 
 	// Project subcommand flags
 	hubProjectsInfoCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
@@ -1507,7 +1515,14 @@ func runHubProjects(cmd *cobra.Command, args []string) error {
 
 	// If a project name is provided, show info for that project
 	if len(args) == 1 {
+		if hubProjectsAll || (cmd != nil && cmd.Flags().Changed("limit")) {
+			return fmt.Errorf("cannot use --limit or --all when specifying a project name or ID")
+		}
 		return runHubProjectsInfo(cmd, args)
+	}
+
+	if err := validateListLimitFlags(cmd, hubProjectsLimit, hubProjectsAll, "limit", "all"); err != nil {
+		return err
 	}
 
 	_, client, err := loadHubClient()
@@ -1515,19 +1530,43 @@ func runHubProjects(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := listRequestContext(cmdContext(cmd), hubProjectsAll)
 	defer cancel()
 
-	resp, err := client.Projects().List(ctx, nil)
+	pageRes, err := fetchListPages(ctx, hubProjectsLimit, hubProjectsAll, 1000, func(ctx context.Context, pageLimit int, cursor string) ([]hubclient.Project, string, int, error) {
+		resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{
+			Page: apiclient.PageOptions{
+				Limit:  pageLimit,
+				Cursor: cursor,
+			},
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		return resp.Projects, resp.Page.NextCursor, resp.Page.TotalCount, nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to list projects: %w", err)
 	}
 
 	if isJSONOutput() {
-		return outputJSON(resp.Projects)
+		out := struct {
+			Projects  []hubclient.Project `json:"projects"`
+			Total     int                 `json:"total"`
+			Truncated bool                `json:"truncated"`
+		}{
+			Projects:  pageRes.Items,
+			Total:     pageRes.TotalCount,
+			Truncated: pageRes.Truncated,
+		}
+		if err := outputJSON(out); err != nil {
+			return err
+		}
+		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "projects", "limit", "all")
+		return nil
 	}
 
-	if len(resp.Projects) == 0 {
+	if len(pageRes.Items) == 0 {
 		fmt.Println("No projects found")
 		return nil
 	}
@@ -1543,7 +1582,7 @@ func runHubProjects(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%-36s  %-20s  %-10s  %-20s  %s\n", "ID", "NAME", "AGENTS", "DEFAULT BROKER", "GIT REMOTE")
 	fmt.Printf("%-36s  %-20s  %-10s  %-20s  %s\n", "------------------------------------", "--------------------", "----------", "--------------------", "----------")
-	for _, g := range resp.Projects {
+	for _, g := range pageRes.Items {
 		gitRemote := g.GitRemote
 		if len(gitRemote) > 40 {
 			gitRemote = gitRemote[:37] + "..."
@@ -1555,6 +1594,7 @@ func runHubProjects(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%-36s  %-20s  %-10d  %-20s  %s\n", g.ID, truncate(g.Name, 20), g.AgentCount, truncate(brokerDisplay, 20), gitRemote)
 	}
 
+	printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "projects", "limit", "all")
 	return nil
 }
 
@@ -2199,6 +2239,10 @@ func valueOrDefault(value, defaultVal string) string {
 }
 
 func runHubBrokers(cmd *cobra.Command, args []string) error {
+	if err := validateListLimitFlags(cmd, hubBrokersLimit, hubBrokersAll, "limit", "all"); err != nil {
+		return err
+	}
+
 	// Bridge --json flag to global --format
 	if hubOutputJSON {
 		outputFormat = "json"
@@ -2209,26 +2253,50 @@ func runHubBrokers(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := listRequestContext(cmdContext(cmd), hubBrokersAll)
 	defer cancel()
 
-	resp, err := client.RuntimeBrokers().List(ctx, nil)
+	pageRes, err := fetchListPages(ctx, hubBrokersLimit, hubBrokersAll, 200, func(ctx context.Context, pageLimit int, cursor string) ([]hubclient.RuntimeBroker, string, int, error) {
+		resp, err := client.RuntimeBrokers().List(ctx, &hubclient.ListBrokersOptions{
+			Page: apiclient.PageOptions{
+				Limit:  pageLimit,
+				Cursor: cursor,
+			},
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		return resp.Brokers, resp.Page.NextCursor, resp.Page.TotalCount, nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to list brokers: %w", err)
 	}
 
 	if isJSONOutput() {
-		return outputJSON(resp.Brokers)
+		out := struct {
+			Brokers   []hubclient.RuntimeBroker `json:"brokers"`
+			Total     int                       `json:"total"`
+			Truncated bool                      `json:"truncated"`
+		}{
+			Brokers:   pageRes.Items,
+			Total:     pageRes.TotalCount,
+			Truncated: pageRes.Truncated,
+		}
+		if err := outputJSON(out); err != nil {
+			return err
+		}
+		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "runtime brokers", "limit", "all")
+		return nil
 	}
 
-	if len(resp.Brokers) == 0 {
+	if len(pageRes.Items) == 0 {
 		fmt.Println("No runtime brokers found")
 		return nil
 	}
 
 	fmt.Printf("%-36s  %-20s  %-34s  %-10s  %-12s  %s\n", "ID", "NAME", "TARGET", "STATUS", "AUTO-PROVIDE", "LAST SEEN")
 	fmt.Printf("%-36s  %-20s  %-34s  %-10s  %-12s  %s\n", "------------------------------------", "--------------------", "----------------------------------", "----------", "------------", "---------------")
-	for _, h := range resp.Brokers {
+	for _, h := range pageRes.Items {
 		lastSeen := "-"
 		if !h.LastHeartbeat.IsZero() {
 			lastSeen = clitime.Ago(h.LastHeartbeat)
@@ -2241,6 +2309,7 @@ func runHubBrokers(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%-36s  %-20s  %-34s  %-10s  %-12s  %s\n", h.ID, truncate(h.Name, 20), target, h.Status, autoProvide, lastSeen)
 	}
 
+	printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "runtime brokers", "limit", "all")
 	return nil
 }
 
