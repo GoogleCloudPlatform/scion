@@ -591,7 +591,9 @@ func TestProjectDecisionStore_MadeFoldConfirmDismissReplaceAndFacets(t *testing.
 	require.NoError(t, err)
 
 	// (f) Facet exclusion check: Charlie only appears on a superseded agent_interpreted row
-	// whose direct sibling had its user cleared (simulating user deletion or divergence on the direct row).
+	// whose direct sibling had its user cleared (simulating an older-binary/diverged direct row).
+	// Also mark the direct row facet_indexed=false so the fallback probe runs first, then
+	// verify the summary-backed path matches after re-indexing.
 	_, facetRowID := seedPrompt("K-FACET", "Facet check?", "pg", false)
 	_ = recordInterpreted("K-FACET", "pg", charlieID, "Charlie")
 	facetDirectAns, _, err := cs.RecordAnswer(ctx, &store.RecordAnswerInput{
@@ -608,7 +610,7 @@ func TestProjectDecisionStore_MadeFoldConfirmDismissReplaceAndFacets(t *testing.
 	})
 	require.NoError(t, err)
 	_, err = cs.DB().ExecContext(ctx,
-		rebindForDialect(cs.Dialect(), "UPDATE decision_answers SET answered_by_user_id = NULL WHERE id = ?"),
+		rebindForDialect(cs.Dialect(), "UPDATE decision_answers SET answered_by_user_id = NULL, facet_indexed = false WHERE id = ?"),
 		facetDirectAns.ID)
 	require.NoError(t, err)
 
@@ -689,14 +691,31 @@ func TestProjectDecisionStore_MadeFoldConfirmDismissReplaceAndFacets(t *testing.
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{unconfInterp.ID, replV1Interp.ID}, answerIDs(interpFiltered))
 
-	// ListDecisionFacets excludes superseded interpreted rows from answerers facet (Charlie is absent).
-	_, facetAnswerers, _, err := cs.ListDecisionFacets(ctx, []string{projectID}, []string{topic})
-	require.NoError(t, err)
-	answererIDs := make([]string, 0, len(facetAnswerers))
-	for _, a := range facetAnswerers {
-		answererIDs = append(answererIDs, a.ID)
+	// ListDecisionFacets excludes superseded interpreted rows from answerers facet (Charlie is absent)
+	// on both the legacy fallback path (while facet_indexed=false) and the summary-backed path.
+	assertAnswerersExcludeCharlie := func(t *testing.T, label string) {
+		t.Helper()
+		_, facetAnswerers, _, err := cs.ListDecisionFacets(ctx, []string{projectID}, []string{topic})
+		require.NoError(t, err, label)
+		answererIDs := make([]string, 0, len(facetAnswerers))
+		for _, a := range facetAnswerers {
+			answererIDs = append(answererIDs, a.ID)
+		}
+		assert.ElementsMatch(t, []string{aliceID, bobID}, answererIDs, label)
 	}
-	assert.ElementsMatch(t, []string{aliceID, bobID}, answererIDs)
+	assertAnswerersExcludeCharlie(t, "legacy fallback path")
+
+	// Rebuild summary from scratch via the facet indexer so the summary-backed
+	// path is exercised with the exact same DB state (superseded interpreted row
+	// still naming Charlie, direct sibling with NULL user).
+	_, err = cs.DB().ExecContext(ctx, "DELETE FROM decision_facet_entries")
+	require.NoError(t, err)
+	_, err = cs.DB().ExecContext(ctx, "UPDATE decisions SET facet_indexed = false")
+	require.NoError(t, err)
+	_, err = cs.DB().ExecContext(ctx, "UPDATE decision_answers SET facet_indexed = false")
+	require.NoError(t, err)
+	drainDecisionIndex(t, ctx, cs, 50)
+	assertAnswerersExcludeCharlie(t, "summary-backed path")
 }
 
 func TestProjectDecisionStore_MadeFoldOtherTextSearchAndPreviousOtherText(t *testing.T) {
