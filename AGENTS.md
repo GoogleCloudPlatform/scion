@@ -19,6 +19,7 @@ Alpha: changing or removing behavior needs no deprecation path.
 | Workspace or worktree provisioning | `docs-site/src/content/docs/local/workspace.md` ("Linked git projects") |
 | Building on another unmerged branch (stacked PRs) | `docs-repo/agents/stacked-branches.md` |
 | Adding or changing a user-visible runtime launch failure | `docs-repo/agents/typed-launch-failures.md` |
+| Live verification runs, or hosted/production-mode hardening that removes a workstation convenience | `docs-repo/agents/live-verification-gates.md` |
 
 ## Sandbox
 
