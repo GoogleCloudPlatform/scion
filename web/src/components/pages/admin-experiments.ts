@@ -353,7 +353,8 @@ export class ScionAdminExperiments extends LitElement {
       <sl-dialog
         label="Reset all experiments"
         ?open=${this.showResetDialog}
-        @sl-hide=${(): void => {
+        @sl-hide=${(e: Event): void => {
+          if (e.target !== e.currentTarget) return;
           this.showResetDialog = false;
         }}
       >

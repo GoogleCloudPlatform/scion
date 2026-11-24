@@ -358,7 +358,10 @@ export class ScionSkillPublishDialog extends LitElement {
       <sl-dialog
         label="Publish New Version"
         ?open=${this.open}
-        @sl-after-hide=${() => this.onDialogHide()}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
+          this.onDialogHide();
+        }}
         style="--width: 540px;"
       >
         ${this.step === 'input' ? this.renderInput() : nothing}

@@ -1004,7 +1004,8 @@ export class ScionPageSkillDetail extends LitElement {
       <sl-dialog
         label="Deprecate Version"
         ?open=${this.deprecateVersionId !== null}
-        @sl-after-hide=${() => {
+        @sl-after-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.deprecateVersionId = null;
         }}
       >
@@ -1053,7 +1054,14 @@ export class ScionPageSkillDetail extends LitElement {
         .skillId=${this.skillId}
         ?open=${this.publishDialogOpen}
         .latestVersion=${this.latestPublishedVersion}
-        @sl-after-hide=${() => {
+        @sl-after-hide=${(e: Event) => {
+          const origin = e.composedPath()[0];
+          if (
+            origin !== e.currentTarget &&
+            !(origin instanceof Element && origin.tagName === 'SL-DIALOG')
+          ) {
+            return;
+          }
           this.publishDialogOpen = false;
         }}
         @skill-version-published=${() => {

@@ -403,7 +403,8 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       <sl-dialog
         label="Create Skill Registry"
         ?open=${this.createOpen}
-        @sl-after-hide=${() => {
+        @sl-after-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.createOpen = false;
           this.createError = null;
         }}

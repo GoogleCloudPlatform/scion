@@ -638,7 +638,10 @@ export class ScionGroupFormDialog extends LitElement {
         label=${dialogTitle}
         open
         @sl-request-close=${(e: Event) => this.onRequestClose(e)}
-        @sl-after-show=${() => this.focusNameInput()}
+        @sl-after-show=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
+          this.focusNameInput();
+        }}
       >
         ${this.mode === 'create'
           ? html`

@@ -7626,7 +7626,8 @@ export class ScionPageChat extends LitElement {
         class="promote-dialog"
         label="Promote DM to Thread"
         ?open=${this.promoteDialogOpen}
-        @sl-after-hide=${() => {
+        @sl-after-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.promoteDialogOpen = false;
         }}
       >

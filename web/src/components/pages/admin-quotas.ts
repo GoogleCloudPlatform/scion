@@ -1200,7 +1200,8 @@ export class ScionPageAdminQuotas extends LitElement {
       <sl-dialog
         label=${title}
         ?open=${this.showLimitDialog}
-        @sl-hide=${() => {
+        @sl-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.showLimitDialog = false;
         }}
       >
@@ -1320,7 +1321,8 @@ export class ScionPageAdminQuotas extends LitElement {
       <sl-dialog
         label="Create Entitlement Binding"
         ?open=${this.showEntitlementDialog}
-        @sl-hide=${() => {
+        @sl-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.showEntitlementDialog = false;
         }}
       >
@@ -1437,7 +1439,8 @@ export class ScionPageAdminQuotas extends LitElement {
       <sl-dialog
         label="Confirm Delete"
         ?open=${this.showDeleteDialog}
-        @sl-hide=${() => {
+        @sl-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.showDeleteDialog = false;
           this.deleteTarget = null;
           this.deleteDialogError = null;
