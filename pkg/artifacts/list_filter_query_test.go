@@ -259,3 +259,129 @@ func TestListCandidates_UnknownQueryFieldReturnsError(t *testing.T) {
 		t.Fatal("expected error for unknown filter field, got nil")
 	}
 }
+
+// TestListCandidates_FilterQuerySQLPushdown verifies that ListCandidates
+// pushes filter-query terms down into SQL itself (not merely via collect()
+// post-filtering), including is:review, -is:review (with NULL current_seq),
+// is:mine, -is:mine, project:, negated project:, project-scoped is:shared,
+// and text/excludeText.
+func TestListCandidates_FilterQuerySQLPushdown(t *testing.T) {
+	f := newFixture(t, false)
+	t0 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	seedList(t, f.db, f.store, listSeed{
+		title: "mine-review-p1", ownerKind: PrincipalKindUser, ownerRef: "u1",
+		scope: "p1", updated: t0.Add(4 * time.Minute), kind: VersionKindReview,
+	})
+	seedList(t, f.db, f.store, listSeed{
+		title: "mine-pub-p1", ownerKind: PrincipalKindUser, ownerRef: "u1",
+		scope: "p1", updated: t0.Add(3 * time.Minute), kind: VersionKindPublish,
+	})
+	seedList(t, f.db, f.store, listSeed{
+		title: "other-review-p2", ownerKind: PrincipalKindUser, ownerRef: "u2",
+		scope: "p2", updated: t0.Add(2 * time.Minute), kind: VersionKindReview,
+		grants: []Grant{{SubjectKind: SubjectScope, SubjectRef: "p1", Permission: GrantRead}},
+	})
+	seedList(t, f.db, f.store, listSeed{
+		title: "other-pub-p2", ownerKind: PrincipalKindUser, ownerRef: "u2",
+		scope: "p2", updated: t0.Add(1 * time.Minute), kind: VersionKindPublish,
+		grants: []Grant{{SubjectKind: SubjectPrincipal, SubjectRef: PrincipalRef(PrincipalKindUser, "u1"), Permission: GrantRead}},
+	})
+	// Row with no current ready version (current_seq IS NULL -> LEFT JOIN v.kind IS NULL).
+	nullSeqID := seedList(t, f.db, f.store, listSeed{
+		title: "mine-null-ver-p1", ownerKind: PrincipalKindUser, ownerRef: "u1",
+		scope: "p1", updated: t0, kind: VersionKindPublish,
+	})
+	if _, err := f.db.Exec(`UPDATE artifact SET current_seq = NULL WHERE id = ?`, nullSeqID); err != nil {
+		t.Fatal(err)
+	}
+
+	base := CandidateQuery{
+		PrincipalKind: PrincipalKindUser,
+		PrincipalRef:  "u1",
+		ScopeRefs:     []string{"p1"},
+		Limit:         100,
+		Now:           t0.Add(10 * time.Minute),
+	}
+
+	cases := []struct {
+		name  string
+		query *QueryTerms
+		scope string
+		want  []string
+	}{
+		{
+			name:  "is:review",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"review"}}}},
+			want:  []string{"mine-review-p1", "other-review-p2"},
+		},
+		{
+			name:  "-is:review includes NULL v.kind",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"review"}, Negate: true}}},
+			want:  []string{"mine-null-ver-p1", "mine-pub-p1", "other-pub-p2"},
+		},
+		{
+			name:  "is:mine",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"mine"}}}},
+			want:  []string{"mine-null-ver-p1", "mine-pub-p1", "mine-review-p1"},
+		},
+		{
+			name:  "-is:mine",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"mine"}, Negate: true}}},
+			want:  []string{"other-pub-p2", "other-review-p2"},
+		},
+		{
+			name:  "is:review,mine comma OR",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"mine", "review"}}}},
+			want:  []string{"mine-null-ver-p1", "mine-pub-p1", "mine-review-p1", "other-review-p2"},
+		},
+		{
+			name:  "-is:review,mine negated comma OR",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"mine", "review"}, Negate: true}}},
+			want:  []string{"other-pub-p2"},
+		},
+		{
+			name:  "project:p1",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "project", Values: []string{"p1"}}}},
+			want:  []string{"mine-null-ver-p1", "mine-pub-p1", "mine-review-p1"},
+		},
+		{
+			name:  "-project:p1",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "project", Values: []string{"p1"}, Negate: true}}},
+			want:  []string{"other-pub-p2", "other-review-p2"},
+		},
+		{
+			name:  "project-scoped is:shared",
+			scope: "p1",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"shared"}}}},
+			want:  []string{"other-review-p2"},
+		},
+		{
+			name:  "project-scoped -is:shared",
+			scope: "p1",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"shared"}, Negate: true}}},
+			want:  []string{"mine-null-ver-p1", "mine-pub-p1", "mine-review-p1"},
+		},
+		{
+			name:  "text and excludeText",
+			query: &QueryTerms{Text: "mine", ExcludeText: []string{"null"}},
+			want:  []string{"mine-pub-p1", "mine-review-p1"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := base
+			q.Query = tc.query
+			if tc.scope != "" {
+				q.HomeScope = tc.scope
+				q.ScopeShares = true
+			}
+			got := candidateTitles(t, f.store, q)
+			slices.Sort(got)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ListCandidates(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
