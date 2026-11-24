@@ -39,14 +39,16 @@ import {
   type ResourceScope,
 } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { addLeaveGuard } from '../../client/navigation.js';
 import { projectLabelNow, resolveProjectLabel } from '../../client/project-label.js';
+import type { Crumb } from '../shared/breadcrumb.js';
 import '../shared/detail-header.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
 import { TemplateFileBrowserDataSource } from '../shared/file-browser.js';
 import type { FileBrowserDataSource } from '../shared/file-browser.js';
 import { TemplateFileEditorDataSource } from '../shared/file-editor.js';
-import type { FileEditorDataSource } from '../shared/file-editor.js';
+import type { FileEditorDataSource, ScionFileEditor } from '../shared/file-editor.js';
 import '../shared/hash-display.js';
 import '../shared/message-mode-badge.js';
 
@@ -102,6 +104,7 @@ export class ScionPageTemplateDetail extends LitElement {
 
   private fileBrowserDataSource: FileBrowserDataSource | null = null;
   private fileEditorDataSource: FileEditorDataSource | null = null;
+  private removeLeaveGuard: (() => void) | null = null;
 
   static override styles = css`
     :host {
@@ -211,8 +214,24 @@ export class ScionPageTemplateDetail extends LitElement {
         }
       }
     }
+    this.removeLeaveGuard?.();
+    this.removeLeaveGuard = addLeaveGuard(
+      () => !this.editorDirty || window.confirm('You have unsaved changes. Leave anyway?')
+    );
     this.syncProjectLabel();
     void this.loadTemplate();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.removeLeaveGuard?.();
+    this.removeLeaveGuard = null;
+  }
+
+  private get editorDirty(): boolean {
+    if (this.editingFilePath === null) return false;
+    const editor = this.shadowRoot?.querySelector<ScionFileEditor>('scion-file-editor');
+    return editor?.dirty ?? false;
   }
 
   protected override willUpdate(changed: PropertyValues<this>): void {
@@ -309,7 +328,19 @@ export class ScionPageTemplateDetail extends LitElement {
     this.editorInitialPreview = false;
   }
 
-  private handleFileSaved(): void {
+  private async requestCloseEditor(): Promise<void> {
+    const editor = this.shadowRoot?.querySelector<ScionFileEditor>('scion-file-editor');
+    if (editor) {
+      await editor.requestClose();
+      return;
+    }
+    this.handleEditorClosed();
+  }
+
+  private handleFileSaved(e: CustomEvent<{ path: string }>): void {
+    if (this.editingFilePath === '' && e.detail?.path) {
+      this.editingFilePath = e.detail.path;
+    }
     this.refreshFileBrowser();
   }
 
@@ -344,17 +375,42 @@ export class ScionPageTemplateDetail extends LitElement {
     return html`${this.renderHeader()} ${this.renderFilesSection()}`;
   }
 
+  private selfPath(t: Template): string {
+    const id = encodeURIComponent((this.templateId || t.id).trim());
+    if (this.projectId) {
+      return `/projects/${encodeURIComponent(this.projectId.trim())}/templates/${id}`;
+    }
+    if (this.scope === 'user') {
+      return `/profile/templates/${id}`;
+    }
+    return `/settings/templates/${id}`;
+  }
+
+  private headerCrumbs(t: Template): Crumb[] {
+    const entityLabel = t.displayName || t.name || this.templateId;
+    if (this.editingFilePath !== null) {
+      return [
+        ...this.parentCrumbs(true),
+        {
+          label: entityLabel,
+          href: this.selfPath(t),
+          truncate: true,
+          onActivate: (e: MouseEvent) => {
+            e.preventDefault();
+            void this.requestCloseEditor();
+          },
+        },
+        current(this.editingFilePath || 'New file'),
+      ];
+    }
+    return [...this.parentCrumbs(true), current(entityLabel)];
+  }
+
   private renderHeader() {
     const t = this.template!;
     return html`
       <scion-detail-header heading=${t.displayName || t.name}>
-        <scion-breadcrumb
-          slot="back"
-          .crumbs=${[
-            ...this.parentCrumbs(true),
-            current(t.displayName || t.name || this.templateId),
-          ]}
-        ></scion-breadcrumb>
+        <scion-breadcrumb slot="back" .crumbs=${this.headerCrumbs(t)}></scion-breadcrumb>
         <sl-icon slot="icon" name="file-earmark-code"></sl-icon>
         ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}
         ${t.description
@@ -494,7 +550,11 @@ export class ScionPageTemplateDetail extends LitElement {
         ${isEditorOpen
           ? html`
               <div class="editor-back-row">
-                <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
+                <sl-button
+                  size="small"
+                  variant="text"
+                  @click=${() => void this.requestCloseEditor()}
+                >
                   <sl-icon slot="prefix" name="arrow-left"></sl-icon>
                   Back to files
                 </sl-button>

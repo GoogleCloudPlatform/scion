@@ -107,7 +107,7 @@ import {
   WorkspaceFileEditorDataSource,
   SharedDirFileEditorDataSource,
 } from '../shared/file-editor.js';
-import type { FileEditorDataSource } from '../shared/file-editor.js';
+import type { FileEditorDataSource, ScionFileEditor } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
 import { stopAllNotices, type StopAllResult } from '../../utils/stop-all.js';
 import { pullLatestErrorMessage, type PullLatestResponse } from '../../utils/pull-latest.js';
@@ -116,7 +116,7 @@ import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
-import { navigateTo } from '../../client/navigation.js';
+import { addLeaveGuard, navigateTo } from '../../client/navigation.js';
 import {
   leaveVisibility,
   PROJECT_NO_ACCESS_MESSAGE,
@@ -1266,6 +1266,7 @@ export class ScionPageProjectDetail extends LitElement {
   private adminStatusUserId: string | null = null;
 
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
+  private removeLeaveGuard: (() => void) | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -1363,10 +1364,16 @@ export class ScionPageProjectDetail extends LitElement {
     stateManager.addEventListener('decision-updated', this.boundOnDecisionUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.agentWindow.addEventListener('change', this.boundOnWindowChange);
+    this.removeLeaveGuard?.();
+    this.removeLeaveGuard = addLeaveGuard(
+      () => !this.editorDirty || window.confirm('You have unsaved changes. Leave anyway?')
+    );
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.removeLeaveGuard?.();
+    this.removeLeaveGuard = null;
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
@@ -2326,12 +2333,30 @@ export class ScionPageProjectDetail extends LitElement {
     this.editorInitialPreview = false;
   }
 
+  private get editorDirty(): boolean {
+    if (this.editingFilePath === null) return false;
+    const editor = this.shadowRoot?.querySelector<ScionFileEditor>('scion-file-editor');
+    return editor?.dirty ?? false;
+  }
+
   private handleEditorClosed(): void {
     this.editingFilePath = null;
     this.editorInitialPreview = false;
   }
 
-  private handleFileSaved(): void {
+  private async requestCloseEditor(): Promise<void> {
+    const editor = this.shadowRoot?.querySelector<ScionFileEditor>('scion-file-editor');
+    if (editor) {
+      await editor.requestClose();
+      return;
+    }
+    this.handleEditorClosed();
+  }
+
+  private handleFileSaved(e: CustomEvent<{ path: string }>): void {
+    if (this.editingFilePath === '' && e.detail?.path) {
+      this.editingFilePath = e.detail.path;
+    }
     // Refresh the file browser to reflect the saved/new file
     this.refreshActiveFileBrowser();
   }
@@ -3328,7 +3353,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (isEditorOpen) {
       return html`
         <div class="editor-back-row">
-          <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
+          <sl-button size="small" variant="text" @click=${() => void this.requestCloseEditor()}>
             <sl-icon slot="prefix" name="arrow-left"></sl-icon>
             Back to files
           </sl-button>
