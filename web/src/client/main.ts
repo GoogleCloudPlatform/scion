@@ -477,6 +477,7 @@ interface RouteConfig {
   pattern: RegExp;
   tag: string;
   load: () => Promise<unknown>;
+  shell?: ShellType;
 }
 
 const ROUTES: RouteConfig[] = [
@@ -741,6 +742,7 @@ const ROUTES: RouteConfig[] = [
   {
     pattern: /^\/profile\/templates\/[^/]+$/,
     tag: 'scion-page-template-detail',
+    shell: 'profile',
     load: () => import('../components/pages/template-detail.js'),
   },
   {
@@ -1192,10 +1194,11 @@ function resolveRoute(path: string): RouteConfig {
  */
 type ShellType = 'standalone' | 'profile' | 'chat' | 'app';
 
-function getShellType(tag: string): ShellType {
-  if (STANDALONE_ROUTE_TITLES.has(tag)) return 'standalone';
-  if (PROFILE_ROUTES.has(tag)) return 'profile';
-  if (CHAT_ROUTES.has(tag)) return 'chat';
+function getShellType(route: RouteConfig): ShellType {
+  if (route.shell) return route.shell;
+  if (STANDALONE_ROUTE_TITLES.has(route.tag)) return 'standalone';
+  if (PROFILE_ROUTES.has(route.tag)) return 'profile';
+  if (CHAT_ROUTES.has(route.tag)) return 'chat';
   return 'app';
 }
 
@@ -1234,7 +1237,7 @@ function preloadInitialRoute(pathname: string): void {
     return;
   }
   const route = resolveRoute(legacyAgentRedirect(pathname) ?? pathname);
-  startRouteLoads(route, getShellType(route.tag)).catch(() => undefined);
+  startRouteLoads(route, getShellType(route)).catch(() => undefined);
 }
 
 /** Cached shell element and its type, reused across navigations */
@@ -1443,7 +1446,7 @@ async function renderRoute(path: string, options?: RouteNavigationOptions): Prom
     return;
   }
 
-  const shellType = getShellType(tag);
+  const shellType = getShellType(route);
 
   // Lazy-load the page component module (and profile/chat shell if needed).
   // Started before the admin-status request below so the chunk downloads

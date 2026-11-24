@@ -39,8 +39,7 @@
  *   </scion-detail-header>
  *
  * The back slot sits above the title row and takes a scion-breadcrumb
- * (ptone/scion#8281) or legacy scion-back-link elements; it takes no space
- * when empty.
+ * (ptone/scion#8281); it takes no space when empty.
  *
  * Unslotted children are the badges, laid out after the name. Slotted
  * content stays in the page's DOM, so the page styles its own
@@ -50,7 +49,6 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import './back-link.js';
 import './breadcrumb.js';
 
 @customElement('scion-detail-header')
@@ -64,8 +62,8 @@ export class ScionDetailHeader extends LitElement {
       margin-bottom: 1.5rem;
     }
 
-    /* Back links share a row and wrap. Each link carries its own 1rem
-       bottom margin, so an empty slot takes no space. */
+    /* The back slot wraps its breadcrumb trail. scion-breadcrumb carries its
+       own 1rem bottom margin, so an empty slot takes no space. */
     .back {
       display: flex;
       flex-wrap: wrap;
