@@ -39,6 +39,7 @@ import {
   pathIdentityKey,
   type PathLinkTarget,
 } from '../utils/chat-file-links.js';
+import { recentFilesStorageKey, registerRecentFilesStore } from './chat-recent-files-lifecycle.js';
 
 /** Attachment identity + display fields needed to index it; structurally compatible with chat-message.ts's `AttachmentRefInfo`. */
 export interface AttachmentRefLike {
@@ -137,9 +138,7 @@ const STORAGE_VERSION = 1;
 const MAX_TEXT_LEN = 4096;
 const MAX_ID_LEN = 512;
 
-function storageKey(scope: RecentFilesScope): string {
-  return 'scion.chat.recentFiles.v1:' + JSON.stringify([scope.origin, scope.baseUrl, scope.userId]);
-}
+const storageKey = recentFilesStorageKey;
 
 /** A Go zero-time serializes as `0001-01-01T00:00:00Z`; treat it, and any unparseable string, as unknown (0). */
 function sentAtMs(sentAt: string): number {
@@ -647,3 +646,4 @@ export class ChatRecentFilesStore {
 
 /** The module-level singleton — see the class doc for why this can't be page/component state. */
 export const chatRecentFiles = new ChatRecentFilesStore();
+registerRecentFilesStore(chatRecentFiles);

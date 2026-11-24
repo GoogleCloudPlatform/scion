@@ -24,6 +24,55 @@
 import type { AccountTeardownDetail } from '../utils/auth.js';
 import type { RecentFilesScope } from './chat-recent-files.js';
 
+export interface RecentFilesStoreHandle {
+  setScope(scope: RecentFilesScope | null): void;
+  clearForLogout(): void;
+}
+
+let pendingScope: RecentFilesScope | null = null;
+let registeredStore: RecentFilesStoreHandle | null = null;
+
+/** localStorage key for a given recent-files scope. */
+export function recentFilesStorageKey(scope: RecentFilesScope): string {
+  return 'scion.chat.recentFiles.v1:' + JSON.stringify([scope.origin, scope.baseUrl, scope.userId]);
+}
+
+/**
+ * Register the live `chatRecentFiles` store when the chat chunk loads,
+ * immediately applying any scope recorded at app boot.
+ */
+export function registerRecentFilesStore(store: RecentFilesStoreHandle | null): void {
+  registeredStore = store;
+  if (store && pendingScope) {
+    store.setScope(pendingScope);
+  }
+}
+
+/** Record the active user scope at boot and forward it if the store is loaded. */
+export function setRecentFilesScope(scope: RecentFilesScope | null): void {
+  pendingScope = scope;
+  registeredStore?.setScope(scope);
+}
+
+/**
+ * Explicit logout: clear the loaded store (suspending ingestion, memory, and
+ * storage), or remove this identity's persisted key directly when the chat
+ * chunk has not loaded in this tab.
+ */
+export function clearRecentFilesForLogout(): void {
+  const scope = pendingScope;
+  pendingScope = null;
+  if (registeredStore) {
+    registeredStore.clearForLogout();
+  } else if (scope) {
+    try {
+      localStorage.removeItem(recentFilesStorageKey(scope));
+    } catch {
+      // Private mode / no storage — nothing persisted to clear.
+    }
+  }
+}
+
 /**
  * Explicit logout only: an auth-expiry teardown may resume the same account
  * after re-auth, so it must not clear this account's recent-files index.

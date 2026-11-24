@@ -26,30 +26,13 @@
 import { apiFetch, extractApiError } from './api.js';
 import { clearAdminStatus } from './admin-status.js';
 import { loadPage, stripBasePath } from './navigation.js';
+import {
+  isAdminRoutePath,
+  setAdminPathChecker,
+  type AdminPathChecker,
+} from './admin-route-check.js';
 
-export type AdminPathChecker = (pathname: string) => boolean;
-
-/**
- * Registered at boot by `client/main.ts` as
- * `(pathname) => ADMIN_ROUTES.has(resolveRoute(pathname).tag)` so this module
- * derives admin-route membership directly from the router without importing
- * `main.ts` (which boots the app on module load).
- */
-let adminPathChecker: AdminPathChecker | null = null;
-
-/** Register the router-backed predicate for `ADMIN_ROUTES` paths. */
-export function setAdminPathChecker(checker: AdminPathChecker | null): void {
-  adminPathChecker = checker;
-}
-
-/**
- * Whether an application pathname (base-path stripped) maps to a route in
- * `ADMIN_ROUTES`. Delegates to the router predicate registered by `main.ts`.
- */
-export function isAdminRoutePath(pathname: string): boolean {
-  const clean = pathname.split(/[?#]/, 1)[0] || '/';
-  return adminPathChecker ? adminPathChecker(clean) : false;
-}
+export { isAdminRoutePath, setAdminPathChecker, type AdminPathChecker };
 
 export interface ToggleViewAsMemberOptions {
   /** Override for full-page navigation (e.g. to `/` when leaving an admin route). */

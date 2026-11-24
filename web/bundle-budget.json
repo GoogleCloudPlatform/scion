@@ -108,6 +108,12 @@
         "src/components/pages/home.ts"
       ],
       "pathPattern": "src/(shared/filter-query|components/shared/filter-box)/"
+    },
+    {
+      "$comment": "View-as-member banner/client (ptone/scion#9147) and chat recent-files/file-link helpers load lazily outside the initial entry bundle.",
+      "roots": ["src/client/main.ts"],
+      "pathPattern": "src/(client/view-as-member\\.ts|components/shared/view-as-member-banner\\.ts|client/chat-recent-files\\.ts|utils/chat-file-links\\.ts)$",
+      "allow": []
     }
   ]
 }
