@@ -257,10 +257,28 @@ func TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate(t *testing.T) {
 	rec = doProjectSystemOneBearerReq(t, srv, http.MethodDelete, basePath+"/inst-uat-hub", hubBoundaryOwnerUAT, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	// 4d. Scoped UAT minted by a hub admin who is NOT a member of proj MUST be denied (403).
+	// 4d. Scoped UAT minted by a hub admin who is NOT an active member of proj MUST be denied (403).
+	// Grant project-admin transiently to mint the token, then revoke the project binding
+	// (matching TestProjectUAT_HubAdminScheduledEventGrantsDoNotUnlockAgents), and also
+	// verify a hub-boundary UAT minted by non-member superAdmin is denied.
+	projAdminRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	tempBinding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		RoleDefinitionID: projAdminRole.ID,
+		PrincipalType:    "user",
+		PrincipalID:      hubAdmin.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+	})
+	require.NoError(t, err)
 	hubAdminNonMemberUAT := projectOpsMint(t, srv, hubAdmin.ID, projectBoundary(proj.ID), "project:manage_system_one_instances")
+	require.NoError(t, s.DeleteRoleBinding(ctx, tempBinding.ID))
 	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodPut, basePath+"/inst-x", hubAdminNonMemberUAT, nil).Code)
 	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodDelete, basePath+"/inst-uat", hubAdminNonMemberUAT, nil).Code)
+
+	superAdminNonMemberUAT := projectOpsMint(t, srv, superAdmin.ID, projectBoundary(proj.ID), "project:manage_system_one_instances")
+	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodPut, basePath+"/inst-x", superAdminNonMemberUAT, nil).Code)
 
 	// 4e. Non-owner/admin holding a custom role granting project.manage_system_one_instances
 	// (and a UAT minted by them) MUST be denied (403) by the owner/admin rule.
