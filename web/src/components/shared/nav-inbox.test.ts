@@ -22,7 +22,16 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('../../client/inbox-summary-loader.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../../client/inbox-summary-loader.js')>();
+  return {
+    ...mod,
+    ensureInboxSummaryStarted: vi.fn(mod.ensureInboxSummaryStarted),
+  };
+});
+
 import type { ScionNav } from './nav.js';
+import { ensureInboxSummaryStarted } from '../../client/inbox-summary-loader.js';
 import {
   INBOX_SUMMARY_CHANGED_EVENT,
   inboxSummaryStore,
@@ -79,6 +88,7 @@ function overviewLinks(el: ScionNav): string[] {
 
 describe('sidebar Inbox item', () => {
   let summaryResponse: InboxSummaryResponse = makeSummary(0);
+  let fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
 
   beforeAll(async () => {
     await import('./nav.js');
@@ -90,22 +100,21 @@ describe('sidebar Inbox item', () => {
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
     inboxSummaryStore.resetForTests();
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((input: RequestInfo | URL) => {
-        const url =
-          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes('/api/v1/users/me/inbox/summary')) {
-          return Promise.resolve(
-            new Response(JSON.stringify(summaryResponse), {
-              status: 200,
-              headers: { 'Content-Type': 'application/json' },
-            })
-          );
-        }
-        return Promise.resolve(new Response('{}', { status: 404 }));
-      })
-    );
+    vi.mocked(ensureInboxSummaryStarted).mockClear();
+    fetchMock = vi.fn<typeof fetch>((input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(summaryResponse), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
   });
 
   afterEach(() => {
@@ -117,18 +126,30 @@ describe('sidebar Inbox item', () => {
     localStorage.clear();
   });
 
-  it('is absent when web.inbox_dashboard is off or unset', async () => {
+  it('is absent and never loads or fetches inbox summary when web.inbox_dashboard is off or unset', async () => {
     const elDefault = document.createElement('scion-nav') as ScionNav;
+    elDefault.user = { id: 'u-1', email: 'u@example.com', name: 'User', role: 'member' };
     document.body.appendChild(elDefault);
+    await flush();
     await elDefault.updateComplete;
     expect(overviewLinks(elDefault)).toEqual(['/']);
+    expect(ensureInboxSummaryStarted).not.toHaveBeenCalled();
     elDefault.remove();
 
     setFeatureFlag(INBOX_DASHBOARD_FLAG, false);
     const elOff = document.createElement('scion-nav') as ScionNav;
+    elOff.user = { id: 'u-1', email: 'u@example.com', name: 'User', role: 'member' };
     document.body.appendChild(elOff);
+    await flush();
     await elOff.updateComplete;
     expect(overviewLinks(elOff)).toEqual(['/']);
+    expect(ensureInboxSummaryStarted).not.toHaveBeenCalled();
+    const inboxFetches = fetchMock.mock.calls.filter(([input]) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      return url.includes('/inbox/summary');
+    });
+    expect(inboxFetches).toHaveLength(0);
   });
 
   it('appears in Overview right after Dashboard with inbox icon and active state when flag is on', async () => {

@@ -21,7 +21,16 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('../../client/inbox-summary-loader.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../../client/inbox-summary-loader.js')>();
+  return {
+    ...mod,
+    ensureInboxSummaryStarted: vi.fn(mod.ensureInboxSummaryStarted),
+  };
+});
+
 import type { ScionNotificationTray } from './notification-tray.js';
+import { ensureInboxSummaryStarted } from '../../client/inbox-summary-loader.js';
 import { inboxSummaryStore, type InboxSummaryResponse } from '../../client/inbox-summary.js';
 import {
   INBOX_DASHBOARD_FLAG,
@@ -84,6 +93,7 @@ async function flush(): Promise<void> {
 describe('notification tray: Inbox link and empty state', () => {
   let summaryResponse: InboxSummaryResponse = makeSummary(0);
   let notificationsResponse: Notification[] = [];
+  let fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
 
   beforeAll(async () => {
     await import('./notification-tray.js');
@@ -96,30 +106,29 @@ describe('notification tray: Inbox link and empty state', () => {
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
     inboxSummaryStore.resetForTests();
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((input: RequestInfo | URL) => {
-        const url =
-          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes('/api/v1/users/me/inbox/summary')) {
-          return Promise.resolve(
-            new Response(JSON.stringify(summaryResponse), {
-              status: 200,
-              headers: { 'Content-Type': 'application/json' },
-            })
-          );
-        }
-        if (url.includes('/api/v1/notifications')) {
-          return Promise.resolve(
-            new Response(JSON.stringify(notificationsResponse), {
-              status: 200,
-              headers: { 'Content-Type': 'application/json' },
-            })
-          );
-        }
-        return Promise.resolve(new Response('{}', { status: 404 }));
-      })
-    );
+    vi.mocked(ensureInboxSummaryStarted).mockClear();
+    fetchMock = vi.fn<typeof fetch>((input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(summaryResponse), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      if (url.includes('/api/v1/notifications')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(notificationsResponse), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
   });
 
   afterEach(() => {
@@ -146,7 +155,7 @@ describe('notification tray: Inbox link and empty state', () => {
     return tray;
   }
 
-  it('renders no Inbox header link and standard empty state when flag is off', async () => {
+  it('renders no Inbox header link, standard empty state, and never loads or fetches inbox summary when flag is off', async () => {
     summaryResponse = makeSummary(5);
     const tray = await mountTray();
 
@@ -155,6 +164,13 @@ describe('notification tray: Inbox link and empty state', () => {
     expect(tray.shadowRoot!.querySelector('.empty-state')?.textContent?.trim()).toBe(
       'No notifications'
     );
+    expect(ensureInboxSummaryStarted).not.toHaveBeenCalled();
+    const inboxFetches = fetchMock.mock.calls.filter(([input]) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      return url.includes('/inbox/summary');
+    });
+    expect(inboxFetches).toHaveLength(0);
   });
 
   it('renders "Inbox · N →" header link and "No new notifications. Open Inbox" when flag is on and total > 0', async () => {

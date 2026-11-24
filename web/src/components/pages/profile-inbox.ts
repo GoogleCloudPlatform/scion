@@ -44,8 +44,9 @@ import {
 import {
   PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
   fetchProfileDecisionProbe,
-  getCachedProfileDecisionProbe,
-  getLastKnownProfileDecisionAvailability,
+  getInitialProfileDecisionVisibility,
+  resolveProfileDecisionVisibility,
+  type ProfileDecisionVisibility,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
 import {
@@ -97,7 +98,7 @@ export class ScionPageProfileInbox extends LitElement {
 
   /** Mirrors `<scion-profile-nav>`'s 404 probe state for the Decisions sub-tab. */
   @state()
-  private decisionsNavVisibility: 'unknown' | 'visible' | 'hidden' = 'unknown';
+  private decisionsNavVisibility: ProfileDecisionVisibility = 'unknown';
 
   private unmountPage: (() => void) | null = null;
 
@@ -379,18 +380,10 @@ export class ScionPageProfileInbox extends LitElement {
   }
 
   private syncOrProbeDecisionsAvailability(): void {
-    const cached = getCachedProfileDecisionProbe();
-    if (cached !== null) {
-      this.decisionsNavVisibility = cached.available ? 'visible' : 'hidden';
+    const initial = getInitialProfileDecisionVisibility();
+    this.decisionsNavVisibility = initial.visibility;
+    if (!initial.needsProbe) {
       return;
-    }
-    const lastKnownAvailable = getLastKnownProfileDecisionAvailability();
-    if (lastKnownAvailable === true) {
-      this.decisionsNavVisibility = 'visible';
-    } else if (lastKnownAvailable === false) {
-      this.decisionsNavVisibility = 'hidden';
-    } else {
-      this.decisionsNavVisibility = 'unknown';
     }
     void this.probeDecisionsAvailability();
   }
@@ -399,13 +392,10 @@ export class ScionPageProfileInbox extends LitElement {
     if (!decisionsEnabled()) return;
     const probe = await fetchProfileDecisionProbe();
     if (!this.isConnected || !decisionsEnabled()) return;
-    if (probe === null) {
-      if (this.decisionsNavVisibility === 'unknown') {
-        this.decisionsNavVisibility = 'visible';
-      }
-      return;
-    }
-    this.decisionsNavVisibility = probe.available ? 'visible' : 'hidden';
+    this.decisionsNavVisibility = resolveProfileDecisionVisibility(
+      this.decisionsNavVisibility,
+      probe
+    ).visibility;
   }
 
   private startStore(): void {

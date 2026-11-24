@@ -1342,26 +1342,24 @@ export class ScionNotificationTray extends LitElement {
       <div class="panel" role="dialog" aria-label="Notifications">
         <div class="panel-header">
           <h3 class="panel-title">Notifications</h3>
-          ${inboxOn
+          ${inboxOn || count > 0
             ? html`<div class="panel-header-actions">
-                <a
-                  href="/profile/inbox"
-                  class="inbox-link"
-                  data-tray-inbox-link
-                  @click=${(e: Event): void => this.navigateToPath(e, '/profile/inbox')}
-                  >${inboxBadge ? `Inbox \u00b7 ${inboxBadge} \u2192` : 'Inbox \u2192'}</a
-                >
+                ${inboxOn
+                  ? html`<a
+                      href="/profile/inbox"
+                      class="inbox-link"
+                      data-tray-inbox-link
+                      @click=${(e: Event): void => this.navigateToPath(e, '/profile/inbox')}
+                      >${inboxBadge ? `Inbox \u00b7 ${inboxBadge} \u2192` : 'Inbox \u2192'}</a
+                    >`
+                  : nothing}
                 ${count > 0
                   ? html`<button class="mark-all-btn" @click=${(): void => void this.ackAll()}>
                       Mark all read
                     </button>`
                   : nothing}
               </div>`
-            : count > 0
-              ? html`<button class="mark-all-btn" @click=${(): void => void this.ackAll()}>
-                  Mark all read
-                </button>`
-              : nothing}
+            : nothing}
         </div>
         <div class="panel-list">
           ${count > 0 ? this.notifications.map((n) => this.renderItem(n)) : this.renderEmpty()}

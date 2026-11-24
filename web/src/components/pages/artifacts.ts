@@ -198,8 +198,8 @@ export class ScionPageArtifacts extends LitElement {
     const params = new URLSearchParams(window.location.search);
     const reviewParam = params.get('review_pending');
     this.reviewPending = reviewParam === '1' || reviewParam === 'true';
-    if (params.get('owner') === 'me') {
-      this.ownedOnly = true;
+    this.ownedOnly = params.get('owner') === 'me';
+    if (this.ownedOnly) {
       this.sharedOnly = false;
     }
   }
