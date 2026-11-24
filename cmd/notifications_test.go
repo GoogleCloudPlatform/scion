@@ -712,6 +712,12 @@ func TestResolveSubscriptionID(t *testing.T) {
 	})
 }
 
+func TestResolveIDPrefix_CaseInsensitiveExactMatch(t *testing.T) {
+	got, err := resolveIDPrefix("ABC", []string{"abc", "abcdef"}, "subscription", "subscriptions")
+	require.NoError(t, err)
+	assert.Equal(t, "abc", got)
+}
+
 func TestResolveNotificationID(t *testing.T) {
 	const (
 		unackedA = "a1b2c3d4-1111-4000-8000-000000000001"

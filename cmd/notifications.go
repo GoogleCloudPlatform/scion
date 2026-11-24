@@ -345,13 +345,13 @@ func notificationArtifactRef(n hubclient.Notification) string {
 	return "scion://artifact/" + n.ResourceID
 }
 
-// resolveIDPrefix resolves ref against ids by exact match or unique
-// case-insensitive prefix match.
+// resolveIDPrefix resolves ref against ids by case-insensitive exact match or
+// unique case-insensitive prefix match.
 func resolveIDPrefix(ref string, ids []string, noun, plural string) (string, error) {
 	lowerRef := strings.ToLower(ref)
 	var prefixMatches []string
 	for _, id := range ids {
-		if id == ref {
+		if strings.EqualFold(id, ref) {
 			return id, nil
 		}
 		if strings.HasPrefix(strings.ToLower(id), lowerRef) {

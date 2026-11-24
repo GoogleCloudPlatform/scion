@@ -581,12 +581,14 @@ var allowedTriggerActivitySet = func() map[string]struct{} {
 
 // validateTriggerActivities checks that triggers is non-empty and every entry
 // names an allowed notification trigger activity (matched case-insensitively).
-// On success it returns the trimmed, uppercased trigger names.
+// On success it returns the trimmed, uppercased, deduplicated trigger names
+// preserving first-seen order.
 func validateTriggerActivities(triggers []string) ([]string, error) {
 	if len(triggers) == 0 {
 		return nil, errors.New("triggerActivities must be non-empty")
 	}
 	normalized := make([]string, 0, len(triggers))
+	seen := make(map[string]struct{}, len(triggers))
 	var invalid []string
 	for _, raw := range triggers {
 		upper := strings.ToUpper(strings.TrimSpace(raw))
@@ -594,7 +596,10 @@ func validateTriggerActivities(triggers []string) ([]string, error) {
 			invalid = append(invalid, fmt.Sprintf("%q", raw))
 			continue
 		}
-		normalized = append(normalized, upper)
+		if _, ok := seen[upper]; !ok {
+			seen[upper] = struct{}{}
+			normalized = append(normalized, upper)
+		}
 	}
 	if len(invalid) > 0 {
 		return nil, fmt.Errorf("invalid triggerActivities %s; allowed values: %s",
@@ -866,10 +871,6 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			if !subscriptionRequestWellFormed(&req) {
 				continue
 			}
-			normalizedTriggers, err := validateTriggerActivities(req.TriggerActivities)
-			if err != nil {
-				continue
-			}
 			sub := &store.NotificationSubscription{
 				ID:                api.NewUUID(),
 				Scope:             req.Scope,
@@ -877,7 +878,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 				SubscriberType:    caller.Type,
 				SubscriberID:      caller.ID,
 				ProjectID:         req.ProjectID,
-				TriggerActivities: normalizedTriggers,
+				TriggerActivities: req.TriggerActivities,
 				CreatedBy:         caller.ID,
 			}
 
@@ -956,7 +957,8 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 }
 
 // subscriptionRequestWellFormed reports whether a bulk create entry is one
-// bulk create files; malformed entries are skipped.
+// bulk create files; malformed entries are skipped. When well-formed, it
+// normalizes req.TriggerActivities in place.
 func subscriptionRequestWellFormed(req *createSubscriptionRequest) bool {
 	if req.Scope != store.SubscriptionScopeAgent && req.Scope != store.SubscriptionScopeProject {
 		return false
@@ -964,7 +966,8 @@ func subscriptionRequestWellFormed(req *createSubscriptionRequest) bool {
 	if req.ProjectID == "" {
 		return false
 	}
-	if _, err := validateTriggerActivities(req.TriggerActivities); err != nil {
+	normalized, err := validateTriggerActivities(req.TriggerActivities)
+	if err != nil {
 		return false
 	}
 	if req.Scope == store.SubscriptionScopeAgent && req.AgentID == "" {
@@ -977,6 +980,7 @@ func subscriptionRequestWellFormed(req *createSubscriptionRequest) bool {
 	if req.Scope == store.SubscriptionScopeProject && req.AgentID != "" {
 		return false
 	}
+	req.TriggerActivities = normalized
 	return true
 }
 
