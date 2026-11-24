@@ -64,8 +64,7 @@ import {
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { clearAdminStatus, loadAdminStatus } from './admin-status.js';
-import { setAdminPathChecker } from './view-as-member.js';
-import { chatRecentFiles } from './chat-recent-files.js';
+import { setAdminPathChecker } from './admin-route-check.js';
 import { isInPagePop, pushRouteEntry, type RouteShell } from './route-history.js';
 import {
   browserPath,
@@ -80,6 +79,8 @@ import { deepActiveElement } from '../components/shared/deep-active-element.js';
 import { installViewportFrame } from './viewport.js';
 import {
   buildRecentFilesScope,
+  clearRecentFilesForLogout,
+  setRecentFilesScope,
   shouldClearRecentFilesOnTeardown,
 } from './chat-recent-files-lifecycle.js';
 
@@ -1066,7 +1067,7 @@ async function init(): Promise<void> {
     // The recent-files index (native chat quick palette "Documents") is
     // scoped to this identity + hub/base path; initialize only now that the
     // user is known.
-    chatRecentFiles.setScope(
+    setRecentFilesScope(
       buildRecentFilesScope(currentUser, window.location.origin, import.meta.env.BASE_URL)
     );
   }
@@ -1130,7 +1131,7 @@ async function init(): Promise<void> {
     // does not clear recents.
     const reason = (e as CustomEvent<AccountTeardownDetail>).detail?.reason;
     if (shouldClearRecentFilesOnTeardown(reason)) {
-      chatRecentFiles.clearForLogout();
+      clearRecentFilesForLogout();
     }
 
     clearTerminalLoading();

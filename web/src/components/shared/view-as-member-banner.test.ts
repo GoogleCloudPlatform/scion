@@ -259,6 +259,9 @@ describe('view-as-member banner in authenticated shells', () => {
 
       el.user = VAM_USER;
       await el.updateComplete;
+      await vi.waitFor(() =>
+        expect(el.shadowRoot!.querySelector('[data-testid="view-as-member-banner"]')).not.toBeNull()
+      );
       const banner = el.shadowRoot!.querySelector('[data-testid="view-as-member-banner"]');
       const header = el.shadowRoot!.querySelector('scion-header');
       expect(banner).not.toBeNull();

@@ -21,7 +21,7 @@
  * Uses Shoelace components for UI and integrates with shared Scion components.
  */
 
-import { LitElement, html, css, type TemplateResult } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
@@ -42,11 +42,28 @@ import {
   renderTestHubBanner,
   testHubBannerStyles,
 } from './shared/test-hub-banner.js';
-import {
-  renderViewAsMemberBanner,
-  viewAsMemberBannerStyles,
-} from './shared/view-as-member-banner.js';
 import { renderTestIdentityChip, testIdentityChipStyles } from './shared/test-identity-chip.js';
+
+type ViewAsMemberBannerModule = typeof import('./shared/view-as-member-banner.js');
+let viewAsMemberBannerModule: ViewAsMemberBannerModule | null = null;
+let viewAsMemberBannerPromise: Promise<ViewAsMemberBannerModule> | null = null;
+
+function loadViewAsMemberBanner(): Promise<ViewAsMemberBannerModule> {
+  if (viewAsMemberBannerModule) return Promise.resolve(viewAsMemberBannerModule);
+  if (!viewAsMemberBannerPromise) {
+    const load = import('./shared/view-as-member-banner.js')
+      .then((mod) => {
+        viewAsMemberBannerModule = mod;
+        return mod;
+      })
+      .catch((err) => {
+        if (viewAsMemberBannerPromise === load) viewAsMemberBannerPromise = null;
+        throw err;
+      });
+    viewAsMemberBannerPromise = load;
+  }
+  return viewAsMemberBannerPromise;
+}
 
 /**
  * Page title configuration
@@ -99,6 +116,9 @@ export class ScionApp extends LitElement {
   @state()
   _sidebarCollapsed = false;
 
+  @state()
+  private _viewAsMemberBanner: ViewAsMemberBannerModule | null = viewAsMemberBannerModule;
+
   /** Bound listener references for cleanup */
   private _accessDeniedHandler = this.handleAccessDenied.bind(this);
   private _pageTitleHandler = this.handlePageTitle.bind(this);
@@ -108,7 +128,6 @@ export class ScionApp extends LitElement {
 
   static override styles = css`
     ${testHubBannerStyles}
-    ${viewAsMemberBannerStyles}
     ${testIdentityChipStyles}
 
     :host {
@@ -283,6 +302,15 @@ export class ScionApp extends LitElement {
       // Retry a status fetch that failed earlier; a no-op once it is known.
       this._testHubBanner.ensure();
     }
+    if (changedProperties.has('user') && this.user?.viewAsMember && !this._viewAsMemberBanner) {
+      void loadViewAsMemberBanner()
+        .then((mod) => {
+          this._viewAsMemberBanner = mod;
+        })
+        .catch((err: unknown) => {
+          console.error('Failed to load View as member banner:', err);
+        });
+    }
   }
 
   /**
@@ -349,7 +377,12 @@ export class ScionApp extends LitElement {
         <!-- Test-hub banner: keyed on the path, so every navigation renders
              a fresh element even if the previous one was removed. -->
         ${keyed(this.currentPath, renderTestHubBanner(this._testHubBanner.status))}
-        ${renderViewAsMemberBanner(this.user)} ${renderTestIdentityChip(this.user)}
+        ${this.user?.viewAsMember && this._viewAsMemberBanner
+          ? html`<style>
+                ${this._viewAsMemberBanner.viewAsMemberBannerStyles.cssText}</style
+              >${this._viewAsMemberBanner.renderViewAsMemberBanner(this.user)}`
+          : nothing}
+        ${renderTestIdentityChip(this.user)}
         <scion-header
           .user=${this.user}
           .currentPath=${this.currentPath}
