@@ -47,8 +47,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -101,6 +103,56 @@ func hubCallSites(t *testing.T, symbols ...string) map[string]map[stripSiteKey]b
 			if want[sym] {
 				fn := enclosingFuncName(fset, f, fset.Position(call.Pos()).Offset)
 				out[sym][stripSiteKey{name, fn}] = true
+			}
+			return true
+		})
+	})
+	return out
+}
+
+// hubPkgSymbolSites returns, for every non-test .go file in the hub guard
+// scan directories, the (file, function) pairs that reference symbol from
+// importPath (matching default, aliased, and dot imports).
+func hubPkgSymbolSites(t *testing.T, importPath, symbol string) map[stripSiteKey]bool {
+	t.Helper()
+	out := map[stripSiteKey]bool{}
+	defaultPkg := path.Base(importPath)
+	forEachHubFile(t, func(name string, fset *token.FileSet, f *ast.File) {
+		localNames := map[string]bool{}
+		dotImport := false
+		for _, imp := range f.Imports {
+			p, err := strconv.Unquote(imp.Path.Value)
+			if err != nil || p != importPath {
+				continue
+			}
+			switch {
+			case imp.Name == nil:
+				localNames[defaultPkg] = true
+			case imp.Name.Name == "_":
+				continue
+			case imp.Name.Name == ".":
+				dotImport = true
+			default:
+				localNames[imp.Name.Name] = true
+			}
+		}
+		if len(localNames) == 0 && !dotImport {
+			return
+		}
+		selectors := map[*ast.Ident]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				selectors[x.Sel] = true
+				if id, ok := x.X.(*ast.Ident); ok && localNames[id.Name] && x.Sel.Name == symbol {
+					fn := enclosingFuncName(fset, f, fset.Position(x.Pos()).Offset)
+					out[stripSiteKey{name, fn}] = true
+				}
+			case *ast.Ident:
+				if dotImport && x.Name == symbol && !selectors[x] {
+					fn := enclosingFuncName(fset, f, fset.Position(x.Pos()).Offset)
+					out[stripSiteKey{name, fn}] = true
+				}
 			}
 			return true
 		})
@@ -303,13 +355,50 @@ func TestArtifactRefsAdmittedAfterAuthzInChatV2(t *testing.T) {
 }
 
 // TestArtifactRefResolverReachableOnlyFromRequestContexts pins the
-// in-process path to the artifact service that message references add:
-// artifactRefResolver is called only by resolveArtifactRefs, which resolves
-// only when the authentication middleware's credential context binds ctx's
-// current identity; and that credential context is recorded only by the
-// authentication middleware files, so in-process code cannot satisfy the
-// check.
+// artifacts.NewService constructors and the request-context guard on
+// artifactRefResolver:
+//   - artifacts.NewService is referenced only by the pinned constructors in
+//     artifacts_store.go (artifactsHandler, artifactRefResolver, and
+//     attachmentService), so any new or renamed constructor calling
+//     artifacts.NewService fails the guard;
+//   - artifactRefResolver is called only by resolveArtifactRefs (and the
+//     warning-only artifactRecipientWarning), which resolve only when the
+//     authentication middleware's credential context binds ctx's current
+//     identity (attachmentService callers, such as background
+//     attachment_delivery sweeps, are intentionally unpinned by this guard);
+//   - that credential context is recorded only by the authentication
+//     middleware files, so in-process code cannot satisfy the check.
 func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
+	// Pin every artifacts.NewService reference in pkg/hub so any new or
+	// renamed constructor calling artifacts.NewService fails the guard
+	// (ptone/scion#9121):
+	//   - artifactsHandler: mounted once on the HTTP mux behind
+	//     UnifiedAuthMiddleware (TestArtifactServiceReachableOnlyThroughHTTPAuth).
+	//   - artifactRefResolver: callers are guarded below (request-bound
+	//     contexts only).
+	//   - attachmentService: pinned as a constructor only; its callers (such as
+	//     background attachment_delivery sweeps) are intentionally unpinned by
+	//     this guard.
+	wantNewService := map[stripSiteKey]bool{
+		{"artifacts_store.go", "artifactsHandler"}:    true,
+		{"artifacts_store.go", "artifactRefResolver"}: true,
+		{"artifacts_store.go", "attachmentService"}:   true,
+	}
+	gotNewService := hubPkgSymbolSites(t, "github.com/GoogleCloudPlatform/scion/pkg/artifacts", "NewService")
+	if len(gotNewService) == 0 {
+		t.Fatal("found no artifacts.NewService call sites: scanner broken")
+	}
+	for key := range gotNewService {
+		if !wantNewService[key] {
+			t.Errorf("artifacts.NewService called from %s:%s; only pinned constructors in artifacts_store.go may build the artifact service", key.file, key.function)
+		}
+	}
+	for key := range wantNewService {
+		if !gotNewService[key] {
+			t.Errorf("STALE wantNewService entry %s:%s: no artifacts.NewService call", key.file, key.function)
+		}
+	}
+
 	got := hubCallSites(t, "artifactRefResolver", "contextWithCredentialContext")
 
 	// artifactRecipientWarning builds it too, for the warning-only
