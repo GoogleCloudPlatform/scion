@@ -186,8 +186,12 @@ func TestListAgents_FilterQuery_AllServerKeysAndReferents(t *testing.T) {
 
 	brokerEast := &store.RuntimeBroker{ID: uuid.NewString(), Name: "broker-east", Slug: "broker-east", Status: store.BrokerStatusOnline}
 	brokerWest := &store.RuntimeBroker{ID: uuid.NewString(), Name: "broker-west", Slug: "broker-west", Status: store.BrokerStatusOnline}
+	brokerDup1 := &store.RuntimeBroker{ID: uuid.NewString(), Name: "shared-name", Slug: "shared-name-1", Status: store.BrokerStatusOnline}
+	brokerDup2 := &store.RuntimeBroker{ID: uuid.NewString(), Name: "shared-name", Slug: "shared-name-2", Status: store.BrokerStatusOnline}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, brokerEast))
 	require.NoError(t, s.CreateRuntimeBroker(ctx, brokerWest))
+	require.NoError(t, s.CreateRuntimeBroker(ctx, brokerDup1))
+	require.NoError(t, s.CreateRuntimeBroker(ctx, brokerDup2))
 
 	agents := []store.Agent{
 		{
@@ -278,6 +282,17 @@ func TestListAgents_FilterQuery_AllServerKeysAndReferents(t *testing.T) {
 	var respOutOfScope ListAgentsResponse
 	require.NoError(t, json.Unmarshal(recOutOfScope.Body.Bytes(), &respOutOfScope))
 	assert.Empty(t, respOutOfScope.Agents)
+
+	// Two brokers sharing the same non-unique name: broker:<name> resolves to BOTH deterministically.
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: uuid.NewString(), Name: "dup-1", Slug: "dup-1", ProjectID: projA.ID,
+		Phase: "running", RuntimeBrokerID: brokerDup1.ID,
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: uuid.NewString(), Name: "dup-2", Slug: "dup-2", ProjectID: projA.ID,
+		Phase: "running", RuntimeBrokerID: brokerDup2.ID,
+	}))
+	assert.Equal(t, []string{"dup-1", "dup-2"}, queryNames(t, "broker:shared-name"))
 }
 
 func TestListProjectAgents_FilterQuery(t *testing.T) {

@@ -664,14 +664,30 @@ func (s *Server) buildAgentQueryResolver(ctx context.Context, identity Identity,
 			}
 			return project.ID, true
 		},
-		ResolveBroker: func(raw string) (string, bool) {
+		ResolveBroker: func(raw string) ([]string, bool) {
 			if broker, err := s.store.GetRuntimeBroker(ctx, raw); err == nil && broker != nil {
-				return broker.ID, true
+				return []string{broker.ID}, true
 			}
-			if broker, err := s.store.GetRuntimeBrokerByName(ctx, raw); err == nil && broker != nil {
-				return broker.ID, true
+			var ids []string
+			cursor := ""
+			for {
+				res, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{Name: raw}, store.ListOptions{Limit: 200, Cursor: cursor})
+				if err != nil || res == nil || len(res.Items) == 0 {
+					break
+				}
+				for _, b := range res.Items {
+					ids = append(ids, b.ID)
+				}
+				if res.NextCursor == "" {
+					break
+				}
+				cursor = res.NextCursor
 			}
-			return "", false
+			if len(ids) > 0 {
+				sort.Strings(ids)
+				return ids, true
+			}
+			return nil, false
 		},
 		ResolveOwner: func(raw string) (string, bool) {
 			if strings.EqualFold(raw, "me") {

@@ -47,11 +47,13 @@ const (
 // AgentQueryResolver resolves reference values in an agents filter query to
 // canonical store IDs. Each hook is optional; when nil, values pass through
 // unchanged (useful in store-level tests that supply raw IDs directly).
-// A hook returning ("", false) marks the referent unresolvable and substitutes
-// ImpossibleFilterUUID.
+// A hook returning ("", false) or (nil, false) marks the referent unresolvable
+// and substitutes ImpossibleFilterUUID.
+// ResolveBroker returns a slice so non-unique broker names resolve to all
+// matching broker IDs deterministically.
 type AgentQueryResolver struct {
 	ResolveProject func(raw string) (string, bool)
-	ResolveBroker  func(raw string) (string, bool)
+	ResolveBroker  func(raw string) ([]string, bool)
 	ResolveOwner   func(raw string) (string, bool)
 }
 
@@ -65,7 +67,8 @@ type TranslatedAgentQuery struct {
 // TranslateAgentQuery translates a validated agents filterquery.Query into
 // canonicalized store.QueryTerms (deterministic for cursor bindings) plus any
 // extracted `is:` scope classification. Both the hub handlers and store parity
-// tests call this single translator.
+// tests call this single translator. Raw referent values are memoized per field
+// so repeated tokens (e.g. `project:x project:x`) trigger only one lookup.
 func TranslateAgentQuery(q filterquery.Query, resolver AgentQueryResolver) TranslatedAgentQuery {
 	if q.IsEmpty() {
 		return TranslatedAgentQuery{}
@@ -81,6 +84,44 @@ func TranslateAgentQuery(q filterquery.Query, resolver AgentQueryResolver) Trans
 	}
 
 	var wantMine, wantShared bool
+	projectCache := make(map[string]string)
+	ownerCache := make(map[string]string)
+	brokerCache := make(map[string][]string)
+
+	resolveProject := func(raw string) string {
+		key := strings.ToLower(raw)
+		if cached, ok := projectCache[key]; ok {
+			return cached
+		}
+		res := resolveOrImpossible(raw, resolver.ResolveProject)
+		projectCache[key] = res
+		return res
+	}
+	resolveOwner := func(raw string) string {
+		key := strings.ToLower(raw)
+		if cached, ok := ownerCache[key]; ok {
+			return cached
+		}
+		res := resolveOrImpossible(raw, resolver.ResolveOwner)
+		ownerCache[key] = res
+		return res
+	}
+	resolveBroker := func(raw string) []string {
+		key := strings.ToLower(raw)
+		if cached, ok := brokerCache[key]; ok {
+			return cached
+		}
+		var res []string
+		if resolver.ResolveBroker == nil {
+			res = []string{raw}
+		} else if ids, ok := resolver.ResolveBroker(raw); ok && len(ids) > 0 {
+			res = ids
+		} else {
+			res = []string{ImpossibleFilterUUID}
+		}
+		brokerCache[key] = res
+		return res
+	}
 
 	if len(q.Terms) > 0 {
 		terms := make([]QueryTerm, 0, len(q.Terms))
@@ -106,19 +147,19 @@ func TranslateAgentQuery(q filterquery.Query, resolver AgentQueryResolver) Trans
 				continue
 			}
 
-			vals := make([]string, len(t.Values))
-			for i, v := range t.Values {
+			vals := make([]string, 0, len(t.Values))
+			for _, v := range t.Values {
 				switch key {
 				case "label":
-					vals[i] = v
+					vals = append(vals, v)
 				case "project":
-					vals[i] = resolveOrImpossible(v, resolver.ResolveProject)
+					vals = append(vals, resolveProject(v))
 				case "broker":
-					vals[i] = resolveOrImpossible(v, resolver.ResolveBroker)
+					vals = append(vals, resolveBroker(v)...)
 				case "owner":
-					vals[i] = resolveOrImpossible(v, resolver.ResolveOwner)
+					vals = append(vals, resolveOwner(v))
 				default:
-					vals[i] = strings.ToLower(v)
+					vals = append(vals, strings.ToLower(v))
 				}
 			}
 			sort.Strings(vals)

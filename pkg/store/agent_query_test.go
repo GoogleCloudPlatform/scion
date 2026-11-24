@@ -15,6 +15,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
@@ -29,11 +30,11 @@ func TestTranslateAgentQuery_ScopeAndResolution(t *testing.T) {
 			}
 			return "", false
 		},
-		ResolveBroker: func(raw string) (string, bool) {
+		ResolveBroker: func(raw string) ([]string, bool) {
 			if raw == "east" {
-				return "broker-east-id", true
+				return []string{"broker-east-2", "broker-east-1"}, true
 			}
-			return "", false
+			return nil, false
 		},
 		ResolveOwner: func(raw string) (string, bool) {
 			if raw == "me" {
@@ -89,11 +90,11 @@ func TestTranslateAgentQuery_ScopeAndResolution(t *testing.T) {
 			wantFirst: []string{"22222222-2222-2222-2222-222222222222"}, // owner sorts before project
 		},
 		{
-			name:      "broker resolution and unresolvable fallback",
+			name:      "broker resolution expands all same-named brokers and unresolvable fallback",
 			input:     "broker:east,missing",
 			wantScope: AgentQueryScopeNone,
 			wantTerms: 1,
-			wantFirst: []string{ImpossibleFilterUUID, "broker-east-id"},
+			wantFirst: []string{ImpossibleFilterUUID, "broker-east-1", "broker-east-2"},
 		},
 	}
 
@@ -126,5 +127,30 @@ func TestTranslateAgentQuery_ScopeAndResolution(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTranslateAgentQuery_MemoizesRepeatedReferents(t *testing.T) {
+	calls := 0
+	resolver := AgentQueryResolver{
+		ResolveProject: func(raw string) (string, bool) {
+			calls++
+			return "11111111-1111-1111-1111-111111111111", true
+		},
+	}
+	parts := make([]string, 32)
+	for i := range parts {
+		parts[i] = "project:x"
+	}
+	q, fqErr := filterquery.Parse(strings.Join(parts, " "), schemas.Agents.HasKey)
+	if fqErr != nil {
+		t.Fatalf("Parse: %v", fqErr)
+	}
+	got := TranslateAgentQuery(q, resolver)
+	if calls != 1 {
+		t.Fatalf("ResolveProject called %d times for 32 copies of project:x, want 1", calls)
+	}
+	if got.Terms == nil || len(got.Terms.Terms) != 32 {
+		t.Fatalf("expected 32 terms, got %+v", got.Terms)
 	}
 }
