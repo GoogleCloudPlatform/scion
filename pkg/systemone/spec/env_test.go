@@ -227,12 +227,12 @@ func TestEnvironmentRegistry_ValidationAndConcurrency(t *testing.T) {
 	probe, ok := reg.Get(spec.ProbeEnvironmentName)
 	require.True(t, ok)
 	assert.Equal(t, spec.ProbeEnvironment(), probe)
-	require.Error(t, reg.Register(spec.ProbeEnvironment()), "duplicate probe registration must fail")
+	require.Error(t, reg.RegisterForConsumer("probe", spec.ProbeEnvironment()), "duplicate probe registration must fail")
 
 	// Register custom environment without ChoiceSets and verify defensive copies.
 	msgEnv := sampleMessageEnv()
 	msgEnv.ChoiceSets = nil
-	require.NoError(t, reg.Register(msgEnv))
+	require.NoError(t, reg.RegisterForConsumer("test_consumer", msgEnv))
 	msgEnv.Fields[0].MaxBytes = 1 // mutate caller copy
 
 	got, ok := reg.Get("test_message_env")
@@ -247,21 +247,16 @@ func TestEnvironmentRegistry_ValidationAndConcurrency(t *testing.T) {
 	// Duplicate registration fails.
 	dupEnv := sampleMessageEnv()
 	dupEnv.ChoiceSets = nil
-	require.Error(t, reg.Register(dupEnv))
+	require.Error(t, reg.RegisterForConsumer("test_consumer", dupEnv))
 
-	// Environments declaring ChoiceSets are refused fail-closed in both
-	// Register and RegisterForConsumer (probe remains unaffected).
+	// Environments declaring ChoiceSets are refused fail-closed (probe remains unaffected).
 	csEnv := sampleMessageEnv()
 	csEnv.Name = "env_with_choicesets"
-	err := reg.Register(csEnv)
+	err := reg.RegisterForConsumer("test_consumer", csEnv)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "dynamic choice sets are not yet supported")
 
-	err = reg.RegisterForConsumer("test_consumer", csEnv)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "dynamic choice sets are not yet supported")
-
-	// Concurrent Register, Get, and Names must be race-free.
+	// Concurrent RegisterForConsumer, Get, and Names must be race-free.
 	var wg sync.WaitGroup
 	for i := range 24 {
 		wg.Add(1)
@@ -276,7 +271,7 @@ func TestEnvironmentRegistry_ValidationAndConcurrency(t *testing.T) {
 				},
 				MaxTotalBytes: 256,
 			}
-			assert.NoError(t, reg.Register(env))
+			assert.NoError(t, reg.RegisterForConsumer("conc_consumer", env))
 			loaded, found := reg.Get(name)
 			assert.True(t, found)
 			assert.Equal(t, name, loaded.Name)

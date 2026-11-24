@@ -724,4 +724,101 @@ func TestRuntime_ProjectAllowlistCompileEvaluateAndCredentialIndependence(t *tes
 	ceEmpty, ok := spec.AsCompileError(err)
 	require.True(t, ok)
 	assert.Equal(t, spec.CategoryBinding, ceEmpty.Category)
+
+	// 8. Unbound rule with >1 enabled, allowlisted instances (and no defaultInstance)
+	// is ambiguous and fails ValidateCompiled with CategoryBinding (rev3-runtime O1);
+	// allowlisting exactly one succeeds at compile and evaluate.
+	instB := Instance{
+		ID:       "inst-allow-b",
+		Name:     "inst-b",
+		Adapter:  "adm_allow",
+		Model:    "test-model-1",
+		Endpoint: tlsSrv.URL,
+		Auth:     InstanceAuth{Kind: "api_key", SecretName: "test-allow-secret"},
+		Enabled:  true,
+	}
+	allowMulti := &mutableProjectAllowlist{}
+	allowMulti.set("proj-multi", []string{"inst-a", "inst-b"})
+	rtMulti := New(Config{
+		Registry:         reg,
+		Instances:        StaticInstances(inst, instB),
+		ProjectAllowlist: allowMulti,
+		Credentials: func(context.Context, Instance) (string, error) {
+			return "sk-test-allow-key", nil
+		},
+	}, WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client())))
+	err = rtMulti.ValidateCompiled(WithEvalProjectID(context.Background(), "proj-multi"), unboundCompiled)
+	require.Error(t, err)
+	ceAmbig, ok := spec.AsCompileError(err)
+	require.True(t, ok)
+	assert.Equal(t, spec.CategoryBinding, ceAmbig.Category)
+	assert.Contains(t, ceAmbig.Message, "ambiguous")
+
+	allowMulti.set("proj-multi", []string{"inst-a"})
+	require.NoError(t, rtMulti.ValidateCompiled(WithEvalProjectID(context.Background(), "proj-multi"), unboundCompiled))
+	decMulti, err := rtMulti.Evaluate(context.Background(), unboundCompiled, ProbeInput("hello"), EvalOptions{ProjectID: "proj-multi"})
+	require.NoError(t, err)
+	assert.True(t, decMulti.Bool)
+}
+
+func TestAdmission_CallerDeadlineDuringAdmissionClassifiesAsCanceled(t *testing.T) {
+	block := make(chan struct{})
+	inFlight := make(chan struct{})
+	adapter := &admissionFakeAdapter{
+		name: "adm_deadline",
+		invoke: func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			select {
+			case inFlight <- struct{}{}:
+			default:
+			}
+			<-block
+			return binarySuccessResult(), nil
+		},
+	}
+	reg := provider.NewRegistry()
+	require.NoError(t, reg.Register(adapter))
+
+	inst := Instance{
+		ID:      "inst-dead",
+		Name:    "inst-dead",
+		Adapter: "adm_deadline",
+		Model:   "test-model-1",
+		Auth:    InstanceAuth{Kind: "none"},
+		Limits:  InstanceLimits{MaxInFlight: 1},
+		Enabled: true,
+	}
+	rt := New(Config{
+		Registry:              reg,
+		Instances:             StaticInstances(inst),
+		MaxInFlightPerProject: 4,
+		AdmissionWait:         250 * time.Millisecond,
+	})
+	compiled := compileAdmissionTestRule(t, "inst-dead")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = rt.Evaluate(context.Background(), compiled, ProbeInput("holder"), EvalOptions{ProjectID: "proj-1"})
+	}()
+	<-inFlight
+
+	// 1. Caller deadline shorter than admissionWait -> FailCanceled (NOT capacity).
+	shortCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	_, err := rt.Evaluate(shortCtx, compiled, ProbeInput("short-deadline"), EvalOptions{ProjectID: "proj-2"})
+	require.Error(t, err)
+	evalShort, ok := EvaluationFrom(err)
+	require.True(t, ok)
+	assert.Equal(t, string(provider.FailCanceled), evalShort.Reason)
+
+	// 2. Live caller ctx saturating admissionWait -> still FailCapacity.
+	_, err = rt.Evaluate(context.Background(), compiled, ProbeInput("live-ctx"), EvalOptions{ProjectID: "proj-2"})
+	require.Error(t, err)
+	evalCap, ok := EvaluationFrom(err)
+	require.True(t, ok)
+	assert.Equal(t, string(provider.FailCapacity), evalCap.Reason)
+
+	close(block)
+	wg.Wait()
 }

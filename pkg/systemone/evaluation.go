@@ -54,10 +54,11 @@ type (
 // Request wraps a System One Input with consumer-authorized evaluation context
 // for ruleengine.Input.Payload (t2-p2-trigger-binding-amendment §2.2, I3).
 //
-// Consumers evaluating rules on behalf of a project pass Request in
+// Consumers evaluating rules through the ruleengine.Dialect pass Request in
 // ruleengine.Input.Payload so the dialect forwards ProjectID, RuleID,
 // Revision, and optional ElementIndex into runtime.EvalOptions and evaluation
-// provenance. Probes may continue passing a bare Input.
+// provenance. Dialect evaluations always enforce RequireProject: true (so a
+// bare Input fails closed); Hub admin probes call Runtime.Evaluate directly.
 //
 // Security contract: ProjectID MUST come from the consumer's authorized
 // context (for example a Hub-owned trigger or message-policy record), never

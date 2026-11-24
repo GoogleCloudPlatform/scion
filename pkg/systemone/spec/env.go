@@ -266,12 +266,6 @@ func NewEnvironmentRegistry() *EnvironmentRegistry {
 	}
 }
 
-// Register validates and registers env without a consumer owner. Registering an
-// invalid environment or a duplicate name (including "probe") returns an error.
-func (r *EnvironmentRegistry) Register(env ContentEnvironment) error {
-	return r.registerWithOwner("", env)
-}
-
 // RegisterForConsumer validates and registers env owned by consumer.
 // Cross-consumer compiles against env are refused by Dialect.Compile.
 func (r *EnvironmentRegistry) RegisterForConsumer(consumer string, env ContentEnvironment) error {

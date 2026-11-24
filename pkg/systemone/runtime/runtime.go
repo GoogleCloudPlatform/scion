@@ -586,6 +586,13 @@ func (r *Runtime) ValidateCompiled(ctx context.Context, compiled *spec.Compiled)
 				Message:  "no enabled System One instance is available",
 			}
 		}
+		if len(candidates) > 1 {
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("unbound rule is ambiguous: %d eligible instances; bind an instance explicitly", len(candidates)),
+			}
+		}
 	}
 
 	var firstErr error
@@ -841,8 +848,8 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	if !admitted {
 		admissionDur := time.Since(admissionStart)
 		reason := provider.FailCapacity
-		if errors.Is(ctx.Err(), context.Canceled) {
-			reason = provider.FailCanceled
+		if ctx.Err() != nil {
+			reason = classifyContextCause(ctx.Err(), latchCause(context.Cause(attemptCtx)))
 		}
 		eval.Attempts = []Attempt{{
 			Instance:         inst.Name,
