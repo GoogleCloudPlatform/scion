@@ -372,6 +372,276 @@ func TestSelectProfileDecisionProjects_UnsettledOnlyRespectsEffectiveCap(t *test
 	}
 }
 
+// seedDecidedAndOpenHistoryForProfileQueryCount seeds numProjects projects with
+// historyPerProject settled decided+answer rows each plus openProjects open
+// prompts, so profile tab=pending, tab=made&sort=recent, and
+// tab=made&sort=project all return non-empty results.
+func seedDecidedAndOpenHistoryForProfileQueryCount(
+	t *testing.T,
+	f *decisionsFixture,
+	cs *entadapter.CompositeStore,
+	numProjects int,
+	historyPerProject int,
+	openProjects int,
+) {
+	t.Helper()
+	ctx := context.Background()
+	memberRole, err := f.store.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
+	require.NoError(t, err)
+
+	base := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
+	choicesJSON := `[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}]`
+
+	type projInfo struct {
+		projID string
+		tpID   string
+		botID  string
+		idx    int
+	}
+	projs := make([]projInfo, numProjects)
+	for p := 0; p < numProjects; p++ {
+		proj := &store.Project{
+			ID:      api.NewUUID(),
+			Name:    fmt.Sprintf("p3-qc-proj-%03d", p),
+			Slug:    fmt.Sprintf("p3-qc-proj-%03d", p),
+			Created: base,
+		}
+		require.NoError(t, f.store.CreateProject(ctx, proj))
+		_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: memberRole.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      f.bob.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          proj.ID,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+		tpID := createTestDecisionTopic(t, f.wcs, proj.ID, "general", f.bob.ID)
+		botID := api.NewUUID()
+		projs[p] = projInfo{projID: proj.ID, tpID: tpID, botID: botID, idx: p}
+	}
+
+	tx, err := cs.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	stmtDec, err := tx.PrepareContext(ctx,
+		`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, created_at, decided_at)
+		 VALUES (?, ?, ?, ?, 0, ?, 'bot', ?, ?, 'agent', 1, 'History?', ?, false, 0, 'decided', true, ?, ?)`)
+	require.NoError(t, err)
+	stmtAns, err := tx.PrepareContext(ctx,
+		`INSERT INTO decision_answers (id, decision_row_id, project_id, asker_agent_id, key, version, question_text, choice_id, choice_label, answered_by_user_id, answered_by_name, answered_by_email, provenance, outcome, surface, response_message_id, matched_default, created_at)
+		 VALUES (?, ?, ?, ?, ?, 1, 'History?', 'yes', 'Yes', ?, 'Bob', 'bob@test.com', 'direct', 'answer', 'decisions_page', ?, false, ?)`)
+	require.NoError(t, err)
+
+	for _, pr := range projs {
+		for j := 0; j < historyPerProject; j++ {
+			decID := uuid.NewString()
+			msgID := uuid.NewString()
+			ansID := uuid.NewString()
+			respMsgID := uuid.NewString()
+			ts := base.Add(time.Duration(pr.idx*10000+j) * time.Second)
+			key := fmt.Sprintf("h-%03d-%05d", pr.idx, j)
+			_, err := stmtDec.ExecContext(ctx, decID, pr.projID, pr.tpID, msgID, pr.botID, key, key, choicesJSON, ts, ts)
+			require.NoError(t, err)
+			_, err = stmtAns.ExecContext(ctx, ansID, decID, pr.projID, pr.botID, key, f.bob.ID, respMsgID, ts)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, stmtDec.Close())
+	require.NoError(t, stmtAns.Close())
+	require.NoError(t, tx.Commit())
+
+	for p := 0; p < openProjects && p < numProjects; p++ {
+		pr := projs[p]
+		_, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: api.NewUUID(), ProjectID: pr.projID, Sender: "agent:bot", SenderID: pr.botID,
+				Recipient: "chat", ThreadID: pr.tpID, Channel: "web",
+				CreatedAt: base.Add(24 * time.Hour),
+			},
+			AskerAgentID:   pr.botID,
+			AskerAgentName: "bot",
+			Decisions: []messages.Decision{
+				{Key: fmt.Sprintf("open-%03d", p), Question: "Open?", Choices: choices},
+			},
+		})
+		require.NoError(t, err)
+	}
+}
+
+// TestDecisionsQueryCount_ProfilePendingAndMade proves that profile
+// GET /api/v1/users/me/decisions for tab=pending, tab=made&sort=recent, and
+// tab=made&sort=project issue a constant number of SQL queries with respect to
+// project count (5 vs 40) and history depth (10 vs 300) (design-scale §7 item 4).
+func TestDecisionsQueryCount_ProfilePendingAndMade(t *testing.T) {
+	type counts struct {
+		pending     int64
+		madeRecent  int64
+		madeProject int64
+	}
+	measure := func(t *testing.T, numProjects, historyPerProject int) counts {
+		t.Helper()
+		f, cs, counter := newCountingDecisionsFixture(t)
+		seedDecidedAndOpenHistoryForProfileQueryCount(t, f, cs, numProjects, historyPerProject, numProjects)
+
+		var c counts
+		counter.Reset(true)
+		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=20", nil)
+		pResp := decodeProfilePendingDecisions(t, rr)
+		c.pending = counter.Count()
+		counter.Reset(false)
+		assert.Equal(t, numProjects, pResp.Counts.WaitingOnYou)
+		assert.NotEmpty(t, pResp.Prompts)
+
+		counter.Reset(true)
+		rr = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=recent&limit=20", nil)
+		mrResp := decodeProfileMadeDecisions(t, rr)
+		c.madeRecent = counter.Count()
+		counter.Reset(false)
+		assert.Len(t, mrResp.Entries, 20)
+
+		counter.Reset(true)
+		rr = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=project", nil)
+		mpResp := decodeProfileMadeByProjectDecisions(t, rr)
+		c.madeProject = counter.Count()
+		counter.Reset(false)
+		assert.Len(t, mpResp.Groups, numProjects)
+
+		t.Logf("projects=%d history=%d -> pending=%d, made/recent=%d, made/project=%d",
+			numProjects, historyPerProject, c.pending, c.madeRecent, c.madeProject)
+		return c
+	}
+
+	c5p10h := measure(t, 5, 10)
+	c40p10h := measure(t, 40, 10)
+	c5p300h := measure(t, 5, 300)
+
+	assert.Equal(t, c5p10h.pending, c40p10h.pending, "tab=pending query count must be constant across 5 vs 40 projects")
+	assert.Equal(t, c5p10h.pending, c5p300h.pending, "tab=pending query count must be constant across 10 vs 300 history rows/project")
+	assert.Equal(t, c5p10h.madeRecent, c40p10h.madeRecent, "tab=made&sort=recent query count must be constant across 5 vs 40 projects")
+	assert.Equal(t, c5p10h.madeRecent, c5p300h.madeRecent, "tab=made&sort=recent query count must be constant across 10 vs 300 history rows/project")
+	assert.Equal(t, c5p10h.madeProject, c40p10h.madeProject, "tab=made&sort=project query count must be constant across 5 vs 40 projects")
+	assert.Equal(t, c5p10h.madeProject, c5p300h.madeProject, "tab=made&sort=project query count must be constant across 10 vs 300 history rows/project")
+}
+
+// TestDecisionsP3_ScopeDifferential verifies that batched
+// resolveProfileDecisionScopes produces identical scopes to legacy per-project
+// scope resolution (ListTopicsIncludingDeleted + ListProjectDecisionAgents +
+// GetAgentsByIDsIncludingDeleted) across active/soft-deleted topics,
+// live/soft-deleted/hard-deleted agents, and unreadable-DM-heavy projects.
+func TestDecisionsP3_ScopeDifferential(t *testing.T) {
+	f, cs, _ := newCountingDecisionsFixture(t)
+	ctx := context.Background()
+	memberRole, err := f.store.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
+	require.NoError(t, err)
+
+	base := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
+
+	var projects []*store.Project
+	for i := 0; i < 3; i++ {
+		p := &store.Project{
+			ID:      api.NewUUID(),
+			Name:    fmt.Sprintf("diff-scope-%d", i),
+			Slug:    fmt.Sprintf("diff-scope-%d", i),
+			Created: base,
+		}
+		require.NoError(t, f.store.CreateProject(ctx, p))
+		_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: memberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.bob.ID,
+			ScopeType: store.RoleScopeProject, ScopeID: p.ID, CreatedBy: "test",
+		})
+		require.NoError(t, err)
+		projects = append(projects, p)
+	}
+
+	// Project 0: active topic + soft-deleted topic + live agent + soft-deleted agent + hard-deleted agent.
+	tp0Active := createTestDecisionTopic(t, f.wcs, projects[0].ID, "general", f.bob.ID)
+	tp0Deleted := createTestDecisionTopic(t, f.wcs, projects[0].ID, "archived", f.bob.ID)
+	require.NoError(t, f.wcs.DeleteTopic(ctx, tp0Deleted))
+
+	agLive := &store.Agent{ID: api.NewUUID(), Slug: "ag-live", Name: "Live Agent", ProjectID: projects[0].ID, Phase: "running"}
+	require.NoError(t, f.store.CreateAgent(ctx, agLive))
+	agSoft := &store.Agent{ID: api.NewUUID(), Slug: "ag-soft", Name: "Soft Agent", ProjectID: projects[0].ID, Phase: "stopped"}
+	require.NoError(t, f.store.CreateAgent(ctx, agSoft))
+	_, err = cs.DB().ExecContext(ctx, "UPDATE agents SET deleted_at = ? WHERE id = ?", time.Now().UTC(), agSoft.ID)
+	require.NoError(t, err)
+	agHardID := api.NewUUID()
+
+	for idx, ag := range []struct {
+		id, name, ck string
+	}{
+		{agLive.ID, "Old Live Name", tp0Active},
+		{agSoft.ID, "Old Soft Name", tp0Deleted},
+		{agHardID, "Hard Deleted Snapshot", "dm:agent:" + agHardID + ":user:" + f.alice.ID},
+	} {
+		_, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: api.NewUUID(), ProjectID: projects[0].ID, Sender: "agent:" + ag.name, SenderID: ag.id,
+				Recipient: "chat", ThreadID: ag.ck, Channel: "web", CreatedAt: base.Add(time.Duration(idx) * time.Minute),
+			},
+			AskerAgentID: ag.id, AskerAgentName: ag.name,
+			Decisions: []messages.Decision{{Key: fmt.Sprintf("k-%d", idx), Question: "Q?", Choices: choices}},
+		})
+		require.NoError(t, err)
+	}
+
+	// Project 1: DM-heavy with Alice's unreadable DMs + Bob's own DM.
+	ag1ID := api.NewUUID()
+	dmAlice := "dm:agent:" + ag1ID + ":user:" + f.alice.ID
+	dmBob := "dm:agent:" + ag1ID + ":user:" + f.bob.ID
+	for idx, ck := range []string{dmAlice, dmBob} {
+		_, err := cs.DB().ExecContext(ctx,
+			`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, created_at)
+			 VALUES (?, ?, ?, ?, 0, ?, 'dm-bot', ?, ?, 'agent', 1, 'DM?', '[{"id":"yes","label":"Yes"}]', false, 0, 'pending', false, ?)`,
+			uuid.NewString(), projects[1].ID, ck, uuid.NewString(), ag1ID, fmt.Sprintf("dm-%d", idx), fmt.Sprintf("dm-%d", idx), base)
+		require.NoError(t, err)
+	}
+
+	// Project 2: topic only, no decisions.
+	createTestDecisionTopic(t, f.wcs, projects[2].ID, "general", f.bob.ID)
+
+	viewer := NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, string(ClientTypeWeb))
+	memoCtx := withAuthzInputMemo(ctx)
+	batched, err := f.srv.resolveProfileDecisionScopes(memoCtx, projects, viewer, nil, f.wcs)
+	require.NoError(t, err)
+	require.Len(t, batched, len(projects))
+
+	for i, p := range projects {
+		// Legacy per-project resolution via single-project store methods.
+		acc := f.srv.chatUserAccess(memoCtx, viewer, p, []string{ChatActionRead}, chatThreadWriteActions, nil, false, false)
+		var topics []WebChatTopic
+		if acc.Can(ChatActionRead) {
+			topics, err = f.wcs.ListTopicsIncludingDeleted(memoCtx, p.ID)
+			require.NoError(t, err)
+		}
+		decAgents, err := f.store.ListProjectDecisionAgents(memoCtx, p.ID)
+		require.NoError(t, err)
+		var ids []string
+		for _, da := range decAgents {
+			ids = append(ids, da.ID)
+		}
+		var agMap map[string]*store.Agent
+		if len(ids) > 0 {
+			agMap, err = f.store.GetAgentsByIDsIncludingDeleted(memoCtx, ids)
+			require.NoError(t, err)
+		}
+		want := f.srv.buildProjectReadableScope(memoCtx, p, viewer.ID(), nil, nil, acc, topics, decAgents, agMap)
+		got := batched[i]
+
+		assert.Equal(t, want.chatKeys, got.chatKeys, "project %d chatKeys", i)
+		assert.Equal(t, want.conversationLabel, got.conversationLabel, "project %d labels", i)
+		assert.Equal(t, want.conversationAvailable, got.conversationAvailable, "project %d available", i)
+		assert.Equal(t, want.userCanPost, got.userCanPost, "project %d userCanPost", i)
+		assert.Equal(t, want.agentNames, got.agentNames, "project %d agentNames", i)
+		assert.Equal(t, want.queriedAgentIDs, got.queriedAgentIDs, "project %d queriedAgentIDs", i)
+		assert.Len(t, got.liveAgents, len(want.liveAgents), "project %d liveAgents", i)
+		assert.Len(t, got.agentsByID, len(want.agentsByID), "project %d agentsByID", i)
+		// Authorization invariant: Alice's DM key must never appear in Bob's scope.
+		assert.NotContains(t, got.chatKeys, dmAlice)
+	}
+}
+
 // TestDecisionsScale is the opt-in hub-level scale test (design-scale §7),
 // skipped unless SCION_DECISIONS_SCALE=1.
 func TestDecisionsScale(t *testing.T) {

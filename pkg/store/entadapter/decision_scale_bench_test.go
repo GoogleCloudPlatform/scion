@@ -204,9 +204,16 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 	base := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
 	choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
 
+	// Include a per-spec namespace byte so running R and S sequentially
+	// against the same Postgres DSN does not collide on primary keys.
+	var specTag byte
+	for i := 0; i < len(sc.name); i++ {
+		specTag ^= sc.name[i]
+	}
 	detUUID := func(tag byte, p, j int) uuid.UUID {
 		var u uuid.UUID
 		u[0] = tag
+		u[1] = specTag
 		binary.BigEndian.PutUint32(u[4:8], uint32(p+1))
 		binary.BigEndian.PutUint32(u[8:12], uint32(j+1))
 		u[6] = (u[6] & 0x0f) | 0x40
@@ -497,6 +504,36 @@ func BenchmarkDecisionsProfileScale(b *testing.B) {
 					require.Empty(b, got)
 				}
 			})
+
+			b.Run("ListDecisionAnswers_MadeRecent_Page1", func(b *testing.B) {
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					entries, next, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs, f.allKeys, store.ProjectDecisionAnswerFilter{}, "", 20)
+					require.NoError(b, err)
+					require.Len(b, entries, 20)
+					require.NotEmpty(b, next)
+				}
+			})
+
+			b.Run("ListDecisionAnswersPerProject_MadeProject", func(b *testing.B) {
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					byProj, err := f.cs.ListDecisionAnswersPerProject(ctx, f.projectIDs, f.keysByProject, store.ProjectDecisionAnswerFilter{}, 6)
+					require.NoError(b, err)
+					require.Len(b, byProj, sc.numProjects)
+				}
+			})
+
+			b.Run("ListDecisionAnswers_SingleProject", func(b *testing.B) {
+				pid := f.projectIDs[1]
+				pkeys := f.keysByProject[pid]
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					entries, _, err := f.cs.ListDecisionAnswers(ctx, []string{pid}, pkeys, store.ProjectDecisionAnswerFilter{}, "", 20)
+					require.NoError(b, err)
+					require.Len(b, entries, 20)
+				}
+			})
 		})
 	}
 }
@@ -604,6 +641,54 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
+			var nextCur string
+			coldRecentP1, medRecentP1 := measureColdAndWarmMedian(t, warmRuns, func() error {
+				recentPage1, nc, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs, f.allKeys, store.ProjectDecisionAnswerFilter{}, "", 20)
+				if err != nil {
+					return err
+				}
+				require.Len(t, recentPage1, 20)
+				require.NotEmpty(t, nc)
+				nextCur = nc
+				return nil
+			})
+
+			coldRecentP2, medRecentP2 := measureColdAndWarmMedian(t, warmRuns, func() error {
+				recentPage2, _, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs, f.allKeys, store.ProjectDecisionAnswerFilter{}, nextCur, 20)
+				if err != nil {
+					return err
+				}
+				require.Len(t, recentPage2, 20)
+				return nil
+			})
+
+			coldPerProj, medPerProj := measureColdAndWarmMedian(t, warmRuns, func() error {
+				byProj, err := f.cs.ListDecisionAnswersPerProject(ctx, f.projectIDs, f.keysByProject, store.ProjectDecisionAnswerFilter{}, 6)
+				if err != nil {
+					return err
+				}
+				require.Len(t, byProj, sc.numProjects)
+				return nil
+			})
+
+			coldSingleAns, medSingleAns := measureColdAndWarmMedian(t, warmRuns, func() error {
+				singleAns, _, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs[1:2], f.keysByProject[f.projectIDs[1]], store.ProjectDecisionAnswerFilter{}, "", 20)
+				if err != nil {
+					return err
+				}
+				require.Len(t, singleAns, 20)
+				return nil
+			})
+
+			coldDMHeavyAns, medDMHeavyAns := measureColdAndWarmMedian(t, warmRuns, func() error {
+				dmHeavyAns, _, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs[:1], f.keysByProject[f.projectIDs[0]], store.ProjectDecisionAnswerFilter{}, "", 20)
+				if err != nil {
+					return err
+				}
+				require.Len(t, dmHeavyAns, 20)
+				return nil
+			})
+
 			// Quiet-user measurement: scope update to this fixture's projects only.
 			_, err := f.cs.client.Decision.Update().
 				Where(decision.ProjectIDIn(f.projectUUIDs...)).
@@ -637,6 +722,11 @@ func TestDecisionsScaleStore(t *testing.T) {
 			t.Logf("  ListProjectDecisionAgentsForProjects(%d)   = %v / %v / %v / %v", sc.numProjects, coldAgentsBatch, medAgentsBatch, tailMedAgentsBatch, tailMaxAgentsBatch)
 			t.Logf("  ProjectsWithUnsettledDecisions(%d open)    = %v / %v / %v / %v", sc.numProjects, coldUnsettled, medUnsettled, tailMedUnsettled, tailMaxUnsettled)
 			t.Logf("  ListOpenPrompts(%d open)                   = %v / %v / %v / %v", sc.numProjects*sc.openPerProject, coldOpen, medOpen, tailMedOpen, tailMaxOpen)
+			t.Logf("  ListDecisionAnswers(recent p1, 20)         = cold %v / warm-med %v", coldRecentP1, medRecentP1)
+			t.Logf("  ListDecisionAnswers(recent p2, 20)         = cold %v / warm-med %v", coldRecentP2, medRecentP2)
+			t.Logf("  ListDecisionAnswersPerProject(6/proj)      = cold %v / warm-med %v", coldPerProj, medPerProj)
+			t.Logf("  ListDecisionAnswers(single normal, 20)     = cold %v / warm-med %v", coldSingleAns, medSingleAns)
+			t.Logf("  ListDecisionAnswers(single DM-heavy, 20)   = cold %v / warm-med %v", coldDMHeavyAns, medDMHeavyAns)
 			t.Logf("  ProjectsWithUnsettledDecisions(quiet)      = %v / %v / %v / %v", coldQuietUnsettled, medQuietUnsettled, tailMedQuietUnsettled, tailMaxQuietUnsettled)
 			t.Logf("  ListOpenPrompts(quiet)                     = %v / %v / %v / %v", coldQuietOpen, medQuietOpen, tailMedQuietOpen, tailMaxQuietOpen)
 		})
