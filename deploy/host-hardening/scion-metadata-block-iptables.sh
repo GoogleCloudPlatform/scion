@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Host-level defense-in-depth iptables (DOCKER-USER) script blocking bridged
+# container HTTP access (TCP/80) to cloud instance metadata endpoints (IPv4 and
+# IPv6) from Docker bridges (docker0, br-+). The DROP rules match only TCP/80;
+# the RETURN rules make the GCE DNS (UDP/TCP 53 on 169.254.169.254) exemption
+# explicit.
+#
+# SCOPE CAVEAT: This applies to EVERY Docker-bridged container on the host,
+# including Scion agents in `passthrough` mode and non-Scion containers that
+# rely on the host VM's metadata identity. Enable only on hosts dedicated to
+# `block` and `assign` agents.
+#
+# For hosts that also run Podman or CNI bridges, prefer scion-metadata-block.nft.
+
+set -euo pipefail
+
+ensure_rule() {
+    local tool="$1"
+    shift
+    if ! "$tool" -C "$@" 2>/dev/null; then
+        "$tool" -I "$@"
+    fi
+}
+
+# Verify we are running as root and DOCKER-USER exists (created by dockerd).
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "error: cannot read iptables chain DOCKER-USER (run as root with dockerd running)" >&2
+    exit 1
+fi
+if ! iptables -L DOCKER-USER -n >/dev/null 2>&1; then
+    echo "error: cannot read iptables chain DOCKER-USER (run as root with dockerd running)" >&2
+    exit 1
+fi
+
+for iface in docker0 br-+; do
+    # Drop HTTP (TCP/80) to IPv4 cloud metadata endpoint.
+    # Inserted first so the explicit DNS RETURN rules sit ahead of it.
+    ensure_rule iptables DOCKER-USER -i "$iface" -d 169.254.169.254/32 -p tcp --dport 80 -j DROP
+
+    # Make the GCE DNS (UDP/TCP 53) exemption explicit.
+    ensure_rule iptables DOCKER-USER -i "$iface" -d 169.254.169.254/32 -p tcp --dport 53 -j RETURN
+    ensure_rule iptables DOCKER-USER -i "$iface" -d 169.254.169.254/32 -p udp --dport 53 -j RETURN
+done
+
+# Drop HTTP (TCP/80) to IPv6 cloud metadata endpoints (GCE, AWS) when ip6tables
+# and the IPv6 DOCKER-USER chain are present.
+if command -v ip6tables >/dev/null 2>&1; then
+    if ip6tables -L DOCKER-USER -n >/dev/null 2>&1; then
+        for iface in docker0 br-+; do
+            ensure_rule ip6tables DOCKER-USER -i "$iface" -d fd20:ce::254/128 -p tcp --dport 80 -j DROP
+            ensure_rule ip6tables DOCKER-USER -i "$iface" -d fd00:ec2::254/128 -p tcp --dport 80 -j DROP
+        done
+    else
+        echo "warning: ip6tables is installed but chain DOCKER-USER does not exist; skipping IPv6 metadata block rules" >&2
+    fi
+fi

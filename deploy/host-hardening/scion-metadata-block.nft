@@ -1,0 +1,59 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Host-level defense-in-depth nftables ruleset blocking bridged container
+# HTTP access (TCP/80) to cloud instance metadata endpoints (IPv4 and IPv6).
+# The drop rules match only TCP/80; the explicit accept rules make the GCE DNS
+# (UDP/TCP 53 on 169.254.169.254) exemption explicit.
+#
+# One rule per interface pattern is used (rather than wildcards inside an
+# anonymous set) so the ruleset loads across older nftables releases.
+#
+# SCOPE CAVEAT: This ruleset applies to EVERY bridged container on the host,
+# including Scion agents in `passthrough` mode and non-Scion containers that
+# rely on the host VM's metadata identity. Enable only on hosts dedicated to
+# `block` and `assign` agents.
+#
+# Install:
+#   sudo install -D -m 0644 scion-metadata-block.nft /etc/nftables.d/scion-metadata-block.nft
+#   sudo nft -c -f /etc/nftables.d/scion-metadata-block.nft
+#   sudo nft -f /etc/nftables.d/scion-metadata-block.nft
+
+table inet scion_metadata_block
+delete table inet scion_metadata_block
+
+table inet scion_metadata_block {
+    chain forward {
+        type filter hook forward priority filter - 1; policy accept;
+
+        # Make the GCE DNS (UDP/TCP 53 on 169.254.169.254) exemption explicit
+        # (the drop rules below match only TCP/80).
+        iifname "docker0" ip daddr 169.254.169.254 meta l4proto { udp, tcp } th dport 53 accept
+        iifname "br-*" ip daddr 169.254.169.254 meta l4proto { udp, tcp } th dport 53 accept
+        iifname "podman*" ip daddr 169.254.169.254 meta l4proto { udp, tcp } th dport 53 accept
+        iifname "cni-*" ip daddr 169.254.169.254 meta l4proto { udp, tcp } th dport 53 accept
+
+        # Drop HTTP (TCP/80) to IPv4 cloud metadata endpoint.
+        iifname "docker0" ip daddr 169.254.169.254 tcp dport 80 drop
+        iifname "br-*" ip daddr 169.254.169.254 tcp dport 80 drop
+        iifname "podman*" ip daddr 169.254.169.254 tcp dport 80 drop
+        iifname "cni-*" ip daddr 169.254.169.254 tcp dport 80 drop
+
+        # Drop HTTP (TCP/80) to IPv6 cloud metadata endpoints (GCE, AWS).
+        iifname "docker0" ip6 daddr { fd20:ce::254, fd00:ec2::254 } tcp dport 80 drop
+        iifname "br-*" ip6 daddr { fd20:ce::254, fd00:ec2::254 } tcp dport 80 drop
+        iifname "podman*" ip6 daddr { fd20:ce::254, fd00:ec2::254 } tcp dport 80 drop
+        iifname "cni-*" ip6 daddr { fd20:ce::254, fd00:ec2::254 } tcp dport 80 drop
+    }
+}

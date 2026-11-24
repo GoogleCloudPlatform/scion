@@ -151,6 +151,37 @@ type KubernetesRuntime struct {
 // "a container name must be specified" error.
 const agentContainerName = "agent"
 
+// k8sMetadataModeLabel is the pod label recording the resolved metadata mode
+// on Kubernetes ("block" or "passthrough", where "passthrough" includes
+// Workload Identity assign pods because the Runtime Broker rewrites assign to
+// passthrough before emitting SCION_METADATA_MODE). Cluster NetworkPolicy
+// objects can select on scion.metadata-mode=block without affecting
+// passthrough or assign pods.
+const k8sMetadataModeLabel = "scion.metadata-mode"
+
+// k8sMetadataModeLabelValue returns the canonical Kubernetes metadata mode for
+// the pod label ("block" or "passthrough"), or "" when none is configured.
+// KubernetesBlockIdentity takes precedence over env entries, and only those
+// canonical mode names are accepted so arbitrary values never become
+// Kubernetes label values.
+func k8sMetadataModeLabelValue(config RunConfig) string {
+	if config.KubernetesBlockIdentity {
+		return "block"
+	}
+	var mode string
+	for _, e := range config.Env {
+		if k, v, ok := strings.Cut(e, "="); ok && k == "SCION_METADATA_MODE" {
+			mode = v
+		}
+	}
+	switch mode {
+	case "block", "passthrough":
+		return mode
+	default:
+		return ""
+	}
+}
+
 var serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 func NewKubernetesRuntime(client *k8s.Client) *KubernetesRuntime {
@@ -2735,11 +2766,20 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		agentVolumeMounts = append(agentVolumeMounts, homeParts.mount)
 	}
 
+	podLabels := maps.Clone(config.Labels)
+	delete(podLabels, k8sMetadataModeLabel)
+	if mode := k8sMetadataModeLabelValue(config); mode != "" {
+		if podLabels == nil {
+			podLabels = make(map[string]string, 1)
+		}
+		podLabels[k8sMetadataModeLabel] = mode
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        config.Name,
 			Namespace:   namespace,
-			Labels:      config.Labels,
+			Labels:      podLabels,
 			Annotations: withScionAnnotation(withScionAnnotation(config.Annotations, k8sHomeStorageAnnotation, HomeStorageNFS, nfsHome), k8sWorkspaceAgentsAnnotation, "true", agentsExcluded),
 		},
 		Spec: corev1.PodSpec{
