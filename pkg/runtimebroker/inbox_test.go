@@ -105,6 +105,15 @@ type fakeFetcher struct {
 	fetched []string
 }
 
+func (f *fakeFetcher) setBody(path string, content []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.bodies == nil {
+		f.bodies = map[string][]byte{}
+	}
+	f.bodies[path] = content
+}
+
 func (f *fakeFetcher) FetchAttachmentDelivery(ctx context.Context, path string) (io.ReadCloser, error) {
 	f.mu.Lock()
 	f.fetched = append(f.fetched, path)
@@ -116,7 +125,9 @@ func (f *fakeFetcher) FetchAttachmentDelivery(ctx context.Context, path string) 
 			return nil, ctx.Err()
 		}
 	}
+	f.mu.Lock()
 	b, ok := f.bodies[path]
+	f.mu.Unlock()
 	if !ok {
 		return nil, errors.New("refused")
 	}
@@ -137,10 +148,7 @@ func inboxServer(t *testing.T) *Server {
 func wireFor(f *fakeFetcher, msgID, name string, content []byte) messages.WireAttachment {
 	sum := sha256.Sum256(content)
 	path := "/api/v1/attachment-deliveries/" + uuid.NewString()
-	if f.bodies == nil {
-		f.bodies = map[string][]byte{}
-	}
-	f.bodies[path] = content
+	f.setBody(path, content)
 	return messages.WireAttachment{ID: uuid.NewString(), Name: name, Size: int64(len(content)),
 		SHA256: hex.EncodeToString(sum[:]), Path: "~/.scion/inbox/" + msgID + "/" + name, URL: path}
 }
@@ -214,7 +222,7 @@ func TestInboxWriter_HashMismatchNotWritten(t *testing.T) {
 	f := &fakeFetcher{}
 	msgID := uuid.NewString()
 	w := wireFor(f, msgID, "a.txt", []byte("alpha"))
-	f.bodies[w.URL] = []byte("ALPHA") // same size, other bytes
+	f.setBody(w.URL, []byte("ALPHA")) // same size, other bytes
 	d := startWith(s, f, msgID, w)
 	text := d.BeforeText(context.Background(), rt, "c1")
 	require.Contains(t, text, "Attachment not delivered: ~/.scion/inbox/"+msgID+"/a.txt (5 bytes): failed verification")
@@ -228,7 +236,7 @@ func TestInboxWriter_SizeMismatchNotWritten(t *testing.T) {
 	f := &fakeFetcher{}
 	msgID := uuid.NewString()
 	w := wireFor(f, msgID, "a.txt", []byte("alpha"))
-	f.bodies[w.URL] = []byte("alpha and more")
+	f.setBody(w.URL, []byte("alpha and more"))
 	d := startWith(s, f, msgID, w)
 	require.Contains(t, d.BeforeText(context.Background(), rt, "c1"), "failed verification")
 	_, err := os.Stat(filepath.Join(rt.home, ".scion", "inbox", msgID))
@@ -347,7 +355,7 @@ func TestInboxWriter_TwoBufferedMessages(t *testing.T) {
 	f := &fakeFetcher{}
 	m1, m2 := uuid.NewString(), uuid.NewString()
 	bad := wireFor(f, m2, "b.txt", []byte("beta"))
-	f.bodies[bad.URL] = []byte("BETA")
+	f.setBody(bad.URL, []byte("BETA"))
 	d1 := startWith(s, f, m1, wireFor(f, m1, "a.txt", []byte("alpha")))
 	d2 := startWith(s, f, m2, bad, wireFor(f, m2, "c.txt", []byte("gamma")))
 	require.Empty(t, d1.BeforeText(context.Background(), rt, "c1"))
