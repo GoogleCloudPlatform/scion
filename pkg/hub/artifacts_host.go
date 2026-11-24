@@ -40,7 +40,19 @@ type artifactHost struct {
 	server *Server
 }
 
-var _ artifacts.Host = (*artifactHost)(nil)
+var (
+	_ artifacts.Host          = (*artifactHost)(nil)
+	_ artifacts.InboxNotifier = (*artifactHost)(nil)
+)
+
+// InboxChanged implements artifacts.InboxNotifier: it publishes a content-free
+// reviews invalidation hint to userID when web.inbox_dashboard is enabled.
+func (h *artifactHost) InboxChanged(ctx context.Context, userID string) {
+	if h.server == nil || userID == "" {
+		return
+	}
+	h.server.publishInboxHint(ctx, userID, InboxHint{Category: InboxCategoryReviews})
+}
 
 // newArtifactHost returns the artifacts.Host for s. The authz service is read
 // per call, not captured, so a host built at route registration sees the

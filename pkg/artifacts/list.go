@@ -16,6 +16,7 @@ package artifacts
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -30,6 +31,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
 )
+
+// ErrBackendUnavailable is returned by Service methods called directly in Go
+// when the artifact store or storage backend is not configured.
+var ErrBackendUnavailable = errors.New("artifacts: storage is not configured")
 
 // List endpoint limits.
 const (
@@ -731,4 +736,108 @@ func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []Arti
 		}
 	}
 	return nil
+}
+
+// ReviewPendingSummary returns the count of live, unexpired, non-attachment
+// artifacts owned by the caller of ctx whose current version is a submitted
+// review awaiting owner action, whether the collect scan budget (maxListScan)
+// was reached, and up to previews newest items.
+func (s *Service) ReviewPendingSummary(ctx context.Context, previews int) (count int, capped bool, items []ArtifactListItem, err error) {
+	if previews < 0 {
+		previews = 0
+	}
+	b, ok := s.backend()
+	if !ok {
+		return 0, false, nil, ErrBackendUnavailable
+	}
+	host := newMemoHost(s.host)
+	kind, ref, _, ok := host.Principal(ctx)
+	if !ok {
+		return 0, false, []ArtifactListItem{}, nil
+	}
+	all, next, err := s.collect(ctx, host, b, CandidateQuery{
+		PrincipalKind: kind,
+		PrincipalRef:  ref,
+		OwnedOnly:     true,
+		ReviewPending: true,
+	}, maxListScan)
+	if err != nil {
+		return 0, false, nil, err
+	}
+	count = len(all)
+	capped = next != nil
+	if previews == 0 || len(all) == 0 {
+		return count, capped, []ArtifactListItem{}, nil
+	}
+	if len(all) > previews {
+		all = all[:previews]
+	}
+	return count, capped, all, nil
+}
+
+// ReadableArtifacts returns the ArtifactInfo for each artifact ID in ids that
+// exists, is live, unexpired, not an attachment, and readable by the caller of
+// ctx under the same read check as GET /api/v1/artifacts/{id} (canReadWith).
+// Grants are loaded in batches via grantsWindow and host checks are memoized
+// for the duration of the call.
+func (s *Service) ReadableArtifacts(ctx context.Context, ids []string) (map[string]ArtifactInfo, error) {
+	out := make(map[string]ArtifactInfo)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	b, ok := s.backend()
+	if !ok {
+		return nil, ErrBackendUnavailable
+	}
+	host := newMemoHost(s.host)
+	if _, _, _, ok := host.Principal(ctx); !ok {
+		return out, nil
+	}
+
+	seen := make(map[string]bool, len(ids))
+	candidates := make([]Candidate, 0, len(ids))
+	for _, id := range ids {
+		if seen[id] || !canonicalID(id) {
+			continue
+		}
+		seen[id] = true
+		a, err := b.store.GetArtifact(ctx, id)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if IsAttachmentScope(a.ScopeKind) {
+			continue
+		}
+		candidates = append(candidates, Candidate{Artifact: *a})
+	}
+	if len(candidates) == 0 {
+		return out, nil
+	}
+
+	grants := newGrantsWindow(ctx, b.store, candidates, max(len(candidates), grantWindowMin))
+	for i := range candidates {
+		a := &candidates[i].Artifact
+		readable := canReadWith(ctx, host, a, func() ([]Grant, error) { return grants.forRow(i) })
+		if grants.err != nil {
+			return nil, grants.err
+		}
+		if readable {
+			out[a.ID] = artifactInfo(a)
+		}
+	}
+	return out, nil
+}
+
+// notifyInboxChanged tells the host, when it implements InboxNotifier, that
+// userID's artifact-reviews inbox may have changed.
+func (s *Service) notifyInboxChanged(ctx context.Context, userID string) {
+	if userID == "" {
+		return
+	}
+	if n, ok := s.host.(InboxNotifier); ok {
+		n.InboxChanged(ctx, userID)
+	}
 }

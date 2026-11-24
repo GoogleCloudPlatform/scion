@@ -46,6 +46,10 @@ const (
 	InboxCategoryApprovals = "approvals"
 	InboxCategoryChat      = "chat"
 
+	// InboxCategoryNotifications is the SSE hint category emitted when a user
+	// acknowledges one or all bell notifications (design §5.2).
+	InboxCategoryNotifications = "notifications"
+
 	// InboxState* are the valid values for InboxCategory.State.
 	InboxStateOK          = "ok"
 	InboxStateDisabled    = "disabled"
@@ -308,7 +312,7 @@ func (s *Server) inboxSources() []inboxSourceEntry {
 	return []inboxSourceEntry{
 		{key: InboxCategoryApprovals, run: s.inboxApprovalsCategory},
 		{key: InboxCategoryWaiting, run: s.inboxWaitingCategory},
-		{key: InboxCategoryReviews, run: inboxDisabledCategory("/artifacts?review_pending=1&owner=me")},
+		{key: InboxCategoryReviews, run: s.inboxReviewsCategory},
 		{key: InboxCategoryChat, run: s.inboxChatCategory},
 		{key: InboxCategoryDecisions, run: s.inboxDecisionsCategory},
 	}

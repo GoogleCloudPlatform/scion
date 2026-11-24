@@ -497,4 +497,74 @@ describe('InboxSummaryStore', () => {
     await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it('refetches on inbox-changed for reviews and notifications categories', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(makeSummary(1)), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    store.ensureStarted('user-1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('inbox-changed', { detail: { category: 'reviews' } })
+    );
+    await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('inbox-changed', { detail: { category: 'notifications' } })
+    );
+    await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('refetches on ARTIFACT_REVIEW_SUBMITTED and ARTIFACT_REVIEW_REQUESTED notifications', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(makeSummary(1)), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    store.ensureStarted('user-1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('notification-created', {
+        detail: {
+          kind: 'artifact_review_summary',
+          status: 'ARTIFACT_REVIEW_SUBMITTED',
+          resourceType: 'artifact',
+          resourceId: 'art-1',
+        },
+      })
+    );
+    await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('notification-created', {
+        detail: {
+          kind: 'artifact_grant',
+          status: 'ARTIFACT_REVIEW_REQUESTED',
+          resourceType: 'artifact',
+          resourceId: 'art-2',
+        },
+      })
+    );
+    await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });

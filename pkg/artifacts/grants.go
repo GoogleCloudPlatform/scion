@@ -490,7 +490,19 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 	if !ok {
 		return
 	}
-	removed := s.grantForLog(r, b, a, grantID)
+	var removed *Grant
+	if _, hasInbox := s.host.(InboxNotifier); hasInbox {
+		if grants, gerr := b.store.ListGrants(r.Context(), a.ID); gerr == nil {
+			for i := range grants {
+				if grants[i].ID == grantID {
+					removed = &grants[i]
+					break
+				}
+			}
+		}
+	} else {
+		removed = s.grantForLog(r, b, a, grantID)
+	}
 	switch err := b.store.DeleteGrant(r.Context(), a.ID, grantID, actor); {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "home_grant", "the home project's grant cannot be removed; move the artifact instead")
@@ -502,6 +514,9 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 		writeError(w, http.StatusInternalServerError, "internal", "could not remove the grant")
 	default:
 		s.logGrantRemoved(r, a, removed, actor)
+		if removed != nil && isUserPrincipal(removed.SubjectKind, removed.SubjectRef) {
+			s.notifyInboxChanged(r.Context(), strings.TrimPrefix(removed.SubjectRef, PrincipalKindUser+":"))
+		}
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}
