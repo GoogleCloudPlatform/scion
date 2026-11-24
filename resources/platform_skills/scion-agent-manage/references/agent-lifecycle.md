@@ -21,9 +21,10 @@ authorized user to reincarnate it, or to recreate it directly: a user's reincarn
 re-records the agent's delegation with that user as delegator, even without a role
 change. Reincarnating it yourself, or from another agent, keeps the chain and does not
 clear the denial. Run `--dry-run` first to catch unintended model or config fallback
-drift, and move any needed container-local `/tmp/` files to persistent storage beforehand
+drift, move any needed container-local `/tmp/` files to persistent storage beforehand
 (in-place container recreation wipes `/tmp/`, while keeping the agent home unless
-`--harness` or `--broker` rebuilds it). Because reincarnation returns before the
+`--harness` or `--broker` rebuilds it), and record active branch, `HEAD` SHA, and
+any backup ref in `--handoff-file` when workspace Git state matters. Because reincarnation returns before the
 replacement container finishes starting, verify that the agent reaches `running` (rather
 than `error`) and confirm a resumed-work receipt; this proves runtime continuity, whereas
 `resolvedVersion` in `~/.scion/resolved-skills.json` inside the container verifies
@@ -74,7 +75,9 @@ When an agent must remain available for follow-up — such as an unanswered huma
 open PR review, or an idle lead between assignments — and its harness supports session
 resume, ensure its state and handoff are durable and use `scion suspend <name>` (under the
 same creator/supervisor authority) to stop the container while keeping the harness session
-resumable. Suspension releases the active broker and project capacity slot without closing
+resumable. Because suspending stops the container and recreates it on resume,
+container-local `/tmp/` is wiped (keep reusable scripts, briefs, and handoffs in the
+workspace or a shared directory). Suspension releases the active broker and project capacity slot without closing
 open human questions; human silence is not closure. An agent you suspend receives nothing
 until someone with lifecycle permission on it (normally you) resumes it: messages without
 `--wake` fail (`scion-messaging`), and its own schedules fire only if they set `--wake`

@@ -63,8 +63,11 @@ at 60 runes:
 **Administration:** `create`, `join`, `leave`, `participants`, and
 `set-default` create coordination spaces and manage their membership and
 default agent. A conversation name is the positional argument to `create`, not
-a `--title` flag. `join` is not idempotent: adding an existing participant
-returns HTTP 409, so check `participants` first when membership is uncertain.
+a `--title` flag; names must start with an ASCII letter or digit, contain only
+ASCII letters, digits, spaces, underscores, and hyphens, and be at most 100
+characters (punctuation such as `:`, `#`, `.`, or parentheses returns HTTP 400).
+`join` is not idempotent: adding an existing participant returns HTTP 409, so
+check `participants` first when membership is uncertain.
 
 Run `scion conversation --help` for the full command reference and
 `scion conversation <subcommand> --help` for authoritative usage, arguments,

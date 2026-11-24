@@ -20,7 +20,7 @@ In-container per-agent clones (`SCION_GIT_DEPTH` set — `clone-per-agent`, or a
 **Symptoms of a shallow clone:**
 - `git diff main...HEAD` and `git merge-base` fail with `no merge base` (or return empty output) when the branch point is older than the clone depth.
 - Two-dot ranges (`git log a..b`) walk to the shallow graft and list hundreds of unrelated commits.
-- `git log -S`, `git blame`, and tag comparisons cannot see commits past the shallow boundary; `git merge`/`git pull` fail with `refusing to merge unrelated histories`, and `git rebase` replays the grafted root commit and conflicts.
+- `git log -S`, `git blame`, and tag comparisons cannot see commits past the shallow boundary; `git merge`/`git pull` fail with `refusing to merge unrelated histories`, `git rebase` replays the grafted root commit and conflicts, and `git push` to a lagging fork remote can fail with `remote rejected` when `.git/shallow` holds a boundary commit absent from `origin` (deepen past the merge base or unshallow first).
 
 **How to handle history and range operations (when remote access permits):**
 - **Reach a merge base quickly:** `git fetch --deepen=50 origin main` (increase `<N>` until `git merge-base` succeeds). Use `--deepen=<N>` while shallow and plain `git fetch` once unshallowed — running `git fetch --depth=<N>` on an unshallowed checkout writes a new `.git/shallow` graft and re-shallows it.
