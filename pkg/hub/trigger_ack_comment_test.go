@@ -34,10 +34,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -718,4 +721,387 @@ func TestGitHubOwnAppUnknownIdentity_BotRefusal(t *testing.T) {
 	outCommentRecovered := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionGitHubComment, commentPayload, "Bot", "dependabot[bot]"))
 	assert.Equal(t, hubfire.FireStatusFired, outCommentRecovered.Status, outCommentRecovered.Error)
 	assert.Equal(t, int64(3), commentPostCount.Load())
+}
+
+// TestG4aG4b_AckCommentReuseIsolationAndStaleRefusalOrder verifies the G4a×G4b
+// interactions through the real trigger.Dispatcher:
+//   - (a) ackComment posts on a dispatch_agent create fire, and does NOT post
+//     on a subsequent subject_mode="reuse" wake-message delivery;
+//   - (b) stale refusal ("stale event") deterministically takes precedence over
+//     the unknown-identity / own-App bot guard for both dispatch_agent and
+//     github.comment, and non-stale Bot events with unknown identity still
+//     refuse as "github app identity unknown" without posting any comment.
+func TestG4aG4b_AckCommentReuseIsolationAndStaleRefusalOrder(t *testing.T) {
+	f, gh, _, proj := setupAckCommentFixture(t, "g4a-g4b-reuse-stale")
+	ctx := context.Background()
+	creatorCtx := f.userAuth(t, f.sched.creator)
+
+	tracker := &reuseTrackingBrokerClient{
+		headlessGatherBrokerClient: f.client,
+		storeForUpd:                f.sched.store,
+	}
+	f.sched.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.sched.store, tracker, false, slog.Default()))
+
+	// 1. Create a GitHub dispatch_agent trigger with subjectMode="reuse" and ackComment.
+	recDisp := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:    "gh-reuse-ack",
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:   &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeReuse},
+			Action: TriggerActionSpec{
+				Type:          store.TriggerActionDispatchAgent,
+				Task:          "Review PR #${event.attributes.number}",
+				ReuseMessage:  "Follow-up on ${event.subject} by ${event.attributes.sender}",
+				GithubToken:   DispatchAgentGitHubTokenInstallation,
+				AckComment:    &DispatchAgentAckComment{Body: "Started **${result.agent_name}** (${result.agent_id})"},
+				UntrustedVars: []string{"event.attributes.number", "event.subject", "event.attributes.sender"},
+			},
+		})
+	require.Equal(t, http.StatusCreated, recDisp.Code, recDisp.Body.String())
+	var dispTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recDisp.Body.Bytes(), &dispTrig))
+
+	// 2. Create a GitHub github.comment trigger for stale vs bot-guard ordering.
+	recComment := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-comment-stale-order",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.pull_request.synchronize"}},
+			Action: TriggerActionSpec{
+				Type: store.TriggerActionGitHubComment,
+				Body: "Synced PR",
+			},
+		})
+	require.Equal(t, http.StatusCreated, recComment.Code, recComment.Body.String())
+	var commentTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recComment.Body.Bytes(), &commentTrig))
+
+	// Also add a dispatch_agent trigger on pull_request.synchronize for step 3/4.
+	recDispSync := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-dispatch-stale-order",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.pull_request.synchronize"}},
+			Action: TriggerActionSpec{
+				Type:        store.TriggerActionDispatchAgent,
+				Task:        "Check sync",
+				GithubToken: DispatchAgentGitHubTokenInstallation,
+				AckComment:  &DispatchAgentAckComment{Body: "Sync started ${result.agent_name}"},
+			},
+		})
+	require.Equal(t, http.StatusCreated, recDispSync.Code, recDispSync.Body.String())
+	var dispSyncTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recDispSync.Body.Bytes(), &dispSyncTrig))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(f.sched.store, f.sched.store, clock)
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Store:         f.sched.store,
+		Core:          serverTriggerCore{srv: f.sched.srv},
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	enqueueAndHandle := func(evType, subject string, attrs map[string]string) string {
+		t.Helper()
+		evID := uuid.NewString()
+		ev := &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  proj.ID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "8301",
+			Type:       evType,
+			Subject:    subject,
+			DedupKey:   "dedup-" + evID,
+			OccurredAt: now,
+			ReceivedAt: now,
+			Attributes: attrs,
+			Status:     store.TriggerEventStatusPending,
+		}
+		require.NoError(t, f.sched.store.CreateTriggerEvent(ctx, ev))
+		rawPayload, mErr := json.Marshal(trigger.EventQueuePayload{
+			Version: trigger.EventQueuePayloadVersion,
+			EventID: ev.ID,
+		})
+		require.NoError(t, mErr)
+		res := disp.HandleItem(ctx, durablequeue.Item{
+			Kind:     trigger.EventQueueKind,
+			DedupKey: ev.ID,
+			Payload:  rawPayload,
+			Attempts: 1,
+		}, nil)
+		require.True(t, res.Done, "HandleItem err=%v", res.Err)
+		return ev.ID
+	}
+
+	// Step A1: First event creates the agent and posts exactly 1 ackComment.
+	ev1ID := enqueueAndHandle("github.issue_comment.created", "github:acme/widgets#42", map[string]string{
+		"repo":        "acme/widgets",
+		"repo_owner":  "acme",
+		"repo_name":   "widgets",
+		"number":      "42",
+		"sender":      "alice",
+		"sender_type": "User",
+	})
+	fires1, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: ev1ID, TriggerID: dispTrig.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires1.Items, 1)
+	require.Equal(t, store.TriggerFireStatusFired, fires1.Items[0].Status, fires1.Items[0].Error)
+	agentID := fires1.Items[0].TargetAgentID
+	require.NotEmpty(t, agentID)
+
+	gh.mu.Lock()
+	assert.Equal(t, 1, gh.postCount, "initial create fire must post 1 ackComment")
+	gh.mu.Unlock()
+
+	// Mark the created agent running so the second event takes the reuse wake-message path.
+	ag, err := f.sched.store.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	ag.Phase = string(state.PhaseRunning)
+	ag.ContainerStatus = "running"
+	require.NoError(t, f.sched.store.UpdateAgent(ctx, ag))
+
+	// Step A2: Second event on same subject takes subject_mode="reuse" wake-message path.
+	// It must deliver a wake message to the existing agent and must NOT post another ackComment.
+	ev2ID := enqueueAndHandle("github.issue_comment.created", "github:acme/widgets#42", map[string]string{
+		"repo":        "acme/widgets",
+		"repo_owner":  "acme",
+		"repo_name":   "widgets",
+		"number":      "42",
+		"sender":      "bob",
+		"sender_type": "User",
+	})
+	fires2, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: ev2ID, TriggerID: dispTrig.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires2.Items, 1)
+	require.Equal(t, store.TriggerFireStatusFired, fires2.Items[0].Status, fires2.Items[0].Error)
+	assert.Equal(t, agentID, fires2.Items[0].TargetAgentID)
+
+	sentMsgs := tracker.messages()
+	require.Len(t, sentMsgs, 1, "reuse delivery must send wake message to claimed agent")
+	assert.Equal(t, ag.Slug, sentMsgs[0].AgentID)
+	assert.Equal(t, "Follow-up on github:acme/widgets#42 by bob", sentMsgs[0].Message)
+
+	gh.mu.Lock()
+	assert.Equal(t, 1, gh.postCount, "reuse wake-message delivery must NOT post ackComment")
+	gh.mu.Unlock()
+
+	// Step A3: Reuse delivery whose reuseMessage template fails to render
+	// (renderDispatchReuseMessage -> refuseTemplateRender) refuses the fire
+	// without sending a wake message or posting an ackComment.
+	ev3ID := enqueueAndHandle("github.issue_comment.created", "github:acme/widgets#42", map[string]string{
+		"repo":        "acme/widgets",
+		"repo_owner":  "acme",
+		"repo_name":   "widgets",
+		"number":      "42",
+		"sender_type": "User",
+		// sender intentionally omitted -> KindValueMissing in reuseMessage
+	})
+	fires3, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: ev3ID, TriggerID: dispTrig.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires3.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusRefused, fires3.Items[0].Status)
+	assert.Equal(t, string(triggertemplate.KindValueMissing), fires3.Items[0].Error)
+	assert.Len(t, tracker.messages(), 1, "refused reuseMessage render must not send wake message")
+
+	gh.mu.Lock()
+	assert.Equal(t, 1, gh.postCount, "refused reuseMessage render must NOT post ackComment")
+	gh.mu.Unlock()
+
+	// Step B1: Stale + Bot + unknown App identity -> "stale event" deterministically wins
+	// over "github app identity unknown" for both dispatch_agent and github.comment.
+	// Clear AppSlug and PrivateKey (keeping APIBaseURL host-pinned to gh.srv.URL)
+	// so AuthorizeEventSource still passes while GitHubAppBotLogin returns "".
+	f.sched.srv.mu.Lock()
+	f.sched.srv.config.GitHubAppConfig.AppSlug = ""
+	f.sched.srv.config.GitHubAppConfig.PrivateKey = ""
+	f.sched.srv.mu.Unlock()
+	f.sched.srv.githubAppIdentity.reset()
+
+	evStaleBotID := enqueueAndHandle("github.pull_request.synchronize", "github:acme/widgets#55", map[string]string{
+		"repo":        "acme/widgets",
+		"repo_owner":  "acme",
+		"repo_name":   "widgets",
+		"number":      "55",
+		"sender":      "dependabot[bot]",
+		"sender_type": "Bot",
+		"stale":       "true",
+	})
+	firesStale, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evStaleBotID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, firesStale.Items, 2)
+	byTrig := map[string]store.TriggerFire{}
+	for _, fr := range firesStale.Items {
+		byTrig[fr.TriggerID] = fr
+	}
+	assert.Equal(t, store.TriggerFireStatusRefused, byTrig[dispSyncTrig.ID].Status)
+	assert.Equal(t, trigger.ErrFireStaleEvent, byTrig[dispSyncTrig.ID].Error)
+	assert.Equal(t, store.TriggerFireStatusRefused, byTrig[commentTrig.ID].Status)
+	assert.Equal(t, trigger.ErrFireStaleEvent, byTrig[commentTrig.ID].Error)
+
+	// Step B2: Non-stale + Bot + unknown App identity -> "github app identity unknown" refuses both.
+	evFreshBotID := enqueueAndHandle("github.pull_request.synchronize", "github:acme/widgets#56", map[string]string{
+		"repo":        "acme/widgets",
+		"repo_owner":  "acme",
+		"repo_name":   "widgets",
+		"number":      "56",
+		"sender":      "dependabot[bot]",
+		"sender_type": "Bot",
+	})
+	firesFresh, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evFreshBotID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, firesFresh.Items, 2)
+	byTrigFresh := map[string]store.TriggerFire{}
+	for _, fr := range firesFresh.Items {
+		byTrigFresh[fr.TriggerID] = fr
+	}
+	assert.Equal(t, store.TriggerFireStatusRefused, byTrigFresh[dispSyncTrig.ID].Status)
+	assert.Equal(t, "github app identity unknown", byTrigFresh[dispSyncTrig.ID].Error)
+	assert.Equal(t, store.TriggerFireStatusRefused, byTrigFresh[commentTrig.ID].Status)
+	assert.Equal(t, "github app identity unknown", byTrigFresh[commentTrig.ID].Error)
+
+	gh.mu.Lock()
+	assert.Equal(t, 1, gh.postCount, "refused stale/unknown-identity fires must NOT post any comment")
+	gh.mu.Unlock()
+}
+
+// TestG4aG4b_RepoRemovalReleasesClaimAndCancelsDeferredFire verifies G4a×G4b
+// interaction (c): when a repository is removed from the GitHub App
+// installation while a subject_mode="reuse" fire is deferred waiting on an
+// in-flight agent launch, repo removal releases the bound claim with
+// release_reason="association_lost" and pauses the trigger with
+// status_reason="source_deleted", and the subsequent drainer re-handle cleanly
+// cancels the deferred fire ("defer cancelled") and marks the event processed
+// with nothing stranded.
+func TestG4aG4b_RepoRemovalReleasesClaimAndCancelsDeferredFire(t *testing.T) {
+	f, _, _, proj := setupAckCommentFixture(t, "g4a-g4b-repo-remove-defer")
+	ctx := context.Background()
+	creatorCtx := f.userAuth(t, f.sched.creator)
+
+	rec := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:    "gh-reuse-defer-remove",
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:   &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeReuse},
+			Action: TriggerActionSpec{
+				Type:        store.TriggerActionDispatchAgent,
+				Task:        "Review PR",
+				GithubToken: DispatchAgentGitHubTokenInstallation,
+			},
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var trigResp TriggerResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &trigResp))
+
+	// Seed an in-flight (PhaseStarting) agent and bind an active subject claim to it.
+	now := time.Now().UTC().Truncate(time.Second)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(f.sched.store, f.sched.store, clock)
+
+	inFlightAgent := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "launching-pr-agent",
+		Name:            "launching-pr-agent",
+		ProjectID:       proj.ID,
+		OwnerID:         f.sched.creator.ID,
+		RuntimeBrokerID: f.sched.broker.ID,
+		Phase:           string(state.PhaseStarting),
+		LaunchDeadline:  now.Add(5 * time.Minute),
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, inFlightAgent))
+
+	const subject = "github:acme/widgets#77"
+	seedClaim, existing, err := claims.Claim(ctx, trigResp.ID, subject, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.Nil(t, existing)
+	require.NoError(t, claims.Bind(ctx, seedClaim, inFlightAgent.ID))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Store:         f.sched.store,
+		Core:          serverTriggerCore{srv: f.sched.srv},
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	// 1. Incoming event for the claimed in-flight subject defers non-terminally.
+	ev := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  proj.ID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "8301",
+		Type:       "github.issue_comment.created",
+		Subject:    subject,
+		DedupKey:   "dedup-defer-" + uuid.NewString(),
+		OccurredAt: now,
+		ReceivedAt: now,
+		Attributes: map[string]string{
+			"repo":        "acme/widgets",
+			"repo_owner":  "acme",
+			"repo_name":   "widgets",
+			"number":      "77",
+			"sender":      "alice",
+			"sender_type": "User",
+		},
+		Status: store.TriggerEventStatusPending,
+	}
+	require.NoError(t, f.sched.store.CreateTriggerEvent(ctx, ev))
+
+	rawPayload, err := json.Marshal(trigger.EventQueuePayload{
+		Version: trigger.EventQueuePayloadVersion,
+		EventID: ev.ID,
+	})
+	require.NoError(t, err)
+	item := durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: ev.ID,
+		Payload:  rawPayload,
+		Attempts: 1,
+	}
+
+	res1 := disp.HandleItem(ctx, item, nil)
+	require.False(t, res1.Done, "in-flight launch must defer reuse fire")
+	require.False(t, res1.RetryAt.IsZero())
+
+	fires1, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: ev.ID, TriggerID: trigResp.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires1.Items, 1)
+	require.Equal(t, store.TriggerFireStatusDeferred, fires1.Items[0].Status)
+
+	// 2. Repository is removed from the GitHub App installation.
+	f.sched.srv.checkProjectsForRemovedRepos(ctx, 8301, map[string]bool{"acme/widgets": true})
+
+	// Claim must be released (GetActiveTriggerSubjectClaim returns ErrNotFound).
+	activeClaim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subject)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.Nil(t, activeClaim, "bound claim must be released on repo removal")
+
+	// Trigger must be paused with source_deleted.
+	pausedTrig, err := f.sched.store.GetTrigger(ctx, trigResp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusPaused, pausedTrig.Status)
+	assert.Equal(t, store.TriggerStatusReasonSourceDeleted, pausedTrig.StatusReason)
+
+	// 3. Drainer re-handles the deferred item at RetryAt -> cleanly cancels deferred fire and completes event.
+	now = res1.RetryAt.Add(time.Second)
+	res2 := disp.HandleItem(ctx, item, nil)
+	require.True(t, res2.Done, "re-handle after repo removal must complete event, err=%v", res2.Err)
+
+	fires2, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: ev.ID, TriggerID: trigResp.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires2.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusSkipped, fires2.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireDeferCancelled, fires2.Items[0].Error)
+
+	evAfter, err := f.sched.store.GetTriggerEvent(ctx, ev.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusProcessed, evAfter.Status)
 }
