@@ -693,6 +693,25 @@ func isRedactedResponseEnvKey(key string, installationOnly bool) bool {
 	return key == "GITHUB_TOKEN"
 }
 
+// stripBlockedInstallationGitHubEnv removes all
+// api.IsBlockedInstallationGitHubEnvKey entries from cfg.Env in place. Called
+// only on the freshly copied InlineConfig inside AgentAppliedConfig.ResponseView
+// for installation-only agents so redactInlineConfigForResponse and
+// redactCreateInputsForResponse keep their two-argument canAttach chain.
+func stripBlockedInstallationGitHubEnv(cfg *api.ScionConfig) {
+	if cfg == nil || len(cfg.Env) == 0 {
+		return
+	}
+	for k := range cfg.Env {
+		if api.IsBlockedInstallationGitHubEnvKey(k) {
+			delete(cfg.Env, k)
+		}
+	}
+	if len(cfg.Env) == 0 {
+		cfg.Env = nil
+	}
+}
+
 // ResponseView returns a copy of ac for an API response. canAttach must be
 // the caller's attach-equivalent access to the agent: without it Env is
 // omitted; with it GITHUB_TOKEN is stripped (and for installation-only agents,
@@ -708,11 +727,16 @@ func (ac *AgentAppliedConfig) ResponseView(canAttach bool) *AgentAppliedConfig {
 	if ac == nil {
 		return nil
 	}
-	installationOnly := ac.GitHubTokenPreference == GitHubTokenPreferenceInstallation
 	view := *ac
 	view.envResponseVisible = canAttach
-	view.InlineConfig = redactInlineConfigForResponse(ac.InlineConfig, canAttach, installationOnly)
-	view.CreateInputs = redactCreateInputsForResponse(ac.CreateInputs, canAttach, installationOnly)
+	view.InlineConfig = redactInlineConfigForResponse(ac.InlineConfig, canAttach)
+	view.CreateInputs = redactCreateInputsForResponse(ac.CreateInputs, canAttach)
+	if ac.GitHubTokenPreference == GitHubTokenPreferenceInstallation {
+		stripBlockedInstallationGitHubEnv(view.InlineConfig)
+		if view.CreateInputs != nil {
+			stripBlockedInstallationGitHubEnv(view.CreateInputs.InlineConfig)
+		}
+	}
 	return &view
 }
 
@@ -720,15 +744,15 @@ func (ac *AgentAppliedConfig) ResponseView(canAttach bool) *AgentAppliedConfig {
 // response body. CreateInputs.InlineConfig is the create request's explicit
 // config, so it gets exactly the treatment ResponseView gives InlineConfig
 // (see redactInlineConfigForResponse): Env and the Telemetry cloud-export
-// header map are cleared unless canAttach is true, and GITHUB_TOKEN (plus the
-// wider GH_* set when installationOnly is true) is stripped. The remaining
-// fields carry no env and are copied through. The input is never mutated.
-func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach, installationOnly bool) *AgentCreateInputs {
+// header map are cleared unless canAttach is true, and GITHUB_TOKEN is always
+// stripped. The remaining fields carry no env and are copied through. The
+// input is never mutated.
+func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *AgentCreateInputs {
 	if ci == nil {
 		return nil
 	}
 	copied := *ci
-	copied.InlineConfig = redactInlineConfigForResponse(ci.InlineConfig, canAttach, installationOnly)
+	copied.InlineConfig = redactInlineConfigForResponse(ci.InlineConfig, canAttach)
 	if ci.ThinkingLevel != nil {
 		level := *ci.ThinkingLevel
 		copied.ThinkingLevel = &level
@@ -740,8 +764,8 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach, installatio
 // response body: Env, the Telemetry cloud-export header map, every MCP
 // server's env and headers and every service's env are cleared unless
 // canAttach is true, and
-// GITHUB_TOKEN (plus the wider GH_* set when installationOnly is true) is
-// stripped from Env, mirroring AgentAppliedConfig's own top-level rule (see
+// GITHUB_TOKEN is stripped from Env
+// unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
 // ResponseView/MarshalJSON above). ClearedFields and ChangedFields are
 // dropped for every viewer: they are hub-internal bookkeeping
 // (ptone/scion#3906, ptone/scion#3982), ClearedFields' env.<KEY>
@@ -761,7 +785,7 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach, installatio
 // MarshalJSON keeps persistence and the response view fully decoupled: this
 // function's caller (ResponseView) is only ever reached from response
 // serialization code, never from marshalAppliedConfig.
-func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach, installationOnly bool) *api.ScionConfig {
+func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.ScionConfig {
 	if cfg == nil {
 		return nil
 	}
@@ -773,7 +797,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach, installation
 	} else if len(cfg.Env) > 0 {
 		env := make(map[string]string, len(cfg.Env))
 		for k, v := range cfg.Env {
-			if isRedactedResponseEnvKey(k, installationOnly) {
+			if k == "GITHUB_TOKEN" {
 				continue
 			}
 			env[k] = v
