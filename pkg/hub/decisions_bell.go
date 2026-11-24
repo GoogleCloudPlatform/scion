@@ -952,11 +952,18 @@ func (s *Server) reconcileDecisionBellInline(userID string, total, projects int,
 		return
 	}
 	defer s.finishInlineDecisionBell(userID)
-	ctx, cancel := context.WithTimeout(context.Background(), s.chatSearchTimeout())
-	defer cancel()
-	if err := s.writeDecisionsWaitingNotification(ctx, userID, total, projects); err != nil {
-		slog.Warn("decisions bell: inline reconcile failed", "user_id", userID, "error", err)
-	}
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("decisions bell: inline reconcile panic", "user_id", userID, "panic", fmt.Sprint(rec))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), s.chatSearchTimeout())
+		defer cancel()
+		if err := s.writeDecisionsWaitingNotification(ctx, userID, total, projects); err != nil {
+			slog.Warn("decisions bell: inline reconcile failed", "user_id", userID, "error", err)
+		}
+	}()
 }
 
 func findDecisionBellStatusRecorder(w http.ResponseWriter) *decisionBellStatusRecorder {
@@ -1013,7 +1020,16 @@ func decisionsBellReconcileCaller(r *http.Request) string {
 
 // withDecisionsBellReconcile wraps a Decisions HTTP handler (profile or project)
 // so GET requests for tab=pending reconcile the caller's bell notification row
-// asynchronously after the HTTP response has been written (design B6, C3).
+// after the HTTP response has been written (design B6, C3; design-scale §3.5 M6).
+//
+// When a session-authenticated, unfiltered GET /api/v1/users/me/decisions
+// tab=pending request (including limit=0) succeeds, the handler stashes its
+// exact waiting-on-you counts and pre-read bell generation on the recorder;
+// this wrapper flushes the response and writes the notification row inline
+// (serialized with inFlightUsers) if no concurrent recompute or queued update
+// raced with the read. All other cases (scoped tokens, filtered or
+// project-scoped requests, /api/v1/projects/{id}/decisions, flag-off
+// reconciliation, or raced reads) enqueue an asynchronous coalesced recompute.
 func (s *Server) withDecisionsBellReconcile(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1037,6 +1053,7 @@ func (s *Server) withDecisionsBellReconcile(next http.HandlerFunc) http.HandlerF
 		}
 		if rec.status == http.StatusOK {
 			if rec.hasBellCounts {
+				_ = http.NewResponseController(w).Flush()
 				s.reconcileDecisionBellInline(userID, rec.bellTotal, rec.bellProjects, rec.bellGen)
 				return
 			}
