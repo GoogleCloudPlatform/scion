@@ -96,4 +96,10 @@ done
 [ "${found}" = true ] || die "image.name in ${meta} does not name ${ref}"
 
 printf '%s %s\n' "${ref}" "${digest}" > "${BUILDER_OUTPUT}/output"
+if [ -n "${BUILD_STEP_STATUS_DIR:-}" ]; then
+  img_tag="${ref##*/}"
+  img_name="${img_tag%%:*}"
+  mkdir -p "${BUILD_STEP_STATUS_DIR}"
+  printf '%s %s\n' "${ref}" "${digest}" > "${BUILD_STEP_STATUS_DIR}/${img_name}"
+fi
 echo "buildx-record-digest: recorded ${ref} ${digest}"

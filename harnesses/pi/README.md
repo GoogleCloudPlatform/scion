@@ -148,6 +148,8 @@ pi/
   capture_auth.py    # Captures ~/.pi/agent/auth.json as the PI_AUTH secret
   dialect.yaml       # Hook dialect for the bridge's events
   Dockerfile         # Image build (FROM scion-base), pinned pi version
+  package.json       # Pinned @earendil-works/pi-coding-agent version for npm ci
+  package-lock.json  # Locked transitive dependency graph and integrity hashes
   cloudbuild.yaml    # Cloud Build configuration
   scion-bridge.test.mjs, provision_test.py
   home/.pi/agent/
@@ -166,8 +168,11 @@ gcloud builds submit --config cloudbuild.yaml .
 ```
 
 The pi version is the `PI_VERSION` build arg (default `1.3.0`); never use a
-floating tag. The install uses `--ignore-scripts`; transitive dependencies are
-not pinned by npm's global install.
+floating tag. The install uses `--ignore-scripts` and installs from the
+committed `package.json` and `package-lock.json` via `npm ci` when `PI_VERSION`
+matches the lockfile, pinning every transitive dependency and its integrity
+hash. When bumping `PI_VERSION`, regenerate `package-lock.json` (`npm install
+--package-lock-only --ignore-scripts`) in the same commit.
 
 ## Tests
 
