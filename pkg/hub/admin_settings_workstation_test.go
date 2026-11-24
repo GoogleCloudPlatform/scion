@@ -745,6 +745,59 @@ func TestWorkstation_PutServerConfig_InvalidModeRejected(t *testing.T) {
 	}
 }
 
+// The PUT never writes an invalid server.broker.init_firewall that would cause
+// LoadGlobalConfig to fail on the next server start.
+func TestWorkstation_PutServerConfig_InvalidInitFirewallRejected(t *testing.T) {
+	settingsPath := workstationHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	before := readFileString(t, settingsPath)
+
+	tooMany := make([]string, 65)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("host-%02d.example.com", i)
+	}
+	tooManyJSON, err := json.Marshal(tooMany)
+	if err != nil {
+		t.Fatalf("marshal 65 domains: %v", err)
+	}
+
+	invalidBodies := []struct {
+		name string
+		body string
+	}{
+		{"metacharacter", `{"server":{"broker":{"init_firewall":{"allow_domains":["bad;name"]}}}}`},
+		{"wildcard", `{"server":{"broker":{"init_firewall":{"allow_domains":["*.example.com"]}}}}`},
+		{"ip literal", `{"server":{"broker":{"init_firewall":{"allow_domains":["1.2.3.4"]}}}}`},
+		{"over 64 entries", `{"server":{"broker":{"init_firewall":{"allow_domains":` + string(tooManyJSON) + `}}}}`},
+	}
+
+	for _, tc := range invalidBodies {
+		rr := putServerConfig(t, srv, tc.body)
+		if rr.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: expected 422, got %d: %s", tc.name, rr.Code, rr.Body.String())
+		} else if e := settingsErrorEntries(t, rr); len(e) == 0 || e[0].Field != "server.broker.init_firewall.allow_domains" {
+			t.Errorf("%s: entries = %+v, want field server.broker.init_firewall.allow_domains", tc.name, e)
+		}
+	}
+	if after := readFileString(t, settingsPath); after != before {
+		t.Errorf("settings.yaml changed after rejected PUTs:\n%s", after)
+	}
+
+	rr := putServerConfig(t, srv, `{"server":{"broker":{"init_firewall":{"allow_domains":["PyPI.org."],"allow_ssh":true}}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid init_firewall: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	gc, err := config.LoadGlobalConfig("")
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig after valid PUT failed: %v", err)
+	}
+	if gc.RuntimeBroker.InitFirewall == nil ||
+		!reflect.DeepEqual(gc.RuntimeBroker.InitFirewall.AllowDomains, []string{"pypi.org"}) ||
+		!gc.RuntimeBroker.InitFirewall.AllowSSH {
+		t.Errorf("loaded InitFirewall = %+v, want AllowDomains=[pypi.org] AllowSSH=true", gc.RuntimeBroker.InitFirewall)
+	}
+}
+
 // broker_id/broker_token are hub-owned; the PUT may echo them
 // (the masked token included) but not change or clear them.
 func TestWorkstation_PutServerConfig_HubOwnedBrokerIdentity(t *testing.T) {
