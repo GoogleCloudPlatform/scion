@@ -171,6 +171,7 @@ export function buildFixture() {
       body: {
         experiments: {
           'federation.project_visitors': false,
+          'filters.query_dialect': false,
           'hub.admin_managed_brokers': false,
           'hub.agent_edit_held': false,
           'hub.agent_secrets': false,

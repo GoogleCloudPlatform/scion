@@ -1510,6 +1510,42 @@ type AgentFilter struct {
 	// either the same way, since IDEQ simply never matches a user ID and
 	// ancestryContains still finds that user's descendants.
 	LineageRootID string
+
+	// Query, when non-nil, applies structured filter-query predicates (from
+	// pkg/filterquery) to the agent list. It is always ANDed with every other
+	// filter field, including AuthorizedProjectIDs and ExcludedProjectIDs — it
+	// narrows results and never widens authorization. omitempty keeps existing
+	// cursor bindings unchanged when unset.
+	Query *QueryTerms `json:",omitempty"`
+}
+
+// QueryOp classifies the predicate operation of a QueryTerm.
+type QueryOp string
+
+const (
+	// QueryOpEq matches field equality against any value in QueryTerm.Values (IN / OR).
+	QueryOpEq QueryOp = "eq"
+	// QueryOpHasKey matches rows whose map/JSON column (e.g. labels) contains any key in Values.
+	QueryOpHasKey QueryOp = "has_key"
+	// QueryOpLabelEq matches rows whose labels column contains any key=value pair in Values.
+	QueryOpLabelEq QueryOp = "label_eq"
+)
+
+// QueryTerm is one validated, reference-resolved predicate clause pushed down
+// into store queries. Values within a term are ORed; terms in QueryTerms are ANDed.
+// Negate inverts the whole term: NOT (v1 OR v2 ...).
+type QueryTerm struct {
+	Field  string   `json:"field"`
+	Values []string `json:"values"`
+	Negate bool     `json:"negate,omitempty"`
+	Op     QueryOp  `json:"op"`
+}
+
+// QueryTerms is the store-level representation of a parsed filter query.
+type QueryTerms struct {
+	Terms       []QueryTerm `json:"terms,omitempty"`
+	Text        string      `json:"text,omitempty"`
+	ExcludeText []string    `json:"excludeText,omitempty"`
 }
 
 // AgentMember is the narrow projection ListAgentMembers reads for

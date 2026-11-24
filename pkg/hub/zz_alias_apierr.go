@@ -69,6 +69,7 @@ const (
 	ErrCodeInternalError                    = apierr.ErrCodeInternalError
 	ErrCodeInvalidCursor                    = apierr.ErrCodeInvalidCursor
 	ErrCodeInvalidDMKey                     = apierr.ErrCodeInvalidDMKey
+	ErrCodeInvalidFilterQuery               = apierr.ErrCodeInvalidFilterQuery
 	ErrCodeInvalidJoinToken                 = apierr.ErrCodeInvalidJoinToken
 	ErrCodeInvalidRequest                   = apierr.ErrCodeInvalidRequest
 	ErrCodeInvalidRoleSet                   = apierr.ErrCodeInvalidRoleSet

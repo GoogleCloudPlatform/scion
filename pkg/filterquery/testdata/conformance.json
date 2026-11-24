@@ -1,0 +1,437 @@
+{
+  "parse": [
+    {
+      "name": "empty string",
+      "input": "",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "" },
+      "canonical": ""
+    },
+    {
+      "name": "whitespace only",
+      "input": "   \t\n  ",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "" },
+      "canonical": ""
+    },
+    {
+      "name": "pure text simple",
+      "input": "  api server  ",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "api server" },
+      "canonical": "api server"
+    },
+    {
+      "name": "pure text preserves regex",
+      "input": "src/(foo|bar)\\.go",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "src/(foo|bar)\\.go" }
+    },
+    {
+      "name": "pure text preserves quotes verbatim",
+      "input": "\"hello\"",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "\"hello\"" }
+    },
+    {
+      "name": "pure text preserves leading dash verbatim (Q6)",
+      "input": "-foo",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "-foo" }
+    },
+    {
+      "name": "pure text preserves windows path",
+      "input": "C:\\temp",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "C:\\temp" }
+    },
+    {
+      "name": "pure text preserves unknown key:value verbatim",
+      "input": "foo:bar",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "foo:bar" }
+    },
+    {
+      "name": "pure text preserves OR and parens",
+      "input": "(a OR b)",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "(a OR b)" }
+    },
+    {
+      "name": "quoted known key stays pure text",
+      "input": "\"phase:running\"",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "\"phase:running\"" }
+    },
+    {
+      "name": "single structured key term",
+      "input": "phase:running",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [{ "key": "phase", "values": ["running"], "negate": false, "offset": 0, "length": 13 }]
+      },
+      "canonical": "phase:running"
+    },
+    {
+      "name": "case folding on key",
+      "input": "Phase:Running",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [{ "key": "phase", "values": ["Running"], "negate": false, "offset": 0, "length": 13 }]
+      },
+      "canonical": "phase:running"
+    },
+    {
+      "name": "comma OR within key",
+      "input": "phase:error,stopped",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [{ "key": "phase", "values": ["error", "stopped"], "negate": false, "offset": 0, "length": 19 }]
+      },
+      "canonical": "phase:error,stopped"
+    },
+    {
+      "name": "negated key term with comma OR",
+      "input": "-phase:stopped,error",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [{ "key": "phase", "values": ["stopped", "error"], "negate": true, "offset": 0, "length": 20 }]
+      },
+      "canonical": "-phase:error,stopped"
+    },
+    {
+      "name": "implicit AND with label k=v and bare key",
+      "input": "phase:running label:team=ui -label:tmp",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [
+          { "key": "phase", "values": ["running"], "negate": false, "offset": 0, "length": 13 },
+          { "key": "label", "values": ["team=ui"], "negate": false, "offset": 14, "length": 13 },
+          { "key": "label", "values": ["tmp"], "negate": true, "offset": 28, "length": 10 }
+        ]
+      },
+      "canonical": "label:team=ui -label:tmp phase:running"
+    },
+    {
+      "name": "label preserves case in canonical",
+      "input": "label:Team=WebUI",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [{ "key": "label", "values": ["Team=WebUI"], "negate": false, "offset": 0, "length": 16 }]
+      },
+      "canonical": "label:Team=WebUI"
+    },
+    {
+      "name": "quoted label value with space and escapes",
+      "input": "label:\"team=web \\\"ui\\\\v2\\\"\" phase:running",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [
+          { "key": "label", "values": ["team=web \"ui\\v2\""], "negate": false, "offset": 0, "length": 27 },
+          { "key": "phase", "values": ["running"], "negate": false, "offset": 28, "length": 13 }
+        ]
+      },
+      "canonical": "label:\"team=web \\\"ui\\\\v2\\\"\" phase:running"
+    },
+    {
+      "name": "structured mode joins positive free text and collects excluded text",
+      "input": "phase:running api server -test -\"draft notes\"",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "text": "api server",
+        "terms": [{ "key": "phase", "values": ["running"], "negate": false, "offset": 0, "length": 13 }],
+        "excludeText": ["test", "draft notes"]
+      },
+      "canonical": "phase:running \"api server\" -\"draft notes\" -test"
+    },
+    {
+      "name": "unknown key in structured mode becomes free text",
+      "input": "phase:running foo:bar",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "text": "foo:bar",
+        "terms": [{ "key": "phase", "values": ["running"], "negate": false, "offset": 0, "length": 13 }]
+      },
+      "canonical": "phase:running \"foo:bar\""
+    },
+    {
+      "name": "repeated key terms both kept",
+      "input": "label:a label:b",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [
+          { "key": "label", "values": ["a"], "negate": false, "offset": 0, "length": 7 },
+          { "key": "label", "values": ["b"], "negate": false, "offset": 8, "length": 7 }
+        ]
+      },
+      "canonical": "label:a label:b"
+    },
+    {
+      "name": "error: empty value after known key",
+      "input": "phase:",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 0, "length": 6 }
+    },
+    {
+      "name": "error: whitespace after colon",
+      "input": "phase: running",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 0, "length": 6 }
+    },
+    {
+      "name": "error: trailing comma",
+      "input": "phase:running,",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 13, "length": 1 }
+    },
+    {
+      "name": "error: leading comma",
+      "input": "phase:,running",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 6, "length": 1 }
+    },
+    {
+      "name": "error: double comma",
+      "input": "phase:running,,error",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 14, "length": 1 }
+    },
+    {
+      "name": "error: lone dash in structured mode",
+      "input": "phase:running -",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 14, "length": 1 }
+    },
+    {
+      "name": "error: unterminated quote in value",
+      "input": "label:\"unterminated",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 6, "length": 13 }
+    },
+    {
+      "name": "error: invalid escape in quoted string",
+      "input": "label:\"bad\\nval\"",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 10, "length": 2 }
+    },
+    {
+      "name": "error: bare OR in structured mode",
+      "input": "phase:running OR phase:error",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 14, "length": 2 }
+    },
+    {
+      "name": "error: bare AND in structured mode",
+      "input": "phase:running AND label:a",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 14, "length": 3 }
+    },
+    {
+      "name": "error: parentheses in structured mode",
+      "input": "phase:running (label:a)",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 14, "length": 1 }
+    },
+    {
+      "name": "error: reserved comparison prefix >",
+      "input": "phase:>running",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 6, "length": 1 }
+    },
+    {
+      "name": "error: reserved comparison prefix <=",
+      "input": "label:<=5",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 6, "length": 2 }
+    },
+    {
+      "name": "quoted value starting with > is allowed as literal",
+      "input": "label:\">5\"",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [{ "key": "label", "values": [">5"], "negate": false, "offset": 0, "length": 10 }]
+      },
+      "canonical": "label:\">5\""
+    },
+    {
+      "name": "quoted text resembling known key stays quoted in canonical",
+      "input": "phase:running \"label:tmp\"",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "text": "label:tmp",
+        "terms": [{ "key": "phase", "values": ["running"], "negate": false, "offset": 0, "length": 13 }]
+      },
+      "canonical": "phase:running \"label:tmp\""
+    },
+    {
+      "name": "negated quoted text resembling known key stays quoted in canonical",
+      "input": "phase:running -\"phase:x\"",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [{ "key": "phase", "values": ["running"], "negate": false, "offset": 0, "length": 13 }],
+        "excludeText": ["phase:x"]
+      },
+      "canonical": "phase:running -\"phase:x\""
+    },
+    {
+      "name": "non-ASCII prefix error reports byte offsets in Go and UTF-16 offsets in TS",
+      "input": "é phase:",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 3, "length": 6, "utf16Offset": 2, "utf16Length": 6 }
+    },
+    {
+      "name": "non-ASCII prefix bare OR error reports byte vs UTF-16 offsets",
+      "input": "éé phase:running OR x",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 19, "length": 2, "utf16Offset": 17, "utf16Length": 2 }
+    },
+    {
+      "name": "leading NBSP keeps input in pure text mode and preserves NBSP in canonical",
+      "input": "\u00a0phase:running",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "\u00a0phase:running" },
+      "canonical": "\u00a0phase:running"
+    },
+    {
+      "name": "U+0085 at both edges is preserved in both Go and TS",
+      "input": "\u0085hello\u0085",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "\u0085hello\u0085" },
+      "canonical": "\u0085hello\u0085"
+    },
+    {
+      "name": "U+FEFF at both edges is preserved in both Go and TS",
+      "input": "\ufeffhello\ufeff",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "\ufeffhello\ufeff" },
+      "canonical": "\ufeffhello\ufeff"
+    },
+    {
+      "name": "URL scheme stays pure text",
+      "input": "https://example.com/x",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "https://example.com/x" },
+      "canonical": "https://example.com/x"
+    }
+  ],
+  "eval": {
+    "knownKeys": ["phase", "label"],
+    "rows": [
+      {
+        "id": "a1",
+        "name": "api-server",
+        "slug": "api-server-1",
+        "phase": "running",
+        "labels": { "team": "ui", "env": "prod" }
+      },
+      {
+        "id": "a2",
+        "name": "api-worker",
+        "slug": "api-worker-2",
+        "phase": "error",
+        "labels": { "team": "ui", "tmp": "true" }
+      },
+      {
+        "id": "a3",
+        "name": "db-migrator",
+        "slug": "db-migrator-3",
+        "phase": "stopped",
+        "labels": { "team": "backend" }
+      },
+      {
+        "id": "a4",
+        "name": "frontend-preview",
+        "slug": "foo-preview-4",
+        "phase": "running",
+        "labels": {}
+      },
+      {
+        "id": "a5",
+        "name": "foo-runner",
+        "slug": "foo-runner-5",
+        "phase": "error",
+        "labels": { "team": "UI" }
+      }
+    ],
+    "cases": [
+      {
+        "name": "empty query matches all",
+        "query": "",
+        "expectIds": ["a1", "a2", "a3", "a4", "a5"]
+      },
+      {
+        "name": "pure text matches name or slug case-insensitively",
+        "query": "FOO",
+        "expectIds": ["a4", "a5"]
+      },
+      {
+        "name": "phase single value",
+        "query": "phase:running",
+        "expectIds": ["a1", "a4"]
+      },
+      {
+        "name": "phase comma OR",
+        "query": "phase:running,error",
+        "expectIds": ["a1", "a2", "a4", "a5"]
+      },
+      {
+        "name": "phase negated",
+        "query": "-phase:stopped",
+        "expectIds": ["a1", "a2", "a4", "a5"]
+      },
+      {
+        "name": "phase negated comma OR",
+        "query": "-phase:running,stopped",
+        "expectIds": ["a2", "a5"]
+      },
+      {
+        "name": "label exact k=v is case-sensitive",
+        "query": "label:team=ui",
+        "expectIds": ["a1", "a2"]
+      },
+      {
+        "name": "label bare key has-key",
+        "query": "label:tmp",
+        "expectIds": ["a2"]
+      },
+      {
+        "name": "negated bare label excludes only rows with that key (including empty labels)",
+        "query": "-label:tmp",
+        "expectIds": ["a1", "a3", "a4", "a5"]
+      },
+      {
+        "name": "negated k=v label includes rows without key or with different value",
+        "query": "-label:team=ui",
+        "expectIds": ["a3", "a4", "a5"]
+      },
+      {
+        "name": "combined phase OR + negated label + text",
+        "query": "phase:running,error -label:tmp foo",
+        "expectIds": ["a4", "a5"]
+      },
+      {
+        "name": "combined with excluded text",
+        "query": "phase:running,error api -worker",
+        "expectIds": ["a1"]
+      },
+      {
+        "name": "multiple label terms ANDed",
+        "query": "label:team=ui label:env=prod",
+        "expectIds": ["a1"]
+      }
+    ]
+  }
+}

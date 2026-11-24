@@ -1,0 +1,34 @@
+[
+  {
+    "view": "agents",
+    "keys": [
+      {
+        "name": "phase",
+        "help": "Agent lifecycle phase",
+        "kind": "enum",
+        "exec": "server",
+        "enum": [
+          "created",
+          "provisioning",
+          "cloning",
+          "starting",
+          "running",
+          "suspended",
+          "stopping",
+          "stopped",
+          "error",
+          "halted"
+        ],
+        "multiValued": false
+      },
+      {
+        "name": "label",
+        "help": "Label key or key=value pair",
+        "kind": "label",
+        "exec": "server",
+        "multiValued": true
+      }
+    ],
+    "textHelp": "Matches agent name or slug"
+  }
+]

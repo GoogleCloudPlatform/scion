@@ -1729,12 +1729,127 @@ func (s *AgentStore) agentFilterPredicates(ctx context.Context, filter store.Age
 		preds = append(preds, agent.ProjectIDNotIn(excludeIDs...))
 	}
 
+	// Structured filter query terms (ANDed with all other predicates,
+	// including AuthorizedProjectIDs and ExcludedProjectIDs).
+	if filter.Query != nil {
+		qPreds, err := agentQueryTermsPredicates(filter.Query)
+		if err != nil {
+			return nil, err
+		}
+		preds = append(preds, qPreds...)
+	}
+
 	// Exclude soft-deleted agents unless explicitly requested.
 	if !filter.IncludeDeleted {
 		preds = append(preds, agent.DeletedAtIsNil())
 	}
 
 	return preds, nil
+}
+
+// agentQueryTermsPredicates translates validated store.QueryTerms into Ent
+// predicates through an explicit field allowlist. Unknown fields return an
+// error rather than becoming a no-op.
+func agentQueryTermsPredicates(qt *store.QueryTerms) ([]predicate.Agent, error) {
+	if qt == nil {
+		return nil, nil
+	}
+	var preds []predicate.Agent
+
+	for _, term := range qt.Terms {
+		if len(term.Values) == 0 {
+			continue
+		}
+		switch term.Field {
+		case "phase":
+			if term.Negate {
+				preds = append(preds, agent.PhaseNotIn(term.Values...))
+			} else {
+				preds = append(preds, agent.PhaseIn(term.Values...))
+			}
+		case "label":
+			if term.Negate {
+				// NOT (v1 OR v2 ...) == (NOT v1) AND (NOT v2) ...
+				for _, v := range term.Values {
+					p, err := agentLabelPredicate(v, term.Op, true)
+					if err != nil {
+						return nil, err
+					}
+					preds = append(preds, p)
+				}
+			} else {
+				orParts := make([]predicate.Agent, 0, len(term.Values))
+				for _, v := range term.Values {
+					p, err := agentLabelPredicate(v, term.Op, false)
+					if err != nil {
+						return nil, err
+					}
+					orParts = append(orParts, p)
+				}
+				if len(orParts) == 1 {
+					preds = append(preds, orParts[0])
+				} else {
+					preds = append(preds, agent.Or(orParts...))
+				}
+			}
+		default:
+			return nil, fmt.Errorf("agentQueryTermsPredicates: unsupported filter field %q: %w", term.Field, store.ErrInvalidInput)
+		}
+	}
+
+	if qt.Text != "" {
+		preds = append(preds, agent.Or(
+			agent.NameContainsFold(qt.Text),
+			agent.SlugContainsFold(qt.Text),
+		))
+	}
+
+	for _, ex := range qt.ExcludeText {
+		if ex == "" {
+			continue
+		}
+		preds = append(preds, agent.Not(agent.Or(
+			agent.NameContainsFold(ex),
+			agent.SlugContainsFold(ex),
+		)))
+	}
+
+	return preds, nil
+}
+
+func agentLabelPredicate(val string, op store.QueryOp, negate bool) (predicate.Agent, error) {
+	switch op {
+	case store.QueryOpHasKey:
+		if negate {
+			return labelNotHasKey(val), nil
+		}
+		return labelHasKey(val), nil
+	case store.QueryOpLabelEq:
+		k, v, ok := strings.Cut(val, "=")
+		if !ok || k == "" {
+			return nil, fmt.Errorf("agentLabelPredicate: invalid label_eq value %q: %w", val, store.ErrInvalidInput)
+		}
+		if negate {
+			return labelNotContains(k, v), nil
+		}
+		return labelContains(k, v), nil
+	case store.QueryOpEq, "":
+		if k, v, ok := strings.Cut(val, "="); ok {
+			if k == "" {
+				return nil, fmt.Errorf("agentLabelPredicate: empty label key in %q: %w", val, store.ErrInvalidInput)
+			}
+			if negate {
+				return labelNotContains(k, v), nil
+			}
+			return labelContains(k, v), nil
+		}
+		if negate {
+			return labelNotHasKey(val), nil
+		}
+		return labelHasKey(val), nil
+	default:
+		return nil, fmt.Errorf("agentLabelPredicate: unsupported op %q: %w", op, store.ErrInvalidInput)
+	}
 }
 
 // UpdateAgentStatus applies a partial, status-only update. It is the hottest

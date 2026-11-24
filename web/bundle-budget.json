@@ -99,6 +99,15 @@
       "roots": ["src/client/main.ts"],
       "pathPattern": "src/components/shared/breadcrumb",
       "allow": []
+    },
+    {
+      "$comment": "The unified filter query engine and <scion-filter-box> (ptone/scion#9018) are imported only by lazy list-page chunks and must never enter the static closure of the entry, login, or home routes.",
+      "roots": [
+        "src/client/main.ts",
+        "src/components/pages/login.ts",
+        "src/components/pages/home.ts"
+      ],
+      "pathPattern": "src/(shared/filter-query|components/shared/filter-box)/"
     }
   ]
 }

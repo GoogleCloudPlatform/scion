@@ -130,9 +130,11 @@ jobs:
           #     harnesses/ directory (harnesses/*/config.yaml).
           #   - web/src/components/pages/admin-server-config-env-keys.test.ts
           #     reads pkg/config/schemas/settings-v1.schema.json.
+          #   - web/src/shared/filter-query/filter-query.test.ts reads
+          #     docs-site/src/content/docs/reference/filter-queries.md.
           # Keep this regex in sync when web/ starts reading anything else
           # outside web/.
-          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|pkg/config/schemas/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|pkg/config/schemas/|docs-site/src/content/docs/reference/filter-queries\.md$|\.github/workflows/ci\.yml$)' <<<"$changed"; then
             echo "web_checks=true" >> "$GITHUB_OUTPUT"
           else
             echo "web_checks=false" >> "$GITHUB_OUTPUT"

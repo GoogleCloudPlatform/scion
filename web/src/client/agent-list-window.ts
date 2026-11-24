@@ -139,6 +139,32 @@ export interface AgentListViewState {
    * state complete-needing.
    */
   modeFilter?: string;
+  /**
+   * Optional client-side filter predicate from the unified filter query dialect
+   * (ptone/scion#9018). When set, replaces legacy `phaseFilter` and `label`
+   * local filtering while still applying `modeFilter`.
+   */
+  filterPredicate?: ((agent: Agent) => boolean) | null;
+  /**
+   * Snapshot predicate for the committed server query (updated only when
+   * `serverQuery` commits, never on per-keystroke typing). Used in the paged
+   * state to gate off-page SSE adds and detect when existing members leave
+   * the server's filtered population.
+   */
+  committedFilterPredicate?: ((agent: Agent) => boolean) | null;
+  /**
+   * Phase-only projection of `committedFilterPredicate`, used for off-page
+   * `unknown` deltas that carry only `phase` (without labels or name).
+   * Returns false only when the new phase violates the committed query's
+   * phase terms, so label/text terms never cause false eviction.
+   */
+  committedPhasePredicate?: ((phase: string) => boolean) | null;
+  /**
+   * Canonical server `?q=` query string when the unified filter dialect is active.
+   * When defined (even empty string), `isSortedEligible` does not require `=` in
+   * `committedLabel` and `serverParamsKey` tracks `serverQuery` instead of `phaseFilter`.
+   */
+  serverQuery?: string;
 }
 
 /** Parameters of one paged-navigation request, passed to the host's `fetchPage`. */
@@ -360,10 +386,11 @@ export class AgentListWindow extends EventTarget {
    * complete set.
    */
   isSortedEligible(committedLabel: string): boolean {
-    const { view, sortField, modeFilter } = this.viewState;
+    const { view, sortField, modeFilter, serverQuery } = this.viewState;
     if (view !== 'grid' && view !== 'list') return false;
     if (modeFilter) return false;
     if (sortField !== 'updated' && sortField !== 'created') return false;
+    if (serverQuery !== undefined) return true;
     const label = committedLabel.trim();
     return label === '' || label.includes('=');
   }
@@ -430,7 +457,10 @@ export class AgentListWindow extends EventTarget {
 
   /** The view-state fields a sorted request depends on. The view (grid or list) is not one of them. */
   private serverParamsKey(): string {
-    const { sortField, sortDir, phaseFilter, pageSize } = this.viewState;
+    const { sortField, sortDir, phaseFilter, pageSize, serverQuery } = this.viewState;
+    if (serverQuery !== undefined) {
+      return `${sortField}|${sortDir}|q:${serverQuery}|${pageSize}`;
+    }
     return `${sortField}|${sortDir}|${phaseFilter}|${pageSize}`;
   }
 
@@ -759,11 +789,15 @@ export class AgentListWindow extends EventTarget {
 
   private filteredAndSorted(list: Agent[]): Agent[] {
     let out = list;
-    if (this.viewState.phaseFilter) {
-      out = out.filter((a) => a.phase === this.viewState.phaseFilter);
+    if (this.viewState.filterPredicate) {
+      out = out.filter(this.viewState.filterPredicate);
+    } else {
+      if (this.viewState.phaseFilter) {
+        out = out.filter((a) => a.phase === this.viewState.phaseFilter);
+      }
+      out = this.filterByLabel(out);
     }
     out = filterByMode(out, this.viewState.modeFilter ?? '');
-    out = this.filterByLabel(out);
     return sortAgents(out, this.viewState.sortField, this.viewState.sortDir);
   }
 
@@ -777,7 +811,12 @@ export class AgentListWindow extends EventTarget {
    * match the filtered row count until the label is committed.
    */
   get items(): Agent[] {
-    if (this._state === 'paged') return this.filterByLabel(this.pageItems);
+    if (this._state === 'paged') {
+      if (this.viewState.filterPredicate) {
+        return this.pageItems.filter(this.viewState.filterPredicate);
+      }
+      return this.filterByLabel(this.pageItems);
+    }
     const display = this.display;
     const start = this._pageIndex * this.viewState.pageSize;
     return display.slice(start, start + this.viewState.pageSize);
@@ -1057,12 +1096,15 @@ export class AgentListWindow extends EventTarget {
     this.notifyChange();
   }
 
-  /** The committed label's add rule (today's add rule, mirroring the server's stats population): the project match (or `isAddable`) plus the committed `k=v`, if any. */
+  /** The committed label's add rule (today's add rule, mirroring the server's stats population): the project match (or `isAddable`) plus the committed `k=v` or committed query predicate, if any. */
   private passesCommittedLabel(agent: Agent): boolean {
     if (this.isAddable) {
       if (!this.isAddable(agent)) return false;
     } else if (agent.projectId !== this.getProjectId()) {
       return false;
+    }
+    if (this.viewState.committedFilterPredicate) {
+      return this.viewState.committedFilterPredicate(agent);
     }
     const label = this.committedLabel.trim();
     if (!label || !label.includes('=')) return true;
@@ -1129,6 +1171,9 @@ export class AgentListWindow extends EventTarget {
   }
 
   private passesPhase(a: Agent): boolean {
+    if (this.viewState.committedFilterPredicate) {
+      return this.viewState.committedFilterPredicate(a);
+    }
     return !this.viewState.phaseFilter || a.phase === this.viewState.phaseFilter;
   }
 
@@ -1144,6 +1189,7 @@ export class AgentListWindow extends EventTarget {
     const rangeBefore = this.pageKRange();
     const onPage = new Map(this.pageItems.map((a) => [a.id, a]));
     const pageSizeBefore = onPage.size;
+    const statsBefore = this.memberIndex.stats;
     let chip = false;
     let resort = false;
 
@@ -1165,12 +1211,17 @@ export class AgentListWindow extends EventTarget {
           if (rangeBefore && this.onPageChipForNewKey(newK, rangeBefore)) chip = true;
           onPage.set(id, agent);
           resort = true;
+          this.memberIndex.set(id, agent.phase);
         } else {
-          // On-page agent now fails the phase filter: remove the row (backfill chip).
+          // On-page agent now fails the phase / committed query filter: remove the row (backfill chip).
           onPage.delete(id);
           chip = true;
+          if (this.viewState.committedFilterPredicate) {
+            this.memberIndex.delete(id);
+          } else {
+            this.memberIndex.set(id, agent.phase);
+          }
         }
-        this.memberIndex.set(id, agent.phase);
       } else {
         chip ||= this.applyOffPageUpsert(id, agent, rangeBefore);
       }
@@ -1195,8 +1246,12 @@ export class AgentListWindow extends EventTarget {
       );
     }
 
+    const statsAfter = this.memberIndex.stats;
+    const statsChanged =
+      statsAfter.total !== statsBefore.total || statsAfter.running !== statsBefore.running;
+
     if (chip) this._updatesAvailable = true;
-    if (chip || resort) this.notifyChange();
+    if (chip || resort || statsChanged) this.notifyChange();
   }
 
   /**
@@ -1242,6 +1297,15 @@ export class AgentListWindow extends EventTarget {
     const wasMember = this.memberIndex.has(id);
 
     if (wasMember) {
+      if (this.viewState.committedFilterPredicate) {
+        if (!this.viewState.committedFilterPredicate(agent)) {
+          // Existing member stopped matching the committed server query: remove from population.
+          this.memberIndex.delete(id);
+          return false;
+        }
+        this.memberIndex.set(id, agent.phase);
+        return this.withinPageKRange(this.kOf(agent), rangeBefore);
+      }
       // An existing off-page member's phase changes unconditionally: only
       // *adding* a new member is gated by the add rule.
       const prevPhase = this.memberIndex.getPhase(id);
@@ -1282,6 +1346,22 @@ export class AgentListWindow extends EventTarget {
     rangeBefore: { first: string; last: string } | null
   ): boolean {
     if (!this.memberIndex.has(id)) return false; // neither on-page nor a member: ignored.
+    if (this.viewState.committedFilterPredicate || this.viewState.committedPhasePredicate) {
+      if (delta.phase) {
+        if (
+          this.viewState.committedPhasePredicate &&
+          !this.viewState.committedPhasePredicate(delta.phase)
+        ) {
+          // Existing member's phase now violates the committed query: remove from population.
+          this.memberIndex.delete(id);
+          return false;
+        }
+        this.memberIndex.set(id, delta.phase);
+      }
+      return delta.lastActivityEvent && this.serverSort === 'updated'
+        ? this.withinPageKRange(delta.lastActivityEvent, rangeBefore)
+        : false;
+    }
     const prevPhase = this.memberIndex.getPhase(id);
     const prevPassed = !this.viewState.phaseFilter || prevPhase === this.viewState.phaseFilter;
     if (delta.phase) this.memberIndex.set(id, delta.phase);

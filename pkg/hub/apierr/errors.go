@@ -72,12 +72,13 @@ type ErrorResponse struct {
 
 // Error codes matching the Hub API specification.
 const (
-	ErrCodeInvalidRequest  = "invalid_request"
-	ErrCodeValidationError = "validation_error"
-	ErrCodeUnauthorized    = "unauthorized"
-	ErrCodeForbidden       = "forbidden"
-	ErrCodeNotFound        = "not_found"
-	ErrCodeConflict        = "conflict"
+	ErrCodeInvalidRequest     = "invalid_request"
+	ErrCodeInvalidFilterQuery = "invalid_filter_query"
+	ErrCodeValidationError    = "validation_error"
+	ErrCodeUnauthorized       = "unauthorized"
+	ErrCodeForbidden          = "forbidden"
+	ErrCodeNotFound           = "not_found"
+	ErrCodeConflict           = "conflict"
 	// ErrCodeAgentExistsResumable is returned (409) when a create/start
 	// request without Resume targets an existing agent in a resumable
 	// resting phase (suspended, stopped, halted, or an active idle-suspend
