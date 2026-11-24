@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -243,4 +244,61 @@ func shellAgentNotMessageableError(agent *store.Agent) *AgentDMError {
 		Message:    fmt.Sprintf("agent %q is an execution container and cannot receive messages", agentTargetLabel(agent)),
 		HTTPStatus: http.StatusUnprocessableEntity,
 	}
+}
+
+const shellHarnessSwitchRefusalMessage = "cannot switch harness to or from execution container (shell)"
+
+// shellPatchHarnessSwitchError returns a refusal message if a PATCH config
+// payload attempts to switch an agent's harness to or from the reserved
+// built-in "shell" execution container (ptone/scion#8812 §3.4 S7).
+//
+// An unchanged echo of "shell" on an existing shell agent is allowed (and
+// later stripped by dropFixedConfigKeys). Any attempt to set harness_config,
+// harness, or default_harness_config to "shell" on a non-shell agent, or to
+// anything other than "shell" (including clearing it) on a shell agent, is
+// refused outright.
+func shellPatchHarnessSwitchError(agent *store.Agent, cfg *api.ScionConfig, present map[string]bool) string {
+	if cfg == nil {
+		return ""
+	}
+	isShell := isShellAgent(agent)
+	if !isShell {
+		if strings.EqualFold(strings.TrimSpace(cfg.HarnessConfig), config.ShellHarnessConfigName) ||
+			strings.EqualFold(strings.TrimSpace(cfg.Harness), config.ShellHarnessConfigName) ||
+			strings.EqualFold(strings.TrimSpace(cfg.DefaultHarnessConfig), config.ShellHarnessConfigName) {
+			return shellHarnessSwitchRefusalMessage
+		}
+		return ""
+	}
+	if present["harness_config"] && cfg.HarnessConfig != config.ShellHarnessConfigName {
+		return shellHarnessSwitchRefusalMessage
+	}
+	if present["harness"] && cfg.Harness != config.ShellHarnessConfigName {
+		return shellHarnessSwitchRefusalMessage
+	}
+	if present["default_harness_config"] && cfg.DefaultHarnessConfig != config.ShellHarnessConfigName {
+		return shellHarnessSwitchRefusalMessage
+	}
+	return ""
+}
+
+// shellReincarnateHarnessSwitchError returns a refusal message if a
+// reincarnate request attempts a harness switch on a shell execution container
+// or to the reserved "shell" harness config (ptone/scion#8812 §3.4 S7).
+func shellReincarnateHarnessSwitchError(agent *store.Agent, reqHarnessConfig string) string {
+	if reqHarnessConfig == "" {
+		return ""
+	}
+	if isShellAgent(agent) || strings.EqualFold(strings.TrimSpace(reqHarnessConfig), config.ShellHarnessConfigName) {
+		return shellHarnessSwitchRefusalMessage
+	}
+	return ""
+}
+
+// isShellPatchLaunchShaping reports whether an agent PATCH touches any
+// launch-shaping field (anything in config, explicitTimezone, gcp_identity, or
+// agentRole). Non-launch metadata (name, labels, annotations, taskSummary)
+// returns false and keeps agent.update (ptone/scion#8812 §3.4 S7).
+func isShellPatchLaunchShaping(hasConfig, hasExplicitTimezone, hasGCPIdentity, hasAgentRole bool) bool {
+	return hasConfig || hasExplicitTimezone || hasGCPIdentity || hasAgentRole
 }

@@ -252,6 +252,21 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		ValidationError(w, fmt.Sprintf("handoff exceeds %d bytes", maxHandoffBytes), nil)
 		return
 	}
+	// S7 (ptone/scion#8812 §3.4): refuse any harness switch to or from a shell
+	// execution container outright, regardless of experiment flags.
+	if msg := shellReincarnateHarnessSwitchError(agent, req.HarnessConfig); msg != "" {
+		ValidationError(w, msg, nil)
+		return
+	}
+	// S7 (ptone/scion#8812 §3.4): reincarnate patch flags on a shell execution
+	// container require owner-human authorization via authorizeAgentTargetAction
+	// (ActionAttach), blocking project admins without attach and all agent
+	// principals.
+	if isShellAgent(agent) && req.hasPatch() {
+		if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
+			return
+		}
+	}
 	// A harness switch (ptone/scion#7757) is gated by its experiment, ahead
 	// of every other check, so a disabled hub gives a clear reason.
 	if req.HarnessConfig != "" && !s.experimentEnabled(experiments.ReincarnateHarnessSwitch) {
@@ -515,6 +530,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	if isShellAgent(agent) != (fresh.HarnessConfig == config.ShellHarnessConfigName) {
+		ValidationError(w, shellHarnessSwitchRefusalMessage, nil)
 		return
 	}
 	if from, to, ok := implicitHarnessSwitch(agent.AppliedConfig, fresh, patch); ok {
@@ -846,6 +865,10 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	if isShellAgent(agent) != (fresh.HarnessConfig == config.ShellHarnessConfigName) {
+		ValidationError(w, shellHarnessSwitchRefusalMessage, nil)
 		return
 	}
 	if from, to, ok := implicitHarnessSwitch(agent.AppliedConfig, fresh, patch); ok {

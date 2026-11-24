@@ -4891,6 +4891,26 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		}
 	}
 
+	// S7 (ptone/scion#8812 §3.4): refuse any harness switch to or from the
+	// reserved built-in "shell" execution container outright, before any
+	// optimistic-lock, phase, or state mutation.
+	if msg := shellPatchHarnessSwitchError(agent, updates.Config, presentConfigKeys); msg != "" {
+		ValidationError(w, msg, nil)
+		return
+	}
+
+	// S7 (ptone/scion#8812 §3.4): on a shell execution container, every
+	// launch-shaping field (config, explicitTimezone, gcp_identity, agentRole)
+	// requires owner-human authorization via authorizeAgentTargetAction
+	// (ActionAttach), blocking project admins without attach and all agent
+	// principals. Non-launch metadata (name, labels, annotations, taskSummary)
+	// keeps agent.update.
+	if isShellAgent(agent) && isShellPatchLaunchShaping(updates.Config != nil, updates.ExplicitTimezone != nil, updates.GCPIdentity != nil, updates.AgentRole != nil) {
+		if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
+			return
+		}
+	}
+
 	// Env writes require agent.attach in addition to agent.update
 	// (ptone/scion#5599), matching the env action route (agentActionPermission).
 	// Checked before any optimistic-lock, phase, or state mutation so a caller

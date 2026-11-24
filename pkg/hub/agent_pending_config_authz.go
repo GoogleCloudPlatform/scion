@@ -325,20 +325,38 @@ func (s *Server) pendingSaverMayApply(ctx context.Context, agent *store.Agent, d
 	}
 	res := agentResource(agent)
 	decision := s.authzService.CheckAccess(ctx, d.identity, res, ActionUpdate)
-	if decision.Allowed {
-		return d, nil
+	if !decision.Allowed {
+		if pendingFoldDenyIndeterminate(decision) {
+			return d, errPendingReauthIndeterminate
+		}
+		confirm := s.authzService.CheckAccess(maskAllAuthzMemo(ctx), d.identity, res, ActionUpdate)
+		switch {
+		case confirm.Allowed:
+		case pendingFoldDenyIndeterminate(confirm):
+			return d, errPendingReauthIndeterminate
+		default:
+			d.out, d.reason = saverUnauthorized, "agent.update denied: "+confirm.Reason
+			return d, nil
+		}
 	}
-	if pendingFoldDenyIndeterminate(decision) {
-		return d, errPendingReauthIndeterminate
+	// S7 (ptone/scion#8812 §3.4): pending config edits on a shell execution
+	// container mirror the live PATCH gate and require owner-human
+	// ActionAttach through authorizeAgentTargetAction.
+	if isShellAgent(agent) {
+		if denial := s.authorizeAgentTargetAction(ctx, d.identity, agent, ActionAttach); denial != nil {
+			if denial.indeterminate {
+				return d, errPendingReauthIndeterminate
+			}
+			confirm := s.authorizeAgentTargetAction(maskAllAuthzMemo(ctx), d.identity, agent, ActionAttach)
+			if confirm != nil {
+				if confirm.indeterminate {
+					return d, errPendingReauthIndeterminate
+				}
+				d.out, d.reason = saverUnauthorized, "execution container agent.attach denied: "+confirm.reason
+				return d, nil
+			}
+		}
 	}
-	confirm := s.authzService.CheckAccess(maskAllAuthzMemo(ctx), d.identity, res, ActionUpdate)
-	switch {
-	case confirm.Allowed:
-		return d, nil
-	case pendingFoldDenyIndeterminate(confirm):
-		return d, errPendingReauthIndeterminate
-	}
-	d.out, d.reason = saverUnauthorized, "agent.update denied: "+confirm.Reason
 	return d, nil
 }
 

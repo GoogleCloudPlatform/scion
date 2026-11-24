@@ -273,6 +273,10 @@ func withMergedEnv(cfg, base *api.ScionConfig, ep envPatch) *api.ScionConfig {
 // call when it is saved; the harness is fixed after create, so the check
 // still holds when the edit is applied.
 func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig, rawConfig map[string]json.RawMessage) bool {
+	if isShellAgent(agent) && cfg != nil && strings.TrimSpace(cfg.Task) != "" {
+		writeError(w, http.StatusBadRequest, ErrCodeTaskNotSupported, "execution containers do not support an initial task", nil)
+		return false
+	}
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
 	if issues := validateConfigAgainstHarnessCapabilities(cfg, harnessCaps); len(issues) > 0 {
 		ValidationError(w, "Config contains unsupported fields for harness "+resolvedHarness, map[string]interface{}{
