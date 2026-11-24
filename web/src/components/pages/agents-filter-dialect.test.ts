@@ -755,4 +755,141 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect((projDrain as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toEqual(['p1']);
     projDrain.remove();
   });
+
+  it('updates committed predicates without refetching when only a client-only mode: value changes', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    const makeModeAgent = (
+      id: string,
+      projectId: string,
+      messageMode: 'lineage' | 'branch'
+    ): Agent => ({
+      id,
+      name: `agent-${id}`,
+      slug: `agent-${id}`,
+      projectId,
+      template: 'developer',
+      phase: 'running',
+      messageMode,
+    });
+
+    const dispatchSseCreate = (agent: Agent): void => {
+      stateManager.seedAgents([agent]);
+      stateManager.dispatchEvent(
+        new CustomEvent('agents-changed', {
+          detail: {
+            data: {
+              upserted: [agent.id],
+              deleted: [],
+              unknown: new Map(),
+              generation: stateManager.scopeGeneration,
+            },
+          },
+        })
+      );
+    };
+
+    // 1. Global agents page: ?q=mode:lineage -> commit mode:branch
+    window.history.replaceState(null, '', '/agents?q=mode%3Alineage');
+    const globalFetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            agents: [makeModeAgent('a-lineage-0', 'proj-1', 'lineage')],
+            complete: true,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
+    );
+    vi.stubGlobal('fetch', globalFetch);
+
+    const agentsEl = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(agentsEl);
+    await new Promise((r) => setTimeout(r, 20));
+    await agentsEl.updateComplete;
+
+    const fetchCountBefore = globalFetch.mock.calls.length;
+    const box1 = agentsEl.shadowRoot?.querySelector('scion-filter-box');
+    const input1 = box1?.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input1.value = 'mode:branch';
+    input1.dispatchEvent(new Event('input'));
+    input1.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await agentsEl.updateComplete;
+
+    // Server subset is unchanged ('' -> ''), so no extra fetch should fire.
+    expect(globalFetch.mock.calls.length).toBe(fetchCountBefore);
+
+    const globalWin = (agentsEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    const liveBranch1 = makeModeAgent('live-branch-1', 'proj-1', 'branch');
+    const liveLineage1 = makeModeAgent('live-lineage-1', 'proj-1', 'lineage');
+    expect(globalWin.passesCommittedLabel(liveBranch1)).toBe(true);
+    expect(globalWin.passesCommittedLabel(liveLineage1)).toBe(false);
+
+    dispatchSseCreate(liveBranch1);
+    dispatchSseCreate(liveLineage1);
+    expect((agentsEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toContain(
+      'live-branch-1'
+    );
+    expect((agentsEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).not.toContain(
+      'live-lineage-1'
+    );
+    agentsEl.remove();
+
+    // 2. Project detail page: ?q=mode:lineage -> commit mode:branch
+    window.history.replaceState(null, '', '/projects/proj-123?q=mode%3Alineage');
+    const projFetch = vi.fn((input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/api/v1/projects/proj-123/agents')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [makeModeAgent('p-lineage-0', 'proj-123', 'lineage')],
+              complete: true,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: 'proj-123', name: 'Proj 123', slug: 'proj-123' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    });
+    vi.stubGlobal('fetch', projFetch);
+
+    const projEl = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    projEl.projectId = 'proj-123';
+    document.body.appendChild(projEl);
+    await new Promise((r) => setTimeout(r, 20));
+    await projEl.updateComplete;
+
+    const projFetchBefore = projFetch.mock.calls.length;
+    const box2 = projEl.shadowRoot?.querySelector('scion-filter-box');
+    const input2 = box2?.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input2.value = 'mode:branch';
+    input2.dispatchEvent(new Event('input'));
+    input2.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await projEl.updateComplete;
+
+    expect(projFetch.mock.calls.length).toBe(projFetchBefore);
+
+    const projWin = (projEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    const liveBranch2 = makeModeAgent('live-proj-branch-1', 'proj-123', 'branch');
+    const liveLineage2 = makeModeAgent('live-proj-lineage-1', 'proj-123', 'lineage');
+    expect(projWin.passesCommittedLabel(liveBranch2)).toBe(true);
+    expect(projWin.passesCommittedLabel(liveLineage2)).toBe(false);
+
+    dispatchSseCreate(liveBranch2);
+    dispatchSseCreate(liveLineage2);
+    expect((projEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toContain(
+      'live-proj-branch-1'
+    );
+    expect((projEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).not.toContain(
+      'live-proj-lineage-1'
+    );
+    projEl.remove();
+  });
 });

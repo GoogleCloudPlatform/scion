@@ -893,7 +893,6 @@ export class ScionPageAgents extends LitElement {
     const nextHasClientOnly = hasClientOnlyKeys(fq, AGENTS_FILTER_SCHEMA);
     const serverChanged = nextQ !== this.committedServerQ;
     const clientOnlyChanged = nextHasClientOnly !== this.committedHasClientOnly;
-    if (!serverChanged && !clientOnlyChanged) return;
     this.committedServerQ = nextQ;
     this.committedFilterQuery = fq;
     this.committedHasClientOnly = nextHasClientOnly;
@@ -905,7 +904,9 @@ export class ScionPageAgents extends LitElement {
       serverQuery: nextQ,
       hasClientOnlyFilter: nextHasClientOnly,
     });
-    void this.loadAgents('label-commit');
+    if (serverChanged || clientOnlyChanged) {
+      void this.loadAgents('label-commit');
+    }
   }
 
   private setChipInQuery(key: string, value: string): void {

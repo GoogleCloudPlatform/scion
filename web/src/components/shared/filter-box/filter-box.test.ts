@@ -179,6 +179,10 @@ describe('<scion-filter-box>', () => {
     expect(popover).not.toBeNull();
     expect(popover?.textContent).toContain('activity:');
     expect(popover?.textContent).toContain('project:');
+    expect(popover?.textContent).toContain('Project slug or ID');
+    expect(popover?.textContent).toContain('Runtime broker name or ID');
+    expect(popover?.textContent).toContain("Owner ID, email, or 'me'");
+    expect(popover?.textContent).not.toContain('name, slug, or ID');
     expect(popover?.textContent).toContain('mode:');
     expect(popover?.textContent).toContain('local');
   });

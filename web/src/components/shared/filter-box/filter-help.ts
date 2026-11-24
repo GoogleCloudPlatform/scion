@@ -24,8 +24,6 @@ function formatKeyValues(k: KeySchema): TemplateResult | typeof nothing {
   switch (k.kind) {
     case 'label':
       return html`<div class="help-values">key or key=value (exact case)</div>`;
-    case 'ref':
-      return html`<div class="help-values">name, slug, or ID</div>`;
     case 'string':
       return html`<div class="help-values">exact name (case-insensitive)</div>`;
     default:
