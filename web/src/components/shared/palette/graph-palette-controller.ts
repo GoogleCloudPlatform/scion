@@ -58,8 +58,10 @@ export interface GraphPaletteControllerOptions {
   /**
    * Called when the user selects a candidate that is not currently in
    * `treeView().agents` (e.g. hidden by an active graph filter).
+   * Returns true if the host handled the selection (e.g. cleared the filter
+   * and scheduled a reveal); returning false keeps `pickedAgentId` unset.
    */
-  onSelectHidden?: (agentId: string) => void;
+  onSelectHidden?: (agentId: string) => boolean;
 }
 
 /** One Agents-group row per agent, in the given order. */
@@ -123,8 +125,7 @@ export class GraphPaletteController implements ReactiveController {
         }
         if (tree.revealAgent(target.agentId)) {
           this.pickedAgentId = target.agentId;
-        } else if (this.options.onSelectHidden) {
-          this.options.onSelectHidden(target.agentId);
+        } else if (this.options.onSelectHidden?.(target.agentId)) {
           this.pickedAgentId = target.agentId;
         } else {
           this.pickedAgentId = null;

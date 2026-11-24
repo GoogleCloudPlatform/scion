@@ -324,7 +324,7 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     harnessConfig: 'codex',
   });
 
-  it('keeps legacy select and URL unchanged when filters.query_dialect is off', async () => {
+  it('keeps legacy select, URL, and palette selection unchanged when filters.query_dialect is off', async () => {
     vi.spyOn(stateManager, 'getAgents').mockReturnValue([parent, child, other]);
     window.history.replaceState({}, '', '/agents/graph');
     page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
@@ -333,6 +333,28 @@ describe('scion-page-agent-graph filter dialect integration', () => {
 
     expect(page.shadowRoot!.querySelector('scion-filter-box')).toBeNull();
     expect(page.shadowRoot!.querySelector('sl-select')).not.toBeNull();
+
+    // With experiment off, selecting an unrendered/missing agent does not focus it.
+    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    const focusSpy = vi.spyOn(tree, 'focusAgentNode');
+    page.graphPalette.open();
+    const palette = await vi.waitFor(() => {
+      const p = document.querySelector('scion-quick-palette') as
+        | (HTMLElement & { open?: boolean; groups?: { agents?: { status?: string } } })
+        | null;
+      if (!p?.open || p.groups?.agents?.status !== 'ready') throw new Error('palette not ready');
+      return p;
+    });
+    palette.dispatchEvent(
+      new CustomEvent('palette-select', {
+        detail: { target: { kind: 'agent', agentId: 'missing-id', displayName: 'Missing' } },
+      })
+    );
+    palette
+      .shadowRoot!.querySelector('sl-dialog')!
+      .dispatchEvent(new Event('sl-after-hide', { bubbles: true, composed: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(focusSpy).not.toHaveBeenCalled();
   });
 
   it('migrates ?project= to ?q=project:... and filters with dimmed context when dialect is on', async () => {

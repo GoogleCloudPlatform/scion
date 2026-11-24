@@ -190,12 +190,13 @@ export class AgentGraphPage extends LitElement {
       this.renderRoot.querySelector('scion-agent-tree-view'),
     candidates: (): readonly Agent[] | undefined =>
       filtersQueryDialectEnabled() ? this.agents : undefined,
-    onSelectHidden: (agentId: string): void => {
-      if (!filtersQueryDialectEnabled()) return;
+    onSelectHidden: (agentId: string): boolean => {
+      if (!filtersQueryDialectEnabled()) return false;
       this.onClearFilter();
       void this.updateComplete.then(() => {
         this.renderRoot.querySelector('scion-agent-tree-view')?.revealAgent(agentId);
       });
+      return true;
     },
   });
 
