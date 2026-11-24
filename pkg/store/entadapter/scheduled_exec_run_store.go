@@ -95,6 +95,20 @@ func finalExecOutcome(o string) bool {
 	return false
 }
 
+// scheduledExecOverlapLockKey returns the Postgres advisory-lock key for run
+// overlap serialization. Schedule-owned runs keep the legacy hash(scheduleID)
+// key so mixed-version replicas still serialize during a rolling upgrade;
+// trigger-owned runs hash the "trigger:<id>" overlapKey.
+func scheduledExecOverlapLockKey(scheduleID, overlapKey string) (int32, bool) {
+	if scheduleID != "" {
+		return store.StableProjectHash(scheduleID), true
+	}
+	if overlapKey != "" {
+		return store.StableProjectHash(overlapKey), true
+	}
+	return 0, false
+}
+
 // CreateScheduledExecRun inserts the run record of an admitted exec event or
 // trigger fire inside a transaction that verifies the owner is still open
 // (scheduled_events status fired/expired or trigger_fires status firing;
@@ -204,10 +218,10 @@ func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.S
 		return nil
 	}
 	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
-		if overlapKey != "" && isPostgres(c) {
+		if lockKey, ok := scheduledExecOverlapLockKey(run.ScheduleID, overlapKey); ok && isPostgres(c) {
 			var res sql.Result
 			if err := c.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
-				[]any{int32(store.LockScheduledExecOverlap), store.StableProjectHash(overlapKey)}, &res); err != nil {
+				[]any{int32(store.LockScheduledExecOverlap), lockKey}, &res); err != nil {
 				return fmt.Errorf("lock scheduled exec overlap: %w", err)
 			}
 		}

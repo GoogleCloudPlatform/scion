@@ -2693,7 +2693,7 @@ func (s *TriggerStore) PurgeOldTriggerHistory(ctx context.Context, olderThan tim
 		return nil
 	})
 	if err != nil {
-		return eventsDeleted, firesDeleted, err
+		return 0, 0, err
 	}
 	return eventsDeleted, firesDeleted, nil
 }

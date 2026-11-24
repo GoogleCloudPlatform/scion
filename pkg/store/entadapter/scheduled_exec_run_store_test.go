@@ -1441,3 +1441,24 @@ func TestScheduledExecRun_TriggerFireOwnerLifecycle(t *testing.T) {
 	_, err = s.GetScheduledExecRun(ctx, f1.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
+
+// TestScheduledExecOverlapLockKey_PreservesLegacyScheduleHash pins O-a:
+// schedule-owned runs keep hashing the raw scheduleID (not "schedule:"+id) so
+// mixed-version replicas still serialize on the same Postgres advisory lock
+// during a rolling upgrade, while trigger-owned runs hash "trigger:<id>".
+func TestScheduledExecOverlapLockKey_PreservesLegacyScheduleHash(t *testing.T) {
+	sid := uuid.NewString()
+	tid := uuid.NewString()
+
+	key, ok := scheduledExecOverlapLockKey(sid, "schedule:"+sid)
+	require.True(t, ok)
+	assert.Equal(t, store.StableProjectHash(sid), key, "schedule runs must keep legacy hash(scheduleID)")
+	assert.NotEqual(t, store.StableProjectHash("schedule:"+sid), key)
+
+	key, ok = scheduledExecOverlapLockKey("", "trigger:"+tid)
+	require.True(t, ok)
+	assert.Equal(t, store.StableProjectHash("trigger:"+tid), key, "trigger runs must hash overlapKey")
+
+	_, ok = scheduledExecOverlapLockKey("", "")
+	assert.False(t, ok, "one-shot runs without overlap scope must not lock")
+}

@@ -48,10 +48,12 @@ import (
 //     capabilities.features advertises exec_context.v1. If a fire-owned run has
 //     trigger context and the session lacks exec_context.v1, the hub refuses the
 //     run before sending exec-start (fire failed, "sciontool lacks exec_context.v1")
-//     and never starts without context or drops the field. Only keys in the rule's
-//     validated contextAttributes allow-list are copied (each value <=4 KiB, valid
-//     UTF-8, no NUL; total JSON <=16 KiB; violations refuse the fire without
-//     truncation). Bound into sciontool's execBinding sha256 digest and never logged.
+//     and never starts without context or drops the field. Top-level subject is
+//     included ONLY when the rule's contextAttributes allow-list contains the
+//     "subject" token, and only keys in contextAttributes are copied into
+//     attributes (each value <=4 KiB, valid UTF-8, no NUL; total JSON <=16 KiB;
+//     violations refuse the fire without truncation). Bound into sciontool's
+//     execBinding sha256 digest and never logged.
 //  4. Working directory (workdir): fixed by sciontool (/workspace -> HOME -> /);
 //     neither rule config nor event data can influence it.
 //  5. Attach target (agentId / launch_id): resolved to authoritative UUID agentId
@@ -210,7 +212,7 @@ func (a *execAction) Preauthorize(ctx context.Context, req hubfire.FireRequest) 
 			a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New(execReasonSourceNotReplayProtected))
 			return &FireRefusal{Reason: execReasonSourceNotReplayProtected}, nil
 		}
-		if !execWebhookDeliveryProtected(req.Event, ep) {
+		if !execWebhookDeliveryProtected(req.Event) {
 			a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New(execReasonMissingDeliveryID))
 			return &FireRefusal{Reason: execReasonMissingDeliveryID}, nil
 		}
@@ -223,14 +225,12 @@ func (a *execAction) Preauthorize(ctx context.Context, req hubfire.FireRequest) 
 }
 
 // execWebhookDeliveryProtected enforces the M1 replay rule for webhook-sourced
-// exec fires: a non-hub_token webhook delivery must carry a non-empty delivery
-// id (ev.Attributes["delivery"]). P4a will consolidate this into a shared
-// helper alongside dispatch_agent.
-func execWebhookDeliveryProtected(ev *hubfire.FireEvent, ep *store.WebhookEndpoint) bool {
+// exec fires: a webhook delivery must carry a non-empty delivery id
+// (ev.Attributes["delivery"]). P4a will consolidate this into a shared helper
+// alongside dispatch_agent and exempt auth_mode == "hub_token" when auth_mode
+// lands.
+func execWebhookDeliveryProtected(ev *hubfire.FireEvent) bool {
 	if ev == nil || ev.SourceKind != store.TriggerSourceKindWebhook {
-		return true
-	}
-	if ep != nil && ep.SignatureMode == "hub_token" {
 		return true
 	}
 	return strings.TrimSpace(ev.Attributes["delivery"]) != ""

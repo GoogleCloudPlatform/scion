@@ -371,7 +371,7 @@ func TestTriggerExec_AcceptanceFixture_WebhookStartedJobEndToEnd(t *testing.T) {
 			AgentID:           f.launched.ID,
 			Command:           cmd,
 			TimeoutSeconds:    30,
-			ContextAttributes: []string{"event", "endpoint_name"},
+			ContextAttributes: []string{"event", "endpoint_name", "subject"},
 		},
 	})
 	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
@@ -441,7 +441,9 @@ func TestTriggerExec_AcceptanceFixture_WebhookStartedJobEndToEnd(t *testing.T) {
 	assert.Equal(t, "webhook:"+ep.ID+"/"+subject, gotCtx.Subject)
 	assert.Equal(t, "ci-sync-hook", gotCtx.Attributes["endpoint_name"])
 	assert.Equal(t, eventHeader, gotCtx.Attributes["event"])
-	// Non-allow-listed attributes (e.g. delivery, signature_mode) must NOT appear.
+	// Non-allow-listed attributes (e.g. delivery, signature_mode) must NOT appear,
+	// and "subject" maps to top-level subject rather than duplicating into attributes.
+	assert.NotContains(t, gotCtx.Attributes, "subject")
 	assert.NotContains(t, gotCtx.Attributes, "delivery")
 	assert.NotContains(t, gotCtx.Attributes, "signature_mode")
 
@@ -475,7 +477,7 @@ func TestTriggerExec_AcceptanceFixture_WebhookStartedJobEndToEnd(t *testing.T) {
 		assert.Equal(t, fire.ID, a.FireID)
 		if a.Action == ScheduledExecAuditAdmit {
 			sawAdmit = true
-			assert.Equal(t, []string{"endpoint_name", "event"}, a.ContextAttributeKeys)
+			assert.Equal(t, []string{"endpoint_name", "event", "subject"}, a.ContextAttributeKeys)
 		}
 		if a.Action == ScheduledExecAuditOutcome {
 			sawOutcome = true
@@ -670,7 +672,7 @@ func TestTriggerExec_MissingCapabilityRefusalAndContextBounds(t *testing.T) {
 		AgentName:         f.launched.Slug,
 		Command:           []string{"true"},
 		TimeoutSeconds:    30,
-		ContextAttributes: []string{"big"},
+		ContextAttributes: []string{"big", "subject"},
 	}).encode()
 	require.NoError(t, err)
 
@@ -978,4 +980,285 @@ func TestTriggerExec_FireTimeReplayAndDeliveryIDRefusals(t *testing.T) {
 	auditCol.mu.Unlock()
 	assert.Contains(t, refusedReasons, execReasonMissingDeliveryID)
 	assert.Contains(t, refusedReasons, execReasonSourceNotReplayProtected)
+}
+
+// TestTriggerExec_SubjectOptIn_ClaimReleaseOnOverlap_AndFireRateCap verifies:
+//   - O-b: SCION_TRIGGER_CONTEXT omits top-level subject unless "subject" is in
+//     the rule's contextAttributes allow-list, and includes it when allow-listed;
+//   - O-c (kills mutant m11): when a skip-mode trigger acquires a subject claim
+//     and then hits an overlap (previous run in progress) at run admission, the
+//     unbound claim is released immediately;
+//   - O-d (kills mutant m12): when a trigger exceeds triggerExecMaxFiresPerMinute
+//     recent non-skipped fires, the next fire is skipped with execReasonRateLimit
+//     and zero exec-start RPCs are sent.
+func TestTriggerExec_SubjectOptIn_ClaimReleaseOnOverlap_AndFireRateCap(t *testing.T) {
+	// 1. O-b: buildTriggerExecContext omits subject without opt-in and includes it with opt-in.
+	baseReq := hubfire.FireRequest{
+		ProjectID: "proj-ob",
+		Authority: hubfire.RecordedAuthority{
+			DefinitionKind: hubfire.DefinitionKindTrigger,
+			DefinitionID:   "trg-ob",
+			FireID:         "fire-ob",
+		},
+		Event: &hubfire.FireEvent{
+			ID:         "evt-ob",
+			Subject:    "webhook:ep/ci/nightly",
+			Attributes: map[string]string{"event": "ci_done", "subject": "ci/nightly"},
+		},
+	}
+	rawNoSubject, err := buildTriggerExecContext(baseReq, []string{"event"})
+	require.NoError(t, err)
+	var ctxNoSubject triggerExecContextPayload
+	require.NoError(t, json.Unmarshal([]byte(rawNoSubject), &ctxNoSubject))
+	assert.Empty(t, ctxNoSubject.Subject, "subject must be omitted unless allow-listed")
+	assert.Equal(t, "ci_done", ctxNoSubject.Attributes["event"])
+
+	rawWithSubject, err := buildTriggerExecContext(baseReq, []string{"event", "subject"})
+	require.NoError(t, err)
+	var ctxWithSubject triggerExecContextPayload
+	require.NoError(t, json.Unmarshal([]byte(rawWithSubject), &ctxWithSubject))
+	assert.Equal(t, "webhook:ep/ci/nightly", ctxWithSubject.Subject)
+	assert.NotContains(t, ctxWithSubject.Attributes, "subject")
+
+	// 2. O-c: skip-mode claim acquired, then overlap at run admission -> claim released.
+	f := newExecRouteFixture(t)
+	enableTriggerExecExperiments(t, f.srv)
+	f.startAgent(t)
+
+	ctx := context.Background()
+	projectID := f.launched.ProjectID
+	ep := &store.WebhookEndpoint{
+		ID:                  api.NewUUID(),
+		ProjectID:           projectID,
+		Name:                "oc-od-hook",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    f.owner.ID(),
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		SecretVersion:       1,
+		Status:              store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, f.store.CreateWebhookEndpoint(ctx, ep))
+
+	payloadJSON, err := (&scheduledExecPayload{
+		AgentID:        f.launched.ID,
+		AgentName:      f.launched.Slug,
+		Command:        []string{"true"},
+		TimeoutSeconds: 30,
+	}).encode()
+	require.NoError(t, err)
+
+	tr := &store.Trigger{
+		ID:            api.NewUUID(),
+		ProjectID:     projectID,
+		Name:          "oc-od-trig",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      ep.ID,
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionExec,
+		ActionPayload: payloadJSON,
+		SubjectMode:   store.TriggerSubjectModeSkip,
+		Status:        store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    f.owner.ID(),
+			InitiatorCredentialKind: "session",
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}
+	require.NoError(t, f.store.CreateTrigger(ctx, tr))
+
+	makeFire := func(subject string) (string, hubfire.FireRequest) {
+		now := time.Now().UTC()
+		delivID := api.NewUUID()
+		ev := &store.TriggerEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   ep.ID,
+			Type:       "webhook.received",
+			Subject:    subject,
+			DedupKey:   delivID,
+			OccurredAt: now,
+			ReceivedAt: now,
+			Attributes: map[string]string{"delivery": delivID},
+			Status:     store.TriggerEventStatusPending,
+		}
+		require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
+		tf := &store.TriggerFire{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			TriggerID:  tr.ID,
+			EventID:    ev.ID,
+			Subject:    subject,
+			ActionType: store.TriggerActionExec,
+			Status:     store.TriggerFireStatusFiring,
+			LeaseUntil: now.Add(10 * time.Minute),
+			StartedAt:  now,
+			CreatedAt:  now,
+		}
+		claimed, _, cErr := f.store.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, cErr)
+		require.True(t, claimed)
+		return tf.ID, hubfire.FireRequest{
+			ProjectID: projectID,
+			Authority: hubfire.RecordedAuthority{
+				Attribution:    tr.InitiatorAttribution,
+				Ceiling:        tr.AuthorityCeiling,
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   tr.ID,
+				FireID:         tf.ID,
+			},
+			ActionType: store.TriggerActionExec,
+			Payload:    tr.ActionPayload,
+			Event: &hubfire.FireEvent{
+				ID:         ev.ID,
+				ProjectID:  projectID,
+				SourceKind: ev.SourceKind,
+				SourceID:   ev.SourceID,
+				Type:       ev.Type,
+				Subject:    subject,
+				Attributes: ev.Attributes,
+				Trigger: &hubfire.FireTriggerRef{
+					ID:          tr.ID,
+					Name:        tr.Name,
+					SubjectMode: store.TriggerSubjectModeSkip,
+					FireSubject: subject,
+				},
+			},
+			Executor: hubfire.ExecutorContext{Kind: "trigger_drainer", ID: "trigger_event:" + ev.ID},
+		}
+	}
+
+	// Seed an active unfinished run holding overlap_key = "trigger:<tr.ID>" for another subject.
+	blockerFireID, _ := makeFire("job-blocker")
+	now := time.Now().UTC()
+	require.NoError(t, f.store.CreateScheduledExecRun(ctx, &store.ScheduledExecRun{
+		FireID:         blockerFireID,
+		OverlapKey:     "trigger:" + tr.ID,
+		ProjectID:      projectID,
+		TargetAgentID:  f.launched.ID,
+		CommandSHA256:  agentcontrol.ExecArgvDigest([]string{"true"}),
+		Argc:           1,
+		TimeoutSeconds: 30,
+		StartedAt:      now,
+		NotAfter:       now.Add(time.Minute),
+		LeaseUntil:     now.Add(3 * time.Minute),
+		Outcome:        store.ScheduledExecOutcomeRunning,
+		Runtime:        f.launched.Runtime,
+		LaunchID:       f.launched.RunID,
+	}))
+
+	// Fire for a new subject ("job-overlap"): claim succeeds, then DB overlap refuses.
+	_, overlapReq := makeFire("job-overlap")
+	overlapOut := f.srv.fireAction(ctx, overlapReq)
+	assert.Equal(t, hubfire.FireStatusSkipped, overlapOut.Status)
+	assert.Equal(t, execReasonOverlap, overlapOut.Error)
+	// The unbound claim MUST have been released (kills mutant m11).
+	_, claimErr := f.store.GetActiveTriggerSubjectClaim(ctx, tr.ID, "job-overlap")
+	assert.ErrorIs(t, claimErr, store.ErrNotFound, "unbound skip claim must be released on pre-admission overlap failure")
+
+	// 3. O-d: per-trigger fire-rate cap (> triggerExecMaxFiresPerMinute recent non-skipped fires).
+	// Create a fresh trigger without an active blocker run, seed triggerExecMaxFiresPerMinute
+	// recent non-skipped fires, and verify the next fire is skipped with execReasonRateLimit.
+	trCap := *tr
+	trCap.ID = api.NewUUID()
+	trCap.Name = "od-rate-cap-trig"
+	trCap.SubjectMode = store.TriggerSubjectModeNew
+	require.NoError(t, f.store.CreateTrigger(ctx, &trCap))
+
+	for i := 0; i < triggerExecMaxFiresPerMinute; i++ {
+		ts := time.Now().UTC()
+		ev := &store.TriggerEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   ep.ID,
+			Type:       "webhook.received",
+			Subject:    fmt.Sprintf("cap-%d", i),
+			DedupKey:   api.NewUUID(),
+			OccurredAt: ts,
+			ReceivedAt: ts,
+			Status:     store.TriggerEventStatusProcessed,
+		}
+		require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
+		tf := &store.TriggerFire{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			TriggerID:  trCap.ID,
+			EventID:    ev.ID,
+			Subject:    ev.Subject,
+			ActionType: store.TriggerActionExec,
+			Status:     store.TriggerFireStatusFired,
+			LeaseUntil: ts.Add(time.Minute),
+			StartedAt:  ts,
+			CreatedAt:  ts,
+		}
+		claimed, _, cErr := f.store.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, cErr)
+		require.True(t, claimed)
+	}
+
+	startsBefore := f.capture.count(execRoutePath(agentcontrol.RouteExecStart))
+	ts := time.Now().UTC()
+	delivID := api.NewUUID()
+	evOver := &store.TriggerEvent{
+		ID:         api.NewUUID(),
+		ProjectID:  projectID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   ep.ID,
+		Type:       "webhook.received",
+		Subject:    "cap-over",
+		DedupKey:   delivID,
+		OccurredAt: ts,
+		ReceivedAt: ts,
+		Attributes: map[string]string{"delivery": delivID},
+		Status:     store.TriggerEventStatusPending,
+	}
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, evOver))
+	tfOver := &store.TriggerFire{
+		ID:         api.NewUUID(),
+		ProjectID:  projectID,
+		TriggerID:  trCap.ID,
+		EventID:    evOver.ID,
+		Subject:    evOver.Subject,
+		ActionType: store.TriggerActionExec,
+		Status:     store.TriggerFireStatusFiring,
+		LeaseUntil: ts.Add(10 * time.Minute),
+		StartedAt:  ts,
+		CreatedAt:  ts,
+	}
+	claimed, _, cErr := f.store.ClaimTriggerFire(ctx, tfOver)
+	require.NoError(t, cErr)
+	require.True(t, claimed)
+
+	overOut := f.srv.fireAction(ctx, hubfire.FireRequest{
+		ProjectID: projectID,
+		Authority: hubfire.RecordedAuthority{
+			Attribution:    trCap.InitiatorAttribution,
+			Ceiling:        trCap.AuthorityCeiling,
+			DefinitionKind: hubfire.DefinitionKindTrigger,
+			DefinitionID:   trCap.ID,
+			FireID:         tfOver.ID,
+		},
+		ActionType: store.TriggerActionExec,
+		Payload:    trCap.ActionPayload,
+		Event: &hubfire.FireEvent{
+			ID:         evOver.ID,
+			ProjectID:  projectID,
+			SourceKind: evOver.SourceKind,
+			SourceID:   evOver.SourceID,
+			Type:       evOver.Type,
+			Subject:    evOver.Subject,
+			Attributes: evOver.Attributes,
+			Trigger:    &hubfire.FireTriggerRef{ID: trCap.ID, Name: trCap.Name, SubjectMode: store.TriggerSubjectModeNew},
+		},
+		Executor: hubfire.ExecutorContext{Kind: "trigger_drainer", ID: "trigger_event:" + evOver.ID},
+	})
+	assert.Equal(t, hubfire.FireStatusSkipped, overOut.Status)
+	assert.Equal(t, execReasonRateLimit, overOut.Error)
+	assert.Equal(t, startsBefore, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)),
+		"rate-limited fire must not send exec-start")
 }

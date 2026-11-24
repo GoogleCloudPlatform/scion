@@ -235,29 +235,39 @@ type triggerExecContextPayload struct {
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
+// triggerExecContextAttrSubject is the reserved contextAttributes allow-list
+// token that opts into including the fire's subject in SCION_TRIGGER_CONTEXT.
+const triggerExecContextAttrSubject = "subject"
+
 // buildTriggerExecContext constructs the bounded SCION_TRIGGER_CONTEXT JSON
-// string for req, copying only event attributes explicitly listed in allowAttrs.
+// string for req, copying only event attributes explicitly listed in allowAttrs
+// (and including top-level "subject" only when allowAttrs contains "subject").
 // Any invalid UTF-8, NUL byte, or bound violation returns an error (never truncates).
 func buildTriggerExecContext(req hubfire.FireRequest, allowAttrs []string) (string, error) {
 	if req.Event == nil {
 		return "", errors.New("missing trigger event for exec context")
 	}
-	subject := req.Event.Subject
-	if req.Event.Trigger != nil && req.Event.Trigger.FireSubject != "" {
-		subject = req.Event.Trigger.FireSubject
-	}
-	if subject != "" && (!utf8.ValidString(subject) || strings.IndexByte(subject, 0) >= 0) {
-		return "", errors.New("trigger context subject violates bounds")
-	}
 	payload := triggerExecContextPayload{
 		EventID:   req.Event.ID,
 		TriggerID: req.Authority.DefinitionID,
 		FireID:    req.Authority.FireID,
-		Subject:   subject,
+	}
+	if slices.Contains(allowAttrs, triggerExecContextAttrSubject) {
+		subject := req.Event.Subject
+		if req.Event.Trigger != nil && req.Event.Trigger.FireSubject != "" {
+			subject = req.Event.Trigger.FireSubject
+		}
+		if subject != "" && (!utf8.ValidString(subject) || strings.IndexByte(subject, 0) >= 0) {
+			return "", errors.New("trigger context subject violates bounds")
+		}
+		payload.Subject = subject
 	}
 	if len(allowAttrs) > 0 && len(req.Event.Attributes) > 0 {
 		attrs := make(map[string]string, len(allowAttrs))
 		for _, k := range allowAttrs {
+			if k == triggerExecContextAttrSubject {
+				continue
+			}
 			v, ok := req.Event.Attributes[k]
 			if !ok {
 				continue

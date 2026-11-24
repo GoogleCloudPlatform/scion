@@ -293,7 +293,7 @@ func TestExecStartSchema400(t *testing.T) {
 		"unknown field": {`{"v":1,"run_id":"` + good.RunID + `","argv":["true"],"timeout_s":1,"not_after_unix_ms":1,"cwd":"/"}`, "body"},
 		"trailing data": {`{"v":1,"run_id":"` + good.RunID + `","argv":["true"],"timeout_s":1,"not_after_unix_ms":1} {}`, "body"},
 		"not json":      {`argv=true`, "body"},
-		"version":       {mut(func(r *agentcontrol.ExecStartRequest) { r.V = 3 }), "v"},
+		"version":       {mut(func(r *agentcontrol.ExecStartRequest) { r.V = 2 }), "v"},
 		"run id":        {mut(func(r *agentcontrol.ExecStartRequest) { r.RunID = "not-a-uuid" }), "run_id"},
 		"run id upper":  {mut(func(r *agentcontrol.ExecStartRequest) { r.RunID = "AAAAAAAA-0000-4000-8000-00000000000A" }), "run_id"},
 		"schedule id":   {mut(func(r *agentcontrol.ExecStartRequest) { r.ScheduleID = "x" }), "schedule_id"},
