@@ -71,6 +71,8 @@ export class ScionArtifactList extends LitElement {
   @property({ type: String }) projectId = '';
   /** The signed-in user, shown as "You" in the Owner column. */
   @property({ type: String }) currentUserId = '';
+  /** URL query parameter used to persist the filter query (defaults to `q`). */
+  @property({ type: String }) urlParam = 'q';
 
   @state() private items: ArtifactListItem[] = [];
   @state() private cursor = '';
@@ -250,7 +252,7 @@ export class ScionArtifactList extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     if (filtersQueryDialectEnabled()) {
-      const urlQ = new URLSearchParams(window.location.search).get('q') ?? '';
+      const urlQ = new URLSearchParams(window.location.search).get(this.urlParam) ?? '';
       if (urlQ) {
         this.filterQueryText = urlQ;
         const parsed = parseFilterQuery(urlQ, knownKeysFor(PROJECT_ARTIFACTS_SCHEMA));
@@ -356,9 +358,9 @@ export class ScionArtifactList extends LitElement {
     const params = new URLSearchParams(window.location.search);
     const trimmed = raw.trim();
     if (trimmed) {
-      params.set('q', trimmed);
+      params.set(this.urlParam, trimmed);
     } else {
-      params.delete('q');
+      params.delete(this.urlParam);
     }
     replaceSearch(params);
   }

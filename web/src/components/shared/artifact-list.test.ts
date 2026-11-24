@@ -492,6 +492,53 @@ describe('artifact list paging', () => {
       window.history.replaceState({}, '', '/');
     }
   });
+
+  it('uses custom urlParam (aq) without touching q when configured', async () => {
+    window.__SCION_FEATURES__ = { 'filters.query_dialect': true };
+    window.history.replaceState({}, '', '/projects/p-1?q=phase%3Arunning&aq=is%3Ashared');
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        urls.push(url);
+        return Promise.resolve(
+          new Response(JSON.stringify({ artifacts: [item('s')] }), { status: 200 })
+        );
+      })
+    );
+    try {
+      const el = document.createElement('scion-artifact-list') as ListElement & {
+        urlParam: string;
+      };
+      el.projectId = 'p-1';
+      el.urlParam = 'aq';
+      document.body.appendChild(el);
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+      const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+        value: string;
+      };
+      expect(box.value).toBe('is:shared');
+      expect(urls[0]).toContain('q=is%3Ashared');
+
+      // Toggling the chip clears `aq` while leaving `q=phase:running` untouched.
+      const chip = el.shadowRoot!.querySelector<HTMLButtonElement>('.filter-chip')!;
+      chip.click();
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+      const params = new URLSearchParams(window.location.search);
+      expect(params.get('aq')).toBeNull();
+      expect(params.get('q')).toBe('phase:running');
+    } finally {
+      delete window.__SCION_FEATURES__;
+      window.history.replaceState({}, '', '/');
+    }
+  });
 });
 
 describe('publish dialog helpers', () => {

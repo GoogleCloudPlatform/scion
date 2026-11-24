@@ -3347,6 +3347,7 @@ export class ScionPageProjectDetail extends LitElement {
       return html`<scion-artifact-list
         .projectId=${this.projectId}
         .currentUserId=${this.pageData?.user?.id ?? ''}
+        urlParam="aq"
       ></scion-artifact-list>`;
     }
     return html`
