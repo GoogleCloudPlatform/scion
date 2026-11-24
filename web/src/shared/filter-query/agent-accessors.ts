@@ -139,6 +139,17 @@ export function matchAgentQuery(fq: Query, agent: Agent, ctx?: AgentFilterContex
 }
 
 /**
+ * Conservative live-add membership check for SSE creates and drain-time adds:
+ * returns false whenever `fq` contains any server-only term (`is:`, external-email
+ * `owner:`) that the client cannot evaluate, and otherwise evaluates `fq` locally.
+ */
+export function canLiveAddAgent(fq: Query | null, agent: Agent, ctx?: AgentFilterContext): boolean {
+  if (fq === null) return true;
+  if (hasServerOnlyAgentTerms(fq, ctx)) return false;
+  return matchAgentQuery(fq, agent, ctx);
+}
+
+/**
  * Build a phase-only predicate from `fq` for off-page unknown SSE deltas that
  * carry only `phase` (ignoring other terms so they never falsely evict).
  */

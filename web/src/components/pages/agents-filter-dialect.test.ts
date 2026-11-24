@@ -426,4 +426,333 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(isMemberOther).toBe(false);
     elMe.remove();
   });
+
+  it('does not overwrite in-progress invalid text or URL when a deferred commit fires on global and project pages', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    vi.useFakeTimers();
+    try {
+      // 1) Global agents page
+      window.history.replaceState(null, '', '/agents');
+      const agentsEl = document.createElement('scion-page-agents') as ScionPageAgents;
+      document.body.appendChild(agentsEl);
+      await vi.advanceTimersByTimeAsync(20);
+      await agentsEl.updateComplete;
+
+      const box1 = agentsEl.shadowRoot?.querySelector('scion-filter-box');
+      expect(box1).not.toBeNull();
+      const input1 = box1?.shadowRoot?.querySelector('input') as HTMLInputElement;
+
+      fetchUrls = [];
+      input1.value = 'phase:running';
+      input1.dispatchEvent(new Event('input'));
+      await agentsEl.updateComplete;
+
+      await vi.advanceTimersByTimeAsync(100);
+      input1.value = 'phase:running label:';
+      input1.dispatchEvent(new Event('input'));
+      await agentsEl.updateComplete;
+
+      await vi.advanceTimersByTimeAsync(250);
+      await agentsEl.updateComplete;
+
+      const box1After = agentsEl.shadowRoot?.querySelector('scion-filter-box');
+      expect(box1After?.value).toBe('phase:running label:');
+      expect(new URLSearchParams(window.location.search).get('q')).toBeNull();
+      expect(fetchUrls.some((u) => u.includes('q=phase%3Arunning'))).toBe(true);
+      agentsEl.remove();
+
+      // 2) Project detail page
+      window.history.replaceState(null, '', '/projects/proj-123');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL) => {
+          const url =
+            typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+          fetchUrls.push(url);
+          if (url.includes('/api/v1/projects/proj-123/agents')) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  agents: [
+                    {
+                      id: 'a1',
+                      name: 'a1',
+                      slug: 'a1',
+                      projectId: 'proj-123',
+                      template: 'dev',
+                      phase: 'running',
+                    },
+                  ],
+                  complete: true,
+                  totalCount: 1,
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+              )
+            );
+          }
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: 'proj-123', name: 'Proj 123', slug: 'proj-123' }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        })
+      );
+
+      const projEl = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+      projEl.projectId = 'proj-123';
+      document.body.appendChild(projEl);
+      await vi.advanceTimersByTimeAsync(20);
+      await projEl.updateComplete;
+
+      const box2 = projEl.shadowRoot?.querySelector('scion-filter-box');
+      expect(box2).not.toBeNull();
+      const input2 = box2?.shadowRoot?.querySelector('input') as HTMLInputElement;
+
+      fetchUrls = [];
+      input2.value = 'phase:running';
+      input2.dispatchEvent(new Event('input'));
+      await projEl.updateComplete;
+
+      await vi.advanceTimersByTimeAsync(100);
+      input2.value = 'phase:running label:';
+      input2.dispatchEvent(new Event('input'));
+      await projEl.updateComplete;
+
+      await vi.advanceTimersByTimeAsync(250);
+      await projEl.updateComplete;
+
+      const box2After = projEl.shadowRoot?.querySelector('scion-filter-box');
+      expect(box2After?.value).toBe('phase:running label:');
+      expect(new URLSearchParams(window.location.search).get('q')).toBeNull();
+      expect(
+        fetchUrls.some(
+          (u) => u.includes('/api/v1/projects/proj-123/agents') && u.includes('q=phase%3Arunning')
+        )
+      ).toBe(true);
+      projEl.remove();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('pins all remaining live-add/membership sites (shouldAdd, loadFitAgents, drainGlobalAgents, project-detail isAddable/shouldAdd/drainProjectAgents)', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    const makeAgent = (id: string, projectId: string, ownerId: string): Agent => ({
+      id,
+      name: `a-${id}`,
+      slug: `a-${id}`,
+      projectId,
+      template: 'developer',
+      phase: 'running',
+      ownerId,
+      messageMode: 'lineage',
+    });
+
+    const user = { id: 'me-id', email: 'me@example.com', name: 'Me', role: 'admin' as const };
+    const dispatchEpochCreate = (agent: Agent): void => {
+      stateManager.seedAgents([agent]);
+      stateManager.dispatchEvent(
+        new CustomEvent('agent-created', {
+          detail: { data: agent },
+        })
+      );
+    };
+    const dispatchSseCreate = (agent: Agent): void => {
+      stateManager.seedAgents([agent]);
+      stateManager.dispatchEvent(
+        new CustomEvent('agents-changed', {
+          detail: {
+            data: {
+              upserted: [agent.id],
+              deleted: [],
+              unknown: new Map(),
+              generation: stateManager.scopeGeneration,
+            },
+          },
+        })
+      );
+    };
+
+    // (A) agents.ts shouldAdd (small/local state)
+    window.history.replaceState(null, '', '/agents?q=owner%3Abob%40example.com');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ agents: [makeAgent('a1', 'proj-1', 'bob-id')], complete: true }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        )
+      )
+    );
+    const elSmall = document.createElement('scion-page-agents') as ScionPageAgents;
+    elSmall.pageData = { path: '/agents', title: 'Agents', user };
+    document.body.appendChild(elSmall);
+    await new Promise((r) => setTimeout(r, 15));
+    await elSmall.updateComplete;
+    dispatchSseCreate(makeAgent('live-carol-small', 'proj-1', 'carol-id'));
+    expect((elSmall as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toEqual(['a1']);
+    elSmall.remove();
+
+    // (B) agents.ts loadFitAgents epoch.seed isMember (SSE create during in-flight fit request)
+    let resolveFit!: (r: Response) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((res) => {
+            resolveFit = res;
+          })
+      )
+    );
+    const elFit = document.createElement('scion-page-agents') as ScionPageAgents;
+    elFit.pageData = { path: '/agents', title: 'Agents', user };
+    document.body.appendChild(elFit);
+    await new Promise((r) => setTimeout(r, 5));
+    dispatchEpochCreate(makeAgent('live-carol-fit', 'proj-1', 'carol-id'));
+    resolveFit(
+      new Response(
+        JSON.stringify({ agents: [makeAgent('a1', 'proj-1', 'bob-id')], complete: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await new Promise((r) => setTimeout(r, 15));
+    expect((elFit as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toEqual(['a1']);
+    elFit.remove();
+
+    // (C) agents.ts drainGlobalAgents isMember (SSE create during in-flight drain)
+    window.history.replaceState(null, '', '/agents?q=mode%3Alineage%20owner%3Abob%40example.com');
+    let resolveDrain!: (r: Response) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((res) => {
+            resolveDrain = res;
+          })
+      )
+    );
+    const elDrain = document.createElement('scion-page-agents') as ScionPageAgents;
+    elDrain.pageData = { path: '/agents', title: 'Agents', user };
+    document.body.appendChild(elDrain);
+    await new Promise((r) => setTimeout(r, 10));
+    dispatchEpochCreate(makeAgent('live-carol-drain', 'proj-1', 'carol-id'));
+    resolveDrain(
+      new Response(JSON.stringify({ agents: [makeAgent('a1', 'proj-1', 'bob-id')] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    await new Promise((r) => setTimeout(r, 15));
+    expect((elDrain as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toEqual(['a1']);
+    elDrain.remove();
+
+    // (D) project-detail.ts isAddable (paged state) + shouldAdd (small state)
+    const makeProjectFetch = (agentsPayload: unknown) =>
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes('/api/v1/projects/proj-123/agents')) {
+          return Promise.resolve(
+            new Response(JSON.stringify(agentsPayload), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'proj-123', name: 'Proj 123', slug: 'proj-123' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      });
+
+    window.history.replaceState(null, '', '/projects/proj-123?q=owner%3Abob%40example.com');
+    vi.stubGlobal(
+      'fetch',
+      makeProjectFetch({
+        agents: [makeAgent('p1', 'proj-123', 'bob-id')],
+        complete: false,
+        totalCount: 2,
+        nextCursor: 'c1',
+        stats: { total: 2, running: 2, agents: [['p1', 'running']] },
+      })
+    );
+    const projPaged = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    projPaged.projectId = 'proj-123';
+    projPaged.pageData = { path: '/projects/proj-123', title: 'Project', user };
+    document.body.appendChild(projPaged);
+    await new Promise((r) => setTimeout(r, 20));
+    const projWin = (projPaged as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(projWin.state).toBe('paged');
+    const beforeProjTotal = projWin.stats.total;
+    const carolProjPaged = makeAgent('live-carol-proj-paged', 'proj-123', 'carol-id');
+    stateManager.seedAgents([carolProjPaged]);
+    projWin.applyChanges({
+      upserted: [carolProjPaged.id],
+      deleted: [],
+      unknown: new Map(),
+      generation: stateManager.scopeGeneration,
+    });
+    expect(projWin.stats.total).toBe(beforeProjTotal);
+    projPaged.remove();
+
+    // project-detail.ts shouldAdd (small state)
+    vi.stubGlobal(
+      'fetch',
+      makeProjectFetch({ agents: [makeAgent('p1', 'proj-123', 'bob-id')], complete: true })
+    );
+    const projSmall = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    projSmall.projectId = 'proj-123';
+    projSmall.pageData = { path: '/projects/proj-123', title: 'Project', user };
+    document.body.appendChild(projSmall);
+    await new Promise((r) => setTimeout(r, 20));
+    dispatchSseCreate(makeAgent('live-carol-proj-small', 'proj-123', 'carol-id'));
+    expect((projSmall as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toEqual(['p1']);
+    projSmall.remove();
+
+    // (E) project-detail.ts drainProjectAgents isMember (SSE create during in-flight drain)
+    window.history.replaceState(
+      null,
+      '',
+      '/projects/proj-123?q=mode%3Alineage%20owner%3Abob%40example.com'
+    );
+    let resolveProjDrain!: (r: Response) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes('/api/v1/projects/proj-123/agents')) {
+          return new Promise<Response>((res) => {
+            resolveProjDrain = res;
+          });
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'proj-123', name: 'Proj 123', slug: 'proj-123' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+    const projDrain = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    projDrain.projectId = 'proj-123';
+    projDrain.pageData = { path: '/projects/proj-123', title: 'Project', user };
+    document.body.appendChild(projDrain);
+    await new Promise((r) => setTimeout(r, 15));
+    dispatchEpochCreate(makeAgent('live-carol-proj-drain', 'proj-123', 'carol-id'));
+    resolveProjDrain(
+      new Response(JSON.stringify({ agents: [makeAgent('p1', 'proj-123', 'bob-id')] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect((projDrain as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toEqual(['p1']);
+    projDrain.remove();
+  });
 });

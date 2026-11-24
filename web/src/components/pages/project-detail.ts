@@ -120,6 +120,7 @@ import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
 import {
   buildAgentValueSuggestions,
+  canLiveAddAgent,
   filtersQueryDialectEnabled,
   getActiveSingleKeyValue,
   getViewSchema,
@@ -136,12 +137,6 @@ import {
   type Query as FilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
-
-const PROJECT_AGENTS_FILTER_SCHEMA: ViewSchema = getViewSchema('project_agents') ?? {
-  view: 'project_agents',
-  keys: [],
-  textHelp: '',
-};
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { navigateTo } from '../../client/navigation.js';
 import {
@@ -161,6 +156,12 @@ import { fetchProjectDecisionCounts } from '../../client/project-decisions.js';
 import { agentBadges } from '../shared/agent-badges.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import '../shared/artifact-list.js';
+
+const PROJECT_AGENTS_FILTER_SCHEMA: ViewSchema = getViewSchema('project_agents') ?? {
+  view: 'project_agents',
+  keys: [],
+  textHelp: '',
+};
 
 /** A request/refresh trigger; every one funnels into `loadAgentsForView`, which asks the window's planner for the one request it needs. */
 type AgentsViewTrigger = AgentListTrigger;
@@ -503,9 +504,8 @@ export class ScionPageProjectDetail extends LitElement {
     getProjectId: () => this.projectId,
     isAddable: (agent: Agent): boolean => {
       if (agent.projectId !== this.projectId) return false;
-      if (filtersQueryDialectEnabled() && this.committedFilterQuery) {
-        if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) return false;
-        return matchAgentQuery(this.committedFilterQuery, agent, this.filterContext);
+      if (filtersQueryDialectEnabled()) {
+        return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
       }
       return true;
     },
@@ -1713,11 +1713,7 @@ export class ScionPageProjectDetail extends LitElement {
       shouldAdd: (agent): boolean => {
         if (agent.projectId !== this.projectId) return false;
         if (filtersQueryDialectEnabled()) {
-          if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) return false;
-          return (
-            this.committedFilterQuery === null ||
-            matchAgentQuery(this.committedFilterQuery, agent, this.filterContext)
-          );
+          return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
         }
         return true;
       },
@@ -2207,9 +2203,7 @@ export class ScionPageProjectDetail extends LitElement {
   private isProjectMember(agent: Agent, label: string): boolean {
     if (agent.projectId !== this.projectId) return false;
     if (filtersQueryDialectEnabled()) {
-      const fq = this.committedFilterQuery;
-      if (hasServerOnlyAgentTerms(fq, this.filterContext)) return false;
-      return fq === null || matchAgentQuery(fq, agent, this.filterContext);
+      return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
     }
     const eq = label.indexOf('=');
     if (eq < 0) return true;
@@ -2671,9 +2665,13 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private handleFilterCommit(e: CustomEvent<FilterCommitDetail>): void {
-    this.filterQueryText = e.detail.value;
+    // Do not overwrite `this.filterQueryText` or the URL when a deferred commit
+    // fires after the user has moved on to a newer (e.g. in-progress invalid) edit.
+    const isCurrentText = e.detail.value === this.filterQueryText;
     this.filterQuery = e.detail.query;
-    this.syncQueryToUrl(e.detail.value);
+    if (isCurrentText) {
+      this.syncQueryToUrl(e.detail.value);
+    }
     const fq = e.detail.query;
     const nextQ = e.detail.serverQ;
     const nextHasClientOnly = hasClientOnlyKeys(fq, PROJECT_AGENTS_FILTER_SCHEMA);

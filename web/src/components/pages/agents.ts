@@ -82,6 +82,7 @@ import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
 import {
   buildAgentValueSuggestions,
+  canLiveAddAgent,
   filtersQueryDialectEnabled,
   getActiveSingleKeyValue,
   getViewSchema,
@@ -335,9 +336,8 @@ export class ScionPageAgents extends LitElement {
     getProjectId: (): string => '',
     isAddable: (agent: Agent): boolean => {
       if (this.loadedScope !== 'all') return false;
-      if (filtersQueryDialectEnabled() && this.committedFilterQuery) {
-        if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) return false;
-        return matchAgentQuery(this.committedFilterQuery, agent, this.filterContext);
+      if (filtersQueryDialectEnabled()) {
+        return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
       }
       return true;
     },
@@ -881,9 +881,13 @@ export class ScionPageAgents extends LitElement {
   }
 
   private handleFilterCommit(e: CustomEvent<FilterCommitDetail>): void {
-    this.filterQueryText = e.detail.value;
+    // Do not overwrite `this.filterQueryText` or the URL when a deferred commit
+    // fires after the user has moved on to a newer (e.g. in-progress invalid) edit.
+    const isCurrentText = e.detail.value === this.filterQueryText;
     this.filterQuery = e.detail.query;
-    this.syncQueryToUrl(e.detail.value);
+    if (isCurrentText) {
+      this.syncQueryToUrl(e.detail.value);
+    }
     const fq = e.detail.query;
     const nextQ = e.detail.serverQ;
     const nextHasClientOnly = hasClientOnlyKeys(fq, AGENTS_FILTER_SCHEMA);
@@ -967,11 +971,7 @@ export class ScionPageAgents extends LitElement {
       // An ID already held keeps getting its updates regardless.
       shouldAdd: (agent): boolean => {
         if (filtersQueryDialectEnabled()) {
-          if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) return false;
-          return (
-            this.committedFilterQuery === null ||
-            matchAgentQuery(this.committedFilterQuery, agent, this.filterContext)
-          );
+          return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
         }
         return this.agentScope === 'all';
       },
@@ -1213,8 +1213,7 @@ export class ScionPageAgents extends LitElement {
           isMember: (agent) =>
             requestedScope === 'all' &&
             (useDialect
-              ? !hasServerOnlyAgentTerms(fq, this.filterContext) &&
-                (fq === null || matchAgentQuery(fq, agent, this.filterContext))
+              ? canLiveAddAgent(fq, agent, this.filterContext)
               : matchesCommittedLabel(agent, label)),
         }).agents;
         this.agentWindow.setSmall(epoch.sawResync);
