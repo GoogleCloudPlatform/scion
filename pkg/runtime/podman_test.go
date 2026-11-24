@@ -531,6 +531,61 @@ func TestParsePodmanMajorMinorVersion(t *testing.T) {
 	}
 }
 
+func TestParsePodmanVersionJSON(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        string
+		wantMajor int
+		wantMinor int
+		wantOK    bool
+	}{
+		{
+			name:      "prefers server version over newer client",
+			in:        `{"Client":{"Version":"5.3.0"},"Server":{"Version":"4.3.1"}}`,
+			wantMajor: 4, wantMinor: 3, wantOK: true,
+		},
+		{
+			name:      "prefers server version over older client",
+			in:        `{"Client":{"Version":"4.3.1"},"Server":{"Version":"4.7.0"}}`,
+			wantMajor: 4, wantMinor: 7, wantOK: true,
+		},
+		{
+			name:      "falls back to client when no server present",
+			in:        `{"Client":{"Version":"4.3.1"}}`,
+			wantMajor: 4, wantMinor: 3, wantOK: true,
+		},
+		{
+			name:      "falls back to client when server version is empty",
+			in:        `{"Client":{"Version":"4.9.3"},"Server":{"Version":""}}`,
+			wantMajor: 4, wantMinor: 9, wantOK: true,
+		},
+		{
+			name:      "tolerates leading warning lines",
+			in:        "WARNING: something\n{\"Client\":{\"Version\":\"5.0.0\"},\"Server\":{\"Version\":\"4.6.2\"}}",
+			wantMajor: 4, wantMinor: 6, wantOK: true,
+		},
+		{
+			name:   "invalid json",
+			in:     "not json",
+			wantOK: false,
+		},
+		{
+			name:   "unparseable versions",
+			in:     `{"Client":{"Version":"4"},"Server":{"Version":"bad"}}`,
+			wantOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			major, minor, ok := parsePodmanVersionJSON(tc.in)
+			if ok != tc.wantOK || major != tc.wantMajor || minor != tc.wantMinor {
+				t.Errorf("parsePodmanVersionJSON(%q) = (%d, %d, %v), want (%d, %d, %v)",
+					tc.in, major, minor, ok, tc.wantMajor, tc.wantMinor, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestPodmanSupportsHostGateway(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -538,24 +593,60 @@ func TestPodmanSupportsHostGateway(t *testing.T) {
 		want   bool
 	}{
 		{
-			name:   "podman 4.3.1 unsupported",
-			script: "#!/bin/sh\necho 'podman version 4.3.1'\n",
-			want:   false,
+			name: "remote server 4.3.1 with client 5.3.0 unsupported",
+			script: "#!/bin/sh\n" +
+				"if [ \"$1\" = \"version\" ]; then echo '{\"Client\":{\"Version\":\"5.3.0\"},\"Server\":{\"Version\":\"4.3.1\"}}'; exit 0; fi\n" +
+				"echo 'podman version 5.3.0'\n",
+			want: false,
 		},
 		{
-			name:   "podman 4.6.2 unsupported",
-			script: "#!/bin/sh\necho 'podman version 4.6.2'\n",
-			want:   false,
+			name: "remote server 4.7.0 with client 4.3.1 supported",
+			script: "#!/bin/sh\n" +
+				"if [ \"$1\" = \"version\" ]; then echo '{\"Client\":{\"Version\":\"4.3.1\"},\"Server\":{\"Version\":\"4.7.0\"}}'; exit 0; fi\n" +
+				"echo 'podman version 4.3.1'\n",
+			want: true,
 		},
 		{
-			name:   "podman 4.7.0 supported",
-			script: "#!/bin/sh\necho 'podman version 4.7.0'\n",
-			want:   true,
+			name: "local daemonless client-only json 4.3.1 unsupported",
+			script: "#!/bin/sh\n" +
+				"if [ \"$1\" = \"version\" ]; then echo '{\"Client\":{\"Version\":\"4.3.1\"}}'; exit 0; fi\n" +
+				"exit 1\n",
+			want: false,
 		},
 		{
-			name:   "podman 5.3.0 supported",
-			script: "#!/bin/sh\necho 'podman version 5.3.0'\n",
-			want:   true,
+			name: "local daemonless client-only json 4.7.0 supported",
+			script: "#!/bin/sh\n" +
+				"if [ \"$1\" = \"version\" ]; then echo '{\"Client\":{\"Version\":\"4.7.0\"}}'; exit 0; fi\n" +
+				"exit 1\n",
+			want: true,
+		},
+		{
+			name: "fallback to --version when json version fails (4.3.1 unsupported)",
+			script: "#!/bin/sh\n" +
+				"if [ \"$1\" = \"version\" ]; then exit 1; fi\n" +
+				"echo 'podman version 4.3.1'\n",
+			want: false,
+		},
+		{
+			name: "fallback to --version when json version fails (4.6.2 unsupported)",
+			script: "#!/bin/sh\n" +
+				"if [ \"$1\" = \"version\" ]; then exit 1; fi\n" +
+				"echo 'podman version 4.6.2'\n",
+			want: false,
+		},
+		{
+			name: "fallback to --version when json version fails (4.7.0 supported)",
+			script: "#!/bin/sh\n" +
+				"if [ \"$1\" = \"version\" ]; then exit 1; fi\n" +
+				"echo 'podman version 4.7.0'\n",
+			want: true,
+		},
+		{
+			name: "fallback to --version when json version fails (5.3.0 supported)",
+			script: "#!/bin/sh\n" +
+				"if [ \"$1\" = \"version\" ]; then exit 1; fi\n" +
+				"echo 'podman version 5.3.0'\n",
+			want: true,
 		},
 		{
 			name:   "probe command failure defaults to supported",
@@ -589,6 +680,9 @@ func TestPodmanRuntime_Run_HostGatewayProbe(t *testing.T) {
 		mockPodman := filepath.Join(dir, "mock-podman")
 		argvFile := filepath.Join(dir, "argv")
 		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"version\" ]; then\n" +
+			"  exit 1\n" +
+			"fi\n" +
 			"if [ \"$1\" = \"--version\" ]; then\n" +
 			"  echo '" + versionLine + "'\n" +
 			"  exit 0\n" +
@@ -700,12 +794,98 @@ func TestPodmanRuntime_Run_HostGatewayProbe(t *testing.T) {
 		if !ok {
 			t.Fatalf("NewPodmanRuntime() = %T, want *PodmanRuntime", rt)
 		}
-		if pr.hostGatewaySupported == nil || *pr.hostGatewaySupported {
-			t.Fatalf("expected cached hostGatewaySupported = false for Podman 4.3.1, got %v", pr.hostGatewaySupported)
+		if pr.hostGatewaySupported {
+			t.Fatalf("expected cached hostGatewaySupported = false for Podman 4.3.1")
 		}
 		_, err := pr.Run(context.Background(), baseCfg([]string{"hub.example.com:host-gateway"}))
 		if !errors.Is(err, ErrPodmanHostGatewayUnsupported) {
 			t.Errorf("Run() error = %v, want ErrPodmanHostGatewayUnsupported", err)
+		}
+	})
+
+	t.Run("NewPodmanRuntime prefers remote server version over newer client", func(t *testing.T) {
+		dir := t.TempDir()
+		mockPodman := filepath.Join(dir, "mock-podman")
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"version\" ]; then echo '{\"Client\":{\"Version\":\"5.3.0\"},\"Server\":{\"Version\":\"4.3.1\"}}'; exit 0; fi\n" +
+			"if [ \"$1\" = \"--version\" ]; then echo 'podman version 5.3.0'; exit 0; fi\n" +
+			"if [ \"$1\" = \"info\" ]; then echo 'false'; exit 0; fi\n" +
+			"echo " + mockPodmanID + "\n"
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatalf("failed to write mock podman: %v", err)
+		}
+		rt := NewPodmanRuntime(mockPodman)
+		pr, ok := rt.(*PodmanRuntime)
+		if !ok {
+			t.Fatalf("NewPodmanRuntime() = %T, want *PodmanRuntime", rt)
+		}
+		_, err := pr.Run(context.Background(), baseCfg([]string{"hub.example.com:host-gateway"}))
+		if !errors.Is(err, ErrPodmanHostGatewayUnsupported) {
+			t.Errorf("Run() error = %v, want ErrPodmanHostGatewayUnsupported when server is 4.3.1", err)
+		}
+	})
+
+	t.Run("caches unparseable probe failure once per runtime across multiple Run calls", func(t *testing.T) {
+		dir := t.TempDir()
+		mockPodman := filepath.Join(dir, "mock-podman")
+		probeCountFile := filepath.Join(dir, "probes")
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"version\" ] || [ \"$1\" = \"--version\" ]; then\n" +
+			"  echo x >> '" + probeCountFile + "'\n" +
+			"  echo 'unparseable'\n" +
+			"  exit 0\n" +
+			"fi\n" +
+			"echo " + mockPodmanID + "\n"
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatalf("failed to write mock podman: %v", err)
+		}
+		rt := &PodmanRuntime{Command: mockPodman}
+		for i := 0; i < 3; i++ {
+			if _, err := rt.Run(context.Background(), baseCfg([]string{"hub.example.com:host-gateway"})); err != nil {
+				t.Fatalf("Run() #%d error = %v, want nil (conservative default)", i+1, err)
+			}
+		}
+		data, err := os.ReadFile(probeCountFile)
+		if err != nil {
+			t.Fatalf("read probe count: %v", err)
+		}
+		// One probe consists of `version --format json` followed by `--version` fallback = 2 lines.
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		if len(lines) != 2 {
+			t.Errorf("expected exactly 1 probe (2 version invocations: json + --version fallback) across 3 Runs, got %d invocations", len(lines))
+		}
+	})
+
+	t.Run("NewPodmanRuntime caches unparseable minor version without re-probing on Run", func(t *testing.T) {
+		dir := t.TempDir()
+		mockPodman := filepath.Join(dir, "mock-podman")
+		probeCountFile := filepath.Join(dir, "probes")
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"version\" ]; then echo json >> '" + probeCountFile + "'; exit 1; fi\n" +
+			"if [ \"$1\" = \"--version\" ]; then echo ver >> '" + probeCountFile + "'; echo 'podman version 4'; exit 0; fi\n" +
+			"if [ \"$1\" = \"info\" ]; then echo 'false'; exit 0; fi\n" +
+			"echo " + mockPodmanID + "\n"
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatalf("failed to write mock podman: %v", err)
+		}
+		rt := NewPodmanRuntime(mockPodman)
+		pr, ok := rt.(*PodmanRuntime)
+		if !ok {
+			t.Fatalf("NewPodmanRuntime() = %T, want *PodmanRuntime", rt)
+		}
+		beforeData, err := os.ReadFile(probeCountFile)
+		if err != nil {
+			t.Fatalf("read probe count before Run: %v", err)
+		}
+		if _, err := pr.Run(context.Background(), baseCfg([]string{"hub.example.com:host-gateway"})); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+		afterData, err := os.ReadFile(probeCountFile)
+		if err != nil {
+			t.Fatalf("read probe count after Run: %v", err)
+		}
+		if string(beforeData) != string(afterData) {
+			t.Errorf("expected no re-probe on Run after NewPodmanRuntime, before=%q after=%q", string(beforeData), string(afterData))
 		}
 	})
 }

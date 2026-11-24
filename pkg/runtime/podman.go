@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -46,10 +47,12 @@ const (
 var ErrPodmanHostGatewayUnsupported = errors.New("podman does not support --add-host host-gateway; upgrade to Podman 4.7 or newer")
 
 type PodmanRuntime struct {
-	Command              string
-	Host                 string
-	Rootless             bool // true when Podman is running in rootless mode
-	hostGatewaySupported *bool
+	Command  string
+	Host     string
+	Rootless bool // true when Podman is running in rootless mode
+
+	hostGatewayOnce      sync.Once
+	hostGatewaySupported bool
 }
 
 // NewPodmanRuntime creates a new PodmanRuntime after verifying that the podman
@@ -84,41 +87,95 @@ func NewPodmanRuntime(cmdOverride string) Runtime {
 		return &ErrorRuntime{Err: fmt.Errorf("podman version %s is below the minimum supported version 4.x", version)}
 	}
 
-	var hostGatewaySupported *bool
-	if maj, min, ok := parsePodmanMajorMinorVersion(versionOutput); ok {
-		supported := podmanVersionSupportsHostGateway(maj, min)
-		hostGatewaySupported = &supported
-	}
-
 	// Detect and store rootless mode
 	rootless := detectRootlessMode(command)
 
-	return &PodmanRuntime{
-		Command:              command,
-		Rootless:             rootless,
-		hostGatewaySupported: hostGatewaySupported,
+	rt := &PodmanRuntime{
+		Command:  command,
+		Rootless: rootless,
 	}
+	supported := probePodmanHostGateway(context.Background(), command, versionOutput)
+	rt.hostGatewayOnce.Do(func() {
+		rt.hostGatewaySupported = supported
+	})
+	return rt
 }
 
-// PodmanSupportsHostGateway reports whether the Podman binary supports the
-// special "host-gateway" address used by --add-host. Support was added in
-// Podman 4.7; older releases (e.g. Podman 4.3.1 on Debian 12) reject it with
-// "invalid IP address in add-host: host-gateway". On any probe failure we
-// conservatively assume support is present, matching DockerSupportsHostGateway.
+type podmanVersionJSON struct {
+	Client *struct {
+		Version string `json:"Version"`
+	} `json:"Client"`
+	Server *struct {
+		Version string `json:"Version"`
+	} `json:"Server"`
+}
+
+// parsePodmanVersionJSON extracts major.minor from "podman version --format json"
+// output. When both Server and Client are present (remote Podman / podman machine),
+// the Server version is preferred because the service enforces --add-host support.
+// When no separate Server is present (local daemonless Podman), it falls back to
+// Client.Version.
+func parsePodmanVersionJSON(output string) (major, minor int, ok bool) {
+	trimmed := strings.TrimSpace(output)
+	idx := strings.IndexByte(trimmed, '{')
+	if idx < 0 {
+		return 0, 0, false
+	}
+	var parsed podmanVersionJSON
+	if err := json.Unmarshal([]byte(trimmed[idx:]), &parsed); err != nil {
+		return 0, 0, false
+	}
+	if parsed.Server != nil && strings.TrimSpace(parsed.Server.Version) != "" {
+		if maj, min, ok := parsePodmanMajorMinorVersion(parsed.Server.Version); ok {
+			return maj, min, true
+		}
+	}
+	if parsed.Client != nil && strings.TrimSpace(parsed.Client.Version) != "" {
+		if maj, min, ok := parsePodmanMajorMinorVersion(parsed.Client.Version); ok {
+			return maj, min, true
+		}
+	}
+	return 0, 0, false
+}
+
+// PodmanSupportsHostGateway reports whether Podman supports the special
+// "host-gateway" address used by --add-host. Support was added in Podman 4.7;
+// older releases (e.g. Podman 4.3.1 on Debian 12) reject it with
+// "invalid IP address in add-host: host-gateway". It prefers the Podman server
+// version (for remote Podman / podman machine) via "podman version --format json",
+// falling back to the client version when there is no separate server. On any
+// probe failure we conservatively assume support is present, matching
+// DockerSupportsHostGateway.
 func PodmanSupportsHostGateway(ctx context.Context, command string) bool {
+	return probePodmanHostGateway(ctx, command, "")
+}
+
+func probePodmanHostGateway(ctx context.Context, command, clientVersionFallback string) bool {
 	if command == "" {
 		command = "podman"
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := runSimpleCommand(probeCtx, command, "--version")
-	if err != nil {
-		runtimeLog().Debug("Unable to probe Podman version for host-gateway support", "error", err)
-		return true
+	if out, err := runSimpleCommand(probeCtx, command, "version", "--format", "json"); err == nil {
+		if major, minor, ok := parsePodmanVersionJSON(out); ok {
+			return podmanVersionSupportsHostGateway(major, minor)
+		}
+		runtimeLog().Debug("Unable to parse Podman JSON version for host-gateway support", "output", strings.TrimSpace(out))
+	} else {
+		runtimeLog().Debug("Unable to probe Podman JSON version for host-gateway support", "error", err)
 	}
-	major, minor, ok := parsePodmanMajorMinorVersion(strings.TrimSpace(out))
+
+	if clientVersionFallback == "" {
+		out, err := runSimpleCommand(probeCtx, command, "--version")
+		if err != nil {
+			runtimeLog().Debug("Unable to probe Podman client version for host-gateway support", "error", err)
+			return true
+		}
+		clientVersionFallback = strings.TrimSpace(out)
+	}
+	major, minor, ok := parsePodmanMajorMinorVersion(clientVersionFallback)
 	if !ok {
-		runtimeLog().Debug("Unable to parse Podman version for host-gateway support", "version", out)
+		runtimeLog().Debug("Unable to parse Podman version for host-gateway support", "version", clientVersionFallback)
 		return true
 	}
 	return podmanVersionSupportsHostGateway(major, minor)
@@ -157,10 +214,10 @@ func parsePodmanMajorMinorVersion(output string) (major, minor int, ok bool) {
 }
 
 func (r *PodmanRuntime) supportsHostGateway(ctx context.Context) bool {
-	if r.hostGatewaySupported != nil {
-		return *r.hostGatewaySupported
-	}
-	return PodmanSupportsHostGateway(ctx, r.Command)
+	r.hostGatewayOnce.Do(func() {
+		r.hostGatewaySupported = PodmanSupportsHostGateway(ctx, r.Command)
+	})
+	return r.hostGatewaySupported
 }
 
 // filterPodmanExtraHosts checks config.ExtraHosts for "host-gateway" targets
