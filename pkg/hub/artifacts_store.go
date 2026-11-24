@@ -196,6 +196,16 @@ func (s *Server) artifactRefResolver() *artifacts.Service {
 	return svc
 }
 
+// inboxArtifactService returns the artifact service for the inbox summary's
+// reviews category (inboxReviewsCategory). Like artifactRefResolver it is built
+// over this server's artifacts.Host and called only from request-authenticated
+// user contexts admitted by inboxSummaryCaller.
+func (s *Server) inboxArtifactService() *artifacts.Service {
+	svc := artifacts.NewService(newArtifactHost(s))
+	svc.SetBackendProvider(s.artifactBackend)
+	return svc
+}
+
 // artifactLog returns the artifact decision logger set with
 // SetArtifactLogger, or nil (entries discarded) when none is set.
 func (s *Server) artifactLog() *slog.Logger {

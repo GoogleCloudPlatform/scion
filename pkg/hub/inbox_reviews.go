@@ -90,7 +90,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 		}
 	}
 
-	svc := s.artifactRefResolver()
+	svc := s.inboxArtifactService()
 
 	// 1. Owned artifacts whose current version is a submitted review awaiting owner action.
 	toAddressCount, toAddressCapped, toAddressItems, err := svc.ReviewPendingSummary(ctx, previews)
