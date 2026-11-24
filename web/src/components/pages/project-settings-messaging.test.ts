@@ -2,7 +2,8 @@
  * Tests for D2: Project settings — cross-project messaging policy section.
  *
  * Verifies the messaging policy UI: three inbound options (none/members/any),
- * owner-only editing, Hub-disabled state, and CAS-based save with conflict handling.
+ * owner-only editing, hiding the section when disabled by Hub administrators,
+ * and CAS-based save with conflict handling.
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -161,7 +162,7 @@ describe('project-settings: messaging policy section (D2)', () => {
     expect(text).toContain('any project on this Hub');
   });
 
-  it('shows Hub-disabled warning when hubCrossProjectEnabled is false', async () => {
+  it('hides the Cross-Project Messaging section when hubCrossProjectEnabled is false', async () => {
     element = await createComponent(
       createFetchHandler({
         messagingPolicy: {
@@ -174,10 +175,23 @@ describe('project-settings: messaging policy section (D2)', () => {
     );
 
     const text = shadowText(element);
-    expect(text).toContain('Disabled by Hub administrator');
+    expect(text).not.toContain('Cross-Project Messaging');
+    expect(text).not.toContain('No external agents');
+    expect(text).not.toContain('Disabled by Hub administrator');
   });
 
-  it('does not show Hub-disabled warning when hubCrossProjectEnabled is true', async () => {
+  it('hides the Cross-Project Messaging section when messaging-policy endpoint returns 404', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        messagingPolicy: null,
+      })
+    );
+
+    const text = shadowText(element);
+    expect(text).not.toContain('Cross-Project Messaging');
+  });
+
+  it('renders the Cross-Project Messaging section when hubCrossProjectEnabled is true', async () => {
     element = await createComponent(
       createFetchHandler({
         messagingPolicy: {
@@ -190,6 +204,7 @@ describe('project-settings: messaging policy section (D2)', () => {
     );
 
     const text = shadowText(element);
+    expect(text).toContain('Cross-Project Messaging');
     expect(text).not.toContain('Disabled by Hub administrator');
   });
 
