@@ -279,10 +279,11 @@ test('rail list preserves valid semantics and real browser arrow key navigation'
   );
   await expect.poll(() => socket.attaches).toBe(2);
 
-  await expect(page.getByRole('list', { name: 'Retained terminal sessions' })).toBeVisible();
+  const railList = page.getByRole('list', { name: 'Retained terminal sessions' });
+  await expect(railList).toBeVisible();
   await expect(page.getByRole('button', { name: /alpha in project-a/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /beta in project-b/ })).toBeVisible();
-  await expect(page.getByRole('listitem')).toHaveCount(2);
+  await expect(railList.getByRole('listitem')).toHaveCount(2);
   await expect(page.locator('[role="option"]')).toHaveCount(0);
 
   await page.getByRole('button', { name: /alpha in project-a/ }).focus();
@@ -3031,7 +3032,9 @@ test.describe('>12 retained sessions', () => {
     expect(socket.closes).toBe(0);
 
     // Rail list has 13 items
-    await expect(page.getByRole('listitem')).toHaveCount(13);
+    await expect(
+      page.getByRole('list', { name: 'Retained terminal sessions' }).getByRole('listitem')
+    ).toHaveCount(13);
 
     // Verify the first and last sessions are both still reachable
     // Select the first session
