@@ -19,15 +19,60 @@ package hub
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
+
+func newAuthzPrefilterTestServer(t *testing.T) (*Server, *entadapter.CompositeStore, string) {
+	t.Helper()
+	ctx := context.Background()
+	if dsn := os.Getenv("SCION_TEST_POSTGRES_DSN"); dsn != "" {
+		schemaName := "authz_prefilter_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		adminClient, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 2})
+		require.NoError(t, err)
+		adminCS := entadapter.NewCompositeStore(adminClient)
+		_, err = adminCS.DB().ExecContext(ctx, "CREATE SCHEMA "+schemaName)
+		require.NoError(t, err)
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		scopedDSN := dsn + sep + "search_path=" + schemaName
+		base, err := entc.OpenPostgres(scopedDSN, entc.PoolConfig{MaxOpenConns: 4})
+		if err != nil {
+			_, _ = adminCS.DB().ExecContext(ctx, "DROP SCHEMA IF EXISTS "+schemaName+" CASCADE")
+			_ = adminCS.Close()
+			require.NoError(t, err)
+		}
+		require.NoError(t, entc.AutoMigrate(ctx, base))
+		cs := entadapter.NewCompositeStore(base)
+		t.Cleanup(func() {
+			_ = cs.Close()
+			_, _ = adminCS.DB().ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schemaName+" CASCADE")
+			_ = adminCS.Close()
+		})
+		srv, _ := testServerOnMigratedStore(t, cs)
+		alice, _, _ := setupDemoPolicyOn(t, srv, srv.store)
+		return srv, cs, alice.ID
+	}
+	rawStore, _, err := newTestStoreWithClient(t)
+	require.NoError(t, err)
+	srv, _ := testServerOnMigratedStore(t, rawStore)
+	alice, _, _ := setupDemoPolicyOn(t, srv, srv.store)
+	return srv, rawStore, alice.ID
+}
 
 // TestEvaluate_PrecomputedSortedPermsByteIdentical verifies that precomputing
 // sortedPerms on RolePermissions produces byte-identical KernelDecision and
@@ -97,9 +142,10 @@ func TestEvaluate_PrecomputedSortedPermsByteIdentical(t *testing.T) {
 // UAT scope/boundary, and View-as-member session (ptone/scion#9157).
 func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 	ctx := context.Background()
-	rawStore, _, err := newTestStoreWithClient(t)
-	require.NoError(t, err)
-	srv, s := testServerOnMigratedStore(t, rawStore)
+	srv, rawStore, issuerID := newAuthzPrefilterTestServer(t)
+	s := srv.store
+	d := rawStore.Dialect()
+	var err error
 
 	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
@@ -178,8 +224,43 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 			Status:      status,
 			Kind:        kind,
 			ExpiresAt:   expiresAt,
+			Created:     now,
 		}
-		require.NoError(t, s.CreateUser(ctx, u))
+		switch kind {
+		case store.UserKindTestFixture:
+			u.Email = fmt.Sprintf("fixture-%s@%s", api.NewUUID()[:6], store.TestFixtureEmailDomain)
+			u.IssuedBy = &issuerID
+			require.NoError(t, rawStore.CreateTestFixtureUser(ctx, u))
+		case store.UserKindTestHubAdmin, store.UserKindTestSuperAdmin:
+			domain := store.TestHubAdminEmailDomain
+			rdID := hubAdminRD.ID
+			if kind == store.UserKindTestSuperAdmin {
+				domain = store.TestSuperAdminEmailDomain
+				rdID = superAdminRD.ID
+			}
+			u.Email = fmt.Sprintf("tadmin-%s@%s", api.NewUUID()[:6], domain)
+			u.Role = store.TestAdminRole(kind)
+			issuanceID := api.NewUUID()
+			purpose := "authz scope prefilter parity matrix"
+			u.IssuedBy = &issuerID
+			u.IssuanceID = &issuanceID
+			u.Purpose = &purpose
+			createExp := future
+			u.ExpiresAt = &createExp
+			_, cerr := rawStore.CreateTestAdminUser(ctx, u, rdID)
+			require.NoError(t, cerr)
+			if expiresAt != nil && expiresAt.Before(now) {
+				q := "UPDATE users SET expires_at = ? WHERE id = ?"
+				if d == dialect.Postgres {
+					q = "UPDATE users SET expires_at = $1 WHERE id = $2"
+				}
+				_, uerr := rawStore.DB().ExecContext(ctx, q, *expiresAt, u.ID)
+				require.NoError(t, uerr)
+				u.ExpiresAt = expiresAt
+			}
+		default:
+			require.NoError(t, rawStore.CreateUser(ctx, u))
+		}
 		return u
 	}
 
@@ -286,34 +367,19 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 	require.NoError(t, err)
 
 	// 4. Test identities: test_fixture, test_hub_admin (live/expired), test_super_admin.
+	// CreateTestAdminUser already creates the system role binding for test_hub_admin
+	// and test_super_admin.
 	testFixture := createUser("fixture@test.local", store.UserStatusActive, store.UserKindTestFixture, &future)
 	bindMixedProjects(testFixture.ID)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+	_, err = rawStore.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: hubAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: testFixture.ID,
 		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
 	})
 	require.NoError(t, err)
 
 	testHubAdminLive := createUser("tha-live@test.local", store.UserStatusActive, store.UserKindTestHubAdmin, &future)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: hubAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: testHubAdminLive.ID,
-		ScopeType: store.RoleScopeSystem, ExpiresAt: &future, CreatedBy: "test",
-	})
-	require.NoError(t, err)
-
 	testHubAdminExpired := createUser("tha-exp@test.local", store.UserStatusActive, store.UserKindTestHubAdmin, &past)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: hubAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: testHubAdminExpired.ID,
-		ScopeType: store.RoleScopeSystem, ExpiresAt: &future, CreatedBy: "test",
-	})
-	require.NoError(t, err)
-
 	testSuperAdmin := createUser("tsa@test.local", store.UserStatusActive, store.UserKindTestSuperAdmin, &future)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: superAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: testSuperAdmin.ID,
-		ScopeType: store.RoleScopeSystem, ExpiresAt: &future, CreatedBy: "test",
-	})
-	require.NoError(t, err)
 
 	// 5. Suspended, invited, and unknown-Kind users.
 	suspended := createUser("suspended@test.local", store.UserStatusSuspended, store.UserKindHuman, nil)
@@ -324,7 +390,11 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 
 	unknownKind := createUser("unknown-kind@test.local", store.UserStatusActive, store.UserKindHuman, nil)
 	bindMixedProjects(unknownKind.ID)
-	_, err = rawStore.DB().ExecContext(ctx, `UPDATE users SET kind = 'future_unknown_kind' WHERE id = ?`, unknownKind.ID)
+	qUnknown := `UPDATE users SET kind = 'future_unknown_kind' WHERE id = ?`
+	if d == dialect.Postgres {
+		qUnknown = `UPDATE users SET kind = 'future_unknown_kind' WHERE id = $1`
+	}
+	_, err = rawStore.DB().ExecContext(ctx, qUnknown, unknownKind.ID)
 	require.NoError(t, err)
 
 	// 6. Scoped UAT identities for human.
