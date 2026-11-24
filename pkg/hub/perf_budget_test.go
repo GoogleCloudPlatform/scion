@@ -118,33 +118,33 @@ var perfBudgets = []perfBudget{
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1"
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 74, decisions: 280, dbReads: 4, bytes: 49895}, // was 49199: +696 for harnessVendor (ptone/scion#5502), about 28 bytes per row
+		baseline: perfBudgetCounts{authzStoreCalls: 74, decisions: 280, dbReads: 4, bytes: 50476}, // was 49895: +581 for suspendPolicy (ptone/scion#9181), 23 bytes per row
 	},
 	{
 		name: "project list, page by ids (25)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?sort=updated&dir=desc&limit=25&ids=" + strings.Join(f.agentIDs[25:50], ",")
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 102, decisions: 205, dbReads: 4, bytes: 44272}, // was 43574: +698 for harnessVendor (ptone/scion#5502), about 28 bytes per row
+		baseline: perfBudgetCounts{authzStoreCalls: 102, decisions: 205, dbReads: 4, bytes: 44843}, // was 44272: +571 for suspendPolicy (ptone/scion#9181), 23 bytes per row
 	},
 	{
 		name: "project list, graph (limit=500)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?limit=500"
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 312, decisions: 1005, dbReads: 4, bytes: 190385}, // was 187593: +2792 for harnessVendor (ptone/scion#5502), about 28 bytes per row
+		baseline: perfBudgetCounts{authzStoreCalls: 312, decisions: 1005, dbReads: 4, bytes: 192691}, // was 190385: +2306 for suspendPolicy (ptone/scion#9181), 23 bytes per row
 	},
 	{
 		name: "global list, first page (fit, stats)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1"
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 84, decisions: 474, dbReads: 5, bytes: 51853}, // was 51157: +696 for harnessVendor (ptone/scion#5502), about 28 bytes per row
+		baseline: perfBudgetCounts{authzStoreCalls: 84, decisions: 474, dbReads: 5, bytes: 52434}, // was 51853: +581 for suspendPolicy (ptone/scion#9181), 23 bytes per row
 	},
 	{
 		name:     "global list, legacy full",
 		path:     func(f *perfBudgetFixture) string { return "/api/v1/agents" },
-		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 198114}, // was 195322: +2792 for harnessVendor (ptone/scion#5502), about 28 bytes per row
+		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 200420}, // was 198114: +2306 for suspendPolicy (ptone/scion#9181), 23 bytes per row
 	},
 	{
 		name:     "global list, legacy compact",
