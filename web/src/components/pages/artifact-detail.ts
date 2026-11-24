@@ -1221,7 +1221,7 @@ export class ScionPageArtifactDetail extends LitElement {
       this.resolvedProjectId = '';
       return;
     }
-    const id = this.homeProject.trim();
+    const id = (this.homeProject ?? '').trim();
     if (!id) {
       this.projectNamed = null;
       this.resolvedProjectId = '';
@@ -1231,7 +1231,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.resolvedProjectId = id;
     this.projectNamed = projectLabelNow(id);
     void resolveProjectLabel(id).then((resolved) => {
-      if (this.homeProject.trim() === id) {
+      if (this.isConnected && (this.homeProject ?? '').trim() === id) {
         this.projectNamed = resolved;
       }
     });

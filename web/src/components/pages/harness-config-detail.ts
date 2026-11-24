@@ -538,7 +538,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   }
 
   private syncProjectLabel(): void {
-    const id = this.projectId.trim();
+    const id = (this.projectId ?? '').trim();
     if (!id) {
       this.projectNamed = null;
       this.resolvedProjectId = '';
@@ -548,7 +548,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     this.resolvedProjectId = id;
     this.projectNamed = projectLabelNow(id);
     void resolveProjectLabel(id).then((resolved) => {
-      if (this.projectId.trim() === id) {
+      if (this.isConnected && (this.projectId ?? '').trim() === id) {
         this.projectNamed = resolved;
       }
     });

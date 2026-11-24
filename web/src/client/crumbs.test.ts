@@ -79,6 +79,16 @@ describe('crumbs trail builders', () => {
       { label: 'Profile', href: '/profile' },
       { label: 'Templates', href: '/profile/templates' },
     ]);
+
+    expect(
+      scopedResourceTrail(
+        { kind: 'user' },
+        { plural: 'Service Accounts', projectTab: 'gcp-sa', hubTab: 'service-accounts' }
+      )
+    ).toEqual([
+      { label: 'Profile', href: '/profile' },
+      { label: 'Service Accounts', href: '/profile' },
+    ]);
   });
 
   it('builds agentParentTrail under project when known and under Agents otherwise', () => {

@@ -82,7 +82,7 @@ export function scopedResourceTrail(scope: ResourceScope, res: ScopedResourceSpe
     case 'user':
       return [
         { label: 'Profile', href: '/profile' },
-        { label: res.plural, href: res.profilePath! },
+        { label: res.plural, href: res.profilePath ?? '/profile' },
       ];
   }
 }
