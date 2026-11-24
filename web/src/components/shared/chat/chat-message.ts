@@ -3886,7 +3886,16 @@ export class ScionChatMessage extends LitElement {
         return html`
           <div class="delivery-state pending">
             <sl-icon name="clock"></sl-icon>
-            Sending
+            Sending…
+          </div>
+        `;
+      case 'resuming':
+        // ptone/scion#9015: client-only state while the hub auto-resumes an
+        // idle- or stalled-suspended agent before dispatching the message.
+        return html`
+          <div class="delivery-state pending resuming">
+            <sl-icon name="hourglass-split"></sl-icon>
+            Resuming agent…
           </div>
         `;
       case 'waking':

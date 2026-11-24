@@ -484,6 +484,7 @@ export type StateEventType =
   | 'chat-dm-promoted'
   | 'chat-scheduled-updated'
   | 'chat-stars-updated'
+  | 'chat-send-progress'
   | 'decision-updated'
   | 'message-action-updated'
   | 'agent-created';
@@ -812,6 +813,8 @@ export class StateManager extends EventTarget {
       if (!subs.includes(ownNotifications)) subs.push(ownNotifications);
       const ownInbox = `user.${userId}.inbox`;
       if (!subs.includes(ownInbox)) subs.push(ownInbox);
+      const ownProgress = `user.${userId}.send-progress`;
+      if (!subs.includes(ownProgress)) subs.push(ownProgress);
     }
     return subs;
   }
@@ -848,12 +851,18 @@ export class StateManager extends EventTarget {
     const { subject, data } = update;
     const parts = subject.split('.');
 
-    // User-scoped notifications: user.{userId}.notification. Without an
-    // explicit case the subject is dropped: it has three tokens, and the
-    // user-scoped chat branch below requires four.
-    if (parts[0] === 'user' && parts.length === 3 && parts[2] === 'notification') {
-      this.notifyWithData('notification-created', data);
-      return;
+    // User-scoped notifications and send-progress: user.{userId}.{notification|send-progress}.
+    // Kept outside user.{userId}.chat.> so older web bundles never treat
+    // send-progress as a chat-message refresh hint.
+    if (parts[0] === 'user' && parts.length === 3) {
+      if (parts[2] === 'notification') {
+        this.notifyWithData('notification-created', data);
+        return;
+      }
+      if (parts[2] === 'send-progress') {
+        this.notifyWithData('chat-send-progress', data);
+        return;
+      }
     }
 
     // User-scoped inbox invalidation hints: user.{userId}.inbox.

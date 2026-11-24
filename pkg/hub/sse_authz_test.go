@@ -589,6 +589,70 @@ collect:
 		"only the caller's own star invalidation is delivered")
 }
 
+// TestSSE_ChatSendProgressSubjectIsolation pins that a sender's auto-resume
+// progress event (user.<id>.send-progress, ptone/scion#9015) reaches only
+// that user: another signed-in user may not subscribe to it explicitly,
+// the user.> wildcard expands to the caller's own subjects, and neither
+// user.<id>.chat.> nor project.> receives it.
+func TestSSE_ChatSendProgressSubjectIsolation(t *testing.T) {
+	mockStore := &mockAuthzStore{}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	assert.Nil(t, ws.authorizeSSESubjects(req, []string{"user.user-1.send-progress"}),
+		"a user may subscribe to its own send-progress events")
+	assert.Equal(t, []string{"user.other-user.send-progress"},
+		ws.authorizeSSESubjects(req, []string{"user.other-user.send-progress"}),
+		"a user may not subscribe to another user's send-progress events")
+
+	expanded := ws.expandSSEWildcards(req, []string{"user.>"})
+	require.Equal(t, []string{"user.user-1.>"}, expanded)
+	assert.Nil(t, ws.authorizeSSESubjects(req, expanded))
+
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	ch, unsub := pub.Subscribe(expanded...)
+	defer unsub()
+	chatCh, unsubChat := pub.Subscribe("user.user-1.chat.>")
+	defer unsubChat()
+	projCh, unsubProj := pub.Subscribe("project.>")
+	defer unsubProj()
+
+	pub.PublishChatSendProgress(context.Background(), "other-user", ChatSendProgressEvent{
+		ConversationKey: "topic-1",
+		IdempotencyKey:  "idem-other",
+		Stage:           ChatSendProgressResuming,
+	})
+	pub.PublishChatSendProgress(context.Background(), "user-1", ChatSendProgressEvent{
+		ConversationKey: "topic-1",
+		IdempotencyKey:  "idem-own",
+		Stage:           ChatSendProgressResuming,
+	})
+
+	var subjects []string
+	timeout := time.After(200 * time.Millisecond)
+collect:
+	for {
+		select {
+		case evt := <-ch:
+			subjects = append(subjects, evt.Subject)
+		case evt := <-chatCh:
+			t.Fatalf("send-progress must not publish under user.<id>.chat.>: got %s", evt.Subject)
+		case evt := <-projCh:
+			t.Fatalf("send-progress must not publish under project.>: got %s", evt.Subject)
+		case <-timeout:
+			break collect
+		}
+	}
+	assert.Equal(t, []string{"user.user-1.send-progress"}, subjects,
+		"only the caller's own send-progress event is delivered")
+}
+
 // --- SSE Handler integration test for authz ---
 
 func TestSSEHandler_SubjectAuthzDenied(t *testing.T) {

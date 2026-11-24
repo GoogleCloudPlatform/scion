@@ -1240,6 +1240,7 @@ export class ScionChatThread extends LitElement {
 
   /** Bound listener for v2 SSE chat-message events via stateManager. */
   private _v2MessageHandler = this.handleV2ChatMessage.bind(this);
+  private _v2SendProgressHandler = this.handleV2SendProgress.bind(this);
 
   /** True once an SSE connection has been observed while this thread listens. */
   private _sawSseConnect = false;
@@ -2088,6 +2089,7 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-stars-updated', this._starsUpdatedHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
+    stateManager.removeEventListener('chat-send-progress', this._v2SendProgressHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
@@ -2186,6 +2188,7 @@ export class ScionChatThread extends LitElement {
       this._starLoadTimer = null;
     }
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
+    stateManager.removeEventListener('chat-send-progress', this._v2SendProgressHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
@@ -2378,6 +2381,7 @@ export class ScionChatThread extends LitElement {
     // Always remove v2 SSE listeners — clearing conversationKey before
     // stopStream() must not leak listeners registered for the earlier key.
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
+    stateManager.removeEventListener('chat-send-progress', this._v2SendProgressHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
@@ -2519,7 +2523,9 @@ export class ScionChatThread extends LitElement {
         toStore = withDispatchFailure(msg, 'delivered', undefined, undefined);
       } else if (
         existing?.dispatchState === 'dispatched' &&
-        (msg.dispatchState === 'pending' || msg.dispatchState === 'waking')
+        (msg.dispatchState === 'pending' ||
+          msg.dispatchState === 'waking' ||
+          msg.dispatchState === 'resuming')
       ) {
         toStore = withDispatchFailure(msg, 'dispatched', undefined, undefined);
       }
@@ -2834,6 +2840,7 @@ export class ScionChatThread extends LitElement {
     stateManager.addEventListener('connected', this._sseReconnectHandler);
     stateManager.addEventListener('chat-stars-updated', this._starsUpdatedHandler);
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
+    stateManager.addEventListener('chat-send-progress', this._v2SendProgressHandler);
     stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.addEventListener('chat-message-edited', this._v2EditHandler);
@@ -2875,6 +2882,64 @@ export class ScionChatThread extends LitElement {
       }
     }
     return this._currentUserId || this.currentUserId;
+  }
+
+  /**
+   * Handle sender-only auto-resume progress SSE events (`user.<id>.send-progress`,
+   * ptone/scion#9015) to step an in-flight optimistic bubble through
+   * `Resuming agent…` -> `Sending…` before `Accepted` arrives.
+   */
+  private handleV2SendProgress(e: Event): void {
+    type SendProgressData = {
+      conversationKey?: string;
+      idempotencyKey?: string;
+      stage?: string;
+    };
+    const detail = (e as CustomEvent).detail as
+      | ({ data?: SendProgressData } & SendProgressData)
+      | undefined;
+    const data: SendProgressData | undefined = detail?.data ?? detail;
+    if (!data?.idempotencyKey || !data.stage) return;
+    if (data.conversationKey && data.conversationKey !== this.conversationKey) return;
+    if (!this._pendingIdempotencyKeys.has(data.idempotencyKey)) return;
+    const existing = this.messageMap.get(data.idempotencyKey);
+    if (!existing) return;
+    const nextState =
+      data.stage === 'resuming' ? 'resuming' : data.stage === 'sending' ? 'pending' : null;
+    if (!nextState || existing.dispatchState === nextState) return;
+    this.messageMap.set(data.idempotencyKey, { ...existing, dispatchState: nextState });
+    this.messages = Array.from(this.messageMap.values())
+      .filter((m) => m.type !== 'mention')
+      .sort(compareMessageOrder);
+  }
+
+  /**
+   * Resolve the primary target agent member for an optimistic send so we can
+   * show `Resuming agent…` immediately when it is known to be hub-suspended
+   * (idle/stalled), avoiding a brief `Sending…` flash before the SSE arrives.
+   */
+  private resolveOptimisticTargetAgent(
+    mentions: string[] | undefined,
+    isReplyToAgent: boolean,
+    replySender: string,
+    replySenderId: string
+  ): ChatAgentMember | undefined {
+    if (mentions && mentions.length > 0) {
+      for (const raw of mentions) {
+        const lower = raw.toLowerCase();
+        const found = this.agentMembers.find(
+          (m) => m.slug?.toLowerCase() === lower || m.displayName.toLowerCase() === lower
+        );
+        if (found) return found;
+      }
+    }
+    if (isReplyToAgent) {
+      const slug = replySender.slice(6).toLowerCase();
+      return this.agentMembers.find(
+        (m) => (replySenderId && m.id === replySenderId) || m.slug?.toLowerCase() === slug
+      );
+    }
+    return this.defaultAgentMember();
   }
 
   /** Handle v2 SSE chat message events.
@@ -3007,7 +3072,15 @@ export class ScionChatThread extends LitElement {
 
       // If we have a pending optimistic message and this SSE event is from us,
       // remove the temp-keyed optimistic entry to prevent a duplicate flash.
+      // Exception (ptone/scion#9015 M2): a pre-dispatch `pending` self-echo
+      // arrives at persist time for co-members and the sender's other tabs;
+      // keep the optimistic bubble on the sender's own tab so mid-dispatch
+      // `send-progress` events (`resuming` -> `sending`) still target it until
+      // the settled echo or HTTP 201 arrives.
       if (this._pendingIdempotencyKeys.size > 0 && msg.senderId === this.selfUserId()) {
+        if (msg.dispatchState === 'pending') {
+          return;
+        }
         for (const key of this._pendingIdempotencyKeys) {
           const opt = this.messageMap.get(key);
           if (opt) {
@@ -3702,6 +3775,12 @@ export class ScionChatThread extends LitElement {
     const replySender = savedReplyTo?.sender || replyMsg?.sender || '';
     const replySenderId = savedReplyTo?.senderId || replyMsg?.senderId || '';
     const isReplyToAgent = !!replyToId && replySender.startsWith('agent:');
+    const optimisticTarget = wake
+      ? undefined
+      : this.resolveOptimisticTargetAgent(mentions, isReplyToAgent, replySender, replySenderId);
+    const optimisticAutoResuming =
+      optimisticTarget?.phase === 'suspended' &&
+      (optimisticTarget.suspendReason === 'idle' || optimisticTarget.suspendReason === 'stalled');
     const optimisticMsg: Message = {
       id: idempotencyKey,
       projectId: '',
@@ -3724,7 +3803,7 @@ export class ScionChatThread extends LitElement {
       createdAt: new Date().toISOString(),
       // A wake resumes the agent before delivery, which takes a while:
       // say so on the bubble instead of a plain "Sending".
-      dispatchState: wake ? WAKING_DISPATCH_STATE : 'pending',
+      dispatchState: wake ? WAKING_DISPATCH_STATE : optimisticAutoResuming ? 'resuming' : 'pending',
     };
     this.messageMap.set(optimisticMsg.id, optimisticMsg);
     this._pendingIdempotencyKeys.add(idempotencyKey);
@@ -3909,7 +3988,9 @@ export class ScionChatThread extends LitElement {
               const wouldDowngrade =
                 (sseVersion.dispatchState === 'delivered' && dispatchState !== 'delivered') ||
                 (sseVersion.dispatchState === 'dispatched' &&
-                  (dispatchState === 'pending' || dispatchState === 'waking')) ||
+                  (dispatchState === 'pending' ||
+                    dispatchState === 'waking' ||
+                    dispatchState === 'resuming')) ||
                 ((sseVersion.dispatchState === 'failed' ||
                   sseVersion.dispatchState === 'no_recipient') &&
                   (dispatchState === 'dispatched' || dispatchState === 'pending'));

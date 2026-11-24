@@ -40,11 +40,12 @@ type chatSendInput struct {
 	ReplyToID   string
 	// Metadata is client-supplied metadata; only allowlisted keys reach
 	// the agent (see allowedClientMetadataKeys).
-	Metadata   map[string]string
-	Interrupt  bool
-	Wake       bool
-	DetachWake bool
-	OfferWake  bool
+	Metadata       map[string]string
+	Interrupt      bool
+	Wake           bool
+	DetachWake     bool
+	OfferWake      bool
+	IdempotencyKey string
 	// OnPersisted, when set, is called for an agent-routed send right
 	// after the row is stored and before dispatch. See
 	// chatSendOptions.OnPersisted.
@@ -961,7 +962,7 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 		// watermark update — see the comment there.
 		return s.sendAgentRouted(ctx, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, in.ReplyToID, in.Metadata,
 			chatSendOptions{Interrupt: in.Interrupt, Wake: in.Wake, DetachWake: in.DetachWake, OfferWake: in.OfferWake,
-				OnPersisted: in.OnPersisted, BeforeWake: in.BeforeWake,
+				IdempotencyKey: in.IdempotencyKey, OnPersisted: in.OnPersisted, BeforeWake: in.BeforeWake,
 				HumanMentionNames: humanMentionNames, HumanMentionsResolved: true})
 	}
 

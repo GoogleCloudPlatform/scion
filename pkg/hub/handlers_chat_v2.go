@@ -1213,14 +1213,15 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	in := chatSendInput{
-		Content:     body.Content,
-		Attachments: body.Attachments,
-		ReplyToID:   body.ReplyToID,
-		Metadata:    body.Metadata,
-		Interrupt:   body.Interrupt,
-		Wake:        body.Wake,
-		DetachWake:  true,
-		OfferWake:   body.OfferWake,
+		Content:        body.Content,
+		Attachments:    body.Attachments,
+		ReplyToID:      body.ReplyToID,
+		Metadata:       body.Metadata,
+		Interrupt:      body.Interrupt,
+		Wake:           body.Wake,
+		DetachWake:     true,
+		OfferWake:      body.OfferWake,
+		IdempotencyKey: body.IdempotencyKey,
 	}
 
 	// Validated before the idempotency lookup, so an invalid body is never
@@ -1660,6 +1661,10 @@ type chatSendOptions struct {
 	// then asks the user and resends with Wake. Without the permission the
 	// failed row is kept, so the user sees the ordinary non-wake error.
 	OfferWake bool
+	// IdempotencyKey is the client-supplied send key used to correlate
+	// transient auto-resume progress SSE events (user.<id>.send-progress)
+	// to the sender's optimistic message bubble. Empty for non-interactive callers.
+	IdempotencyKey string
 	// OnPersisted, when set, is called with the message ID right after the
 	// row is stored and before any dispatch. The caller notes the message
 	// against its idempotency key while keeping the key in flight (the
@@ -2048,6 +2053,19 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 		chatV2ConvResult = convResult
 	}
+	// emitSendProgress publishes a transient sender-only auto-resume progress
+	// event (ptone/scion#9015) on user.<senderID>.send-progress.
+	emitSendProgress := func(stage string) {
+		if opts.IdempotencyKey == "" || user == nil || user.ID() == "" {
+			return
+		}
+		s.events.PublishChatSendProgress(ctx, user.ID(), ChatSendProgressEvent{
+			ConversationKey: key,
+			IdempotencyKey:  opts.IdempotencyKey,
+			Stage:           stage,
+		})
+	}
+
 	// Wake: after conversation resolution, so a resolution failure cannot
 	// leave the agent awake with no message, and before persistence, so a
 	// failed wake leaves no row behind and the client keeps the draft.
@@ -2080,6 +2098,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		var wakeRes *WakeResult
 		var wakeErr *AgentDMError
 		if autoWakePrimary {
+			emitSendProgress(ChatSendProgressResuming)
 			// A hub-suspended primary whose wake another start already
 			// holds is waited for and delivered to (wakeOrAwaitStart);
 			// a wait that ends without a ready agent answers as a
@@ -2118,6 +2137,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			storeMsg.DispatchState = store.MessageDispatchDispatched
 			storeMsg.DispatchFailureReason = nil
 			dispatchFailureCode = ""
+			if autoWakePrimary {
+				emitSendProgress(ChatSendProgressSending)
+			}
 		}
 		// The wake took a while: date the message (and everything sent
 		// after it, mentions included) at delivery, not at request time.
@@ -2156,9 +2178,30 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// makes the idempotency key done. A row the gates already settled
 	// (failed or deferred) keeps its state.
 	primarySettled := false
+	pendingPublished := false
+	var settleMemberFanout func(*store.Message)
 	defer func() {
 		if !primarySettled && storeMsg.DispatchState == store.MessageDispatchDispatched {
 			_ = s.markFailed(ctx, storeMsg.ID, chatSendInterruptedReason)
+			if pendingPublished {
+				pubCtx := context.WithoutCancel(ctx)
+				failedMsg := *storeMsg
+				failedMsg.DispatchState = store.MessageDispatchFailed
+				reason := chatSendInterruptedReason
+				failedMsg.DispatchFailureReason = &reason
+				if cur, err := s.store.GetMessage(pubCtx, storeMsg.ID); err == nil && cur != nil {
+					failedMsg.DispatchState = cur.DispatchState
+					failedMsg.DispatchFailureReason = cur.DispatchFailureReason
+				}
+				s.events.PublishUserMessage(pubCtx, &failedMsg, attachmentRefs, recordedRefs)
+				if settleMemberFanout != nil {
+					settleMemberFanout(&failedMsg)
+					settleMemberFanout = nil
+				}
+			}
+		}
+		if settleMemberFanout != nil {
+			settleMemberFanout(nil)
 		}
 	}()
 
@@ -2231,24 +2274,42 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 	}
 
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
-
-	// Thread membership, then the member fan-out, in one background job:
-	// the sender and the human project members they @mentioned become
-	// members of the thread before the message is fanned out, so they
-	// receive it. Started here, not after agent dispatch, so dispatch
-	// retries do not delay it. Best effort.
-	if !strings.HasPrefix(key, "dm:") {
-		m := threadMembership{
+	// Prepare thread membership metadata for non-DM conversations.
+	isNonDM := !strings.HasPrefix(key, "dm:")
+	var threadMemberRec threadMembership
+	if isNonDM {
+		threadMemberRec = threadMembership{
 			ProjectID:        projectID,
 			ThreadKey:        key,
 			UserID:           user.ID(),
 			MentionedUserIDs: mentionedHumans,
 		}
 		if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
-			m.ConversationID = chatV2ConvResult.ConversationID
+			threadMemberRec.ConversationID = chatV2ConvResult.ConversationID
 		}
-		s.recordThreadMembersThenFanOutAsync(ctx, m, storeMsg, attachmentRefs, recordedRefs)
+	}
+
+	// Dispatch to the primary agent — skipped entirely when the phase gate
+	// above already marked the row failed or deferred.
+	dispatcher := s.GetDispatcher()
+	primaryDispatchOK := !primaryReincarnating && !primaryUnreachable
+	willDispatchPrimary := primaryDispatchOK && dispatcher != nil
+
+	// When primary dispatch is about to run synchronously, publish a
+	// non-terminal "pending" copy immediately at persist time (and record
+	// thread membership + member fan-out) so co-members and the sender's other
+	// tabs see the message promptly without waiting on the broker call or a
+	// mid-dispatch auto-resume (ptone/scion#9015 M2). The sender's own tab
+	// ignores the pending self-echo while its optimistic bubble is in flight,
+	// and the settled state is published after holdOrDispatch returns below.
+	if willDispatchPrimary {
+		pendingMsg := *storeMsg
+		pendingMsg.DispatchState = store.MessageDispatchPending
+		s.events.PublishUserMessage(ctx, &pendingMsg, attachmentRefs, recordedRefs)
+		pendingPublished = true
+		if isNonDM {
+			settleMemberFanout = s.recordThreadMembersThenFanOutStagedAsync(ctx, threadMemberRec, &pendingMsg, attachmentRefs, recordedRefs)
+		}
 	}
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
@@ -2278,14 +2339,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// gate and the dispatch outcome (see logMessageRecord).
 	logMessageRecord(s.recordLog(), primaryAgent, msg)
 
-	// Dispatch to the primary agent — skipped entirely when the phase gate
-	// above already marked the row failed or deferred.
-	dispatcher := s.GetDispatcher()
-	primaryDispatchOK := true
-	if primaryReincarnating || primaryUnreachable {
-		primaryDispatchOK = false
-	}
-	if primaryDispatchOK && dispatcher != nil {
+	if willDispatchPrimary {
 		// withDispatchMessageID carries the hub message ID to the broker so a
 		// later buffered-delivery failure report (#1820) can mark this row
 		// failed even though this synchronous call returns nil (message_delivery_failures.go).
@@ -2326,6 +2380,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 					if opts.BeforeWake != nil {
 						opts.BeforeWake(len(agents))
 					}
+					emitSendProgress(ChatSendProgressResuming)
 					baseCtx := ctx
 					if opts.DetachWake {
 						baseCtx = context.WithoutCancel(ctx)
@@ -2344,6 +2399,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 						newCancel()
 						return nil, nil, err
 					}
+					emitSendProgress(ChatSendProgressSending)
 					return newCtx, newCancel, nil
 				}),
 				withAdjustUrgentAfterWake(func(target *store.Agent, _ bool) bool {
@@ -2365,8 +2421,32 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			primaryDispatchOK = false
 		}
 	}
-	// The row now holds the primary's real outcome.
+	// The row now holds the primary's real outcome. Re-read the current stored
+	// dispatch state before publishing so a fast broker delivery confirmation
+	// or async failure is never overwritten by a stale in-memory "dispatched"
+	// echo (ptone/scion#9015 M1).
 	primarySettled = true
+	if cur, err := s.store.GetMessage(ctx, storeMsg.ID); err == nil && cur != nil {
+		storeMsg.DispatchState = cur.DispatchState
+		storeMsg.DispatchFailureReason = cur.DispatchFailureReason
+		if cur.DispatchState == store.MessageDispatchDelivered {
+			dispatchFailureCode = ""
+		} else if cur.DispatchState == store.MessageDispatchFailed && dispatchFailureCode == "" && cur.DispatchFailureReason != nil {
+			dispatchFailureCode = dispatchFailureCodeFromReason(*cur.DispatchFailureReason)
+		}
+	}
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
+	if isNonDM {
+		if settleMemberFanout != nil {
+			// Deliver the settled snapshot to the single ordered job started
+			// at persist time so membership recording and pending fan-out
+			// always complete before the settled fan-out runs.
+			settleMemberFanout(storeMsg)
+			settleMemberFanout = nil
+		} else if !willDispatchPrimary {
+			s.recordThreadMembersThenFanOutAsync(ctx, threadMemberRec, storeMsg, attachmentRefs, recordedRefs)
+		}
+	}
 	if primaryDispatchOK {
 		dispatchedAgents = append(dispatchedAgents, primaryAgent)
 	}
