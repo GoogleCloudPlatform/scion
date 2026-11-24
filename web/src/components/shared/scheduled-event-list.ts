@@ -205,7 +205,7 @@ export class ScionScheduledEventList extends LitElement {
       }
       .load-more-error {
         font-size: 0.8125rem;
-        color: var(--scion-danger, #dc2626);
+        color: var(--scion-error-text, #991b1b);
       }
     `,
   ];
