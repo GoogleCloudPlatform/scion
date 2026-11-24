@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -2596,7 +2597,8 @@ const stagedSecretWarnThreshold = 100 * 1024
 func reservedAgentEnvName(name string) bool {
 	return name == stagedsecrets.HubTokenStagedEnvVar ||
 		name == stagedsecrets.ResolvedAuthStagedEnvVar ||
-		name == envpolicy.HookWithheldEnvVar
+		name == envpolicy.HookWithheldEnvVar ||
+		strings.HasPrefix(name, firewallpolicy.EnvPrefix)
 }
 
 // dropReservedAgentEnv deletes the reservedAgentEnvName entries from an
@@ -3330,6 +3332,11 @@ func buildNetnsSetupArgs(containerID string, cfg RunConfig) []string {
 	if v, ok := effectiveInitFirewall(cfg); ok {
 		if norm, emit := normalizeInitFirewallArg(v); emit {
 			args = append(args, "-e", initFirewallEnvVar+"="+norm)
+			if norm == "true" {
+				for _, kv := range cfg.InitFirewall.Env() {
+					args = append(args, "-e", kv)
+				}
+			}
 		}
 	}
 	args = append(args,

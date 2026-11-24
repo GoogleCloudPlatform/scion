@@ -48,6 +48,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -206,6 +207,11 @@ type ServerConfig struct {
 	// Provisioners execute scripts inside the agent container with access to
 	// projected secrets. Defaults to true; set false to block such dispatches.
 	AllowContainerScriptHarnesses bool
+
+	// InitFirewall holds the broker operator's normalized egress firewall
+	// policy (server.broker.init_firewall), applied when an agent opts into
+	// SCION_INIT_FIREWALL on a runtime-managed netns-setup path.
+	InitFirewall firewallpolicy.Policy
 
 	// NFSConfig holds NFS workspace storage settings for this broker. The
 	// server command sets it from server.workspace_storage when the backend

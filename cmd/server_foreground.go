@@ -339,6 +339,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := validateBrokerStateDir(cfg); err != nil {
 		return err
 	}
+	if _, err := cfg.RuntimeBroker.InitFirewall.Normalize(); err != nil {
+		return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
+	}
 
 	// 5b. The convert host lock (convert-apply design section 4.7): a
 	// process that hosts the Runtime Broker refuses to start while a
@@ -4844,6 +4847,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		return err
 	}
 
+	brokerInitFirewall, err := cfg.RuntimeBroker.InitFirewall.Normalize()
+	if err != nil {
+		return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
+	}
+
 	// Create Runtime Broker server configuration
 	rhCfg := runtimebroker.ServerConfig{
 		Port:                          cfg.RuntimeBroker.Port,
@@ -4859,6 +4867,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSAllowedHeaders:            cfg.RuntimeBroker.CORSAllowedHeaders,
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
+		InitFirewall:                  brokerInitFirewall,
 		StateDir:                      rhStateDir,
 		NFSConfig:                     brokerNFS,
 		StorageOverridesCheck:         brokerStorageOverridesCheck,

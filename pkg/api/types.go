@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 )
 
 // ParseDuration parses a duration string, returning 0 for empty or invalid input.
@@ -1547,13 +1549,20 @@ type StartOptions struct {
 	// Env["SCION_HUB_ENDPOINT"] — see pkg/agent/run.go and
 	// pkg/runtime/substrate_egress.go.
 	TrustedHubEndpoint string
-	Detached           *bool
-	Resume             bool
-	NoAuth             bool
-	Branch             string
-	Workspace          string
-	GitClone           *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
-	SharedWorkspace    bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// InitFirewall is the broker's operator-derived egress firewall policy
+	// (extra allowed domains and SSH opt-in). Set only by the broker from
+	// operator-controlled configuration, never from Env, templates,
+	// harness-configs, or secrets. Forwarded verbatim to RunConfig.InitFirewall
+	// and rendered only into the netns-setup container's argv when
+	// SCION_INIT_FIREWALL is effective.
+	InitFirewall    firewallpolicy.Policy
+	Detached        *bool
+	Resume          bool
+	NoAuth          bool
+	Branch          string
+	Workspace       string
+	GitClone        *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
+	SharedWorkspace bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
 	// HubProjectID is the Hub-supplied project ID of a broker dispatch (set
 	// by the broker from the request, never from agent or workspace state).
 	// It locates a shared-workspace project's broker-side external agents

@@ -42,6 +42,7 @@ import (
 	yamlv3 "gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 )
 
 // HubServerConfig holds configuration for the Hub API server.
@@ -839,10 +840,31 @@ type RuntimeBrokerConfig struct {
 	// to true; set false to block provisioner-based dispatches on this broker.
 	AllowContainerScriptHarnesses bool `json:"allowContainerScriptHarnesses" yaml:"allowContainerScriptHarnesses" koanf:"allowContainerScriptHarnesses"`
 
+	// InitFirewall configures the operator-authoritative egress firewall
+	// policy (server.broker.init_firewall) applied when an agent opts into
+	// SCION_INIT_FIREWALL.
+	InitFirewall *InitFirewallConfig `json:"initFirewall,omitempty" yaml:"initFirewall,omitempty" koanf:"initFirewall"`
+
 	// Instances mirrors settings server.broker.instances (flat Runtime Broker
 	// instances). Only settings.yaml may set it; a legacy server.yaml that
 	// does is rejected by LoadGlobalConfig.
 	Instances []RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
+}
+
+// InitFirewallConfig is the GlobalConfig form of V1InitFirewallConfig
+// (server.broker.init_firewall).
+type InitFirewallConfig struct {
+	AllowDomains []string `json:"allowDomains,omitempty" yaml:"allowDomains,omitempty" koanf:"allowDomains"`
+	AllowSSH     bool     `json:"allowSsh,omitempty" yaml:"allowSsh,omitempty" koanf:"allowSsh"`
+}
+
+// Normalize validates and canonicalizes the configured init-firewall policy.
+// A nil receiver returns an empty policy with no error.
+func (c *InitFirewallConfig) Normalize() (firewallpolicy.Policy, error) {
+	if c == nil {
+		return firewallpolicy.Policy{}, nil
+	}
+	return firewallpolicy.Normalize(c.AllowDomains, c.AllowSSH)
 }
 
 // RuntimeBrokerInstanceConfig is the server-config form of
@@ -1697,6 +1719,9 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 		return nil, err
 	}
 	if ok {
+		if err := validateBrokerInitFirewall(gc); err != nil {
+			return nil, err
+		}
 		markTrustedProxiesSet(gc, nil)
 		return gc, nil
 	}
@@ -1709,8 +1734,24 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateBrokerInitFirewall(gc); err != nil {
+		return nil, err
+	}
 	markTrustedProxiesSet(gc, nil)
 	return gc, nil
+}
+
+func validateBrokerInitFirewall(gc *GlobalConfig) error {
+	if gc == nil || gc.RuntimeBroker.InitFirewall == nil {
+		return nil
+	}
+	policy, err := gc.RuntimeBroker.InitFirewall.Normalize()
+	if err != nil {
+		return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
+	}
+	gc.RuntimeBroker.InitFirewall.AllowDomains = policy.AllowDomains
+	gc.RuntimeBroker.InitFirewall.AllowSSH = policy.AllowSSH
+	return nil
 }
 
 // markTrustedProxiesSet sets gc.TrustedProxiesSet when server.trusted_proxies
@@ -2635,6 +2676,7 @@ var envListConfigKeys = []string{
 	"hub.conduit.peerServiceAccounts",
 	"hub.conduit.tcpAllowedPorts",
 	"hub.conduit.denyPorts",
+	"runtimeBroker.initFirewall.allowDomains",
 }
 
 // splitCommaSeparatedKoanfKeys splits comma-separated string values into slices

@@ -3015,6 +3015,7 @@ authDone:
 		}(),
 		GitClone:           opts.GitClone,
 		TrustedHubEndpoint: trustedHubEndpoint,
+		InitFirewall:       opts.InitFirewall,
 		SharedDirs:         effectiveSharedDirs,
 		SharedDirStorage:   sharedDirStorage,
 		HomeStorageBackend: homeStorageBackend,

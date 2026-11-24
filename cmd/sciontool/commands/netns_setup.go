@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	"github.com/spf13/cobra"
 )
@@ -42,7 +44,12 @@ func runNetnsSetup() error {
 	if metaCfg == nil {
 		return fmt.Errorf("netns-setup requires SCION_METADATA_MODE to be configured (block or assign)")
 	}
-	if _, err := setupInitFirewall(); err != nil {
+	policy, err := firewallpolicy.FromEnv(os.LookupEnv)
+	if err != nil {
+		log.Error("Invalid init firewall policy: %v", err)
+		return errInitFirewallFailed
+	}
+	if _, err := setupInitFirewall(policy); err != nil {
 		return err
 	}
 	if err := netnsSetupInstallRules(metaCfg.Mode, metaCfg.Port); err != nil {

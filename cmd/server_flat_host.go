@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
@@ -734,10 +735,16 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		activator = &remoteFlatActivator{globalDir: p.globalDir}
 	}
 
+	brokerInitFirewall, err := cfg.RuntimeBroker.InitFirewall.Normalize()
+	if err != nil {
+		return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
+	}
+
 	shared := flatServerShared{
 		cfg:                     cfg,
 		mode:                    mode,
 		hubEndpoint:             hubEndpointForRH,
+		initFirewall:            brokerInitFirewall,
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
 		storageLayout:           brokerLayout,
@@ -1026,6 +1033,8 @@ type flatServerShared struct {
 	colocatedStorage storage.Storage
 	// colocatedHubID is the co-located Hub's instance ID (empty without one).
 	colocatedHubID string
+	// initFirewall is the broker operator's normalized egress firewall policy.
+	initFirewall firewallpolicy.Policy
 }
 
 // flatInstanceServerConfig is one activated flat instance's Runtime Broker
@@ -1054,6 +1063,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		CORSAllowedHeaders:            cfg.RuntimeBroker.CORSAllowedHeaders,
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
+		InitFirewall:                  sh.initFirewall,
 		NFSConfig:                     sh.nfs,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       sh.workspaceStorageBackend,

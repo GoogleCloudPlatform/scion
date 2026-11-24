@@ -311,6 +311,8 @@ var schemaEnvVarDerivationExceptions = map[string]string{
 	"server.broker.enabled":                          envNameRuntimeBroker,
 	"server.broker.host":                             envNameRuntimeBroker,
 	"server.broker.hub_endpoint":                     envNameRuntimeBroker,
+	"server.broker.init_firewall.allow_domains":      envNameRuntimeBroker,
+	"server.broker.init_firewall.allow_ssh":          envNameRuntimeBroker,
 	"server.broker.port":                             envNameRuntimeBroker,
 	"server.broker.read_timeout":                     envNameRuntimeBroker,
 	"server.broker.state_dir":                        envNameRuntimeBroker,

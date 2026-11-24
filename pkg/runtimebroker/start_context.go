@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -786,6 +787,16 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		delete(env, key)
 		delete(envCls, key)
 	}
+	// SCION_INIT_FIREWALL_* keys (e.g. ALLOW_DOMAINS, ALLOW_SSH) are
+	// operator-owned and passed exclusively through the typed
+	// StartOptions.InitFirewall field, never through agent env. Bare
+	// SCION_INIT_FIREWALL (no trailing underscore) stays user-settable.
+	for key := range env {
+		if strings.HasPrefix(key, firewallpolicy.EnvPrefix) {
+			delete(env, key)
+			delete(envCls, key)
+		}
+	}
 
 	// 3. Hub auth token. The agent's hub credential is only the token the
 	// hub issued for this start (opts.HubIssuedToken below):
@@ -1073,6 +1084,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,
 		TrustedHubEndpoint: trustedHubEndpoint,
+		InitFirewall:       s.config.InitFirewall,
 		HubIssuedToken:     hubIssuedToken,
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
