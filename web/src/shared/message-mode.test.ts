@@ -22,12 +22,16 @@ describe('MESSAGE_MODE_DISPLAY', () => {
     expect(hub.description).toContain('other projects');
   });
 
-  it('includes all five modes', () => {
-    const modes: MessageMode[] = ['none', 'lineage', 'branch', 'project', 'hub'];
+  it('includes all six modes', () => {
+    const modes: MessageMode[] = ['none', 'owner', 'direct', 'tree', 'project', 'hub'];
     for (const mode of modes) {
       expect(MESSAGE_MODE_DISPLAY[mode]).toBeDefined();
       expect(MESSAGE_MODE_DISPLAY[mode].label).toBeTruthy();
     }
+    expect(MESSAGE_MODE_DISPLAY.owner.label).toBe('Owner');
+    expect(MESSAGE_MODE_DISPLAY.direct.label).toBe('Direct plus owner');
+    expect(MESSAGE_MODE_DISPLAY.tree.label).toBe('Tree plus owner');
+    expect(MESSAGE_MODE_DISPLAY.tree.icon).toBe('tree');
   });
 });
 
@@ -40,8 +44,14 @@ describe('MODE_SORT_ORDER', () => {
     expect(MODE_SORT_ORDER.project).toBeGreaterThan(MODE_SORT_ORDER.hub);
   });
 
+  it('ranks tree, direct, owner in descending permissiveness', () => {
+    expect(MODE_SORT_ORDER.tree).toBeGreaterThan(MODE_SORT_ORDER.project);
+    expect(MODE_SORT_ORDER.direct).toBeGreaterThan(MODE_SORT_ORDER.tree);
+    expect(MODE_SORT_ORDER.owner).toBeGreaterThan(MODE_SORT_ORDER.direct);
+  });
+
   it('ranks none as least permissive', () => {
-    expect(MODE_SORT_ORDER.none).toBe(4);
+    expect(MODE_SORT_ORDER.none).toBe(5);
   });
 });
 
@@ -64,9 +74,14 @@ describe('getDenialMessage — names', () => {
     expect(getDenialMessage('mode_none', "bot-$&-$'-$`")).toBe(
       "bot-$&-$'-$` is sealed (mode: none) and cannot receive messages."
     );
-    expect(getDenialMessage('mode_lineage_agent_to_agent', undefined, 'a$&b')).toBe(
-      'a$&b is in lineage mode: it can message lineage users but not other agents.'
+    expect(getDenialMessage('mode_incompatible', 'target-$&', 'a$&b')).toBe(
+      'a$&b and target-$& are in message modes that cannot exchange messages.'
     );
+    expect(getDenialMessage('mode_owner_only', 'bot-1')).toBe(
+      'bot-1 only accepts messages from its owner.'
+    );
+    expect(getDenialMessage('mode_direct_no_edge', 'bot-1')).toContain('Direct mode');
+    expect(getDenialMessage('mode_tree_outside', 'bot-1')).toContain('Tree mode');
   });
 });
 

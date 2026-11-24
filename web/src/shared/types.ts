@@ -375,7 +375,7 @@ export type AgentPhase =
 /**
  * Message mode controlling an agent's messaging authorization scope
  */
-export type MessageMode = 'none' | 'lineage' | 'branch' | 'project' | 'hub';
+export type MessageMode = 'none' | 'owner' | 'direct' | 'tree' | 'project' | 'hub';
 
 // ---------------------------------------------------------------------------
 // Cascade mode change types
@@ -410,9 +410,10 @@ export interface AgentMessageability {
   /** Reason code when canMessage is false */
   reason?:
     | 'mode_none'
-    | 'mode_lineage_no_ancestry'
-    | 'mode_branch_no_edge'
-    | 'mode_lineage_agent_to_agent'
+    | 'mode_owner_only'
+    | 'mode_direct_no_edge'
+    | 'mode_tree_outside'
+    | 'mode_incompatible'
     | 'mode_none_sender'
     | 'missing_permission'
     | 'cross_project_disabled'

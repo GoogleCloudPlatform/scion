@@ -56,17 +56,23 @@ export const MESSAGE_MODE_DISPLAY: Record<MessageMode, MessageModeDisplay> = {
     label: 'Project',
     description: 'Messages all agents and users in the project',
   },
-  branch: {
+  tree: {
+    icon: 'tree',
+    color: 'primary',
+    label: 'Tree plus owner',
+    description: 'Messages agents in its creation tree (also in Tree mode) and its owner',
+  },
+  direct: {
     icon: 'diagram-3',
     color: 'primary',
-    label: 'Branch',
-    description: 'Messages parent/children agents and lineage users',
+    label: 'Direct plus owner',
+    description: 'Messages its direct parent and children (also in Direct mode) and its owner',
   },
-  lineage: {
+  owner: {
     icon: 'person-lines-fill',
     color: 'warning',
-    label: 'Lineage',
-    description: 'Messages lineage users only; no agent-to-agent',
+    label: 'Owner',
+    description: 'Messages its owner only; no agent-to-agent',
   },
   none: {
     icon: 'shield-lock',
@@ -83,9 +89,10 @@ export const MESSAGE_MODE_DISPLAY: Record<MessageMode, MessageModeDisplay> = {
 export const MODE_SORT_ORDER: Record<MessageMode, number> = {
   hub: 0,
   project: 1,
-  branch: 2,
-  lineage: 3,
-  none: 4,
+  tree: 2,
+  direct: 3,
+  owner: 4,
+  none: 5,
 };
 
 // ---------------------------------------------------------------------------
@@ -111,9 +118,10 @@ export function getMessageModeDisplay(mode?: string): MessageModeDisplay {
 export type MessageDenialReason =
   | 'mode_none'
   | 'mode_none_sender'
-  | 'mode_lineage_no_ancestry'
-  | 'mode_branch_no_edge'
-  | 'mode_lineage_agent_to_agent'
+  | 'mode_owner_only'
+  | 'mode_direct_no_edge'
+  | 'mode_tree_outside'
+  | 'mode_incompatible'
   | 'missing_permission'
   | 'cross_project_disabled'
   | 'cross_project_sender_mode'
@@ -131,12 +139,12 @@ export type MessageDenialReason =
 export const DENIAL_REASON_COPY: Record<MessageDenialReason, string> = {
   mode_none: '{recipient} is sealed (mode: none) and cannot receive messages.',
   mode_none_sender: 'You cannot send messages: this agent is sealed (mode: none).',
-  mode_lineage_no_ancestry:
-    '{recipient} is in lineage mode and only accepts messages from users in its ancestry. You are not in its lineage.',
-  mode_branch_no_edge:
-    '{recipient} is in branch mode and only exchanges messages with its direct parent/children that are also in branch mode.',
-  mode_lineage_agent_to_agent:
-    '{sender} is in lineage mode: it can message lineage users but not other agents.',
+  mode_owner_only: '{recipient} only accepts messages from its owner.',
+  mode_direct_no_edge:
+    '{recipient} is in Direct mode and only exchanges messages with its direct parent and children that are also in Direct mode.',
+  mode_tree_outside:
+    '{recipient} is in Tree mode and only exchanges messages with Tree-mode agents in its own creation tree.',
+  mode_incompatible: '{sender} and {recipient} are in message modes that cannot exchange messages.',
   missing_permission: 'You do not have permission to message this agent.',
   cross_project_disabled: 'Cross-project messaging is disabled by the Hub administrator.',
   cross_project_sender_mode: '{sender} must be in Hub mode to send messages across projects.',

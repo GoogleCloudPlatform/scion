@@ -53,7 +53,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_DELIVERY_SETTLE_TIMEOUT_MS = 20_000;
 
 export type TestAgentRole = 'readonly' | 'baseline' | 'full';
-export type TestAgentMessageMode = 'none' | 'lineage' | 'branch' | 'project' | 'hub';
+export type TestAgentMessageMode = 'none' | 'owner' | 'direct' | 'tree' | 'project' | 'hub';
 
 /** Stock JWT scope bundles matching `ScopesForRole` in `pkg/hub/agentrole.go`. */
 const ROLE_SCOPES: Record<TestAgentRole, readonly string[]> = {

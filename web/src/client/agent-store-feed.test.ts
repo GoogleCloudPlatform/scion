@@ -1072,7 +1072,7 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
       suspendReason: 'idle',
       containerStatus: 'Up 1 minute',
       message: 'Waiting for review',
-      messageMode: 'lineage',
+      messageMode: 'owner',
       ancestry: ['root'],
       createdBy: 'u1',
       created: '2026-01-01T00:00:00Z',

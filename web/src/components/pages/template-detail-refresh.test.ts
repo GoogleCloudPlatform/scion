@@ -211,18 +211,18 @@ describe('template detail: message mode', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() =>
-        Promise.resolve(jsonResponse(makeTemplate({ agentConfig: { message_mode: 'lineage' } })))
+        Promise.resolve(jsonResponse(makeTemplate({ agentConfig: { message_mode: 'owner' } })))
       )
     );
     element = await createElement();
-    expect(modeBadge(element)?.getAttribute('mode')).toBe('lineage');
+    expect(modeBadge(element)?.getAttribute('mode')).toBe('owner');
   });
 
   it('ignores a legacy row config messageMode (ptone/scion#4223)', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() =>
-        Promise.resolve(jsonResponse(makeTemplate({ config: { messageMode: 'branch' } })))
+        Promise.resolve(jsonResponse(makeTemplate({ config: { messageMode: 'direct' } })))
       )
     );
     element = await createElement();

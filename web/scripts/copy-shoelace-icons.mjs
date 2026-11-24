@@ -217,6 +217,7 @@ const USED_ICONS = [
   'three-dots',
   'three-dots-vertical',
   'trash',
+  'tree',
   'upload',
   'volume-mute',
   'volume-up',

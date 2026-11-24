@@ -527,7 +527,7 @@ export async function routeDecisionThread(
         projectId: PROJECT_A.id,
         _messageability:
           asker === 'denied'
-            ? { canMessage: false, reason: 'mode_lineage_no_ancestry' }
+            ? { canMessage: false, reason: 'mode_owner_only' }
             : { canMessage: true },
       },
     });

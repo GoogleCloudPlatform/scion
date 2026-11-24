@@ -108,6 +108,7 @@ import '../shared/quick-message-dialog.js';
 import {
   getDenialMessage,
   MESSAGE_MODE_DISPLAY,
+  MODE_SORT_ORDER,
   getMessageModeDisplay,
 } from '../../shared/message-mode.js';
 import type { DeletionInfo, MessageMode } from '../../shared/types.js';
@@ -726,9 +727,18 @@ export class ScionPageAgents extends LitElement {
       ) {
         this.phaseFilter = storedPhase;
       }
+      // Read persisted mode filter (reset to All if a retired/unknown mode was persisted)
       const storedMode = localStorage.getItem('scion-filter-agents-mode');
-      if (storedMode) {
+      if (
+        storedMode &&
+        (storedMode === 'can_message' ||
+          storedMode === 'cannot_message' ||
+          storedMode in MESSAGE_MODE_DISPLAY)
+      ) {
         this.modeFilter = storedMode;
+      } else if (storedMode) {
+        localStorage.removeItem('scion-filter-agents-mode');
+        this.modeFilter = '';
       }
     }
 
@@ -1856,22 +1866,16 @@ export class ScionPageAgents extends LitElement {
                 >
                   <sl-menu-item value="" ?checked=${this.modeFilter === ''}>All Modes</sl-menu-item>
                   <sl-divider></sl-divider>
-                  <sl-menu-item value="project" ?checked=${this.modeFilter === 'project'}>
-                    <sl-icon slot="prefix" name="globe2"></sl-icon>
-                    Project
-                  </sl-menu-item>
-                  <sl-menu-item value="branch" ?checked=${this.modeFilter === 'branch'}>
-                    <sl-icon slot="prefix" name="diagram-3"></sl-icon>
-                    Branch
-                  </sl-menu-item>
-                  <sl-menu-item value="lineage" ?checked=${this.modeFilter === 'lineage'}>
-                    <sl-icon slot="prefix" name="person-lines-fill"></sl-icon>
-                    Lineage
-                  </sl-menu-item>
-                  <sl-menu-item value="none" ?checked=${this.modeFilter === 'none'}>
-                    <sl-icon slot="prefix" name="shield-lock"></sl-icon>
-                    Sealed
-                  </sl-menu-item>
+                  ${(Object.keys(MESSAGE_MODE_DISPLAY) as MessageMode[])
+                    .sort((a, b) => MODE_SORT_ORDER[a] - MODE_SORT_ORDER[b])
+                    .map(
+                      (mode) => html`
+                        <sl-menu-item value=${mode} ?checked=${this.modeFilter === mode}>
+                          <sl-icon slot="prefix" name=${MESSAGE_MODE_DISPLAY[mode].icon}></sl-icon>
+                          ${MESSAGE_MODE_DISPLAY[mode].label}
+                        </sl-menu-item>
+                      `
+                    )}
                   <sl-divider></sl-divider>
                   <sl-menu-item value="can_message" ?checked=${this.modeFilter === 'can_message'}>
                     <sl-icon slot="prefix" name="check-circle"></sl-icon>

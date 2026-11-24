@@ -25,9 +25,9 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-import { jumpScale } from './agent-tree-view.js';
+import { jumpScale, modesCompatibleForParentChild } from './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';
-import type { Agent } from '../../shared/types.js';
+import type { Agent, MessageMode } from '../../shared/types.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
@@ -342,7 +342,7 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
     // root's. messageMode is not part of the topology signature by design
     // (edge styling reads live agents, same as node status), so this must
     // still show the mismatch on the very next render.
-    el.agents = el.agents.map((a) => (a.id === 'k1' ? { ...a, messageMode: 'branch' } : a));
+    el.agents = el.agents.map((a) => (a.id === 'k1' ? { ...a, messageMode: 'direct' } : a));
     await el.updateComplete;
 
     expect(cachedLayout(el)).toBe(before); // confirms this really was a cache hit
@@ -698,7 +698,7 @@ describe('scion-agent-tree-view edge endpoint lookup via id map (#2388)', () => 
     // agent's messageMode and either gain or lose the mismatch styling.
     const agents: Agent[] = [
       { ...agent('r1', 'root-1', ['user-1']), messageMode: 'project' },
-      { ...agent('k1', 'kid-1', ['user-1', 'r1']), messageMode: 'branch' },
+      { ...agent('k1', 'kid-1', ['user-1', 'r1']), messageMode: 'direct' },
       { ...agent('r2', 'root-2', ['user-2']), messageMode: 'project' },
       { ...agent('k2', 'kid-2', ['user-2', 'r2']), messageMode: 'project' },
     ];
@@ -1798,5 +1798,29 @@ describe('deletion badge on graph nodes', () => {
     vi.advanceTimersByTime(20_000);
     await el.updateComplete;
     expect((await nodeBadge('d1'))?.text).toBe('Interrupted');
+  });
+});
+
+describe('modesCompatibleForParentChild', () => {
+  const allModes: MessageMode[] = ['none', 'owner', 'direct', 'tree', 'project', 'hub'];
+
+  const expected: Record<MessageMode, Record<MessageMode, boolean>> = {
+    none: { none: false, owner: false, direct: false, tree: false, project: false, hub: false },
+    owner: { none: false, owner: false, direct: false, tree: false, project: false, hub: false },
+    direct: { none: false, owner: false, direct: true, tree: true, project: false, hub: false },
+    tree: { none: false, owner: false, direct: true, tree: true, project: true, hub: true },
+    project: { none: false, owner: false, direct: false, tree: true, project: true, hub: true },
+    hub: { none: false, owner: false, direct: false, tree: true, project: true, hub: true },
+  };
+
+  it('matches the Hub same-project parent/child matrix for all 36 ordered mode pairs', () => {
+    for (const pm of allModes) {
+      for (const cm of allModes) {
+        expect(modesCompatibleForParentChild(pm, cm), `${pm} -> ${cm}`).toBe(expected[pm][cm]);
+        expect(modesCompatibleForParentChild(pm, cm), `symmetry ${pm} <-> ${cm}`).toBe(
+          modesCompatibleForParentChild(cm, pm)
+        );
+      }
+    }
   });
 });

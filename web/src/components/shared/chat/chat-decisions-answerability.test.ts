@@ -42,8 +42,7 @@ const { deniedAnswerability, readOnlyAnswerability } =
 await import('./chat-decisions.js');
 type ScionChatDecisions = import('./chat-decisions.js').ScionChatDecisions;
 
-const LINEAGE =
-  'release-bot is in lineage mode and only accepts messages from users in its ancestry. You are not in its lineage.';
+const LINEAGE = 'release-bot only accepts messages from its owner.';
 
 function view(over: Partial<DecisionView> = {}): DecisionView {
   return {
@@ -143,7 +142,7 @@ afterEach(() => {
 
 describe('blocked before the click', () => {
   it('disables the choices and shows the asker rule with a lock icon', async () => {
-    const el = await mount(deniedAnswerability('mode_lineage_no_ancestry', 'release-bot'));
+    const el = await mount(deniedAnswerability('mode_owner_only', 'release-bot'));
     expectBlocked(el);
     const r = reason(el)!;
     expect(r.querySelector('sl-icon')!.getAttribute('name')).toBe('lock');
@@ -223,7 +222,7 @@ describe('403 on click (authoritative)', () => {
 
   it('message_denied blocks with details.reason, toasts and emits', async () => {
     const { el, events } = await clickDenied(
-      denied('message_denied', { reason: 'mode_lineage_no_ancestry' })
+      denied('message_denied', { reason: 'mode_owner_only' })
     );
     expectBlocked(el);
     expect(text(reason(el))).toBe(`You can't answer release-bot: ${LINEAGE}`);
@@ -233,7 +232,7 @@ describe('403 on click (authoritative)', () => {
         messageId: 'm1',
         askerAgentId: 'a1',
         code: 'message_denied',
-        reason: 'mode_lineage_no_ancestry',
+        reason: 'mode_owner_only',
         answerability: {
           state: 'blocked',
           askerName: 'release-bot',

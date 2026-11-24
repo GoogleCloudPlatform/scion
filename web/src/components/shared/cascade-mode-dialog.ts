@@ -279,7 +279,7 @@ export class ScionCascadeModeDialog extends LitElement {
   override render() {
     return html`
       <sl-dialog
-        label="Apply Mode to Branch"
+        label="Apply Mode to Descendants"
         ?open=${this.open}
         @sl-request-close=${(e: Event) => {
           e.stopPropagation();
@@ -288,7 +288,7 @@ export class ScionCascadeModeDialog extends LitElement {
       >
         <div class="dialog-body">
           <div class="mode-selector">
-            <label>Set all agents in this branch to:</label>
+            <label>Set this agent and all its descendants to:</label>
             <sl-select
               size="small"
               value=${this.selectedMode}
