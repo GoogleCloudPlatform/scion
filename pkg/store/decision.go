@@ -86,6 +86,7 @@ const (
 const (
 	DecisionSurfaceNative        = "native"
 	DecisionSurfaceDecisionsPage = "decisions_page"
+	DecisionSurfaceInbox         = "inbox"
 	DecisionSurfaceSlack         = "slack"
 	DecisionSurfaceGoogleChat    = "google_chat"
 	DecisionSurfaceDiscord       = "discord"

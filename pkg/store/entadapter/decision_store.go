@@ -2398,7 +2398,7 @@ func validateDismissDecisionsInput(in *store.DismissDecisionsInput) error {
 	if surface == "" {
 		surface = store.DecisionSurfaceNative
 	}
-	if surface != store.DecisionSurfaceNative && surface != store.DecisionSurfaceDecisionsPage {
+	if surface != store.DecisionSurfaceNative && surface != store.DecisionSurfaceDecisionsPage && surface != store.DecisionSurfaceInbox {
 		return fmt.Errorf("%w: invalid dismiss surface %q", store.ErrInvalidInput, in.Surface)
 	}
 	if _, err := msgaction.NormalizeReason(in.Reason); err != nil {

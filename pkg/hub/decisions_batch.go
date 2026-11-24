@@ -222,7 +222,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 	}
 	surface, ok := normalizeAnswerSurface(req.Surface)
 	if !ok {
-		ValidationError(w, fmt.Sprintf("surface %q is not supported; expected %q or %q", req.Surface, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage),
+		ValidationError(w, fmt.Sprintf("surface %q is not supported; expected %q, %q, or %q", req.Surface, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage, store.DecisionSurfaceInbox),
 			map[string]interface{}{"field": "surface"})
 		return
 	}
