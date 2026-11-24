@@ -1830,3 +1830,90 @@ describe('scion-schedule-list initialScheduleId deep-link', () => {
     expect(dialog?.hasAttribute('open')).toBe(true);
   });
 });
+
+describe('scion-schedule-list creator display', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function openDetail(sched: Record<string, unknown>): Promise<Element> {
+    const el = await mount([sched]);
+    rowFor(el, String(sched.name)).click();
+    await settle(el as unknown as { updateComplete: Promise<unknown> });
+    const dialog = (el.shadowRoot as ShadowRoot).querySelector('sl-dialog[label^="Schedule:"]');
+    if (!dialog) throw new Error('detail dialog not rendered');
+    return dialog;
+  }
+
+  function createdRow(dialog: Element): Element {
+    const row = Array.from(dialog.querySelectorAll('.detail-row')).find((r) =>
+      (r.textContent ?? '').includes('Created:')
+    );
+    if (!row) throw new Error('Created detail row not found');
+    return row;
+  }
+
+  it('shows the user display name or email instead of the raw UUID', async () => {
+    const userUuid = '11111111-1111-1111-1111-111111111111';
+    const dialog = await openDetail(
+      schedule({
+        name: 'user-sched',
+        createdBy: userUuid,
+        createdByName: 'alice@example.com',
+        createdByType: 'user',
+      })
+    );
+    const row = createdRow(dialog);
+    expect(row.textContent).toContain('by alice@example.com');
+    expect(row.textContent).not.toContain(userUuid);
+    expect(row.querySelector('a')).toBeNull();
+  });
+
+  it('shows the agent slug as a link to the agent detail page', async () => {
+    const agentUuid = '22222222-2222-2222-2222-222222222222';
+    const dialog = await openDetail(
+      schedule({
+        name: 'agent-sched',
+        createdBy: agentUuid,
+        createdByName: 'ops-bot',
+        createdByType: 'agent',
+      })
+    );
+    const row = createdRow(dialog);
+    expect(row.textContent).toContain('by ops-bot');
+    expect(row.textContent).not.toContain(agentUuid);
+    const link = row.querySelector('a.creator-link');
+    expect(link).not.toBeNull();
+    expect(link?.textContent?.trim()).toBe('ops-bot');
+    expect(link?.getAttribute('href')).toBe(`/agents/${agentUuid}`);
+  });
+
+  it('falls back to the raw UUID when the creator cannot be resolved', async () => {
+    const deletedUuid = '33333333-3333-3333-3333-333333333333';
+    const dialog = await openDetail(
+      schedule({
+        name: 'orphan-sched',
+        createdBy: deletedUuid,
+      })
+    );
+    const row = createdRow(dialog);
+    expect(row.textContent).toContain(`by ${deletedUuid}`);
+    expect(row.querySelector('a')).toBeNull();
+  });
+
+  it('omits creator text when createdBy is absent', async () => {
+    const dialog = await openDetail(
+      schedule({
+        name: 'anon-sched',
+      })
+    );
+    const row = createdRow(dialog);
+    expect(row.textContent).not.toContain(' by ');
+  });
+});

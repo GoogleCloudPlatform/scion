@@ -893,3 +893,164 @@ func TestSchedule_ListFilterByCreatedByAndTargetAgent(t *testing.T) {
 		assert.Equal(t, ScheduleListScopeCaller, respTarget.Scope)
 	})
 }
+
+func TestSchedule_CreatorNameResolution(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	// 1. User with display name
+	aliceID := tid("sched-creator-alice")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          aliceID,
+		Email:       "alice@example.com",
+		DisplayName: "Alice Example",
+		Role:        "member",
+		Status:      "active",
+	}))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, aliceID))
+
+	// 2. User without display name (falls back to email)
+	bobID := tid("sched-creator-bob")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          bobID,
+		Email:       "bob@example.com",
+		DisplayName: "",
+		Role:        "member",
+		Status:      "active",
+	}))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, bobID))
+
+	// 3. Agent in the same project
+	agentID := tid("sched-creator-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:        agentID,
+		Slug:      "ops-bot",
+		Name:      "Ops Bot",
+		ProjectID: projectID,
+		Phase:     "running",
+	}))
+
+	// 4. Agent in another project (viewer without access to that project must not see its slug)
+	otherProjID := tid("sched-creator-other-proj")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   otherProjID,
+		Name: "Secret Project",
+		Slug: "secret-project",
+	}))
+	otherAgentID := tid("sched-creator-other-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:        otherAgentID,
+		Slug:      "secret-bot",
+		Name:      "Secret Bot",
+		ProjectID: otherProjID,
+		Phase:     "running",
+	}))
+
+	// 5. Soft-deleted agent (must fall back to UUID)
+	deletedAgentID := tid("sched-creator-deleted-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:        deletedAgentID,
+		Slug:      "gone-bot",
+		Name:      "Gone Bot",
+		ProjectID: projectID,
+		Phase:     "stopped",
+	}))
+	require.NoError(t, s.DeleteAgent(ctx, deletedAgentID))
+
+	missingID := tid("sched-creator-missing")
+
+	mkSched := func(name, createdBy string) string {
+		id := tid("sched-row-" + name)
+		sc := &store.Schedule{
+			ID:        id,
+			ProjectID: projectID,
+			Name:      name,
+			CronExpr:  "0 9 * * *",
+			EventType: "message",
+			Payload:   `{"agentName":"worker","message":"hi"}`,
+			Status:    store.ScheduleStatusActive,
+			CreatedBy: createdBy,
+		}
+		require.NoError(t, s.CreateSchedule(ctx, sc))
+		return id
+	}
+
+	aliceSchedID := mkSched("by-alice", aliceID)
+	bobSchedID := mkSched("by-bob", bobID)
+	agentSchedID := mkSched("by-agent", agentID)
+	otherAgentSchedID := mkSched("by-other-agent", otherAgentID)
+	deletedAgentSchedID := mkSched("by-deleted-agent", deletedAgentID)
+	missingSchedID := mkSched("by-missing", missingID)
+
+	aliceUser := NewAuthenticatedUser(aliceID, "alice@example.com", "Alice Example", "member", "web")
+
+	t.Run("list resolves user display name, user email, agent slug, and omits unresolvable or unauthorized", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, aliceUser, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+
+		assert.Equal(t, "Alice Example", byID[aliceSchedID].CreatedByName)
+		assert.Equal(t, "user", byID[aliceSchedID].CreatedByType)
+
+		assert.Equal(t, "bob@example.com", byID[bobSchedID].CreatedByName)
+		assert.Equal(t, "user", byID[bobSchedID].CreatedByType)
+
+		assert.Equal(t, "ops-bot", byID[agentSchedID].CreatedByName)
+		assert.Equal(t, "agent", byID[agentSchedID].CreatedByType)
+
+		// Agent in another project that alice cannot read: omitted (falls back to UUID)
+		assert.Empty(t, byID[otherAgentSchedID].CreatedByName)
+		assert.Empty(t, byID[otherAgentSchedID].CreatedByType)
+		assert.Equal(t, otherAgentID, byID[otherAgentSchedID].CreatedBy)
+
+		// Deleted agent: omitted (falls back to UUID)
+		assert.Empty(t, byID[deletedAgentSchedID].CreatedByName)
+		assert.Empty(t, byID[deletedAgentSchedID].CreatedByType)
+		assert.Equal(t, deletedAgentID, byID[deletedAgentSchedID].CreatedBy)
+
+		// Non-existent creator: omitted (falls back to UUID)
+		assert.Empty(t, byID[missingSchedID].CreatedByName)
+		assert.Empty(t, byID[missingSchedID].CreatedByType)
+		assert.Equal(t, missingID, byID[missingSchedID].CreatedBy)
+	})
+
+	t.Run("get single schedule resolves creator", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, aliceUser, http.MethodGet, projectID, agentSchedID, nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp ScheduleResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, "ops-bot", resp.CreatedByName)
+		assert.Equal(t, "agent", resp.CreatedByType)
+	})
+
+	t.Run("scoped token without user.read does not resolve other users", func(t *testing.T) {
+		scopedAlice := NewScopedUserIdentity(aliceUser, projectID, []string{"scheduled_event:read", "scheduled_event:list", "agent:read"})
+		rec := doScheduleUserRequest(t, srv, scopedAlice, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+
+		// Self is still readable
+		assert.Equal(t, "Alice Example", byID[aliceSchedID].CreatedByName)
+		assert.Equal(t, "user", byID[aliceSchedID].CreatedByType)
+
+		// Another user's email/display name must NOT be exposed without user.read
+		assert.Empty(t, byID[bobSchedID].CreatedByName)
+		assert.Empty(t, byID[bobSchedID].CreatedByType)
+		assert.Equal(t, bobID, byID[bobSchedID].CreatedBy)
+	})
+}

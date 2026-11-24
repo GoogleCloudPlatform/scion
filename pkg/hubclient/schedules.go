@@ -114,6 +114,8 @@ type Schedule struct {
 	ErrorCount    int        `json:"errorCount"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	CreatedBy     string     `json:"createdBy"`
+	CreatedByName string     `json:"createdByName,omitempty"`
+	CreatedByType string     `json:"createdByType,omitempty"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
 	UpdatedBy     string     `json:"updatedBy,omitempty"`
 }
