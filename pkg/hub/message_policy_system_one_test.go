@@ -1808,8 +1808,8 @@ func TestMessagePolicySystemOne_R2GroupSendCELOnlySkipsAgentListing(t *testing.T
 	fault.Arm()
 
 	rr := f.sendOutbound(t, OutboundMessageRequest{
-		ConversationID: conv.ID,
-		Msg:            "Normal group update with no mentions.",
+		ConversationRef: "conv:" + conv.ID,
+		Msg:             "Normal group update with no mentions.",
 	})
 	require.Equal(t, http.StatusOK, rr.Code, "CEL-only group send must admit without listing project agents: %s", rr.Body.String())
 	assert.Zero(t, hook.calls.Load(), "CEL-only group send must make 0 ListAgents calls")
