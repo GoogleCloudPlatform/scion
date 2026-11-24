@@ -14,6 +14,15 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Message modes revised: `owner`, `direct`, and new `tree` mode
+
+Agent message modes now consist of six values: `none`, `owner`, `direct`, `tree`, `project`, and `hub`:
+
+- **Renames with automatic DB migration:** `lineage` has been renamed to `owner` and `branch` has been renamed to `direct` (labelled **Direct plus owner** in the Web UI). Existing rows in `agents.message_mode` (including soft-deleted rows) are automatically rewritten on Hub startup (`lineage` → `owner`, `branch` → `direct`), preserving effective allow and deny sets.
+- **New `tree` mode (Tree plus owner):** Admits the agent's origin owner plus same-project agents in the same creation tree (sharing the same owner-created root agent) that are in `tree`, `project`, or `hub` mode, or in `direct` mode when they are a direct parent or child. The rule is symmetric so replies work in both directions. `tree` is also accepted for `server.hub.default_message_mode`.
+- **Hard rejection of retired names:** `lineage` and `branch` are no longer accepted as input aliases by the API, CLI, template validation, or `server.hub.default_message_mode`. Each validator returns an actionable error naming the replacement (`owner` or `direct`). Update any `scion-agent.yaml` templates or `settings.yaml` / `SCION_SERVER_HUB_DEFAULTMESSAGEMODE` values that still name `lineage` or `branch` before creating agents or restarting the Hub.
+- **HA hosted rolling upgrades:** Upgrade all Hub replicas, then restart one replica after the rollout finishes so any `lineage` or `branch` rows written by an older replica during the mixed-version window are rewritten. See [Messaging Authorization](/scion/reference/messaging-authorization/).
+
 ## Daily automatic release updates and `update_policy: auto` cadence change
 
 Hubs running release binaries and following `latest` on a channel can now toggle daily automatic updates from the **Server Version & Updates** card on **Admin → Maintenance** (or via `PUT /api/v1/admin/maintenance/auto-update`), with a selectable UTC hour window (default `04:00` UTC).

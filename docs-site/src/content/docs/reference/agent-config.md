@@ -43,7 +43,7 @@ Edits to a template's `env` take effect on an agent's next start. Its job keys a
 | `task_flag` | string | CLI flag name for passing the task (e.g., `--input`). When set, the task is delivered as a flag value instead of a positional argument. |
 | `model` | string | LLM model identifier override. |
 | `thinking_level` | int | Harness-agnostic thinking level from 0 to 100, mapped by the harness-config to a native tier (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)). |
-| `message_mode` | string | Hub only: the initial message mode (`none`, `lineage`, `branch`, `project`, `hub`) for agents created from this template when the create request names none. A `none` (sealed) agent still runs the task given at creation, which is passed to the harness at start rather than sent as a message; later messages reach it only from a super-admin (see [Piercing Rules](/scion/reference/messaging-authorization/#piercing-rules)). |
+| `message_mode` | string | Hub only: the initial message mode (`none`, `owner`, `direct`, `tree`, `project`, `hub`) for agents created from this template when the create request names none. A `none` (sealed) agent still runs the task given at creation, which is passed to the harness at start rather than sent as a message; later messages reach it only from a super-admin (see [Piercing Rules](/scion/reference/messaging-authorization/#piercing-rules)). |
 
 :::caution[Harness Field Deprecated]
 The `harness` field is no longer supported in `scion-agent.yaml`. Templates must be harness-agnostic. Use `default_harness_config` to specify a preferred harness, which can be overridden by users at runtime.

@@ -452,11 +452,20 @@ Every agent is protected by a **Message Mode** that controls which users and oth
 
 The available modes are:
 
-- **Project Mode (Default)**: Any user with the `agent:message` permission in the project can message the agent. Any peer agent in the project (that is not restricted by lineage mode) can also message it. The most permissive mode. Note that the default project-member role does **not** include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent (i.e., the agent's creator or their ancestors). This aligns messaging authorization with the terminal attach permission gate.
+- **Project Mode (Default)**: Any user with the `agent:message` permission in the project can message the agent. Any same-project agent in `project` or `hub` mode (or in `tree` mode within the same creation tree) can also message it. Note that the default project-member role does **not** include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent. This aligns messaging authorization with the terminal attach permission gate.
 - **Hub Mode**: Behaves like Project mode within the agent's own project, and additionally allows the agent to send direct messages across project boundaries when [cross-project messaging](#cross-project-messaging) is enabled. A project-mode agent can *receive* a cross-project DM but cannot *reply* across the boundary until granted Hub mode.
-- **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it. Agent-to-agent messages need both agents in branch mode and one to be the other's direct parent; siblings, grandparents, and pairs that mix branch with another mode are denied.
-- **Lineage Mode**: Strictly restricts messaging to users in the agent's ancestry chain (its creator and their ancestors). No agent-to-agent messaging is permitted.
-- **None Mode**: Seals the agent from all messaging except system-plane notices and a super-admin's messages (see [Piercing](#piercing)). No other user and no agent can message a none-mode agent, so a task sent later as a message is refused and the agent stays idle. Give a none-mode agent its task when you create it: the creation-time task is passed to the harness when the agent starts, not delivered as a message, so the seal does not block it.
+- **Tree Mode (`tree`, UI label: Tree plus owner)**: Admits the agent's origin owner (`Ancestry[0]`), plus same-project agents in the same creation tree (sharing the same owner-created root agent) that are in `tree`, `project`, or `hub` mode, or in `direct` mode when they are a direct parent or child. The rule is symmetric so replies work in both directions.
+- **Direct Mode (`direct`, UI label: Direct plus owner)**: Admits the agent's origin owner plus its direct parent and direct child agents (when the counterpart is in `direct` or `tree` mode). Siblings, grandparents, and agents in `owner`, `project`, or `hub` mode are denied.
+- **Owner Mode (`owner`)**: Strictly restricts messaging to the agent's origin owner (`Ancestry[0]`). No agent-to-agent messaging is permitted in either direction.
+- **None Mode (`none`, UI label: Sealed)**: Seals the agent from all messaging except system-plane notices and a super-admin's messages (see [Piercing](#piercing)). No other user and no agent can message a none-mode agent, so a task sent later as a message is refused and the agent stays idle. Give a none-mode agent its task when you create it: the creation-time task is passed to the harness when the agent starts, not delivered as a message, so the seal does not block it.
+
+### Choosing a mode
+
+- Use **`project`** when all agents in a project should collaborate freely.
+- Use **`tree`** when an owner-created coordinator spawns sub-agents that should collaborate freely with each other and with the root without exposing them to unrelated trees in the same project. Set the root to `tree` with cascade (`scion set-message-mode <root> tree --cascade`) — newly spawned children inherit `tree` automatically.
+- Use **`direct`** when each agent should only talk to its immediate parent and children (strict hub-and-spoke delegation).
+- Use **`owner`** for isolated single-agent tasks that only report back to their human owner.
+- Use **`none`** to quarantine an agent immediately.
 
 A new agent's mode is set once, at creation: the `--message-mode` flag of `scion create` or `scion start` if given, else the template's `message_mode`, else the parent agent's mode when an agent creates it, else the Hub's default message mode ([`server.hub.default_message_mode`](/scion/reference/server-config/#hub-settings-serverhub), `project` unless the operator sets it). A default that resolves to `hub` still needs a hub-mode grant.
 
@@ -464,12 +473,12 @@ To see modes:
 
 - `scion whoami --full` shows the calling agent's own mode (`messageMode` in `--format json`).
 - `scion conversation get` and `scion conversation participants` show a **MSG MODE** column for agent participants in the conversation's project; for a conversation without a project (a DM or legacy group), in the calling agent's project (`messageMode` in JSON). It shows `-` for users, for agents outside that project, and for every agent when a user reads a conversation without a project.
-- When a send is denied, the CLI error names the reason and both modes, for example `message_denied: Message delivery denied [reason: ..., sender mode: branch, recipient mode: project] (status: 403)`.
+- When a send is denied, the CLI error names the reason and both modes, for example `message_denied: Message delivery denied [reason: mode_incompatible, sender mode: direct, recipient mode: project] (status: 403)`.
 
 ### Piercing
 Highly privileged users can bypass an agent's message mode restrictions. This is called **piercing**.
-- **Project Owners** can pierce Branch and Lineage modes.
-- **Super-admins** pierce all modes, including None mode.
+- **Project Owners** can pierce `owner`, `direct`, and `tree` modes.
+- **Super-admins** pierce all modes, including `none` mode.
 Piercing applies only to user identities — it is never inherited by an owner's agents.
 
 The Web Dashboard displays reachability indicators (e.g., whether you can message a specific agent) based on the computed messageability, which takes into account the agent's mode, your ancestry relationship to it, and any piercing privileges.

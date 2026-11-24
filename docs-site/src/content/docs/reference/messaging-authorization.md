@@ -16,14 +16,15 @@ For an overview of Scion's messaging features and day-to-day usage, see
 
 Every agent has a **message mode** that governs its conversational reach — both who can deliver
 messages to the agent and who the agent can deliver messages to. There are
-five modes:
+six modes:
 
 | Mode | Default | Description |
 |------|---------|-------------|
 | `project` | Yes | Bidirectional with all agents and users in the project. |
 | `hub` | | Project cell + cross-project DM delivery to eligible recipients on the same Hub. |
-| `branch` | | Ancestry users + direct parent/child agents (both must be `branch` mode). |
-| `lineage` | | Ancestry users only. Zero agent-to-agent edges. |
+| `tree` | | Origin owner + same-project agents in the same creation tree (`tree`, `project`, `hub`, or direct parent/child `direct`). |
+| `direct` | | Origin owner + direct parent/child agents (in `direct` or `tree` mode). |
+| `owner` | | Origin owner only. Zero agent-to-agent edges. |
 | `none` | | Sealed. No message-plane delivery except from super-admin. |
 
 The default mode is **`project`**, which preserves pre-mode behavior: any
@@ -31,7 +32,7 @@ project member with the `agent.message` permission can message any agent.
 No tightening occurs until someone explicitly sets a non-default mode. A
 Hub operator can change the default for new agents with
 [`server.hub.default_message_mode`](/scion/reference/server-config/#hub-settings-serverhub)
-(`none`, `lineage`, `branch` or `project`). It applies only when neither the
+(`none`, `owner`, `direct`, `tree` or `project`). It applies only when neither the
 create request, the template nor the parent agent sets a mode, and it does not
 change existing agents. A
 soft-deleted agent (`deletedAt` set) cannot receive messages in any mode and
@@ -42,15 +43,15 @@ store write, or Runtime Broker dispatch; see
 
 ### Key principles
 
-1. **Not creator-private.** Lineage and branch modes are "private to lineage
-   users + project owners," not creator-private. The counterparty set grows
-   silently when a user is promoted to project owner. True creator-privacy
-   exists only in sole-owner projects.
+1. **Not creator-private.** `owner`, `direct`, and `tree` modes are "private to
+   the origin owner (`Ancestry[0]`) + project owners," not creator-private. The
+   counterparty set grows silently when a user is promoted to project owner.
+   True creator-privacy exists only in sole-owner projects.
 
 2. **Owner role stays rare.** Basic project usage never requires the owner or
    admin role. The default `project` mode allows any project member with
    `agent.message` to send messages. The owner role is needed only for
-   accessing lineage- or branch-restricted agents.
+   accessing `owner`-, `direct`-, or `tree`-restricted agents.
 
 3. **Mode is orthogonal to agent role.** Role governs sender-side capabilities
    over Hub resources; mode governs conversational reach including inbound
@@ -99,7 +100,7 @@ DM but cannot reply across projects until an authorized actor grants it
 - No access to the other project's agents, files, settings, or resources.
 - No cross-Hub communication (that remains on A2A/OIDC).
 - No project group, broadcast, or plugin channel access across projects.
-- The `any` policy does not open `none`, `lineage`, or `branch` recipients.
+- The `any` policy does not open `none`, `owner`, `direct`, or `tree` recipients.
 
 ### Scope
 
@@ -122,14 +123,17 @@ extension.
 | `project` | User lacks `agent.message` | DENY |
 | `hub` | User holds `agent.message` on the project | ALLOW |
 | `hub` | User lacks `agent.message` | DENY |
-| `branch` | User is in the agent's ancestry chain | ALLOW |
-| `branch` | User is a project owner | ALLOW |
-| `branch` | Otherwise | DENY |
-| `lineage` | User is in the agent's ancestry chain | ALLOW |
-| `lineage` | User is a project owner | ALLOW |
-| `lineage` | Otherwise | DENY |
+| `tree` | User is the origin owner (`Ancestry[0]`) with active project access | ALLOW |
+| `tree` | User is a project owner | ALLOW |
+| `tree` | Otherwise | DENY (`mode_owner_only`) |
+| `direct` | User is the origin owner (`Ancestry[0]`) with active project access | ALLOW |
+| `direct` | User is a project owner | ALLOW |
+| `direct` | Otherwise | DENY (`mode_owner_only`) |
+| `owner` | User is the origin owner (`Ancestry[0]`) with active project access | ALLOW |
+| `owner` | User is a project owner | ALLOW |
+| `owner` | Otherwise | DENY (`mode_owner_only`) |
 | `none` | User is super-admin | ALLOW |
-| `none` | Otherwise (including project owner) | DENY |
+| `none` | Otherwise (including project owner) | DENY (`mode_none`) |
 
 For human-to-agent delivery, `hub` behaves identically to `project`. The
 `hub` mode grants no new right to message unrelated humans.
@@ -138,21 +142,34 @@ For human-to-agent delivery, `hub` behaves identically to `project`. The
 
 | Sender mode | Target mode | Condition | Result |
 |-------------|-------------|-----------|--------|
-| `project` | `project` | Same project | ALLOW |
-| `project` | `hub` | Same project | ALLOW |
-| `hub` | `project` | Same project | ALLOW |
-| `hub` | `hub` | Same project | ALLOW |
-| `branch` | `branch` | Direct parent/child relationship | ALLOW |
-| `branch` | `branch` | Not direct parent/child | DENY |
-| `lineage` | any | _(lineage agents have no agent-to-agent edges)_ | DENY |
-| any | `lineage` | _(lineage agents have no agent-to-agent edges)_ | DENY |
-| `none` | any | Sealed | DENY |
-| any | `none` | Sealed | DENY |
-| Mixed (`project`/`branch`) | | Mode mismatch | DENY |
+| `project` / `hub` | `project` / `hub` | Same project | ALLOW |
+| `direct` | `direct` | Direct parent/child relationship | ALLOW |
+| `direct` | `direct` | Not direct parent/child | DENY (`mode_direct_no_edge`) |
+| `tree` | `tree` / `project` / `hub` | Same creation tree (same owner-created root) | ALLOW |
+| `project` / `hub` | `tree` | Same creation tree (same owner-created root) | ALLOW |
+| `tree` ↔ `tree`/`project`/`hub` | | Different creation trees or empty ancestry | DENY (`mode_tree_outside`) |
+| `tree` ↔ `direct` | | Same creation tree AND direct parent/child | ALLOW |
+| `tree` ↔ `direct` | | Different creation trees | DENY (`mode_tree_outside`) |
+| `tree` ↔ `direct` | | Same creation tree, not direct parent/child | DENY (`mode_direct_no_edge`) |
+| `owner` | any | _(owner agents have no agent-to-agent edges)_ | DENY (`mode_incompatible`) |
+| any | `owner` | _(owner agents have no agent-to-agent edges)_ | DENY (`mode_incompatible`) |
+| `none` | any | Sealed sender | DENY (`mode_none_sender`) |
+| any | `none` | Sealed target | DENY (`mode_none`) |
+| `direct` ↔ `project`/`hub` | | Mode mismatch | DENY (`mode_incompatible`) |
 
 Within the same project, `hub` behaves identically to `project` — it joins
 the same communication cell. The `hub` mode only gains additional
 cross-project reach described in [Cross-Project Agent Messaging](#cross-project-agent-messaging).
+
+**Creation tree membership (`tree` mode):** Every hub-created agent records an
+immutable `Ancestry = [originUser, rootAgent, ..., directParent]`. The
+owner-created root is `agent.ID` when `len(Ancestry) == 1`, and `Ancestry[1]`
+when `len(Ancestry) >= 2`. Two agents are in the same creation tree iff both
+have non-empty ancestry with the same `Ancestry[0]` and the same owner-created
+root. Because `Ancestry` is an immutable snapshot, surviving descendants remain
+in the same tree even if the root or an intermediate ancestor is soft- or
+hard-deleted. Separate agents created directly by the same user start separate
+trees. Agents with empty `Ancestry` fail closed.
 
 ### Agent to Agent (cross-project)
 
@@ -176,20 +193,21 @@ in an existing cross-project DM.
 A group conversation has no single recipient, so the sender's mode alone
 decides agent posts to it. `project` and `hub` agents may post to any group
 conversation in their project, and posting to a conversation by ID adds them
-as participants. `lineage` and `branch` agents may post only to a group
+as participants. `owner`, `direct`, and `tree` agents may post only to a group
 conversation they already belong to, and only a human allowed to message
-them (an ancestry user, a project owner, or a super-admin) can add them.
+them (the origin owner, a project owner, or a super-admin) can add them; an
+agent adder (even in the same creation tree) is always refused.
 `none` agents never post to group conversations, and agents or other users
 cannot add them. A refused post or add returns 403 `message_denied`.
 
 Group conversations can hold agent participant rows written before these
 rules. The optional `group-participant-mode-cleanup` maintenance migration
 marks as left the active agent rows in group conversations whose agent is
-in `none`, `lineage` or `branch` mode (or an unrecognized mode), or is
-deleted or missing. Older rows do not record who added them, so `lineage`
-and `branch` rows a human added are removed as well. Only `lineage` and
-`branch` agents can be added back this way, by a human allowed to message
-them: `scion conversation join conv:<conversation-id> agent <agent-id>`; a
+in `none`, `owner`, `direct`, or `tree` mode (or an unrecognized mode), or is
+deleted or missing. Older rows do not record who added them, so `owner`,
+`direct`, and `tree` rows a human added are removed as well. Only `owner`,
+`direct`, and `tree` agents can be added back this way, by a human allowed to
+message them: `scion conversation join conv:<conversation-id> agent <agent-id>`; a
 `none` mode agent cannot. The migration only reports
 until it is run with `{"params":{"apply":"true"}}` (`apply` must be the
 string `"true"`; a boolean `true` is ignored).
@@ -218,7 +236,7 @@ All messaging falls into one of two planes:
 The system-plane flag is set exclusively by hub-internal code paths. It is
 **never** derived from external request data — including JWT claims — and
 is **never** settable from any external ingress. Without this exemption,
-`none`/`lineage`/`branch` agents would break scheduling and sub-agent
+`none`/`owner`/`direct`/`tree` agents would break scheduling and sub-agent
 workflows.
 
 ---
@@ -228,12 +246,12 @@ workflows.
 Piercing allows certain users to reach agents in restricted modes. Piercing
 is evaluated on the **human principal at delivery time**.
 
-| Principal | Pierces `project` | Pierces `hub` | Pierces `branch` | Pierces `lineage` | Pierces `none` |
-|-----------|:-:|:-:|:-:|:-:|:-:|
-| Super-admin | Yes | Yes | Yes | Yes | Yes |
-| Project owner | Yes | Yes | Yes | Yes | No |
-| Ancestry user | Yes | Yes | Yes | Yes | No |
-| Project member (non-owner) | Yes | Yes | No | No | No |
+| Principal | Pierces `project` | Pierces `hub` | Pierces `tree` | Pierces `direct` | Pierces `owner` | Pierces `none` |
+|-----------|:-:|:-:|:-:|:-:|:-:|:-:|
+| Super-admin | Yes | Yes | Yes | Yes | Yes | Yes |
+| Project owner | Yes | Yes | Yes | Yes | Yes | No |
+| Origin owner (`Ancestry[0]`) | Yes | Yes | Yes | Yes | Yes | No |
+| Project member (non-owner) | Yes | Yes | No | No | No | No |
 
 `hub` mode follows the same piercing rules as `project` mode.
 
@@ -241,9 +259,9 @@ is evaluated on the **human principal at delivery time**.
 
 - **User-identity-only.** Piercing is never inherited by an owner's agents.
   If a project owner has a `project`-mode agent, that agent cannot deliver
-  messages to a `lineage` or `branch` agent. This prevents relay exploits
-  (U → owner's agent → restricted agent). Evaluated on the human principal,
-  never on on-behalf-of markers.
+  messages to an `owner`, `direct`, or outside-tree `tree` agent. This prevents
+  relay exploits (U → owner's agent → restricted agent). Evaluated on the human
+  principal, never on on-behalf-of markers.
 
 - **Active project access for ancestry.** The ancestry allow requires the
   user's current access to the agent's project: a project role binding
@@ -271,21 +289,21 @@ is evaluated on the **human principal at delivery time**.
 
 ---
 
-## Mixed Modes in a Branch
+## Mixed Modes in a Tree
 
-Mixed message modes within a branch are allowed. The per-edge rule (both
-endpoints must be `branch` mode AND have a direct parent/child relationship)
-is the sole enforcement mechanism. Key behaviors:
+Mixed message modes within a creation tree are allowed. Key behaviors:
 
-- **Mode mixtures only ever remove edges, never add them.** Mixing is
-  fail-safe: a comprehension issue, not a security one.
-
-- A `branch`-mode child under a `project`-mode parent **cannot** message its
-  parent in either direction. Its reachable set may be surprisingly small.
-
-- A `project`-mode agent inside a branch is denied in both directions with
-  every `branch`-mode relative (bridge test). It communicates normally with
-  the project cell only.
+- **Symmetric tree bond:** A `tree`-mode agent can exchange messages with
+  same-project agents in its own creation tree that are in `tree`, `project`, or
+  `hub` mode, or in `direct` mode when they are its direct parent or child. For
+  example, a `project`-mode root can message its `tree`-mode descendants and
+  they can reply without the root switching to `tree`.
+- **`direct` keeps its direct-neighbour restriction:** A `direct`-mode child
+  under a `project`-mode parent **cannot** message its parent in either
+  direction, and a `direct`-mode agent can only message a `tree`-mode relative
+  when they are direct parent and child.
+- **`owner` and `none` are never overridden:** An `owner`-mode agent has no
+  agent-to-agent edges in either direction, even inside the same creation tree.
 
 ---
 
@@ -510,7 +528,7 @@ exposing settings or topology.
 ```json
 {
     "hubEnabled": true,
-    "supportedModes": ["none", "lineage", "branch", "project", "hub"],
+    "supportedModes": ["none", "owner", "direct", "tree", "project", "hub"],
     "crossProjectConversationKinds": ["direct"]
 }
 ```
@@ -567,14 +585,14 @@ POST /api/v1/projects/{pid}/agents/{aid}/action/set_message_mode
 
 ```json
 {
-    "mode": "none|lineage|branch|project|hub",
+    "mode": "none|owner|direct|tree|project|hub",
     "cascade": false
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mode` | string | Yes | One of: `none`, `lineage`, `branch`, `project`, `hub` |
+| `mode` | string | Yes | One of: `none`, `owner`, `direct`, `tree`, `project`, `hub` |
 | `cascade` | bool | No | If true, apply the mode to all descendants of this agent |
 
 ### Response
@@ -743,8 +761,8 @@ For full CLI documentation, see the [CLI Reference](/scion/reference/cli/).
 ### `scion start --message-mode <mode>`
 
 Sets the initial message mode when creating an agent. Overrides template
-and parent inheritance. Valid modes: `none`, `lineage`, `branch`, `project`,
-`hub`.
+and parent inheritance. Valid modes: `none`, `owner`, `direct`, `tree`,
+`project`, `hub`.
 
 ### `scion create --message-mode <mode>`
 

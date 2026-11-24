@@ -234,17 +234,29 @@ An authorization model where certain resources (such as scheduled events, recurr
 ### Conversation
 A surface-agnostic container for a message thread, owned by the Hub. Every exchange — whether it originates in the web chat, CLI, Discord, Telegram, or another channel — is routed through a conversation. Conversations have a kind (`direct` for 1-on-1, `group` for multi-participant) and a surface that identifies where they were created. Managed via the `scion conversation` CLI command (alias `conv`) or the Web Dashboard.
 
-### Branch mode (message mode)
-A message mode that permits messaging from ancestry users (like lineage) plus the agent's direct parent and child agents. Project owners can pierce branch mode.
+### Creation tree
+The set of same-project agents rooted at a single **Owner-created root** — the owner-created root agent itself plus all of its direct and transitive descendants, identified via their immutable `Ancestry` snapshot (`Ancestry[1]`, or the agent's own ID when created directly by a user). Two agents created directly by the same user start separate creation trees.
 
-### Lineage mode (message mode)
-A message mode that restricts messaging to users in the agent's ancestry chain — the creating user and their ancestors. No agent-to-agent messaging is permitted for lineage-mode agents. Project owners can pierce lineage mode.
+### Direct mode (message mode)
+A message mode (`direct`; UI label: **Direct plus owner**) that permits messaging from the agent's origin owner plus its direct parent and direct child agents (when the counterpart is in `direct` or `tree` mode). Project owners can pierce direct mode.
+
+### Owner (messaging)
+The **origin user** recorded at `Ancestry[0]` when an agent is created. Written once by the Hub and immutable. Distinct from the mutable `agents.owner_id` column and from the **project-owner** role.
+
+### Owner-created root
+The top-level agent created directly by a human user at the root of a creation tree: `Ancestry[1]` for any descendant agent, or the agent itself when created directly by a user (`len(Ancestry) == 1`).
+
+### Owner mode (message mode)
+A message mode (`owner`) that restricts messaging to the agent's origin owner (`Ancestry[0]`). No agent-to-agent messaging is permitted in either direction. Project owners can pierce owner mode.
+
+### Tree mode (message mode)
+A message mode (`tree`; UI label: **Tree plus owner**) that permits messaging from the agent's origin owner plus same-project agents in the same creation tree that are in `tree`, `project`, or `hub` mode, or in `direct` mode when they are a direct parent or child. Project owners can pierce tree mode.
 
 ### Hub mode (message mode)
 A message mode that behaves like Project mode within the agent's own project and additionally permits the agent to send direct messages across project boundaries (when cross-project messaging is enabled at the Hub and receiving-project level). A project-mode agent can receive a cross-project DM but cannot reply until granted Hub mode. Hub mode is subject to a non-escalation grant guard: an agent can only grant it to another agent if the granting agent is itself in Hub mode and has the `full` authorization role.
 
 ### Message Mode
-A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: `none`, `lineage`, `branch`, `project` (the built-in default unless the operator sets `server.hub.default_message_mode`), or `hub`. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
+A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of six values: `none`, `owner`, `direct`, `tree`, `project` (the built-in default unless the operator sets `server.hub.default_message_mode`), or `hub`. Set by the agent's owner, a project owner, a super-admin, or a same-project full-role agent via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
 
 ### Messageability
 A server-computed assessment of whether a specific viewer can message a specific agent, considering the agent's message mode, the viewer's identity, ancestry relationship, and permissions. Exposed in API responses as `_messageability` with `canMessage` and `canReachViewer` booleans. Used by the UI to gate message buttons and show reachability indicators.
@@ -256,10 +268,10 @@ The built-in interactive messaging interface in the Web Dashboard (enabled via t
 A message mode that seals the agent from all messaging except system-plane notices and super-admin piercing. No users and no agents can message a none-mode agent through normal paths.
 
 ### Piercing (message authorization)
-The ability of a privileged user to bypass an agent's message mode restrictions. Super-admins pierce all modes including none. Project owners pierce lineage and branch modes. Piercing applies only to user identities — it is never inherited by an owner's agents.
+The ability of a privileged user to bypass an agent's message mode restrictions. Super-admins pierce all modes including none. Project owners pierce `owner`, `direct`, and `tree` modes. Piercing applies only to user identities — it is never inherited by an owner's agents.
 
 ### Project mode (message mode)
-The built-in default message mode (unless the operator sets `server.hub.default_message_mode`). Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in project or branch mode can message it. The most permissive mode. Note that the default project-member role does not include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent.
+The built-in default message mode (unless the operator sets `server.hub.default_message_mode`). Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in `project` or `hub` mode (or in `tree` mode within the same creation tree) can message it. Note that the default project-member role does not include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent.
 
 ### Cross-project inbound policy
 A project-level setting (`crossProjectInbound`) that controls whether the project accepts agent messages originating from other projects. One of three values: `none` (default — reject all), `members` (accept only when the sender's originating human is a member of this project), or `any` (accept from any project on the Hub). One of three independent controls required for cross-project messaging.
