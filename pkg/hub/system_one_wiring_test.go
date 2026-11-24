@@ -819,7 +819,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 			srcBad := &hubSystemOneCredentialSource{srv: srvBad}
 			_, err := srcBad.APIKeyToken(ctxWithProj, makeInst(systemoneprovider.SecretScopeProject))
 			require.Error(t, err, "project-scope %q must be refused", disallowedType)
-			assert.ErrorIs(t, err, systemone.ErrAuth)
+			assert.ErrorIs(t, err, egress.ErrAuth)
 		}
 	})
 
