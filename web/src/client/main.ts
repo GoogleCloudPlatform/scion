@@ -115,8 +115,6 @@ setBasePath('/shoelace');
 // tag used in src/ must be imported here; shoelace-registration.test.ts
 // enforces it.
 import '@shoelace-style/shoelace/dist/components/badge/badge.js';
-import '@shoelace-style/shoelace/dist/components/breadcrumb/breadcrumb.js';
-import '@shoelace-style/shoelace/dist/components/breadcrumb-item/breadcrumb-item.js';
 import '@shoelace-style/shoelace/dist/components/button/button.js';
 import '@shoelace-style/shoelace/dist/components/button-group/button-group.js';
 import '@shoelace-style/shoelace/dist/components/card/card.js';
@@ -154,7 +152,6 @@ import '@shoelace-style/shoelace/dist/components/tag/tag.js';
 import '../components/app-shell.js';
 import '../components/shared/nav.js';
 import '../components/shared/header.js';
-import '../components/shared/breadcrumb.js';
 import '../components/shared/status-badge.js';
 
 // Profile shell (lazy-loaded with profile routes)
@@ -1063,7 +1060,6 @@ async function init(): Promise<void> {
     customElements.whenDefined('scion-app'),
     customElements.whenDefined('scion-nav'),
     customElements.whenDefined('scion-header'),
-    customElements.whenDefined('scion-breadcrumb'),
     customElements.whenDefined('scion-status-badge'),
   ]);
 

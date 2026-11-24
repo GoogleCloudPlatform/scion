@@ -53,6 +53,7 @@ import {
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
+import { agentParentTrail, current, type Named } from '../../client/crumbs.js';
 import { projectDisplayName } from '../../client/project-label.js';
 import { isZeroDurationLimit } from '../../shared/duration-limit.js';
 
@@ -999,22 +1000,13 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   /**
-   * Where the deleted-state redirect (and its link/back-link fallbacks) go:
-   * the agent's project page if known, otherwise the agents list. Shared by
-   * the deferred redirect timer, `renderDeletedState` and `renderError` so
-   * they cannot disagree about the destination computed from the same
-   * `this.project`. Deliberately *not* captured at schedule time: the timer
-   * re-reads this getter when it fires, so a project that finishes loading
-   * after the delete but before the 1s redirect still wins. The two can only
-   * differ in that window, and both destinations are valid.
+   * Parent project for the breadcrumb trail and deleted-state redirect:
+   * prefers the fetched `this.project`, falls back to `agent.project` /
+   * `agent.projectSlug`, or `null` (which yields the `Agents` root).
+   * Deliberately *not* captured at timer schedule time so a project that
+   * finishes loading before the 1s redirect still wins.
    */
-  private get projectBackInfo(): {
-    href: string;
-    label: string;
-    deletedLabel: string;
-    truncate: boolean;
-    tooltip: string;
-  } {
+  private get projectNamed(): Named | null {
     const projectLabel =
       projectDisplayName(this.project) ||
       projectDisplayName({
@@ -1022,35 +1014,22 @@ export class ScionPageAgentDetail extends LitElement {
         slug: this.agent?.projectSlug,
       });
     if (this.project) {
-      const display = projectLabel || 'Project';
       return {
-        href: `/projects/${encodeURIComponent(this.project.id)}`,
-        label: `To ${display}`,
-        deletedLabel: `Go to ${display}`,
-        truncate: true,
-        tooltip: projectLabel,
+        id: this.project.id,
+        label: projectLabel || this.project.id,
       };
     }
     if (this.agent?.projectId && projectLabel) {
       return {
-        href: `/projects/${encodeURIComponent(this.agent.projectId)}`,
-        label: `To ${projectLabel}`,
-        deletedLabel: `Go to ${projectLabel}`,
-        truncate: true,
-        tooltip: projectLabel,
+        id: this.agent.projectId,
+        label: projectLabel,
       };
     }
-    return {
-      href: '/agents',
-      label: 'Back to Agents',
-      deletedLabel: 'Go to Agents',
-      truncate: false,
-      tooltip: '',
-    };
+    return null;
   }
 
   private get redirectTarget(): string {
-    return this.projectBackInfo.href;
+    return this.projectNamed ? `/projects/${encodeURIComponent(this.projectNamed.id)}` : '/agents';
   }
 
   /**
@@ -1999,16 +1978,12 @@ export class ScionPageAgentDetail extends LitElement {
     // complete, which the hub refuses to start or resume (409
     // agent_create_incomplete); the launch banner offers delete instead.
     const startOk = lifecycleOk && !isAgentLaunching(agent) && !isIncompleteCreate(agent);
-    const back = this.projectBackInfo;
     return html`
       <scion-detail-header heading=${agent.name}>
-        <scion-back-link
+        <scion-breadcrumb
           slot="back"
-          href="${back.href}"
-          ?truncate=${back.truncate}
-          tooltip=${back.tooltip}
-          >${back.label}</scion-back-link
-        >
+          .crumbs=${[...agentParentTrail(this.projectNamed), current(agent.name)]}
+        ></scion-breadcrumb>
         <sl-icon slot="icon" name="cpu"></sl-icon>
         ${agentStatusBadge(agent)}
         <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
@@ -3623,6 +3598,7 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderLoading() {
     return html`
+      <scion-breadcrumb .crumbs=${agentParentTrail(this.projectNamed)}></scion-breadcrumb>
       <div class="loading-state">
         <sl-spinner></sl-spinner>
         <p>Loading agent...</p>
@@ -3639,32 +3615,25 @@ export class ScionPageAgentDetail extends LitElement {
    * skipped — hidden behind `/terminals`, see `isOnThisAgentRoute` — or
    * never re-armed after a disconnect/reconnect while deleted), the copy
    * drops back to a plain statement so the page never claims a redirect
-   * that is not actually coming. The link covers all of those cases, so
+   * that is not actually coming. The breadcrumb covers all of those cases, so
    * the user always has a way out.
    */
   private renderDeletedState(): TemplateResult {
-    const back = this.projectBackInfo;
     return html`
+      <scion-breadcrumb
+        data-testid="agent-deleted-link"
+        .crumbs=${agentParentTrail(this.projectNamed)}
+      ></scion-breadcrumb>
       <div class="loading-state" data-testid="agent-deleted-state">
         <sl-icon name="trash"></sl-icon>
         <p>Agent deleted.${this.deleteRedirectTimer ? ' Redirecting…' : ''}</p>
-        <scion-back-link
-          href="${back.href}"
-          ?truncate=${back.truncate}
-          tooltip=${back.tooltip}
-          data-testid="agent-deleted-link"
-          >${back.deletedLabel}</scion-back-link
-        >
       </div>
     `;
   }
 
   private renderError() {
-    const back = this.projectBackInfo;
     return html`
-      <scion-back-link href="${back.href}" ?truncate=${back.truncate} tooltip=${back.tooltip}
-        >${back.label}</scion-back-link
-      >
+      <scion-breadcrumb .crumbs=${agentParentTrail(this.projectNamed)}></scion-breadcrumb>
 
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>

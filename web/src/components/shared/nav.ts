@@ -489,7 +489,7 @@ export class ScionNav extends LitElement {
         })}
       </div>
 
-      <nav class="nav-container">
+      <nav class="nav-container" aria-label="Main">
         ${NAV_SECTIONS.map(
           (section) => html`
             <div class="nav-section">

@@ -31,16 +31,16 @@
  * Usage:
  *
  *   <scion-detail-header heading=${name}>
- *     <scion-back-link slot="back" href="/brokers">Back to Brokers</scion-back-link>
+ *     <scion-breadcrumb slot="back" .crumbs=${crumbs}></scion-breadcrumb>
  *     <sl-icon slot="icon" name="hdd-rack"></sl-icon>
  *     <scion-status-badge ...></scion-status-badge>
  *     <div slot="meta">...</div>
  *     <div slot="actions" class="header-actions">...</div>
  *   </scion-detail-header>
  *
- * The back slot sits above the title row and takes one or more
- * scion-back-link elements (ptone/scion#4177); they share one row and wrap.
- * Leave it empty on pages with no back link.
+ * The back slot sits above the title row and takes a scion-breadcrumb
+ * (ptone/scion#8281) or legacy scion-back-link elements; it takes no space
+ * when empty.
  *
  * Unslotted children are the badges, laid out after the name. Slotted
  * content stays in the page's DOM, so the page styles its own
@@ -51,6 +51,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import './back-link.js';
+import './breadcrumb.js';
 
 @customElement('scion-detail-header')
 export class ScionDetailHeader extends LitElement {

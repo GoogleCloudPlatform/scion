@@ -15,176 +15,315 @@
  */
 
 /**
- * Breadcrumb Navigation Component
+ * Shared Breadcrumb Navigation Component (`ptone/scion#8281`).
  *
- * Displays hierarchical navigation breadcrumbs using Shoelace
+ * Renders an accessible native `<nav aria-label="Breadcrumb"><ol>` trail.
+ * Lives in lazy route chunks (never in the entry bundle) and uses CSS-only
+ * separators with empty alt text so screen readers skip them. Truncated
+ * crumbs lazily mount `<sl-tooltip>` on first `pointerenter`/`focusin`
+ * (matching `scion-status-badge`) to keep initial DOM counts within budget.
  */
 
-import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { LitElement, html, css, nothing, type PropertyValues, type TemplateResult } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
 
-/**
- * Route label configuration
- */
-const ROUTE_LABELS: Record<string, string> = {
-  '/': 'Dashboard',
-  '/projects': 'Projects',
-  '/agents': 'Agents',
-  '/settings': 'Settings',
-};
-
-/**
- * Breadcrumb item structure
- */
-interface BreadcrumbItem {
+export interface Crumb {
+  /** Visible plain text. Never empty: pages pass an ID fallback, never ''. */
   label: string;
-  href: string;
-  current: boolean;
+  /**
+   * Link target (unprefixed app path). Omit only on the current-page crumb,
+   * which must be last.
+   */
+  href?: string;
+  /** Entity name: cap at 24ch with ellipsis; full label shown in a tooltip. */
+  truncate?: boolean;
+  /** Label is a fallback (raw ID) while a name resolves: muted style. */
+  pending?: boolean;
+  /**
+   * Same-page intercept (e.g. closing an in-page file editor). Called on a
+   * plain left click; if it calls `e.preventDefault()`, the router ignores the
+   * click. Modifier and middle clicks still open `href` natively.
+   */
+  onActivate?: (e: MouseEvent) => void;
 }
 
 @customElement('scion-breadcrumb')
 export class ScionBreadcrumb extends LitElement {
-  /**
-   * Current path for generating breadcrumbs
-   */
-  @property({ type: String })
-  path = '/';
+  @property({ attribute: false })
+  crumbs: readonly Crumb[] = [];
 
-  /**
-   * Optional custom label for the current page
-   */
-  @property({ type: String })
-  currentLabel = '';
+  @state()
+  private expanded = false;
+
+  /** Stable keys of truncated crumbs whose `<sl-tooltip>` has been lazily mounted. */
+  @state()
+  private mountedTooltips: ReadonlySet<string> = new Set();
 
   static override styles = css`
     :host {
       display: block;
-    }
-
-    sl-breadcrumb {
-      --separator-color: var(--scion-text-muted, #64748b);
-    }
-
-    sl-breadcrumb-item::part(label) {
+      width: 100%;
+      min-width: 0;
+      margin-bottom: 1rem;
       font-size: 0.875rem;
+      container-type: inline-size;
     }
 
-    sl-breadcrumb-item::part(label):hover {
-      color: var(--scion-primary, #3b82f6);
+    nav {
+      min-width: 0;
     }
 
-    sl-breadcrumb-item[aria-current='page']::part(label) {
-      color: var(--scion-text, #1e293b);
+    ol {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      min-width: 0;
+      row-gap: 0.25rem;
+    }
+
+    li {
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    li + li::before {
+      content: '/' / '';
+      color: var(--scion-text-muted);
+      margin-inline: 0.375rem;
+      flex-shrink: 0;
+      user-select: none;
+    }
+
+    sl-tooltip {
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    a {
+      display: inline-block;
+      min-width: 0;
+      max-width: 100%;
+      color: var(--scion-text-muted);
+      text-decoration: none;
+      border-radius: var(--scion-radius-sm);
+    }
+
+    a:hover,
+    a:focus-visible {
+      color: var(--scion-primary);
+    }
+
+    a:focus-visible,
+    .ellipsis:focus-visible {
+      outline: 2px solid var(--scion-primary);
+      outline-offset: 2px;
+    }
+
+    .current {
+      display: inline-block;
+      min-width: 0;
+      max-width: 100%;
+      color: var(--scion-text);
       font-weight: 500;
     }
 
-    .breadcrumb-icon {
-      font-size: 0.875rem;
-      vertical-align: middle;
-      margin-right: 0.25rem;
+    .pending {
+      color: var(--scion-text-muted);
+      opacity: 0.75;
+    }
+
+    .truncate {
+      max-width: 24ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: bottom;
+    }
+
+    .ellipsis-item {
+      display: none;
+    }
+
+    .ellipsis {
+      appearance: none;
+      background: transparent;
+      border: none;
+      padding: 0 0.25rem;
+      margin: 0;
+      font: inherit;
+      line-height: 1.2;
+      color: var(--scion-text-muted);
+      border-radius: var(--scion-radius-sm);
+      cursor: pointer;
+    }
+
+    .ellipsis:hover,
+    .ellipsis:focus-visible {
+      color: var(--scion-primary);
+    }
+
+    @container (max-width: 36rem) {
+      ol:not(.expanded) li.middle {
+        display: none;
+      }
+
+      ol:not(.expanded) li.ellipsis-item {
+        display: inline-flex;
+      }
     }
   `;
 
-  override render() {
-    const items = this.generateBreadcrumbs();
-
-    if (items.length <= 1) {
-      // Don't show breadcrumbs for root level
-      return html``;
-    }
-
-    return html`
-      <sl-breadcrumb>
-        ${items.map(
-          (item, index) => html`
-            <sl-breadcrumb-item
-              href="${item.current ? '' : item.href}"
-              ?aria-current=${item.current ? 'page' : false}
-            >
-              ${index === 0 ? html`<sl-icon name="house" class="breadcrumb-icon"></sl-icon>` : ''}
-              ${item.label}
-            </sl-breadcrumb-item>
-          `
-        )}
-      </sl-breadcrumb>
-    `;
+  private tooltipKey(crumb: Crumb, index: number): string {
+    return crumb.href !== undefined ? `href:${crumb.href}` : `current:${index}`;
   }
 
-  /**
-   * Generate breadcrumb items from the current path
-   */
-  private generateBreadcrumbs(): BreadcrumbItem[] {
-    const items: BreadcrumbItem[] = [];
-
-    // Always start with home
-    items.push({
-      label: 'Home',
-      href: '/',
-      current: this.path === '/',
-    });
-
-    if (this.path === '/') {
-      return items;
-    }
-
-    // Parse the path and build breadcrumbs
-    const segments = this.path.split('/').filter(Boolean);
-    let currentPath = '';
-
-    segments.forEach((segment, index) => {
-      currentPath += `/${segment}`;
-      const isLast = index === segments.length - 1;
-
-      // Get label from configuration or format the segment
-      let label = ROUTE_LABELS[currentPath];
-
-      if (!label) {
-        // Check if this is a dynamic segment (like an ID)
-        if (this.isId(segment)) {
-          // Use custom label for IDs or truncate
-          label = this.currentLabel && isLast ? this.currentLabel : this.formatId(segment);
-        } else {
-          label = this.formatSegment(segment);
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    if (changed.has('crumbs')) {
+      if (this.crumbs.length < 4 && this.expanded) {
+        this.expanded = false;
+      }
+      if (this.mountedTooltips.size > 0) {
+        const activeKeys = new Set<string>();
+        for (let i = 0; i < this.crumbs.length; i++) {
+          const crumb = this.crumbs[i];
+          if (crumb.truncate) {
+            activeKeys.add(this.tooltipKey(crumb, i));
+          }
+        }
+        let pruned = false;
+        const next = new Set<string>();
+        for (const key of this.mountedTooltips) {
+          if (activeKeys.has(key)) {
+            next.add(key);
+          } else {
+            pruned = true;
+          }
+        }
+        if (pruned) {
+          this.mountedTooltips = next;
         }
       }
-
-      items.push({
-        label,
-        href: currentPath,
-        current: isLast,
-      });
-    });
-
-    return items;
-  }
-
-  /**
-   * Check if a segment looks like an ID
-   */
-  private isId(segment: string): boolean {
-    // UUID pattern or numeric ID
-    return /^[0-9a-f-]{8,}$/i.test(segment) || /^\d+$/.test(segment);
-  }
-
-  /**
-   * Format an ID segment for display
-   */
-  private formatId(id: string): string {
-    // Show first 8 characters of UUID or full numeric ID
-    if (id.length > 8) {
-      return id.slice(0, 8) + '...';
     }
-    return id;
   }
 
-  /**
-   * Format a path segment as a label
-   */
-  private formatSegment(segment: string): string {
-    return segment
-      .split('-')
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+  private handleCrumbClick(crumb: Crumb, e: MouseEvent): void {
+    if (!crumb.onActivate) return;
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+      return;
+    }
+    crumb.onActivate(e);
+  }
+
+  private mountTooltip(key: string, index: number, restoreFocus: boolean): void {
+    if (this.mountedTooltips.has(key)) return;
+    const next = new Set(this.mountedTooltips);
+    next.add(key);
+    this.mountedTooltips = next;
+    void this.updateComplete.then(() => {
+      const tip = this.shadowRoot?.querySelector<
+        HTMLElement & { show?: () => Promise<void> | void }
+      >(`sl-tooltip[data-crumb-index="${index}"]`);
+      if (restoreFocus) {
+        tip?.querySelector<HTMLElement>('a, span')?.focus();
+      }
+      void tip?.show?.();
+    });
+  }
+
+  private async handleExpand(): Promise<void> {
+    this.expanded = true;
+    await this.updateComplete;
+    const firstRevealed = this.shadowRoot?.querySelector<HTMLElement>(
+      'li.middle a, li.middle [tabindex]'
+    );
+    firstRevealed?.focus();
+  }
+
+  private renderCrumbContent(crumb: Crumb, index: number): TemplateResult {
+    const classes = [crumb.truncate ? 'truncate' : '', crumb.pending ? 'pending' : '']
+      .filter(Boolean)
       .join(' ');
+    const key = this.tooltipKey(crumb, index);
+    const mountTip = Boolean(crumb.truncate && this.mountedTooltips.has(key));
+    const deferTip = Boolean(crumb.truncate && !mountTip);
+
+    let inner: TemplateResult;
+    if (crumb.href !== undefined) {
+      inner = html`<a
+        href=${crumb.href}
+        part="link"
+        class=${classes}
+        @click=${(e: MouseEvent) => this.handleCrumbClick(crumb, e)}
+        @pointerenter=${deferTip ? () => this.mountTooltip(key, index, false) : nothing}
+        @focusin=${deferTip ? () => this.mountTooltip(key, index, true) : nothing}
+        >${crumb.label}</a
+      >`;
+    } else {
+      if (index !== this.crumbs.length - 1 && import.meta.env?.DEV) {
+        console.warn('scion-breadcrumb: crumb without href must be the last item', crumb);
+      }
+      const currentClasses = ['current', classes].filter(Boolean).join(' ');
+      // Pointer-only tooltip: the full name is already shown in the page h1,
+      // so the current-page span is intentionally kept non-focusable.
+      inner = html`<span
+        aria-current="page"
+        part="current"
+        class=${currentClasses}
+        @pointerenter=${deferTip ? () => this.mountTooltip(key, index, false) : nothing}
+        >${crumb.label}</span
+      >`;
+    }
+
+    if (mountTip) {
+      return html`<sl-tooltip content=${crumb.label} data-crumb-index=${index} hoist
+        >${inner}</sl-tooltip
+      >`;
+    }
+    return inner;
+  }
+
+  override render() {
+    if (this.crumbs.length === 0) {
+      return nothing;
+    }
+
+    const canCollapse = this.crumbs.length >= 4;
+    const lastMiddleIndex = this.crumbs.length - 3;
+
+    return html`
+      <nav aria-label="Breadcrumb" part="nav">
+        <ol part="list" class=${this.expanded ? 'expanded' : ''}>
+          ${this.crumbs.map((crumb, index) => {
+            const isMiddle = canCollapse && index >= 1 && index <= lastMiddleIndex;
+            const item = html`<li class=${isMiddle ? 'middle' : ''}>
+              ${this.renderCrumbContent(crumb, index)}
+            </li>`;
+
+            if (canCollapse && index === 0) {
+              return html`${item}
+                <li class="ellipsis-item">
+                  <button
+                    type="button"
+                    class="ellipsis"
+                    aria-label="Show full path"
+                    aria-expanded=${this.expanded ? 'true' : 'false'}
+                    @click=${() => void this.handleExpand()}
+                  >
+                    &hellip;
+                  </button>
+                </li>`;
+            }
+
+            return item;
+          })}
+        </ol>
+      </nav>
+    `;
   }
 }
 

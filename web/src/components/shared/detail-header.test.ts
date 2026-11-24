@@ -134,10 +134,37 @@ describe('scion-detail-header structure', () => {
   });
 });
 
-describe('scion-detail-header back link (ptone/scion#4177)', () => {
-  async function mountWithBack(links: Array<[string, string]>): Promise<ScionDetailHeader> {
+describe('scion-detail-header back slot (ptone/scion#8281)', () => {
+  it('renders a slotted scion-breadcrumb above the title row', async () => {
     const el = await mount();
-    for (const [href, label] of links) {
+    const crumb = document.createElement('scion-breadcrumb');
+    crumb.slot = 'back';
+    crumb.crumbs = [
+      { label: 'Projects', href: '/projects' },
+      { label: LONG_NAME, truncate: true },
+    ];
+    el.prepend(crumb);
+    await el.updateComplete;
+    await crumb.updateComplete;
+
+    const back = slot(el, 'back');
+    const row = back.parentElement!;
+    expect(row.className).toBe('back');
+    expect(row.nextElementSibling!.className).toBe('header');
+    const items = back.assignedElements();
+    expect(items.map((n) => n.tagName.toLowerCase())).toEqual(['scion-breadcrumb']);
+    expect(crumb.shadowRoot!.querySelector('a')!.getAttribute('href')).toBe('/projects');
+    expect(crumb.shadowRoot!.querySelector('[aria-current="page"]')!.textContent?.trim()).toBe(
+      LONG_NAME
+    );
+  });
+
+  it('lays multiple legacy back links out in one wrapping row', async () => {
+    const el = await mount();
+    for (const [href, label] of [
+      ['/projects/p/settings', 'Project Settings'],
+      ['/projects/p/settings?tab=templates', 'Templates'],
+    ]) {
       const link = document.createElement('scion-back-link');
       link.slot = 'back';
       link.href = href;
@@ -145,28 +172,6 @@ describe('scion-detail-header back link (ptone/scion#4177)', () => {
       el.prepend(link);
     }
     await el.updateComplete;
-    return el;
-  }
-
-  it('renders the back link above the title row', async () => {
-    const el = await mountWithBack([['/brokers', 'Back to Brokers']]);
-    const back = slot(el, 'back');
-    const row = back.parentElement!;
-    expect(row.className).toBe('back');
-    expect(row.nextElementSibling!.className).toBe('header');
-    const links = back.assignedElements();
-    expect(links.map((n) => n.tagName.toLowerCase())).toEqual(['scion-back-link']);
-    const link = links[0] as HTMLElement & { href: string; updateComplete: Promise<boolean> };
-    await link.updateComplete;
-    expect(link.textContent).toBe('Back to Brokers');
-    expect(link.shadowRoot!.querySelector('a')!.getAttribute('href')).toBe('/brokers');
-  });
-
-  it('lays several back links out in one wrapping row', async () => {
-    const el = await mountWithBack([
-      ['/projects/p/settings', 'Project Settings'],
-      ['/projects/p/settings?tab=templates', 'Templates'],
-    ]);
     expect(slot(el, 'back').assignedElements()).toHaveLength(2);
     const row = rules.get('.back') ?? '';
     expect(row).toMatch(/display:\s*flex/);
@@ -174,9 +179,10 @@ describe('scion-detail-header back link (ptone/scion#4177)', () => {
     expect(row).toMatch(/column-gap:\s*1rem/);
   });
 
-  it('renders no back link when none is set', async () => {
+  it('renders no back content when none is set', async () => {
     const el = await mount();
     expect(slot(el, 'back').assignedElements()).toHaveLength(0);
+    expect(el.querySelector('scion-breadcrumb')).toBeNull();
     expect(el.querySelector('scion-back-link')).toBeNull();
     expect(el.shadowRoot!.querySelector('a')).toBeNull();
     // The empty row adds no space of its own.

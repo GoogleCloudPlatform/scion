@@ -28,7 +28,6 @@ import { keyed } from 'lit/directives/keyed.js';
 // Import shared components
 import './shared/nav.js';
 import './shared/header.js';
-import './shared/breadcrumb.js';
 import type { User } from '../shared/types.js';
 import type { AccessDeniedDetail } from '../client/api.js';
 import { showAccessDeniedToast } from '../utils/access-denied.js';

@@ -29,6 +29,7 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { render, type CSSResult, type TemplateResult } from 'lit';
 
+import { crumbTuples, type CrumbTuple } from '../../test-utils/crumbs.js';
 import { styleRules } from './__fixtures__/css-rules.js';
 
 // Some page module graphs reach the app entry point, which bootstraps the
@@ -53,8 +54,10 @@ interface PageCase {
   badges: string[];
   /** Classes of the meta slot's elements, in order. */
   meta: string[];
-  /** Back links in the back slot, as [href, label], in order. */
-  back: Array<[string, string]>;
+  /** Legacy back links in the back slot, as [href, label], in order. */
+  back?: Array<[string, string]>;
+  /** Breadcrumb trail in the back slot, as [label, href|undefined] tuples. */
+  crumbs?: CrumbTuple[];
   /** State overrides under which no header action renders. */
   noActions?: Record<string, unknown>;
 }
@@ -182,7 +185,10 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'render',
       icon: 'sl-icon.[folder-fill]',
-      back: [['/projects', 'Back to Projects']],
+      crumbs: [
+        ['Projects', '/projects'],
+        [LONG_NAME, undefined],
+      ],
       badges: ['sl-tooltip'],
       meta: ['header-path'],
     },
@@ -464,11 +470,19 @@ describe.each(cases)('%s detail header', (_label, c) => {
     ).toBe(true);
   });
 
-  it('hands its back links to the back slot as shared back links', () => {
+  it('hands its navigation to the back slot as shared breadcrumb or back links', () => {
     const header = renderHeader(c);
     const back = Array.from(header.children).filter((n) => n.getAttribute('slot') === 'back');
-    expect(back.map((n) => n.tagName.toLowerCase())).toEqual(c.back.map(() => 'scion-back-link'));
-    expect(back.map((n) => [n.getAttribute('href'), n.textContent?.trim()])).toEqual(c.back);
+    if (c.crumbs) {
+      expect(back.map((n) => n.tagName.toLowerCase())).toEqual(['scion-breadcrumb']);
+      expect(crumbTuples(header)).toEqual(c.crumbs);
+    } else {
+      const expected = c.back ?? [];
+      expect(back.map((n) => n.tagName.toLowerCase())).toEqual(
+        expected.map(() => 'scion-back-link')
+      );
+      expect(back.map((n) => [n.getAttribute('href'), n.textContent?.trim()])).toEqual(expected);
+    }
     // The page renders no back anchor of its own.
     expect(header.querySelector('a.back-link, a > sl-icon[name="arrow-left"]')).toBeNull();
   });
@@ -569,7 +583,7 @@ describe.each([
     '/admin/groups',
     'Back to Groups',
   ],
-  ['project', './project-detail.js', 'scion-page-project-detail', '/projects', 'Back to Projects'],
+  ['project', './project-detail.js', 'scion-page-project-detail', '/projects', 'Projects', true],
   [
     'skill registry',
     './admin-skill-registry-detail.js',
@@ -585,19 +599,27 @@ describe.each([
     '/settings?tab=service-accounts',
     'Hub Resources',
   ],
-])('%s error state', (_label, module, tag, href, text) => {
-  it('renders the shared back link on its own', async () => {
+])('%s error state', (_label, module, tag, href, text, usesBreadcrumb) => {
+  it('renders the shared navigation on its own', async () => {
     await import(/* @vite-ignore */ module);
     const el = document.createElement(tag);
     Object.assign(el, { loading: false, error: 'boom' });
     const host = document.createElement('div');
     render((el as unknown as { render: () => TemplateResult }).render(), host);
     expect(host.querySelector('scion-detail-header')).toBeNull();
-    const links = host.querySelectorAll('scion-back-link');
-    expect(links).toHaveLength(1);
-    expect(links[0].getAttribute('href')).toBe(href);
-    expect(links[0].hasAttribute('slot')).toBe(false);
-    expect(links[0].textContent?.trim()).toBe(text);
+    if (usesBreadcrumb) {
+      const crumbs = host.querySelectorAll('scion-breadcrumb');
+      expect(crumbs).toHaveLength(1);
+      expect(crumbs[0].hasAttribute('slot')).toBe(false);
+      expect(crumbTuples(host)).toEqual([[text, href]]);
+      expect(host.querySelector('scion-back-link')).toBeNull();
+    } else {
+      const links = host.querySelectorAll('scion-back-link');
+      expect(links).toHaveLength(1);
+      expect(links[0].getAttribute('href')).toBe(href);
+      expect(links[0].hasAttribute('slot')).toBe(false);
+      expect(links[0].textContent?.trim()).toBe(text);
+    }
     expect(host.querySelector('a.back-link, .breadcrumb')).toBeNull();
   });
 });

@@ -47,6 +47,8 @@ import {
 } from '../../shared/types.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current, projectsRoot } from '../../client/crumbs.js';
+import { projectDisplayName } from '../../client/project-label.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import {
@@ -2842,7 +2844,13 @@ export class ScionPageProjectDetail extends LitElement {
 
     return html`
       <scion-detail-header heading=${this.project.name}>
-        <scion-back-link slot="back" href="/projects">Back to Projects</scion-back-link>
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[
+            projectsRoot(),
+            current(projectDisplayName(this.project, this.projectId || this.project.id)),
+          ]}
+        ></scion-breadcrumb>
         ${this.renderProjectIcon()} ${this.renderLinkedBadge()}
         <div slot="meta" class="header-path">
           <scion-git-remote-display .project=${this.project}></scion-git-remote-display>
@@ -3353,6 +3361,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderLoading() {
     return html`
+      <scion-breadcrumb .crumbs=${[projectsRoot()]}></scion-breadcrumb>
       <div class="loading-state">
         <sl-spinner></sl-spinner>
         <p>Loading project...</p>
@@ -3414,7 +3423,7 @@ export class ScionPageProjectDetail extends LitElement {
   private renderError() {
     if (this.noAccess) {
       return html`
-        <scion-back-link href="/projects">Back to Projects</scion-back-link>
+        <scion-breadcrumb .crumbs=${[projectsRoot()]}></scion-breadcrumb>
 
         <div class="error-state" data-project-no-access>
           <sl-icon name="exclamation-triangle"></sl-icon>
@@ -3424,7 +3433,7 @@ export class ScionPageProjectDetail extends LitElement {
       `;
     }
     return html`
-      <scion-back-link href="/projects">Back to Projects</scion-back-link>
+      <scion-breadcrumb .crumbs=${[projectsRoot()]}></scion-breadcrumb>
 
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
