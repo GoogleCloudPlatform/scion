@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,6 +261,19 @@ func TestWebhookEndpointBoundAgentAccess(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	rec = f.doWebhookEndpoint(t, f.agentAAuth, ownedResp.ID, http.MethodPatch, map[string]any{
+		"boundLifetime": "persistent",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	// O-B: owner agent cannot unbind or self-bind via PATCH either (users only).
+	rec = f.doWebhookEndpoint(t, f.agentAAuth, ownedResp.ID, http.MethodPatch, map[string]any{
+		"boundAgentId":  "",
+		"boundLifetime": "",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	rec = f.doWebhookEndpoint(t, f.agentAAuth, ownedResp.ID, http.MethodPatch, map[string]any{
+		"boundAgentId":  "self",
 		"boundLifetime": "persistent",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
@@ -835,4 +849,76 @@ func TestWebhookEndpointPatch_AgentLifetimeRequiresDeletePermission(t *testing.T
 		"boundAgentId": f.agentB.ID,
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+type patchRaceState struct {
+	armed atomic.Bool
+	hook  func(tx store.Store)
+}
+
+type patchRaceLockStore struct {
+	store.Store
+	st *patchRaceState
+}
+
+func (r *patchRaceLockStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return r.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&patchRaceLockStore{Store: tx, st: r.st})
+	})
+}
+
+func (r *patchRaceLockStore) LockTriggerQuota(ctx context.Context, projectID string) error {
+	if err := r.Store.LockTriggerQuota(ctx, projectID); err != nil {
+		return err
+	}
+	if r.st.armed.CompareAndSwap(true, false) && r.st.hook != nil {
+		r.st.hook(r.Store)
+	}
+	return nil
+}
+
+// TestWebhookEndpointPatch_SnapshotRace verifies O-A (Review 3): if the owner
+// concurrently downgrades an agent-lifetime endpoint to persistent between an
+// admin's pre-transaction snapshot read and LockTriggerQuota, the handler
+// re-reads inside the transaction, treats the admin's agent-lifetime PATCH as
+// a change requiring webhook_endpoint.delete, refuses with 403, and does not
+// revert the owner's persistent downgrade.
+func TestWebhookEndpointPatch_SnapshotRace(t *testing.T) {
+	srv, s := testServer(t)
+	st := &patchRaceState{}
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *patchRaceLockStore {
+		return &patchRaceLockStore{Store: inner, st: st}
+	})
+	f := setupTriggersTestFixtureOnServer(t, srv, s)
+	ctx := context.Background()
+
+	rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, map[string]any{
+		"name":          "patch-race-ep",
+		"boundAgentId":  f.agentA.ID,
+		"boundLifetime": store.WebhookBoundLifetimeAgent,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ep))
+
+	st.hook = func(tx store.Store) {
+		cur, err := tx.GetWebhookEndpoint(ctx, ep.ID)
+		require.NoError(t, err)
+		cur.BoundLifetime = store.WebhookBoundLifetimePersistent
+		require.NoError(t, tx.UpdateWebhookEndpoint(ctx, cur, store.WebhookEndpointFieldMask{Binding: true}))
+	}
+	st.armed.Store(true)
+
+	// Admin (no webhook_endpoint.delete) sends a PATCH that looked like a no-op
+	// against the pre-tx snapshot, but is now a persistent->agent upgrade.
+	rec = f.doWebhookEndpoint(t, f.adminAuth, ep.ID, http.MethodPatch, map[string]any{
+		"boundAgentId":  f.agentA.ID,
+		"boundLifetime": store.WebhookBoundLifetimeAgent,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	got, err := s.GetWebhookEndpoint(ctx, ep.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.WebhookBoundLifetimePersistent, got.BoundLifetime,
+		"owner's concurrent persistent downgrade must not be reverted")
 }

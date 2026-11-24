@@ -581,6 +581,9 @@ func runTriggerWebhookUpdate(cmd *cobra.Command, args []string) error {
 	} else {
 		if cmd.Flags().Changed("bind") {
 			b := strings.TrimSpace(triggerWebhookUpdateBind)
+			if b != "" && !triggerWebhookUpdatePersistent && !triggerWebhookUpdateAgentLife {
+				return newUsageError("--bind requires --persistent or --agent-lifetime (specify the binding lifetime, e.g. --bind %s --persistent)", b)
+			}
 			req.BoundAgentID = &b
 			changed = true
 		}

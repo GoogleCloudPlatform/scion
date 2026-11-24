@@ -674,8 +674,10 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 	}
 
 	var (
-		mask    store.WebhookEndpointFieldMask
-		updated = *ep
+		mask             store.WebhookEndpointFieldMask
+		updated          = *ep
+		resolvedAgent    string
+		resolvedLifetime string
 	)
 	if req.Description != nil {
 		if err := validateTriggerResourceDescription(*req.Description, maxWebhookEndpointDescLen); err != nil {
@@ -707,22 +709,11 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		if req.BoundLifetime != nil {
 			targetLifetime = strings.TrimSpace(*req.BoundLifetime)
 		}
-		resolvedAgent, resolvedLifetime, valid := s.resolveWebhookEndpointBinding(w, r, projectID, targetAgent, targetLifetime, true)
+		var valid bool
+		resolvedAgent, resolvedLifetime, valid = s.resolveWebhookEndpointBinding(w, r, projectID, targetAgent, targetLifetime, true)
 		if !valid {
 			return
 		}
-		bindingChanged := resolvedAgent != ep.BoundAgentID || resolvedLifetime != ep.BoundLifetime
-		if resolvedLifetime == store.WebhookBoundLifetimeAgent && bindingChanged {
-			// Setting or changing an agent-lifetime binding delegates endpoint
-			// deletion to whoever can delete the bound agent; require
-			// webhook_endpoint.delete (the same decision as DELETE) so callers
-			// with update-only cannot delete endpoints indirectly.
-			if !s.authorizeWebhookEndpointAccess(w, r, projectID, ActionDelete) {
-				return
-			}
-		}
-		updated.BoundAgentID = resolvedAgent
-		updated.BoundLifetime = resolvedLifetime
 		mask.Binding = true
 	}
 
@@ -732,31 +723,89 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 	}
 
 	audit := newWebhookEndpointAudit(ctx, mutationTypeWebhookEndpointUpdate, ep.ID)
-	beforeBytes, _ := json.Marshal(map[string]any{
-		"endpoint_id":    ep.ID,
-		"project_id":     projectID,
-		"status":         ep.Status,
-		"bound_agent_id": ep.BoundAgentID,
-		"bound_lifetime": ep.BoundLifetime,
-	})
-	audit.BeforeSummary = string(beforeBytes)
 
+	var (
+		deleteDeniedReason string
+		deleteDeniedPolicy bool
+		errDeleteForbidden = errors.New("webhook_endpoint.delete required for agent-lifetime binding")
+		errInvalidBinding  = errors.New("invalid webhook endpoint binding state")
+	)
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 			return lErr
 		}
-		if mask.Binding && updated.BoundAgentID != "" && updated.BoundAgentID != ep.BoundAgentID {
-			boundCount, bErr := tx.CountBoundWebhookEndpoints(ctx, projectID, updated.BoundAgentID)
-			if bErr != nil {
-				return bErr
-			}
-			if boundCount >= store.MaxBoundWebhookEndpointsPerAgent {
-				return errWebhookEndpointBoundLimitExceeded
-			}
+		// Re-read under LockTriggerQuota so bindingChanged, the R1 delete check,
+		// the per-agent cap, and the audit snapshot see the authoritative state
+		// rather than a stale pre-transaction snapshot (O-A).
+		current, gErr := tx.GetWebhookEndpoint(ctx, ep.ID)
+		if gErr != nil {
+			return gErr
 		}
-		if uErr := tx.UpdateWebhookEndpoint(ctx, &updated, mask); uErr != nil {
+		if current.ProjectID != projectID {
+			return store.ErrNotFound
+		}
+
+		next := *current
+		if mask.Description {
+			next.Description = updated.Description
+		}
+		if mask.Status {
+			next.Status = updated.Status
+		}
+		if mask.Binding {
+			effectiveAgent := current.BoundAgentID
+			effectiveLifetime := current.BoundLifetime
+			if req.BoundAgentID != nil {
+				effectiveAgent = resolvedAgent
+				if effectiveAgent == "" && req.BoundLifetime == nil {
+					effectiveLifetime = ""
+				}
+			}
+			if req.BoundLifetime != nil {
+				effectiveLifetime = resolvedLifetime
+			}
+			if (effectiveAgent == "") != (effectiveLifetime == "") {
+				return errInvalidBinding
+			}
+			bindingChanged := effectiveAgent != current.BoundAgentID || effectiveLifetime != current.BoundLifetime
+			if effectiveLifetime == store.WebhookBoundLifetimeAgent && bindingChanged {
+				// Setting or changing an agent-lifetime binding delegates endpoint
+				// deletion to whoever can delete the bound agent; require
+				// webhook_endpoint.delete (the same decision as DELETE) so callers
+				// with update-only cannot delete endpoints indirectly.
+				d := s.webhookEndpointAccessDecision(ctx, projectID, ActionDelete, nil)
+				if !d.allowed {
+					deleteDeniedReason = d.reason
+					deleteDeniedPolicy = d.byPolicy
+					return errDeleteForbidden
+				}
+			}
+			if effectiveAgent != "" && effectiveAgent != current.BoundAgentID {
+				boundCount, bErr := tx.CountBoundWebhookEndpoints(ctx, projectID, effectiveAgent)
+				if bErr != nil {
+					return bErr
+				}
+				if boundCount >= store.MaxBoundWebhookEndpointsPerAgent {
+					return errWebhookEndpointBoundLimitExceeded
+				}
+			}
+			next.BoundAgentID = effectiveAgent
+			next.BoundLifetime = effectiveLifetime
+		}
+
+		beforeBytes, _ := json.Marshal(map[string]any{
+			"endpoint_id":    current.ID,
+			"project_id":     projectID,
+			"status":         current.Status,
+			"bound_agent_id": current.BoundAgentID,
+			"bound_lifetime": current.BoundLifetime,
+		})
+		audit.BeforeSummary = string(beforeBytes)
+
+		if uErr := tx.UpdateWebhookEndpoint(ctx, &next, mask); uErr != nil {
 			return uErr
 		}
+		updated = next
 		afterBytes, _ := json.Marshal(map[string]any{
 			"endpoint_id":    updated.ID,
 			"project_id":     projectID,
@@ -772,6 +821,16 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			writeWebhookEndpointNotFound(w)
+		case errors.Is(err, errDeleteForbidden):
+			identity := GetIdentityFromContext(ctx)
+			logAuthzDenial(r, identity, webhookEndpointResource(projectID), ActionDelete, deleteDeniedReason)
+			if deleteDeniedPolicy {
+				writeForbidden(w, "You don't have permission to access webhook endpoints in this project")
+			} else {
+				writeForbidden(w, "")
+			}
+		case errors.Is(err, errInvalidBinding):
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidBinding, "boundAgentId and boundLifetime must either both be set or both be empty", nil)
 		case errors.Is(err, errWebhookEndpointBoundLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("agent has reached the maximum of %d bound webhook endpoints", store.MaxBoundWebhookEndpointsPerAgent), nil)

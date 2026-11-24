@@ -206,6 +206,27 @@ func TestTriggerWebhookP3_CreateBindUpdateDisableRotate(t *testing.T) {
 	require.NotNil(t, lastPatchReq.Status)
 	assert.Equal(t, "active", *lastPatchReq.Status)
 
+	// update --bind without lifetime flag -> local usage error with hint (N-1)
+	require.NoError(t, triggerWebhookUpdateCmd.Flags().Set("bind", "worker-1"))
+	triggerWebhookUpdatePersistent = false
+	triggerWebhookUpdateAgentLife = false
+	triggerWebhookUpdateUnbind = false
+	err = runTriggerWebhookUpdate(triggerWebhookUpdateCmd, []string{epID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--bind requires --persistent or --agent-lifetime")
+
+	// update --bind with --persistent -> sends PATCH with both fields
+	lastPatchReq = nil
+	triggerWebhookUpdatePersistent = true
+	_ = captureStdout(t, func() {
+		require.NoError(t, runTriggerWebhookUpdate(triggerWebhookUpdateCmd, []string{epID}))
+	})
+	require.NotNil(t, lastPatchReq)
+	require.NotNil(t, lastPatchReq.BoundAgentID)
+	require.NotNil(t, lastPatchReq.BoundLifetime)
+	assert.Equal(t, "worker-1", *lastPatchReq.BoundAgentID)
+	assert.Equal(t, "persistent", *lastPatchReq.BoundLifetime)
+
 	// rotate-secret
 	out := captureStdout(t, func() {
 		require.NoError(t, runTriggerWebhookRotateSecret(triggerWebhookRotateSecretCmd, []string{epID}))

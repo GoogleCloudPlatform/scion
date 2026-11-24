@@ -223,6 +223,9 @@ func (s *Server) unbindPersistentWebhookEndpoint(ctx context.Context, agent *sto
 		return tx.CreateMutationAudit(ctx, audit)
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false
+		}
 		s.agentLifecycleLog.Warn("Failed to unbind persistent webhook endpoint for deleted agent",
 			"agent_id", agent.ID, "project_id", ep.ProjectID, "endpoint_id", ep.ID, "error", err)
 		return false
