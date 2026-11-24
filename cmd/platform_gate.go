@@ -84,6 +84,10 @@ var windowsAllowed = map[string]bool{
 	"decisions.record":   true,
 	"decisions.withdraw": true,
 
+	// Inbox summary (ptone/scion#9008, parent ptone/scion#8962): pure Hub API
+	// call, no local writes.
+	"inbox": true,
+
 	// Event triggers and webhook endpoints (ptone/scion#8028): pure Hub API
 	// calls, no local writes.
 	"trigger":                true,

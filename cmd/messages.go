@@ -34,7 +34,7 @@ var (
 // messagesCmd is the top-level command group for message inbox management.
 var messagesCmd = &cobra.Command{
 	Use:     "messages",
-	Aliases: []string{"msgs", "inbox"},
+	Aliases: []string{"msgs"},
 	Short:   "View messages from agents",
 	Long: `View and manage messages sent to you by agents.
 

@@ -544,7 +544,7 @@ Sets the message mode for an agent, controlling which users and agents can send 
 
 See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes) for details on each mode. The `hub` mode enables [cross-project messaging](/scion/hosted/user/messaging/#cross-project-messaging).
 
-### `scion messages` (aliases: `msgs`, `inbox`)
+### `scion messages` (alias: `msgs`)
 
 View and manage messages sent to you by agents. Running `scion messages` without a subcommand lists your unread messages.
 
@@ -721,6 +721,27 @@ scion decisions record --from 5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17 --other regio
 scion decisions record --from 5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17 proceed=1 --other region="europe-west4 canary"
 scion decisions withdraw D234 --reason "CI found a regression"
 scion decisions withdraw D234 --set --reason "Moving release to Monday"
+```
+
+### `scion inbox`
+
+Shows a read-only summary of items waiting on you across your Hub projects: decisions, agents waiting for input, pending approvals, artifact reviews, and unread chat conversations (`GET /api/v1/users/me/inbox/summary`). Runs outside a local project directory and is available on Windows. Human-mode only (absent in agent mode, since the endpoint refuses agent identities and agents already have `scion decisions` and `scion notifications`).
+
+Requires the `web.inbox_dashboard` [experiment](/scion/reference/experiments/) (off by default); while it is off, `scion inbox` fails with `Inbox is not enabled on this hub (experiment web.inbox_dashboard)`. Under user access token (UAT) authentication, the token must hold the `inbox:read` scope; pending secret approvals remain session-only and are shown as unavailable with a link to `/profile/secrets` in the browser. Exits `0` on success, including when an individual category reports an error (`!`).
+
+**Usage:** `scion inbox [flags]`
+
+- **Flags:**
+    - `--previews <n>`: Maximum number of preview items per category (`0` to `10`, default `3`). Pass `0` for counts only.
+    - `--chat <all|dms|mentions>`: Which unread conversations populate chat previews (default `all`). Category counts and breakdown always cover all unread conversations.
+    - `--format json` (global flag): Print the Hub API response JSON verbatim.
+
+```bash
+scion inbox
+scion inbox --previews 5
+scion inbox --previews 0
+scion inbox --chat mentions
+scion inbox --format json
 ```
 
 ### `scion logs`

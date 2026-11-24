@@ -137,7 +137,7 @@ func TestMessagesBareAndUnknownSubcommand(t *testing.T) {
 		return stdout + buf.String(), execErr
 	}
 
-	for _, bare := range [][]string{{"messages"}, {"msgs"}, {"inbox"}} {
+	for _, bare := range [][]string{{"messages"}, {"msgs"}} {
 		t.Run("bare_"+bare[0], func(t *testing.T) {
 			sawRequest.Store(false)
 			out, err := execArgs(t, bare)
@@ -185,11 +185,6 @@ func TestMessagesBareAndUnknownSubcommand(t *testing.T) {
 		{
 			name:    "msgs_alias_unknown_subcommand",
 			args:    []string{"msgs", "bogus"},
-			wantErr: `unknown command "bogus" for "scion messages"`,
-		},
-		{
-			name:    "inbox_alias_unknown_subcommand",
-			args:    []string{"inbox", "bogus"},
 			wantErr: `unknown command "bogus" for "scion messages"`,
 		},
 		{

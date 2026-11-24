@@ -52,6 +52,10 @@ func warnRemovedMode(source string) {
 // Deliberately absent: "exec-container" (show, set, clear). Human-mode only
 // per ptone/scion#8812 decision D4 (the Hub endpoint is session-only too);
 // cmd/platform_gate.go keeps it off Windows in v1.
+//
+// Deliberately absent: "inbox". Human-mode only (ptone/scion#9008, parent
+// ptone/scion#8962): GET /api/v1/users/me/inbox/summary refuses agent
+// identities, and agents already have scion decisions and scion notifications.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,
