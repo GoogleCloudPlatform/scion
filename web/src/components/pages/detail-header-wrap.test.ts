@@ -109,7 +109,10 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'render',
       icon: 'sl-icon.[hdd-rack]',
-      back: [['/brokers', 'Back to Brokers']],
+      crumbs: [
+        ['Brokers', '/brokers'],
+        [LONG_NAME, undefined],
+      ],
       badges: ['span', 'scion-status-badge'],
       meta: ['header-subtitle'],
       noActions: {
@@ -129,7 +132,10 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[lightning-charge]',
-      back: [['/skills', 'Back to Skills']],
+      crumbs: [
+        ['Skills', '/skills'],
+        [LONG_NAME, undefined],
+      ],
       badges: ['scion-status-badge'],
       meta: ['header-meta'],
       noActions: {
@@ -162,7 +168,10 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'render',
       icon: 'div.group-icon explicit[]',
-      back: [['/admin/groups', 'Back to Groups']],
+      crumbs: [
+        ['Groups', '/admin/groups'],
+        [LONG_NAME, undefined],
+      ],
       badges: ['span'],
       meta: ['header-slug'],
       noActions: {
@@ -216,7 +225,11 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[file-earmark-code]',
-      back: [['/settings?tab=templates', 'Hub Resources']],
+      crumbs: [
+        ['Hub Resources', '/settings'],
+        ['Templates', '/settings?tab=templates'],
+        [LONG_NAME, undefined],
+      ],
       badges: ['span'],
       meta: ['template-description', 'template-meta-row'],
       // Refresh from Source shows only for a GitHub source.
@@ -250,7 +263,11 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[sliders]',
-      back: [['/settings?tab=harness-configs', 'Hub Resources']],
+      crumbs: [
+        ['Hub Resources', '/settings'],
+        ['Harness Configs', '/settings?tab=harness-configs'],
+        [LONG_NAME, undefined],
+      ],
       badges: ['span'],
       // The description sits in the title column, beside the actions.
       meta: ['resource-description', 'resource-meta-row'],
@@ -276,7 +293,10 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[cloud-arrow-down]',
-      back: [['/admin/skill-registries', 'Back to Registries']],
+      crumbs: [
+        ['Skill Registries', '/admin/skill-registries'],
+        [LONG_NAME, undefined],
+      ],
       badges: [],
       meta: [],
     },
@@ -368,7 +388,10 @@ const cases: Array<[string, PageCase]> = [
       state: { loading: false, roleData: ROLE },
       method: 'renderDetail',
       icon: 'sl-icon.[shield-lock]',
-      back: [['/admin/roles', 'Roles']],
+      crumbs: [
+        ['Roles', '/admin/roles'],
+        [LONG_NAME, undefined],
+      ],
       badges: ['span', 'span'],
       meta: ['header-description', 'metadata-row'],
     },
@@ -382,7 +405,10 @@ const cases: Array<[string, PageCase]> = [
       method: 'renderPageHeader',
       args: [BOUNDARY],
       icon: 'sl-icon.[shield-check]',
-      back: [['/admin/access-boundaries', 'Access Constraints']],
+      crumbs: [
+        ['Access Constraints', '/admin/access-boundaries'],
+        [LONG_NAME, undefined],
+      ],
       badges: ['scion-access-boundary-status'],
       meta: ['header-meta'],
       noActions: { boundary: { ...BOUNDARY, _capabilities: { actions: ['read'] } } },
@@ -599,6 +625,13 @@ describe.each([
   ['project-create', './project-create.js', 'scion-page-project-create'],
   ['agent-create', './agent-create.js', 'scion-page-agent-create'],
   ['agent-edit', './agent-edit.js', 'scion-page-agent-edit'],
+  ['skill-create', './skill-create.js', 'scion-page-skill-create'],
+  [
+    'admin-access-boundary-editor',
+    './admin-access-boundary-editor.js',
+    'scion-page-admin-access-boundary-editor',
+  ],
+  ['admin-integrations', './admin-integrations.js', 'scion-page-admin-integrations'],
 ])('%s page navigation CSS guard', (_label, module, tag) => {
   it('keeps no copy of the back-link or ad-hoc breadcrumb CSS', async () => {
     await import(/* @vite-ignore */ module);
@@ -609,26 +642,33 @@ describe.each([
 });
 
 /**
- * Error states have no header, so the navigation stands alone there: either
- * the shared scion-breadcrumb (migrated pages) or scion-back-link (remaining).
+ * Error states have no header, so the navigation stands alone there as the
+ * shared scion-breadcrumb.
  */
-describe.each<[string, string, string, string, string, CrumbTuple[] | undefined]>([
+describe.each<[string, string, string, string, string, CrumbTuple[]]>([
   [
     'broker',
     './broker-detail.js',
     'scion-page-broker-detail',
     '/brokers',
-    'Back to Brokers',
-    undefined,
+    'Brokers',
+    [['Brokers', '/brokers']],
   ],
-  ['skill', './skill-detail.js', 'scion-page-skill-detail', '/skills', 'Back to Skills', undefined],
+  [
+    'skill',
+    './skill-detail.js',
+    'scion-page-skill-detail',
+    '/skills',
+    'Skills',
+    [['Skills', '/skills']],
+  ],
   [
     'group',
     './admin-group-detail.js',
     'scion-page-admin-group-detail',
     '/admin/groups',
-    'Back to Groups',
-    undefined,
+    'Groups',
+    [['Groups', '/admin/groups']],
   ],
   [
     'project',
@@ -643,8 +683,8 @@ describe.each<[string, string, string, string, string, CrumbTuple[] | undefined]
     './admin-skill-registry-detail.js',
     'scion-page-admin-skill-registry-detail',
     '/admin/skill-registries',
-    'Back to Registries',
-    undefined,
+    'Skill Registries',
+    [['Skill Registries', '/admin/skill-registries']],
   ],
   [
     'role',
@@ -652,7 +692,7 @@ describe.each<[string, string, string, string, string, CrumbTuple[] | undefined]
     'scion-page-admin-role-detail',
     '/admin/roles',
     'Roles',
-    undefined,
+    [['Roles', '/admin/roles']],
   ],
   [
     'gcp service account',
@@ -665,7 +705,7 @@ describe.each<[string, string, string, string, string, CrumbTuple[] | undefined]
       ['Service Accounts', '/settings?tab=service-accounts'],
     ],
   ],
-])('%s error state', (_label, module, tag, href, text, expectedCrumbs) => {
+])('%s error state', (_label, module, tag, _href, _text, expectedCrumbs) => {
   it('renders the shared navigation on its own', async () => {
     await import(/* @vite-ignore */ module);
     const el = document.createElement(tag);
@@ -673,19 +713,11 @@ describe.each<[string, string, string, string, string, CrumbTuple[] | undefined]
     const host = document.createElement('div');
     render((el as unknown as { render: () => TemplateResult }).render(), host);
     expect(host.querySelector('scion-detail-header')).toBeNull();
-    if (expectedCrumbs) {
-      const crumbs = host.querySelectorAll('scion-breadcrumb');
-      expect(crumbs).toHaveLength(1);
-      expect(crumbs[0].hasAttribute('slot')).toBe(false);
-      expect(crumbTuples(host)).toEqual(expectedCrumbs);
-      expect(host.querySelector('scion-back-link')).toBeNull();
-    } else {
-      const links = host.querySelectorAll('scion-back-link');
-      expect(links).toHaveLength(1);
-      expect(links[0].getAttribute('href')).toBe(href);
-      expect(links[0].hasAttribute('slot')).toBe(false);
-      expect(links[0].textContent?.trim()).toBe(text);
-    }
+    const crumbs = host.querySelectorAll('scion-breadcrumb');
+    expect(crumbs).toHaveLength(1);
+    expect(crumbs[0].hasAttribute('slot')).toBe(false);
+    expect(crumbTuples(host)).toEqual(expectedCrumbs);
+    expect(host.querySelector('scion-back-link')).toBeNull();
     expect(host.querySelector('a.back-link, .breadcrumb, .crumbs')).toBeNull();
   });
 });

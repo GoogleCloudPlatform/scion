@@ -27,6 +27,7 @@ import type { PageData, Skill, SkillVersion, SkillDownloadUrl } from '../../shar
 import { can } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current } from '../../client/crumbs.js';
 import '../shared/status-badge.js';
 import '../shared/detail-header.js';
 import '../shared/hash-display.js';
@@ -608,7 +609,10 @@ export class ScionPageSkillDetail extends LitElement {
     // prettier-ignore
     return html`
       <scion-detail-header heading=${skill.name}>
-        <scion-back-link slot="back" href="/skills">Back to Skills</scion-back-link>
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[{ label: 'Skills', href: '/skills' }, current(skill.name || this.skillId)]}
+        ></scion-breadcrumb>
         <sl-icon slot="icon" name="lightning-charge"></sl-icon>
         <scion-status-badge
           status=${skill.status}
@@ -1074,6 +1078,7 @@ export class ScionPageSkillDetail extends LitElement {
 
   private renderLoading() {
     return html`
+      <scion-breadcrumb .crumbs=${[{ label: 'Skills', href: '/skills' }]}></scion-breadcrumb>
       <div class="loading-state">
         <sl-spinner></sl-spinner>
         <p>Loading skill...</p>
@@ -1083,7 +1088,7 @@ export class ScionPageSkillDetail extends LitElement {
 
   private renderError() {
     return html`
-      <scion-back-link href="/skills">Back to Skills</scion-back-link>
+      <scion-breadcrumb .crumbs=${[{ label: 'Skills', href: '/skills' }]}></scion-breadcrumb>
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
         <h2>Failed to Load Skill</h2>

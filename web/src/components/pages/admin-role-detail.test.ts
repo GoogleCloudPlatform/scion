@@ -27,6 +27,7 @@ import { setPreferredTimeZone } from '../../utils/time.js';
 import type { CSSResult } from 'lit';
 import type { ScionDetailHeader } from '../shared/detail-header.js';
 import { styleRules } from './__fixtures__/css-rules.js';
+import { crumbTuples } from '../../test-utils/crumbs.js';
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -481,21 +482,23 @@ describe('admin-role-detail', () => {
     expect(emptyHeading?.textContent?.trim()).toBe('No Bindings');
   });
 
-  // -- Back link --
+  // -- Breadcrumb --
 
-  it('renders back link to Roles list', async () => {
+  it('renders breadcrumb to Roles list', async () => {
     const handler = createFetchHandler({ role: CUSTOM_ROLE });
     el = await createElement(handler);
 
-    // The shared scion-back-link, in the shared header's back slot.
-    const backLinks = el.shadowRoot?.querySelectorAll('scion-back-link');
-    expect(backLinks).toHaveLength(1);
-    const backLink = backLinks![0];
-    expect(backLink.parentElement?.tagName.toLowerCase()).toBe('scion-detail-header');
-    expect(backLink.getAttribute('slot')).toBe('back');
-    expect(backLink.getAttribute('href')).toBe('/admin/roles');
-    expect(backLink.textContent?.trim()).toBe('Roles');
-    expect(el.shadowRoot?.querySelector('a.back-link')).toBeNull();
+    // The shared scion-breadcrumb, in the shared header's back slot.
+    const breadcrumbs = el.shadowRoot?.querySelectorAll('scion-breadcrumb');
+    expect(breadcrumbs).toHaveLength(1);
+    const breadcrumb = breadcrumbs![0];
+    expect(breadcrumb.parentElement?.tagName.toLowerCase()).toBe('scion-detail-header');
+    expect(breadcrumb.getAttribute('slot')).toBe('back');
+    expect(crumbTuples(el.shadowRoot!)).toEqual([
+      ['Roles', '/admin/roles'],
+      [CUSTOM_ROLE.name, undefined],
+    ]);
+    expect(el.shadowRoot?.querySelector('a.back-link, scion-back-link')).toBeNull();
   });
 
   it('shows the Roles nav icon in the header icon slot', async () => {

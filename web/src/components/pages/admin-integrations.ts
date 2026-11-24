@@ -19,6 +19,8 @@ import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current } from '../../client/crumbs.js';
+import '../shared/breadcrumb.js';
 import {
   fallbackFieldKey,
   fieldErrorMessages,
@@ -760,21 +762,6 @@ export class ScionPageAdminIntegrations extends LitElement {
     }
 
     /* Detail view */
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.875rem;
-      color: var(--scion-primary, #3b82f6);
-      text-decoration: none;
-      cursor: pointer;
-      margin-bottom: 1rem;
-    }
-
-    .back-link:hover {
-      text-decoration: underline;
-    }
-
     .detail-name {
       font-size: 1.25rem;
       font-weight: 700;
@@ -1424,7 +1411,14 @@ export class ScionPageAdminIntegrations extends LitElement {
         : nothing}
       ${isDetail ? this.renderUpdateNotices() : nothing}
       ${this.loading
-        ? html`<div class="loading-container"><sl-spinner></sl-spinner></div>`
+        ? html`
+            ${isDetail
+              ? html`<scion-breadcrumb
+                  .crumbs=${[{ label: 'Integrations', href: '/admin/integrations' }]}
+                ></scion-breadcrumb>`
+              : nothing}
+            <div class="loading-container"><sl-spinner></sl-spinner></div>
+          `
         : isDetail
           ? this.renderDetail()
           : this.renderList()}
@@ -1542,14 +1536,18 @@ export class ScionPageAdminIntegrations extends LitElement {
   // ── Detail View ──
 
   private renderDetail() {
+    const rootCrumb = { label: 'Integrations', href: '/admin/integrations' };
     if (!this.detail) {
-      return html`<div class="status-message error">Integration not found.</div>`;
+      return html`
+        <scion-breadcrumb .crumbs=${[rootCrumb]}></scion-breadcrumb>
+        <div class="status-message error">Integration not found.</div>
+      `;
     }
     const d = this.detail;
     return html`
-      <a class="back-link" href="/admin/integrations">
-        <sl-icon name="arrow-left"></sl-icon> Back to Integrations
-      </a>
+      <scion-breadcrumb
+        .crumbs=${[rootCrumb, current(d.name || this.currentName || '')]}
+      ></scion-breadcrumb>
 
       <h2 class="detail-name">${d.name}</h2>
       <p class="detail-platform">

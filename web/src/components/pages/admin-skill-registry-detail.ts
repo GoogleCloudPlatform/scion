@@ -25,6 +25,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import type { SkillRegistry } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current } from '../../client/crumbs.js';
 import { formatRelative } from '../../utils/time.js';
 import '../shared/detail-header.js';
 import '../shared/status-badge.js';
@@ -470,9 +471,13 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     const r = this.registry!;
     return html`
       <scion-detail-header heading=${r.name}>
-        <scion-back-link slot="back" href="/admin/skill-registries"
-          >Back to Registries</scion-back-link
-        >
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[
+            { label: 'Skill Registries', href: '/admin/skill-registries' },
+            current(r.name || this.registryId),
+          ]}
+        ></scion-breadcrumb>
         <sl-icon slot="icon" name="cloud-arrow-down"></sl-icon>
         <div slot="actions" class="header-actions">
           <sl-button variant="default" size="small" outline @click=${() => this.startEditing()}>
@@ -805,6 +810,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
 
   private renderLoading() {
     return html`
+      <scion-breadcrumb
+        .crumbs=${[{ label: 'Skill Registries', href: '/admin/skill-registries' }]}
+      ></scion-breadcrumb>
       <div class="loading-state">
         <sl-spinner></sl-spinner>
         <p>Loading registry...</p>
@@ -814,7 +822,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
 
   private renderError() {
     return html`
-      <scion-back-link href="/admin/skill-registries">Back to Registries</scion-back-link>
+      <scion-breadcrumb
+        .crumbs=${[{ label: 'Skill Registries', href: '/admin/skill-registries' }]}
+      ></scion-breadcrumb>
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
         <h2>Failed to Load Registry</h2>

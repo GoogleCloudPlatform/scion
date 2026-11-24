@@ -29,7 +29,9 @@ import yaml from 'js-yaml';
 import type { Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current } from '../../client/crumbs.js';
 import { navigateTo } from '../../client/navigation.js';
+import '../shared/breadcrumb.js';
 import type { ProjectChangeDetail, ProjectOption } from '../shared/project-picker.js';
 import '../shared/project-picker.js';
 
@@ -138,19 +140,6 @@ export class ScionPageSkillCreate extends LitElement {
   static override styles = css`
     :host {
       display: block;
-    }
-
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
     }
 
     .page-header {
@@ -912,6 +901,7 @@ export class ScionPageSkillCreate extends LitElement {
   override render() {
     if (this.loading) {
       return html`
+        <scion-breadcrumb .crumbs=${[{ label: 'Skills', href: '/skills' }]}></scion-breadcrumb>
         <div
           style="display: flex; flex-direction: column; align-items: center; padding: 4rem 2rem; color: var(--scion-text-muted, #64748b);"
         >
@@ -923,10 +913,7 @@ export class ScionPageSkillCreate extends LitElement {
 
     if (!this.canCreate) {
       return html`
-        <a href="/skills" class="back-link">
-          <sl-icon name="arrow-left"></sl-icon>
-          Back to Skills
-        </a>
+        <scion-breadcrumb .crumbs=${[{ label: 'Skills', href: '/skills' }]}></scion-breadcrumb>
         <div
           style="text-align: center; padding: 3rem 2rem; background: var(--scion-surface, #ffffff); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius-lg, 0.75rem);"
         >
@@ -953,10 +940,9 @@ export class ScionPageSkillCreate extends LitElement {
     }
 
     return html`
-      <a href="/skills" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Skills
-      </a>
+      <scion-breadcrumb
+        .crumbs=${[{ label: 'Skills', href: '/skills' }, current('New skill', false)]}
+      ></scion-breadcrumb>
 
       <div class="page-header">
         <h1>

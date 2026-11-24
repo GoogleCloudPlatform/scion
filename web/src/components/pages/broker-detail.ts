@@ -40,6 +40,7 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import type { AdminStatus } from '../../lib/admin-permissions.js';
+import { current } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import { visibleInterval } from '../../client/visible-interval.js';
@@ -761,7 +762,13 @@ export class ScionPageBrokerDetail extends LitElement {
 
     return html`
       <scion-detail-header heading=${this.broker.name}>
-        <scion-back-link slot="back" href="/brokers">Back to Brokers</scion-back-link>
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[
+            { label: 'Brokers', href: '/brokers' },
+            current(this.broker.name || this.brokerId),
+          ]}
+        ></scion-breadcrumb>
         <sl-icon slot="icon" name="hdd-rack"></sl-icon>
         ${this.renderBrokerTypeBadge()} ${renderAdminManagedBadge(this.broker)}
         ${renderPolicyBlockedTag(this.broker)}
@@ -1242,6 +1249,7 @@ export class ScionPageBrokerDetail extends LitElement {
 
   private renderLoading() {
     return html`
+      <scion-breadcrumb .crumbs=${[{ label: 'Brokers', href: '/brokers' }]}></scion-breadcrumb>
       <div class="loading-state">
         <sl-spinner></sl-spinner>
         <p>Loading broker...</p>
@@ -1251,7 +1259,7 @@ export class ScionPageBrokerDetail extends LitElement {
 
   private renderError() {
     return html`
-      <scion-back-link href="/brokers">Back to Brokers</scion-back-link>
+      <scion-breadcrumb .crumbs=${[{ label: 'Brokers', href: '/brokers' }]}></scion-breadcrumb>
 
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
