@@ -105,6 +105,15 @@ type OutboundMessageRequest struct {
 	// exist (a new version each). Valid only with Decisions.
 	DecisionsUpdate bool `json:"decisions_update,omitempty"`
 
+	// SecretRequests makes the message a secret request prompt asking a user to
+	// supply one or more agent-scoped secrets (ptone/scion#8747). Gated by the
+	// hub.agent_secrets experiment.
+	SecretRequests []messages.SecretRequestInput `json:"secret_requests,omitempty"`
+	// SecretRequestsUpdate allows SecretRequests to replace pending secret
+	// requests for the named keys (a new version each). Valid only with
+	// SecretRequests.
+	SecretRequestsUpdate bool `json:"secret_requests_update,omitempty"`
+
 	// legacy choices fallback: remove in ptone/scion#8249
 	Choices       []messages.DecisionInput `json:"choices,omitempty"`
 	ChoicesUpdate bool                     `json:"choices_update,omitempty"`
@@ -1228,6 +1237,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if decisionSend != nil {
 		req.Type = messages.TypeDecisionPrompt
 	}
+	secretRequestSend, ok := s.prepareSecretRequestSend(w, ctx, id, &req)
+	if !ok {
+		return
+	}
+	if secretRequestSend != nil {
+		req.Type = messages.TypeSecretRequest
+	}
 
 	if req.Type == "" {
 		req.Type = "input-needed"
@@ -1242,10 +1258,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// With decisions the body is the optional intro above the decisions.
+	// With decisions or secret requests the body is the optional intro above the card.
 	// Attachment-id-only sends may omit text; attachment_ids are resolved
 	// and authorized after routing (ptone/scion#6154).
-	if req.Msg == "" && decisionSend == nil && len(req.AttachmentIDs) == 0 {
+	if req.Msg == "" && decisionSend == nil && secretRequestSend == nil && len(req.AttachmentIDs) == 0 {
 		ValidationError(w, "msg is required", nil)
 		return
 	}
@@ -1260,6 +1276,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if decisionSend != nil {
 		// The intro is the body after that rewrite, as the stored row is.
 		decisionSend.intro = req.Msg
+	}
+	if secretRequestSend != nil {
+		secretRequestSend.intro = req.Msg
 	}
 
 	// Validate DM key format when the thread_id looks like a DM key.
@@ -1318,6 +1337,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// an agent (an agent DM, or a conversation that is one) is refused.
 	if decisionSend != nil && (outboundTargetAgentID != "" || result.DeliveryPath == deliveryAgentDM) {
 		ValidationError(w, "decisions can be sent only to a user or a conversation, not to an agent",
+			map[string]interface{}{"field": "recipient"})
+		return
+	}
+	if secretRequestSend != nil && (outboundTargetAgentID != "" || result.DeliveryPath == deliveryAgentDM) {
+		ValidationError(w, "secret requests can be sent only to a user or a conversation, not to an agent",
 			map[string]interface{}{"field": "recipient"})
 		return
 	}
@@ -1566,6 +1590,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			if err := s.storeDecisionPrompt(storeCtx, decisionSend, agent, storeMsg, structuredMsg); err != nil {
 				return err
 			}
+		} else if secretRequestSend != nil {
+			// The message and its secret requests in one transaction.
+			if err := s.storeSecretRequestPrompt(storeCtx, secretRequestSend, agent, storeMsg, structuredMsg); err != nil {
+				return err
+			}
 		} else if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
 			return err
 		}
@@ -1598,6 +1627,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			// Open cards of the versions this send replaced (--update).
 			s.publishReplacedDecisions(storeCtx, decisionSend.result)
 			s.enqueueDecisionBellEvent(storeMsg.ProjectID, storeMsg.ThreadID, "")
+		}
+		if secretRequestSend != nil {
+			s.publishReplacedSecretRequests(storeCtx, secretRequestSend.result)
+			s.emitSecretRequestSendAudit(storeCtx, secretRequestSend.result)
 		}
 		return nil
 	}
@@ -1638,7 +1671,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
-			if len(artifactAttachments) > 0 || decisionSend != nil {
+			if len(artifactAttachments) > 0 || decisionSend != nil || secretRequestSend != nil {
 				// A decision prompt is stored with its decisions by this
 				// handler, so it takes the same stored-first path.
 				// Decision D2 (ptone/scion#4596): a message that carries
@@ -1735,7 +1768,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserDirect:
 		// Direct path: persist, link attachments, publish SSE, dispatch to channels.
 		if err := storeOutboundRow(ctx); err != nil {
-			if writeDecisionStoreError(w, err) {
+			if writeDecisionStoreError(w, err) || s.writeSecretRequestStoreError(w, ctx, agent, err) {
 				return
 			}
 			s.messageLog.Error("Failed to persist outbound message", "error", err)
@@ -1764,9 +1797,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// its external_ref embeds whatever the caller chose to send; fan-out
 	// treats that the same as no group context at all.
 	//
-	// A decision prompt is addressed to humans and fans out to no agent.
+	// A decision prompt or secret request is addressed to humans and fans out to no agent.
 	var mentionResults []messages.MentionResult
-	if decisionSend == nil {
+	if decisionSend == nil && secretRequestSend == nil {
 		mentionResults = s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
 			Sender:             agent,
 			SenderIdent:        agentIdent,
@@ -1789,7 +1822,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// (group_message_mode.go).
 	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
 	var defaultAgentResult *messages.MentionResult
-	if isGroupPost && decisionSend == nil {
+	if isGroupPost && decisionSend == nil && secretRequestSend == nil {
 		defaultAgentResult = s.wakeGroupDefaultAgent(ctx, groupDefaultWakeInput{
 			Sender:            agent,
 			SenderIdent:       agentIdent,
@@ -1864,6 +1897,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if decisionSend != nil {
 		respBody["decisions"] = decisionSendResults(agent.ID, decisionSend.result)
+	}
+	if secretRequestSend != nil {
+		respBody["secret_requests"] = secretRequestSendResults(secretRequestSend.result)
 	}
 	writeJSON(w, http.StatusOK, respBody)
 }

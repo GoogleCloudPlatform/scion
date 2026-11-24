@@ -68,6 +68,15 @@ type SecretService interface {
 	// pending secrets as one list, with a state per item. Values are never
 	// returned.
 	ListWithPending(ctx context.Context) (*ListSecretsWithPendingResponse, error)
+
+	// ListRequests returns one page of secret requests belonging to the
+	// calling agent (GET /api/v1/agent/secret-requests). Values are never
+	// returned.
+	ListRequests(ctx context.Context, opts *ListAgentSecretRequestsOptions) (*AgentSecretRequestListResponse, error)
+
+	// WithdrawRequests withdraws pending secret requests belonging to the
+	// calling agent (POST /api/v1/agent/secret-requests/withdraw).
+	WithdrawRequests(ctx context.Context, req *WithdrawSecretRequestsRequest) (*WithdrawSecretRequestsResponse, error)
 }
 
 // secretService is the implementation of SecretService.

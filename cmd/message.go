@@ -152,6 +152,13 @@ revise an unanswered multi-decision set on a single card, resend all
 still-pending keys of that set together.
 To retire a decision without a replacement, use scion decisions withdraw.
 
+Secret requests (--secret-request or --secret-request-file, from an agent to a
+user or a conversation) ask a human to supply one or more agent-scoped secrets
+through the Hub (never in chat). They print one line per key with its version
+(and replaced version when --update replaces a pending request). With --format
+json the output is the Hub's full send result. Use scion secret request list
+and scion secret request withdraw to inspect or retire open requests.
+
 Exit codes:
   0  Sent. For a group, every recipient was accepted or deferred.
   1  Not sent. For a group, no recipient received the message, so the whole
@@ -175,11 +182,12 @@ Examples:
 			return errRawFlagRemoved
 		}
 		// --body-file provides the message, so we only need recipient.
-		// With decisions the body (the intro above the decisions) is optional.
+		// With decisions or secret requests the body (the intro above the card) is optional.
 		bodyFile, _ := cmd.Flags().GetString("body-file")
 		withDecisions := cmd.Flags().Changed("decisions") || cmd.Flags().Changed("decisions-file") ||
 			cmd.Flags().Changed("choices") || cmd.Flags().Changed("choices-file")
-		if bodyFile != "" || withDecisions {
+		withSecretRequests := cmd.Flags().Changed("secret-request") || cmd.Flags().Changed("secret-request-file")
+		if bodyFile != "" || withDecisions || withSecretRequests {
 			if len(args) < 1 {
 				return fmt.Errorf("recipient is required")
 			}
@@ -247,12 +255,17 @@ Examples:
 		}
 
 		// Decision prompts (--decisions, --decisions-file, --update, plus legacy
-		// --choices* aliases): checked and read before the body, so
-		// --decisions-file - owns stdin. The JSON is parsed only for early
+		// --choices* aliases) and secret requests (--secret-request,
+		// --secret-description, --secret-request-file, --update): checked and read
+		// before the body, so -file - owns stdin. The JSON is parsed only for early
 		// errors; the hub is the authority.
 		msgDecisionsPayload = nil
+		msgSecretRequestsPayload = nil
 		agentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
 		if err := validateDecisionFlags(agentTarget, len(groupRecipients) > 0); err != nil {
+			return err
+		}
+		if err := validateSecretRequestFlags(agentTarget, len(groupRecipients) > 0); err != nil {
 			return err
 		}
 		if decisionsRequested() {
@@ -262,6 +275,13 @@ Examples:
 			}
 			msgDecisionsPayload = payload
 			warnDecisionLengths(os.Stderr, payload)
+		}
+		if secretRequestsRequested() {
+			payload, err := loadSecretRequestsPayload()
+			if err != nil {
+				return err
+			}
+			msgSecretRequestsPayload = payload
 		}
 
 		// Resolve body from --body-file or stdin
@@ -276,8 +296,8 @@ Examples:
 		// the slug. Code spans and quoted lines are left unchanged.
 		message = messages.RewriteAgentMentions(message)
 
-		// Ensure we have a message body (optional with decisions)
-		if message == "" && len(msgArtifacts) == 0 && msgDecisionsPayload == nil {
+		// Ensure we have a message body (optional with decisions or secret requests)
+		if message == "" && len(msgArtifacts) == 0 && msgDecisionsPayload == nil && msgSecretRequestsPayload == nil {
 			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
 		}
 
@@ -852,6 +872,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			outMsg.Recipient = "user:" + ref.Value
 		}
 		applyDecisionsToOutbound(outMsg)
+		applySecretRequestsToOutbound(outMsg)
 
 		// DEF-51 principle: the validated probe must match the sent envelope
 		// by construction. Fields the outbound path does not send (Channel,
@@ -867,9 +888,9 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		if ref.Kind == messaging.RefEmail {
 			probe.Recipient = outMsg.Recipient
 		}
-		// A decision prompt's type and body are the hub's to set (the body
-		// may be empty), so only an ordinary message is probed.
-		if msgDecisionsPayload == nil {
+		// A decision or secret-request prompt's type and body are the hub's to
+		// set (the body may be empty), so only an ordinary message is probed.
+		if msgDecisionsPayload == nil && msgSecretRequestsPayload == nil {
 			if err := messaging.ValidateLegacyMessage(probe); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
@@ -883,7 +904,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		outMsg.AttachmentIDs = ids
 		result, err := agentSvc.SendOutboundMessage(sendCtx, senderAgent, outMsg)
 		if err != nil {
-			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
+			return formatSecretRequestSendError(ref.Raw, err)
 		}
 		// The hub stored the prompt: mark the agent waiting for input.
 		defer afterDecisionsSent()
@@ -915,8 +936,9 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		default:
 			fmt.Printf("Message dispatched to %s%s (status: %s).\n", ref.Raw, receiptSuffix(result.MessageID, result.ConversationID), result.Status)
 		}
-		// A decision prompt's decisions, whatever the status.
+		// A decision or secret-request prompt's items, whatever the status.
 		printSentDecisions(result)
+		printSentSecretRequests(result)
 		printAttachmentWarnings(result.AttachmentWarnings)
 		return nil
 	}
@@ -1036,6 +1058,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		Metadata:    artifactRefsMetadata(msgArtifactRefs),
 	}
 	applyDecisionsToOutbound(outMsg)
+	applySecretRequestsToOutbound(outMsg)
 
 	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
 	if err != nil {
@@ -1045,7 +1068,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	outMsg.AttachmentIDs = attachmentIDs
 	result, err := agentSvc.SendOutboundMessage(sendCtx, senderAgent, outMsg)
 	if err != nil {
-		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", userRecipient, err))
+		return formatSecretRequestSendError(userRecipient, err)
 	}
 	// The hub stored the prompt: mark the agent waiting for input.
 	defer afterDecisionsSent()
@@ -1068,6 +1091,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	if result != nil {
 		fmt.Printf("Message sent to %s via Hub%s.\n", userRecipient, receiptSuffix(result.MessageID, result.ConversationID))
 		printSentDecisions(result)
+		printSentSecretRequests(result)
 	} else {
 		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
 	}
@@ -2159,7 +2183,10 @@ func init() {
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 	messageCmd.Flags().StringVar(&msgDecisions, "decisions", "", "Send a decision prompt: a JSON array of decisions for a user or conversation to answer (agents only; needs the web.decisions experiment). The body becomes the optional intro")
 	messageCmd.Flags().StringVar(&msgDecisionsFile, "decisions-file", "", "Read the --decisions JSON from a file ('-' reads stdin, which then excludes --body-file -)")
-	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions or --decisions-file: replace decisions whose ids already exist (a new version each); without it, reusing an id is refused. To revise an unanswered set on one card, resend all still-pending keys of that set. To retire a decision without a replacement, use 'scion decisions withdraw'")
+	messageCmd.Flags().StringArrayVar(&msgSecretRequests, "secret-request", nil, "Request an agent-scoped secret key from a user or conversation (repeatable; agents only; needs the hub.agent_secrets experiment). The body becomes the optional intro")
+	messageCmd.Flags().StringVar(&msgSecretDescription, "secret-description", "", "With a single --secret-request: description explaining what the secret is for")
+	messageCmd.Flags().StringVar(&msgSecretRequestFile, "secret-request-file", "", "Read secret request entries (JSON array of {key, description, type, target}) from a file ('-' reads stdin, which then excludes --body-file -)")
+	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions/--decisions-file or --secret-request/--secret-request-file: replace items whose keys already exist (a new version each); without it, reusing an id or pending key is refused. To revise an unanswered set on one card, resend all still-pending keys of that set. To retire without a replacement, use 'scion decisions withdraw' or 'scion secret request withdraw'")
 
 	// legacy choices fallback: remove in ptone/scion#8249
 	messageCmd.Flags().StringVar(&msgLegacyChoices, "choices", "", "Deprecated alias of --decisions")

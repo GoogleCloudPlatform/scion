@@ -93,6 +93,18 @@
       }
     }
   },
+  "dismiss_400_idempotency_key_too_long": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "details": {
+          "field": "idempotencyKey"
+        },
+        "message": "idempotencyKey is at most 128 bytes"
+      }
+    }
+  },
   "dismiss_400_invalid_json": {
     "status": 400,
     "body": {
@@ -185,6 +197,42 @@
       "error": {
         "code": "validation_error",
         "message": "invalid JSON body: invalid character 'b' looking for beginning of object key string"
+      }
+    }
+  },
+  "withdraw_400_key_blank": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "details": {
+          "field": "keys"
+        },
+        "message": "each key must be non-empty"
+      }
+    }
+  },
+  "withdraw_400_key_duplicate": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "details": {
+          "field": "keys"
+        },
+        "message": "duplicate decision key \"d234\" in request"
+      }
+    }
+  },
+  "withdraw_400_keys_empty": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "details": {
+          "field": "keys"
+        },
+        "message": "keys must contain 1 to 10 items"
       }
     }
   },

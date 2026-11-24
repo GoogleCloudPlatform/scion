@@ -289,6 +289,10 @@ const (
 	// unused gap of the range.
 	LockPendingSecretExpiry AdvisoryLockKey = 0x5C10001B
 
+	// LockSecretRequestExpiry guards the periodic secret-request expiry and
+	// stale-claim recovery sweep ("secret-request-expiry", ptone/scion#8747).
+	LockSecretRequestExpiry AdvisoryLockKey = 0x5C100033
+
 	// LockScheduledExecRunSweep guards the scheduled exec run sweeper
 	// ("scheduled-exec-run-sweep", ptone/scion#7883), so one replica per tick
 	// polls the outcomes of unfinished exec runs no live tracker owns and

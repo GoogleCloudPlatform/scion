@@ -35,7 +35,7 @@ import { performLogout } from '../utils/auth.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from './shared/app-frame.js';
-import { decisionsEnabled, isFeatureEnabled } from '../utils/feature-flags.js';
+import { agentSecretsEnabled, decisionsEnabled, isFeatureEnabled } from '../utils/feature-flags.js';
 import { ARTIFACTS_FLAG } from '../client/artifacts-flag.js';
 import {
   TestHubBannerController,
@@ -387,6 +387,9 @@ export class ScionApp extends LitElement {
     }
     if (path.match(/^\/projects\/[^/]+\/decisions$/)) {
       return decisionsEnabled() ? 'Decisions' : 'Page Not Found';
+    }
+    if (path.match(/^\/secret-requests\/[^/]+$/)) {
+      return agentSecretsEnabled() ? 'Secret Request' : 'Page Not Found';
     }
     if (path.match(/^\/projects\/[^/]+\/metrics$/)) {
       return 'Project Metrics';

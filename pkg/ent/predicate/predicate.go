@@ -267,6 +267,9 @@ type ScheduledExecRun func(*sql.Selector)
 // Secret is the predicate function for secret builders.
 type Secret func(*sql.Selector)
 
+// SecretRequest is the predicate function for secretrequest builders.
+type SecretRequest func(*sql.Selector)
+
 // Skill is the predicate function for skill builders.
 type Skill func(*sql.Selector)
 

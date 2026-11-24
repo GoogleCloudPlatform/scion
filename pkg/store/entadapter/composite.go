@@ -616,6 +616,10 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err := deleteProjectDecisions(ctx, c.client, uid, agentIDs); err != nil {
 		return err
 	}
+	// Secret request rows go with the project (§4.7).
+	if err := deleteProjectSecretRequests(ctx, c.client, uid); err != nil {
+		return err
+	}
 	// Primary-project trigger routing entries in github_installations.trigger_routing
 	// carry project IDs inside JSON with no DB-level FK; scrub them when the
 	// project is deleted (§8.4).
@@ -873,6 +877,9 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 			}
 			for _, id := range removed {
 				if _, err := txStore.DeleteSecretsByScope(ctx, store.ScopeAgent, id); err != nil {
+					return 0, err
+				}
+				if _, err := txStore.WithdrawAgentSecretRequestsOnDelete(ctx, id, now); err != nil {
 					return 0, err
 				}
 			}

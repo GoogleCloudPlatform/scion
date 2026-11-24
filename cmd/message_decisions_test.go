@@ -112,7 +112,7 @@ func TestValidateDecisionFlags(t *testing.T) {
 			require.NoError(t, messageCmd.Flags().Set("decisions-file", "a.json"))
 			require.NoError(t, messageCmd.Flags().Set("choices-file", "b.json"))
 		}, wantErr: "--decisions-file and --choices-file are mutually exclusive", wantUsage: true},
-		{name: "update without decisions", setup: func() { msgDecisionsUpdate = true }, wantErr: "--update is valid only with --decisions or --decisions-file", wantUsage: true},
+		{name: "update without decisions", setup: func() { msgDecisionsUpdate = true }, wantErr: "--update is valid only with --decisions, --decisions-file, --secret-request, or --secret-request-file", wantUsage: true},
 		{name: "two readers of stdin", setup: func() { msgDecisionsFile = "-"; msgBodyFile = "-" }, wantErr: "both read stdin", wantUsage: true},
 		{name: "agent recipient", setup: func() { msgDecisions = "[]" }, agent: true, wantErr: "not to an agent", wantUsage: false},
 		{name: "group recipient", setup: func() { msgDecisions = "[]" }, group: true, wantErr: "not to an agent or a group", wantUsage: false},

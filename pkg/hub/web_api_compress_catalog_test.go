@@ -193,6 +193,15 @@ var compressBypassedUntagged = map[string]string{
 	"exemption /api/v1/agent/decisions":  "agent prefix",
 	"exemption /api/v1/agent/decisions/": "agent prefix",
 	"exemption GET /api/v1/agent/hub":    "agent prefix",
+
+	// Secret-request routes: /api/v1/secret-requests/ matches the "secret"
+	// bypass rule and /api/v1/agent/ is bypassed as a whole; none of these
+	// responses carry secret values (only request metadata and status).
+	"GET /api/v1/secret-requests/{messageId}":          "secret path substring",
+	"POST /api/v1/secret-requests/{messageId}/fulfill": "secret path substring",
+	"POST /api/v1/secret-requests/{messageId}/dismiss": "secret path substring",
+	"exemption /api/v1/agent/secret-requests":          "agent prefix",
+	"exemption /api/v1/agent/secret-requests/":         "agent prefix",
 }
 
 // compressRequestBypassed mirrors the MountHubAPI decision: the request

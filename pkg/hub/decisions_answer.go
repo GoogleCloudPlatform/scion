@@ -38,7 +38,7 @@ const (
 	ErrCodeDecisionReplaced    = msgaction.ConflictReplaced
 	ErrCodeDecisionWithdrawn   = msgaction.ConflictWithdrawn
 	ErrCodeDecisionDismissed   = msgaction.ConflictDismissed
-	ErrCodeDecisionAnswered    = "already_answered"
+	ErrCodeDecisionAnswered    = msgaction.DecisionAlreadyAnsweredCode
 	ErrCodeNotRecordedAnswerer = "not_recorded_answerer"
 )
 

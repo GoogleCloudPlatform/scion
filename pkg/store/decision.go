@@ -53,7 +53,7 @@ const MaxDecisionDismissReasonRunes = msgaction.MaxReasonRunes
 
 // DecisionDismissMinAge is the minimum age a decision version must reach
 // before a user may dismiss it (design-8194 section 4.4a, D10).
-const DecisionDismissMinAge = 5 * time.Minute
+const DecisionDismissMinAge = msgaction.DecisionDismissMinAge
 
 // DecisionStatusTerminal reports whether status is a terminal decision status
 // (replaced, withdrawn, or dismissed) that cannot accept new answers.

@@ -101,6 +101,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/secretrequest"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
@@ -226,6 +227,7 @@ const (
 	TypeScheduledExecPollCursor       = "ScheduledExecPollCursor"
 	TypeScheduledExecRun              = "ScheduledExecRun"
 	TypeSecret                        = "Secret"
+	TypeSecretRequest                 = "SecretRequest"
 	TypeSkill                         = "Skill"
 	TypeSkillInjection                = "SkillInjection"
 	TypeSkillRegistry                 = "SkillRegistry"
@@ -103405,6 +103407,2420 @@ func (m *SecretMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *SecretMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown Secret edge %s", name)
+}
+
+// SecretRequestMutation represents an operation that mutates the SecretRequest nodes in the graph.
+type SecretRequestMutation struct {
+	config
+	op                  Op
+	typ                 string
+	id                  *uuid.UUID
+	project_id          *uuid.UUID
+	agent_id            *uuid.UUID
+	agent_name          *string
+	key                 *string
+	key_norm            *string
+	version             *int
+	addversion          *int
+	description         *string
+	secret_type         *secretrequest.SecretType
+	target              *string
+	message_id          *uuid.UUID
+	position            *int
+	addposition         *int
+	intro_length        *int
+	addintro_length     *int
+	conversation_id     *uuid.UUID
+	chat_key            *string
+	status              *secretrequest.Status
+	replaced_by_id      *uuid.UUID
+	replaced_at         *time.Time
+	withdrawn_reason    *string
+	withdrawn_by        *string
+	resolved_by_user_id *string
+	resolved_by_name    *string
+	resolved_by_email   *string
+	dismiss_reason      *string
+	surface             *secretrequest.Surface
+	idempotency_key     *string
+	response_message_id *uuid.UUID
+	secret_version      *int
+	addsecret_version   *int
+	claimed_at          *time.Time
+	created_at          *time.Time
+	expires_at          *time.Time
+	resolved_at         *time.Time
+	clearedFields       map[string]struct{}
+	done                bool
+	oldValue            func(context.Context) (*SecretRequest, error)
+	predicates          []predicate.SecretRequest
+}
+
+var _ ent.Mutation = (*SecretRequestMutation)(nil)
+
+// secretrequestOption allows management of the mutation configuration using functional options.
+type secretrequestOption func(*SecretRequestMutation)
+
+// newSecretRequestMutation creates new mutation for the SecretRequest entity.
+func newSecretRequestMutation(c config, op Op, opts ...secretrequestOption) *SecretRequestMutation {
+	m := &SecretRequestMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeSecretRequest,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withSecretRequestID sets the ID field of the mutation.
+func withSecretRequestID(id uuid.UUID) secretrequestOption {
+	return func(m *SecretRequestMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *SecretRequest
+		)
+		m.oldValue = func(ctx context.Context) (*SecretRequest, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().SecretRequest.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withSecretRequest sets the old SecretRequest of the mutation.
+func withSecretRequest(node *SecretRequest) secretrequestOption {
+	return func(m *SecretRequestMutation) {
+		m.oldValue = func(context.Context) (*SecretRequest, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m SecretRequestMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m SecretRequestMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of SecretRequest entities.
+func (m *SecretRequestMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *SecretRequestMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *SecretRequestMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().SecretRequest.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *SecretRequestMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *SecretRequestMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *SecretRequestMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *SecretRequestMutation) SetAgentID(u uuid.UUID) {
+	m.agent_id = &u
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *SecretRequestMutation) AgentID() (r uuid.UUID, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldAgentID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *SecretRequestMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetAgentName sets the "agent_name" field.
+func (m *SecretRequestMutation) SetAgentName(s string) {
+	m.agent_name = &s
+}
+
+// AgentName returns the value of the "agent_name" field in the mutation.
+func (m *SecretRequestMutation) AgentName() (r string, exists bool) {
+	v := m.agent_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentName returns the old "agent_name" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldAgentName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentName: %w", err)
+	}
+	return oldValue.AgentName, nil
+}
+
+// ResetAgentName resets all changes to the "agent_name" field.
+func (m *SecretRequestMutation) ResetAgentName() {
+	m.agent_name = nil
+}
+
+// SetKey sets the "key" field.
+func (m *SecretRequestMutation) SetKey(s string) {
+	m.key = &s
+}
+
+// Key returns the value of the "key" field in the mutation.
+func (m *SecretRequestMutation) Key() (r string, exists bool) {
+	v := m.key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKey returns the old "key" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKey: %w", err)
+	}
+	return oldValue.Key, nil
+}
+
+// ResetKey resets all changes to the "key" field.
+func (m *SecretRequestMutation) ResetKey() {
+	m.key = nil
+}
+
+// SetKeyNorm sets the "key_norm" field.
+func (m *SecretRequestMutation) SetKeyNorm(s string) {
+	m.key_norm = &s
+}
+
+// KeyNorm returns the value of the "key_norm" field in the mutation.
+func (m *SecretRequestMutation) KeyNorm() (r string, exists bool) {
+	v := m.key_norm
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKeyNorm returns the old "key_norm" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldKeyNorm(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKeyNorm is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKeyNorm requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKeyNorm: %w", err)
+	}
+	return oldValue.KeyNorm, nil
+}
+
+// ResetKeyNorm resets all changes to the "key_norm" field.
+func (m *SecretRequestMutation) ResetKeyNorm() {
+	m.key_norm = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *SecretRequestMutation) SetVersion(i int) {
+	m.version = &i
+	m.addversion = nil
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *SecretRequestMutation) Version() (r int, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// AddVersion adds i to the "version" field.
+func (m *SecretRequestMutation) AddVersion(i int) {
+	if m.addversion != nil {
+		*m.addversion += i
+	} else {
+		m.addversion = &i
+	}
+}
+
+// AddedVersion returns the value that was added to the "version" field in this mutation.
+func (m *SecretRequestMutation) AddedVersion() (r int, exists bool) {
+	v := m.addversion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *SecretRequestMutation) ResetVersion() {
+	m.version = nil
+	m.addversion = nil
+}
+
+// SetDescription sets the "description" field.
+func (m *SecretRequestMutation) SetDescription(s string) {
+	m.description = &s
+}
+
+// Description returns the value of the "description" field in the mutation.
+func (m *SecretRequestMutation) Description() (r string, exists bool) {
+	v := m.description
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDescription returns the old "description" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldDescription(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDescription is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDescription requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDescription: %w", err)
+	}
+	return oldValue.Description, nil
+}
+
+// ResetDescription resets all changes to the "description" field.
+func (m *SecretRequestMutation) ResetDescription() {
+	m.description = nil
+}
+
+// SetSecretType sets the "secret_type" field.
+func (m *SecretRequestMutation) SetSecretType(st secretrequest.SecretType) {
+	m.secret_type = &st
+}
+
+// SecretType returns the value of the "secret_type" field in the mutation.
+func (m *SecretRequestMutation) SecretType() (r secretrequest.SecretType, exists bool) {
+	v := m.secret_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSecretType returns the old "secret_type" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldSecretType(ctx context.Context) (v secretrequest.SecretType, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSecretType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSecretType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSecretType: %w", err)
+	}
+	return oldValue.SecretType, nil
+}
+
+// ResetSecretType resets all changes to the "secret_type" field.
+func (m *SecretRequestMutation) ResetSecretType() {
+	m.secret_type = nil
+}
+
+// SetTarget sets the "target" field.
+func (m *SecretRequestMutation) SetTarget(s string) {
+	m.target = &s
+}
+
+// Target returns the value of the "target" field in the mutation.
+func (m *SecretRequestMutation) Target() (r string, exists bool) {
+	v := m.target
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTarget returns the old "target" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldTarget(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTarget is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTarget requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTarget: %w", err)
+	}
+	return oldValue.Target, nil
+}
+
+// ClearTarget clears the value of the "target" field.
+func (m *SecretRequestMutation) ClearTarget() {
+	m.target = nil
+	m.clearedFields[secretrequest.FieldTarget] = struct{}{}
+}
+
+// TargetCleared returns if the "target" field was cleared in this mutation.
+func (m *SecretRequestMutation) TargetCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldTarget]
+	return ok
+}
+
+// ResetTarget resets all changes to the "target" field.
+func (m *SecretRequestMutation) ResetTarget() {
+	m.target = nil
+	delete(m.clearedFields, secretrequest.FieldTarget)
+}
+
+// SetMessageID sets the "message_id" field.
+func (m *SecretRequestMutation) SetMessageID(u uuid.UUID) {
+	m.message_id = &u
+}
+
+// MessageID returns the value of the "message_id" field in the mutation.
+func (m *SecretRequestMutation) MessageID() (r uuid.UUID, exists bool) {
+	v := m.message_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMessageID returns the old "message_id" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldMessageID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMessageID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMessageID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMessageID: %w", err)
+	}
+	return oldValue.MessageID, nil
+}
+
+// ResetMessageID resets all changes to the "message_id" field.
+func (m *SecretRequestMutation) ResetMessageID() {
+	m.message_id = nil
+}
+
+// SetPosition sets the "position" field.
+func (m *SecretRequestMutation) SetPosition(i int) {
+	m.position = &i
+	m.addposition = nil
+}
+
+// Position returns the value of the "position" field in the mutation.
+func (m *SecretRequestMutation) Position() (r int, exists bool) {
+	v := m.position
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPosition returns the old "position" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldPosition(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPosition is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPosition requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPosition: %w", err)
+	}
+	return oldValue.Position, nil
+}
+
+// AddPosition adds i to the "position" field.
+func (m *SecretRequestMutation) AddPosition(i int) {
+	if m.addposition != nil {
+		*m.addposition += i
+	} else {
+		m.addposition = &i
+	}
+}
+
+// AddedPosition returns the value that was added to the "position" field in this mutation.
+func (m *SecretRequestMutation) AddedPosition() (r int, exists bool) {
+	v := m.addposition
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPosition resets all changes to the "position" field.
+func (m *SecretRequestMutation) ResetPosition() {
+	m.position = nil
+	m.addposition = nil
+}
+
+// SetIntroLength sets the "intro_length" field.
+func (m *SecretRequestMutation) SetIntroLength(i int) {
+	m.intro_length = &i
+	m.addintro_length = nil
+}
+
+// IntroLength returns the value of the "intro_length" field in the mutation.
+func (m *SecretRequestMutation) IntroLength() (r int, exists bool) {
+	v := m.intro_length
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIntroLength returns the old "intro_length" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldIntroLength(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIntroLength is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIntroLength requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIntroLength: %w", err)
+	}
+	return oldValue.IntroLength, nil
+}
+
+// AddIntroLength adds i to the "intro_length" field.
+func (m *SecretRequestMutation) AddIntroLength(i int) {
+	if m.addintro_length != nil {
+		*m.addintro_length += i
+	} else {
+		m.addintro_length = &i
+	}
+}
+
+// AddedIntroLength returns the value that was added to the "intro_length" field in this mutation.
+func (m *SecretRequestMutation) AddedIntroLength() (r int, exists bool) {
+	v := m.addintro_length
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetIntroLength resets all changes to the "intro_length" field.
+func (m *SecretRequestMutation) ResetIntroLength() {
+	m.intro_length = nil
+	m.addintro_length = nil
+}
+
+// SetConversationID sets the "conversation_id" field.
+func (m *SecretRequestMutation) SetConversationID(u uuid.UUID) {
+	m.conversation_id = &u
+}
+
+// ConversationID returns the value of the "conversation_id" field in the mutation.
+func (m *SecretRequestMutation) ConversationID() (r uuid.UUID, exists bool) {
+	v := m.conversation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConversationID returns the old "conversation_id" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldConversationID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConversationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConversationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConversationID: %w", err)
+	}
+	return oldValue.ConversationID, nil
+}
+
+// ClearConversationID clears the value of the "conversation_id" field.
+func (m *SecretRequestMutation) ClearConversationID() {
+	m.conversation_id = nil
+	m.clearedFields[secretrequest.FieldConversationID] = struct{}{}
+}
+
+// ConversationIDCleared returns if the "conversation_id" field was cleared in this mutation.
+func (m *SecretRequestMutation) ConversationIDCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldConversationID]
+	return ok
+}
+
+// ResetConversationID resets all changes to the "conversation_id" field.
+func (m *SecretRequestMutation) ResetConversationID() {
+	m.conversation_id = nil
+	delete(m.clearedFields, secretrequest.FieldConversationID)
+}
+
+// SetChatKey sets the "chat_key" field.
+func (m *SecretRequestMutation) SetChatKey(s string) {
+	m.chat_key = &s
+}
+
+// ChatKey returns the value of the "chat_key" field in the mutation.
+func (m *SecretRequestMutation) ChatKey() (r string, exists bool) {
+	v := m.chat_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChatKey returns the old "chat_key" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldChatKey(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChatKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChatKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChatKey: %w", err)
+	}
+	return oldValue.ChatKey, nil
+}
+
+// ClearChatKey clears the value of the "chat_key" field.
+func (m *SecretRequestMutation) ClearChatKey() {
+	m.chat_key = nil
+	m.clearedFields[secretrequest.FieldChatKey] = struct{}{}
+}
+
+// ChatKeyCleared returns if the "chat_key" field was cleared in this mutation.
+func (m *SecretRequestMutation) ChatKeyCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldChatKey]
+	return ok
+}
+
+// ResetChatKey resets all changes to the "chat_key" field.
+func (m *SecretRequestMutation) ResetChatKey() {
+	m.chat_key = nil
+	delete(m.clearedFields, secretrequest.FieldChatKey)
+}
+
+// SetStatus sets the "status" field.
+func (m *SecretRequestMutation) SetStatus(s secretrequest.Status) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *SecretRequestMutation) Status() (r secretrequest.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldStatus(ctx context.Context) (v secretrequest.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *SecretRequestMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetReplacedByID sets the "replaced_by_id" field.
+func (m *SecretRequestMutation) SetReplacedByID(u uuid.UUID) {
+	m.replaced_by_id = &u
+}
+
+// ReplacedByID returns the value of the "replaced_by_id" field in the mutation.
+func (m *SecretRequestMutation) ReplacedByID() (r uuid.UUID, exists bool) {
+	v := m.replaced_by_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReplacedByID returns the old "replaced_by_id" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldReplacedByID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReplacedByID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReplacedByID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReplacedByID: %w", err)
+	}
+	return oldValue.ReplacedByID, nil
+}
+
+// ClearReplacedByID clears the value of the "replaced_by_id" field.
+func (m *SecretRequestMutation) ClearReplacedByID() {
+	m.replaced_by_id = nil
+	m.clearedFields[secretrequest.FieldReplacedByID] = struct{}{}
+}
+
+// ReplacedByIDCleared returns if the "replaced_by_id" field was cleared in this mutation.
+func (m *SecretRequestMutation) ReplacedByIDCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldReplacedByID]
+	return ok
+}
+
+// ResetReplacedByID resets all changes to the "replaced_by_id" field.
+func (m *SecretRequestMutation) ResetReplacedByID() {
+	m.replaced_by_id = nil
+	delete(m.clearedFields, secretrequest.FieldReplacedByID)
+}
+
+// SetReplacedAt sets the "replaced_at" field.
+func (m *SecretRequestMutation) SetReplacedAt(t time.Time) {
+	m.replaced_at = &t
+}
+
+// ReplacedAt returns the value of the "replaced_at" field in the mutation.
+func (m *SecretRequestMutation) ReplacedAt() (r time.Time, exists bool) {
+	v := m.replaced_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReplacedAt returns the old "replaced_at" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldReplacedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReplacedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReplacedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReplacedAt: %w", err)
+	}
+	return oldValue.ReplacedAt, nil
+}
+
+// ClearReplacedAt clears the value of the "replaced_at" field.
+func (m *SecretRequestMutation) ClearReplacedAt() {
+	m.replaced_at = nil
+	m.clearedFields[secretrequest.FieldReplacedAt] = struct{}{}
+}
+
+// ReplacedAtCleared returns if the "replaced_at" field was cleared in this mutation.
+func (m *SecretRequestMutation) ReplacedAtCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldReplacedAt]
+	return ok
+}
+
+// ResetReplacedAt resets all changes to the "replaced_at" field.
+func (m *SecretRequestMutation) ResetReplacedAt() {
+	m.replaced_at = nil
+	delete(m.clearedFields, secretrequest.FieldReplacedAt)
+}
+
+// SetWithdrawnReason sets the "withdrawn_reason" field.
+func (m *SecretRequestMutation) SetWithdrawnReason(s string) {
+	m.withdrawn_reason = &s
+}
+
+// WithdrawnReason returns the value of the "withdrawn_reason" field in the mutation.
+func (m *SecretRequestMutation) WithdrawnReason() (r string, exists bool) {
+	v := m.withdrawn_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWithdrawnReason returns the old "withdrawn_reason" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldWithdrawnReason(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWithdrawnReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWithdrawnReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWithdrawnReason: %w", err)
+	}
+	return oldValue.WithdrawnReason, nil
+}
+
+// ClearWithdrawnReason clears the value of the "withdrawn_reason" field.
+func (m *SecretRequestMutation) ClearWithdrawnReason() {
+	m.withdrawn_reason = nil
+	m.clearedFields[secretrequest.FieldWithdrawnReason] = struct{}{}
+}
+
+// WithdrawnReasonCleared returns if the "withdrawn_reason" field was cleared in this mutation.
+func (m *SecretRequestMutation) WithdrawnReasonCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldWithdrawnReason]
+	return ok
+}
+
+// ResetWithdrawnReason resets all changes to the "withdrawn_reason" field.
+func (m *SecretRequestMutation) ResetWithdrawnReason() {
+	m.withdrawn_reason = nil
+	delete(m.clearedFields, secretrequest.FieldWithdrawnReason)
+}
+
+// SetWithdrawnBy sets the "withdrawn_by" field.
+func (m *SecretRequestMutation) SetWithdrawnBy(s string) {
+	m.withdrawn_by = &s
+}
+
+// WithdrawnBy returns the value of the "withdrawn_by" field in the mutation.
+func (m *SecretRequestMutation) WithdrawnBy() (r string, exists bool) {
+	v := m.withdrawn_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWithdrawnBy returns the old "withdrawn_by" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldWithdrawnBy(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWithdrawnBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWithdrawnBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWithdrawnBy: %w", err)
+	}
+	return oldValue.WithdrawnBy, nil
+}
+
+// ClearWithdrawnBy clears the value of the "withdrawn_by" field.
+func (m *SecretRequestMutation) ClearWithdrawnBy() {
+	m.withdrawn_by = nil
+	m.clearedFields[secretrequest.FieldWithdrawnBy] = struct{}{}
+}
+
+// WithdrawnByCleared returns if the "withdrawn_by" field was cleared in this mutation.
+func (m *SecretRequestMutation) WithdrawnByCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldWithdrawnBy]
+	return ok
+}
+
+// ResetWithdrawnBy resets all changes to the "withdrawn_by" field.
+func (m *SecretRequestMutation) ResetWithdrawnBy() {
+	m.withdrawn_by = nil
+	delete(m.clearedFields, secretrequest.FieldWithdrawnBy)
+}
+
+// SetResolvedByUserID sets the "resolved_by_user_id" field.
+func (m *SecretRequestMutation) SetResolvedByUserID(s string) {
+	m.resolved_by_user_id = &s
+}
+
+// ResolvedByUserID returns the value of the "resolved_by_user_id" field in the mutation.
+func (m *SecretRequestMutation) ResolvedByUserID() (r string, exists bool) {
+	v := m.resolved_by_user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResolvedByUserID returns the old "resolved_by_user_id" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldResolvedByUserID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResolvedByUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResolvedByUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResolvedByUserID: %w", err)
+	}
+	return oldValue.ResolvedByUserID, nil
+}
+
+// ClearResolvedByUserID clears the value of the "resolved_by_user_id" field.
+func (m *SecretRequestMutation) ClearResolvedByUserID() {
+	m.resolved_by_user_id = nil
+	m.clearedFields[secretrequest.FieldResolvedByUserID] = struct{}{}
+}
+
+// ResolvedByUserIDCleared returns if the "resolved_by_user_id" field was cleared in this mutation.
+func (m *SecretRequestMutation) ResolvedByUserIDCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldResolvedByUserID]
+	return ok
+}
+
+// ResetResolvedByUserID resets all changes to the "resolved_by_user_id" field.
+func (m *SecretRequestMutation) ResetResolvedByUserID() {
+	m.resolved_by_user_id = nil
+	delete(m.clearedFields, secretrequest.FieldResolvedByUserID)
+}
+
+// SetResolvedByName sets the "resolved_by_name" field.
+func (m *SecretRequestMutation) SetResolvedByName(s string) {
+	m.resolved_by_name = &s
+}
+
+// ResolvedByName returns the value of the "resolved_by_name" field in the mutation.
+func (m *SecretRequestMutation) ResolvedByName() (r string, exists bool) {
+	v := m.resolved_by_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResolvedByName returns the old "resolved_by_name" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldResolvedByName(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResolvedByName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResolvedByName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResolvedByName: %w", err)
+	}
+	return oldValue.ResolvedByName, nil
+}
+
+// ClearResolvedByName clears the value of the "resolved_by_name" field.
+func (m *SecretRequestMutation) ClearResolvedByName() {
+	m.resolved_by_name = nil
+	m.clearedFields[secretrequest.FieldResolvedByName] = struct{}{}
+}
+
+// ResolvedByNameCleared returns if the "resolved_by_name" field was cleared in this mutation.
+func (m *SecretRequestMutation) ResolvedByNameCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldResolvedByName]
+	return ok
+}
+
+// ResetResolvedByName resets all changes to the "resolved_by_name" field.
+func (m *SecretRequestMutation) ResetResolvedByName() {
+	m.resolved_by_name = nil
+	delete(m.clearedFields, secretrequest.FieldResolvedByName)
+}
+
+// SetResolvedByEmail sets the "resolved_by_email" field.
+func (m *SecretRequestMutation) SetResolvedByEmail(s string) {
+	m.resolved_by_email = &s
+}
+
+// ResolvedByEmail returns the value of the "resolved_by_email" field in the mutation.
+func (m *SecretRequestMutation) ResolvedByEmail() (r string, exists bool) {
+	v := m.resolved_by_email
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResolvedByEmail returns the old "resolved_by_email" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldResolvedByEmail(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResolvedByEmail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResolvedByEmail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResolvedByEmail: %w", err)
+	}
+	return oldValue.ResolvedByEmail, nil
+}
+
+// ClearResolvedByEmail clears the value of the "resolved_by_email" field.
+func (m *SecretRequestMutation) ClearResolvedByEmail() {
+	m.resolved_by_email = nil
+	m.clearedFields[secretrequest.FieldResolvedByEmail] = struct{}{}
+}
+
+// ResolvedByEmailCleared returns if the "resolved_by_email" field was cleared in this mutation.
+func (m *SecretRequestMutation) ResolvedByEmailCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldResolvedByEmail]
+	return ok
+}
+
+// ResetResolvedByEmail resets all changes to the "resolved_by_email" field.
+func (m *SecretRequestMutation) ResetResolvedByEmail() {
+	m.resolved_by_email = nil
+	delete(m.clearedFields, secretrequest.FieldResolvedByEmail)
+}
+
+// SetDismissReason sets the "dismiss_reason" field.
+func (m *SecretRequestMutation) SetDismissReason(s string) {
+	m.dismiss_reason = &s
+}
+
+// DismissReason returns the value of the "dismiss_reason" field in the mutation.
+func (m *SecretRequestMutation) DismissReason() (r string, exists bool) {
+	v := m.dismiss_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDismissReason returns the old "dismiss_reason" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldDismissReason(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDismissReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDismissReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDismissReason: %w", err)
+	}
+	return oldValue.DismissReason, nil
+}
+
+// ClearDismissReason clears the value of the "dismiss_reason" field.
+func (m *SecretRequestMutation) ClearDismissReason() {
+	m.dismiss_reason = nil
+	m.clearedFields[secretrequest.FieldDismissReason] = struct{}{}
+}
+
+// DismissReasonCleared returns if the "dismiss_reason" field was cleared in this mutation.
+func (m *SecretRequestMutation) DismissReasonCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldDismissReason]
+	return ok
+}
+
+// ResetDismissReason resets all changes to the "dismiss_reason" field.
+func (m *SecretRequestMutation) ResetDismissReason() {
+	m.dismiss_reason = nil
+	delete(m.clearedFields, secretrequest.FieldDismissReason)
+}
+
+// SetSurface sets the "surface" field.
+func (m *SecretRequestMutation) SetSurface(s secretrequest.Surface) {
+	m.surface = &s
+}
+
+// Surface returns the value of the "surface" field in the mutation.
+func (m *SecretRequestMutation) Surface() (r secretrequest.Surface, exists bool) {
+	v := m.surface
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSurface returns the old "surface" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldSurface(ctx context.Context) (v *secretrequest.Surface, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSurface is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSurface requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSurface: %w", err)
+	}
+	return oldValue.Surface, nil
+}
+
+// ClearSurface clears the value of the "surface" field.
+func (m *SecretRequestMutation) ClearSurface() {
+	m.surface = nil
+	m.clearedFields[secretrequest.FieldSurface] = struct{}{}
+}
+
+// SurfaceCleared returns if the "surface" field was cleared in this mutation.
+func (m *SecretRequestMutation) SurfaceCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldSurface]
+	return ok
+}
+
+// ResetSurface resets all changes to the "surface" field.
+func (m *SecretRequestMutation) ResetSurface() {
+	m.surface = nil
+	delete(m.clearedFields, secretrequest.FieldSurface)
+}
+
+// SetIdempotencyKey sets the "idempotency_key" field.
+func (m *SecretRequestMutation) SetIdempotencyKey(s string) {
+	m.idempotency_key = &s
+}
+
+// IdempotencyKey returns the value of the "idempotency_key" field in the mutation.
+func (m *SecretRequestMutation) IdempotencyKey() (r string, exists bool) {
+	v := m.idempotency_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIdempotencyKey returns the old "idempotency_key" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldIdempotencyKey(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIdempotencyKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIdempotencyKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIdempotencyKey: %w", err)
+	}
+	return oldValue.IdempotencyKey, nil
+}
+
+// ClearIdempotencyKey clears the value of the "idempotency_key" field.
+func (m *SecretRequestMutation) ClearIdempotencyKey() {
+	m.idempotency_key = nil
+	m.clearedFields[secretrequest.FieldIdempotencyKey] = struct{}{}
+}
+
+// IdempotencyKeyCleared returns if the "idempotency_key" field was cleared in this mutation.
+func (m *SecretRequestMutation) IdempotencyKeyCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldIdempotencyKey]
+	return ok
+}
+
+// ResetIdempotencyKey resets all changes to the "idempotency_key" field.
+func (m *SecretRequestMutation) ResetIdempotencyKey() {
+	m.idempotency_key = nil
+	delete(m.clearedFields, secretrequest.FieldIdempotencyKey)
+}
+
+// SetResponseMessageID sets the "response_message_id" field.
+func (m *SecretRequestMutation) SetResponseMessageID(u uuid.UUID) {
+	m.response_message_id = &u
+}
+
+// ResponseMessageID returns the value of the "response_message_id" field in the mutation.
+func (m *SecretRequestMutation) ResponseMessageID() (r uuid.UUID, exists bool) {
+	v := m.response_message_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResponseMessageID returns the old "response_message_id" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldResponseMessageID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResponseMessageID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResponseMessageID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResponseMessageID: %w", err)
+	}
+	return oldValue.ResponseMessageID, nil
+}
+
+// ClearResponseMessageID clears the value of the "response_message_id" field.
+func (m *SecretRequestMutation) ClearResponseMessageID() {
+	m.response_message_id = nil
+	m.clearedFields[secretrequest.FieldResponseMessageID] = struct{}{}
+}
+
+// ResponseMessageIDCleared returns if the "response_message_id" field was cleared in this mutation.
+func (m *SecretRequestMutation) ResponseMessageIDCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldResponseMessageID]
+	return ok
+}
+
+// ResetResponseMessageID resets all changes to the "response_message_id" field.
+func (m *SecretRequestMutation) ResetResponseMessageID() {
+	m.response_message_id = nil
+	delete(m.clearedFields, secretrequest.FieldResponseMessageID)
+}
+
+// SetSecretVersion sets the "secret_version" field.
+func (m *SecretRequestMutation) SetSecretVersion(i int) {
+	m.secret_version = &i
+	m.addsecret_version = nil
+}
+
+// SecretVersion returns the value of the "secret_version" field in the mutation.
+func (m *SecretRequestMutation) SecretVersion() (r int, exists bool) {
+	v := m.secret_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSecretVersion returns the old "secret_version" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldSecretVersion(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSecretVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSecretVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSecretVersion: %w", err)
+	}
+	return oldValue.SecretVersion, nil
+}
+
+// AddSecretVersion adds i to the "secret_version" field.
+func (m *SecretRequestMutation) AddSecretVersion(i int) {
+	if m.addsecret_version != nil {
+		*m.addsecret_version += i
+	} else {
+		m.addsecret_version = &i
+	}
+}
+
+// AddedSecretVersion returns the value that was added to the "secret_version" field in this mutation.
+func (m *SecretRequestMutation) AddedSecretVersion() (r int, exists bool) {
+	v := m.addsecret_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearSecretVersion clears the value of the "secret_version" field.
+func (m *SecretRequestMutation) ClearSecretVersion() {
+	m.secret_version = nil
+	m.addsecret_version = nil
+	m.clearedFields[secretrequest.FieldSecretVersion] = struct{}{}
+}
+
+// SecretVersionCleared returns if the "secret_version" field was cleared in this mutation.
+func (m *SecretRequestMutation) SecretVersionCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldSecretVersion]
+	return ok
+}
+
+// ResetSecretVersion resets all changes to the "secret_version" field.
+func (m *SecretRequestMutation) ResetSecretVersion() {
+	m.secret_version = nil
+	m.addsecret_version = nil
+	delete(m.clearedFields, secretrequest.FieldSecretVersion)
+}
+
+// SetClaimedAt sets the "claimed_at" field.
+func (m *SecretRequestMutation) SetClaimedAt(t time.Time) {
+	m.claimed_at = &t
+}
+
+// ClaimedAt returns the value of the "claimed_at" field in the mutation.
+func (m *SecretRequestMutation) ClaimedAt() (r time.Time, exists bool) {
+	v := m.claimed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldClaimedAt returns the old "claimed_at" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldClaimedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldClaimedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldClaimedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldClaimedAt: %w", err)
+	}
+	return oldValue.ClaimedAt, nil
+}
+
+// ClearClaimedAt clears the value of the "claimed_at" field.
+func (m *SecretRequestMutation) ClearClaimedAt() {
+	m.claimed_at = nil
+	m.clearedFields[secretrequest.FieldClaimedAt] = struct{}{}
+}
+
+// ClaimedAtCleared returns if the "claimed_at" field was cleared in this mutation.
+func (m *SecretRequestMutation) ClaimedAtCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldClaimedAt]
+	return ok
+}
+
+// ResetClaimedAt resets all changes to the "claimed_at" field.
+func (m *SecretRequestMutation) ResetClaimedAt() {
+	m.claimed_at = nil
+	delete(m.clearedFields, secretrequest.FieldClaimedAt)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *SecretRequestMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *SecretRequestMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *SecretRequestMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *SecretRequestMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *SecretRequestMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *SecretRequestMutation) ResetExpiresAt() {
+	m.expires_at = nil
+}
+
+// SetResolvedAt sets the "resolved_at" field.
+func (m *SecretRequestMutation) SetResolvedAt(t time.Time) {
+	m.resolved_at = &t
+}
+
+// ResolvedAt returns the value of the "resolved_at" field in the mutation.
+func (m *SecretRequestMutation) ResolvedAt() (r time.Time, exists bool) {
+	v := m.resolved_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResolvedAt returns the old "resolved_at" field's value of the SecretRequest entity.
+// If the SecretRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SecretRequestMutation) OldResolvedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResolvedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResolvedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResolvedAt: %w", err)
+	}
+	return oldValue.ResolvedAt, nil
+}
+
+// ClearResolvedAt clears the value of the "resolved_at" field.
+func (m *SecretRequestMutation) ClearResolvedAt() {
+	m.resolved_at = nil
+	m.clearedFields[secretrequest.FieldResolvedAt] = struct{}{}
+}
+
+// ResolvedAtCleared returns if the "resolved_at" field was cleared in this mutation.
+func (m *SecretRequestMutation) ResolvedAtCleared() bool {
+	_, ok := m.clearedFields[secretrequest.FieldResolvedAt]
+	return ok
+}
+
+// ResetResolvedAt resets all changes to the "resolved_at" field.
+func (m *SecretRequestMutation) ResetResolvedAt() {
+	m.resolved_at = nil
+	delete(m.clearedFields, secretrequest.FieldResolvedAt)
+}
+
+// Where appends a list predicates to the SecretRequestMutation builder.
+func (m *SecretRequestMutation) Where(ps ...predicate.SecretRequest) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the SecretRequestMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *SecretRequestMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.SecretRequest, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *SecretRequestMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *SecretRequestMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (SecretRequest).
+func (m *SecretRequestMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *SecretRequestMutation) Fields() []string {
+	fields := make([]string, 0, 31)
+	if m.project_id != nil {
+		fields = append(fields, secretrequest.FieldProjectID)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, secretrequest.FieldAgentID)
+	}
+	if m.agent_name != nil {
+		fields = append(fields, secretrequest.FieldAgentName)
+	}
+	if m.key != nil {
+		fields = append(fields, secretrequest.FieldKey)
+	}
+	if m.key_norm != nil {
+		fields = append(fields, secretrequest.FieldKeyNorm)
+	}
+	if m.version != nil {
+		fields = append(fields, secretrequest.FieldVersion)
+	}
+	if m.description != nil {
+		fields = append(fields, secretrequest.FieldDescription)
+	}
+	if m.secret_type != nil {
+		fields = append(fields, secretrequest.FieldSecretType)
+	}
+	if m.target != nil {
+		fields = append(fields, secretrequest.FieldTarget)
+	}
+	if m.message_id != nil {
+		fields = append(fields, secretrequest.FieldMessageID)
+	}
+	if m.position != nil {
+		fields = append(fields, secretrequest.FieldPosition)
+	}
+	if m.intro_length != nil {
+		fields = append(fields, secretrequest.FieldIntroLength)
+	}
+	if m.conversation_id != nil {
+		fields = append(fields, secretrequest.FieldConversationID)
+	}
+	if m.chat_key != nil {
+		fields = append(fields, secretrequest.FieldChatKey)
+	}
+	if m.status != nil {
+		fields = append(fields, secretrequest.FieldStatus)
+	}
+	if m.replaced_by_id != nil {
+		fields = append(fields, secretrequest.FieldReplacedByID)
+	}
+	if m.replaced_at != nil {
+		fields = append(fields, secretrequest.FieldReplacedAt)
+	}
+	if m.withdrawn_reason != nil {
+		fields = append(fields, secretrequest.FieldWithdrawnReason)
+	}
+	if m.withdrawn_by != nil {
+		fields = append(fields, secretrequest.FieldWithdrawnBy)
+	}
+	if m.resolved_by_user_id != nil {
+		fields = append(fields, secretrequest.FieldResolvedByUserID)
+	}
+	if m.resolved_by_name != nil {
+		fields = append(fields, secretrequest.FieldResolvedByName)
+	}
+	if m.resolved_by_email != nil {
+		fields = append(fields, secretrequest.FieldResolvedByEmail)
+	}
+	if m.dismiss_reason != nil {
+		fields = append(fields, secretrequest.FieldDismissReason)
+	}
+	if m.surface != nil {
+		fields = append(fields, secretrequest.FieldSurface)
+	}
+	if m.idempotency_key != nil {
+		fields = append(fields, secretrequest.FieldIdempotencyKey)
+	}
+	if m.response_message_id != nil {
+		fields = append(fields, secretrequest.FieldResponseMessageID)
+	}
+	if m.secret_version != nil {
+		fields = append(fields, secretrequest.FieldSecretVersion)
+	}
+	if m.claimed_at != nil {
+		fields = append(fields, secretrequest.FieldClaimedAt)
+	}
+	if m.created_at != nil {
+		fields = append(fields, secretrequest.FieldCreatedAt)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, secretrequest.FieldExpiresAt)
+	}
+	if m.resolved_at != nil {
+		fields = append(fields, secretrequest.FieldResolvedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *SecretRequestMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case secretrequest.FieldProjectID:
+		return m.ProjectID()
+	case secretrequest.FieldAgentID:
+		return m.AgentID()
+	case secretrequest.FieldAgentName:
+		return m.AgentName()
+	case secretrequest.FieldKey:
+		return m.Key()
+	case secretrequest.FieldKeyNorm:
+		return m.KeyNorm()
+	case secretrequest.FieldVersion:
+		return m.Version()
+	case secretrequest.FieldDescription:
+		return m.Description()
+	case secretrequest.FieldSecretType:
+		return m.SecretType()
+	case secretrequest.FieldTarget:
+		return m.Target()
+	case secretrequest.FieldMessageID:
+		return m.MessageID()
+	case secretrequest.FieldPosition:
+		return m.Position()
+	case secretrequest.FieldIntroLength:
+		return m.IntroLength()
+	case secretrequest.FieldConversationID:
+		return m.ConversationID()
+	case secretrequest.FieldChatKey:
+		return m.ChatKey()
+	case secretrequest.FieldStatus:
+		return m.Status()
+	case secretrequest.FieldReplacedByID:
+		return m.ReplacedByID()
+	case secretrequest.FieldReplacedAt:
+		return m.ReplacedAt()
+	case secretrequest.FieldWithdrawnReason:
+		return m.WithdrawnReason()
+	case secretrequest.FieldWithdrawnBy:
+		return m.WithdrawnBy()
+	case secretrequest.FieldResolvedByUserID:
+		return m.ResolvedByUserID()
+	case secretrequest.FieldResolvedByName:
+		return m.ResolvedByName()
+	case secretrequest.FieldResolvedByEmail:
+		return m.ResolvedByEmail()
+	case secretrequest.FieldDismissReason:
+		return m.DismissReason()
+	case secretrequest.FieldSurface:
+		return m.Surface()
+	case secretrequest.FieldIdempotencyKey:
+		return m.IdempotencyKey()
+	case secretrequest.FieldResponseMessageID:
+		return m.ResponseMessageID()
+	case secretrequest.FieldSecretVersion:
+		return m.SecretVersion()
+	case secretrequest.FieldClaimedAt:
+		return m.ClaimedAt()
+	case secretrequest.FieldCreatedAt:
+		return m.CreatedAt()
+	case secretrequest.FieldExpiresAt:
+		return m.ExpiresAt()
+	case secretrequest.FieldResolvedAt:
+		return m.ResolvedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *SecretRequestMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case secretrequest.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case secretrequest.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case secretrequest.FieldAgentName:
+		return m.OldAgentName(ctx)
+	case secretrequest.FieldKey:
+		return m.OldKey(ctx)
+	case secretrequest.FieldKeyNorm:
+		return m.OldKeyNorm(ctx)
+	case secretrequest.FieldVersion:
+		return m.OldVersion(ctx)
+	case secretrequest.FieldDescription:
+		return m.OldDescription(ctx)
+	case secretrequest.FieldSecretType:
+		return m.OldSecretType(ctx)
+	case secretrequest.FieldTarget:
+		return m.OldTarget(ctx)
+	case secretrequest.FieldMessageID:
+		return m.OldMessageID(ctx)
+	case secretrequest.FieldPosition:
+		return m.OldPosition(ctx)
+	case secretrequest.FieldIntroLength:
+		return m.OldIntroLength(ctx)
+	case secretrequest.FieldConversationID:
+		return m.OldConversationID(ctx)
+	case secretrequest.FieldChatKey:
+		return m.OldChatKey(ctx)
+	case secretrequest.FieldStatus:
+		return m.OldStatus(ctx)
+	case secretrequest.FieldReplacedByID:
+		return m.OldReplacedByID(ctx)
+	case secretrequest.FieldReplacedAt:
+		return m.OldReplacedAt(ctx)
+	case secretrequest.FieldWithdrawnReason:
+		return m.OldWithdrawnReason(ctx)
+	case secretrequest.FieldWithdrawnBy:
+		return m.OldWithdrawnBy(ctx)
+	case secretrequest.FieldResolvedByUserID:
+		return m.OldResolvedByUserID(ctx)
+	case secretrequest.FieldResolvedByName:
+		return m.OldResolvedByName(ctx)
+	case secretrequest.FieldResolvedByEmail:
+		return m.OldResolvedByEmail(ctx)
+	case secretrequest.FieldDismissReason:
+		return m.OldDismissReason(ctx)
+	case secretrequest.FieldSurface:
+		return m.OldSurface(ctx)
+	case secretrequest.FieldIdempotencyKey:
+		return m.OldIdempotencyKey(ctx)
+	case secretrequest.FieldResponseMessageID:
+		return m.OldResponseMessageID(ctx)
+	case secretrequest.FieldSecretVersion:
+		return m.OldSecretVersion(ctx)
+	case secretrequest.FieldClaimedAt:
+		return m.OldClaimedAt(ctx)
+	case secretrequest.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case secretrequest.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case secretrequest.FieldResolvedAt:
+		return m.OldResolvedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown SecretRequest field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SecretRequestMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case secretrequest.FieldProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case secretrequest.FieldAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case secretrequest.FieldAgentName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentName(v)
+		return nil
+	case secretrequest.FieldKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKey(v)
+		return nil
+	case secretrequest.FieldKeyNorm:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKeyNorm(v)
+		return nil
+	case secretrequest.FieldVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case secretrequest.FieldDescription:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDescription(v)
+		return nil
+	case secretrequest.FieldSecretType:
+		v, ok := value.(secretrequest.SecretType)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSecretType(v)
+		return nil
+	case secretrequest.FieldTarget:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTarget(v)
+		return nil
+	case secretrequest.FieldMessageID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMessageID(v)
+		return nil
+	case secretrequest.FieldPosition:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPosition(v)
+		return nil
+	case secretrequest.FieldIntroLength:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIntroLength(v)
+		return nil
+	case secretrequest.FieldConversationID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConversationID(v)
+		return nil
+	case secretrequest.FieldChatKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChatKey(v)
+		return nil
+	case secretrequest.FieldStatus:
+		v, ok := value.(secretrequest.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case secretrequest.FieldReplacedByID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReplacedByID(v)
+		return nil
+	case secretrequest.FieldReplacedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReplacedAt(v)
+		return nil
+	case secretrequest.FieldWithdrawnReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWithdrawnReason(v)
+		return nil
+	case secretrequest.FieldWithdrawnBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWithdrawnBy(v)
+		return nil
+	case secretrequest.FieldResolvedByUserID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResolvedByUserID(v)
+		return nil
+	case secretrequest.FieldResolvedByName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResolvedByName(v)
+		return nil
+	case secretrequest.FieldResolvedByEmail:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResolvedByEmail(v)
+		return nil
+	case secretrequest.FieldDismissReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDismissReason(v)
+		return nil
+	case secretrequest.FieldSurface:
+		v, ok := value.(secretrequest.Surface)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSurface(v)
+		return nil
+	case secretrequest.FieldIdempotencyKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIdempotencyKey(v)
+		return nil
+	case secretrequest.FieldResponseMessageID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResponseMessageID(v)
+		return nil
+	case secretrequest.FieldSecretVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSecretVersion(v)
+		return nil
+	case secretrequest.FieldClaimedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetClaimedAt(v)
+		return nil
+	case secretrequest.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case secretrequest.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case secretrequest.FieldResolvedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResolvedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown SecretRequest field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *SecretRequestMutation) AddedFields() []string {
+	var fields []string
+	if m.addversion != nil {
+		fields = append(fields, secretrequest.FieldVersion)
+	}
+	if m.addposition != nil {
+		fields = append(fields, secretrequest.FieldPosition)
+	}
+	if m.addintro_length != nil {
+		fields = append(fields, secretrequest.FieldIntroLength)
+	}
+	if m.addsecret_version != nil {
+		fields = append(fields, secretrequest.FieldSecretVersion)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *SecretRequestMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case secretrequest.FieldVersion:
+		return m.AddedVersion()
+	case secretrequest.FieldPosition:
+		return m.AddedPosition()
+	case secretrequest.FieldIntroLength:
+		return m.AddedIntroLength()
+	case secretrequest.FieldSecretVersion:
+		return m.AddedSecretVersion()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SecretRequestMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case secretrequest.FieldVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddVersion(v)
+		return nil
+	case secretrequest.FieldPosition:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPosition(v)
+		return nil
+	case secretrequest.FieldIntroLength:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddIntroLength(v)
+		return nil
+	case secretrequest.FieldSecretVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSecretVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown SecretRequest numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *SecretRequestMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(secretrequest.FieldTarget) {
+		fields = append(fields, secretrequest.FieldTarget)
+	}
+	if m.FieldCleared(secretrequest.FieldConversationID) {
+		fields = append(fields, secretrequest.FieldConversationID)
+	}
+	if m.FieldCleared(secretrequest.FieldChatKey) {
+		fields = append(fields, secretrequest.FieldChatKey)
+	}
+	if m.FieldCleared(secretrequest.FieldReplacedByID) {
+		fields = append(fields, secretrequest.FieldReplacedByID)
+	}
+	if m.FieldCleared(secretrequest.FieldReplacedAt) {
+		fields = append(fields, secretrequest.FieldReplacedAt)
+	}
+	if m.FieldCleared(secretrequest.FieldWithdrawnReason) {
+		fields = append(fields, secretrequest.FieldWithdrawnReason)
+	}
+	if m.FieldCleared(secretrequest.FieldWithdrawnBy) {
+		fields = append(fields, secretrequest.FieldWithdrawnBy)
+	}
+	if m.FieldCleared(secretrequest.FieldResolvedByUserID) {
+		fields = append(fields, secretrequest.FieldResolvedByUserID)
+	}
+	if m.FieldCleared(secretrequest.FieldResolvedByName) {
+		fields = append(fields, secretrequest.FieldResolvedByName)
+	}
+	if m.FieldCleared(secretrequest.FieldResolvedByEmail) {
+		fields = append(fields, secretrequest.FieldResolvedByEmail)
+	}
+	if m.FieldCleared(secretrequest.FieldDismissReason) {
+		fields = append(fields, secretrequest.FieldDismissReason)
+	}
+	if m.FieldCleared(secretrequest.FieldSurface) {
+		fields = append(fields, secretrequest.FieldSurface)
+	}
+	if m.FieldCleared(secretrequest.FieldIdempotencyKey) {
+		fields = append(fields, secretrequest.FieldIdempotencyKey)
+	}
+	if m.FieldCleared(secretrequest.FieldResponseMessageID) {
+		fields = append(fields, secretrequest.FieldResponseMessageID)
+	}
+	if m.FieldCleared(secretrequest.FieldSecretVersion) {
+		fields = append(fields, secretrequest.FieldSecretVersion)
+	}
+	if m.FieldCleared(secretrequest.FieldClaimedAt) {
+		fields = append(fields, secretrequest.FieldClaimedAt)
+	}
+	if m.FieldCleared(secretrequest.FieldResolvedAt) {
+		fields = append(fields, secretrequest.FieldResolvedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *SecretRequestMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *SecretRequestMutation) ClearField(name string) error {
+	switch name {
+	case secretrequest.FieldTarget:
+		m.ClearTarget()
+		return nil
+	case secretrequest.FieldConversationID:
+		m.ClearConversationID()
+		return nil
+	case secretrequest.FieldChatKey:
+		m.ClearChatKey()
+		return nil
+	case secretrequest.FieldReplacedByID:
+		m.ClearReplacedByID()
+		return nil
+	case secretrequest.FieldReplacedAt:
+		m.ClearReplacedAt()
+		return nil
+	case secretrequest.FieldWithdrawnReason:
+		m.ClearWithdrawnReason()
+		return nil
+	case secretrequest.FieldWithdrawnBy:
+		m.ClearWithdrawnBy()
+		return nil
+	case secretrequest.FieldResolvedByUserID:
+		m.ClearResolvedByUserID()
+		return nil
+	case secretrequest.FieldResolvedByName:
+		m.ClearResolvedByName()
+		return nil
+	case secretrequest.FieldResolvedByEmail:
+		m.ClearResolvedByEmail()
+		return nil
+	case secretrequest.FieldDismissReason:
+		m.ClearDismissReason()
+		return nil
+	case secretrequest.FieldSurface:
+		m.ClearSurface()
+		return nil
+	case secretrequest.FieldIdempotencyKey:
+		m.ClearIdempotencyKey()
+		return nil
+	case secretrequest.FieldResponseMessageID:
+		m.ClearResponseMessageID()
+		return nil
+	case secretrequest.FieldSecretVersion:
+		m.ClearSecretVersion()
+		return nil
+	case secretrequest.FieldClaimedAt:
+		m.ClearClaimedAt()
+		return nil
+	case secretrequest.FieldResolvedAt:
+		m.ClearResolvedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown SecretRequest nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *SecretRequestMutation) ResetField(name string) error {
+	switch name {
+	case secretrequest.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case secretrequest.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case secretrequest.FieldAgentName:
+		m.ResetAgentName()
+		return nil
+	case secretrequest.FieldKey:
+		m.ResetKey()
+		return nil
+	case secretrequest.FieldKeyNorm:
+		m.ResetKeyNorm()
+		return nil
+	case secretrequest.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case secretrequest.FieldDescription:
+		m.ResetDescription()
+		return nil
+	case secretrequest.FieldSecretType:
+		m.ResetSecretType()
+		return nil
+	case secretrequest.FieldTarget:
+		m.ResetTarget()
+		return nil
+	case secretrequest.FieldMessageID:
+		m.ResetMessageID()
+		return nil
+	case secretrequest.FieldPosition:
+		m.ResetPosition()
+		return nil
+	case secretrequest.FieldIntroLength:
+		m.ResetIntroLength()
+		return nil
+	case secretrequest.FieldConversationID:
+		m.ResetConversationID()
+		return nil
+	case secretrequest.FieldChatKey:
+		m.ResetChatKey()
+		return nil
+	case secretrequest.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case secretrequest.FieldReplacedByID:
+		m.ResetReplacedByID()
+		return nil
+	case secretrequest.FieldReplacedAt:
+		m.ResetReplacedAt()
+		return nil
+	case secretrequest.FieldWithdrawnReason:
+		m.ResetWithdrawnReason()
+		return nil
+	case secretrequest.FieldWithdrawnBy:
+		m.ResetWithdrawnBy()
+		return nil
+	case secretrequest.FieldResolvedByUserID:
+		m.ResetResolvedByUserID()
+		return nil
+	case secretrequest.FieldResolvedByName:
+		m.ResetResolvedByName()
+		return nil
+	case secretrequest.FieldResolvedByEmail:
+		m.ResetResolvedByEmail()
+		return nil
+	case secretrequest.FieldDismissReason:
+		m.ResetDismissReason()
+		return nil
+	case secretrequest.FieldSurface:
+		m.ResetSurface()
+		return nil
+	case secretrequest.FieldIdempotencyKey:
+		m.ResetIdempotencyKey()
+		return nil
+	case secretrequest.FieldResponseMessageID:
+		m.ResetResponseMessageID()
+		return nil
+	case secretrequest.FieldSecretVersion:
+		m.ResetSecretVersion()
+		return nil
+	case secretrequest.FieldClaimedAt:
+		m.ResetClaimedAt()
+		return nil
+	case secretrequest.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case secretrequest.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case secretrequest.FieldResolvedAt:
+		m.ResetResolvedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown SecretRequest field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *SecretRequestMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *SecretRequestMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *SecretRequestMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *SecretRequestMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *SecretRequestMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *SecretRequestMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *SecretRequestMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown SecretRequest unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *SecretRequestMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown SecretRequest edge %s", name)
 }
 
 // SkillMutation represents an operation that mutates the Skill nodes in the graph.

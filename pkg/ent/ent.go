@@ -99,6 +99,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecpollcursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/secretrequest"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
@@ -270,6 +271,7 @@ func checkColumn(t, c string) error {
 			scheduledexecpollcursor.Table:       scheduledexecpollcursor.ValidColumn,
 			scheduledexecrun.Table:              scheduledexecrun.ValidColumn,
 			secret.Table:                        secret.ValidColumn,
+			secretrequest.Table:                 secretrequest.ValidColumn,
 			skill.Table:                         skill.ValidColumn,
 			skillinjection.Table:                skillinjection.ValidColumn,
 			skillregistry.Table:                 skillregistry.ValidColumn,

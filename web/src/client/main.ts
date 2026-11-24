@@ -824,6 +824,12 @@ const ROUTES: RouteConfig[] = [
     tag: 'scion-page-agent-detail',
     load: () => import('../components/pages/agent-detail.js'),
   },
+  {
+    // Standalone secret request page (experiment hub.agent_secrets; renders 404 when off).
+    pattern: /^\/secret-requests\/[^/]+$/,
+    tag: 'scion-page-secret-request',
+    load: () => import('../components/pages/secret-request.js'),
+  },
   // Chat mode routes (Phase 5 — top-level chat)
   {
     pattern: /^\/chat$/,

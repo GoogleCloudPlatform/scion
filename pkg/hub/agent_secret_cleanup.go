@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -225,11 +226,15 @@ func (s *Server) removeAgentScopedSecretsCtx(ctx context.Context, backend secret
 // withAgentSecretCleanup runs fn (a hard-delete, purge, env-gather recreate,
 // or create compensation transaction) with an in-transaction key collector
 // attached to txCtx so agentHardDeleteWork captures the exact agent-scope key
-// set from the rows it deletes before DeleteSecretsByScope removes them. It
-// also captures a pre-transaction snapshot for callers that do not invoke
-// agentHardDeleteWork (such as PurgeDeletedAgentsByID on already soft-deleted
-// agents, where new secret writes are refused). When fn commits with n > 0, it
-// runs best-effort post-commit external backend cleanup for the merged key set.
+// set from the rows it deletes before DeleteSecretsByScope removes them, and
+// a withdrawn secret-request collector so WithdrawAgentSecretRequestsOnDelete
+// records the exact secret-request rows withdrawn inside the transaction. It
+// also captures a pre-transaction secret-key snapshot for callers that do not
+// invoke agentHardDeleteWork (such as PurgeDeletedAgentsByID on already
+// soft-deleted agents, where new secret writes are refused). When fn commits
+// with n > 0, it runs best-effort post-commit external backend cleanup for the
+// merged key set and emits post-commit withdrawn live updates and audit events
+// for every secret request withdrawn by the delete/purge.
 func (s *Server) withAgentSecretCleanup(ctx context.Context, agentID string, fn func(txCtx context.Context) (int, error)) (int, error) {
 	return s.withAgentSecretCleanupOpts(ctx, agentID, false, fn)
 }
@@ -248,11 +253,16 @@ func (s *Server) withAgentSecretCleanupOpts(ctx context.Context, agentID string,
 		preKeys = s.listAgentSecretNames(ctx, agentID)
 	}
 	collector := &agentSecretCleanupCollector{}
+	var withdrawn []*store.SecretRequest
 	txCtx := withAgentSecretCleanupCollector(ctx, collector)
+	txCtx = store.WithWithdrawnSecretRequestsCollector(txCtx, &withdrawn)
 	n, err := fn(txCtx)
 	if err == nil && n > 0 {
 		keys := append(preKeys, collector.snapshot()...)
 		s.removeAgentScopedSecrets(ctx, agentID, keys)
+		if len(withdrawn) > 0 {
+			s.emitPostCommitDeletedAgentSecretRequests(ctx, withdrawn)
+		}
 		return n, err
 	}
 	if cleanupWhenAbsent && err == nil && n == 0 && s.store != nil {
@@ -264,6 +274,59 @@ func (s *Server) withAgentSecretCleanupOpts(ctx context.Context, agentID string,
 		}
 	}
 	return n, err
+}
+
+func (s *Server) emitPostCommitDeletedAgentSecretRequests(ctx context.Context, rows []*store.SecretRequest) {
+	if len(rows) == 0 {
+		return
+	}
+	// Deduplicate by row ID (keeping the latest copy in case a retried tx
+	// recorded the same row on an earlier attempt).
+	order := make([]string, 0, len(rows))
+	byID := make(map[string]*store.SecretRequest, len(rows))
+	for _, sr := range rows {
+		if sr == nil || sr.ID == "" {
+			continue
+		}
+		if _, seen := byID[sr.ID]; !seen {
+			order = append(order, sr.ID)
+		}
+		byID[sr.ID] = sr
+	}
+	postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentScopedSecretCleanupTimeout)
+	defer cancel()
+	for _, id := range order {
+		sr := byID[id]
+		if sr.Status != store.SecretRequestStatusWithdrawn ||
+			sr.WithdrawnBy != store.SecretRequestWithdrawnByHub ||
+			sr.WithdrawnReason != "agent deleted" {
+			continue
+		}
+		s.publishSecretRequestUpdated(postCtx, sr, nil)
+		details := map[string]string{"secret_type": sr.SecretType}
+		if sr.Target != "" {
+			details["target"] = sr.Target
+		}
+		ts := time.Now().UTC()
+		if sr.ResolvedAt != nil {
+			ts = *sr.ResolvedAt
+		}
+		s.emitMessageActionEvent(postCtx, &MessageActionEvent{
+			Kind:      msgaction.KindSecretRequest,
+			EventType: MessageActionEventWithdrawn,
+			RowID:     sr.ID,
+			MessageID: sr.MessageID,
+			ProjectID: sr.ProjectID,
+			AgentID:   sr.AgentID,
+			AgentName: sr.AgentName,
+			Key:       sr.Key,
+			Version:   sr.Version,
+			ActorKind: MessageActionActorHub,
+			Reason:    "agent deleted",
+			Details:   details,
+			Timestamp: ts,
+		})
+	}
 }
 
 // snapshotAgentSecrets reads the metadata and values of all agent-scoped

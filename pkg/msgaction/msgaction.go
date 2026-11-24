@@ -18,11 +18,8 @@
 package msgaction
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"time"
@@ -119,6 +116,9 @@ type KindSpec struct {
 	// ResolvedStatus is the kind's stored status name for ClassResolved
 	// (e.g. "decided", "fulfilled", "approved"). Defaults to "resolved" when empty.
 	ResolvedStatus string
+	// ClaimedStatus is the kind's stored status name for ClassClaimed
+	// (e.g. "fulfilling" for secret requests). Defaults to "claimed" when empty.
+	ClaimedStatus string
 	// ResolvedConflictCode overrides the 409 conflict code for ClassResolved
 	// (e.g. "already_answered" for decisions). Defaults to ConflictAlreadyResolved.
 	ResolvedConflictCode string
@@ -129,6 +129,8 @@ type KindSpec struct {
 	// (or zero value) never re-arms a stale claim.
 	ClaimRecovery ClaimRecovery
 	// ClaimTTL is the staleness threshold used only when ClaimRecovery == ClaimRecoveryToPending.
+	// The entire resolve step (all backend writes plus finish) must complete within
+	// ClaimTTL, because the stale-claim sweeper re-arms claimed rows once ClaimTTL elapses.
 	ClaimTTL time.Duration
 	// Expires is the default TTL of a pending action (0 means never expires).
 	Expires time.Duration
@@ -162,16 +164,26 @@ var (
 	}
 )
 
+// Shared decision kind constants referenced by DecisionKindSpec, pkg/store, and pkg/hub.
+const (
+	DecisionDismissMinAge       = 5 * time.Minute
+	DecisionAlreadyAnsweredCode = "already_answered"
+)
+
 // RegisterKind registers spec under spec.Name in the package-level kind
 // registry used by audit emission to enforce per-kind event types and detail
-// key allow-lists.
+// key allow-lists. It panics if a kind with the same name is already
+// registered, preventing silent overwrites of fail-closed allow-lists.
 func RegisterKind(spec KindSpec) {
 	if spec.Name == "" {
 		return
 	}
 	kindRegistryMu.Lock()
+	defer kindRegistryMu.Unlock()
+	if _, exists := kindRegistry[spec.Name]; exists {
+		panic(fmt.Sprintf("msgaction: duplicate kind registration %q", spec.Name))
+	}
 	kindRegistry[spec.Name] = spec
-	kindRegistryMu.Unlock()
 }
 
 // UnregisterKind removes name from the package-level kind registry (intended
@@ -195,11 +207,11 @@ func LookupKind(name string) (KindSpec, bool) {
 var DecisionKindSpec = KindSpec{
 	Name:                    "decision",
 	ResolvedStatus:          "decided",
-	ResolvedConflictCode:    "already_answered",
+	ResolvedConflictCode:    DecisionAlreadyAnsweredCode,
 	UsesClaim:               false,
 	ClaimRecovery:           ClaimRecoveryNone,
 	Expires:                 0,
-	DismissMinAge:           5 * time.Minute,
+	DismissMinAge:           DecisionDismissMinAge,
 	RepostTerminalOK:        false,
 	ReplaceResolvedOnUpdate: true,
 }
@@ -223,10 +235,14 @@ func (s KindSpec) Classify(status string) (Class, bool) {
 	if resolved == "" {
 		resolved = string(ClassResolved)
 	}
+	claimed := s.ClaimedStatus
+	if claimed == "" {
+		claimed = string(ClassClaimed)
+	}
 	switch status {
 	case string(ClassPending):
 		return ClassPending, true
-	case string(ClassClaimed):
+	case claimed:
 		if s.UsesClaim {
 			return ClassClaimed, true
 		}
@@ -512,29 +528,6 @@ func ValidateWithdrawRequest(req *WithdrawRequest, opts WithdrawParseOptions) *F
 	return nil
 }
 
-// ParseWithdrawRequest decodes a WithdrawRequest using json.NewDecoder
-// (first-value struct decoding, case-insensitive field matching) and validates
-// it via ValidateWithdrawRequest.
-//
-// Note: ParseWithdrawRequest currently has no production callers. Its decode
-// rules differ from the hub's readJSON + http.MaxBytesReader path (it does not
-// wrap r with a body-size limit). Decision handlers decode into
-// WithdrawDecisionsRequest via readJSON and call ValidateWithdrawRequest so
-// existing wire decoding and oversize error texts remain unchanged.
-func ParseWithdrawRequest(r io.Reader, opts WithdrawParseOptions) (*WithdrawRequest, *FieldError) {
-	if r == nil {
-		return nil, &FieldError{Message: "invalid JSON body: EOF", InvalidJSON: true}
-	}
-	var req WithdrawRequest
-	if err := json.NewDecoder(r).Decode(&req); err != nil {
-		return nil, &FieldError{Message: "invalid JSON body: " + err.Error(), InvalidJSON: true}
-	}
-	if ferr := ValidateWithdrawRequest(&req, opts); ferr != nil {
-		return nil, ferr
-	}
-	return &req, nil
-}
-
 // DismissRequest is the parsed body of a user dismiss request.
 type DismissRequest struct {
 	RowIDs         []string `json:"rowIds,omitempty"`
@@ -601,40 +594,4 @@ func ValidateDismissRequest(req *DismissRequest, opts DismissParseOptions) *Fiel
 	}
 	req.Reason = reason
 	return nil
-}
-
-// ParseDismissRequest decodes an optional-body DismissRequest using standard
-// Go struct decoding (case-insensitive field names) and validates it via
-// ValidateDismissRequest.
-//
-// Note: ParseDismissRequest currently has no production callers. Its decode
-// rules differ from the hub's readOptionalDismissJSON path (it has no
-// ContentLength == 0 short-circuit and enforces MaxRequestBodyBytes directly
-// via io.LimitReader + json.Unmarshal). Decision handlers decode into
-// DismissDecisionPromptRequest via readOptionalDismissJSON and call
-// ValidateDismissRequest so existing wire decoding and Go struct field type
-// error texts remain unchanged.
-func ParseDismissRequest(r io.Reader, opts DismissParseOptions) (*DismissRequest, *FieldError) {
-	var req DismissRequest
-	if r != nil {
-		body, err := io.ReadAll(io.LimitReader(r, MaxRequestBodyBytes+1))
-		if err != nil {
-			return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
-		}
-		if int64(len(body)) > MaxRequestBodyBytes {
-			return nil, &FieldError{
-				Message:     fmt.Sprintf("Invalid request body: request body exceeds %d bytes", MaxRequestBodyBytes),
-				InvalidJSON: true,
-			}
-		}
-		if len(bytes.TrimSpace(body)) > 0 {
-			if err := json.Unmarshal(body, &req); err != nil {
-				return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
-			}
-		}
-	}
-	if ferr := ValidateDismissRequest(&req, opts); ferr != nil {
-		return nil, ferr
-	}
-	return &req, nil
 }

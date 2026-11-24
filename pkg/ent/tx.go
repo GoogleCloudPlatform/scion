@@ -186,6 +186,8 @@ type Tx struct {
 	ScheduledExecRun *ScheduledExecRunClient
 	// Secret is the client for interacting with the Secret builders.
 	Secret *SecretClient
+	// SecretRequest is the client for interacting with the SecretRequest builders.
+	SecretRequest *SecretRequestClient
 	// Skill is the client for interacting with the Skill builders.
 	Skill *SkillClient
 	// SkillInjection is the client for interacting with the SkillInjection builders.
@@ -452,6 +454,7 @@ func (tx *Tx) init() {
 	tx.ScheduledExecPollCursor = NewScheduledExecPollCursorClient(tx.config)
 	tx.ScheduledExecRun = NewScheduledExecRunClient(tx.config)
 	tx.Secret = NewSecretClient(tx.config)
+	tx.SecretRequest = NewSecretRequestClient(tx.config)
 	tx.Skill = NewSkillClient(tx.config)
 	tx.SkillInjection = NewSkillInjectionClient(tx.config)
 	tx.SkillRegistry = NewSkillRegistryClient(tx.config)

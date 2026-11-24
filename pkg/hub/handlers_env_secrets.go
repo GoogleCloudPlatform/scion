@@ -1818,51 +1818,57 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		target = key
 	}
 
-	if !validateEnvSecretTarget(w, secretType, target) {
-		return
-	}
-
-	// Validate file-specific constraints.
-	if secretType == store.SecretTypeFile {
-		if strings.Contains(target, "..") {
-			BadRequest(w, "target path must not contain '..'")
+	if scope == store.ScopeAgent {
+		// Shared agent-scope secret write constraints (reserved env targets,
+		// ~/ file-target rule with no '..', System One & webhook reserved
+		// keys, and internal secret mutation refusal).
+		if !s.validateAgentSecretWriteConstraints(w, ctx, agentID, key, secretType, target) {
 			return
 		}
-		if scope == store.ScopeAgent && !strings.HasPrefix(target, "~/") {
-			ValidationError(w, "agent-written file secrets must target a path under the agent home (~/...)", map[string]interface{}{
-				"field": "target",
-				"value": target,
-			})
-			return
-		}
-		if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
-			ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{
-				"field": "target",
-				"value": target,
-			})
-			return
-		}
-		if len(decoded) > 64*1024 {
+		if secretType == store.SecretTypeFile && len(decoded) > 64*1024 {
 			BadRequest(w, "secret value exceeds 64KB limit")
 			return
 		}
-	}
+	} else {
+		if !validateEnvSecretTarget(w, secretType, target) {
+			return
+		}
 
-	// A user-scope write by an agent waits for the owning user's approval:
-	// it is recorded as a pending secret and never written to the secrets
-	// table here, so force does not apply. An approved secret of the same
-	// name stays in effect until the owner approves the replacement.
-	if scope == store.ScopeUser {
-		allowProgeny := req.AllowProgeny != nil && *req.AllowProgeny
-		s.agentWritePendingUserSecret(w, r, agentID, projectID, scopeID, key, decoded, secretType, target, allowProgeny)
-		return
-	}
+		// Validate file-specific constraints for project/user scopes.
+		if secretType == store.SecretTypeFile {
+			if strings.Contains(target, "..") {
+				BadRequest(w, "target path must not contain '..'")
+				return
+			}
+			if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
+				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{
+					"field": "target",
+					"value": target,
+				})
+				return
+			}
+			if len(decoded) > 64*1024 {
+				BadRequest(w, "secret value exceeds 64KB limit")
+				return
+			}
+		}
 
-	if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
-		return
-	}
-	if rejectWebhookEndpointReservedSecretWrite(w, key) {
-		return
+		// A user-scope write by an agent waits for the owning user's approval:
+		// it is recorded as a pending secret and never written to the secrets
+		// table here, so force does not apply. An approved secret of the same
+		// name stays in effect until the owner approves the replacement.
+		if scope == store.ScopeUser {
+			allowProgeny := req.AllowProgeny != nil && *req.AllowProgeny
+			s.agentWritePendingUserSecret(w, r, agentID, projectID, scopeID, key, decoded, secretType, target, allowProgeny)
+			return
+		}
+
+		if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
+			return
+		}
+		if rejectWebhookEndpointReservedSecretWrite(w, key) {
+			return
+		}
 	}
 
 	// Check for existing secret when force is not set.

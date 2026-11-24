@@ -595,6 +595,27 @@ func TestDecisionsRequestValidation_Golden(t *testing.T) {
 			Body:   norm.decodeBody(t, rrLong.Body.Bytes()),
 		}
 
+		rrEmpty := rawWithdraw(f, `{"keys":[]}`)
+		require.Equal(t, http.StatusBadRequest, rrEmpty.Code)
+		captures["withdraw_400_keys_empty"] = goldenCapture{
+			Status: rrEmpty.Code,
+			Body:   norm.decodeBody(t, rrEmpty.Body.Bytes()),
+		}
+
+		rrBlank := rawWithdraw(f, `{"keys":["   "]}`)
+		require.Equal(t, http.StatusBadRequest, rrBlank.Code)
+		captures["withdraw_400_key_blank"] = goldenCapture{
+			Status: rrBlank.Code,
+			Body:   norm.decodeBody(t, rrBlank.Body.Bytes()),
+		}
+
+		rrDup := rawWithdraw(f, `{"keys":["D234","d234"]}`)
+		require.Equal(t, http.StatusBadRequest, rrDup.Code)
+		captures["withdraw_400_key_duplicate"] = goldenCapture{
+			Status: rrDup.Code,
+			Body:   norm.decodeBody(t, rrDup.Body.Bytes()),
+		}
+
 		// Trailing data after first JSON value is accepted by Decoder.
 		normTrail := newGoldenNormalizer(f, "")
 		rrTrail := rawWithdraw(f, `{"keys":["D234"]} trailing`)
@@ -658,6 +679,13 @@ func TestDecisionsRequestValidation_Golden(t *testing.T) {
 		captures["dismiss_400_reason_too_long"] = goldenCapture{
 			Status: rrLong.Code,
 			Body:   norm.decodeBody(t, rrLong.Body.Bytes()),
+		}
+
+		rrIdem := rawDismiss(f, msg.ID, `{"idempotencyKey":"`+strings.Repeat("k", 129)+`"}`)
+		require.Equal(t, http.StatusBadRequest, rrIdem.Code)
+		captures["dismiss_400_idempotency_key_too_long"] = goldenCapture{
+			Status: rrIdem.Code,
+			Body:   norm.decodeBody(t, rrIdem.Body.Bytes()),
 		}
 
 		// Mis-cased keys: must dismiss ONLY row0 (not the whole card) and replay under IdempotencyKey.

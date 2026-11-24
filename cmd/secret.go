@@ -149,6 +149,7 @@ func init() {
 	agentSecretCmd.AddCommand(agentSecretGetCmd)
 	agentSecretCmd.AddCommand(agentSecretSetCmd)
 	agentSecretCmd.AddCommand(agentSecretListCmd)
+	agentSecretCmd.AddCommand(newSecretRequestCmd())
 
 	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetMetadata, "metadata", false, "Print the secret's metadata (the default)")
 	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetValue, "value", false, "Print the secret's decoded value (requires an agent's hub identity)")

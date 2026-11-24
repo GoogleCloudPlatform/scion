@@ -71,9 +71,15 @@ func resetMessageFlags() func() {
 	msgArtifacts = nil
 	msgArtifactRefs = nil
 	resetDecisionFlags()
-	for _, name := range []string{"decisions", "decisions-file", "choices", "choices-file", "update"} {
-		_ = messageCmd.Flags().Lookup(name).Value.Set(messageCmd.Flags().Lookup(name).DefValue)
-		messageCmd.Flags().Lookup(name).Changed = false
+	resetSecretRequestFlags()
+	for _, name := range []string{"decisions", "decisions-file", "choices", "choices-file", "secret-request", "secret-description", "secret-request-file", "update"} {
+		f := messageCmd.Flags().Lookup(name)
+		if sl, ok := f.Value.(interface{ Replace([]string) error }); ok {
+			_ = sl.Replace(nil)
+		} else {
+			_ = f.Value.Set(f.DefValue)
+		}
+		f.Changed = false
 	}
 	messageCmd.Flags().Lookup("broadcast").Changed = false
 	messageCmd.Flags().Lookup("all").Changed = false
@@ -94,9 +100,15 @@ func resetMessageFlags() func() {
 		msgArtifacts = orig.artifacts
 		msgArtifactRefs = nil
 		resetDecisionFlags()
-		for _, name := range []string{"decisions", "decisions-file", "choices", "choices-file", "update"} {
-			_ = messageCmd.Flags().Lookup(name).Value.Set(messageCmd.Flags().Lookup(name).DefValue)
-			messageCmd.Flags().Lookup(name).Changed = false
+		resetSecretRequestFlags()
+		for _, name := range []string{"decisions", "decisions-file", "choices", "choices-file", "secret-request", "secret-description", "secret-request-file", "update"} {
+			f := messageCmd.Flags().Lookup(name)
+			if sl, ok := f.Value.(interface{ Replace([]string) error }); ok {
+				_ = sl.Replace(nil)
+			} else {
+				_ = f.Value.Set(f.DefValue)
+			}
+			f.Changed = false
 		}
 		messageCmd.Flags().Lookup("broadcast").Changed = bcastChanged
 		messageCmd.Flags().Lookup("all").Changed = allChanged
@@ -699,7 +711,9 @@ func TestDeprecatedFlags_Hidden(t *testing.T) {
 func TestRetainedFlags_NotHidden(t *testing.T) {
 	retainedFlags := []string{
 		"interrupt", "wake", "attach",
-		"decisions", "decisions-file", "update",
+		"decisions", "decisions-file",
+		"secret-request", "secret-description", "secret-request-file",
+		"update",
 	}
 	for _, name := range retainedFlags {
 		f := messageCmd.Flags().Lookup(name)

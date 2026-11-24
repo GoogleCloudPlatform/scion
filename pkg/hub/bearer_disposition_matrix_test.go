@@ -347,6 +347,18 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the web.decisions experiment is off, as in this fixture; the dedicated test enables the experiment and drives the route across session, project and hub UATs (with and without inbox:write and across project boundaries), agent tokens (403 users_only), federated users and visitors",
 		Pin:    "TestDecisionPromptDismiss_Authorization",
 	},
+	{OperationID: "chat.secretrequest.read", Method: "GET", Pattern: "/api/v1/secret-requests/{messageId}"}: {
+		Reason: "the route answers 404 while the hub.agent_secrets experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token, agent token, non-recipient, and recipient without agent.attach",
+		Pin:    "TestSecretRequests_EndToEnd",
+	},
+	{OperationID: "chat.secretrequest.fulfill", Method: "POST", Pattern: "/api/v1/secret-requests/{messageId}/fulfill"}: {
+		Reason: "the route answers 404 while the hub.agent_secrets experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token, agent token, non-recipient, and recipient without agent.attach",
+		Pin:    "TestSecretRequests_EndToEnd",
+	},
+	{OperationID: "chat.secretrequest.dismiss", Method: "POST", Pattern: "/api/v1/secret-requests/{messageId}/dismiss"}: {
+		Reason: "the route answers 404 while the hub.agent_secrets experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token, agent token, non-recipient, and recipient without agent.attach",
+		Pin:    "TestSecretRequests_EndToEnd",
+	},
 	{OperationID: "chat.decision.answer", Method: "POST", Pattern: "/api/v1/decisions/{rowId}/answer"}: {
 		Reason: "the route answers 404 while the web.decisions experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token and a visitor",
 		Pin:    "TestDecisionRoutes_TokenAndVisitorForbidden",

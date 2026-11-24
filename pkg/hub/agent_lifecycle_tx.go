@@ -298,6 +298,12 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 	if _, err := tx.DeleteSecretsByScope(ctx, store.ScopeAgent, a.ID); err != nil {
 		return 0, 0, fmt.Errorf("%s: delete agent-scope secrets: %w", label, err)
 	}
+	// Withdraw pending/fulfilling secret requests inside the transaction;
+	// live updates and audit events are published strictly after commit by
+	// withAgentSecretCleanup (R4).
+	if _, err := tx.WithdrawAgentSecretRequestsOnDelete(ctx, a.ID, time.Now().UTC()); err != nil {
+		return 0, 0, fmt.Errorf("%s: withdraw agent secret requests: %w", label, err)
+	}
 	if err := runAgentTxHooks(ctx, "hard-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.hardDelete), tx, a, actor); err != nil {
 		return 0, 0, err
 	}

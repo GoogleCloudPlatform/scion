@@ -462,6 +462,32 @@ func Spec() []TableFixture {
 		{Table: "decision_key_counters", Rows: []row{
 			{"agent_id": agentID, "next": 2},
 		}},
+		// ---- Agent-to-human secret requests ----
+		{Table: "secret_requests", Rows: []row{
+			{
+				"id": "5f000000-0000-0000-0000-000000000001", "project_id": projectID,
+				"agent_id": agentID, "agent_name": "worker",
+				"key": "GITHUB_TOKEN", "key_norm": "GITHUB_TOKEN", "version": 1,
+				"description": "Token for pushing branch updates", "secret_type": "environment",
+				"target": "GITHUB_TOKEN", "message_id": messageID, "position": 0, "intro_length": 0,
+				"conversation_id": conversationID, "chat_key": "dm:agent:" + agentID + ":user:" + userID,
+				"status": "fulfilled", "resolved_by_user_id": userID, "resolved_by_name": "Alice",
+				"resolved_by_email": "alice@example.com", "surface": "standalone_page",
+				"idempotency_key": "sr-fulfill-1", "response_message_id": messageID,
+				"secret_version": 1, "created_at": baseTime,
+				"expires_at": baseTime.Add(7 * 24 * time.Hour), "resolved_at": baseTime.Add(2 * time.Minute),
+			},
+			{
+				"id": "5f000000-0000-0000-0000-000000000002", "project_id": projectID,
+				"agent_id": agentID, "agent_name": "worker",
+				"key": "DEPLOY_KEY", "key_norm": "DEPLOY_KEY", "version": 1,
+				"description": "SSH key for staging", "secret_type": "file",
+				"target": "~/.ssh/deploy_key", "message_id": messageID, "position": 1, "intro_length": 0,
+				"conversation_id": conversationID, "chat_key": "dm:agent:" + agentID + ":user:" + userID,
+				"status": "pending", "created_at": baseTime,
+				"expires_at": baseTime.Add(7 * 24 * time.Hour),
+			},
+		}},
 
 		// ---- Schedules ----
 		{Table: "schedules", Rows: []row{

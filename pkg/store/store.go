@@ -604,6 +604,9 @@ type Store interface {
 	// Decision prompt decisions and answers (ptone/scion#7514)
 	DecisionStore
 
+	// Agent-to-human secret requests (ptone/scion#8747)
+	SecretRequestStore
+
 	// System One provider instances (ptone/scion#8044)
 	SystemOneInstanceStore
 
