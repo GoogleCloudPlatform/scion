@@ -531,8 +531,8 @@ func TestBrokerPolicy_StartClaim_RefusedAndRollback(t *testing.T) {
 	assert.NoError(t, f.srv.checkBrokerPolicyForStart(ctx, ghostAgent))
 
 	// Approving the broker makes the next start succeed.
-	broker.AdminManaged = true
-	require.NoError(t, f.s.UpdateRuntimeBroker(ctx, broker))
+	_, err = f.s.SetRuntimeBrokerAdminManaged(ctx, broker.ID, true)
+	require.NoError(t, err)
 	require.NoError(t, f.srv.startAgentCore(ctx, got, StartOpts{Kind: store.StartClaimUser}))
 	assert.Equal(t, 1, startCalled)
 }
@@ -591,15 +591,15 @@ func TestBrokerPolicy_Lifecycle_StartResumeRestartAndRunningUnaffected(t *testin
 	assert.Equal(t, string(state.PhaseStopped), getAgent(t, f.s, a.ID).Phase)
 
 	// 5. Approving the broker makes the next start succeed.
-	broker.AdminManaged = true
-	require.NoError(t, f.s.UpdateRuntimeBroker(ctx, broker))
+	_, err := f.s.SetRuntimeBrokerAdminManaged(ctx, broker.ID, true)
+	require.NoError(t, err)
 	status, _ = lifecycle(t, f, a.ID, "start")
 	assert.Equal(t, http.StatusOK, status)
 	assert.Equal(t, 1, startCalls)
 
 	// 6. Policy off: unmanaged broker start succeeds.
-	broker.AdminManaged = false
-	require.NoError(t, f.s.UpdateRuntimeBroker(ctx, broker))
+	_, err = f.s.SetRuntimeBrokerAdminManaged(ctx, broker.ID, false)
+	require.NoError(t, err)
 	setBrokerPolicyStateP4(t, f.srv, f.s, true, false)
 	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStopped)}))
 	status, _ = lifecycle(t, f, a.ID, "start")
@@ -695,8 +695,8 @@ func TestBrokerPolicy_WakeDM_RefusedAndNonRetryable(t *testing.T) {
 	// 5. Approving the broker makes the next wake succeed.
 	require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseSuspended)}))
 	target.Phase = string(state.PhaseSuspended)
-	broker.AdminManaged = true
-	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+	_, err = s.SetRuntimeBrokerAdminManaged(ctx, broker.ID, true)
+	require.NoError(t, err)
 
 	go func() {
 		time.Sleep(150 * time.Millisecond)

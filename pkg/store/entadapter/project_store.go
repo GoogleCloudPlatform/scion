@@ -1082,7 +1082,6 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
 			SetAutoProvide(b.AutoProvide).
-			SetAdminManaged(b.AdminManaged).
 			SetUpdated(now).
 			AddLockVersion(1)
 		if b.ConnectedHubID != nil {
@@ -1100,6 +1099,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 		} else {
 			update.ClearConnectedAt()
 		}
+		// admin_managed is never written here; see SetRuntimeBrokerAdminManaged.
 		// The GCP host pair and its source are never written here; see
 		// SetRuntimeBrokerGCPHost*.
 		affected, err := update.Save(ctx)
@@ -1192,6 +1192,34 @@ func (s *ProjectStore) SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id,
 		return false, mapError(err)
 	}
 	return affected == 1, nil
+}
+
+// SetRuntimeBrokerAdminManaged sets admin_managed on a runtime broker as a
+// compare-and-set on lock_version and returns the value it replaced.
+func (s *ProjectStore) SetRuntimeBrokerAdminManaged(ctx context.Context, id string, adminManaged bool) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return false, mapError(err)
+		}
+		affected, err := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			SetAdminManaged(adminManaged).
+			SetUpdated(time.Now()).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return false, mapError(err)
+		}
+		if affected == 1 {
+			return cur.AdminManaged, nil
+		}
+	}
+	return false, store.ErrVersionConflict
 }
 
 // gcpHostEmailUnset and the other predicates below match both an empty

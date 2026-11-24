@@ -1366,6 +1366,10 @@ type RuntimeBroker struct {
 
 	// AdminManaged records whether a hub administrator explicitly registered or
 	// approved this broker as admin-managed (ptone/scion#7829).
+	//
+	// Written only by CreateRuntimeBroker and the dedicated
+	// SetRuntimeBrokerAdminManaged store method. UpdateRuntimeBroker leaves the
+	// stored value unchanged whatever this copy carries.
 	AdminManaged bool `json:"adminManaged,omitempty"`
 
 	// Timestamps

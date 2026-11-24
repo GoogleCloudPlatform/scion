@@ -662,10 +662,8 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		// broker_policy.admin_managed_only is off).
 		brokerID = existingBroker.ID
 		reregistered = true
-		if req.AdminManaged && !existingBroker.AdminManaged {
-			existingBroker.AdminManaged = true
-			existingBroker.Updated = time.Now()
-			if err := s.store.UpdateRuntimeBroker(ctx, existingBroker); err != nil {
+		if req.AdminManaged {
+			if _, err := s.store.SetRuntimeBrokerAdminManaged(ctx, brokerID, true); err != nil {
 				return nil, fmt.Errorf("failed to update existing broker: %w", err)
 			}
 		}
@@ -682,9 +680,6 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		}
 		priorHostSA := hostSAClaimOf(existingBroker)
 		existingBroker.AutoProvide = req.AutoProvide
-		if req.AdminManaged {
-			existingBroker.AdminManaged = true
-		}
 		existingBroker.Labels, kept = mergeRegistrationLabels(existingBroker.Labels, req.Labels)
 		existingBroker.Updated = time.Now()
 		if err := hostSAClaimWriteAllowed(priorHostSA, hostSAClaimOf(existingBroker), hostSA); err != nil {
@@ -692,6 +687,11 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		}
 		if err := s.store.UpdateRuntimeBroker(ctx, existingBroker); err != nil {
 			return nil, fmt.Errorf("failed to update existing broker: %w", err)
+		}
+		if req.AdminManaged {
+			if _, err := s.store.SetRuntimeBrokerAdminManaged(ctx, brokerID, true); err != nil {
+				return nil, fmt.Errorf("failed to update existing broker: %w", err)
+			}
 		}
 		if gcp, err = fillRegistrationGCPHost(ctx, s.store, brokerID, req.GCPHostServiceAccountEmail, req.GCPHostProjectID, hostSA); err != nil {
 			return nil, err

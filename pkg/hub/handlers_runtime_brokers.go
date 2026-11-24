@@ -603,10 +603,6 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		broker.Labels = labels
 		recordChanged = true
 	}
-	if updates.AdminManaged != nil && broker.AdminManaged != *updates.AdminManaged {
-		broker.AdminManaged = *updates.AdminManaged
-		recordChanged = true
-	}
 	priorHostSA := hostSAClaimOf(broker)
 
 	setGCPHost := updates.GCPHostServiceAccountEmail != nil || updates.GCPHostProjectID != nil
@@ -642,11 +638,19 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	// made against (priorHostSA); if a registration or another update
 	// changed it in between, nothing is written and the request gets 409.
 	var gcpPrev *store.GCPHostSetting
+	var adminManagedPrev *bool
 	writeErr := func() error {
 		if recordChanged {
 			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
 				return err
 			}
+		}
+		if updates.AdminManaged != nil {
+			prev, err := s.store.SetRuntimeBrokerAdminManaged(ctx, broker.ID, *updates.AdminManaged)
+			if err != nil {
+				return err
+			}
+			adminManagedPrev = &prev
 		}
 		if setGCPHost {
 			prev, applied, err := s.store.SetRuntimeBrokerGCPHostIfPrior(ctx, broker.ID,
@@ -685,6 +689,12 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		} else {
 			// No GCP host writer ran: any difference is not this update's.
 			old.GCPHostServiceAccountEmail, old.GCPHostProjectID, old.GCPHostSource = after.GCPHostServiceAccountEmail, after.GCPHostProjectID, after.GCPHostSource
+		}
+		if adminManagedPrev != nil {
+			old.AdminManaged = *adminManagedPrev
+		} else {
+			// No admin_managed writer ran: any difference is not this update's.
+			old.AdminManaged = after.AdminManaged
 		}
 		if details := brokerSettingsChangeDetails(&old, after); details != nil {
 			LogBrokerSettingsEvent(ctx, s.auditLogger, after.ID, after.Name, actor.ID(), s.clientIP(r),
