@@ -739,6 +739,10 @@ type CandidateQuery struct {
 	// SharedOnly, with HomeScope and ScopeShares, keeps only the rows
 	// homed elsewhere and shared with HomeScope.
 	SharedOnly bool
+	// Query, when non-nil, applies validated filter-query predicates (from
+	// pkg/filterquery) to the candidate query. It is always ANDed with every
+	// other field and never widens authorization.
+	Query *QueryTerms
 	// After, when set, keeps rows strictly after this position in the
 	// result order.
 	After *Position
@@ -746,6 +750,22 @@ type CandidateQuery struct {
 	Limit int
 	// Now is the instant expiry is judged at.
 	Now time.Time
+}
+
+// QueryTerm is one validated, reference-resolved predicate clause pushed down
+// into ListCandidates. Values within a term are ORed; terms in QueryTerms are
+// ANDed. Negate inverts the whole term: NOT (v1 OR v2 ...).
+type QueryTerm struct {
+	Field  string
+	Values []string
+	Negate bool
+}
+
+// QueryTerms is the artifact-store representation of a parsed filter query.
+type QueryTerms struct {
+	Terms       []QueryTerm
+	Text        string
+	ExcludeText []string
 }
 
 // Position is a place in ListCandidates' order.

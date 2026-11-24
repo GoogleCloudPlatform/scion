@@ -45,7 +45,10 @@ func TestReadGrantFilterMatchesGrantsForRead(t *testing.T) {
 		ScopeRefs: []string{"p1"}, HomeScope: "p1", ScopeShares: true,
 		Now: time.Unix(0, 0).UTC(), Limit: 10,
 	}
-	sqlText, qargs := s.candidateQuery(q)
+	sqlText, qargs, err := s.candidateQuery(q)
+	if err != nil {
+		t.Fatalf("candidateQuery: %v", err)
+	}
 	// The principal and scope grant arms each carry the read set once, and
 	// the "shared with the project" subquery is part of the filters every
 	// arm shares (owner, principal and scope arms): 2 + 3 = 5.

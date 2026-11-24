@@ -69,6 +69,21 @@ type fakeHost struct {
 	// sponsorArgs records the sponsorRef argument of every StewardClause
 	// question, as "<method> <ownerAgentID> <sponsorRef>".
 	sponsorArgs []string
+	// slugs maps project slug -> scope ref for ScopeResolver tests.
+	slugs map[string]string
+}
+
+func (h *fakeHost) ResolveScope(ctx context.Context, slugOrID string) (string, error) {
+	if canonicalID(strings.ToLower(slugOrID)) {
+		return strings.ToLower(slugOrID), nil
+	}
+	h.mu.Lock()
+	id := h.slugs[strings.ToLower(slugOrID)]
+	h.mu.Unlock()
+	if id == "" || !h.Authorize(ctx, id, PermissionRead) {
+		return "", nil
+	}
+	return id, nil
 }
 
 // allowAdmin makes AdministersScope answer yes for u in scope.
