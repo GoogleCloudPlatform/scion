@@ -618,10 +618,11 @@ func TestDecisionsScaleStore(t *testing.T) {
 	}
 }
 
-// TestDecisionsScaleBackfill verifies keyset-cursor settled-hint backfill
-// correctness on a small fixture by default, or measures a full Scale S (200p /
-// 200k decisions) backfill on SQLite (file-backed, MaxOpenConns=1, no ANALYZE)
-// and PostgreSQL when SCION_DECISIONS_SCALE=1.
+// TestDecisionsScaleBackfill verifies keyset-cursor settled-hint, facet
+// backfill, and reconciler correctness on a small fixture by default, or
+// measures a full Scale S (200p / 200k decisions) backfill on SQLite
+// (file-backed, MaxOpenConns=1, no ANALYZE) and PostgreSQL when
+// SCION_DECISIONS_SCALE=1.
 func TestDecisionsScaleBackfill(t *testing.T) {
 	ctx := context.Background()
 	sc := decisionScaleSmokeSpec
@@ -633,54 +634,77 @@ func TestDecisionsScaleBackfill(t *testing.T) {
 		minPages = 10
 	}
 	f := seedDecisionScaleFixture(t, sc, false)
-	t.Logf("[%s/%s] seeded %d decisions (all settled=false) in %v",
+	t.Logf("[%s/%s] seeded %d decisions (all settled=false, facet_indexed=false) in %v",
 		sc.name, f.cs.Dialect(), f.totalDecisions, f.seedDuration)
-
-	var pageDurs []time.Duration
-	totalSwept := 0
-	cursor := ""
-	totalStart := time.Now()
-	for {
-		pStart := time.Now()
-		n, nextCursor, err := f.cs.SweepSettledDecisionsPage(ctx, cursor, pageSize)
-		pDur := time.Since(pStart)
-		require.NoError(t, err)
-		if nextCursor == "" {
-			break
-		}
-		pageDurs = append(pageDurs, pDur)
-		totalSwept += n
-		cursor = nextCursor
-	}
-	totalDur := time.Since(totalStart)
-
-	pending, err := f.cs.HasPendingDecisionIndexWork(ctx)
-	require.NoError(t, err)
-	require.False(t, pending, "no pending settled work after full backfill")
-
-	expectedSettled := f.totalDecisions - sc.numProjects*sc.openPerProject
-	require.Equal(t, expectedSettled, totalSwept)
-	require.GreaterOrEqual(t, len(pageDurs), minPages)
 
 	median := func(ds []time.Duration) time.Duration {
 		cp := append([]time.Duration(nil), ds...)
 		sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
 		return cp[len(cp)/2]
 	}
-	window := 5
-	if len(pageDurs) < window {
-		window = len(pageDurs)
-	}
-	firstMed := median(pageDurs[:window])
-	lastMed := median(pageDurs[len(pageDurs)-window:])
-	worst := pageDurs[0]
-	for _, d := range pageDurs[1:] {
-		if d > worst {
-			worst = d
+
+	runPagedStep := func(stepName string, fn func(cursor string) (int, string, error)) (int, int) {
+		var pageDurs []time.Duration
+		totalUpdated := 0
+		cursor := ""
+		totalStart := time.Now()
+		for {
+			pStart := time.Now()
+			n, nextCursor, err := fn(cursor)
+			pDur := time.Since(pStart)
+			require.NoError(t, err, "backfill step %s", stepName)
+			if nextCursor == "" {
+				break
+			}
+			pageDurs = append(pageDurs, pDur)
+			totalUpdated += n
+			cursor = nextCursor
 		}
+		totalDur := time.Since(totalStart)
+		require.GreaterOrEqual(t, len(pageDurs), minPages, "backfill step %s page count", stepName)
+
+		window := 5
+		if len(pageDurs) < window {
+			window = len(pageDurs)
+		}
+		firstMed := median(pageDurs[:window])
+		lastMed := median(pageDurs[len(pageDurs)-window:])
+		worst := pageDurs[0]
+		for _, d := range pageDurs[1:] {
+			if d > worst {
+				worst = d
+			}
+		}
+		t.Logf("[%s/%s] BACKFILL %s (%d rows, %d pages of %d):",
+			sc.name, f.cs.Dialect(), stepName, totalUpdated, len(pageDurs), pageSize)
+		t.Logf("  total=%v  first-%d med=%v  last-%d med=%v  worst-page=%v",
+			totalDur, window, firstMed, window, lastMed, worst)
+		return totalUpdated, len(pageDurs)
 	}
-	t.Logf("[%s/%s] BACKFILL TIMINGS (%d rows, %d pages of %d):",
-		sc.name, f.cs.Dialect(), totalSwept, len(pageDurs), pageSize)
-	t.Logf("  total=%v  first-%d med=%v  last-%d med=%v  worst-page=%v",
-		totalDur, window, firstMed, window, lastMed, worst)
+
+	totalSwept, _ := runPagedStep("settled", func(cursor string) (int, string, error) {
+		return f.cs.SweepSettledDecisionsPage(ctx, cursor, pageSize)
+	})
+	totalFacetDecs, _ := runPagedStep("facet_decisions", func(cursor string) (int, string, error) {
+		return f.cs.IndexDecisionFacetsDecisionsPage(ctx, cursor, pageSize)
+	})
+	totalFacetAns, _ := runPagedStep("facet_answers", func(cursor string) (int, string, error) {
+		return f.cs.IndexDecisionFacetsAnswersPage(ctx, cursor, pageSize)
+	})
+
+	recStart := time.Now()
+	reconciled, err := f.cs.ReconcileDecisionFacets(ctx)
+	recDur := time.Since(recStart)
+	require.NoError(t, err)
+	t.Logf("[%s/%s] BACKFILL reconcile (%d deleted): total=%v",
+		sc.name, f.cs.Dialect(), reconciled, recDur)
+
+	pending, err := f.cs.HasPendingDecisionIndexWork(ctx)
+	require.NoError(t, err)
+	require.False(t, pending, "no pending decision index work after full backfill")
+
+	expectedSettled := f.totalDecisions - sc.numProjects*sc.openPerProject
+	require.Equal(t, expectedSettled, totalSwept)
+	require.Equal(t, f.totalDecisions, totalFacetDecs)
+	require.Greater(t, totalFacetAns, 0)
 }
