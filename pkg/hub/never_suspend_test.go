@@ -524,3 +524,111 @@ func TestNeverSuspend_RaceRule(t *testing.T) {
 		assert.Equal(t, store.RunIntentStopped, after.RunIntent, "membership-loss hold must not be blocked by never-suspend")
 	})
 }
+
+func TestNeverSuspend_ExistingAgentConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	userID := tid("ns-existing-member")
+	createTestUserWithRole(t, s, userID, "ns-existing-member@test.com", store.UserRoleMember, store.SystemRoleHubMember)
+	user, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+
+	projectID := tid("ns-existing-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "NS Existing Project", Slug: "ns-existing-project",
+		GitRemote: "https://github.com/example/ns-existing.git",
+		OwnerID:   userID, CreatedBy: userID,
+	}))
+	createTestUserWithProjectRole(t, s, userID, user.Email, projectID, store.ProjectRoleMember)
+
+	brokerID := tid("ns-existing-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "NS Existing Broker", Slug: "ns-existing-broker", Status: store.BrokerStatusOnline,
+		CreatedBy: userID,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS Existing Broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	srv.SetDispatcher(&createAgentDispatcher{})
+	setNeverSuspendExperiment(t, srv, true)
+
+	t.Run("mismatched suspendPolicy on existing agent returns 409 and preserves stored policy", func(t *testing.T) {
+		// Provision-only create with default policy ("auto").
+		createRec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-exist-mismatch",
+			"projectId":     projectID,
+			"provisionOnly": true,
+		})
+		require.Equal(t, http.StatusCreated, createRec.Code, "body: %s", createRec.Body.String())
+		var created CreateAgentResponse
+		require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+		require.NotNil(t, created.Agent)
+		assert.Equal(t, store.SuspendPolicyAuto, created.Agent.SuspendPolicy)
+
+		// Second POST with same name and mismatched suspendPolicy="never" -> 409.
+		repostRec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-exist-mismatch",
+			"projectId":     projectID,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusConflict, repostRec.Code, "body: %s", repostRec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(repostRec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeSuspendPolicyCreateOnly, errResp.Error.Code)
+
+		// Verify the stored row still has suspend_policy="auto" and was not started.
+		stored, err := s.GetAgent(ctx, created.Agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyAuto, stored.SuspendPolicy)
+		assert.NotEqual(t, string(state.PhaseRunning), stored.Phase)
+	})
+
+	t.Run("never-suspend agent re-POSTed with no suspendPolicy keeps never", func(t *testing.T) {
+		createRec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-exist-keep",
+			"projectId":     projectID,
+			"provisionOnly": true,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusCreated, createRec.Code, "body: %s", createRec.Body.String())
+		var created CreateAgentResponse
+		require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+		require.NotNil(t, created.Agent)
+
+		repostRec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":      "ns-exist-keep",
+			"projectId": projectID,
+		})
+		require.Equal(t, http.StatusOK, repostRec.Code, "body: %s", repostRec.Body.String())
+
+		stored, err := s.GetAgent(ctx, created.Agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyNever, stored.SuspendPolicy)
+	})
+
+	t.Run("matching suspendPolicy on existing agent passes", func(t *testing.T) {
+		createRec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-exist-match",
+			"projectId":     projectID,
+			"provisionOnly": true,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusCreated, createRec.Code, "body: %s", createRec.Body.String())
+		var created CreateAgentResponse
+		require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+		require.NotNil(t, created.Agent)
+
+		repostRec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-exist-match",
+			"projectId":     projectID,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, repostRec.Code, "body: %s", repostRec.Body.String())
+
+		stored, err := s.GetAgent(ctx, created.Agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyNever, stored.SuspendPolicy)
+	})
+}

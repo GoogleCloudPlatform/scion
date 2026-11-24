@@ -1557,6 +1557,26 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
+	// SuspendPolicy is create-only in Phase 1 (ptone/scion#9181): changing it
+	// on an existing agent requires PATCH with quota and audit (Phase 3).
+	// Refuse a mismatched non-empty suspendPolicy with 409 before any
+	// existing-agent branch acts; empty or matching values pass through.
+	if req.SuspendPolicy != "" {
+		existingPolicy := existingAgent.SuspendPolicy
+		if existingPolicy == "" {
+			existingPolicy = store.SuspendPolicyAuto
+		}
+		if req.SuspendPolicy != existingPolicy {
+			writeError(w, http.StatusConflict, ErrCodeSuspendPolicyCreateOnly,
+				"suspendPolicy applies only when the agent is created; it cannot be changed on an existing agent in this release",
+				map[string]interface{}{
+					"current":   existingPolicy,
+					"requested": req.SuspendPolicy,
+				})
+			return existingAgentErrored
+		}
+	}
+
 	// Start gate (design ptone/scion#2483 §2.1): every branch below
 	// starts, resumes, restarts or recreates existingAgent, so the shared
 	// start gate runs first, after the lifecycle authz above. An agent whose
