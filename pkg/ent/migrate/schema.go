@@ -1312,6 +1312,7 @@ var (
 		{Name: "other_placeholder", Type: field.TypeString, Nullable: true, Size: 100},
 		{Name: "intro_length", Type: field.TypeInt, Default: 0},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "decided", "replaced", "withdrawn", "dismissed"}, Default: "pending"},
+		{Name: "settled", Type: field.TypeBool, Default: false},
 		{Name: "replaced_by_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "decided_at", Type: field.TypeTime, Nullable: true},
@@ -1345,6 +1346,14 @@ var (
 				Name:    "decision_project_id_chat_key_status",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionsColumns[1], DecisionsColumns[3], DecisionsColumns[20]},
+			},
+			{
+				Name:    "decision_project_id_chat_key",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionsColumns[1], DecisionsColumns[3]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "settled = false",
+				},
 			},
 			{
 				Name:    "decision_message_id_position",

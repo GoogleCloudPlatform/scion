@@ -130,6 +130,13 @@ func (Decision) Fields() []ent.Field {
 		field.Enum("status").
 			Values("pending", "decided", "replaced", "withdrawn", "dismissed").
 			Default("pending"),
+		// settled is a hint: true only when this row is known settled (replaced,
+		// withdrawn, dismissed, or decided with a direct answer). false means
+		// "possibly open": rows written by an older binary stay false until the
+		// background indexer settles them. Readers MUST keep the exact open
+		// predicate.
+		field.Bool("settled").
+			Default(false),
 		// replaced_by_id is the row of the version that replaced this one.
 		field.UUID("replaced_by_id", uuid.UUID{}).
 			Optional().
@@ -169,6 +176,10 @@ func (Decision) Indexes() []ent.Index {
 		index.Fields("project_id", "status"),
 		// Project-wide decisions scoped to readable conversation keys.
 		index.Fields("project_id", "chat_key", "status"),
+		// Partial index for open-prompt lookups and bell fast-path project checks:
+		// covers queries filtering on (project_id, chat_key) WHERE settled = false.
+		index.Fields("project_id", "chat_key").
+			Annotations(entsql.IndexWhere("settled = false")),
 		// History pages load a page's decisions by message.
 		index.Fields("message_id", "position"),
 		index.Fields("conversation_id"),

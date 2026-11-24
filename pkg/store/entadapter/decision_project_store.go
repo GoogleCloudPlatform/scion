@@ -98,9 +98,14 @@ func (c *CompositeStore) ListOpenPrompts(ctx context.Context, projectIDs, chatKe
 	}
 
 	// Find every non-settled decision row in (projectIDs, chatKeys):
-	// status == pending, OR (status == decided AND NOT EXISTS direct answer).
+	// settled = false AND (status == pending, OR (status == decided AND NOT
+	// EXISTS direct answer)). The settled = false hint narrows the lookup to
+	// the partial index (project_id, chat_key) WHERE settled = false while the
+	// exact open predicate preserves correctness for rows written by an older
+	// binary before the background indexer sweeps them.
 	openRows, err := c.client.Decision.Query().
 		Where(
+			decisionSettledFalse(),
 			decision.ProjectIDIn(projectUUIDs...),
 			decisionChatKeyIn(len(projectUUIDs), keys),
 			decision.Or(
@@ -293,6 +298,48 @@ func (c *CompositeStore) ProjectsWithDecisions(ctx context.Context, projectIDs [
 	out := make([]string, len(ordered))
 	for i, p := range ordered {
 		out[i] = p.id
+	}
+	return out, nil
+}
+
+const unsettledProjectsChunkSize = 500
+
+// ProjectsWithUnsettledDecisions implements store.DecisionStore.
+func (c *CompositeStore) ProjectsWithUnsettledDecisions(ctx context.Context, projectIDs []string) (map[string]bool, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+	projectUUIDs, err := parseProjectIDs(projectIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(projectUUIDs) == 0 {
+		return nil, nil
+	}
+
+	out := make(map[string]bool)
+	for start := 0; start < len(projectUUIDs); start += unsettledProjectsChunkSize {
+		end := start + unsettledProjectsChunkSize
+		if end > len(projectUUIDs) {
+			end = len(projectUUIDs)
+		}
+		var rows []struct {
+			ProjectID uuid.UUID `json:"project_id"`
+		}
+		err := c.client.Decision.Query().
+			Where(
+				decisionSettledFalse(),
+				decision.ProjectIDIn(projectUUIDs[start:end]...),
+			).
+			Unique(true).
+			Select(decision.FieldProjectID).
+			Scan(ctx, &rows)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, r := range rows {
+			out[r.ProjectID.String()] = true
+		}
 	}
 	return out, nil
 }
@@ -632,15 +679,7 @@ func (c *CompositeStore) decisionAgentFacet(ctx context.Context, projectUUIDs []
 
 func noDirectDecisionAnswer() predicate.Decision {
 	return func(s *entsql.Selector) {
-		t := entsql.Table(decisionanswer.Table)
-		s.Where(entsql.NotExists(
-			entsql.Select(t.C(decisionanswer.FieldID)).
-				From(t).
-				Where(entsql.And(
-					entsql.ColumnsEQ(t.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
-					entsql.EQ(t.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
-				)),
-		))
+		s.Where(entsql.NotExists(directDecisionAnswerSubquery(s)))
 	}
 }
 

@@ -1027,6 +1027,25 @@ type DecisionStore interface {
 	// projectIDs returns (nil, nil) without querying.
 	ProjectsWithDecisions(ctx context.Context, projectIDs []string) ([]string, error)
 
+	// ProjectsWithUnsettledDecisions returns the subset of projectIDs holding
+	// at least one decision with settled=false (a superset of "has open
+	// decisions"). Empty projectIDs returns (nil, nil) without querying.
+	ProjectsWithUnsettledDecisions(ctx context.Context, projectIDs []string) (map[string]bool, error)
+
+	// HasPendingDecisionIndexWork reports whether any background decision
+	// indexing work is pending (e.g. settled-eligible rows still marked
+	// settled=false).
+	HasPendingDecisionIndexWork(ctx context.Context) (bool, error)
+
+	// SweepSettledDecisionsPage marks up to limit settled-eligible decisions
+	// with id > afterID (when afterID is non-empty) whose settled hint is still
+	// false as settled=true in one transaction. Returns the number of rows
+	// updated and the highest decision ID scanned on this page (nextCursor,
+	// empty when no matching rows remain after afterID). Callers advance
+	// afterID = nextCursor while nextCursor != "" (even on short pages, since
+	// Postgres FOR UPDATE SKIP LOCKED may return fewer than limit rows).
+	SweepSettledDecisionsPage(ctx context.Context, afterID string, limit int) (updated int, nextCursor string, err error)
+
 	// ListDecisionAnswersPerProject lists up to perProject newest non-superseded
 	// Made-tab decision_answers entries per project in projectIDs whose
 	// decision's chat_key is in chatKeysByProject[projectID], filtered by

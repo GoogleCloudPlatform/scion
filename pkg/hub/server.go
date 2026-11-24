@@ -3080,6 +3080,10 @@ type Server struct {
 	// sweeper (ptone/scion#4424) so CleanupResources can join it.
 	threadGroupMigration threadGroupMigrationRuntime
 
+	// decisionIndexer tracks the background decision settled/facet indexer
+	// (ptone/scion#8082) so CleanupBackgroundResources can join it.
+	decisionIndexer decisionIndexerRuntime
+
 	// messageStarUpkeep is the starred-message upkeep loop
 	// (chat_star_upkeep.go), joined by CleanupResources.
 	messageStarUpkeep messageStarUpkeepRuntime
@@ -7636,6 +7640,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
 	s.startThreadGroupMigrationSweeper(ctx)
 
+	// Start the background decision settled/facet indexer (ptone/scion#8082).
+	// Runs once at boot (outside Migrate) and periodically thereafter; exits
+	// when ctx is cancelled.
+	s.startDecisionIndexer(ctx)
+
 	// Start notification dispatcher (uses the current event publisher).
 	// The dispatcher is resolved lazily so it works even if SetDispatcher
 	// is called after Start().
@@ -7898,6 +7907,9 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Wait for a thread group migration pass in progress; the cancelled
 		// ctx above makes its store calls return.
 		s.stopThreadGroupMigrationSweeper()
+
+		// Stop the background decision indexer and wait for any page in progress.
+		s.stopDecisionIndexer()
 
 		// Likewise for a starred-message upkeep pass (bounded at 5 s).
 		s.stopMessageStarUpkeep()

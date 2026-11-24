@@ -140,6 +140,11 @@ func IntroLength(v int) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldIntroLength, v))
 }
 
+// Settled applies equality check predicate on the "settled" field. It's identical to SettledEQ.
+func Settled(v bool) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldSettled, v))
+}
+
 // ReplacedByID applies equality check predicate on the "replaced_by_id" field. It's identical to ReplacedByIDEQ.
 func ReplacedByID(v uuid.UUID) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldReplacedByID, v))
@@ -1148,6 +1153,16 @@ func StatusIn(vs ...Status) predicate.Decision {
 // StatusNotIn applies the NotIn predicate on the "status" field.
 func StatusNotIn(vs ...Status) predicate.Decision {
 	return predicate.Decision(sql.FieldNotIn(FieldStatus, vs...))
+}
+
+// SettledEQ applies the EQ predicate on the "settled" field.
+func SettledEQ(v bool) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldSettled, v))
+}
+
+// SettledNEQ applies the NEQ predicate on the "settled" field.
+func SettledNEQ(v bool) predicate.Decision {
+	return predicate.Decision(sql.FieldNEQ(FieldSettled, v))
 }
 
 // ReplacedByIDEQ applies the EQ predicate on the "replaced_by_id" field.

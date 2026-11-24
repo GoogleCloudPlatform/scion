@@ -1265,8 +1265,12 @@ func init() {
 	decision.DefaultIntroLength = decisionDescIntroLength.Default.(int)
 	// decision.IntroLengthValidator is a validator for the "intro_length" field. It is called by the builders before save.
 	decision.IntroLengthValidator = decisionDescIntroLength.Validators[0].(func(int) error)
+	// decisionDescSettled is the schema descriptor for settled field.
+	decisionDescSettled := decisionFields[21].Descriptor()
+	// decision.DefaultSettled holds the default value on creation for the settled field.
+	decision.DefaultSettled = decisionDescSettled.Default.(bool)
 	// decisionDescCreatedAt is the schema descriptor for created_at field.
-	decisionDescCreatedAt := decisionFields[22].Descriptor()
+	decisionDescCreatedAt := decisionFields[23].Descriptor()
 	// decision.DefaultCreatedAt holds the default value on creation for the created_at field.
 	decision.DefaultCreatedAt = decisionDescCreatedAt.Default.(func() time.Time)
 	// decisionDescID is the schema descriptor for id field.

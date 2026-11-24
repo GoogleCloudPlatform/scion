@@ -55,6 +55,8 @@ const (
 	FieldIntroLength = "intro_length"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
+	// FieldSettled holds the string denoting the settled field in the database.
+	FieldSettled = "settled"
 	// FieldReplacedByID holds the string denoting the replaced_by_id field in the database.
 	FieldReplacedByID = "replaced_by_id"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
@@ -96,6 +98,7 @@ var Columns = []string{
 	FieldOtherPlaceholder,
 	FieldIntroLength,
 	FieldStatus,
+	FieldSettled,
 	FieldReplacedByID,
 	FieldCreatedAt,
 	FieldDecidedAt,
@@ -138,6 +141,8 @@ var (
 	DefaultIntroLength int
 	// IntroLengthValidator is a validator for the "intro_length" field. It is called by the builders before save.
 	IntroLengthValidator func(int) error
+	// DefaultSettled holds the default value on creation for the "settled" field.
+	DefaultSettled bool
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -297,6 +302,11 @@ func ByIntroLength(opts ...sql.OrderTermOption) OrderOption {
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
+}
+
+// BySettled orders the results by the settled field.
+func BySettled(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSettled, opts...).ToFunc()
 }
 
 // ByReplacedByID orders the results by the replaced_by_id field.
