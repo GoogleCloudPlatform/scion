@@ -165,6 +165,12 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 	assert.NotNil(t, sessResp.Categories[InboxCategoryWaiting].AgentIDs)
 	assert.Empty(t, sessResp.Categories[InboxCategoryWaiting].AgentIDs)
 
+	chatCat := sessResp.Categories[InboxCategoryChat]
+	assert.Equal(t, InboxStateOK, chatCat.State)
+	assert.Equal(t, 0, chatCat.Count)
+	assert.Empty(t, chatCat.Previews)
+	assert.Equal(t, map[string]int{"dms": 0, "mentions": 0, "unreadConversations": 0}, chatCat.Breakdown)
+
 	// Verify raw JSON wire shape: waiting always emits "agentIds": [] when state=="ok"
 	// and count==0, while other categories omit "agentIds".
 	var rawResp struct {
@@ -178,7 +184,7 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 		_, hasAgentIDs := rawResp.Categories[otherKey]["agentIds"]
 		assert.False(t, hasAgentIDs, "category %s must omit agentIds", otherKey)
 	}
-	for _, disabledKey := range []string{InboxCategoryDecisions, InboxCategoryReviews, InboxCategoryChat} {
+	for _, disabledKey := range []string{InboxCategoryDecisions, InboxCategoryReviews} {
 		cat := sessResp.Categories[disabledKey]
 		assert.Equal(t, InboxStateDisabled, cat.State, "category %s", disabledKey)
 		assert.Equal(t, 0, cat.Count, "category %s", disabledKey)

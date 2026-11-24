@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -79,25 +80,62 @@ func (s *Server) handleChatUnreadCount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+type chatUnreadThread struct {
+	topic   WebChatTopic
+	project *store.Project
+}
+
+type chatUnreadDM struct {
+	dm            WebChatDM
+	lastMessageAt time.Time
+	peerAgent     *store.Agent
+}
+
+type chatUnreadDetail struct {
+	counts        chatUnreadCountResponse
+	unreadThreads []chatUnreadThread
+	unreadDMs     []chatUnreadDM
+	visibleSpaces map[string]*store.Project
+	storeNil      bool
+}
+
 // chatUnreadCount computes the unread conversation count for userID, with
 // identity deciding project read access.
 func (s *Server) chatUnreadCount(ctx context.Context, identity Identity, userID string) (chatUnreadCountResponse, error) {
-	var resp chatUnreadCountResponse
+	detail, err := s.chatUnreadDetail(ctx, identity, userID, chatToken(ctx))
+	if err != nil {
+		return chatUnreadCountResponse{}, err
+	}
+	return detail.counts, nil
+}
+
+// chatUnreadDetail computes the unread conversation counts along with the
+// unread threads and DMs that contributed to them. Both /api/v1/chat/unread-count
+// and the inbox summary chat category use this function so their counts and
+// token scoping always agree.
+func (s *Server) chatUnreadDetail(ctx context.Context, identity Identity, userID string, token *ScopedUserIdentity) (chatUnreadDetail, error) {
+	var detail chatUnreadDetail
 
 	s.mu.RLock()
 	wcs := s.webChatStore
 	s.mu.RUnlock()
 	if wcs == nil {
-		return resp, nil
+		detail.storeNil = true
+		return detail, nil
 	}
 
 	spaces, err := s.chatVisibleSpaces(ctx, identity)
 	if err != nil {
-		return resp, err
+		return detail, err
 	}
+	detail.visibleSpaces = make(map[string]*store.Project, len(spaces))
+	for _, p := range spaces {
+		detail.visibleSpaces[p.ID] = p
+	}
+
 	members, err := s.chatMemberProjectIDs(ctx, userID)
 	if err != nil {
-		return resp, fmt.Errorf("member projects: %w", err)
+		return detail, fmt.Errorf("member projects: %w", err)
 	}
 	// Only member spaces count toward the badge, so only their topics are
 	// read: a non-member space would load its topics for a zero count.
@@ -107,29 +145,36 @@ func (s *Server) chatUnreadCount(ctx context.Context, identity Identity, userID 
 			memberSpaces = append(memberSpaces, p)
 		}
 	}
-	rollups, err := chatSpaceRollupsStrict(ctx, wcs, userID, memberSpaces, members, s.chatSpacesBatch)
+	rollups, err := chatSpaceRollupsStrictWithUnread(ctx, wcs, userID, memberSpaces, members, s.chatSpacesBatch)
 	if err != nil {
-		return resp, fmt.Errorf("space rollups: %w", err)
+		return detail, fmt.Errorf("space rollups: %w", err)
 	}
-	for _, ru := range rollups {
-		resp.Threads += ru.unreadCount
+	for _, p := range memberSpaces {
+		ru := rollups[p.ID]
+		detail.counts.Threads += ru.unreadCount
+		for _, t := range ru.unreadTopics {
+			detail.unreadThreads = append(detail.unreadThreads, chatUnreadThread{
+				topic:   t,
+				project: p,
+			})
+		}
 	}
 
 	dms, err := wcs.ListDMs(ctx, userID)
 	if err != nil {
-		return resp, fmt.Errorf("list DMs: %w", err)
+		return detail, fmt.Errorf("list DMs: %w", err)
 	}
 	// A DM with a deleted agent is not counted (the rail does not list it
 	// as unread either); /chat/dms flags it as peerDeleted by the same rule.
-	deletedPeers, err := s.chatDeletedAgentPeers(ctx, dms)
+	deletedPeers, peerAgents, err := s.chatDMDeletedAgentPeers(ctx, dms)
 	if err != nil {
-		return resp, err
+		return detail, err
 	}
-	token := chatToken(ctx)
 	var tokenCheck *selfScopeCheck
 	if token != nil {
 		tokenCheck = s.newSelfScopeCheck(ctx, token, permInboxRead)
 	}
+	visibleDMs := make([]WebChatDM, 0, len(dms))
 	dmKeys := make([]string, 0, len(dms))
 	for _, dm := range dms {
 		if dm.PeerKind == "agent" && deletedPeers[dm.PeerID] {
@@ -138,6 +183,7 @@ func (s *Server) chatUnreadCount(ctx context.Context, identity Identity, userID 
 		if token != nil && !s.chatTokenDMVisible(ctx, token, tokenCheck, dm.ConversationKey) {
 			continue
 		}
+		visibleDMs = append(visibleDMs, dm)
 		dmKeys = append(dmKeys, dm.ConversationKey)
 	}
 	// The DM list derives unread from the latest message, not from the
@@ -146,25 +192,39 @@ func (s *Server) chatUnreadCount(ctx context.Context, identity Identity, userID 
 	// path does, rather than reporting every DM as read.
 	dmLast, err := s.nativeDMLastMessagesStrict(ctx, dmKeys)
 	if err != nil {
-		return resp, fmt.Errorf("DM last messages: %w", err)
+		return detail, fmt.Errorf("DM last messages: %w", err)
 	}
 
 	readMap, err := chatReadStatesBatched(ctx, wcs, userID, dmKeys, s.chatSpacesBatch.withDefaults().readStates)
 	if err != nil {
-		return resp, err
+		return detail, err
 	}
 
-	for _, key := range dmKeys {
+	for _, dm := range visibleDMs {
 		lastID := ""
-		if msg := dmLast[key]; msg != nil {
+		var lastAt time.Time
+		if msg := dmLast[dm.ConversationKey]; msg != nil {
 			lastID = msg.ID
+			lastAt = msg.CreatedAt
 		}
-		if chatConversationUnread(lastID, readMap, key) {
-			resp.DMs++
+		if lastAt.IsZero() {
+			lastAt = dm.LastActivityAt
+		}
+		if chatConversationUnread(lastID, readMap, dm.ConversationKey) {
+			detail.counts.DMs++
+			var agent *store.Agent
+			if dm.PeerKind == "agent" {
+				agent = peerAgents[dm.PeerID]
+			}
+			detail.unreadDMs = append(detail.unreadDMs, chatUnreadDM{
+				dm:            dm,
+				lastMessageAt: lastAt,
+				peerAgent:     agent,
+			})
 		}
 	}
-	resp.Conversations = resp.Threads + resp.DMs
-	return resp, nil
+	detail.counts.Conversations = detail.counts.Threads + detail.counts.DMs
+	return detail, nil
 }
 
 // chatConversationUnread reports whether a conversation whose latest message

@@ -309,7 +309,7 @@ func (s *Server) inboxSources() []inboxSourceEntry {
 		{key: InboxCategoryApprovals, run: s.inboxApprovalsCategory},
 		{key: InboxCategoryWaiting, run: s.inboxWaitingCategory},
 		{key: InboxCategoryReviews, run: inboxDisabledCategory("/artifacts?review_pending=1&owner=me")},
-		{key: InboxCategoryChat, run: inboxDisabledCategory("/chat?filter=unread")},
+		{key: InboxCategoryChat, run: s.inboxChatCategory},
 		{key: InboxCategoryDecisions, run: s.inboxDecisionsCategory},
 	}
 }
