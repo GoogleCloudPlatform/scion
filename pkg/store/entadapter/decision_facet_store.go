@@ -63,10 +63,12 @@ func facetDeltaNewer(ts time.Time, name, email string, curTS time.Time, curName,
 	return email > curEmail
 }
 
-// applyDecisionFacetDeltas applies a batch of positive (+k) and negative (-k)
-// contributions to decision_facet_entries inside the caller's transaction.
-// Keys are processed in deterministic sorted order to avoid Postgres ON CONFLICT
-// lock-order deadlocks across concurrent writers/indexers.
+// applyDecisionFacetDeltas merges positive (+k) and negative (-k) contributions
+// per key into a single net signed delta and applies them in one pass in
+// deterministic sorted (project_id, chat_key, kind, actor_id) order inside the
+// caller's transaction. Applying all signed operations in a single sorted pass
+// prevents Postgres row-lock-order deadlocks (40P01) between concurrent
+// multi-key writers or indexers (e.g., crossed interpreted-sibling supersession).
 func applyDecisionFacetDeltas(ctx context.Context, client *ent.Client, deltas []facetEntryDelta) error {
 	if len(deltas) == 0 {
 		return nil
@@ -74,8 +76,8 @@ func applyDecisionFacetDeltas(ctx context.Context, client *ent.Client, deltas []
 
 	type agg struct {
 		key      facetEntryKey
-		posCount int
-		negCount int
+		netDelta int
+		hasPos   bool
 		name     string
 		email    string
 		latestAt time.Time
@@ -97,16 +99,15 @@ func applyDecisionFacetDeltas(ctx context.Context, client *ent.Client, deltas []
 			a = &agg{key: k}
 			byKey[k] = a
 		}
+		a.netDelta += d.Delta
 		if d.Delta > 0 {
 			ts := d.LatestAt.UTC().Truncate(time.Microsecond)
-			if a.posCount == 0 || facetDeltaNewer(ts, d.Name, d.Email, a.latestAt, a.name, a.email) {
+			if !a.hasPos || facetDeltaNewer(ts, d.Name, d.Email, a.latestAt, a.name, a.email) {
 				a.name = d.Name
 				a.email = d.Email
 				a.latestAt = ts
 			}
-			a.posCount += d.Delta
-		} else {
-			a.negCount += -d.Delta
+			a.hasPos = true
 		}
 	}
 	if len(byKey) == 0 {
@@ -115,7 +116,13 @@ func applyDecisionFacetDeltas(ctx context.Context, client *ent.Client, deltas []
 
 	ordered := make([]*agg, 0, len(byKey))
 	for _, a := range byKey {
+		if a.netDelta == 0 && !a.hasPos {
+			continue
+		}
 		ordered = append(ordered, a)
+	}
+	if len(ordered) == 0 {
+		return nil
 	}
 	sort.Slice(ordered, func(i, j int) bool {
 		ki, kj := ordered[i].key, ordered[j].key
@@ -131,29 +138,12 @@ func applyDecisionFacetDeltas(ctx context.Context, client *ent.Client, deltas []
 		return ki.ActorID < kj.ActorID
 	})
 
-	// 1. Positive upserts (batched via CreateBulk + ON CONFLICT DO UPDATE).
 	var posCreates []*ent.DecisionFacetEntryCreate
-	for _, a := range ordered {
-		if a.posCount <= 0 {
-			continue
+	flushPos := func() error {
+		if len(posCreates) == 0 {
+			return nil
 		}
-		posCreates = append(posCreates, client.DecisionFacetEntry.Create().
-			SetProjectID(a.key.ProjectID).
-			SetChatKey(a.key.ChatKey).
-			SetKind(a.key.Kind).
-			SetActorID(a.key.ActorID).
-			SetName(a.name).
-			SetEmail(a.email).
-			SetLatestAt(a.latestAt).
-			SetRefCount(a.posCount),
-		)
-	}
-	for start := 0; start < len(posCreates); start += facetUpsertChunkSize {
-		end := start + facetUpsertChunkSize
-		if end > len(posCreates) {
-			end = len(posCreates)
-		}
-		err := client.DecisionFacetEntry.CreateBulk(posCreates[start:end]...).
+		err := client.DecisionFacetEntry.CreateBulk(posCreates...).
 			OnConflictColumns(
 				decisionfacetentry.FieldProjectID,
 				decisionfacetentry.FieldChatKey,
@@ -176,41 +166,99 @@ func applyDecisionFacetDeltas(ctx context.Context, client *ent.Client, deltas []
 				}))
 			}).
 			Exec(ctx)
-		if err != nil {
-			return mapError(err)
-		}
+		posCreates = posCreates[:0]
+		return mapError(err)
 	}
 
-	// 2. Negative deltas (superseded interpreted siblings), clamped at 0 so a
-	// concurrently deleted summary row is a safe no-op and ref_count stays >= 0.
 	drv := client.Driver()
 	d := entsql.Dialect(drv.Dialect())
+
 	for _, a := range ordered {
-		if a.negCount <= 0 {
+		if a.netDelta > 0 {
+			posCreates = append(posCreates, client.DecisionFacetEntry.Create().
+				SetProjectID(a.key.ProjectID).
+				SetChatKey(a.key.ChatKey).
+				SetKind(a.key.Kind).
+				SetActorID(a.key.ActorID).
+				SetName(a.name).
+				SetEmail(a.email).
+				SetLatestAt(a.latestAt).
+				SetRefCount(a.netDelta),
+			)
+			if len(posCreates) >= facetUpsertChunkSize {
+				if err := flushPos(); err != nil {
+					return err
+				}
+			}
 			continue
 		}
-		dec := a.negCount
-		ub := d.Update(decisionfacetentry.Table).
-			Set(decisionfacetentry.FieldRefCount, entsql.ExprFunc(func(b *entsql.Builder) {
+
+		// Flush any preceding positive upserts before executing this key's
+		// UPDATE so row locks are acquired strictly in sorted key order.
+		if err := flushPos(); err != nil {
+			return err
+		}
+
+		ub := d.Update(decisionfacetentry.Table)
+		if a.netDelta < 0 {
+			dec := -a.netDelta
+			ub.Set(decisionfacetentry.FieldRefCount, entsql.ExprFunc(func(b *entsql.Builder) {
 				b.WriteString("CASE WHEN ref_count > ")
 				b.Arg(dec)
 				b.WriteString(" THEN ref_count - ")
 				b.Arg(dec)
 				b.WriteString(" ELSE 0 END")
-			})).
-			Where(entsql.And(
-				entsql.EQ(decisionfacetentry.FieldProjectID, a.key.ProjectID),
-				entsql.EQ(decisionfacetentry.FieldChatKey, a.key.ChatKey),
-				entsql.EQ(decisionfacetentry.FieldKind, string(a.key.Kind)),
-				entsql.EQ(decisionfacetentry.FieldActorID, a.key.ActorID),
-			))
+			}))
+		}
+		if a.hasPos {
+			ts, name, email := a.latestAt, a.name, a.email
+			ub.Set(decisionfacetentry.FieldName, entsql.ExprFunc(func(b *entsql.Builder) {
+				b.WriteString("CASE WHEN ")
+				b.Arg(ts)
+				b.WriteString(" > latest_at OR (")
+				b.Arg(ts)
+				b.WriteString(" = latest_at AND ")
+				b.Arg(name)
+				b.WriteString(" > name) THEN ")
+				b.Arg(name)
+				b.WriteString(" ELSE name END")
+			}))
+			ub.Set(decisionfacetentry.FieldEmail, entsql.ExprFunc(func(b *entsql.Builder) {
+				b.WriteString("CASE WHEN ")
+				b.Arg(ts)
+				b.WriteString(" > latest_at OR (")
+				b.Arg(ts)
+				b.WriteString(" = latest_at AND (")
+				b.Arg(name)
+				b.WriteString(" > name OR (")
+				b.Arg(name)
+				b.WriteString(" = name AND ")
+				b.Arg(email)
+				b.WriteString(" > email))) THEN ")
+				b.Arg(email)
+				b.WriteString(" ELSE email END")
+			}))
+			ub.Set(decisionfacetentry.FieldLatestAt, entsql.ExprFunc(func(b *entsql.Builder) {
+				b.WriteString("CASE WHEN ")
+				b.Arg(ts)
+				b.WriteString(" > latest_at THEN ")
+				b.Arg(ts)
+				b.WriteString(" ELSE latest_at END")
+			}))
+		}
+		ub.Where(entsql.And(
+			entsql.EQ(decisionfacetentry.FieldProjectID, a.key.ProjectID),
+			entsql.EQ(decisionfacetentry.FieldChatKey, a.key.ChatKey),
+			entsql.EQ(decisionfacetentry.FieldKind, string(a.key.Kind)),
+			entsql.EQ(decisionfacetentry.FieldActorID, a.key.ActorID),
+		))
 		query, args := ub.Query()
 		if err := drv.Exec(ctx, query, args, nil); err != nil {
 			return mapError(err)
 		}
 	}
 
-	return nil
+	return flushPos()
 }
 
 // supersededInterpretedFacetDelta returns a -1 answerer delta when a direct

@@ -1238,3 +1238,219 @@ func TestDecisionFacets_QueryPlans(t *testing.T) {
 		})
 	})
 }
+
+// TestDecisionFacets_ConcurrentCrossedInterpretedSiblingsNoDeadlock verifies
+// that concurrent multi-key writers whose positive (+k) and negative (-k)
+// deltas cross the same two decision_facet_entries rows (U1 < U2: tx1 = U1:+1,
+// U2:-1; tx2 = U2:+1, U1:-1) never deadlock (Postgres 40P01) and leave
+// decision_facet_entries exact vs SQL recompute.
+func TestDecisionFacets_ConcurrentCrossedInterpretedSiblingsNoDeadlock(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+
+	projID := uuid.NewString()
+	projUUID := uuid.MustParse(projID)
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: projID, Name: "crossed-proj", Slug: "crossed-proj", Created: time.Now().UTC(),
+	}))
+	// Deterministic sorted actor IDs so u1 < u2 in decision_facet_entries.
+	u1 := "00000000-0000-4000-8000-000000000001"
+	u2 := "00000000-0000-4000-8000-000000000002"
+	for _, u := range []struct{ id, email, name string }{
+		{u1, "u1-crossed@test.com", "User One"},
+		{u2, "u2-crossed@test.com", "User Two"},
+	} {
+		require.NoError(t, cs.CreateUser(ctx, &store.User{
+			ID: u.id, Email: u.email, DisplayName: u.name,
+			Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC(),
+		}))
+	}
+
+	t.Run("crossed_signed_deltas_no_deadlock", func(t *testing.T) {
+		chatKey := "topic-crossed-direct"
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		// Seed initial positive rows for u1 and u2 so both rows exist and have headroom.
+		require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+			return applyDecisionFacetDeltas(ctx, tx.(*CompositeStore).client, []facetEntryDelta{
+				{ProjectID: projUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer, ActorID: u1, Name: "User One", Email: "u1-crossed@test.com", LatestAt: now, Delta: 100},
+				{ProjectID: projUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer, ActorID: u2, Name: "User Two", Email: "u2-crossed@test.com", LatestAt: now, Delta: 100},
+			})
+		}))
+
+		const rounds = 40
+		for r := 0; r < rounds; r++ {
+			ts := now.Add(time.Duration(r+1) * time.Second)
+			start := make(chan struct{})
+			errs := make(chan error, 2)
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				errs <- cs.WithTx(ctx, func(tx store.Store) error {
+					return applyDecisionFacetDeltas(ctx, tx.(*CompositeStore).client, []facetEntryDelta{
+						{ProjectID: projUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer, ActorID: u1, Name: "User One", Email: "u1-crossed@test.com", LatestAt: ts, Delta: +1},
+						{ProjectID: projUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer, ActorID: u2, Delta: -1},
+					})
+				})
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				errs <- cs.WithTx(ctx, func(tx store.Store) error {
+					return applyDecisionFacetDeltas(ctx, tx.(*CompositeStore).client, []facetEntryDelta{
+						{ProjectID: projUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer, ActorID: u2, Name: "User Two", Email: "u2-crossed@test.com", LatestAt: ts, Delta: +1},
+						{ProjectID: projUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer, ActorID: u1, Delta: -1},
+					})
+				})
+			}()
+			close(start)
+			wg.Wait()
+			close(errs)
+			for e := range errs {
+				require.NoError(t, e, "round %d: crossed +1/-1 facet deltas must not deadlock (40P01)", r)
+			}
+		}
+
+		rows, err := cs.client.DecisionFacetEntry.Query().
+			Where(
+				decisionfacetentry.ProjectIDEQ(projUUID),
+				decisionfacetentry.ChatKeyEQ(chatKey),
+				decisionfacetentry.KindEQ(decisionfacetentry.KindAnswerer),
+			).
+			All(ctx)
+		require.NoError(t, err)
+		require.Len(t, rows, 2)
+		for _, row := range rows {
+			assert.Equal(t, 100, row.RefCount, "balanced +1/-1 rounds must preserve ref_count for %s", row.ActorID)
+		}
+		// Clean up synthetic rows before the recompute subtest.
+		_, err = cs.client.DecisionFacetEntry.Delete().
+			Where(decisionfacetentry.ChatKeyEQ(chatKey)).
+			Exec(ctx)
+		require.NoError(t, err)
+	})
+
+	t.Run("concurrent_answer_sets_with_interpreted_siblings", func(t *testing.T) {
+		botID := uuid.NewString()
+		chatKey := "topic-crossed-sets"
+		choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
+
+		const rounds = 15
+		for r := 0; r < rounds; r++ {
+			msgA := uuid.NewString()
+			pA, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+				Message: &store.Message{
+					ID: msgA, ProjectID: projID, Sender: "agent:bot", SenderID: botID,
+					Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+				},
+				AskerAgentID: botID, AskerAgentName: "bot",
+				Decisions: []messages.Decision{
+					{Key: fmt.Sprintf("r%d-a1", r), Question: "A1?", Choices: choices},
+					{Key: fmt.Sprintf("r%d-a2", r), Question: "A2?", Choices: choices},
+				},
+			})
+			require.NoError(t, err)
+			msgB := uuid.NewString()
+			pB, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+				Message: &store.Message{
+					ID: msgB, ProjectID: projID, Sender: "agent:bot", SenderID: botID,
+					Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+				},
+				AskerAgentID: botID, AskerAgentName: "bot",
+				Decisions: []messages.Decision{
+					{Key: fmt.Sprintf("r%d-b1", r), Question: "B1?", Choices: choices},
+					{Key: fmt.Sprintf("r%d-b2", r), Question: "B2?", Choices: choices},
+				},
+			})
+			require.NoError(t, err)
+
+			// Seed interpreted answers (u1 on pA[0], u2 on pB[0]; pA[1] and pB[1] stay pending).
+			_, err = cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+				InterpretedByAgentID: botID,
+				SourceMessageID:      uuid.NewString(),
+				AnsweredByUserID:     u1,
+				AnsweredByName:       "User One",
+				AnsweredByEmail:      "u1-crossed@test.com",
+				Surface:              store.DecisionSurfaceNative,
+				Answers: []store.InterpretedAnswerPair{
+					{DecisionRowID: pA.Decisions[0].RowID, ChoiceID: "yes"},
+				},
+				ResponseMessage: &store.Message{
+					ID: uuid.NewString(), ProjectID: projID, Sender: "agent:bot", SenderID: botID,
+					Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+				},
+			})
+			require.NoError(t, err)
+			_, err = cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+				InterpretedByAgentID: botID,
+				SourceMessageID:      uuid.NewString(),
+				AnsweredByUserID:     u2,
+				AnsweredByName:       "User Two",
+				AnsweredByEmail:      "u2-crossed@test.com",
+				Surface:              store.DecisionSurfaceNative,
+				Answers: []store.InterpretedAnswerPair{
+					{DecisionRowID: pB.Decisions[0].RowID, ChoiceID: "yes"},
+				},
+				ResponseMessage: &store.Message{
+					ID: uuid.NewString(), ProjectID: projID, Sender: "agent:bot", SenderID: botID,
+					Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+				},
+			})
+			require.NoError(t, err)
+
+			start := make(chan struct{})
+			errs := make(chan error, 2)
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, err := cs.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
+					MessageID:        msgA,
+					AnsweredByUserID: u1,
+					AnsweredByName:   "User One Updated",
+					AnsweredByEmail:  "u1-crossed@test.com",
+					Surface:          store.DecisionSurfaceNative,
+					Answers: []store.AnswerSetItem{
+						{DecisionRowID: pA.Decisions[0].RowID, ChoiceID: "no", Outcome: store.DecisionOutcomeOverride},
+						{DecisionRowID: pA.Decisions[1].RowID, ChoiceID: "no", Outcome: store.DecisionOutcomeAnswer},
+					},
+					ResponseMessage: &store.Message{
+						ID: uuid.NewString(), ProjectID: projID, Sender: "user:" + u1, SenderID: u1,
+						Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+					},
+				})
+				errs <- err
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				_, err := cs.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
+					MessageID:        msgB,
+					AnsweredByUserID: u2,
+					AnsweredByName:   "User Two Updated",
+					AnsweredByEmail:  "u2-crossed@test.com",
+					Surface:          store.DecisionSurfaceNative,
+					Answers: []store.AnswerSetItem{
+						{DecisionRowID: pB.Decisions[0].RowID, ChoiceID: "no", Outcome: store.DecisionOutcomeOverride},
+						{DecisionRowID: pB.Decisions[1].RowID, ChoiceID: "no", Outcome: store.DecisionOutcomeAnswer},
+					},
+					ResponseMessage: &store.Message{
+						ID: uuid.NewString(), ProjectID: projID, Sender: "user:" + u2, SenderID: u2,
+						Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+					},
+				})
+				errs <- err
+			}()
+			close(start)
+			wg.Wait()
+			close(errs)
+			for e := range errs {
+				require.NoError(t, e, "round %d: concurrent RecordAnswerSet with interpreted siblings must succeed", r)
+			}
+		}
+
+		assertFacetSummaryMatchesRecompute(t, ctx, cs.client)
+	})
+}
