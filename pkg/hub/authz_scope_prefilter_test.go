@@ -109,7 +109,7 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 	require.NoError(t, err)
 	projViewerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
 	require.NoError(t, err)
-	projVisitorRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
+	projAdminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 
 	newProj := func(slug string) *store.Project {
@@ -124,7 +124,7 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 	}
 	pMember := newProj("p-member")
 	pViewer := newProj("p-viewer")
-	pVisitor := newProj("p-visitor")
+	pAdmin := newProj("p-admin")
 	pDirectGroup := newProj("p-direct-group")
 	pNestedGroup := newProj("p-nested-group")
 	pExpired := newProj("p-expired")
@@ -135,7 +135,7 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 	pNoGrant := newProj("p-no-grant")
 
 	allProjects := []*store.Project{
-		pMember, pViewer, pVisitor, pDirectGroup, pNestedGroup,
+		pMember, pViewer, pAdmin, pDirectGroup, pNestedGroup,
 		pExpired, pFuture, pConstrainedReadOnly, pGroupConstrainedRO,
 		pGroupConstrainedDeny, pNoGrant,
 	}
@@ -192,7 +192,7 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 		}{
 			{pMember.ID, projMemberRD.ID, nil, nil},
 			{pViewer.ID, projViewerRD.ID, nil, nil},
-			{pVisitor.ID, projVisitorRD.ID, nil, nil},
+			{pAdmin.ID, projAdminRD.ID, nil, nil},
 			{pExpired.ID, projMemberRD.ID, nil, &past},
 			{pFuture.ID, projMemberRD.ID, &future, nil},
 			{pConstrainedReadOnly.ID, projMemberRD.ID, nil, nil},
@@ -388,7 +388,7 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 		caps := srv.authzService.ComputeCapabilitiesForActions(memoCtx, humanIdent, allResources, []Action{ActionRead, ActionChatPost})
 		assert.Equal(t, []string{"read", "chat_post"}, caps[0].Actions, "pMember")
 		assert.Equal(t, []string{"read"}, caps[1].Actions, "pViewer")
-		assert.Equal(t, []string{"read"}, caps[2].Actions, "pVisitor")
+		assert.Equal(t, []string{"read", "chat_post"}, caps[2].Actions, "pAdmin")
 		assert.Equal(t, []string{"read", "chat_post"}, caps[3].Actions, "pDirectGroup")
 		assert.Equal(t, []string{"read", "chat_post"}, caps[4].Actions, "pNestedGroup")
 		assert.Empty(t, caps[5].Actions, "pExpired")
