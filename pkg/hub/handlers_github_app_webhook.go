@@ -852,10 +852,10 @@ func (s *Server) pauseGitHubTriggersForRemovedRepo(ctx context.Context, project 
 		store.TriggerSubjectClaimReleaseReasonAssociationLost,
 		timeNow().UTC(),
 	); err != nil {
-		slog.Warn("Failed to release GitHub trigger subject claims after repo removal",
+		slog.WarnContext(ctx, "Failed to release GitHub trigger subject claims after repo removal",
 			"project_id", project.ID, "installation_id", installationID, "error", err)
 	} else if releasedClaims > 0 {
-		slog.Info("Released GitHub trigger subject claims after repository removal from installation",
+		slog.InfoContext(ctx, "Released GitHub trigger subject claims after repository removal from installation",
 			"project_id", project.ID,
 			"installation_id", installationID,
 			"repo", strings.ToLower(strings.TrimSpace(ownerRepo)),
