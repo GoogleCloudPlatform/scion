@@ -746,3 +746,178 @@ func TestProjectSystemOneInstances_TestAdminDenied(t *testing.T) {
 	recDel := doRequestWithToken(t, srv, humanTok, http.MethodDelete, basePath+"/ta-inst", nil)
 	require.Equal(t, http.StatusOK, recDel.Code, recDel.Body.String())
 }
+
+func TestProjectSystemOneInstances_ViewAsMemberRefusesNonProjectOwnerHubAdmin(t *testing.T) {
+	ctx := context.Background()
+	srv, s, _ := tsaServer(t)
+
+	// Enable both hub.system_one and hub.view_as_member.
+	fakeSettings := newFakeHubSettingStore()
+	fakeSettings.seed("experiments", json.RawMessage(`{"overrides":{"hub.system_one":true,"hub.view_as_member":true}}`))
+	ops := NewOperationalSettings(fakeSettings, emptyKoanf(), emptyKoanf())
+	_, err := ops.Refresh(ctx)
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+
+	// Wire counting secret backend and loopback TLS provider to verify zero I/O on denied probe.
+	countingSecrets := &s1CountingSecretBackend{SecretBackend: srv.secretBackend}
+	srv.secretBackend = countingSecrets
+	var providerCalls atomic.Int32
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models": [{"name": "jev-1.14.0"}]}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+	srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+
+	// Principals:
+	// - otherOwner: project owner (non-hub-admin)
+	// - plainMember: project member (non-hub-admin)
+	// - hubAdmin / superAdmin: hub/super admins who are ONLY project-member on proj (not owner/admin)
+	// - hubAdminProjAdmin: hub admin who is ALSO project-admin on proj (permitted under effective identity)
+	otherOwner := taUser(t, s, "s1-vam-owner", store.SystemRoleHubMember)
+	plainMember := taUser(t, s, "s1-vam-member", store.SystemRoleHubMember)
+	hubAdmin := taUser(t, s, "s1-vam-hubadmin", store.SystemRoleHubAdmin)
+	superAdmin := taUser(t, s, "s1-vam-superadmin", store.SystemRoleSuperAdmin)
+	hubAdminProjAdmin := taUser(t, s, "s1-vam-hubadmin-projadmin", store.SystemRoleHubAdmin)
+
+	proj := &store.Project{
+		ID:      uuid.NewString(),
+		Name:    "System One VAM Gate",
+		Slug:    "s1-vam-gate",
+		OwnerID: otherOwner.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	projMemberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	projAdminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	for _, u := range []*store.User{plainMember, hubAdmin, superAdmin} {
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			ID:               uuid.NewString(),
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      u.ID,
+			RoleDefinitionID: projMemberRD.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          proj.ID,
+		})
+		require.NoError(t, err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      hubAdminProjAdmin.ID,
+		RoleDefinitionID: projAdminRD.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       uuid.NewString(),
+		Name:     "vam-inst",
+		Adapter:  "typesafe",
+		Model:    "jev-1.14.0",
+		Endpoint: tlsSrv.URL,
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "sec-vam-inst"},
+		Enabled:  true,
+	}))
+
+	basePath := "/api/v1/projects/" + proj.ID + "/system-one/instances"
+	instList := []string{"vam-inst"}
+
+	mintWeb := func(u *store.User, vam bool) string {
+		t.Helper()
+		tok, _, err := srv.GetUserTokenService().MintAccessToken(UserTokenSubject{
+			UserID:       u.ID,
+			Email:        u.Email,
+			DisplayName:  u.DisplayName,
+			Role:         u.Role,
+			ClientType:   ClientTypeWeb,
+			ViewAsMember: vam,
+		})
+		require.NoError(t, err)
+		return tok
+	}
+
+	// (a) Clamped hub/super admin lacking project authority is REFUSED on allowlist mutate,
+	// (c) while ordinary mode (vam=false) admits them, and
+	// (d) denied probe by clamped admin makes 0 secret reads and 0 provider requests.
+	for name, u := range map[string]*store.User{
+		"hub_admin":   hubAdmin,
+		"super_admin": superAdmin,
+	} {
+		t.Run(name, func(t *testing.T) {
+			vamTok := mintWeb(u, true)
+			normalTok := mintWeb(u, false)
+
+			// (a) View-as-member ON: refused (403) on collection PUT, item PUT, and item DELETE.
+			recSetVAM := doRequestWithToken(t, srv, vamTok, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &instList})
+			assert.Equal(t, http.StatusForbidden, recSetVAM.Code, "VAM collection PUT: %s", recSetVAM.Body.String())
+
+			recAddVAM := doRequestWithToken(t, srv, vamTok, http.MethodPut, basePath+"/vam-inst", nil)
+			assert.Equal(t, http.StatusForbidden, recAddVAM.Code, "VAM item PUT: %s", recAddVAM.Body.String())
+
+			recDelVAM := doRequestWithToken(t, srv, vamTok, http.MethodDelete, basePath+"/vam-inst", nil)
+			assert.Equal(t, http.StatusForbidden, recDelVAM.Code, "VAM item DELETE: %s", recDelVAM.Body.String())
+
+			// (d) Denied probe (both hub-only and --project) by clamped admin makes 0 secret reads and 0 provider hits.
+			secretsBefore := countingSecrets.getCalls.Load()
+			callsBefore := providerCalls.Load()
+			recProbeHub := doRequestWithToken(t, srv, vamTok, http.MethodPost, systemOneAdminPath+"/vam-inst/probe", ProbeSystemOneInstanceRequest{
+				Models: true,
+			})
+			assert.Equal(t, http.StatusForbidden, recProbeHub.Code, "VAM hub probe: %s", recProbeHub.Body.String())
+			recProbeProj := doRequestWithToken(t, srv, vamTok, http.MethodPost, systemOneAdminPath+"/vam-inst/probe", ProbeSystemOneInstanceRequest{
+				Models:  true,
+				Project: proj.ID,
+			})
+			assert.Equal(t, http.StatusForbidden, recProbeProj.Code, "VAM project probe: %s", recProbeProj.Body.String())
+			assert.Equal(t, secretsBefore, countingSecrets.getCalls.Load(), "denied VAM probe must make 0 secret reads")
+			assert.Equal(t, callsBefore, providerCalls.Load(), "denied VAM probe must make 0 provider requests")
+
+			// (c) Ordinary mode (View-as-member OFF): hub/super admin admitted (200).
+			recAdd := doRequestWithToken(t, srv, normalTok, http.MethodPut, basePath+"/vam-inst", nil)
+			require.Equal(t, http.StatusOK, recAdd.Code, "normal item PUT: %s", recAdd.Body.String())
+
+			recSet := doRequestWithToken(t, srv, normalTok, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &instList})
+			require.Equal(t, http.StatusOK, recSet.Code, "normal collection PUT: %s", recSet.Body.String())
+
+			recDel := doRequestWithToken(t, srv, normalTok, http.MethodDelete, basePath+"/vam-inst", nil)
+			require.Equal(t, http.StatusOK, recDel.Code, "normal item DELETE: %s", recDel.Body.String())
+		})
+	}
+
+	// (b) Project owner/admin is PERMITTED under effective identity, including while in view-as-member.
+	t.Run("project_admin_permitted_in_vam", func(t *testing.T) {
+		vamProjAdminTok := mintWeb(hubAdminProjAdmin, true)
+
+		recAdd := doRequestWithToken(t, srv, vamProjAdminTok, http.MethodPut, basePath+"/vam-inst", nil)
+		require.Equal(t, http.StatusOK, recAdd.Code, "VAM project-admin item PUT: %s", recAdd.Body.String())
+
+		recSet := doRequestWithToken(t, srv, vamProjAdminTok, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &instList})
+		require.Equal(t, http.StatusOK, recSet.Code, "VAM project-admin collection PUT: %s", recSet.Body.String())
+
+		recDel := doRequestWithToken(t, srv, vamProjAdminTok, http.MethodDelete, basePath+"/vam-inst", nil)
+		require.Equal(t, http.StatusOK, recDel.Code, "VAM project-admin item DELETE: %s", recDel.Body.String())
+	})
+
+	// (c) Ordinary mode: plain project member (non-admin) remains REFUSED (403).
+	t.Run("ordinary_member_refused", func(t *testing.T) {
+		memberTok := mintWeb(plainMember, false)
+
+		recSet := doRequestWithToken(t, srv, memberTok, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &instList})
+		assert.Equal(t, http.StatusForbidden, recSet.Code, "member collection PUT: %s", recSet.Body.String())
+
+		recAdd := doRequestWithToken(t, srv, memberTok, http.MethodPut, basePath+"/vam-inst", nil)
+		assert.Equal(t, http.StatusForbidden, recAdd.Code, "member item PUT: %s", recAdd.Body.String())
+
+		recDel := doRequestWithToken(t, srv, memberTok, http.MethodDelete, basePath+"/vam-inst", nil)
+		assert.Equal(t, http.StatusForbidden, recDel.Code, "member item DELETE: %s", recDel.Body.String())
+	})
+}
