@@ -2083,4 +2083,74 @@ describe('scion-chat-secret-request', () => {
     };
     expect(sent.values).toEqual({ LF_IN_CRLF: 'AAA\r\nBBB\nL1\nL2' });
   });
+
+  it('clears the previous file value immediately when a newly selected file fails validation', async () => {
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'r-file', key: 'CERT_PEM', secretType: 'file' })],
+    });
+    const fileInput = el.shadowRoot!.querySelector(
+      'input[type="file"][data-file-input="CERT_PEM"]'
+    ) as HTMLInputElement;
+
+    // 1. Load valid file A
+    const validFile = new File(['valid-secret-content\nline2'], 'a.pem', { type: 'text/plain' });
+    Object.defineProperty(fileInput, 'files', { value: [validFile], configurable: true });
+    fileInput.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(false);
+
+    // 2. Select invalid file B (non-UTF-8 binary) -> previous value must be cleared
+    const invalidFile = new File([new Uint8Array([0xff, 0xfe, 0x80])], 'b.bin', {
+      type: 'application/octet-stream',
+    });
+    Object.defineProperty(fileInput, 'files', { value: [invalidFile], configurable: true });
+    fileInput.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
+    expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
+      'not valid UTF-8'
+    );
+  });
+
+  it('shows a friendly error and leaves no value when file.arrayBuffer() rejects', async () => {
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'r-file', key: 'UNREADABLE_FILE', secretType: 'file' })],
+    });
+    const fileInput = el.shadowRoot!.querySelector(
+      'input[type="file"][data-file-input="UNREADABLE_FILE"]'
+    ) as HTMLInputElement;
+
+    // Seed an existing value first to confirm it is also cleared on read failure
+    const input = el.shadowRoot!.querySelector(
+      'input[data-key="UNREADABLE_FILE"]'
+    ) as HTMLInputElement;
+    input.value = 'old-val';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(false);
+
+    // Select a File whose arrayBuffer() rejects
+    const badFile = new File(['placeholder'], 'unreadable.pem', { type: 'text/plain' });
+    badFile.arrayBuffer = (): Promise<ArrayBuffer> =>
+      Promise.reject(new DOMException('Permission denied', 'NotReadableError'));
+    Object.defineProperty(fileInput, 'files', { value: [badFile], configurable: true });
+    fileInput.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
+    expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent?.trim()).toBe(
+      'Could not read the file for UNREADABLE_FILE.'
+    );
+    expect(fileInput.value).toBe('');
+  });
 });

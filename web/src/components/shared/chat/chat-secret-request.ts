@@ -1030,6 +1030,20 @@ export class ScionChatSecretRequest extends LitElement {
     const file = input?.files?.[0];
     if (!file) return;
 
+    // Clear any previously entered/loaded value for this row immediately so a
+    // subsequent validation or read failure never leaves stale secret content
+    // behind to be submitted.
+    this.formValues.delete(row.rowId);
+    this.capturedRows.delete(row.rowId);
+    if (this.revealedRows.has(row.rowId)) {
+      const next = new Set(this.revealedRows);
+      next.delete(row.rowId);
+      this.revealedRows = next;
+    }
+    this.revealedLineEndings.delete(row.rowId);
+    this.pendingFulfillIdempotencyKey = '';
+    this.formRevision++;
+
     const gen = this.clearGeneration;
     const targetMsgId = this.messageId;
 
@@ -1078,6 +1092,10 @@ export class ScionChatSecretRequest extends LitElement {
       this.pendingFulfillIdempotencyKey = '';
       this.errorMessage = '';
       this.formRevision++;
+    } catch {
+      if (this.isConnected && this.messageId === targetMsgId && this.clearGeneration === gen) {
+        this.errorMessage = `Could not read the file for ${row.key}.`;
+      }
     } finally {
       if (input) {
         input.value = '';
