@@ -60,6 +60,12 @@ import {
   messageActionBannerStyles,
   messageActionRowStatusClass,
 } from './message-action-state.js';
+import '../secret-value-field.js';
+import type {
+  ScionSecretValueField,
+  SecretValueChangeDetail,
+  SecretValueErrorDetail,
+} from '../secret-value-field.js';
 
 export interface SecretRequestFulfilledDetail {
   messageId: string;
@@ -83,48 +89,6 @@ export interface SecretRequestUpdatedDetail {
 export interface SecretRequestRefreshedDetail {
   messageId: string;
   card: SecretRequestCardResponse;
-}
-
-type LineEndingStyle = 'lf' | 'crlf' | 'mixed';
-
-function normalizeToLf(value: string): string {
-  return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-}
-
-function isUndoRedoShortcut(e: KeyboardEvent): boolean {
-  if (!(e.ctrlKey || e.metaKey) || e.altKey) return false;
-  const key = e.key.toLowerCase();
-  return key === 'z' || key === 'y';
-}
-
-function detectLineEndingStyle(value: string): LineEndingStyle {
-  if (!value.includes('\r')) {
-    return 'lf';
-  }
-  const withoutCrlf = value.replace(/\r\n/g, '');
-  if (withoutCrlf.includes('\r') || withoutCrlf.includes('\n')) {
-    return 'mixed';
-  }
-  return 'crlf';
-}
-
-/**
- * Maps a character offset in an LF-normalized textarea display string back to
- * the corresponding offset in the raw stored value (where `\r\n` takes 2 code
- * units in raw and 1 in display).
- */
-function displayOffsetToRawOffset(raw: string, displayOffset: number): number {
-  let rawIdx = 0;
-  let dispIdx = 0;
-  while (rawIdx < raw.length && dispIdx < displayOffset) {
-    if (raw[rawIdx] === '\r' && raw[rawIdx + 1] === '\n') {
-      rawIdx += 2;
-    } else {
-      rawIdx += 1;
-    }
-    dispIdx += 1;
-  }
-  return rawIdx;
 }
 
 @customElement('scion-chat-secret-request')
@@ -197,28 +161,9 @@ export class ScionChatSecretRequest extends LitElement {
   @state()
   private deniedReason = '';
 
-  /** Per-row visibility toggle for masked inputs (keyed by rowId). */
+  /** Monotonic counter bumped on `clearFormValues()` to clear child fields and cancel async file reads. */
   @state()
-  private revealedRows = new Set<string>();
-
-  /** Line-ending style snapshotted when a row is revealed, to avoid HTML textarea LF normalization. */
-  private readonly revealedLineEndings = new Map<string, LineEndingStyle>();
-
-  /**
-   * Rows whose current value was captured via verbatim paste or file load
-   * (or contains CR/LF) so the masked password input stays empty while the
-   * full verbatim value is held in `formValues`.
-   */
-  private readonly capturedRows = new Set<string>();
-
-  /** Monotonic counter bumped on `clearFormValues()` to cancel stale async file reads. */
   private clearGeneration = 0;
-
-  /** Per-row monotonic counter bumped on every edit, clear, or file pick to cancel stale async file reads. */
-  private readonly rowEditTokens = new Map<string, number>();
-
-  /** Row ID whose revealed textarea should receive focus after clicking Show. */
-  private pendingFocusRowId = '';
 
   /** Reactive counter bumped when in-memory form values change, without storing values in @state. */
   @state()
@@ -352,159 +297,8 @@ export class ScionChatSecretRequest extends LitElement {
       overflow-wrap: anywhere;
     }
 
-    .input-wrap {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.4rem;
+    scion-secret-value-field {
       margin-top: 0.55rem;
-    }
-
-    .secret-input {
-      flex: 1 1 auto;
-      min-width: 0;
-      height: 2.25rem;
-      box-sizing: border-box;
-      padding: 0.4rem 0.6rem;
-      border: 1px solid var(--scion-border);
-      border-radius: var(--scion-radius);
-      background: var(--scion-surface);
-      color: var(--scion-text);
-      font-family: var(--scion-font-mono);
-      font-size: 0.875rem;
-      line-height: 1.4;
-    }
-
-    .secret-input::-ms-reveal,
-    .secret-input::-ms-clear {
-      display: none;
-    }
-
-    .secret-input:focus {
-      outline: none;
-      border-color: var(--scion-border-active);
-    }
-
-    .secret-input:focus-visible {
-      outline: 2px solid var(--scion-primary);
-      outline-offset: 1px;
-    }
-
-    .secret-input:disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
-      background: var(--scion-bg-subtle);
-    }
-
-    .secret-textarea {
-      flex: 1 1 auto;
-      min-width: 0;
-      min-height: calc(var(--secret-rows, 2) * 1.4em + 0.9rem + 2px);
-      max-height: 12rem;
-      resize: vertical;
-      box-sizing: border-box;
-      padding: 0.45rem 0.6rem;
-      border: 1px solid var(--scion-border);
-      border-radius: var(--scion-radius);
-      background: var(--scion-surface);
-      color: var(--scion-text);
-      font-family: var(--scion-font-mono);
-      font-size: 0.875rem;
-      line-height: 1.4;
-    }
-
-    .secret-textarea:focus {
-      outline: none;
-      border-color: var(--scion-border-active);
-    }
-
-    .secret-textarea:focus-visible {
-      outline: 2px solid var(--scion-primary);
-      outline-offset: 1px;
-    }
-
-    .secret-textarea:disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
-      background: var(--scion-bg-subtle);
-    }
-
-    .secret-textarea[readonly] {
-      background: var(--scion-bg-subtle);
-    }
-
-    .mixed-line-endings-note {
-      font-size: var(--chat-fs-sm, 0.875rem);
-      color: var(--scion-text-muted);
-    }
-
-    .file-controls {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      min-height: 1.875rem;
-      margin-top: 0.4rem;
-    }
-
-    .file-picker-input {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
-    }
-
-    .file-value-status {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      font-size: var(--chat-fs-sm, 0.875rem);
-      color: var(--scion-text-muted);
-    }
-
-    .file-value-status sl-icon {
-      flex-shrink: 0;
-      font-size: 0.875rem;
-    }
-
-    @media (pointer: coarse) {
-      .secret-input,
-      .secret-textarea {
-        font-size: 1rem;
-      }
-    }
-
-    .toggle-visibility {
-      flex: 0 0 auto;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 2.25rem;
-      height: 2.25rem;
-      border: 1px solid var(--scion-border);
-      border-radius: var(--scion-radius);
-      background: var(--scion-bg);
-      color: var(--scion-text-secondary);
-      cursor: pointer;
-    }
-
-    .toggle-visibility:hover:not(:disabled) {
-      border-color: var(--scion-border-hover);
-      color: var(--scion-text);
-    }
-
-    .toggle-visibility:focus-visible {
-      outline: 2px solid var(--scion-primary);
-      outline-offset: 1px;
-    }
-
-    .toggle-visibility:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
     }
 
     .row-foot {
@@ -700,38 +494,26 @@ export class ScionChatSecretRequest extends LitElement {
     return this.agentName || this.views[0]?.agentName || 'this agent';
   }
 
-  private bumpRowEditToken(rowId: string): number {
-    const next = (this.rowEditTokens.get(rowId) ?? 0) + 1;
-    this.rowEditTokens.set(rowId, next);
-    return next;
-  }
-
   /** Clears all ephemeral secret values and visibility toggles from memory. */
   clearFormValues(): void {
     this.clearGeneration++;
-    this.pendingFocusRowId = '';
     this.formValues.clear();
-    this.capturedRows.clear();
-    this.revealedLineEndings.clear();
-    this.rowEditTokens.clear();
-    this.revealedRows = new Set();
     this.pendingFulfillIdempotencyKey = '';
+    this.shadowRoot
+      ?.querySelectorAll<ScionSecretValueField>('scion-secret-value-field')
+      .forEach((field) => field.clear());
     this.formRevision++;
   }
 
-  protected override updated(): void {
-    if (this.pendingFocusRowId) {
-      const targetId = this.pendingFocusRowId;
-      this.pendingFocusRowId = '';
-      const escaped =
-        typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
-          ? CSS.escape(targetId)
-          : targetId;
-      const ta = this.shadowRoot?.querySelector<HTMLTextAreaElement>(
-        `textarea[data-row-id="${escaped}"]`
-      );
-      ta?.focus();
+  protected override async getUpdateComplete(): Promise<boolean> {
+    const done = await super.getUpdateComplete();
+    const fields = this.shadowRoot?.querySelectorAll<ScionSecretValueField>(
+      'scion-secret-value-field'
+    );
+    if (fields) {
+      await Promise.all([...fields].map((f) => f.updateComplete));
     }
+    return done;
   }
 
   private pruneNonPendingFormValues(): void {
@@ -740,28 +522,7 @@ export class ScionChatSecretRequest extends LitElement {
     for (const rowId of [...this.formValues.keys()]) {
       if (!pendingIds.has(rowId)) {
         this.formValues.delete(rowId);
-        this.capturedRows.delete(rowId);
-        this.revealedLineEndings.delete(rowId);
-        this.rowEditTokens.delete(rowId);
         changed = true;
-      }
-    }
-    for (const rowId of [...this.rowEditTokens.keys()]) {
-      if (!pendingIds.has(rowId)) {
-        this.rowEditTokens.delete(rowId);
-      }
-    }
-    if (this.revealedRows.size > 0) {
-      const nextRevealed = new Set<string>();
-      for (const rowId of this.revealedRows) {
-        if (pendingIds.has(rowId)) nextRevealed.add(rowId);
-        else {
-          this.revealedLineEndings.delete(rowId);
-          changed = true;
-        }
-      }
-      if (nextRevealed.size !== this.revealedRows.size) {
-        this.revealedRows = nextRevealed;
       }
     }
     if (changed) {
@@ -814,20 +575,7 @@ export class ScionChatSecretRequest extends LitElement {
     }
   }
 
-  private onValueInput(rowId: string, e: Event): void {
-    const target = e.target as HTMLInputElement | HTMLTextAreaElement | null;
-    let value = target?.value ?? '';
-    if (this.revealedRows.has(rowId)) {
-      const style = this.revealedLineEndings.get(rowId) ?? 'lf';
-      if (style === 'mixed') {
-        return;
-      }
-      if (style === 'crlf') {
-        value = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
-      }
-    }
-    this.bumpRowEditToken(rowId);
-    this.capturedRows.delete(rowId);
+  private onSecretValueChange(rowId: string, value: string): void {
     if (value.length === 0) {
       this.formValues.delete(rowId);
     } else {
@@ -840,308 +588,8 @@ export class ScionChatSecretRequest extends LitElement {
     this.formRevision++;
   }
 
-  private isRowCaptured(rowId: string): boolean {
-    const value = this.formValues.get(rowId) ?? '';
-    return (
-      value.length > 0 &&
-      (this.capturedRows.has(rowId) || value.includes('\n') || value.includes('\r'))
-    );
-  }
-
-  private applyMaskedInsert(
-    rowId: string,
-    target: HTMLInputElement | null,
-    incoming: string,
-    e: Event
-  ): void {
-    const hasNewline = incoming.includes('\n') || incoming.includes('\r');
-    const isCaptured = this.isRowCaptured(rowId);
-
-    // Non-captured row receiving single-line text: let the browser handle it
-    // natively so password bullets, selection, and caret position are preserved.
-    if (!isCaptured && !hasNewline) {
-      return;
-    }
-
-    e.preventDefault();
-    if (!incoming) return;
-
-    let nextValue: string;
-    if (isCaptured) {
-      nextValue = incoming;
-    } else {
-      const current = target?.value ?? this.formValues.get(rowId) ?? '';
-      const selStart = target?.selectionStart ?? current.length;
-      const selEnd = target?.selectionEnd ?? selStart;
-      nextValue = current.slice(0, selStart) + incoming + current.slice(selEnd);
-    }
-
-    this.bumpRowEditToken(rowId);
-    this.formValues.set(rowId, nextValue);
-    if (nextValue.includes('\n') || nextValue.includes('\r')) {
-      this.capturedRows.add(rowId);
-      if (target) target.value = '';
-    } else {
-      this.capturedRows.delete(rowId);
-      if (target) {
-        target.value = nextValue;
-        target.setSelectionRange?.(nextValue.length, nextValue.length);
-      }
-    }
-    this.pendingFulfillIdempotencyKey = '';
-    if (this.errorMessage) {
-      this.errorMessage = '';
-    }
-    this.formRevision++;
-  }
-
-  private clearCapturedRow(rowId: string, target: HTMLInputElement | null, e: Event): void {
-    e.preventDefault();
-    this.bumpRowEditToken(rowId);
-    this.formValues.delete(rowId);
-    this.capturedRows.delete(rowId);
-    if (target) {
-      target.value = '';
-    }
-    this.pendingFulfillIdempotencyKey = '';
-    if (this.errorMessage) {
-      this.errorMessage = '';
-    }
-    this.formRevision++;
-  }
-
-  private onMaskedKeydown(rowId: string, e: KeyboardEvent): void {
-    if (isUndoRedoShortcut(e)) {
-      e.preventDefault();
-      return;
-    }
-    if ((e.key === 'Backspace' || e.key === 'Delete') && this.isRowCaptured(rowId)) {
-      this.clearCapturedRow(rowId, e.target as HTMLInputElement | null, e);
-    }
-  }
-
-  private extractBeforeInputText(e: InputEvent, includeLineBreaks: boolean): string | null {
-    switch (e.inputType) {
-      case 'insertFromPaste':
-      case 'insertFromDrop':
-      case 'insertReplacementText':
-      case 'insertText':
-        return e.dataTransfer?.getData('text/plain') ?? e.data ?? '';
-      case 'insertLineBreak':
-      case 'insertParagraph':
-        return includeLineBreaks ? '\n' : null;
-      default:
-        return null;
-    }
-  }
-
-  private onMaskedBeforeInput(rowId: string, e: InputEvent): void {
-    if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') {
-      e.preventDefault();
-      return;
-    }
-    const target = e.target as HTMLInputElement | null;
-    if (e.inputType.startsWith('delete') && this.isRowCaptured(rowId)) {
-      this.clearCapturedRow(rowId, target, e);
-      return;
-    }
-    const incoming = this.extractBeforeInputText(e, true);
-    if (incoming === null) return;
-    this.applyMaskedInsert(rowId, target, incoming, e);
-  }
-
-  private onMaskedPaste(rowId: string, e: ClipboardEvent): void {
-    const pasted = e.clipboardData?.getData('text/plain') ?? '';
-    if (!pasted) return;
-    this.applyMaskedInsert(rowId, e.target as HTMLInputElement | null, pasted, e);
-  }
-
-  private onMaskedDrop(rowId: string, e: DragEvent): void {
-    const dropped = e.dataTransfer?.getData('text/plain') ?? '';
-    if (!dropped) return;
-    this.applyMaskedInsert(rowId, e.target as HTMLInputElement | null, dropped, e);
-  }
-
-  private onRevealedKeydown(e: KeyboardEvent): void {
-    if (isUndoRedoShortcut(e)) {
-      e.preventDefault();
-    }
-  }
-
-  private applyRevealedInsert(
-    rowId: string,
-    target: HTMLTextAreaElement | null,
-    incoming: string,
-    e: Event
-  ): void {
-    if (this.revealedLineEndings.get(rowId) === 'mixed') {
-      e.preventDefault();
-      return;
-    }
-    if (!incoming.includes('\r') && !incoming.includes('\n')) {
-      return;
-    }
-
-    e.preventDefault();
-    const rawCurrent = this.formValues.get(rowId) ?? '';
-    const displayCurrent = normalizeToLf(rawCurrent);
-    const dispStart = target?.selectionStart ?? displayCurrent.length;
-    const dispEnd = target?.selectionEnd ?? dispStart;
-    const rawStart = displayOffsetToRawOffset(rawCurrent, dispStart);
-    const rawEnd = displayOffsetToRawOffset(rawCurrent, dispEnd);
-    const rawBefore = rawCurrent.slice(0, rawStart);
-    const rawAfter = rawCurrent.slice(rawEnd);
-    const nextValue = rawBefore + incoming + rawAfter;
-
-    this.bumpRowEditToken(rowId);
-    this.formValues.set(rowId, nextValue);
-    this.capturedRows.delete(rowId);
-    this.revealedLineEndings.set(rowId, detectLineEndingStyle(nextValue));
-
-    if (target) {
-      const nextDisplay = normalizeToLf(nextValue);
-      const nextCaret = normalizeToLf(rawBefore + incoming).length;
-      target.value = nextDisplay;
-      target.setSelectionRange?.(nextCaret, nextCaret);
-    }
-
-    this.pendingFulfillIdempotencyKey = '';
-    if (this.errorMessage) {
-      this.errorMessage = '';
-    }
-    this.formRevision++;
-  }
-
-  private onRevealedBeforeInput(rowId: string, e: InputEvent): void {
-    if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') {
-      e.preventDefault();
-      return;
-    }
-    // Typing Enter (insertLineBreak/insertParagraph) is handled natively so
-    // onValueInput preserves the row's current line-ending style (e.g. CRLF).
-    const incoming = this.extractBeforeInputText(e, false);
-    if (incoming === null) return;
-    this.applyRevealedInsert(rowId, e.target as HTMLTextAreaElement | null, incoming, e);
-  }
-
-  private onRevealedPaste(rowId: string, e: ClipboardEvent): void {
-    const pasted = e.clipboardData?.getData('text/plain') ?? '';
-    if (!pasted) return;
-    this.applyRevealedInsert(rowId, e.target as HTMLTextAreaElement | null, pasted, e);
-  }
-
-  private onRevealedDrop(rowId: string, e: DragEvent): void {
-    const dropped = e.dataTransfer?.getData('text/plain') ?? '';
-    if (!dropped) return;
-    this.applyRevealedInsert(rowId, e.target as HTMLTextAreaElement | null, dropped, e);
-  }
-
-  private triggerFilePicker(rowId: string): void {
-    const escaped =
-      typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(rowId) : rowId;
-    const input = this.shadowRoot?.querySelector<HTMLInputElement>(
-      `input[type="file"][data-row-id="${escaped}"]`
-    );
-    input?.click();
-  }
-
-  private async onFileSelected(row: SecretRequestView, e: Event): Promise<void> {
-    const input = e.target as HTMLInputElement | null;
-    const file = input?.files?.[0];
-    if (!file) return;
-
-    // Clear any previously entered/loaded value for this row immediately so a
-    // subsequent validation or read failure never leaves stale secret content
-    // behind to be submitted.
-    this.formValues.delete(row.rowId);
-    this.capturedRows.delete(row.rowId);
-    if (this.revealedRows.has(row.rowId)) {
-      const next = new Set(this.revealedRows);
-      next.delete(row.rowId);
-      this.revealedRows = next;
-    }
-    this.revealedLineEndings.delete(row.rowId);
-    this.pendingFulfillIdempotencyKey = '';
-    this.formRevision++;
-
-    const token = this.bumpRowEditToken(row.rowId);
-    const gen = this.clearGeneration;
-    const targetMsgId = this.messageId;
-
-    const isStale = (): boolean =>
-      !this.isConnected ||
-      this.messageId !== targetMsgId ||
-      this.clearGeneration !== gen ||
-      this.rowEditTokens.get(row.rowId) !== token;
-
-    try {
-      if (file.size > MAX_SECRET_REQUEST_VALUE_BYTES) {
-        this.errorMessage = `File for ${row.key} exceeds the 64 KiB limit.`;
-        return;
-      }
-
-      const buf = await file.arrayBuffer();
-      if (isStale()) {
-        return;
-      }
-      if (buf.byteLength > MAX_SECRET_REQUEST_VALUE_BYTES) {
-        this.errorMessage = `File for ${row.key} exceeds the 64 KiB limit.`;
-        return;
-      }
-
-      let decoded: string;
-      try {
-        // Preserve a leading UTF-8 BOM verbatim (secret values are never altered).
-        decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf);
-      } catch {
-        this.errorMessage = `File for ${row.key} is not valid UTF-8 text. Binary files are not supported.`;
-        return;
-      }
-
-      if (decoded.includes('\u0000')) {
-        this.errorMessage = `File for ${row.key} appears to be binary (contains NUL bytes). Binary files are not supported.`;
-        return;
-      }
-
-      if (decoded.length === 0) {
-        this.errorMessage = `Selected file for ${row.key} is empty.`;
-        return;
-      }
-
-      this.formValues.set(row.rowId, decoded);
-      this.capturedRows.add(row.rowId);
-      if (this.revealedRows.has(row.rowId)) {
-        const next = new Set(this.revealedRows);
-        next.delete(row.rowId);
-        this.revealedLineEndings.delete(row.rowId);
-        this.revealedRows = next;
-      }
-      this.pendingFulfillIdempotencyKey = '';
-      this.errorMessage = '';
-      this.formRevision++;
-    } catch {
-      if (!isStale()) {
-        this.errorMessage = `Could not read the file for ${row.key}.`;
-      }
-    } finally {
-      if (input) {
-        input.value = '';
-      }
-    }
-  }
-
-  private toggleReveal(rowId: string, currentlyVisible: boolean): void {
-    const nextRevealed = new Set(this.revealedRows);
-    if (currentlyVisible) {
-      nextRevealed.delete(rowId);
-      this.revealedLineEndings.delete(rowId);
-    } else {
-      const current = this.formValues.get(rowId) ?? '';
-      this.revealedLineEndings.set(rowId, detectLineEndingStyle(current));
-      nextRevealed.add(rowId);
-      this.pendingFocusRowId = rowId;
-    }
-    this.revealedRows = nextRevealed;
+  private onSecretValueError(message: string): void {
+    this.errorMessage = message;
   }
 
   private async refetchCard(): Promise<void> {
@@ -1444,144 +892,23 @@ export class ScionChatSecretRequest extends LitElement {
     }
 
     if (isPendingSecretRequest(row)) {
-      const value = this.formValues.get(row.rowId) ?? '';
-      const revealed = this.revealedRows.has(row.rowId);
-      const lineEndingStyle = revealed ? (this.revealedLineEndings.get(row.rowId) ?? 'lf') : 'lf';
-      const isReadonlyRevealed = revealed && lineEndingStyle === 'mixed';
-      const textareaValue = normalizeToLf(value);
       const disabled = !this.canRespondNow || this.submitting || this.actionState.dismissSubmitting;
       const isFile = row.secretType === 'file';
-      const textareaRows = isFile ? 4 : 2;
-      const hasCapturedValue = !revealed && this.isRowCaptured(row.rowId);
-      const placeholder = hasCapturedValue
-        ? isFile
-          ? 'Value entered — type, paste or load to replace'
-          : 'Value entered — type or paste to replace'
-        : isFile
-          ? 'Paste secret file contents…'
-          : `Enter value for ${row.key}…`;
 
       return html`
-        <div class="input-wrap" data-form-rev=${this.formRevision}>
-          ${revealed
-            ? html`
-                <textarea
-                  class="secret-textarea"
-                  style="--secret-rows: ${textareaRows}"
-                  data-key=${row.key}
-                  data-row-id=${row.rowId}
-                  aria-label=${`Secret value for ${row.key}`}
-                  placeholder=${isFile
-                    ? 'Paste secret file contents…'
-                    : `Enter value for ${row.key}…`}
-                  autocomplete="off"
-                  autocorrect="off"
-                  autocapitalize="off"
-                  spellcheck="false"
-                  data-lpignore="true"
-                  data-1p-ignore="true"
-                  rows=${textareaRows}
-                  ?disabled=${disabled}
-                  ?readonly=${isReadonlyRevealed}
-                  .value=${textareaValue}
-                  @keydown=${(e: KeyboardEvent): void => this.onRevealedKeydown(e)}
-                  @beforeinput=${(e: InputEvent): void => this.onRevealedBeforeInput(row.rowId, e)}
-                  @paste=${(e: ClipboardEvent): void => this.onRevealedPaste(row.rowId, e)}
-                  @drop=${(e: DragEvent): void => this.onRevealedDrop(row.rowId, e)}
-                  @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
-                ></textarea>
-              `
-            : html`
-                <input
-                  class="secret-input"
-                  type="password"
-                  data-key=${row.key}
-                  data-row-id=${row.rowId}
-                  aria-label=${hasCapturedValue
-                    ? `Secret value for ${row.key} entered, hidden`
-                    : `Secret value for ${row.key}`}
-                  placeholder=${placeholder}
-                  autocomplete="off"
-                  autocorrect="off"
-                  autocapitalize="off"
-                  spellcheck="false"
-                  data-lpignore="true"
-                  data-1p-ignore="true"
-                  ?disabled=${disabled}
-                  .value=${hasCapturedValue ? '' : value}
-                  @keydown=${(e: KeyboardEvent): void => this.onMaskedKeydown(row.rowId, e)}
-                  @beforeinput=${(e: InputEvent): void => this.onMaskedBeforeInput(row.rowId, e)}
-                  @paste=${(e: ClipboardEvent): void => this.onMaskedPaste(row.rowId, e)}
-                  @drop=${(e: DragEvent): void => this.onMaskedDrop(row.rowId, e)}
-                  @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
-                />
-              `}
-          <button
-            type="button"
-            class="toggle-visibility"
-            data-toggle-visibility=${row.key}
-            aria-pressed=${revealed ? 'true' : 'false'}
-            aria-label=${revealed ? `Hide value for ${row.key}` : `Show value for ${row.key}`}
-            title=${revealed ? 'Hide value' : 'Show value'}
-            ?disabled=${disabled}
-            @click=${(): void => this.toggleReveal(row.rowId, revealed)}
-          >
-            <sl-icon name=${revealed ? 'eye-slash' : 'eye'} aria-hidden="true"></sl-icon>
-          </button>
-        </div>
-        <div class="file-controls">
-          ${isFile
-            ? html`
-                <input
-                  type="file"
-                  tabindex="-1"
-                  class="file-picker-input"
-                  data-file-input=${row.key}
-                  data-row-id=${row.rowId}
-                  aria-label=${`Load secret file for ${row.key}`}
-                  ?disabled=${disabled}
-                  @change=${(e: Event): void => void this.onFileSelected(row, e)}
-                />
-                <sl-button
-                  type="button"
-                  size="small"
-                  variant="default"
-                  class="load-file-btn"
-                  data-load-file=${row.key}
-                  ?disabled=${disabled}
-                  @click=${(): void => this.triggerFilePicker(row.rowId)}
-                >
-                  <sl-icon slot="prefix" name="upload" aria-hidden="true"></sl-icon>
-                  Load from file
-                </sl-button>
-              `
-            : nothing}
-          ${hasCapturedValue
-            ? html`
-                <span
-                  class="file-value-status"
-                  data-testid="file-value-masked"
-                  role="status"
-                  aria-label=${`Secret value for ${row.key} entered, hidden`}
-                >
-                  <sl-icon name="lock" aria-hidden="true"></sl-icon>
-                  <span aria-hidden="true">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span>
-                  <span>Value entered (hidden)</span>
-                </span>
-              `
-            : nothing}
-          ${isReadonlyRevealed
-            ? html`
-                <span
-                  class="mixed-line-endings-note"
-                  data-testid="mixed-line-endings-note"
-                  role="status"
-                >
-                  This value has mixed line endings; paste or load to replace it
-                </span>
-              `
-            : nothing}
-        </div>
+        <scion-secret-value-field
+          data-form-rev=${this.formRevision}
+          .secretKey=${row.key}
+          .rowId=${row.rowId}
+          .allowFileLoad=${isFile}
+          .disabled=${disabled}
+          .maxBytes=${MAX_SECRET_REQUEST_VALUE_BYTES}
+          .clearToken=${this.clearGeneration}
+          @secret-value-change=${(e: CustomEvent<SecretValueChangeDetail>): void =>
+            this.onSecretValueChange(row.rowId, e.detail.value)}
+          @secret-value-error=${(e: CustomEvent<SecretValueErrorDetail>): void =>
+            this.onSecretValueError(e.detail.message)}
+        ></scion-secret-value-field>
       `;
     }
 

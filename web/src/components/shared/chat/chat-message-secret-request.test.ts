@@ -176,7 +176,8 @@ describe('native chat secret-request wiring', () => {
     expect(card.shadowRoot?.querySelector('.status-alert.blocked')?.textContent).toContain(
       'agent.attach'
     );
-    const input = card.shadowRoot?.querySelector('input') as HTMLInputElement;
+    const field = card.shadowRoot?.querySelector('scion-secret-value-field');
+    const input = field?.shadowRoot?.querySelector('input') as HTMLInputElement;
     expect(input.disabled).toBe(true);
     // No body block rendered when intro is empty
     expect(msg.shadowRoot?.querySelector('.plain-text')).toBeNull();
@@ -255,7 +256,8 @@ describe('native chat secret-request wiring', () => {
     );
     await card.updateComplete;
 
-    const input = card.shadowRoot?.querySelector(
+    const field = card.shadowRoot?.querySelector('scion-secret-value-field');
+    const input = field?.shadowRoot?.querySelector(
       'input[data-key="GITHUB_TOKEN"]'
     ) as HTMLInputElement;
     input.value = 'ghp_native_secret';
