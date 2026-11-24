@@ -30,9 +30,13 @@ interface InboxSummaryChangedDetail {
   totalCapped?: boolean;
 }
 
+type InboxSummaryImporter = () => Promise<typeof import('./inbox-summary.js')>;
+const defaultImportInboxSummary: InboxSummaryImporter = () => import('./inbox-summary.js');
+
 let cachedTotal = 0;
 let cachedTotalCapped = false;
 let loadPromise: Promise<typeof import('./inbox-summary.js')> | null = null;
+let importInboxSummary: InboxSummaryImporter = defaultImportInboxSummary;
 
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
   window.addEventListener(INBOX_SUMMARY_CHANGED_EVENT, (e: Event) => {
@@ -53,39 +57,56 @@ export function formatInboxSummaryBadge(): string | null {
   return cachedTotalCapped ? `${cachedTotal}+` : String(cachedTotal);
 }
 
+/** @internal test-only hook to simulate chunk import failures. */
+export function setInboxSummaryImporterForTests(importer?: InboxSummaryImporter): void {
+  importInboxSummary = importer ?? defaultImportInboxSummary;
+  loadPromise = null;
+}
+
 /** @internal called by `inboxSummaryStore.resetForTests()`. */
 export function resetInboxSummaryBadgeCacheForTests(): void {
   cachedTotal = 0;
   cachedTotalCapped = false;
+  loadPromise = null;
+  importInboxSummary = defaultImportInboxSummary;
 }
 
 /**
  * Dynamically loads `inbox-summary.ts` and starts `inboxSummaryStore` for the
- * given user id. Safe to call repeatedly.
+ * given user id. Safe to call repeatedly; a failed chunk import is cleared so
+ * a later call retries.
  */
 export function ensureInboxSummaryStarted(userId?: string): void {
   if (!loadPromise) {
-    loadPromise = import('./inbox-summary.js');
+    const load = importInboxSummary();
+    loadPromise = load;
+    load.catch(() => {
+      if (loadPromise === load) loadPromise = null;
+    });
   }
-  void loadPromise.then((mod) => {
-    mod.inboxSummaryStore.ensureStarted(userId);
-    if (
-      cachedTotal !== mod.inboxSummaryStore.total ||
-      cachedTotalCapped !== mod.inboxSummaryStore.totalCapped
-    ) {
-      cachedTotal = mod.inboxSummaryStore.total;
-      cachedTotalCapped = mod.inboxSummaryStore.totalCapped;
-      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
-        window.dispatchEvent(
-          new CustomEvent(INBOX_SUMMARY_CHANGED_EVENT, {
-            detail: {
-              summary: mod.inboxSummaryStore.summary,
-              total: cachedTotal,
-              totalCapped: cachedTotalCapped,
-            },
-          })
-        );
+  void loadPromise
+    .then((mod) => {
+      mod.inboxSummaryStore.ensureStarted(userId);
+      if (
+        cachedTotal !== mod.inboxSummaryStore.total ||
+        cachedTotalCapped !== mod.inboxSummaryStore.totalCapped
+      ) {
+        cachedTotal = mod.inboxSummaryStore.total;
+        cachedTotalCapped = mod.inboxSummaryStore.totalCapped;
+        if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+          window.dispatchEvent(
+            new CustomEvent(INBOX_SUMMARY_CHANGED_EVENT, {
+              detail: {
+                summary: mod.inboxSummaryStore.summary,
+                total: cachedTotal,
+                totalCapped: cachedTotalCapped,
+              },
+            })
+          );
+        }
       }
-    }
-  });
+    })
+    .catch((err: unknown) => {
+      console.warn('[inbox-summary-loader] failed to load inbox-summary chunk:', err);
+    });
 }

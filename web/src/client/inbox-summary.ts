@@ -284,12 +284,33 @@ export class InboxSummaryStore {
    */
   ensureStarted(userId?: string): void {
     if (!isInboxDashboardEnabled()) return;
+    const prevUserId = this.userId;
     if (userId) {
       this.userId = userId;
     } else if (!this.userId) {
       this.userId = stateManager.getCurrentUserId() || '';
     }
-    if (this.started) return;
+    if (this.started) {
+      if (userId && prevUserId && userId !== prevUserId) {
+        this.clearDebounceTimers();
+        if (this.expiryTimer !== null) {
+          clearTimeout(this.expiryTimer);
+          this.expiryTimer = null;
+        }
+        this._summary = null;
+        this._summaryPreviews = 0;
+        this._error = null;
+        this._unavailable404 = false;
+        const shared = readSharedPayload(this.userId);
+        if (shared) {
+          this.applySummary(shared.summary, shared.previews);
+        } else {
+          this.emitChanged();
+        }
+        this.requestRefresh({ immediate: true, force: true });
+      }
+      return;
+    }
     this.started = true;
     this._unavailable404 = false;
 
@@ -592,7 +613,7 @@ export class InboxSummaryStore {
           const res = await apiFetch(`${INBOX_SUMMARY_API}?previews=${previews}`, {
             signal: controller.signal,
           });
-          if (!this.started) return;
+          if (!this.started || (uid && this.userId && this.userId !== uid)) return;
           if (res.status === 404) {
             this._unavailable404 = true;
             this._summary = null;
@@ -606,13 +627,13 @@ export class InboxSummaryStore {
             return;
           }
           const data = (await res.json()) as InboxSummaryResponse;
-          if (!this.started) return;
+          if (!this.started || (uid && this.userId && this.userId !== uid)) return;
           this.applySummary(data, previews);
           if (uid) {
             writeSharedPayload({ userId: uid, previews, fetchedAt, summary: data });
           }
         } catch (err) {
-          if (!this.started) return;
+          if (!this.started || (uid && this.userId && this.userId !== uid)) return;
           this._error = err instanceof Error ? err.message : 'Failed to load inbox summary';
           this.emitChanged();
         } finally {
