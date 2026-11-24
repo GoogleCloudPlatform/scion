@@ -15,12 +15,16 @@
  */
 
 /**
- * Offline Playwright E2E regression spec for secret-request masking and
- * single-click submission (ptone/scion#8748).
+ * Offline Playwright E2E regression spec for secret-request masking, verbatim
+ * multi-line paste, file picker, and single-click submission (ptone/scion#8748).
  *
  * Verifies in real Chromium:
- * - `environment` rows render a native `<input type="password">` masked in place;
- * - `file` rows keep `<textarea>` mounted and masked with `-webkit-text-security: disc`;
+ * - All row types (`environment`, `variable`, `file`) render a native
+ *   `<input type="password" autocomplete="off">` while masked, hiding values
+ *   both visually and from the CDP accessibility tree;
+ * - Multi-line paste is captured verbatim (newlines intact) while masked,
+ *   and Show reveals a `<textarea>` for editing;
+ * - `file` rows load UTF-8 files via the file picker and submit newlines intact;
  * - Typing a value and clicking Submit once immediately (with the field focused)
  *   causes no blur-triggered layout shift and sends exactly one fulfill POST.
  */
@@ -309,8 +313,18 @@ test('variable secret row masks natively as password input, hides value from AX 
   await expect(input).toHaveAttribute('type', 'password');
   await expect(input).toHaveAttribute('autocomplete', 'off');
 
-  await input.click();
-  await input.fill('super-secret-variable-42');
+  const multilineVar = '{\n "a": 1,\n "secret": "super-secret-variable-42"\n}';
+
+  // Multi-line paste while masked preserves newlines and hides value from AX tree
+  await input.evaluate((el, text) => {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', text);
+    el.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+    );
+  }, multilineVar);
+
+  await expect(page.locator('[data-testid="file-value-masked"]')).toBeVisible();
 
   // Verify the CDP accessibility tree does not expose the masked value
   const cdp = await page.context().newCDPSession(page);
@@ -324,22 +338,23 @@ test('variable secret row masks natively as password input, hides value from AX 
   );
   expect(leaked).toBe(false);
 
-  // Show switches to textarea with value preserved; Hide returns to password input
+  // Show switches to textarea with newlines preserved; Hide returns to password input
   const toggleBtn = page.locator('button[data-toggle-visibility="API_CONFIG"]');
   await expect(toggleBtn).toHaveAttribute('aria-pressed', 'false');
   await toggleBtn.click();
   const textarea = page.locator('textarea[data-key="API_CONFIG"]');
   await expect(textarea).toBeVisible();
-  await expect(textarea).toHaveValue('super-secret-variable-42');
+  await expect(textarea).toHaveValue(multilineVar);
   await expect(toggleBtn).toHaveAttribute('aria-pressed', 'true');
 
   await toggleBtn.click();
   await expect(input).toBeVisible();
+  await expect(input).toHaveValue('');
   await expect(toggleBtn).toHaveAttribute('aria-pressed', 'false');
 
   const submitBtn = page.locator('sl-button.submit-btn');
   await submitBtn.click();
   await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
   expect(fulfills).toHaveLength(1);
-  expect(fulfills[0].body.values).toEqual({ API_CONFIG: 'super-secret-variable-42' });
+  expect(fulfills[0].body.values).toEqual({ API_CONFIG: multilineVar });
 });

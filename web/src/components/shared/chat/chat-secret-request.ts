@@ -160,11 +160,11 @@ export class ScionChatSecretRequest extends LitElement {
   private revealedRows = new Set<string>();
 
   /**
-   * File rows whose current value was captured via verbatim paste or file load
-   * (or contains newlines) so the masked password input stays empty while the
+   * Rows whose current value was captured via verbatim paste or file load
+   * (or contains CR/LF) so the masked password input stays empty while the
    * full verbatim value is held in `formValues`.
    */
-  private readonly capturedFileRows = new Set<string>();
+  private readonly capturedRows = new Set<string>();
 
   /** Monotonic counter bumped on `clearFormValues()` to cancel stale async file reads. */
   private clearGeneration = 0;
@@ -643,7 +643,7 @@ export class ScionChatSecretRequest extends LitElement {
   clearFormValues(): void {
     this.clearGeneration++;
     this.formValues.clear();
-    this.capturedFileRows.clear();
+    this.capturedRows.clear();
     this.revealedRows = new Set();
     this.pendingFulfillIdempotencyKey = '';
     this.formRevision++;
@@ -655,7 +655,7 @@ export class ScionChatSecretRequest extends LitElement {
     for (const rowId of [...this.formValues.keys()]) {
       if (!pendingIds.has(rowId)) {
         this.formValues.delete(rowId);
-        this.capturedFileRows.delete(rowId);
+        this.capturedRows.delete(rowId);
         changed = true;
       }
     }
@@ -698,7 +698,14 @@ export class ScionChatSecretRequest extends LitElement {
     const view = payload.secret_request;
     if (!view || !view.rowId) return;
     if (this.messageId && view.messageId && view.messageId !== this.messageId) return;
+    const prev = this.views.find((r) => r.rowId === view.rowId);
+    const becamePending = Boolean(
+      prev && !isPendingSecretRequest(prev) && isPendingSecretRequest(view)
+    );
     if (this.applyRowUpdates([view])) {
+      if (becamePending && !this.canRespond && !this.deniedReason) {
+        void this.refetchCard();
+      }
       this.dispatchEvent(
         new CustomEvent<SecretRequestUpdatedDetail>('secret-request-updated', {
           detail: {
@@ -715,7 +722,7 @@ export class ScionChatSecretRequest extends LitElement {
   private onValueInput(rowId: string, e: Event): void {
     const target = e.target as HTMLInputElement | HTMLTextAreaElement | null;
     const value = target?.value ?? '';
-    this.capturedFileRows.delete(rowId);
+    this.capturedRows.delete(rowId);
     if (value.length === 0) {
       this.formValues.delete(rowId);
     } else {
@@ -728,12 +735,12 @@ export class ScionChatSecretRequest extends LitElement {
     this.formRevision++;
   }
 
-  private onFilePaste(rowId: string, e: ClipboardEvent): void {
+  private onValuePaste(rowId: string, e: ClipboardEvent): void {
     const pasted = e.clipboardData?.getData('text/plain') ?? '';
     if (!pasted) return;
     e.preventDefault();
     this.formValues.set(rowId, pasted);
-    this.capturedFileRows.add(rowId);
+    this.capturedRows.add(rowId);
     const target = e.target as HTMLInputElement | null;
     if (target) {
       target.value = '';
@@ -785,13 +792,18 @@ export class ScionChatSecretRequest extends LitElement {
         return;
       }
 
+      if (decoded.includes('\u0000')) {
+        this.errorMessage = `File for ${row.key} appears to be binary (contains NUL bytes). Binary files are not supported.`;
+        return;
+      }
+
       if (decoded.length === 0) {
         this.errorMessage = `Selected file for ${row.key} is empty.`;
         return;
       }
 
       this.formValues.set(row.rowId, decoded);
-      this.capturedFileRows.add(row.rowId);
+      this.capturedRows.add(row.rowId);
       if (this.revealedRows.has(row.rowId)) {
         const next = new Set(this.revealedRows);
         next.delete(row.rowId);
@@ -825,9 +837,13 @@ export class ScionChatSecretRequest extends LitElement {
     const res = await fetchSecretRequestCard(this.messageId, { signal: controller.signal });
     if (controller.signal.aborted || !res.ok) return;
     this.applyRowUpdates(res.card.rows);
+    this.canRespond = res.card.canRespond;
+    this.reason = res.card.reason ?? '';
     if (!res.card.canRespond && res.card.reason) {
       this.deniedReason = res.card.reason;
       this.clearFormValues();
+    } else if (res.card.canRespond) {
+      this.deniedReason = '';
     }
     this.dispatchEvent(
       new CustomEvent<SecretRequestRefreshedDetail>('secret-request-refreshed', {
@@ -1116,74 +1132,19 @@ export class ScionChatSecretRequest extends LitElement {
       const value = this.formValues.get(row.rowId) ?? '';
       const revealed = this.revealedRows.has(row.rowId);
       const disabled = !this.canRespondNow || this.submitting || this.actionState.dismissSubmitting;
-      const isEnvironment = !row.secretType || row.secretType === 'environment';
-      const isVariable = row.secretType === 'variable';
-
-      if (isEnvironment || isVariable) {
-        return html`
-          <div class="input-wrap" data-form-rev=${this.formRevision}>
-            ${isVariable && revealed
-              ? html`
-                  <textarea
-                    class="secret-textarea"
-                    style="--secret-rows: 2"
-                    data-key=${row.key}
-                    data-row-id=${row.rowId}
-                    aria-label=${`Secret value for ${row.key}`}
-                    placeholder=${`Enter value for ${row.key}…`}
-                    autocomplete="off"
-                    autocorrect="off"
-                    autocapitalize="off"
-                    spellcheck="false"
-                    data-lpignore="true"
-                    data-1p-ignore="true"
-                    rows="2"
-                    ?disabled=${disabled}
-                    .value=${value}
-                    @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
-                  ></textarea>
-                `
-              : html`
-                  <input
-                    class="secret-input"
-                    type=${revealed ? 'text' : 'password'}
-                    data-key=${row.key}
-                    data-row-id=${row.rowId}
-                    aria-label=${`Secret value for ${row.key}`}
-                    placeholder=${`Enter value for ${row.key}…`}
-                    autocomplete="off"
-                    autocorrect="off"
-                    autocapitalize="off"
-                    spellcheck="false"
-                    data-lpignore="true"
-                    data-1p-ignore="true"
-                    ?disabled=${disabled}
-                    .value=${value}
-                    @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
-                  />
-                `}
-            <button
-              type="button"
-              class="toggle-visibility"
-              data-toggle-visibility=${row.key}
-              aria-pressed=${revealed ? 'true' : 'false'}
-              aria-label=${revealed ? `Hide value for ${row.key}` : `Show value for ${row.key}`}
-              title=${revealed ? 'Hide value' : 'Show value'}
-              ?disabled=${disabled}
-              @click=${(): void => this.toggleReveal(row.rowId, revealed)}
-            >
-              <sl-icon name=${revealed ? 'eye-slash' : 'eye'} aria-hidden="true"></sl-icon>
-            </button>
-          </div>
-        `;
-      }
-
       const isFile = row.secretType === 'file';
-      const hasCapturedFileValue =
-        isFile &&
+      const textareaRows = isFile ? 4 : 2;
+      const hasCapturedValue =
         !revealed &&
         value.length > 0 &&
-        (this.capturedFileRows.has(row.rowId) || value.includes('\n') || value.includes('\r'));
+        (this.capturedRows.has(row.rowId) || value.includes('\n') || value.includes('\r'));
+      const placeholder = hasCapturedValue
+        ? isFile
+          ? 'Value entered — type, paste or load to replace'
+          : 'Value entered — type or paste to replace'
+        : isFile
+          ? 'Paste secret file contents…'
+          : `Enter value for ${row.key}…`;
 
       return html`
         <div class="input-wrap" data-form-rev=${this.formRevision}>
@@ -1191,18 +1152,20 @@ export class ScionChatSecretRequest extends LitElement {
             ? html`
                 <textarea
                   class="secret-textarea"
-                  style="--secret-rows: 4"
+                  style="--secret-rows: ${textareaRows}"
                   data-key=${row.key}
                   data-row-id=${row.rowId}
                   aria-label=${`Secret value for ${row.key}`}
-                  placeholder="Paste secret file contents…"
+                  placeholder=${isFile
+                    ? 'Paste secret file contents…'
+                    : `Enter value for ${row.key}…`}
                   autocomplete="off"
                   autocorrect="off"
                   autocapitalize="off"
                   spellcheck="false"
                   data-lpignore="true"
                   data-1p-ignore="true"
-                  rows="4"
+                  rows=${textareaRows}
                   ?disabled=${disabled}
                   .value=${value}
                   @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
@@ -1214,12 +1177,10 @@ export class ScionChatSecretRequest extends LitElement {
                   type="password"
                   data-key=${row.key}
                   data-row-id=${row.rowId}
-                  aria-label=${hasCapturedFileValue
+                  aria-label=${hasCapturedValue
                     ? `Secret value for ${row.key} entered, hidden`
                     : `Secret value for ${row.key}`}
-                  placeholder=${hasCapturedFileValue
-                    ? 'Value entered — paste or load to replace'
-                    : 'Paste secret file contents…'}
+                  placeholder=${placeholder}
                   autocomplete="off"
                   autocorrect="off"
                   autocapitalize="off"
@@ -1227,8 +1188,8 @@ export class ScionChatSecretRequest extends LitElement {
                   data-lpignore="true"
                   data-1p-ignore="true"
                   ?disabled=${disabled}
-                  .value=${hasCapturedFileValue ? '' : value}
-                  @paste=${(e: ClipboardEvent): void => this.onFilePaste(row.rowId, e)}
+                  .value=${hasCapturedValue ? '' : value}
+                  @paste=${(e: ClipboardEvent): void => this.onValuePaste(row.rowId, e)}
                   @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
                 />
               `}
@@ -1245,43 +1206,54 @@ export class ScionChatSecretRequest extends LitElement {
             <sl-icon name=${revealed ? 'eye-slash' : 'eye'} aria-hidden="true"></sl-icon>
           </button>
         </div>
-        <div class="file-controls">
-          <input
-            type="file"
-            class="file-picker-input"
-            data-file-input=${row.key}
-            data-row-id=${row.rowId}
-            aria-label=${`Load secret file for ${row.key}`}
-            ?disabled=${disabled}
-            @change=${(e: Event): void => void this.onFileSelected(row, e)}
-          />
-          <sl-button
-            type="button"
-            size="small"
-            variant="default"
-            class="load-file-btn"
-            data-load-file=${row.key}
-            ?disabled=${disabled}
-            @click=${(): void => this.triggerFilePicker(row.rowId)}
-          >
-            <sl-icon slot="prefix" name="upload" aria-hidden="true"></sl-icon>
-            Load from file
-          </sl-button>
-          ${hasCapturedFileValue
-            ? html`
-                <span
-                  class="file-value-status"
-                  data-testid="file-value-masked"
-                  role="status"
-                  aria-label=${`Secret value for ${row.key} entered, hidden`}
-                >
-                  <sl-icon name="lock" aria-hidden="true"></sl-icon>
-                  <span aria-hidden="true">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span>
-                  <span>Value entered (hidden)</span>
-                </span>
-              `
-            : nothing}
-        </div>
+        ${isFile || hasCapturedValue
+          ? html`
+              <div class="file-controls">
+                ${isFile
+                  ? html`
+                      <input
+                        type="file"
+                        tabindex="-1"
+                        class="file-picker-input"
+                        data-file-input=${row.key}
+                        data-row-id=${row.rowId}
+                        aria-label=${`Load secret file for ${row.key}`}
+                        ?disabled=${disabled}
+                        @change=${(e: Event): void => void this.onFileSelected(row, e)}
+                      />
+                      <sl-button
+                        type="button"
+                        size="small"
+                        variant="default"
+                        class="load-file-btn"
+                        data-load-file=${row.key}
+                        ?disabled=${disabled}
+                        @click=${(): void => this.triggerFilePicker(row.rowId)}
+                      >
+                        <sl-icon slot="prefix" name="upload" aria-hidden="true"></sl-icon>
+                        Load from file
+                      </sl-button>
+                    `
+                  : nothing}
+                ${hasCapturedValue
+                  ? html`
+                      <span
+                        class="file-value-status"
+                        data-testid="file-value-masked"
+                        role="status"
+                        aria-label=${`Secret value for ${row.key} entered, hidden`}
+                      >
+                        <sl-icon name="lock" aria-hidden="true"></sl-icon>
+                        <span aria-hidden="true"
+                          >&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span
+                        >
+                        <span>Value entered (hidden)</span>
+                      </span>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
       `;
     }
 
@@ -1493,7 +1465,7 @@ export class ScionChatSecretRequest extends LitElement {
         </div>
 
         ${views.map((row) => this.renderRow(row))} ${this.renderStorageNotice()}
-        ${!this.canRespondNow
+        ${hasPending && !this.canRespondNow
           ? html`<div class="status-alert blocked" role="status">
               <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
               <span>${this.disabledReasonText}</span>

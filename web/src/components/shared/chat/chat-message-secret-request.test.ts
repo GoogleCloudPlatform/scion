@@ -458,4 +458,20 @@ describe('native chat secret-request wiring', () => {
     });
     expect(msg.shadowRoot?.querySelector('.secret-request-status.error sl-button')).not.toBeNull();
   });
+
+  it('skips fetching the secret-request card when the message is deleted', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const msg = document.createElement('scion-chat-message') as ScionChatMessage;
+    msg.messageId = 'msg-sr-deleted';
+    msg.messageType = 'secret-request';
+    msg.deletedAt = '2026-11-24T01:00:00Z';
+    msg.body = FALLBACK_MARKDOWN;
+    document.body.appendChild(msg);
+    await msg.updateComplete;
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(msg.shadowRoot?.querySelector('scion-chat-secret-request')).toBeNull();
+  });
 });

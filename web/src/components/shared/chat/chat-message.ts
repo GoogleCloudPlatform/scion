@@ -2931,7 +2931,7 @@ export class ScionChatMessage extends LitElement {
     if (changed.has('authorizingUserId')) {
       this.resolveAuthorizer();
     }
-    if (changed.has('messageType') || changed.has('messageId')) {
+    if (changed.has('messageType') || changed.has('messageId') || changed.has('deletedAt')) {
       this.syncSecretRequestCard();
     }
   }
@@ -3322,7 +3322,10 @@ export class ScionChatMessage extends LitElement {
    */
   private get showsSecretRequestCard(): boolean {
     return (
-      this.messageType === 'secret-request' && Boolean(this.messageId) && agentSecretsEnabled()
+      this.messageType === 'secret-request' &&
+      Boolean(this.messageId) &&
+      !this.deletedAt &&
+      agentSecretsEnabled()
     );
   }
 

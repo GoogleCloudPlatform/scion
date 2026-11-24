@@ -198,7 +198,7 @@ describe('scion-chat-secret-request', () => {
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
     toggleBtn.click();
     await el.updateComplete;
-    expect(input.type).toBe('text');
+    expect(pendingRow.querySelector('textarea')).not.toBeNull();
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
     // Submitting row
@@ -843,6 +843,8 @@ describe('scion-chat-secret-request', () => {
     ) as HTMLInputElement;
     expect(fileInput).not.toBeNull();
 
+    expect(fileInput.getAttribute('tabindex')).toBe('-1');
+
     const triggerFile = async (file: File): Promise<void> => {
       Object.defineProperty(fileInput, 'files', {
         value: [file],
@@ -867,13 +869,24 @@ describe('scion-chat-secret-request', () => {
     expect(fileInput.value).toBe('');
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
 
-    // 3. Accept valid UTF-8 multi-line file, masked by default, cleared on pagehide
+    // 3. Reject valid UTF-8 file containing NUL bytes as binary
+    const nulFile = new File(['hello\u0000world'], 'nul.bin', { type: 'text/plain' });
+    await triggerFile(nulFile);
+    expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain('NUL');
+    expect(fileInput.value).toBe('');
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+
+    // 4. Accept valid UTF-8 multi-line file, masked by default, never rendered into password input value
     const pemContent = '-----BEGIN CERT-----\nabc123\n-----END CERT-----\n';
     const validFile = new File([pemContent], 'cert.pem', { type: 'text/plain' });
     await triggerFile(validFile);
     expect(el.shadowRoot!.querySelector('.status-alert.error')).toBeNull();
     expect(fileInput.value).toBe('');
     expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    const pwdInput = el.shadowRoot!.querySelector(
+      'input[data-key="DEPLOY_KEY"]'
+    ) as HTMLInputElement;
+    expect(pwdInput.value).toBe('');
     expect(el.shadowRoot!.textContent).not.toContain('abc123');
     expect(el.shadowRoot!.innerHTML).not.toContain('abc123');
     expect((el as unknown as { formValues: Map<string, string> }).formValues.get('r-file')).toBe(
@@ -1315,5 +1328,269 @@ describe('scion-chat-secret-request', () => {
       expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['environment', 'variable'] as const)(
+    'preserves CR/LF on masked paste and never merges newlines on Hide+type for %s rows',
+    async (secretType) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            rows: [],
+            responseMessageId: 'resp-lf',
+            replayed: false,
+          })
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            rows: [],
+            responseMessageId: 'resp-crlf',
+            replayed: false,
+          })
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            rows: [],
+            responseMessageId: 'resp-replace',
+            replayed: false,
+          })
+        );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const el = await mountCard({
+        rows: [makeRow({ rowId: 'r-1', key: 'MULTI_KEY', secretType })],
+      });
+
+      const pasteInto = (text: string): void => {
+        const input = el.shadowRoot!.querySelector(
+          'input[data-key="MULTI_KEY"]'
+        ) as HTMLInputElement;
+        const pasteEvent = new Event('paste', {
+          bubbles: true,
+          cancelable: true,
+        }) as ClipboardEvent;
+        Object.defineProperty(pasteEvent, 'clipboardData', {
+          value: { getData: (t: string) => (t === 'text/plain' ? text : '') },
+        });
+        input.dispatchEvent(pasteEvent);
+        expect(pasteEvent.defaultPrevented).toBe(true);
+      };
+
+      // 1. Masked paste "A\nB" -> submits "A\nB"
+      pasteInto('A\nB');
+      await el.updateComplete;
+      expect(
+        (el.shadowRoot!.querySelector('input[data-key="MULTI_KEY"]') as HTMLInputElement).value
+      ).toBe('');
+      expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+      let fulfilledCount = 0;
+      el.addEventListener('secret-request-fulfilled', () => {
+        fulfilledCount++;
+      });
+      (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+      await vi.waitFor(() => expect(fulfilledCount).toBe(1));
+      await el.updateComplete;
+      expect(
+        JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string).values
+      ).toEqual({
+        MULTI_KEY: 'A\nB',
+      });
+
+      // 2. Masked paste "A\r\nB" -> submits "A\r\nB" unchanged
+      pasteInto('A\r\nB');
+      await el.updateComplete;
+      (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+      await vi.waitFor(() => expect(fulfilledCount).toBe(2));
+      await el.updateComplete;
+      expect(
+        JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string).values
+      ).toEqual({
+        MULTI_KEY: 'A\r\nB',
+      });
+
+      // 3. Reveal -> enter "A\nB" in textarea -> Hide -> password input is empty; typing "X" replaces (never "ABX")
+      const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+      toggleBtn.click();
+      await el.updateComplete;
+      const ta = el.shadowRoot!.querySelector(
+        'textarea[data-key="MULTI_KEY"]'
+      ) as HTMLTextAreaElement;
+      expect(ta).not.toBeNull();
+      ta.value = 'A\nB';
+      ta.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      toggleBtn.click();
+      await el.updateComplete;
+      const hiddenInput = el.shadowRoot!.querySelector(
+        'input[data-key="MULTI_KEY"]'
+      ) as HTMLInputElement;
+      expect(hiddenInput.value).toBe('');
+      hiddenInput.value = 'X';
+      hiddenInput.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+      await vi.waitFor(() => expect(fulfilledCount).toBe(3));
+      expect(
+        JSON.parse((fetchMock.mock.calls[2] as [string, RequestInit])[1].body as string).values
+      ).toEqual({
+        MULTI_KEY: 'X',
+      });
+    }
+  );
+
+  it('clears form values when messageId changes', async () => {
+    const el = await mountCard({ messageId: 'msg-a' });
+    const input = el.shadowRoot!.querySelector(
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
+    input.value = 'secret-for-a';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(1);
+
+    el.messageId = 'msg-b';
+    el.rows = [makeRow({ rowId: 'row-1', messageId: 'msg-b' })];
+    await el.updateComplete;
+
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    expect(
+      (el.shadowRoot!.querySelector('input[data-key="GITHUB_TOKEN"]') as HTMLInputElement).value
+    ).toBe('');
+    expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('prunes in-memory form values when a live update resolves a pending row', async () => {
+    const el = await mountCard();
+    const input = el.shadowRoot!.querySelector(
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
+    input.value = 'typed-before-fulfilled';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(1);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('message-action-updated', {
+        detail: {
+          data: {
+            kind: 'secret_request',
+            messageId: 'msg-1',
+            secret_request: makeRow({
+              rowId: 'row-1',
+              status: 'fulfilled',
+              fulfilled: {
+                at: '2026-11-24T00:05:00Z',
+                byUserId: 'user-2',
+                byName: 'Bob',
+                surface: 'native',
+              },
+            }),
+          },
+        },
+      })
+    );
+    await el.updateComplete;
+
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+  });
+
+  it('discards an async file read that completes after clearFormValues()', async () => {
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'r-file', key: 'DEPLOY_KEY', secretType: 'file' })],
+    });
+    const fileInput = el.shadowRoot!.querySelector(
+      'input[type="file"][data-file-input="DEPLOY_KEY"]'
+    ) as HTMLInputElement;
+
+    let resolveBuf: ((buf: ArrayBuffer) => void) | null = null;
+    const slowFile = new File(['delayed-secret'], 'slow.pem', { type: 'text/plain' });
+    vi.spyOn(slowFile, 'arrayBuffer').mockImplementation(
+      () =>
+        new Promise<ArrayBuffer>((resolve) => {
+          resolveBuf = resolve;
+        })
+    );
+    Object.defineProperty(fileInput, 'files', { value: [slowFile], configurable: true });
+    fileInput.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Clear values (e.g. pagehide / submit / 403) before arrayBuffer resolves
+    el.clearFormValues();
+    resolveBuf!(new TextEncoder().encode('delayed-secret').buffer);
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+  });
+
+  it('hides the blocked alert on closed cards and refetches canRespond when a submitting claim rolls back to pending', async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse({
+          messageId: 'msg-1',
+          projectId: 'proj-1',
+          agentId: 'agent-1',
+          agentName: 'builder-1',
+          canRespond: true,
+          reason: '',
+          rows: [makeRow({ rowId: 'row-1', status: 'pending', submitting: false })],
+        })
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Closed card with canRespond=false shows no blocked warning alert
+    const closed = await mountCard({
+      canRespond: false,
+      reason: 'all secret requests on this card are closed',
+      rows: [
+        makeRow({
+          rowId: 'row-1',
+          status: 'fulfilled',
+          fulfilled: {
+            at: '2026-11-24T00:05:00Z',
+            byUserId: 'user-2',
+            byName: 'Alice',
+            surface: 'native',
+          },
+        }),
+      ],
+    });
+    expect(closed.shadowRoot!.querySelector('.status-alert.blocked')).toBeNull();
+
+    // Card loaded while submitting (canRespond=false) refetches when claim rolls back to pending
+    const rolling = await mountCard({
+      canRespond: false,
+      reason: 'all secret requests on this card are closed',
+      rows: [makeRow({ rowId: 'row-1', status: 'pending', submitting: true })],
+    });
+    stateManager.dispatchEvent(
+      new CustomEvent('message-action-updated', {
+        detail: {
+          data: {
+            kind: 'secret_request',
+            messageId: 'msg-1',
+            secret_request: makeRow({ rowId: 'row-1', status: 'pending', submitting: false }),
+          },
+        },
+      })
+    );
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/v1/secret-requests/msg-1',
+        expect.objectContaining({ method: 'GET' })
+      );
+      expect(rolling.canRespond).toBe(true);
+    });
+    await rolling.updateComplete;
+    expect(
+      (rolling.shadowRoot!.querySelector('input[data-key="GITHUB_TOKEN"]') as HTMLInputElement)
+        .disabled
+    ).toBe(false);
   });
 });
