@@ -996,7 +996,6 @@ func (s *Server) profileMadeByProjectGroups(
 // waitingOnYouTotal wraps it in context.WithTimeout(ctx, s.chatSearchTimeout()).
 // Missing or non-active accounts (suspended, invited, pending, deleting)
 // return (0, 0, nil); store lookup faults return (0, 0, err).
-//
 func (s *Server) waitingOnYouTotal(ctx context.Context, userID string) (total, projects int, err error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
