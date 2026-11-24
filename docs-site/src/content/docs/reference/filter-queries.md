@@ -73,7 +73,3 @@ Text search matches agent **name** or **slug** (case-insensitive substring). Non
 | `template` | string | template name | client | `template:developer` | Agent template name |
 | `harness` | string | harness config name | client | `harness:antigravity` | Harness config name |
 | `mode` | enum | `hub`, `project`, `branch`, `lineage`, `none`, `can_message`, `cannot_message` | client | `mode:branch`, `mode:can_message` | Messaging mode or messageability |
-
-### `graph_project` (Project-scoped agent graph)
-
-Same keys and behaviour as `graph`, minus `project` (already scoped to the current project).

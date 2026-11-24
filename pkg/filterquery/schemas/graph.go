@@ -64,8 +64,8 @@ func graphModeEnum() []string {
 	}
 }
 
-func graphKeys(includeProject bool) []filterquery.Key {
-	keys := []filterquery.Key{
+func graphKeys() []filterquery.Key {
+	return []filterquery.Key{
 		{
 			Name:        "phase",
 			Help:        "Agent lifecycle phase",
@@ -89,32 +89,28 @@ func graphKeys(includeProject bool) []filterquery.Key {
 			Exec:        filterquery.ExecClient,
 			MultiValued: true,
 		},
-	}
-	if includeProject {
-		keys = append(keys, filterquery.Key{
+		{
 			Name:        "project",
 			Help:        "Project slug, name, or ID",
 			Kind:        filterquery.KindRef,
 			Exec:        filterquery.ExecClient,
 			MultiValued: false,
-		})
-	}
-	keys = append(keys,
-		filterquery.Key{
+		},
+		{
 			Name:        "template",
 			Help:        "Agent template name",
 			Kind:        filterquery.KindString,
 			Exec:        filterquery.ExecClient,
 			MultiValued: false,
 		},
-		filterquery.Key{
+		{
 			Name:        "harness",
 			Help:        "Harness config name",
 			Kind:        filterquery.KindString,
 			Exec:        filterquery.ExecClient,
 			MultiValued: false,
 		},
-		filterquery.Key{
+		{
 			Name:        "mode",
 			Help:        "Messaging mode or messageability",
 			Kind:        filterquery.KindEnum,
@@ -122,8 +118,7 @@ func graphKeys(includeProject bool) []filterquery.Key {
 			Enum:        graphModeEnum(),
 			MultiValued: false,
 		},
-	)
-	return keys
+	}
 }
 
 // Graph is the filter query schema for the global agent graph view.
@@ -131,13 +126,5 @@ func graphKeys(includeProject bool) []filterquery.Key {
 var Graph = filterquery.Schema{
 	View:     "graph",
 	TextHelp: "Matches agent name or slug",
-	Keys:     graphKeys(true),
-}
-
-// GraphProject is the filter query schema for a project-scoped agent graph view.
-// It omits the project key because the view is already scoped to one project.
-var GraphProject = filterquery.Schema{
-	View:     "graph_project",
-	TextHelp: "Matches agent name or slug",
-	Keys:     graphKeys(false),
+	Keys:     graphKeys(),
 }

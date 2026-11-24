@@ -38,16 +38,6 @@ func TestGraphSchemas(t *testing.T) {
 			t.Errorf("Graph key %q has Exec=%v, want ExecClient", k.Name, k.Exec)
 		}
 	}
-
-	if schemas.GraphProject.View != "graph_project" {
-		t.Fatalf("GraphProject.View = %q, want %q", schemas.GraphProject.View, "graph_project")
-	}
-	if schemas.GraphProject.HasKey("project") {
-		t.Errorf("GraphProject must omit project key")
-	}
-	if len(schemas.GraphProject.Keys) != len(wantGlobal)-1 {
-		t.Fatalf("GraphProject has %d keys, want %d", len(schemas.GraphProject.Keys), len(wantGlobal)-1)
-	}
 }
 
 func TestGraphSchemaParse(t *testing.T) {
@@ -66,14 +56,5 @@ func TestGraphSchemaParse(t *testing.T) {
 		if q.Mode != filterquery.ModeStructured {
 			t.Errorf("Parse(%q) mode = %v, want structured", input, q.Mode)
 		}
-	}
-
-	// In project-scoped graph schema, project: is unknown and falls back to text.
-	q, err := filterquery.Parse("project:demo", schemas.GraphProject.HasKey)
-	if err != nil {
-		t.Fatalf("Parse(project:demo) on GraphProject error: %v", err)
-	}
-	if q.Mode != filterquery.ModeText || q.Text != "project:demo" {
-		t.Errorf("GraphProject Parse(project:demo) = %+v, want text fallback", q)
 	}
 }
