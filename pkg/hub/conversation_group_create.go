@@ -185,9 +185,8 @@ func (s *Server) createNativeGroupConversation(ctx context.Context, p createGrou
 	}
 
 	// Read back the conversation CreateTopic minted atomically alongside the
-	// topic. A not-found here means the SQLite hasConversationsTable() gate
-	// was false, which cannot happen on a hub where the conversation API
-	// itself works (design §3.4) — treat it as an internal error.
+	// topic. A not-found here cannot happen because CreateTopic mints the
+	// conversation in the same transaction — treat it as an internal error.
 	conv, err := s.store.GetConversation(ctx, topic.ConversationID)
 	if err != nil {
 		slog.ErrorContext(ctx, "createGroupConversation: read-back of newly created conversation failed",

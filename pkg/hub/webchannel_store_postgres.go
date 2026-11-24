@@ -674,9 +674,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 // UpdateTopic applies partial updates to a topic. Identity fields (display_name
 // for Name, default_agent_id for DefaultAgentID) are written to the
 // authoritative conversations row first and mirrored to webchat_topic in the
-// same transaction. Postgres migrations guarantee the conversations table
-// exists (see CreateTopic's DEF-89 comment above), so unlike the SQLite store
-// there is no hasConversationsTable() gate here.
+// same transaction.
 func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error {
 	var sets []string
 	var args []interface{}
