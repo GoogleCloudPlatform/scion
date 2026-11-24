@@ -2947,6 +2947,10 @@ type Server struct {
 	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
 	templateSourceFetcher templateSourceFetcher
 
+	// templateDrift holds the caches and optional test seams for the Hub-side
+	// template drift check at agent creation (template_drift.go).
+	templateDrift templateDriftChecker
+
 	// welcome holds the welcome project flow's previews and test seams
 	// (welcome_project.go).
 	welcome welcomeRuntimeState
