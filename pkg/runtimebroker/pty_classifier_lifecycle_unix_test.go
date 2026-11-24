@@ -1,0 +1,321 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build unix
+
+package runtimebroker
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"github.com/stretchr/testify/require"
+)
+
+// TestPTYClassifier_RealTmuxAttachEnd exercises classifyAttachEnd through the
+// full production path — handlePTYStream -> handlePTYStreamWithAgent -> Run
+// -> classifyAttachEnd -> CloseStream — against a real tmux session and
+// kernel PTY. Only the runtime exec is adapted to a private local tmux
+// socket, as in TestPTYLifecycle_PrivateTmuxSurvivesDetachAndStreamClose.
+//
+// Covers: detach-client -> 1000; kill-session -> 4410; a Hub-initiated stream
+// close sends no probe and no CloseStream; and a killed exec with the
+// session alive gives 4503.
+func TestPTYClassifier_RealTmuxAttachEnd(t *testing.T) {
+	useFastPTYTimings(t)
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("real-tmux classifier test requires tmux in PATH")
+	}
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+
+	// The adapter script itself is shared: it forwards to whatever socket
+	// TW_CLASSIFIER_SOCKET names at exec time, so each subtest below can
+	// point it at its own private tmux server (a fresh socket per subtest
+	// avoids a create/kill-server race on a shared socket path between fast
+	// consecutive subtests). It also appends a marker line to
+	// TW_CLASSIFIER_PROBE_LOG every time it is invoked as the post-exit
+	// has-session probe (classifyAttachEnd's tmuxHasSession), so tests can
+	// assert precisely on the number of probe execs rather than inferring it
+	// from the session's state.
+	adapter := filepath.Join(t.TempDir(), "runtime-exec")
+	require.NoError(t, os.WriteFile(adapter, []byte(`#!/bin/sh
+set -eu
+[ "$1" = exec ]; shift
+if [ "$1" = -it ]; then shift; fi
+[ "$1" = --user ]; shift 2
+[ "$1" = classifier-fixture ]; shift
+[ "$1" = tmux ]; shift
+if [ "$1" = has-session ]; then
+  echo probe >> "$TW_CLASSIFIER_PROBE_LOG"
+fi
+exec "$TW_CLASSIFIER_TMUX" -S "$TW_CLASSIFIER_SOCKET" "$@"
+`), 0700))
+	t.Setenv("TW_CLASSIFIER_TMUX", tmux)
+
+	lookup := &fixedAgentLookup{result: &AgentLookupResult{
+		ContainerID: "classifier-fixture",
+		RuntimeName: adapter,
+		ExecUser:    "scion",
+	}}
+
+	// attachHarness holds everything a duringAttach callback needs to poke
+	// at a live attach: the handler (to inject data or a Hub-initiated
+	// close) and the tmux command runner (to drive the session directly).
+	type attachHarness struct {
+		handler     *StreamHandler
+		client      *ControlChannelClient
+		tmuxCommand func(args ...string) (string, error)
+	}
+
+	// runAttach starts a fresh tmux session, drives one attach through
+	// handlePTYStream, invokes duringAttach once the client has attached,
+	// waits for handlePTYStream to return, and reports what (if anything)
+	// the broker sent the Hub as the stream close. The returned probeCount
+	// reads how many times the adapter's has-session probe actually ran.
+	runAttach := func(t *testing.T, streamID string, duringAttach func(t *testing.T, h attachHarness)) (msg ptyClassifierCloseMsg, gotClose bool, tmuxCmd func(args ...string) (string, error), probeCount func() int) {
+		t.Helper()
+
+		socket := filepath.Join(t.TempDir(), "tmux.sock")
+		tmuxCommand := func(args ...string) (string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, tmux, append([]string{"-S", socket}, args...)...).CombinedOutput()
+			return strings.TrimSpace(string(out)), err
+		}
+		t.Setenv("TW_CLASSIFIER_SOCKET", socket)
+
+		probeLog := filepath.Join(t.TempDir(), "probe.log")
+		t.Setenv("TW_CLASSIFIER_PROBE_LOG", probeLog)
+		probeCount = func() int {
+			data, err := os.ReadFile(probeLog)
+			if err != nil {
+				return 0 // never created means never invoked
+			}
+			trimmed := strings.TrimSpace(string(data))
+			if trimmed == "" {
+				return 0
+			}
+			return len(strings.Split(trimmed, "\n"))
+		}
+
+		out, err := tmuxCommand("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
+		require.NoError(t, err, "new-session output: %s", out)
+		t.Cleanup(func() { _, _ = tmuxCommand("kill-server") })
+
+		// Disable tmux's paste-detection heuristic (default assume-paste-time
+		// is 1ms) on this private fixture server so rapid programmatic writes
+		// over the test stream cannot be misclassified as pasted text and
+		// bypass the C-b d detach keybinding.
+		out, err = tmuxCommand("set", "-g", "assume-paste-time", "0")
+		require.NoError(t, err, "set assume-paste-time output: %s", out)
+
+		brokerConn, hubConn, cleanup := newWSPair(t)
+		defer cleanup()
+		client := &ControlChannelClient{
+			conn:        brokerConn,
+			connected:   true,
+			streams:     make(map[string]*StreamHandler),
+			agentLookup: lookup,
+			log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+			// Set explicitly (rather than left nil) so this test exercises
+			// the production probeCtx := c.ctx branch in
+			// handlePTYStreamWithAgent, not just its nil-ctx test fallback.
+			ctx: context.Background(),
+		}
+
+		closedCh := make(chan ptyClassifierCloseMsg, 4)
+		ptyReady := make(chan struct{})
+		var ptyReadyOnce sync.Once
+		readerDone := make(chan struct{})
+		go func() {
+			defer close(readerDone)
+			for {
+				var m struct {
+					Type     string `json:"type"`
+					StreamID string `json:"streamId"`
+					Code     int    `json:"code"`
+					Reason   string `json:"reason"`
+					Data     []byte `json:"data,omitempty"`
+				}
+				if err := hubConn.ReadJSON(&m); err != nil {
+					return
+				}
+				switch m.Type {
+				case wsprotocol.TypeStream:
+					// Ignore the synthetic active-window OSC sent before
+					// readFromPTY starts; any other stream bytes come from
+					// the real tmux PTY after terminal initialization.
+					if len(m.Data) > 0 && !bytes.HasPrefix(m.Data, []byte("\033]7337;")) {
+						ptyReadyOnce.Do(func() { close(ptyReady) })
+					}
+				case wsprotocol.TypeStreamClose:
+					closedCh <- ptyClassifierCloseMsg{
+						Type:     m.Type,
+						StreamID: m.StreamID,
+						Code:     m.Code,
+						Reason:   m.Reason,
+					}
+				}
+			}
+		}()
+		defer func() { _ = hubConn.Close(); <-readerDone }()
+
+		handler := &StreamHandler{streamID: streamID, slug: "classifier-fixture", dataCh: make(chan []byte, 4), resizeCh: make(chan [2]int, 4), closeCh: make(chan struct{})}
+		client.streamMu.Lock()
+		client.streams[streamID] = handler
+		client.streamMu.Unlock()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			client.handlePTYStream(handler, 80, 24)
+		}()
+		t.Cleanup(func() {
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("handlePTYStream did not return during cleanup")
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_width}x#{client_height}")
+			return err == nil && out == "80x24"
+		}, 10*time.Second, 20*time.Millisecond, "one real tmux client should attach")
+
+		select {
+		case <-ptyReady:
+		case <-readerDone:
+			select {
+			case <-ptyReady:
+			default:
+				t.Fatal("reader goroutine exited before PTY became ready")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for initial tmux PTY output")
+		}
+
+		// waitForTmuxSession's readiness poll also runs has-session checks
+		// before the attach succeeds, and those land in the same probe log.
+		// Reset it here so probeCount() reflects only probes that happen
+		// after this point — i.e. classifyAttachEnd's post-exit probe, which
+		// is what the tests below actually care about.
+		require.NoError(t, os.RemoveAll(probeLog))
+
+		duringAttach(t, attachHarness{handler: handler, client: client, tmuxCommand: tmuxCommand})
+
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Fatal("handlePTYStream did not return")
+		}
+
+		select {
+		case msg := <-closedCh:
+			return msg, true, tmuxCommand, probeCount
+		case <-time.After(500 * time.Millisecond):
+			return ptyClassifierCloseMsg{}, false, tmuxCommand, probeCount
+		}
+	}
+
+	t.Run("detach-client gives 1000", func(t *testing.T) {
+		msg, ok, _, _ := runAttach(t, "classifier-detach", func(t *testing.T, h attachHarness) {
+			// ptyReady above already ordered this after tmux's initial terminal
+			// output (which follows terminal setup). Probe once with a unique
+			// marker and wait for it to echo through the pane so we know tmux's
+			// input loop is reading keystrokes before C-b d, without sending
+			// extra input on the tick that observes readiness.
+			h.handler.dataCh <- []byte("scion-ready\n")
+			require.Eventually(t, func() bool {
+				out, err := h.tmuxCommand("capture-pane", "-p", "-t", "scion")
+				return err == nil && strings.Contains(out, "scion-ready")
+			}, 5*time.Second, 20*time.Millisecond, "tmux client should echo readiness marker before detach")
+
+			// C-b d: the tmux detach keystroke, delivered exactly as a real
+			// client keypress would arrive over the stream.
+			h.handler.dataCh <- []byte{2, 'd'}
+		})
+		require.True(t, ok, "expected a stream_close for a client-initiated detach")
+		require.Equal(t, wsprotocol.ClosePTYNormal, msg.Code)
+	})
+
+	t.Run("kill-session gives 4410", func(t *testing.T) {
+		msg, ok, _, probeCount := runAttach(t, "classifier-kill-session", func(t *testing.T, h attachHarness) {
+			_, err := h.tmuxCommand("kill-session", "-t", "scion")
+			require.NoError(t, err)
+		})
+		require.True(t, ok, "expected a stream_close once the session is gone")
+		require.Equal(t, wsprotocol.ClosePTYSessionGone, msg.Code)
+		require.Equal(t, wsprotocol.CloseReasonSessionEnded, msg.Reason)
+
+		// Sanity check on the probe-counting mechanism itself: a genuine
+		// post-exit classification always runs exactly one has-session probe,
+		// so the "no probe" claim in the Hub-close subtest below is backed by
+		// a counter that does register real invocations, not one that always
+		// reads zero.
+		require.Equal(t, 1, probeCount(), "classifying a gone session should run exactly one has-session probe")
+	})
+
+	t.Run("killed exec with session alive gives 4503", func(t *testing.T) {
+		msg, ok, tmuxCmd, _ := runAttach(t, "classifier-killed-exec", func(t *testing.T, h attachHarness) {
+			pidStr, err := h.tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+			require.NoError(t, err)
+			pid, err := strconv.Atoi(pidStr)
+			require.NoError(t, err)
+			// Kill the exec transport (the tmux attach client process)
+			// directly, simulating a docker/podman exec transport drop or an
+			// operator `kill -9` — without touching the tmux session itself.
+			require.NoError(t, syscall.Kill(pid, syscall.SIGKILL))
+		})
+		require.True(t, ok, "expected a stream_close after the exec transport was killed")
+		require.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, msg.Code)
+		require.Equal(t, wsprotocol.CloseReasonRuntimeStreamDropped, msg.Reason)
+
+		// The session itself must have survived — only the transport died.
+		out, err := tmuxCmd("has-session", "-t", "scion")
+		require.NoError(t, err, "tmux session must survive a killed exec transport: %s", out)
+	})
+
+	t.Run("Hub-initiated close sends no probe and no CloseStream", func(t *testing.T) {
+		_, ok, tmuxCmd, probeCount := runAttach(t, "classifier-hub-close", func(t *testing.T, h attachHarness) {
+			payload, err := json.Marshal(wsprotocol.NewStreamCloseMessage("classifier-hub-close", "hub closed", 0))
+			require.NoError(t, err)
+			require.NoError(t, h.client.handleStreamClose(payload))
+		})
+		require.False(t, ok, "a Hub-initiated close must not be followed by a broker CloseStream")
+
+		// No probe exec ran at all — counted directly from the adapter's own
+		// invocation log, not inferred from the session's state.
+		require.Equal(t, 0, probeCount(), "a Hub-initiated close must skip the has-session probe entirely")
+
+		// The session must also be untouched.
+		out, err := tmuxCmd("has-session", "-t", "scion")
+		require.NoError(t, err, "tmux session must still exist: %s", out)
+	})
+}
