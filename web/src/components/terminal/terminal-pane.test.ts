@@ -1736,6 +1736,26 @@ describe('compact pane header (ptone/scion#4324)', () => {
     expect(crumbTuples(toolbar())).toEqual([['test', `/agents/${agentId}`]]);
   });
 
+  it('omits navigation links when mounted before open() binds an agentId', async () => {
+    const unbound = document.createElement('scion-terminal-pane');
+    document.body.append(unbound);
+    try {
+      await unbound.updateComplete;
+      const bar = unbound.shadowRoot!.querySelector<HTMLElement>('.toolbar')!;
+      expect(bar.querySelector('scion-breadcrumb')).toBeNull();
+      expect(bar.querySelector('a.back-link')).toBeNull();
+
+      unbound.compactHeader = true;
+      unbound.requestUpdate();
+      await unbound.updateComplete;
+      expect(bar.querySelector('scion-breadcrumb')).toBeNull();
+      expect(bar.querySelector('a.back-link')).toBeNull();
+    } finally {
+      unbound.dispose();
+      unbound.remove();
+    }
+  });
+
   it('URL-encodes projectId in full-mode breadcrumb and compact icon links (#9025)', async () => {
     await mountConnected();
     (page as unknown as { projectId: string }).projectId = 'proj/a b?x';

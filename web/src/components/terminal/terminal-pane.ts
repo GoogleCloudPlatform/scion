@@ -2426,6 +2426,9 @@ export class ScionTerminalPane extends LitElement {
    * accessible names, and tooltips.
    */
   private renderBackLinks() {
+    if (!this.agentId) {
+      return nothing;
+    }
     const projectHref = `/projects/${encodeURIComponent(this.projectId)}`;
     const agentHref = `/agents/${encodeURIComponent(this.agentId)}`;
     const projectName = projectDisplayName({
@@ -2456,7 +2459,7 @@ export class ScionTerminalPane extends LitElement {
       });
     }
     crumbs.push({
-      label: this.agentName || this.agentId || 'Agent',
+      label: this.agentName || this.agentId,
       href: agentHref,
       truncate: true,
     });
