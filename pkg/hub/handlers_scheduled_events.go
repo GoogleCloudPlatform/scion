@@ -576,7 +576,7 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 		})
 		return
 	}
-	rawStatus := query.Get("status")
+	rawStatus := strings.TrimSpace(query.Get("status"))
 	group := query.Get("group")
 	if rawStatus != "" && group != "" {
 		ValidationError(w, "cannot specify both status and group", nil)

@@ -838,6 +838,13 @@ func TestScheduledEvent_ListGroupSortAndCursorBinding(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&multiResp))
 	assert.Equal(t, 3, multiResp.TotalCount)
 
+	// Single status filter trims surrounding whitespace, matching comma-separated parsing.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?status=%20pending%20", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var singleTrimResp ListScheduledEventsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&singleTrimResp))
+	assert.Equal(t, 2, singleTrimResp.TotalCount)
+
 	// Validation errors.
 	for _, qs := range []string{
 		"group=unknown",

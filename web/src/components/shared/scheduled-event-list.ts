@@ -229,8 +229,8 @@ export class ScionScheduledEventList extends LitElement {
   }
 
   private handleTabShow(e: CustomEvent): void {
-    e.stopPropagation();
     if (e.target !== e.currentTarget) return;
+    e.stopPropagation();
     const name = (e.detail as { name?: string } | undefined)?.name;
     if (name !== 'pending' && name !== 'past') return;
     if (this.activeTab === name) return;

@@ -498,6 +498,22 @@ describe('scion-scheduled-event-list tabs and on-demand pagination (ptone/scion#
     expect(urls[0]).toContain('group=pending');
 
     const tabGroup = el.shadowRoot!.querySelector('sl-tab-group.events-tab-group')!;
+    // A nested element's sl-tab-show must neither switch tabs nor have its propagation stopped.
+    const nestedChild = document.createElement('div');
+    tabGroup.appendChild(nestedChild);
+    nestedChild.dispatchEvent(
+      new CustomEvent('sl-tab-show', {
+        detail: { name: 'past' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
+    expect(parentSawTabShow).toBe(true);
+    expect(urls).toHaveLength(1);
+    nestedChild.remove();
+    parentSawTabShow = false;
+
     tabGroup.dispatchEvent(
       new CustomEvent('sl-tab-show', {
         detail: { name: 'past' },
