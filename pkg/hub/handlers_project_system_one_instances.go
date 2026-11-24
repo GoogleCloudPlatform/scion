@@ -127,6 +127,9 @@ func projectSystemOneUserCredentialAllowed(ctx context.Context, identity Identit
 // project's System One instance allowlist: an active project owner, an active
 // project admin, or an unscoped Hub/platform admin.
 func (s *Server) projectSystemOneOwnerOrAdminRule(ctx context.Context, identity Identity, projectID string) bool {
+	if s.testAdminPolicyRefuses(ctx, "handlers_project_system_one_instances.go:projectSystemOneOwnerOrAdminRule") {
+		return false
+	}
 	if !projectSystemOneUserCredentialAllowed(ctx, identity) {
 		return false
 	}

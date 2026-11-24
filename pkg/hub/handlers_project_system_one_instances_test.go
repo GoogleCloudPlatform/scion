@@ -679,3 +679,70 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	assert.Equal(t, callsBefore, providerCalls.Load())
 	assert.Equal(t, secretsBefore, countingSecrets.getCalls.Load())
 }
+
+func TestProjectSystemOneInstances_TestAdminDenied(t *testing.T) {
+	ctx := context.Background()
+	srv, s, _ := tsaServer(t)
+	setSystemOneExperimentLive(t, srv, true)
+
+	issuer1 := taUser(t, s, "s1-ta-iss1", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "s1-ta-iss2", store.SystemRoleSuperAdmin)
+	superKind := tsaIssue(t, srv, issuer1, testAdminRoleSuperAdmin)
+	hubKind := tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin)
+	humanHubAdmin := taUser(t, s, "s1-ta-human-hubadmin", store.SystemRoleHubAdmin)
+	humanTok := taTokenFor(t, srv, humanHubAdmin)
+
+	proj := &store.Project{
+		ID:      uuid.NewString(),
+		Name:    "System One Test Admin Gate",
+		Slug:    "s1-ta-gate",
+		OwnerID: humanHubAdmin.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       uuid.NewString(),
+		Name:     "ta-inst",
+		Adapter:  "typesafe",
+		Model:    "jev-1.14.0",
+		Endpoint: "https://api.typesafe.ai",
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "sec-ta-inst"},
+		Enabled:  true,
+	}))
+
+	basePath := "/api/v1/projects/" + proj.ID + "/system-one/instances"
+	instList := []string{"ta-inst"}
+
+	// Both test_hub_admin and test_super_admin MUST receive 403 on collection PUT,
+	// item PUT (add), and item DELETE (remove).
+	for who, tok := range map[string]string{
+		"test_super_admin": superKind.AccessToken,
+		"test_hub_admin":   hubKind.AccessToken,
+	} {
+		recSet := doRequestWithToken(t, srv, tok, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &instList})
+		assert.Equal(t, http.StatusForbidden, recSet.Code, "%s collection PUT: %s", who, recSet.Body.String())
+
+		recAdd := doRequestWithToken(t, srv, tok, http.MethodPut, basePath+"/ta-inst", nil)
+		assert.Equal(t, http.StatusForbidden, recAdd.Code, "%s item PUT: %s", who, recAdd.Body.String())
+
+		recDel := doRequestWithToken(t, srv, tok, http.MethodDelete, basePath+"/ta-inst", nil)
+		assert.Equal(t, http.StatusForbidden, recDel.Code, "%s item DELETE: %s", who, recDel.Body.String())
+	}
+
+	// Direct role-gate check: projectSystemOneOwnerOrAdminRule itself refuses test-admin
+	// identities before the IsUnscopedLocalPlatformAdmin / IsHubAdmin bypass.
+	testAdminUserIdent := tsaIdentity(t, s, hubKind.Identity.ID)
+	taCtx := contextWithIdentity(ctx, testAdminUserIdent)
+	taCtx = contextWithCredentialContext(taCtx, CredentialContext{Kind: CredentialKindWebSession, ID: "ta-web"})
+	assert.False(t, srv.projectSystemOneOwnerOrAdminRule(taCtx, testAdminUserIdent, proj.ID),
+		"projectSystemOneOwnerOrAdminRule must refuse test-admin identity directly")
+
+	// Control: human hub admin succeeds (200) on add, set, and remove.
+	recAdd := doRequestWithToken(t, srv, humanTok, http.MethodPut, basePath+"/ta-inst", nil)
+	require.Equal(t, http.StatusOK, recAdd.Code, recAdd.Body.String())
+
+	recSet := doRequestWithToken(t, srv, humanTok, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &instList})
+	require.Equal(t, http.StatusOK, recSet.Code, recSet.Body.String())
+
+	recDel := doRequestWithToken(t, srv, humanTok, http.MethodDelete, basePath+"/ta-inst", nil)
+	require.Equal(t, http.StatusOK, recDel.Code, recDel.Body.String())
+}
