@@ -223,6 +223,12 @@ func MigrateRetireVariableSecretTypeLeftovers(ctx context.Context, client *ent.C
 		return fmt.Errorf("retire variable secret leftovers (close secrets): %w", err)
 	}
 
+	recheckSecretSQL := fmt.Sprintf(
+		"SELECT secret_type FROM secrets WHERE key = %s AND scope = %s AND scope_id = %s",
+		sqlPlaceholder(dial, 1),
+		sqlPlaceholder(dial, 2),
+		sqlPlaceholder(dial, 3),
+	)
 	deleteSecretSQL := fmt.Sprintf(
 		"DELETE FROM secrets WHERE key = %s AND scope = %s AND scope_id = %s AND secret_type = %s",
 		sqlPlaceholder(dial, 1),
@@ -231,6 +237,20 @@ func MigrateRetireVariableSecretTypeLeftovers(ctx context.Context, client *ent.C
 		sqlPlaceholder(dial, 4),
 	)
 	for _, r := range secretLeftovers {
+		// Re-check immediately before calling the name-keyed backend Delete so
+		// a concurrent API writer that replaced the row with a non-variable
+		// secret between the initial SELECT and this delete is not wiped.
+		var currentType string
+		err := db.QueryRowContext(ctx, recheckSecretSQL, r.key, r.scope, r.scopeID).Scan(&currentType)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("retire variable secret leftovers (recheck secret row %s/%s/%s): %w", r.scope, r.scopeID, r.key, err)
+		}
+		if currentType != retiredSecretTypeVariable {
+			continue
+		}
 		slog.Warn("retired variable secret deleted; recreate as environment/file/on_demand",
 			"key", r.key, "scope", r.scope, "scope_id", r.scopeID)
 		if deleter != nil {

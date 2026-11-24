@@ -540,7 +540,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if gcpBackend, ok := secretBackend.(*secret.GCPBackend); ok {
 			gcpBackend.SetHubName(cfg.Hub.ResolveHubName())
 		}
-		if entClient != nil {
+		if sbErr == nil && entClient != nil {
 			runWithAdvisoryLock(ctx, s, store.LockInlineSecretsMigration, "retire variable secret leftovers", func() {
 				if err := entc.MigrateRetireVariableSecretTypeLeftovers(ctx, entClient, secretBackend); err != nil {
 					log.Printf("Warning: failed to clean up retired variable secrets: %v", err)

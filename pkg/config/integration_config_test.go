@@ -677,6 +677,35 @@ func TestIsSecretConfigKey_A2AApiKey(t *testing.T) {
 	}
 }
 
+func TestHubProducerSecretKeys(t *testing.T) {
+	keys := HubProducerSecretKeys()
+	if len(keys) == 0 {
+		t.Fatal("HubProducerSecretKeys returned empty slice")
+	}
+	seen := make(map[string]bool, len(keys))
+	for i, k := range keys {
+		if seen[k] {
+			t.Errorf("duplicate key %q in HubProducerSecretKeys", k)
+		}
+		seen[k] = true
+		if i > 0 && keys[i-1] > k {
+			t.Errorf("HubProducerSecretKeys not sorted: %q > %q", keys[i-1], k)
+		}
+	}
+	for plugin, mappings := range PluginSecretKeyMap {
+		for _, m := range mappings {
+			if !seen[m.SecretKey] {
+				t.Errorf("PluginSecretKeyMap[%q] key %q missing from HubProducerSecretKeys", plugin, m.SecretKey)
+			}
+		}
+	}
+	for _, ghKey := range []string{SecretGitHubAppPrivateKey, SecretGitHubAppWebhookSecret} {
+		if !seen[ghKey] {
+			t.Errorf("GitHub App key %q missing from HubProducerSecretKeys", ghKey)
+		}
+	}
+}
+
 func TestLoadPluginConfigFile_FiltersSecretKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plugin.yaml")

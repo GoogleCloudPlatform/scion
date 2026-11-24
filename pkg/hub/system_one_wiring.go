@@ -423,7 +423,8 @@ func isDefiniteSecretNotFound(err error) bool {
 func isAllowedNamedSecretType(secretType string) bool {
 	switch secretType {
 	case "", // legacy => environment
-		store.SecretTypeEnvironment:
+		store.SecretTypeEnvironment,
+		store.SecretTypeOnDemand:
 		return true
 	default:
 		return false

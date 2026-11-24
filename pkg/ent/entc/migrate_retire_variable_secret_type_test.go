@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	entsecretrequest "github.com/GoogleCloudPlatform/scion/pkg/ent/secretrequest"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -34,10 +36,14 @@ import (
 type recordingVariableDeleter struct {
 	deletedSecrets []string
 	droppedPending []string
+	onDelete       func(name, scope, scopeID string)
 }
 
 func (r *recordingVariableDeleter) Delete(_ context.Context, name, scope, scopeID string) error {
 	r.deletedSecrets = append(r.deletedSecrets, scope+"/"+scopeID+"/"+name)
+	if r.onDelete != nil {
+		r.onDelete(name, scope, scopeID)
+	}
 	return nil
 }
 
@@ -228,4 +234,77 @@ func TestMigrateRetireVariableSecretTypeLeftovers_NilDeleter(t *testing.T) {
 	var count int
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM secrets WHERE secret_type = 'variable'").Scan(&count))
 	assert.Zero(t, count)
+}
+
+func TestMigrateRetireVariableSecretTypeLeftovers_SkipsConcurrentlyReplacedRow(t *testing.T) {
+	ctx := context.Background()
+	client, err := OpenSQLite(":memory:", PoolConfig{})
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	require.NoError(t, AutoMigrate(ctx, client))
+
+	db := SQLDB(client.Driver())
+	now := time.Now().UTC()
+	for _, key := range []string{"A_VAR", "B_VAR"} {
+		_, err = db.ExecContext(ctx, `
+			INSERT INTO secrets (
+				id, key, encrypted_value, secret_ref, secret_type, target,
+				scope, scope_id, description, injection_mode, allow_progeny,
+				version, created_by, updated_by, created, updated
+			) VALUES (?, ?, 'enc', '', 'variable', ?, 'user', 'u1', '', 'as_needed', 0, 1, '', '', ?, ?)
+		`, uuid.NewString(), key, key, now, now)
+		require.NoError(t, err)
+	}
+
+	// Simulate a concurrent API writer replacing B_VAR with an environment
+	// secret after the initial SELECT, while A_VAR is being deleted.
+	deleter := &recordingVariableDeleter{
+		onDelete: func(name, _, _ string) {
+			if name == "A_VAR" {
+				_, uErr := db.ExecContext(ctx,
+					"UPDATE secrets SET secret_type = 'environment' WHERE key = 'B_VAR' AND scope = 'user' AND scope_id = 'u1'")
+				require.NoError(t, uErr)
+			}
+		},
+	}
+
+	require.NoError(t, MigrateRetireVariableSecretTypeLeftovers(ctx, client, deleter))
+
+	assert.Equal(t, []string{"user/u1/A_VAR"}, deleter.deletedSecrets,
+		"re-check must prevent backend delete for concurrently replaced row B_VAR")
+
+	var bType string
+	require.NoError(t, db.QueryRowContext(ctx,
+		"SELECT secret_type FROM secrets WHERE key = 'B_VAR' AND scope = 'user' AND scope_id = 'u1'").Scan(&bType))
+	assert.Equal(t, store.SecretTypeEnvironment, bType)
+}
+
+func TestSecretRequest_LegacyVariableNormalizesToOnDemandInEnt(t *testing.T) {
+	ctx := context.Background()
+	client, err := OpenSQLite(":memory:", PoolConfig{})
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	require.NoError(t, AutoMigrate(ctx, client))
+
+	reqs, err := messages.NormalizeSecretRequests("secret_requests", []messages.SecretRequestInput{
+		{Key: "LEGACY_VAR_REQ", Type: messages.SecretRequestTypeVariable},
+	})
+	require.NoError(t, err)
+	require.Len(t, reqs, 1)
+	require.Equal(t, messages.SecretRequestTypeOnDemand, reqs[0].SecretType)
+
+	row, err := client.SecretRequest.Create().
+		SetProjectID(uuid.New()).
+		SetAgentID(uuid.New()).
+		SetAgentName("agent-r3").
+		SetKey(reqs[0].Key).
+		SetKeyNorm(reqs[0].KeyNorm).
+		SetVersion(1).
+		SetSecretType(entsecretrequest.SecretType(reqs[0].SecretType)).
+		SetMessageID(uuid.New()).
+		SetPosition(0).
+		SetExpiresAt(time.Now().UTC().Add(time.Hour)).
+		Save(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, entsecretrequest.SecretTypeOnDemand, row.SecretType)
 }

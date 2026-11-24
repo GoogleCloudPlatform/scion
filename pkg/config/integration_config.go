@@ -235,12 +235,6 @@ func IsSecretConfigKey(key string) bool {
 // included automatically.
 func HubProducerSecretKeys() []string {
 	seen := map[string]struct{}{
-		SecretTelegramBotToken:       {},
-		SecretTelegramWebhookKey:     {},
-		SecretDiscordBotToken:        {},
-		SecretDiscordPublicKey:       {},
-		SecretGChatSigningKey:        {},
-		SecretTeamsAppSecret:         {},
 		SecretGitHubAppPrivateKey:    {},
 		SecretGitHubAppWebhookSecret: {},
 	}

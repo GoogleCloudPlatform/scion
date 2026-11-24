@@ -391,8 +391,9 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnvWith(ctx context.Context, sel *de
 
 // secretDeliveryCandidate is one secret selected for fetch.
 type secretDeliveryCandidate struct {
-	meta    secret.SecretMeta // as listed; FetchValues matches on it
-	progeny bool
+	meta      secret.SecretMeta // as listed; FetchValues matches on it
+	scopeRank int               // index in scopes (lowest-to-highest precedence)
+	progeny   bool
 }
 
 // selectDeliverySecrets is resolveSecrets for the start and restart paths.
@@ -502,13 +503,20 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 	noAuth := launchesWithoutCredentials(agent)
 
 	var kept []secretDeliveryCandidate
-	for _, sc := range scopes {
+	// shadowedRank records the highest scope rank at which a non-deliverable,
+	// non-internal secret (such as on_demand or an unknown type) occupies a
+	// key name. That row is never fetched or delivered, and it shadows any
+	// lower-precedence scope row of the same name and blocks progeny fill.
+	// Internal rows and hub rows excluded by HubSecretDeliverable do not
+	// shadow (matching HubSecretDeliverable's contract).
+	var shadowedRank map[string]int
+	for scopeRank, sc := range scopes {
 		metas, err := d.secretBackend.List(ctx, secret.Filter{Scope: sc.scope, ScopeID: sc.scopeID})
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		for _, m := range metas {
-			if !secret.DeliverableType(m.SecretType) {
+			if m.SecretType == store.SecretTypeInternal {
 				continue
 			}
 			// An agent without credentials: only the git token candidates
@@ -525,6 +533,13 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 					continue
 				}
 			}
+			if !secret.DeliverableType(m.SecretType) {
+				if shadowedRank == nil {
+					shadowedRank = make(map[string]int)
+				}
+				shadowedRank[m.Name] = scopeRank
+				continue
+			}
 			if sc.scope != store.ScopeUser {
 				allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, sc.scope, sc.scopeID)
 				if err != nil {
@@ -538,7 +553,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 				// row with the same name stays in effect.
 				continue
 			}
-			kept = append(kept, secretDeliveryCandidate{meta: m})
+			kept = append(kept, secretDeliveryCandidate{meta: m, scopeRank: scopeRank})
 		}
 	}
 
@@ -556,11 +571,29 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 			if !secret.DeliverableType(m.SecretType) {
 				continue
 			}
+			if _, shadowed := shadowedRank[m.Name]; shadowed {
+				continue
+			}
 			if !check(m) {
 				continue
 			}
 			kept = append(kept, secretDeliveryCandidate{meta: m, progeny: true})
 		}
+	}
+
+	// Drop any lower-precedence scope candidate shadowed by a higher-precedence
+	// non-deliverable row before FetchValues so its value is never read.
+	if len(shadowedRank) > 0 && len(kept) > 0 {
+		filtered := kept[:0]
+		for _, c := range kept {
+			if !c.progeny {
+				if sr, ok := shadowedRank[c.meta.Name]; ok && sr > c.scopeRank {
+					continue
+				}
+			}
+			filtered = append(filtered, c)
+		}
+		kept = filtered
 	}
 
 	// Not logged once the request has ended (see authorize).
