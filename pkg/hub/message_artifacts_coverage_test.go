@@ -353,24 +353,30 @@ func TestArtifactRefsAdmittedAfterAuthzInChatV2(t *testing.T) {
 }
 
 // TestArtifactRefResolverReachableOnlyFromRequestContexts pins the
-// in-process paths to the artifact service:
+// artifacts.NewService constructors and the request-context guard on
+// artifactRefResolver:
 //   - artifacts.NewService is referenced only by the pinned constructors in
-//     artifacts_store.go, so a renamed or new constructor cannot bypass the
-//     caller guards below;
+//     artifacts_store.go (artifactsHandler, artifactRefResolver, and
+//     attachmentService), so any new or renamed constructor calling
+//     artifacts.NewService fails the guard;
 //   - artifactRefResolver is called only by resolveArtifactRefs (and the
 //     warning-only artifactRecipientWarning), which resolve only when the
 //     authentication middleware's credential context binds ctx's current
-//     identity;
+//     identity (attachmentService callers, such as background
+//     attachment_delivery sweeps, are intentionally unpinned by this guard);
 //   - that credential context is recorded only by the authentication
 //     middleware files, so in-process code cannot satisfy the check.
 func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
-	// Pin every artifacts.NewService reference in pkg/hub so a renamed or
-	// new constructor cannot bypass the artifactRefResolver pin below
-	// (ptone/scion#9121). Each allowed site is itself guarded:
+	// Pin every artifacts.NewService reference in pkg/hub so any new or
+	// renamed constructor calling artifacts.NewService fails the guard
+	// (ptone/scion#9121):
 	//   - artifactsHandler: mounted once on the HTTP mux behind
 	//     UnifiedAuthMiddleware (TestArtifactServiceReachableOnlyThroughHTTPAuth).
-	//   - artifactRefResolver: callers pinned below to request-bound contexts.
-	//   - attachmentService: chat/attachment paths.
+	//   - artifactRefResolver: callers are guarded below (request-bound
+	//     contexts only).
+	//   - attachmentService: pinned as a constructor only; its callers (such as
+	//     background attachment_delivery sweeps) are intentionally unpinned by
+	//     this guard.
 	wantNewService := map[stripSiteKey]bool{
 		{"artifacts_store.go", "artifactsHandler"}:    true,
 		{"artifacts_store.go", "artifactRefResolver"}: true,
