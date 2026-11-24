@@ -49,7 +49,8 @@ jobs:
   changes:
     name: Detect changed paths
     if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
     outputs:
       single_node_vm: ${{ steps.diff.outputs.single_node_vm }}
       starter_hub: ${{ steps.diff.outputs.starter_hub }}
@@ -178,7 +179,7 @@ jobs:
   # here does not touch the path detection in changes (which fails open).
   runner-routing-check:
     name: Runner routing check
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name == 'pull_request') }}
     steps:
@@ -198,7 +199,7 @@ jobs:
   # schedule-triggered workflow carrying the gate in its if:.
   fork-ci-gate-check:
     name: Fork CI gate check
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name == 'pull_request') }}
     steps:
@@ -1149,7 +1150,7 @@ jobs:
   hub-shard-plan:
     name: pkg/hub shard plan
     if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
@@ -1389,7 +1390,7 @@ jobs:
     name: pkg/hub SQLite Tests
     needs: [hub-shard-plan, hub-shard, hub-shard-postgres-integration]
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Check shard results
@@ -1597,7 +1598,7 @@ jobs:
     name: T1 Launch Store PostgreSQL Tests
     needs: [launch-store-postgres-entadapter, launch-store-postgres-others]
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Check T1 part results
@@ -2128,7 +2129,7 @@ jobs:
     name: Chat mobile E2E
     needs: [changes, chat-mobile-e2e]
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Check shard results
