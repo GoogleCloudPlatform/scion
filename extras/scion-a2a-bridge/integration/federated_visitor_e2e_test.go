@@ -356,7 +356,14 @@ func (e *fvEnv) fvHubAUser(t *testing.T, email string) (*store.User, string) {
 	if err := e.hubA.store.CreateUser(context.Background(), u); err != nil {
 		t.Fatalf("create hub A user %s: %v", email, err)
 	}
-	session, _, err := e.hubA.srv.GetUserTokenService().MintAccessToken(u.ID, u.Email, u.DisplayName, u.Role, u.SessionGeneration, hub.ClientTypeWeb)
+	session, _, err := e.hubA.srv.GetUserTokenService().MintAccessToken(hub.UserTokenSubject{
+		UserID:            u.ID,
+		Email:             u.Email,
+		DisplayName:       u.DisplayName,
+		Role:              u.Role,
+		SessionGeneration: u.SessionGeneration,
+		ClientType:        hub.ClientTypeWeb,
+	})
 	if err != nil {
 		t.Fatalf("session credential for %s: %v", email, err)
 	}

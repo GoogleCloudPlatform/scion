@@ -764,7 +764,14 @@ func (e *rplEnv) rplLocalUser(t *testing.T, email string) rplUser {
 	if status != http.StatusCreated && status != http.StatusOK {
 		t.Fatalf("add %s to the project: status %d, want 201; body %s", email, status, body)
 	}
-	token, _, err := e.hub.GetUserTokenService().MintAccessToken(u.ID, u.Email, u.DisplayName, u.Role, u.SessionGeneration, hub.ClientTypeWeb)
+	token, _, err := e.hub.GetUserTokenService().MintAccessToken(hub.UserTokenSubject{
+		UserID:            u.ID,
+		Email:             u.Email,
+		DisplayName:       u.DisplayName,
+		Role:              u.Role,
+		SessionGeneration: u.SessionGeneration,
+		ClientType:        hub.ClientTypeWeb,
+	})
 	if err != nil {
 		t.Fatalf("user JWT for %s: %v", email, err)
 	}
