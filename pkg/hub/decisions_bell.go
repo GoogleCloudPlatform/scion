@@ -116,6 +116,7 @@ type decisionBellState struct {
 	topicDue       map[decisionBellTopicKey]time.Time
 	inFlightUsers  map[string]bool
 	inFlightTopics map[decisionBellTopicKey]bool
+	userGen        map[string]uint64
 }
 
 func (s *Server) decisionBellDebounce() time.Duration {
@@ -152,10 +153,21 @@ func (s *Server) ensureDecisionBellStartedLocked() bool {
 	st.stopCh = make(chan struct{})
 	st.wakeCh = make(chan struct{}, 1)
 	st.idleCond = sync.NewCond(&st.mu)
-	st.userDue = make(map[string]decisionBellUserEntry)
-	st.topicDue = make(map[decisionBellTopicKey]time.Time)
-	st.inFlightUsers = make(map[string]bool)
-	st.inFlightTopics = make(map[decisionBellTopicKey]bool)
+	if st.userDue == nil {
+		st.userDue = make(map[string]decisionBellUserEntry)
+	}
+	if st.topicDue == nil {
+		st.topicDue = make(map[decisionBellTopicKey]time.Time)
+	}
+	if st.inFlightUsers == nil {
+		st.inFlightUsers = make(map[string]bool)
+	}
+	if st.inFlightTopics == nil {
+		st.inFlightTopics = make(map[decisionBellTopicKey]bool)
+	}
+	if st.userGen == nil {
+		st.userGen = make(map[string]uint64)
+	}
 	for i := 0; i < defaultDecisionBellWorkers; i++ {
 		st.wg.Add(1)
 		go s.runDecisionBellWorker()
@@ -449,6 +461,7 @@ func (s *Server) nextDecisionBellWorkItem() (decisionBellWorkItem, time.Duration
 		if !now.Before(entry.dueAt) {
 			delete(st.userDue, uid)
 			st.inFlightUsers[uid] = true
+			st.userGen[uid]++
 			return decisionBellWorkItem{
 				userID:    uid,
 				reconcile: entry.reconcile,
@@ -540,6 +553,17 @@ func (s *Server) executeDecisionBellWorkItem(item decisionBellWorkItem) {
 func (s *Server) recomputeDecisionBellUser(ctx context.Context, userID string) error {
 	if s == nil || s.store == nil || !s.decisionsBellEnabled() {
 		return nil
+	}
+	// Bump userGen here too for direct callers outside the worker loop (the
+	// worker pop bumps it as well; inline reconcile checks inequality only).
+	if uid := strings.TrimSpace(userID); uid != "" {
+		st := &s.decisionBell
+		st.mu.Lock()
+		if st.userGen == nil {
+			st.userGen = make(map[string]uint64)
+		}
+		st.userGen[uid]++
+		st.mu.Unlock()
 	}
 	total, projects, err := s.waitingOnYouTotal(ctx, userID)
 	if err != nil {
@@ -859,7 +883,103 @@ func (m decisionBellUserMapReader) GetUser(_ context.Context, id string) (*store
 
 type decisionBellStatusRecorder struct {
 	http.ResponseWriter
-	status int
+	status        int
+	hasBellCounts bool
+	bellTotal     int
+	bellProjects  int
+	bellGen       uint64
+}
+
+func (r *decisionBellStatusRecorder) setBellCounts(total, projects int, gen uint64) {
+	r.hasBellCounts = true
+	r.bellTotal = total
+	r.bellProjects = projects
+	r.bellGen = gen
+}
+
+func (s *Server) decisionBellUserGen(userID string) uint64 {
+	userID = strings.TrimSpace(userID)
+	if s == nil || userID == "" {
+		return 0
+	}
+	st := &s.decisionBell
+	st.mu.Lock()
+	gen := st.userGen[userID]
+	st.mu.Unlock()
+	return gen
+}
+
+// tryBeginInlineDecisionBell claims per-user bell write serialization for an
+// inline reconcile if no recompute or queued bell update has raced since
+// capturedGen was read. Returns false when the caller must fall back to
+// reconcileDecisionBellAsync.
+func (s *Server) tryBeginInlineDecisionBell(userID string, capturedGen uint64) bool {
+	st := &s.decisionBell
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.stopped {
+		return false
+	}
+	if st.userGen[userID] != capturedGen || st.inFlightUsers[userID] {
+		return false
+	}
+	if _, due := st.userDue[userID]; due {
+		return false
+	}
+	if st.inFlightUsers == nil {
+		st.inFlightUsers = make(map[string]bool)
+	}
+	if st.userGen == nil {
+		st.userGen = make(map[string]uint64)
+	}
+	st.inFlightUsers[userID] = true
+	st.userGen[userID]++
+	return true
+}
+
+func (s *Server) finishInlineDecisionBell(userID string) {
+	st := &s.decisionBell
+	st.mu.Lock()
+	delete(st.inFlightUsers, userID)
+	if _, pendingAgain := st.userDue[userID]; pendingAgain {
+		st.signalWakeLocked()
+	}
+	st.notifyIdleIfEmptyLocked()
+	st.mu.Unlock()
+}
+
+func (s *Server) reconcileDecisionBellInline(userID string, total, projects int, capturedGen uint64) {
+	if !s.tryBeginInlineDecisionBell(userID, capturedGen) {
+		s.reconcileDecisionBellAsync(userID)
+		return
+	}
+	defer s.finishInlineDecisionBell(userID)
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("decisions bell: inline reconcile panic", "user_id", userID, "panic", fmt.Sprint(rec))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), s.chatSearchTimeout())
+		defer cancel()
+		if err := s.writeDecisionsWaitingNotification(ctx, userID, total, projects); err != nil {
+			slog.Warn("decisions bell: inline reconcile failed", "user_id", userID, "error", err)
+		}
+	}()
+}
+
+func findDecisionBellStatusRecorder(w http.ResponseWriter) *decisionBellStatusRecorder {
+	for w != nil {
+		if rec, ok := w.(*decisionBellStatusRecorder); ok {
+			return rec
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return nil
+		}
+		w = u.Unwrap()
+	}
+	return nil
 }
 
 func (r *decisionBellStatusRecorder) WriteHeader(code int) {
@@ -902,7 +1022,19 @@ func decisionsBellReconcileCaller(r *http.Request) string {
 
 // withDecisionsBellReconcile wraps a Decisions HTTP handler (profile or project)
 // so GET requests for tab=pending reconcile the caller's bell notification row
-// asynchronously after the HTTP response has been written (design B6, C3).
+// after the HTTP response has been written (design B6, C3; design-scale §3.5 M6).
+//
+// When a session-authenticated, unfiltered GET /api/v1/users/me/decisions
+// tab=pending request (including limit=0) succeeds, the handler stashes its
+// exact waiting-on-you counts and pre-read bell generation on the recorder;
+// this wrapper flushes buffered bytes and runs the inline notification write
+// (serialized with inFlightUsers) if no concurrent recompute or queued update
+// raced with the read. Flush does not terminate a chunked response (no
+// Content-Length), so the client's body completes once the inline write
+// returns; the added latency is one GetNotification when the count is
+// unchanged. All other cases (scoped tokens, filtered or project-scoped
+// requests, /api/v1/projects/{id}/decisions, flag-off reconciliation, or raced
+// reads) enqueue an asynchronous coalesced recompute.
 func (s *Server) withDecisionsBellReconcile(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -925,6 +1057,11 @@ func (s *Server) withDecisionsBellReconcile(next http.HandlerFunc) http.HandlerF
 			return
 		}
 		if rec.status == http.StatusOK {
+			if rec.hasBellCounts {
+				_ = http.NewResponseController(w).Flush()
+				s.reconcileDecisionBellInline(userID, rec.bellTotal, rec.bellProjects, rec.bellGen)
+				return
+			}
 			s.reconcileDecisionBellAsync(userID)
 		}
 	}

@@ -399,6 +399,8 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	searchCtx := withAuthzInputMemo(rawSearchCtx)
 
+	bellGen := s.decisionBellUserGen(user.ID())
+
 	selected, truncated, err := s.selectProfileDecisionProjects(searchCtx, user, token, pq.projectID)
 	if err != nil {
 		writeDecisionsError(w, r, searchCtx, err)
@@ -421,6 +423,20 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 	}
 	pq.truncatedProjects = truncated
 
+	var (
+		hasBellCounts bool
+		bellTotal     int
+		bellProjects  int
+	)
+	_, viewAsMember := viewAsMemberUserFromContext(r.Context())
+	if pq.tab == ProjectDecisionsTabPending && token == nil && !viewAsMember && !pq.filtered() {
+		pq.onUnfilteredBellCounts = func(total, projects int) {
+			bellTotal = total
+			bellProjects = projects
+			hasBellCounts = true
+		}
+	}
+
 	resp, err := s.decisionsCore(searchCtx, user, token, wcs, scopes, pq)
 	if err == nil && errors.Is(searchCtx.Err(), context.DeadlineExceeded) {
 		err = searchCtx.Err()
@@ -428,6 +444,11 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeDecisionsError(w, r, searchCtx, err)
 		return
+	}
+	if hasBellCounts {
+		if rec := findDecisionBellStatusRecorder(w); rec != nil {
+			rec.setBellCounts(bellTotal, bellProjects, bellGen)
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

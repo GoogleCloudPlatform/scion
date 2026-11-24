@@ -297,19 +297,20 @@ func projectDecisionsCaller(w http.ResponseWriter, r *http.Request, projectID st
 // (its AgentID mirrors agentID). On the profile endpoint (profile == true),
 // sort and projectID also apply.
 type projectDecisionsQuery struct {
-	profile           bool
-	viewerID          string
-	tab               string
-	sort              string
-	projectID         string
-	truncatedProjects bool
-	limit             int
-	cursor            string
-	pendingCursor     *pendingPromptCursor
-	q                 string
-	conversation      string
-	agentID           string
-	madeFilter        store.ProjectDecisionAnswerFilter
+	profile                bool
+	viewerID               string
+	tab                    string
+	sort                   string
+	projectID              string
+	truncatedProjects      bool
+	limit                  int
+	cursor                 string
+	pendingCursor          *pendingPromptCursor
+	q                      string
+	conversation           string
+	agentID                string
+	madeFilter             store.ProjectDecisionAnswerFilter
+	onUnfilteredBellCounts func(total, projects int)
 }
 
 // filtered reports whether a filter that applies to tab=pending is set.
@@ -814,6 +815,9 @@ func (s *Server) decisionsCore(
 	if err != nil {
 		return nil, err
 	}
+	if pq.onUnfilteredBellCounts != nil {
+		pq.onUnfilteredBellCounts(counts.WaitingOnYou, countProjectsWithWaiting(classified))
+	}
 
 	if pq.tab == ProjectDecisionsTabPending {
 		var filteredCounts *ProjectDecisionCounts
@@ -1037,6 +1041,16 @@ func sumClassifiedCounts(all []classifiedOpenPrompt) ProjectDecisionCounts {
 		c.WaitingOnOthers += p.onOthers
 	}
 	return c
+}
+
+func countProjectsWithWaiting(classified []classifiedOpenPrompt) int {
+	projectsWithWaiting := make(map[string]bool)
+	for _, p := range classified {
+		if p.onYou > 0 {
+			projectsWithWaiting[p.raw.ProjectID] = true
+		}
+	}
+	return len(projectsWithWaiting)
 }
 
 type classifiedOpenPrompt struct {
