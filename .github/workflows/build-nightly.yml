@@ -73,6 +73,9 @@ jobs:
             exit 0
           fi
 
+          # Refuse to tag a nightly whose DowngradeFloor is dated after it.
+          ./scripts/release/check-downgrade-floor.sh "$TAG"
+
           git tag "$TAG"
           git push origin "$TAG"
 

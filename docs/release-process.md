@@ -320,24 +320,58 @@ notifications without implementing a separate release-discovery path.
 [`build-release.yml`](../.github/workflows/build-release.yml) runs when a stable, preview,
 release-candidate, or nightly tag is pushed. It:
 
-1. Builds the web UI, cross-compiles Scion for all supported platforms, and builds `sciontool`
+1. Verifies that `pkg/version.DowngradeFloor` is not dated after the release's UTC date (see
+   [Downgrade floor guard](#downgrade-floor-guard)).
+2. Builds the web UI, cross-compiles Scion for all supported platforms, and builds `sciontool`
    for Linux.
-2. Builds the Linux plugin binaries.
-3. Packages and uploads the build artifacts.
-4. Generates a `SHA256SUMS` checksums file covering every published asset.
-5. Creates a GitHub release and marks non-stable channels as pre-releases. Preview, rc and
+3. Builds the Linux plugin binaries.
+4. Packages and uploads the build artifacts.
+5. Generates a `SHA256SUMS` checksums file covering every published asset.
+6. Creates a GitHub release and marks non-stable channels as pre-releases. Preview, rc and
    stable releases link the docs release notes page for the tag and list the pull requests
    since the previous release in the same channel (see [Release notes](#release-notes)).
-6. Force-updates the matching `stable`, `preview`, or `nightly` channel branch.
-7. Updates the corresponding channel in `LATEST.json` on `main`.
-8. Calls [`docs-snapshot.yml`](../.github/workflows/docs-snapshot.yml) to build and attach a
+7. Force-updates the matching `stable`, `preview`, or `nightly` channel branch.
+8. Updates the corresponding channel in `LATEST.json` on `main`.
+9. Calls [`docs-snapshot.yml`](../.github/workflows/docs-snapshot.yml) to build and attach a
    versioned documentation tarball (`scion-docs-<tag>.tar.gz` and `.sha256`) to the GitHub
    release (see [Versioned documentation snapshots](#versioned-documentation-snapshots)).
-9. For preview tags only, calls [`publish-homebrew.yml`](../.github/workflows/publish-homebrew.yml)
-   (see [Homebrew publishing](#homebrew-publishing)).
+10. For preview tags only, calls [`publish-homebrew.yml`](../.github/workflows/publish-homebrew.yml)
+    (see [Homebrew publishing](#homebrew-publishing)).
 
 Release-candidate tags route to the preview branch and preview manifest entry. They are not
 published to Homebrew.
+
+### Downgrade floor guard
+
+[`check-downgrade-floor.sh`](../scripts/release/check-downgrade-floor.sh) prevents cutting a
+release whose `pkg/version.DowngradeFloor` is dated later than the release itself. A preview,
+release-candidate, or stable release published before its own `nightly-YYYYMMDD` floor date sorts
+below the floor in `pkg/version/update.BelowFloor` and is refused as a downgrade target
+(`below_downgrade_floor`).
+
+The guard runs automatically in three places:
+
+- [`build-release.yml`](../.github/workflows/build-release.yml) runs it as a pre-flight gate before
+  building binaries or publishing any GitHub release (covering manual tag pushes as well as
+  workflow-dispatched cuts).
+- [`build-preview-weekly.yml`](../.github/workflows/build-preview-weekly.yml) runs it against the
+  selected nightly commit (`--ref <sha>`) before pushing the release branch fast-forward and
+  preview tag.
+- [`build-nightly.yml`](../.github/workflows/build-nightly.yml) runs it against `HEAD` before
+  creating and pushing the `nightly-YYYYMMDD` tag.
+
+For preview, release-candidate, and stable tags, the guard compares the floor date against the
+current UTC date (or `--date DATE`). For `nightly-YYYYMMDD[.N]` tags, it compares against the
+date embedded in the tag itself, matching `BelowFloor`'s same-channel comparison. To run a local
+check or dry run before tagging:
+
+```bash
+./scripts/release/check-downgrade-floor.sh v0.4.0-preview.4
+./scripts/release/check-downgrade-floor.sh --ref <sha> --date 2026-11-20T15:18Z v0.4.0-preview.3
+```
+
+Its tests run with `./scripts/release/test-check-downgrade-floor.sh` (also included in
+`make check-custom`).
 
 ### Versioned documentation snapshots
 
@@ -403,9 +437,11 @@ locally:
 
 [`build-nightly.yml`](../.github/workflows/build-nightly.yml) runs on a daily 03:00 UTC schedule
 (7:00 PM Pacific the previous evening) or by manual dispatch. It compares `main` with the latest
-nightly tag and pushes a new dated tag only when new commits exist. That tag starts
-`build-release.yml`, which builds and publishes the nightly release. After creating a new nightly
-tag, the workflow deletes nightly GitHub releases and tags older than 14 days.
+nightly tag, verifies `pkg/version.DowngradeFloor` is not dated after the new tag
+([Downgrade floor guard](#downgrade-floor-guard)), and pushes a new dated tag only when new
+commits exist. That tag starts `build-release.yml`, which builds and publishes the nightly
+release. After creating a new nightly tag, the workflow deletes nightly GitHub releases and tags
+older than 14 days.
 
 GitHub cron schedules are UTC-only, so the nightly and weekly preview schedules are adjusted by
 hand at each daylight saving change to keep 7:00 PM and 7:00 AM Pacific. The 03:00 and 15:00 UTC
@@ -435,9 +471,11 @@ times are for Pacific standard time; when daylight saving starts in March, rever
    first, then the highest `N` within it, both compared numerically, or `vX.Y.0-preview.1` if
    there is none. It fails if that tag exists or if that `vX.Y.Z` has already been promoted to
    stable.
-6. Pushes the fast-forward of `release/vX.Y` and the new tag in one atomic push (a plain push,
+6. Verifies `pkg/version.DowngradeFloor` at the chosen commit is not dated after the current UTC
+   date ([Downgrade floor guard](#downgrade-floor-guard)).
+7. Pushes the fast-forward of `release/vX.Y` and the new tag in one atomic push (a plain push,
    which the remote rejects unless the branch update is a fast-forward).
-7. Calls `build-release.yml` with the tag, because tags pushed with `GITHUB_TOKEN` do not start
+8. Calls `build-release.yml` with the tag, because tags pushed with `GITHUB_TOKEN` do not start
    other workflows. The build publishes the pre-release, moves the `preview` branch and updates
    `LATEST.json`.
 
