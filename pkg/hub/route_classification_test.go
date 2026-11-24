@@ -110,6 +110,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/users/me/terminal-workspace":                   "authenticated:user-terminal-workspace",
 	"/api/v1/users/me/exec-container":                       "authenticated:user-exec-container",
 	"/api/v1/users/me/decisions":                            "authenticated:user-decisions",
+	"/api/v1/users/me/inbox/summary":                        "authenticated:user-inbox-summary",
 	"/api/v1/users/me/delegations":                          "authenticated:agent-delegations",
 	"/api/v1/users/me/delegations/revoke-all":               "authenticated:agent-delegations",
 	"/api/v1/hub/settings/injected-skills":                  "authenticated:injected-skills",

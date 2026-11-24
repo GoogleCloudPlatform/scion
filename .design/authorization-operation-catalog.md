@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 434
+**Operations:** 435
 
 ## Table of Contents
 
@@ -141,6 +141,7 @@
 - [project.triggersources.github.read](#projecttriggersourcesgithubread) — Read a project's GitHub trigger source settings, readiness, and repository routing status
 - [project.triggersources.github.update](#projecttriggersourcesgithubupdate) — Update a project's GitHub trigger source unmatched-command reply settings
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
+- [inbox.summary.read](#inboxsummaryread) — Read the caller's aggregated inbox summary across categories (approvals, waiting agents, artifact reviews, chat, decisions). Interactive web sessions and dev credentials receive the full view; user access tokens with inbox:read receive the token view (approvals marked unavailable, excluded from total). Agents, visitors, federated users, and UATs without inbox:read get 403; unsupported methods get 405; 404 while web.inbox_dashboard is off
 - [inbox.message.read](#inboxmessageread) — List and read the caller's own inbox messages. A project token lists only messages of its boundary project
 - [inbox.message.write](#inboxmessagewrite) — Mark the caller's own inbox messages read. Mark-all by a project token touches only messages of its boundary project
 - [inbox.channels.list](#inboxchannelslist) — List the registered message channels: static capability metadata with no records
@@ -5715,6 +5716,38 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## inbox.summary.read
+
+**Domain:** inbox
+
+**Description:** Read the caller's aggregated inbox summary across categories (approvals, waiting agents, artifact reviews, chat, decisions). Interactive web sessions and dev credentials receive the full view; user access tokens with inbox:read receive the token view (approvals marked unavailable, excluded from total). Agents, visitors, federated users, and UATs without inbox:read get 403; unsupported methods get 405; 404 while web.inbox_dashboard is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/inbox/summary` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`; pinned by `TestUserMeInboxSummary_AuthAndValidation`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestUserMeInboxSummary_AuthAndValidation`
 
 ---
 

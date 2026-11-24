@@ -396,3 +396,17 @@ export const AGENT_SECRETS_FLAG = 'hub.agent_secrets';
 export function agentSecretsEnabled(): boolean {
   return isFeatureEnabled(AGENT_SECRETS_FLAG);
 }
+
+/**
+ * Top-level Inbox dashboard (web.inbox_dashboard, ptone/scion#8962):
+ * gates the Profile Inbox page, Inbox nav section/badge, and bell discovery
+ * link. Presentation only: the hub enforces the experiment on
+ * GET /api/v1/users/me/inbox/summary (404 while off) and user.*.inbox SSE
+ * invalidation hints. Default OFF.
+ */
+export const INBOX_DASHBOARD_FLAG = 'web.inbox_dashboard';
+
+/** Whether the Inbox dashboard UI surfaces are enabled in this session. */
+export function isInboxDashboardEnabled(): boolean {
+  return isFeatureEnabled(INBOX_DASHBOARD_FLAG);
+}

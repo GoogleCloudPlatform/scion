@@ -472,6 +472,7 @@ export type StateEventType =
   | 'disconnected'
   | 'scope-changed'
   | 'notification-created'
+  | 'inbox-changed'
   | 'chat-message-received'
   | 'chat-topic-updated'
   | 'chat-thread-group-updated'
@@ -809,6 +810,8 @@ export class StateManager extends EventTarget {
       if (!subs.includes(own)) subs.push(own);
       const ownNotifications = `user.${userId}.notification`;
       if (!subs.includes(ownNotifications)) subs.push(ownNotifications);
+      const ownInbox = `user.${userId}.inbox`;
+      if (!subs.includes(ownInbox)) subs.push(ownInbox);
     }
     return subs;
   }
@@ -850,6 +853,12 @@ export class StateManager extends EventTarget {
     // user-scoped chat branch below requires four.
     if (parts[0] === 'user' && parts.length === 3 && parts[2] === 'notification') {
       this.notifyWithData('notification-created', data);
+      return;
+    }
+
+    // User-scoped inbox invalidation hints: user.{userId}.inbox.
+    if (parts[0] === 'user' && parts.length === 3 && parts[2] === 'inbox') {
+      this.notifyWithData('inbox-changed', data);
       return;
     }
 

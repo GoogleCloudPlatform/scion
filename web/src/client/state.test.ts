@@ -192,6 +192,22 @@ describe('StateManager own chat subject', () => {
     expect(message).not.toHaveBeenCalled();
   });
 
+  it('routes the per-user inbox subject to inbox-changed only', () => {
+    const sm = new StateManager();
+    const inboxChanged = vi.fn();
+    const created = vi.fn();
+    sm.addEventListener('inbox-changed', inboxChanged);
+    sm.addEventListener('notification-created', created);
+
+    const data = { category: 'approvals' };
+    emit(sm, 'user.b.inbox', data);
+
+    expect(inboxChanged).toHaveBeenCalledTimes(1);
+    const detail = (inboxChanged.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual(data);
+    expect(created).not.toHaveBeenCalled();
+  });
+
   it('ignores removed unscoped notification subjects', () => {
     const sm = new StateManager();
     const created = vi.fn();
@@ -235,6 +251,7 @@ describe('StateManager own chat subject', () => {
       const subjects = subjectsFor(sm, scope);
       expect(subjects).toContain('user.me.chat.>');
       expect(subjects).toContain('user.me.notification');
+      expect(subjects).toContain('user.me.inbox');
       expect(subjects).not.toContain('notification.>');
     }
   });
@@ -260,6 +277,7 @@ describe('StateManager profile scope', () => {
       'project.>',
       'user.u-1.chat.>',
       'user.u-1.notification',
+      'user.u-1.inbox',
     ]);
 
     sm.setCurrentUserId('u-1');
@@ -283,6 +301,7 @@ describe('StateManager profile scope', () => {
       'project.>',
       'user.u-2.chat.>',
       'user.u-2.notification',
+      'user.u-2.inbox',
     ]);
 
     sm.setScope({ type: 'profile', userId: 'u-2' });
@@ -305,6 +324,7 @@ describe('StateManager profile scope', () => {
       'broker.>',
       'user.u-3.chat.>',
       'user.u-3.notification',
+      'user.u-3.inbox',
     ]);
   });
 });

@@ -322,6 +322,9 @@ func (e *agentKeysEventSpy) PublishChatScheduledEvent(_ context.Context, _ strin
 func (e *agentKeysEventSpy) PublishChatStarsChanged(_ context.Context, _ string) {
 	e.record("PublishChatStarsChanged")
 }
+func (e *agentKeysEventSpy) PublishUserInboxHint(_ context.Context, _ string, _ InboxHint) {
+	e.record("PublishUserInboxHint")
+}
 func (e *agentKeysEventSpy) PublishRaw(_ string, _ interface{}) {
 	e.record("PublishRaw")
 }
