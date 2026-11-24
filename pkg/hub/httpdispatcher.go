@@ -4149,12 +4149,12 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		span.SetStatus(codes.Error, errHomeFilesNotDelivered.Error())
 		return nil, errHomeFilesNotDelivered
 	}
-	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
+
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-
-	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
@@ -4572,10 +4572,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if agentHomeFilesPending(agent) {
 		return errHomeFilesNotDelivered
 	}
-	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
-	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)

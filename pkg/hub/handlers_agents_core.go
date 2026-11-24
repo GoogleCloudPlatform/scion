@@ -3309,6 +3309,15 @@ func (s *Server) createAgentInProject(
 					acceptedLaunch = true
 					warnings = append(warnings, s.adoptAcceptedLaunch(ctx, agent)...)
 				} else if envReqs != nil {
+					if len(envReqs.Needs) > 0 && len(filterInstallationEnvGatherKeys(agent, envReqs.Needs)) == 0 {
+						// Broker answered 202 (agent not started, waiting on finalize-env)
+						// requesting only blocked GitHub token keys for an installation-only
+						// agent. Fail closed rather than returning an empty needs list.
+						failCreate(createRollback{Stage: createStageMissingEnv, Cause: ErrBrokerRequestedBlockedGitHubEnv, RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+							writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, ErrBrokerRequestedBlockedGitHubEnv.Error(), nil)
+						})
+						return
+					}
 					// Broker returned 202: needs env gather
 					agent.Phase = string(state.PhaseProvisioning)
 					if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
@@ -3407,7 +3416,18 @@ func (s *Server) createAgentInProject(
 					// provisioning; persist only the non-status fields.
 					acceptedLaunch = true
 					warnings = append(warnings, s.adoptAcceptedLaunch(ctx, agent)...)
-				} else if envReqs != nil && len(filterInstallationEnvGatherKeys(agent, envReqs.Needs)) > 0 {
+				} else if envReqs != nil && len(envReqs.Needs) > 0 {
+					filteredNeeds := filterInstallationEnvGatherKeys(agent, envReqs.Needs)
+					if len(filteredNeeds) == 0 {
+						// Broker answered 202 (agent not started, waiting on finalize-env)
+						// requesting only blocked GitHub token keys for an installation-only
+						// agent. Fail closed rather than treating the unstarted response as
+						// success; rollback revokes any minted credential and removes the row.
+						failCreate(createRollback{Stage: createStageMissingEnv, Cause: ErrBrokerRequestedBlockedGitHubEnv, RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+							writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, ErrBrokerRequestedBlockedGitHubEnv.Error(), nil)
+						})
+						return
+					}
 					// Broker reported missing required env vars — fail the dispatch.
 					// Clean up the provisioning agent and its files so orphaned
 					// local state doesn't trigger spurious sync-registration.

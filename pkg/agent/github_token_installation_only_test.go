@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 func TestBuildTrackedAgentEnv_GitHubTokenInstallationOnlyBlocksHostAndConfigLayers(t *testing.T) {
@@ -169,6 +170,84 @@ func TestStartTemplateEnv_GitHubTokenInstallationOnlyBlocksTemplateFallbackEnv(t
 	if env["SAFE_TEMPLATE_KEY"] != "template_ok" {
 		t.Errorf("SAFE_TEMPLATE_KEY = %q, want template_ok", env["SAFE_TEMPLATE_KEY"])
 	}
+}
+
+// TestStart_GitHubTokenInstallationOnlyRefusesHubEndpointHostEnvExpansion
+// verifies R1 (lifted from p1c4b-review-2 probe): a ${GITHUB_TOKEN} reference
+// in inline config SCION_HUB_ENDPOINT must not expand the broker host's
+// GITHUB_TOKEN into container env (SCION_HUB_ENDPOINT / SCION_HUB_URL), nor
+// echo it in the plaintext http:// hub transport refusal error, and
+// RunConfig.GitHubTokenInstallationOnly is threaded through to the runtime.
+func TestStart_GitHubTokenInstallationOnlyRefusesHubEndpointHostEnvExpansion(t *testing.T) {
+	t.Run("inline_https_does_not_leak_and_threads_run_config", func(t *testing.T) {
+		project := templateEnvStart{}.fixture(t)
+		t.Setenv("GITHUB_TOKEN", "ghp_brokerhostpat")
+		runCfg, _ := startTemplateEnvRunConfig(t, context.Background(), project, "inst-ep-inl", func(o *api.StartOptions) {
+			o.GitHubTokenInstallationOnly = true
+			o.HubIssuedToken = "hub-issued"
+			o.InlineConfig = &api.ScionConfig{Env: map[string]string{
+				"SCION_HUB_ENDPOINT": "https://hub.example/${GITHUB_TOKEN}",
+			}}
+		})
+		if !runCfg.GitHubTokenInstallationOnly {
+			t.Errorf("expected RunConfig.GitHubTokenInstallationOnly = true")
+		}
+		env := effectiveContainerEnv(t, runCfg)
+		for k, v := range env {
+			if strings.Contains(v, "ghp_brokerhostpat") {
+				t.Errorf("installation-only container env %s=%q leaked broker host GITHUB_TOKEN", k, v)
+			}
+		}
+	})
+
+	t.Run("inline_http_error_does_not_echo_host_token", func(t *testing.T) {
+		project := templateEnvStart{}.fixture(t)
+		t.Setenv("GITHUB_TOKEN", "ghp_brokerhostpat_http")
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				return "mock-id", nil
+			},
+		}
+		_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+			Name:                        "inst-ep-http",
+			Template:                    "tenv",
+			ProjectPath:                 project,
+			BrokerMode:                  true,
+			NoAuth:                      true,
+			GitHubTokenInstallationOnly: true,
+			HubIssuedToken:              "hub-issued",
+			Env:                         map[string]string{},
+			InlineConfig: &api.ScionConfig{Env: map[string]string{
+				"SCION_HUB_ENDPOINT": "http://hub.example/${GITHUB_TOKEN}",
+			}},
+		})
+		if err == nil {
+			t.Fatalf("expected plaintext http:// hub endpoint to fail transport policy")
+		}
+		if strings.Contains(err.Error(), "ghp_brokerhostpat_http") {
+			t.Errorf("http:// hub endpoint refusal error echoed broker host GITHUB_TOKEN: %v", err)
+		}
+	})
+
+	t.Run("control_other_key_refused", func(t *testing.T) {
+		project := templateEnvStart{}.fixture(t)
+		t.Setenv("GITHUB_TOKEN", "ghp_brokerhostpat")
+		env, _ := startTemplateEnv(t, context.Background(), project, "inst-ep-ctl", func(o *api.StartOptions) {
+			o.GitHubTokenInstallationOnly = true
+			o.HubIssuedToken = "hub-issued"
+			o.InlineConfig = &api.ScionConfig{Env: map[string]string{
+				"FOO_URL": "http://x/${GITHUB_TOKEN}",
+			}}
+		})
+		for k, v := range env {
+			if strings.Contains(v, "ghp_brokerhostpat") {
+				t.Errorf("control LEAK: %s=%q", k, v)
+			}
+		}
+	})
 }
 
 func envSliceToMap(env []string) map[string]string {

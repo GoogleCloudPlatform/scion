@@ -100,21 +100,42 @@ func checkHostFileSource(src string) (string, error) {
 	return resolved, nil
 }
 
+// volumeEnvRefuser returns the host-env refusal predicate for volume path
+// expansion. Server-reserved names are always refused; when
+// githubTokenInstallationOnly is true, blocked GitHub token env keys are
+// refused as well so broker host credentials cannot leak into agent-visible
+// mount paths or refusal logs.
+func volumeEnvRefuser(githubTokenInstallationOnly bool) func(string) bool {
+	if !githubTokenInstallationOnly {
+		return util.IsAgentRefusedHostEnvName
+	}
+	return func(name string) bool {
+		return util.IsAgentRefusedHostEnvName(name) || api.IsBlockedInstallationGitHubEnvKey(name)
+	}
+}
+
 // expandVolumeEnv expands environment variables in a volume path (e.g.
 // ${GOPATH}, $HOME). Mount paths are visible to the agent, so names refused
-// for agents expand to empty.
-func expandVolumeEnv(path string) string {
-	expanded, _, refused := util.ExpandEnvRefusing(path, util.IsAgentRefusedHostEnvName)
+// by refuse (defaulting to util.IsAgentRefusedHostEnvName) expand to empty.
+func expandVolumeEnv(path string, refuse func(string) bool) string {
+	if refuse == nil {
+		refuse = util.IsAgentRefusedHostEnvName
+	}
+	expanded, _, refused := util.ExpandEnvRefusing(path, refuse)
 	for _, name := range refused {
-		slog.Warn("volume path: host environment variable is reserved and is not expanded", "variable", name)
+		if util.IsAgentRefusedHostEnvName(name) {
+			slog.Warn("volume path: host environment variable is reserved and is not expanded", "variable", name)
+		} else {
+			slog.Warn("volume path: host environment variable is not passed to installation-only GitHub token agents", "variable", name)
+		}
 	}
 	return expanded
 }
 
 // expandHostSource expands a configured volume source on the host side the
 // way buildCommonRunArgs does: environment variables, then a leading "~".
-func expandHostSource(path string) string {
-	expanded := expandVolumeEnv(path)
+func expandHostSource(path string, refuse func(string) bool) string {
+	expanded := expandVolumeEnv(path, refuse)
 	hostHome, _ := os.UserHomeDir()
 	if strings.HasPrefix(expanded, "~/") {
 		return filepath.Join(hostHome, expanded[2:])
@@ -134,6 +155,14 @@ func expandHostSource(path string) string {
 // volume at /workspace: that is the agent's workspace, judged where the
 // workspace is decided.
 func CheckVolumeSources(vols []api.VolumeMount) error {
+	return CheckVolumeSourcesWithPolicy(vols, false)
+}
+
+// CheckVolumeSourcesWithPolicy is CheckVolumeSources with the agent's
+// GitHubTokenInstallationOnly policy applied to host-env expansion of volume
+// sources.
+func CheckVolumeSourcesWithPolicy(vols []api.VolumeMount, githubTokenInstallationOnly bool) error {
+	refuse := volumeEnvRefuser(githubTokenInstallationOnly)
 	for i, v := range vols {
 		switch strings.ToLower(v.Type) {
 		case "gcs", "cloudrun-volume", "gke-shared-volume":
@@ -146,7 +175,7 @@ func CheckVolumeSources(vols []api.VolumeMount) error {
 			// again when the container is created.
 			continue
 		}
-		if err := checkConfiguredVolumeSource(expandHostSource(v.Source)); err != nil {
+		if err := checkConfiguredVolumeSource(expandHostSource(v.Source, refuse)); err != nil {
 			return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
 		}
 	}
@@ -168,7 +197,7 @@ func CheckWorkspaceVolumeSources(vols []api.VolumeMount) error {
 		case "gcs", "cloudrun-volume", "gke-shared-volume":
 			continue
 		}
-		if _, err := checkBindSource(expandHostSource(v.Source)); err != nil {
+		if _, err := checkBindSource(expandHostSource(v.Source, nil)); err != nil {
 			return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
 		}
 	}

@@ -109,17 +109,22 @@ type RunConfig struct {
 	// independent of WorkspaceBackendName/NFS* above, which describe
 	// workspace storage only. Nil means the local backend: shared dirs use
 	// the local layout (on Kubernetes, one claim per shared dir).
-	SharedDirStorage     *SharedDirRealization
-	BrokerMode           bool
-	NoAuth               bool
-	NoAuthMessage        string
-	NoAuthCommand        string
-	Debug                bool
-	MetadataInterception bool     // Configure runtime-managed iptables metadata server interception via netns-setup sidecar
-	ExtraHosts           []string // Extra /etc/hosts entries (e.g. "host.docker.internal:host-gateway")
-	NetworkMode          string   // Container network mode (e.g. "host" for --network=host)
-	Project              string   // Project name (e.g., "global" or "my-project")
-	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
+	SharedDirStorage *SharedDirRealization
+	BrokerMode       bool
+	// GitHubTokenInstallationOnly mirrors api.StartOptions.GitHubTokenInstallationOnly:
+	// when true, host-env ${VAR} expansion in agent-visible runtime paths (such as
+	// volume sources and targets) refuses blocked GitHub token env keys in addition
+	// to server-reserved names.
+	GitHubTokenInstallationOnly bool
+	NoAuth                      bool
+	NoAuthMessage               string
+	NoAuthCommand               string
+	Debug                       bool
+	MetadataInterception        bool     // Configure runtime-managed iptables metadata server interception via netns-setup sidecar
+	ExtraHosts                  []string // Extra /etc/hosts entries (e.g. "host.docker.internal:host-gateway")
+	NetworkMode                 string   // Container network mode (e.g. "host" for --network=host)
+	Project                     string   // Project name (e.g., "global" or "my-project")
+	ProjectID                   string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
 
 	// PrivateGitConfigSource is the host path to the per-agent private copy of
 	// the repository's .git/config, seeded by the broker into the agent's

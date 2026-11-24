@@ -574,3 +574,56 @@ func TestVerifyRunningContainerBinds_ControlPathRefusedBeforeExistence(t *testin
 		t.Fatalf("err = %v, want ErrControlPathMount", err)
 	}
 }
+
+// TestExpandVolumeEnv_GitHubTokenInstallationOnly verifies R1: when
+// RunConfig.GitHubTokenInstallationOnly is set, ${VAR} expansion in both
+// volume sources and volume targets refuses blocked GitHub token env keys so
+// broker host tokens never leak into agent-visible mount paths.
+func TestExpandVolumeEnv_GitHubTokenInstallationOnly(t *testing.T) {
+	_, _, outside := controlPathFixture(t)
+	t.Setenv("GITHUB_TOKEN", "ghp_vol_secret_1")
+	t.Setenv("GH_TOKEN", "ghp_vol_secret_2")
+	t.Setenv("SAFE_VOL_SEG", "safe-seg")
+
+	vol := api.VolumeMount{
+		Source: filepath.Join(outside, "${GITHUB_TOKEN}", "${SAFE_VOL_SEG}"),
+		Target: "/mnt/${GH_TOKEN}/${SAFE_VOL_SEG}",
+	}
+
+	argsInst, err := buildCommonRunArgs(RunConfig{
+		Name:                        "inst-vol",
+		Image:                       "test-image",
+		UnixUsername:                "scion",
+		Harness:                     &harness.Generic{},
+		GitHubTokenInstallationOnly: true,
+		Volumes:                     []api.VolumeMount{vol},
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs(installation-only) failed: %v", err)
+	}
+	joinedInst := strings.Join(argsInst, " ")
+	for _, secretVal := range []string{"ghp_vol_secret_1", "ghp_vol_secret_2"} {
+		if strings.Contains(joinedInst, secretVal) {
+			t.Errorf("installation-only run args leaked host GitHub token %q in volume mount: %s", secretVal, joinedInst)
+		}
+	}
+	if !strings.Contains(joinedInst, "safe-seg") {
+		t.Errorf("expected non-blocked SAFE_VOL_SEG to expand in volume path: %s", joinedInst)
+	}
+
+	// Non-installation control: ordinary expansion still works.
+	argsNormal, err := buildCommonRunArgs(RunConfig{
+		Name:         "norm-vol",
+		Image:        "test-image",
+		UnixUsername: "scion",
+		Harness:      &harness.Generic{},
+		Volumes:      []api.VolumeMount{vol},
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs(normal) failed: %v", err)
+	}
+	joinedNormal := strings.Join(argsNormal, " ")
+	if !strings.Contains(joinedNormal, "ghp_vol_secret_2") {
+		t.Errorf("expected non-installation volume target to expand GH_TOKEN: %s", joinedNormal)
+	}
+}

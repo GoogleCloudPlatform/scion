@@ -94,6 +94,7 @@ func TestGitHubTokenInstallationOnly_BrokerCapabilityGateAndWireFlag(t *testing.
 		_, err := disp.DispatchAgentCreate(ctx, ag)
 		require.ErrorIs(t, err, ErrBrokerLacksGitHubTokenInstallationOnly)
 		require.ErrorIs(t, err, errStartRequestNotSent)
+		assert.Contains(t, err.Error(), "upgrade the Runtime Broker to a version that advertises githubTokenInstallationOnly")
 		assert.False(t, mockClient.createCalled, "must not call broker when capability is missing")
 
 		mockClient.createCalled = false
@@ -115,6 +116,20 @@ func TestGitHubTokenInstallationOnly_BrokerCapabilityGateAndWireFlag(t *testing.
 		err = disp.DispatchAgentRestart(ctx, ag)
 		require.ErrorIs(t, err, ErrBrokerLacksGitHubTokenInstallationOnly)
 		assert.False(t, mockClient.restartCalled)
+	})
+
+	t.Run("unassigned_broker_reports_no_broker_before_capability_gate", func(t *testing.T) {
+		ag := makeAgent("no-broker-inst", "", DispatchAgentGitHubTokenInstallation)
+
+		err := disp.DispatchAgentStart(ctx, ag, "", false)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrBrokerLacksGitHubTokenInstallationOnly)
+		assert.Contains(t, err.Error(), "no runtime broker assigned")
+
+		err = disp.DispatchAgentRestart(ctx, ag)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrBrokerLacksGitHubTokenInstallationOnly)
+		assert.Contains(t, err.Error(), "no runtime broker assigned")
 	})
 
 	t.Run("old_broker_allows_non_installation_agent", func(t *testing.T) {
@@ -457,8 +472,8 @@ func TestReapExpiredPendingDispatch_OfflineStopSurvivesPastTTLAndAppliesOnReconn
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 
-	later := time.Now().Add(11 * time.Minute)
-	n, err := s.ReapExpiredPendingDispatch(ctx, later.Add(-dispatchPendingTTL))
+	later := time.Now().Add(srv.pendingDispatchTTL() + time.Minute)
+	n, err := s.ReapExpiredPendingDispatch(ctx, later.Add(-srv.pendingDispatchTTL()))
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "offline-queued stop must not be expired by the pending-dispatch TTL sweep")
 
@@ -466,11 +481,62 @@ func TestReapExpiredPendingDispatch_OfflineStopSurvivesPastTTLAndAppliesOnReconn
 	assert.Equal(t, int32(1), disp.stops.Load(), "the queued stop must still be applied on reconnect")
 }
 
+// TestPendingDispatchTTL_AtLeastCreateUnconfirmedHold verifies O1: the
+// pending-dispatch TTL is derived at reap time from
+// startClaimSettings().CreateUnconfirmedHold (default 16m), so a pending
+// create within the create unconfirmed hold window is not prematurely expired,
+// while one older than the hold window is failed and scrubbed.
+func TestPendingDispatchTTL_AtLeastCreateUnconfirmedHold(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+
+	defaultHold := srv.startClaimSettings().CreateUnconfirmedHold
+	require.GreaterOrEqual(t, defaultHold, 16*time.Minute)
+	assert.GreaterOrEqual(t, srv.pendingDispatchTTL(), defaultHold)
+
+	// Raising CreateUnconfirmedHold in server config raises pendingDispatchTTL
+	// dynamically at reap time.
+	raisedHold := defaultHold + 5*time.Minute
+	srv.config.StartClaim = StartClaimSettings{CreateUnconfirmedHold: raisedHold}
+	assert.GreaterOrEqual(t, srv.pendingDispatchTTL(), raisedHold)
+
+	// Reset to default and verify a create row aged 12m (past the old 10m
+	// constant, inside the 16m CreateUnconfirmedHold) survives reap, while
+	// after CreateUnconfirmedHold+1m it is failed and its args are scrubbed.
+	srv.config.StartClaim = StartClaimSettings{}
+	_, broker, agent := setupOfflineBrokerAgent(t, s, "pending-ttl-hold")
+	row := &store.BrokerDispatch{
+		ID:       api.NewUUID(),
+		BrokerID: broker.ID,
+		Op:       "create",
+		AgentID:  agent.ID,
+		State:    store.DispatchStatePending,
+		Args:     `{"home_files":"secret-event-body"}`,
+	}
+	require.NoError(t, s.InsertBrokerDispatch(ctx, row))
+
+	now := time.Now()
+	withinHoldCutoff := now.Add(12 * time.Minute).Add(-srv.pendingDispatchTTL())
+	n, err := s.ReapExpiredPendingDispatch(ctx, withinHoldCutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "pending create within CreateUnconfirmedHold must not be expired")
+
+	pastHoldCutoff := now.Add(srv.pendingDispatchTTL() + time.Minute).Add(-srv.pendingDispatchTTL())
+	n, err = s.ReapExpiredPendingDispatch(ctx, pastHoldCutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "pending create past CreateUnconfirmedHold must be expired and scrubbed")
+
+	got, err := s.GetBrokerDispatch(ctx, row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStateFailed, got.State)
+	assert.Empty(t, got.Args)
+}
+
 // TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateInputs
-// verifies R4 (lifted from p1c4b-review-1 probe): because all blocked GitHub
-// token keys are hidden from GET responses for every viewer, an env PATCH on a
-// non-installation agent must not record any of them as removed from
-// CreateInputs.InlineConfig.Env.
+// verifies R4 / review-2 R3: because all blocked GitHub token keys are hidden
+// from GET responses for every viewer, an env PATCH on a non-installation agent
+// must not record any non-reserved blocked GitHub key as removed from
+// CreateInputs.InlineConfig.Env, and GET must also hide SCION_USER_GITHUB_TOKEN.
 func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateInputs(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -481,7 +547,6 @@ func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateI
 		"GH_TOKEN":                "ghp_secret_2",
 		"GH_ENTERPRISE_TOKEN":     "ghp_secret_3",
 		"GITHUB_ENTERPRISE_TOKEN": "ghp_secret_4",
-		"SCION_USER_GITHUB_TOKEN": "true",
 		"FOO":                     "bar",
 	}
 	copyEnv := func() map[string]string {
@@ -492,9 +557,12 @@ func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateI
 		return out
 	}
 
+	appliedWithReserved := copyEnv()
+	appliedWithReserved["SCION_USER_GITHUB_TOKEN"] = "scion_user_gh_hidden"
+
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseCreated)
-		a.AppliedConfig.Env = copyEnv()
+		a.AppliedConfig.Env = appliedWithReserved
 		a.AppliedConfig.InlineConfig = &api.ScionConfig{Env: copyEnv()}
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
 			InlineConfig: &api.ScionConfig{Env: copyEnv()},
@@ -503,7 +571,7 @@ func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateI
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	for _, secretVal := range []string{"ghp_secret_1", "ghp_secret_2", "ghp_secret_3", "ghp_secret_4"} {
+	for _, secretVal := range []string{"ghp_secret_1", "ghp_secret_2", "ghp_secret_3", "ghp_secret_4", "scion_user_gh_hidden"} {
 		assert.NotContains(t, rec.Body.String(), secretVal, "GET must hide all blocked GitHub token keys")
 	}
 
@@ -522,10 +590,76 @@ func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateI
 	}
 }
 
-// TestFilterInstallationEnvGatherKeys_OnlyBlockedKeysBecomesEmpty verifies O1:
-// when a broker reports only blocked GitHub keys as missing for an
-// installation-only agent, the filtered needs slice is empty so the Hub
-// decision and response agree.
+type blockedOnlyEnvGatherDispatcher struct {
+	runIntentDispatcher
+}
+
+func (d *blockedOnlyEnvGatherDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	if agent.AppliedConfig == nil {
+		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	agent.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
+	return envReqsResult(&RemoteEnvRequirementsResponse{
+		Required: []string{"GITHUB_TOKEN", "GH_TOKEN"},
+		Needs:    []string{"GITHUB_TOKEN", "GH_TOKEN"},
+	}), nil
+}
+
+// TestCreateAgent_InstallationOnlyFailsClosedWhenBrokerNeedsOnlyBlockedGitHubKeys
+// verifies O2: if a broker answers 202 with Needs containing only blocked
+// GitHub token keys for an installation-only agent, the Hub fails closed with
+// ErrBrokerRequestedBlockedGitHubEnv and rolls back the agent instead of
+// treating the unstarted response as success.
+func TestCreateAgent_InstallationOnlyFailsClosedWhenBrokerNeedsOnlyBlockedGitHubKeys(t *testing.T) {
+	for _, gatherEnv := range []bool{false, true} {
+		name := fmt.Sprintf("gatherEnv_%t", gatherEnv)
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, s := testServer(t)
+			srv.SetDispatcher(&blockedOnlyEnvGatherDispatcher{})
+
+			proj := &store.Project{ID: tid("o2-proj-" + name), Name: "o2-" + name, Slug: "o2-" + name}
+			require.NoError(t, s.CreateProject(ctx, proj))
+
+			broker := &store.RuntimeBroker{
+				ID:           tid("o2-broker-" + name),
+				Name:         "o2-broker-" + name,
+				Slug:         "o2-broker-" + name,
+				Endpoint:     "http://localhost:9802",
+				Status:       store.BrokerStatusOnline,
+				Capabilities: &store.BrokerCapabilities{GitHubTokenInstallationOnly: true},
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+				ProjectID:  proj.ID,
+				BrokerID:   broker.ID,
+				BrokerName: broker.Name,
+				LocalPath:  "/tmp/o2-" + name,
+				Status:     store.BrokerStatusOnline,
+			}))
+
+			body := map[string]any{
+				"name":                  "inst-o2-" + name,
+				"projectId":             proj.ID,
+				"runtimeBrokerId":       broker.ID,
+				"gatherEnv":             gatherEnv,
+				"githubTokenPreference": DispatchAgentGitHubTokenInstallation,
+			}
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+proj.ID+"/agents", body)
+			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), ErrBrokerRequestedBlockedGitHubEnv.Error())
+
+			// Agent row must have been rolled back, not left Provisioning.
+			agents, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: proj.ID}, store.ListOptions{})
+			require.NoError(t, err)
+			assert.Empty(t, agents.Items, "failed create must roll back the agent row")
+		})
+	}
+}
+
+// TestFilterInstallationEnvGatherKeys_OnlyBlockedKeysBecomesEmpty verifies that
+// filterInstallationEnvGatherKeys omits blocked GitHub keys for
+// installation-only agents while leaving non-installation agents untouched.
 func TestFilterInstallationEnvGatherKeys_OnlyBlockedKeysBecomesEmpty(t *testing.T) {
 	instAg := &store.Agent{
 		AppliedConfig: &store.AgentAppliedConfig{

@@ -31,17 +31,22 @@ import (
 // dispatchStuckAge: 3× the dispatchRollingTimeout (90s) from dispatch_wait.go —
 // gives the rolling-timeout wait ample time to fail organically before the
 // reaper force-transitions the row.
-// dispatchPendingTTL: bounded lifetime for a pending dispatch row that is
-// never claimed (or whose broker never drains it). Exceeding this TTL — or
-// passing deadline_at — transitions the row to failed and clears its args
-// (including any HomeFiles event bodies) so abandoned payloads cannot linger
-// in the database (P1c-4a security L-1).
 const (
 	affinityStaleAge   = 2 * defaultAffinityFreshness // 180s
 	dispatchStuckAge   = 3 * dispatchRollingTimeout   // 270s
-	dispatchPendingTTL = 10 * time.Minute
 	dispatchMaxRetries = 3
 )
+
+// pendingDispatchTTL returns the bounded lifetime for a pending create-family
+// dispatch row that is never claimed (or whose broker never drains it).
+// Derived at reap time as at least startClaimSettings().CreateUnconfirmedHold
+// (default 16m, api.SyncStartCeiling + 60s) so a broker reconnecting within the
+// hub's create unconfirmed hold window can still drain and complete the create
+// before the reaper fails the row and scrubs its args (including HomeFiles
+// event bodies; P1c-4a security L-1).
+func (s *Server) pendingDispatchTTL() time.Duration {
+	return s.startClaimSettings().CreateUnconfirmedHold
+}
 
 // brokerHeartbeatTimeoutHandler returns a recurring handler that marks brokers
 // as offline when their last heartbeat exceeds a 5-minute threshold. It publishes
@@ -122,7 +127,7 @@ func (s *Server) brokerAffinityReapHandler() func(ctx context.Context) {
 			return
 		}
 
-		expiredPending, err := s.store.ReapExpiredPendingDispatch(ctx, now.Add(-dispatchPendingTTL))
+		expiredPending, err := s.store.ReapExpiredPendingDispatch(ctx, now.Add(-s.pendingDispatchTTL()))
 		if err != nil {
 			slog.Error("Scheduler: expired pending dispatch reap failed", "error", err)
 		}

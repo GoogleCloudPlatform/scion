@@ -875,9 +875,13 @@ func (s *BrokerDispatchStore) ReapStuckDispatch(ctx context.Context, stuckBefore
 }
 
 // pendingReapCreateOps lists the create-family broker_dispatch ops eligible for
-// the pending-dispatch TTL sweep (P1c-4a security L-1). Lifecycle control ops
-// (stop, start, restart, delete, check_prompt) — notably offline-queued stops
-// meant to apply when a broker reconnects — are deliberately excluded.
+// the pending-dispatch TTL sweep (P1c-4a security L-1). Today
+// deferredDataOpResult writes only "create" and "finalize_env" rows;
+// "create_with_gather", "provision", and "reprovision" are included defensively
+// so every create-family op is covered if deferred in the future. Lifecycle
+// control ops (stop, start, restart, delete, check_prompt) — notably
+// offline-queued stops meant to apply when a broker reconnects — are
+// deliberately excluded.
 var pendingReapCreateOps = []string{
 	"create",
 	"create_with_gather",

@@ -67,22 +67,17 @@ import (
 //     githubTokenInstallationOnly into api.StartOptions, drops blocked GitHub
 //     keys from env-gather requirements, and strips them from Config.Env,
 //     InlineConfig.Env, and workstation altEnvKeySatisfiedWithPolicy host-env
-//     lookups. pkg/agent/run.go (resolveAuthEnvOverlayWithPolicy,
+//     lookups. pkg/agent/run.go (hostEnvRefuserForAgent,
+//     resolveAuthEnvOverlayWithPolicy, expandConfigHubEndpoint,
 //     buildTrackedAgentEnv, templateEnvFallback / RunConfig.FallbackEnv,
-//     suppressedFallbackKeys) refuses broker host-env passthrough, ${VAR}
-//     expansion, harness-config settings/bundle entries, persisted scionCfg.Env
-//     entries, template env fallback entries, and hub defaults for blocked
-//     GitHub keys when GitHubTokenInstallationOnly is set, so only the
+//     suppressedFallbackKeys) and pkg/runtime (RunConfig.GitHubTokenInstallationOnly,
+//     volumeEnvRefuser, expandVolumeEnv, expandHostSource,
+//     CheckVolumeSourcesWithPolicy) refuse broker host-env passthrough, ${VAR}
+//     expansion (including SCION_HUB_ENDPOINT / SCION_HUB_URL and volume
+//     source/target paths), harness-config settings/bundle entries, persisted
+//     scionCfg.Env entries, template env fallback entries, and hub defaults for
+//     blocked GitHub keys when GitHubTokenInstallationOnly is set, so only the
 //     Hub-minted installation token in ResolvedEnv may supply GITHUB_TOKEN.
-//
-// Scope limits (documented by design):
-//   - Credential redirection via ~/.gitconfig or ~/.config/git/config
-//     credential helpers, url.<...>.insteadOf rewrites, or XDG_CONFIG_HOME /
-//     GH_CONFIG_DIR env redirection is outside the well-known-locations
-//     contract (equivalent to storing a PAT under an arbitrary name).
-//   - COPILOT_GITHUB_TOKEN is LLM harness auth (allowed under identity ruling
-//     (b)), not a gh/git credential, and is intentionally not covered by
-//     IsBlockedInstallationGitHubEnvKey.
 //   - Push (env-gather finalize):
 //     HTTPAgentDispatcher.DispatchFinalizeEnv (httpdispatcher.go) ->
 //     filters gathered env keys with isBlockedInstallationGitHubEnvKey.
@@ -178,12 +173,27 @@ import (
 //   - Reincarnation:
 //     Server.reincarnateConfig (reincarnate_config.go) -> sticky: preserves
 //     "installation" if either AppliedConfig or CreateInputs carries it.
+//
+// Scope limits (documented by design):
+//   - Credential redirection via ~/.gitconfig or ~/.config/git/config
+//     credential helpers, url.<...>.insteadOf rewrites, or XDG_CONFIG_HOME /
+//     GH_CONFIG_DIR env redirection is outside the well-known-locations
+//     contract (equivalent to storing a PAT under an arbitrary name).
+//   - COPILOT_GITHUB_TOKEN is LLM harness auth (allowed under identity ruling
+//     (b)), not a gh/git credential, and is intentionally not covered by
+//     IsBlockedInstallationGitHubEnvKey.
 
 // ErrBrokerLacksGitHubTokenInstallationOnly is returned when an
 // installation-only GitHub token agent is dispatched to a Runtime Broker that
 // does not advertise Capabilities.GitHubTokenInstallationOnly (Stage 2 §5.1a,
 // ptone/scion#8058).
-var ErrBrokerLacksGitHubTokenInstallationOnly = errors.New("broker does not support installation-only GitHub token delivery")
+var ErrBrokerLacksGitHubTokenInstallationOnly = errors.New("broker does not support installation-only GitHub token delivery; upgrade the Runtime Broker to a version that advertises githubTokenInstallationOnly")
+
+// ErrBrokerRequestedBlockedGitHubEnv is returned when a Runtime Broker answers
+// an env-gather create with missing env vars containing only blocked GitHub
+// token keys for an installation-only agent. Failing closed prevents the Hub
+// from treating an unstarted 202 response as a successful dispatch.
+var ErrBrokerRequestedBlockedGitHubEnv = errors.New("broker requested a blocked GitHub key for an installation-only agent")
 
 type brokerLacksGitHubTokenInstallationOnlyError struct {
 	broker string
@@ -193,7 +203,7 @@ func (e *brokerLacksGitHubTokenInstallationOnlyError) Error() string {
 	if e.broker == "" {
 		return ErrBrokerLacksGitHubTokenInstallationOnly.Error()
 	}
-	return fmt.Sprintf("broker %s does not support installation-only GitHub token delivery", e.broker)
+	return fmt.Sprintf("broker %s does not support installation-only GitHub token delivery; upgrade the Runtime Broker to a version that advertises githubTokenInstallationOnly", e.broker)
 }
 
 func (e *brokerLacksGitHubTokenInstallationOnlyError) Unwrap() []error {

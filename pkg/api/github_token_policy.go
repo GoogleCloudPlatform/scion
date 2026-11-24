@@ -16,8 +16,26 @@ package api
 
 import (
 	"path"
+	"slices"
 	"strings"
 )
+
+// blockedInstallationGitHubEnvKeys is the single canonical list of environment
+// variable names blocked for installation-only GitHub token agents and stripped
+// from API response views.
+var blockedInstallationGitHubEnvKeys = []string{
+	"GITHUB_TOKEN",
+	"GH_TOKEN",
+	"GH_ENTERPRISE_TOKEN",
+	"GITHUB_ENTERPRISE_TOKEN",
+	"SCION_USER_GITHUB_TOKEN",
+}
+
+// BlockedInstallationGitHubEnvKeys returns a copy of the canonical list of
+// blocked GitHub token environment variable names.
+func BlockedInstallationGitHubEnvKeys() []string {
+	return slices.Clone(blockedInstallationGitHubEnvKeys)
+}
 
 // IsGitHubTokenEnvKey reports whether key is a GitHub token environment
 // variable that git's credential helper, gh CLI, or sciontool gh-wrapper

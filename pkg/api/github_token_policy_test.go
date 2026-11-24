@@ -44,6 +44,21 @@ func TestIsBlockedInstallationGitHubEnvKey(t *testing.T) {
 			t.Errorf("IsBlockedInstallationGitHubEnvKey(%q) = true, want false", k)
 		}
 	}
+
+	got := BlockedInstallationGitHubEnvKeys()
+	if len(got) != len(blocked) {
+		t.Fatalf("BlockedInstallationGitHubEnvKeys() len = %d, want %d", len(got), len(blocked))
+	}
+	for _, k := range got {
+		if !IsBlockedInstallationGitHubEnvKey(k) {
+			t.Errorf("BlockedInstallationGitHubEnvKeys() returned %q which is not blocked by predicate", k)
+		}
+	}
+	// Mutating the returned slice must not affect subsequent calls.
+	got[0] = "MUTATED"
+	if BlockedInstallationGitHubEnvKeys()[0] == "MUTATED" {
+		t.Errorf("BlockedInstallationGitHubEnvKeys() returned an uncopied backing slice")
+	}
 }
 
 func TestIsBlockedInstallationGitHubCredentialFileTarget(t *testing.T) {

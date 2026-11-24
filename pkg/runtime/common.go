@@ -389,11 +389,12 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addTrackedEnv(name, value, false)
 	}
 
+	volRefuse := volumeEnvRefuser(config.GitHubTokenInstallationOnly)
 	expandPath := func(path string, isTarget bool) string {
 		if !isTarget {
-			return expandHostSource(path)
+			return expandHostSource(path, volRefuse)
 		}
-		expanded := expandVolumeEnv(path)
+		expanded := expandVolumeEnv(path, volRefuse)
 		if strings.HasPrefix(expanded, "~/") {
 			return filepath.Join(util.GetHomeDir(config.UnixUsername), expanded[2:])
 		}
