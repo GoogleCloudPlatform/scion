@@ -151,68 +151,6 @@ func TestPhase9f_Scheduler_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 	}, *env.Event.Schedule)
 }
 
-// TestPhase9f_Scheduler_DeliveryText_EmptyWhenSwitchOff verifies that the
-// messageEventHandler does NOT stamp DeliveryText when the envelope switch
-// is OFF (the default).
-func TestPhase9f_Scheduler_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	projectID := tid("9f-sched-off-project")
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: projectID, Name: "9f-sched-off-project", Slug: "9f-sched-off-project",
-	}))
-	brokerID := tid("9f-sched-off-broker")
-	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-		ID: brokerID, Name: "9f-sched-off-broker", Slug: "9f-sched-off-broker",
-		Status: store.BrokerStatusOnline,
-	}))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: projectID, BrokerID: brokerID, BrokerName: "9f-sched-off-broker",
-		Status: store.BrokerStatusOnline,
-	}))
-	agentID := tid("9f-sched-off-agent")
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: agentID, Name: "9f-sched-off-agent", Slug: "9f-sched-off-agent",
-		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running",
-	}))
-
-	dispatcher := &recordingDispatcher{}
-	srv.SetDispatcher(dispatcher)
-
-	// Do NOT enable the envelope switch — default is OFF.
-
-	handler := func(ctx context.Context, evt store.ScheduledEvent) error {
-		return fireScheduledActionForTest(ctx, srv, "message", evt)
-	}
-	payload, _ := json.Marshal(MessageEventPayload{
-		AgentName: "9f-sched-off-agent",
-		Message:   "Phase 9f scheduler legacy test",
-	})
-	evt := store.ScheduledEvent{
-		ID:        api.NewUUID(),
-		ProjectID: projectID,
-		EventType: "message",
-		Payload:   string(payload),
-		Status:    store.ScheduledEventPending,
-		CreatedBy: agentID,
-	}
-	// The revision principal is the target agent itself (a self-message).
-	evt = withAgentRevision(t, srv, evt, agentID)
-
-	err := handler(ctx, evt)
-	require.NoError(t, err, "messageEventHandler should succeed")
-
-	calls := dispatcher.getCalls()
-	require.Equal(t, 1, len(calls), "expected 1 dispatch call")
-	require.NotNil(t, calls[0].StructuredMessage)
-	if calls[0].StructuredMessage.DeliveryText != "" {
-		t.Errorf("DeliveryText should be empty when envelope switch is OFF, got %q",
-			calls[0].StructuredMessage.DeliveryText)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Notification dispatch — DeliveryText
 // ---------------------------------------------------------------------------

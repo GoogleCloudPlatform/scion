@@ -304,7 +304,7 @@ func TestAgentMessagesStream_ConversationSettingOwnDM(t *testing.T) {
 func TestAgentStreamConversation(t *testing.T) {
 	calls := 0
 	current := ""
-	c := &agentStreamConversation{enabled: true, resolve: func() (string, error) {
+	c := &agentStreamConversation{resolve: func() (string, error) {
 		calls++
 		return current, nil
 	}}
@@ -322,9 +322,8 @@ func TestAgentStreamConversation(t *testing.T) {
 	assert.False(t, c.includes("conv-2", true))
 	assert.Equal(t, 2, calls)
 
-	failing := &agentStreamConversation{enabled: true, resolve: func() (string, error) {
+	failing := &agentStreamConversation{resolve: func() (string, error) {
 		return "", errors.New("lookup failed")
 	}}
 	assert.False(t, failing.includes("conv-1", true))
-	assert.True(t, (&agentStreamConversation{}).includes("", false), "setting off: no filter")
 }

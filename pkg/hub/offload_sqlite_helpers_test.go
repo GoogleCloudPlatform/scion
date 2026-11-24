@@ -43,6 +43,13 @@ func enableOffload(t *testing.T, srv *Server, threshold int, _ bool) {
 	srv.SetOperationalSettings(ops)
 }
 
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
 // predicateSetup creates two projects, each with one agent, and a hub owner.
 // Hub-level cross-project messaging starts disabled (compiled default).
 func predicateSetup(t *testing.T) (srv *Server, s store.Store, projA, projB string, agentA, agentB *store.Agent) {

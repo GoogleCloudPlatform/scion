@@ -224,19 +224,28 @@ func seedChatRecords(t *testing.T, ctx context.Context, s store.Store, wcs WebCh
 	r.dmUser, err = messages.DMConversationKey("user", userID, "user", peerUserID)
 	require.NoError(t, err)
 
-	message := func(threadID, projectOfRow string, offset time.Duration) string {
+	topicConvID, _ := wcs.GetTopicConversationID(ctx, topicID)
+	if topicConvID == "" {
+		dbp, ok := s.(interface{ DB() *sql.DB })
+		require.True(t, ok, "store must expose DB() for topic conversation setup")
+		setTopicConversationID(t, dbp.DB(), s, topicID, projectID)
+		topicConvID = topicConversationID(t, wcs, topicID)
+	}
+	dmAgentConvID := seedConversation(t, s, "native", r.dmAgent, "direct")
+
+	message := func(threadID, convID, projectOfRow string, offset time.Duration) string {
 		id := uuid.NewString()
 		require.NoError(t, s.CreateMessage(ctx, &store.Message{
 			ID: id, ProjectID: projectOfRow, Sender: "user:" + userID, SenderID: userID,
 			Recipient: "chat", Msg: "chat record " + id[:8], Type: "chat",
-			Channel: "web", ThreadID: threadID, CreatedAt: at.Add(offset),
+			Channel: "web", ThreadID: threadID, ConversationID: convID, CreatedAt: at.Add(offset),
 		}))
 		return id
 	}
-	r.topicMessageEdit = message(topicID, projectID, time.Second)
-	r.topicMessageDelete = message(topicID, projectID, 2*time.Second)
-	r.topicMessage = message(topicID, projectID, 3*time.Second)
-	r.dmMessage = message(r.dmAgent, projectID, 4*time.Second)
+	r.topicMessageEdit = message(topicID, topicConvID, projectID, time.Second)
+	r.topicMessageDelete = message(topicID, topicConvID, projectID, 2*time.Second)
+	r.topicMessage = message(topicID, topicConvID, projectID, 3*time.Second)
+	r.dmMessage = message(r.dmAgent, dmAgentConvID, projectID, 4*time.Second)
 	return r
 }
 

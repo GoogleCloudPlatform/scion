@@ -221,16 +221,20 @@ func TestChatV2_MarkUnread_DM(t *testing.T) {
 	ctx := context.Background()
 
 	peerID := tid("unread-dm-peer")
-	dmKey := "dm:user:" + DevUserID + ":user:" + peerID
+	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+	dmConvID := seedConversation(t, s, "native", dmKey, "direct")
 	if err := wcs.UpsertDM(ctx, WebChatDM{ConversationKey: dmKey, ParticipantID: DevUserID, PeerID: peerID, PeerKind: "user"}); err != nil {
 		t.Fatalf("UpsertDM: %v", err)
 	}
 
 	base := time.Now().UTC().Add(-time.Minute)
 	older := &store.Message{ID: tid("unread-dm-older"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
-		Recipient: "user:peer", RecipientID: peerID, Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, CreatedAt: base}
+		Recipient: "user:peer", RecipientID: peerID, Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, ConversationID: dmConvID, CreatedAt: base}
 	newer := &store.Message{ID: tid("unread-dm-newer"), ProjectID: proj.ID, Sender: "user:peer", SenderID: peerID,
-		Recipient: "user:dev", RecipientID: DevUserID, Msg: "hello back", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, CreatedAt: base.Add(time.Second)}
+		Recipient: "user:dev", RecipientID: DevUserID, Msg: "hello back", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, ConversationID: dmConvID, CreatedAt: base.Add(time.Second)}
 	if err := s.CreateMessage(ctx, older); err != nil {
 		t.Fatalf("CreateMessage(older): %v", err)
 	}
@@ -292,7 +296,11 @@ func TestChatV2_MarkUnread_DM_ExcludesMentionRowFromPredecessor(t *testing.T) {
 	ctx := context.Background()
 
 	peerID := tid("unread-dm-mention-peer")
-	dmKey := "dm:user:" + DevUserID + ":user:" + peerID
+	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+	dmConvID := seedConversation(t, s, "native", dmKey, "direct")
 	if err := wcs.UpsertDM(ctx, WebChatDM{ConversationKey: dmKey, ParticipantID: DevUserID, PeerID: peerID, PeerKind: "user"}); err != nil {
 		t.Fatalf("UpsertDM: %v", err)
 	}
@@ -304,11 +312,11 @@ func TestChatV2_MarkUnread_DM_ExcludesMentionRowFromPredecessor(t *testing.T) {
 	// with it, the predecessor of "the newest VISIBLE row" (`visible2`) is
 	// `visible1`.
 	visible1 := &store.Message{ID: tid("unread-dm-mention-v1"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
-		Recipient: "user:peer", RecipientID: peerID, Msg: "first", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, CreatedAt: base}
+		Recipient: "user:peer", RecipientID: peerID, Msg: "first", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, ConversationID: dmConvID, CreatedAt: base}
 	visible2 := &store.Message{ID: tid("unread-dm-mention-v2"), ProjectID: proj.ID, Sender: "user:peer", SenderID: peerID,
-		Recipient: "user:dev", RecipientID: DevUserID, Msg: "second", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, CreatedAt: base.Add(time.Second)}
+		Recipient: "user:dev", RecipientID: DevUserID, Msg: "second", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, ConversationID: dmConvID, CreatedAt: base.Add(time.Second)}
 	mentionCopy := &store.Message{ID: tid("unread-dm-mention-copy"), ProjectID: proj.ID, Sender: "user:peer", SenderID: peerID,
-		Recipient: "user:dev", RecipientID: DevUserID, Msg: "@dev fyi", Type: messages.TypeMention, Channel: "web", ThreadID: dmKey, CreatedAt: base.Add(2 * time.Second)}
+		Recipient: "user:dev", RecipientID: DevUserID, Msg: "@dev fyi", Type: messages.TypeMention, Channel: "web", ThreadID: dmKey, ConversationID: dmConvID, CreatedAt: base.Add(2 * time.Second)}
 	for _, m := range []*store.Message{visible1, visible2, mentionCopy} {
 		if err := s.CreateMessage(ctx, m); err != nil {
 			t.Fatalf("CreateMessage(%s): %v", m.ID, err)

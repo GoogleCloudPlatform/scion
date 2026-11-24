@@ -793,10 +793,13 @@ func TestAttachmentArtifacts_AgentStreamOmitsArtifactAttachmentsForTokens(t *tes
 	legacy := f.attach(t, f.projA.ID, f.ua.ID, "legacy.txt")
 	artifact := f.uploadAs(t, f.ua, f.projA.ID, "artifact-file.txt", "stored as an artifact")
 	refs := []AttachmentRef{{ID: legacy, Name: "legacy.txt"}, {ID: artifact, Name: "artifact-file.txt", artifact: true}}
+	dmKey, err := messages.DMConversationKey("agent", f.aa.ID, "user", f.ua.ID)
+	require.NoError(t, err)
+	dmConvID := seedConversation(t, f.st, "native", dmKey, "direct")
 	msg := &store.Message{
 		ID: uuid.NewString(), ProjectID: f.projA.ID, Sender: "user:alice", SenderID: f.ua.ID,
 		Recipient: "user:carol", RecipientID: f.uc.ID, AgentID: f.aa.ID, Msg: "message-with-files",
-		Channel: "web", ThreadID: f.topicA, CreatedAt: time.Now().UTC(),
+		Channel: "web", ThreadID: f.topicA, ConversationID: dmConvID, CreatedAt: time.Now().UTC(),
 	}
 
 	// Every subject the publish reaches, once.

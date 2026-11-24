@@ -3490,21 +3490,26 @@ func TestDEF96_PromoteDM_ProceedsOnErrNotFound(t *testing.T) {
 func seedHistoryMessages(t *testing.T, s store.Store, projectID, threadID string, n int) []string {
 	t.Helper()
 	ctx := context.Background()
+	var convID string
+	if conv, err := s.GetConversationByExternalRef(ctx, "native", fmt.Sprintf("thread:%s:%s", projectID, threadID)); err == nil && conv != nil {
+		convID = conv.ID
+	}
 	base := time.Now().UTC().Add(-time.Duration(n) * time.Second)
 	contents := make([]string, 0, n)
 	for i := 0; i < n; i++ {
 		content := fmt.Sprintf("message-%03d", i)
 		msg := &store.Message{
-			ID:        tid(threadID + "-msg-" + content),
-			ProjectID: projectID,
-			Sender:    "user:dev",
-			SenderID:  DevUserID,
-			Recipient: "thread:" + threadID,
-			Msg:       content,
-			Type:      messages.TypeChat,
-			Channel:   "web",
-			ThreadID:  threadID,
-			CreatedAt: base.Add(time.Duration(i) * time.Second),
+			ID:             tid(threadID + "-msg-" + content),
+			ProjectID:      projectID,
+			Sender:         "user:dev",
+			SenderID:       DevUserID,
+			Recipient:      "thread:" + threadID,
+			Msg:            content,
+			Type:           messages.TypeChat,
+			Channel:        "web",
+			ThreadID:       threadID,
+			ConversationID: convID,
+			CreatedAt:      base.Add(time.Duration(i) * time.Second),
 		}
 		if err := s.CreateMessage(ctx, msg); err != nil {
 			t.Fatalf("CreateMessage(%s): %v", content, err)
@@ -3727,21 +3732,24 @@ func setupEditDeleteTest(t *testing.T) (*Server, store.Store, WebChatStore, stri
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, rawDB, s, topicID, proj.ID)
+	convID := topicConversationID(t, wcs, topicID)
 
 	// Create a message owned by the dev user.
 	now := time.Now().UTC()
 	msgID := tid("msg-editdel")
 	storeMsg := &store.Message{
-		ID:        msgID,
-		ProjectID: proj.ID,
-		Sender:    "user:dev@localhost",
-		SenderID:  DevUserID,
-		Recipient: "thread:" + topicID,
-		Msg:       "original content",
-		Type:      "chat",
-		Channel:   "web",
-		ThreadID:  topicID,
-		CreatedAt: now,
+		ID:             msgID,
+		ProjectID:      proj.ID,
+		Sender:         "user:dev@localhost",
+		SenderID:       DevUserID,
+		Recipient:      "thread:" + topicID,
+		Msg:            "original content",
+		Type:           "chat",
+		Channel:        "web",
+		ThreadID:       topicID,
+		ConversationID: convID,
+		CreatedAt:      now,
 	}
 	if err := s.CreateMessage(ctx, storeMsg); err != nil {
 		t.Fatalf("CreateMessage: %v", err)

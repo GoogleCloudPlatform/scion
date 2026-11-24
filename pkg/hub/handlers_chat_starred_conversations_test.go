@@ -689,18 +689,22 @@ func TestChatStarredConversations_BatchedLookups(t *testing.T) {
 			key := f.topic(t, f.projA)
 			m := f.threadMsg(t, key, f.projA, "m", time.Now().Add(-time.Minute))
 			_, _, err := f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: m, ProjectID: f.projA,
-				Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}})
+				Selector: StarSelector{ConversationKey: key, Channel: "web", ConversationID: topicConversationID(t, f.wcs, key)}})
 			require.NoError(t, err)
 			dmKey := f.dm(t, f.member, "user", f.plainUser(t))
-			dm := f.dmMsg(t, dmKey, "", uuid.Nil.String(), "user:"+f.member, f.member, "d", "web", time.Now().Add(-time.Minute))
+			dmConv, err := f.s.GetConversationByExternalRef(ctx, "native", dmKey)
+			require.NoError(t, err)
+			dm := f.dmMsg(t, dmKey, dmConv.ID, uuid.Nil.String(), "user:"+f.member, f.member, "d", "web", time.Now().Add(-time.Minute))
 			_, _, err = f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: dm,
-				Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ThreadID: dmKey}})
+				Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ConversationID: dmConv.ID}})
 			require.NoError(t, err)
 		}
 		key := f.dm(t, f.member, "agent", f.agentA.ID)
-		m := f.dmMsg(t, key, "", f.projA, "user:"+f.member, f.member, "a", "web", time.Now().Add(-time.Minute))
-		_, _, err := f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: m, ProjectID: f.projA,
-			Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}})
+		agentDMConv, err := f.s.GetConversationByExternalRef(ctx, "native", key)
+		require.NoError(t, err)
+		m := f.dmMsg(t, key, agentDMConv.ID, f.projA, "user:"+f.member, f.member, "a", "web", time.Now().Add(-time.Minute))
+		_, _, err = f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: m, ProjectID: f.projA,
+			Selector: StarSelector{ConversationKey: key, Channel: "web", ConversationID: agentDMConv.ID}})
 		require.NoError(t, err)
 	}
 	addConversations(2)

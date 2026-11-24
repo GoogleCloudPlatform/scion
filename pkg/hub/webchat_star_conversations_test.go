@@ -80,16 +80,17 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 	user, other := uuid.NewString(), uuid.NewString()
 	projA, projB := env.projectID, uuid.NewString()
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	convByKey := map[string]string{}
 	add := func(u, msgID, key, projectID string) {
 		t.Helper()
 		_, _, err := st.AddMessageStar(ctx, u, StarTarget{MessageID: msgID, ProjectID: projectID,
-			Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}})
+			Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key, ConversationID: convByKey[key]}})
 		require.NoError(t, err)
 	}
 	msg := func(key string, at time.Time) string {
 		t.Helper()
 		id := uuid.NewString()
-		env.addMsg(t, id, "web", key, "", at)
+		env.addMsg(t, id, "web", key, convByKey[key], at)
 		return id
 	}
 	topic := func(projectID, name string, activity *time.Time) string {
@@ -97,7 +98,16 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 		id := uuid.NewString()
 		env.addTopic(t, id)
 		env.setTopic(t, id, projectID, name, activity)
+		convID := uuid.NewString()
+		env.setTopicConversation(t, id, convID)
+		convByKey[id] = convID
 		return id
+	}
+	dmConv := func(key string) {
+		t.Helper()
+		convID := uuid.NewString()
+		env.addNativeConversation(t, convID, key)
+		convByKey[key] = convID
 	}
 	at := func(d time.Duration) *time.Time { v := base.Add(d); return &v }
 
@@ -119,6 +129,9 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 	agentDM := "dm:agent:" + agentID + ":user:" + user
 	humanDM := "dm:user:" + user + ":user:" + peerUser
 	goneDM := "dm:agent:" + goneAgent + ":user:" + user
+	dmConv(agentDM)
+	dmConv(humanDM)
+	dmConv(goneDM)
 	env.addDMRow(t, user, agentDM, "agent", agentID, base.Add(45*time.Minute))
 	env.addDMRow(t, user, humanDM, "user", peerUser, base.Add(10*time.Minute))
 	env.addDMRow(t, user, goneDM, "agent", goneAgent, base.Add(5*time.Minute))
@@ -139,7 +152,7 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 	env.moveMsg(t, mMoved, movedTo)
 	otherChannel := topic(projA, "other channel", at(58*time.Minute))
 	mOther := uuid.NewString()
-	env.addMsg(t, mOther, "telegram", otherChannel, "", base)
+	env.addMsg(t, mOther, "telegram", otherChannel, convByKey[otherChannel], base)
 	env.insertStar(t, user, mOther, otherChannel, projA, base)
 	goneTopic := topic(projA, "gone topic", at(59*time.Minute))
 	add(user, msg(goneTopic, base), goneTopic, projA)
@@ -271,6 +284,7 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 		env.addNamedUser(t, blank, "\u00a0\u2003")
 		for _, peer := range []string{padded, blank} {
 			key := "dm:user:" + u + ":user:" + peer
+			dmConv(key)
 			env.addDMRow(t, u, key, "user", peer, base)
 			add(u, msg(key, base), key, "")
 		}
@@ -313,7 +327,7 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 		env.setTopicConversation(t, legacy, uuid.NewString())
 		legacyMsg := uuid.NewString()
 		env.addMsg(t, legacyMsg, "web", legacy, uuid.NewString(), base)
-		add(u, legacyMsg, legacy, projA)
+		env.insertStar(t, u, legacyMsg, legacy, projA, base)
 		// (c) A DM whose starred message is in a soft-deleted native
 		// conversation that shares the key with a live one.
 		oldKey := "dm:user:" + u + ":user:" + uuid.NewString()
