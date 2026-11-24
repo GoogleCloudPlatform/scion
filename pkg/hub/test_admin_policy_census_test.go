@@ -368,7 +368,6 @@ var viewAsMemberIdentityRebuildPolicy = map[string]viewAsMemberGate{
 	"artifacts_recipient.go:recipientIdentity":                          vamNotARequestGate("evaluates a target share recipient user, not a caller admin gate"),
 	"artifacts_subject_user.go:namedUserSubject":                        vamNotARequestGate("resolves a named target subject user for an artifact access grant"),
 	"auth.go:MakeProxyUserProvisioner":                                  vamNotARequestGate("proxy direct API auth (no scion_sess cookie; §4.4 unaffected)"),
-	"auth.go:extractProxyUser":                                          vamNotARequestGate("proxy direct API auth (no scion_sess cookie; §4.4 unaffected)"),
 	"auth_external_bearer.go:authenticateExternalBearer":                vamNotARequestGate("external Google bearer auth (no scion_sess cookie; §4.4 unaffected)"),
 	"authz_delegation_ceiling.go:userRelationshipAuthority":             vamNotARequestGate("evaluates a delegator's relationship authority via clamped AuthzService"),
 	"authz_execution_project.go:sourceUserExecutionAdmission":           vamNotARequestGate("evaluates a trigger/agent source user's project admission, not a web session caller"),
