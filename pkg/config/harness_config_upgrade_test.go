@@ -334,3 +334,104 @@ func TestUpgradeHarnessConfig_SkipsSymlinkedProvisionerScript(t *testing.T) {
 	}
 	assertFileContents(t, filepath.Dir(linkTarget), map[string]string{"my-provision.py": "# my linked provision"})
 }
+
+// TestUpgradeHarnessConfig_SkipsSeedSkipFiles verifies that a non-force upgrade
+// skips the same build-only files as seeding (seedSkipFiles), still copies
+// legitimate support files, and leaves any skipped file already present in
+// home/ untouched (ptone/scion#9195).
+func TestUpgradeHarnessConfig_SkipsSeedSkipFiles(t *testing.T) {
+	configYAML := "harness: myh\nimage: img:latest\nuser: scion\nconfig_dir: .myh\n"
+	hcDir := filepath.Join(t.TempDir(), "myh")
+	existingReadmeDir := filepath.Join(hcDir, "home", ".myh")
+	if err := os.MkdirAll(existingReadmeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(configYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	const existingReadmeContent = "# pre-existing readme in agent home"
+	existingReadmePath := filepath.Join(existingReadmeDir, "README.md")
+	if err := os.WriteFile(existingReadmePath, []byte(existingReadmeContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	harnessesFS := fstest.MapFS{
+		"myh/config.yaml":       &fstest.MapFile{Data: []byte(configYAML)},
+		"myh/dialect.yaml":      &fstest.MapFile{Data: []byte("# bundled dialect")},
+		"myh/home/.bashrc":      &fstest.MapFile{Data: []byte("# bundled bashrc")},
+		"myh/home/.gitkeep":     &fstest.MapFile{Data: []byte("")},
+		"myh/Dockerfile":        &fstest.MapFile{Data: []byte("FROM scratch")},
+		"myh/cloudbuild.yaml":   &fstest.MapFile{Data: []byte("steps: []")},
+		"myh/README.md":         &fstest.MapFile{Data: []byte("# bundled readme")},
+		"myh/provision_test.py": &fstest.MapFile{Data: []byte("# test")},
+		"myh/init-firewall.sh":  &fstest.MapFile{Data: []byte("#!/bin/bash")},
+		"myh/.gitkeep":          &fstest.MapFile{Data: []byte("")},
+	}
+
+	h := &MockHarness{NameVal: "myh"}
+	for _, dryRun := range []bool{true, false} {
+		plan, err := UpgradeHarnessConfig(hcDir, h, HarnessConfigUpgradeOptions{
+			DryRun:      dryRun,
+			Now:         fixedTime,
+			HarnessesFS: harnessesFS,
+		})
+		if err != nil {
+			t.Fatalf("UpgradeHarnessConfig (dryRun=%v) failed: %v", dryRun, err)
+		}
+		added := actionsOfType(plan, "add_file")
+		if _, ok := added["dialect.yaml"]; !ok {
+			t.Errorf("dryRun=%v: expected add_file dialect.yaml, got %+v", dryRun, plan.Actions)
+		}
+		if _, ok := added["home/.bashrc"]; !ok {
+			t.Errorf("dryRun=%v: expected add_file home/.bashrc, got %+v", dryRun, plan.Actions)
+		}
+		for _, a := range plan.Actions {
+			if seedSkipFiles[filepath.Base(a.Path)] {
+				t.Errorf("dryRun=%v: unexpected action for skipped file: %+v", dryRun, a)
+			}
+		}
+	}
+
+	// Legitimate support files were copied.
+	assertFileContents(t, hcDir, map[string]string{
+		"dialect.yaml": "# bundled dialect",
+		"home/.bashrc": "# bundled bashrc",
+	})
+
+	// Skipped build-only files were not copied into targetDir or home/.
+	for _, rel := range []string{
+		"Dockerfile",
+		"home/.myh/Dockerfile",
+		"cloudbuild.yaml",
+		"home/.myh/cloudbuild.yaml",
+		"provision_test.py",
+		"home/.myh/provision_test.py",
+		"init-firewall.sh",
+		"home/.myh/init-firewall.sh",
+		".gitkeep",
+		"home/.gitkeep",
+		"home/.myh/.gitkeep",
+		"README.md",
+	} {
+		if _, err := os.Lstat(filepath.Join(hcDir, rel)); err == nil {
+			t.Errorf("expected skipped file %s not to be copied on upgrade", rel)
+		}
+	}
+
+	// A skipped file already present in home/ is left untouched.
+	assertFileContents(t, hcDir, map[string]string{
+		"home/.myh/README.md": existingReadmeContent,
+	})
+
+	// A second upgrade is a no-op.
+	plan, err := UpgradeHarnessConfig(hcDir, h, HarnessConfigUpgradeOptions{
+		Now:         fixedTime,
+		HarnessesFS: harnessesFS,
+	})
+	if err != nil {
+		t.Fatalf("second UpgradeHarnessConfig failed: %v", err)
+	}
+	if plan.Changed || len(plan.Actions) != 0 {
+		t.Errorf("second upgrade should be a no-op, got changed=%v actions=%+v", plan.Changed, plan.Actions)
+	}
+}
