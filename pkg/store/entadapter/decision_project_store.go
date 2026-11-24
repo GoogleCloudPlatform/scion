@@ -374,7 +374,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 		q := c.client.DecisionAnswer.Query().
 			Where(
 				decisionanswer.ProjectIDEQ(projectUUIDs[0]),
-				decisionAnswerInChatKeys(keys),
+				decisionAnswerInChatKeysBounded(keys),
 				notSupersededInterpretedAnswer(),
 			)
 		q = applyDecisionAnswerFilter(q, filter, agentUUID, provPred)
@@ -969,7 +969,7 @@ func (c *CompositeStore) listDecisionAnswersUnion(
 		tbl := d.Table(decisionanswer.Table)
 		inner := d.Select(tbl.Columns(decisionanswer.Columns...)...).From(tbl)
 		inner.Where(entsql.EQ(tbl.C(decisionanswer.FieldProjectID), arm.projectUUID))
-		decisionAnswerInChatKeys(arm.chatKeys)(inner)
+		decisionAnswerInChatKeysBounded(arm.chatKeys)(inner)
 		notSupersededInterpretedAnswer()(inner)
 		for _, pred := range arm.preds {
 			pred(inner)
@@ -1496,12 +1496,37 @@ func decisionChatKeyIn(projectCount int, keys []string) predicate.Decision {
 }
 
 // decisionAnswerInChatKeys checks that the answer's parent decision row has
-// chat_key in keys via a correlated PK scalar subquery on decisions.id.
-// Using a scalar subquery instead of EXISTS prevents Postgres from pulling the
-// check up into a Hash Semi Join over all project rows, keeping each UNION ALL
-// arm on a bounded Index Scan Backward over decisionanswer_project_id_created_at
-// with an early LIMIT stop and per-row PK lookup on decisions.
+// chat_key in keys via an EXISTS semi-join correlated on (id, project_id).
+// Used by unbounded callers such as ListDecisionFacets so Postgres can plan a
+// Hash Semi Join rather than running a correlated per-row PK lookup over the
+// entire answer history once pgx switches to a generic cached plan.
 func decisionAnswerInChatKeys(keys []string) predicate.DecisionAnswer {
+	vals := make([]any, len(keys))
+	for i, k := range keys {
+		vals[i] = k
+	}
+	return func(s *entsql.Selector) {
+		t := entsql.Table(decision.Table)
+		s.Where(entsql.Exists(
+			entsql.Select(t.C(decision.FieldID)).
+				From(t).
+				Where(entsql.And(
+					entsql.ColumnsEQ(t.C(decision.FieldID), s.C(decisionanswer.FieldDecisionRowID)),
+					entsql.ColumnsEQ(t.C(decision.FieldProjectID), s.C(decisionanswer.FieldProjectID)),
+					entsql.In(t.C(decision.FieldChatKey), vals...),
+				)),
+		))
+	}
+}
+
+// decisionAnswerInChatKeysBounded checks that the answer's parent decision row
+// has chat_key in keys via a correlated PK scalar subquery on decisions.id.
+// Used ONLY inside bounded per-project arms (with LIMIT k): using a scalar
+// subquery instead of EXISTS prevents Postgres from pulling the check up into
+// a Hash Semi Join over all project rows, keeping each arm on a bounded
+// Index Scan Backward over decisionanswer_project_id_created_at with an early
+// LIMIT stop and per-row PK lookup on decisions.
+func decisionAnswerInChatKeysBounded(keys []string) predicate.DecisionAnswer {
 	return func(s *entsql.Selector) {
 		t := entsql.Table(decision.Table)
 		sub := entsql.Dialect(s.Dialect()).
