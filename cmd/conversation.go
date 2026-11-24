@@ -389,7 +389,6 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 
 	if len(result.Conversations) == 0 {
 		fmt.Println("No conversations found.")
-		printConversationTruncationNotice(result)
 		return nil
 	}
 
