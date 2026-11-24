@@ -648,10 +648,23 @@ func (c *CompositeStore) reconcileDecisionFacetsTx(ctx context.Context) (int, er
 			if end > len(staleActors) {
 				end = len(staleActors)
 			}
+			// Re-check inside the DELETE itself (AND NOT EXISTS) so a live
+			// answer inserted concurrently between the guard query above and
+			// this DELETE cannot lose its summary row.
 			n, err := c.client.DecisionFacetEntry.Delete().
 				Where(
 					decisionfacetentry.KindEQ(decisionfacetentry.KindAnswerer),
 					decisionfacetentry.ActorIDIn(staleActors[start:end]...),
+					predicate.DecisionFacetEntry(func(s *entsql.Selector) {
+						sub := entsql.Dialect(s.Dialect()).
+							SelectExpr(entsql.Raw("1")).
+							From(entsql.Table(decisionanswer.Table)).
+							Where(entsql.ColumnsEQ(
+								entsql.Table(decisionanswer.Table).C(decisionanswer.FieldAnsweredByUserID),
+								s.C(decisionfacetentry.FieldActorID),
+							))
+						s.Where(entsql.Not(entsql.Exists(sub)))
+					}),
 				).
 				Exec(ctx)
 			if err != nil {
@@ -716,8 +729,23 @@ func (c *CompositeStore) reconcileDecisionFacetsTx(ctx context.Context) (int, er
 			if end > len(staleProjs) {
 				end = len(staleProjs)
 			}
+			// Re-check inside the DELETE itself (AND NOT EXISTS) so a live
+			// decision inserted concurrently between the guard query above and
+			// this DELETE cannot lose its summary row.
 			n, err := c.client.DecisionFacetEntry.Delete().
-				Where(decisionfacetentry.ProjectIDIn(staleProjs[start:end]...)).
+				Where(
+					decisionfacetentry.ProjectIDIn(staleProjs[start:end]...),
+					predicate.DecisionFacetEntry(func(s *entsql.Selector) {
+						sub := entsql.Dialect(s.Dialect()).
+							SelectExpr(entsql.Raw("1")).
+							From(entsql.Table(decision.Table)).
+							Where(entsql.ColumnsEQ(
+								entsql.Table(decision.Table).C(decision.FieldProjectID),
+								s.C(decisionfacetentry.FieldProjectID),
+							))
+						s.Where(entsql.Not(entsql.Exists(sub)))
+					}),
+				).
 				Exec(ctx)
 			if err != nil {
 				return 0, mapError(err)
