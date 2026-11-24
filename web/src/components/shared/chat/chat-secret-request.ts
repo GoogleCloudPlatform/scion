@@ -169,6 +169,9 @@ export class ScionChatSecretRequest extends LitElement {
   /** Monotonic counter bumped on `clearFormValues()` to cancel stale async file reads. */
   private clearGeneration = 0;
 
+  /** Row ID whose revealed textarea should receive focus after clicking Show. */
+  private pendingFocusRowId = '';
+
   /** Reactive counter bumped when in-memory form values change, without storing values in @state. */
   @state()
   private formRevision = 0;
@@ -643,11 +646,27 @@ export class ScionChatSecretRequest extends LitElement {
   /** Clears all ephemeral secret values and visibility toggles from memory. */
   clearFormValues(): void {
     this.clearGeneration++;
+    this.pendingFocusRowId = '';
     this.formValues.clear();
     this.capturedRows.clear();
     this.revealedRows = new Set();
     this.pendingFulfillIdempotencyKey = '';
     this.formRevision++;
+  }
+
+  protected override updated(): void {
+    if (this.pendingFocusRowId) {
+      const targetId = this.pendingFocusRowId;
+      this.pendingFocusRowId = '';
+      const escaped =
+        typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+          ? CSS.escape(targetId)
+          : targetId;
+      const ta = this.shadowRoot?.querySelector<HTMLTextAreaElement>(
+        `textarea[data-row-id="${escaped}"]`
+      );
+      ta?.focus();
+    }
   }
 
   private pruneNonPendingFormValues(): void {
@@ -790,8 +809,32 @@ export class ScionChatSecretRequest extends LitElement {
     this.formRevision++;
   }
 
+  private clearCapturedRow(rowId: string, target: HTMLInputElement | null, e: Event): void {
+    e.preventDefault();
+    this.formValues.delete(rowId);
+    this.capturedRows.delete(rowId);
+    if (target) {
+      target.value = '';
+    }
+    this.pendingFulfillIdempotencyKey = '';
+    if (this.errorMessage) {
+      this.errorMessage = '';
+    }
+    this.formRevision++;
+  }
+
+  private onMaskedKeydown(rowId: string, e: KeyboardEvent): void {
+    if ((e.key === 'Backspace' || e.key === 'Delete') && this.isRowCaptured(rowId)) {
+      this.clearCapturedRow(rowId, e.target as HTMLInputElement | null, e);
+    }
+  }
+
   private onMaskedBeforeInput(rowId: string, e: InputEvent): void {
     const target = e.target as HTMLInputElement | null;
+    if (e.inputType.startsWith('delete') && this.isRowCaptured(rowId)) {
+      this.clearCapturedRow(rowId, target, e);
+      return;
+    }
     let incoming: string;
     switch (e.inputType) {
       case 'insertFromPaste':
@@ -856,8 +899,8 @@ export class ScionChatSecretRequest extends LitElement {
 
       let decoded: string;
       try {
-        // TextDecoder strips a leading UTF-8 BOM by default (intentional for text secret files).
-        decoded = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+        // Preserve a leading UTF-8 BOM verbatim (secret values are never altered).
+        decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf);
       } catch {
         this.errorMessage = `File for ${row.key} is not valid UTF-8 text. Binary files are not supported.`;
         return;
@@ -896,6 +939,7 @@ export class ScionChatSecretRequest extends LitElement {
       nextRevealed.delete(rowId);
     } else {
       nextRevealed.add(rowId);
+      this.pendingFocusRowId = rowId;
     }
     this.revealedRows = nextRevealed;
   }
@@ -1205,10 +1249,7 @@ export class ScionChatSecretRequest extends LitElement {
       const disabled = !this.canRespondNow || this.submitting || this.actionState.dismissSubmitting;
       const isFile = row.secretType === 'file';
       const textareaRows = isFile ? 4 : 2;
-      const hasCapturedValue =
-        !revealed &&
-        value.length > 0 &&
-        (this.capturedRows.has(row.rowId) || value.includes('\n') || value.includes('\r'));
+      const hasCapturedValue = !revealed && this.isRowCaptured(row.rowId);
       const placeholder = hasCapturedValue
         ? isFile
           ? 'Value entered — type, paste or load to replace'
@@ -1260,6 +1301,7 @@ export class ScionChatSecretRequest extends LitElement {
                   data-1p-ignore="true"
                   ?disabled=${disabled}
                   .value=${hasCapturedValue ? '' : value}
+                  @keydown=${(e: KeyboardEvent): void => this.onMaskedKeydown(row.rowId, e)}
                   @beforeinput=${(e: InputEvent): void => this.onMaskedBeforeInput(row.rowId, e)}
                   @paste=${(e: ClipboardEvent): void => this.onMaskedPaste(row.rowId, e)}
                   @drop=${(e: DragEvent): void => this.onMaskedDrop(row.rowId, e)}

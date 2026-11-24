@@ -1664,4 +1664,104 @@ describe('scion-chat-secret-request', () => {
       'D1\nD2\nD3'
     );
   });
+
+  it('clears a captured value on Backspace / delete beforeinput and disables Submit', async () => {
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'r-1', key: 'TOKEN', secretType: 'file' })],
+    });
+    const input = el.shadowRoot!.querySelector('input[data-key="TOKEN"]') as HTMLInputElement;
+    const paste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(paste, 'clipboardData', {
+      value: { getData: (t: string) => (t === 'text/plain' ? 'line1\nline2' : '') },
+    });
+    input.dispatchEvent(paste);
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(false);
+
+    // Clear via deleteContentBackward beforeinput
+    const delEv = new InputEvent('beforeinput', {
+      bubbles: true,
+      cancelable: true,
+      inputType: 'deleteContentBackward',
+    });
+    input.dispatchEvent(delEv);
+    await el.updateComplete;
+
+    expect(delEv.defaultPrevented).toBe(true);
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
+
+    // Re-paste and clear via Backspace keydown (for browsers that don't fire beforeinput on empty input)
+    input.dispatchEvent(paste);
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    const kd = new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true });
+    input.dispatchEvent(kd);
+    await el.updateComplete;
+    expect(kd.defaultPrevented).toBe(true);
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('preserves a leading UTF-8 BOM verbatim when loading and submitting a file', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        rows: [
+          makeRow({
+            rowId: 'r-file',
+            key: 'BOM_KEY',
+            secretType: 'file',
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-24T00:05:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+        ],
+        responseMessageId: 'resp-bom',
+        replayed: false,
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'r-file', key: 'BOM_KEY', secretType: 'file' })],
+    });
+    const fileInput = el.shadowRoot!.querySelector(
+      'input[type="file"][data-file-input="BOM_KEY"]'
+    ) as HTMLInputElement;
+    // EF BB BF + "abc\n"
+    const bomBytes = new Uint8Array([0xef, 0xbb, 0xbf, 0x61, 0x62, 0x63, 0x0a]);
+    const bomFile = new File([bomBytes], 'bom.txt', { type: 'text/plain' });
+    Object.defineProperty(fileInput, 'files', { value: [bomFile], configurable: true });
+    fileInput.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as { values: Record<string, string> };
+    expect(sent.values).toEqual({ BOM_KEY: '\uFEFFabc\n' });
+  });
+
+  it('moves focus to the revealed textarea when Show is clicked', async () => {
+    const el = await mountCard();
+    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    toggleBtn.click();
+    await el.updateComplete;
+
+    const ta = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    expect(ta).not.toBeNull();
+    expect(el.shadowRoot!.activeElement).toBe(ta);
+  });
 });

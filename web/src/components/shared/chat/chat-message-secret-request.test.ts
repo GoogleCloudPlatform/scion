@@ -327,6 +327,23 @@ describe('native chat secret-request wiring', () => {
     expect(msg.shadowRoot?.querySelector('.secret-response-row.other')).not.toBeNull();
   });
 
+  it('falls back to a plain message bubble for secret-response when hub.agent_secrets is off', async () => {
+    setFeatureFlag(AGENT_SECRETS_FLAG, false);
+    const msg = document.createElement('scion-chat-message') as ScionChatMessage;
+    msg.messageId = 'msg-resp-off';
+    msg.messageType = 'secret-response';
+    msg.body = '`GITHUB_TOKEN` v2 is now available.';
+    msg.senderId = 'user-1';
+    msg.currentUserId = 'user-1';
+    document.body.appendChild(msg);
+
+    await vi.waitFor(() => {
+      expect(msg.shadowRoot?.querySelector('.bubble')).not.toBeNull();
+      expect(msg.shadowRoot?.textContent).toContain('GITHUB_TOKEN');
+    });
+    expect(msg.shadowRoot?.querySelector('[data-testid="secret-response-row"]')).toBeNull();
+  });
+
   it('jumps to replaced secret-request card within chat when present, else navigates to standalone route', async () => {
     navigateToMock.mockReset();
     const thread = document.createElement('scion-chat-thread') as ScionChatThread;
@@ -388,6 +405,20 @@ describe('native chat secret-request wiring', () => {
 
     // Simulate switching conversation before scrollToMessageById resolves
     t.fetchId++;
+    resolveScroll!();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(navigateToMock).not.toHaveBeenCalled();
+
+    // Simulate a superseding jump (_jumpSeq advances) before scrollToMessageById resolves
+    const t2 = thread as unknown as {
+      _jumpSeq: number;
+      handleSecretRequestJump: (e: CustomEvent<{ messageId: string }>) => void;
+    };
+    t2.handleSecretRequestJump(
+      new CustomEvent('secret-request-jump', { detail: { messageId: 'v2-superseded-jump' } })
+    );
+    t2._jumpSeq++;
     resolveScroll!();
     await new Promise((r) => setTimeout(r, 0));
 

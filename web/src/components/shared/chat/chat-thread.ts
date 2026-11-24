@@ -4290,8 +4290,10 @@ export class ScionChatThread extends LitElement {
 
   private async jumpToSecretRequest(targetId: string): Promise<void> {
     const startFetchId = this.fetchId;
-    await this.scrollToMessageById(targetId, true, false, '');
-    if (this.fetchId !== startFetchId) return;
+    const scrollPromise = this.scrollToMessageById(targetId, true, false, '');
+    const jumpSeq = this._jumpSeq;
+    await scrollPromise;
+    if (this.fetchId !== startFetchId || this._jumpSeq !== jumpSeq) return;
     const found = Boolean(this.shadowRoot?.getElementById(`msg-${targetId}`));
     if (!found) {
       navigateTo(`/secret-requests/${encodeURIComponent(targetId)}`);

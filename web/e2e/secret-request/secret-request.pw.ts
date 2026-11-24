@@ -485,3 +485,27 @@ test('type-then-paste composes at caret (end and middle) for both single-line an
   await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
   expect(f3[0].body.values).toEqual({ COMP_KEY: 'aX\nYbc' });
 });
+
+test('multi-line paste then one Backspace clears captured value and disables Submit', async ({
+  page,
+}) => {
+  await installMockSecretRequestHub(page, {
+    messageId: 'msg-clear-bs',
+    key: 'CLEAR_KEY',
+    secretType: 'file',
+  });
+  await page.goto('/secret-requests/msg-clear-bs', { waitUntil: 'domcontentloaded' });
+
+  const input = page.locator('input[data-key="CLEAR_KEY"]');
+  await input.click();
+  await page.keyboard.insertText('line1\nline2');
+
+  const badge = page.locator('[data-testid="file-value-masked"]');
+  const submitBtn = page.locator('sl-button.submit-btn');
+  await expect(badge).toBeVisible();
+  await expect(submitBtn).toBeEnabled();
+
+  await page.keyboard.press('Backspace');
+  await expect(badge).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled();
+});
