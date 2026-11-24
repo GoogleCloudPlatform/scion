@@ -201,16 +201,14 @@
       },
       {
         "name": "mode",
-        "help": "Messaging mode or reachability (client-side)",
+        "help": "Messaging mode (client-side)",
         "kind": "enum",
         "exec": "client",
         "enum": [
           "project",
           "branch",
           "lineage",
-          "none",
-          "can_message",
-          "cannot_message"
+          "none"
         ],
         "multiValued": false
       }

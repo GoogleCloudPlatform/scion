@@ -147,11 +147,34 @@ var Agents = filterquery.Schema{
 }
 
 // ProjectAgents is the filter query schema for the project-scoped agents list view.
-// It exposes the same keys as Agents except project and is:.
+// It exposes the same keys as Agents except project and is:, and its mode enum
+// omits reachability values (can_message / cannot_message) because the project
+// agents endpoint does not emit per-row _messageability.
 var ProjectAgents = filterquery.Schema{
 	View:     "project_agents",
 	TextHelp: "Matches agent name or slug",
-	Keys:     append([]filterquery.Key(nil), agentCommonKeys...),
+	Keys: []filterquery.Key{
+		agentCommonKeys[0], // phase
+		agentCommonKeys[1], // activity
+		agentCommonKeys[2], // label
+		agentCommonKeys[3], // harness
+		agentCommonKeys[4], // broker
+		agentCommonKeys[5], // template
+		agentCommonKeys[6], // owner
+		{
+			Name: "mode",
+			Help: "Messaging mode (client-side)",
+			Kind: filterquery.KindEnum,
+			Exec: filterquery.ExecClient,
+			Enum: []string{
+				"project",
+				"branch",
+				"lineage",
+				"none",
+			},
+			MultiValued: false,
+		},
+	},
 }
 
 // All returns every registered view schema in deterministic order.

@@ -56,7 +56,7 @@ Text search matches agent **name** or **slug** (case-insensitive substring). Sco
 | `broker` | ref | runtime broker name or ID | server | `broker:local-docker` | Runtime broker name or ID |
 | `template` | string | template name (case-insensitive) | server | `template:developer` | Agent template name |
 | `owner` | ref | user ID, email, or `me` | server | `owner:me` | Owner ID, email, or 'me' |
-| `mode` | enum | `project`, `branch`, `lineage`, `none`, `can_message`, `cannot_message` | client | `mode:lineage` | Messaging mode or reachability (client-side) |
+| `mode` | enum | `project`, `branch`, `lineage`, `none` | client | `mode:lineage` | Messaging mode (client-side) |
 
 ### `artifacts` (Artifacts list)
 
