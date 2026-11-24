@@ -806,13 +806,17 @@ func sortDecisionAnswerRowsDesc(rows []*ent.DecisionAnswer) {
 }
 
 // execDecisionAnswerSelector runs finalSel against DecisionAnswer. On Postgres
-// when disableJIT is true, it executes inside a read-only transaction with
-// SET LOCAL jit = off. Even when every per-project arm uses an optimal
-// bounded Index Scan Backward over (project_id, created_at) (~6-13 ms actual
-// execution at 200 projects), Postgres's planner sums the correlated PK
-// subplan cost across all N projects, exceeding jit_above_cost (100,000) and
-// spending 200 ms (LATERAL) to 14.5 s (100-arm UNION ALL) in LLVM JIT
-// compilation for a ~10 ms query.
+// when disableJIT is true, it sets two transaction-local GUCs in one round trip:
+//   - jit = off: even when every per-project arm uses an optimal bounded
+//     Index Scan Backward over (project_id, created_at) (~6-13 ms actual
+//     execution at 200 projects), Postgres's planner sums the correlated PK
+//     subplan cost across all N projects, exceeding jit_above_cost (100,000)
+//     and spending 200 ms (LATERAL) to 14.5 s (100-arm UNION ALL) in LLVM JIT.
+//   - plan_cache_mode = force_custom_plan: on cursor pages (page 2+), pgx's
+//     generic cached plan (call 6+) gives created_at <= $n a default range
+//     selectivity, switching each LATERAL arm to Bitmap Heap Scan + Sort over
+//     the project's entire history. Forcing custom plans keeps every cursor
+//     page on Index Scan Backward with an early LIMIT stop.
 func (c *CompositeStore) execDecisionAnswerSelector(
 	ctx context.Context,
 	finalSel *entsql.Selector,
@@ -825,12 +829,13 @@ func (c *CompositeStore) execDecisionAnswerSelector(
 	applySel := func(s *entsql.Selector) {
 		*s = *finalSel
 	}
+	const pgLocalConfigSQL = "SELECT set_config('jit','off',true), set_config('plan_cache_mode','force_custom_plan',true)"
 	if disableJIT && c.Dialect() == dialect.Postgres {
 		if c.inTx {
-			// Already inside a transaction (WithTx): SET LOCAL applies to the
-			// active transaction without attempting a nested BeginTx (which
-			// Postgres rejects).
-			if err := c.client.Driver().Exec(ctx, "SET LOCAL jit = off", []any{}, nil); err != nil {
+			// Already inside a transaction (WithTx): transaction-local
+			// set_config applies to the active transaction without attempting
+			// a nested BeginTx (which Postgres rejects).
+			if err := c.client.Driver().Exec(ctx, pgLocalConfigSQL, []any{}, nil); err != nil {
 				return nil, mapError(err)
 			}
 			rows, err := c.client.DecisionAnswer.Query().Where(applySel).All(ctx)
@@ -844,7 +849,7 @@ func (c *CompositeStore) execDecisionAnswerSelector(
 			return nil, mapError(err)
 		}
 		defer func() { _ = tx.Rollback() }()
-		if err := tx.Client().Driver().Exec(ctx, "SET LOCAL jit = off", []any{}, nil); err != nil {
+		if err := tx.Client().Driver().Exec(ctx, pgLocalConfigSQL, []any{}, nil); err != nil {
 			return nil, mapError(err)
 		}
 		rows, err := tx.DecisionAnswer.Query().Where(applySel).All(ctx)

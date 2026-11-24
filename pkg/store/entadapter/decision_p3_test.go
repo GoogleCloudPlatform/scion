@@ -666,11 +666,13 @@ func TestDecisionAnswersP3_MultiChunkMerge(t *testing.T) {
 // recorded for EXPLAIN inspection.
 type txPlanRecordingDriver struct {
 	*planRecordingDriver
+	onTxQuery func(ctx context.Context, tx dialect.Tx, query string, args []any)
 }
 
 type txPlanRecordingTx struct {
 	dialect.Tx
-	rec *planRecordingDriver
+	rec       *planRecordingDriver
+	onTxQuery func(ctx context.Context, tx dialect.Tx, query string, args []any)
 }
 
 func (t *txPlanRecordingTx) Query(ctx context.Context, query string, args, v any) error {
@@ -681,6 +683,9 @@ func (t *txPlanRecordingTx) Query(ctx context.Context, query string, args, v any
 	t.rec.mu.Lock()
 	t.rec.queries = append(t.rec.queries, recordedQuery{sql: query, args: copied})
 	t.rec.mu.Unlock()
+	if t.onTxQuery != nil {
+		t.onTxQuery(ctx, t.Tx, query, copied)
+	}
 	return t.Tx.Query(ctx, query, args, v)
 }
 
@@ -689,7 +694,7 @@ func (d *txPlanRecordingDriver) Tx(ctx context.Context) (dialect.Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &txPlanRecordingTx{Tx: tx, rec: d.planRecordingDriver}, nil
+	return &txPlanRecordingTx{Tx: tx, rec: d.planRecordingDriver, onTxQuery: d.onTxQuery}, nil
 }
 
 func (d *txPlanRecordingDriver) BeginTx(ctx context.Context, opts *sql.TxOptions) (dialect.Tx, error) {
@@ -701,7 +706,7 @@ func (d *txPlanRecordingDriver) BeginTx(ctx context.Context, opts *sql.TxOptions
 		if err != nil {
 			return nil, err
 		}
-		return &txPlanRecordingTx{Tx: tx, rec: d.planRecordingDriver}, nil
+		return &txPlanRecordingTx{Tx: tx, rec: d.planRecordingDriver, onTxQuery: d.onTxQuery}, nil
 	}
 	return d.Tx(ctx)
 }
@@ -885,5 +890,102 @@ func TestDecisionAnswersP3_QueryPlans(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, got, numProjects)
 		})
+	})
+
+	// Pin that cursor pages (page 2+) of ListDecisionAnswersForProjects and
+	// multi-project ListDecisionAnswers stay on Index Scan Backward with no
+	// Bitmap Heap Scan even when the Postgres session has
+	// plan_cache_mode = force_generic_plan (runs cursor pagination on SQLite
+	// too so this test never skips).
+	t.Run("CursorPage_under_session_force_generic_plan", func(t *testing.T) {
+		page1, cur, err := cs.ListDecisionAnswersForProjects(ctx, projectIDs, keysByProject, store.ProjectDecisionAnswerFilter{}, "", 20)
+		require.NoError(t, err)
+		require.Len(t, page1, 20)
+		require.NotEmpty(t, cur)
+
+		if base.Driver().Dialect() != dialect.Postgres {
+			page2a, _, err := cs.ListDecisionAnswersForProjects(ctx, projectIDs, keysByProject, store.ProjectDecisionAnswerFilter{}, cur, 20)
+			require.NoError(t, err)
+			require.Len(t, page2a, 20)
+			page2b, _, err := cs.ListDecisionAnswers(ctx, projectIDs, allKeys, store.ProjectDecisionAnswerFilter{}, cur, 20)
+			require.NoError(t, err)
+			require.Len(t, page2b, 20)
+			return
+		}
+
+		// Pin to a single connection so session SET plan_cache_mode applies
+		// to the exact connection used by execDecisionAnswerSelector.
+		if sd, ok := base.Driver().(*entsql.Driver); ok {
+			sd.DB().SetMaxOpenConns(1)
+		}
+		require.NoError(t, base.Driver().Exec(ctx, "SET plan_cache_mode = 'force_generic_plan'", []any{}, nil))
+		t.Cleanup(func() {
+			_ = base.Driver().Exec(context.Background(), "RESET plan_cache_mode", []any{}, nil)
+		})
+
+		var capturedMode string
+		var capturedPlan string
+		txRec := &txPlanRecordingDriver{
+			planRecordingDriver: rec,
+			onTxQuery: func(qCtx context.Context, tx dialect.Tx, query string, args []any) {
+				if capturedPlan != "" {
+					return
+				}
+				modeRows := &entsql.Rows{}
+				require.NoError(t, tx.Query(qCtx, "SHOW plan_cache_mode", []any{}, modeRows))
+				require.True(t, modeRows.Next())
+				require.NoError(t, modeRows.Scan(&capturedMode))
+				require.NoError(t, modeRows.Close())
+
+				// Execute EXPLAIN (ANALYZE) inside the same transaction so the
+				// txn-local plan_cache_mode override is active against the
+				// session-level force_generic_plan.
+				expRows := &entsql.Rows{}
+				require.NoError(t, tx.Query(qCtx, "EXPLAIN (ANALYZE) "+query, args, expRows))
+				var lines []string
+				for expRows.Next() {
+					var line string
+					require.NoError(t, expRows.Scan(&line))
+					lines = append(lines, line)
+				}
+				require.NoError(t, expRows.Err())
+				require.NoError(t, expRows.Close())
+				capturedPlan = strings.Join(lines, "\n")
+			},
+		}
+		pgCS := NewCompositeStore(ent.NewClient(ent.Driver(txRec)))
+
+		for _, tc := range []struct {
+			name string
+			run  func()
+		}{
+			{
+				name: "ListDecisionAnswersForProjects_page2",
+				run: func() {
+					got, _, err := pgCS.ListDecisionAnswersForProjects(ctx, projectIDs, keysByProject, store.ProjectDecisionAnswerFilter{}, cur, 20)
+					require.NoError(t, err)
+					require.Len(t, got, 20)
+				},
+			},
+			{
+				name: "ListDecisionAnswers_multi_page2",
+				run: func() {
+					got, _, err := pgCS.ListDecisionAnswers(ctx, projectIDs, allKeys, store.ProjectDecisionAnswerFilter{}, cur, 20)
+					require.NoError(t, err)
+					require.Len(t, got, 20)
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				capturedMode = ""
+				capturedPlan = ""
+				tc.run()
+				assert.Equal(t, "force_custom_plan", capturedMode, "%s must override plan_cache_mode inside transaction", tc.name)
+				assert.Contains(t, capturedPlan, "Index Scan Backward using decisionanswer_project_id_created_at",
+					"%s must use Index Scan Backward under session force_generic_plan; plan:\n%s", tc.name, capturedPlan)
+				assert.NotContains(t, capturedPlan, "Bitmap Heap Scan",
+					"%s must not fall back to Bitmap Heap Scan under session force_generic_plan; plan:\n%s", tc.name, capturedPlan)
+			})
+		}
 	})
 }
