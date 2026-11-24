@@ -560,7 +560,14 @@ describe('scion-page-agent-graph filter dialect integration', () => {
 
     const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
     expect(tree.agents.map((a) => a.id)).toEqual(['a-parent', 'a-child']);
-    const revealSpy = vi.spyOn(tree, 'revealAgent');
+    let nodeRenderedAtReveal = false;
+    const origReveal = tree.revealAgent.bind(tree);
+    const revealSpy = vi.spyOn(tree, 'revealAgent').mockImplementation((id: string) => {
+      nodeRenderedAtReveal = Boolean(
+        tree.shadowRoot?.querySelector(`a.node[data-agent-id="${id}"]`)
+      );
+      return origReveal(id);
+    });
     const focusSpy = vi.spyOn(tree, 'focusAgentNode');
 
     page.graphPalette.open();
@@ -573,17 +580,19 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     });
 
     // Pick 'a-other', which is currently hidden by harness:antigravity.
+    // Call 1 (from GraphPaletteController) returns false; Call 2 (from onSelectHidden)
+    // must run only after the child tree view finishes rendering the revealed node.
     palette.dispatchEvent(
       new CustomEvent('palette-select', {
         detail: { target: { kind: 'agent', agentId: 'a-other', displayName: 'Other' } },
       })
     );
-    await page.updateComplete;
-    await tree.updateComplete;
+    await vi.waitFor(() => expect(revealSpy).toHaveBeenCalledTimes(2));
 
     expect(window.location.search).toBe('');
     expect(tree.agents.map((a) => a.id)).toEqual(['a-parent', 'a-child', 'a-other']);
-    expect(revealSpy).toHaveBeenCalledWith('a-other');
+    expect(revealSpy).toHaveBeenLastCalledWith('a-other');
+    expect(nodeRenderedAtReveal).toBe(true);
 
     palette
       .shadowRoot!.querySelector('sl-dialog')!
@@ -970,14 +979,12 @@ describe('scion-page-agent-graph R1 load scope with non-held drains', () => {
         detail: { target: { kind: 'agent', agentId: 'a-2', displayName: 'Alpha Stopped' } },
       })
     );
-    await page.updateComplete;
-    await tree.updateComplete;
+    await vi.waitFor(() => expect(revealSpy).toHaveBeenCalledWith('a-2'));
 
     // Keeps project:alpha, issues no second drain, reveals and focuses a-2.
     expect(window.location.search).toBe('?q=project%3Aalpha');
     expect(drainCalls).toEqual(['/api/v1/agents?projectId=alpha']);
     expect(tree.agents.map((a) => a.id)).toEqual(['a-1', 'a-2']);
-    expect(revealSpy).toHaveBeenCalledWith('a-2');
 
     palette
       .shadowRoot!.querySelector('sl-dialog')!

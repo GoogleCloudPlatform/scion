@@ -212,8 +212,10 @@ export class AgentGraphPage extends LitElement {
       } else {
         this.onClearFilter();
       }
-      void this.updateComplete.then(() => {
-        this.renderRoot.querySelector('scion-agent-tree-view')?.revealAgent(agentId);
+      void this.updateComplete.then(async () => {
+        const tree = this.renderRoot.querySelector('scion-agent-tree-view');
+        await tree?.updateComplete;
+        tree?.revealAgent(agentId);
       });
       return true;
     },
