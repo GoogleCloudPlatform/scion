@@ -743,6 +743,8 @@ var seedSkipFiles = map[string]bool{
 	"provision_test.py": true,
 	".gitkeep":          true,
 	"init-firewall.sh":  true,
+	"package.json":      true,
+	"package-lock.json": true,
 }
 
 // SeedHarnessConfigFromDir populates a harness-config directory from an

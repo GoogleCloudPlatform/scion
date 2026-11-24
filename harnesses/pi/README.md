@@ -171,8 +171,10 @@ The pi version is the `PI_VERSION` build arg (default `1.3.0`); never use a
 floating tag. The install uses `--ignore-scripts` and installs from the
 committed `package.json` and `package-lock.json` via `npm ci` when `PI_VERSION`
 matches the lockfile, pinning every transitive dependency and its integrity
-hash. When bumping `PI_VERSION`, regenerate `package-lock.json` (`npm install
---package-lock-only --ignore-scripts`) in the same commit.
+hash. Overriding `--build-arg PI_VERSION=...` to a version that differs from
+`package.json` falls back to an unlocked global `npm install -g`. When bumping
+`PI_VERSION`, regenerate `package-lock.json` (`npm install --package-lock-only
+--ignore-scripts`) in the same commit.
 
 ## Tests
 
