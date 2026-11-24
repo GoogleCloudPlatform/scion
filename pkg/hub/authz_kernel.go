@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"slices"
 	"sort"
 	"time"
 )
@@ -70,6 +71,8 @@ type RolePermissions struct {
 	ScopeType string
 
 	// Permissions is the set of canonical permission IDs this role grants.
+	// Callers must treat Permissions as immutable after NewRolePermissions
+	// constructs the RolePermissions value.
 	Permissions map[string]struct{}
 
 	// ConfersMembership reports whether a project-scoped binding of this
@@ -84,17 +87,17 @@ type RolePermissions struct {
 
 	// sortedPerms caches sortedKeys(Permissions) at construction time so
 	// evaluateBinding does not allocate and sort a fresh slice on every
-	// binding evaluation. Read-only after NewRolePermissions.
+	// binding evaluation. Clipped and read-only after NewRolePermissions.
 	sortedPerms []string
 }
 
 // sortedPermissions returns Permissions keys in sorted order, reusing the
-// precomputed slice when available.
+// precomputed slice populated by NewRolePermissions when present.
 func (rp *RolePermissions) sortedPermissions() []string {
 	if rp == nil || len(rp.Permissions) == 0 {
 		return nil
 	}
-	if len(rp.sortedPerms) == len(rp.Permissions) {
+	if rp.sortedPerms != nil {
 		return rp.sortedPerms
 	}
 	return sortedKeys(rp.Permissions)
@@ -122,7 +125,7 @@ func NewRolePermissions(roleID, roleName, scopeType string, perms []string) *Rol
 		ScopeType:         scopeType,
 		Permissions:       m,
 		ConfersMembership: true,
-		sortedPerms:       sortedKeys(m),
+		sortedPerms:       slices.Clip(sortedKeys(m)),
 	}
 }
 

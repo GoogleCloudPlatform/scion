@@ -63,6 +63,7 @@ type GrantProvenance struct {
 	ActivationResult ActivationResult
 
 	// Permissions lists the permissions this binding's role contains.
+	// Read-only: may alias RolePermissions.sortedPerms (capacity-capped).
 	// Populated for provenance/explain output.
 	Permissions []string
 
