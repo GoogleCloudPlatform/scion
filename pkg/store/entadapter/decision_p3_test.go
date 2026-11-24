@@ -965,8 +965,8 @@ func TestDecisionAnswersP3_QueryPlans(t *testing.T) {
 
 		// Pin to a single connection so session SET plan_cache_mode applies
 		// to the exact connection used by execDecisionAnswerSelector.
-		if sd, ok := base.Driver().(*entsql.Driver); ok {
-			sd.DB().SetMaxOpenConns(1)
+		if db := NewCompositeStore(base).DB(); db != nil {
+			db.SetMaxOpenConns(1)
 		}
 		require.NoError(t, base.Driver().Exec(ctx, "SET plan_cache_mode = 'force_generic_plan'", []any{}, nil))
 		t.Cleanup(func() {
