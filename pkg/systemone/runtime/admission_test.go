@@ -791,7 +791,7 @@ func TestAdmission_CallerDeadlineDuringAdmissionClassifiesAsCanceled(t *testing.
 		Registry:              reg,
 		Instances:             StaticInstances(inst),
 		MaxInFlightPerProject: 4,
-		AdmissionWait:         250 * time.Millisecond,
+		AdmissionWait:         80 * time.Millisecond,
 	})
 	compiled := compileAdmissionTestRule(t, "inst-dead")
 
@@ -804,7 +804,7 @@ func TestAdmission_CallerDeadlineDuringAdmissionClassifiesAsCanceled(t *testing.
 	<-inFlight
 
 	// 1. Caller deadline shorter than admissionWait -> FailCanceled (NOT capacity).
-	shortCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	shortCtx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
 	defer cancel()
 	_, err := rt.Evaluate(shortCtx, compiled, ProbeInput("short-deadline"), EvalOptions{ProjectID: "proj-2"})
 	require.Error(t, err)
@@ -812,12 +812,30 @@ func TestAdmission_CallerDeadlineDuringAdmissionClassifiesAsCanceled(t *testing.
 	require.True(t, ok)
 	assert.Equal(t, string(provider.FailCanceled), evalShort.Reason)
 
-	// 2. Live caller ctx saturating admissionWait -> still FailCapacity.
+	// 2. Caller deadline equal to AdmissionWait -> still FailCanceled (NOT capacity).
+	equalCtx, cancelEqual := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancelEqual()
+	_, err = rt.Evaluate(equalCtx, compiled, ProbeInput("equal-deadline"), EvalOptions{ProjectID: "proj-2"})
+	require.Error(t, err)
+	evalEqual, ok := EvaluationFrom(err)
+	require.True(t, ok)
+	assert.Equal(t, string(provider.FailCanceled), evalEqual.Reason)
+
+	// 3. Live caller ctx saturating admissionWait -> still FailCapacity.
 	_, err = rt.Evaluate(context.Background(), compiled, ProbeInput("live-ctx"), EvalOptions{ProjectID: "proj-2"})
 	require.Error(t, err)
 	evalCap, ok := EvaluationFrom(err)
 	require.True(t, ok)
 	assert.Equal(t, string(provider.FailCapacity), evalCap.Reason)
+
+	// 4. Caller deadline later than admissionWait -> still FailCapacity.
+	longCtx, cancelLong := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelLong()
+	_, err = rt.Evaluate(longCtx, compiled, ProbeInput("long-deadline"), EvalOptions{ProjectID: "proj-2"})
+	require.Error(t, err)
+	evalLong, ok := EvaluationFrom(err)
+	require.True(t, ok)
+	assert.Equal(t, string(provider.FailCapacity), evalLong.Reason)
 
 	close(block)
 	wg.Wait()

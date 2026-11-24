@@ -311,12 +311,20 @@ func (c *admissionController) acquire(
 
 	now := time.Now()
 	waitDeadline := now.Add(c.admissionWait)
-	if dl, ok := attemptCtx.Deadline(); ok && dl.Before(waitDeadline) {
+	waitCtx := attemptCtx
+	if dl, ok := attemptCtx.Deadline(); ok && !waitDeadline.Before(dl) {
+		// attemptCtx already bounds the wait at or before now+admissionWait.
+		// Reuse attemptCtx directly instead of wrapping it with
+		// context.WithDeadline(attemptCtx, dl), which allocates a second
+		// independent timer at the same instant (Go's WithDeadline only elides
+		// the child timer when parentDeadline < d, not <=) and can fire before
+		// caller/attempt context cancellation is visible via ctx.Err().
 		waitDeadline = dl
+	} else {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithDeadline(attemptCtx, waitDeadline)
+		defer cancel()
 	}
-
-	waitCtx, cancel := context.WithDeadline(attemptCtx, waitDeadline)
-	defer cancel()
 
 	var releaseProj func()
 	if needsProject {

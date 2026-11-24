@@ -850,6 +850,8 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		reason := provider.FailCapacity
 		if ctx.Err() != nil {
 			reason = classifyContextCause(ctx.Err(), latchCause(context.Cause(attemptCtx)))
+		} else if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+			reason = classifyContextCause(context.DeadlineExceeded, latchCause(context.Cause(attemptCtx)))
 		}
 		eval.Attempts = []Attempt{{
 			Instance:         inst.Name,
