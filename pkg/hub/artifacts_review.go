@@ -188,8 +188,8 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 			extendWriteDeadlineForWake(w, 1)
 		}
 		wakeCtx, cancelWake := context.WithTimeout(context.WithoutCancel(ctx), chatWakeResumeBudget)
+		defer cancelWake()
 		wakeRes, wakeErr := s.wakeAgentForDM(wakeCtx, agent)
-		cancelWake()
 		if wakeErr != nil {
 			status := artifacts.ReviewDeliveryWakeFailed
 			if isWakeRefusal(wakeErr) {
@@ -214,8 +214,8 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 					}
 				}()
 				waitCtx, cancelWait := context.WithTimeout(bgCtx, chatWakeResumeBudget)
+				defer cancelWait()
 				err := s.awaitStartInProgress(waitCtx, &target)
-				cancelWait()
 				if err != nil {
 					slog.WarnContext(bgCtx, "artifacts: deferred wake did not become ready for review notice",
 						"artifact_id", n.ArtifactID, "seq", n.Seq, "agent_id", target.ID, "error", err)
@@ -233,8 +233,8 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 			return deliveryInfo(artifacts.ReviewDeliveryWaking, "")
 		}
 		dctx, cancelDispatch := context.WithTimeout(context.WithoutCancel(ctx), artifactReviewNoticeTimeout)
+		defer cancelDispatch()
 		err := s.deliverArtifactReview(dctx, n)
-		cancelDispatch()
 		if err != nil {
 			slog.WarnContext(ctx, "artifacts: review notice not delivered after wake",
 				"artifact_id", n.ArtifactID, "seq", n.Seq, "agent_id", agent.ID, "error", err)
