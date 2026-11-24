@@ -54,7 +54,7 @@ func artifactPagePath(scopeRef, artifactID string) string {
 }
 
 func reviewRequestedByFromMessage(msg string) string {
-	before, _, ok := strings.Cut(msg, " asked you to review an artifact")
+	before, _, ok := strings.Cut(msg, reviewRequestMessagePhrase)
 	if !ok {
 		return ""
 	}
@@ -90,7 +90,18 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 		}
 	}
 
-	svc := s.inboxArtifactService()
+	if !requestCredentialBindsIdentity(ctx) {
+		return InboxCategory{
+			State:             InboxStateUnavailable,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: true,
+			Href:              inboxReviewsHref,
+			Previews:          []any{},
+		}
+	}
+
+	svc := s.artifactRefResolver()
 
 	// 1. Owned artifacts whose current version is a submitted review awaiting owner action.
 	toAddressCount, toAddressCapped, toAddressItems, err := svc.ReviewPendingSummary(ctx, previews)
@@ -142,7 +153,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 
 	requestedCount := 0
 	var readableNotifs []store.Notification
-	readableInfo, err := svc.ReadableArtifacts(ctx, requestedIDs)
+	readableInfo, requestedCapped, err := svc.ReadableArtifacts(ctx, requestedIDs)
 	if err != nil {
 		return inboxReviewsErrorCategory(ctx, err)
 	}
@@ -220,7 +231,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 	return InboxCategory{
 		State:             InboxStateOK,
 		Count:             toAddressCount + requestedCount,
-		Capped:            toAddressCapped,
+		Capped:            toAddressCapped || requestedCapped,
 		CountsTowardTotal: true,
 		Href:              inboxReviewsHref,
 		Previews:          items,

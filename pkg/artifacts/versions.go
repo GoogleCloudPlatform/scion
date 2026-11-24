@@ -916,7 +916,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	}
 	extra, warnings := s.finalizeExtras(w, r.WithContext(work), b, v, files)
 	priorWasReview := false
-	if v.Kind == VersionKindPublish && a.OwnerKind == PrincipalKindUser && a.CurrentSeq > 0 {
+	if v.Kind == VersionKindPublish && a.OwnerKind == PrincipalKindUser && a.CurrentSeq > 0 && s.inboxHintsActive(work) {
 		if prior, perr := b.store.GetVersion(work, a.ID, a.CurrentSeq); perr == nil && prior.Kind == VersionKindReview {
 			priorWasReview = true
 		}

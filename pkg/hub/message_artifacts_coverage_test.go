@@ -408,6 +408,7 @@ func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 	wantResolver := map[stripSiteKey]bool{
 		{"message_artifacts.go", "resolveArtifactRefs"}:      true,
 		{"message_artifacts.go", "artifactRecipientWarning"}: true,
+		{"inbox_reviews.go", "inboxReviewsCategory"}:         true,
 	}
 	if len(got["artifactRefResolver"]) == 0 {
 		t.Fatal("found no artifactRefResolver call sites: scanner broken")

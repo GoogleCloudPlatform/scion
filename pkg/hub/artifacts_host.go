@@ -45,6 +45,14 @@ var (
 	_ artifacts.InboxNotifier = (*artifactHost)(nil)
 )
 
+// InboxHintsActive implements artifacts.InboxNotifier: reports whether the
+// web.inbox_dashboard experiment is enabled on this server so pkg/artifacts
+// can skip extra reads (such as prior version kind on publish) when hints are
+// inactive.
+func (h *artifactHost) InboxHintsActive(context.Context) bool {
+	return h.server != nil && h.server.experimentEnabled(experiments.InboxDashboard)
+}
+
 // InboxChanged implements artifacts.InboxNotifier: it publishes a content-free
 // reviews invalidation hint to userID when web.inbox_dashboard is enabled.
 func (h *artifactHost) InboxChanged(ctx context.Context, userID string) {

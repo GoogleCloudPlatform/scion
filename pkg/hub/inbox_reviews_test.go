@@ -353,6 +353,9 @@ func (s *inboxReviewsCountingStore) GetProject(ctx context.Context, id string) (
 type countingArtifactStore struct {
 	artifacts.Store
 	listCandidatesCalls atomic.Int32
+	getArtifactCalls    atomic.Int32
+	getArtifactsCalls   atomic.Int32
+	listGrantsForCalls  atomic.Int32
 }
 
 func (s *countingArtifactStore) ListCandidates(ctx context.Context, q artifacts.CandidateQuery) ([]artifacts.Candidate, error) {
@@ -360,8 +363,24 @@ func (s *countingArtifactStore) ListCandidates(ctx context.Context, q artifacts.
 	return s.Store.ListCandidates(ctx, q)
 }
 
-// TestUserMeInboxSummary_ReviewsStoreCallCount verifies AC6: bounded store calls
-// for the reviews category regardless of how many review-pending artifacts exist.
+func (s *countingArtifactStore) GetArtifact(ctx context.Context, id string) (*artifacts.Artifact, error) {
+	s.getArtifactCalls.Add(1)
+	return s.Store.GetArtifact(ctx, id)
+}
+
+func (s *countingArtifactStore) GetArtifacts(ctx context.Context, ids []string) (map[string]*artifacts.Artifact, error) {
+	s.getArtifactsCalls.Add(1)
+	return s.Store.GetArtifacts(ctx, ids)
+}
+
+func (s *countingArtifactStore) ListGrantsFor(ctx context.Context, artifactIDs []string) (map[string][]artifacts.Grant, error) {
+	s.listGrantsForCalls.Add(1)
+	return s.Store.ListGrantsFor(ctx, artifactIDs)
+}
+
+// TestUserMeInboxSummary_ReviewsStoreCallCount verifies AC6: artifact-store
+// and hub-store reads stay constant as review-request notifications grow
+// (same count at 2 requests and at 10, mixing readable and unreadable artifacts).
 func TestUserMeInboxSummary_ReviewsStoreCallCount(t *testing.T) {
 	srv, rawStore := testServer(t)
 	rawArtStore := enableInboxAndArtifacts(t, srv)
@@ -372,8 +391,11 @@ func TestUserMeInboxSummary_ReviewsStoreCallCount(t *testing.T) {
 	})
 
 	p1 := artifactProject(t, rawStore, "rev-spy-p1")
+	p2 := artifactProject(t, rawStore, "rev-spy-p2")
 	uID := tid("rev-spy-user")
+	otherID := tid("rev-spy-other")
 	createTestUserWithProjectRole(t, rawStore, uID, "rev-spy@test.com", p1.ID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, rawStore, otherID, "rev-spy-other@test.com", p2.ID, store.ProjectRoleMember)
 	u, err := rawStore.GetUser(context.Background(), uID)
 	require.NoError(t, err)
 
@@ -382,15 +404,145 @@ func TestUserMeInboxSummary_ReviewsStoreCallCount(t *testing.T) {
 		seedHubReviewArtifact(t, rawArtStore, p1.ID, artifacts.PrincipalKindUser, u.ID, fmt.Sprintf("Rev %d", i), artifacts.VersionKindReview, now.Add(time.Duration(i)*time.Second))
 	}
 
-	hubCounter.getNotifsCalls.Store(0)
-	hubCounter.getProjectCalls.Store(0)
-	artCounter.listCandidatesCalls.Store(0)
+	seedRequest := func(idx int, readable bool) {
+		var grants []artifacts.Grant
+		if readable {
+			grants = append(grants, artifacts.Grant{
+				SubjectKind: artifacts.SubjectPrincipal,
+				SubjectRef:  artifacts.PrincipalRef(artifacts.PrincipalKindUser, u.ID),
+				Permission:  artifacts.GrantReview,
+			})
+		}
+		artID := seedHubReviewArtifact(t, rawArtStore, p2.ID, artifacts.PrincipalKindUser, otherID, fmt.Sprintf("Req %d", idx), artifacts.VersionKindPublish, now, grants...)
+		seedReviewRequestNotification(t, rawStore, u.ID, p2.ID, artID, "Other", now.Add(time.Duration(idx)*time.Second), false)
+	}
 
-	resp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath+"?previews=3", nil))
-	assert.Equal(t, 10, resp.Categories[InboxCategoryReviews].Count)
-	assert.Equal(t, int32(1), artCounter.listCandidatesCalls.Load(), "reviews must issue exactly 1 ListCandidates query")
-	assert.Equal(t, int32(1), hubCounter.getNotifsCalls.Load(), "reviews must issue exactly 1 GetNotifications query")
-	assert.LessOrEqual(t, hubCounter.getProjectCalls.Load(), int32(1), "GetProject should be memoized per distinct project in previews")
+	measure := func(wantRequested int) (getArt, getArts, listCand, listGrants, getNotifs int32) {
+		hubCounter.getNotifsCalls.Store(0)
+		hubCounter.getProjectCalls.Store(0)
+		artCounter.getArtifactCalls.Store(0)
+		artCounter.getArtifactsCalls.Store(0)
+		artCounter.listCandidatesCalls.Store(0)
+		artCounter.listGrantsForCalls.Store(0)
+
+		resp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath+"?previews=3", nil))
+		assert.Equal(t, 10+wantRequested, resp.Categories[InboxCategoryReviews].Count)
+		assert.Equal(t, map[string]int{"toAddress": 10, "requested": wantRequested}, resp.Categories[InboxCategoryReviews].Breakdown)
+		assert.LessOrEqual(t, hubCounter.getProjectCalls.Load(), int32(2), "GetProject should be memoized per distinct project in previews")
+		return artCounter.getArtifactCalls.Load(), artCounter.getArtifactsCalls.Load(),
+			artCounter.listCandidatesCalls.Load(), artCounter.listGrantsForCalls.Load(),
+			hubCounter.getNotifsCalls.Load()
+	}
+
+	// Seed 2 review-request notifications (1 readable via grant, 1 unreadable in p2).
+	seedRequest(0, true)
+	seedRequest(1, false)
+	g1, gs1, lc1, lg1, gn1 := measure(1)
+	assert.Equal(t, int32(0), g1, "must not call per-ID GetArtifact")
+	assert.Equal(t, int32(1), gs1, "must issue exactly 1 batched GetArtifacts call")
+	assert.Equal(t, int32(1), lc1, "must issue exactly 1 ListCandidates call")
+	assert.Equal(t, int32(1), lg1, "must issue exactly 1 batched ListGrantsFor call")
+	assert.Equal(t, int32(1), gn1, "must issue exactly 1 GetNotifications call")
+
+	// Grow to 10 distinct review-request notifications (5 readable, 5 unreadable).
+	for i := 2; i < 10; i++ {
+		seedRequest(i, i%2 == 0)
+	}
+	g2, gs2, lc2, lg2, gn2 := measure(5)
+	assert.Equal(t, g1, g2, "GetArtifact count must stay constant (0) at 2 vs 10 requests")
+	assert.Equal(t, gs1, gs2, "GetArtifacts count must stay constant (1) at 2 vs 10 requests")
+	assert.Equal(t, lc1, lc2, "ListCandidates count must stay constant (1) at 2 vs 10 requests")
+	assert.Equal(t, lg1, lg2, "ListGrantsFor count must stay constant (1) at 2 vs 10 requests")
+	assert.Equal(t, gn1, gn2, "GetNotifications count must stay constant (1) at 2 vs 10 requests")
+}
+
+// TestUserMeInboxSummary_ReviewsRefusesUnboundIdentity verifies R1: a context
+// whose identity was injected/replaced via ContextWithIdentity (not bound to
+// the authentication middleware's credential context) gets no artifact data.
+func TestUserMeInboxSummary_ReviewsRefusesUnboundIdentity(t *testing.T) {
+	srv, s := testServer(t)
+	st := enableInboxAndArtifacts(t, srv)
+	ctx := context.Background()
+
+	p1 := artifactProject(t, s, "unbound-p1")
+	ownerID := tid("unbound-owner")
+	createTestUserWithProjectRole(t, s, ownerID, "unbound@test.com", p1.ID, store.ProjectRoleMember)
+	owner, err := s.GetUser(ctx, ownerID)
+	require.NoError(t, err)
+
+	seedHubReviewArtifact(t, st, p1.ID, artifacts.PrincipalKindUser, owner.ID, "Sensitive Review", artifacts.VersionKindReview, time.Now().UTC())
+
+	// Context with identity set via contextWithIdentity (no bound request credential).
+	userIdent := NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, owner.Role, "")
+	unboundCtx := contextWithIdentity(ctx, userIdent)
+	cat := srv.inboxReviewsCategory(unboundCtx, inboxViewer{userID: owner.ID, user: userIdent}, 3, InboxChatFilterAll)
+	assert.Equal(t, InboxStateUnavailable, cat.State)
+	assert.Equal(t, 0, cat.Count)
+	assert.Empty(t, cat.Previews)
+}
+
+// TestUserMeInboxSummary_ReviewsRevokedGrantDropsRequested verifies N2: an
+// artifact that was readable via a review grant disappears from requested
+// count and previews once that grant is revoked.
+func TestUserMeInboxSummary_ReviewsRevokedGrantDropsRequested(t *testing.T) {
+	srv, s := testServer(t)
+	enableInboxAndArtifacts(t, srv)
+	ctx := context.Background()
+
+	p1 := artifactProject(t, s, "revoke-p1")
+	ownerID := tid("revoke-owner")
+	reviewerID := tid("revoke-reviewer")
+	createTestUserWithProjectRole(t, s, ownerID, "rev-o@test.com", p1.ID, store.ProjectRoleOwner)
+	// reviewer is NOT a member of p1, so readability depends solely on the grant.
+	reviewer := &store.User{
+		ID: reviewerID, Email: "rev-r@test.com", DisplayName: "Reviewer",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateUser(ctx, reviewer))
+	owner, err := s.GetUser(ctx, ownerID)
+	require.NoError(t, err)
+
+	artID := decodeArtifactID(t, userArtifactRequest(t, srv, owner, http.MethodPost, "/api/v1/artifacts?name=doc.md&scope="+p1.ID, []byte("hello\n")))
+	grantBody, _ := json.Marshal(artifacts.GrantRequest{
+		SubjectKind: artifacts.SubjectPrincipal,
+		SubjectRef:  artifacts.PrincipalRef(artifacts.PrincipalKindUser, reviewer.ID),
+		Permission:  artifacts.GrantReview,
+	})
+	gRec := userArtifactRequest(t, srv, owner, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", grantBody)
+	require.Equal(t, http.StatusCreated, gRec.Code, gRec.Body.String())
+	var gResp artifacts.GrantResponse
+	require.NoError(t, json.Unmarshal(gRec.Body.Bytes(), &gResp))
+
+	seedReviewRequestNotification(t, s, reviewer.ID, p1.ID, artID, "Owner", time.Now().UTC(), false)
+
+	// Before revocation: artifact is readable -> requested=1.
+	before := decodeInboxSummary(t, doRequestAsUser(t, srv, reviewer, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, 1, before.Categories[InboxCategoryReviews].Count)
+	assert.Equal(t, map[string]int{"toAddress": 0, "requested": 1}, before.Categories[InboxCategoryReviews].Breakdown)
+	require.Len(t, decodeReviewPreviews(t, before.Categories[InboxCategoryReviews]), 1)
+
+	// Revoke the grant.
+	delRec := userArtifactRequest(t, srv, owner, http.MethodDelete, "/api/v1/artifacts/"+artID+"/grants/"+gResp.Grant.ID, nil)
+	require.Equal(t, http.StatusNoContent, delRec.Code, delRec.Body.String())
+
+	// After revocation: artifact is no longer readable -> requested=0 and absent from previews.
+	after := decodeInboxSummary(t, doRequestAsUser(t, srv, reviewer, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, 0, after.Categories[InboxCategoryReviews].Count)
+	assert.Equal(t, map[string]int{"toAddress": 0, "requested": 0}, after.Categories[InboxCategoryReviews].Breakdown)
+	assert.Empty(t, after.Categories[InboxCategoryReviews].Previews)
+}
+
+// TestReviewRequestedByFromMessage_RoundTrip verifies N1: the parser in
+// inbox_reviews.go round-trips labels formatted by grantNoticeMessage.
+func TestReviewRequestedByFromMessage_RoundTrip(t *testing.T) {
+	artID := uuid.NewString()
+	for _, label := range []string{"Alice", "Bob (bob@example.com)", "a user"} {
+		msg := grantNoticeMessage(label, artifacts.GrantReview, artID)
+		assert.Equal(t, label, reviewRequestedByFromMessage(msg))
+	}
+	// Non-review share notice returns empty string.
+	shareMsg := grantNoticeMessage("Alice", artifacts.GrantRead, artID)
+	assert.Empty(t, reviewRequestedByFromMessage(shareMsg))
 }
 
 // TestUserMeInboxSummary_ReviewsAndNotificationHints verifies AC7:

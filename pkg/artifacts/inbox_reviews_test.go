@@ -30,11 +30,18 @@ import (
 
 type inboxRecordingHost struct {
 	*fakeHost
-	inboxMu    sync.Mutex
-	inboxUsers []string
+	inboxMu     sync.Mutex
+	hintsActive bool
+	inboxUsers  []string
 }
 
 var _ InboxNotifier = (*inboxRecordingHost)(nil)
+
+func (h *inboxRecordingHost) InboxHintsActive(context.Context) bool {
+	h.inboxMu.Lock()
+	defer h.inboxMu.Unlock()
+	return h.hintsActive
+}
 
 func (h *inboxRecordingHost) InboxChanged(_ context.Context, userID string) {
 	h.inboxMu.Lock()
@@ -151,6 +158,44 @@ func TestReviewPendingSummary_BasicOrderingAndCapping(t *testing.T) {
 	}
 }
 
+func TestStoreGetArtifacts(t *testing.T) {
+	f := newFixture(t, false)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Empty input returns empty map without error.
+	empty, err := f.store.GetArtifacts(ctx, nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty GetArtifacts: got (%v, %v), want empty map, nil", empty, err)
+	}
+
+	// Exceeding MaxGrantsForIDs returns an error.
+	if _, err := f.store.GetArtifacts(ctx, make([]string, MaxGrantsForIDs+1)); err == nil {
+		t.Fatalf("expected error for >MaxGrantsForIDs ids")
+	}
+
+	live1 := seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, userU.ref, "live-1", VersionKindPublish, now, nil)
+	live2 := seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, userU.ref, "live-2", VersionKindReview, now, nil)
+	deleted := seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, userU.ref, "deleted-1", VersionKindPublish, now, nil)
+	if _, err := f.store.DeleteArtifact(ctx, deleted, DeleteOptions{
+		Actor:    &Actor{Kind: PrincipalKindUser, Ref: userU.ref, Authority: AuthorityOwner},
+		ScopeRef: "project-1",
+	}); err != nil {
+		t.Fatalf("DeleteArtifact: %v", err)
+	}
+
+	got, err := f.store.GetArtifacts(ctx, []string{live1, live2, deleted, uuid.NewString()})
+	if err != nil {
+		t.Fatalf("GetArtifacts: %v", err)
+	}
+	if len(got) != 2 || got[live1] == nil || got[live2] == nil || got[deleted] != nil {
+		t.Fatalf("GetArtifacts returned %v, want only %s and %s", got, live1, live2)
+	}
+	if got[live1].Title != "live-1" || got[live2].Title != "live-2" {
+		t.Fatalf("unexpected titles: %q, %q", got[live1].Title, got[live2].Title)
+	}
+}
+
 func TestReadableArtifacts(t *testing.T) {
 	f := newFixture(t, false)
 	now := time.Now().UTC()
@@ -170,9 +215,12 @@ func TestReadableArtifacts(t *testing.T) {
 	expiredID := seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, outside.ref, "expired-doc", VersionKindPublish, now, &past)
 
 	ctx := context.WithValue(context.Background(), principalKey{}, userU)
-	got, err := f.svc.ReadableArtifacts(ctx, []string{ownedID, projID, grantedID, hiddenID, expiredID, uuid.NewString(), "not-a-uuid"})
+	got, capped, err := f.svc.ReadableArtifacts(ctx, []string{ownedID, projID, grantedID, hiddenID, expiredID, uuid.NewString(), "not-a-uuid"})
 	if err != nil {
 		t.Fatalf("ReadableArtifacts: %v", err)
+	}
+	if capped {
+		t.Fatalf("expected capped=false")
 	}
 	if len(got) != 3 {
 		t.Fatalf("got %d readable artifacts (%v), want 3", len(got), got)
@@ -183,11 +231,23 @@ func TestReadableArtifacts(t *testing.T) {
 			t.Fatalf("artifact %s: got (%v, %+v), want title %q", id, ok, info, wantTitle)
 		}
 	}
+
+	// Lower maxListScan to 2 to verify truncation sets capped=true and keeps newest (first) 2.
+	origScan := maxListScan
+	maxListScan = 2
+	t.Cleanup(func() { maxListScan = origScan })
+	gotCap, capped, err := f.svc.ReadableArtifacts(ctx, []string{ownedID, projID, grantedID})
+	if err != nil {
+		t.Fatalf("ReadableArtifacts(capped): %v", err)
+	}
+	if !capped || len(gotCap) != 2 || gotCap[ownedID].ID != ownedID || gotCap[projID].ID != projID {
+		t.Fatalf("got (%v, capped=%v), want 2 items (%s, %s) with capped=true", gotCap, capped, ownedID, projID)
+	}
 }
 
 func TestInboxNotifier_PublishDeleteAndGrantRevoke(t *testing.T) {
 	f := newFixture(t, false)
-	recHost := &inboxRecordingHost{fakeHost: f.host}
+	recHost := &inboxRecordingHost{fakeHost: f.host, hintsActive: true}
 	f.svc.host = recHost
 	f.host.allow(outside, "project-1", PermissionRead)
 
@@ -255,6 +315,15 @@ func TestInboxNotifier_PublishDeleteAndGrantRevoke(t *testing.T) {
 	if got := recHost.takeInboxUsers(); len(got) != 1 || got[0] != userU.ref {
 		t.Fatalf("review-clearing publish: got %v, want [%s]", got, userU.ref)
 	}
+
+	// 3b. When InboxHintsActive is false, review-clearing publish skips the prior-version check and does not fire InboxChanged.
+	finalizeVersion(outside, art.Artifact.ID, VersionKindReview, []byte("v4 addressed{>>again<<}\n"), 4)
+	recHost.hintsActive = false
+	finalizeVersion(userU, art.Artifact.ID, VersionKindPublish, []byte("v6 addressed\n"), 0)
+	if got := recHost.takeInboxUsers(); len(got) != 0 {
+		t.Fatalf("hintsActive=false review-clearing publish should not fire InboxChanged, got %v", got)
+	}
+	recHost.hintsActive = true
 
 	// 4. Revoke outside's review grant -> fires InboxChanged for subject user (outside) only!
 	delGrantRec := f.do(&userU, http.MethodDelete, "/api/v1/artifacts/"+art.Artifact.ID+"/grants/"+gResp.Grant.ID, nil, nil)

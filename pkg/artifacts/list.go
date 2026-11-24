@@ -778,57 +778,78 @@ func (s *Service) ReviewPendingSummary(ctx context.Context, previews int) (count
 // ReadableArtifacts returns the ArtifactInfo for each artifact ID in ids that
 // exists, is live, unexpired, not an attachment, and readable by the caller of
 // ctx under the same read check as GET /api/v1/artifacts/{id} (canReadWith).
-// Grants are loaded in batches via grantsWindow and host checks are memoized
-// for the duration of the call.
-func (s *Service) ReadableArtifacts(ctx context.Context, ids []string) (map[string]ArtifactInfo, error) {
+// At most maxListScan unique canonical IDs (in caller order) are inspected;
+// capped is true when additional unique canonical IDs were truncated. Both
+// artifact rows (GetArtifacts) and grants (grantsWindow) are loaded in batch
+// and host checks are memoized for the duration of the call.
+func (s *Service) ReadableArtifacts(ctx context.Context, ids []string) (map[string]ArtifactInfo, bool, error) {
 	out := make(map[string]ArtifactInfo)
 	if len(ids) == 0 {
-		return out, nil
+		return out, false, nil
 	}
 	b, ok := s.backend()
 	if !ok {
-		return nil, ErrBackendUnavailable
+		return nil, false, ErrBackendUnavailable
 	}
 	host := newMemoHost(s.host)
 	if _, _, _, ok := host.Principal(ctx); !ok {
-		return out, nil
+		return out, false, nil
 	}
 
-	seen := make(map[string]bool, len(ids))
-	candidates := make([]Candidate, 0, len(ids))
+	limit := min(maxListScan, MaxGrantsForIDs)
+	seen := make(map[string]bool, min(len(ids), limit))
+	unique := make([]string, 0, min(len(ids), limit))
+	capped := false
 	for _, id := range ids {
 		if seen[id] || !canonicalID(id) {
 			continue
 		}
+		if len(unique) >= limit {
+			capped = true
+			break
+		}
 		seen[id] = true
-		a, err := b.store.GetArtifact(ctx, id)
-		if errors.Is(err, ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if IsAttachmentScope(a.ScopeKind) {
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return out, false, nil
+	}
+
+	byID, err := b.store.GetArtifacts(ctx, unique)
+	if err != nil {
+		return nil, false, err
+	}
+	candidates := make([]Candidate, 0, len(byID))
+	for _, id := range unique {
+		a, found := byID[id]
+		if !found || IsAttachmentScope(a.ScopeKind) {
 			continue
 		}
 		candidates = append(candidates, Candidate{Artifact: *a})
 	}
 	if len(candidates) == 0 {
-		return out, nil
+		return out, capped, nil
 	}
 
-	grants := newGrantsWindow(ctx, b.store, candidates, max(len(candidates), grantWindowMin))
+	grants := newGrantsWindow(ctx, b.store, candidates, min(max(len(candidates), grantWindowMin), MaxGrantsForIDs))
 	for i := range candidates {
 		a := &candidates[i].Artifact
 		readable := canReadWith(ctx, host, a, func() ([]Grant, error) { return grants.forRow(i) })
 		if grants.err != nil {
-			return nil, grants.err
+			return nil, false, grants.err
 		}
 		if readable {
 			out[a.ID] = artifactInfo(a)
 		}
 	}
-	return out, nil
+	return out, capped, nil
+}
+
+// inboxHintsActive reports whether the host implements InboxNotifier and
+// currently has inbox invalidation hints enabled.
+func (s *Service) inboxHintsActive(ctx context.Context) bool {
+	n, ok := s.host.(InboxNotifier)
+	return ok && n.InboxHintsActive(ctx)
 }
 
 // notifyInboxChanged tells the host, when it implements InboxNotifier, that
