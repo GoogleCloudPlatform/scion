@@ -57,6 +57,8 @@ func TestListConversations_HappyPath(t *testing.T) {
 	var result conversationListResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
 	require.Len(t, result.Conversations, 1)
+	require.Equal(t, 1, result.Total)
+	require.False(t, result.Truncated)
 	require.Equal(t, conv.ID, result.Conversations[0].ID)
 	require.Equal(t, "Test Conversation", result.Conversations[0].DisplayName)
 	// Participants are deliberately omitted from list responses (R-2: N+1 fix).
@@ -96,6 +98,8 @@ func TestListConversations_WithFilters(t *testing.T) {
 	var result conversationListResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
 	require.Len(t, result.Conversations, 1)
+	require.Equal(t, 1, result.Total)
+	require.False(t, result.Truncated)
 	require.Equal(t, conv.ID, result.Conversations[0].ID)
 
 	// Filter by surface=discord — should only return the second conversation.
@@ -138,8 +142,11 @@ func TestListConversations_WithLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, convs, 3) // agent was only added to 3 new ones
 
+	readerCtx := projectReaderAgentContext(t, s, agent.ID, project.ID)
+
+	// limit < total: truncated is true, total reflects all matching rows.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=2", nil)
-	req = req.WithContext(projectReaderAgentContext(t, s, agent.ID, project.ID))
+	req = req.WithContext(readerCtx)
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -147,6 +154,53 @@ func TestListConversations_WithLimit(t *testing.T) {
 	var result conversationListResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
 	require.Len(t, result.Conversations, 2)
+	require.Equal(t, 3, result.Total)
+	require.True(t, result.Truncated)
+
+	// limit == total: not truncated.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=3", nil)
+	req = req.WithContext(readerCtx)
+	rr = httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	result = conversationListResponse{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 3)
+	require.Equal(t, 3, result.Total)
+	require.False(t, result.Truncated)
+
+	// limit > total: not truncated.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=10", nil)
+	req = req.WithContext(readerCtx)
+	rr = httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	result = conversationListResponse{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 3)
+	require.Equal(t, 3, result.Total)
+	require.False(t, result.Truncated)
+
+	// omitted limit (--all): returns all rows, not truncated, and always
+	// serializes total and truncated keys in JSON.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
+	req = req.WithContext(readerCtx)
+	rr = httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	result = conversationListResponse{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 3)
+	require.Equal(t, 3, result.Total)
+	require.False(t, result.Truncated)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+	require.Contains(t, raw, "total")
+	require.Contains(t, raw, "truncated")
 }
 
 func TestListConversations_Unauthenticated(t *testing.T) {
@@ -673,6 +727,8 @@ func TestListConversations_AsUser(t *testing.T) {
 	var result conversationListResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
 	require.Len(t, result.Conversations, 1)
+	require.Equal(t, 1, result.Total)
+	require.False(t, result.Truncated)
 	require.Equal(t, conv.ID, result.Conversations[0].ID)
 }
 
@@ -987,6 +1043,8 @@ func TestMux_ListConversations(t *testing.T) {
 	var result conversationListResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
 	require.Len(t, result.Conversations, 1)
+	require.Equal(t, 1, result.Total)
+	require.False(t, result.Truncated)
 	require.Equal(t, conv.ID, result.Conversations[0].ID)
 }
 

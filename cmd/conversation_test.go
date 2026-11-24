@@ -693,6 +693,8 @@ type conversationListTestState struct {
 	projectPath  string
 	convProject  string
 	convJSON     bool
+	convLimit    int
+	convAll      bool
 	outputFormat string
 }
 
@@ -702,6 +704,8 @@ func saveConversationListTestState() conversationListTestState {
 		projectPath:  projectPath,
 		convProject:  convProject,
 		convJSON:     convJSON,
+		convLimit:    convLimit,
+		convAll:      convAll,
 		outputFormat: outputFormat,
 	}
 }
@@ -711,6 +715,8 @@ func (s conversationListTestState) restore() {
 	projectPath = s.projectPath
 	convProject = s.convProject
 	convJSON = s.convJSON
+	convLimit = s.convLimit
+	convAll = s.convAll
 	outputFormat = s.outputFormat
 }
 
@@ -1228,4 +1234,190 @@ func TestConversationParticipantDetail_JSON(t *testing.T) {
 	require.Len(t, back.Participants, 1)
 	assert.Equal(t, "lineage", back.Participants[0].MessageMode)
 	assert.Equal(t, "a1", back.Participants[0].PrincipalID)
+}
+
+func TestRunConversationList_TruncationNotice_TableAndJSON(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var respBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/conversations" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, "")
+	convProject = ""
+	convLimit = 2
+	convAll = false
+
+	truncatedBody := `{"conversations":[
+		{"id":"11111111-1111-1111-1111-111111111111","kind":"group","surface":"native","displayName":"alpha","driftState":"active"},
+		{"id":"22222222-2222-2222-2222-222222222222","kind":"group","surface":"native","displayName":"beta","driftState":"active"}
+	],"total":5,"truncated":true}`
+	fullBody := `{"conversations":[
+		{"id":"11111111-1111-1111-1111-111111111111","kind":"group","surface":"native","displayName":"alpha","driftState":"active"},
+		{"id":"22222222-2222-2222-2222-222222222222","kind":"group","surface":"native","displayName":"beta","driftState":"active"}
+	],"total":2,"truncated":false}`
+
+	// Truncated table output: table on stdout, notice on stderr.
+	respBody = truncatedBody
+	convJSON = false
+	outputFormat = ""
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	stdout, stderr := captureStdoutStderr(t, func() {
+		require.NoError(t, runConversationList(cmd, nil))
+	})
+	assert.Contains(t, stdout, "11111111-1111-1111-1111-111111111111")
+	assert.Contains(t, stdout, "22222222-2222-2222-2222-222222222222")
+	assert.Equal(t, "Showing 2 of 5 conversations; use --limit or --all to see more.\n", stderr)
+
+	// Non-truncated table output: table on stdout, empty stderr.
+	respBody = fullBody
+	stdout, stderr = captureStdoutStderr(t, func() {
+		require.NoError(t, runConversationList(cmd, nil))
+	})
+	assert.Contains(t, stdout, "11111111-1111-1111-1111-111111111111")
+	assert.Empty(t, stderr)
+
+	// Truncated JSON output: pure valid JSON with total/truncated on stdout,
+	// and truncation notice on stderr.
+	respBody = truncatedBody
+	convJSON = true
+	outputFormat = ""
+	stdout, stderr = captureStdoutStderr(t, func() {
+		require.NoError(t, runConversationList(cmd, nil))
+	})
+	var parsed struct {
+		Conversations []map[string]any `json:"conversations"`
+		Total         int              `json:"total"`
+		Truncated     bool             `json:"truncated"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &parsed), "stdout must be valid JSON: %s", stdout)
+	assert.Len(t, parsed.Conversations, 2)
+	assert.Equal(t, 5, parsed.Total)
+	assert.True(t, parsed.Truncated)
+	assert.Equal(t, "Showing 2 of 5 conversations; use --limit or --all to see more.\n", stderr)
+
+	// Non-truncated JSON output: valid JSON with truncated=false, empty stderr.
+	respBody = fullBody
+	stdout, stderr = captureStdoutStderr(t, func() {
+		require.NoError(t, runConversationList(cmd, nil))
+	})
+	parsed = struct {
+		Conversations []map[string]any `json:"conversations"`
+		Total         int              `json:"total"`
+		Truncated     bool             `json:"truncated"`
+	}{}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &parsed), "stdout must be valid JSON: %s", stdout)
+	assert.Len(t, parsed.Conversations, 2)
+	assert.Equal(t, 2, parsed.Total)
+	assert.False(t, parsed.Truncated)
+	assert.Empty(t, stderr)
+}
+
+func TestRunConversationList_AllFlag_OmitsLimit(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var sawLimit bool
+	var gotLimit string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/conversations" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		sawLimit = r.URL.Query().Has("limit")
+		gotLimit = r.URL.Query().Get("limit")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"conversations":[
+			{"id":"11111111-1111-1111-1111-111111111111","kind":"group","surface":"native","displayName":"alpha","driftState":"active"}
+		],"total":1,"truncated":false}`))
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, "")
+	convProject = ""
+	convJSON = true
+	outputFormat = ""
+
+	// With --all set (and default --limit untouched), limit query param is omitted.
+	convLimit = 50
+	convAll = true
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	stdout, stderr := captureStdoutStderr(t, func() {
+		require.NoError(t, runConversationList(cmd, nil))
+	})
+	assert.False(t, sawLimit, "--all must omit the limit query parameter")
+	assert.Empty(t, gotLimit)
+	assert.Contains(t, stdout, `"truncated": false`)
+	assert.Empty(t, stderr)
+
+	// Without --all, --limit is sent.
+	convLimit = 25
+	convAll = false
+	_, _ = captureStdoutStderr(t, func() {
+		require.NoError(t, runConversationList(cmd, nil))
+	})
+	assert.True(t, sawLimit, "without --all, limit query parameter must be sent")
+	assert.Equal(t, "25", gotLimit)
+}
+
+func TestRunConversationList_AllFlagRegisteredOnBothCommands(t *testing.T) {
+	for _, c := range []*cobra.Command{conversationCmd, conversationListCmd} {
+		f := c.Flags().Lookup("all")
+		require.NotNil(t, f, "expected --all flag on %q", c.Name())
+		assert.Equal(t, "false", f.DefValue)
+	}
+}
+
+func TestRunConversationList_FlagValidation(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	t.Run("all with explicit limit", func(t *testing.T) {
+		convAll = true
+		convLimit = 10
+		cmd := &cobra.Command{}
+		cmd.Flags().IntVar(&convLimit, "limit", 50, "")
+		cmd.Flags().BoolVar(&convAll, "all", false, "")
+		require.NoError(t, cmd.Flags().Set("limit", "10"))
+		require.NoError(t, cmd.Flags().Set("all", "true"))
+
+		err := runConversationList(cmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--all")
+		assert.Contains(t, err.Error(), "--limit")
+	})
+
+	t.Run("limit zero", func(t *testing.T) {
+		convAll = false
+		convLimit = 0
+		cmd := &cobra.Command{}
+		err := runConversationList(cmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--limit")
+	})
+
+	t.Run("limit negative", func(t *testing.T) {
+		convAll = false
+		convLimit = -1
+		cmd := &cobra.Command{}
+		err := runConversationList(cmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--limit")
+	})
 }

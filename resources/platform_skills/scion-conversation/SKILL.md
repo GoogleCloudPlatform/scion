@@ -53,8 +53,9 @@ at 60 runes:
 - Pass `--full` on `messages` or `catch-up` to print complete untruncated
   message bodies, full sender names, and message IDs in chronological order.
 - Pass `--json` (or `--format json`) to read full JSON payloads (`list`
-  returns `conversations[]`; `messages` and `catch-up` return `items[]` with
-  `id`, `sender`, `msg`, and `createdAt`).
+  returns `conversations[]`, `total`, and `truncated`; `messages` and
+  `catch-up` return `items[]` with `id`, `sender`, `msg`, and `createdAt`).
+  Pass `--all` on `list` to return all conversations without the default limit.
 - `get-message <conv-ref> <message-id>` requires the **full 36-character message
   UUID** (8-character prefixes return HTTP 404). Pass `--body` to write exact
   raw message bytes to stdout with no added text (for `> file` redirection or

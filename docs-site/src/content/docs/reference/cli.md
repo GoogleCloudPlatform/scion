@@ -584,7 +584,7 @@ Conversations are referenced using one of three forms:
 **Usage:** `scion conversation [command] [flags]`
 
 - **Commands:**
-    - `list` (default): List conversations you participate in. The NAME column shows `DM:<name>` for a direct conversation (the other participant), otherwise the conversation's display name or thread name. Conversation IDs and default-agent IDs are printed in full (never truncated), so any listed ID can be passed directly as `conv:<id>`.
+    - `list` (default): List conversations you participate in. The NAME column shows `DM:<name>` for a direct conversation (the other participant), otherwise the conversation's display name or thread name. Conversation IDs and default-agent IDs are printed in full (never truncated), so any listed ID can be passed directly as `conv:<id>`. When results are truncated by `--limit`, a notice (`Showing N of M conversations; use --limit or --all to see more.`) is written to stderr in both table and `--json` modes.
     - `get <conversation-ref>`: Show conversation details (prints full conversation and default-agent IDs).
     - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages.
     - `messages <conversation-ref>`: View messages in a conversation.
@@ -600,8 +600,9 @@ Conversations are referenced using one of three forms:
     - `--kind <string>`: Filter by kind (`direct`, `group`).
     - `--surface <string>`: Filter by surface (`native`, `discord`, `slack`, etc.).
     - `--project <string>`: Filter by project ID.
-    - `--limit <int>`: Maximum number of conversations to show (default 50).
-    - `--json`: Output in JSON format.
+    - `--limit <int>`: Maximum number of conversations to show (default `50`). Must be a positive integer; cannot be combined with `--all`.
+    - `--all`: Return all matching conversations without a limit. Cannot be combined with `--limit`.
+    - `--json`: Output in JSON format (`conversations`, `total`, and `truncated`).
 - **Flags (on `messages`):**
     - `--limit <int>`: Maximum number of messages to show (default 25).
     - `--before <time>`: Show messages before this time (RFC 3339).
