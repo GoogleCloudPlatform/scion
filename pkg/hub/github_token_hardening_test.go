@@ -887,7 +887,7 @@ func TestFinalizeEnv_InstallationOnlyFiltersAndFailsClosedOnBlockedOnlyNeeds(t *
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+ag.ID+"/env", map[string]any{
 			"env": map[string]string{"OTHER": "1"},
 		})
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), "OTHER_REQUIRED_KEY")
 		assert.NotContains(t, rec.Body.String(), "GITHUB_TOKEN")
 	})
