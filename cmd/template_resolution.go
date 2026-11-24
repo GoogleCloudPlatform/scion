@@ -665,7 +665,7 @@ func collectAvailableTemplateNames(ctx context.Context, hubCtx *HubContext, scop
 	}
 
 	if hubCtx != nil && hubCtx.Client != nil {
-		listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		listCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 
 		queryScope := func(s, projID string) {
