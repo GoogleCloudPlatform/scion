@@ -517,7 +517,8 @@ You can bind secrets to an agent when creating or starting it:
 
 - **CLI (`--secrets-file <path>` on `scion create` and `scion start`):** Reads a YAML or JSON file client-side (at most **50 secrets**, up to **64 KiB** per value) and sends the values in `CreateAgentRequest.Secrets`. There is deliberately no `--secret KEY=VALUE` flag so values are never exposed in shell history or process listings. On Unix, the CLI warns to stderr if the file is group- or world-readable.
   ```yaml
-  # Map shorthand (environment, as_needed)
+  # Map shorthand (environment, as_needed — use the full form with
+  # injectionMode: always to inject unconditionally at every start)
   GITHUB_TOKEN: ghp_example
   ```
   ```yaml
@@ -606,7 +607,7 @@ Withdrawal is all-or-nothing over the named keys' `pending` versions. `--set` al
 | :--- | :--- |
 | `pending` | Waiting for a human responder. |
 | `fulfilling` *(internal)* | Short-lived claim while the Hub writes to the secret backend; API views report `status: "pending"` with `submitting: true`. Stale claims older than **2 minutes** are automatically recovered back to `pending`. |
-| `fulfilled` | Stored at agent scope (`as_needed`); the agent receives a `secret-response` message (with auto-wake) and can read the value immediately with `scion secret get --value KEY` (start-time injection applies from the next start). |
+| `fulfilled` | Stored at agent scope (`as_needed`); the agent receives a `secret-response` message (with auto-wake) and can read the value immediately with `scion secret get --value KEY`. `file` and `variable` secrets are placed at every later start; an `environment` secret is stored `as_needed`, reaching the environment at start only when the agent's template or harness requests that key, and otherwise is read with `scion secret get --value` (a human can switch it with `scion hub secret update --agent <agent> KEY --injection-mode always`). |
 | `replaced` | Superseded by a newer version sent with `--update`; the old card links to the newer version and cannot be submitted (`409 replaced`). |
 | `withdrawn` | Retired by the agent (`withdrawn_by: "agent"`) or by the Hub when the agent is hard-deleted (`withdrawn_by: "hub"`, reason `"agent deleted"`). |
 | `dismissed` | Declined by an eligible responder (whole card or selected keys, optional reason up to 500 characters, no minimum age); the agent receives a `secret-response` message. |
@@ -630,7 +631,7 @@ Secret request rows never store secret values and are retained as a request log 
 
 `hub.agent_secrets` is a server- and web-layer experiment (alpha, off by default). While it is off:
 - `scope=agent` is rejected (`400 invalid scope`) on secret CRUD and agent secret routes, and agent-scope secrets are skipped by launch delivery.
-- `CreateAgentRequest.Secrets` and outbound messages carrying `secret_requests` are refused with `400 experiment_disabled`.
+- `CreateAgentRequest.Secrets` is refused with `400 invalid_request` (message `… (experiment not enabled)`), and outbound messages carrying `secret_requests` are refused with `400 experiment_disabled`.
 - `/api/v1/secret-requests/{messageId}` (plus `/fulfill` and `/dismiss`) and `/api/v1/agent/secret-requests` (plus `/withdraw`) answer `404`.
 - The web UI hides the agent detail/edit **Secrets** tab, the create-form **Secrets** tab, and native chat secret-request cards.
 

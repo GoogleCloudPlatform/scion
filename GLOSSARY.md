@@ -239,9 +239,9 @@ _See also_: Native Web Chat
 **Secret**:
 A credential made available to an agent at runtime (e.g. API keys, tokens). A harness-config's `secrets` field *declares* which secrets an agent needs; the **Secret Backend** — a pluggable store (local SQLite for development, GCP Secret Manager in production, selected via `SCION_SERVER_SECRETS_BACKEND`) — *stores and resolves* them, scoped by runtime broker, hub, project, user, or (with `hub.agent_secrets`) agent, and injects them into the container. Also holds the Hub's signing keys.
 _Avoid_: credential, vault, secret store, env secret
-_See also_: Agent scope, Secret Request, Harness-config, Profile
+_See also_: Agent Scope, Secret Request, Harness-config, Profile
 
-**Agent scope** (agent-scoped secret):
+**Agent Scope** (agent-scoped secret):
 A secret scope (`scope=agent`, keyed by the agent's stable UUID) that binds a secret to one agent. No API returns an agent-scope value to anyone but the bound agent's token; for humans, agent-scoped secrets are write-only (managed with `agent.read` for metadata and `agent.update` for writes, with no reveal). Agent scope sits at the top of the secret precedence ladder (`runtime_broker < hub < project < user < agent`), applies to secrets only (not plain environment variables), never propagates to progeny (`allowProgeny` is rejected), persists across stop, suspend, restart, reincarnation, and soft delete, and is deleted when the agent is hard-deleted or purged. Gated by the `hub.agent_secrets` experiment.
 _Avoid_: private agent env, per-agent profile, agent-only credential
 _See also_: Secret, Secret Request
@@ -432,7 +432,7 @@ _See also_: Answer, Decision
 **Secret Request**:
 A structured agent-to-human message (`secret-request`) asking a human to supply one to ten **agent-scoped** secrets for the asking agent without pasting values into chat. Each requested key is versioned per agent (`--update` replaces a pending version), expires after 7 days, can be withdrawn by the agent (`scion secret request withdraw`) or dismissed by an eligible responder, and transitions through `pending`, `fulfilling` (shown as `submitting`), `fulfilled`, `replaced`, `withdrawn`, `dismissed`, or `expired`. In native web chat it renders as an interactive masked form; non-native surfaces receive a Markdown fallback with a link to the standalone Hub form at `/secret-requests/<messageId>`. Only a signed-in human recipient with `agent.attach` on the asking agent can fulfill or dismiss a request (user access tokens are refused). Secret request rows never store secret values. Gated by the `hub.agent_secrets` experiment.
 _Avoid_: secret prompt, credential ask, secret form message
-_See also_: Agent scope, Secret, Decision prompt
+_See also_: Agent Scope, Secret, Decision prompt
 
 ## Identity & State
 

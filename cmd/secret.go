@@ -82,7 +82,7 @@ var newSecretValueHubClient = func() *sciontoolhub.Client {
 // agentSecretGetCmd retrieves a project-scoped secret value or its metadata.
 var agentSecretGetCmd = &cobra.Command{
 	Use:   "get KEY",
-	Short: "Get a project-scoped secret's metadata, or its value with --value",
+	Short: "Get a secret's metadata, or its value with --value",
 	Long: `Get a project-scoped secret from the Hub.
 
 By default this prints the secret's metadata (key, scope, type, target,
@@ -137,7 +137,7 @@ Examples:
 // agentSecretListCmd lists metadata for all project-scoped secrets.
 var agentSecretListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List project-scoped secrets",
+	Short: "List secret metadata",
 	Long: `List metadata for all project-scoped secrets from the Hub.
 
 Only metadata (key, type, allowProgeny, version, updated) is returned —
