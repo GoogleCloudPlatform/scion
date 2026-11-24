@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -139,5 +140,19 @@ func TestFetchAttachmentDelivery_ErrorsCarryNoURL(t *testing.T) {
 	_, err = c.(AttachmentDeliveryFetcher).FetchAttachmentDelivery(context.Background(), "/api/v1/attachment-deliveries/"+token)
 	if err == nil || strings.Contains(err.Error(), "SIGSECRET") || strings.Contains(err.Error(), token) {
 		t.Fatalf("object store error = %v; want an error without the signed URL or the capability", err)
+	}
+
+	// An unexpected 2xx status from the hub: formatted with the status and wraps errDeliveryUnexpectedStatus, without the capability or URL.
+	unexpected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer unexpected.Close()
+	c, err = New(unexpected.URL, WithHMACAuth("broker-1", []byte("secret-key-for-test-0123456789ab")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.(AttachmentDeliveryFetcher).FetchAttachmentDelivery(context.Background(), "/api/v1/attachment-deliveries/"+token)
+	if !errors.Is(err, errDeliveryUnexpectedStatus) || errors.Is(err, errDeliveryRefused) || strings.Contains(err.Error(), token) || strings.Contains(err.Error(), unexpected.URL) {
+		t.Fatalf("unexpected status error = %v; want errDeliveryUnexpectedStatus without capability or URL", err)
 	}
 }
