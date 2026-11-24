@@ -18,7 +18,9 @@ import (
 	"context"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -111,16 +113,35 @@ func (c *CompositeStore) SweepSettledDecisionsPage(ctx context.Context, limit in
 	return updated, err
 }
 
-func (c *CompositeStore) sweepSettledDecisionsPageTx(ctx context.Context, limit int) (int, error) {
-	ids, err := c.client.Decision.Query().
-		Where(
-			decisionSettledFalse(),
-			settledDecisionPredicate(),
-		).
-		Limit(limit).
-		IDs(ctx)
+// selectDecisionIDsForIndexPage selects up to limit decision IDs matching
+// preds in deterministic ORDER BY id order. On Postgres it locks the selected
+// rows with FOR UPDATE SKIP LOCKED so concurrent replicas' sweeps and live
+// writers (e.g. repost loadKeyStates FOR UPDATE) never deadlock (SQLSTATE
+// 40P01) or stall on overlapping pages (design-scale §3.6). Reusable by P4's
+// facet-indexing steps.
+func (c *CompositeStore) selectDecisionIDsForIndexPage(
+	ctx context.Context,
+	limit int,
+	preds ...predicate.Decision,
+) ([]uuid.UUID, error) {
+	q := c.client.Decision.Query().
+		Where(preds...).
+		Order(ent.Asc(decision.FieldID)).
+		Limit(limit)
+	if c.isPostgres() {
+		q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
+	}
+	ids, err := q.IDs(ctx)
 	if err != nil {
-		return 0, mapError(err)
+		return nil, mapError(err)
+	}
+	return ids, nil
+}
+
+func (c *CompositeStore) sweepSettledDecisionsPageTx(ctx context.Context, limit int) (int, error) {
+	ids, err := c.selectDecisionIDsForIndexPage(ctx, limit, decisionSettledFalse(), settledDecisionPredicate())
+	if err != nil {
+		return 0, err
 	}
 	if len(ids) == 0 {
 		return 0, nil

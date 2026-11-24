@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -793,4 +794,138 @@ func TestDecisionSettled_QueryPlans(t *testing.T) {
 			require.Len(t, got, 2)
 		})
 	})
+}
+
+// TestDecisionIndex_PostgresConcurrentSweepAndRepost verifies that two
+// concurrent settled sweepers over overlapping pages plus a concurrent repost
+// of terminal keys (which takes FOR UPDATE locks in loadKeyStates) never
+// deadlock (SQLSTATE 40P01) on Postgres and converge to exact settled parity.
+func TestDecisionIndex_PostgresConcurrentSweepAndRepost(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	if !cs.isPostgres() {
+		t.Skip("Postgres-only concurrency/deadlock test (requires FOR UPDATE SKIP LOCKED)")
+	}
+	ctx := context.Background()
+
+	projectID := backfillTestProject(t, cs, "pg-conc-sweep")
+	agentID := uuid.NewString()
+	chatKey := uuid.NewString()
+	choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
+	baseTime := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
+	// Seed 240 withdrawn decisions forced to settled=false (overlapping sweep pages).
+	pUUID := uuid.MustParse(projectID)
+	aUUID := uuid.MustParse(agentID)
+	creates := make([]*ent.DecisionCreate, 0, 240)
+	for i := 0; i < 240; i++ {
+		key := fmt.Sprintf("bulk-%04d", i)
+		creates = append(creates, cs.client.Decision.Create().
+			SetProjectID(pUUID).
+			SetChatKey(chatKey).
+			SetMessageID(uuid.New()).
+			SetPosition(0).
+			SetAskerAgentID(aUUID).
+			SetAskerAgentName("bot").
+			SetKey(key).
+			SetKeyNorm(key).
+			SetKeySource(decision.KeySourceAgent).
+			SetVersion(1).
+			SetQuestion("Bulk?").
+			SetChoices(choices).
+			SetStatus(decision.StatusWithdrawn).
+			SetSettled(false).
+			SetCreatedAt(baseTime.Add(time.Duration(i) * time.Second)).
+			SetWithdrawnAt(baseTime))
+	}
+	require.NoError(t, cs.client.Decision.CreateBulk(creates...).Exec(ctx))
+
+	// Seed 12 terminal (withdrawn) keys that a concurrent writer will repost
+	// with Update: true (loadKeyStates FOR UPDATE) while sweepers are running.
+	repostKeys := make([]string, 12)
+	for i := range repostKeys {
+		k := fmt.Sprintf("term-repost-%02d", i)
+		repostKeys[i] = k
+		_, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: uuid.NewString(), ProjectID: projectID, Sender: "agent:bot", SenderID: agentID,
+				Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+			},
+			AskerAgentID: agentID, AskerAgentName: "bot",
+			Decisions: []messages.Decision{{Key: k, Question: "V1?", Choices: choices}},
+		})
+		require.NoError(t, err)
+		_, err = cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+			AskerAgentID: agentID, Keys: []string{k},
+		})
+		require.NoError(t, err)
+	}
+	// Reset all rows to settled=false to simulate older-binary state before rollout.
+	forceDecisionSettled(t, cs, false)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 3)
+
+	// Two concurrent sweepers draining overlapping pages of 25 rows.
+	for s := 0; s < 2; s++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				n, err := cs.SweepSettledDecisionsPage(ctx, 25)
+				if err != nil {
+					errCh <- fmt.Errorf("sweeper error: %w", err)
+					return
+				}
+				if n == 0 {
+					return
+				}
+			}
+		}()
+	}
+
+	// One concurrent writer reposting all 12 terminal keys with Update: true.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, k := range repostKeys {
+			_, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+				Message: &store.Message{
+					ID: uuid.NewString(), ProjectID: projectID, Sender: "agent:bot", SenderID: agentID,
+					Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+				},
+				AskerAgentID: agentID, AskerAgentName: "bot", Update: true,
+				Decisions: []messages.Decision{{Key: k, Question: "V2?", Choices: choices}},
+			})
+			if err != nil {
+				errCh <- fmt.Errorf("repost %s error: %w", k, err)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+
+	// Drain any row skipped via SKIP LOCKED while the repost held its lock.
+	for {
+		n, err := cs.SweepSettledDecisionsPage(ctx, 50)
+		require.NoError(t, err)
+		if n == 0 {
+			break
+		}
+	}
+
+	pending, err := cs.HasPendingDecisionIndexWork(ctx)
+	require.NoError(t, err)
+	assert.False(t, pending, "no pending settled work after concurrent sweep + repost")
+
+	settledHint, err := cs.client.Decision.Query().Where(decision.Settled(true)).Count(ctx)
+	require.NoError(t, err)
+	settledExact, err := cs.client.Decision.Query().Where(settledDecisionPredicate()).Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, settledExact, settledHint, "final settled hint count must equal exact settled predicate")
+	assert.Equal(t, 240+len(repostKeys), settledHint, "all 240 bulk + 12 terminal v1 rows must be settled")
 }
