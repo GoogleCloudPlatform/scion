@@ -230,13 +230,33 @@ type instanceLimiter struct {
 // attemptDeadline) and acquires in a fixed order (project -> instance -> rate)
 // so deadlocks cannot occur and one saturated project cannot starve another
 // beyond its own limit.
+type admissionStopCause int
+
+const (
+	admissionStopNone            admissionStopCause = iota // permit acquired
+	admissionStopCapacity                                  // admissionWait bound or rate-limit fail-fast exhausted
+	admissionStopAttemptDeadline                           // wait was bounded by attemptCtx deadline (dl <= now+admissionWait)
+	admissionStopCanceled                                  // attemptCtx was canceled/expired while waiting
+)
+
 type admissionController struct {
 	maxInFlightPerProject int
 	admissionWait         time.Duration
 
+	// Optional unexported test seams for deterministic boundary/race tests.
+	nowFn         func() time.Time
+	withWaitCtxFn func(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc)
+
 	mu        sync.Mutex
 	instances map[string]*instanceLimiter
 	projects  map[string]*dynSemaphore
+}
+
+func (c *admissionController) now() time.Time {
+	if c != nil && c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
 }
 
 func newAdmissionController(maxInFlightPerProject int, admissionWait time.Duration) *admissionController {
@@ -289,41 +309,70 @@ func (c *admissionController) forgetInstance(id string) {
 
 // acquire acquires the per-project semaphore (when projectID != ""), the
 // per-instance semaphore, and one per-instance rate token, bounded by
-// min(now + admissionWait, attemptDeadline). On success, callers MUST invoke
-// the returned release function once the attempt finishes.
+// min(now + admissionWait, attemptDeadline). On success (admissionStopNone),
+// callers MUST invoke the returned release function once the attempt finishes.
+// On failure, the returned admissionStopCause deterministically identifies why
+// admission stopped (capacity vs attempt deadline vs explicit cancellation).
+//
+// Equal-bound precedence: when attemptCtx's deadline equals now+admissionWait
+// (dl <= now+admissionWait), the attempt/caller deadline takes precedence over
+// admissionWait, consistent with the existing caller-cancellation contract.
 func (c *admissionController) acquire(
 	attemptCtx context.Context,
 	projectID string,
 	inst Instance,
-) (func(), bool) {
+) (func(), admissionStopCause) {
 	if c == nil {
-		return func() {}, true
+		return func() {}, admissionStopNone
 	}
 	needsProject := projectID != "" && c.maxInFlightPerProject > 0
 	needsInstSem := inst.Limits.MaxInFlight > 0
 	needsRate := inst.Limits.RatePerSec > 0
 	if !needsProject && !needsInstSem && !needsRate {
-		return func() {}, true
+		return func() {}, admissionStopNone
 	}
 	if attemptCtx.Err() != nil {
-		return nil, false
+		return nil, admissionStopCanceled
 	}
 
-	now := time.Now()
+	now := c.now()
 	waitDeadline := now.Add(c.admissionWait)
-	waitCtx := attemptCtx
+	boundedByAttemptDeadline := false
 	if dl, ok := attemptCtx.Deadline(); ok && !waitDeadline.Before(dl) {
+		waitDeadline = dl
+		boundedByAttemptDeadline = true
+	}
+
+	var waitCtx context.Context
+	if c.withWaitCtxFn != nil {
+		var cancel context.CancelFunc
+		waitCtx, cancel = c.withWaitCtxFn(attemptCtx, waitDeadline)
+		defer cancel()
+	} else if boundedByAttemptDeadline {
 		// attemptCtx already bounds the wait at or before now+admissionWait.
 		// Reuse attemptCtx directly instead of wrapping it with
 		// context.WithDeadline(attemptCtx, dl), which allocates a second
 		// independent timer at the same instant (Go's WithDeadline only elides
 		// the child timer when parentDeadline < d, not <=) and can fire before
 		// caller/attempt context cancellation is visible via ctx.Err().
-		waitDeadline = dl
+		waitCtx = attemptCtx
 	} else {
 		var cancel context.CancelFunc
 		waitCtx, cancel = context.WithDeadline(attemptCtx, waitDeadline)
 		defer cancel()
+	}
+
+	stopCause := func(rateFailFast bool) admissionStopCause {
+		if rateFailFast && waitCtx.Err() == nil && attemptCtx.Err() == nil {
+			return admissionStopCapacity
+		}
+		if attemptCtx.Err() != nil {
+			return admissionStopCanceled
+		}
+		if boundedByAttemptDeadline {
+			return admissionStopAttemptDeadline
+		}
+		return admissionStopCapacity
 	}
 
 	var releaseProj func()
@@ -331,7 +380,7 @@ func (c *admissionController) acquire(
 		var ok bool
 		releaseProj, ok = c.projectFor(projectID).acquire(waitCtx, c.maxInFlightPerProject)
 		if !ok {
-			return nil, false
+			return nil, stopCause(false)
 		}
 	}
 
@@ -345,7 +394,7 @@ func (c *admissionController) acquire(
 				if releaseProj != nil {
 					releaseProj()
 				}
-				return nil, false
+				return nil, stopCause(false)
 			}
 		}
 		if needsRate {
@@ -356,7 +405,7 @@ func (c *admissionController) acquire(
 				if releaseProj != nil {
 					releaseProj()
 				}
-				return nil, false
+				return nil, stopCause(true)
 			}
 		}
 	}
@@ -368,5 +417,5 @@ func (c *admissionController) acquire(
 		if releaseProj != nil {
 			releaseProj()
 		}
-	}, true
+	}, admissionStopNone
 }

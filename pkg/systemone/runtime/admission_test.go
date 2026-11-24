@@ -840,3 +840,228 @@ func TestAdmission_CallerDeadlineDuringAdmissionClassifiesAsCanceled(t *testing.
 	close(block)
 	wg.Wait()
 }
+
+// TestAdmission_DeterministicStopCauseAndBoundaryMatrix covers Fix Round 5
+// Addendum (a)–(g) deterministically, including exact equal-bound precedence
+// (via injected nowFn) and the deterministic waitCtx-fires-before-parent-Err
+// regression (via injected withWaitCtxFn).
+func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
+	newTestRuntime := func(admissionWait time.Duration) (*Runtime, *spec.Compiled, chan struct{}, chan struct{}) {
+		inFlight := make(chan struct{})
+		release := make(chan struct{})
+		var holderSignaled atomic.Bool
+		adapter := &admissionFakeAdapter{
+			name: "adm_det",
+			invoke: func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				if holderSignaled.CompareAndSwap(false, true) {
+					close(inFlight)
+					<-release
+				}
+				return binarySuccessResult(), nil
+			},
+		}
+		reg := provider.NewRegistry()
+		require.NoError(t, reg.Register(adapter))
+		inst := Instance{
+			ID:      "inst-det",
+			Name:    "inst-det",
+			Adapter: "adm_det",
+			Model:   "test-model-1",
+			Auth:    InstanceAuth{Kind: "none"},
+			Limits:  InstanceLimits{MaxInFlight: 1},
+			Enabled: true,
+		}
+		rt := New(Config{
+			Registry:              reg,
+			Instances:             StaticInstances(inst),
+			MaxInFlightPerProject: 4,
+			AdmissionWait:         admissionWait,
+		})
+		return rt, compileAdmissionTestRule(t, "inst-det"), inFlight, release
+	}
+
+	// (g) Deterministic regression: force waitCtx to expire BEFORE parent ctx.Err()
+	// becomes visible (ctx.Err() is still nil when acquire returns), with
+	// callerDL <= now+admissionWait. Old code checked only ctx.Err() != nil and
+	// returned FailCapacity; new code preserves admissionStopAttemptDeadline -> FailCanceled.
+	t.Run("g_waitCtx_expires_before_parent_ctx_err_visible", func(t *testing.T) {
+		rt, compiled, inFlight, release := newTestRuntime(250 * time.Millisecond)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = rt.Evaluate(context.Background(), compiled, ProbeInput("holder"), EvalOptions{ProjectID: "proj-1"})
+		}()
+		<-inFlight
+
+		// Caller deadline is 50ms from t0 (< 250ms admissionWait), so caller deadline
+		// is the limiting bound. Inject withWaitCtxFn returning an already-canceled
+		// waitCtx while parent callerCtx is STILL live (callerCtx.Err() == nil).
+		t0 := time.Now()
+		rt.admission.nowFn = func() time.Time { return t0 }
+		rt.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
+			wctx, cancel := context.WithCancel(parent)
+			cancel() // expires waitCtx immediately while parent ctx.Err() is still nil
+			return wctx, cancel
+		}
+
+		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(50*time.Millisecond))
+		defer cancelCaller()
+		require.NoError(t, callerCtx.Err(), "precondition: parent ctx.Err() must still be nil")
+
+		_, err := rt.Evaluate(callerCtx, compiled, ProbeInput("waiter-g"), EvalOptions{ProjectID: "proj-2"})
+		require.NoError(t, callerCtx.Err(), "parent ctx.Err() was still nil when Evaluate returned")
+		require.Error(t, err)
+		eval, ok := EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, string(provider.FailCanceled), eval.Reason)
+		require.Len(t, eval.Attempts, 1)
+		assert.Equal(t, 0, eval.Attempts[0].Requests)
+
+		close(release)
+		wg.Wait()
+	})
+
+	// (c) Exact equal bounds: callerDL.Equal(now + admissionWait).
+	// Precedence: caller/attempt deadline takes precedence over admissionWait -> FailCanceled.
+	t.Run("c_equal_bounds_caller_deadline_precedence", func(t *testing.T) {
+		rt, compiled, inFlight, release := newTestRuntime(100 * time.Millisecond)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = rt.Evaluate(context.Background(), compiled, ProbeInput("holder"), EvalOptions{ProjectID: "proj-1"})
+		}()
+		<-inFlight
+
+		t0 := time.Now()
+		exactDL := t0.Add(100 * time.Millisecond)
+		rt.admission.nowFn = func() time.Time { return t0 }
+		// Also test with waitCtx expiring right at the boundary while parent ctx.Err() is nil.
+		rt.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
+			wctx, cancel := context.WithCancel(parent)
+			cancel()
+			return wctx, cancel
+		}
+
+		callerCtx, cancelCaller := context.WithDeadline(context.Background(), exactDL)
+		defer cancelCaller()
+
+		_, err := rt.Evaluate(callerCtx, compiled, ProbeInput("waiter-c"), EvalOptions{ProjectID: "proj-2"})
+		require.Error(t, err)
+		eval, ok := EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, string(provider.FailCanceled), eval.Reason)
+
+		close(release)
+		wg.Wait()
+	})
+
+	// (b) admissionWait strictly earlier than caller deadline -> FailCapacity
+	// (even with deterministic immediate waitCtx expiration).
+	t.Run("b_admission_wait_strictly_earlier_gives_capacity", func(t *testing.T) {
+		rt, compiled, inFlight, release := newTestRuntime(100 * time.Millisecond)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = rt.Evaluate(context.Background(), compiled, ProbeInput("holder"), EvalOptions{ProjectID: "proj-1"})
+		}()
+		<-inFlight
+
+		t0 := time.Now()
+		rt.admission.nowFn = func() time.Time { return t0 }
+		rt.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
+			wctx, cancel := context.WithCancel(parent)
+			cancel()
+			return wctx, cancel
+		}
+
+		// Caller deadline is 500ms > 100ms admissionWait -> admissionWait is limiting bound.
+		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(500*time.Millisecond))
+		defer cancelCaller()
+
+		_, err := rt.Evaluate(callerCtx, compiled, ProbeInput("waiter-b"), EvalOptions{ProjectID: "proj-2"})
+		require.Error(t, err)
+		eval, ok := EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, string(provider.FailCapacity), eval.Reason)
+
+		close(release)
+		wg.Wait()
+	})
+
+	// (d) Explicit cancellation during admission -> FailCanceled.
+	t.Run("d_explicit_cancellation_during_admission", func(t *testing.T) {
+		rt, compiled, inFlight, release := newTestRuntime(2 * time.Second)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = rt.Evaluate(context.Background(), compiled, ProbeInput("holder"), EvalOptions{ProjectID: "proj-1"})
+		}()
+		<-inFlight
+
+		cancelCtx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(15 * time.Millisecond)
+			cancel()
+		}()
+		_, err := rt.Evaluate(cancelCtx, compiled, ProbeInput("waiter-d"), EvalOptions{ProjectID: "proj-2"})
+		require.Error(t, err)
+		eval, ok := EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, string(provider.FailCanceled), eval.Reason)
+
+		close(release)
+		wg.Wait()
+	})
+
+	// (e) Successful acquisition just before the boundary proceeds normally.
+	t.Run("e_acquire_just_before_boundary_succeeds", func(t *testing.T) {
+		rt, compiled, inFlight, release := newTestRuntime(200 * time.Millisecond)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = rt.Evaluate(context.Background(), compiled, ProbeInput("holder"), EvalOptions{ProjectID: "proj-1"})
+		}()
+		<-inFlight
+
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			close(release)
+		}()
+
+		callerCtx, cancelCaller := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancelCaller()
+		dec, err := rt.Evaluate(callerCtx, compiled, ProbeInput("waiter-e"), EvalOptions{ProjectID: "proj-2"})
+		require.NoError(t, err)
+		assert.True(t, dec.Bool)
+
+		wg.Wait()
+	})
+
+	// (f) Genuine exhaustion with time remaining -> FailCapacity with 0 requests.
+	t.Run("f_genuine_exhaustion_with_time_remaining", func(t *testing.T) {
+		rt, compiled, inFlight, release := newTestRuntime(40 * time.Millisecond)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = rt.Evaluate(context.Background(), compiled, ProbeInput("holder"), EvalOptions{ProjectID: "proj-1"})
+		}()
+		<-inFlight
+
+		_, err := rt.Evaluate(context.Background(), compiled, ProbeInput("waiter-f"), EvalOptions{ProjectID: "proj-2"})
+		require.Error(t, err)
+		eval, ok := EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, string(provider.FailCapacity), eval.Reason)
+		require.Len(t, eval.Attempts, 1)
+		assert.Equal(t, 0, eval.Attempts[0].Requests)
+
+		close(release)
+		wg.Wait()
+	})
+}

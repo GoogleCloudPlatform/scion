@@ -844,14 +844,29 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	// bucket), waiting at most min(admissionWait, attemptDeadline) before
 	// failing fast with FailCapacity and 0 provider requests (runtime-design §7.2).
 	admissionStart := time.Now().UTC()
-	releaseAdmission, admitted := r.admission.acquire(attemptCtx, strings.TrimSpace(opts.ProjectID), inst)
-	if !admitted {
+	releaseAdmission, stopCause := r.admission.acquire(attemptCtx, strings.TrimSpace(opts.ProjectID), inst)
+	if stopCause != admissionStopNone {
 		admissionDur := time.Since(admissionStart)
 		reason := provider.FailCapacity
-		if ctx.Err() != nil {
-			reason = classifyContextCause(ctx.Err(), latchCause(context.Cause(attemptCtx)))
-		} else if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
-			reason = classifyContextCause(context.DeadlineExceeded, latchCause(context.Cause(attemptCtx)))
+		switch stopCause {
+		case admissionStopCanceled:
+			if ctx.Err() != nil {
+				reason = classifyContextCause(ctx.Err(), latchCause(context.Cause(attemptCtx)))
+			}
+		case admissionStopAttemptDeadline:
+			// The wait was bounded by attemptCtx's deadline (dl <= now+admissionWait).
+			// If the caller's deadline was the limiting bound (callerDL <= ownDeadline),
+			// preserve caller-deadline classification deterministically even if waitCtx
+			// expired before parent ctx.Err() became visible.
+			if ctx.Err() != nil {
+				reason = classifyContextCause(ctx.Err(), latchCause(context.Cause(attemptCtx)))
+			} else if callerDL, ok := ctx.Deadline(); ok && !ownDeadline.Before(callerDL) {
+				reason = classifyContextCause(context.DeadlineExceeded, latchCause(context.Cause(attemptCtx)))
+			}
+		case admissionStopCapacity:
+			if ctx.Err() != nil {
+				reason = classifyContextCause(ctx.Err(), latchCause(context.Cause(attemptCtx)))
+			}
 		}
 		eval.Attempts = []Attempt{{
 			Instance:         inst.Name,
