@@ -591,7 +591,7 @@ Conversations are referenced using one of three forms:
     - `create <name>`: Create a new group conversation. The group appears as a thread in the project's web chat space. Names must start with a letter or digit, contain only letters, digits, spaces, `_`, or `-`, and be at most 100 characters (returns `400 Bad Request` otherwise). A name already used in the project returns `409` (name conflict).
     - `set-default <conversation-ref> <agent-id>`: Set the default agent for a conversation.
     - `participants <conversation-ref>`: List participants in a conversation.
-    - `join <conversation-ref> <principal-kind> <principal-id>`: Add a participant to a conversation.
+    - `join <conversation-ref> <principal-kind> <principal>`: Add a participant to a conversation. `<principal-kind>` is `user` or `agent`. For `user`, `<principal>` is a user ID, email, or handle (display name, hyphenated display-name slug such as `alice-smith`, or email local part); in a project conversation it must match an active member of the conversation's project, and any other value fails with `400` (a conversation without a project takes only a user ID). For `agent`, it is an agent ID, slug, or name, matched within the conversation's project (a conversation without a project takes only an agent ID); an agent outside the project, deleted, or unknown fails with `404`. A name or handle that matches more than one principal fails with `409`; pass an ID instead. When the resolved ID differs from the input, the command prints it, for example `Added agent my-agent (<agent-id>) to conversation <conversation-id>`.
     - `leave <conversation-ref>`: Leave a conversation.
     - `catch-up <conversation-ref>`: Show recent messages in a conversation.
     - `watch <conversation-ref>`: Wait for new messages in a conversation via server-side long-polling (host-only). See [`scion conversation watch`](#scion-conversation-watch) below.
@@ -1131,8 +1131,10 @@ Unlike `scion hub secret` (which supports managing secrets at any scope: user, h
     - Flags:
         - `--value`: Print the decoded value instead. It is written to stdout as-is, with no added newline or labels, so `export API_KEY=$(scion secret get --value API_KEY)` works. Reading a value requires an agent's hub identity, so it works only inside an agent container; elsewhere the command fails with a message saying so. Cannot be combined with `--metadata` or `--format json`.
         - `--metadata`: Print the metadata (the default).
+        - `--scope <agent|project>`: Look the key up only in that scope. Inside an agent container, the default (no `--scope`) checks the agent's own agent-scoped secrets first, then project scope, when the `hub.agent_secrets` [experiment](/scion/reference/experiments/) is on; with it off, only project scope is used. `--scope agent` needs an agent's hub identity.
     - With `--format json`, prints the metadata object. The value is never included in JSON output.
 - `scion secret list`: List metadata (key, type, version, updated time) for all project-scoped secrets. Secret values are never returned. With `--format json`, prints the same list shape as `scion hub secret list`.
+    - `--scope <agent|project|all>`: Inside an agent container with the `hub.agent_secrets` [experiment](/scion/reference/experiments/) on, the list (default `all`) covers the agent's own agent-scoped secrets and the project's secrets, with `KEY`, `SCOPE`, `TYPE` and `TARGET` columns. `--scope project` (or the experiment being off) prints the project-scoped list described above.
 
 ### `scion clean`
 
@@ -1408,11 +1410,12 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - `--admin-managed`: Register the new Runtime Broker as admin-managed (requires `broker.manage` with an interactive sign-in or dev credential — not a user access token — and experiment `hub.admin_managed_brokers`; required for new Runtime Brokers when `broker_policy.admin_managed_only` is active).
         - `--ttl <duration>`: How long the token is valid, from `5m` to `24h`. Default: the Hub's default, `1h`.
         - `--json`: Print `brokerId`, `brokerName`, `joinToken`, `expiresAt`, `hubEndpoint` and `reissued` as JSON.
-- `scion hub secret`: Manage write-only secrets on the Hub. Scope defaults to your user (`scope=user`); pass `--project [<name|id>]` for project scope (a bare `--project` with no value infers the current directory's linked Hub project, or else the project selected with `scion use`, and fails if the current directory's project is not linked to a Hub), `--broker <name|id>` for Runtime Broker scope, or `--hub-scope` for Hub scope.
+- `scion hub secret`: Manage write-only secrets on the Hub. Scope defaults to your user (`scope=user`); pass `--project [<name|id>]` for project scope (a bare `--project` with no value infers the current directory's linked Hub project, or else the project selected with `scion use`, and fails if the current directory's project is not linked to a Hub), `--broker <name|id>` for Runtime Broker scope, `--scope hub` for Hub scope, or `--agent <name|id>` for agent scope. These scope flags are mutually exclusive.
+    - `--agent <name|id>`: Select one agent's secrets (requires the `hub.agent_secrets` [experiment](/scion/reference/experiments/); the Hub answers `400 invalid scope: agent` while it is off). A name or slug is resolved within the inferred project when there is one, otherwise across the agents you can access; an ambiguous name fails. Listing and reading metadata need read access to the agent; `set`, `update` and `clear` need update access. Only the agent itself can read the values. See [Agent-Scoped Secrets](/scion/hosted/user/secrets/#agent-scoped-secrets).
     - `set <key> <value>`: Set a secret (supports `--allow-progeny` for user-scoped secrets).
     - `get [key]`: Get secret metadata. Honors `--format json` (as well as `--json`).
     - `list`: List secrets in the selected scope. At user scope (`scope=user`), calls `GET /api/v1/secrets?scope=user&includePending=true` and prints a `STATE` column (`approved` or `pending`) alongside `NAME`, `TYPE`, `PROGENY`, `VERSION`, and `UPDATED`, so agent-written user secrets awaiting approval appear alongside active user secrets. Honors `--format json` (as well as `--json`).
-    - `clear <key>`: Remove a secret.
+    - `clear <key>` (alias `delete`): Remove a secret.
     - `pending`: Review and resolve user-scoped secrets written by your agents (`sciontool secret set --scope user`), which wait in pending state until you approve or reject them. User-only (not available in agent mode); see [Approving User Secrets Saved by Your Agents](/scion/hosted/user/secrets/#approving-user-secrets-saved-by-your-agents).
         - `list`: List your pending user secrets (`id`, `key`, `type`, `target`, `agentSlug`, `agentId`, `projectName`, `projectId`, `created`, `updated`, `expiresAt`, `allowProgeny`, `replacesExisting`). Honors `--json` / `--format json`.
         - `show <ID>`: Show metadata for a pending user secret from `GET /api/v1/secrets?scope=user&includePending=true`, including its `id`, `key`, `type`, `target`, `valueLen`, `agentSlug`, `agentId`, `projectName`, `projectId`, `created`, `updated`, `expiresAt`, `allowProgeny`, `replacesExisting`, `replacesSecretId`, `replacesVersion`, `description`, and `overridesProjectSecrets` (project secrets of the same key that approving it would override). Honors `--json` / `--format json`.
@@ -1476,7 +1479,7 @@ FIXTURE_ID=$(jq -r .identity.id fixture.json)
 ./run-e2e.sh --token-file ./fixture.token   # your test runner reads the token from the file
 scion hub test-identity delete "$FIXTURE_ID" --purge
 ```
-- `scion hub env`: Manage environment variables on the Hub. Scope defaults to your user (`scope=user`); pass `--project [<name|id>]` for project scope (a bare `--project` with no value infers the current directory's linked Hub project, or else the project selected with `scion use`, and fails if the current directory's project is not linked to a Hub), `--broker <name|id>` for Runtime Broker scope, or `--hub-scope` for Hub scope.
+- `scion hub env`: Manage environment variables on the Hub. Scope defaults to your user (`scope=user`); pass `--project [<name|id>]` for project scope (a bare `--project` with no value infers the current directory's linked Hub project, or else the project selected with `scion use`, and fails if the current directory's project is not linked to a Hub), `--broker <name|id>` for Runtime Broker scope, or `--scope hub` for Hub scope.
     - `set <key>=<value>`: Set a variable.
     - `get [key]`: Get variable values. `get` and `list` honor `--format json` (as well as `--json`).
     - `clear <key>`: Remove a variable.
