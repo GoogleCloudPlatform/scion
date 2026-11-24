@@ -121,6 +121,39 @@ const (
 // FormatReadySpecEnv.
 const HarnessReadyEnv = "SCION_HARNESS_READY"
 
+// HarnessDeliveryDisabledEnv names the broker-written environment variable
+// derived from the resolved harness's DeliverySpec.Disabled. When set to "1"
+// (or "true"), sciontool refuses to register the deliver-message control route
+// regardless of SCION_HARNESS or start env (ptone/scion#8812 §3.4 S5).
+const HarnessDeliveryDisabledEnv = "SCION_HARNESS_DELIVERY_DISABLED"
+
+// HarnessDeliveryDisabled reports whether the broker-written
+// HarnessDeliveryDisabledEnv signal disables message delivery for this
+// container.
+func HarnessDeliveryDisabled(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	v := strings.TrimSpace(getenv(HarnessDeliveryDisabledEnv))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// ReadySpecIsIdle reports whether the broker-written HarnessReadyEnv signal
+// declares ReadyStrategyIdle (used by execution containers for attached-terminal
+// liveness and pane-tail suppression, so start env SCION_HARNESS cannot toggle
+// them).
+func ReadySpecIsIdle(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	raw := strings.TrimSpace(getenv(HarnessReadyEnv))
+	if raw == "" {
+		return false
+	}
+	spec, err := ParseReadySpecEnv(raw)
+	return err == nil && spec.Strategy == ReadyStrategyIdle
+}
+
 // LivenessHarnessRootDepthEnv names the environment variable a harness
 // config sets (in its env map) when the harness's TUI is not the direct
 // child of the agent window's wrapper: it is how many process levels below

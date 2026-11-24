@@ -79,13 +79,43 @@ func TestWatchHarnessReady_IdleStrategy(t *testing.T) {
 	}
 }
 
-func TestLivenessAttachedChecker_ShellOnly(t *testing.T) {
-	if fn := livenessAttachedChecker(func(string) string { return "shell" }, 1000, 1000); fn == nil {
-		t.Fatal("expected non-nil checker for SCION_HARNESS=shell")
+func TestLivenessAttachedChecker_IdleReadySpecOnly(t *testing.T) {
+	idleEnv := state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyIdle))
+	// Broker-written ReadyStrategyIdle enables the attached checker even if
+	// SCION_HARNESS in start env claims a different harness.
+	getenvIdle := func(k string) string {
+		switch k {
+		case state.HarnessReadyEnv:
+			return idleEnv
+		case "SCION_HARNESS":
+			return "claude"
+		default:
+			return ""
+		}
 	}
-	for _, h := range []string{"", "claude", "gemini", "generic"} {
-		if fn := livenessAttachedChecker(func(string) string { return h }, 1000, 1000); fn != nil {
-			t.Errorf("expected nil checker for SCION_HARNESS=%q", h)
+	if fn := livenessAttachedChecker(getenvIdle, 1000, 1000); fn == nil {
+		t.Fatal("expected non-nil checker when SCION_HARNESS_READY has strategy idle")
+	}
+
+	// Non-idle strategies (and unset/malformed) return nil even if SCION_HARNESS=shell.
+	for _, raw := range []string{
+		"",
+		"not-json",
+		state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyDelay)),
+		state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyHook)),
+	} {
+		getenv := func(k string) string {
+			switch k {
+			case state.HarnessReadyEnv:
+				return raw
+			case "SCION_HARNESS":
+				return "shell"
+			default:
+				return ""
+			}
+		}
+		if fn := livenessAttachedChecker(getenv, 1000, 1000); fn != nil {
+			t.Errorf("expected nil checker for SCION_HARNESS_READY=%q", raw)
 		}
 	}
 }

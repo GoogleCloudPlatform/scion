@@ -828,11 +828,28 @@ func TestNewHarnessWatchdogConfig_ShellSkipsPaneTail(t *testing.T) {
 	capture := func(context.Context, int, int) ([]byte, error) {
 		return []byte("gh auth token\nghp_secret\n"), nil
 	}
+	idleEnv := state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyIdle))
 	shellCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
-		Getenv:      func(k string) string { return map[string]string{"SCION_HARNESS": "shell"}[k] },
+		Getenv: func(k string) string {
+			return map[string]string{
+				state.HarnessReadyEnv: idleEnv,
+				"SCION_HARNESS":       "claude",
+			}[k]
+		},
 		CapturePane: capture,
 	})
-	assert.Nil(t, shellCfg.PaneTail, "shell harness must not wire PaneTail capture")
+	assert.Nil(t, shellCfg.PaneTail, "idle-ready execution container must not wire PaneTail capture even when SCION_HARNESS=claude")
+
+	deliveryDisabledCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
+		Getenv: func(k string) string {
+			return map[string]string{
+				state.HarnessDeliveryDisabledEnv: "1",
+				"SCION_HARNESS":                  "claude",
+			}[k]
+		},
+		CapturePane: capture,
+	})
+	assert.Nil(t, deliveryDisabledCfg.PaneTail, "delivery-disabled container must not wire PaneTail capture")
 
 	llmCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
 		Getenv:      func(k string) string { return map[string]string{"SCION_HARNESS": "claude"}[k] },

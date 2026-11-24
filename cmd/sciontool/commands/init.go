@@ -36,7 +36,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/delegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
@@ -2147,10 +2146,12 @@ func livenessAgentGID(targetGID int) int {
 }
 
 // livenessAttachedChecker returns the attached-terminal liveness checker for
-// the built-in "shell" execution container harness only, or nil for every
-// other harness (ptone/scion#8812 §3.3).
+// idle-strategy execution containers only, or nil for every other harness
+// (ptone/scion#8812 §3.3). Keyed on the broker-written SCION_HARNESS_READY
+// signal (ReadyStrategyIdle) rather than SCION_HARNESS so start env cannot
+// switch it off.
 func livenessAttachedChecker(getenv func(string) string, uid, gid int) func() bool {
-	if !control.IsShellHarness(getenv) {
+	if !state.ReadySpecIsIdle(getenv) {
 		return nil
 	}
 	return liveness.TmuxAttachedChecker("scion", uid, gid)
@@ -2249,11 +2250,12 @@ const harnessTailLines = 5
 // as readHarnessExitCode. The text is raw harness output: callers redact
 // it (handlers.FormatHarnessTailReason) before it leaves the process.
 //
-// For execution containers (SCION_HARNESS=shell), pane output is never read
-// or published so credentials displayed in the interactive shell cannot leave
-// the container via crash/status reasons (ptone/scion#8812 §3.4 I1).
+// For execution containers (broker-written ReadyStrategyIdle or
+// HarnessDeliveryDisabled), pane output is never read or published so
+// credentials displayed in the interactive shell cannot leave the container
+// via crash/status reasons (ptone/scion#8812 §3.4 I1).
 func readHarnessTail() string {
-	if control.IsShellHarness(os.Getenv) {
+	if state.ReadySpecIsIdle(os.Getenv) || state.HarnessDeliveryDisabled(os.Getenv) {
 		return ""
 	}
 	data, err := dirfd.ReadFileNoFollow(harnessTailPath, harnessTailMaxBytes)
