@@ -80,7 +80,7 @@ Examples:
 func init() {
 	f := adminSystemOneInstanceProbeCmd.Flags()
 	f.BoolVar(&adminSystemOneProbeOpts.models, "models", false, "Query models supported by the provider instance (requires adapter model-listing support, e.g. typesafe)")
-	f.StringVar(&adminSystemOneProbeOpts.project, "project", "", "Optional project ID or slug providing evaluation project context for project- or project_or_hub-scoped named secrets (requires project.read and project.secret_read on that project)")
+	f.StringVar(&adminSystemOneProbeOpts.project, "project", "", "Optional project ID or slug providing evaluation project context (requires project.read and project.secret_read on that project, and the instance must be on the project's System One allowlist via 'scion project system-one add')")
 	f.StringVar(&adminSystemOneProbeOpts.specFile, "spec-file", "", "Path to inline System One spec or rule envelope (JSON or YAML, or '-' for stdin)")
 	f.StringVar(&adminSystemOneProbeOpts.text, "text", "", "Synthetic text bound to probe.text")
 	f.StringVar(&adminSystemOneProbeOpts.textFile, "text-file", "", "Path to file containing synthetic text bound to probe.text")
