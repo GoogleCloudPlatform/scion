@@ -370,6 +370,26 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     expect(box).not.toBeNull();
     expect(page.shadowRoot!.querySelector('sl-select')).toBeNull();
 
+    // Typing invalid or un-committed text does not churn filterKey.
+    const keyBeforeInput = (
+      page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView
+    ).filterKey;
+    box!.dispatchEvent(
+      new CustomEvent('filter-input', {
+        detail: {
+          value: 'project:p-1 phase:',
+          query: parseGraph('project:p-1'),
+          valid: false,
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await page.updateComplete;
+    expect(
+      (page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView).filterKey
+    ).toBe(keyBeforeInput);
+
     // Filter by harness:antigravity -> child matched, parent dimmed context, other hidden
     box!.dispatchEvent(
       new CustomEvent('filter-commit', {
