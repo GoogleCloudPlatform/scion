@@ -852,13 +852,14 @@ func (s *Service) inboxHintsActive(ctx context.Context) bool {
 	return ok && n.InboxHintsActive(ctx)
 }
 
-// notifyInboxChanged tells the host, when it implements InboxNotifier, that
-// userID's artifact-reviews inbox may have changed.
+// notifyInboxChanged tells the host, when it implements InboxNotifier and
+// InboxHintsActive is true, that userID's artifact-reviews inbox may have
+// changed.
 func (s *Service) notifyInboxChanged(ctx context.Context, userID string) {
 	if userID == "" {
 		return
 	}
-	if n, ok := s.host.(InboxNotifier); ok {
+	if n, ok := s.host.(InboxNotifier); ok && n.InboxHintsActive(ctx) {
 		n.InboxChanged(ctx, userID)
 	}
 }

@@ -491,7 +491,8 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 		return
 	}
 	var removed *Grant
-	if s.inboxHintsActive(r.Context()) {
+	hintsActive := s.inboxHintsActive(r.Context())
+	if hintsActive {
 		if grants, gerr := b.store.ListGrants(r.Context(), a.ID); gerr == nil {
 			for i := range grants {
 				if grants[i].ID == grantID {
@@ -514,7 +515,7 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 		writeError(w, http.StatusInternalServerError, "internal", "could not remove the grant")
 	default:
 		s.logGrantRemoved(r, a, removed, actor)
-		if removed != nil && isUserPrincipal(removed.SubjectKind, removed.SubjectRef) {
+		if hintsActive && removed != nil && isUserPrincipal(removed.SubjectKind, removed.SubjectRef) {
 			s.notifyInboxChanged(r.Context(), strings.TrimPrefix(removed.SubjectRef, PrincipalKindUser+":"))
 		}
 		w.Header().Set("Cache-Control", "private, no-store")

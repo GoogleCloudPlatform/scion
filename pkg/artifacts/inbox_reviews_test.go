@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"testing"
@@ -334,7 +336,8 @@ func TestInboxNotifier_PublishDeleteAndGrantRevoke(t *testing.T) {
 		t.Fatalf("grant revocation: got %v, want [%s]", got, outside.ref)
 	}
 
-	// 4b. When InboxHintsActive is false, revoking a grant skips the grant read and does not fire InboxChanged.
+	// 4b. When InboxHintsActive is false, revoking a grant does not fire InboxChanged
+	// even when decision logging is active (so grantForLog populates removed).
 	gRec2 := f.do(&userU, http.MethodPost, "/api/v1/artifacts/"+art.Artifact.ID+"/grants", grantBody, map[string]string{"Content-Type": "application/json"})
 	if gRec2.Code != http.StatusCreated {
 		t.Fatalf("re-grant review: %d %s", gRec2.Code, gRec2.Body.String())
@@ -343,6 +346,8 @@ func TestInboxNotifier_PublishDeleteAndGrantRevoke(t *testing.T) {
 	if err := json.Unmarshal(gRec2.Body.Bytes(), &gResp2); err != nil {
 		t.Fatal(err)
 	}
+	infoLogger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	f.svc.SetLogger(func() *slog.Logger { return infoLogger })
 	recHost.hintsActive = false
 	delGrantRec2 := f.do(&userU, http.MethodDelete, "/api/v1/artifacts/"+art.Artifact.ID+"/grants/"+gResp2.Grant.ID, nil, nil)
 	if delGrantRec2.Code != http.StatusNoContent {
@@ -351,6 +356,7 @@ func TestInboxNotifier_PublishDeleteAndGrantRevoke(t *testing.T) {
 	if got := recHost.takeInboxUsers(); len(got) != 0 {
 		t.Fatalf("hintsActive=false grant revocation should not fire InboxChanged, got %v", got)
 	}
+	f.svc.SetLogger(nil)
 	recHost.hintsActive = true
 
 	// 5. Delete user-owned artifact -> fires InboxChanged for owner only!
@@ -361,6 +367,18 @@ func TestInboxNotifier_PublishDeleteAndGrantRevoke(t *testing.T) {
 	if got := recHost.takeInboxUsers(); len(got) != 1 || got[0] != userU.ref {
 		t.Fatalf("delete user artifact: got %v, want [%s]", got, userU.ref)
 	}
+
+	// 5b. When InboxHintsActive is false, deleting a user-owned artifact does not fire InboxChanged.
+	art2 := f.publish(userU, "doc2.md", []byte("v1\n"), "scope=project-1")
+	recHost.hintsActive = false
+	delRec2 := f.do(&userU, http.MethodDelete, "/api/v1/artifacts/"+art2.Artifact.ID, nil, nil)
+	if delRec2.Code != http.StatusNoContent {
+		t.Fatalf("delete artifact (hints off): %d %s", delRec2.Code, delRec2.Body.String())
+	}
+	if got := recHost.takeInboxUsers(); len(got) != 0 {
+		t.Fatalf("hintsActive=false delete user artifact should not fire InboxChanged, got %v", got)
+	}
+	recHost.hintsActive = true
 
 	// 6. Delete agent-owned artifact -> must NOT fire InboxChanged (not a user owner).
 	agentArt := f.publish(agentA, "agent.md", []byte("agent doc\n"), "")
