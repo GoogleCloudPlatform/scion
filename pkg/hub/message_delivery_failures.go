@@ -432,8 +432,8 @@ func (s *Server) applyBrokerMessageDeliveryOutcome(ctx context.Context, brokerID
 	}
 
 	finCtx, finCancel := finalizationContext(ctx)
+	defer finCancel()
 	won, err := s.store.MarkMessageDelivered(finCtx, msg.ID)
-	finCancel()
 	if err != nil {
 		slog.Error("message-failures: failed to mark message delivered",
 			"broker_id", brokerID, "message_id", msg.ID, "error", err)
@@ -451,7 +451,7 @@ func (s *Server) applyBrokerMessageDeliveryOutcome(ctx context.Context, brokerID
 		)
 	}
 
-	s.notifyStoredMessageSenderDelivered(ctx, msg)
+	s.notifyStoredMessageSenderDelivered(finCtx, msg)
 	return true
 }
 

@@ -35,6 +35,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -799,6 +800,70 @@ func TestHandleBrokerMessageFailures_Deliveries(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("publishes_SSE_with_live_finalization_context_when_request_cancelled_during_cas", func(t *testing.T) {
+		var reqCancel context.CancelFunc
+		srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *casLossDeliveryStore {
+			return &casLossDeliveryStore{
+				Store: inner,
+				fault: f,
+				onBefore: func(_ context.Context, _ string) error {
+					if reqCancel != nil {
+						reqCancel()
+					}
+					return nil
+				},
+			}
+		})
+		ctx := context.Background()
+
+		projectID := setupBrokerTestProject(t, s)
+		target := setupBrokerTestAgent(t, s, projectID, "fin-ctx-target", "running")
+
+		pub := &ctxCheckEventPublisher{}
+		srv.SetEventPublisher(pub)
+
+		msgID := api.NewUUID()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID:            msgID,
+			ProjectID:     projectID,
+			Sender:        "user:alice@example.com",
+			SenderID:      tid("user-alice-finctx"),
+			Recipient:     "agent:" + target.Slug,
+			RecipientID:   target.ID,
+			Msg:           "hello finCtx",
+			Type:          messages.TypeInstruction,
+			AgentID:       target.ID,
+			CreatedAt:     time.Now(),
+			DispatchState: store.MessageDispatchDispatched,
+		}))
+
+		reqCtx, cancel := context.WithCancel(ctx)
+		reqCancel = cancel
+		defer cancel()
+
+		fault.Arm()
+		ok := srv.applyBrokerMessageDeliveryOutcome(reqCtx, target.RuntimeBrokerID, messageDeliveryConfirmation{
+			MessageID: msgID,
+			AgentID:   target.ID,
+			ProjectID: target.ProjectID,
+		})
+		assert.True(t, ok)
+		assert.ErrorIs(t, reqCtx.Err(), context.Canceled, "request context should have been cancelled during CAS")
+		assert.True(t, pub.called, "expected live SSE event to be published")
+		assert.NoError(t, pub.ctxErr, "PublishUserMessage must receive a live finalization context, not the cancelled request context")
+	})
+}
+
+type ctxCheckEventPublisher struct {
+	noopEventPublisher
+	called bool
+	ctxErr error
+}
+
+func (p *ctxCheckEventPublisher) PublishUserMessage(ctx context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef, _ ...ChatEventOption) {
+	p.called = true
+	p.ctxErr = ctx.Err()
 }
 
 type casLossDeliveryStore struct {
