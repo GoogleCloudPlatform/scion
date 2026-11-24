@@ -539,7 +539,7 @@ func TestAgentConfigPatch_RemovedEnvKeysWarning(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, code, body)
 	require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
-	assert.Contains(t, resp.Warnings[0], "config.env: removed DROP_A, DROP_B now; the agent keeps those variables until the next reincarnation")
+	assert.Contains(t, resp.Warnings[0], "config.env: removed DROP_A, DROP_B now; those variables will be removed at the next start")
 	// The removal reaches the agent only at the next reincarnation, so the
 	// env edit is held for it, even though it also adds a key.
 	assert.Empty(t, resp.Disposition.Applied)
