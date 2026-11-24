@@ -658,7 +658,7 @@ func TestMessagePolicySystemOne_I3AuthorizedProjectIDAndProjectScopedSecret(t *t
 
 	// O1: Seed a second project B with a same-named project secret holding a different value.
 	projB := &store.Project{
-		ID:   "proj-i3-conflict-b",
+		ID:   tid("proj-i3-conflict-b"),
 		Name: "I3 Conflict Project B",
 		Slug: "i3-conflict-project-b",
 	}
@@ -1760,7 +1760,7 @@ func TestMessagePolicySystemOne_R2GroupSendCELOnlySkipsAgentListing(t *testing.T
 
 	// Create a second agent participant in the group conversation.
 	peerAgent := &store.Agent{
-		ID:        "ag-r2-peer",
+		ID:        tid("ag-r2-peer"),
 		Slug:      "peer-agent",
 		Name:      "Peer Agent",
 		ProjectID: f.project.ID,
@@ -1770,7 +1770,7 @@ func TestMessagePolicySystemOne_R2GroupSendCELOnlySkipsAgentListing(t *testing.T
 
 	projID := f.project.ID
 	conv := &store.Conversation{
-		ID:          "conv-r2-group",
+		ID:          tid("conv-r2-group"),
 		ProjectID:   &projID,
 		Kind:        "group",
 		DisplayName: "r2-team-thread",
@@ -1870,7 +1870,7 @@ func TestMessagePolicySystemOne_O2UnboundRuleBeyond200InstancesL1Precheck(t *tes
 	for i := 0; i < 205; i++ {
 		name := fmt.Sprintf("a-dummy-%03d", i)
 		require.NoError(t, f.s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
-			ID:       fmt.Sprintf("inst-o2-dummy-%03d", i),
+			ID:       tid(fmt.Sprintf("inst-o2-dummy-%03d", i)),
 			Name:     name,
 			Adapter:  "typesafe",
 			Model:    "jev-1.14.0",
