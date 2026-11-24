@@ -430,7 +430,7 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 		providerCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(`{"models": [{"name": "jev-1.14.0"}]}`))
+			_, _ = w.Write([]byte(`{"models": [{"name": "jev-1.14.0", "description": "Pinned Jev 1.14.0 release.", "release_date": "2026-09-15"}]}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{
