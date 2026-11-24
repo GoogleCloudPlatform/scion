@@ -325,16 +325,72 @@
       "knownKeys": ["phase", "label"],
       "expect": { "mode": "text", "text": "https://example.com/x" },
       "canonical": "https://example.com/x"
+    },
+    {
+      "name": "negated quoted run containing known key stays pure text",
+      "input": "-\"a phase:running\"",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "-\"a phase:running\"" },
+      "canonical": "-\"a phase:running\""
+    },
+    {
+      "name": "negated quoted known key stays pure text",
+      "input": "-\"phase:running\"",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "-\"phase:running\"" },
+      "canonical": "-\"phase:running\""
+    },
+    {
+      "name": "limit: input exceeds 512 ASCII bytes",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "limit", "offset": 512, "length": 1 }
+    },
+    {
+      "name": "limit: multi-byte rune straddling 512 bytes backs up to rune start",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "limit", "offset": 511, "length": 2, "utf16Offset": 511, "utf16Length": 1 }
+    },
+    {
+      "name": "limit: pure text exceeds 200 runes",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "limit", "offset": 0, "length": 201 }
+    },
+    {
+      "name": "limit: structured search text exceeds 200 runes",
+      "input": "phase:running xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "limit", "offset": 0, "length": 215 }
+    },
+    {
+      "name": "limit: more than 20 values per key",
+      "input": "label:a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "limit", "offset": 0, "length": 47 }
+    },
+    {
+      "name": "limit: more than 32 terms",
+      "input": "label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "limit", "offset": 0, "length": 263 }
     }
   ],
   "eval": {
-    "knownKeys": ["phase", "label"],
+    "knownKeys": ["phase", "activity", "label", "project", "harness", "broker", "template", "owner"],
     "rows": [
       {
         "id": "a1",
         "name": "api-server",
         "slug": "api-server-1",
         "phase": "running",
+        "activity": "working",
+        "project": "proj-alpha",
+        "harness": "claude",
+        "broker": "broker-east",
+        "template": "developer",
+        "owner": "user-alice",
         "labels": { "team": "ui", "env": "prod" }
       },
       {
@@ -342,6 +398,12 @@
         "name": "api-worker",
         "slug": "api-worker-2",
         "phase": "error",
+        "activity": "crashed",
+        "project": "proj-alpha",
+        "harness": "antigravity",
+        "broker": "broker-west",
+        "template": "reviewer",
+        "owner": "user-bob",
         "labels": { "team": "ui", "tmp": "true" }
       },
       {
@@ -349,6 +411,12 @@
         "name": "db-migrator",
         "slug": "db-migrator-3",
         "phase": "stopped",
+        "activity": "",
+        "project": "proj-beta",
+        "harness": "gemini-cli",
+        "broker": "broker-east",
+        "template": "developer",
+        "owner": "",
         "labels": { "team": "backend" }
       },
       {
@@ -356,6 +424,12 @@
         "name": "frontend-preview",
         "slug": "foo-preview-4",
         "phase": "running",
+        "activity": "idle",
+        "project": "proj-beta",
+        "harness": "claude",
+        "broker": "",
+        "template": "",
+        "owner": "user-alice",
         "labels": {}
       },
       {
@@ -363,6 +437,12 @@
         "name": "foo-runner",
         "slug": "foo-runner-5",
         "phase": "error",
+        "activity": "stalled",
+        "project": "proj-alpha",
+        "harness": "",
+        "broker": "broker-west",
+        "template": "OpsRunner",
+        "owner": "user-bob",
         "labels": { "team": "UI" }
       }
     ],
@@ -431,6 +511,66 @@
         "name": "multiple label terms ANDed",
         "query": "label:team=ui label:env=prod",
         "expectIds": ["a1"]
+      },
+      {
+        "name": "activity single value",
+        "query": "activity:working",
+        "expectIds": ["a1"]
+      },
+      {
+        "name": "activity negated includes empty activity",
+        "query": "-activity:working,crashed",
+        "expectIds": ["a3", "a4", "a5"]
+      },
+      {
+        "name": "project single value",
+        "query": "project:proj-beta",
+        "expectIds": ["a3", "a4"]
+      },
+      {
+        "name": "project negated",
+        "query": "-project:proj-alpha",
+        "expectIds": ["a3", "a4"]
+      },
+      {
+        "name": "harness case-insensitive",
+        "query": "harness:CLAUDE",
+        "expectIds": ["a1", "a4"]
+      },
+      {
+        "name": "harness negated includes empty harness",
+        "query": "-harness:claude,antigravity",
+        "expectIds": ["a3", "a5"]
+      },
+      {
+        "name": "broker single value",
+        "query": "broker:broker-east",
+        "expectIds": ["a1", "a3"]
+      },
+      {
+        "name": "broker negated includes empty broker",
+        "query": "-broker:broker-east",
+        "expectIds": ["a2", "a4", "a5"]
+      },
+      {
+        "name": "template case-insensitive",
+        "query": "template:opsrunner",
+        "expectIds": ["a5"]
+      },
+      {
+        "name": "template negated includes empty template",
+        "query": "-template:developer",
+        "expectIds": ["a2", "a4", "a5"]
+      },
+      {
+        "name": "owner single value",
+        "query": "owner:user-alice",
+        "expectIds": ["a1", "a4"]
+      },
+      {
+        "name": "owner negated includes unowned agents",
+        "query": "-owner:user-alice",
+        "expectIds": ["a2", "a3", "a5"]
       }
     ]
   }

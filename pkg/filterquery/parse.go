@@ -325,9 +325,13 @@ func hasKnownKeyTerm(input string, known func(key string) bool) bool {
 		if i >= n {
 			break
 		}
-		if input[i] == '"' {
-			// Skip quoted string (not a key term).
-			i++
+		start := i
+		if input[start] == '-' {
+			start++
+		}
+		if start < n && input[start] == '"' {
+			// Skip quoted string (optionally preceded by '-', not a key term).
+			i = start + 1
 			for i < n {
 				if input[i] == '\\' && i+1 < n {
 					i += 2
@@ -340,10 +344,6 @@ func hasKnownKeyTerm(input string, known func(key string) bool) bool {
 				i++
 			}
 			continue
-		}
-		start := i
-		if input[start] == '-' {
-			start++
 		}
 		if key, _, ok := scanKeyPrefix(input, start); ok && known(strings.ToLower(key)) {
 			return true

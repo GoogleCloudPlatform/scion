@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -33,53 +32,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func queryToStoreTerms(q filterquery.Query) *store.QueryTerms {
-	if q.IsEmpty() {
-		return nil
-	}
-	qt := &store.QueryTerms{
-		Text:        q.Text,
-		ExcludeText: q.ExcludeText,
-	}
-	for _, t := range q.Terms {
-		op := store.QueryOpEq
-		if t.Key == "label" {
-			allHasKey := true
-			allEq := true
-			for _, v := range t.Values {
-				if strings.Contains(v, "=") {
-					allHasKey = false
-				} else {
-					allEq = false
-				}
-			}
-			if allHasKey {
-				op = store.QueryOpHasKey
-			} else if allEq {
-				op = store.QueryOpLabelEq
-			}
-		}
-		vals := make([]string, len(t.Values))
-		for i, v := range t.Values {
-			if t.Key == "phase" {
-				vals[i] = strings.ToLower(v)
-			} else {
-				vals[i] = v
-			}
-		}
-		qt.Terms = append(qt.Terms, store.QueryTerm{
-			Field:  t.Key,
-			Values: vals,
-			Negate: t.Negate,
-			Op:     op,
-		})
-	}
-	return qt
-}
-
 func TestListAgents_QueryTerms_ConformanceParity(t *testing.T) {
 	as, projID := newTestAgentStore(t)
 	ctx := context.Background()
+
+	// Create a second project so conformance rows can exercise project: filters.
+	p2UID := uuid.New()
+	if _, err := as.client.Project.Create().SetID(p2UID).SetName("proj-beta").SetSlug("proj-beta").Save(ctx); err != nil {
+		t.Fatalf("CreateProject p2: %v", err)
+	}
+	projectByLogical := map[string]string{
+		"proj-alpha": projID,
+		"proj-beta":  p2UID.String(),
+	}
+	ownerByLogical := map[string]string{
+		"user-alice": uuid.NewString(),
+		"user-bob":   uuid.NewString(),
+	}
 
 	raw, err := os.ReadFile(filepath.Join("..", "..", "filterquery", "testdata", "conformance.json"))
 	if err != nil {
@@ -88,11 +57,17 @@ func TestListAgents_QueryTerms_ConformanceParity(t *testing.T) {
 	var cf struct {
 		Eval struct {
 			Rows []struct {
-				ID     string            `json:"id"`
-				Name   string            `json:"name"`
-				Slug   string            `json:"slug"`
-				Phase  string            `json:"phase"`
-				Labels map[string]string `json:"labels"`
+				ID       string            `json:"id"`
+				Name     string            `json:"name"`
+				Slug     string            `json:"slug"`
+				Phase    string            `json:"phase"`
+				Activity string            `json:"activity"`
+				Project  string            `json:"project"`
+				Harness  string            `json:"harness"`
+				Broker   string            `json:"broker"`
+				Template string            `json:"template"`
+				Owner    string            `json:"owner"`
+				Labels   map[string]string `json:"labels"`
 			} `json:"rows"`
 			Cases []struct {
 				Name      string   `json:"name"`
@@ -113,16 +88,46 @@ func TestListAgents_QueryTerms_ConformanceParity(t *testing.T) {
 		if len(r.Labels) > 0 {
 			labels = r.Labels
 		}
+		rowProjID := projID
+		if r.Project != "" {
+			if mapped, ok := projectByLogical[r.Project]; ok {
+				rowProjID = mapped
+			}
+		}
+		var appliedCfg *store.AgentAppliedConfig
+		if r.Harness != "" {
+			appliedCfg = &store.AgentAppliedConfig{HarnessConfig: r.Harness}
+		}
+		ownerID := ""
+		if r.Owner != "" {
+			ownerID = ownerByLogical[r.Owner]
+		}
 		if err := as.CreateAgent(ctx, &store.Agent{
-			ID:        uid,
-			Name:      r.Name,
-			Slug:      r.Slug,
-			ProjectID: projID,
-			Phase:     r.Phase,
-			Labels:    labels,
+			ID:              uid,
+			Name:            r.Name,
+			Slug:            r.Slug,
+			ProjectID:       rowProjID,
+			Phase:           r.Phase,
+			Activity:        r.Activity,
+			RuntimeBrokerID: r.Broker,
+			Template:        r.Template,
+			OwnerID:         ownerID,
+			AppliedConfig:   appliedCfg,
+			Labels:          labels,
 		}); err != nil {
 			t.Fatalf("CreateAgent(%s): %v", r.ID, err)
 		}
+	}
+
+	resolver := store.AgentQueryResolver{
+		ResolveProject: func(raw string) (string, bool) {
+			id, ok := projectByLogical[raw]
+			return id, ok
+		},
+		ResolveOwner: func(raw string) (string, bool) {
+			id, ok := ownerByLogical[raw]
+			return id, ok
+		},
 	}
 
 	for _, tc := range cf.Eval.Cases {
@@ -131,9 +136,10 @@ func TestListAgents_QueryTerms_ConformanceParity(t *testing.T) {
 			if fqErr != nil {
 				t.Fatalf("Parse(%q): %v", tc.Query, fqErr)
 			}
+			translated := store.TranslateAgentQuery(q, resolver)
 			res, err := as.ListAgents(ctx, store.AgentFilter{
-				ProjectID: projID,
-				Query:     queryToStoreTerms(q),
+				AuthorizedProjectIDs: []string{projID, p2UID.String()},
+				Query:                translated.Terms,
 			}, store.ListOptions{Limit: 100})
 			if err != nil {
 				t.Fatalf("ListAgents(%q): %v", tc.Query, err)

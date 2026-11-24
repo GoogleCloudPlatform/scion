@@ -20,44 +20,145 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
 )
 
-// Agents is the Phase 1 filter query schema for the global agents list view.
+var agentCommonKeys = []filterquery.Key{
+	{
+		Name: "phase",
+		Help: "Agent lifecycle phase",
+		Kind: filterquery.KindEnum,
+		Exec: filterquery.ExecServer,
+		Enum: []string{
+			string(state.PhaseCreated),
+			string(state.PhaseProvisioning),
+			string(state.PhaseCloning),
+			string(state.PhaseStarting),
+			string(state.PhaseRunning),
+			string(state.PhaseSuspended),
+			string(state.PhaseStopping),
+			string(state.PhaseStopped),
+			string(state.PhaseError),
+			string(state.PhaseHalted),
+		},
+		MultiValued: false,
+	},
+	{
+		Name: "activity",
+		Help: "Agent runtime activity",
+		Kind: filterquery.KindEnum,
+		Exec: filterquery.ExecServer,
+		Enum: []string{
+			string(state.ActivityInitializing),
+			string(state.ActivityWorking),
+			string(state.ActivityThinking),
+			string(state.ActivityExecuting),
+			string(state.ActivityWaitingForInput),
+			string(state.ActivityBlocked),
+			string(state.ActivityIdle),
+			string(state.ActivityCompleted),
+			string(state.ActivityLimitsExceeded),
+			string(state.ActivityStalled),
+			string(state.ActivityOffline),
+			string(state.ActivityCrashed),
+			string(state.ActivityHarnessError),
+		},
+		MultiValued: false,
+	},
+	{
+		Name:        "label",
+		Help:        "Label key or key=value pair",
+		Kind:        filterquery.KindLabel,
+		Exec:        filterquery.ExecServer,
+		MultiValued: true,
+	},
+	{
+		Name:        "harness",
+		Help:        "Harness configuration name",
+		Kind:        filterquery.KindString,
+		Exec:        filterquery.ExecServer,
+		MultiValued: false,
+	},
+	{
+		Name:        "broker",
+		Help:        "Runtime broker name or ID",
+		Kind:        filterquery.KindRef,
+		Exec:        filterquery.ExecServer,
+		MultiValued: false,
+	},
+	{
+		Name:        "template",
+		Help:        "Agent template name",
+		Kind:        filterquery.KindString,
+		Exec:        filterquery.ExecServer,
+		MultiValued: false,
+	},
+	{
+		Name:        "owner",
+		Help:        "Owner ID, email, or 'me'",
+		Kind:        filterquery.KindRef,
+		Exec:        filterquery.ExecServer,
+		MultiValued: false,
+	},
+	{
+		Name: "mode",
+		Help: "Messaging mode or reachability (client-side)",
+		Kind: filterquery.KindEnum,
+		Exec: filterquery.ExecClient,
+		Enum: []string{
+			"project",
+			"branch",
+			"lineage",
+			"none",
+			"can_message",
+			"cannot_message",
+		},
+		MultiValued: false,
+	},
+}
+
+// Agents is the filter query schema for the global agents list view.
 var Agents = filterquery.Schema{
 	View:     "agents",
 	TextHelp: "Matches agent name or slug",
 	Keys: []filterquery.Key{
+		agentCommonKeys[0], // phase
+		agentCommonKeys[1], // activity
+		agentCommonKeys[2], // label
 		{
-			Name: "phase",
-			Help: "Agent lifecycle phase",
-			Kind: filterquery.KindEnum,
-			Exec: filterquery.ExecServer,
-			Enum: []string{
-				string(state.PhaseCreated),
-				string(state.PhaseProvisioning),
-				string(state.PhaseCloning),
-				string(state.PhaseStarting),
-				string(state.PhaseRunning),
-				string(state.PhaseSuspended),
-				string(state.PhaseStopping),
-				string(state.PhaseStopped),
-				string(state.PhaseError),
-				string(state.PhaseHalted),
-			},
+			Name:        "project",
+			Help:        "Project slug or ID",
+			Kind:        filterquery.KindRef,
+			Exec:        filterquery.ExecServer,
 			MultiValued: false,
 		},
+		agentCommonKeys[3], // harness
+		agentCommonKeys[4], // broker
+		agentCommonKeys[5], // template
+		agentCommonKeys[6], // owner
 		{
-			Name:        "label",
-			Help:        "Label key or key=value pair",
-			Kind:        filterquery.KindLabel,
+			Name:        "is",
+			Help:        "Scope filter (mine or shared)",
+			Kind:        filterquery.KindFlagSet,
 			Exec:        filterquery.ExecServer,
-			MultiValued: true,
+			Enum:        []string{"mine", "shared"},
+			Exclusive:   [][]string{{"mine", "shared"}},
+			MultiValued: false,
 		},
+		agentCommonKeys[7], // mode
 	},
+}
+
+// ProjectAgents is the filter query schema for the project-scoped agents list view.
+// It exposes the same keys as Agents except project and is:.
+var ProjectAgents = filterquery.Schema{
+	View:     "project_agents",
+	TextHelp: "Matches agent name or slug",
+	Keys:     append([]filterquery.Key(nil), agentCommonKeys...),
 }
 
 // All returns every registered view schema in deterministic order.
 func All() []filterquery.Schema {
 	return []filterquery.Schema{
 		Agents,
+		ProjectAgents,
 		Artifacts,
 		ProjectArtifacts,
 	}

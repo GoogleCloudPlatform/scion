@@ -61,11 +61,17 @@ type evalSuite struct {
 }
 
 type evalRow struct {
-	ID     string            `json:"id"`
-	Name   string            `json:"name"`
-	Slug   string            `json:"slug"`
-	Phase  string            `json:"phase"`
-	Labels map[string]string `json:"labels"`
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	Slug     string            `json:"slug"`
+	Phase    string            `json:"phase"`
+	Activity string            `json:"activity"`
+	Project  string            `json:"project"`
+	Harness  string            `json:"harness"`
+	Broker   string            `json:"broker"`
+	Template string            `json:"template"`
+	Owner    string            `json:"owner"`
+	Labels   map[string]string `json:"labels"`
 }
 
 func (r evalRow) Values(key string) []string {
@@ -75,6 +81,36 @@ func (r evalRow) Values(key string) []string {
 			return nil
 		}
 		return []string{r.Phase}
+	case "activity":
+		if r.Activity == "" {
+			return nil
+		}
+		return []string{r.Activity}
+	case "project":
+		if r.Project == "" {
+			return nil
+		}
+		return []string{r.Project}
+	case "harness":
+		if r.Harness == "" {
+			return nil
+		}
+		return []string{r.Harness}
+	case "broker":
+		if r.Broker == "" {
+			return nil
+		}
+		return []string{r.Broker}
+	case "template":
+		if r.Template == "" {
+			return nil
+		}
+		return []string{r.Template}
+	case "owner":
+		if r.Owner == "" {
+			return nil
+		}
+		return []string{r.Owner}
 	case "label":
 		if len(r.Labels) == 0 {
 			return nil
@@ -321,6 +357,7 @@ func FuzzParse(f *testing.F) {
 	f.Add("label:\"unterminated")
 	f.Add("phase:running \"label:tmp\"")
 	f.Add("phase:running -\"phase:x\"")
+	f.Add("-\"a phase:running\"")
 	f.Add("\u00a0phase:running")
 	f.Add("\u0085hello\u0085")
 	f.Add("\ufeffhello\ufeff")

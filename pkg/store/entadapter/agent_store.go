@@ -1763,9 +1763,73 @@ func agentQueryTermsPredicates(qt *store.QueryTerms) ([]predicate.Agent, error) 
 		switch term.Field {
 		case "phase":
 			if term.Negate {
-				preds = append(preds, agent.PhaseNotIn(term.Values...))
+				preds = append(preds, agent.Or(agent.PhaseIsNil(), agent.PhaseNotIn(term.Values...)))
 			} else {
 				preds = append(preds, agent.PhaseIn(term.Values...))
+			}
+		case "activity":
+			if term.Negate {
+				preds = append(preds, agent.Or(agent.ActivityIsNil(), agent.ActivityNotIn(term.Values...)))
+			} else {
+				preds = append(preds, agent.ActivityIn(term.Values...))
+			}
+		case "project":
+			uids, err := parseUUIDsStrict(term.Values)
+			if err != nil {
+				return nil, fmt.Errorf("agentQueryTermsPredicates: invalid project UUID: %w", store.ErrInvalidInput)
+			}
+			if term.Negate {
+				preds = append(preds, agent.ProjectIDNotIn(uids...))
+			} else {
+				preds = append(preds, agent.ProjectIDIn(uids...))
+			}
+		case "harness":
+			orParts := make([]predicate.Agent, 0, len(term.Values))
+			for _, v := range term.Values {
+				orParts = append(orParts, agent.HarnessConfigEqualFold(v))
+			}
+			var matchPred predicate.Agent
+			if len(orParts) == 1 {
+				matchPred = orParts[0]
+			} else {
+				matchPred = agent.Or(orParts...)
+			}
+			if term.Negate {
+				preds = append(preds, agent.Or(agent.HarnessConfigIsNil(), agent.Not(matchPred)))
+			} else {
+				preds = append(preds, matchPred)
+			}
+		case "broker":
+			if term.Negate {
+				preds = append(preds, agent.Or(agent.RuntimeBrokerIDIsNil(), agent.RuntimeBrokerIDNotIn(term.Values...)))
+			} else {
+				preds = append(preds, agent.RuntimeBrokerIDIn(term.Values...))
+			}
+		case "template":
+			orParts := make([]predicate.Agent, 0, len(term.Values))
+			for _, v := range term.Values {
+				orParts = append(orParts, agent.TemplateEqualFold(v))
+			}
+			var matchPred predicate.Agent
+			if len(orParts) == 1 {
+				matchPred = orParts[0]
+			} else {
+				matchPred = agent.Or(orParts...)
+			}
+			if term.Negate {
+				preds = append(preds, agent.Or(agent.TemplateIsNil(), agent.Not(matchPred)))
+			} else {
+				preds = append(preds, matchPred)
+			}
+		case "owner":
+			uids, err := parseUUIDsStrict(term.Values)
+			if err != nil {
+				return nil, fmt.Errorf("agentQueryTermsPredicates: invalid owner UUID: %w", store.ErrInvalidInput)
+			}
+			if term.Negate {
+				preds = append(preds, agent.Or(agent.OwnerIDIsNil(), agent.OwnerIDNotIn(uids...)))
+			} else {
+				preds = append(preds, agent.OwnerIDIn(uids...))
 			}
 		case "label":
 			if term.Negate {
