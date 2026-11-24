@@ -405,46 +405,56 @@ func TestOnDemandSecret_StartDeliveryShadowsLowerScopesAndBlocksProgeny(t *testi
 	})
 
 	// Subtest 2: agent on_demand blocks progeny fill without fetching either
-	// value. OwnerID is empty on progenyChild so ScopeUser is not queried
-	// directly and only the progeny path can supply owner's allowProgeny rows.
+	// value. A real delegation chain (newChainFixture) authorizes progeny
+	// secret.use; OwnerID is cleared on the target copy so ScopeUser is not
+	// queried directly and only the progeny path can supply the creator's
+	// allowProgeny rows.
 	t.Run("blocks_progeny_fill", func(t *testing.T) {
-		progenyChild := &store.Agent{
-			ID:            api.NewUUID(),
-			Slug:          "progeny-od-shadow",
-			Name:          "progeny-od-shadow",
-			ProjectID:     project.ID,
-			CreatedBy:     agentX.ID,
-			Ancestry:      []string{owner.ID, agentX.ID},
-			Phase:         "running",
-			AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+		f := newChainFixture(t, "od-progeny")
+		enableAgentSecretsExperimentForTest(t, f.srv, f.store)
+		if f.srv.GetSecretBackend() == nil {
+			f.srv.SetSecretBackend(secret.NewLocalBackend(f.store, "test-hub", "test-signing-key-32-bytes-long!!"))
 		}
-		require.NoError(t, s.CreateAgent(ctx, progenyChild))
+		parent, _ := f.sessionParent(t, "od-parent")
+		child, _ := f.childOf(t, parent, "od-child")
 
-		mustSet(&secret.SetSecretInput{
+		fsb := f.srv.GetSecretBackend()
+		setProgeny := func(in *secret.SetSecretInput) {
+			t.Helper()
+			_, _, err := fsb.Set(ctx, in)
+			require.NoError(t, err)
+		}
+
+		setProgeny(&secret.SetSecretInput{
 			Name: "SHADOW_PROGENY", Value: "progeny-env-val", SecretType: store.SecretTypeEnvironment,
-			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: owner.ID,
-			AllowProgeny: true, CreatedBy: owner.ID,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: f.creator.ID,
+			AllowProgeny: true, CreatedBy: f.creator.ID,
 		})
-		mustSet(&secret.SetSecretInput{
+		setProgeny(&secret.SetSecretInput{
 			Name: "SHADOW_PROGENY", Value: "agent-od-progeny-val", SecretType: store.SecretTypeOnDemand,
-			Target: "SHADOW_PROGENY", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: progenyChild.ID, ProjectID: project.ID,
+			Target: "SHADOW_PROGENY", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: child.ID, ProjectID: f.proj.ID,
 		})
 
 		// Unshadowed progeny secret proves the progeny path is active.
-		mustSet(&secret.SetSecretInput{
+		setProgeny(&secret.SetSecretInput{
 			Name: "CONTROL_PROGENY", Value: "progeny-control-val", SecretType: store.SecretTypeEnvironment,
-			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: owner.ID,
-			AllowProgeny: true, CreatedBy: owner.ID,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: f.creator.ID,
+			AllowProgeny: true, CreatedBy: f.creator.ID,
 		})
 
-		spy := &spyFetchValuesBackend{SecretBackend: sb}
-		d := NewHTTPAgentDispatcher(s, false, nil)
-		d.SetSecretBackend(spy)
-		d.SetAuthzService(srv.authzService)
-		d.SetAgentSecretsEnabledProvider(func() bool { return srv.experimentEnabled(experiments.AgentSecrets) })
+		// Clear OwnerID on a copy so ScopeUser is skipped and only progeny fill
+		// can reach f.creator's allowProgeny secrets.
+		childNoOwner := *child
+		childNoOwner.OwnerID = ""
 
-		sel := newDeliverySelector(srv.authzService, progenyChild, PurposeDispatch)
-		resolved, asNeeded, skipped, err := d.selectDeliverySecretsWith(ctx, sel, progenyChild, nil)
+		spy := &spyFetchValuesBackend{SecretBackend: fsb}
+		d := NewHTTPAgentDispatcher(f.store, false, nil)
+		d.SetSecretBackend(spy)
+		d.SetAuthzService(f.srv.authzService)
+		d.SetAgentSecretsEnabledProvider(func() bool { return f.srv.experimentEnabled(experiments.AgentSecrets) })
+
+		sel := newDeliverySelector(f.srv.authzService, &childNoOwner, PurposeDispatch)
+		resolved, asNeeded, skipped, err := d.selectDeliverySecretsWith(ctx, sel, &childNoOwner, nil)
 		require.NoError(t, err)
 		assert.Empty(t, skipped)
 		assert.Empty(t, asNeeded)
