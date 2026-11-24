@@ -76,8 +76,44 @@ type memoEntry struct {
 	bindings   []*store.RoleBinding
 	bindingsOK bool
 
+	// scopeIdx lazily partitions bindings by ScopeID for non-explain
+	// evaluations (see BindingsForProject). Built at most once after
+	// bindingsOK is set; read-only once populated.
+	scopeIdx *bindingScopeIndex
+
 	roleDefs   map[string]*RolePermissions
 	roleDefsOK bool
+}
+
+// bindingScopeIndex partitions a principal's unfiltered bindings by project
+// ScopeID so non-explain decide() calls hand the kernel only bindings that
+// could pass scopeApplies for the target resource's project.
+type bindingScopeIndex struct {
+	// nonProject holds every binding whose ScopeType != ScopeTypeProject
+	// (system-scoped plus any unknown scope type, so fail-closed handling
+	// stays inside the kernel).
+	nonProject []*store.RoleBinding
+	// byProject maps ScopeID -> project-scoped bindings for that project.
+	byProject map[string][]*store.RoleBinding
+}
+
+func buildBindingScopeIndex(bindings []*store.RoleBinding) *bindingScopeIndex {
+	idx := &bindingScopeIndex{
+		byProject: make(map[string][]*store.RoleBinding),
+	}
+	for _, b := range bindings {
+		if b == nil {
+			continue
+		}
+		if b.ScopeType == ScopeTypeProject {
+			if b.ScopeID != "" {
+				idx.byProject[b.ScopeID] = append(idx.byProject[b.ScopeID], b)
+			}
+			continue
+		}
+		idx.nonProject = append(idx.nonProject, b)
+	}
+	return idx
 }
 
 // authzInputMemo memoizes principal-bound authorization inputs for one
@@ -428,6 +464,60 @@ func (h *principalInputs) Bindings() ([]*store.RoleBinding, error) {
 	return bindings, nil
 }
 
+// BindingsForProject returns the subset of h.Bindings() that could pass
+// scopeApplies for a target resource with authoritative projectID. Only
+// bindings that scopeApplies would unconditionally reject (project-scoped
+// bindings for a different project, or any project-scoped binding when
+// projectID is empty) are omitted.
+//
+// Intended for non-explain decide() calls where InactiveGrants are stripped.
+// When no memo is active, returns the full bindings slice directly without
+// indexing overhead. When all bindings are project-scoped for other projects,
+// returns bindings[:1] so the kernel's deny reason ("no active binding grants
+// permission ...") stays identical to evaluating the full slice.
+func (h *principalInputs) BindingsForProject(projectID string) ([]*store.RoleBinding, error) {
+	bindings, err := h.Bindings()
+	if err != nil || len(bindings) == 0 {
+		return bindings, err
+	}
+	if h.memo == nil || h.bindingsEntry == nil || h.ctx.Err() != nil {
+		return bindings, nil
+	}
+
+	entry := h.bindingsEntry
+	memo := h.memo
+
+	memo.mu.Lock()
+	idx := entry.scopeIdx
+	if idx == nil {
+		idx = buildBindingScopeIndex(entry.bindings)
+		entry.scopeIdx = idx
+	}
+	memo.mu.Unlock()
+
+	var projBindings []*store.RoleBinding
+	if projectID != "" {
+		projBindings = idx.byProject[projectID]
+	}
+
+	total := len(idx.nonProject) + len(projBindings)
+	if total == 0 {
+		// Preserve exact kernel deny reason when the principal has bindings
+		// but none apply to this project.
+		return bindings[:1], nil
+	}
+	if len(projBindings) == 0 {
+		return idx.nonProject, nil
+	}
+	if len(idx.nonProject) == 0 {
+		return projBindings, nil
+	}
+	out := make([]*store.RoleBinding, 0, total)
+	out = append(out, idx.nonProject...)
+	out = append(out, projBindings...)
+	return out, nil
+}
+
 // RoleDefs loads the role definitions for exactly the bindings this handle's
 // Bindings() produced (step 4), keyed by the definition IDs those bindings
 // reference. Calling it before Bindings is a programming error and fails
@@ -444,9 +534,8 @@ func (h *principalInputs) RoleDefs() (map[string]*RolePermissions, error) {
 		return nil, h.bindingsErr
 	}
 
-	roleDefIDs := collectRoleDefinitionIDs(h.bindingsVal)
-
 	if h.memo == nil || h.bindingsEntry == nil || h.ctx.Err() != nil {
+		roleDefIDs := collectRoleDefinitionIDs(h.bindingsVal)
 		return h.a.loadRoleDefinitions(h.ctx, roleDefIDs)
 	}
 
@@ -461,6 +550,7 @@ func (h *principalInputs) RoleDefs() (map[string]*RolePermissions, error) {
 	}
 	memo.mu.Unlock()
 
+	roleDefIDs := collectRoleDefinitionIDs(h.bindingsVal)
 	defs, err := h.a.loadRoleDefinitions(h.ctx, roleDefIDs)
 	if err != nil {
 		return nil, err
