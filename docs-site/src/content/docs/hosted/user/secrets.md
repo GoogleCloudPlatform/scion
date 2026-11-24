@@ -100,6 +100,28 @@ This applies to Hub-scoped secrets only. Hub-scoped environment variables (`scio
 
 An agent reading Hub-scoped secrets (`GET /api/v1/secrets?scope=hub`, `GET /api/v1/env?scope=hub` and their single-key routes) sees only the `environment` secrets with the `always` mode. Every other Hub-scoped secret, including the telemetry credential file, is left out of those lists, and a request for it by name answers as for a key that does not exist. Hub administrators see every Hub-scoped secret.
 
+### Agent-Scoped Secrets
+
+:::note[Experimental]
+Agent-scoped secrets require the `hub.agent_secrets` [experiment](/scion/reference/experiments/), which is off by default. While it is off, the Hub rejects the `agent` scope with `400 invalid scope: agent` and delivers no agent-scoped secrets.
+:::
+
+An agent-scoped secret belongs to a single agent. Only that agent receives it at start and restart, and only that agent can read its value at runtime. When the experiment is on, it takes precedence over a secret of the same name at Runtime Broker, Hub, Project or User scope (`runtime_broker < hub < project < user < agent`), and it is deleted when the agent is hard-deleted or purged. The scope exists for secrets only; environment variables cannot be agent-scoped.
+
+- **You** set, list, update and clear an agent's secrets with `scion hub secret --agent <name|id>` (or on the agent's **Secrets** tab in the Web UI). Listing and reading metadata need read access to the agent, and writing or clearing needs update access. As at every scope, values are never returned to you.
+- **The agent** stores and removes its own agent-scoped secrets with `sciontool secret set --scope agent` and `sciontool secret delete --scope agent` (see [Writing secrets with `sciontool`](#writing-secrets-with-sciontool)), and reads them with `scion secret get --value`. An agent cannot read or write another agent's agent-scoped secrets.
+
+```bash
+# Store a secret for one agent (a name is resolved in the current project)
+printf %s "$TOKEN" | scion hub secret set --agent my-agent API_TOKEN -
+
+# List that agent's secrets (metadata only)
+scion hub secret list --agent my-agent
+
+# Remove it
+scion hub secret clear --agent my-agent API_TOKEN
+```
+
 ---
 ## Injection Modes
 
@@ -298,7 +320,7 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     # Set a user-scoped (personal) secret
     sciontool secret set MY_PERSONAL_TOKEN "token-xyz" --scope user
     ```
-    *Note: `--scope` accepts `project` (default) or `user`.*
+    *Note: `--scope` accepts `project` (default), `user`, or `agent`. `--scope agent` stores a secret private to the calling agent and needs the `hub.agent_secrets` experiment; the agent removes it with `sciontool secret delete KEY --scope agent`. See [Agent-Scoped Secrets](#agent-scoped-secrets).*
 
     *Hub admins can restrict agents to writing user (profile) scope only. If the "Restrict
     agent-written secrets to profile scope" setting is on (Admin > Server Config), a project-scope
