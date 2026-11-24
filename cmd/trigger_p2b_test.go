@@ -183,3 +183,140 @@ func TestTriggerHistory_ShowsWaitingExpiredAndWaitUntil(t *testing.T) {
 	assert.Contains(t, out, waitUntil.UTC().Format(time.RFC3339))
 	assert.Contains(t, out, "offline queue expired")
 }
+
+func TestTriggerUpdate_MessagePreservesOfflineTTLAndAllow(t *testing.T) {
+	const trigID = "33333333-3333-3333-3333-333333333333"
+
+	runCase := func(t *testing.T, setFlags func(t *testing.T)) hubclient.UpdateTriggerRequest {
+		t.Helper()
+		resetTriggerDispatchTestFlags(t)
+		var gotPatch hubclient.UpdateTriggerRequest
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.Method {
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+					ID:                    trigID,
+					ProjectID:             "proj-1",
+					Name:                  "m",
+					AuthorizationRevision: 2,
+					Status:                "active",
+					Action: hubclient.TriggerActionSpec{
+						Type:            "message",
+						AgentName:       "a1",
+						Message:         "x ${event.payload.title}",
+						Offline:         "queue",
+						QueueTTLSeconds: 3600,
+						UntrustedVars:   []string{"event.payload.title"},
+					},
+				})
+			case http.MethodPatch:
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&gotPatch))
+				_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+					ID:                    trigID,
+					ProjectID:             "proj-1",
+					Name:                  "m",
+					AuthorizationRevision: 3,
+					Action:                *gotPatch.Action,
+					Status:                "active",
+				})
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		origFn := triggerHubContextFn
+		t.Cleanup(func() { triggerHubContextFn = origFn })
+		triggerHubContextFn = func() (*HubContext, string, context.Context, context.CancelFunc, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			return &HubContext{Client: client, Endpoint: srv.URL}, "proj-1", ctx, cancel, nil
+		}
+
+		setFlags(t)
+		_ = captureStdout(t, func() {
+			require.NoError(t, runTriggerUpdate(triggerUpdateCmd, []string{trigID}))
+		})
+		require.NotNil(t, gotPatch.Action)
+		return gotPatch
+	}
+
+	t.Run("partial --interrupt preserves offline, ttl, and untrustedVars", func(t *testing.T) {
+		patch := runCase(t, func(t *testing.T) {
+			require.NoError(t, triggerUpdateCmd.Flags().Set("interrupt", "true"))
+			t.Cleanup(func() {
+				_ = triggerUpdateCmd.Flags().Set("interrupt", "false")
+				triggerUpdateCmd.Flags().Lookup("interrupt").Changed = false
+			})
+		})
+		assert.True(t, patch.Action.Interrupt)
+		assert.Equal(t, "queue", patch.Action.Offline)
+		assert.Equal(t, 3600, patch.Action.QueueTTLSeconds)
+		assert.Equal(t, []string{"event.payload.title"}, patch.Action.UntrustedVars)
+	})
+
+	t.Run("partial --agent alone preserves offline, ttl, and untrustedVars", func(t *testing.T) {
+		patch := runCase(t, func(t *testing.T) {
+			require.NoError(t, triggerUpdateCmd.Flags().Set("agent", "a2"))
+			t.Cleanup(func() {
+				_ = triggerUpdateCmd.Flags().Set("agent", "")
+				triggerUpdateCmd.Flags().Lookup("agent").Changed = false
+			})
+		})
+		assert.Equal(t, "a2", patch.Action.AgentName)
+		assert.Equal(t, "queue", patch.Action.Offline)
+		assert.Equal(t, 3600, patch.Action.QueueTTLSeconds)
+		assert.Equal(t, []string{"event.payload.title"}, patch.Action.UntrustedVars)
+	})
+
+	t.Run("--offline skip clears queueTtlSeconds while preserving untrustedVars", func(t *testing.T) {
+		patch := runCase(t, func(t *testing.T) {
+			require.NoError(t, triggerUpdateCmd.Flags().Set("offline", "skip"))
+			t.Cleanup(func() {
+				_ = triggerUpdateCmd.Flags().Set("offline", "")
+				triggerUpdateCmd.Flags().Lookup("offline").Changed = false
+			})
+		})
+		assert.Equal(t, "skip", patch.Action.Offline)
+		assert.Equal(t, 0, patch.Action.QueueTTLSeconds)
+		assert.Equal(t, []string{"event.payload.title"}, patch.Action.UntrustedVars)
+	})
+}
+
+func TestTriggerCreate_DispatchAgentRejectsOfflineAndQueueTTL(t *testing.T) {
+	t.Run("rejects --offline", func(t *testing.T) {
+		resetTriggerDispatchTestFlags(t)
+		triggerName = "d"
+		triggerWebhookRef = "wh"
+		triggerAction = "dispatch-agent"
+		triggerDispatch.template = "default"
+		triggerDispatch.task = "do it"
+		triggerOffline = "queue"
+		t.Cleanup(func() {
+			triggerName, triggerWebhookRef, triggerAction, triggerOffline = "", "", "", ""
+			triggerDispatch.template, triggerDispatch.task = "", ""
+		})
+		_, _, err := buildCreateTriggerRequestWithAllow(false)
+		require.Error(t, err)
+		assert.True(t, isUsageError(err))
+		assert.Contains(t, err.Error(), "--offline cannot be used with --action dispatch-agent")
+	})
+
+	t.Run("rejects --queue-ttl", func(t *testing.T) {
+		resetTriggerDispatchTestFlags(t)
+		triggerName = "d"
+		triggerWebhookRef = "wh"
+		triggerAction = "dispatch-agent"
+		triggerDispatch.template = "default"
+		triggerDispatch.task = "do it"
+		triggerQueueTTL = "1h"
+		t.Cleanup(func() {
+			triggerName, triggerWebhookRef, triggerAction, triggerQueueTTL = "", "", "", ""
+			triggerDispatch.template, triggerDispatch.task = "", ""
+		})
+		_, _, err := buildCreateTriggerRequestWithAllow(false)
+		require.Error(t, err)
+		assert.True(t, isUsageError(err))
+		assert.Contains(t, err.Error(), "--queue-ttl cannot be used with --action dispatch-agent")
+	})
+}

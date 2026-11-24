@@ -579,6 +579,12 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 		if badFlag, ok := hasMessageFlagValues(triggerAgent, triggerMessage, triggerInterrupt, triggerWake, triggerPlain); ok {
 			return nil, nil, newUsageError("%s cannot be used with --action dispatch-agent", badFlag)
 		}
+		if strings.TrimSpace(triggerOffline) != "" {
+			return nil, nil, newUsageError("--offline cannot be used with --action dispatch-agent")
+		}
+		if strings.TrimSpace(triggerQueueTTL) != "" {
+			return nil, nil, newUsageError("--queue-ttl cannot be used with --action dispatch-agent")
+		}
 		action, derivedUntrusted, err = buildDispatchAgentActionSpec(&triggerDispatch, allowExplicit)
 		if err != nil {
 			return nil, nil, err

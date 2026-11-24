@@ -953,18 +953,19 @@ func renderDispatchedMessageTemplate(
 
 	tmpl, err := triggertemplate.Parse(payload.Message, triggertemplate.SlotMessage)
 	if err != nil {
-		out := refuseMessageTemplateRender(req, err)
+		out := refuseMessageTemplateRender(ctx, s, req, err)
 		return "", nil, &out
 	}
 	if payload.Plain && len(tmpl.Untrusted()) > 0 {
-		logging.Subsystem("hub.audit").Warn("trigger.fire.template_refused",
-			"event_type", "trigger.fire.template_refused",
-			"fire_id", req.Authority.FireID,
-			"trigger_id", req.Authority.DefinitionID,
-			"project_id", req.ProjectID,
-			"slot", triggertemplate.SlotMessage,
-			"path", tmpl.Untrusted()[0],
-			"reason", "plain_with_untrusted")
+		s.triggerTemplateRefusalAudit().RecordTemplateRefusal(ctx, trigger.TemplateRefusalAuditRecord{
+			ProjectID: req.ProjectID,
+			TriggerID: req.Authority.DefinitionID,
+			EventID:   ev.ID,
+			FireID:    req.Authority.FireID,
+			Slot:      triggertemplate.SlotMessage,
+			Path:      tmpl.Untrusted()[0],
+			Reason:    "plain_with_untrusted",
+		})
 		out := hubfire.FireOutcome{
 			Status: hubfire.FireStatusRefused,
 			Error:  "plain_with_untrusted",
@@ -1003,7 +1004,7 @@ func renderDispatchedMessageTemplate(
 	})
 	rendered, report, err := tmpl.Render(vars, payload.UntrustedVars)
 	if err != nil {
-		out := refuseMessageTemplateRender(req, err)
+		out := refuseMessageTemplateRender(ctx, s, req, err)
 		return "", nil, &out
 	}
 
@@ -1024,7 +1025,7 @@ func renderDispatchedMessageTemplate(
 	return rendered, untrustedPaths, nil
 }
 
-func refuseMessageTemplateRender(req hubfire.FireRequest, err error) hubfire.FireOutcome {
+func refuseMessageTemplateRender(ctx context.Context, s *Server, req hubfire.FireRequest, err error) hubfire.FireOutcome {
 	slot := triggertemplate.SlotMessage
 	path := ""
 	reason := string(triggertemplate.KindValueRejected)
@@ -1052,15 +1053,20 @@ func refuseMessageTemplateRender(req hubfire.FireRequest, err error) hubfire.Fir
 		}
 	}
 
+	eventID := ""
+	if req.Event != nil {
+		eventID = req.Event.ID
+	}
 	// Never log expanded values or rendered output (§5.2, §5.7).
-	logging.Subsystem("hub.audit").Warn("trigger.fire.template_refused",
-		"event_type", "trigger.fire.template_refused",
-		"fire_id", req.Authority.FireID,
-		"trigger_id", req.Authority.DefinitionID,
-		"project_id", req.ProjectID,
-		"slot", slot,
-		"path", path,
-		"reason", reason)
+	s.triggerTemplateRefusalAudit().RecordTemplateRefusal(ctx, trigger.TemplateRefusalAuditRecord{
+		ProjectID: req.ProjectID,
+		TriggerID: req.Authority.DefinitionID,
+		EventID:   eventID,
+		FireID:    req.Authority.FireID,
+		Slot:      slot,
+		Path:      path,
+		Reason:    reason,
+	})
 	return hubfire.FireOutcome{
 		Status: hubfire.FireStatusRefused,
 		Error:  reason,

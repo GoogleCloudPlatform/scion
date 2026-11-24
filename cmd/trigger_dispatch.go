@@ -632,6 +632,11 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 				spec.Interrupt = existing.Action.Interrupt
 				spec.Plain = existing.Action.Plain
 				spec.Wake = existing.Action.Wake
+				spec.Offline = existing.Action.Offline
+				spec.QueueTTLSeconds = existing.Action.QueueTTLSeconds
+				if existing.Action.UntrustedVars != nil {
+					spec.UntrustedVars = append([]string(nil), existing.Action.UntrustedVars...)
+				}
 			}
 			if flags.Changed("agent") {
 				agentRef := strings.TrimSpace(triggerUpdateAgent)

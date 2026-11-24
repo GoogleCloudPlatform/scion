@@ -17,10 +17,8 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -255,11 +253,11 @@ func TestTriggerMessageP2b_TemplatingFireEnvelopeAuditAndRender(t *testing.T) {
 	var badTrig TriggerResponse
 	require.NoError(t, json.Unmarshal(badTrigRec.Body.Bytes(), &badTrig))
 
-	// Capture slog output to assert render refusal audit carries slot/path, never values.
-	var logBuf bytes.Buffer
-	origLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(origLogger) })
+	// Inject a TemplateRefusalAuditSink to assert render refusal audit carries
+	// event_id, slot, path, and reason, never values.
+	refusalSink := &captureTemplateRefusalAuditSink{}
+	f.srv.SetTriggerTemplateRefusalAuditSink(refusalSink)
+	t.Cleanup(func() { f.srv.SetTriggerTemplateRefusalAuditSink(nil) })
 
 	const secretTitle = "SENTINEL_TITLE_VALUE_NEVER_LOG_9876"
 	now := time.Now().UTC().Truncate(time.Second)
@@ -309,17 +307,16 @@ func TestTriggerMessageP2b_TemplatingFireEnvelopeAuditAndRender(t *testing.T) {
 	require.Len(t, badFires.Items, 1)
 	assert.Equal(t, store.TriggerFireStatusRefused, badFires.Items[0].Status)
 	assert.Equal(t, string(triggertemplate.KindValueMissing), badFires.Items[0].Error)
-	var refusedAuditLine string
-	for _, line := range strings.Split(logBuf.String(), "\n") {
-		if strings.Contains(line, "trigger.fire.template_refused") {
-			refusedAuditLine = line
-			break
-		}
-	}
-	require.NotEmpty(t, refusedAuditLine, "expected trigger.fire.template_refused audit line")
-	assert.Contains(t, refusedAuditLine, "slot=message")
-	assert.Contains(t, refusedAuditLine, "path=event.payload.does_not_exist")
-	assert.NotContains(t, refusedAuditLine, secretTitle)
+	refusals := refusalSink.snapshot()
+	require.Len(t, refusals, 1, "expected one trigger.fire.template_refused audit record")
+	assert.Equal(t, f.projectID, refusals[0].ProjectID)
+	assert.Equal(t, badTrig.ID, refusals[0].TriggerID)
+	assert.Equal(t, ev.ID, refusals[0].EventID)
+	assert.Equal(t, badFires.Items[0].ID, refusals[0].FireID)
+	assert.Equal(t, triggertemplate.SlotMessage, refusals[0].Slot)
+	assert.Equal(t, "event.payload.does_not_exist", refusals[0].Path)
+	assert.Equal(t, string(triggertemplate.KindValueMissing), refusals[0].Reason)
+	assert.NotContains(t, refusals[0].Path+refusals[0].Reason, secretTitle)
 
 	// POST /triggers/{id}/render?eventId=<id> renders the message slot with used vars.
 	renderRec := f.doTrigger(t, f.ownerAuth, okTrig.ID+"/render?eventId="+ev.ID, http.MethodPost, nil)
@@ -767,6 +764,25 @@ func (h *hookedTriggerCore) CheckRetryTarget(ctx context.Context, agentID string
 type countingWaitingListStore struct {
 	store.Store
 	listCalls atomic.Int32
+}
+
+type captureTemplateRefusalAuditSink struct {
+	mu      sync.Mutex
+	records []trigger.TemplateRefusalAuditRecord
+}
+
+func (s *captureTemplateRefusalAuditSink) RecordTemplateRefusal(_ context.Context, rec trigger.TemplateRefusalAuditRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = append(s.records, rec)
+}
+
+func (s *captureTemplateRefusalAuditSink) snapshot() []trigger.TemplateRefusalAuditRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]trigger.TemplateRefusalAuditRecord, len(s.records))
+	copy(out, s.records)
+	return out
 }
 
 func (s *countingWaitingListStore) ListWaitingFiresForTarget(ctx context.Context, targetAgentID string, limit int) ([]string, error) {
