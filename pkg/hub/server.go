@@ -2494,6 +2494,10 @@ type Server struct {
 	// runningDetachedFires are the recurring detached fires in flight, so
 	// shutdown can record the outcome of one it gave up waiting for.
 	runningDetachedFires detachedFireRuns
+	// manualScheduleRuns tracks schedule IDs with an in-flight manual "Run now"
+	// request on this replica to prevent concurrent double-fires.
+	manualScheduleRunsMu sync.Mutex
+	manualScheduleRuns   map[string]struct{}
 
 	// execRuns tracks scheduled exec runs in flight on this replica
 	// (ptone/scion#7883): the inline fires up to exec-start and the
@@ -7360,7 +7364,11 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 	}()
 	// E.2b: mark this as deferred execution of the schedule, distinct from the
 	// initiator attribution just copied onto evt above.
-	exec := ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}
+	execKind := "schedule_evaluator"
+	if evt.Manual {
+		execKind = "schedule_manual"
+	}
+	exec := ExecutorContext{Kind: execKind, ID: "schedule:" + sched.ID}
 	req := scheduledFireRequestWithSchedule(ctx, s, s.store, evt, &sched, exec)
 	handlerCtx, cancel := context.WithTimeout(
 		withFireHistoryCreator(ContextWithExecutor(ctx, exec), evt.CreatedBy),
@@ -7441,7 +7449,12 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 		// Update event status. If the handler returned an error, record as
 		// failed rather than fired — matches fireEvent semantics (O-R3-1).
 		_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, status, &firedAt, errMsg)
-		_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, nextRunAt, errMsg)
+		if nextRunAt.IsZero() {
+			// Manual run: record outcome without touching next_run_at.
+			_ = s.store.RecordScheduleRun(ctx, sched.ID, now, errMsg)
+		} else {
+			_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, nextRunAt, errMsg)
+		}
 		return
 	}
 	// A detached fire may have outlasted the tick's context, or been aborted:
@@ -7456,6 +7469,25 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 		}
 		_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, status, firedAt, errMsg, sched.ID, now)
 	})
+}
+
+func (s *Server) acquireManualScheduleRun(scheduleID string) bool {
+	s.manualScheduleRunsMu.Lock()
+	defer s.manualScheduleRunsMu.Unlock()
+	if s.manualScheduleRuns == nil {
+		s.manualScheduleRuns = make(map[string]struct{})
+	}
+	if _, exists := s.manualScheduleRuns[scheduleID]; exists {
+		return false
+	}
+	s.manualScheduleRuns[scheduleID] = struct{}{}
+	return true
+}
+
+func (s *Server) releaseManualScheduleRun(scheduleID string) {
+	s.manualScheduleRunsMu.Lock()
+	delete(s.manualScheduleRuns, scheduleID)
+	s.manualScheduleRunsMu.Unlock()
 }
 
 // registerSchedulerHandlers registers every periodic scheduler task on

@@ -99263,6 +99263,7 @@ type ScheduledEventMutation struct {
 	fired_at                              *time.Time
 	error                                 *string
 	schedule_id                           *string
+	manual                                *bool
 	created                               *time.Time
 	clearedFields                         map[string]struct{}
 	exec_run                              *uuid.UUID
@@ -100399,6 +100400,42 @@ func (m *ScheduledEventMutation) ResetScheduleID() {
 	delete(m.clearedFields, scheduledevent.FieldScheduleID)
 }
 
+// SetManual sets the "manual" field.
+func (m *ScheduledEventMutation) SetManual(b bool) {
+	m.manual = &b
+}
+
+// Manual returns the value of the "manual" field in the mutation.
+func (m *ScheduledEventMutation) Manual() (r bool, exists bool) {
+	v := m.manual
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldManual returns the old "manual" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldManual(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldManual is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldManual requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldManual: %w", err)
+	}
+	return oldValue.Manual, nil
+}
+
+// ResetManual resets all changes to the "manual" field.
+func (m *ScheduledEventMutation) ResetManual() {
+	m.manual = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *ScheduledEventMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -100508,7 +100545,7 @@ func (m *ScheduledEventMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduledEventMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 24)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, scheduledevent.FieldInitiatorPrincipalKind)
 	}
@@ -100575,6 +100612,9 @@ func (m *ScheduledEventMutation) Fields() []string {
 	if m.schedule_id != nil {
 		fields = append(fields, scheduledevent.FieldScheduleID)
 	}
+	if m.manual != nil {
+		fields = append(fields, scheduledevent.FieldManual)
+	}
 	if m.created != nil {
 		fields = append(fields, scheduledevent.FieldCreated)
 	}
@@ -100630,6 +100670,8 @@ func (m *ScheduledEventMutation) Field(name string) (ent.Value, bool) {
 		return m.Error()
 	case scheduledevent.FieldScheduleID:
 		return m.ScheduleID()
+	case scheduledevent.FieldManual:
+		return m.Manual()
 	case scheduledevent.FieldCreated:
 		return m.Created()
 	}
@@ -100685,6 +100727,8 @@ func (m *ScheduledEventMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldError(ctx)
 	case scheduledevent.FieldScheduleID:
 		return m.OldScheduleID(ctx)
+	case scheduledevent.FieldManual:
+		return m.OldManual(ctx)
 	case scheduledevent.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -100849,6 +100893,13 @@ func (m *ScheduledEventMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetScheduleID(v)
+		return nil
+	case scheduledevent.FieldManual:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetManual(v)
 		return nil
 	case scheduledevent.FieldCreated:
 		v, ok := value.(time.Time)
@@ -101091,6 +101142,9 @@ func (m *ScheduledEventMutation) ResetField(name string) error {
 		return nil
 	case scheduledevent.FieldScheduleID:
 		m.ResetScheduleID()
+		return nil
+	case scheduledevent.FieldManual:
+		m.ResetManual()
 		return nil
 	case scheduledevent.FieldCreated:
 		m.ResetCreated()

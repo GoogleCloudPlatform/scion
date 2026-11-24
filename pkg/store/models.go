@@ -4025,6 +4025,7 @@ type ScheduledEvent struct {
 	FiredAt    *time.Time `json:"firedAt,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	ScheduleID string     `json:"scheduleId,omitempty"` // FK to schedules.id for recurring schedule fires
+	Manual     bool       `json:"manual,omitempty"`     // True when triggered via "Run now" on a recurring schedule
 
 	// InitiatorAttribution is set at authoring time (one-shot create) or
 	// copied from the parent schedule at each recurrence (E.2b). See the

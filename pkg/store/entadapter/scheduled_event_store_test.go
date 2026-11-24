@@ -529,3 +529,24 @@ func TestListScheduledEvents_StatusesSortsAndCursors(t *testing.T) {
 	_, err = s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, Sort: "bogus"}, store.ListOptions{})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
+
+func TestScheduledEvent_ManualRoundTrip(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	normalEvt := newTestScheduledEvent(projectID)
+	require.NoError(t, s.CreateScheduledEvent(ctx, normalEvt))
+
+	manualEvt := newTestScheduledEvent(projectID)
+	manualEvt.Manual = true
+	require.NoError(t, s.CreateScheduledEvent(ctx, manualEvt))
+
+	gotNormal, err := s.GetScheduledEvent(ctx, normalEvt.ID)
+	require.NoError(t, err)
+	assert.False(t, gotNormal.Manual)
+
+	gotManual, err := s.GetScheduledEvent(ctx, manualEvt.ID)
+	require.NoError(t, err)
+	assert.True(t, gotManual.Manual)
+}

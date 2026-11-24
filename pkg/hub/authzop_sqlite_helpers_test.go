@@ -1299,6 +1299,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/schedules/{id}/history": {"projectId": f.project, "id": f.schedule},
 		"/api/v1/projects/{projectId}/schedules/{id}/pause":   {"projectId": f.project, "id": f.schedule},
 		"/api/v1/projects/{projectId}/schedules/{id}/resume":  {"projectId": f.project, "id": f.schedule},
+		"/api/v1/projects/{projectId}/schedules/{id}/run":     {"projectId": f.project, "id": f.schedule},
 
 		// --- webhook endpoint & trigger families ---
 		"/api/v1/projects/{projectId}/webhook-endpoints":                    {"projectId": f.project},

@@ -1917,3 +1917,310 @@ describe('scion-schedule-list creator display', () => {
     expect(row.textContent).not.toContain(' by ');
   });
 });
+
+describe('scion-schedule-list Run now on detail card', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('fires POST /schedules/{id}/run for a message schedule and shows manual run result', async () => {
+    const calls: { url: string; method: string }[] = [];
+    let runCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? 'GET';
+        calls.push({ url, method });
+        if (method === 'POST' && url.endsWith('/schedules/sched-msg/run')) {
+          runCount = 1;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: 'evt-manual-1',
+                scheduleId: 'sched-msg',
+                eventType: 'message',
+                status: 'fired',
+                manual: true,
+                fireAt: '2026-11-24T12:00:00Z',
+                firedAt: '2026-11-24T12:00:00Z',
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schedules: [
+                schedule({
+                  id: 'sched-msg',
+                  name: 'morning-ping',
+                  runCount,
+                  nextRunAt: '2026-11-25T09:00:00Z',
+                }),
+              ],
+              totalCount: 1,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      })
+    );
+
+    const el = document.createElement('scion-schedule-list') as HTMLElement & {
+      projectId: string;
+      updateComplete: Promise<unknown>;
+    };
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await settle(el);
+
+    rowFor(el, 'morning-ping').click();
+    await settle(el);
+
+    const root = el.shadowRoot as ShadowRoot;
+    const dialog = root.querySelector('sl-dialog[label^="Schedule:"]')!;
+    const runBtn = dialog.querySelector('sl-button.detail-run-now') as HTMLElement;
+    expect(runBtn).not.toBeNull();
+    runBtn.click();
+    await settle(el);
+
+    expect(
+      calls.some((c) => c.method === 'POST' && c.url.endsWith('/schedules/sched-msg/run'))
+    ).toBe(true);
+    const panel = dialog.querySelector('.manual-run-panel');
+    expect(panel).not.toBeNull();
+    expect(panel?.textContent).toContain('Manual run');
+    expect(panel?.textContent).toContain('fired');
+  });
+
+  it('shows exec exit code and captured output for Run now when captureOutput is enabled', async () => {
+    const ff = await import('../../utils/feature-flags.js');
+    ff.setServerFlags({ 'hub.exec_schedules': true });
+    const calls: { url: string; method: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? 'GET';
+        calls.push({ url, method });
+        if (method === 'POST' && url.endsWith('/schedules/sched-exec/run')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: 'evt-exec-1',
+                scheduleId: 'sched-exec',
+                eventType: 'exec',
+                status: 'fired',
+                manual: true,
+                fireAt: '2026-11-24T12:00:00Z',
+                firedAt: '2026-11-24T12:00:00Z',
+                execSummary: {
+                  outcome: 'ok',
+                  exitCode: 0,
+                  durationMs: 120,
+                  captureMode: 'tail',
+                  outputStatus: 'captured',
+                  startedAt: '2026-11-24T12:00:00Z',
+                  finishedAt: '2026-11-24T12:00:01Z',
+                },
+              }),
+              { status: 202, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        if (url.endsWith('/scheduled-events/evt-exec-1/output')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                captureMode: 'tail',
+                outputStatus: 'captured',
+                output: 'captured-hello-world\n',
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        if (url.includes('/schedules/sched-exec/history')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                events: [
+                  {
+                    id: 'evt-exec-1',
+                    fireAt: '2026-11-24T12:00:00Z',
+                    firedAt: '2026-11-24T12:00:00Z',
+                    status: 'fired',
+                    manual: true,
+                    execSummary: {
+                      outcome: 'ok',
+                      exitCode: 0,
+                      durationMs: 120,
+                      captureMode: 'tail',
+                      outputStatus: 'captured',
+                      startedAt: '2026-11-24T12:00:00Z',
+                      finishedAt: '2026-11-24T12:00:01Z',
+                    },
+                  },
+                ],
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schedules: [
+                schedule({
+                  id: 'sched-exec',
+                  name: 'check-queue',
+                  eventType: 'exec',
+                  payload: JSON.stringify({
+                    agentId: 'agent-1',
+                    agentName: 'worker',
+                    command: ['echo', 'hi'],
+                    timeoutSeconds: 60,
+                    captureOutput: 'tail',
+                  }),
+                }),
+              ],
+              totalCount: 1,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      })
+    );
+
+    try {
+      const el = document.createElement('scion-schedule-list') as HTMLElement & {
+        projectId: string;
+        updateComplete: Promise<unknown>;
+      };
+      el.projectId = 'proj-1';
+      document.body.appendChild(el);
+      await settle(el);
+
+      rowFor(el, 'check-queue').click();
+      await settle(el);
+
+      const root = el.shadowRoot as ShadowRoot;
+      const dialog = root.querySelector('sl-dialog[label^="Schedule:"]')!;
+      const runBtn = dialog.querySelector('sl-button.detail-run-now') as HTMLElement;
+      runBtn.click();
+      await settle(el);
+
+      const panel = dialog.querySelector('.manual-run-panel');
+      expect(panel).not.toBeNull();
+      expect(panel?.textContent).toContain('ok');
+      expect(panel?.textContent).toContain('0');
+      expect(panel?.querySelector('.exec-output-pre')?.textContent).toBe('captured-hello-world\n');
+
+      // History table marks the manual run with the Manual badge.
+      const manualBadge = dialog.querySelector('.exec-manual-badge');
+      expect(manualBadge?.textContent?.trim()).toBe('Manual');
+    } finally {
+      ff.setServerFlags({ 'hub.exec_schedules': false });
+    }
+  });
+
+  it('shows attach permission message when /output returns 403 and no output when capture is off', async () => {
+    const ff = await import('../../utils/feature-flags.js');
+    ff.setServerFlags({ 'hub.exec_schedules': true });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? 'GET';
+        if (method === 'POST' && url.endsWith('/schedules/sched-exec-403/run')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: 'evt-exec-403',
+                scheduleId: 'sched-exec-403',
+                eventType: 'exec',
+                status: 'fired',
+                manual: true,
+                fireAt: '2026-11-24T12:00:00Z',
+                execSummary: {
+                  outcome: 'ok',
+                  exitCode: 0,
+                  durationMs: 50,
+                  captureMode: 'json',
+                  outputStatus: 'captured',
+                  startedAt: '2026-11-24T12:00:00Z',
+                  finishedAt: '2026-11-24T12:00:01Z',
+                },
+              }),
+              { status: 202, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        if (url.endsWith('/scheduled-events/evt-exec-403/output')) {
+          return Promise.resolve(new Response('forbidden', { status: 403 }));
+        }
+        if (url.includes('/history')) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ events: [] }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schedules: [
+                schedule({
+                  id: 'sched-exec-403',
+                  name: 'restricted-exec',
+                  eventType: 'exec',
+                  payload: JSON.stringify({
+                    agentId: 'agent-1',
+                    commandRedacted: true,
+                    captureOutput: 'json',
+                  }),
+                }),
+              ],
+              totalCount: 1,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      })
+    );
+
+    try {
+      const el = document.createElement('scion-schedule-list') as HTMLElement & {
+        projectId: string;
+        updateComplete: Promise<unknown>;
+      };
+      el.projectId = 'proj-1';
+      document.body.appendChild(el);
+      await settle(el);
+
+      rowFor(el, 'restricted-exec').click();
+      await settle(el);
+
+      const dialog = (el.shadowRoot as ShadowRoot).querySelector('sl-dialog[label^="Schedule:"]')!;
+      (dialog.querySelector('sl-button.detail-run-now') as HTMLElement).click();
+      await settle(el);
+
+      const panel = dialog.querySelector('.manual-run-panel');
+      expect(panel?.querySelector('.exec-output-error')?.textContent).toContain(
+        'Output unavailable: requires attach on the agent.'
+      );
+      expect(panel?.querySelector('.exec-output-pre')).toBeNull();
+    } finally {
+      ff.setServerFlags({ 'hub.exec_schedules': false });
+    }
+  });
+});

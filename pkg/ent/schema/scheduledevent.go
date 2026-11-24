@@ -75,6 +75,8 @@ func (ScheduledEvent) Fields() []ent.Field {
 			Optional(),
 		field.String("schedule_id").
 			Optional(),
+		field.Bool("manual").
+			Default(false),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

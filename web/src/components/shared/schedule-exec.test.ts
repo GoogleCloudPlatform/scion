@@ -28,8 +28,10 @@ import {
   MAX_EXEC_ARGV_BYTES,
   MAX_EXEC_TIMEOUT_SEC,
   argvEqual,
+  formatCapturedExecOutput,
   formatExecDuration,
   isAgentSelectableForExec,
+  isExecRunTerminal,
   parseExecPayload,
   parseExecTimeoutValue,
   validateExecArgv,
@@ -209,5 +211,43 @@ describe('formatExecDuration, argvEqual, isAgentSelectableForExec, note', () => 
 
   it('exports the exact required no-output note', () => {
     expect(EXEC_NO_OUTPUT_NOTE).toBe("Command output isn't stored; check the agent's own logs.");
+  });
+});
+
+describe('isExecRunTerminal and formatCapturedExecOutput', () => {
+  it('recognizes terminal exec outcomes and event statuses', () => {
+    expect(isExecRunTerminal({ status: 'fired' })).toBe(false);
+    expect(
+      isExecRunTerminal({
+        status: 'fired',
+        execSummary: { outcome: 'starting', startedAt: '2026-01-01T00:00:00Z' },
+      })
+    ).toBe(false);
+    expect(
+      isExecRunTerminal({
+        status: 'fired',
+        execSummary: { outcome: 'running', startedAt: '2026-01-01T00:00:00Z' },
+      })
+    ).toBe(false);
+    for (const outcome of ['ok', 'nonzero', 'timeout', 'skipped', 'error', 'abandoned']) {
+      expect(
+        isExecRunTerminal({
+          status: 'fired',
+          execSummary: { outcome, startedAt: '2026-01-01T00:00:00Z' },
+        }),
+        outcome
+      ).toBe(true);
+    }
+    expect(isExecRunTerminal({ status: 'failed' })).toBe(true);
+    expect(isExecRunTerminal({ status: 'skipped' })).toBe(true);
+    expect(isExecRunTerminal({ status: 'cancelled' })).toBe(true);
+  });
+
+  it('formats json, tail, and absent captured outputs', () => {
+    expect(formatCapturedExecOutput({ captureMode: 'tail' })).toBeNull();
+    expect(formatCapturedExecOutput({ captureMode: 'tail', output: 'hello\n' })).toBe('hello\n');
+    expect(formatCapturedExecOutput({ captureMode: 'json', output: { ok: true, n: 2 } })).toBe(
+      '{\n  "ok": true,\n  "n": 2\n}'
+    );
   });
 });

@@ -55,7 +55,46 @@ export interface ExecHistoryEvent {
   status: string;
   firedAt?: string | undefined;
   error?: string | undefined;
+  manual?: boolean | undefined;
   execSummary?: ExecRunSummary | undefined;
+}
+
+const TERMINAL_EXEC_OUTCOMES = new Set([
+  'ok',
+  'nonzero',
+  'timeout',
+  'skipped',
+  'error',
+  'abandoned',
+]);
+
+/**
+ * Reports whether an exec scheduled event has reached a terminal state
+ * (either its exec run recorded a terminal outcome, or the event itself
+ * failed/skipped/cancelled before run admission).
+ */
+export function isExecRunTerminal(evt: Pick<ExecHistoryEvent, 'status' | 'execSummary'>): boolean {
+  if (evt.execSummary?.outcome && TERMINAL_EXEC_OUTCOMES.has(evt.execSummary.outcome)) {
+    return true;
+  }
+  return evt.status === 'failed' || evt.status === 'skipped' || evt.status === 'cancelled';
+}
+
+/**
+ * Formats a `/scheduled-events/{id}/output` response payload for display.
+ * Returns null when no output body was captured.
+ */
+export function formatCapturedExecOutput(data: {
+  captureMode?: string | undefined;
+  output?: unknown;
+}): string | null {
+  if (data.output === undefined) {
+    return null;
+  }
+  if (data.captureMode === 'json' || typeof data.output !== 'string') {
+    return JSON.stringify(data.output, null, 2);
+  }
+  return data.output;
 }
 
 export interface ExecAgentOption {
@@ -437,6 +476,46 @@ export const scheduleExecStyles = css`
     font-size: 0.8125rem;
     color: var(--sl-color-danger-600, #dc2626);
   }
+
+  .exec-manual-badge {
+    display: inline-block;
+    margin-left: 0.375rem;
+    padding: 0.0625rem 0.375rem;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    border-radius: var(--scion-radius, 0.25rem);
+    background: var(--sl-color-primary-100, #dbeafe);
+    color: var(--sl-color-primary-700, #1d4ed8);
+    vertical-align: middle;
+  }
+
+  .manual-run-panel {
+    margin-top: 0.75rem;
+    padding: 0.625rem 0.75rem;
+    background: var(--scion-bg-subtle, #f1f5f9);
+    border: 1px solid var(--scion-border, #e2e8f0);
+    border-radius: var(--scion-radius, 0.5rem);
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    font-size: 0.8125rem;
+  }
+
+  .manual-run-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-weight: 600;
+    color: var(--scion-text, #1e293b);
+  }
+
+  .manual-run-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    color: var(--scion-text-muted, #64748b);
+  }
 `;
 
 export function renderExecAgentPicker(opts: {
@@ -688,7 +767,14 @@ export function renderExecHistorySection(opts: {
   loading: boolean;
   error: string | null;
   events: readonly ExecHistoryEvent[];
+  onViewOutput?: ((eventId: string) => void) | undefined;
+  expandedOutputEventId?: string | null | undefined;
+  outputLoading?: boolean | undefined;
+  outputError?: string | null | undefined;
+  outputText?: string | null | undefined;
+  outputFetched?: boolean | undefined;
 }): TemplateResult {
+  const showOutputCol = Boolean(opts.onViewOutput);
   return html`
     <div class="exec-history-section">
       <div class="exec-history-title">Recent Runs</div>
@@ -706,6 +792,7 @@ export function renderExecHistorySection(opts: {
                       <th>Outcome</th>
                       <th>Exit Code</th>
                       <th>Duration</th>
+                      ${showOutputCol ? html`<th>Output</th>` : nothing}
                     </tr>
                   </thead>
                   <tbody>
@@ -717,12 +804,17 @@ export function renderExecHistorySection(opts: {
                           ? String(evt.execSummary.exitCode)
                           : '-';
                       const duration = formatExecDuration(evt.execSummary?.durationMs);
+                      const hasCapture = Boolean(evt.execSummary?.captureMode);
+                      const isExpanded = opts.expandedOutputEventId === evt.id;
                       return html`
                         <tr class="exec-history-row" data-event-id=${evt.id}>
                           <td>
                             <span title=${formatInstantWithZone(instant)}
                               >${formatRelative(instant)}</span
                             >
+                            ${evt.manual
+                              ? html`<span class="exec-manual-badge">Manual</span>`
+                              : nothing}
                             ${evt.error
                               ? html`<div class="exec-history-error">${evt.error}</div>`
                               : nothing}
@@ -730,7 +822,48 @@ export function renderExecHistorySection(opts: {
                           <td><code>${outcome}</code></td>
                           <td>${exitCode}</td>
                           <td>${duration}</td>
+                          ${showOutputCol
+                            ? html`
+                                <td>
+                                  ${hasCapture
+                                    ? html`
+                                        <sl-button
+                                          size="small"
+                                          variant="default"
+                                          class="exec-history-output-btn"
+                                          ?loading=${isExpanded && Boolean(opts.outputLoading)}
+                                          @click=${(): void => opts.onViewOutput?.(evt.id)}
+                                        >
+                                          ${isExpanded && opts.outputFetched
+                                            ? 'Hide output'
+                                            : 'View output'}
+                                        </sl-button>
+                                      `
+                                    : html`<span class="meta-text">-</span>`}
+                                </td>
+                              `
+                            : nothing}
                         </tr>
+                        ${showOutputCol && isExpanded
+                          ? html`
+                              <tr class="exec-history-output-row" data-output-for=${evt.id}>
+                                <td colspan="5">
+                                  ${opts.outputError
+                                    ? html`<div class="exec-output-error">${opts.outputError}</div>`
+                                    : opts.outputFetched
+                                      ? opts.outputText !== null && opts.outputText !== undefined
+                                        ? html`<pre class="exec-output-pre">
+${opts.outputText}</pre
+                                          >`
+                                        : html`<div class="exec-no-output-note">
+                                            No captured output
+                                            (${evt.execSummary?.outputStatus ?? 'none'}).
+                                          </div>`
+                                      : html`<div class="meta-text">Loading output…</div>`}
+                                </td>
+                              </tr>
+                            `
+                          : nothing}
                       `;
                     })}
                   </tbody>

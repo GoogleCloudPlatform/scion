@@ -3147,8 +3147,12 @@ func init() {
 	scheduledeventDescStatus := scheduledeventFields[5].Descriptor()
 	// scheduledevent.DefaultStatus holds the default value on creation for the status field.
 	scheduledevent.DefaultStatus = scheduledeventDescStatus.Default.(string)
+	// scheduledeventDescManual is the schema descriptor for manual field.
+	scheduledeventDescManual := scheduledeventFields[10].Descriptor()
+	// scheduledevent.DefaultManual holds the default value on creation for the manual field.
+	scheduledevent.DefaultManual = scheduledeventDescManual.Default.(bool)
 	// scheduledeventDescCreated is the schema descriptor for created field.
-	scheduledeventDescCreated := scheduledeventFields[10].Descriptor()
+	scheduledeventDescCreated := scheduledeventFields[11].Descriptor()
 	// scheduledevent.DefaultCreated holds the default value on creation for the created field.
 	scheduledevent.DefaultCreated = scheduledeventDescCreated.Default.(func() time.Time)
 	// scheduledeventDescID is the schema descriptor for id field.

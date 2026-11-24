@@ -3036,6 +3036,7 @@
 |------|--------|---------|
 | http_route | PATCH | `/api/v1/projects/{projectId}/schedules/{id}` |
 | http_route | POST | `/api/v1/projects/{projectId}/schedules/{id}/resume` |
+| http_route | POST | `/api/v1/projects/{projectId}/schedules/{id}/run` |
 
 **Principals:** `user`, `agent`
 
