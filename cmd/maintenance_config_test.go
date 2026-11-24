@@ -54,6 +54,9 @@ func TestResolveMaintenanceConfig_Defaults(t *testing.T) {
 	if mc.UpdatePolicy != "notify" {
 		t.Errorf("UpdatePolicy = %q, want %q (binary tier → notify)", mc.UpdatePolicy, "notify")
 	}
+	if mc.UpdatePolicyExplicit {
+		t.Errorf("UpdatePolicyExplicit = true, want false for default binary policy")
+	}
 
 	if mc.InstallRoot != config.DefaultMaintenanceInstallRoot {
 		t.Errorf("InstallRoot = %q, want %q", mc.InstallRoot, config.DefaultMaintenanceInstallRoot)
@@ -100,6 +103,9 @@ func TestResolveMaintenanceConfig_SourceTierDefault(t *testing.T) {
 
 	if mc.UpdatePolicy != "disabled" {
 		t.Errorf("UpdatePolicy = %q, want %q (source tier → disabled)", mc.UpdatePolicy, "disabled")
+	}
+	if mc.UpdatePolicyExplicit {
+		t.Errorf("UpdatePolicyExplicit = true, want false for implicit source-tier disabled")
 	}
 }
 
@@ -213,6 +219,59 @@ func TestResolveMaintenanceConfig_ExplicitAutoHonoured(t *testing.T) {
 	mc := resolveMaintenanceConfig(&config.GlobalConfig{})
 	if mc.DeploymentTier != "binary" || mc.UpdatePolicy != "auto" {
 		t.Errorf("tier/policy = %q/%q, want binary/auto", mc.DeploymentTier, mc.UpdatePolicy)
+	}
+	if !mc.UpdatePolicyExplicit {
+		t.Errorf("UpdatePolicyExplicit = false, want true when update_policy is set in settings.yaml")
+	}
+}
+
+func TestResolveMaintenanceConfig_UpdatePolicyExplicit(t *testing.T) {
+	cases := []struct {
+		name         string
+		cfg          *config.V1MaintenanceConfig
+		wantPolicy   string
+		wantExplicit bool
+	}{
+		{
+			name:         "explicit disabled in binary tier",
+			cfg:          &config.V1MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "disabled"},
+			wantPolicy:   "disabled",
+			wantExplicit: true,
+		},
+		{
+			name:         "explicit disabled in source tier",
+			cfg:          &config.V1MaintenanceConfig{DeploymentTier: "source", UpdatePolicy: "disabled"},
+			wantPolicy:   "disabled",
+			wantExplicit: true,
+		},
+		{
+			name:         "implicit disabled in source tier",
+			cfg:          &config.V1MaintenanceConfig{DeploymentTier: "source"},
+			wantPolicy:   "disabled",
+			wantExplicit: false,
+		},
+		{
+			name:         "explicit notify in binary tier",
+			cfg:          &config.V1MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "notify"},
+			wantPolicy:   "notify",
+			wantExplicit: true,
+		},
+		{
+			name:         "implicit notify in binary tier",
+			cfg:          &config.V1MaintenanceConfig{DeploymentTier: "binary"},
+			wantPolicy:   "notify",
+			wantExplicit: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeMaintenanceSettings(t, tc.cfg)
+			mc := resolveMaintenanceConfig(&config.GlobalConfig{})
+			if mc.UpdatePolicy != tc.wantPolicy || mc.UpdatePolicyExplicit != tc.wantExplicit {
+				t.Errorf("got policy=%q explicit=%v, want policy=%q explicit=%v",
+					mc.UpdatePolicy, mc.UpdatePolicyExplicit, tc.wantPolicy, tc.wantExplicit)
+			}
+		})
 	}
 }
 

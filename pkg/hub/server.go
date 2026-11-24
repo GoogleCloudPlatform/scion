@@ -726,6 +726,11 @@ type MaintenanceConfig struct {
 	ReleaseChannel string
 	// UpdatePolicy controls automatic update behavior: "auto", "notify", or "disabled".
 	UpdatePolicy string
+	// UpdatePolicyExplicit is true when UpdatePolicy was supplied explicitly in
+	// server.maintenance.update_policy (as opposed to derived from the
+	// deployment tier default). An explicit "disabled" locks automatic updates
+	// off in the UI and API.
+	UpdatePolicyExplicit bool
 	// CheckIntervalHours sets how often the scheduled update checker runs.
 	// Default: 6. Minimum: 1.
 	CheckIntervalHours int
@@ -8332,6 +8337,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-available", s.guarded("/api/v1/admin/maintenance/update-available", s.handleUpdateAvailable))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.guarded("/api/v1/admin/maintenance/restart", s.handleAdminRestart))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-status", s.guarded("/api/v1/admin/maintenance/update-status", s.handleUpdateStatus))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/auto-update", s.guarded("/api/v1/admin/maintenance/auto-update", s.handleAdminMaintenanceAutoUpdate))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/releases", s.guarded("/api/v1/admin/maintenance/releases", s.handleMaintenanceReleases))
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.guarded("/api/v1/admin/scheduler", s.handleAdminScheduler))
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.guarded("/api/v1/admin/allow-list", s.handleAdminAllowList))
