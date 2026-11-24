@@ -71,15 +71,26 @@ def env_vars(**values: str | None):
 # Mirrors harnesses/antigravity/config.yaml's model_aliases exactly (G4/am-dev
 # scope rule: tests exercise the real pins, they do not restate or alter them).
 ANTIGRAVITY_MODEL_ALIASES = {
-    "small": "Gemini 3.1 Flash Lite",
-    "medium": "Gemini 3.8 Flash (Medium)",
-    "large": "Gemini 4 Argon (Medium)",
-    "extra-large": "Gemini 4 Argon (High)",
+    "small": "gemini-4-hydrogen-low",
+    "medium": "gemini-4-hydrogen-medium",
+    "large": "gemini-4-neon-medium",
+    "extra-large": "gemini-4-neon-high",
 }
 
+_DEFAULT_ALIASES = object()
 
-def make_ctx(home: str, *, model: str | None = None) -> Any:
-    harness_config: dict[str, Any] = {"model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES)}
+
+def make_ctx(
+    home: str,
+    *,
+    model: str | None = None,
+    model_aliases: Any = _DEFAULT_ALIASES,
+) -> Any:
+    harness_config: dict[str, Any] = {}
+    if model_aliases is _DEFAULT_ALIASES:
+        harness_config["model_aliases"] = dict(ANTIGRAVITY_MODEL_ALIASES)
+    elif model_aliases is not None:
+        harness_config["model_aliases"] = model_aliases
     if model is not None:
         harness_config["model"] = model
     manifest = {
@@ -254,14 +265,13 @@ class ExplicitOAuthTokenTest(unittest.TestCase):
 
 
 class ModelResolutionTest(unittest.TestCase):
-    """Covers ptone/scion#2453: provision.py used to read harness_config.model
-    raw (never resolving a tier like "medium" through config.yaml's
-    model_aliases) and ignored SCION_MODEL, the broker-resolved value,
-    entirely. _resolve_model restores the same precedence claude/provision.py
-    uses: SCION_MODEL (via scion_harness.resolve_model) first, then
-    harness_config.model (via scion_harness.normalize_model_alias, not raw),
-    then AGY_MODEL, then FLASH_MODEL. None of FLASH_MODEL, the AGY_MODEL
-    fallback, or config.yaml's model_aliases values change here.
+    """Covers model resolution precedence in _resolve_model (ptone/scion#2453,
+    ptone/scion#9153):
+      1. SCION_MODEL (via scion_harness.resolve_model)
+      2. harness_config.model (via scion_harness.normalize_model_alias, not raw)
+      3. AGY_MODEL (operator env var fallback)
+      4. harness_config.model_aliases["medium"] (default tier from config.yaml)
+      5. FLASH_MODEL (last-resort fallback when model_aliases lacks "medium")
     """
 
     def test_scion_model_tier_resolves_through_config_model_aliases(self) -> None:
@@ -269,7 +279,7 @@ class ModelResolutionTest(unittest.TestCase):
             ctx = make_ctx(tmp)
             with env_vars(SCION_MODEL="medium", AGY_MODEL=None):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 3.8 Flash (Medium)")
+        self.assertEqual(model, "gemini-4-hydrogen-medium")
 
     def test_scion_model_concrete_id_case_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -286,21 +296,21 @@ class ModelResolutionTest(unittest.TestCase):
             ctx = make_ctx(tmp, model="large")
             with env_vars(SCION_MODEL=None, AGY_MODEL=None):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 4 Argon (Medium)")
+        self.assertEqual(model, "gemini-4-neon-medium")
 
     def test_scion_model_unset_uses_harness_config_model_extra_large(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="extra-large")
             with env_vars(SCION_MODEL=None, AGY_MODEL=None):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 4 Argon (High)")
+        self.assertEqual(model, "gemini-4-neon-high")
 
     def test_scion_model_unset_uses_harness_config_model_xl_shorthand(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="xl")
             with env_vars(SCION_MODEL=None, AGY_MODEL=None):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 4 Argon (High)")
+        self.assertEqual(model, "gemini-4-neon-high")
 
     def test_agy_model_env_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -309,46 +319,72 @@ class ModelResolutionTest(unittest.TestCase):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "agy-operator-model")
 
-    def test_flash_model_fallback_when_nothing_requested(self) -> None:
+    def test_medium_alias_fallback_when_nothing_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp)
             with env_vars(SCION_MODEL=None, AGY_MODEL=None):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, provision.FLASH_MODEL)
+        self.assertEqual(model, ANTIGRAVITY_MODEL_ALIASES["medium"])
+        self.assertNotEqual(model, provision.FLASH_MODEL)
+
+    def test_changing_medium_alias_changes_default(self) -> None:
+        custom_aliases = dict(ANTIGRAVITY_MODEL_ALIASES, medium="gemini-next-medium")
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model_aliases=custom_aliases)
+            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "gemini-next-medium")
+
+    def test_flash_model_last_resort_when_medium_alias_missing_or_blank(self) -> None:
+        cases = (
+            ("missing_table", None),
+            ("empty_table", {}),
+            ("no_medium_key", {"large": "gemini-4-neon-medium"}),
+            ("blank_medium", {"medium": "   "}),
+            ("non_dict_aliases", "not-a-dict"),
+        )
+        for label, aliases in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+                    ctx = make_ctx(tmp, model_aliases=aliases)
+                    with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                        model = provision._resolve_model(ctx)
+                self.assertEqual(model, provision.FLASH_MODEL)
 
     # --- Precedence ordering (review round 1, R1) -----------------------
     # Each test below pins one step of the precedence chain by setting both
     # the winning source and the next lower one, so a mutant that swaps two
-    # steps' check order fails here. Verified by hand, each swap kills
-    # exactly the one test that sets both of the swapped sources: swapping
-    # the SCION_MODEL/harness_config.model checks in _resolve_model breaks
-    # only test_scion_model_wins_over_harness_config_model (review round 3,
-    # N1 — test_harness_config_model_wins_over_agy_model leaves SCION_MODEL
-    # unset, so that swap doesn't affect it); separately, swapping the
-    # harness_config.model/AGY_MODEL checks breaks only
-    # test_harness_config_model_wins_over_agy_model.
+    # steps' check order fails here.
 
     def test_scion_model_wins_over_harness_config_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="large")
             with env_vars(SCION_MODEL="medium", AGY_MODEL=None):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 3.8 Flash (Medium)")
+        self.assertEqual(model, "gemini-4-hydrogen-medium")
 
     def test_harness_config_model_wins_over_agy_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp, model="large")
             with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 4 Argon (Medium)")
+        self.assertEqual(model, "gemini-4-neon-medium")
 
-    def test_agy_model_wins_over_flash_model(self) -> None:
+    def test_agy_model_wins_over_medium_alias_and_flash_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp)
             with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "agy-operator-model")
+        self.assertNotEqual(model, ANTIGRAVITY_MODEL_ALIASES["medium"])
         self.assertNotEqual(model, provision.FLASH_MODEL)
+
+    def test_blank_agy_model_falls_through_to_medium_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp)
+            with env_vars(SCION_MODEL=None, AGY_MODEL="   "):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, ANTIGRAVITY_MODEL_ALIASES["medium"])
 
     def test_blank_scion_model_falls_through_to_harness_config_model(self) -> None:
         # Whitespace-only SCION_MODEL must be treated as unset, not as a
@@ -357,7 +393,7 @@ class ModelResolutionTest(unittest.TestCase):
             ctx = make_ctx(tmp, model="small")
             with env_vars(SCION_MODEL="  ", AGY_MODEL=None):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 3.1 Flash Lite")
+        self.assertEqual(model, "gemini-4-hydrogen-low")
 
     def test_harness_config_model_concrete_id_case_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -621,13 +657,6 @@ class ProvisionModelWiringTest(unittest.TestCase):
     """
 
     def test_scion_model_tier_lands_in_settings_json_via_provision(self) -> None:
-        # Deliberately "large", not "medium": FLASH_MODEL's literal value is
-        # "Gemini 3.8 Flash (Medium)", the same string the "medium" alias
-        # resolves to, so a mutant that falls all the way back to FLASH_MODEL
-        # would coincidentally match and go undetected. "large" resolves to
-        # "Gemini 4 Argon (Medium)", which differs from FLASH_MODEL, so the
-        # wiring mutant (reverting this call site to main's raw expression)
-        # is actually caught here -- confirmed by hand.
         with tempfile.TemporaryDirectory() as tmp:
             with env_vars(SCION_MODEL="large", AGY_MODEL=None):
                 _invoke(
@@ -641,7 +670,24 @@ class ProvisionModelWiringTest(unittest.TestCase):
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
-        self.assertEqual(settings["model"], "Gemini 4 Argon (Medium)")
+        self.assertEqual(settings["model"], "gemini-4-neon-medium")
+
+    def test_unset_model_defaults_to_medium_alias_via_provision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                _invoke(
+                    tmp,
+                    env_vars=[],
+                    explicit_type="none",
+                    harness_config={"model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES)},
+                )
+
+            settings_path = os.path.join(tmp, ".gemini", "antigravity-cli", "settings.json")
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+        self.assertEqual(settings["model"], ANTIGRAVITY_MODEL_ALIASES["medium"])
+        self.assertNotEqual(settings["model"], provision.FLASH_MODEL)
 
 
 

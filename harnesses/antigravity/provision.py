@@ -32,6 +32,9 @@ assert scion_harness.INTERFACE_VERSION >= 3, (
 
 PROVISION_VERSION = "2026-07-09T01:00:00Z"
 
+DEFAULT_MODEL_ALIAS = "medium"
+# Last-resort fallback only when harness_config.model_aliases is missing or
+# omits DEFAULT_MODEL_ALIAS.
 FLASH_MODEL = "Gemini 3.8 Flash (Medium)"
 
 
@@ -72,7 +75,11 @@ def _resolve_model(ctx: scion_harness.ProvisionContext) -> str:
          SCION_MODEL would be, instead of leaking into settings.json
          unresolved.
       3. AGY_MODEL (operator-set env var fallback).
-      4. FLASH_MODEL (the hard-coded pin).
+      4. harness_config.model_aliases["medium"] (the default tier alias from
+         config.yaml, so updating the alias table changes the default with no
+         code change).
+      5. FLASH_MODEL (last-resort fallback when model_aliases is missing or
+         omits "medium").
     """
     resolved = scion_harness.resolve_model(ctx)
     if resolved:
@@ -82,7 +89,19 @@ def _resolve_model(ctx: scion_harness.ProvisionContext) -> str:
     )
     if configured:
         return configured
-    return os.environ.get("AGY_MODEL", "") or FLASH_MODEL
+    agy_model = os.environ.get("AGY_MODEL", "").strip()
+    if agy_model:
+        return agy_model
+    aliases = (
+        ctx.harness_config.get("model_aliases")
+        if isinstance(ctx.harness_config, dict)
+        else None
+    )
+    if isinstance(aliases, dict):
+        default_model = str(aliases.get(DEFAULT_MODEL_ALIAS) or "").strip()
+        if default_model:
+            return default_model
+    return FLASH_MODEL
 
 
 ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
