@@ -703,8 +703,20 @@ func (s *Server) validateMessagePolicyAuthoring(
 
 	mode, err := ev.ValidateAuthoring(ctx, spec)
 	if err != nil {
-		writeMessagePolicyValidationError(w, err)
-		return "", nil, false
+		// On /test (!forbidReservedNames), allow a System One binding error
+		// (e.g. instance not on the project allowlist or disabled) to flow into
+		// live evaluation so /test reports class=failed, reason_code=no_eligible_instance
+		// with 0 provider requests and 0 secret reads after G4/L1 pre-check.
+		var vErr *messagepolicy.ValidationError
+		if !forbidReservedNames && errors.As(err, &vErr) && vErr.Field == "system_one_rule" && vErr.Category == "binding" {
+			mode = strings.TrimSpace(spec.Mode)
+			if mode == "" {
+				mode = messagepolicy.ModeShadow
+			}
+		} else {
+			writeMessagePolicyValidationError(w, err)
+			return "", nil, false
+		}
 	}
 
 	if _, parseErr := uuid.Parse(spec.Name); parseErr == nil {
@@ -1213,12 +1225,12 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		RejectReason:      effective.RejectReason,
 		RejectRemediation: effective.RejectRemediation,
 	}
-	// Note: handleTestMessagePolicy intentionally validates syntax/schema/CEL
-	// here without project allowlist short-circuiting so live evaluation runs
-	// through System One Runtime.Evaluate with ProjectID + RequireProject=true
-	// and reports allowlist refusal as class=failed, reason=no_eligible_instance
-	// (with 0 provider requests and 0 secret reads).
-	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, false)
+	// Attach project.ID to evalCtx so unbound System One rules resolve strictly
+	// against this project's allowlist (never falsely tripping ambiguity against
+	// instances not on the project allowlist), while binding refusals flow into
+	// EvaluatePolicyTest to report class=failed, reason_code=no_eligible_instance.
+	evalCtx := systemoneruntime.WithEvalProjectID(ctx, project.ID)
+	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(evalCtx, w, project.ID, spec, false)
 	if !ok {
 		return
 	}
@@ -1391,7 +1403,7 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		if hasSystemOne && !manualJudgments {
 			soBudget := s.messagePolicyGate.systemOneSendBudget()
 			cls = ev.EvaluatePolicyTest(
-				ctx,
+				evalCtx,
 				effective.ID,
 				effective.Revision,
 				effective.ViolationRule,

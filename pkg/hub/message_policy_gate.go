@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -865,8 +866,12 @@ func (s *Server) evalOneMessagePolicyWithFacts(
 	if strings.TrimSpace(pol.SystemOneRule) == "" {
 		return ev.EvaluateViolation(ctx, pol.ID, pol.Revision, pol.ViolationRule, act, messagepolicy.WithBudget(budget))
 	}
+	evalCtx := ctx
+	if projectID != "" {
+		evalCtx = systemoneruntime.WithEvalProjectID(ctx, projectID)
+	}
 	return ev.EvaluatePolicy(
-		ctx,
+		evalCtx,
 		pol.ID,
 		pol.Revision,
 		pol.ViolationRule,

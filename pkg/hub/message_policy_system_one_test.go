@@ -1761,8 +1761,8 @@ func TestMessagePolicySystemOne_R2GroupSendCELOnlySkipsAgentListing(t *testing.T
 	// Create a second agent participant in the group conversation.
 	peerAgent := &store.Agent{
 		ID:        tid("ag-r2-peer"),
-		Slug:      "peer-agent",
-		Name:      "Peer Agent",
+		Slug:      "r2-peer-agent",
+		Name:      "R2 Peer Agent",
 		ProjectID: f.project.ID,
 		Phase:     "running",
 	}
