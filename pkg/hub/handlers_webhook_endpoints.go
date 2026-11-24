@@ -724,9 +724,16 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 
 	audit := newWebhookEndpointAudit(ctx, mutationTypeWebhookEndpointUpdate, ep.ID)
 
+	// Precompute the row-independent delete permission decision BEFORE opening
+	// WithTx so authzService.Decide never queries the root DB pool while the
+	// transaction holds a connection / quota lock (prevents SQLite self-deadlock
+	// and Postgres pool starvation, S-1).
+	var deleteDecision webhookEndpointAccess
+	if mask.Binding {
+		deleteDecision = s.webhookEndpointAccessDecision(ctx, projectID, ActionDelete, nil)
+	}
+
 	var (
-		deleteDeniedReason string
-		deleteDeniedPolicy bool
 		errDeleteForbidden = errors.New("webhook_endpoint.delete required for agent-lifetime binding")
 		errInvalidBinding  = errors.New("invalid webhook endpoint binding state")
 	)
@@ -768,17 +775,12 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 				return errInvalidBinding
 			}
 			bindingChanged := effectiveAgent != current.BoundAgentID || effectiveLifetime != current.BoundLifetime
-			if effectiveLifetime == store.WebhookBoundLifetimeAgent && bindingChanged {
+			if effectiveLifetime == store.WebhookBoundLifetimeAgent && bindingChanged && !deleteDecision.allowed {
 				// Setting or changing an agent-lifetime binding delegates endpoint
 				// deletion to whoever can delete the bound agent; require
 				// webhook_endpoint.delete (the same decision as DELETE) so callers
 				// with update-only cannot delete endpoints indirectly.
-				d := s.webhookEndpointAccessDecision(ctx, projectID, ActionDelete, nil)
-				if !d.allowed {
-					deleteDeniedReason = d.reason
-					deleteDeniedPolicy = d.byPolicy
-					return errDeleteForbidden
-				}
+				return errDeleteForbidden
 			}
 			if effectiveAgent != "" && effectiveAgent != current.BoundAgentID {
 				boundCount, bErr := tx.CountBoundWebhookEndpoints(ctx, projectID, effectiveAgent)
@@ -823,8 +825,8 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 			writeWebhookEndpointNotFound(w)
 		case errors.Is(err, errDeleteForbidden):
 			identity := GetIdentityFromContext(ctx)
-			logAuthzDenial(r, identity, webhookEndpointResource(projectID), ActionDelete, deleteDeniedReason)
-			if deleteDeniedPolicy {
+			logAuthzDenial(r, identity, webhookEndpointResource(projectID), ActionDelete, deleteDecision.reason)
+			if deleteDecision.byPolicy {
 				writeForbidden(w, "You don't have permission to access webhook endpoints in this project")
 			} else {
 				writeForbidden(w, "")
