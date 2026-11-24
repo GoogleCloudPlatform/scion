@@ -3140,10 +3140,11 @@ func netnsSetupContainerName(containerID string) string {
 // non-empty), cfg.Env "K=V", bare "K" (broker os.LookupEnv), and env-type
 // ResolvedSecrets. Precedence matches buildCommonRunArgs and the container
 // engine: ResolvedAuth is lowest precedence; cfg.Env entries are applied next
-// in order (later -e wins, and an unset bare entry does not override an
-// earlier value), and any key present in cfg.Env blocks ResolvedSecrets with
-// the same target; otherwise env-type ResolvedSecrets are applied in order
-// (later -e wins, overriding ResolvedAuth).
+// in order (later -e wins, and a bare entry whose host env var is unset clears
+// any earlier value, matching Docker/Podman `-e K` semantics), and any key
+// present in cfg.Env blocks ResolvedSecrets with the same target; otherwise
+// env-type ResolvedSecrets are applied in order (later -e wins, overriding
+// ResolvedAuth).
 func effectiveInitFirewall(cfg RunConfig) (value string, set bool) {
 	if cfg.Harness != nil && cfg.ResolvedAuth != nil {
 		if v := cfg.ResolvedAuth.EnvVars[initFirewallEnvVar]; v != "" {
@@ -3165,6 +3166,9 @@ func effectiveInitFirewall(cfg RunConfig) (value string, set bool) {
 			if envVal, ok := os.LookupEnv(k); ok {
 				value = envVal
 				set = true
+			} else {
+				value = ""
+				set = false
 			}
 		}
 	}

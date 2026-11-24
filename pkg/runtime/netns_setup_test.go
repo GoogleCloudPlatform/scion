@@ -775,7 +775,7 @@ func TestEffectiveInitFirewall(t *testing.T) {
 		}
 	})
 
-	t.Run("unset bare K does not clobber earlier K=V", func(t *testing.T) {
+	t.Run("unset bare K clears earlier K=V", func(t *testing.T) {
 		t.Setenv("SCION_INIT_FIREWALL", "")
 		if err := os.Unsetenv("SCION_INIT_FIREWALL"); err != nil {
 			t.Fatal(err)
@@ -783,8 +783,8 @@ func TestEffectiveInitFirewall(t *testing.T) {
 		v, ok := effectiveInitFirewall(RunConfig{
 			Env: []string{"SCION_INIT_FIREWALL=true", "SCION_INIT_FIREWALL"},
 		})
-		if !ok || v != "true" {
-			t.Fatalf("effectiveInitFirewall() = (%q, %v), want (\"true\", true)", v, ok)
+		if ok || v != "" {
+			t.Fatalf("effectiveInitFirewall() = (%q, %v), want (\"\", false)", v, ok)
 		}
 	})
 
@@ -988,6 +988,9 @@ func TestBuildNetnsSetupArgs_InitFirewallSources(t *testing.T) {
 				} else if ev, ok := os.LookupEnv(k); ok {
 					val = ev
 					set = true
+				} else {
+					val = ""
+					set = false
 				}
 			}
 			return val, set
@@ -1043,10 +1046,21 @@ func TestBuildNetnsSetupArgs_InitFirewallSources(t *testing.T) {
 				},
 				wantEmit: false,
 			},
+			{
+				name: "K=true then bare K (host unset) clears flag",
+				cfg: RunConfig{
+					Env: []string{"SCION_INIT_FIREWALL=true", "SCION_INIT_FIREWALL"},
+				},
+				wantEmit: false,
+			},
 		}
 
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Setenv("SCION_INIT_FIREWALL", "")
+				if err := os.Unsetenv("SCION_INIT_FIREWALL"); err != nil {
+					t.Fatal(err)
+				}
 				cfg := tc.cfg
 				cfg.RuntimeName = "docker"
 				cfg.Harness = &harness.Generic{}
@@ -1062,10 +1076,11 @@ func TestBuildNetnsSetupArgs_InitFirewallSources(t *testing.T) {
 					t.Fatalf("buildCommonRunArgs() error = %v", err)
 				}
 				agentRaw, agentSet := extractEffectiveEnv(agentArgs, "SCION_INIT_FIREWALL")
-				if !agentSet {
-					t.Fatalf("expected agent argv to set SCION_INIT_FIREWALL; got %v", agentArgs)
+				var agentNorm string
+				var agentEmit bool
+				if agentSet {
+					agentNorm, agentEmit = normalizeInitFirewallArg(agentRaw)
 				}
-				agentNorm, agentEmit := normalizeInitFirewallArg(agentRaw)
 
 				setupArgs := buildNetnsSetupArgs("abcdef0123456789", cfg)
 				setupVal, setupSet := extractEffectiveEnv(setupArgs, "SCION_INIT_FIREWALL")
