@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,16 +95,39 @@ type decisionScaleFixture struct {
 func openScaleCompositeStore(tb testing.TB) *CompositeStore {
 	tb.Helper()
 	ctx := context.Background()
+	if t, ok := tb.(*testing.T); ok && os.Getenv("SCION_TEST_POSTGRES_DSN") == "" {
+		// Under -tags integration + SCION_TEST_POSTGRES_URL, enttest.NewClient(t)
+		// provisions an isolated ephemeral Postgres database and drops it on cleanup.
+		return newTestCompositeStore(t)
+	}
 	if dsn := os.Getenv("SCION_TEST_POSTGRES_DSN"); dsn != "" {
-		client, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 4})
+		// Isolate benchmark runs in a fresh ephemeral schema so concurrent or
+		// repeated runs never pollute a shared Postgres database.
+		schemaName := "scale_bench_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		adminClient, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 2})
 		require.NoError(tb, err)
+		adminCS := NewCompositeStore(adminClient)
+		_, err = adminCS.DB().ExecContext(ctx, "CREATE SCHEMA "+schemaName)
+		require.NoError(tb, err)
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		scopedDSN := dsn + sep + "search_path=" + schemaName
+		client, err := entc.OpenPostgres(scopedDSN, entc.PoolConfig{MaxOpenConns: 4})
+		if err != nil {
+			_, _ = adminCS.DB().ExecContext(ctx, "DROP SCHEMA IF EXISTS "+schemaName+" CASCADE")
+			_ = adminCS.Close()
+			require.NoError(tb, err)
+		}
 		require.NoError(tb, entc.AutoMigrate(ctx, client))
 		cs := NewCompositeStore(client)
-		tb.Cleanup(func() { _ = cs.Close() })
+		tb.Cleanup(func() {
+			_ = cs.Close()
+			_, _ = adminCS.DB().ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schemaName+" CASCADE")
+			_ = adminCS.Close()
+		})
 		return cs
-	}
-	if t, ok := tb.(*testing.T); ok {
-		return newTestCompositeStore(t)
 	}
 	dbPath := filepath.Join(tb.TempDir(), "scale.db")
 	client, err := entc.OpenSQLite(dbPath, entc.PoolConfig{MaxOpenConns: 1})
@@ -111,6 +136,22 @@ func openScaleCompositeStore(tb testing.TB) *CompositeStore {
 	cs := NewCompositeStore(client)
 	tb.Cleanup(func() { _ = cs.Close() })
 	return cs
+}
+
+func measureColdAndWarmMedian(tb testing.TB, warmRuns int, fn func() error) (cold, warmMedian time.Duration) {
+	tb.Helper()
+	t0 := time.Now()
+	require.NoError(tb, fn())
+	cold = time.Since(t0)
+
+	samples := make([]time.Duration, warmRuns)
+	for i := 0; i < warmRuns; i++ {
+		t1 := time.Now()
+		require.NoError(tb, fn())
+		samples[i] = time.Since(t1)
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	return cold, samples[len(samples)/2]
 }
 
 func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled bool) *decisionScaleFixture {
@@ -356,8 +397,11 @@ func BenchmarkDecisionsProfileScale(b *testing.B) {
 			})
 
 			b.Run("ProjectsWithUnsettledDecisions_Quiet", func(b *testing.B) {
-				// Settle all rows temporarily to measure the quiet-user fast path.
-				_, err := f.cs.client.Decision.Update().SetSettled(true).Save(ctx)
+				// Scope the update to this fixture's projects so a shared DB is never touched.
+				_, err := f.cs.client.Decision.Update().
+					Where(decision.ProjectIDIn(f.projectUUIDs...)).
+					SetSettled(true).
+					Save(ctx)
 				require.NoError(b, err)
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -370,12 +414,14 @@ func BenchmarkDecisionsProfileScale(b *testing.B) {
 	}
 }
 
-// TestDecisionsScaleStore runs the store-level scale timing table when
-// SCION_DECISIONS_SCALE=1 (and optionally SCION_DECISIONS_SCALE_X=1 for 1M).
+// TestDecisionsScaleStore runs the store-level scale timing table (cold first
+// call + warm median of 5 calls) when SCION_DECISIONS_SCALE=1 (and optionally
+// SCION_DECISIONS_SCALE_X=1 for 1M).
 func TestDecisionsScaleStore(t *testing.T) {
 	if os.Getenv("SCION_DECISIONS_SCALE") != "1" {
 		t.Skip("set SCION_DECISIONS_SCALE=1 to run store-level scale timings")
 	}
+	const warmRuns = 5
 	ctx := context.Background()
 	for _, sc := range decisionScaleSpecs {
 		if sc.name == "X_200p_1M" && os.Getenv("SCION_DECISIONS_SCALE_X") != "1" {
@@ -386,45 +432,64 @@ func TestDecisionsScaleStore(t *testing.T) {
 			t.Logf("[%s/%s] seeded %d decisions + %d answers across %d projects in %v",
 				sc.name, f.cs.Dialect(), f.totalDecisions, f.totalAnswers, sc.numProjects, f.seedDuration)
 
-			t0 := time.Now()
-			pwds, err := f.cs.ProjectsWithDecisions(ctx, f.projectIDs)
-			dPWD := time.Since(t0)
-			require.NoError(t, err)
-			require.Len(t, pwds, sc.numProjects)
+			coldPWD, medPWD := measureColdAndWarmMedian(t, warmRuns, func() error {
+				pwds, err := f.cs.ProjectsWithDecisions(ctx, f.projectIDs)
+				if err != nil {
+					return err
+				}
+				require.Len(t, pwds, sc.numProjects)
+				return nil
+			})
 
-			t0 = time.Now()
-			unsettled, err := f.cs.ProjectsWithUnsettledDecisions(ctx, f.projectIDs)
-			dUnsettled := time.Since(t0)
-			require.NoError(t, err)
-			require.Len(t, unsettled, sc.numProjects)
+			coldUnsettled, medUnsettled := measureColdAndWarmMedian(t, warmRuns, func() error {
+				unsettled, err := f.cs.ProjectsWithUnsettledDecisions(ctx, f.projectIDs)
+				if err != nil {
+					return err
+				}
+				require.Len(t, unsettled, sc.numProjects)
+				return nil
+			})
 
-			t0 = time.Now()
-			openPrompts, err := f.cs.ListOpenPrompts(ctx, f.projectIDs, f.allKeys)
-			dOpen := time.Since(t0)
-			require.NoError(t, err)
-			require.Len(t, openPrompts, sc.numProjects*sc.openPerProject)
+			coldOpen, medOpen := measureColdAndWarmMedian(t, warmRuns, func() error {
+				openPrompts, err := f.cs.ListOpenPrompts(ctx, f.projectIDs, f.allKeys)
+				if err != nil {
+					return err
+				}
+				require.Len(t, openPrompts, sc.numProjects*sc.openPerProject)
+				return nil
+			})
 
-			// Quiet-user measurement (all rows settled).
-			_, err = f.cs.client.Decision.Update().SetSettled(true).Save(ctx)
+			// Quiet-user measurement: scope update to this fixture's projects only.
+			_, err := f.cs.client.Decision.Update().
+				Where(decision.ProjectIDIn(f.projectUUIDs...)).
+				SetSettled(true).
+				Save(ctx)
 			require.NoError(t, err)
-			t0 = time.Now()
-			quietUnsettled, err := f.cs.ProjectsWithUnsettledDecisions(ctx, f.projectIDs)
-			dQuietUnsettled := time.Since(t0)
-			require.NoError(t, err)
-			require.Empty(t, quietUnsettled)
 
-			t0 = time.Now()
-			quietOpen, err := f.cs.ListOpenPrompts(ctx, f.projectIDs, f.allKeys)
-			dQuietOpen := time.Since(t0)
-			require.NoError(t, err)
-			require.Empty(t, quietOpen)
+			coldQuietUnsettled, medQuietUnsettled := measureColdAndWarmMedian(t, warmRuns, func() error {
+				quietUnsettled, err := f.cs.ProjectsWithUnsettledDecisions(ctx, f.projectIDs)
+				if err != nil {
+					return err
+				}
+				require.Empty(t, quietUnsettled)
+				return nil
+			})
 
-			t.Logf("[%s/%s] STORE TIMINGS:", sc.name, f.cs.Dialect())
-			t.Logf("  ProjectsWithDecisions(%d)                  = %v", sc.numProjects, dPWD)
-			t.Logf("  ProjectsWithUnsettledDecisions(%d open)    = %v", len(unsettled), dUnsettled)
-			t.Logf("  ListOpenPrompts(%d open)                   = %v", len(openPrompts), dOpen)
-			t.Logf("  ProjectsWithUnsettledDecisions(quiet)      = %v", dQuietUnsettled)
-			t.Logf("  ListOpenPrompts(quiet)                     = %v", dQuietOpen)
+			coldQuietOpen, medQuietOpen := measureColdAndWarmMedian(t, warmRuns, func() error {
+				quietOpen, err := f.cs.ListOpenPrompts(ctx, f.projectIDs, f.allKeys)
+				if err != nil {
+					return err
+				}
+				require.Empty(t, quietOpen)
+				return nil
+			})
+
+			t.Logf("[%s/%s] STORE TIMINGS (cold / warm median of %d):", sc.name, f.cs.Dialect(), warmRuns)
+			t.Logf("  ProjectsWithDecisions(%d)                  = cold %v / warm-med %v", sc.numProjects, coldPWD, medPWD)
+			t.Logf("  ProjectsWithUnsettledDecisions(%d open)    = cold %v / warm-med %v", sc.numProjects, coldUnsettled, medUnsettled)
+			t.Logf("  ListOpenPrompts(%d open)                   = cold %v / warm-med %v", sc.numProjects*sc.openPerProject, coldOpen, medOpen)
+			t.Logf("  ProjectsWithUnsettledDecisions(quiet)      = cold %v / warm-med %v", coldQuietUnsettled, medQuietUnsettled)
+			t.Logf("  ListOpenPrompts(quiet)                     = cold %v / warm-med %v", coldQuietOpen, medQuietOpen)
 		})
 	}
 }
