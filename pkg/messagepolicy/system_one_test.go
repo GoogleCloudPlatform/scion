@@ -34,18 +34,22 @@ import (
 )
 
 type mpFakeAdapter struct {
-	name     string
-	invokeFn func(ctx context.Context, tr provider.Transport, inst provider.InstanceView, req provider.ModelRequest) (provider.ModelResult, error)
+	name       string
+	binaryOnly bool
+	invokeFn   func(ctx context.Context, tr provider.Transport, inst provider.InstanceView, req provider.ModelRequest) (provider.ModelResult, error)
 }
 
 func (a *mpFakeAdapter) Name() string    { return a.name }
 func (a *mpFakeAdapter) Version() string { return "1.0.0-test" }
 func (a *mpFakeAdapter) Capabilities(provider.InstanceView) (provider.Capabilities, error) {
+	prims := map[string]provider.PrimitiveLimits{
+		spec.PrimitiveBinary: {Supported: true, DistributionCompleteness: spec.CompletenessComplete},
+	}
+	if !a.binaryOnly {
+		prims[spec.PrimitiveChoice] = provider.PrimitiveLimits{Supported: true, MinOptions: 2, MaxOptions: 16, DistributionCompleteness: spec.CompletenessComplete}
+	}
 	return provider.Capabilities{
-		Primitives: map[string]provider.PrimitiveLimits{
-			spec.PrimitiveBinary: {Supported: true, DistributionCompleteness: spec.CompletenessComplete},
-			spec.PrimitiveChoice: {Supported: true, MinOptions: 2, MaxOptions: 16, DistributionCompleteness: spec.CompletenessComplete},
-		},
+		Primitives:             prims,
 		MaxQuestionsPerRequest: 8,
 		MaxInputTokens:         8192,
 		Truncation:             provider.TruncationNever,
@@ -137,10 +141,8 @@ func TestSystemOneContentEnv_MatchesDesignSpec(t *testing.T) {
 		assert.Equal(t, wf.maxBytes, f.MaxBytes)
 		assert.Equal(t, wf.trust, f.Trust)
 	}
-	cs, ok := env.ChoiceSet(messagepolicy.ChoiceSetUnmentionedAgents)
-	require.True(t, ok)
-	assert.Equal(t, 64, cs.MaxItems)
-	assert.Equal(t, 128, cs.MaxLabelBytes)
+	// Dynamic choice sets are omitted in v1 (refused at registration in P2; deferred to M3 + PV8).
+	assert.Empty(t, env.ChoiceSets)
 }
 
 func TestValidateAuthoring_SystemOneMatrix(t *testing.T) {
@@ -459,4 +461,152 @@ func TestEvaluatePolicy_SystemOneShortCircuitAndProjection(t *testing.T) {
 	projTrunc := messagepolicy.ProjectEvaluation(clsTrunc.Evaluation)
 	require.NotNil(t, projTrunc)
 	assert.True(t, projTrunc.Truncated)
+}
+
+func TestEvaluatePolicy_BinaryOnlyOnBinaryOnlyAdapterAndStaticClosedChoice(t *testing.T) {
+	ctx := context.Background()
+
+	facts := messagepolicy.Facts{
+		Surface: messagepolicy.SurfaceAgentToConversation,
+		Message: messagepolicy.MessageFacts{
+			Body: "Could you pick option A or B?",
+			Type: "input-needed",
+		},
+		Conversation: messagepolicy.ConversationFacts{
+			UnmentionedAgentSlugs: []string{"alice-agent", "bob-agent"},
+		},
+	}
+
+	// BuildSystemOneInput must NOT populate any dynamic choice sets (removed in v1).
+	builtInput := messagepolicy.BuildSystemOneInput(facts)
+	assert.Empty(t, builtInput.ChoiceSets, "v1 message_policy input must not carry dynamic choice sets")
+
+	// 1. Binary-only System One rule on an adapter WITHOUT the choice primitive
+	//    must evaluate normally (NOT fail with unsupported).
+	var seenChoiceSets map[string][]string
+	regBin := provider.NewRegistry()
+	regBin.MustRegister(&mpFakeAdapter{
+		name:       "fake-binary-only",
+		binaryOnly: true,
+		invokeFn: func(_ context.Context, _ provider.Transport, _ provider.InstanceView, req provider.ModelRequest) (provider.ModelResult, error) {
+			seenChoiceSets = req.ChoiceSets
+			dist, val, _, _ := provider.BinaryDistribution(0.94)
+			return provider.ModelResult{
+				ResolvedModel: "bin-model-1",
+				HTTPStatus:    200,
+				Answers: map[string]provider.Answer{
+					"asks_choice": {
+						QuestionID:   "asks_choice",
+						Primitive:    spec.PrimitiveBinary,
+						Status:       provider.AnswerStatusAnswered,
+						Bool:         val,
+						Distribution: dist,
+					},
+				},
+			}, nil
+		},
+	})
+	instBin := systemoneruntime.Instance{
+		ID:       "inst-bin-1",
+		Name:     "bin-inst",
+		Adapter:  "fake-binary-only",
+		Model:    "bin-model-1",
+		Endpoint: "https://bin.example.test",
+		Auth:     systemoneruntime.InstanceAuth{Kind: "api_key", SecretName: "systemone.instance.inst-bin-1"},
+		Enabled:  true,
+		Revision: 1,
+	}
+	rtBin := systemoneruntime.New(systemoneruntime.Config{
+		Registry:    regBin,
+		Instances:   systemoneruntime.StaticInstances(instBin),
+		Credentials: systemoneruntime.StaticCredential("sk-bin-only"),
+	})
+	t.Cleanup(rtBin.CloseIdleConnections)
+
+	engBin := ruleengine.NewEngine()
+	celDialectBin, err := ruleengine.NewCELDialect()
+	require.NoError(t, err)
+	celEngBin, err := messagepolicy.NewCELEngine()
+	require.NoError(t, err)
+	require.NoError(t, celDialectBin.RegisterEnvironment(celEngBin))
+	require.NoError(t, engBin.Register(celDialectBin))
+	require.NoError(t, engBin.Register(systemone.NewDialect(systemone.DialectConfig{
+		Runtime: rtBin,
+		Enabled: func() bool { return true },
+	})))
+	require.NoError(t, engBin.AllowConsumerDialects(
+		messagepolicy.ConsumerName,
+		ruleengine.Grant(ruleengine.DialectCEL),
+		ruleengine.GrantIO(systemone.DialectName),
+	))
+	require.NoError(t, systemone.RegisterConsumerEnvironment(engBin, messagepolicy.ConsumerName, messagepolicy.SystemOneContentEnv()))
+
+	evBin, err := messagepolicy.New(engBin)
+	require.NoError(t, err)
+
+	binaryRule := `{
+		"dialect": "system_one",
+		"inputs": ["message.body"],
+		"spec": {
+			"version": 1,
+			"binding": {"instance": "bin-inst"},
+			"questions": [{"id": "asks_choice", "type": "binary", "instructions": "Does the message ask the user to choose?"}]
+		}
+	}`
+	clsBin := evBin.EvaluatePolicy(
+		ctx, "pol-bin-only", 1,
+		`judgment_flags.asks_choice`,
+		binaryRule, "proj-1", facts,
+		nil, []messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(time.Second)},
+	)
+	assert.Equal(t, messagepolicy.ClassViolation, clsBin.Class, "binary-only rule on binary-only adapter must evaluate normally, not unsupported")
+	assert.Empty(t, clsBin.Reason)
+	assert.Empty(t, seenChoiceSets)
+	assert.True(t, clsBin.Judgments.Flags["asks_choice"])
+
+	// 2. Static closed-choice rule evaluates normally on an adapter that supports PrimitiveChoice.
+	evChoice, _ := newTestEvaluatorWithSystemOne(t, nil, func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+		chosen := "out_of_scope"
+		return provider.ModelResult{
+			ResolvedModel: "fake-model-1",
+			HTTPStatus:    200,
+			Answers: map[string]provider.Answer{
+				"topic": {
+					QuestionID: "topic",
+					Primitive:  spec.PrimitiveChoice,
+					Status:     provider.AnswerStatusAnswered,
+					Choice:     &chosen,
+					Distribution: map[string]float64{
+						"in_scope":     0.05,
+						"out_of_scope": 0.95,
+					},
+				},
+			},
+		}, nil
+	})
+	staticChoiceRule := `{
+		"dialect": "system_one",
+		"inputs": ["message.body"],
+		"spec": {
+			"version": 1,
+			"binding": {"instance": "mp-inst"},
+			"questions": [{
+				"id": "topic",
+				"type": "choice",
+				"instructions": "Classify topic scope.",
+				"options": [
+					{"id": "in_scope", "description": "Within project scope"},
+					{"id": "out_of_scope", "description": "Outside project scope"}
+				]
+			}]
+		}
+	}`
+	clsChoice := evChoice.EvaluatePolicy(
+		ctx, "pol-static-choice", 1,
+		`judgment_labels.topic == "out_of_scope"`,
+		staticChoiceRule, "proj-1", facts,
+		nil, []messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(time.Second)},
+	)
+	assert.Equal(t, messagepolicy.ClassViolation, clsChoice.Class)
+	assert.Equal(t, "out_of_scope", clsChoice.Judgments.Labels["topic"])
 }

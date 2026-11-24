@@ -90,7 +90,7 @@ func mpgEnableSystemOne(t *testing.T, srv *Server, s store.Store, projectID, ins
 	instRow.Endpoint = tlsSrv.URL
 	require.NoError(t, s.UpdateSystemOneInstance(ctx, instRow))
 	if projectID != "" {
-		_, err = s.AddProjectSystemOneInstance(ctx, projectID, instanceName)
+		_, _, err = s.AddProjectSystemOneInstance(ctx, projectID, instanceName)
 		require.NoError(t, err)
 	}
 
@@ -650,7 +650,7 @@ func TestMessagePolicySystemOne_I3AuthorizedProjectIDAndProjectScopedSecret(t *t
 		},
 	})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
-	_, err = f.s.AddProjectSystemOneInstance(ctx, f.project.ID, "gemini-i3-mp")
+	_, _, err = f.s.AddProjectSystemOneInstance(ctx, f.project.ID, "gemini-i3-mp")
 	require.NoError(t, err)
 
 	pol := &store.MessagePolicy{
@@ -795,7 +795,7 @@ func TestMessagePolicySystemOne_TestEndpointAuthorityAndCredentialMatrix(t *test
 		rec := doRequestAsUser(t, f.srv, superAdmin, http.MethodPost, systemOneAdminPath, body)
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		if name, ok := body["name"].(string); ok && name != "" {
-			_, aErr := f.s.AddProjectSystemOneInstance(ctx, f.project, name)
+			_, _, aErr := f.s.AddProjectSystemOneInstance(ctx, f.project, name)
 			require.NoError(t, aErr)
 		}
 	}
@@ -1130,7 +1130,7 @@ func TestMessagePolicySystemOne_FullBodyLimitsRunBeforeCredentialIO(t *testing.T
 		},
 	})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
-	_, err = f.s.AddProjectSystemOneInstance(ctx, f.project.ID, "gemini-oversize")
+	_, _, err = f.s.AddProjectSystemOneInstance(ctx, f.project.ID, "gemini-oversize")
 	require.NoError(t, err)
 
 	// Oversize body: 9000 'é' runes (<= 16000 rune ingress limit, 18000 bytes > 16384 byte field limit).

@@ -64,7 +64,8 @@ const (
 	MaxSystemOneSendBudget = 3 * time.Second
 )
 
-// System One content-environment field and choice-set identifiers (consumer design §5.4).
+// System One content-environment field identifiers (consumer design §5.4).
+// Dynamic choice sets are intentionally omitted in v1 (deferred to M3 + PV8).
 const (
 	FieldMessageBody                      = "message.body"
 	FieldMessageType                      = "message.type"
@@ -72,8 +73,6 @@ const (
 	FieldRecipientSlug                    = "recipient.slug"
 	FieldRecipientKind                    = "recipient.kind"
 	FieldConversationUnmentionedAgentSlug = "conversation.unmentioned_agent_slugs"
-
-	ChoiceSetUnmentionedAgents = "unmentioned_agents"
 )
 
 // Policy modes (consumer design §5.3).
@@ -207,13 +206,6 @@ func SystemOneContentEnv() spec.ContentEnvironment {
 				Kind:     spec.FieldKindText,
 				MaxBytes: 2048,
 				Trust:    spec.TrustTrusted,
-			},
-		},
-		ChoiceSets: []spec.ChoiceSetDecl{
-			{
-				Name:          ChoiceSetUnmentionedAgents,
-				MaxItems:      64,
-				MaxLabelBytes: 128,
 			},
 		},
 		MaxTotalBytes: MaxSystemOneEnvTotalBytes,

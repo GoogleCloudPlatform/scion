@@ -220,14 +220,7 @@ func BuildSystemOneInput(f Facts) systemone.Input {
 			Trust: spec.TrustTrusted,
 		},
 	}
-	var choiceSets map[string][]string
-	if len(f.Conversation.UnmentionedAgentSlugs) > 0 {
-		choiceSets = map[string][]string{
-			ChoiceSetUnmentionedAgents: slices.Clone(f.Conversation.UnmentionedAgentSlugs),
-		}
-	}
 	return systemone.Input{
-		Fields:     fields,
-		ChoiceSets: choiceSets,
+		Fields: fields,
 	}
 }
