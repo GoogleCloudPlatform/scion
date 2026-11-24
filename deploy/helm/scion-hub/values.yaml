@@ -144,6 +144,17 @@ hub:
   #
   adminEmails: []
 
+  # Optional. Rendered as server.trusted_proxies in the Hub settings Secret.
+  # When empty (the default), the key is omitted: the Hub honours no forwarded
+  # client address, and its Runtime Broker transport check trusts only
+  # loopback. List the addresses your load balancer or ingress connects from.
+  #
+  #   trustedProxies:
+  #     - 10.0.0.0/8
+  #     - 35.191.0.0/16
+  #
+  trustedProxies: []
+
   # REQUIRED, and deliberately without a default. The external URL the hub is
   # reached at, scheme and host, no trailing path. Absence is not an error in
   # the hub - it warns once and falls back to http://localhost:<port>, which

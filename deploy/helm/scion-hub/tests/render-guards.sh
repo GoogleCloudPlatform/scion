@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=322   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances) + 8 (the relay version floor set to v0.3.0-preview.5: v0.3.0-preview.4, v0.2.99 and nightly-20261028 refused, v0.3.0-preview.5, v0.3.0, v0.3.1-preview.1 and nightly-20261029 accepted, the default-tag refusal offers the release floor; the empty-floor case moves to a chart copy; the pre-release-of-the-minimum row is dropped, the preview.4 row covering it; the gate block now runs 34 rows) + 3 (v0.3.0-preview.10 accepted, numeric pre-release precedence at the floor's core version; the empty-floor chart copy also refuses the default tag and a malformed version tag; the gate block now runs 37 rows) + 12 (scion-hub.fullname injectivity, preserved names, >63 digest, fullnameOverride upgrade path and NOTES disclosure) + 22 (HA PDB + external Conduit Relay role + peerAuth auto->hmac + oidc refusal).
+EXPECTED_TOTAL=329   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances) + 8 (the relay version floor set to v0.3.0-preview.5: v0.3.0-preview.4, v0.2.99 and nightly-20261028 refused, v0.3.0-preview.5, v0.3.0, v0.3.1-preview.1 and nightly-20261029 accepted, the default-tag refusal offers the release floor; the empty-floor case moves to a chart copy; the pre-release-of-the-minimum row is dropped, the preview.4 row covering it; the gate block now runs 34 rows) + 3 (v0.3.0-preview.10 accepted, numeric pre-release precedence at the floor's core version; the empty-floor chart copy also refuses the default tag and a malformed version tag; the gate block now runs 37 rows) + 12 (scion-hub.fullname injectivity, preserved names, >63 digest, fullnameOverride upgrade path and NOTES disclosure) + 22 (HA PDB + external Conduit Relay role + peerAuth auto->hmac + oidc refusal) + 7 (hub.trustedProxies: default omission, list render, credential guard, existingSecret refusal, relay Secret isolation, catch-all refusal, hub.extraEnv conflict).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1925,6 +1925,64 @@ else
   failed=$((failed + 1))
 fi
 unset _ps_a _ps_b _ps_c _hub_ck_a _hub_ck_b _rel_ck_a _rel_ck_b _rel_ck_c EXT_TLS EXT_BASE
+
+echo "== hub.trustedProxies =="
+executed=$((executed + 1))
+_tp_def="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_tp_def" | grep -q 'trusted_proxies'; then
+  echo "ok    default renders no trusted_proxies in Hub settings Secret"
+else
+  echo "FAIL  default rendered trusted_proxies in Hub settings Secret"
+  failed=$((failed + 1))
+fi
+
+executed=$((executed + 1))
+_tp_set="$(render --set 'hub.trustedProxies={10.0.0.0/8,35.191.0.0/16}' --show-only templates/secret-settings.yaml)"
+if printf '%s\n' "$_tp_set" | grep -qF '      trusted_proxies:' \
+  && printf '%s\n' "$_tp_set" | grep -qF '      - 10.0.0.0/8' \
+  && printf '%s\n' "$_tp_set" | grep -qF '      - 35.191.0.0/16'; then
+  echo "ok    hub.trustedProxies renders server.trusted_proxies list in Hub settings Secret"
+else
+  echo "FAIL  hub.trustedProxies did not render expected server.trusted_proxies list"
+  failed=$((failed + 1))
+fi
+
+reject "hub.trustedProxies credential-shaped entry" "hub.trustedProxies" \
+  --set 'hub.trustedProxies={ghp_0123456789abcdef0123456789abcdef0123}'
+
+reject "hub.trustedProxies with config.existingSecret" "inline settings values (hub.trustedProxies)" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= \
+  --set config.existingSecret=my-settings \
+  --set 'hub.trustedProxies={10.0.0.0/8}'
+
+reject "hub.trustedProxies catch-all 0.0.0.0/0" "hub.trustedProxies may not contain catch-all range" \
+  --set 'hub.trustedProxies={0.0.0.0/0}'
+
+reject "hub.extraEnv SCION_SERVER_TRUSTEDPROXIES when hub.trustedProxies is set" "hub.extraEnv may not set SCION_SERVER_TRUSTEDPROXIES" \
+  --set 'hub.trustedProxies={10.0.0.0/8}' \
+  --set 'hub.extraEnv[0].name=SCION_SERVER_TRUSTEDPROXIES' \
+  --set 'hub.extraEnv[0].value=10.0.0.0/8'
+
+executed=$((executed + 1))
+_tp_rel="$(render \
+  --set conduit.internalTls.enabled=true \
+  --set conduit.internalTls.existingSecret=relay-tls \
+  --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+  --set conduit.existingPeerSecret=peer-secret \
+  --set conduit.relayMode=external \
+  --set relay.enabled=true \
+  --set relay.publicUrl=https://relay.example.com \
+  --set 'hub.trustedProxies={35.191.0.0/16}' \
+  --set 'relay.trustedProxies={10.20.0.0/16}' \
+  --show-only templates/relay-secret-settings.yaml)"
+if printf '%s\n' "$_tp_rel" | grep -qF '10.20.0.0/16' \
+  && ! printf '%s\n' "$_tp_rel" | grep -qF '35.191.0.0/16'; then
+  echo "ok    relay Secret is unaffected by hub.trustedProxies"
+else
+  echo "FAIL  relay Secret was affected by hub.trustedProxies"
+  failed=$((failed + 1))
+fi
+unset _tp_def _tp_set _tp_rel
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"

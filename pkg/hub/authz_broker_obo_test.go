@@ -53,7 +53,7 @@ func oboMiddlewareVariants(auditLogger AuditLogger) []struct {
 			return BrokerAuthMiddleware(svc)(next)
 		}},
 		{"AuditableBrokerAuthMiddleware", func(svc *BrokerAuthService, next http.Handler) http.Handler {
-			return AuditableBrokerAuthMiddleware(svc, auditLogger)(next)
+			return AuditableBrokerAuthMiddleware(svc, auditLogger, nil)(next)
 		}},
 	}
 }
@@ -502,7 +502,7 @@ func TestBrokerOnBehalfOf_AuditableUnknownUserDenies(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := AuditableBrokerAuthMiddleware(srv.brokerAuthService, nil)(handler)
+	wrapped := AuditableBrokerAuthMiddleware(srv.brokerAuthService, nil, nil)(handler)
 	req := signReq(http.MethodPost, "/api/v1/test", map[string]string{
 		HeaderOnBehalfOf: "user:unknown@example.com",
 	})

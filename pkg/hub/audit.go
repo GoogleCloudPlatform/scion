@@ -946,8 +946,13 @@ func (l *LogAuditLogger) RecordSAAssignment(ctx context.Context, event *store.SA
 }
 
 // AuditableBrokerAuthMiddleware creates middleware that logs authentication events.
-// This wraps BrokerAuthMiddleware with audit logging.
-func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) func(http.Handler) http.Handler {
+// This wraps BrokerAuthMiddleware with audit logging. clientIP resolves the
+// request's client address (typically Server.clientIP); when nil, the peer
+// host from RemoteAddr is used.
+func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger, clientIP func(*http.Request) string) func(http.Handler) http.Handler {
+	if clientIP == nil {
+		clientIP = func(r *http.Request) string { return trustedClientIP(r, nil) }
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip if broker auth service is not configured
@@ -966,7 +971,7 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 			// Create base event
 			event := &BrokerAuthEvent{
 				BrokerID:  brokerID,
-				IPAddress: getClientIP(r),
+				IPAddress: clientIP(r),
 				UserAgent: r.UserAgent(),
 				Timestamp: time.Now(),
 			}
@@ -1024,28 +1029,6 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
-}
-
-// getClientIP extracts the client IP address from the request.
-func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For first
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP in the chain
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
-	}
-
-	// Check X-Real-IP
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-
-	// Fall back to RemoteAddr
-	return r.RemoteAddr
 }
 
 // brokerAuditCredentialDetails returns the credential attribution recorded

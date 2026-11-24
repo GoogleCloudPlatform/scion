@@ -31,11 +31,11 @@ import (
 // is already free of any upstream call, so it does not need — and must not
 // be subject to — this budget).
 //
-// Reuses geExchangeRateLimiter's bucket algorithm and geExchangeClientIP's
-// safe trusted-proxy client-IP extraction (ge_exchange_ratelimit.go) rather
-// than duplicating either: the two limiters differ only in their rate/burst
-// budget, sized for different traffic shapes (a handful of pre-auth bridge
-// replicas for the exchange endpoint, vs. arbitrary per-request callers here).
+// Reuses geExchangeRateLimiter's bucket algorithm and trustedClientIP's
+// client-IP extraction (client_ip.go) rather than duplicating either:
+// the two limiters differ only in their rate/burst budget, sized for
+// different traffic shapes (a handful of pre-auth bridge replicas for
+// the exchange endpoint, vs. arbitrary per-request callers here).
 // ---------------------------------------------------------------------------
 
 const (
@@ -56,9 +56,8 @@ type externalBearerRateLimiter struct {
 
 // newExternalBearerRateLimiter creates a rate limiter with the default
 // budget (5 rps / burst 20 per IP). trustedProxies is parsed once at
-// construction, matching how UnifiedAuthMiddleware itself resolves
-// cfg.TrustedProxies (auth.go): trusted-proxy configuration is a startup-time
-// setting, not part of the request-time hot-reload surface (that is
+// construction: trusted-proxy configuration is a startup-time setting,
+// not part of the request-time hot-reload surface (that is
 // FederationAuth's atomic.Pointer, which googleTrust reads fresh on every
 // call — see auth_external_bearer.go).
 func newExternalBearerRateLimiter(trustedProxies []string) *externalBearerRateLimiter {
@@ -74,7 +73,7 @@ func newExternalBearerRateLimiter(trustedProxies []string) *externalBearerRateLi
 // Allow reports whether r's client IP is within budget. retryAfterSeconds is
 // meaningful only when allowed is false.
 func (l *externalBearerRateLimiter) Allow(r *http.Request) (allowed bool, retryAfterSeconds int) {
-	clientIP := geExchangeClientIP(r, l.trustedNets)
+	clientIP := trustedClientIP(r, l.trustedNets)
 	return l.buckets.Allow(clientIP)
 }
 

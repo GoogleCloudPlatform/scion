@@ -41,7 +41,7 @@ func newWebhookIngress(srv *Server, trustedProxies []string) *trigger.Ingress {
 		Queue:      srv.durableQueue,
 		LoadSecret: srv.loadWebhookEndpointSecret,
 		ClientIP: func(r *http.Request) string {
-			return geExchangeClientIP(r, trustedNets)
+			return trustedClientIP(r, trustedNets)
 		},
 		Enabled: func() bool {
 			return srv.experimentEnabled(experiments.Triggers)

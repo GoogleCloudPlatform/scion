@@ -17,11 +17,14 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,15 +63,44 @@ func TestValidateServerPreflight_TrustedProxies(t *testing.T) {
 	}
 }
 
-// The setting reaches the hub only as the transport policy's list, never as
-// the legacy TrustedProxies (proxy header login, client IP rate limits).
-func TestBuildHubServerConfig_TrustedProxiesFeedTransportPolicyOnly(t *testing.T) {
-	cfg := config.GlobalConfig{TrustedProxies: []string{"10.20.0.0/16"}}
-	sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
-	assert.Equal(t, []string{"10.20.0.0/16"}, sc.TransportTrustedProxies)
-	assert.Empty(t, sc.TrustedProxies, "server.trusted_proxies must not enable proxy header login")
-	cfg.TrustedProxies[0] = "192.0.2.0/24"
-	assert.Equal(t, []string{"10.20.0.0/16"}, sc.TransportTrustedProxies, "the hub config holds its own copy")
+// server.trusted_proxies populates both TrustedProxies (client-IP extraction)
+// and TransportTrustedProxies, with independent copies. When unset,
+// TrustedProxies stays nil and TransportTrustedProxiesSet is false; when
+// explicitly empty, both are empty and TransportTrustedProxiesSet is true.
+func TestBuildHubServerConfig_TrustedProxies(t *testing.T) {
+	t.Run("set list", func(t *testing.T) {
+		cfg := config.GlobalConfig{
+			TrustedProxies:    []string{"10.20.0.0/16"},
+			TrustedProxiesSet: true,
+		}
+		sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
+		assert.Equal(t, []string{"10.20.0.0/16"}, sc.TransportTrustedProxies)
+		assert.Equal(t, []string{"10.20.0.0/16"}, sc.TrustedProxies)
+		assert.True(t, sc.TransportTrustedProxiesSet)
+
+		cfg.TrustedProxies[0] = "192.0.2.0/24"
+		assert.Equal(t, []string{"10.20.0.0/16"}, sc.TransportTrustedProxies, "the hub config holds its own copy")
+		assert.Equal(t, []string{"10.20.0.0/16"}, sc.TrustedProxies, "client-IP list holds its own copy")
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		cfg := config.GlobalConfig{}
+		sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
+		assert.Nil(t, sc.TrustedProxies)
+		assert.Nil(t, sc.TransportTrustedProxies)
+		assert.False(t, sc.TransportTrustedProxiesSet)
+	})
+
+	t.Run("explicit empty list", func(t *testing.T) {
+		cfg := config.GlobalConfig{
+			TrustedProxies:    []string{},
+			TrustedProxiesSet: true,
+		}
+		sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
+		assert.Empty(t, sc.TrustedProxies)
+		assert.Empty(t, sc.TransportTrustedProxies)
+		assert.True(t, sc.TransportTrustedProxiesSet)
+	})
 }
 
 // A co-located broker endpoint that is plain http on a non-loopback address
@@ -97,14 +129,12 @@ func TestWarnColocatedBrokerEndpointTransport(t *testing.T) {
 	}
 }
 
-// The binding of the key to its field, through the real load path: with ONLY
+// The binding of the key to its fields, through the real load path: with
 // server.trusted_proxies set (from settings.yaml, from the canonical env
 // name, or from its alias), the server's loaded config passes the startup
-// check and the hub config built from it carries the list as
-// TransportTrustedProxies while the legacy TrustedProxies (proxy header
-// login, client IP rate limits) stays empty. initHubServer passes this
-// hub.ServerConfig to hub.New; no code in cmd sets TrustedProxies.
-func TestTrustedProxies_LoadPathBindsTransportListOnly(t *testing.T) {
+// check and the hub config built from it carries the list in both
+// TransportTrustedProxies and TrustedProxies.
+func TestTrustedProxies_LoadPathBindsHubLists(t *testing.T) {
 	for name, tc := range map[string]struct {
 		file string
 		env  map[string]string
@@ -135,7 +165,118 @@ func TestTrustedProxies_LoadPathBindsTransportListOnly(t *testing.T) {
 
 			sc := buildHubServerConfig(cfg, "", "", nil, false, "", nil)
 			assert.Equal(t, []string{"10.20.0.0/16", "192.0.2.7"}, sc.TransportTrustedProxies, "hub transport policy list")
-			assert.Empty(t, sc.TrustedProxies, "the legacy trusted proxy list must stay empty")
+			assert.Equal(t, []string{"10.20.0.0/16", "192.0.2.7"}, sc.TrustedProxies, "hub client-IP trusted proxy list")
 		})
 	}
+}
+
+// auth.proxy.provider "header" is rejected at startup by both the Hub and web
+// server constructors.
+func TestInitProxyAuth_HeaderProviderRejected(t *testing.T) {
+	const wantErr = `auth.proxy.provider "header" is not supported; use "iap" or "jwt"`
+
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Host = "127.0.0.1"
+	cfg.Auth.Mode = "proxy"
+	cfg.Auth.Proxy = &config.ProxyAuthConfig{Provider: "header"}
+
+	t.Run("hub", func(t *testing.T) {
+		var stubStore struct{ store.Store }
+		_, err := initHubServer(context.Background(), cfg, &stubStore, nil, hub.HubEndpoints{}, "", nil, false, "", nil, nil, nil, "", nil, nil)
+		require.Error(t, err)
+		assert.EqualError(t, err, wantErr)
+	})
+
+	t.Run("web", func(t *testing.T) {
+		_, err := initWebServer(context.Background(), cfg, nil, "", resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, false, "", nil, nil)
+		require.Error(t, err)
+		assert.EqualError(t, err, wantErr)
+	})
+}
+
+func TestLogProxyTrustedProxiesHints(t *testing.T) {
+	const (
+		wantProxyHint      = "auth.mode is proxy and server.trusted_proxies is not set"
+		wantDeprecatedWarn = "server.auth.proxy.require_trusted_proxy_ip is deprecated and has no effect"
+	)
+
+	t.Run("proxy mode with unset trusted_proxies logs info hint", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{}
+		cfg.Auth.Mode = "proxy"
+		logProxyTrustedProxiesHints(cfg)
+		out := buf.String()
+		assert.Contains(t, out, "level=INFO")
+		assert.Contains(t, out, wantProxyHint)
+		assert.NotContains(t, out, wantDeprecatedWarn)
+	})
+
+	t.Run("oauth mode with unset trusted_proxies logs nothing", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{}
+		cfg.Auth.Mode = "oauth"
+		logProxyTrustedProxiesHints(cfg)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("proxy mode with set trusted_proxies logs nothing", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{
+			TrustedProxies:    []string{"10.0.0.0/8"},
+			TrustedProxiesSet: true,
+		}
+		cfg.Auth.Mode = "proxy"
+		logProxyTrustedProxiesHints(cfg)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("proxy mode with explicit empty trusted_proxies logs nothing", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{
+			TrustedProxies:    []string{},
+			TrustedProxiesSet: true,
+		}
+		cfg.Auth.Mode = "proxy"
+		logProxyTrustedProxiesHints(cfg)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("require_trusted_proxy_ip true logs deprecation WARN", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{
+			TrustedProxies:    []string{"10.0.0.0/8"},
+			TrustedProxiesSet: true,
+		}
+		cfg.Auth.Mode = "proxy"
+		cfg.Auth.Proxy = &config.ProxyAuthConfig{
+			Provider:              "iap",
+			RequireTrustedProxyIP: true,
+		}
+		logProxyTrustedProxiesHints(cfg)
+		out := buf.String()
+		assert.Contains(t, out, "level=WARN")
+		assert.Contains(t, out, wantDeprecatedWarn)
+		assert.NotContains(t, out, wantProxyHint)
+	})
+
+	t.Run("require_trusted_proxy_ip false logs nothing", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{
+			TrustedProxies:    []string{"10.0.0.0/8"},
+			TrustedProxiesSet: true,
+		}
+		cfg.Auth.Mode = "proxy"
+		cfg.Auth.Proxy = &config.ProxyAuthConfig{
+			Provider:              "iap",
+			RequireTrustedProxyIP: false,
+		}
+		logProxyTrustedProxiesHints(cfg)
+		assert.Empty(t, buf.String())
+	})
 }

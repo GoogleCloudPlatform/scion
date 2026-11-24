@@ -162,7 +162,7 @@ func TestExternalBearerRateLimiter_DefaultBurstExhaustion(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // The limiter's X-Forwarded-For spoof resistance depends on its own wiring:
-// it reuses geExchangeClientIP, and server.go passes the same
+// it reuses trustedClientIP, and server.go passes the same
 // cfg.TrustedProxies the middleware itself uses. If the constructor were
 // changed to trust every proxy
 // (parseTrustedProxies([]string{"0.0.0.0/0", "::/0"})), any untrusted peer
@@ -205,5 +205,46 @@ func TestExternalBearerRateLimiter_HonoursXForwardedForOnlyFromTrustedProxy(t *t
 				t.Fatalf("client %s: request %d (of %d burst) via the trusted proxy should be allowed", client, i+1, externalBearerBurst)
 			}
 		}
+	}
+}
+
+func TestExternalBearerRateLimiter_MultiLineXFFAndIgnoresXRealIP(t *testing.T) {
+	limiter := newExternalBearerRateLimiter([]string{"10.0.0.0/8"})
+
+	// Multiple X-Forwarded-For header lines are joined in order and read right
+	// to left: varying the earlier line must not grant a fresh bucket for the
+	// same rightmost untrusted hop.
+	for i := 0; i < externalBearerBurst; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		req.RemoteAddr = "10.0.0.1:1"
+		req.Header.Add("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i))
+		req.Header.Add("X-Forwarded-For", "203.0.113.40, 10.0.0.2")
+		if allowed, _ := limiter.Allow(req); !allowed {
+			t.Fatalf("request %d (of %d burst) should be allowed", i+1, externalBearerBurst)
+		}
+	}
+	over := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	over.RemoteAddr = "10.0.0.1:1"
+	over.Header.Add("X-Forwarded-For", "198.51.100.250")
+	over.Header.Add("X-Forwarded-For", "203.0.113.40")
+	if allowed, _ := limiter.Allow(over); allowed {
+		t.Error("request beyond burst for the rightmost untrusted hop must be refused")
+	}
+
+	// X-Real-IP alone is ignored even from a trusted peer: requests share the
+	// peer bucket.
+	for i := 0; i < externalBearerBurst; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		req.RemoteAddr = "10.0.0.9:1"
+		req.Header.Set("X-Real-IP", fmt.Sprintf("198.51.100.%d", i))
+		if allowed, _ := limiter.Allow(req); !allowed {
+			t.Fatalf("X-Real-IP request %d (of %d burst) should be allowed", i+1, externalBearerBurst)
+		}
+	}
+	overRealIP := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	overRealIP.RemoteAddr = "10.0.0.9:1"
+	overRealIP.Header.Set("X-Real-IP", "198.51.100.250")
+	if allowed, _ := limiter.Allow(overRealIP); allowed {
+		t.Error("request beyond burst with only X-Real-IP must share the peer bucket and be refused")
 	}
 }

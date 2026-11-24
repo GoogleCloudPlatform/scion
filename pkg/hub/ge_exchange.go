@@ -288,8 +288,8 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 //     validator, user store, or binding store.
 //   - Rate limit: per-client-IP token bucket (geExchangeRateLimiter) enforced
 //     before credential validation or outbound Google requests. Returns 429
-//     with Retry-After header. Client IP extraction uses safe trusted-proxy
-//     semantics via geExchangeClientIP.
+//     with Retry-After header. Client IP extraction uses trusted-proxy
+//     semantics via Server.clientIP (trustedClientIP).
 func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -298,8 +298,7 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 
 	// Rate limit — before any credential validation or outbound calls.
 	if s.geExchangeRateLimiter != nil {
-		trustedNets := parseTrustedProxies(s.config.TrustedProxies)
-		clientIP := geExchangeClientIP(r, trustedNets)
+		clientIP := s.clientIP(r)
 		allowed, retryAfter := s.geExchangeRateLimiter.Allow(clientIP)
 		if !allowed {
 			s.recordGEExchange(GEExchangeOutcomeRateLimited)

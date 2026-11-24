@@ -94,7 +94,6 @@ func TestRelayAdmit_IAPAssertion(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, refusalStatus(t, err), name)
 	}
 
-	f.cf.srv.authConfig.TrustedProxies = []string{"192.0.2.0/24"}
 	raw := http.Header{"X-Goog-Authenticated-User-Email": {"accounts.google.com:owner@conduit.test"}, "X-Goog-Authenticated-User-Id": {"accounts.google.com:1"}}
 	var resp relay.HubAdmitResponse
 	err := f.hub.Call(context.Background(), relay.HubAdmitPath, relay.HubAdmitRequest{
@@ -113,11 +112,10 @@ func TestRelayAdmit_IAPRequiresPinnedAuthenticator(t *testing.T) {
 	f := newRelayIAPFixture(t)
 	valid := func() http.Header { return f.assertion(t, f.kp, relayIAPAudience, time.Now().Add(10*time.Minute)) }
 
-	t.Run("no proxy authenticator, trusted-proxy headers only", func(t *testing.T) {
+	t.Run("no proxy authenticator", func(t *testing.T) {
 		prev := f.cf.srv.authConfig.ProxyAuthenticator
 		f.cf.srv.authConfig.ProxyAuthenticator = nil
-		f.cf.srv.authConfig.TrustedProxies = []string{"192.0.2.0/24"}
-		defer func() { f.cf.srv.authConfig.ProxyAuthenticator, f.cf.srv.authConfig.TrustedProxies = prev, nil }()
+		defer func() { f.cf.srv.authConfig.ProxyAuthenticator = prev }()
 		_, err := f.admit(t, valid(), "s-legacy")
 		require.Error(t, err, "the assertion header is ignored without an IAP authenticator")
 	})

@@ -98,7 +98,7 @@ func TestAdmissionToken_Confidential(t *testing.T) {
 // credential header still passes.
 func TestRelayAdmit_ForwardedHeadersDefaultDeny(t *testing.T) {
 	f, cf := newUserRelayOps(t)
-	cf.srv.authConfig.TrustedProxies = []string{"192.0.2.0/24", "0.0.0.0/0"}
+	cf.srv.clientIPTrustedNets = parseTrustedProxies([]string{"192.0.2.0/24", "0.0.0.0/0"})
 	var mu sync.Mutex
 	var seen []http.Header
 	conduitRelayAdmitObserve = func(r *http.Request) {

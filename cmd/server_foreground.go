@@ -3018,6 +3018,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
 		ConduitPolicy:                conduitPolicySetting(cfg),
+		TrustedProxies:               append([]string(nil), cfg.TrustedProxies...),
 		TransportTrustedProxies:      append([]string(nil), cfg.TrustedProxies...),
 		TransportTrustedProxiesSet:   cfg.TrustedProxiesSet,
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
@@ -3354,6 +3355,18 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 	hubSrv.SetCloudLoggingHealth(func() string { return cs.HealthStatus(time.Now()) })
 }
 
+func logProxyTrustedProxiesHints(cfg *config.GlobalConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Auth.Mode == "proxy" && !cfg.TrustedProxiesSet && len(cfg.TrustedProxies) == 0 {
+		slog.Info("auth.mode is proxy and server.trusted_proxies is not set: rate limits and audit records use the proxy's address; list the proxy's addresses in server.trusted_proxies.")
+	}
+	if cfg.Auth.Proxy != nil && cfg.Auth.Proxy.RequireTrustedProxyIP {
+		slog.Warn("server.auth.proxy.require_trusted_proxy_ip is deprecated and has no effect; remove it from settings.")
+	}
+}
+
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	// A serving hub always has a store: the auth middleware's per-request
 	// user-row checks (account status, session generation) read it, and
@@ -3412,12 +3425,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			hubCfg.ProxyAuth = jwtAuth
 			log.Printf("Proxy auth configured: provider=jwt, algorithm=%s", cfg.Auth.Proxy.JWT.Algorithm)
 		case "header":
-			// TODO: HeaderProxyAuthenticator (refactor of extractProxyUser)
-			log.Printf("Proxy auth configured: provider=header (legacy IP-trust mode)")
+			return nil, fmt.Errorf(`auth.proxy.provider "header" is not supported; use "iap" or "jwt"`)
 		default:
 			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
 		}
 	}
+	logProxyTrustedProxiesHints(cfg)
 
 	// Proxy driver principals (auth.proxy.driverPrincipals, test identities
 	// phase WS2): exact emails, proxy auth mode only. A non-empty list on a
@@ -4271,6 +4284,8 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 				return nil, err
 			}
 			webProxyAuth = jwtAuth
+		case "header":
+			return nil, fmt.Errorf(`auth.proxy.provider "header" is not supported; use "iap" or "jwt"`)
 		default:
 			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
 		}

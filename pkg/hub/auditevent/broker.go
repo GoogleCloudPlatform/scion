@@ -122,11 +122,11 @@ var (
 	// credential_kind is set ONLY when the credential exists but is
 	// unrepresentable, so it never duplicates credential.kind.
 	brokerCredentialKindLeaf = PayloadLeafSchema{Name: "credential_kind", Type: PayloadString, MaxBytes: 32, AllowedValues: brokerCredentialKindValues()}
-	// source_ip is caller-influenced, exactly as the legacy ip_address
-	// attribute was: it is the first X-Forwarded-For hop, else X-Real-IP,
-	// else the connection's remote address. The builder emits only a
-	// netip-canonical address (zone stripped); unparseable input is never
-	// emitted and sets source_ip_unparsed instead.
+	// source_ip is the client address extracted through server.trusted_proxies
+	// (X-Forwarded-For read right to left when the immediate peer is trusted,
+	// else the peer host). The builder emits only a netip-canonical address
+	// (zone stripped); unparseable input is never emitted and sets
+	// source_ip_unparsed instead.
 	brokerSourceIPLeaf         = PayloadLeafSchema{Name: "source_ip", Type: PayloadString, MaxBytes: brokerSourceIPMaxBytes}
 	brokerSourceIPUnparsedLeaf = brokerTrueLeaf("source_ip_unparsed")
 	// user_agent is caller-chosen text, emitted on auth_failure only (the

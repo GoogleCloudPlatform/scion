@@ -2409,7 +2409,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, getClientIP(r),
+		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, s.clientIP(r),
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "project_register"))
 		if !created {
 			s.backfillLinkedOrigin(ctx, project, broker.ID, priorProviderPath, req.Path)
@@ -2519,7 +2519,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// The embedded branch requires an authenticated session user, so the
 		// actor is that user (an empty ID is a bug path; the audit envelope
 		// is then dropped with a warning, R14).
-		LogEmbeddedRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, linkedByForProvider(callerUser), getClientIP(r),
+		LogEmbeddedRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, linkedByForProvider(callerUser), s.clientIP(r),
 			registerOperation, mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", string(registerOperation), "path", "embedded"))
 
 		// Add as project provider.
@@ -2546,7 +2546,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, getClientIP(r),
+		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, s.clientIP(r),
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "embedded"))
 
 		// Set as default runtime broker if project doesn't have one

@@ -1104,7 +1104,7 @@ type TransportAuthConfig struct {
 
 // ProxyAuthConfig holds proxy authentication settings.
 type ProxyAuthConfig struct {
-	// Provider selects the proxy auth provider: "iap", "jwt", or "header".
+	// Provider selects the proxy auth provider: "iap" or "jwt".
 	Provider string `json:"provider" yaml:"provider" koanf:"provider"`
 	// IAP holds Google IAP-specific settings.
 	IAP *IAPAuthConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`

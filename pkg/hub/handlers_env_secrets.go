@@ -3368,7 +3368,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	// Log the link event
-	LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, projectID, linkedBy, getClientIP(r), brokerAuditCredentialDetails(ctx))
+	LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, projectID, linkedBy, s.clientIP(r), brokerAuditCredentialDetails(ctx))
 
 	writeJSON(w, http.StatusCreated, AddProviderResponse{
 		Provider: provider,
@@ -3430,7 +3430,7 @@ func (s *Server) removeProjectProvider(w http.ResponseWriter, r *http.Request, p
 	}
 
 	// Log the unlink event
-	LogUnlinkEvent(ctx, s.auditLogger, brokerID, projectID, actorID, getClientIP(r), brokerAuditCredentialDetails(ctx))
+	LogUnlinkEvent(ctx, s.auditLogger, brokerID, projectID, actorID, s.clientIP(r), brokerAuditCredentialDetails(ctx))
 
 	w.WriteHeader(http.StatusNoContent)
 }

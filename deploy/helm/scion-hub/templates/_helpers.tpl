@@ -2508,6 +2508,9 @@ Refused in every form, literal or valueFrom, matched case-insensitively.
 {{- if eq (upper $name) "SCION_SERVER_HUB_CLASS" }}
 {{- fail "hub.extraEnv may not set SCION_SERVER_HUB_CLASS: it would override server.hub.class, an input of the hub's --test-mode gate, without the chart seeing it. Set the hub class with hub.hubClass (or in your own settings file under config.existingSecret)." }}
 {{- end }}
+{{- if and $.Values.hub.trustedProxies (has (upper $name) (list "SCION_SERVER_TRUSTEDPROXIES" "SCION_SERVER_TRUSTED_PROXIES")) }}
+{{- fail (printf "hub.extraEnv may not set %s when hub.trustedProxies is set: configure trusted proxies in one place (hub.trustedProxies)." $name) }}
+{{- end }}
 {{- if and (has $name (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY")) (not (dig "valueFrom" "" $entry)) (eq (toString (dig "value" "" $entry)) "") }}
 {{- fail (printf "hub.extraEnv may not set %s to an empty value. An empty value is not a registry source: requireImageRegistryForBroker (cmd/server_foreground.go) skips it, and SCION_MAINTENANCE_IMAGE_REGISTRY applies only to maintenance image builds. Remove the entry, or give it a non-empty value or a valueFrom (for agent images, set SCION_IMAGE_REGISTRY or agents.imageRegistry)." $name) }}
 {{- end }}
@@ -2610,7 +2613,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, hub.hubClass, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.mountRoot, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName, workspaceStorage.nfs.subpathRoot, conduit.relayMode, conduit.peerAuth, conduit.peerSecret, conduit.internalTls.enabled, conduit.internalTls.port, conduit.internalTls.existingSecret, conduit.internalTls.caSecret, conduit.internalTls.caKey, conduit.internalTls.serverName, relay.enabled, relay.replicaCount, relay.port, relay.publicUrl, relay.hubInternalUrl, relay.trustedProxies, relay.args, relay.extraEnv, relay.resources.requests.cpu, relay.resources.requests.memory, relay.resources.limits.memory, relay.podAnnotations, relay.podLabels, relay.nodeSelector, relay.tolerations, relay.affinity, relay.topologySpreadConstraints, relay.terminationGracePeriodSeconds, relay.probes.startup.enabled, relay.probes.startup.periodSeconds, relay.probes.startup.failureThreshold, relay.probes.startup.timeoutSeconds, relay.probes.readiness.periodSeconds, relay.probes.readiness.timeoutSeconds, relay.probes.readiness.failureThreshold, relay.probes.liveness.enabled, relay.probes.liveness.periodSeconds, relay.probes.liveness.failureThreshold, relay.probes.liveness.timeoutSeconds, relay.serviceAccount.create, relay.serviceAccount.name, relay.serviceAccount.gcpServiceAccount, relay.serviceAccount.annotations, relay.pdb.enabled, relay.pdb.minAvailable, relay.pdb.maxUnavailable, relay.database.auth, relay.database.user, relay.database.password, relay.database.maxOpenConns, relay.database.maxIdleConns, relay.database.connMaxLifetime, relay.database.connMaxIdleTime
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, hub.trustedProxies, hub.hubClass, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.mountRoot, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName, workspaceStorage.nfs.subpathRoot, conduit.relayMode, conduit.peerAuth, conduit.peerSecret, conduit.internalTls.enabled, conduit.internalTls.port, conduit.internalTls.existingSecret, conduit.internalTls.caSecret, conduit.internalTls.caKey, conduit.internalTls.serverName, relay.enabled, relay.replicaCount, relay.port, relay.publicUrl, relay.hubInternalUrl, relay.trustedProxies, relay.args, relay.extraEnv, relay.resources.requests.cpu, relay.resources.requests.memory, relay.resources.limits.memory, relay.podAnnotations, relay.podLabels, relay.nodeSelector, relay.tolerations, relay.affinity, relay.topologySpreadConstraints, relay.terminationGracePeriodSeconds, relay.probes.startup.enabled, relay.probes.startup.periodSeconds, relay.probes.startup.failureThreshold, relay.probes.startup.timeoutSeconds, relay.probes.readiness.periodSeconds, relay.probes.readiness.timeoutSeconds, relay.probes.readiness.failureThreshold, relay.probes.liveness.enabled, relay.probes.liveness.periodSeconds, relay.probes.liveness.failureThreshold, relay.probes.liveness.timeoutSeconds, relay.serviceAccount.create, relay.serviceAccount.name, relay.serviceAccount.gcpServiceAccount, relay.serviceAccount.annotations, relay.pdb.enabled, relay.pdb.minAvailable, relay.pdb.maxUnavailable, relay.database.auth, relay.database.user, relay.database.password, relay.database.maxOpenConns, relay.database.maxIdleConns, relay.database.connMaxLifetime, relay.database.connMaxIdleTime
 {{- end }}
 
 {{/*
@@ -2661,6 +2664,7 @@ it; keep that call.
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
 {{- if .Values.hub.adminEmails }}{{- $inline = append $inline "hub.adminEmails" }}{{- end }}
+{{- if .Values.hub.trustedProxies }}{{- $inline = append $inline "hub.trustedProxies" }}{{- end }}
 {{- if (dig "hubClass" "" .Values.hub) }}{{- $inline = append $inline "hub.hubClass" }}{{- end }}
 {{- /*
 secrets.backend has a non-empty default, but local is also what renders nothing,
@@ -3577,6 +3581,18 @@ other render byte-identical.
     "storage" $storage
     "auth" $authOut
     "broker" (dict "host" "127.0.0.1" "port" (int (include "scion-hub.brokerPort" .)) "auto_provide" true) }}
+{{- with .Values.hub.trustedProxies }}
+{{- $trusted := list }}
+{{- range $cidr := . }}
+{{- $cs := trim (toString $cidr) }}
+{{- include "scion-hub.assertNoCredential" (dict "value" $cs "source" "hub.trustedProxies") }}
+{{- if or (eq $cs "0.0.0.0/0") (eq $cs "::/0") }}
+{{- fail (printf "hub.trustedProxies may not contain catch-all range %q." $cs) }}
+{{- end }}
+{{- $trusted = append $trusted $cs }}
+{{- end }}
+{{- $server = set $server "trusted_proxies" $trusted }}
+{{- end }}
 {{- if $oauthWeb }}
 {{- $server = set $server "oauth" (dict "web" $oauthWeb) }}
 {{- end }}

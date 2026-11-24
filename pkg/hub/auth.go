@@ -65,10 +65,7 @@ type AuthConfig struct {
 	// than passed through, because nothing further down the chain will ever
 	// establish an identity for it. See issue #591.
 	BrokerAuthSvc *BrokerAuthService
-	// TrustedProxies is a list of trusted proxy IPs/CIDRs
-	TrustedProxies []string
 	// ProxyAuthenticator is the configured proxy authenticator (for proxy auth mode).
-	// When set, it replaces the legacy IP-only extractProxyUser path.
 	ProxyAuthenticator ProxyAuthenticator
 	// ProxyUserProvisioner is a function that provisions a user from a verified
 	// proxy identity. It runs provisionUser and returns the stored user.
@@ -311,10 +308,7 @@ func handlerAfterAuth(next http.Handler) http.Handler {
 // 3. Development tokens (scion_dev_* prefix)
 // 4. User access tokens (scion_pat_* prefix)
 // 5. User JWTs
-// 6. Trusted proxy headers
 func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
-	// Parse trusted proxy CIDRs
-	trustedNets := parseTrustedProxies(cfg.TrustedProxies)
 	devUsers := cfg.DevUser
 	if devUsers == nil {
 		devUsers = newDevUserSource(cfg.DevUserCfg)
@@ -531,29 +525,6 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						return
 					}
 					// (nil, nil) = no assertion present, fall through
-				}
-
-				// Step 3b: Legacy trusted proxy headers (backward compat when no ProxyAuthenticator)
-				if cfg.ProxyAuthenticator == nil && len(trustedNets) > 0 && isTrustedProxy(r, trustedNets) {
-					if user := extractProxyUser(r); user != nil {
-						// This path builds an identity with no store row,
-						// so it never reaches the JWT row block: refuse
-						// the reserved test-identity domain outright.
-						if isReservedTestIdentityEmail(user.Email()) {
-							writeError(w, http.StatusForbidden, ErrCodeForbidden,
-								"access denied: email not authorized", nil)
-							return
-						}
-						ctx = context.WithValue(ctx, userContextKey{}, user)
-						ctx = contextWithIdentity(ctx, user)
-						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))
-						ctx = contextWithAuthType(ctx, AuthTypeProxy)
-						if cfg.Debug {
-							log.Debug("Proxy user authenticated (legacy)", "email", user.Email())
-						}
-						serveAfterAuth(w, next, r.WithContext(ctx))
-						return
-					}
 				}
 
 				// Step 3c: Skill file capability URL (#1792). A credential-less
@@ -1218,25 +1189,6 @@ func isTrustedProxy(r *http.Request, trustedNets []*net.IPNet) bool {
 	}
 
 	return false
-}
-
-// extractProxyUser extracts user information from trusted proxy headers.
-func extractProxyUser(r *http.Request) UserIdentity {
-	userID := r.Header.Get("X-Forwarded-User-Id")
-	email := r.Header.Get("X-Forwarded-User-Email")
-	name := r.Header.Get("X-Forwarded-User-Name")
-	role := r.Header.Get("X-Forwarded-User-Role")
-
-	// At minimum, we need user ID and email
-	if userID == "" || email == "" {
-		return nil
-	}
-
-	if role == "" {
-		role = "member"
-	}
-
-	return NewAuthenticatedUser(userID, email, name, role, string(ClientTypeWeb))
 }
 
 // agentCredentialIDContextKey stores the credential ID for a validated agent token.

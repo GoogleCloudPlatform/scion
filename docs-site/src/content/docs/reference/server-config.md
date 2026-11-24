@@ -700,8 +700,8 @@ Proxy authentication configuration (consulted when `server.auth.mode` is set to 
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `provider` | string | | Selects the proxy auth provider: `"iap"`, `"jwt"`, or `"header"`. |
-| `require_trusted_proxy_ip` | bool | `false` | Enables defense-in-depth IP allowlisting. Uses the trusted_proxies CIDR list. |
+| `provider` | string | | Selects the proxy auth provider: `"iap"` or `"jwt"`. |
+| `require_trusted_proxy_ip` | bool | `false` | Deprecated; has no effect. The Hub logs a warning at startup when set to `true`. Remove it from settings. |
 | `driver_principals` | list | `[]` | Exact emails (no wildcards) of the browser drivers, such as a test-UI service account, that may carry test identity browser sessions through the proxy. A driver principal never gets a hub account: without a test identity session, page navigations and assertion-only API requests get `403` (`driver_principal_has_no_session`), and API requests with its ID token never act as it (`401` or `403`). Startup only; never writable through the settings API and not shown by it. A hub whose `mode` is not `"proxy"` refuses to start with a non-empty list. See [Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/#iap-fronted-hubs). |
 | `driver_token_audience` | string | | The IAP OAuth client ID. On `/api/v1/` requests, a driver's Google ID token with exactly this audience is replaced by the test identity session it carries (only when every condition in the how-to holds). Unset: never replaced. Startup only; never writable through the settings API and not shown by it. |
 
@@ -1630,7 +1630,19 @@ Any other request gets `403` with the error code `transport_not_confidential`. A
 
 The default covers a proxy that connects from loopback. A proxy container on the same host usually connects from a bridge network address (for example `172.17.0.1`), not loopback, so it is not covered: list that address. Until then its refusals are logged at WARN with reason `not_tls`, without the ERROR line and the health check of a loopback proxy, and the Runtime Broker log names the reason and `server.trusted_proxies`.
 
-The proxy must overwrite `X-Forwarded-Proto` (and any `Forwarded` header), not append to it: a header with more than one value is not trusted. Only the immediate peer address is compared; `X-Forwarded-For` is not used. An entry that is not an IP address or CIDR range, or that is wider than an IPv4 `/8` or an IPv6 `/16` (so `0.0.0.0/0` and `::/0` are refused), stops the server at startup. The list is used for this check only: it does not enable proxy header login or change how client addresses are rate limited. It is restart-bound and never returned or accepted by the admin API.
+The proxy must overwrite `X-Forwarded-Proto` (and any `Forwarded` header), not append to it: a header with more than one value is not trusted. Only the immediate peer address is compared for transport checks; `X-Forwarded-For` is not used. An entry that is not an IP address or CIDR range, or that is wider than an IPv4 `/8` or an IPv6 `/16` (so `0.0.0.0/0` and `::/0` are refused), stops the server at startup. It is restart-bound and never returned or accepted by the admin API.
+
+#### Client addresses behind a proxy
+
+The same `server.trusted_proxies` list decides whose `X-Forwarded-For` header the Hub honours when recording client addresses for per-IP rate limits and audit records:
+
+- `X-Forwarded-For` is read right to left across all header lines. The first address not in `server.trusted_proxies` is used as the client address. A malformed entry stops the walk and the immediate peer address is used instead.
+- If `server.trusted_proxies` is unset or `[]`, no forwarded client address is used and the immediate peer address is recorded (unlike the Runtime Broker transport check above, which defaults to loopback when the key is unset).
+- List **every** proxy hop, including any address your load balancer adds to the header itself (for example, some cloud load balancers append their own frontend address after the client's).
+- Listing an address range that untrusted clients can connect from directly lets those clients choose their recorded address and their rate-limit bucket.
+- `X-Real-IP` and `Forwarded` are not used for client addresses.
+- `server.trusted_proxies` never enables header-based sign-in.
+- Cloud Run's front-end source addresses are not documented, so client-address extraction cannot be configured for Cloud Run Hubs.
 
 ```yaml
 server:

@@ -991,12 +991,12 @@ type testIdentityRedeemRequest struct {
 // audit and the per-IP rate limit. Behind proxy auth the connection comes
 // from the proxy, so the client is read through the hub's trusted proxies
 // (server trusted_proxies): X-Forwarded-For right to left past trusted hops
-// (geExchangeClientIP). A forwarding header from a peer that is not a
+// (trustedClientIP). A forwarding header from a peer that is not a
 // trusted proxy is ignored. Otherwise it is the host part of the
 // connection's remote address.
 func (ws *WebServer) redeemClientIP(r *http.Request) string {
 	if ws.proxyMode() && ws.testIdentityHub != nil {
-		return geExchangeClientIP(r, parseTrustedProxies(ws.testIdentityHub.config.TrustedProxies))
+		return ws.testIdentityHub.clientIP(r)
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

@@ -541,6 +541,7 @@ func TestTIWebIAP_RedeemRateLimitedPerEmail(t *testing.T) {
 func TestTIWebIAP_RedeemClientIPThroughTrustedProxy(t *testing.T) {
 	e := newTIIAPEnv(t, []string{tiDriverEmail})
 	e.srv.config.TrustedProxies = []string{"192.0.2.0/24"}
+	e.srv.clientIPTrustedNets = parseTrustedProxies(e.srv.config.TrustedProxies)
 	clientIPs := func() map[string]bool {
 		out := map[string]bool{}
 		for _, a := range tiWebAudits(t, e.st, testIdentityWebSessionRefuseMutation) {

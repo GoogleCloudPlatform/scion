@@ -178,8 +178,7 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc.SetArchiveEnabled(func(context.Context) bool { return s.experimentEnabled(experiments.ArtifactArchive) })
 	// Share-link reads are rate limited per client, read through the
 	// hub's trusted proxies the same way as its other pre-auth limits.
-	trusted := parseTrustedProxies(s.config.TrustedProxies)
-	svc.SetClientKey(func(r *http.Request) string { return shareLinkClientKey(r, trusted) })
+	svc.SetClientKey(func(r *http.Request) string { return shareLinkClientKey(r, s.clientIPTrustedNets) })
 	return svc.Handler()
 }
 
@@ -447,13 +446,13 @@ func (s *Server) initArtifactViewKey(ctx context.Context) error {
 }
 
 // shareLinkClientKey is the client a share-link read is charged to: the
-// client address as geExchangeClientIP reads it through trusted proxies,
+// client address as trustedClientIP reads it through trusted proxies,
 // with an IPv6 address keyed on its /64 prefix (the usual allocation to
 // one network interface) and an IPv4 address keyed as is. A larger IPv6
 // allocation still spans many /64 prefixes; the service's limit across all
 // clients bounds those.
 func shareLinkClientKey(r *http.Request, trusted []*net.IPNet) string {
-	key := geExchangeClientIP(r, trusted)
+	key := trustedClientIP(r, trusted)
 	ip := net.ParseIP(key)
 	if ip == nil || ip.To4() != nil {
 		return key

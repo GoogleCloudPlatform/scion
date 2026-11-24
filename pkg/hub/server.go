@@ -251,16 +251,15 @@ type ServerConfig struct {
 	// list in proxy mode leaves test identity web sessions unavailable.
 	// Startup config only; never API-writable.
 	ProxyDriverPrincipals []string
-	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
+	// TrustedProxies is a list of trusted proxy IPs/CIDRs for client-IP
+	// extraction only (rate limits, audit). Never used for authentication.
 	TrustedProxies []string
 	// TransportTrustedProxies is server.trusted_proxies: the IPs/CIDRs of
 	// the TLS-terminating proxies whose X-Forwarded-Proto the hub-broker
-	// transport policy trusts (config.ConfidentialArrival). It is read by that
-	// policy only, never by TrustedProxies' users (proxy header login,
-	// client IP rate limits). New resolves it with
-	// TransportTrustedProxiesSet (config.TransportTrustedProxies): when the
-	// setting is not set, a proxy on this host (loopback) is trusted; set to
-	// an empty list, a forwarded protocol is never trusted. The server
+	// transport policy trusts (config.ConfidentialArrival). New resolves it
+	// with TransportTrustedProxiesSet (config.TransportTrustedProxies): when
+	// the setting is not set, a proxy on this host (loopback) is trusted;
+	// set to an empty list, a forwarded protocol is never trusted. The server
 	// command validates it at startup (config.ParseTrustedProxies); New
 	// drops an invalid list (logged), which only narrows what is accepted.
 	// Startup config only; never API-writable.
@@ -3115,6 +3114,9 @@ type Server struct {
 	triggerMetricsSnapshot *TriggerSnapshotMetrics
 	triggerMetrics         atomic.Pointer[triggerMetricsHolder]
 
+	// clientIPTrustedNets is ServerConfig.TrustedProxies, parsed once in
+	// New for client-IP extraction (rate limits, audit).
+	clientIPTrustedNets []*net.IPNet
 	// transportTrustedNets is ServerConfig.TransportTrustedProxies,
 	// resolved once in New (config.TransportTrustedProxies) for
 	// config.ConfidentialArrival.
@@ -4058,7 +4060,6 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		UserTokenSvc:       srv.userTokenService,
 		UATSvc:             srv.uatService,
 		BrokerAuthSvc:      srv.brokerAuthService,
-		TrustedProxies:     cfg.TrustedProxies,
 		ProxyAuthenticator: cfg.ProxyAuth,
 		FederationAuth:     &srv.federationAuth,
 		CredentialStore:    s,
@@ -4226,6 +4227,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Without a running cleanup, the bounded bucket map fills permanently
 	// after maxEntries distinct client IPs and fails closed for every new
 	// one.
+	srv.clientIPTrustedNets = parseTrustedProxies(cfg.TrustedProxies)
 	srv.externalBearerRateLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
 
@@ -8602,7 +8604,7 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// This runs after unified auth but before the handler, allowing hosts to authenticate
 	if s.brokerAuthService != nil {
 		if s.auditLogger != nil {
-			h = AuditableBrokerAuthMiddleware(s.brokerAuthService, s.auditLogger)(h)
+			h = AuditableBrokerAuthMiddleware(s.brokerAuthService, s.auditLogger, s.clientIP)(h)
 		} else {
 			h = BrokerAuthMiddleware(s.brokerAuthService)(h)
 		}

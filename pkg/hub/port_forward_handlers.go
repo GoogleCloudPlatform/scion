@@ -913,8 +913,7 @@ func applyPortProxyResponsePolicy(h http.Header, policy portProxyPolicy) {
 // sensitiveHeader reports whether a request header is removed before a
 // request proxied to an agent's port reaches the app, on both port proxy
 // transports: the hub's credential headers, the federation token
-// (FederationTokenHeader) and the trusted-proxy identity headers
-// (extractProxyUser). The hub reads them for its own authentication; the
+// (FederationTokenHeader) and the X-Forwarded-User-* headers. The
 // agent's app never receives them.
 func sensitiveHeader(k string) bool {
 	switch strings.ToLower(k) {
