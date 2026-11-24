@@ -452,6 +452,46 @@ describe('artifact list paging', () => {
     rows = el.shadowRoot!.querySelectorAll('tbody tr');
     expect(rows).toHaveLength(1);
   });
+
+  it('adopts <scion-filter-box> and query-editing chip when filters.query_dialect is on', async () => {
+    window.__SCION_FEATURES__ = { 'filters.query_dialect': true };
+    window.history.replaceState({}, '', '/projects/p-1?tab=artifacts');
+    try {
+      const { el, urls } = await mountList({
+        'q=is%3Ashared': { artifacts: [item('s', { scopeRef: 'p-2', sharedWithScope: true })] },
+        'mine=1': {
+          artifacts: [item('a'), item('s', { scopeRef: 'p-2', sharedWithScope: true })],
+        },
+      });
+      const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+        view: string;
+        value: string;
+      };
+      expect(box).not.toBeNull();
+      expect(box.view).toBe('artifacts-project');
+      expect(el.shadowRoot!.querySelector('.toolbar sl-checkbox')).toBeNull();
+
+      const chip = el.shadowRoot!.querySelector<HTMLButtonElement>('.filter-chip')!;
+      expect(chip.textContent?.trim()).toBe('Shared with this project');
+      expect(chip.getAttribute('aria-pressed')).toBe('false');
+
+      chip.click();
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+      expect(box.value).toBe('is:shared');
+      expect(chip.getAttribute('aria-pressed')).toBe('true');
+      expect(new URLSearchParams(window.location.search).get('q')).toBe('is:shared');
+      expect(new URLSearchParams(window.location.search).get('tab')).toBe('artifacts');
+      expect(urls.at(-1)).toContain('q=is%3Ashared');
+      expect(urls.at(-1)).not.toContain('shared=1');
+      expect(el.shadowRoot!.querySelectorAll('tbody tr')).toHaveLength(1);
+    } finally {
+      delete window.__SCION_FEATURES__;
+      window.history.replaceState({}, '', '/');
+    }
+  });
 });
 
 describe('publish dialog helpers', () => {

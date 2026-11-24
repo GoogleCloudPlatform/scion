@@ -29,6 +29,8 @@ import {
   type ArtifactListResponse,
 } from '../../client/artifacts.js';
 import type { ScionPageArtifacts } from './artifacts.js';
+import { hasIsFlagInQuery, toggleIsFlagInQuery } from './artifacts.js';
+import { getViewSchema, type ViewSchema } from '../../shared/filter-query/index.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const ME = 'user-me';
@@ -901,5 +903,129 @@ describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
     const m = mockPublish([GLOBAL], new Set(['g-1']));
     await mount(false);
     expect(m.urls).toEqual([]);
+  });
+});
+
+describe('artifacts list page with filters.query_dialect', () => {
+  beforeAll(async () => {
+    await import('./artifacts.js');
+  }, 30_000);
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    window.history.replaceState({}, '', '/artifacts');
+    delete window.__SCION_FEATURES__;
+  });
+
+  async function mountWithDialect(initialSearch = ''): Promise<ScionPageArtifacts> {
+    window.history.replaceState({}, '', `/artifacts${initialSearch}`);
+    window.__SCION_FEATURES__ = { 'hub.artifacts': true, 'filters.query_dialect': true };
+    const el = document.createElement('scion-page-artifacts') as ScionPageArtifacts;
+    el.pageData = {
+      path: '/artifacts',
+      title: 'Artifacts',
+      user: { id: ME, email: 'me@example.com', name: 'Me' },
+    } as ScionPageArtifacts['pageData'];
+    document.body.appendChild(el);
+    await settle(el);
+    return el;
+  }
+
+  it('renders <scion-filter-box> and query-editing chips instead of legacy select/checkboxes', async () => {
+    const m = mockFetch({ '': { artifacts: [item(1)] } });
+    const el = await mountWithDialect();
+    const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+      view: string;
+      value: string;
+    };
+    expect(box).not.toBeNull();
+    expect(box.view).toBe('artifacts');
+    expect(el.shadowRoot!.querySelector('sl-select')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-checkbox')).toBeNull();
+
+    const chips = Array.from(el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.filter-chip'));
+    expect(chips.map((c) => c.textContent?.trim())).toEqual([
+      'Review pending',
+      'Owned by me',
+      'Shared with me',
+    ]);
+    expect(chips.every((c) => c.getAttribute('aria-pressed') === 'false')).toBe(true);
+
+    // Click "Review pending" -> adds is:review and reloads with q=is:review (no legacy params).
+    chips[0].click();
+    await settle(el);
+    expect(box.value).toBe('is:review');
+    expect(chips[0].getAttribute('aria-pressed')).toBe('true');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:review');
+    let last = listUrls(m).at(-1)!;
+    expect(last.get('q')).toBe('is:review');
+    expect(last.get('review_pending')).toBeNull();
+
+    // Click "Owned by me" -> adds is:mine alongside is:review.
+    chips[1].click();
+    await settle(el);
+    expect(box.value).toBe('is:mine is:review');
+    expect(chips[0].getAttribute('aria-pressed')).toBe('true');
+    expect(chips[1].getAttribute('aria-pressed')).toBe('true');
+
+    // Click "Shared with me" -> replaces mutually exclusive is:mine with is:shared, keeping is:review.
+    chips[2].click();
+    await settle(el);
+    expect(box.value).toBe('is:shared is:review');
+    expect(chips[1].getAttribute('aria-pressed')).toBe('false');
+    expect(chips[2].getAttribute('aria-pressed')).toBe('true');
+    last = listUrls(m).at(-1)!;
+    expect(last.get('q')).toBe('is:review is:shared');
+    expect(last.get('shared')).toBeNull();
+    expect(last.get('owner')).toBeNull();
+
+    // Clicking "Shared with me" again toggles it off, leaving is:review.
+    chips[2].click();
+    await settle(el);
+    expect(box.value).toBe('is:review');
+  });
+
+  it('restores ?q= from the URL on load and updates on filter-commit', async () => {
+    const m = mockFetch({ '': { artifacts: [item(1)] } });
+    const el = await mountWithDialect('?q=project%3Aweb-app');
+    const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+      value: string;
+    };
+    expect(box.value).toBe('project:web-app');
+    expect(listUrls(m)[0].get('q')).toBe('project:web-app');
+
+    // Commit a new query from the filter box.
+    box.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: {
+          value: 'is:review report',
+          query: {
+            mode: 'structured',
+            terms: [{ key: 'is', values: ['review'], negate: false, offset: 0, length: 9 }],
+            text: 'report',
+          },
+          serverQ: 'is:review report',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:review report');
+    expect(listUrls(m).at(-1)!.get('q')).toBe('is:review report');
+  });
+
+  it('toggles is: flags while preserving other terms and quoted text', () => {
+    const schema = getViewSchema('artifacts') as ViewSchema;
+    expect(hasIsFlagInQuery('is:review project:p1', 'review', schema)).toBe(true);
+    expect(hasIsFlagInQuery('-is:review project:p1', 'review', schema)).toBe(false);
+    expect(toggleIsFlagInQuery('', 'review', [], schema)).toBe('is:review');
+    expect(toggleIsFlagInQuery('is:review project:p1', 'review', [], schema)).toBe('project:p1');
+    expect(toggleIsFlagInQuery('is:mine project:p1', 'shared', ['mine'], schema)).toBe(
+      'is:shared project:p1'
+    );
+    expect(toggleIsFlagInQuery('report', 'mine', ['shared'], schema)).toBe('is:mine report');
   });
 });

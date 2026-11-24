@@ -28,7 +28,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import { navigateTo } from '../../client/navigation.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import { formatInstant } from '../../utils/time.js';
 import { artifactPagePath, listProjectArtifacts } from '../../client/artifacts.js';
 import {
@@ -38,6 +38,19 @@ import {
   shortId,
 } from '../../client/principal-names.js';
 import type { ArtifactListItem, ArtifactResponse } from '../../client/artifacts.js';
+import {
+  filtersQueryDialectEnabled,
+  getActiveSingleKeyValue,
+  getViewSchema,
+  knownKeysFor,
+  parse as parseFilterQuery,
+  serverSubset,
+  setSingleKeyInQuery,
+  validate as validateFilterQuery,
+  type ViewSchema,
+} from '../../shared/filter-query/index.js';
+import type { FilterCommitDetail, FilterInputDetail } from './filter-box/filter-box.js';
+import './filter-box/filter-box.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from './artifact-owner-deleted.js';
 import './artifact-publish-dialog.js';
 
@@ -46,6 +59,12 @@ const SEARCH_DELAY_MS = 300;
 
 /** Most pages one load follows past empty pages before showing what it has. */
 const MAX_EMPTY_FOLLOWS = 10;
+
+const PROJECT_ARTIFACTS_SCHEMA: ViewSchema = getViewSchema('artifacts-project') ?? {
+  view: 'artifacts-project',
+  keys: [],
+  textHelp: 'Matches artifact title or key',
+};
 
 @customElement('scion-artifact-list')
 export class ScionArtifactList extends LitElement {
@@ -61,6 +80,8 @@ export class ScionArtifactList extends LitElement {
   @state() private query = '';
   /** Only artifacts homed elsewhere and shared with this project. */
   @state() private sharedOnly = false;
+  @state() private filterQueryText = '';
+  private committedServerQ = '';
   @state() private publishOpen = false;
   /** The caller may publish here: canCreate on the list (ptone/scion#4584). */
   @state() private canCreate = false;
@@ -87,6 +108,32 @@ export class ScionArtifactList extends LitElement {
     }
     .toolbar .spacer {
       flex: 1;
+    }
+    .filter-chip {
+      appearance: none;
+      border: 1px solid var(--scion-border);
+      background: var(--scion-surface);
+      color: var(--scion-text-secondary);
+      border-radius: var(--scion-radius);
+      padding: 0.3125rem 0.625rem;
+      font: inherit;
+      font-size: 0.8125rem;
+      line-height: 1.25;
+      cursor: pointer;
+      transition:
+        background-color 120ms ease,
+        border-color 120ms ease,
+        color 120ms ease;
+    }
+    .filter-chip:hover {
+      background: var(--scion-bg-subtle);
+      color: var(--scion-text);
+    }
+    .filter-chip.active {
+      background: var(--scion-primary-tint);
+      border-color: var(--scion-primary);
+      color: var(--scion-primary);
+      font-weight: 500;
     }
     table {
       width: 100%;
@@ -202,6 +249,19 @@ export class ScionArtifactList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    if (filtersQueryDialectEnabled()) {
+      const urlQ = new URLSearchParams(window.location.search).get('q') ?? '';
+      if (urlQ) {
+        this.filterQueryText = urlQ;
+        const parsed = parseFilterQuery(urlQ, knownKeysFor(PROJECT_ARTIFACTS_SCHEMA));
+        if (!parsed.error && parsed.query) {
+          const v = validateFilterQuery(parsed.query, PROJECT_ARTIFACTS_SCHEMA, urlQ);
+          if (!v.error) {
+            this.committedServerQ = serverSubset(parsed.query, PROJECT_ARTIFACTS_SCHEMA);
+          }
+        }
+      }
+    }
     void this.load();
   }
 
@@ -233,12 +293,18 @@ export class ScionArtifactList extends LitElement {
       // examines a bounded number of rows per request), so keep following
       // it until there is a row to show or the walk ends.
       for (let follow = 0; follow < MAX_EMPTY_FOLLOWS; follow++) {
-        const page = await listProjectArtifacts(this.projectId, {
-          q: this.query.trim(),
-          cursor,
-          signal: abort.signal,
-          sharedOnly: this.sharedOnly,
-        });
+        const page = filtersQueryDialectEnabled()
+          ? await listProjectArtifacts(this.projectId, {
+              q: this.committedServerQ,
+              cursor,
+              signal: abort.signal,
+            })
+          : await listProjectArtifacts(this.projectId, {
+              q: this.query.trim(),
+              cursor,
+              signal: abort.signal,
+              sharedOnly: this.sharedOnly,
+            });
         if (abort.signal.aborted) return;
         items = [...items, ...page.artifacts];
         cursor = page.nextCursor ?? '';
@@ -284,6 +350,56 @@ export class ScionArtifactList extends LitElement {
     this.sharedOnly = (e.target as HTMLInputElement).checked;
     this.cursor = '';
     void this.load();
+  };
+
+  private syncQueryToUrl(raw: string): void {
+    const params = new URLSearchParams(window.location.search);
+    const trimmed = raw.trim();
+    if (trimmed) {
+      params.set('q', trimmed);
+    } else {
+      params.delete('q');
+    }
+    replaceSearch(params);
+  }
+
+  private onFilterInput = (e: CustomEvent<FilterInputDetail>): void => {
+    this.filterQueryText = e.detail.value;
+  };
+
+  private onFilterCommit = (e: CustomEvent<FilterCommitDetail>): void => {
+    this.filterQueryText = e.detail.value;
+    this.syncQueryToUrl(e.detail.value);
+    if (e.detail.serverQ === this.committedServerQ) return;
+    this.committedServerQ = e.detail.serverQ;
+    this.cursor = '';
+    void this.load();
+  };
+
+  private onSharedChipClick = (): void => {
+    const active =
+      getActiveSingleKeyValue(this.filterQueryText, 'is', PROJECT_ARTIFACTS_SCHEMA) === 'shared';
+    const next = setSingleKeyInQuery(
+      this.filterQueryText,
+      'is',
+      active ? '' : 'shared',
+      PROJECT_ARTIFACTS_SCHEMA
+    );
+    if (next === this.filterQueryText) return;
+    this.filterQueryText = next;
+    this.syncQueryToUrl(next);
+    const parsed = parseFilterQuery(next, knownKeysFor(PROJECT_ARTIFACTS_SCHEMA));
+    if (!parsed.error && parsed.query) {
+      const v = validateFilterQuery(parsed.query, PROJECT_ARTIFACTS_SCHEMA, next);
+      if (!v.error) {
+        const nextQ = serverSubset(parsed.query, PROJECT_ARTIFACTS_SCHEMA);
+        if (nextQ !== this.committedServerQ) {
+          this.committedServerQ = nextQ;
+          this.cursor = '';
+          void this.load();
+        }
+      }
+    }
   };
 
   private resolveNames(items: ArtifactListItem[]): void {
@@ -339,13 +455,19 @@ export class ScionArtifactList extends LitElement {
   }
 
   private renderEmpty(): TemplateResult {
-    if (this.query.trim()) {
-      return html`<div class="empty">No artifacts match "${this.query.trim()}".</div>`;
-    }
-    if (this.sharedOnly) {
-      return html`<div class="empty">
-        No artifacts from other projects are shared with this project.
-      </div>`;
+    if (filtersQueryDialectEnabled()) {
+      if (this.committedServerQ.trim()) {
+        return html`<div class="empty">No artifacts match "${this.committedServerQ.trim()}".</div>`;
+      }
+    } else {
+      if (this.query.trim()) {
+        return html`<div class="empty">No artifacts match "${this.query.trim()}".</div>`;
+      }
+      if (this.sharedOnly) {
+        return html`<div class="empty">
+          No artifacts from other projects are shared with this project.
+        </div>`;
+      }
     }
     return html`
       <div class="empty">
@@ -455,21 +577,45 @@ export class ScionArtifactList extends LitElement {
     } else {
       body = this.renderTable();
     }
+    const useDialect = filtersQueryDialectEnabled();
+    const sharedActive =
+      useDialect &&
+      getActiveSingleKeyValue(this.filterQueryText, 'is', PROJECT_ARTIFACTS_SCHEMA) === 'shared';
     return html`
       <div class="toolbar">
-        <sl-input
-          size="small"
-          placeholder="Search title or key"
-          clearable
-          .value=${this.query}
-          @sl-input=${this.onSearch}
-          @sl-clear=${this.onSearch}
-        >
-          <sl-icon slot="prefix" name="search"></sl-icon>
-        </sl-input>
-        <sl-checkbox size="small" ?checked=${this.sharedOnly} @sl-change=${this.onSharedOnly}
-          >Shared with this project</sl-checkbox
-        >
+        ${useDialect
+          ? html`
+              <scion-filter-box
+                view="artifacts-project"
+                .value=${this.filterQueryText}
+                placeholder="Filter artifacts… (try is:shared)"
+                @filter-input=${this.onFilterInput}
+                @filter-commit=${this.onFilterCommit}
+              ></scion-filter-box>
+              <button
+                type="button"
+                class="filter-chip ${sharedActive ? 'active' : ''}"
+                aria-pressed=${sharedActive ? 'true' : 'false'}
+                @click=${this.onSharedChipClick}
+              >
+                Shared with this project
+              </button>
+            `
+          : html`
+              <sl-input
+                size="small"
+                placeholder="Search title or key"
+                clearable
+                .value=${this.query}
+                @sl-input=${this.onSearch}
+                @sl-clear=${this.onSearch}
+              >
+                <sl-icon slot="prefix" name="search"></sl-icon>
+              </sl-input>
+              <sl-checkbox size="small" ?checked=${this.sharedOnly} @sl-change=${this.onSharedOnly}
+                >Shared with this project</sl-checkbox
+              >
+            `}
         <span class="spacer"></span>
         ${this.newButton()}
       </div>
