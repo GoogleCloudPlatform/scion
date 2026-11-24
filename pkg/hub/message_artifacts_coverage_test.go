@@ -139,15 +139,17 @@ func hubPkgSymbolSites(t *testing.T, importPath, symbol string) map[stripSiteKey
 		if len(localNames) == 0 && !dotImport {
 			return
 		}
+		selectors := map[*ast.Ident]bool{}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.SelectorExpr:
+				selectors[x.Sel] = true
 				if id, ok := x.X.(*ast.Ident); ok && localNames[id.Name] && x.Sel.Name == symbol {
 					fn := enclosingFuncName(fset, f, fset.Position(x.Pos()).Offset)
 					out[stripSiteKey{name, fn}] = true
 				}
 			case *ast.Ident:
-				if dotImport && x.Name == symbol {
+				if dotImport && x.Name == symbol && !selectors[x] {
 					fn := enclosingFuncName(fset, f, fset.Position(x.Pos()).Offset)
 					out[stripSiteKey{name, fn}] = true
 				}
