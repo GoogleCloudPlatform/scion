@@ -624,7 +624,7 @@ func TestDecisionSettled_PartialIndexAutoMigrate(t *testing.T) {
 				"SELECT indexdef FROM pg_indexes WHERE tablename = 'decisions' AND indexname = $1",
 				[]any{decisionSettledPartialIndex}, rows)
 			require.NoError(t, err)
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			if !rows.Next() {
 				return false
 			}
@@ -638,7 +638,7 @@ func TestDecisionSettled_PartialIndexAutoMigrate(t *testing.T) {
 			"SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'decisions' AND name = ?",
 			[]any{decisionSettledPartialIndex}, rows)
 		require.NoError(t, err)
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		if !rows.Next() {
 			return false
 		}
