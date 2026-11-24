@@ -34,6 +34,7 @@ import (
 func RunTestMain(m *testing.M) int {
 	stopMemGuard := StartMemGuard()
 	teardown := testutil.IsolateHome("scion-hub-test-home-*")
+	SilenceSciontoolLog()
 	ClearAmbientGCPProjectEnv()
 	restoreLsRemote := InstallHermeticGitLsRemote()
 	restoreSparseCheckout := InstallHermeticGitSparseCheckout()

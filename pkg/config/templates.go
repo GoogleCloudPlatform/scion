@@ -852,6 +852,15 @@ func DeleteTemplate(name string, global bool) error {
 // ListTemplatesGrouped returns templates grouped by scope (global and project).
 // Unlike ListTemplates, this preserves the scope information and does not merge duplicates.
 func ListTemplatesGrouped() (global []*Template, project []*Template, err error) {
+	projectDir, _ := GetProjectDir()
+	return ListTemplatesGroupedForProject(projectDir)
+}
+
+// ListTemplatesGroupedForProject returns templates grouped by scope (global and
+// project), scanning project templates from projectDir/templates when projectDir
+// is non-empty and skipping project templates when projectDir is empty.
+// Unlike ListTemplates, this preserves the scope information and does not merge duplicates.
+func ListTemplatesGroupedForProject(projectDir string) (global []*Template, project []*Template, err error) {
 	// Helper to scan a directory for templates
 	scan := func(dir string, scope string) []*Template {
 		var templates []*Template
@@ -876,9 +885,9 @@ func ListTemplatesGrouped() (global []*Template, project []*Template, err error)
 		global = scan(globalDir, "global")
 	}
 
-	// Scan project templates
-	if projectDir, err := GetProjectTemplatesDir(); err == nil {
-		project = scan(projectDir, "project")
+	// Scan project templates only when a local project directory is provided
+	if projectDir != "" {
+		project = scan(filepath.Join(projectDir, "templates"), "project")
 	}
 
 	// Sort both lists by name for consistent output

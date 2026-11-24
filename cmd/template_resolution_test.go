@@ -257,15 +257,15 @@ func TestTruncateHash(t *testing.T) {
 }
 
 func TestFormatTemplateNotFoundError(t *testing.T) {
-	// Test that the error message is formatted correctly
-	err := formatTemplateNotFoundError("test-template", "/some/project/path")
+	// Test that the error message lists available templates and does not
+	// suggest syncing a template that does not exist locally.
+	err := formatTemplateNotFoundError("test-template", "/some/project/path", []string{"claude", "default", "gemini"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 
 	errMsg := err.Error()
 
-	// Check that key information is present
 	if !contains(errMsg, "test-template") {
 		t.Error("error message should contain template name")
 	}
@@ -275,14 +275,23 @@ func TestFormatTemplateNotFoundError(t *testing.T) {
 	if !contains(errMsg, "project scope") {
 		t.Error("error message should mention project scope")
 	}
-	if !contains(errMsg, "scion template sync") {
-		t.Error("error message should provide guidance on how to create template")
+	if !contains(errMsg, "Available templates:") {
+		t.Errorf("error message should list available templates, got:\n%s", errMsg)
+	}
+	if !contains(errMsg, "claude, default, gemini") {
+		t.Errorf("error message should include available template names, got:\n%s", errMsg)
+	}
+	if !contains(errMsg, "scion templates list") {
+		t.Errorf("error message should direct user to 'scion templates list', got:\n%s", errMsg)
+	}
+	if contains(errMsg, "scion template sync") {
+		t.Errorf("error message should not suggest syncing a missing template, got:\n%s", errMsg)
 	}
 }
 
 func TestFormatTemplateNotFoundErrorNoProject(t *testing.T) {
-	// Test with empty project path
-	err := formatTemplateNotFoundError("test-template", "")
+	// Test with empty project path and no available templates
+	err := formatTemplateNotFoundError("test-template", "", nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -292,6 +301,104 @@ func TestFormatTemplateNotFoundErrorNoProject(t *testing.T) {
 	// Should not have project scope line when no project path
 	if contains(errMsg, "project scope") {
 		t.Error("error message should not mention project scope when no project path")
+	}
+	if contains(errMsg, "Available templates:") {
+		t.Errorf("error message should omit available templates section when none exist, got:\n%s", errMsg)
+	}
+	if !contains(errMsg, "Run 'scion templates list' to see available templates") {
+		t.Errorf("error message should direct user to 'scion templates list', got:\n%s", errMsg)
+	}
+	if contains(errMsg, "scion template sync") {
+		t.Errorf("error message should not suggest syncing a missing template, got:\n%s", errMsg)
+	}
+}
+
+func TestResolveTemplateForHub_NotFoundListsAvailableTemplates(t *testing.T) {
+	oldTemplateScope := templateScope
+	templateScope = ""
+	defer func() { templateScope = oldTemplateScope }()
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	// Create a local global template
+	localGlobalTpl := filepath.Join(homeDir, config.GlobalDir, "templates", "local-helper")
+	if err := os.MkdirAll(localGlobalTpl, 0755); err != nil {
+		t.Fatalf("MkdirAll local-helper: %v", err)
+	}
+
+	// Create a local project template
+	projRoot := t.TempDir()
+	projScionDir := filepath.Join(projRoot, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(projScionDir, "templates", "proj-local"), 0755); err != nil {
+		t.Fatalf("MkdirAll proj-local: %v", err)
+	}
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() failed: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+	if err := os.Chdir(projRoot); err != nil {
+		t.Fatalf("os.Chdir() failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		// Name-filtered lookups return empty (requested template doesn't exist)
+		if q.Get("name") != "" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"templates":[],"totalCount":0}`))
+			return
+		}
+		// Unfiltered scope queries for available templates
+		switch q.Get("scope") {
+		case "project":
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"templates":  []map[string]any{{"id": "t1", "name": "developer", "slug": "developer", "status": "active"}},
+				"totalCount": 1,
+			})
+		case "user":
+			// Simulate agent identity where user scope is 401 (invisible)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"user scope not available"}}`))
+		case "global":
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"templates":  []map[string]any{{"id": "t2", "name": "default", "slug": "default", "status": "active"}},
+				"totalCount": 1,
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"templates":[],"totalCount":0}`))
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	if err != nil {
+		t.Fatalf("hubclient.New failed: %v", err)
+	}
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "p1", ProjectPath: projScionDir}
+
+	_, err = ResolveTemplateForHub(context.Background(), hubCtx, "definitely-not-a-template")
+	if err == nil {
+		t.Fatal("ResolveTemplateForHub() = nil error, want template not found")
+	}
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "template 'definitely-not-a-template' not found") {
+		t.Errorf("unexpected error header: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "Available templates:") {
+		t.Errorf("expected Available templates section, got:\n%s", errMsg)
+	}
+	if !strings.Contains(errMsg, "default, developer, local-helper, proj-local") {
+		t.Errorf("expected sorted deduplicated Hub+local templates, got:\n%s", errMsg)
+	}
+	if strings.Contains(errMsg, "scion template sync") {
+		t.Errorf("must not suggest 'scion template sync' when template does not exist locally:\n%s", errMsg)
 	}
 }
 

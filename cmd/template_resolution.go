@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -134,7 +135,8 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 	}
 
 	// Case 3: Template not found anywhere
-	return nil, formatTemplateNotFoundError(name, hubCtx.ProjectPath)
+	available := collectAvailableTemplateNames(ctx, hubCtx, scope, projectID)
+	return nil, formatTemplateNotFoundError(name, hubCtx.ProjectPath, available)
 }
 
 // validateTemplateScope rejects a --template-scope flag value that isn't one
@@ -650,8 +652,87 @@ func promptChoice(prompt, defaultChoice string, validChoices []string) (string, 
 	}
 }
 
+// collectAvailableTemplateNames gathers available template names from visible
+// Hub scopes and local directories for display in template-not-found errors.
+// All queries are best-effort; errors (including 401/403 on invisible scopes)
+// are skipped so the caller always gets a helpful not-found error.
+func collectAvailableTemplateNames(ctx context.Context, hubCtx *HubContext, scope, projectID string) []string {
+	seen := make(map[string]struct{})
+	addName := func(n string) {
+		if n != "" {
+			seen[n] = struct{}{}
+		}
+	}
+
+	if hubCtx != nil && hubCtx.Client != nil {
+		listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		queryScope := func(s, projID string) {
+			opts := &hubclient.ListTemplatesOptions{
+				Scope:  s,
+				Status: "active",
+			}
+			if s == "project" && projID != "" {
+				opts.ProjectID = projID
+			}
+			resp, err := hubCtx.Client.Templates().List(listCtx, opts)
+			if err != nil || resp == nil {
+				return
+			}
+			for i := range resp.Templates {
+				t := &resp.Templates[i]
+				if t.Name != "" {
+					addName(t.Name)
+				} else {
+					addName(t.Slug)
+				}
+			}
+		}
+
+		if scope != "" {
+			queryScope(scope, projectID)
+		} else {
+			if projectID != "" {
+				queryScope("project", projectID)
+			}
+			queryScope("user", "")
+			queryScope("global", "")
+		}
+	}
+
+	localDir := localProjectDir()
+	if hubCtx != nil && hubCtx.ProjectPath != "" {
+		localDir = hubCtx.ProjectPath
+	}
+	localGlobal, localProject, err := config.ListTemplatesGroupedForProject(localDir)
+	if err == nil {
+		if scope == "" || scope == "project" {
+			for _, t := range localProject {
+				addName(t.Name)
+			}
+		}
+		if scope == "" || scope == "global" {
+			for _, t := range localGlobal {
+				addName(t.Name)
+			}
+		}
+	}
+
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// maxNotFoundTemplatesDisplay caps the number of template names printed inline
+// in formatTemplateNotFoundError so large registries stay readable.
+const maxNotFoundTemplatesDisplay = 20
+
 // formatTemplateNotFoundError creates a helpful error message when template is not found.
-func formatTemplateNotFoundError(name, projectPath string) error {
+func formatTemplateNotFoundError(name, projectPath string, available []string) error {
 	var locations []string
 
 	// Check project-specific locations
@@ -669,9 +750,25 @@ func formatTemplateNotFoundError(name, projectPath string) error {
 		locations = append(locations, fmt.Sprintf("  - Local (%s/%s) - not found", globalDir, name))
 	}
 
+	if len(available) == 0 {
+		return fmt.Errorf("template '%s' not found\n\n"+
+			"Searched locations:\n%s\n\n"+
+			"Run 'scion templates list' to see available templates",
+			name, strings.Join(locations, "\n"))
+	}
+
+	display := available
+	suffix := ""
+	if len(display) > maxNotFoundTemplatesDisplay {
+		extra := len(display) - maxNotFoundTemplatesDisplay
+		display = display[:maxNotFoundTemplatesDisplay]
+		suffix = fmt.Sprintf(", ... (%d more)", extra)
+	}
+
 	return fmt.Errorf("template '%s' not found\n\n"+
 		"Searched locations:\n%s\n\n"+
-		"To sync a local template to the Hub:\n"+
-		"  scion template sync %s",
-		name, strings.Join(locations, "\n"), name)
+		"Available templates:\n"+
+		"  %s%s\n\n"+
+		"Run 'scion templates list' for details",
+		name, strings.Join(locations, "\n"), strings.Join(display, ", "), suffix)
 }
