@@ -268,9 +268,9 @@ func TestDialect_EngineSuccessAndUncertainMatchProbeShape(t *testing.T) {
 	}
 	for _, cons := range []string{"trigger", "message"} {
 		require.NoError(t, systemone.RegisterConsumerEnvironment(eng, cons, spec.ContentEnvironment{
-			Name:    cons + "_env",
-			Version: 1,
-			Fields:  []spec.FieldDecl{{Name: spec.ProbeFieldText, Kind: spec.FieldKindText, MaxBytes: 16384, Trust: spec.TrustUntrusted}},
+			Name:          cons + "_env",
+			Version:       1,
+			Fields:        []spec.FieldDecl{{Name: spec.ProbeFieldText, Kind: spec.FieldKindText, MaxBytes: 16384, Trust: spec.TrustUntrusted}},
 			MaxTotalBytes: 16384,
 		}))
 	}
