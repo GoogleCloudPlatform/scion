@@ -102,7 +102,7 @@ type bindingScopeIndex struct {
 	total int
 	// nonProject holds every nil binding and every binding whose ScopeType !=
 	// ScopeTypeProject (system-scoped plus any unknown scope type, so
-	// fail-closed handling stays inside the kernel), in original order.
+	// behaviour matches the unfiltered list), in original order.
 	nonProject []indexedBinding
 	// byProject maps ScopeID -> project-scoped bindings for that project,
 	// in original order.
