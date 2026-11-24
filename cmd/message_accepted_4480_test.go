@@ -93,11 +93,11 @@ var accepted4480Sends = []struct {
 }{
 	{
 		name: "agent direct send", sender: "sender-agent", target: "'builder'", deferredName: "builder",
-		send: func(h *HubContext) error { return sendMessageViaHub(h, "builder", "hello", false, false, false) },
+		send: func(h *HubContext) error { return sendMessageViaHub(h, "builder", "hello", false, false) },
 	},
 	{
 		name: "human direct send", sender: "", target: "'builder'", deferredName: "builder",
-		send: func(h *HubContext) error { return sendMessageViaHub(h, "builder", "hello", false, false, false) },
+		send: func(h *HubContext) error { return sendMessageViaHub(h, "builder", "hello", false, false) },
 	},
 	{
 		name: "agent @agent ref", sender: "sender-agent", target: "'builder'", deferredName: "builder",

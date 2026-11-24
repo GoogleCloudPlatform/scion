@@ -192,14 +192,12 @@ func TestSendMessageViaConversation_NoAgentWokenIncludesAgentState(t *testing.T)
 // notice.
 func TestSendOutboundMessageViaHub_NoAgentWokenNotice(t *testing.T) {
 	orig := saveMessageTestState()
-	origFormat, origThreadID, origChannel := outputFormat, msgThreadID, msgChannel
+	origFormat := outputFormat
 	t.Cleanup(func() {
 		orig.restore()
-		outputFormat, msgThreadID, msgChannel = origFormat, origThreadID, origChannel
+		outputFormat = origFormat
 	})
 	outputFormat = ""
-	msgThreadID = "thread-group"
-	msgChannel = ""
 	t.Setenv("SCION_AGENT_NAME", "sender")
 	hubCtx := newNoAgentWokenHub(t, "proj-no-agent-woken-thread", map[string]interface{}{
 		"no_agent_woken": true,

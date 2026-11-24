@@ -374,7 +374,7 @@ func TestSendMessageViaHub_SingleAgent(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -409,7 +409,7 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	msgInterrupt = true
 	defer func() { msgInterrupt = origInterrupt }()
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "urgent", true, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "urgent", true, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -452,46 +452,8 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false)
 	require.Error(t, err, "single-agent message failure should return an error")
-}
-
-func TestScheduleMessageFlagValidation(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	tests := []struct {
-		name    string
-		in      string
-		at      string
-		wantErr string
-	}{
-		{
-			name:    "in and at are mutually exclusive",
-			in:      "30m",
-			at:      "2030-01-01T00:00:00Z",
-			wantErr: "--in and --at are mutually exclusive",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			// Save and restore global state
-			origIn, origAt := msgIn, msgAt
-			defer func() {
-				msgIn, msgAt = origIn, origAt
-			}()
-
-			msgIn = tc.in
-			msgAt = tc.at
-
-			args := []string{"agent1", "hello"}
-
-			err := messageCmd.RunE(messageCmd, args)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErr)
-		})
-	}
 }
 
 func TestResolveSenderIdentity_AgentContext(t *testing.T) {
@@ -519,19 +481,17 @@ func TestResolveSenderIdentity_NoContext(t *testing.T) {
 
 func TestBuildStructuredMessage(t *testing.T) {
 	// Save and restore global state
-	origPlain, origInterrupt := msgPlain, msgInterrupt
+	origInterrupt := msgInterrupt
 	origAttach := msgAttach
 	defer func() {
-		msgPlain = origPlain
 		msgInterrupt = origInterrupt
 		msgAttach = origAttach
 	}()
 
-	msgPlain = false
 	msgInterrupt = true
 	msgAttach = []string{"file1.go", "file2.go"}
 
-	msg := buildStructuredMessage("user:alice", "agent:dev", "do something", msgAttach, msgPlain, msgInterrupt)
+	msg := buildStructuredMessage("user:alice", "agent:dev", "do something", msgAttach, msgInterrupt)
 
 	assert.Equal(t, messages.Version, msg.Version)
 	assert.Equal(t, "user:alice", msg.Sender)
@@ -542,104 +502,6 @@ func TestBuildStructuredMessage(t *testing.T) {
 	assert.True(t, msg.Urgent)
 	assert.False(t, msg.Broadcasted)
 	assert.Equal(t, []string{"file1.go", "file2.go"}, msg.Attachments)
-}
-
-func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	projectID := "project-msg-notify"
-
-	var notifyReceived bool
-	var mu sync.Mutex
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodPost:
-			var body struct {
-				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
-				Interrupt         bool                        `json:"interrupt"`
-				Notify            bool                        `json:"notify"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			mu.Lock()
-			notifyReceived = body.Notify
-			mu.Unlock()
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, true, false)
-	require.NoError(t, err)
-
-	mu.Lock()
-	assert.True(t, notifyReceived, "notify should be true by default")
-	mu.Unlock()
-}
-
-func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	projectID := "project-msg-no-notify"
-
-	var notifyReceived bool
-	var mu sync.Mutex
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodPost:
-			var body struct {
-				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
-				Interrupt         bool                        `json:"interrupt"`
-				Notify            bool                        `json:"notify"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			mu.Lock()
-			notifyReceived = body.Notify
-			mu.Unlock()
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	// Explicit --no-notify: notify should be false
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false)
-	require.NoError(t, err)
-
-	mu.Lock()
-	assert.False(t, notifyReceived, "notify should be false when --no-notify is used")
-
-	mu.Unlock()
 }
 
 func TestSendOutboundMessageViaHub(t *testing.T) {
@@ -718,40 +580,6 @@ func TestSendOutboundMessageViaHub_RequiresAgentContext(t *testing.T) {
 	assert.Contains(t, err.Error(), "requires an agent identity")
 }
 
-func TestUserRecipientFlagValidation(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	tests := []struct {
-		name    string
-		args    []string
-		in      string
-		wantErr string
-	}{
-		{
-			name:    "scheduled with user recipient not allowed",
-			args:    []string{"user:alice", "hello"},
-			in:      "30m",
-			wantErr: "--in/--at cannot be used with user recipients",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			origIn := msgIn
-			defer func() {
-				msgIn = origIn
-			}()
-
-			msgIn = tc.in
-
-			err := messageCmd.RunE(messageCmd, tc.args)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErr)
-		})
-	}
-}
-
 func TestSetRecipientFlagValidation(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
@@ -759,22 +587,8 @@ func TestSetRecipientFlagValidation(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
-		in      string
-		notify  bool
 		wantErr string
 	}{
-		{
-			name:    "set with in not allowed",
-			args:    []string{"set[agent:a,agent:b]", "hello"},
-			in:      "30m",
-			wantErr: "--in/--at cannot be used with group[] recipients",
-		},
-		{
-			name:    "set with notify not allowed",
-			args:    []string{"set[agent:a,agent:b]", "hello"},
-			notify:  true,
-			wantErr: "--notify cannot be used with group[] recipients",
-		},
 		{
 			name:    "invalid set",
 			args:    []string{"set[agent:a]", "hello"},
@@ -789,16 +603,6 @@ func TestSetRecipientFlagValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			origIn := msgIn
-			origNotify := msgNotify
-			defer func() {
-				msgIn = origIn
-				msgNotify = origNotify
-			}()
-
-			msgIn = tc.in
-			msgNotify = tc.notify
-
 			err := messageCmd.RunE(messageCmd, tc.args)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
@@ -817,18 +621,6 @@ func TestWakeFlagValidation(t *testing.T) {
 		args     []string // cobra args; nil means use default ["agent1", "hello"]
 		errMsg   string
 	}{
-		{
-			name:     "wake with in",
-			setup:    func() { msgWake = true; msgIn = "5m" },
-			teardown: func() { msgWake = false; msgIn = "" },
-			errMsg:   "--wake cannot be combined with --in or --at",
-		},
-		{
-			name:     "wake with at",
-			setup:    func() { msgWake = true; msgAt = "2026-01-01T00:00:00Z" },
-			teardown: func() { msgWake = false; msgAt = "" },
-			errMsg:   "--wake cannot be combined with --in or --at",
-		},
 		{
 			name:     "wake with user recipient",
 			setup:    func() { msgWake = true },
@@ -849,42 +641,6 @@ func TestWakeFlagValidation(t *testing.T) {
 			}
 
 			err := messageCmd.RunE(messageCmd, args)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.errMsg)
-		})
-	}
-}
-
-func TestAttachFlagValidation(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	tests := []struct {
-		name     string
-		setup    func()
-		teardown func()
-		errMsg   string
-	}{
-		{
-			name:     "attach with in",
-			setup:    func() { msgAttach = []string{"notes.md"}; msgIn = "5m" },
-			teardown: func() { msgAttach = nil; msgIn = "" },
-			errMsg:   "--attach cannot be combined with --in or --at",
-		},
-		{
-			name:     "attach with at",
-			setup:    func() { msgAttach = []string{"notes.md"}; msgAt = "2026-01-01T00:00:00Z" },
-			teardown: func() { msgAttach = nil; msgAt = "" },
-			errMsg:   "--attach cannot be combined with --in or --at",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.setup()
-			defer tc.teardown()
-
-			err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.errMsg)
 		})
@@ -1111,7 +867,7 @@ func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
 	}
 
 	// Send with wake=true
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, true)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, true)
 	require.NoError(t, err)
 
 	mu.Lock()
@@ -1144,16 +900,10 @@ func TestBareEmailRecipientAutoPrefix(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Reset flags to defaults
-			origIn := msgIn
-			origNotify := msgNotify
 			origWake := msgWake
 			defer func() {
-				msgIn = origIn
-				msgNotify = origNotify
 				msgWake = origWake
 			}()
-			msgIn = ""
-			msgNotify = false
 			msgWake = false
 
 			err := messageCmd.RunE(messageCmd, tc.args)
@@ -1558,79 +1308,6 @@ func TestExtractMentions_Basic(t *testing.T) {
 	}
 }
 
-func TestParseCCFlag(t *testing.T) {
-	tests := []struct {
-		name string
-		cc   []string
-		want []string
-	}{
-		{
-			name: "empty",
-			cc:   nil,
-			want: nil,
-		},
-		{
-			name: "single empty string",
-			cc:   []string{""},
-			want: nil,
-		},
-		{
-			name: "single name",
-			cc:   []string{"alice"},
-			want: []string{"alice"},
-		},
-		{
-			name: "multiple names",
-			cc:   []string{"alice,bob,charlie"},
-			want: []string{"alice", "bob", "charlie"},
-		},
-		{
-			name: "whitespace trimmed",
-			cc:   []string{" alice , bob , charlie "},
-			want: []string{"alice", "bob", "charlie"},
-		},
-		{
-			name: "empty entries skipped",
-			cc:   []string{"alice,,bob"},
-			want: []string{"alice", "bob"},
-		},
-		{
-			name: "duplicates removed",
-			cc:   []string{"alice,bob,alice"},
-			want: []string{"alice", "bob"},
-		},
-		{
-			name: "case insensitive dedup",
-			cc:   []string{"Alice,alice"},
-			want: []string{"Alice"},
-		},
-		{
-			// The repeatable form: previously only the last occurrence
-			// survived, so "alice" was silently dropped.
-			name: "repeated flag accumulates",
-			cc:   []string{"alice", "bob"},
-			want: []string{"alice", "bob"},
-		},
-		{
-			name: "repeated and comma forms mixed",
-			cc:   []string{"alice,bob", "charlie"},
-			want: []string{"alice", "bob", "charlie"},
-		},
-		{
-			name: "dedup across occurrences",
-			cc:   []string{"alice", "Alice", "bob"},
-			want: []string{"alice", "bob"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parseCCFlag(tc.cc)
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
 // TestSendMessageViaHub_OldHubShaped_MentionsFieldCarriesTheMention: against
 // a server that only understands the legacy explicit "mentions" field (no
 // server-side body parsing — i.e. an "old hub" shape), the request body
@@ -1677,11 +1354,7 @@ func TestSendMessageViaHub_OldHubShaped_MentionsFieldCarriesTheMention(t *testin
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
 
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
-
-	err = sendMessageViaHub(hubCtx, "builder", "hey @bystander take a look", false, false, false)
+	err = sendMessageViaHub(hubCtx, "builder", "hey @bystander take a look", false, false)
 	require.NoError(t, err)
 
 	mu.Lock()
@@ -1710,12 +1383,8 @@ func TestSendMessageViaHub_PossessiveMentionNotifiesIntendedAgent(t *testing.T) 
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
 
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
-
 	stderr := captureStderr(t, func() {
-		err = sendMessageViaHub(hubCtx, "primary-agent", "reviewing @instance-investigator's proposal and @instance-investigator\u2019s follow-up.", false, false, false)
+		err = sendMessageViaHub(hubCtx, "primary-agent", "reviewing @instance-investigator's proposal and @instance-investigator\u2019s follow-up.", false, false)
 	})
 	require.NoError(t, err)
 	require.Contains(t, stderr, "Mention notification sent to @instance-investigator.")
@@ -1744,13 +1413,9 @@ func TestSendMessageViaHub_NumericAndHexTokensNotReportedAsMissingAgents(t *test
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
 
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
-
 	body := "checked @10 items from @5aaf533a and @847772c4cf1e6e1a692cb12ebd06c718ebcb7d4e with @alice."
 	stderr := captureStderr(t, func() {
-		err = sendMessageViaHub(hubCtx, "primary-agent", body, false, false, false)
+		err = sendMessageViaHub(hubCtx, "primary-agent", body, false, false)
 	})
 	require.NoError(t, err)
 	require.Contains(t, stderr, "Mention notification sent to @alice.")
@@ -1915,12 +1580,8 @@ func TestSendMessageViaHub_JSONOutputIncludesMentionResults(t *testing.T) {
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
 
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
-
 	out := captureStdout(t, func() {
-		err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false, false)
+		err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false)
 	})
 	require.NoError(t, err)
 
@@ -1954,11 +1615,8 @@ func TestSendMessageViaHub_MentionFanOut(t *testing.T) {
 	}
 
 	// Reset CC flag
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
 
-	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false, false)
+	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false)
 	require.NoError(t, err)
 
 	// Server-side fan-out: the CLI sends exactly one request, with the body
@@ -1992,12 +1650,8 @@ func TestSendMessageViaHub_MentionDedup(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
-
 	// Primary recipient is also @mentioned in body — should be deduplicated
-	err = sendMessageViaHub(hubCtx, "my-agent", "hey @my-agent check @other-agent", false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hey @my-agent check @other-agent", false, false)
 	require.NoError(t, err)
 
 	// One request; the primary (self-mentioned) is filtered out of the
@@ -2028,16 +1682,12 @@ func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
-
 	// @nonexistent doesn't match any agent — should warn but not fail. The
 	// mock server echoes a not_found mention_results entry for it,
 	// exercising the CLI's printMentionResults wiring.
 	var sendErr error
 	out := captureStderr(t, func() {
-		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hey @nonexistent check this", false, false, false)
+		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hey @nonexistent check this", false, false)
 	})
 	require.NoError(t, sendErr)
 
@@ -2045,113 +1695,6 @@ func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
 	require.Len(t, *sent, 1)
 	assert.Equal(t, "my-agent", (*sent)[0].AgentName)
 	assert.Contains(t, out, "Note: @nonexistent is not an agent in this project; no agent was notified.")
-}
-
-func TestSendMessageViaHub_CCFlag(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	projectID := "project-msg-cc"
-	agents := []hubclient.Agent{
-		{Name: "primary-agent", Status: "running"},
-		{Name: "cc-agent-1", Status: "running"},
-		{Name: "cc-agent-2", Status: "running"},
-	}
-	server, sent := newMessageMockHubServer(t, projectID, agents)
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	origCC := msgCC
-	msgCC = []string{"cc-agent-1", "cc-agent-2"}
-	defer func() { msgCC = origCC }()
-
-	err = sendMessageViaHub(hubCtx, "primary-agent", "check this out", false, false, false)
-	require.NoError(t, err)
-
-	// One request; --cc names go into the explicit mentions field.
-	require.Len(t, *sent, 1)
-	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
-	assert.Equal(t, messages.TypeInstruction, (*sent)[0].StructuredMsg.Type)
-	assert.ElementsMatch(t, []string{"cc-agent-1", "cc-agent-2"}, (*sent)[0].Mentions)
-}
-
-func TestSendMessageViaHub_CCAndMentionCombined(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	projectID := "project-msg-cc-mention"
-	agents := []hubclient.Agent{
-		{Name: "primary-agent", Status: "running"},
-		{Name: "mention-agent", Status: "running"},
-		{Name: "cc-agent", Status: "running"},
-	}
-	server, sent := newMessageMockHubServer(t, projectID, agents)
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	origCC := msgCC
-	msgCC = []string{"cc-agent"}
-	defer func() { msgCC = origCC }()
-
-	// Both @mention in body and --cc flag
-	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mention-agent check this", false, false, false)
-	require.NoError(t, err)
-
-	// One request; the explicit mentions field unions the body @mention and
-	// --cc.
-	require.Len(t, *sent, 1)
-	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
-	assert.ElementsMatch(t, []string{"mention-agent", "cc-agent"}, (*sent)[0].Mentions)
-}
-
-func TestSendMessageViaHub_CCDedupWithMention(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	projectID := "project-msg-cc-dedup"
-	agents := []hubclient.Agent{
-		{Name: "primary-agent", Status: "running"},
-		{Name: "shared-agent", Status: "running"},
-	}
-	server, sent := newMessageMockHubServer(t, projectID, agents)
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	origCC := msgCC
-	msgCC = []string{"shared-agent"}
-	defer func() { msgCC = origCC }()
-
-	// Same agent in both @mention and --cc — should only appear once
-	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @shared-agent check this", false, false, false)
-	require.NoError(t, err)
-
-	require.Len(t, *sent, 1)
-	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
-	assert.Equal(t, []string{"shared-agent"}, (*sent)[0].Mentions)
 }
 
 func TestSendMessageViaHub_NoMentionsInBody(t *testing.T) {
@@ -2175,12 +1718,8 @@ func TestSendMessageViaHub_NoMentionsInBody(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
-
 	// No mentions in body, no --cc — only primary should be sent
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -2210,9 +1749,6 @@ func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
 	}
 
 	// Reset CC flag
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
 
 	recipients := []messages.GroupRecipient{
 		{Kind: messages.RecipientAgent, Name: "agent-a"},
@@ -2457,67 +1993,6 @@ func TestSendGroupMessageViaHub_A257_O2_PartialFailureReportsCountsExplicitly(t 
 	require.Error(t, sendErr)
 	assert.Contains(t, sendErr.Error(), "1 accepted, 0 deferred, 1 failed (of 2 total)",
 		"got: %v", sendErr)
-}
-
-func TestCCFlagValidation(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	tests := []struct {
-		name      string
-		cc        []string
-		userRecip bool
-		in        string
-		at        string
-		wantErr   string
-	}{
-		{
-			name:      "cc with user recipient",
-			cc:        []string{"agent-a"},
-			userRecip: true,
-			wantErr:   "--cc cannot be used with user recipients",
-		},
-		{
-			name:    "cc with --in scheduling",
-			cc:      []string{"agent-a"},
-			in:      "5m",
-			wantErr: "--cc cannot be combined with --in or --at",
-		},
-		{
-			name:    "cc with --at scheduling",
-			cc:      []string{"agent-a"},
-			at:      "2026-01-01 12:00",
-			wantErr: "--cc cannot be combined with --in or --at",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			origCC := msgCC
-			origIn := msgIn
-			origAt := msgAt
-			defer func() {
-				msgCC = origCC
-				msgIn = origIn
-				msgAt = origAt
-			}()
-
-			msgCC = tc.cc
-			msgIn = tc.in
-			msgAt = tc.at
-
-			var args []string
-			if tc.userRecip {
-				args = []string{"user:alice", "hello"}
-			} else {
-				args = []string{"my-agent", "hello"}
-			}
-
-			err := messageCmd.RunE(messageCmd, args)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErr)
-		})
-	}
 }
 
 // --- Cross-project messaging tests ---
@@ -3457,7 +2932,7 @@ func TestSendMessageViaHub_ReincarnatingAgent_PrintsDeferredNotice(t *testing.T)
 
 	var sendErr error
 	output := captureStdout(t, func() {
-		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hello during migration", false, false, false)
+		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hello during migration", false, false)
 	})
 	require.NoError(t, sendErr, "a deferred delivery must not be reported as a send error")
 	assert.Contains(t, output, "agent my-agent is reincarnating; message saved to history and will be seen on catch-up",
@@ -3600,13 +3075,9 @@ func TestSendMessageViaHub_SkippedMentionPrintsBeforeConfirmation(t *testing.T) 
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
 
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
-
 	var sendErr error
 	out := captureCombinedOutput(t, func() {
-		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hey @nobody", false, false, false)
+		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hey @nobody", false, false)
 	})
 	require.NoError(t, sendErr)
 
@@ -3672,10 +3143,6 @@ func TestSendGroupMessageViaHub_SkippedMentionPrintsBeforeSummary(t *testing.T) 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
-
-	origCC := msgCC
-	msgCC = nil
-	defer func() { msgCC = origCC }()
 
 	recipients := []messages.GroupRecipient{
 		{Kind: messages.RecipientAgent, Name: "agent-a"},
@@ -3831,7 +3298,7 @@ func TestSendMessage_DeferredMentionPrintsBeforeConfirmation(t *testing.T) {
 		{
 			name: "agent",
 			send: func(hubCtx *HubContext) error {
-				return sendMessageViaHub(hubCtx, "my-agent", "hey @nobody", false, false, false)
+				return sendMessageViaHub(hubCtx, "my-agent", "hey @nobody", false, false)
 			},
 			confirm: "agent my-agent is reincarnating; message saved to history" +
 				" and will be seen on catch-up (message msg-deferred).",
@@ -3861,10 +3328,6 @@ func TestSendMessage_DeferredMentionPrintsBeforeConfirmation(t *testing.T) {
 			orig := saveMessageTestState()
 			defer orig.restore()
 			t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
-
-			origCC := msgCC
-			msgCC = nil
-			defer func() { msgCC = origCC }()
 
 			hubCtx := newServer(t)
 			var sendErr error

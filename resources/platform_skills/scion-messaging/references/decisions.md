@@ -155,8 +155,7 @@ result.
 After a successful send the CLI marks you as waiting for input, the same as
 `sciontool status ask_user`, with the first question as the summary.
 
-You cannot combine decisions with `--attach`, `--artifact`, `--wake`, `--in`,
-`--at`, `--cc`, `--channel` or `--thread-id`.
+You cannot combine decisions with `--attach`, `--artifact` or `--wake`.
 
 ## Let the user answer in their own words: `allow_other`
 

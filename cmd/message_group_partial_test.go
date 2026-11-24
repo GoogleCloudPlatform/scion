@@ -198,12 +198,12 @@ func agentRecipients(names ...string) []messages.GroupRecipient {
 func groupTestState(t *testing.T, format string) {
 	t.Helper()
 	orig := saveMessageTestState()
-	oldFormat, oldCC := outputFormat, msgCC
-	outputFormat, msgCC = format, nil
+	oldFormat := outputFormat
+	outputFormat = format
 	t.Setenv("SCION_AGENT_NAME", "")
 	t.Cleanup(func() {
 		orig.restore()
-		outputFormat, msgCC = oldFormat, oldCC
+		outputFormat = oldFormat
 	})
 }
 
@@ -488,11 +488,10 @@ func (f *testFanOut) hook(parent context.Context) (context.Context, context.Canc
 
 // An interrupt mid-send must not hide the recipients already delivered: the
 // in-flight send is cancelled and reported unknown, the delivered set is
-// still printed, the exit code is the partial one, and the --cc fan-out is
+// still printed, the exit code is the partial one, and the @mention fan-out is
 // skipped.
 func TestSendGroupMessage3510_InterruptStillReportsDelivered(t *testing.T) {
 	groupTestState(t, "")
-	msgCC = []string{"agent-cc"}
 	h := newGroupFakeHub(t, map[string]groupOutcome{"agent-fast": ok(), "agent-slow": blockUntilCancelled()})
 	h.listAgents = []string{"agent-fast", "agent-slow", "agent-cc"}
 
@@ -518,7 +517,7 @@ func TestSendGroupMessage3510_InterruptStillReportsDelivered(t *testing.T) {
 	var sendErr error
 	var out, errOut string
 	out, errOut = captureStdoutStderr(t, func() {
-		sendErr = sendGroupMessageViaHubCtx(h.hubCtx(t), agentRecipients("agent-fast", "agent-slow"), "hi", false, hooks)
+		sendErr = sendGroupMessageViaHubCtx(h.hubCtx(t), agentRecipients("agent-fast", "agent-slow"), "hi @agent-cc", false, hooks)
 	})
 
 	assert.Less(t, time.Since(start), 10*time.Second, "an interrupt must cancel in-flight sends promptly")
@@ -529,8 +528,8 @@ func TestSendGroupMessage3510_InterruptStillReportsDelivered(t *testing.T) {
 	assert.Contains(t, out, "Accepted (1): agent:agent-fast")
 	assert.Contains(t, out, "Unknown (may have been delivered) (1):\n  agent:agent-slow: no response from Hub")
 	assert.False(t, h.seen("GET agents"), "the mention fan-out must not run after an interrupt")
-	assert.False(t, h.seen("POST message agent-cc"), "--cc recipients must not be messaged after an interrupt")
-	assert.Contains(t, errOut, "@mention and --cc notifications were not sent")
+	assert.False(t, h.seen("POST message agent-cc"), "mentioned agents must not be messaged after an interrupt")
+	assert.Contains(t, errOut, "@mention notifications were not sent")
 }
 
 // An interrupt before a request starts means it was never sent: it is a
@@ -565,7 +564,6 @@ func TestSendGroupMessage3510_InterruptBeforeSendIsFailed(t *testing.T) {
 // every send has finished does not mark the send interrupted.
 func TestSendGroupMessage3510_SignalHandlerScopedToFanOut(t *testing.T) {
 	groupTestState(t, "")
-	msgCC = []string{"agent-cc"}
 	h := newGroupFakeHub(t, map[string]groupOutcome{"agent-a": ok(), "agent-b": ok()})
 	h.listAgents = []string{"agent-a", "agent-b", "agent-cc"}
 
@@ -591,7 +589,7 @@ func TestSendGroupMessage3510_SignalHandlerScopedToFanOut(t *testing.T) {
 
 	var sendErr error
 	out := captureStdout(t, func() {
-		sendErr = sendGroupMessageViaHubCtx(h.hubCtx(t), agentRecipients("agent-a", "agent-b"), "hi", false,
+		sendErr = sendGroupMessageViaHubCtx(h.hubCtx(t), agentRecipients("agent-a", "agent-b"), "hi @agent-cc", false,
 			groupSendHooks{fanOutContext: fan.hook})
 	})
 	require.NoError(t, sendErr)
@@ -601,7 +599,7 @@ func TestSendGroupMessage3510_SignalHandlerScopedToFanOut(t *testing.T) {
 	defer mu.Unlock()
 	require.Contains(t, activeAt, "me", "the sender lookup must reach the hub")
 	require.Contains(t, activeAt, "group")
-	require.Contains(t, activeAt, "list", "the --cc fan-out must run")
+	require.Contains(t, activeAt, "list", "the @mention fan-out must run")
 	require.Contains(t, activeAt, "cc")
 	assert.False(t, activeAt["me"], "the signal handler must not be installed before the fan-out")
 	assert.True(t, activeAt["group"], "the group sends must run under the signal handler")
@@ -613,7 +611,6 @@ func TestSendGroupMessage3510_SignalHandlerScopedToFanOut(t *testing.T) {
 // send is not reported interrupted, though the mention fan-out is skipped.
 func TestSendGroupMessage3510_LateSignalNotReportedInterrupted(t *testing.T) {
 	groupTestState(t, "")
-	msgCC = []string{"agent-cc"}
 	h := newGroupFakeHub(t, map[string]groupOutcome{"agent-a": ok(), "agent-b": ok()})
 	h.listAgents = []string{"agent-a", "agent-b", "agent-cc"}
 
@@ -630,7 +627,7 @@ func TestSendGroupMessage3510_LateSignalNotReportedInterrupted(t *testing.T) {
 
 	var sendErr error
 	out, _ := captureStdoutStderr(t, func() {
-		sendErr = sendGroupMessageViaHubCtx(h.hubCtx(t), agentRecipients("agent-a", "agent-b"), "hi", false, hooks)
+		sendErr = sendGroupMessageViaHubCtx(h.hubCtx(t), agentRecipients("agent-a", "agent-b"), "hi @agent-cc", false, hooks)
 	})
 
 	require.NoError(t, sendErr)

@@ -268,8 +268,6 @@ func executeMessagePolicyE2ECLI(t *testing.T, mode CLIMode, args ...string) (str
 
 func resetMessageCommandGlobals(t *testing.T) {
 	t.Helper()
-	msgChannel = ""
-	msgThreadID = ""
 	msgBodyFile = ""
 	msgAttach = nil
 	msgAttachUpload = nil
@@ -278,11 +276,6 @@ func resetMessageCommandGlobals(t *testing.T) {
 	resetDecisionFlags()
 	msgInterrupt = false
 	msgWake = false
-	msgNotify = false
-	msgPlain = false
-	msgIn = ""
-	msgAt = ""
-	msgCC = nil
 }
 
 // TestMessagePolicy_EndToEnd_EnforceRejectThenShadowDeliver exercises the full

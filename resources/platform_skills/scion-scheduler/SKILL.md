@@ -19,8 +19,7 @@ schedules within its own project.
 For full command syntax: `scion schedule --help` and its subcommands.
 
 Use `scion schedule create` for every delayed message, including a simple
-self-callback. The `--in` and `--at` flags of `scion message` are deprecated;
-do not use them for callbacks.
+self-callback. The `--in` and `--at` flags have been removed from `scion message`.
 
 ## Waiting on external processes — the blocked-wait pairing rule
 

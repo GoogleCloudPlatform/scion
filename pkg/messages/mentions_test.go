@@ -270,29 +270,6 @@ func TestIsLeadingMention(t *testing.T) {
 	}
 }
 
-func TestParseCCFlag(t *testing.T) {
-	tests := []struct {
-		name string
-		cc   string
-		want []string
-	}{
-		{name: "empty", cc: "", want: nil},
-		{name: "single", cc: "alice", want: []string{"alice"}},
-		{name: "multiple", cc: "alice,bob,charlie", want: []string{"alice", "bob", "charlie"}},
-		{name: "whitespace trimmed", cc: " alice , bob ", want: []string{"alice", "bob"}},
-		{name: "empty entries", cc: "alice,,bob", want: []string{"alice", "bob"}},
-		{name: "duplicates", cc: "alice,bob,alice", want: []string{"alice", "bob"}},
-		{name: "case insensitive dedup", cc: "Alice,alice", want: []string{"Alice"}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := ParseCCFlag(tc.cc)
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
 func TestResolveMentions(t *testing.T) {
 	agents := []AgentInfo{
 		{Slug: "alice", Name: "Alice Agent"},

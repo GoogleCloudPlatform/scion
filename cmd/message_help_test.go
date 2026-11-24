@@ -110,25 +110,25 @@ func TestMessageHelpCoversAllRefForms(t *testing.T) {
 			"expected Long to NOT contain fabricated prefix xyz:<fake> — assertion mechanism is broken")
 	})
 
-	// CHANGE 2: assert that deprecation warnings referencing conversation forms
+	// CHANGE 2: assert that removed-flag errors referencing conversation forms
 	// point to forms that are actually documented in Long.
-	t.Run("deprecation_warnings_reference_documented_forms", func(t *testing.T) {
-		// Patterns that indicate a deprecation message references a
+	t.Run("removed_flag_errors_reference_documented_forms", func(t *testing.T) {
+		// Patterns that indicate a removed-flag message references a
 		// conversation-reference form.
 		refPatterns := []string{"@<", "conv:", "#<"}
 		checked := 0
-		for _, d := range deprecationReplacements {
+		for _, r := range removedFlagErrors {
 			for _, pat := range refPatterns {
-				if strings.Contains(d.Message, pat) {
+				if strings.Contains(r.Message, pat) {
 					checked++
 					assert.True(t, strings.Contains(long, pat),
-						"deprecation for --%s says %q which references %q, but messageCmd.Long does not contain it",
-						d.Flag, d.Message, pat)
+						"removed-flag error for --%s says %q which references %q, but messageCmd.Long does not contain it",
+						r.Flag, r.Message, pat)
 				}
 			}
 		}
 		require.Greater(t, checked, 0,
-			"expected at least one deprecation replacement to reference a conversation form")
+			"expected at least one removed-flag replacement to reference a conversation form")
 	})
 }
 

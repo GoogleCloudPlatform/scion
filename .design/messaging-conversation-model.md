@@ -26,8 +26,9 @@ confirmed by @ptone 2026-08-23.
 > 2. **`scion schedule message` is not a separate verb.** #1264 maps `--in` / `--at` onto it.
 >    That split was dropped from both the phase plan and the flag mapping.
 >
-> §2.6.3 (`Conversation` and `webchat_topic` as parallel constructs) remains **OPEN** and is the
-> one load-bearing question this document does not settle.
+> §2.6.3 (`Conversation` and `webchat_topic` as parallel constructs) is **DECIDED** (option ii:
+> `webchat_topic` stays as the native-chat projection and `conversations` owns identity;
+> reaffirmed in ptone/scion#8959, which tracks the remaining V1→V2 cutover program).
 
 ---
 

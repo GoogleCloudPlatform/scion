@@ -116,13 +116,9 @@ func TestValidateDecisionFlags(t *testing.T) {
 		{name: "two readers of stdin", setup: func() { msgDecisionsFile = "-"; msgBodyFile = "-" }, wantErr: "both read stdin", wantUsage: true},
 		{name: "agent recipient", setup: func() { msgDecisions = "[]" }, agent: true, wantErr: "not to an agent", wantUsage: false},
 		{name: "group recipient", setup: func() { msgDecisions = "[]" }, group: true, wantErr: "not to an agent or a group", wantUsage: false},
-		{name: "scheduled", setup: func() { msgDecisions = "[]"; msgIn = "5m" }, wantErr: "--in or --at", wantUsage: true},
 		{name: "attachments", setup: func() { msgDecisions = "[]"; msgAttach = []string{"f"} }, wantErr: "--attach", wantUsage: true},
 		{name: "artifact", setup: func() { msgDecisions = "[]"; msgArtifacts = []string{"scion://artifact/a"} }, wantErr: "--artifact", wantUsage: true},
 		{name: "wake", setup: func() { msgDecisions = "[]"; msgWake = true }, wantErr: "--wake", wantUsage: true},
-		{name: "cc", setup: func() { msgDecisions = "[]"; msgCC = []string{"agent:x"} }, wantErr: "--cc", wantUsage: true},
-		{name: "channel", setup: func() { msgDecisions = "[]"; msgChannel = "web" }, wantErr: "--channel", wantUsage: true},
-		{name: "thread id", setup: func() { msgDecisions = "[]"; msgThreadID = "t1" }, wantErr: "--thread-id", wantUsage: true},
 		{name: "not an agent", setup: func() { msgDecisions = "[]" }, noAgent: true, wantErr: "only by an agent", wantUsage: false},
 		{name: "agent name in human mode", setup: func() { msgDecisions = "[]" }, human: true, wantErr: "only by an agent", wantUsage: false},
 	}

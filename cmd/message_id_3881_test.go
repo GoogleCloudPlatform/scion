@@ -88,12 +88,12 @@ func msgID3881State(t *testing.T, senderAgent string) {
 	t.Helper()
 	orig := saveMessageTestState()
 	restoreFlags := resetMessageFlags()
-	origFormat, origCC := outputFormat, msgCC
-	outputFormat, msgCC = "", nil
+	origFormat := outputFormat
+	outputFormat = ""
 	t.Cleanup(func() {
 		restoreFlags()
 		orig.restore()
-		outputFormat, msgCC = origFormat, origCC
+		outputFormat = origFormat
 	})
 	t.Setenv("SCION_AGENT_NAME", senderAgent)
 }
@@ -109,7 +109,7 @@ func TestMessageID3881_ConfirmationsAppendMessageID(t *testing.T) {
 			name:   "direct agent send",
 			sender: "sender-agent",
 			send: func(h *HubContext) error {
-				return sendMessageViaHub(h, "builder", "hello", false, false, false)
+				return sendMessageViaHub(h, "builder", "hello", false, false)
 			},
 			want: "Message accepted for agent 'builder' (message msg-3881-builder).",
 		},
@@ -117,7 +117,7 @@ func TestMessageID3881_ConfirmationsAppendMessageID(t *testing.T) {
 			name:   "human direct agent send",
 			sender: "",
 			send: func(h *HubContext) error {
-				return sendMessageViaHub(h, "builder", "hello", false, false, false)
+				return sendMessageViaHub(h, "builder", "hello", false, false)
 			},
 			want: "Message accepted for agent 'builder' (message msg-3881-builder).",
 		},
@@ -188,7 +188,7 @@ func TestMessageID3881_NoMessageIDKeepsConfirmation(t *testing.T) {
 		{
 			name: "direct agent send",
 			send: func(h *HubContext) error {
-				return sendMessageViaHub(h, "builder", "hello", false, false, false)
+				return sendMessageViaHub(h, "builder", "hello", false, false)
 			},
 			want: "Message accepted for agent 'builder'.",
 		},
