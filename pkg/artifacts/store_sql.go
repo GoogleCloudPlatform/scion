@@ -933,7 +933,10 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 	if len(q.ScopeRefs) > maxCandidateScopes {
 		return nil, fmt.Errorf("artifacts: ListCandidates accepts at most %d scopes", maxCandidateScopes)
 	}
-	query, args := s.candidateQuery(q)
+	query, args, err := s.candidateQuery(q)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: list candidates: %w", err)
@@ -970,7 +973,7 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 
 // candidateQuery builds ListCandidates' SQL, rebound for the dialect, and
 // its arguments.
-func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
+func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any, error) {
 	// The candidates are the union of up to three arms, each served by an
 	// index and cut to the page in its own order: artifacts the principal
 	// owns (idx_artifact_owner), artifacts with a principal grant to it, and
@@ -980,11 +983,15 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 	// caller's own rows. Each arm returns at most Limit distinct rows, so
 	// fewer than Limit rows overall means every arm is exhausted.
 	var (
-		b     strings.Builder
-		args  []any
-		nArms int
+		b       strings.Builder
+		args    []any
+		nArms   int
+		filtErr error
 	)
 	arm := func(from, where string, whereArgs ...any) {
+		if filtErr != nil {
+			return
+		}
 		nArms++
 		if nArms > 1 {
 			b.WriteString("\nUNION\n")
@@ -992,7 +999,10 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 		b.WriteString("SELECT * FROM (SELECT DISTINCT " + candidateColumns + " FROM " + from +
 			"\n\t\tLEFT JOIN artifact_version v ON v.artifact_id = a.id AND v.seq = a.current_seq\n\t\tWHERE " + where)
 		args = append(args, whereArgs...)
-		s.writeCandidateFilters(&b, &args, q)
+		if err := s.writeCandidateFilters(&b, &args, q); err != nil {
+			filtErr = err
+			return
+		}
 		b.WriteString(" ORDER BY a.updated_at DESC, a.id DESC LIMIT ?) arm" + strconv.Itoa(nArms))
 		args = append(args, q.Limit)
 	}
@@ -1015,10 +1025,13 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 				"g.subject_kind = ? AND g.subject_ref IN ("+in+")"+grantWhere, append(scopeArgs, grantArgs...)...)
 		}
 	}
+	if filtErr != nil {
+		return "", nil, filtErr
+	}
 	b.WriteString("\nORDER BY updated_at DESC, id DESC LIMIT ?")
 	args = append(args, q.Limit)
 
-	return s.rebind(b.String()), args
+	return s.rebind(b.String()), args, nil
 }
 
 // readGrantFilter returns the SQL condition, on the grant table aliased
@@ -1048,20 +1061,14 @@ const candidateColumns = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner
 // case for ASCII letters only and compares other characters exactly;
 // Postgres lowercases both sides with LOWER, under the database's own
 // collation rules.
-func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q CandidateQuery) {
+func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q CandidateQuery) error {
 	now := s.timeArg(q.Now)
 	// Attachments are never listed: they are read through their message.
 	b.WriteString(" AND " + notAttachmentScope("a.scope_kind"))
 	b.WriteString(" AND a.deleted_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > ?)")
 	*args = append(*args, now)
 	if q.Search != "" {
-		pattern := "%" + escapeLike(q.Search) + "%"
-		if s.dialect == dialectPostgres {
-			b.WriteString(` AND (LOWER(a.title) LIKE LOWER(?) ESCAPE '\' OR LOWER(COALESCE(a."key", '')) LIKE LOWER(?) ESCAPE '\')`)
-		} else {
-			b.WriteString(` AND (a.title LIKE ? ESCAPE '\' OR COALESCE(a."key", '') LIKE ? ESCAPE '\')`)
-		}
-		*args = append(*args, pattern, pattern)
+		s.writeSearchLike(b, args, q.Search, false)
 	}
 	if q.ReviewPending {
 		b.WriteString(" AND v.kind = ?")
@@ -1070,10 +1077,7 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 	if q.HomeScope != "" {
 		// Shared with the project: an unexpired scope grant to it, found
 		// through the (artifact_id, subject_kind, subject_ref) unique index.
-		permSQL, permArgs := readGrantFilter("sg")
-		shared := `EXISTS (SELECT 1 FROM artifact_grant sg WHERE sg.artifact_id = a.id AND sg.subject_kind = ?
-			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND ` + permSQL + `)`
-		sharedArgs := append([]any{SubjectScope, q.HomeScope, now}, permArgs...)
+		shared, sharedArgs := projectSharedExistsSQL(q.HomeScope, now)
 		switch {
 		case q.ScopeShares && q.SharedOnly:
 			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref <> ? AND " + shared)
@@ -1088,11 +1092,141 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 			*args = append(*args, ScopeKindProject, q.HomeScope)
 		}
 	}
+	if q.Query != nil {
+		if err := s.writeQueryTermsFilters(b, args, q, now); err != nil {
+			return err
+		}
+	}
 	if q.After != nil {
 		at := s.timeArg(q.After.UpdatedAt)
 		b.WriteString(" AND (a.updated_at < ? OR (a.updated_at = ? AND a.id < ?))")
 		*args = append(*args, at, at, q.After.ID)
 	}
+	return nil
+}
+
+func projectSharedExistsSQL(homeScope string, now any) (string, []any) {
+	permSQL, permArgs := readGrantFilter("sg")
+	sql := `EXISTS (SELECT 1 FROM artifact_grant sg WHERE sg.artifact_id = a.id AND sg.subject_kind = ?
+			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND ` + permSQL + `)`
+	args := append([]any{SubjectScope, homeScope, now}, permArgs...)
+	return sql, args
+}
+
+func (s *sqlStore) writeSearchLike(b *strings.Builder, args *[]any, text string, negate bool) {
+	pattern := "%" + escapeLike(text) + "%"
+	if negate {
+		b.WriteString(" AND NOT ")
+	} else {
+		b.WriteString(" AND ")
+	}
+	if s.dialect == dialectPostgres {
+		b.WriteString(`(LOWER(a.title) LIKE LOWER(?) ESCAPE '\' OR LOWER(COALESCE(a."key", '')) LIKE LOWER(?) ESCAPE '\')`)
+	} else {
+		b.WriteString(`(a.title LIKE ? ESCAPE '\' OR COALESCE(a."key", '') LIKE ? ESCAPE '\')`)
+	}
+	*args = append(*args, pattern, pattern)
+}
+
+// writeQueryTermsFilters translates validated store.QueryTerms into SQL
+// predicates ANDed onto every candidate arm. An unknown field or flag value
+// returns an error rather than silently becoming a no-op.
+func (s *sqlStore) writeQueryTermsFilters(b *strings.Builder, args *[]any, q CandidateQuery, now any) error {
+	qt := q.Query
+	if qt.Text != "" {
+		s.writeSearchLike(b, args, qt.Text, false)
+	}
+	for _, ex := range qt.ExcludeText {
+		if ex == "" {
+			continue
+		}
+		s.writeSearchLike(b, args, ex, true)
+	}
+	for _, term := range qt.Terms {
+		if len(term.Values) == 0 {
+			return fmt.Errorf("artifacts: empty values for filter field %q", term.Field)
+		}
+		switch term.Field {
+		case "project":
+			marks := strings.TrimSuffix(strings.Repeat("?, ", len(term.Values)), ", ")
+			if term.Negate {
+				b.WriteString(" AND (a.scope_kind <> ? OR a.scope_ref NOT IN (" + marks + "))")
+			} else {
+				b.WriteString(" AND a.scope_kind = ? AND a.scope_ref IN (" + marks + ")")
+			}
+			*args = append(*args, ScopeKindProject)
+			for _, v := range term.Values {
+				*args = append(*args, v)
+			}
+		case "is":
+			if err := s.writeIsTermFilter(b, args, q, now, term); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("artifacts: unsupported filter field %q", term.Field)
+		}
+	}
+	return nil
+}
+
+func (s *sqlStore) writeIsTermFilter(b *strings.Builder, args *[]any, q CandidateQuery, now any, term QueryTerm) error {
+	if term.Negate {
+		for _, v := range term.Values {
+			switch v {
+			case "review":
+				b.WriteString(" AND (v.kind IS NULL OR v.kind <> ?)")
+				*args = append(*args, VersionKindReview)
+			case "mine":
+				b.WriteString(" AND NOT (a.owner_kind = ? AND a.owner_ref = ?)")
+				*args = append(*args, q.PrincipalKind, q.PrincipalRef)
+			case "shared":
+				if q.HomeScope != "" {
+					// On project views, NOT shared with this project means homed here.
+					b.WriteString(" AND a.scope_ref = ?")
+					*args = append(*args, q.HomeScope)
+				}
+				// On global views, AccessShared depends on host.Authorize per home
+				// project; collect() applies the exact -is:shared check after canReadWith.
+			default:
+				return fmt.Errorf("artifacts: unsupported is filter value %q", v)
+			}
+		}
+		return nil
+	}
+
+	clauses := make([]string, 0, len(term.Values))
+	var clauseArgs []any
+	for _, v := range term.Values {
+		switch v {
+		case "review":
+			clauses = append(clauses, "v.kind = ?")
+			clauseArgs = append(clauseArgs, VersionKindReview)
+		case "mine":
+			clauses = append(clauses, "(a.owner_kind = ? AND a.owner_ref = ?)")
+			clauseArgs = append(clauseArgs, q.PrincipalKind, q.PrincipalRef)
+		case "shared":
+			if q.HomeScope != "" {
+				if !q.ScopeShares {
+					clauses = append(clauses, "1 = 0")
+				} else {
+					shared, sharedArgs := projectSharedExistsSQL(q.HomeScope, now)
+					clauses = append(clauses, "(a.scope_kind = ? AND a.scope_ref <> ? AND "+shared+")")
+					clauseArgs = append(clauseArgs, ScopeKindProject, q.HomeScope)
+					clauseArgs = append(clauseArgs, sharedArgs...)
+				}
+			} else {
+				// Sound SQL pre-filter: owned rows are never AccessShared.
+				// collect() applies the exact listAccess check after canReadWith.
+				clauses = append(clauses, "NOT (a.owner_kind = ? AND a.owner_ref = ?)")
+				clauseArgs = append(clauseArgs, q.PrincipalKind, q.PrincipalRef)
+			}
+		default:
+			return fmt.Errorf("artifacts: unsupported is filter value %q", v)
+		}
+	}
+	b.WriteString(" AND (" + strings.Join(clauses, " OR ") + ")")
+	*args = append(*args, clauseArgs...)
+	return nil
 }
 
 // escapeLike escapes the LIKE wildcards and the escape character itself,

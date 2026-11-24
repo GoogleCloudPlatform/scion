@@ -19,12 +19,16 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
 )
 
 // List endpoint limits.
@@ -93,6 +97,9 @@ type ArtifactListResponse struct {
 // listParams is a validated list request.
 type listParams struct {
 	search        string
+	rawQuery      string
+	canonicalQ    string
+	dialect       bool
 	reviewPending bool
 	ownedOnly     bool
 	scope         string
@@ -107,11 +114,21 @@ type listParams struct {
 // (ptone/scion#3062); this package does not import pkg/hub/apierr.
 const invalidCursorMessage = "invalid cursor: restart pagination from the first page"
 
+// impossibleScopeID is substituted when a `project:` slug cannot be resolved
+// within the caller's authorized scope, so unknown and unauthorized slugs are
+// externally indistinguishable (empty 200, never 400 or 403).
+const impossibleScopeID = "00000000-0000-0000-0000-000000000000"
+
 // binding is the normalized query a cursor is bound to. The page size is
-// left out: changing it mid-walk is harmless.
+// left out: changing it mid-walk is harmless. When the filter query dialect is
+// enabled, q is bound to the server-computed filterquery.Canonical(ast).
 func (p listParams) binding() string {
 	v := url.Values{}
-	v.Set("q", p.search)
+	if p.dialect {
+		v.Set("q", p.canonicalQ)
+	} else {
+		v.Set("q", p.search)
+	}
 	v.Set("review_pending", strconv.FormatBool(p.reviewPending))
 	v.Set("owned", strconv.FormatBool(p.ownedOnly))
 	if p.scope != "" {
@@ -123,19 +140,24 @@ func (p listParams) binding() string {
 	return v.Encode()
 }
 
-func parseListParams(q url.Values) (listParams, string) {
-	p := listParams{limit: DefaultListLimit}
+func parseListParams(q url.Values, dialect bool) (listParams, string) {
+	p := listParams{limit: DefaultListLimit, dialect: dialect}
 	switch q.Get("mine") {
 	case "1", "true":
 	default:
 		return p, "mine=1 is required; only the caller's own and shared artifacts can be listed"
 	}
-	p.search = strings.TrimSpace(q.Get("q"))
-	if !utf8.ValidString(p.search) || strings.ContainsRune(p.search, 0) {
+	rawQ := q.Get("q")
+	if !utf8.ValidString(rawQ) || strings.ContainsRune(rawQ, 0) {
 		return p, "q must be valid text"
 	}
-	if utf8.RuneCountInString(p.search) > maxSearchLength {
-		return p, "q must be at most " + strconv.Itoa(maxSearchLength) + " characters"
+	if dialect {
+		p.rawQuery = rawQ
+	} else {
+		p.search = strings.TrimSpace(rawQ)
+		if utf8.RuneCountInString(p.search) > maxSearchLength {
+			return p, "q must be at most " + strconv.Itoa(maxSearchLength) + " characters"
+		}
 	}
 	switch q.Get("review_pending") {
 	case "", "0", "false":
@@ -173,23 +195,55 @@ func parseListParams(q url.Values) (listParams, string) {
 	return p, ""
 }
 
+func writeInvalidFilterQuery(w http.ResponseWriter, fqErr *filterquery.Error) {
+	writeErrorDetails(w, http.StatusBadRequest, "invalid_filter_query", fqErr.Message, map[string]any{
+		"offset": fqErr.Offset,
+		"length": fqErr.Length,
+	})
+}
+
 // handleList serves GET /api/v1/artifacts?mine=1: the artifacts the caller
 // owns, or that a grant to the caller or to one of its projects lets it
 // read. Each candidate passes the same check a GET of that artifact runs
 // (canReadErr), so the list never shows an artifact the caller could not open,
 // and a caller the host does not serve gets an empty list.
 func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
-	p, msg := parseListParams(r.URL.Query())
+	ctx := r.Context()
+	dialect := s.isFilterQueryDialectEnabled(ctx)
+	p, msg := parseListParams(r.URL.Query(), dialect)
 	if msg != "" {
 		writeError(w, http.StatusBadRequest, "bad_request", msg)
 		return
 	}
+
+	var parsedQuery filterquery.Query
+	var hasParsedQuery bool
+	if dialect && p.rawQuery != "" {
+		schema := schemas.Artifacts
+		if p.scope != "" {
+			schema = schemas.ProjectArtifacts
+		}
+		parsed, fqErr := filterquery.Parse(p.rawQuery, schema.HasKey)
+		if fqErr != nil {
+			writeInvalidFilterQuery(w, fqErr)
+			return
+		}
+		if vErr := schema.Validate(parsed); vErr != nil {
+			writeInvalidFilterQuery(w, vErr)
+			return
+		}
+		p.canonicalQ = filterquery.Canonical(parsed)
+		if !parsed.IsEmpty() {
+			parsedQuery = parsed
+			hasParsedQuery = true
+		}
+	}
+
 	b, ok := s.backend()
 	if !ok {
 		writeBackendUnavailable(w, b, "artifact storage is not configured")
 		return
 	}
-	ctx := r.Context()
 	host := newMemoHost(s.host)
 	kind, ref, _, ok := host.Principal(ctx)
 	if !ok {
@@ -209,8 +263,21 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var queryTerms *QueryTerms
+	if hasParsedQuery {
+		var err error
+		queryTerms, err = filterQueryToArtifactStoreTerms(ctx, s.host, parsedQuery)
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: resolve filter query failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "could not list artifacts")
+			return
+		}
+	}
+
+	ownedOnly := p.ownedOnly || queryRequiresOwnedOnly(queryTerms)
+
 	var scopes []string
-	if !p.ownedOnly {
+	if !ownedOnly {
 		var err error
 		scopes, err = host.MemberScopes(ctx)
 		if err != nil {
@@ -225,14 +292,14 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	// in it. Otherwise scope= narrows to artifacts homed there, and asking
 	// for only the shared ones gives an empty list.
 	scopeShares := p.scope != "" && host.Authorize(ctx, p.scope, PermissionRead)
-	if p.scope != "" && p.sharedOnly && !scopeShares {
+	if p.scope != "" && !scopeShares && (p.sharedOnly || queryRequiresProjectShared(queryTerms)) {
 		writeJSON(w, http.StatusOK, ArtifactListResponse{Artifacts: []ArtifactListItem{}, CanCreate: canCreateIn(ctx, host, p.scope)})
 		return
 	}
 	items, next, err := s.collect(ctx, host, b, CandidateQuery{
-		PrincipalKind: kind, PrincipalRef: ref, ScopeRefs: scopes, OwnedOnly: p.ownedOnly,
+		PrincipalKind: kind, PrincipalRef: ref, ScopeRefs: scopes, OwnedOnly: ownedOnly,
 		Search: p.search, ReviewPending: p.reviewPending, HomeScope: p.scope, ScopeShares: scopeShares,
-		SharedOnly: p.sharedOnly, After: after,
+		SharedOnly: p.sharedOnly, Query: queryTerms, After: after,
 	}, p.limit)
 	if err != nil {
 		slog.ErrorContext(ctx, "artifacts: list failed", "error", err)
@@ -300,9 +367,13 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 		if q.SharedOnly && q.HomeScope == "" && access != AccessShared {
 			continue
 		}
+		reviewPending := c.CurrentKind == VersionKindReview
+		if q.Query != nil && q.HomeScope == "" && !matchesQueryIsTerms(q.Query, reviewPending, access) {
+			continue
+		}
 		items = append(items, ArtifactListItem{
 			ArtifactInfo:    artifactInfo(&c.Artifact),
-			ReviewPending:   c.CurrentKind == VersionKindReview,
+			ReviewPending:   reviewPending,
 			Access:          access,
 			SharedWithScope: q.HomeScope != "" && c.ScopeRef != q.HomeScope,
 			src:             &c.Artifact,
@@ -317,6 +388,139 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 		return items, nil, nil
 	}
 	return items, last, nil
+}
+
+// filterQueryToArtifactStoreTerms translates a validated artifacts filter query
+// into QueryTerms, resolving `project:` referents through ScopeResolver
+// (substituting impossibleScopeID for unknown/unauthorized referents).
+func filterQueryToArtifactStoreTerms(ctx context.Context, host Host, q filterquery.Query) (*QueryTerms, error) {
+	if q.IsEmpty() {
+		return nil, nil
+	}
+	qt := &QueryTerms{
+		Text: q.Text,
+	}
+	if len(q.ExcludeText) > 0 {
+		excl := append([]string(nil), q.ExcludeText...)
+		sort.Strings(excl)
+		qt.ExcludeText = slices.Compact(excl)
+	}
+	resolver, hasResolver := host.(ScopeResolver)
+	if len(q.Terms) > 0 {
+		terms := make([]QueryTerm, 0, len(q.Terms))
+		for _, t := range q.Terms {
+			key := strings.ToLower(t.Key)
+			vals := make([]string, len(t.Values))
+			for i, v := range t.Values {
+				lower := strings.ToLower(v)
+				if key == "project" {
+					resolved, err := resolveProjectValue(ctx, resolver, hasResolver, lower)
+					if err != nil {
+						return nil, err
+					}
+					vals[i] = resolved
+				} else {
+					vals[i] = lower
+				}
+			}
+			sort.Strings(vals)
+			vals = slices.Compact(vals)
+			terms = append(terms, QueryTerm{
+				Field:  key,
+				Values: vals,
+				Negate: t.Negate,
+			})
+		}
+		sort.Slice(terms, func(i, j int) bool {
+			if terms[i].Field != terms[j].Field {
+				return terms[i].Field < terms[j].Field
+			}
+			if terms[i].Negate != terms[j].Negate {
+				return !terms[i].Negate
+			}
+			return strings.Join(terms[i].Values, ",") < strings.Join(terms[j].Values, ",")
+		})
+		qt.Terms = terms
+	}
+	return qt, nil
+}
+
+func resolveProjectValue(ctx context.Context, resolver ScopeResolver, hasResolver bool, val string) (string, error) {
+	if canonicalID(val) {
+		return val, nil
+	}
+	if !hasResolver {
+		return impossibleScopeID, nil
+	}
+	id, err := resolver.ResolveScope(ctx, val)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return impossibleScopeID, nil
+	}
+	return id, nil
+}
+
+func queryRequiresOwnedOnly(qt *QueryTerms) bool {
+	if qt == nil {
+		return false
+	}
+	for _, t := range qt.Terms {
+		if t.Field == "is" && !t.Negate && len(t.Values) == 1 && t.Values[0] == "mine" {
+			return true
+		}
+	}
+	return false
+}
+
+func queryRequiresProjectShared(qt *QueryTerms) bool {
+	if qt == nil {
+		return false
+	}
+	for _, t := range qt.Terms {
+		if t.Field == "is" && !t.Negate && len(t.Values) == 1 && t.Values[0] == "shared" {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesQueryIsTerms evaluates global-list `is:` terms against a row's
+// resolved ReviewPending and Access classification (required for `is:shared`
+// and `-is:shared`, since AccessShared depends on host.Authorize per home
+// project).
+func matchesQueryIsTerms(qt *QueryTerms, reviewPending bool, access string) bool {
+	for _, t := range qt.Terms {
+		if t.Field != "is" {
+			continue
+		}
+		matched := false
+		for _, v := range t.Values {
+			switch v {
+			case "review":
+				if reviewPending {
+					matched = true
+				}
+			case "mine":
+				if access == AccessOwned {
+					matched = true
+				}
+			case "shared":
+				if access == AccessShared {
+					matched = true
+				}
+			}
+		}
+		if t.Negate {
+			if matched {
+				return false
+			}
+		} else if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 // grantsWindow loads the grants of candidates on demand. The first row that

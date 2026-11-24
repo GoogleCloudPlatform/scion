@@ -598,6 +598,32 @@ func (h *artifactHost) CrossScopeSharingAllowed(context.Context) bool {
 
 var _ artifacts.ScopeChecker = (*artifactHost)(nil)
 
+var _ artifacts.ScopeResolver = (*artifactHost)(nil)
+
+// ResolveScope implements artifacts.ScopeResolver: resolves a project slug or
+// UUID from a filter query `project:` term to a project ID within the caller's
+// authorized scope. Unknown or unauthorized slugs return ("", nil) so the
+// lookup never acts as an existence oracle.
+func (h *artifactHost) ResolveScope(ctx context.Context, slugOrID string) (string, error) {
+	if h.server == nil || h.server.store == nil || slugOrID == "" {
+		return "", nil
+	}
+	if uuid.Validate(slugOrID) == nil {
+		return strings.ToLower(slugOrID), nil
+	}
+	project, err := h.server.store.GetProjectBySlug(ctx, slugOrID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && project == nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !h.Authorize(ctx, project.ID, artifacts.PermissionRead) {
+		return "", nil
+	}
+	return project.ID, nil
+}
+
 // ScopesExist implements artifacts.ScopeChecker: a project exists while the
 // store has it. The hub deletes projects outright, so a missing one is
 // gone. One store query covers the page: refs holds at most one id per

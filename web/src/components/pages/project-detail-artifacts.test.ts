@@ -67,8 +67,12 @@ async function settle(el: TestElement): Promise<void> {
   }
 }
 
-async function mount(flag: boolean, sharedDirs = [{ name: 'datasets' }]): Promise<TestElement> {
-  window.__SCION_FEATURES__ = { 'hub.artifacts': flag };
+async function mount(
+  flag: boolean,
+  sharedDirs = [{ name: 'datasets' }],
+  extraFeatures: Record<string, boolean> = {}
+): Promise<TestElement> {
+  window.__SCION_FEATURES__ = { 'hub.artifacts': flag, ...extraFeatures };
   urls = [];
   vi.stubGlobal(
     'fetch',
@@ -216,5 +220,36 @@ describe('project Files area with artifacts', () => {
       currentUserId: string;
     };
     expect(list.currentUserId).toBe('u');
+  });
+
+  it('persists artifact filter queries under aq on project-detail without touching q', async () => {
+    window.history.replaceState({}, '', `/projects/${PROJECT_ID}?q=phase%3Arunning&aq=is%3Ashared`);
+    try {
+      const el = await mount(true, [{ name: 'datasets' }], { 'filters.query_dialect': true });
+      const list = el.shadowRoot!.querySelector('scion-artifact-list') as HTMLElement & {
+        urlParam: string;
+        updateComplete: Promise<boolean>;
+      };
+      expect(list).not.toBeNull();
+      expect(list.urlParam).toBe('aq');
+      await list.updateComplete;
+      const box = list.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+        value: string;
+      };
+      expect(box.value).toBe('is:shared');
+      expect(
+        urls.some((u) => u.includes(`/api/v1/artifacts?mine=1&scope=${PROJECT_ID}&q=is%3Ashared`))
+      ).toBe(true);
+
+      // Clicking the chip clears aq while preserving q=phase:running.
+      const chip = list.shadowRoot!.querySelector<HTMLButtonElement>('.filter-chip')!;
+      chip.click();
+      await settle(el);
+      const params = new URLSearchParams(window.location.search);
+      expect(params.get('aq')).toBeNull();
+      expect(params.get('q')).toBe('phase:running');
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
   });
 });

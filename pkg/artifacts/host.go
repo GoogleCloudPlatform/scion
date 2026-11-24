@@ -123,6 +123,15 @@ type ScopeChecker interface {
 	ScopesExist(ctx context.Context, refs []string) (map[string]bool, error)
 }
 
+// ScopeResolver is an optional extension of Host. The artifact list asks it
+// to resolve a project slug or ID from a filter query `project:` term to a
+// project scope ref within the caller's authorized scope. An unknown or
+// unauthorized value must return ("", nil) so the lookup never acts as an
+// existence oracle. A host without it resolves only canonical UUIDs.
+type ScopeResolver interface {
+	ResolveScope(ctx context.Context, slugOrID string) (string, error)
+}
+
 // messageRefPrefix marks a message ref in a ScopesExist question. Project
 // ids are UUIDs, so the two kinds of ref never collide.
 const messageRefPrefix = ScopeKindMessage + ":"

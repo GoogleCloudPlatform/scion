@@ -55,6 +55,17 @@ import {
   type ArtifactListItem,
   type ArtifactListResponse,
 } from '../../client/artifacts.js';
+import {
+  filtersQueryDialectEnabled,
+  getViewSchema,
+  knownKeysFor,
+  parse as parseFilterQuery,
+  serverSubset,
+  validate as validateFilterQuery,
+  type ViewSchema,
+} from '../../shared/filter-query/index.js';
+import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
+import '../shared/filter-box/filter-box.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { formatRelative, formatInstant } from '../../utils/time.js';
 import { listPageStyles } from '../shared/resource-styles.js';
@@ -88,6 +99,80 @@ type PublishAccess = 'checking' | 'yes' | 'no' | 'unknown';
 /** Delay before a search box change reloads the list. */
 const SEARCH_DEBOUNCE_MS = 300;
 
+const ARTIFACTS_FILTER_SCHEMA: ViewSchema = getViewSchema('artifacts') ?? {
+  view: 'artifacts',
+  keys: [],
+  textHelp: 'Matches artifact title or key',
+};
+
+/**
+ * Reports whether `input` currently has a positive single-value `is:<flag>` term
+ * (and no negated `-is:<flag>` term) for the given schema.
+ */
+export function hasIsFlagInQuery(input: string, flag: string, schema: ViewSchema): boolean {
+  const res = parseFilterQuery(input, knownKeysFor(schema));
+  if (!res.query || res.query.mode !== 'structured') return false;
+  const target = flag.toLowerCase();
+  let foundPositive = false;
+  for (const t of res.query.terms) {
+    if (t.key.toLowerCase() !== 'is') continue;
+    const hasTarget = t.values.some((v) => v.toLowerCase() === target);
+    if (!hasTarget) continue;
+    if (t.negate) return false;
+    if (t.values.length === 1) foundPositive = true;
+  }
+  return foundPositive;
+}
+
+/**
+ * Toggles an `is:<flag>` term in `input` while preserving all other terms and
+ * free text verbatim. When turning `flag` on, removes any mutually exclusive
+ * `is:<ex>` terms and any `-is:<flag>` negation first.
+ */
+export function toggleIsFlagInQuery(
+  input: string,
+  flag: string,
+  exclusiveFlags: readonly string[],
+  schema: ViewSchema
+): string {
+  const target = flag.toLowerCase();
+  const active = hasIsFlagInQuery(input, target, schema);
+  const trimmed = input.trim();
+
+  if (!trimmed) {
+    return active ? '' : `is:${target}`;
+  }
+
+  const res = parseFilterQuery(input, knownKeysFor(schema));
+  if (!res.query || res.query.mode !== 'structured') {
+    return active ? trimmed : `is:${target} ${trimmed}`;
+  }
+
+  const dropSet = new Set<string>(
+    active ? [target] : [target, ...exclusiveFlags.map((f) => f.toLowerCase())]
+  );
+  const toRemove = res.query.terms.filter((t) => {
+    if (t.key.toLowerCase() !== 'is') return false;
+    if (t.values.length !== 1) return false;
+    const val = t.values[0].toLowerCase();
+    if (active) {
+      return !t.negate && val === target;
+    }
+    return dropSet.has(val);
+  });
+
+  let out = input;
+  const sortedDesc = [...toRemove].sort((a, b) => b.offset - a.offset);
+  for (const t of sortedDesc) {
+    const before = out.slice(0, t.offset).replace(/[ \t\n\r]+$/, '');
+    const after = out.slice(t.offset + t.length).replace(/^[ \t\n\r]+/, '');
+    out = before && after ? `${before} ${after}` : before + after;
+  }
+  out = out.trim();
+  if (active) return out;
+  return out ? `is:${target} ${out}` : `is:${target}`;
+}
+
 @customElement('scion-page-artifacts')
 export class ScionPageArtifacts extends LitElement {
   @property({ type: Object })
@@ -103,10 +188,14 @@ export class ScionPageArtifacts extends LitElement {
   @state() private reviewPending = false;
   @state() private ownedOnly = false;
   @state() private sharedOnly = false;
+  @state() private filterQueryText = '';
   /** The row whose Move dialog is open. */
   @state() private moving: ArtifactListItem | null = null;
   /** Display names by "kind:id" (owners) or "project:id"; '' while unknown. */
   @state() private names = new Map<string, string>();
+  /** Project slugs by project id, for filter-box `project:` value suggestions. */
+  private projectSlugs = new Map<string, string>();
+  private committedServerQ = '';
   @state() private publishAccess: PublishAccess = 'checking';
   @state() private publishOpen = false;
 
@@ -173,6 +262,38 @@ export class ScionPageArtifacts extends LitElement {
         justify-content: center;
         margin-top: 1rem;
       }
+      .filter-chips {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.375rem;
+      }
+      .filter-chip {
+        appearance: none;
+        border: 1px solid var(--scion-border);
+        background: var(--scion-surface);
+        color: var(--scion-text-secondary);
+        border-radius: var(--scion-radius);
+        padding: 0.3125rem 0.625rem;
+        font: inherit;
+        font-size: 0.8125rem;
+        line-height: 1.25;
+        cursor: pointer;
+        transition:
+          background-color 120ms ease,
+          border-color 120ms ease,
+          color 120ms ease;
+      }
+      .filter-chip:hover {
+        background: var(--scion-bg-subtle);
+        color: var(--scion-text);
+      }
+      .filter-chip.active {
+        background: var(--scion-primary-tint);
+        border-color: var(--scion-primary);
+        color: var(--scion-primary);
+        font-weight: 500;
+      }
     `,
   ];
 
@@ -183,7 +304,36 @@ export class ScionPageArtifacts extends LitElement {
       this.loading = false;
       return;
     }
-    this.hydrateFiltersFromUrl();
+    if (filtersQueryDialectEnabled()) {
+      const params = new URLSearchParams(window.location.search);
+      let urlQ = params.get('q') ?? '';
+      let migratedLegacy = false;
+      if (!urlQ) {
+        const migrated: string[] = [];
+        const reviewParam = params.get('review_pending');
+        if (reviewParam === '1' || reviewParam === 'true') migrated.push('is:review');
+        if (params.get('owner') === 'me') migrated.push('is:mine');
+        if (migrated.length > 0) {
+          urlQ = migrated.join(' ');
+          migratedLegacy = true;
+        }
+      }
+      if (urlQ) {
+        this.filterQueryText = urlQ;
+        const parsed = parseFilterQuery(urlQ, knownKeysFor(ARTIFACTS_FILTER_SCHEMA));
+        if (!parsed.error && parsed.query) {
+          const v = validateFilterQuery(parsed.query, ARTIFACTS_FILTER_SCHEMA, urlQ);
+          if (!v.error) {
+            this.committedServerQ = serverSubset(parsed.query, ARTIFACTS_FILTER_SCHEMA);
+          }
+        }
+        if (migratedLegacy) {
+          this.syncQueryToUrl(urlQ);
+        }
+      }
+    } else {
+      this.hydrateFiltersFromUrl();
+    }
     void this.load();
     void this.checkPublishAccess();
   }
@@ -293,6 +443,9 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private get filtered(): boolean {
+    if (filtersQueryDialectEnabled()) {
+      return this.committedServerQ.trim() !== '';
+    }
     return this.search.trim() !== '' || this.reviewPending || this.ownedOnly || this.sharedOnly;
   }
 
@@ -346,15 +499,17 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private async fetchPage(cursor?: string): Promise<ArtifactListResponse> {
-    const url = artifactListUrl(
-      {
-        q: this.search,
-        reviewPending: this.reviewPending,
-        ownedOnly: this.ownedOnly,
-        sharedOnly: this.sharedOnly,
-      },
-      cursor
-    );
+    const url = filtersQueryDialectEnabled()
+      ? artifactListUrl({ q: this.committedServerQ }, cursor)
+      : artifactListUrl(
+          {
+            q: this.search,
+            reviewPending: this.reviewPending,
+            ownedOnly: this.ownedOnly,
+            sharedOnly: this.sharedOnly,
+          },
+          cursor
+        );
     const res = await apiFetch(url);
     if (!res.ok) {
       throw new Error(await extractApiError(res, `HTTP ${res.status}`));
@@ -396,6 +551,9 @@ export class ScionPageArtifacts extends LitElement {
           displayName?: string;
         };
         const name = body.displayName || body.name || body.slug || '';
+        if (collection === 'projects' && body.slug && this.isConnected) {
+          this.projectSlugs.set(id, body.slug);
+        }
         if (name && this.isConnected) {
           const next = new Map(this.names);
           next.set(key, name);
@@ -436,6 +594,72 @@ export class ScionPageArtifacts extends LitElement {
     this.syncUrlFromFilters();
     void this.load();
   }
+
+  private syncQueryToUrl(raw: string): void {
+    const params = new URLSearchParams(window.location.search);
+    const trimmed = raw.trim();
+    if (trimmed) {
+      params.set('q', trimmed);
+    } else {
+      params.delete('q');
+    }
+    params.delete('review_pending');
+    if (params.get('owner') === 'me') {
+      params.delete('owner');
+    }
+    replaceSearch(params);
+  }
+
+  private onFilterInput = (e: CustomEvent<FilterInputDetail>): void => {
+    this.filterQueryText = e.detail.value;
+  };
+
+  private onFilterCommit = (e: CustomEvent<FilterCommitDetail>): void => {
+    this.filterQueryText = e.detail.value;
+    this.syncQueryToUrl(e.detail.value);
+    if (e.detail.serverQ === this.committedServerQ) return;
+    this.committedServerQ = e.detail.serverQ;
+    void this.load();
+  };
+
+  private onFlagChipClick(flag: 'review' | 'mine' | 'shared'): void {
+    const exclusive = flag === 'mine' ? ['shared'] : flag === 'shared' ? ['mine'] : [];
+    const next = toggleIsFlagInQuery(
+      this.filterQueryText,
+      flag,
+      exclusive,
+      ARTIFACTS_FILTER_SCHEMA
+    );
+    if (next === this.filterQueryText) return;
+    this.filterQueryText = next;
+    this.syncQueryToUrl(next);
+    const parsed = parseFilterQuery(next, knownKeysFor(ARTIFACTS_FILTER_SCHEMA));
+    if (!parsed.error && parsed.query) {
+      const v = validateFilterQuery(parsed.query, ARTIFACTS_FILTER_SCHEMA, next);
+      if (!v.error) {
+        const nextQ = serverSubset(parsed.query, ARTIFACTS_FILTER_SCHEMA);
+        if (nextQ !== this.committedServerQ) {
+          this.committedServerQ = nextQ;
+          void this.load();
+        }
+      }
+    }
+  }
+
+  private suggestValues = (key: string): string[] => {
+    if (key.toLowerCase() !== 'project') return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const a of this.items) {
+      if (a.scopeKind !== 'project' || !a.scopeRef || a.scopeDeleted) continue;
+      const val = this.projectSlugs.get(a.scopeRef) || a.scopeRef;
+      if (!seen.has(val)) {
+        seen.add(val);
+        out.push(val);
+      }
+    }
+    return out;
+  };
 
   private onMoved(e: CustomEvent<Artifact>): void {
     const moved = e.detail;
@@ -499,6 +723,63 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private renderFilterBar(): TemplateResult {
+    if (filtersQueryDialectEnabled()) {
+      const reviewActive = hasIsFlagInQuery(
+        this.filterQueryText,
+        'review',
+        ARTIFACTS_FILTER_SCHEMA
+      );
+      const mineActive = hasIsFlagInQuery(this.filterQueryText, 'mine', ARTIFACTS_FILTER_SCHEMA);
+      const sharedActive = hasIsFlagInQuery(
+        this.filterQueryText,
+        'shared',
+        ARTIFACTS_FILTER_SCHEMA
+      );
+      return html`
+        <div class="filter-bar">
+          <scion-filter-box
+            view="artifacts"
+            .value=${this.filterQueryText}
+            .valueSuggestions=${this.suggestValues}
+            placeholder="Filter artifacts… (try is:review project:my-project)"
+            @filter-input=${this.onFilterInput}
+            @filter-commit=${this.onFilterCommit}
+          ></scion-filter-box>
+          <div class="filter-chips" role="group" aria-label="Quick filters">
+            <button
+              type="button"
+              class="filter-chip ${reviewActive ? 'active' : ''}"
+              aria-pressed=${reviewActive ? 'true' : 'false'}
+              @click=${(): void => this.onFlagChipClick('review')}
+            >
+              Review pending
+            </button>
+            <button
+              type="button"
+              class="filter-chip ${mineActive ? 'active' : ''}"
+              aria-pressed=${mineActive ? 'true' : 'false'}
+              @click=${(): void => this.onFlagChipClick('mine')}
+            >
+              Owned by me
+            </button>
+            <button
+              type="button"
+              class="filter-chip ${sharedActive ? 'active' : ''}"
+              aria-pressed=${sharedActive ? 'true' : 'false'}
+              @click=${(): void => this.onFlagChipClick('shared')}
+            >
+              Shared with me
+            </button>
+          </div>
+          ${this.loading && this.items.length > 0
+            ? html`<sl-spinner class="inline-loading" aria-label="Loading artifacts"></sl-spinner>`
+            : nothing}
+          ${this.items.length > 0
+            ? html`<span class="count">Showing ${this.items.length}</span>`
+            : nothing}
+        </div>
+      `;
+    }
     return html`
       <div class="filter-bar">
         <sl-input

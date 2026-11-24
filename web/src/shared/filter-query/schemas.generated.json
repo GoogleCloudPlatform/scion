@@ -30,5 +30,52 @@
       }
     ],
     "textHelp": "Matches agent name or slug"
+  },
+  {
+    "view": "artifacts",
+    "keys": [
+      {
+        "name": "is",
+        "help": "Artifact state or access",
+        "kind": "flag_set",
+        "exec": "server",
+        "enum": [
+          "review",
+          "mine",
+          "shared"
+        ],
+        "exclusive": [
+          [
+            "mine",
+            "shared"
+          ]
+        ],
+        "multiValued": true
+      },
+      {
+        "name": "project",
+        "help": "Home project slug or ID",
+        "kind": "ref",
+        "exec": "server",
+        "multiValued": false
+      }
+    ],
+    "textHelp": "Matches artifact title or key"
+  },
+  {
+    "view": "artifacts-project",
+    "keys": [
+      {
+        "name": "is",
+        "help": "Artifacts shared with this project",
+        "kind": "flag_set",
+        "exec": "server",
+        "enum": [
+          "shared"
+        ],
+        "multiValued": false
+      }
+    ],
+    "textHelp": "Matches artifact title or key"
   }
 ]
