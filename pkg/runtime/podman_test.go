@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -671,6 +672,20 @@ func TestPodmanSupportsHostGateway(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("json probe timeout still allows --version fallback with fresh timeout", func(t *testing.T) {
+		mockPodman := filepath.Join(t.TempDir(), "mock-podman")
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"version\" ]; then sleep 2; exit 0; fi\n" +
+			"echo 'podman version 4.3.1'\n"
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatalf("failed to write mock podman: %v", err)
+		}
+		got := probePodmanHostGatewayWithTimeout(context.Background(), mockPodman, "", 100*time.Millisecond)
+		if got {
+			t.Errorf("probePodmanHostGatewayWithTimeout() = true, want false (fallback --version should run with fresh timeout after json probe times out)")
+		}
+	})
 }
 
 func TestPodmanRuntime_Run_HostGatewayProbe(t *testing.T) {

@@ -150,13 +150,20 @@ func PodmanSupportsHostGateway(ctx context.Context, command string) bool {
 	return probePodmanHostGateway(ctx, command, "")
 }
 
+const podmanHostGatewayProbeTimeout = 5 * time.Second
+
 func probePodmanHostGateway(ctx context.Context, command, clientVersionFallback string) bool {
+	return probePodmanHostGatewayWithTimeout(ctx, command, clientVersionFallback, podmanHostGatewayProbeTimeout)
+}
+
+func probePodmanHostGatewayWithTimeout(ctx context.Context, command, clientVersionFallback string, timeout time.Duration) bool {
 	if command == "" {
 		command = "podman"
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if out, err := runSimpleCommand(probeCtx, command, "version", "--format", "json"); err == nil {
+	jsonCtx, jsonCancel := context.WithTimeout(ctx, timeout)
+	out, err := runSimpleCommand(jsonCtx, command, "version", "--format", "json")
+	jsonCancel()
+	if err == nil {
 		if major, minor, ok := parsePodmanVersionJSON(out); ok {
 			return podmanVersionSupportsHostGateway(major, minor)
 		}
@@ -166,12 +173,14 @@ func probePodmanHostGateway(ctx context.Context, command, clientVersionFallback 
 	}
 
 	if clientVersionFallback == "" {
-		out, err := runSimpleCommand(probeCtx, command, "--version")
-		if err != nil {
-			runtimeLog().Debug("Unable to probe Podman client version for host-gateway support", "error", err)
+		fallbackCtx, fallbackCancel := context.WithTimeout(ctx, timeout)
+		fallbackOut, fallbackErr := runSimpleCommand(fallbackCtx, command, "--version")
+		fallbackCancel()
+		if fallbackErr != nil {
+			runtimeLog().Debug("Unable to probe Podman client version for host-gateway support", "error", fallbackErr)
 			return true
 		}
-		clientVersionFallback = strings.TrimSpace(out)
+		clientVersionFallback = strings.TrimSpace(fallbackOut)
 	}
 	major, minor, ok := parsePodmanMajorMinorVersion(clientVersionFallback)
 	if !ok {
