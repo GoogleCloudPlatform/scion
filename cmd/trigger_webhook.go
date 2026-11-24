@@ -164,7 +164,8 @@ var triggerWebhookRotateSecretCmd = &cobra.Command{
 
 The new secret is displayed ONCE in this command's output. The previous secret
 version remains accepted alongside the new secret for a 24-hour grace window,
-after which maintenance deletes the retired secret row.`,
+after which maintenance deletes the retired secret row. Rotating again within
+24h retires the older secret immediately.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTriggerWebhookRotateSecret,
 }
@@ -343,18 +344,13 @@ func buildCreateWebhookEndpointRequest() (*hubclient.CreateWebhookEndpointReques
 }
 
 func webhookEndpointBoundLabel(ep *hubclient.WebhookEndpoint) string {
-	if ep == nil {
+	if ep == nil || ep.BoundAgent == nil {
 		return ""
 	}
-	if ep.BoundAgent != nil {
-		if ep.BoundAgent.Name != "" {
-			return ep.BoundAgent.Name
-		}
-		if ep.BoundAgent.ID != "" {
-			return ep.BoundAgent.ID
-		}
+	if ep.BoundAgent.Name != "" {
+		return ep.BoundAgent.Name
 	}
-	return ep.BoundAgentID
+	return ep.BoundAgent.ID
 }
 
 func webhookEndpointLifetimeSummary(ep *hubclient.WebhookEndpoint) string {
@@ -708,7 +704,7 @@ func init() {
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookName, "name", "", "Webhook endpoint name (required)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookDescription, "description", "", "Optional endpoint description")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookAgent, "agent", "", "Create a default message trigger targeting this agent name or ID (requires --message)")
-	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookToSelf, "to-self", false, "Bind the endpoint to the calling agent via its Hub identity and create a default message trigger to self")
+	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookToSelf, "to-self", false, "Bind the endpoint to the calling agent via its Hub identity and create a default message trigger to self (deleted with the agent unless --persistent)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookBind, "bind", "", "Bind the endpoint to an agent name or ID (user callers)")
 	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookPersistent, "persistent", false, "Keep the bound endpoint when its agent is deleted (unbind instead of deleting; requires --to-self or --bind)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookMessage, "message", "", "Message delivered by the default trigger (defaults to 'Webhook event received.' for --to-self)")

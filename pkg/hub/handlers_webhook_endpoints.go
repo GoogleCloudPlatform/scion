@@ -191,6 +191,10 @@ func (s *Server) resolveWebhookEndpointBinding(w http.ResponseWriter, r *http.Re
 		Unauthorized(w)
 		return "", "", false
 	}
+	if isPatch && identity.Type() == "agent" {
+		writeForbidden(w, "Only user callers may modify webhook endpoint agent bindings")
+		return "", "", false
+	}
 
 	boundAgentRef = strings.TrimSpace(boundAgentRef)
 	boundLifetime = strings.TrimSpace(boundLifetime)
@@ -208,10 +212,6 @@ func (s *Server) resolveWebhookEndpointBinding(w http.ResponseWriter, r *http.Re
 	}
 
 	if identity.Type() == "agent" {
-		if isPatch {
-			writeForbidden(w, "Only user callers may modify webhook endpoint agent bindings")
-			return "", "", false
-		}
 		if boundAgentRef != "self" {
 			writeError(w, http.StatusForbidden, "bind_self_only", "agent callers may only bind webhook endpoints to themselves (boundAgentId: \"self\")", nil)
 			return "", "", false
@@ -695,10 +695,6 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		mask.Status = true
 	}
 	if req.BoundAgentID != nil || req.BoundLifetime != nil {
-		if isAgentCaller(ctx) {
-			writeForbidden(w, "Only user callers may modify webhook endpoint agent bindings")
-			return
-		}
 		targetAgent := ep.BoundAgentID
 		targetLifetime := ep.BoundLifetime
 		if req.BoundAgentID != nil {

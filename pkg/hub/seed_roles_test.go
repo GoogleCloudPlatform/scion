@@ -1154,7 +1154,6 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"template.create", "template.list", "template.read",
 				"trigger.create", "trigger.list", "trigger.read",
 				"webhook_endpoint.create", "webhook_endpoint.list", "webhook_endpoint.read",
-				"webhook_endpoint.update",
 			},
 		},
 		{
@@ -1183,7 +1182,7 @@ func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
 		store.ProjectRoleOwner:   15,
 		store.ProjectRoleAdmin:   13,
-		store.ProjectRoleMember:  10,
+		store.ProjectRoleMember:  9,
 		store.ProjectRoleVisitor: 1,
 		store.ProjectRoleViewer:  2,
 	}
@@ -1210,7 +1209,7 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 	}{
 		{store.ProjectRoleOwner, 15, projectOwnerPermissionIDs},
 		{store.ProjectRoleAdmin, 13, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 10, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleMember, 9, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
 		{store.ProjectRoleViewer, 2, projectViewerPermissionIDs},
 	}

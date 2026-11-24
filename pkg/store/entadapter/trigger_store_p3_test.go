@@ -280,4 +280,89 @@ func TestTriggerStore_BoundEndpointsCascadeAndRotation(t *testing.T) {
 	unboundAgain, err := cs.UnbindWebhookEndpointForAgent(ctx, projID, epPersist.ID, agentA)
 	require.NoError(t, err)
 	assert.False(t, unboundAgain)
+
+	// 6. ListOrphanedAgentLifetimeWebhookEndpoints (O2 backstop):
+	//    returns agent-lifetime endpoints bound to missing or soft-deleted agents,
+	//    and excludes live agents and persistent endpoints.
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   projID,
+		Name: "orphan-proj",
+		Slug: "orphan-" + projID[:8],
+	}))
+	liveAg := &store.Agent{
+		ID:        agentB,
+		ProjectID: projID,
+		Name:      "live-agent",
+		Slug:      "live-agent",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, liveAg))
+
+	softDelAgID := uuid.NewString()
+	softDelAg := &store.Agent{
+		ID:        softDelAgID,
+		ProjectID: projID,
+		Name:      "softdel-agent",
+		Slug:      "softdel-agent",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, softDelAg))
+	softDelTime := time.Now().UTC().Truncate(time.Microsecond)
+	_, err = cs.client.Agent.UpdateOneID(uuid.MustParse(softDelAgID)).SetDeletedAt(softDelTime).Save(ctx)
+	require.NoError(t, err)
+
+	epOrphanSoft := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "ep-orphan-softdel",
+		OwnerPrincipalKind:  store.DelegationPrincipalAgent,
+		OwnerPrincipalID:    softDelAgID,
+		OwnerCredentialKind: store.InitiatorCredentialKindAgent,
+		SecretVersion:       1,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		Status:              store.WebhookEndpointStatusActive,
+		BoundAgentID:        softDelAgID,
+		BoundLifetime:       store.WebhookBoundLifetimeAgent,
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, epOrphanSoft))
+
+	missingAgID := uuid.NewString()
+	epOrphanMissing := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "ep-orphan-missing",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    userID,
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SecretVersion:       1,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		Status:              store.WebhookEndpointStatusActive,
+		BoundAgentID:        missingAgID,
+		BoundLifetime:       store.WebhookBoundLifetimeAgent,
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, epOrphanMissing))
+
+	epPersistSoft := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "ep-persist-softdel",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    userID,
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SecretVersion:       1,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		Status:              store.WebhookEndpointStatusActive,
+		BoundAgentID:        softDelAgID,
+		BoundLifetime:       store.WebhookBoundLifetimePersistent,
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, epPersistSoft))
+
+	orphans, err := cs.ListOrphanedAgentLifetimeWebhookEndpoints(ctx, 50)
+	require.NoError(t, err)
+	orphanIDs := make([]string, 0, len(orphans))
+	for _, o := range orphans {
+		orphanIDs = append(orphanIDs, o.ID)
+	}
+	assert.Contains(t, orphanIDs, epOrphanSoft.ID)
+	assert.Contains(t, orphanIDs, epOrphanMissing.ID)
+	assert.NotContains(t, orphanIDs, epOther.ID, "live agent endpoint must not be orphaned")
+	assert.NotContains(t, orphanIDs, epPersistSoft.ID, "persistent endpoint must not be orphaned")
 }

@@ -55,7 +55,6 @@ type WebhookEndpointResponse struct {
 	SecretRotatedAt *time.Time                 `json:"secretRotatedAt,omitempty"`
 	ConfigVersion   int                        `json:"configVersion,omitempty"`
 	Status          string                     `json:"status"`
-	BoundAgentID    string                     `json:"boundAgentId,omitempty"`
 	BoundAgent      *WebhookEndpointBoundAgent `json:"boundAgent,omitempty"`
 	BoundLifetime   string                     `json:"boundLifetime,omitempty"`
 	LastReceivedAt  *time.Time                 `json:"lastReceivedAt,omitempty"`
@@ -327,7 +326,6 @@ func (s *Server) buildWebhookEndpointResponseWithCache(ctx context.Context, ep s
 		SecretRotatedAt: ep.SecretRotatedAt,
 		ConfigVersion:   ep.ConfigVersion,
 		Status:          ep.Status,
-		BoundAgentID:    ep.BoundAgentID,
 		BoundAgent:      boundAgent,
 		BoundLifetime:   ep.BoundLifetime,
 		LastReceivedAt:  ep.LastReceivedAt,

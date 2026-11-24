@@ -84,7 +84,39 @@ func (s *Server) releaseTriggerBindingsForAgent(ctx context.Context, agent *stor
 	}
 }
 
-func (s *Server) deleteAgentLifetimeWebhookEndpoint(ctx context.Context, agent *store.Agent, ep store.WebhookEndpoint) {
+// sweepOrphanedAgentLifetimeWebhookEndpoints is the hourly maintenance backstop
+// for agent-lifetime webhook endpoints whose bound agent is soft-deleted or
+// missing (e.g. if the best-effort deletion-engine tail step failed on a
+// transient store error). It delegates to deleteAgentLifetimeWebhookEndpoint so
+// cleanup, trigger pausing/deletion, cache invalidation, and audit records are
+// identical and idempotent.
+func (s *Server) sweepOrphanedAgentLifetimeWebhookEndpoints(ctx context.Context) int {
+	if s == nil || s.store == nil {
+		return 0
+	}
+	const sweepBatchLimit = 100
+	orphans, err := s.store.ListOrphanedAgentLifetimeWebhookEndpoints(ctx, sweepBatchLimit)
+	if err != nil {
+		s.agentLifecycleLog.Warn("Failed to list orphaned agent-lifetime webhook endpoints during maintenance",
+			"error", err)
+		return 0
+	}
+	swept := 0
+	for _, ep := range orphans {
+		if ctx.Err() != nil {
+			break
+		}
+		if ep.BoundAgentID == "" {
+			continue
+		}
+		if s.deleteAgentLifetimeWebhookEndpoint(ctx, &store.Agent{ID: ep.BoundAgentID, ProjectID: ep.ProjectID}, ep) {
+			swept++
+		}
+	}
+	return swept
+}
+
+func (s *Server) deleteAgentLifetimeWebhookEndpoint(ctx context.Context, agent *store.Agent, ep store.WebhookEndpoint) bool {
 	var deletedTriggerIDs, pausedTriggerIDs []string
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		var dErr error
@@ -143,15 +175,16 @@ func (s *Server) deleteAgentLifetimeWebhookEndpoint(ctx context.Context, agent *
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return
+			return false
 		}
 		s.agentLifecycleLog.Warn("Failed to delete agent-lifetime webhook endpoint for deleted agent",
 			"agent_id", agent.ID, "project_id", ep.ProjectID, "endpoint_id", ep.ID, "error", err)
-		return
+		return false
 	}
 	if s.webhookIngress != nil {
 		s.webhookIngress.InvalidateEndpoint(ep.ID)
 	}
+	return true
 }
 
 func (s *Server) unbindPersistentWebhookEndpoint(ctx context.Context, agent *store.Agent, ep store.WebhookEndpoint) {

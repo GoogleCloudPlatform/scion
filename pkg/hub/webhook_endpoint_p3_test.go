@@ -71,7 +71,6 @@ func TestWebhookEndpointBoundCreateAndCap(t *testing.T) {
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		var created WebhookEndpointCreatedResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
-		assert.Equal(t, f.agentA.ID, created.BoundAgentID)
 		assert.Equal(t, store.WebhookBoundLifetimeAgent, created.BoundLifetime)
 		require.NotNil(t, created.BoundAgent)
 		assert.Equal(t, f.agentA.ID, created.BoundAgent.ID)
@@ -279,14 +278,41 @@ func TestWebhookEndpointUpdateAndDisable(t *testing.T) {
 	var created WebhookEndpointCreatedResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 
+	// Member creates its own endpoint (Stage 1 create/list/read still allowed).
+	rec = f.doWebhookEndpoint(t, f.memberAuth, "", http.MethodPost, map[string]any{
+		"name": "member-own-hook",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var memberCreated WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &memberCreated))
+
+	// R1 regression (option A): project-member does NOT hold webhook_endpoint.update
+	// and is refused (403) on PATCH, bind, and rotate-secret for BOTH an endpoint
+	// someone else owns AND one the member created.
+	for _, epID := range []string{created.ID, memberCreated.ID} {
+		rec = f.doWebhookEndpoint(t, f.memberAuth, epID, http.MethodPatch, map[string]any{
+			"description": "member-nope",
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "member PATCH desc ep=%s", epID)
+
+		rec = f.doWebhookEndpoint(t, f.memberAuth, epID, http.MethodPatch, map[string]any{
+			"boundAgentId":  f.agentA.ID,
+			"boundLifetime": "agent",
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "member PATCH bind ep=%s", epID)
+
+		rec = f.doWebhookEndpoint(t, f.memberAuth, epID+"/rotate-secret", http.MethodPost, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "member rotate-secret ep=%s", epID)
+	}
+
 	// Viewer cannot PATCH -> 403.
 	rec = f.doWebhookEndpoint(t, f.viewerAuth, created.ID, http.MethodPatch, map[string]any{
 		"description": "viewer-nope",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 
-	// Member CAN PATCH description, status=disabled, and bind to agentA.
-	rec = f.doWebhookEndpoint(t, f.memberAuth, created.ID, http.MethodPatch, map[string]any{
+	// Project admin CAN PATCH description, status=disabled, and bind to agentA, and rotate-secret.
+	rec = f.doWebhookEndpoint(t, f.adminAuth, created.ID, http.MethodPatch, map[string]any{
 		"description":   "v2",
 		"status":        "disabled",
 		"boundAgentId":  f.agentA.ID,
@@ -297,9 +323,14 @@ func TestWebhookEndpointUpdateAndDisable(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &updated))
 	assert.Equal(t, "v2", updated.Description)
 	assert.Equal(t, store.WebhookEndpointStatusDisabled, updated.Status)
-	assert.Equal(t, f.agentA.ID, updated.BoundAgentID)
+	require.NotNil(t, updated.BoundAgent)
+	assert.Equal(t, f.agentA.ID, updated.BoundAgent.ID)
 	assert.Equal(t, store.WebhookBoundLifetimePersistent, updated.BoundLifetime)
 	assert.GreaterOrEqual(t, updated.ConfigVersion, 2)
+
+	// Admin CAN rotate-secret on any endpoint in the project (including member's).
+	rec = f.doWebhookEndpoint(t, f.adminAuth, memberCreated.ID+"/rotate-secret", http.MethodPost, nil)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	// Disabled endpoint returns 404 at ingress immediately (cache invalidated).
 	body := []byte(`{"test":1}`)
@@ -312,8 +343,8 @@ func TestWebhookEndpointUpdateAndDisable(t *testing.T) {
 	f.srv.Handler().ServeHTTP(hookRec, hookReq)
 	assert.Equal(t, http.StatusNotFound, hookRec.Code)
 
-	// Re-enable endpoint -> ingress returns 202.
-	rec = f.doWebhookEndpoint(t, f.memberAuth, created.ID, http.MethodPatch, map[string]any{
+	// Owner re-enables endpoint -> ingress returns 202.
+	rec = f.doWebhookEndpoint(t, f.ownerAuth, created.ID, http.MethodPatch, map[string]any{
 		"status": "active",
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -326,14 +357,14 @@ func TestWebhookEndpointUpdateAndDisable(t *testing.T) {
 	f.srv.Handler().ServeHTTP(hookRec2, hookReq2)
 	assert.Equal(t, http.StatusAccepted, hookRec2.Code, hookRec2.Body.String())
 
-	// Unbind via PATCH boundAgentId="".
-	rec = f.doWebhookEndpoint(t, f.memberAuth, created.ID, http.MethodPatch, map[string]any{
+	// Owner unbinds via PATCH boundAgentId="".
+	rec = f.doWebhookEndpoint(t, f.ownerAuth, created.ID, http.MethodPatch, map[string]any{
 		"boundAgentId": "",
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var unbound WebhookEndpointResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &unbound))
-	assert.Empty(t, unbound.BoundAgentID)
+	assert.Nil(t, unbound.BoundAgent)
 	assert.Empty(t, unbound.BoundLifetime)
 }
 
@@ -399,6 +430,9 @@ func TestWebhookEndpointSecretRotation_GraceWindowAndMaintenance(t *testing.T) {
 
 func TestAgentDelete_ReleaseTriggerBindingsCascade(t *testing.T) {
 	f := setupTriggersTestFixture(t)
+	// O1: enable soft-delete retention so the delete is a real soft delete and
+	// the restore step runs unconditionally.
+	f.srv.config.SoftDeleteRetention = 72 * time.Hour
 	ctx := context.Background()
 
 	// 1. Agent-lifetime endpoint bound to agentA, with agentA's own trigger + owner's trigger.
@@ -476,13 +510,17 @@ func TestAgentDelete_ReleaseTriggerBindingsCascade(t *testing.T) {
 	require.NoError(t, f.store.CreateTrigger(ctx, trUnrelated))
 
 	// 3. Soft-delete agentA through the agent delete handler (which runs runAgentDeletion).
-	delReq := authoredRequest(t, f.ownerAuth, http.MethodDelete, "/api/v1/projects/"+f.projectID+"/agents/"+f.agentA.ID+"?force=true", nil)
+	delReq := authoredRequest(t, f.ownerAuth, http.MethodDelete, "/api/v1/projects/"+f.projectID+"/agents/"+f.agentA.ID, nil)
 	delRec := httptest.NewRecorder()
 	f.srv.deleteAgent(delRec, delReq, f.agentA.ID)
 	require.Equal(t, http.StatusNoContent, delRec.Code, delRec.Body.String())
 
+	deletedAgent, err := f.store.GetAgent(ctx, f.agentA.ID)
+	require.NoError(t, err, "soft delete must retain the agent row")
+	require.False(t, deletedAgent.DeletedAt.IsZero(), "expected soft delete with deleted_at set")
+
 	// Verify agent-lifetime endpoint, its secret row, and agentA's own rule are deleted.
-	_, err := f.store.GetWebhookEndpoint(ctx, epAgentResp.ID)
+	_, err = f.store.GetWebhookEndpoint(ctx, epAgentResp.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = f.store.GetSecret(ctx, store.WebhookEndpointSecretKey(f.projectID, epAgentResp.ID, 1), store.ScopeHub, f.srv.HubID())
 	assert.ErrorIs(t, err, store.ErrNotFound)
@@ -533,10 +571,7 @@ func TestAgentDelete_ReleaseTriggerBindingsCascade(t *testing.T) {
 	assert.Equal(t, len(audits), len(auditsAfter), "cascade retry must be idempotent with no duplicate audits")
 
 	// 6. Restoring soft-deleted agentA does NOT resurrect deleted endpoint/rules or rebind persistent endpoint.
-	deletedAgent, err := f.store.GetAgent(ctx, f.agentA.ID)
-	if err == nil && deletedAgent != nil && !deletedAgent.DeletedAt.IsZero() {
-		require.NoError(t, f.srv.restoreAgentTx(ctx, deletedAgent, AuditActor{}))
-	}
+	require.NoError(t, f.srv.restoreAgentTx(ctx, deletedAgent, AuditActor{}))
 	_, err = f.store.GetWebhookEndpoint(ctx, epAgentResp.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = f.store.GetTrigger(ctx, ownTriggerID)
@@ -544,4 +579,138 @@ func TestAgentDelete_ReleaseTriggerBindingsCascade(t *testing.T) {
 	gotPersistAfterRestore, err := f.store.GetWebhookEndpoint(ctx, epPersistResp.ID)
 	require.NoError(t, err)
 	assert.Empty(t, gotPersistAfterRestore.BoundAgentID)
+}
+
+// TestWebhookEndpointMaintenanceSweep_OrphanedAgentLifetime verifies the O2
+// hourly-maintenance backstop sweep for agent-lifetime endpoints whose bound
+// agent is soft-deleted or missing (idempotent, audited, same cascade code).
+func TestWebhookEndpointMaintenanceSweep_OrphanedAgentLifetime(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	f.srv.config.SoftDeleteRetention = 72 * time.Hour
+	ctx := context.Background()
+
+	// Soft-delete agentA first, then simulate an orphaned agent-lifetime endpoint
+	// left behind by a transient tail-step error, plus a persistent endpoint on agentA,
+	// plus an agent-lifetime endpoint bound to a missing agent UUID, plus a live endpoint on agentB.
+	delReq := authoredRequest(t, f.ownerAuth, http.MethodDelete, "/api/v1/projects/"+f.projectID+"/agents/"+f.agentA.ID, nil)
+	delRec := httptest.NewRecorder()
+	f.srv.deleteAgent(delRec, delReq, f.agentA.ID)
+	require.Equal(t, http.StatusNoContent, delRec.Code, delRec.Body.String())
+
+	mkBoundEP := func(name, ownerKind, ownerID, boundAgentID, lifetime string) *store.WebhookEndpoint {
+		t.Helper()
+		ep := &store.WebhookEndpoint{
+			ID:                  api.NewUUID(),
+			ProjectID:           f.projectID,
+			Name:                name,
+			OwnerPrincipalKind:  ownerKind,
+			OwnerPrincipalID:    ownerID,
+			OwnerCredentialKind: store.InitiatorCredentialKindSession,
+			SecretVersion:       1,
+			SignatureMode:       store.WebhookSignatureModeScionV1,
+			Status:              store.WebhookEndpointStatusActive,
+			BoundAgentID:        boundAgentID,
+			BoundLifetime:       lifetime,
+			CreatedBy:           ownerID,
+		}
+		require.NoError(t, f.store.CreateWebhookEndpoint(ctx, ep))
+		secRow, err := f.srv.newWebhookEndpointSecretRow(f.projectID, ep.ID, 1, "secret-"+name, ownerID)
+		require.NoError(t, err)
+		require.NoError(t, f.store.CreateSecret(ctx, secRow))
+		return ep
+	}
+
+	epOrphanSoft := mkBoundEP("orphan-soft", store.DelegationPrincipalAgent, f.agentA.ID, f.agentA.ID, store.WebhookBoundLifetimeAgent)
+	missingAgentID := api.NewUUID()
+	epOrphanMissing := mkBoundEP("orphan-missing", store.DelegationPrincipalUser, f.owner.ID, missingAgentID, store.WebhookBoundLifetimeAgent)
+	epLive := mkBoundEP("live-agent-ep", store.DelegationPrincipalAgent, f.agentB.ID, f.agentB.ID, store.WebhookBoundLifetimeAgent)
+	epPersist := mkBoundEP("persist-soft-ep", store.DelegationPrincipalUser, f.owner.ID, f.agentA.ID, store.WebhookBoundLifetimePersistent)
+
+	// Trigger authored by agentA on epOrphanSoft (must be deleted) and trigger authored by owner (must be paused source_deleted).
+	trOwn := &store.Trigger{
+		ID:             api.NewUUID(),
+		ProjectID:      f.projectID,
+		Name:           "sweep-own-rule",
+		SourceKind:     store.TriggerSourceKindWebhook,
+		SourceID:       epOrphanSoft.ID,
+		MatchTypes:     []string{"webhook.received"},
+		ActionType:     store.TriggerActionMessage,
+		ActionPayload:  `{"agentId":"` + f.agentA.ID + `","message":"hi"}`,
+		SubjectDialect: store.TriggerDialectCEL,
+		SubjectMode:    store.TriggerSubjectModeNew,
+		Status:         store.TriggerStatusActive,
+		CreatedBy:      f.agentA.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AttributionVersion:      1,
+			InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+			InitiatorPrincipalID:    f.agentA.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+			AuthorizationRevision:   1,
+		},
+	}
+	require.NoError(t, f.store.CreateTrigger(ctx, trOwn))
+
+	trOther := &store.Trigger{
+		ID:             api.NewUUID(),
+		ProjectID:      f.projectID,
+		Name:           "sweep-other-rule",
+		SourceKind:     store.TriggerSourceKindWebhook,
+		SourceID:       epOrphanSoft.ID,
+		MatchTypes:     []string{"webhook.received"},
+		ActionType:     store.TriggerActionMessage,
+		ActionPayload:  `{"agentId":"` + f.agentB.ID + `","message":"hi"}`,
+		SubjectDialect: store.TriggerDialectCEL,
+		SubjectMode:    store.TriggerSubjectModeNew,
+		Status:         store.TriggerStatusActive,
+		CreatedBy:      f.owner.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AttributionVersion:      1,
+			InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+			InitiatorPrincipalID:    f.owner.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AuthorizationRevision:   1,
+		},
+	}
+	require.NoError(t, f.store.CreateTrigger(ctx, trOther))
+
+	// First sweep cleans both orphaned agent-lifetime endpoints and writes audits.
+	swept := f.srv.sweepOrphanedAgentLifetimeWebhookEndpoints(ctx)
+	assert.Equal(t, 2, swept)
+
+	_, err := f.store.GetWebhookEndpoint(ctx, epOrphanSoft.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = f.store.GetSecret(ctx, store.WebhookEndpointSecretKey(f.projectID, epOrphanSoft.ID, 1), store.ScopeHub, f.srv.HubID())
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = f.store.GetTrigger(ctx, trOwn.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	gotOther, err := f.store.GetTrigger(ctx, trOther.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusPaused, gotOther.Status)
+	assert.Equal(t, store.TriggerStatusReasonSourceDeleted, gotOther.StatusReason)
+
+	_, err = f.store.GetWebhookEndpoint(ctx, epOrphanMissing.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Live agent-lifetime endpoint and persistent endpoint remain untouched.
+	_, err = f.store.GetWebhookEndpoint(ctx, epLive.ID)
+	require.NoError(t, err)
+	_, err = f.store.GetWebhookEndpoint(ctx, epPersist.ID)
+	require.NoError(t, err)
+
+	audits1, _, err := f.store.ListMutationAudits(ctx, store.MutationAuditFilter{Limit: 200})
+	require.NoError(t, err)
+	delAudits := 0
+	for _, a := range audits1 {
+		if (a.TargetID == epOrphanSoft.ID || a.TargetID == epOrphanMissing.ID) && a.MutationType == mutationTypeWebhookEndpointDelete {
+			delAudits++
+		}
+	}
+	assert.Equal(t, 2, delAudits)
+
+	// Second sweep is idempotent (0 swept, no new audits).
+	assert.Equal(t, 0, f.srv.sweepOrphanedAgentLifetimeWebhookEndpoints(ctx))
+	audits2, _, err := f.store.ListMutationAudits(ctx, store.MutationAuditFilter{Limit: 200})
+	require.NoError(t, err)
+	assert.Equal(t, len(audits1), len(audits2))
 }

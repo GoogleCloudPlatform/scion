@@ -451,7 +451,6 @@ func TestWebhookEndpointService_UpdateAndRotateSecret(t *testing.T) {
 				ID:            "ep-123",
 				ProjectID:     "proj-1",
 				Name:          "bound-ep",
-				BoundAgentID:  "ag-1",
 				BoundAgent:    &WebhookEndpointBoundAgent{ID: "ag-1", Name: "worker"},
 				BoundLifetime: "agent",
 				Status:        "active",
@@ -509,8 +508,8 @@ func TestWebhookEndpointService_UpdateAndRotateSecret(t *testing.T) {
 	listed, err := svc.List(ctx, &ListWebhookEndpointsOptions{BoundAgentID: "ag-1"})
 	require.NoError(t, err)
 	require.Len(t, listed.Endpoints, 1)
-	assert.Equal(t, "ag-1", listed.Endpoints[0].BoundAgentID)
 	require.NotNil(t, listed.Endpoints[0].BoundAgent)
+	assert.Equal(t, "ag-1", listed.Endpoints[0].BoundAgent.ID)
 	assert.Equal(t, "worker", listed.Endpoints[0].BoundAgent.Name)
 
 	disabled := "disabled"

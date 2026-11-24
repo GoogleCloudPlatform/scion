@@ -123,7 +123,6 @@ func TestTriggerWebhookP3_CreateBindUpdateDisableRotate(t *testing.T) {
 					SignatureMode: "scion_v1",
 					SecretVersion: 1,
 					Status:        "active",
-					BoundAgentID:  agID,
 					BoundAgent:    &hubclient.WebhookEndpointBoundAgent{ID: agID, Name: "worker-1"},
 					BoundLifetime: "agent",
 					CreatedAt:     now,

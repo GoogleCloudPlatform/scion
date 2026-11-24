@@ -516,6 +516,18 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !verified && len(sigVals) == 1 && ep.SecretVersion > 1 && ep.SecretRotatedAt != nil &&
 		!now.After(ep.SecretRotatedAt.UTC().Add(store.WebhookSecretRotationGraceWindow)) {
 		prevSecret, prevErr := h.cache.LookupSecret(ctx, h.loadSecret, ep.ProjectID, ep.ID, ep.SecretVersion-1)
+		if prevErr != nil && !errors.Is(prevErr, store.ErrNotFound) {
+			h.failedSecret.Add(1)
+			h.recordMetric(IngressResultRejectedSecretUnavailable)
+			h.logger.Error("Failed to load or unseal previous webhook endpoint secret during rotation grace",
+				"endpoint_id", ep.ID,
+				"project_id", ep.ProjectID,
+				"secret_version", ep.SecretVersion-1,
+				"error", prevErr,
+			)
+			apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
+			return
+		}
 		if prevErr == nil && VerifyScionV1Signature(prevSecret, now, sigVals[0], delivery, eventHdr, subjectHdr, body) {
 			verified = true
 		}

@@ -28,6 +28,7 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
@@ -819,6 +820,40 @@ func (s *TriggerStore) PurgeExpiredRotatedWebhookSecrets(ctx context.Context, no
 		return 0, mapError(err)
 	}
 	return n, nil
+}
+
+func (s *TriggerStore) ListOrphanedAgentLifetimeWebhookEndpoints(ctx context.Context, limit int) ([]store.WebhookEndpoint, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	entities, err := s.client.WebhookEndpoint.Query().
+		Where(
+			webhookendpoint.BoundLifetimeEQ(store.WebhookBoundLifetimeAgent),
+			webhookendpoint.BoundAgentIDNotNil(),
+			predicate.WebhookEndpoint(func(sel *entsql.Selector) {
+				d := sel.Dialect()
+				a := entsql.Dialect(d).Table(agent.Table).As("ag")
+				sub := entsql.Dialect(d).
+					Select(a.C(agent.FieldID)).
+					From(a).
+					Where(entsql.And(
+						entsql.ColumnsEQ(a.C(agent.FieldID), sel.C(webhookendpoint.FieldBoundAgentID)),
+						entsql.IsNull(a.C(agent.FieldDeletedAt)),
+					))
+				sel.Where(entsql.Not(entsql.Exists(sub)))
+			}),
+		).
+		Order(webhookendpoint.ByCreated(entsql.OrderAsc()), webhookendpoint.ByID(entsql.OrderAsc())).
+		Limit(limit).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]store.WebhookEndpoint, 0, len(entities))
+	for _, e := range entities {
+		out = append(out, *entWebhookEndpointToStore(e))
+	}
+	return out, nil
 }
 
 // ============================================================================

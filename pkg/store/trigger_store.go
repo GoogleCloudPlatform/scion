@@ -388,6 +388,10 @@ type TriggerStore interface {
 	// for webhook endpoints whose secret version is retired and past graceWindow
 	// (or superseded by a newer rotation, Stage 2 §4.4).
 	PurgeExpiredRotatedWebhookSecrets(ctx context.Context, now time.Time, graceWindow time.Duration) (int, error)
+	// ListOrphanedAgentLifetimeWebhookEndpoints returns up to limit webhook
+	// endpoints with bound_lifetime="agent" whose bound_agent_id references a
+	// soft-deleted or missing agent row (hourly maintenance cascade backstop).
+	ListOrphanedAgentLifetimeWebhookEndpoints(ctx context.Context, limit int) ([]WebhookEndpoint, error)
 
 	// Triggers
 	CreateTrigger(ctx context.Context, tr *Trigger) error

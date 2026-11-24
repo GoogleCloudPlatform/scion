@@ -982,7 +982,7 @@ func TestProjectRoles_AttachAndPortAccessLockIn(t *testing.T) {
 	revisions := map[string]int{
 		store.ProjectRoleOwner:  15,
 		store.ProjectRoleAdmin:  13,
-		store.ProjectRoleMember: 10,
+		store.ProjectRoleMember: 9,
 	}
 	portAccess := map[string]bool{
 		store.ProjectRoleOwner: true,

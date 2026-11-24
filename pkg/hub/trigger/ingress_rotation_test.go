@@ -70,6 +70,7 @@ func TestIngress_SecretRotationGraceWindow(t *testing.T) {
 
 	baseQ := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return now }))
 	failCurrentSecret := false
+	failPrevSecretErr := error(nil)
 	ing := trigger.NewIngress(trigger.IngressConfig{
 		Store:      cs,
 		QueueStore: cs,
@@ -83,6 +84,9 @@ func TestIngress_SecretRotationGraceWindow(t *testing.T) {
 				}
 				return secV2, nil
 			case 1:
+				if failPrevSecretErr != nil {
+					return "", failPrevSecretErr
+				}
 				return secV1, nil
 			default:
 				return "", store.ErrNotFound
@@ -114,6 +118,17 @@ func TestIngress_SecretRotationGraceWindow(t *testing.T) {
 	failCurrentSecret = true
 	assert.Equal(t, http.StatusServiceUnavailable, sendSigned(secV1, "del-fail-closed").Code)
 	failCurrentSecret = false
+
+	// 3b. O3: if previous secret (v1) fails to load with a transient error (not
+	//     ErrNotFound) during grace, ingress returns 503; if ErrNotFound, 401.
+	ing.InvalidateEndpoint(ep.ID)
+	failPrevSecretErr = errors.New("db timeout")
+	assert.Equal(t, http.StatusServiceUnavailable, sendSigned(secV1, "del-prev-err-503").Code)
+	ing.InvalidateEndpoint(ep.ID)
+	failPrevSecretErr = store.ErrNotFound
+	assert.Equal(t, http.StatusUnauthorized, sendSigned(secV1, "del-prev-notfound-401").Code)
+	failPrevSecretErr = nil
+	ing.InvalidateEndpoint(ep.ID)
 
 	// 4. After 24h grace window: v2 is accepted, v1 is refused with 401.
 	now = rotatedAt.Add(store.WebhookSecretRotationGraceWindow + time.Second)
