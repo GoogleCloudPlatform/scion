@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-import { formatText } from './canonical.js';
+import { formatText, renderQueryPreservingMeaning } from './canonical.js';
 import { parse, trimASCIISpace } from './parse.js';
-import type { ViewSchema } from './types.js';
+import type { Query, ViewSchema } from './types.js';
 
 /**
  * Return the active chip state for `key`:
@@ -81,6 +81,23 @@ export function setSingleKeyInQuery(
   const keyTerms = res.query.terms.filter((t) => t.key.toLowerCase() === target);
   if (keyTerms.length === 0) {
     return value ? `${target}:${value} ${trimmed}` : trimmed;
+  }
+
+  // When clearing the last remaining key terms, render via
+  // renderQueryPreservingMeaning so structured text/exclusions are not
+  // silently demoted into literal pure text (e.g. `phase:running -test` ->
+  // literal `-test` or `is:mine "a b"` -> literal `"a b"`).
+  if (!value) {
+    const remainingTerms = res.query.terms.filter((t) => t.key.toLowerCase() !== target);
+    if (remainingTerms.length === 0) {
+      const remaining: Query = {
+        mode: 'structured',
+        terms: [],
+        ...(res.query.text !== undefined ? { text: res.query.text } : {}),
+        ...(res.query.excludeText !== undefined ? { excludeText: res.query.excludeText } : {}),
+      };
+      return renderQueryPreservingMeaning(remaining, known);
+    }
   }
 
   // Splice out existing terms for `target` from right to left without touching

@@ -197,30 +197,50 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     expect(v.warnings).toEqual([]);
   });
 
-  it('strips client-only keys in serverSubset', () => {
-    const schemaWithClient: ViewSchema = {
-      ...agentsSchema,
-      keys: [
-        ...agentsSchema.keys,
-        {
-          name: 'mode',
-          help: 'Message mode',
-          kind: 'enum',
-          exec: 'client',
-          enum: ['lineage', 'branch'],
-          multiValued: false,
-        },
-      ],
+  it('strips client-only keys in serverSubset while preserving meaning when re-parsed on hub', () => {
+    const known = knownKeysFor(agentsSchema);
+    const checkSubset = (raw: string, wantSubset: string): void => {
+      const res = parse(raw, known);
+      expect(res.error).toBeUndefined();
+      const q = res.query as Query;
+      const sub = serverSubset(q, agentsSchema);
+      expect(sub).toBe(wantSubset);
+      if (sub !== '') {
+        const reparsed = parse(sub, known);
+        expect(reparsed.error).toBeUndefined();
+        expect(reparsed.query).toBeDefined();
+        if (q.mode === 'structured' && reparsed.query?.mode === 'text') {
+          expect(reparsed.query.text).toBe(q.text ?? '');
+          expect(q.excludeText ?? []).toEqual([]);
+        }
+      }
     };
-    const res = parse('phase:running mode:lineage api', knownKeysFor(schemaWithClient));
-    expect(res.error).toBeUndefined();
-    expect(serverSubset(res.query as Query, schemaWithClient)).toBe('phase:running api');
 
-    // When all key terms are stripped, key-shaped text stays quoted so the hub
-    // does not re-parse it as a structured key term.
-    const quotedTextOnly = parse('mode:lineage "phase:error"', knownKeysFor(schemaWithClient));
-    expect(quotedTextOnly.error).toBeUndefined();
-    expect(serverSubset(quotedTextOnly.query as Query, schemaWithClient)).toBe('"phase:error"');
+    checkSubset('phase:running mode:lineage api', 'phase:running api');
+    checkSubset('mode:lineage foo bar', 'foo bar');
+    checkSubset('mode:lineage "a b"', 'a b');
+    checkSubset('mode:lineage C:\\x', 'C:\\x');
+    // Exclusions and key-shaped quoted text cannot be represented in pure-text
+    // mode without a server key, so serverSubset returns '' (drain + client eval).
+    checkSubset('mode:lineage -test', '');
+    checkSubset('mode:lineage foo -bar', '');
+    checkSubset('mode:lineage "phase:error"', '');
+  });
+
+  it('rejects reachability mode values (can_message / cannot_message) on project_agents schema', () => {
+    const projectSchema = getViewSchema('project_agents') as ViewSchema;
+    const known = knownKeysFor(projectSchema);
+
+    const okRes = parse('mode:lineage', known);
+    expect(okRes.error).toBeUndefined();
+    expect(validate(okRes.query as Query, projectSchema, 'mode:lineage').error).toBeUndefined();
+
+    for (const bad of ['mode:can_message', 'mode:cannot_message']) {
+      const res = parse(bad, known);
+      expect(res.error).toBeUndefined();
+      const v = validate(res.query as Query, projectSchema, bad);
+      expect(v.error?.code).toBe('value');
+    }
   });
 
   it('suggests keys at boundary and enum values after key:', () => {
@@ -290,6 +310,11 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
       'phase:running "\\"hello\\""'
     );
     expect(setSingleKeyInQuery('foo', 'phase', 'running', agentsSchema)).toBe('phase:running foo');
+
+    // Clearing the last chip preserves meaning instead of demoting structured text to literal text.
+    expect(setSingleKeyInQuery('phase:running -test', 'phase', '', agentsSchema)).toBe('');
+    expect(setSingleKeyInQuery('is:mine "a b"', 'is', '', agentsSchema)).toBe('a b');
+    expect(setSingleKeyInQuery('phase:running foo', 'phase', '', agentsSchema)).toBe('foo');
   });
 
   it('matches all P2 agent keys and builds dynamic value suggestions from loaded rows', () => {

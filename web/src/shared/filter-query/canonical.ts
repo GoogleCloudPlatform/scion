@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { comparisonPrefixLen, scanKeyPrefix, trimASCIISpace } from './parse.js';
+import { comparisonPrefixLen, parse, scanKeyPrefix, trimASCIISpace } from './parse.js';
 import type { Query, ViewSchema } from './types.js';
 
 function quoteString(s: string): string {
@@ -118,8 +118,47 @@ export function canonical(q: Query): string {
 }
 
 /**
- * Strip client-only keys from q and return the canonical server query string
- * suitable for `?q=`.
+ * Render `q` as a query string that preserves its match semantics when parsed
+ * against `known`.
+ *
+ * - Pure-text queries render as trimmed text.
+ * - Structured queries with at least one key term render via `canonical(q)`.
+ * - Structured queries with zero remaining key terms (e.g. after stripping
+ *   client-only keys or clearing the last chip): if `excludeText` is non-empty,
+ *   no pure-text string can represent exclusions without a known key, so `''`
+ *   is returned; otherwise the unquoted `text` is returned only if it
+ *   re-parses as identical pure text under `known` (else `''`).
+ */
+export function renderQueryPreservingMeaning(q: Query, known: (key: string) => boolean): string {
+  if (q.mode === 'text') {
+    return trimASCIISpace(q.text);
+  }
+  if (q.terms.length > 0) {
+    return canonical(q);
+  }
+  if (q.excludeText && q.excludeText.length > 0) {
+    return '';
+  }
+  if (!q.text) {
+    return '';
+  }
+  const candidate = trimASCIISpace(q.text);
+  if (!candidate) {
+    return '';
+  }
+  const reparsed = parse(candidate, known);
+  if (!reparsed.error && reparsed.query?.mode === 'text' && reparsed.query.text === q.text) {
+    return candidate;
+  }
+  return '';
+}
+
+/**
+ * Strip client-only keys from q and return a hub-safe `?q=` query string whose
+ * parsed semantics on the server never contradict `q`. When stripping leaves
+ * no server key terms and the remaining text/exclusions cannot be represented
+ * faithfully in pure-text mode, returns `''` (the client drains and evaluates
+ * the full query locally).
  */
 export function serverSubset(q: Query, schema: ViewSchema): string {
   if (q.mode === 'text') {
@@ -135,7 +174,8 @@ export function serverSubset(q: Query, schema: ViewSchema): string {
   };
   if (q.text !== undefined) next.text = q.text;
   if (q.excludeText !== undefined) next.excludeText = q.excludeText;
-  return canonical(next);
+  const knownForHub = (k: string): boolean => schema.keys.some((sk) => sk.name.toLowerCase() === k);
+  return renderQueryPreservingMeaning(next, knownForHub);
 }
 
 /**
