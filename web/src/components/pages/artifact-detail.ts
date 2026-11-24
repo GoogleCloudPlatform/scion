@@ -96,6 +96,7 @@ import {
   publishFiles,
   rendererFor,
   ReviewOpenError,
+  ReviewWakeOfferError,
   safeReviewDownloadName,
 } from '../../client/artifacts.js';
 import type {
@@ -109,10 +110,12 @@ import type {
   DiscardedVersion,
   PendingPublish,
   PublishFile,
+  ReviewDeliveryInfo,
   ReviewDraft,
   ReviewOpenEntry,
   ViewResponse,
 } from '../../client/artifacts.js';
+import type { WakeOffer } from '../../client/wake-offer.js';
 import { principalLabel, principalName, shortId } from '../../client/principal-names.js';
 import { getLanguageFromPath } from '../shared/code-editor.js';
 import type { ScionCodeEditor } from '../shared/code-editor.js';
@@ -160,6 +163,158 @@ export function versionKindLabel(kind: string): string {
   if (kind === 'review') return 'Review';
   if (kind === 'attachment') return 'Attachment';
   return kind;
+}
+
+/**
+ * Formats a user-facing notice from the hub's post-finalize reviewDelivery
+ * outcome when the owning agent was suspended (ptone/scion#8946).
+ */
+export function reviewDeliveryNotice(delivery: ReviewDeliveryInfo): {
+  message: string;
+  variant: 'primary' | 'warning';
+} {
+  const name = delivery.agentSlug ? `@${delivery.agentSlug}` : 'The owning agent';
+  const detail = delivery.message ? `: ${delivery.message}` : '';
+  switch (delivery.status) {
+    case 'auto_waking':
+      return {
+        message: `Review saved. Waking ${name} to deliver the review.`,
+        variant: 'primary',
+      };
+    case 'woken':
+      return {
+        message: `Review saved. ${name} was woken and notified.`,
+        variant: 'primary',
+      };
+    case 'waking':
+      return {
+        message: `Review saved. ${name} is starting; the review notice will be sent when it is ready, if the start completes.`,
+        variant: 'primary',
+      };
+    case 'wake_refused':
+      return {
+        message: `Review saved, but ${name} could not be woken${detail}. The agent was not notified.`,
+        variant: 'warning',
+      };
+    case 'wake_failed':
+      return {
+        message: `Review saved, but waking or notifying ${name} failed${detail}. The agent was not notified.`,
+        variant: 'warning',
+      };
+    case 'suspended':
+    default:
+      return {
+        message: `Review saved. ${name} is suspended and was not notified.`,
+        variant: 'warning',
+      };
+  }
+}
+
+export type ReviewWakeChoice = 'wake' | 'submit' | 'cancel';
+
+/**
+ * Prompts the user when submitting a review of a user-suspended agent's
+ * artifact (ptone/scion#8946).
+ * - "Wake and submit" (or Enter outside buttons/inputs): resolves `'wake'`.
+ * - "Submit without waking": resolves `'submit'`.
+ * - Escape, close button, or any other dismissal: resolves `'cancel'` so
+ *   dismissing the dialog never submits the review (matching chat's wake
+ *   dialog dismissal semantics).
+ */
+export function confirmReviewWake(offer: WakeOffer): Promise<ReviewWakeChoice> {
+  const name = offer.agentSlug ? `@${offer.agentSlug}` : 'This agent';
+  return new Promise<ReviewWakeChoice>((resolve) => {
+    const dialog = document.createElement('sl-dialog');
+    dialog.label = 'Agent is suspended';
+
+    let resolved = false;
+    function cleanup(result: ReviewWakeChoice): void {
+      if (resolved) return;
+      resolved = true;
+      dialog.open = false;
+      dialog.addEventListener(
+        'sl-after-hide',
+        () => {
+          dialog.remove();
+          resolve(result);
+        },
+        { once: true }
+      );
+    }
+
+    // Intercept close requests so overlay clicks stay open (matching
+    // confirm-dialog.ts) while Escape / close button cancel without submitting.
+    dialog.addEventListener('sl-request-close', (e: Event) => {
+      e.preventDefault();
+      const detail = (e as CustomEvent<{ source: string }>).detail;
+      if (detail?.source === 'overlay') {
+        return;
+      }
+      cleanup('cancel');
+    });
+
+    // Guard against any unexpected hide without a button click.
+    dialog.addEventListener(
+      'sl-after-hide',
+      () => {
+        if (resolved) return;
+        resolved = true;
+        dialog.remove();
+        resolve('cancel');
+      },
+      { once: true }
+    );
+
+    const body = document.createElement('div');
+    body.style.whiteSpace = 'pre-line';
+    body.textContent = `${name} is suspended. Wake it to deliver this review?`;
+    dialog.appendChild(body);
+
+    const submitBtn = document.createElement('sl-button');
+    submitBtn.slot = 'footer';
+    submitBtn.setAttribute('variant', 'default');
+    submitBtn.textContent = 'Submit without waking';
+    submitBtn.addEventListener('click', () => cleanup('submit'));
+    dialog.appendChild(submitBtn);
+
+    const wakeBtn = document.createElement('sl-button');
+    wakeBtn.slot = 'footer';
+    wakeBtn.setAttribute('variant', 'primary');
+    wakeBtn.textContent = 'Wake and submit';
+    wakeBtn.style.marginInlineStart = '0.5rem';
+    wakeBtn.addEventListener('click', () => cleanup('wake'));
+    dialog.appendChild(wakeBtn);
+
+    dialog.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+        if (
+          tag === 'textarea' ||
+          tag === 'input' ||
+          tag === 'sl-textarea' ||
+          tag === 'sl-input' ||
+          tag === 'button' ||
+          tag === 'sl-button'
+        ) {
+          return;
+        }
+        e.preventDefault();
+        cleanup('wake');
+      }
+    });
+
+    if (document.documentElement.classList.contains('sl-theme-dark')) {
+      dialog.classList.add('sl-theme-dark');
+    }
+    dialog.style.setProperty('--sl-panel-background-color', 'var(--scion-surface-raised)');
+    dialog.style.setProperty('--sl-panel-border-color', 'var(--scion-border)');
+    body.style.color = 'var(--scion-text)';
+
+    document.body.appendChild(dialog);
+    requestAnimationFrame(() => {
+      dialog.open = true;
+    });
+  });
 }
 
 /**
@@ -520,6 +675,7 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private discardedReview: string | null = null;
   /** Why Review mode was left (shown on the page after it closes). */
   @state() private reviewNotice: string | null = null;
+  @state() private reviewNoticeVariant: 'primary' | 'warning' = 'warning';
 
   @query('.untrusted') private untrustedFrame?: HTMLElement;
   @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
@@ -1717,6 +1873,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewPreview = this.reviewText;
     this.reviewHint = null;
     this.reviewNotice = null;
+    this.reviewNoticeVariant = 'warning';
     this.discardedReview = null;
     this.staleReviewError = false;
     const v = this.data?.version;
@@ -2024,24 +2181,58 @@ export class ScionPageArtifactDetail extends LitElement {
             ? { path: x.path, data: new Blob([this.reviewText], { type: f.mediaType }) }
             : { path: x.path, size: x.size, sha256: x.sha256 }
         );
-      await publishFiles({
+      const baseReq = {
         artifactId: this.artifactId,
-        kind: 'review',
+        kind: 'review' as const,
         base: v.seq,
         entry: v.entryPath,
         note: this.reviewNote.trim() || undefined,
         files,
         resume: this.reviewPending,
-      });
+      };
+      const offerWake = this.data?.artifact.ownerKind === 'agent';
+      let finalized: ArtifactResponse;
+      try {
+        finalized = await publishFiles({ ...baseReq, offerWake });
+      } catch (err) {
+        if (!(err instanceof ReviewWakeOfferError)) throw err;
+        this.reviewPending = err.pending;
+        const choice = await confirmReviewWake(err.offer);
+        if (choice === 'cancel') {
+          if (draftCtrl && this.draftController === draftCtrl) {
+            draftCtrl.resumeFromQuiesce();
+          }
+          return;
+        }
+        finalized = await publishFiles({
+          ...baseReq,
+          resume: err.pending,
+          offerWake: false,
+          wake: choice === 'wake',
+        });
+      }
+      let nextNotice: string | null = null;
+      let nextVariant: 'primary' | 'warning' = 'warning';
+      if (finalized.reviewDelivery) {
+        const d = reviewDeliveryNotice(finalized.reviewDelivery);
+        nextNotice = d.message;
+        nextVariant = d.variant;
+      }
       if (draftCtrl && this.draftController === draftCtrl) {
         const delResult = await draftCtrl.deleteAfterSubmit();
         this.disposeDraftController();
         if (delResult === 'deleted') {
           this.savedDraft = null;
         } else if (delResult === 'conflict') {
-          this.reviewNotice =
+          const conflictMsg =
             'Your review was saved. A newer draft from another device or tab was kept.';
+          nextNotice = nextNotice ? `${nextNotice} ${conflictMsg}` : conflictMsg;
+          nextVariant = 'warning';
         }
+      }
+      if (nextNotice) {
+        this.reviewNotice = nextNotice;
+        this.reviewNoticeVariant = nextVariant;
       }
       this.reviewPending = null;
       this.reviewing = false;
@@ -2105,6 +2296,7 @@ export class ScionPageArtifactDetail extends LitElement {
     if (!this.canReview) {
       this.reviewing = false;
       this.reviewNotice = this.staleReviewNotice();
+      this.reviewNoticeVariant = 'warning';
       this.discardedReview = discarded;
       return;
     }
@@ -2309,6 +2501,7 @@ export class ScionPageArtifactDetail extends LitElement {
       this.staleDraft = null;
       if (!this.canReview || !this.data?.version) {
         this.reviewNotice = this.staleReviewNotice();
+        this.reviewNoticeVariant = 'warning';
         this.carriedReview = {
           base: stale.draft.base,
           body: stale.draft.body,
@@ -2369,6 +2562,7 @@ export class ScionPageArtifactDetail extends LitElement {
       if (!this.canReview || !this.data?.version) {
         this.closeReviewMode();
         this.reviewNotice = this.staleReviewNotice();
+        this.reviewNoticeVariant = 'warning';
         this.carriedReview = { base: oldBase, body: oldBody, entry: oldEntry };
         return;
       }
@@ -3570,8 +3764,9 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Why Review mode closed, with the discarded or carried text, outside Review mode. */
   private renderReviewNotice(): TemplateResult | typeof nothing {
     if (!this.reviewNotice) return nothing;
-    return html`<sl-alert class="review-notice" variant="warning" open>
-        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+    const icon = this.reviewNoticeVariant === 'primary' ? 'info-circle' : 'exclamation-triangle';
+    return html`<sl-alert class="review-notice" variant=${this.reviewNoticeVariant} open>
+        <sl-icon slot="icon" name=${icon}></sl-icon>
         ${this.reviewNotice}
       </sl-alert>
       ${this.renderCarriedReview()} ${this.renderDiscarded()}`;

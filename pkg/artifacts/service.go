@@ -80,6 +80,12 @@ type Service struct {
 	provider func() Backend
 	// reviewNotifier is told about each finalized review version.
 	reviewNotifier func(context.Context, ReviewNotice)
+	// reviewDeliveryNotifier, when set, replaces reviewNotifier and returns
+	// optional delivery/wake metadata for the finalize response.
+	reviewDeliveryNotifier func(context.Context, http.ResponseWriter, ReviewNotice) *ReviewDeliveryInfo
+	// reviewWakeOfferer, when set, checks before finalizing a review whether
+	// a user-suspended owning agent should trigger a wake-confirm offer.
+	reviewWakeOfferer func(context.Context, *Artifact) *ReviewWakeOffer
 
 	// htmlNotice remembers, by entry digest, whether an HTML entry
 	// references remote images (see entryHasRemoteImages).
@@ -216,6 +222,17 @@ type ReviewNotice struct {
 	// that request itself, and the reviewer is not the owner
 	// (ptone/scion#6853).
 	SubmitAuthorized bool
+	// Wake is true when the caller explicitly requested waking a suspended
+	// owning agent (after confirming a wake offer) on review finalize.
+	Wake bool
+}
+
+// ReviewWakeOffer describes a user-suspended owning agent that the caller is
+// authorized to wake, returned before finalizing a review when OfferWake is set.
+type ReviewWakeOffer struct {
+	AgentID   string
+	AgentSlug string
+	Phase     string
 }
 
 // Ref is the notice's versioned reference.
@@ -231,22 +248,64 @@ func (s *Service) SetReviewNotifier(fn func(context.Context, ReviewNotice)) {
 	s.reviewNotifier = fn
 }
 
+// SetReviewDeliveryNotifier sets a review notifier that also returns optional
+// delivery/wake metadata for ArtifactResponse.ReviewDelivery. When set, it
+// takes precedence over SetReviewNotifier.
+func (s *Service) SetReviewDeliveryNotifier(fn func(context.Context, http.ResponseWriter, ReviewNotice) *ReviewDeliveryInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reviewDeliveryNotifier = fn
+}
+
+// SetReviewWakeOfferer sets the pre-finalize check that determines whether a
+// review of a user-suspended agent should return a 409 wake offer.
+func (s *Service) SetReviewWakeOfferer(fn func(context.Context, *Artifact) *ReviewWakeOffer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reviewWakeOfferer = fn
+}
+
+// offerReviewWake asks the host whether finalizing a review of a should prompt
+// the caller to confirm waking a user-suspended owning agent.
+func (s *Service) offerReviewWake(ctx context.Context, a *Artifact, v *Version) *ReviewWakeOffer {
+	s.mu.RLock()
+	fn := s.reviewWakeOfferer
+	s.mu.RUnlock()
+	if fn == nil || (v.CreatedByKind == a.OwnerKind && v.CreatedByRef == a.OwnerRef) {
+		return nil
+	}
+	return fn(ctx, a)
+}
+
 // notifyReview tells the review notifier about review version v of a,
 // finalized by a caller with access.
 func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version, access writeAccess) {
+	_ = s.notifyReviewWithDelivery(ctx, nil, a, v, access, false)
+}
+
+// notifyReviewWithDelivery tells the review notifier about review version v
+// of a and returns optional delivery/wake metadata for the finalize response.
+func (s *Service) notifyReviewWithDelivery(ctx context.Context, w http.ResponseWriter, a *Artifact, v *Version, access writeAccess, wake bool) *ReviewDeliveryInfo {
 	s.mu.RLock()
+	deliveryFn := s.reviewDeliveryNotifier
 	fn := s.reviewNotifier
 	s.mu.RUnlock()
-	if fn == nil || (v.CreatedByKind == a.OwnerKind && v.CreatedByRef == a.OwnerRef) {
-		return
+	if (deliveryFn == nil && fn == nil) || (v.CreatedByKind == a.OwnerKind && v.CreatedByRef == a.OwnerRef) {
+		return nil
 	}
-	fn(context.WithoutCancel(ctx), ReviewNotice{
+	notice := ReviewNotice{
 		ArtifactID: a.ID, Seq: v.Seq, ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
 		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef,
 		ReviewerKind: v.CreatedByKind, ReviewerRef: v.CreatedByRef,
 		Note:             v.Note,
 		SubmitAuthorized: access.allowsKind(VersionKindReview) && access != accessOwner,
-	})
+		Wake:             wake,
+	}
+	if deliveryFn != nil {
+		return deliveryFn(context.WithoutCancel(ctx), w, notice)
+	}
+	fn(context.WithoutCancel(ctx), notice)
+	return nil
 }
 
 // Host returns the host the service was built with.

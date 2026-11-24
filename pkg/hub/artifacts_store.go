@@ -174,6 +174,8 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc.SetLimits(s.artifactLimits)
 	svc.SetBackendProvider(s.artifactBackend)
 	svc.SetReviewNotifier(s.notifyArtifactReview)
+	svc.SetReviewWakeOfferer(s.offerArtifactReviewWake)
+	svc.SetReviewDeliveryNotifier(s.notifyArtifactReviewWithDelivery)
 	svc.SetLogger(s.artifactLog)
 	svc.SetArchiveEnabled(func(context.Context) bool { return s.experimentEnabled(experiments.ArtifactArchive) })
 	// Share-link reads are rate limited per client, read through the
