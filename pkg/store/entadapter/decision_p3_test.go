@@ -277,6 +277,7 @@ func TestListProjectDecisionAgentsForProjects_ParityAndChunking(t *testing.T) {
 
 	tx, err := cs.client.Tx(ctx)
 	require.NoError(t, err)
+	var proj0AgA uuid.UUID
 	for p := 0; p < numProjects; p++ {
 		pid := uuid.New()
 		projectIDs[p] = pid.String()
@@ -285,6 +286,9 @@ func TestListProjectDecisionAgentsForProjects_ParityAndChunking(t *testing.T) {
 			continue
 		}
 		agA := uuid.New()
+		if p == 0 {
+			proj0AgA = agA
+		}
 		agB := uuid.New()
 		creates := []*ent.DecisionCreate{
 			tx.Decision.Create().
@@ -300,9 +304,39 @@ func TestListProjectDecisionAgentsForProjects_ParityAndChunking(t *testing.T) {
 				SetKey("k2").SetKeyNorm("k2").SetKeySource(decision.KeySourceAgent).SetVersion(1).
 				SetQuestion("Q2?").SetChoices(choices).SetStatus(decision.StatusPending).SetCreatedAt(base.Add(time.Minute)))
 		}
+		if p == 0 {
+			// Seed agA with a second lexicographically higher name so MAX vs MIN
+			// aggregation is pinned against a MAX->MIN mutant.
+			creates = append(creates, tx.Decision.Create().
+				SetProjectID(pid).SetChatKey("t-"+pid.String()).SetMessageID(uuid.New()).SetPosition(0).
+				SetAskerAgentID(agA).SetAskerAgentName("zeta").
+				SetKey("k3").SetKeyNorm("k3").SetKeySource(decision.KeySourceAgent).SetVersion(1).
+				SetQuestion("Q3?").SetChoices(choices).SetStatus(decision.StatusPending).SetCreatedAt(base.Add(2*time.Minute)))
+		}
 		require.NoError(t, tx.Decision.CreateBulk(creates...).Exec(ctx))
 	}
 	require.NoError(t, tx.Commit())
+
+	// Independent base GROUP BY oracle (does not delegate to ListProjectDecisionAgents).
+	legacyProjectDecisionAgents := func(pidStr string) []store.ProjectDecisionActor {
+		pid := uuid.MustParse(pidStr)
+		var rows []struct {
+			AskerAgentID uuid.UUID `json:"asker_agent_id"`
+			Name         string    `json:"asker_agent_name"`
+		}
+		err := cs.client.Decision.Query().
+			Where(decision.ProjectIDEQ(pid)).
+			GroupBy(decision.FieldAskerAgentID).
+			Aggregate(ent.As(ent.Max(decision.FieldAskerAgentName), "asker_agent_name")).
+			Scan(ctx, &rows)
+		require.NoError(t, err)
+		out := make([]store.ProjectDecisionActor, len(rows))
+		for i, r := range rows {
+			out[i] = store.ProjectDecisionActor{ID: r.AskerAgentID.String(), Name: r.Name}
+		}
+		sortProjectDecisionActors(out)
+		return out
+	}
 
 	// Include a duplicate project ID in the request to verify deduplication.
 	reqIDs := append([]string{projectIDs[0]}, projectIDs...)
@@ -311,11 +345,20 @@ func TestListProjectDecisionAgentsForProjects_ParityAndChunking(t *testing.T) {
 	assert.Len(t, got, numProjects-1, "project with zero decisions must be omitted")
 	assert.NotContains(t, got, projectIDs[numProjects-1])
 
-	// Spot-check parity with single-project ListProjectDecisionAgents across chunk boundary.
+	// Pin MAX(asker_agent_name) on project 0 (proj0AgA has "alpha" and "zeta").
+	require.Len(t, got[projectIDs[0]], 2)
+	var proj0AgAName string
+	for _, a := range got[projectIDs[0]] {
+		if a.ID == proj0AgA.String() {
+			proj0AgAName = a.Name
+		}
+	}
+	assert.Equal(t, "zeta", proj0AgAName, "MAX(asker_agent_name) must select zeta over alpha")
+
+	// Spot-check parity with independent base GROUP BY oracle across chunk boundary.
 	for _, idx := range []int{0, 1, 3, 499, 500, 501, numProjects - 2} {
 		pid := projectIDs[idx]
-		want, err := cs.ListProjectDecisionAgents(ctx, pid)
-		require.NoError(t, err)
+		want := legacyProjectDecisionAgents(pid)
 		assert.Equal(t, want, got[pid], "project index %d", idx)
 	}
 }
