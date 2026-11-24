@@ -28,10 +28,12 @@ import (
 // HashPrefix is the prefix for SHA-256 hashes.
 const HashPrefix = "sha256:"
 
+// isLowerHex reports whether every byte of s is a lowercase ASCII hex digit.
+// It returns true for an empty string; callers check the expected length first.
 func isLowerHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}
