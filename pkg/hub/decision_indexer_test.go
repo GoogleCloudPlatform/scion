@@ -99,7 +99,11 @@ func TestDecisionIndexer_PassAndLifecycle(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = cs.DB().ExecContext(ctx, "UPDATE decisions SET settled = false")
+	_, err = cs.DB().ExecContext(ctx, "UPDATE decisions SET settled = false, facet_indexed = false")
+	require.NoError(t, err)
+	_, err = cs.DB().ExecContext(ctx, "UPDATE decision_answers SET facet_indexed = false")
+	require.NoError(t, err)
+	_, err = cs.DB().ExecContext(ctx, "DELETE FROM decision_facet_entries")
 	require.NoError(t, err)
 
 	// Run with a small page size so pagination + SQLite yield are exercised.
@@ -116,7 +120,9 @@ func TestDecisionIndexer_PassAndLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, stats.HadPending)
 	assert.Equal(t, 8, stats.StepCounts["settled"])
-	assert.Equal(t, 3, stats.Pages, "8 rows at page size 3 should take 3 pages (3+3+2)")
+	assert.Equal(t, 10, stats.StepCounts["facet_decisions"], "all 10 decisions must be facet-indexed")
+	assert.Equal(t, 9, stats.StepCounts["facet_answers"], "all 9 answers (8 direct + 1 interpreted) must be facet-indexed")
+	assert.GreaterOrEqual(t, stats.Pages, 3)
 
 	// Second pass must find nothing pending.
 	stats2, err := f.srv.runDecisionIndexPass(ctx)
@@ -124,10 +130,28 @@ func TestDecisionIndexer_PassAndLifecycle(t *testing.T) {
 	assert.False(t, stats2.HadPending)
 	assert.Equal(t, 0, stats2.Pages)
 
-	// 3. Boot-time goroutine lifecycle: reset rows to settled=false, start the
+	// 2b. Reconciler step: insert a stale answerer row for a deleted user and
+	// verify runDecisionIndexPass heals it even when no unindexed rows remain.
+	staleUserID := api.NewUUID()
+	_, err = cs.DB().ExecContext(ctx,
+		`INSERT INTO decision_facet_entries (id, project_id, chat_key, kind, actor_id, name, email, latest_at, ref_count)
+		 VALUES (?, ?, ?, 'answerer', ?, 'Ghost', 'ghost@test.com', ?, 1)`,
+		api.NewUUID(), f.project.ID, tpID, staleUserID, time.Now().UTC(),
+	)
+	require.NoError(t, err)
+	statsRec, err := f.srv.runDecisionIndexPass(ctx)
+	require.NoError(t, err)
+	assert.True(t, statsRec.HadPending)
+	assert.Equal(t, 1, statsRec.StepCounts["reconcile"])
+
+	// 3. Boot-time goroutine lifecycle: reset rows to settled=false & facet_indexed=false, start the
 	// indexer, wait for it to drain, then verify stopDecisionIndexer is clean
 	// and idempotent.
-	_, err = cs.DB().ExecContext(ctx, "UPDATE decisions SET settled = false")
+	_, err = cs.DB().ExecContext(ctx, "UPDATE decisions SET settled = false, facet_indexed = false")
+	require.NoError(t, err)
+	_, err = cs.DB().ExecContext(ctx, "UPDATE decision_answers SET facet_indexed = false")
+	require.NoError(t, err)
+	_, err = cs.DB().ExecContext(ctx, "DELETE FROM decision_facet_entries")
 	require.NoError(t, err)
 
 	loopCtx, cancel := context.WithCancel(ctx)

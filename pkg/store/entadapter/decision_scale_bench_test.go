@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -216,6 +217,7 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 		for a := 0; a < sc.agentsPerProject; a++ {
 			agentIDs[a] = detUUID(0x10, p, a)
 		}
+		var projFacetDeltas []facetEntryDelta
 
 		for offset := 0; offset < sc.rowsPerProject; offset += batchSize {
 			end := offset + batchSize
@@ -262,7 +264,19 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 					SetVersion(1).
 					SetQuestion(fmt.Sprintf("Deploy service %d in project %d?", j, p)).
 					SetChoices(choices).
+					SetFacetIndexed(markSettled).
 					SetCreatedAt(ts)
+				if markSettled {
+					projFacetDeltas = append(projFacetDeltas, facetEntryDelta{
+						ProjectID: pUUID,
+						ChatKey:   chatKey,
+						Kind:      decisionfacetentry.KindAsker,
+						ActorID:   agentID.String(),
+						Name:      agentName,
+						LatestAt:  ts,
+						Delta:     1,
+					})
+				}
 
 				switch {
 				case isInterpOpen:
@@ -286,7 +300,14 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 						SetSourceMessageID(detUUID(0x60, p, j)).
 						SetSurface(decisionanswer.SurfaceNative).
 						SetResponseMessageID(respMsgID).
+						SetFacetIndexed(markSettled).
 						SetCreatedAt(ts))
+					if markSettled {
+						projFacetDeltas = append(projFacetDeltas, facetEntryDelta{
+							ProjectID: pUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer,
+							ActorID: uid, Name: "User 0", LatestAt: ts, Delta: 1,
+						})
+					}
 				case isOpen:
 					dc.SetStatus(decision.StatusPending).SetSettled(false)
 				case isWithdrawn:
@@ -294,6 +315,7 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 				case isDismissed:
 					dc.SetStatus(decision.StatusDismissed).SetDismissedAt(ts).SetSettled(markSettled)
 					uid := users[j%len(users)]
+					uName := fmt.Sprintf("User %d", j%len(users))
 					ansCreates = append(ansCreates, tx.DecisionAnswer.Create().
 						SetID(ansID).
 						SetDecisionRowID(decID).
@@ -305,15 +327,23 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 						SetChoiceID("$dismissed").
 						SetChoiceLabel("Dismissed").
 						SetAnsweredByUserID(uid).
-						SetAnsweredByName(fmt.Sprintf("User %d", j%len(users))).
+						SetAnsweredByName(uName).
 						SetProvenance(decisionanswer.ProvenanceDirect).
 						SetOutcome(decisionanswer.OutcomeDismiss).
 						SetSurface(decisionanswer.SurfaceDecisionsPage).
 						SetResponseMessageID(respMsgID).
+						SetFacetIndexed(markSettled).
 						SetCreatedAt(ts))
+					if markSettled {
+						projFacetDeltas = append(projFacetDeltas, facetEntryDelta{
+							ProjectID: pUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer,
+							ActorID: uid, Name: uName, LatestAt: ts, Delta: 1,
+						})
+					}
 				default:
 					dc.SetStatus(decision.StatusDecided).SetDecidedAt(ts).SetSettled(markSettled)
 					uid := users[j%len(users)]
+					uName := fmt.Sprintf("User %d", j%len(users))
 					ansCreates = append(ansCreates, tx.DecisionAnswer.Create().
 						SetID(ansID).
 						SetDecisionRowID(decID).
@@ -325,12 +355,19 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 						SetChoiceID("yes").
 						SetChoiceLabel("Yes").
 						SetAnsweredByUserID(uid).
-						SetAnsweredByName(fmt.Sprintf("User %d", j%len(users))).
+						SetAnsweredByName(uName).
 						SetProvenance(decisionanswer.ProvenanceDirect).
 						SetOutcome(decisionanswer.OutcomeAnswer).
 						SetSurface(decisionanswer.SurfaceDecisionsPage).
 						SetResponseMessageID(respMsgID).
+						SetFacetIndexed(markSettled).
 						SetCreatedAt(ts))
+					if markSettled {
+						projFacetDeltas = append(projFacetDeltas, facetEntryDelta{
+							ProjectID: pUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer,
+							ActorID: uid, Name: uName, LatestAt: ts, Delta: 1,
+						})
+					}
 				}
 				decCreates = append(decCreates, dc)
 			}
@@ -341,6 +378,9 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 				totalAnswers += len(ansCreates)
 			}
 		}
+		if markSettled && len(projFacetDeltas) > 0 {
+			require.NoError(tb, applyDecisionFacetDeltas(ctx, tx.Client(), projFacetDeltas))
+		}
 		require.NoError(tb, tx.Commit())
 	}
 
@@ -349,7 +389,7 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 	if markSettled || cs.Dialect() == dialect.Postgres {
 		analyzeSQL := "ANALYZE"
 		if cs.Dialect() == dialect.Postgres {
-			analyzeSQL = "ANALYZE decisions, decision_answers"
+			analyzeSQL = "ANALYZE decisions, decision_answers, decision_facet_entries"
 		}
 		_, err := cs.DB().ExecContext(ctx, analyzeSQL)
 		require.NoError(tb, err)
@@ -381,6 +421,35 @@ func BenchmarkDecisionsProfileScale(b *testing.B) {
 			ctx := context.Background()
 			b.Logf("[%s/%s] seeded %d decisions + %d answers in %v",
 				sc.name, f.cs.Dialect(), f.totalDecisions, f.totalAnswers, f.seedDuration)
+
+			b.Run("ListDecisionFacets", func(b *testing.B) {
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					ag, ans, ck, err := f.cs.ListDecisionFacets(ctx, f.projectIDs, f.allKeys)
+					require.NoError(b, err)
+					require.NotEmpty(b, ag)
+					require.NotEmpty(b, ans)
+					require.NotEmpty(b, ck)
+				}
+			})
+
+			b.Run("ListProjectDecisionAgentsForProjects", func(b *testing.B) {
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					got, err := f.cs.ListProjectDecisionAgentsForProjects(ctx, f.projectIDs)
+					require.NoError(b, err)
+					require.Len(b, got, sc.numProjects)
+				}
+			})
+
+			b.Run("ProjectsWithDecisions", func(b *testing.B) {
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					got, err := f.cs.ProjectsWithDecisions(ctx, f.projectIDs)
+					require.NoError(b, err)
+					require.Len(b, got, sc.numProjects)
+				}
+			})
 
 			b.Run("ListOpenPrompts", func(b *testing.B) {
 				b.ResetTimer()
@@ -461,6 +530,38 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
+			coldFacets, medFacets := measureColdAndWarmMedian(t, warmRuns, func() error {
+				ag, ans, ck, err := f.cs.ListDecisionFacets(ctx, f.projectIDs, f.allKeys)
+				if err != nil {
+					return err
+				}
+				require.NotEmpty(t, ag)
+				require.NotEmpty(t, ans)
+				require.NotEmpty(t, ck)
+				return nil
+			})
+
+			singleKeys := f.keysByProject[f.projectIDs[0]]
+			coldFacetsSingle, medFacetsSingle := measureColdAndWarmMedian(t, warmRuns, func() error {
+				ag, ans, ck, err := f.cs.ListDecisionFacets(ctx, f.projectIDs[:1], singleKeys)
+				if err != nil {
+					return err
+				}
+				require.NotEmpty(t, ag)
+				require.NotEmpty(t, ans)
+				require.NotEmpty(t, ck)
+				return nil
+			})
+
+			coldAgentsBatch, medAgentsBatch := measureColdAndWarmMedian(t, warmRuns, func() error {
+				got, err := f.cs.ListProjectDecisionAgentsForProjects(ctx, f.projectIDs)
+				if err != nil {
+					return err
+				}
+				require.Len(t, got, sc.numProjects)
+				return nil
+			})
+
 			coldUnsettled, medUnsettled := measureColdAndWarmMedian(t, warmRuns, func() error {
 				unsettled, err := f.cs.ProjectsWithUnsettledDecisions(ctx, f.projectIDs)
 				if err != nil {
@@ -506,6 +607,9 @@ func TestDecisionsScaleStore(t *testing.T) {
 
 			t.Logf("[%s/%s] STORE TIMINGS (cold / warm median of %d):", sc.name, f.cs.Dialect(), warmRuns)
 			t.Logf("  ProjectsWithDecisions(%d)                  = cold %v / warm-med %v", sc.numProjects, coldPWD, medPWD)
+			t.Logf("  ListDecisionFacets(%d projects)            = cold %v / warm-med %v", sc.numProjects, coldFacets, medFacets)
+			t.Logf("  ListDecisionFacets(single project)         = cold %v / warm-med %v", coldFacetsSingle, medFacetsSingle)
+			t.Logf("  ListProjectDecisionAgentsForProjects(%d)   = cold %v / warm-med %v", sc.numProjects, coldAgentsBatch, medAgentsBatch)
 			t.Logf("  ProjectsWithUnsettledDecisions(%d open)    = cold %v / warm-med %v", sc.numProjects, coldUnsettled, medUnsettled)
 			t.Logf("  ListOpenPrompts(%d open)                   = cold %v / warm-med %v", sc.numProjects*sc.openPerProject, coldOpen, medOpen)
 			t.Logf("  ProjectsWithUnsettledDecisions(quiet)      = cold %v / warm-med %v", coldQuietUnsettled, medQuietUnsettled)

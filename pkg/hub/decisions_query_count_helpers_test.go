@@ -20,11 +20,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"entgo.io/ent/dialect"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -128,6 +131,48 @@ func newCountingDecisionsFixture(t *testing.T) (*decisionsFixture, *entadapter.C
 	require.NoError(t, entc.AutoMigrate(context.Background(), base))
 	counter := newBellQueryCountingDriver(base.Driver())
 	cs := entadapter.NewCompositeStore(ent.NewClient(ent.Driver(counter)))
+	srv, s := testServerOnMigratedStore(t, cs)
+	alice, bob, project := setupDemoPolicyOn(t, srv, s)
+	f := newDecisionsFixtureOn(t, srv, s, alice, bob, project)
+	return f, cs, counter
+}
+
+// newCountingDecisionsFixtureForScale returns a decisionsFixture backed by an
+// isolated ephemeral Postgres schema when SCION_TEST_POSTGRES_DSN is set, and
+// SQLite otherwise, so TestDecisionsScale can measure real hub-level latency
+// and query counts on both dialects.
+func newCountingDecisionsFixtureForScale(t *testing.T) (*decisionsFixture, *entadapter.CompositeStore, *bellQueryCountingDriver) {
+	t.Helper()
+	dsn := os.Getenv("SCION_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		return newCountingDecisionsFixture(t)
+	}
+	ctx := context.Background()
+	schemaName := "hub_scale_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	adminClient, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 2})
+	require.NoError(t, err)
+	adminCS := entadapter.NewCompositeStore(adminClient)
+	_, err = adminCS.DB().ExecContext(ctx, "CREATE SCHEMA "+schemaName)
+	require.NoError(t, err)
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	scopedDSN := dsn + sep + "search_path=" + schemaName
+	base, err := entc.OpenPostgres(scopedDSN, entc.PoolConfig{MaxOpenConns: 8})
+	if err != nil {
+		_, _ = adminCS.DB().ExecContext(ctx, "DROP SCHEMA IF EXISTS "+schemaName+" CASCADE")
+		_ = adminCS.Close()
+		require.NoError(t, err)
+	}
+	require.NoError(t, entc.AutoMigrate(ctx, base))
+	counter := newBellQueryCountingDriver(base.Driver())
+	cs := entadapter.NewCompositeStore(ent.NewClient(ent.Driver(counter)))
+	t.Cleanup(func() {
+		_ = cs.Close()
+		_, _ = adminCS.DB().ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schemaName+" CASCADE")
+		_ = adminCS.Close()
+	})
 	srv, s := testServerOnMigratedStore(t, cs)
 	alice, bob, project := setupDemoPolicyOn(t, srv, s)
 	f := newDecisionsFixtureOn(t, srv, s, alice, bob, project)

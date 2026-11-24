@@ -22,9 +22,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,6 +37,38 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
+
+func rebindScaleSQL(d, q string) string {
+	if d != dialect.Postgres {
+		return q
+	}
+	var b strings.Builder
+	idx := 1
+	for i := 0; i < len(q); i++ {
+		if q[i] == '?' {
+			_, _ = fmt.Fprintf(&b, "$%d", idx)
+			idx++
+		} else {
+			b.WriteByte(q[i])
+		}
+	}
+	return b.String()
+}
+
+func measureHubColdAndWarmMedian(t *testing.T, warmRuns int, fn func()) (cold, warmMedian time.Duration) {
+	t.Helper()
+	t0 := time.Now()
+	fn()
+	cold = time.Since(t0)
+	samples := make([]time.Duration, warmRuns)
+	for i := 0; i < warmRuns; i++ {
+		t1 := time.Now()
+		fn()
+		samples[i] = time.Since(t1)
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	return cold, samples[len(samples)/2]
+}
 
 func seedSettledAndOpenHistoryForQueryCount(
 	t *testing.T,
@@ -71,16 +106,26 @@ func seedSettledAndOpenHistoryForQueryCount(
 		tpID := createTestDecisionTopic(t, f.wcs, proj.ID, "general", f.bob.ID)
 		botID := api.NewUUID()
 
-		// Bulk-insert settled history directly into SQL for fast fixture setup.
+		// Bulk-insert settled & facet-indexed history directly into SQL for fast fixture setup.
+		var latestTS time.Time
 		for j := 0; j < settledPerProject; j++ {
 			decID := uuid.New()
 			msgID := uuid.New()
 			ts := base.Add(time.Duration(p*10000+j) * time.Second)
+			latestTS = ts
 			key := fmt.Sprintf("h-%03d-%05d", p, j)
 			_, err := cs.DB().ExecContext(ctx,
-				`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, created_at, withdrawn_at)
-				 VALUES (?, ?, ?, ?, 0, ?, 'bot', ?, ?, 'agent', 1, 'History?', '[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}]', false, 0, 'withdrawn', true, ?, ?)`,
+				`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, facet_indexed, created_at, withdrawn_at)
+				 VALUES (?, ?, ?, ?, 0, ?, 'bot', ?, ?, 'agent', 1, 'History?', '[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}]', false, 0, 'withdrawn', true, true, ?, ?)`,
 				decID.String(), proj.ID, tpID, msgID.String(), botID, key, key, ts, ts,
+			)
+			require.NoError(t, err)
+		}
+		if settledPerProject > 0 {
+			_, err := cs.DB().ExecContext(ctx,
+				`INSERT INTO decision_facet_entries (id, project_id, chat_key, kind, actor_id, name, email, latest_at, ref_count)
+				 VALUES (?, ?, ?, 'asker', ?, 'bot', '', ?, ?)`,
+				uuid.NewString(), proj.ID, tpID, botID, latestTS, settledPerProject,
 			)
 			require.NoError(t, err)
 		}
@@ -162,6 +207,55 @@ func TestDecisionsQueryCount_LimitZeroAndWaitingOnYouTotal(t *testing.T) {
 	})
 }
 
+// TestDecisionsQueryCount_ProfileReadsConstantInHistory proves that profile and
+// single-project Decisions reads (tab=pending, tab=made&sort=recent,
+// tab=made&sort=project, and GET /projects/{id}/decisions) issue a constant
+// number of SQL queries as history depth grows (10 vs 300 rows/project)
+// (design-scale §7 item 4).
+func TestDecisionsQueryCount_ProfileReadsConstantInHistory(t *testing.T) {
+	measure := func(t *testing.T, settledPerProject int) (pendingQ, madeRecentQ, madeProjectQ, singleProjQ int64) {
+		t.Helper()
+		f, cs, counter := newCountingDecisionsFixture(t)
+		seedSettledAndOpenHistoryForQueryCount(t, f, cs, 5, settledPerProject, 1)
+
+		counter.Reset(true)
+		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		pendingQ = counter.Count()
+		counter.Reset(false)
+
+		counter.Reset(true)
+		rr = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=recent", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		madeRecentQ = counter.Count()
+		counter.Reset(false)
+
+		counter.Reset(true)
+		rr = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=project", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		madeProjectQ = counter.Count()
+		counter.Reset(false)
+
+		counter.Reset(true)
+		rr = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/decisions?tab=pending", f.project.ID), nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		singleProjQ = counter.Count()
+		counter.Reset(false)
+
+		t.Logf("history=%d/proj -> pending=%d, made-recent=%d, made-project=%d, single-project=%d queries",
+			settledPerProject, pendingQ, madeRecentQ, madeProjectQ, singleProjQ)
+		return pendingQ, madeRecentQ, madeProjectQ, singleProjQ
+	}
+
+	p10, mr10, mp10, sp10 := measure(t, 10)
+	p300, mr300, mp300, sp300 := measure(t, 300)
+
+	assert.Equal(t, p10, p300, "tab=pending query count must be constant in history depth")
+	assert.Equal(t, mr10, mr300, "tab=made&sort=recent query count must be constant in history depth")
+	assert.Equal(t, mp10, mp300, "tab=made&sort=project query count must be constant in history depth")
+	assert.Equal(t, sp10, sp300, "single-project decisions query count must be constant in history depth")
+}
+
 // TestDecisionsScale is the opt-in hub-level scale test (design-scale §7),
 // skipped unless SCION_DECISIONS_SCALE=1.
 func TestDecisionsScale(t *testing.T) {
@@ -183,8 +277,9 @@ func TestDecisionsScale(t *testing.T) {
 
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
-			f, cs, counter := newCountingDecisionsFixture(t)
+			f, cs, counter := newCountingDecisionsFixtureForScale(t)
 			ctx := context.Background()
+			d := cs.Dialect()
 			memberRole, err := f.store.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
 			require.NoError(t, err)
 
@@ -233,23 +328,30 @@ func TestDecisionsScale(t *testing.T) {
 
 			tx, err := cs.DB().BeginTx(ctx, nil)
 			require.NoError(t, err)
-			stmtDec, err := tx.PrepareContext(ctx,
-				`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, created_at, decided_at, withdrawn_at, dismissed_at)
-				 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, 'agent', 1, ?, ?, false, 0, ?, ?, ?, ?, ?, ?)`)
+			stmtDec, err := tx.PrepareContext(ctx, rebindScaleSQL(d,
+				`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, facet_indexed, created_at, decided_at, withdrawn_at, dismissed_at)
+				 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, 'agent', 1, ?, ?, false, 0, ?, ?, true, ?, ?, ?, ?)`))
 			require.NoError(t, err)
-			stmtAns, err := tx.PrepareContext(ctx,
-				`INSERT INTO decision_answers (id, decision_row_id, project_id, asker_agent_id, key, version, question_text, choice_id, choice_label, answered_by_user_id, answered_by_name, answered_by_email, provenance, outcome, surface, response_message_id, matched_default, created_at)
-				 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'Bob', 'bob@test.com', 'direct', ?, 'decisions_page', ?, false, ?)`)
+			stmtAns, err := tx.PrepareContext(ctx, rebindScaleSQL(d,
+				`INSERT INTO decision_answers (id, decision_row_id, project_id, asker_agent_id, key, version, question_text, choice_id, choice_label, answered_by_user_id, answered_by_name, answered_by_email, provenance, outcome, surface, response_message_id, matched_default, facet_indexed, created_at)
+				 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'Bob', 'bob@test.com', 'direct', ?, 'decisions_page', ?, false, true, ?)`))
+			require.NoError(t, err)
+			stmtFacet, err := tx.PrepareContext(ctx, rebindScaleSQL(d,
+				`INSERT INTO decision_facet_entries (id, project_id, chat_key, kind, actor_id, name, email, latest_at, ref_count)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`))
 			require.NoError(t, err)
 
 			for p, ps := range projSeeds {
 				projID, tpID, botID := ps.projID, ps.tpID, ps.botID
+				var latestDecTS, latestAnsTS time.Time
+				ansCount := 0
 
 				for j := 0; j < sc.rowsPerProject; j++ {
 					decID := detUUID(0x20, p, j)
 					msgID := detUUID(0x40, p, j)
 					key := fmt.Sprintf("k-%03d-%06d", p, j)
 					ts := base.Add(time.Duration(p*100000+j) * time.Second)
+					latestDecTS = ts
 					qText := fmt.Sprintf("Deploy %d?", j)
 					switch {
 					case j%20 == 1:
@@ -260,16 +362,29 @@ func TestDecisionsScale(t *testing.T) {
 						require.NoError(t, err)
 						_, err = stmtAns.ExecContext(ctx, detUUID(0x30, p, j), decID, projID, botID, key, qText, "$dismissed", "Dismissed", f.bob.ID, "dismiss", detUUID(0x50, p, j), ts)
 						require.NoError(t, err)
+						latestAnsTS = ts
+						ansCount++
 					default:
 						_, err = stmtDec.ExecContext(ctx, decID, projID, tpID, msgID, botID, "bot", key, key, qText, choicesJSON, "decided", true, ts, ts, nil, nil)
 						require.NoError(t, err)
 						_, err = stmtAns.ExecContext(ctx, detUUID(0x30, p, j), decID, projID, botID, key, qText, "yes", "Yes", f.bob.ID, "answer", detUUID(0x50, p, j), ts)
 						require.NoError(t, err)
+						latestAnsTS = ts
+						ansCount++
 					}
+				}
+				if sc.rowsPerProject > 0 {
+					_, err = stmtFacet.ExecContext(ctx, detUUID(0x80, p, 0), projID, tpID, "asker", botID, "bot", "", latestDecTS, sc.rowsPerProject)
+					require.NoError(t, err)
+				}
+				if ansCount > 0 {
+					_, err = stmtFacet.ExecContext(ctx, detUUID(0x81, p, 0), projID, tpID, "answerer", f.bob.ID, "Bob", "bob@test.com", latestAnsTS, ansCount)
+					require.NoError(t, err)
 				}
 			}
 			require.NoError(t, stmtDec.Close())
 			require.NoError(t, stmtAns.Close())
+			require.NoError(t, stmtFacet.Close())
 			require.NoError(t, tx.Commit())
 
 			choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
@@ -284,31 +399,75 @@ func TestDecisionsScale(t *testing.T) {
 				})
 				require.NoError(t, err)
 			}
-			_, err = cs.DB().ExecContext(ctx, "ANALYZE")
+			analyzeSQL := "ANALYZE"
+			if d == dialect.Postgres {
+				analyzeSQL = "ANALYZE decisions, decision_answers, decision_facet_entries"
+			}
+			_, err = cs.DB().ExecContext(ctx, analyzeSQL)
 			require.NoError(t, err)
-			t.Logf("[%s] seeded %d projects x %d rows (+ %d open) in %v", sc.name, sc.numProjects, sc.rowsPerProject, sc.openProjects, time.Since(seedStart))
+			t.Logf("[%s/%s] seeded %d projects x %d rows (+ %d open) in %v", sc.name, d, sc.numProjects, sc.rowsPerProject, sc.openProjects, time.Since(seedStart))
 
-			counter.Reset(true)
-			t0 := time.Now()
-			rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
-			dLimitZero := time.Since(t0)
-			qLimitZero := counter.Count()
-			counter.Reset(false)
-			resp := decodeProfilePendingDecisions(t, rr)
-			require.Equal(t, sc.openProjects, resp.Counts.WaitingOnYou)
+			const warmRuns = 5
+			var qLimitZero, qBell, qPending, qMadeRecent, qMadeProject, qSingleProj int64
 
-			counter.Reset(true)
-			t0 = time.Now()
-			wTot, wProjs, err := f.srv.waitingOnYouTotal(ctx, f.bob.ID)
-			dBell := time.Since(t0)
-			qBell := counter.Count()
-			counter.Reset(false)
-			require.NoError(t, err)
-			require.Equal(t, sc.openProjects, wTot)
-			require.Equal(t, sc.openProjects, wProjs)
+			coldLZ, medLZ := measureHubColdAndWarmMedian(t, warmRuns, func() {
+				counter.Reset(true)
+				rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+				qLimitZero = counter.Count()
+				counter.Reset(false)
+				resp := decodeProfilePendingDecisions(t, rr)
+				require.Equal(t, sc.openProjects, resp.Counts.WaitingOnYou)
+			})
 
-			t.Logf("[%s] HUB TIMINGS: limit=0=%v (%d queries), waitingOnYouTotal=%v (%d queries)",
-				sc.name, dLimitZero, qLimitZero, dBell, qBell)
+			coldBell, medBell := measureHubColdAndWarmMedian(t, warmRuns, func() {
+				counter.Reset(true)
+				wTot, wProjs, berr := f.srv.waitingOnYouTotal(ctx, f.bob.ID)
+				qBell = counter.Count()
+				counter.Reset(false)
+				require.NoError(t, berr)
+				require.Equal(t, sc.openProjects, wTot)
+				require.Equal(t, sc.openProjects, wProjs)
+			})
+
+			coldPend, medPend := measureHubColdAndWarmMedian(t, 3, func() {
+				counter.Reset(true)
+				rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending", nil)
+				qPending = counter.Count()
+				counter.Reset(false)
+				require.Equal(t, http.StatusOK, rr.Code)
+			})
+
+			coldMR, medMR := measureHubColdAndWarmMedian(t, 3, func() {
+				counter.Reset(true)
+				rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=recent", nil)
+				qMadeRecent = counter.Count()
+				counter.Reset(false)
+				require.Equal(t, http.StatusOK, rr.Code)
+			})
+
+			coldMP, medMP := measureHubColdAndWarmMedian(t, 3, func() {
+				counter.Reset(true)
+				rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=project", nil)
+				qMadeProject = counter.Count()
+				counter.Reset(false)
+				require.Equal(t, http.StatusOK, rr.Code)
+			})
+
+			coldSP, medSP := measureHubColdAndWarmMedian(t, 3, func() {
+				counter.Reset(true)
+				rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/decisions?tab=pending", projSeeds[0].projID), nil)
+				qSingleProj = counter.Count()
+				counter.Reset(false)
+				require.Equal(t, http.StatusOK, rr.Code)
+			})
+
+			t.Logf("[%s/%s] HUB TIMINGS (cold / warm-med):", sc.name, d)
+			t.Logf("  limit=0 (HTTP)               = %v / %v (%d queries)", coldLZ, medLZ, qLimitZero)
+			t.Logf("  waitingOnYouTotal            = %v / %v (%d queries)", coldBell, medBell, qBell)
+			t.Logf("  tab=pending                  = %v / %v (%d queries)", coldPend, medPend, qPending)
+			t.Logf("  tab=made&sort=recent         = %v / %v (%d queries)", coldMR, medMR, qMadeRecent)
+			t.Logf("  tab=made&sort=project        = %v / %v (%d queries)", coldMP, medMP, qMadeProject)
+			t.Logf("  single-project (tab=pending) = %v / %v (%d queries)", coldSP, medSP, qSingleProj)
 		})
 	}
 }
@@ -321,8 +480,9 @@ func TestDecisionsScale_BellTopicEventEndToEnd(t *testing.T) {
 	if os.Getenv("SCION_DECISIONS_SCALE") != "1" {
 		t.Skip("set SCION_DECISIONS_SCALE=1 to run end-to-end bell topic event scale test")
 	}
-	f, cs, counter := newCountingDecisionsFixture(t)
+	f, cs, counter := newCountingDecisionsFixtureForScale(t)
 	ctx := context.Background()
+	d := cs.Dialect()
 	setFastDecisionBell(t, f.srv, time.Millisecond)
 
 	memberRole, err := f.store.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
@@ -376,32 +536,43 @@ func TestDecisionsScale_BellTopicEventEndToEnd(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// 3. Seed 200k settled decisions across the 200 projects in one transaction.
+	// 3. Seed 200k settled & facet-indexed decisions across the 200 projects in one transaction.
 	tx, err := cs.DB().BeginTx(ctx, nil)
 	require.NoError(t, err)
-	stmtDec, err := tx.PrepareContext(ctx,
-		`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, created_at, decided_at)
-		 VALUES (?, ?, ?, ?, 0, ?, 'bot', ?, ?, 'agent', 1, 'Deploy?', ?, false, 0, 'decided', true, ?, ?)`)
+	stmtDec, err := tx.PrepareContext(ctx, rebindScaleSQL(d,
+		`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, facet_indexed, created_at, decided_at)
+		 VALUES (?, ?, ?, ?, 0, ?, 'bot', ?, ?, 'agent', 1, 'Deploy?', ?, false, 0, 'decided', true, true, ?, ?)`))
 	require.NoError(t, err)
-	stmtAns, err := tx.PrepareContext(ctx,
-		`INSERT INTO decision_answers (id, decision_row_id, project_id, asker_agent_id, key, version, question_text, choice_id, choice_label, answered_by_user_id, answered_by_name, answered_by_email, provenance, outcome, surface, response_message_id, matched_default, created_at)
-		 VALUES (?, ?, ?, ?, ?, 1, 'Deploy?', 'yes', 'Yes', ?, 'Bob', 'bob@test.com', 'direct', 'answer', 'decisions_page', ?, false, ?)`)
+	stmtAns, err := tx.PrepareContext(ctx, rebindScaleSQL(d,
+		`INSERT INTO decision_answers (id, decision_row_id, project_id, asker_agent_id, key, version, question_text, choice_id, choice_label, answered_by_user_id, answered_by_name, answered_by_email, provenance, outcome, surface, response_message_id, matched_default, facet_indexed, created_at)
+		 VALUES (?, ?, ?, ?, ?, 1, 'Deploy?', 'yes', 'Yes', ?, 'Bob', 'bob@test.com', 'direct', 'answer', 'decisions_page', ?, false, true, ?)`))
+	require.NoError(t, err)
+	stmtFacet, err := tx.PrepareContext(ctx, rebindScaleSQL(d,
+		`INSERT INTO decision_facet_entries (id, project_id, chat_key, kind, actor_id, name, email, latest_at, ref_count)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`))
 	require.NoError(t, err)
 	for p := 0; p < numProjects; p++ {
 		pid, tpID, botID := projIDs[p], topicIDs[p], detUUID(0x10, p, 0)
+		var lastTS time.Time
 		for j := 0; j < rowsPerProject; j++ {
 			decID := detUUID(0x20, p, j)
 			msgID := detUUID(0x40, p, j)
 			key := fmt.Sprintf("e2e-%03d-%06d", p, j)
 			ts := base.Add(time.Duration(p*100000+j) * time.Second)
+			lastTS = ts
 			_, err = stmtDec.ExecContext(ctx, decID, pid, tpID, msgID, botID, key, key, choicesJSON, ts, ts)
 			require.NoError(t, err)
 			_, err = stmtAns.ExecContext(ctx, detUUID(0x30, p, j), decID, pid, botID, key, f.bob.ID, detUUID(0x50, p, j), ts)
 			require.NoError(t, err)
 		}
+		_, err = stmtFacet.ExecContext(ctx, detUUID(0x80, p, 0), pid, tpID, "asker", botID, "bot", "", lastTS, rowsPerProject)
+		require.NoError(t, err)
+		_, err = stmtFacet.ExecContext(ctx, detUUID(0x81, p, 0), pid, tpID, "answerer", f.bob.ID, "Bob", "bob@test.com", lastTS, rowsPerProject)
+		require.NoError(t, err)
 	}
 	require.NoError(t, stmtDec.Close())
 	require.NoError(t, stmtAns.Close())
+	require.NoError(t, stmtFacet.Close())
 	require.NoError(t, tx.Commit())
 
 	// 4. Post 1 open decision in project 0's topic, then ANALYZE.
@@ -415,7 +586,11 @@ func TestDecisionsScale_BellTopicEventEndToEnd(t *testing.T) {
 		Decisions: []messages.Decision{{Key: "e2e-open-1", Question: "Ship release?", Choices: []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}}},
 	})
 	require.NoError(t, err)
-	_, err = cs.DB().ExecContext(ctx, "ANALYZE")
+	analyzeSQL := "ANALYZE"
+	if d == dialect.Postgres {
+		analyzeSQL = "ANALYZE decisions, decision_answers, decision_facet_entries"
+	}
+	_, err = cs.DB().ExecContext(ctx, analyzeSQL)
 	require.NoError(t, err)
 	t.Logf("[E2E 200p/200k + 500 members] seeded in %v", time.Since(seedStart))
 
