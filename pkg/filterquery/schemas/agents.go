@@ -58,5 +58,7 @@ var Agents = filterquery.Schema{
 func All() []filterquery.Schema {
 	return []filterquery.Schema{
 		Agents,
+		Artifacts,
+		ProjectArtifacts,
 	}
 }
