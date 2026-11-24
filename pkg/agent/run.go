@@ -3411,11 +3411,11 @@ func isAgentHomePersistent(in homePersistenceInput) bool {
 	if in.Ephemeral {
 		return false
 	}
-	if isKubernetesRuntime(in.Runtime) || in.Runtime == "k8s" {
+	if isKubernetesRuntime(in.Runtime) {
 		return in.HomeStorageBackend == runtime.HomeStorageNFS
 	}
 	switch in.Runtime {
-	case "docker", "podman", "container", "apple-container", "cloudrun":
+	case "docker", "podman", "container", "cloudrun":
 		return true
 	default:
 		return false

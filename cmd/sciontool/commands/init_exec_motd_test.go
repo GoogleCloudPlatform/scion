@@ -109,7 +109,7 @@ func TestWriteExecContainerMOTD_PersistentAndNonPersistentVariants(t *testing.T)
 		assert.LessOrEqual(t, strings.Count(got, "\n"), 20, "MOTD must fit on one screen")
 	})
 
-	t.Run("sanitizes_control_chars_in_agent_name", func(t *testing.T) {
+	t.Run("sanitizes_control_chars_and_shell_quotes_agent_name", func(t *testing.T) {
 		env := map[string]string{
 			"SCION_HARNESS":         "shell",
 			"SCION_AGENT_NAME":      "ops\x1b[31m\n;rm -rf /",
@@ -118,5 +118,6 @@ func TestWriteExecContainerMOTD_PersistentAndNonPersistentVariants(t *testing.T)
 		got := buildExecContainerMOTD(func(k string) string { return env[k] })
 		assert.NotContains(t, got, "\x1b")
 		assert.NotContains(t, got, "ops\n")
+		assert.Contains(t, got, "scion exec-container set 'ops[31m;rm -rf /'")
 	})
 }

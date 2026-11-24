@@ -21,12 +21,12 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
 const (
-	execContainerShellHarness      = "shell"
 	execContainerMOTDPath          = "/etc/motd"
 	execContainerProfileScriptPath = "/etc/profile.d/scion-exec-container.sh"
 )
@@ -68,6 +68,26 @@ func sanitizeMOTDToken(s string) string {
 	return b.String()
 }
 
+// shellQuoteMOTDArg returns s unchanged when it consists solely of safe
+// unquoted shell token characters, and otherwise wraps it in POSIX single
+// quotes so pasting the command never splits on spaces or interprets shell
+// metacharacters.
+func shellQuoteMOTDArg(s string) string {
+	safe := true
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '-' || r == '_' || r == '.' || r == ':' || r == '/' || r == '@' {
+			continue
+		}
+		safe = false
+		break
+	}
+	if safe && s != "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
 // buildExecContainerMOTD formats the one-screen execution-container MOTD
 // (design §3.5, §3.6, S9, D6; ptone/scion#8820).
 func buildExecContainerMOTD(getenv func(string) string) string {
@@ -79,7 +99,7 @@ func buildExecContainerMOTD(getenv func(string) string) string {
 	registerArg := "<name>"
 	if agentName != "" {
 		header = fmt.Sprintf("Scion Execution Container (%s)", agentName)
-		registerArg = agentName
+		registerArg = shellQuoteMOTDArg(agentName)
 	}
 
 	var persistenceLine string
@@ -121,7 +141,7 @@ func writeExecContainerMOTD() {
 }
 
 func writeExecContainerMOTDAt(getenv func(string) string, motdPath, profileScriptPath string) error {
-	if getenv("SCION_HARNESS") != execContainerShellHarness {
+	if getenv("SCION_HARNESS") != state.ShellHarnessName {
 		return nil
 	}
 	motd := buildExecContainerMOTD(getenv)

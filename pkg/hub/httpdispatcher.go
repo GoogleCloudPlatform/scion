@@ -1640,12 +1640,8 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *st
 			agent.Activity = resp.Agent.Activity
 		}
 		agent.ContainerStatus = resp.Agent.ContainerStatus
-		if rs := resp.Agent.RuntimeState; rs != "" && len(rs) <= 256 && !hasControlCharacter(rs) {
-			if resp.Agent.ID != "" && !strings.Contains(rs, "container:") {
-				agent.RuntimeState = "container:" + resp.Agent.ID + ";" + rs
-			} else {
-				agent.RuntimeState = rs
-			}
+		if merged, ok := mergeBrokerRuntimeState(resp.Agent.ID, resp.Agent.RuntimeState); ok {
+			agent.RuntimeState = merged
 		} else if resp.Agent.ID != "" {
 			agent.RuntimeState = "container:" + resp.Agent.ID
 		}
@@ -1681,6 +1677,28 @@ func (d *HTTPAgentDispatcher) recordWorkspacePlacement(ctx context.Context, agen
 
 // maxWorkspacePlacementBytes bounds a reported workspace placement.
 const maxWorkspacePlacementBytes = 64
+
+// maxBrokerRuntimeStateBytes bounds a broker-reported RuntimeState string.
+const maxBrokerRuntimeStateBytes = 256
+
+// mergeBrokerRuntimeState validates a broker-reported RuntimeState string
+// (non-empty, bounded, and free of control characters) and prefixes
+// "container:<containerID>;" when containerID is non-empty and no existing
+// semicolon-delimited segment already starts with "container:".
+func mergeBrokerRuntimeState(containerID, runtimeState string) (string, bool) {
+	if runtimeState == "" || len(runtimeState) > maxBrokerRuntimeStateBytes || hasControlCharacter(runtimeState) {
+		return "", false
+	}
+	if containerID == "" {
+		return runtimeState, true
+	}
+	for _, seg := range strings.Split(runtimeState, ";") {
+		if strings.HasPrefix(strings.TrimSpace(seg), "container:") {
+			return runtimeState, true
+		}
+	}
+	return "container:" + containerID + ";" + runtimeState, true
+}
 
 // validWorkspacePlacementReport reports whether a broker-reported workspace
 // placement should be recorded: non-empty, bounded and free of control

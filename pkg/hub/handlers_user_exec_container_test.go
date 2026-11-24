@@ -849,4 +849,81 @@ func TestExecContainer_HomePersistent(t *testing.T) {
 	p, ok := api.ParseHomePersistentRuntimeState(a.RuntimeState)
 	assert.True(t, ok)
 	assert.False(t, p)
+
+	// 5. mergeBrokerRuntimeState matches container: only as a segment prefix.
+	got, valid := mergeBrokerRuntimeState("ctr-1", "foo_container:bar;home_persistent=true")
+	assert.True(t, valid)
+	assert.Equal(t, "container:ctr-1;foo_container:bar;home_persistent=true", got)
+	got, valid = mergeBrokerRuntimeState("ctr-1", "container:existing;home_persistent=true")
+	assert.True(t, valid)
+	assert.Equal(t, "container:existing;home_persistent=true", got)
+}
+
+// TestAgentLaunchReport_SucceededRecordsHomePersistentRuntimeState verifies that
+// async launch succeeded reports persist broker-reported RuntimeState (prefixed
+// with container:<id>;) and ignore oversized or control-character values.
+func TestAgentLaunchReport_SucceededRecordsHomePersistentRuntimeState(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := ecProject(t, s, "LR Home Persist Project")
+
+	newLaunchingAgent := func(name, initialRuntimeState string) (*store.Agent, string) {
+		t.Helper()
+		id := api.NewUUID()
+		a := &store.Agent{
+			ID:              id,
+			Slug:            name,
+			Name:            name,
+			ProjectID:       proj.ID,
+			Phase:           string(state.PhaseCreated),
+			RuntimeBrokerID: "broker-1",
+			RuntimeState:    initialRuntimeState,
+			StateVersion:    1,
+			AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: config.ShellHarnessConfigName},
+			Created:         time.Now(),
+			Updated:         time.Now(),
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		launchID, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, 5*time.Minute)
+		require.NoError(t, err)
+		return a, launchID
+	}
+
+	t.Run("records_prefixed_home_persistent", func(t *testing.T) {
+		a, launchID := newLaunchingAgent("lr-hp-ok", "")
+		rec := postLaunchReport(t, srv, "broker-1", a.ID, "broker-1", AgentLaunchReport{
+			LaunchID: launchID, InstanceID: "i1", State: "succeeded",
+			Agent: &RemoteAgentInfo{ID: "ctr-async-1", RuntimeState: "home_persistent=false"},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "container:ctr-async-1;home_persistent=false", got.RuntimeState)
+	})
+
+	t.Run("oversized_runtime_state_leaves_stored_unchanged", func(t *testing.T) {
+		a, launchID := newLaunchingAgent("lr-hp-big", "container:prior;home_persistent=true")
+		oversized := "home_persistent=false;" + string(bytes.Repeat([]byte("a"), maxBrokerRuntimeStateBytes))
+		rec := postLaunchReport(t, srv, "broker-1", a.ID, "broker-1", AgentLaunchReport{
+			LaunchID: launchID, InstanceID: "i1", State: "succeeded",
+			Agent: &RemoteAgentInfo{ID: "ctr-async-2", RuntimeState: oversized},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "container:prior;home_persistent=true", got.RuntimeState)
+	})
+
+	t.Run("control_char_runtime_state_leaves_stored_unchanged", func(t *testing.T) {
+		a, launchID := newLaunchingAgent("lr-hp-ctrl", "container:prior;home_persistent=true")
+		rec := postLaunchReport(t, srv, "broker-1", a.ID, "broker-1", AgentLaunchReport{
+			LaunchID: launchID, InstanceID: "i1", State: "succeeded",
+			Agent: &RemoteAgentInfo{ID: "ctr-async-3", RuntimeState: "home_persistent=false\ninjected"},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "container:prior;home_persistent=true", got.RuntimeState)
+	})
 }
