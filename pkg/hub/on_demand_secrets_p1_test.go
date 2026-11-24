@@ -409,13 +409,14 @@ func TestOnDemandSecret_StartDeliveryShadowsLowerScopesAndBlocksProgeny(t *testi
 	// directly and only the progeny path can supply owner's allowProgeny rows.
 	t.Run("blocks_progeny_fill", func(t *testing.T) {
 		progenyChild := &store.Agent{
-			ID:        api.NewUUID(),
-			Slug:      "progeny-od-shadow",
-			Name:      "progeny-od-shadow",
-			ProjectID: project.ID,
-			CreatedBy: agentX.ID,
-			Ancestry:  []string{owner.ID, agentX.ID},
-			Phase:     "running",
+			ID:            api.NewUUID(),
+			Slug:          "progeny-od-shadow",
+			Name:          "progeny-od-shadow",
+			ProjectID:     project.ID,
+			CreatedBy:     agentX.ID,
+			Ancestry:      []string{owner.ID, agentX.ID},
+			Phase:         "running",
+			AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
 		}
 		require.NoError(t, s.CreateAgent(ctx, progenyChild))
 
