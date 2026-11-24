@@ -860,7 +860,7 @@ func TestDecisionIndex_PostgresConcurrentSweepAndRepost(t *testing.T) {
 			SetChoices(choices).
 			SetStatus(decision.StatusWithdrawn).
 			SetSettled(false).
-			SetCreatedAt(baseTime.Add(time.Duration(i) * time.Second)).
+			SetCreatedAt(baseTime.Add(time.Duration(i)*time.Second)).
 			SetWithdrawnAt(baseTime))
 	}
 	require.NoError(t, cs.client.Decision.CreateBulk(creates...).Exec(ctx))
