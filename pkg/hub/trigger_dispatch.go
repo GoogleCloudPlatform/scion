@@ -191,6 +191,16 @@ func (c serverTriggerCore) Fire(ctx context.Context, req hubfire.FireRequest) hu
 
 const triggerProjectCapNotifyCooldown = time.Hour
 
+// triggerLimitSkipError is a typed sentinel returned from inside a
+// commitAgentCreate OnCommitTx callback when a serialized concurrency or
+// project-cap check fails under LockTriggerQuota, causing the transaction to
+// roll back cleanly and fireTriggerDispatchAgent to report FireStatusSkipped.
+type triggerLimitSkipError struct {
+	reason string
+}
+
+func (e *triggerLimitSkipError) Error() string { return e.reason }
+
 // isLiveTriggerAgentPhase reports whether an agent phase counts as live for
 // trigger dispatch concurrency and project live-agent caps (Stage 2 §7.4:
 // phase not in {stopped, error, halted}; soft-deleted agents are excluded by
@@ -207,8 +217,12 @@ func isLiveTriggerAgentPhase(phase string) bool {
 // countLiveAgentsMatching counts non-deleted agents matching filter whose phase
 // is not terminal (stopped, error, halted).
 func (s *Server) countLiveAgentsMatching(ctx context.Context, filter store.AgentFilter) (int, error) {
+	return countLiveAgentsMatchingStore(ctx, s.store, filter)
+}
+
+func countLiveAgentsMatchingStore(ctx context.Context, st store.Store, filter store.AgentFilter) (int, error) {
 	filter.IncludeDeleted = false
-	rows, err := s.store.CountAgentsByPhaseIDs(ctx, filter)
+	rows, err := st.CountAgentsByPhaseIDs(ctx, filter)
 	if err != nil {
 		return 0, err
 	}
@@ -221,12 +235,34 @@ func (s *Server) countLiveAgentsMatching(ctx context.Context, filter store.Agent
 	return live, nil
 }
 
+func triggerMaxConcurrentDispatches(trig *hubfire.FireTriggerRef) int {
+	maxConc := 0
+	if trig != nil {
+		maxConc = trig.MaxConcurrentDispatches
+	}
+	if maxConc <= 0 {
+		maxConc = store.DefaultTriggerMaxConcurrentDispatches
+	}
+	if maxConc > store.MaxTriggerConcurrentDispatches {
+		maxConc = store.MaxTriggerConcurrentDispatches
+	}
+	return maxConc
+}
+
 // checkTriggerFireLimits enforces Stage 2 §7.4 per-trigger and per-project fire
 // limits after action.Authorize succeeds and before claim/create/delivery:
 //  1. max_fires_per_minute (all trigger actions) -> skipped "rate limit"
 //  2. max_concurrent_dispatches (dispatch_agent; default 5, max 50) -> skipped "concurrency limit"
 //  3. MaxLiveTriggerAgentsPerProject (dispatch_agent; 25) -> skipped "project trigger-agent cap"
 //     + once-per-hour-per-trigger notification hook.
+//
+// The per-trigger rate check runs inside WithTx under LockTriggerQuota so
+// concurrent drainers and Postgres replicas are serialized; CountRecentTriggerFires
+// uses a deterministic (created, id) ordering among in-flight "firing" rows so
+// exactly max_fires_per_minute fires are admitted under concurrency (O1).
+// For dispatch_agent, checkTriggerDispatchAgentLimitsInTx re-verifies (2) and
+// (3) atomically inside commitAgentCreate's transaction under LockTriggerQuota
+// so concurrent drainers and replicas cannot overshoot either cap (O2).
 func (s *Server) checkTriggerFireLimits(ctx context.Context, req hubfire.FireRequest) (string, error) {
 	if s == nil || s.store == nil || req.Event == nil || req.Event.Trigger == nil {
 		return "", nil
@@ -241,7 +277,17 @@ func (s *Server) checkTriggerFireLimits(ctx context.Context, req hubfire.FireReq
 	if trig.MaxFiresPerMinute > 0 && triggerID != "" {
 		maxPerMin := min(trig.MaxFiresPerMinute, store.MaxTriggerFiresPerMinute)
 		since := time.Now().UTC().Add(-time.Minute)
-		recent, err := s.store.CountRecentTriggerFires(ctx, triggerID, since, req.Authority.FireID)
+		var recent int
+		err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if req.ProjectID != "" {
+				if lErr := tx.LockTriggerQuota(ctx, req.ProjectID); lErr != nil {
+					return lErr
+				}
+			}
+			var cErr error
+			recent, cErr = tx.CountRecentTriggerFires(ctx, triggerID, since, req.Authority.FireID)
+			return cErr
+		})
 		if err != nil {
 			return "", fmt.Errorf("count recent trigger fires: %w", err)
 		}
@@ -255,13 +301,7 @@ func (s *Server) checkTriggerFireLimits(ctx context.Context, req hubfire.FireReq
 	}
 
 	// 2. Per-trigger dispatch concurrency (default 5, max 50).
-	maxConc := trig.MaxConcurrentDispatches
-	if maxConc <= 0 {
-		maxConc = store.DefaultTriggerMaxConcurrentDispatches
-	}
-	if maxConc > store.MaxTriggerConcurrentDispatches {
-		maxConc = store.MaxTriggerConcurrentDispatches
-	}
+	maxConc := triggerMaxConcurrentDispatches(trig)
 	liveForTrigger, err := s.countLiveAgentsMatching(ctx, store.AgentFilter{
 		ProjectID: req.ProjectID,
 		Labels:    map[string]string{triggerLabelKeyTrigger: triggerID},
@@ -287,6 +327,50 @@ func (s *Server) checkTriggerFireLimits(ctx context.Context, req hubfire.FireReq
 	}
 
 	return "", nil
+}
+
+// checkTriggerDispatchAgentLimitsInTx enforces max_concurrent_dispatches and
+// MaxLiveTriggerAgentsPerProject atomically inside commitAgentCreate's
+// transaction under tx.LockTriggerQuota (pg_advisory_xact_lock on Postgres).
+// Because tx.CreateAgent has already inserted the new live agent row inside tx,
+// limits are exceeded when count > limit (Stage 2 §7.4, P4a O2).
+func (s *Server) checkTriggerDispatchAgentLimitsInTx(ctx context.Context, tx store.Store, req hubfire.FireRequest) error {
+	if s == nil || tx == nil || req.Event == nil || req.Event.Trigger == nil {
+		return nil
+	}
+	if err := tx.LockTriggerQuota(ctx, req.ProjectID); err != nil {
+		return fmt.Errorf("lock trigger quota for dispatch limits: %w", err)
+	}
+	trig := req.Event.Trigger
+	triggerID := req.Authority.DefinitionID
+	if triggerID == "" {
+		triggerID = trig.ID
+	}
+
+	maxConc := triggerMaxConcurrentDispatches(trig)
+	liveForTrigger, err := countLiveAgentsMatchingStore(ctx, tx, store.AgentFilter{
+		ProjectID: req.ProjectID,
+		Labels:    map[string]string{triggerLabelKeyTrigger: triggerID},
+	})
+	if err != nil {
+		return fmt.Errorf("count live trigger agents in tx: %w", err)
+	}
+	if liveForTrigger > maxConc {
+		return &triggerLimitSkipError{reason: trigger.ErrFireConcurrencyLimit}
+	}
+
+	liveInProject, err := countLiveAgentsMatchingStore(ctx, tx, store.AgentFilter{
+		ProjectID: req.ProjectID,
+		LabelKeys: []string{triggerLabelKeyTrigger},
+	})
+	if err != nil {
+		return fmt.Errorf("count project live trigger agents in tx: %w", err)
+	}
+	if liveInProject > store.MaxLiveTriggerAgentsPerProject {
+		s.notifyTriggerProjectCapReached(ctx, req, liveInProject-1)
+		return &triggerLimitSkipError{reason: trigger.ErrFireProjectTriggerAgentCap}
+	}
+	return nil
 }
 
 // notifyTriggerProjectCapReached emits at most one notification per hour per

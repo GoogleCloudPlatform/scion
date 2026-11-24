@@ -42,6 +42,7 @@ var (
 	errWebhookEndpointNameExists         = errors.New("webhook endpoint name already exists")
 	errDefaultTriggerNameExists          = errors.New("default trigger name already exists")
 	errReplayProtectedTriggersExist      = errors.New("replay-protected triggers exist on webhook endpoint")
+	errWebhookEndpointMissingSecret      = errors.New("webhook endpoint has no signing secret")
 )
 
 // WebhookEndpointDefaultTriggerSpec configures an optional default message
@@ -458,6 +459,11 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		ownerKind = store.DelegationPrincipalAgent
 	}
 
+	secretVersion := 1
+	if authMode == store.WebhookAuthModeHubToken {
+		secretVersion = 0
+	}
+
 	ep := store.WebhookEndpoint{
 		ID:                  api.NewUUID(),
 		ProjectID:           projectID,
@@ -474,7 +480,7 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		ReplayWindowSeconds: replayWindow,
 		ConfigVersion:       1,
 		SignatureMode:       sigMode,
-		SecretVersion:       1,
+		SecretVersion:       secretVersion,
 		Status:              store.WebhookEndpointStatusActive,
 		BoundAgentID:        boundAgentID,
 		BoundLifetime:       boundLifetime,
@@ -549,16 +555,22 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		}
 	}
 
-	rawSecret, err := generateWebhookEndpointSecret()
-	if err != nil {
-		InternalError(w)
-		return
-	}
-
-	secretRow, err := s.newWebhookEndpointSecretRow(projectID, ep.ID, 1, rawSecret, identity.ID())
-	if err != nil {
-		InternalError(w)
-		return
+	var (
+		rawSecret string
+		secretRow *store.Secret
+	)
+	if authMode != store.WebhookAuthModeHubToken {
+		var err error
+		rawSecret, err = generateWebhookEndpointSecret()
+		if err != nil {
+			InternalError(w)
+			return
+		}
+		secretRow, err = s.newWebhookEndpointSecretRow(projectID, ep.ID, 1, rawSecret, identity.ID())
+		if err != nil {
+			InternalError(w)
+			return
+		}
 	}
 
 	audit := newWebhookEndpointAudit(ctx, mutationTypeWebhookEndpointCreate, ep.ID)
@@ -627,8 +639,10 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 			}
 			return cErr
 		}
-		if sErr := tx.CreateSecret(ctx, secretRow); sErr != nil {
-			return sErr
+		if secretRow != nil {
+			if sErr := tx.CreateSecret(ctx, secretRow); sErr != nil {
+				return sErr
+			}
 		}
 		if defaultTr != nil {
 			srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
@@ -931,6 +945,9 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 			next.Status = updated.Status
 		}
 		if mask.AuthMode {
+			if updated.AuthMode == store.WebhookAuthModeHMAC && current.SecretVersion <= 0 {
+				return errWebhookEndpointMissingSecret
+			}
 			next.AuthMode = updated.AuthMode
 		}
 		if mask.AllowProjectAgents {
@@ -1061,6 +1078,8 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		case errors.Is(err, errWebhookEndpointBoundLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("agent has reached the maximum of %d bound webhook endpoints", store.MaxBoundWebhookEndpointsPerAgent), nil)
+		case errors.Is(err, errWebhookEndpointMissingSecret):
+			ValidationError(w, "cannot switch hub_token endpoint to hmac auth without a signing secret", nil)
 		case errors.Is(err, errReplayProtectedTriggersExist):
 			writeError(w, http.StatusConflict, "replay_protected_triggers_exist",
 				"cannot remove replay protection while active dispatch_agent or exec triggers depend on this webhook endpoint", nil)
@@ -1070,9 +1089,7 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	if s.webhookIngress != nil {
-		s.webhookIngress.InvalidateEndpoint(ep.ID)
-	}
+	s.invalidateWebhookEndpointCache(ep.ID)
 	writeJSON(w, http.StatusOK, s.buildWebhookEndpointResponse(ctx, updated))
 }
 
@@ -1148,9 +1165,7 @@ func (s *Server) rotateWebhookEndpointSecret(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if s.webhookIngress != nil {
-		s.webhookIngress.InvalidateEndpoint(ep.ID)
-	}
+	s.invalidateWebhookEndpointCache(ep.ID)
 
 	writeJSON(w, http.StatusOK, WebhookEndpointRotatedResponse{
 		WebhookEndpointResponse: s.buildWebhookEndpointResponse(ctx, *rotated),
@@ -1200,8 +1215,6 @@ func (s *Server) deleteWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	if s.webhookIngress != nil {
-		s.webhookIngress.InvalidateEndpoint(ep.ID)
-	}
+	s.invalidateWebhookEndpointCache(ep.ID)
 	w.WriteHeader(http.StatusNoContent)
 }

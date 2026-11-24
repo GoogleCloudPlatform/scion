@@ -130,3 +130,56 @@ func TestSourceReplayProtected(t *testing.T) {
 		})
 	}
 }
+
+func TestFireReplaySafe(t *testing.T) {
+	cases := []struct {
+		name       string
+		sourceKind string
+		ep         *store.WebhookEndpoint
+		attrs      map[string]string
+		want       string
+	}{
+		{
+			name:       "hmac_scion_v1_with_delivery_ok",
+			sourceKind: store.TriggerSourceKindWebhook,
+			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHMAC, SignatureMode: store.WebhookSignatureModeScionV1},
+			attrs:      map[string]string{"delivery": "deliv-1"},
+			want:       "",
+		},
+		{
+			name:       "hmac_scion_v1_missing_delivery_refused",
+			sourceKind: store.TriggerSourceKindWebhook,
+			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHMAC, SignatureMode: store.WebhookSignatureModeScionV1},
+			attrs:      map[string]string{},
+			want:       "missing delivery id",
+		},
+		{
+			name:       "hub_token_without_delivery_ok",
+			sourceKind: store.TriggerSourceKindWebhook,
+			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHubToken, SignatureMode: store.WebhookSignatureModeBodyOnly},
+			attrs:      nil,
+			want:       "",
+		},
+		{
+			name:       "hmac_body_only_not_replay_protected",
+			sourceKind: store.TriggerSourceKindWebhook,
+			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHMAC, SignatureMode: store.WebhookSignatureModeBodyOnly},
+			attrs:      map[string]string{"delivery": "deliv-2"},
+			want:       "source not replay protected",
+		},
+		{
+			name:       "github_source_ok",
+			sourceKind: store.TriggerSourceKindGitHub,
+			ep:         nil,
+			attrs:      nil,
+			want:       "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FireReplaySafe(tc.sourceKind, tc.ep, tc.attrs); got != tc.want {
+				t.Errorf("FireReplaySafe() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

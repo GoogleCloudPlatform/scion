@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -84,7 +86,14 @@ func mintTestUserUAT(t *testing.T, srv *Server, s store.Store, user *store.User,
 func mintTestUserSessionJWT(t *testing.T, srv *Server, user *store.User) string {
 	t.Helper()
 	require.NotNil(t, srv.userTokenService, "userTokenService must be initialized")
-	tok, _, err := srv.userTokenService.MintAccessToken(user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb)
+	tok, _, err := srv.userTokenService.MintAccessToken(UserTokenSubject{
+		UserID:            user.ID,
+		Email:             user.Email,
+		DisplayName:       user.DisplayName,
+		Role:              user.Role,
+		SessionGeneration: user.SessionGeneration,
+		ClientType:        ClientTypeWeb,
+	})
 	require.NoError(t, err)
 	return tok
 }
@@ -475,12 +484,20 @@ func TestWebhookEndpointPatch_ReplayProtectionAndLimits(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusBadRequest, msgRec.Code, msgRec.Body.String())
 
-	// 4. Authz on PATCH /webhook-endpoints/{id}:
-	//    - Agent caller -> 403.
+	// 4. Authz on PATCH /webhook-endpoints/{id} (reconciled with P3):
+	//    - Unrelated agent caller on user-owned endpoint -> 404 (hidden).
+	//    - Owner agent caller on its own endpoint -> 200 for non-binding fields.
 	//    - UAT without webhook_endpoint:update -> 403.
 	//    - UAT with webhook_endpoint:update -> 200.
 	recAgentPatch := f.doWebhookEndpoint(t, f.agentAAuth, epID, http.MethodPatch, map[string]any{"description": "nope"})
-	assert.Equal(t, http.StatusForbidden, recAgentPatch.Code)
+	assert.Equal(t, http.StatusNotFound, recAgentPatch.Code)
+
+	recAgentCreate := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, map[string]any{"name": "agent-a-own-ep"})
+	require.Equal(t, http.StatusCreated, recAgentCreate.Code, recAgentCreate.Body.String())
+	var agentEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(recAgentCreate.Body.Bytes(), &agentEp))
+	recAgentOwnPatch := f.doWebhookEndpoint(t, f.agentAAuth, agentEp.ID, http.MethodPatch, map[string]any{"description": "agent updated"})
+	assert.Equal(t, http.StatusOK, recAgentOwnPatch.Code, recAgentOwnPatch.Body.String())
 
 	projBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}
 	uatNoUpdate := scheduleTestUAT(t, f.ownerAuth, projBoundary, "webhook_endpoint:read")
@@ -771,4 +788,592 @@ func TestTriggerLimits_RateConcurrencyAndProjectCap(t *testing.T) {
 	assert.GreaterOrEqual(t, snap.Fires.SkippedByReason[trigger.FireSkipReasonRateLimit], int64(1))
 	assert.GreaterOrEqual(t, snap.Fires.SkippedByReason[trigger.FireSkipReasonConcurrency], int64(1))
 	assert.GreaterOrEqual(t, snap.Fires.SkippedByReason[trigger.FireSkipReasonProjectCap], int64(2))
+}
+
+// TestWebhookEndpointPatch_MemberForbiddenOwnerAdminAllowed covers R1 (option A)
+// and N3 (hub_token endpoints do not mint or return an HMAC secret):
+//   - Project members do NOT hold webhook_endpoint.update: PATCH on either the
+//     owner's endpoint or the member's own endpoint returns 403 and does not
+//     bump config_version.
+//   - Project owners and admins can PATCH endpoints (200, config_version bumps).
+//   - Project members retain webhook_endpoint.send: POST with member session
+//     bearer to a hub_token endpoint returns 202.
+//   - Creating a hub_token endpoint omits secret, sets secretVersion=0, stores
+//     no secret row, and refuses PATCH back to hmac without a signing secret.
+func TestWebhookEndpointPatch_MemberForbiddenOwnerAdminAllowed(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	// Seed a project-admin user in the same project.
+	adminUser := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "p4a-admin@example.com",
+		DisplayName: "P4a Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, f.store.CreateUser(ctx, adminUser))
+	adminRoleDef, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               api.NewUUID(),
+		RoleDefinitionID: adminRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      adminUser.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectID,
+	})
+	require.NoError(t, err)
+	adminAuth := NewAuthenticatedUser(adminUser.ID, adminUser.Email, adminUser.DisplayName, adminUser.Role, "web")
+
+	// Owner creates an hmac endpoint (configVersion=1).
+	ownerCreateRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name: "owners-ep",
+	})
+	require.Equal(t, http.StatusCreated, ownerCreateRec.Code, ownerCreateRec.Body.String())
+	var ownerEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(ownerCreateRec.Body.Bytes(), &ownerEp))
+	require.Equal(t, store.WebhookAuthModeHMAC, ownerEp.AuthMode)
+	require.NotEmpty(t, ownerEp.Secret)
+	require.Equal(t, 1, ownerEp.SecretVersion)
+	require.Equal(t, 1, ownerEp.ConfigVersion)
+
+	// Member creates their own hmac endpoint (configVersion=1).
+	memberCreateRec := f.doWebhookEndpoint(t, f.memberAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name: "members-ep",
+	})
+	require.Equal(t, http.StatusCreated, memberCreateRec.Code, memberCreateRec.Body.String())
+	var memberEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(memberCreateRec.Body.Bytes(), &memberEp))
+	require.Equal(t, 1, memberEp.ConfigVersion)
+
+	// Member PATCH on owner's endpoint -> 403; endpoint unchanged.
+	memberPatchOwner := f.doWebhookEndpoint(t, f.memberAuth, ownerEp.ID, http.MethodPatch, map[string]any{
+		"auth":               store.WebhookAuthModeHubToken,
+		"allowProjectAgents": true,
+		"description":        "hijacked",
+	})
+	assert.Equal(t, http.StatusForbidden, memberPatchOwner.Code, memberPatchOwner.Body.String())
+	storedOwnerEp, err := f.store.GetWebhookEndpoint(ctx, ownerEp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.WebhookAuthModeHMAC, storedOwnerEp.AuthMode)
+	assert.False(t, storedOwnerEp.AllowProjectAgents)
+	assert.Equal(t, 1, storedOwnerEp.ConfigVersion)
+
+	// Member PATCH on member's own endpoint -> 403; endpoint unchanged.
+	memberPatchOwn := f.doWebhookEndpoint(t, f.memberAuth, memberEp.ID, http.MethodPatch, map[string]any{
+		"description": "member-edit",
+	})
+	assert.Equal(t, http.StatusForbidden, memberPatchOwn.Code, memberPatchOwn.Body.String())
+	storedMemberEp, err := f.store.GetWebhookEndpoint(ctx, memberEp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, storedMemberEp.ConfigVersion)
+
+	// Owner PATCH succeeds and bumps configVersion to 2.
+	ownerPatch := f.doWebhookEndpoint(t, f.ownerAuth, ownerEp.ID, http.MethodPatch, map[string]any{
+		"auth":        store.WebhookAuthModeHubToken,
+		"description": "owner-updated",
+	})
+	require.Equal(t, http.StatusOK, ownerPatch.Code, ownerPatch.Body.String())
+	var patchedByOwner WebhookEndpointResponse
+	require.NoError(t, json.Unmarshal(ownerPatch.Body.Bytes(), &patchedByOwner))
+	assert.Equal(t, store.WebhookAuthModeHubToken, patchedByOwner.AuthMode)
+	assert.Equal(t, 2, patchedByOwner.ConfigVersion)
+
+	// Admin PATCH succeeds and bumps configVersion to 3.
+	adminPatch := f.doWebhookEndpoint(t, adminAuth, ownerEp.ID, http.MethodPatch, map[string]any{
+		"description": "admin-updated",
+	})
+	require.Equal(t, http.StatusOK, adminPatch.Code, adminPatch.Body.String())
+	var patchedByAdmin WebhookEndpointResponse
+	require.NoError(t, json.Unmarshal(adminPatch.Body.Bytes(), &patchedByAdmin))
+	assert.Equal(t, "admin-updated", patchedByAdmin.Description)
+	assert.Equal(t, 3, patchedByAdmin.ConfigVersion)
+
+	// Member retains webhook_endpoint.send: POST with member session bearer to
+	// the hub_token endpoint returns 202.
+	memberJWT := mintTestUserSessionJWT(t, f.srv, f.member)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ownerEp.ID, bytes.NewReader([]byte(`{"ok":true}`)))
+	sendReq.RemoteAddr = "198.51.100.40:1234"
+	sendReq.Header.Set("Content-Type", "application/json")
+	sendReq.Header.Set("Authorization", "Bearer "+memberJWT)
+	sendRec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(sendRec, sendReq)
+	assert.Equal(t, http.StatusAccepted, sendRec.Code, sendRec.Body.String())
+
+	// N3: Creating a hub_token endpoint does not mint or return an HMAC secret.
+	htCreateRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name:     "hub-token-no-secret",
+		AuthMode: store.WebhookAuthModeHubToken,
+	})
+	require.Equal(t, http.StatusCreated, htCreateRec.Code, htCreateRec.Body.String())
+	var rawResp map[string]any
+	require.NoError(t, json.Unmarshal(htCreateRec.Body.Bytes(), &rawResp))
+	_, hasSecretKey := rawResp["secret"]
+	assert.False(t, hasSecretKey, "hub_token endpoint response must omit secret field")
+	var htEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(htCreateRec.Body.Bytes(), &htEp))
+	assert.Empty(t, htEp.Secret)
+	assert.Equal(t, 0, htEp.SecretVersion)
+
+	// No secret row was written for the hub_token endpoint.
+	_, secErr := f.store.GetSecret(ctx, store.WebhookEndpointSecretKey(f.projectID, htEp.ID, 1), store.ScopeHub, f.srv.hubID)
+	assert.ErrorIs(t, secErr, store.ErrNotFound)
+
+	// Switching that secret-less hub_token endpoint to hmac via PATCH is refused 400.
+	flipBack := f.doWebhookEndpoint(t, f.ownerAuth, htEp.ID, http.MethodPatch, map[string]any{
+		"auth": store.WebhookAuthModeHMAC,
+	})
+	assert.Equal(t, http.StatusBadRequest, flipBack.Code, flipBack.Body.String())
+}
+
+// TestTriggerLimits_RateLimitConcurrentExactAdmission covers O1: when multiple
+// fires of the same trigger are claimed concurrently ("firing") before reaching
+// checkTriggerFireLimits, deterministic (created, id) ordering ensures exactly
+// max_fires_per_minute fires are admitted (never mutual skip, never overshoot).
+func TestTriggerLimits_RateLimitConcurrentExactAdmission(t *testing.T) {
+	f := newTriggerDispatchAgentFixture(t, "rate-concurrent")
+	ctx := context.Background()
+	userCtx := f.userAuth(t, f.sched.creator)
+	ep := f.createEndpoint(t, userCtx, "rate-conc-ep")
+
+	targetAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "rate-conc-target",
+		Name:      "rate-conc-target",
+		ProjectID: f.sched.proj.ID,
+		OwnerID:   f.sched.creator.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, targetAgent))
+
+	createMsgTrigger := func(name string, maxPerMin int) TriggerResponse {
+		rec := f.doJSON(t, userCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:              name,
+				Source:            TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+				Action:            TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAgent.ID, Message: "hi"},
+				MaxFiresPerMinute: maxPerMin,
+			})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var tr TriggerResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tr))
+		return tr
+	}
+
+	claimFire := func(trID, dedupKey string) string {
+		now := time.Now().UTC()
+		ev := &store.TriggerEvent{
+			ID: api.NewUUID(), ProjectID: f.sched.proj.ID, SourceKind: store.TriggerSourceKindWebhook,
+			SourceID: ep.ID, Type: "webhook.received", Subject: "webhook:" + ep.ID, DedupKey: dedupKey,
+			OccurredAt: now, ReceivedAt: now, Attributes: map[string]string{"signature_mode": "scion_v1"},
+			Payload: `{}`, PayloadBytes: 2, Status: store.TriggerEventStatusProcessed, CreatedAt: now,
+		}
+		require.NoError(t, f.sched.store.CreateTriggerEvent(ctx, ev))
+		fire := &store.TriggerFire{
+			ID: api.NewUUID(), ProjectID: f.sched.proj.ID, TriggerID: trID, EventID: ev.ID,
+			Subject: ev.Subject, ActionType: store.TriggerActionMessage, Status: store.TriggerFireStatusFiring,
+			ExecutorKind: "trigger_drainer", ExecutorID: "trigger_event:" + ev.ID,
+			LeaseUntil: now.Add(10 * time.Minute), StartedAt: now, CreatedAt: now,
+		}
+		ok, _, err := f.sched.store.ClaimTriggerFire(ctx, fire)
+		require.NoError(t, err)
+		require.True(t, ok)
+		return fire.ID
+	}
+
+	// Case 1: max_fires_per_minute=1 with 2 pre-claimed fires (reproduces review-1 probe).
+	tr1 := createMsgTrigger("rate-exact-1", 1)
+	fireA := claimFire(tr1.ID, "exact-a")
+	fireB := claimFire(tr1.ID, "exact-b")
+
+	check := func(trID, fireID string, limit int) string {
+		reason, err := f.sched.srv.checkTriggerFireLimits(ctx, hubfire.FireRequest{
+			ProjectID:  f.sched.proj.ID,
+			ActionType: store.TriggerActionMessage,
+			Authority:  hubfire.RecordedAuthority{DefinitionID: trID, FireID: fireID},
+			Event:      &hubfire.FireEvent{Trigger: &hubfire.FireTriggerRef{ID: trID, MaxFiresPerMinute: limit}},
+		})
+		require.NoError(t, err)
+		return reason
+	}
+	ra, rb := check(tr1.ID, fireA, 1), check(tr1.ID, fireB, 1)
+	admitted := 0
+	skipped := 0
+	for _, r := range []string{ra, rb} {
+		if r == "" {
+			admitted++
+		} else if r == trigger.ErrFireRateLimit {
+			skipped++
+		}
+	}
+	assert.Equal(t, 1, admitted, "exactly 1 fire must be admitted (ra=%q rb=%q)", ra, rb)
+	assert.Equal(t, 1, skipped, "exactly 1 fire must be skipped (ra=%q rb=%q)", ra, rb)
+
+	// Case 2: max_fires_per_minute=2 with 5 concurrently checked pre-claimed fires.
+	tr2 := createMsgTrigger("rate-exact-2", 2)
+	fireIDs := make([]string, 5)
+	for i := range fireIDs {
+		fireIDs[i] = claimFire(tr2.ID, fmt.Sprintf("burst-%d", i))
+	}
+	results := make([]string, len(fireIDs))
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i, fid := range fireIDs {
+		wg.Add(1)
+		go func(idx int, id string) {
+			defer wg.Done()
+			<-start
+			results[idx] = check(tr2.ID, id, 2)
+		}(i, fid)
+	}
+	close(start)
+	wg.Wait()
+
+	admitted2, skipped2 := 0, 0
+	for _, r := range results {
+		switch r {
+		case "":
+			admitted2++
+		case trigger.ErrFireRateLimit:
+			skipped2++
+		}
+	}
+	assert.Equal(t, 2, admitted2, "exactly 2 of 5 concurrent fires must be admitted (results=%v)", results)
+	assert.Equal(t, 3, skipped2, "exactly 3 of 5 concurrent fires must be skipped (results=%v)", results)
+}
+
+// TestTriggerLimits_TwoReplicaConcurrencyAndProjectCap covers O2: two separate
+// hub Server replicas sharing the same enttest store (real PostgreSQL 17 under
+// -tags integration + SCION_TEST_POSTGRES_URL) race concurrent dispatch_agent
+// fires against max_concurrent_dispatches=2 and MaxLiveTriggerAgentsPerProject=25.
+// LockTriggerQuota inside commitAgentCreate's OnCommitTx serializes commits
+// across replicas with zero overshoot.
+func TestTriggerLimits_TwoReplicaConcurrencyAndProjectCap(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "two-replica-limits")
+	userCtx := f.userAuth(t, f.sched.creator)
+	ep := f.createEndpoint(t, userCtx, "two-replica-ep")
+
+	// Construct a second Server replica sharing the exact same underlying store
+	// and mock broker dispatcher (simulating two hub replicas on shared Postgres).
+	replica2, err := New(DefaultServerConfig(), f.sched.store)
+	require.NoError(t, err)
+	replica2.SetDispatcher(f.sched.srv.GetDispatcher())
+	replica2.experiments = f.sched.srv.experiments
+	t.Cleanup(func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = replica2.Shutdown(shutCtx)
+	})
+
+	// 1. Concurrency cap = 2 across 6 simultaneous fires split across 2 replicas.
+	recConc := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:   "two-replica-conc",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Action: TriggerActionSpec{
+				Type:     store.TriggerActionDispatchAgent,
+				Template: "default",
+				Task:     "Two-replica conc ${event.id}",
+			},
+			MaxConcurrentDispatches: 2,
+		})
+	require.Equal(t, http.StatusCreated, recConc.Code, recConc.Body.String())
+	var concResp TriggerResponse
+	require.NoError(t, json.Unmarshal(recConc.Body.Bytes(), &concResp))
+	concTr, err := f.sched.store.GetTrigger(ctx, concResp.ID)
+	require.NoError(t, err)
+
+	runConcurrentFires := func(tr *store.Trigger, total int) (fired, skipped int, skipReasons []string) {
+		outcomes := make([]hubfire.FireOutcome, total)
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < total; i++ {
+			srv := f.sched.srv
+			if i%2 == 1 {
+				srv = replica2
+			}
+			wg.Add(1)
+			go func(idx int, s *Server) {
+				defer wg.Done()
+				<-start
+				now := time.Now().UTC()
+				req := hubfire.FireRequest{
+					ProjectID: f.sched.proj.ID,
+					Authority: hubfire.RecordedAuthority{
+						Attribution:    tr.InitiatorAttribution,
+						Ceiling:        tr.AuthorityCeiling,
+						DefinitionKind: hubfire.DefinitionKindTrigger,
+						DefinitionID:   tr.ID,
+						FireID:         api.NewUUID(),
+					},
+					ActionType: store.TriggerActionDispatchAgent,
+					Payload:    tr.ActionPayload,
+					Event: &hubfire.FireEvent{
+						ID:         api.NewUUID(),
+						ProjectID:  f.sched.proj.ID,
+						SourceKind: store.TriggerSourceKindWebhook,
+						SourceID:   ep.ID,
+						Type:       "webhook.received",
+						Subject:    "webhook:" + ep.ID,
+						OccurredAt: now,
+						ReceivedAt: now,
+						Attributes: map[string]string{
+							"endpoint_name":  ep.Name,
+							"signature_mode": store.WebhookSignatureModeScionV1,
+							"delivery":       fmt.Sprintf("two-rep-%s-%d", tr.ID[:8], idx),
+						},
+						Payload: []byte(`{}`),
+						Trigger: &hubfire.FireTriggerRef{
+							ID:                      tr.ID,
+							Name:                    tr.Name,
+							MaxFiresPerMinute:       tr.MaxFiresPerMinute,
+							MaxConcurrentDispatches: tr.MaxConcurrentDispatches,
+						},
+					},
+					FireAt: now,
+				}
+				outcomes[idx] = serverTriggerCore{srv: s}.Fire(ctx, req)
+			}(i, srv)
+		}
+		close(start)
+		wg.Wait()
+		for _, out := range outcomes {
+			switch out.Status {
+			case hubfire.FireStatusFired:
+				fired++
+			case hubfire.FireStatusSkipped:
+				skipped++
+				skipReasons = append(skipReasons, out.Error)
+			default:
+				t.Errorf("unexpected fire status %q (error=%q)", out.Status, out.Error)
+			}
+		}
+		return fired, skipped, skipReasons
+	}
+
+	firedConc, skippedConc, concReasons := runConcurrentFires(concTr, 6)
+	assert.Equal(t, 2, firedConc, "two replicas must admit exactly max_concurrent_dispatches=2")
+	assert.Equal(t, 4, skippedConc, "two replicas must skip the remaining 4 fires")
+	for _, r := range concReasons {
+		assert.Equal(t, trigger.ErrFireConcurrencyLimit, r)
+	}
+
+	// 2. Project cap = 25 across 2 replicas: seed live trigger agents up to 24,
+	//    then race 4 concurrent fires across both replicas -> exactly 1 fired, 3 skipped.
+	liveNow, err := f.sched.srv.countLiveAgentsMatching(ctx, store.AgentFilter{
+		ProjectID: f.sched.proj.ID,
+		LabelKeys: []string{triggerLabelKeyTrigger},
+	})
+	require.NoError(t, err)
+	for i := liveNow; i < store.MaxLiveTriggerAgentsPerProject-1; i++ {
+		slug := fmt.Sprintf("rep-cap-seed-%d", i)
+		require.NoError(t, f.sched.store.CreateAgent(ctx, &store.Agent{
+			ID:        api.NewUUID(),
+			Slug:      slug,
+			Name:      slug,
+			ProjectID: f.sched.proj.ID,
+			Phase:     "running",
+			Labels:    map[string]string{triggerLabelKeyTrigger: "other-trigger"},
+		}))
+	}
+
+	recCap := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:   "two-replica-cap",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Action: TriggerActionSpec{
+				Type:     store.TriggerActionDispatchAgent,
+				Template: "default",
+				Task:     "Two-replica cap ${event.id}",
+			},
+			MaxConcurrentDispatches: 50,
+		})
+	require.Equal(t, http.StatusCreated, recCap.Code, recCap.Body.String())
+	var capResp TriggerResponse
+	require.NoError(t, json.Unmarshal(recCap.Body.Bytes(), &capResp))
+	capTr, err := f.sched.store.GetTrigger(ctx, capResp.ID)
+	require.NoError(t, err)
+
+	firedCap, skippedCap, capReasons := runConcurrentFires(capTr, 4)
+	assert.Equal(t, 1, firedCap, "two replicas must admit exactly 1 fire to reach project cap 25")
+	assert.Equal(t, 3, skippedCap, "two replicas must skip the remaining 3 fires at project cap")
+	for _, r := range capReasons {
+		assert.Equal(t, trigger.ErrFireProjectTriggerAgentCap, r)
+	}
+}
+
+// TestWebhookEndpointCache_CrossReplicaInvalidation covers O4: a PATCH on
+// replica 1 publishes trigger.webhook_endpoint.changed over EventPublisher so
+// replica 2 evicts its positive endpoint cache immediately without waiting for
+// EndpointCacheTTL.
+func TestWebhookEndpointCache_CrossReplicaInvalidation(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+
+	f.srv.SetEventPublisher(pub)
+	replica2, err := New(DefaultServerConfig(), f.store)
+	require.NoError(t, err)
+	replica2.SetEventPublisher(pub)
+	replica2.experiments = f.srv.experiments
+	subCtx, cancelSub := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancelSub()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = replica2.Shutdown(shutCtx)
+	})
+	replica2.startWebhookEndpointInvalidationSubscriber(subCtx)
+
+	// Create a hub_token endpoint on replica 1.
+	createRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name:     "cache-inval-ep",
+		AuthMode: store.WebhookAuthModeHubToken,
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &ep))
+
+	// Warm replica 2's positive cache by sending an authorized request to replica 2.
+	ownerJWT := mintTestUserSessionJWT(t, replica2, f.owner)
+	sendToReplica2 := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ep.ID, bytes.NewReader([]byte(`{"ping":1}`)))
+		req.RemoteAddr = "198.51.100.55:9000"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+ownerJWT)
+		rec := httptest.NewRecorder()
+		replica2.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	require.Equal(t, http.StatusAccepted, sendToReplica2().Code, "replica 2 should accept and cache active endpoint")
+
+	// Disable the endpoint on replica 1 via PATCH.
+	patchRec := f.doWebhookEndpoint(t, f.ownerAuth, ep.ID, http.MethodPatch, map[string]any{
+		"status": store.WebhookEndpointStatusDisabled,
+	})
+	require.Equal(t, http.StatusOK, patchRec.Code, patchRec.Body.String())
+
+	// Replica 2 must observe the invalidation promptly and return 404.
+	require.Eventually(t, func() bool {
+		return sendToReplica2().Code == http.StatusNotFound
+	}, 2*time.Second, 20*time.Millisecond, "replica 2 must evict cached endpoint on cross-replica invalidation event")
+}
+
+// TestTriggerDispatchAgent_ReservedAuthorLabelDroppedAtFire covers P1c-5b
+// security L1: even if a legacy trigger row stored before authoring validation
+// carries a reserved label key (such as scion.dev/github-token-source-project),
+// fireTriggerDispatchAgent drops it before merging labels.
+func TestTriggerDispatchAgent_ReservedAuthorLabelDroppedAtFire(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "l1-reserved-label")
+	userCtx := f.userAuth(t, f.sched.creator)
+	ep := f.createEndpoint(t, userCtx, "l1-ep")
+
+	payloadBytes, err := json.Marshal(DispatchAgentEventPayload{
+		Template: "default",
+		Task:     "L1 test ${event.id}",
+		Labels: map[string]string{
+			"env":                         "prod",
+			githubTokenSourceProjectLabel: api.NewUUID(),
+			triggerLabelKeyTrigger:        "spoofed-trigger-id",
+		},
+	})
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	trigID := api.NewUUID()
+	out := f.sched.srv.fireAction(ctx, hubfire.FireRequest{
+		ProjectID: f.sched.proj.ID,
+		Authority: hubfire.RecordedAuthority{
+			Attribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+				InitiatorPrincipalID:    f.sched.creator.ID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+				AttributionVersion:      1,
+				AuthorizationRevision:   1,
+			},
+			Ceiling:        store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			DefinitionKind: hubfire.DefinitionKindTrigger,
+			DefinitionID:   trigID,
+			FireID:         api.NewUUID(),
+		},
+		ActionType: store.TriggerActionDispatchAgent,
+		Payload:    string(payloadBytes),
+		Event: &hubfire.FireEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  f.sched.proj.ID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   ep.ID,
+			Type:       "webhook.received",
+			Subject:    "webhook:" + ep.ID,
+			OccurredAt: now,
+			ReceivedAt: now,
+			Attributes: map[string]string{
+				"endpoint_name":  ep.Name,
+				"signature_mode": store.WebhookSignatureModeScionV1,
+				"delivery":       "l1-deliv-1",
+			},
+			Payload: []byte(`{}`),
+			Trigger: &hubfire.FireTriggerRef{ID: trigID, Name: "l1-trig"},
+		},
+		FireAt: now,
+	})
+	require.Equal(t, hubfire.FireStatusFired, out.Status, out.Error)
+	require.NotEmpty(t, out.TargetAgentID)
+
+	ag, err := f.sched.store.GetAgent(ctx, out.TargetAgentID)
+	require.NoError(t, err)
+	assert.Equal(t, "prod", ag.Labels["env"])
+	assert.Equal(t, trigID, ag.Labels[triggerLabelKeyTrigger], "hub provenance trigger label must win")
+	_, hasReserved := ag.Labels[githubTokenSourceProjectLabel]
+	assert.False(t, hasReserved, "reserved github-token-source-project author label must be dropped at fire time")
+}
+
+// TestAuthorizeDispatchAgentFire_IdentityRules covers P1c-5b security L2:
+// authorizeDispatchAgentFire mirrors authorizeAgentCreate's identity rules
+// (nil refused, cross-project agent refused, non-user/non-agent identity types
+// default-denied).
+func TestAuthorizeDispatchAgentFire_IdentityRules(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "l2-fire-identity")
+	auth := FireAuthority{
+		PrincipalKind: store.DelegationPrincipalAgent,
+		PrincipalID:   api.NewUUID(),
+	}
+
+	// 1. Nil identity refused.
+	_, _, err := f.sched.srv.authorizeDispatchAgentFire(
+		ctx, f.sched.proj.ID, api.NewUUID(), hubfire.DefinitionKindTrigger, auth, nil, "", false,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unauthenticated")
+
+	// 2. Cross-project agent identity refused even with ScopeAgentCreate.
+	otherProjectID := api.NewUUID()
+	foreignClaims := &AgentTokenClaims{
+		ProjectID: otherProjectID,
+		Scopes:    []AgentTokenScope{ScopeAgentCreate},
+	}
+	foreignClaims.Subject = auth.PrincipalID
+	foreignAgent := &agentIdentityWrapper{foreignClaims}
+	_, _, err = f.sched.srv.authorizeDispatchAgentFire(
+		ctx, f.sched.proj.ID, api.NewUUID(), hubfire.DefinitionKindTrigger, auth, foreignAgent, "", false,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "belongs to project")
+
+	// 3. Non-user / non-agent identity (e.g. broker) default-denied.
+	brokerIdent := NewBrokerIdentity("broker-1")
+	_, _, err = f.sched.srv.authorizeDispatchAgentFire(
+		ctx, f.sched.proj.ID, api.NewUUID(), hubfire.DefinitionKindTrigger,
+		FireAuthority{PrincipalKind: "broker", PrincipalID: brokerIdent.ID()},
+		brokerIdent, "", false,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "may not create agents")
 }

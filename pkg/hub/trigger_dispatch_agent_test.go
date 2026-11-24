@@ -1977,6 +1977,7 @@ func TestTriggerDispatchAgent_TemplateRefusalTypedAudit(t *testing.T) {
 			SourceID:   ep.ID,
 			Type:       "webhook.received",
 			ReceivedAt: time.Now().UTC(),
+			Attributes: map[string]string{"delivery": "deliv-audit-1"},
 			Payload:    []byte(`{"bad_name":"` + secretVal + `"}`),
 			Trigger:    &hubfire.FireTriggerRef{ID: trigID, Name: "audit-trig"},
 		},

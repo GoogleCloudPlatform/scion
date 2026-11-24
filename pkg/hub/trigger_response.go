@@ -82,7 +82,7 @@ type WebhookEndpointResponse struct {
 // message trigger created in the same transaction.
 type WebhookEndpointCreatedResponse struct {
 	WebhookEndpointResponse
-	Secret    string           `json:"secret"`
+	Secret    string           `json:"secret,omitempty"`
 	TriggerID string           `json:"triggerId,omitempty"`
 	Trigger   *TriggerResponse `json:"trigger,omitempty"`
 }

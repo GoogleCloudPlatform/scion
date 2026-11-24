@@ -687,11 +687,33 @@ func (s *Server) authorizeDispatchAgentFire(
 	requestedRole AgentRole,
 	noAuth bool,
 ) (headlessResolvedRole, *store.Project, error) {
-	if auth.PrincipalKind == store.DelegationPrincipalAgent {
+	// Mirror authorizeAgentCreate's identity rules at fire time (P1c-5b
+	// security L2): reject nil, enforce agent project equality + ScopeAgentCreate,
+	// validate user/dev interface, and default-deny every other identity type
+	// (e.g. federated_user, broker, hub).
+	if identity == nil {
+		return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal %s %q: unauthenticated", auth.PrincipalKind, auth.PrincipalID)
+	}
+	switch identity.Type() {
+	case "agent":
 		agentIdent, ok := identity.(AgentIdentity)
-		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
+		if !ok {
+			return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal agent %q: invalid agent identity", auth.PrincipalID)
+		}
+		if !agentIdent.HasScope(ScopeAgentCreate) {
 			return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
 		}
+		if projectID == "" || agentIdent.ProjectID() != projectID {
+			return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal agent %q belongs to project %q, cannot create agents in project %q",
+				auth.PrincipalID, agentIdent.ProjectID(), projectID)
+		}
+	case "user", "dev":
+		if _, ok := identity.(UserIdentity); !ok {
+			return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal %s %q: invalid user identity", auth.PrincipalKind, auth.PrincipalID)
+		}
+	default:
+		return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal %s %q: identity type %q may not create agents",
+			auth.PrincipalKind, auth.PrincipalID, identity.Type())
 	}
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
@@ -770,38 +792,23 @@ func (a *dispatchAgentAction) Authorize(
 			return nil, &FireRefusal{Reason: "unsupported githubToken mode"}, nil
 		}
 		if req.Event != nil {
-			var ep *store.WebhookEndpoint
-			if req.Event.SourceKind == store.TriggerSourceKindWebhook {
-				loaded, epErr := s.store.GetWebhookEndpoint(ctx, req.Event.SourceID)
-				if epErr != nil {
-					if errors.Is(epErr, store.ErrNotFound) || errors.Is(epErr, store.ErrInvalidInput) {
-						return nil, &FireRefusal{Reason: "source not replay protected"}, nil
-					}
-					return nil, nil, fmt.Errorf("dispatch_agent trigger fire: load webhook endpoint: %w", epErr)
-				}
-				ep = loaded
+			ep, replayRefusal, replayErr := s.checkTriggerFireReplaySafety(ctx, req.Event)
+			if replayErr != nil {
+				return nil, nil, replayErr
+			}
+			if replayRefusal != nil {
+				return nil, replayRefusal, nil
+			}
+			if ep != nil {
 				sourceName = ep.Name
 				signatureMode = ep.SignatureMode
 				if ep.AuthMode == store.WebhookAuthModeHubToken {
 					signatureMode = store.WebhookAuthModeHubToken
 				}
 			}
-			if !trigger.SourceReplayProtected(req.Event.SourceKind, ep) {
-				return nil, &FireRefusal{Reason: "source not replay protected"}, nil
-			}
 			// Stage 3 §4.4 defense-in-depth: refuse stale events from replay-protected sources.
 			if req.Event.Attributes["stale"] == "true" {
 				return nil, &FireRefusal{Reason: trigger.ErrFireStaleEvent}, nil
-			}
-			// P1c-1 security M1 (Stage 2 P4a): an HMAC-signed webhook delivery
-			// without X-Scion-Delivery has no dedup key (ingress generates a
-			// random UUID) and is replayable within replay_window_seconds.
-			// Require a non-empty delivery ID for agent-creating triggers on
-			// non-hub_token webhook endpoints.
-			if req.Event.SourceKind == store.TriggerSourceKindWebhook &&
-				ep != nil && ep.AuthMode != store.WebhookAuthModeHubToken &&
-				strings.TrimSpace(req.Event.Attributes["delivery"]) == "" {
-				return nil, &FireRefusal{Reason: "missing delivery id"}, nil
 			}
 		}
 	}
@@ -1241,6 +1248,18 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		}
 		slices.Sort(keys)
 		for _, k := range keys {
+			// P1c-5b security L1: defense in depth for legacy trigger rows that
+			// may predate authoring-time reserved-key rejection (e.g.
+			// scion.dev/github-token-source-project). Drop reserved keys from
+			// author labels before rendering or merging.
+			if reservedTriggerLabelKeys[k] {
+				slog.WarnContext(ctx, "trigger dispatch_agent: dropping reserved author label key at fire time",
+					"project_id", req.ProjectID,
+					"trigger_id", triggerID,
+					"fire_id", req.Authority.FireID,
+					"key", k)
+				continue
+			}
 			val, rErr := renderTemplateSlot(da.payload.Labels[k], triggertemplate.SlotLabel, vars, da.payload.UntrustedVars)
 			if rErr != nil {
 				return a.refuseTemplateRender(ctx, req, triggertemplate.SlotLabel, rErr), nil
@@ -1358,6 +1377,20 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		nameConflict = DispatchAgentNameConflictSuffix
 	}
 
+	// Serialize concurrency and per-project live trigger-agent cap checks inside
+	// commitAgentCreate's transaction under LockTriggerQuota so concurrent
+	// drainers and replicas cannot overshoot either cap (Stage 2 §7.4, P4a O2).
+	claimCommitTx := onCommitTx
+	onCommitTx = func(txCtx context.Context, tx store.Store, agentID string) error {
+		if lErr := a.srv.checkTriggerDispatchAgentLimitsInTx(txCtx, tx, req); lErr != nil {
+			return lErr
+		}
+		if claimCommitTx != nil {
+			return claimCommitTx(txCtx, tx, agentID)
+		}
+		return nil
+	}
+
 	resolvedRole := da.resolvedRole
 	candidate := baseSlug
 	for attempt := 0; ; attempt++ {
@@ -1396,6 +1429,13 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 				Status:        hubfire.FireStatusFired,
 				ResultRef:     agentID,
 				TargetAgentID: agentID,
+			}, nil
+		}
+		var limitSkip *triggerLimitSkipError
+		if errors.As(createErr, &limitSkip) {
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusSkipped,
+				Error:  limitSkip.reason,
 			}, nil
 		}
 		if errors.Is(createErr, errHeadlessAgentExists) || errors.Is(createErr, store.ErrAlreadyExists) {

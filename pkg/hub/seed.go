@@ -591,7 +591,7 @@ func projectMemberCuratedPermissionIDs() []string {
 		"template.create",
 		"template.list",
 		"template.read",
-		// Triggers and webhook endpoints (create, read, list)
+		// Triggers and webhook endpoints (create, read, list, send; update is owner/admin only)
 		"trigger.create",
 		"trigger.list",
 		"trigger.read",
@@ -599,7 +599,6 @@ func projectMemberCuratedPermissionIDs() []string {
 		"webhook_endpoint.list",
 		"webhook_endpoint.read",
 		"webhook_endpoint.send",
-		"webhook_endpoint.update",
 	}
 }
 

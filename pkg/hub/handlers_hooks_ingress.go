@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -22,6 +24,61 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
+
+const webhookEndpointChangedSubject = "trigger.webhook_endpoint.changed"
+
+type webhookEndpointChangedEvent struct {
+	EndpointID string `json:"endpointId"`
+}
+
+// invalidateWebhookEndpointCache evicts endpointID from this replica's ingress
+// cache immediately and publishes a content-free invalidation event via s.events
+// so peer replicas (via PostgresEventPublisher LISTEN/NOTIFY) evict their caches
+// without waiting for EndpointCacheTTL (Stage 2 P4a O4).
+func (s *Server) invalidateWebhookEndpointCache(endpointID string) {
+	if s == nil || endpointID == "" {
+		return
+	}
+	if s.webhookIngress != nil {
+		s.webhookIngress.InvalidateEndpoint(endpointID)
+	}
+	if s.events != nil {
+		s.events.PublishRaw(webhookEndpointChangedSubject, webhookEndpointChangedEvent{
+			EndpointID: endpointID,
+		})
+	}
+}
+
+// startWebhookEndpointInvalidationSubscriber listens for cross-replica webhook
+// endpoint config changes on s.events and evicts the local ingress cache.
+// Exits cleanly when ctx is cancelled.
+func (s *Server) startWebhookEndpointInvalidationSubscriber(ctx context.Context) {
+	if s == nil || s.webhookIngress == nil || s.events == nil {
+		return
+	}
+	ch, unsub := s.events.Subscribe(webhookEndpointChangedSubject)
+	if ch == nil {
+		unsub()
+		return
+	}
+	go func() {
+		defer unsub()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-ch:
+				if !ok {
+					return
+				}
+				var payload webhookEndpointChangedEvent
+				if err := json.Unmarshal(ev.Data, &payload); err == nil && payload.EndpointID != "" {
+					s.webhookIngress.InvalidateEndpoint(payload.EndpointID)
+				}
+			}
+		}
+	}()
+}
 
 // newWebhookIngress constructs the POST /api/v1/hooks/{id} handler over srv's
 // store, durable queue, trusted-proxy configuration, and secret cipher (§8.1).

@@ -342,12 +342,6 @@ func (l *IngressLimiter) AllowRejection() bool {
 	return l.rejection.allow(l.now())
 }
 
-// AllowEndpoint charges the per-endpoint bucket for a known active endpoint
-// using the hub default rate and burst.
-func (l *IngressLimiter) AllowEndpoint(endpointID string) bool {
-	return l.perEndpoint.allow(endpointID, l.now())
-}
-
 // AllowEndpointWithLimit charges the per-endpoint bucket for a known active
 // endpoint using the endpoint's configured ratePerSecond and burst, clamped to
 // the hub constants (Stage 2 §7.4: an endpoint can lower, never raise).

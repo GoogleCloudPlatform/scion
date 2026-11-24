@@ -1155,7 +1155,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"template.create", "template.list", "template.read",
 				"trigger.create", "trigger.list", "trigger.read",
 				"webhook_endpoint.create", "webhook_endpoint.list", "webhook_endpoint.read",
-				"webhook_endpoint.send", "webhook_endpoint.update",
+				"webhook_endpoint.send",
 			},
 		},
 		{

@@ -7816,6 +7816,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	}
 	if s.webhookIngress != nil {
 		s.webhookIngress.StartBackground(ctx)
+		s.startWebhookEndpointInvalidationSubscriber(ctx)
 	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.

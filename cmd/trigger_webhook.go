@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -301,6 +302,9 @@ func parseTriggerByteSize(raw string) (int, error) {
 	if err != nil || n < 0 {
 		return 0, fmt.Errorf("invalid byte size %q", raw)
 	}
+	if mult > 1 && n > math.MaxInt/mult {
+		return 0, fmt.Errorf("byte size %q overflows", raw)
+	}
 	return n * mult, nil
 }
 
@@ -458,7 +462,9 @@ func runTriggerWebhookCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Name:           %s\n", triggerTerminalText(created.Name, false))
 	fmt.Printf("  URL:            %s\n", triggerTerminalText(created.URL, false))
 	fmt.Printf("  Signature Mode: %s\n", triggerTerminalText(created.SignatureMode, false))
-	fmt.Printf("  Secret:         %s\n", created.Secret)
+	if created.Secret != "" {
+		fmt.Printf("  Secret:         %s\n", created.Secret)
+	}
 	if life := webhookEndpointLifetimeSummary(&created.WebhookEndpoint); life != "" {
 		fmt.Printf("  Lifetime:       %s\n", life)
 	}
@@ -475,7 +481,9 @@ func runTriggerWebhookCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 	fmt.Println()
-	fmt.Println("Warning: save this signing secret now; it is shown only once and cannot be retrieved later.")
+	if created.Secret != "" {
+		fmt.Println("Warning: save this signing secret now; it is shown only once and cannot be retrieved later.")
+	}
 	fmt.Println("Note: anyone with read access to this project's triggers can read bodies sent here.")
 	return nil
 }

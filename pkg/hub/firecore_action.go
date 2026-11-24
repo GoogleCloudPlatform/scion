@@ -17,11 +17,45 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// checkTriggerFireReplaySafety enforces Stage 2 §7.3 and P1c-1 security M1 for
+// any trigger action that creates agents or runs commands (dispatch_agent, exec).
+//
+// It loads the webhook endpoint when ev.SourceKind == webhook, then checks
+// trigger.FireReplaySafe(sourceKind, ep, ev.Attributes). Returns the loaded
+// endpoint (nil for non-webhook sources) and a non-nil *FireRefusal when the
+// event is not replay-safe. P8 (exec) adopts this same helper directly.
+func (s *Server) checkTriggerFireReplaySafety(
+	ctx context.Context,
+	ev *hubfire.FireEvent,
+) (*store.WebhookEndpoint, *FireRefusal, error) {
+	if ev == nil {
+		return nil, nil, nil
+	}
+	var ep *store.WebhookEndpoint
+	if ev.SourceKind == store.TriggerSourceKindWebhook {
+		loaded, err := s.store.GetWebhookEndpoint(ctx, ev.SourceID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+				return nil, &FireRefusal{Reason: "source not replay protected"}, nil
+			}
+			return nil, nil, fmt.Errorf("trigger fire replay safety: load webhook endpoint: %w", err)
+		}
+		ep = loaded
+	}
+	if reason := trigger.FireReplaySafe(ev.SourceKind, ep, ev.Attributes); reason != "" {
+		return ep, &FireRefusal{Reason: reason}, nil
+	}
+	return ep, nil, nil
+}
 
 // FireAuthorized carries action-specific state resolved during Authorize so
 // Fire never re-resolves authority or target lookup.

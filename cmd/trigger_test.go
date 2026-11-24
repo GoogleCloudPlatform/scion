@@ -2968,11 +2968,16 @@ func TestTriggerP4aCLIFlags(t *testing.T) {
 	_, err = buildCreateWebhookEndpointRequest()
 	require.Error(t, err)
 
-	// Invalid --max-body is rejected locally.
+	// Invalid --max-body is rejected locally (including integer overflow, N1).
 	triggerWebhookAuth = "hmac"
 	triggerWebhookMaxBody = "not-a-size"
 	_, err = buildCreateWebhookEndpointRequest()
 	require.Error(t, err)
+
+	triggerWebhookMaxBody = "9999999999999MiB"
+	_, err = buildCreateWebhookEndpointRequest()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overflow")
 
 	// Verify trigger create flags --max-per-minute and --max-concurrent.
 	assert.NotNil(t, triggerCreateCmd.Flags().Lookup("max-per-minute"))

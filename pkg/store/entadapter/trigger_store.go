@@ -3249,6 +3249,12 @@ func (s *TriggerStore) CountTriggerFiresSince(ctx context.Context, triggerID str
 	return n, nil
 }
 
+// CountRecentTriggerFires counts non-skipped fires for triggerID created after
+// since. When excludeFireID names the caller's in-flight fire row, it excludes
+// that row AND any other in-flight ("firing") row ordered strictly after the
+// caller's (created, id) pair so concurrent claimants never mutually skip each
+// other (Stage 2 §7.4, P4a O1). Non-firing (completed/refused/failed) rows in
+// the window always count.
 func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID string, since time.Time, excludeFireID string) (int, error) {
 	tid, err := parseUUID(triggerID)
 	if err != nil {
@@ -3266,6 +3272,20 @@ func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID st
 			return 0, parseErr
 		}
 		q = q.Where(triggerfire.IDNEQ(exID))
+		callerRow, getErr := s.client.TriggerFire.Get(ctx, exID)
+		if getErr == nil {
+			callerCreated := callerRow.Created.UTC()
+			q = q.Where(triggerfire.Or(
+				triggerfire.StatusNEQ(store.TriggerFireStatusFiring),
+				triggerfire.CreatedLT(callerCreated),
+				triggerfire.And(
+					triggerfire.CreatedEQ(callerCreated),
+					triggerfire.IDLT(exID),
+				),
+			))
+		} else if !ent.IsNotFound(getErr) {
+			return 0, getErr
+		}
 	}
 	return q.Count(ctx)
 }

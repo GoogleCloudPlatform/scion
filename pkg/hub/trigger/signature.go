@@ -225,3 +225,24 @@ func SourceReplayProtected(sourceKind string, ep *store.WebhookEndpoint) bool {
 		return false
 	}
 }
+
+// FireReplaySafe checks whether a trigger fire event satisfies both source-level
+// replay protection (SourceReplayProtected) and per-delivery deduplication
+// required by agent-creating or command-executing actions (Stage 2 §7.3,
+// P1c-1 security M1).
+//
+// Returns "" when safe to fire, or a closed-set fire refusal reason:
+//   - "source not replay protected" when SourceReplayProtected is false
+//   - "missing delivery id" when a non-hub_token webhook delivery omitted
+//     X-Scion-Delivery (leaving it replayable within replay_window_seconds)
+func FireReplaySafe(sourceKind string, ep *store.WebhookEndpoint, attrs map[string]string) string {
+	if !SourceReplayProtected(sourceKind, ep) {
+		return "source not replay protected"
+	}
+	if sourceKind == store.TriggerSourceKindWebhook &&
+		ep != nil && ep.AuthMode != store.WebhookAuthModeHubToken &&
+		strings.TrimSpace(attrs["delivery"]) == "" {
+		return "missing delivery id"
+	}
+	return ""
+}
