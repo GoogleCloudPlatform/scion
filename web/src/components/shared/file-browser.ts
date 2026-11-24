@@ -1333,9 +1333,18 @@ export class ScionFileBrowser extends LitElement {
           </sl-tooltip>`;
       } else {
         const mergedCount = this.getMergedFiles().length;
-        countLabel = this.backendHasMore
-          ? `${mergedCount} match${mergedCount !== 1 ? 'es' : ''} (more available — refine your filter)`
-          : `${mergedCount} match${mergedCount !== 1 ? 'es' : ''}`;
+        const localOnlyTruncated =
+          useDialect &&
+          !extractFileQueryText(this.activeQuery) &&
+          this.initialHasMore &&
+          Boolean(this.dataSource?.searchFiles);
+        if (localOnlyTruncated) {
+          countLabel = `${mergedCount} match${mergedCount !== 1 ? 'es' : ''} in the ${formatNumber(this.files.length)} most recent files · add text to search the whole workspace`;
+        } else {
+          countLabel = this.backendHasMore
+            ? `${mergedCount} match${mergedCount !== 1 ? 'es' : ''} (more available — refine your filter)`
+            : `${mergedCount} match${mergedCount !== 1 ? 'es' : ''}`;
+        }
       }
     } else if (this.initialHasMore && this.totalCount > this.files.length) {
       const sizeStr = this.totalSize > 0 ? ` (${formatFileSize(this.totalSize)})` : '';

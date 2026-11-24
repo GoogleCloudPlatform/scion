@@ -323,4 +323,66 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
     expect(box.valueSuggestions?.('ext', '')).toEqual(['go', 'md', 'ts']);
     expect(box.valueSuggestions?.('other', '')).toEqual([]);
   });
+
+  it('keeps truncation visible in the count label for key-only queries when initial listing hasMore', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    const searchFiles = vi.fn(() => Promise.resolve({ files: [], totalSize: 0, totalCount: 0 }));
+    const files = [
+      makeEntry('pkg/server.go'),
+      makeEntry('pkg/server_test.go'),
+      makeEntry('dist/app.map'),
+    ];
+    const source: FileBrowserDataSource = {
+      listFiles: vi.fn(() =>
+        Promise.resolve({
+          files,
+          totalSize: 30,
+          totalCount: 5000,
+          hasMore: true,
+        })
+      ),
+      searchFiles,
+      deleteFile: vi.fn(),
+      uploadFiles: vi.fn(),
+      getDownloadUrl: (p) => `/download/${p}`,
+      getPreviewUrl: (p) => `/preview/${p}`,
+    };
+    const el = await mountBrowser(source);
+
+    const box = el.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    const input = box.shadowRoot?.querySelector('input') as HTMLInputElement;
+
+    const cases: Array<{ query: string; expectedPaths: string[]; expectedPrefix: string }> = [
+      {
+        query: 'ext:go',
+        expectedPaths: ['pkg/server_test.go', 'pkg/server.go'],
+        expectedPrefix: '2 matches in the 3 most recent files',
+      },
+      {
+        query: '-ext:map',
+        expectedPaths: ['pkg/server_test.go', 'pkg/server.go'],
+        expectedPrefix: '2 matches in the 3 most recent files',
+      },
+      {
+        query: 'ext:go -test',
+        expectedPaths: ['pkg/server.go'],
+        expectedPrefix: '1 match in the 3 most recent files',
+      },
+    ];
+
+    for (const tc of cases) {
+      input.value = tc.query;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      expect(renderedPaths(el)).toEqual(tc.expectedPaths);
+      const label = el.shadowRoot?.querySelector('.toolbar-meta')?.textContent?.trim() ?? '';
+      expect(label).toContain(tc.expectedPrefix);
+      expect(label).toContain('add text to search the whole workspace');
+    }
+
+    expect(searchFiles).not.toHaveBeenCalled();
+  });
 });
