@@ -686,4 +686,231 @@ describe('scion-admin-experiments', () => {
     expect(fetchMock.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE')).toBe(true);
     expect(shadowText(element)).not.toContain('unreadable');
   });
+
+  describe('filters', () => {
+    function filterGroup(el: HTMLElement): (HTMLElement & { value: string }) | null {
+      return query(el, '.filter-bar sl-radio-group') as (HTMLElement & { value: string }) | null;
+    }
+
+    function filterLabels(el: HTMLElement): string[] {
+      return queryAll(el, '.filter-bar sl-radio-button').map((btn) =>
+        (btn.textContent ?? '').replace(/\s+/g, ' ').trim()
+      );
+    }
+
+    function rowNames(el: HTMLElement): string[] {
+      return queryAll(el, '.row .name').map((n) => (n.textContent ?? '').trim());
+    }
+
+    async function selectFilter(el: ScionAdminExperiments, value: string): Promise<void> {
+      const group = filterGroup(el)!;
+      group.value = value;
+      group.dispatchEvent(new CustomEvent('sl-change'));
+      await el.updateComplete;
+    }
+
+    it('renders All, On, Off, and Overridden with live counts and filters rows without reloading', async () => {
+      const experiments = [
+        makeEntry({
+          name: 'web.default_on',
+          title: 'Default on',
+          default: true,
+          override: null,
+          enabled: true,
+        }),
+        makeEntry({
+          name: 'web.default_off',
+          title: 'Default off',
+          default: false,
+          override: null,
+          enabled: false,
+        }),
+        makeEntry({
+          name: 'hub.overridden_on',
+          title: 'Overridden on',
+          default: false,
+          override: true,
+          enabled: true,
+        }),
+        makeEntry({
+          name: 'hub.overridden_off',
+          title: 'Overridden off',
+          default: true,
+          override: false,
+          enabled: false,
+        }),
+        // Explicitly overridden to match its default — still counts as Overridden.
+        makeEntry({
+          name: 'hub.overridden_same_as_default',
+          title: 'Overridden same as default',
+          default: true,
+          override: true,
+          enabled: true,
+        }),
+      ];
+      const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(makeResponse({ experiments }))));
+      vi.stubGlobal('fetch', fetchMock);
+
+      element = await createElement();
+      await activate(element);
+
+      expect(filterGroup(element)?.getAttribute('label')).toBe('Filter experiments');
+      expect(filterGroup(element)?.value).toBe('all');
+      expect(filterLabels(element)).toEqual(['All (5)', 'On (3)', 'Off (2)', 'Overridden (3)']);
+      expect(rowNames(element)).toEqual([
+        'web.default_on',
+        'web.default_off',
+        'hub.overridden_on',
+        'hub.overridden_off',
+        'hub.overridden_same_as_default',
+      ]);
+
+      await selectFilter(element, 'on');
+      expect(rowNames(element)).toEqual([
+        'web.default_on',
+        'hub.overridden_on',
+        'hub.overridden_same_as_default',
+      ]);
+
+      await selectFilter(element, 'off');
+      expect(rowNames(element)).toEqual(['web.default_off', 'hub.overridden_off']);
+
+      await selectFilter(element, 'overridden');
+      expect(rowNames(element)).toEqual([
+        'hub.overridden_on',
+        'hub.overridden_off',
+        'hub.overridden_same_as_default',
+      ]);
+
+      await selectFilter(element, 'all');
+      expect(rowNames(element)).toHaveLength(5);
+
+      // Filtering is purely client-side — no extra fetches.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows an empty-filter message when no experiments match the active filter', async () => {
+      const experiments = [
+        makeEntry({
+          name: 'web.only_on',
+          default: true,
+          override: null,
+          enabled: true,
+        }),
+      ];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => Promise.resolve(jsonResponse(makeResponse({ experiments }))))
+      );
+
+      element = await createElement();
+      await activate(element);
+
+      expect(filterLabels(element)).toEqual(['All (1)', 'On (1)', 'Off (0)', 'Overridden (0)']);
+
+      await selectFilter(element, 'off');
+      expect(rowNames(element)).toEqual([]);
+      expect(shadowText(element)).toContain('No experiments are currently off.');
+      expect(filterGroup(element)).not.toBeNull();
+
+      await selectFilter(element, 'overridden');
+      expect(rowNames(element)).toEqual([]);
+      expect(shadowText(element)).toContain('No experiments are currently overridden.');
+
+      // Also verify the empty "on" state.
+      element.remove();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() =>
+          Promise.resolve(
+            jsonResponse(
+              makeResponse({
+                experiments: [
+                  makeEntry({
+                    name: 'web.only_off',
+                    default: false,
+                    override: null,
+                    enabled: false,
+                  }),
+                ],
+              })
+            )
+          )
+        )
+      );
+      element = await createElement();
+      await activate(element);
+
+      await selectFilter(element, 'on');
+      expect(rowNames(element)).toEqual([]);
+      expect(shadowText(element)).toContain('No experiments are currently on.');
+    });
+
+    it('does not render the filter bar when no experiments are registered', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => Promise.resolve(jsonResponse(makeResponse({ experiments: [] }))))
+      );
+
+      element = await createElement();
+      await activate(element);
+
+      expect(filterGroup(element)).toBeNull();
+      expect(shadowText(element)).toContain('No experiments are currently registered.');
+    });
+
+    it('updates filter counts and visible rows live after resetting an override', async () => {
+      const overriddenEntry = makeEntry({
+        name: 'web.overridden_flag',
+        title: 'Overridden flag',
+        default: true,
+        override: false,
+        enabled: false,
+      });
+      const defaultEntry = makeEntry({
+        name: 'web.default_flag',
+        title: 'Default flag',
+        default: true,
+        override: null,
+        enabled: true,
+      });
+
+      const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PUT') {
+          return Promise.resolve(
+            jsonResponse(
+              makeResponse({
+                revision: 2,
+                experiments: [{ ...overriddenEntry, override: null, enabled: true }, defaultEntry],
+              })
+            )
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(makeResponse({ experiments: [overriddenEntry, defaultEntry] }))
+        );
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      element = await createElement();
+      await activate(element);
+
+      await selectFilter(element, 'overridden');
+      expect(filterLabels(element)).toEqual(['All (2)', 'On (1)', 'Off (1)', 'Overridden (1)']);
+      expect(rowNames(element)).toEqual(['web.overridden_flag']);
+
+      const resetBtn = queryAll(element, 'sl-button').find((b) =>
+        (b.textContent ?? '').includes('Reset to default')
+      ) as HTMLElement;
+      expect(resetBtn).toBeTruthy();
+      resetBtn.dispatchEvent(new Event('click'));
+      await element.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+      await element.updateComplete;
+
+      expect(filterLabels(element)).toEqual(['All (2)', 'On (2)', 'Off (0)', 'Overridden (0)']);
+      expect(rowNames(element)).toEqual([]);
+      expect(shadowText(element)).toContain('No experiments are currently overridden.');
+    });
+  });
 });

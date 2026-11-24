@@ -63,6 +63,25 @@ interface AdminExperimentsResponse {
   updated_by: string | null;
 }
 
+type ExperimentFilter = 'all' | 'on' | 'off' | 'overridden';
+
+function isExperimentFilter(value: string): value is ExperimentFilter {
+  return value === 'all' || value === 'on' || value === 'off' || value === 'overridden';
+}
+
+function matchesFilter(exp: ExperimentEntry, filter: ExperimentFilter): boolean {
+  switch (filter) {
+    case 'on':
+      return exp.enabled;
+    case 'off':
+      return !exp.enabled;
+    case 'overridden':
+      return exp.override !== null;
+    case 'all':
+      return true;
+  }
+}
+
 /** Builds a GitHub issue URL from an "owner/repo#123" reference. Returns null if it doesn't parse. */
 function issueUrl(issue: string): string | null {
   const m = /^([^/\s]+\/[^/#\s]+)#(\d+)$/.exec(issue);
@@ -87,6 +106,7 @@ export class ScionAdminExperiments extends LitElement {
   @state() private writeError: string | null = null;
   @state() private pending = false;
   @state() private showResetDialog = false;
+  @state() private filter: ExperimentFilter = 'all';
 
   @state() private experiments: ExperimentEntry[] = [];
   @state() private revision = 0;
@@ -111,6 +131,33 @@ export class ScionAdminExperiments extends LitElement {
       }
       sl-alert {
         margin-bottom: 1rem;
+      }
+      .filter-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+      }
+      .filter-bar sl-icon {
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.875rem;
+      }
+      .filter-bar sl-radio-group::part(form-control-label) {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        clip-path: inset(50%);
+        white-space: nowrap;
+        border: 0;
+      }
+      .filter-count {
+        font-variant-numeric: tabular-nums;
+        opacity: 0.8;
       }
       .row {
         border: 1px solid var(--scion-border, #e2e8f0);
@@ -303,9 +350,79 @@ export class ScionAdminExperiments extends LitElement {
       </p>
       ${this.experiments.length === 0
         ? html`<p class="empty">No experiments are currently registered.</p>`
-        : this.experiments.map((exp) => this.renderRow(exp))}
+        : this.renderFilteredList()}
       ${this.malformed ? this.renderResetDialog() : nothing}
     `;
+  }
+
+  private renderFilteredList(): ReturnType<typeof html> {
+    const filtered = this.experiments.filter((exp) => matchesFilter(exp, this.filter));
+    return html`
+      ${this.renderFilterBar()}
+      ${filtered.length === 0
+        ? html`<p class="empty">${this.emptyFilterMessage()}</p>`
+        : filtered.map((exp) => this.renderRow(exp))}
+    `;
+  }
+
+  private renderFilterBar(): ReturnType<typeof html> {
+    let on = 0;
+    let off = 0;
+    let overridden = 0;
+    for (const exp of this.experiments) {
+      if (exp.enabled) {
+        on++;
+      } else {
+        off++;
+      }
+      if (exp.override !== null) {
+        overridden++;
+      }
+    }
+    const options: Array<{ id: ExperimentFilter; label: string; count: number }> = [
+      { id: 'all', label: 'All', count: this.experiments.length },
+      { id: 'on', label: 'On', count: on },
+      { id: 'off', label: 'Off', count: off },
+      { id: 'overridden', label: 'Overridden', count: overridden },
+    ];
+    return html`
+      <div class="filter-bar">
+        <sl-icon name="funnel" aria-hidden="true"></sl-icon>
+        <sl-radio-group
+          size="small"
+          label="Filter experiments"
+          value=${this.filter}
+          .value=${this.filter}
+          @sl-change=${(e: Event): void => {
+            const val = (e.currentTarget as HTMLElement & { value?: string })?.value ?? '';
+            if (isExperimentFilter(val)) {
+              this.filter = val;
+            }
+          }}
+        >
+          ${options.map(
+            (opt) => html`
+              <sl-radio-button value=${opt.id}>
+                ${opt.label} <span class="filter-count">(${opt.count})</span>
+              </sl-radio-button>
+            `
+          )}
+        </sl-radio-group>
+      </div>
+    `;
+  }
+
+  private emptyFilterMessage(): string {
+    switch (this.filter) {
+      case 'on':
+        return 'No experiments are currently on.';
+      case 'off':
+        return 'No experiments are currently off.';
+      case 'overridden':
+        return 'No experiments are currently overridden.';
+      case 'all':
+        return 'No experiments are currently registered.';
+    }
   }
 
   private renderAttribution(): ReturnType<typeof html> | typeof nothing {
