@@ -151,6 +151,7 @@ func deleteContainerByID(ctx context.Context, command string, h api.ResourceHand
 	if h.UID == "" {
 		return errNoUID(h)
 	}
+	removeNetnsSetupContainers(ctx, command, h.UID)
 	out, err := runSimpleCommand(ctx, command, "rm", "-f", h.UID)
 	if err != nil {
 		if isNoSuchContainer(out) {

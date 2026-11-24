@@ -58,6 +58,7 @@ func TestLaunchVocabularyValues(t *testing.T) {
 		{LaunchCodeInvalidImage, "invalid_image"},
 		{LaunchCodeRuntimeUnavailable, "runtime_unavailable"},
 		{LaunchCodeImageLacksNetnsSetup, "image_lacks_netns_setup"},
+		{LaunchCodeFirewallRequiresMetadataInterception, "firewall_requires_metadata_interception"},
 		{LaunchCodeContainerConfig, "container_config"},
 		{LaunchCodeCrashLoop, "crash_loop"},
 		{LaunchCodeInitContainerFailed, "init_container_failed"},

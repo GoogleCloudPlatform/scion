@@ -1,4 +1,4 @@
-# Test image for container_test.go. The scion user gets unrestricted
+# Test image for netcap_container_test.go. The scion user gets unrestricted
 # passwordless sudo on purpose: the test checks that even full sudo cannot
 # change the nat table once sciontool init has finished network setup.
 #

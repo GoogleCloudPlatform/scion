@@ -3083,8 +3083,14 @@ const (
 )
 
 const (
-	netnsSetupLabelKey = "scion.netns-setup"
-	netnsSetupTimeout  = 3 * time.Minute
+	netnsSetupLabelKey   = "scion.netns-setup"
+	netnsSetupNamePrefix = "scion-netns-setup-"
+	// Keep netnsSetupTimeout below sciontool's redirectProbeDeadline (210s in
+	// cmd/sciontool/commands/init_netadmin.go) so the verifier outlives the
+	// setup container.
+	netnsSetupTimeout        = 3 * time.Minute
+	netnsSetupCleanupTimeout = 10 * time.Second
+	initFirewallEnvVar       = "SCION_INIT_FIREWALL"
 
 	// ImageSciontoolCapabilitiesLabel is the image label written by
 	// image-build/scion-base/Dockerfile listing comma-separated capabilities
@@ -3106,6 +3112,125 @@ var ErrImageLacksNetnsSetup = errors.New("agent start refused: metadata intercep
 // comma-separated ImageSciontoolCapabilitiesLabel value.
 func ImageHasCapability(labels map[string]string, capability string) bool {
 	return imageHasCapability(labels, capability)
+}
+
+// ErrFirewallRequiresMetadataInterception is returned when SCION_INIT_FIREWALL
+// is enabled on Docker or Podman without runtime-managed metadata interception
+// (block or assign mode).
+var ErrFirewallRequiresMetadataInterception = errors.New("the init firewall (SCION_INIT_FIREWALL) requires metadata mode block or assign on Docker/Podman (firewall-only mode is not supported)")
+
+// netnsCommandRunner executes a container CLI subcommand; runNetnsSetup and
+// removeNetnsSetupContainers use runSimpleCommand in production and a fake
+// runner in unit tests.
+type netnsCommandRunner func(ctx context.Context, command string, args ...string) (string, error)
+
+// netnsSetupContainerName returns the deterministic container name for the
+// netns-setup container associated with containerID.
+func netnsSetupContainerName(containerID string) string {
+	short := containerID
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	return netnsSetupNamePrefix + short
+}
+
+// effectiveInitFirewall returns the SCION_INIT_FIREWALL value the agent
+// container will observe, from the same sources buildCommonRunArgs emits:
+// ResolvedAuth.EnvVars (when cfg.Harness != nil && cfg.ResolvedAuth != nil and
+// non-empty), cfg.Env "K=V", bare "K" (broker os.LookupEnv), and env-type
+// ResolvedSecrets. Precedence matches buildCommonRunArgs and the container
+// engine: ResolvedAuth is lowest precedence; cfg.Env entries are applied next
+// in order (later -e wins, and a bare entry whose host env var is unset clears
+// any earlier value, matching Docker/Podman `-e K` semantics), and any key
+// present in cfg.Env blocks ResolvedSecrets with the same target; otherwise
+// env-type ResolvedSecrets are applied in order (later -e wins, overriding
+// ResolvedAuth).
+func effectiveInitFirewall(cfg RunConfig) (value string, set bool) {
+	if cfg.Harness != nil && cfg.ResolvedAuth != nil {
+		if v := cfg.ResolvedAuth.EnvVars[initFirewallEnvVar]; v != "" {
+			value = v
+			set = true
+		}
+	}
+	inEnv := false
+	for _, e := range cfg.Env {
+		k, v, hasEq := strings.Cut(e, "=")
+		if k != initFirewallEnvVar {
+			continue
+		}
+		inEnv = true
+		if hasEq {
+			value = v
+			set = true
+		} else if !util.IsAgentRefusedHostEnvName(e) {
+			if envVal, ok := os.LookupEnv(k); ok {
+				value = envVal
+				set = true
+			} else {
+				value = ""
+				set = false
+			}
+		}
+	}
+	if inEnv {
+		return value, set
+	}
+	for _, s := range cfg.ResolvedSecrets {
+		if s.Type != "environment" && s.Type != "" {
+			continue
+		}
+		if s.Target != initFirewallEnvVar {
+			continue
+		}
+		value = s.Value
+		set = true
+	}
+	return value, set
+}
+
+// normalizeInitFirewallArg maps a resolved SCION_INIT_FIREWALL value to a
+// fixed canonical token ("true", "false", or "invalid") for the netns-setup
+// container argv so raw values (including secret-sourced values) are never
+// placed verbatim on the command line. Empty and whitespace-only values are
+// omitted. Forwarding "invalid" fails closed because sciontool parses the
+// value with strconv.ParseBool (cmd/sciontool/commands/init_netadmin.go),
+// which rejects it.
+func normalizeInitFirewallArg(raw string) (string, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return "", false
+	}
+	on, err := CloudRunInitFirewallRequested(raw)
+	if err != nil {
+		return "invalid", true
+	}
+	if on {
+		return "true", true
+	}
+	return "false", true
+}
+
+// checkFirewallWithoutMetadataInterception refuses launches on Docker or
+// Podman that request SCION_INIT_FIREWALL without runtime-managed metadata
+// interception (e.g. passthrough, unset metadata mode, host network, or
+// rootless Podman) before container creation.
+func checkFirewallWithoutMetadataInterception(cfg RunConfig) error {
+	if cfg.MetadataInterception {
+		return nil
+	}
+	val, ok := effectiveInitFirewall(cfg)
+	if !ok {
+		return nil
+	}
+	on, err := CloudRunInitFirewallRequested(val)
+	if err != nil || !on {
+		return nil
+	}
+	return newLaunchFailure(
+		api.LaunchCodeFirewallRequiresMetadataInterception,
+		api.LaunchStepLaunching,
+		"",
+		ErrFirewallRequiresMetadataInterception,
+	)
 }
 
 func imageHasCapability(labels map[string]string, capability string) bool {
@@ -3170,31 +3295,41 @@ func checkImageNetnsSetupSupport(ctx context.Context, command, image string) {
 
 // buildNetnsSetupArgs builds the container CLI argv for the short-lived
 // netns-setup container that joins the agent container's network namespace
-// with NET_ADMIN, runs init-firewall.sh if requested, installs the metadata
-// iptables rules, and exits. It carries only the minimal metadata/firewall
-// environment subset and a non-agent label so List ignores it.
+// with least-privilege capabilities, runs init-firewall.sh if requested,
+// installs the metadata iptables rules, and exits. It carries only the minimal
+// metadata/firewall environment subset and a non-agent label so List ignores
+// it.
 func buildNetnsSetupArgs(containerID string, cfg RunConfig) []string {
 	args := []string{
 		"run", "--rm",
+		"--name", netnsSetupContainerName(containerID),
 		"--network", "container:" + containerID,
+		"--cap-drop", "ALL",
 		"--cap-add", "NET_ADMIN",
+		"--cap-add", "NET_RAW",
+		"--security-opt", "no-new-privileges",
 		"--user", "0",
 		"--entrypoint", "/usr/local/bin/sciontool",
 	}
-	envVals := make(map[string]string, 3)
+	envVals := make(map[string]string, 2)
 	for _, e := range cfg.Env {
 		k, v, ok := strings.Cut(e, "=")
 		if !ok {
 			continue
 		}
 		switch k {
-		case "SCION_METADATA_MODE", "SCION_METADATA_PORT", "SCION_INIT_FIREWALL":
+		case "SCION_METADATA_MODE", "SCION_METADATA_PORT":
 			envVals[k] = v
 		}
 	}
-	for _, k := range []string{"SCION_METADATA_MODE", "SCION_METADATA_PORT", "SCION_INIT_FIREWALL"} {
+	for _, k := range []string{"SCION_METADATA_MODE", "SCION_METADATA_PORT"} {
 		if v := envVals[k]; v != "" {
 			args = append(args, "-e", k+"="+v)
+		}
+	}
+	if v, ok := effectiveInitFirewall(cfg); ok {
+		if norm, emit := normalizeInitFirewallArg(v); emit {
+			args = append(args, "-e", initFirewallEnvVar+"="+norm)
 		}
 	}
 	args = append(args,
@@ -3206,13 +3341,33 @@ func buildNetnsSetupArgs(containerID string, cfg RunConfig) []string {
 }
 
 // runNetnsSetup runs the short-lived netns-setup container against
-// containerID with a 3-minute timeout.
+// containerID with a 3-minute timeout, pre-clearing any leftover setup
+// container by name and force-removing it on any error.
 func runNetnsSetup(ctx context.Context, command, containerID string, cfg RunConfig) error {
+	return runNetnsSetupWith(ctx, runSimpleCommand, command, containerID, cfg)
+}
+
+func runNetnsSetupWith(ctx context.Context, run netnsCommandRunner, command, containerID string, cfg RunConfig) error {
+	name := netnsSetupContainerName(containerID)
 	setupCtx, cancel := context.WithTimeout(ctx, netnsSetupTimeout)
 	defer cancel()
+
+	// Best-effort pre-clear of any leftover setup container with the same
+	// deterministic name (for example after a broker crash).
+	preCleanCtx, preCleanCancel := context.WithTimeout(setupCtx, netnsSetupCleanupTimeout)
+	_, _ = run(preCleanCtx, command, "rm", "-f", name)
+	preCleanCancel()
+
 	args := buildNetnsSetupArgs(containerID, cfg)
-	out, err := runSimpleCommand(setupCtx, command, args...)
+	out, err := run(setupCtx, command, args...)
 	if err != nil {
+		// Force-remove the named setup container on any error (timeout,
+		// cancel, or failure) with a fresh background context so cleanup still
+		// runs when the parent context is done.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), netnsSetupCleanupTimeout)
+		_, _ = run(cleanupCtx, command, "rm", "-f", name)
+		cleanupCancel()
+
 		if setupCtx.Err() != nil {
 			return fmt.Errorf("netns-setup timed out or cancelled: %w", setupCtx.Err())
 		}
@@ -3230,6 +3385,37 @@ func runNetnsSetup(ctx context.Context, command, containerID string, cfg RunConf
 		return fmt.Errorf("netns-setup failed: %w", err)
 	}
 	return nil
+}
+
+// removeNetnsSetupContainers best-effort removes any setup containers labelled
+// for agentContainerID. It is idempotent and never fails the caller.
+func removeNetnsSetupContainers(ctx context.Context, command, agentContainerID string) {
+	removeNetnsSetupContainersWith(ctx, runSimpleCommand, command, agentContainerID)
+}
+
+func removeNetnsSetupContainersWith(ctx context.Context, run netnsCommandRunner, command, agentContainerID string) {
+	if agentContainerID == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), netnsSetupCleanupTimeout)
+	defer cancel()
+	out, err := run(cleanupCtx, command, "ps", "-aq", "--no-trunc", "--filter", "label="+netnsSetupLabelKey+"="+agentContainerID)
+	if err != nil {
+		runtimeLog().Debug("Could not list netns-setup containers for cleanup", "container_id", agentContainerID, "error", err)
+		return
+	}
+	var ids []string
+	for _, id := range strings.Fields(out) {
+		if containerIDRE.MatchString(id) {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	if _, err := run(cleanupCtx, command, append([]string{"rm", "-f"}, ids...)...); err != nil {
+		runtimeLog().Debug("Could not remove netns-setup containers", "container_id", agentContainerID, "count", len(ids), "error", err)
+	}
 }
 
 // removeCreatedContainer best-effort force-removes a container by ID using a

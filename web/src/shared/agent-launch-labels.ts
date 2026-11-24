@@ -79,6 +79,8 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
     'the container runtime is not running or could not be reached; start the container runtime and retry',
   image_lacks_netns_setup:
     'the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough',
+  firewall_requires_metadata_interception:
+    'the init firewall (SCION_INIT_FIREWALL) requires metadata mode block or assign on Docker/Podman (firewall-only mode is not supported)',
   container_config: 'the agent container could not be configured',
   crash_loop: 'the agent container keeps crashing on start',
   init_container_failed: 'an init container of the agent pod failed',

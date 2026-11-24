@@ -59,6 +59,9 @@ func (r *DockerRuntime) ExecUser() string {
 }
 
 func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, error) {
+	if err := checkFirewallWithoutMetadataInterception(config); err != nil {
+		return "", err
+	}
 	if err := prepareContainerSecretEnv(&config); err != nil {
 		return "", err
 	}
@@ -134,6 +137,7 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	id := strings.TrimSpace(out)
 	if config.MetadataInterception {
 		if err := runNetnsSetup(ctx, r.Command, id, config); err != nil {
+			removeNetnsSetupContainers(ctx, r.Command, id)
 			if rmErr := removeCreatedContainer(r.Command, id); rmErr != nil {
 				return "", fmt.Errorf("metadata network setup failed: %w (container cleanup also failed: %v)", err, rmErr)
 			}
@@ -185,10 +189,12 @@ func (r *DockerRuntime) Stop(ctx context.Context, ref RunRef) error {
 	return err
 }
 
-// Delete removes the container ref.ID. The engine container ID is already
+// Delete removes the container ref.ID and best-effort removes any leftover
+// netns-setup containers labelled for it. The engine container ID is already
 // unique per run, so ref.RunID needs no further check here; run targeting is
 // enforced by the caller resolving the ID from List.
 func (r *DockerRuntime) Delete(ctx context.Context, ref RunRef) error {
+	removeNetnsSetupContainers(ctx, r.Command, ref.ID)
 	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
