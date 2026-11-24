@@ -399,6 +399,8 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	searchCtx := withAuthzInputMemo(rawSearchCtx)
 
+	bellGen := s.decisionBellUserGen(user.ID())
+
 	selected, truncated, err := s.selectProfileDecisionProjects(searchCtx, user, token, pq.projectID)
 	if err != nil {
 		writeDecisionsError(w, r, searchCtx, err)
@@ -444,7 +446,7 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasBellCounts {
 		if rec := findDecisionBellStatusRecorder(w); rec != nil {
-			rec.setBellCounts(bellTotal, bellProjects)
+			rec.setBellCounts(bellTotal, bellProjects, bellGen)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -654,4 +655,209 @@ func TestDecisionsScale_TrayOpen(t *testing.T) {
 				dialectName, sc.name, runs, totalDur/runs, lastQueries)
 		})
 	}
+}
+
+type bellReconcileRaceStore struct {
+	store.Store
+	listOpenHook atomic.Pointer[func()]
+	getNotifHook atomic.Pointer[func()]
+}
+
+func (s *bellReconcileRaceStore) ListOpenPrompts(ctx context.Context, projectIDs, chatKeys []string) ([]*store.ProjectDecisionPrompt, error) {
+	out, err := s.Store.ListOpenPrompts(ctx, projectIDs, chatKeys)
+	if h := s.listOpenHook.Swap(nil); h != nil {
+		(*h)()
+	}
+	return out, err
+}
+
+func (s *bellReconcileRaceStore) GetNotification(ctx context.Context, id string) (*store.Notification, error) {
+	if h := s.getNotifHook.Swap(nil); h != nil {
+		(*h)()
+	}
+	return s.Store.GetNotification(ctx, id)
+}
+
+// TestDecisionsBell_ReconcileReuse_RaceSerialization verifies that inline bell
+// writes serialize against the bell worker pool and never overwrite a fresher
+// notification state with a stale tray-open snapshot:
+//   - (a) a recompute completing between the tray read and write (both count
+//     increase and clear-to-zero / false re-alert prevention);
+//   - (b) a recompute already in flight (or queued in userDue) at write time;
+//   - (c) two concurrent tray requests for one user where the newer one writes
+//     first;
+//   - (d) a bell event enqueued while an inline write is in flight wakes the
+//     worker when the inline write finishes.
+func TestDecisionsBell_ReconcileReuse_RaceSerialization(t *testing.T) {
+	newRaceFixture := func(t *testing.T) (*decisionsFixture, *bellReconcileRaceStore, func(string)) {
+		t.Helper()
+		srv, _, alice, bob, project, spy, _ := setupDemoPolicyTestWithFault(t, func(inner store.Store, _ *storeFaultSwitch) *bellReconcileRaceStore {
+			return &bellReconcileRaceStore{Store: inner}
+		})
+		f := newDecisionsFixtureOn(t, srv, spy, alice, bob, project)
+		setDecisionsExperiment(t, f.srv, true)
+		setFastDecisionBell(t, f.srv, time.Millisecond)
+		ctx := context.Background()
+		f.agent.Ancestry = []string{f.bob.ID}
+		f.agent.MessageMode = store.MessageModeProject
+		require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+
+		choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
+		seed := func(key string) {
+			t.Helper()
+			_, err := spy.Store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+				Message: &store.Message{
+					ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+					Recipient: "chat", ThreadID: f.topicID, Channel: "web", CreatedAt: time.Now().UTC(),
+				},
+				AskerAgentID: f.agent.ID, AskerAgentName: f.agent.Name,
+				Decisions: []messages.Decision{{Key: key, Question: key + "?", Choices: choices}},
+			})
+			require.NoError(t, err)
+		}
+		return f, spy, seed
+	}
+
+	t.Run("recompute_completes_between_read_and_write", func(t *testing.T) {
+		f, spy, seed := newRaceFixture(t)
+		ctx := context.Background()
+		seed("a")
+
+		hook := func() {
+			// A new decision arrives and a recompute writes the fresh count (2)
+			// before the tray request's inline reconcile runs.
+			seed("b")
+			require.NoError(t, f.srv.recomputeDecisionBellUser(ctx, f.bob.ID))
+			row, err := spy.Store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+			require.NoError(t, err)
+			require.Equal(t, "2", row.ResourceID)
+		}
+		spy.listOpenHook.Store(&hook)
+
+		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		waitDecisionBellIdle(t, f.srv)
+
+		row, err := spy.Store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+		require.NoError(t, err)
+		assert.Equal(t, "2", row.ResourceID, "bell row must reflect the newer recompute, not the stale tray snapshot")
+	})
+
+	t.Run("cleared_recompute_not_realerted_by_stale_tray", func(t *testing.T) {
+		f, spy, seed := newRaceFixture(t)
+		ctx := context.Background()
+		seed("a")
+		require.NoError(t, f.srv.recomputeDecisionBellUser(ctx, f.bob.ID))
+
+		hook := func() {
+			// Decision is withdrawn and a recompute clears the bell row (0,
+			// Acknowledged=true) before the tray request finishes.
+			_, err := spy.Store.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{AskerAgentID: f.agent.ID, Keys: []string{"a"}})
+			require.NoError(t, err)
+			require.NoError(t, f.srv.recomputeDecisionBellUser(ctx, f.bob.ID))
+			row, err := spy.Store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+			require.NoError(t, err)
+			require.Equal(t, "0", row.ResourceID)
+			require.True(t, row.Acknowledged)
+		}
+		spy.listOpenHook.Store(&hook)
+
+		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		waitDecisionBellIdle(t, f.srv)
+
+		row, err := spy.Store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+		require.NoError(t, err)
+		assert.Equal(t, "0", row.ResourceID, "stale tray snapshot must not restore count 1 after clear")
+		assert.True(t, row.Acknowledged, "stale tray snapshot must not falsely re-alert as unread")
+	})
+
+	t.Run("recompute_in_flight_at_write_time_falls_back_to_async", func(t *testing.T) {
+		f, spy, seed := newRaceFixture(t)
+		ctx := context.Background()
+		release := holdDecisionBellWorkers(t, f.srv)
+		seed("a")
+
+		// Simulate a worker recompute currently in flight for f.bob.
+		f.srv.decisionBell.mu.Lock()
+		if f.srv.decisionBell.inFlightUsers == nil {
+			f.srv.decisionBell.inFlightUsers = make(map[string]bool)
+		}
+		f.srv.decisionBell.inFlightUsers[f.bob.ID] = true
+		f.srv.decisionBell.mu.Unlock()
+
+		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+
+		// Inline path must not have written while a recompute was in flight,
+		// and must have enqueued an async reconcile instead.
+		_, nerr := spy.Store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+		assert.ErrorIs(t, nerr, store.ErrNotFound, "inline write must be skipped while user is inFlightUsers")
+		queued, reconcile := decisionBellHasQueuedUser(f.srv, f.bob.ID)
+		assert.True(t, queued, "must fall back to reconcileDecisionBellAsync when user is inFlightUsers")
+		assert.True(t, reconcile)
+
+		// Finish the simulated in-flight worker and release the queue: async
+		// reconcile picks up the latest state (2 after seeding "b").
+		seed("b")
+		f.srv.finishInlineDecisionBell(f.bob.ID)
+		release()
+		waitDecisionBellIdle(t, f.srv)
+
+		row, err := spy.Store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+		require.NoError(t, err)
+		assert.Equal(t, "2", row.ResourceID)
+	})
+
+	t.Run("concurrent_tray_requests_do_not_overwrite_newer_snapshot", func(t *testing.T) {
+		f, spy, seed := newRaceFixture(t)
+		ctx := context.Background()
+		seed("a")
+
+		hook := func() {
+			// While tray 1 holds its stale snapshot (1), decision "b" arrives
+			// and tray 2 runs end-to-end, writing 2 inline and bumping userGen.
+			seed("b")
+			rr2 := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+			require.Equal(t, http.StatusOK, rr2.Code)
+			row, err := spy.Store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+			require.NoError(t, err)
+			require.Equal(t, "2", row.ResourceID)
+		}
+		spy.listOpenHook.Store(&hook)
+
+		rr1 := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+		require.Equal(t, http.StatusOK, rr1.Code)
+		waitDecisionBellIdle(t, f.srv)
+
+		row, err := spy.Store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+		require.NoError(t, err)
+		assert.Equal(t, "2", row.ResourceID, "older concurrent tray request must not overwrite newer tray write")
+	})
+
+	t.Run("enqueue_during_inline_write_wakes_worker_on_finish", func(t *testing.T) {
+		f, spy, seed := newRaceFixture(t)
+		ctx := context.Background()
+		seed("a")
+
+		hook := func() {
+			// Verify inline write holds inFlightUsers, then seed "b" and enqueue
+			// a bell update while inline write is still in progress.
+			f.srv.decisionBell.mu.Lock()
+			inFlight := f.srv.decisionBell.inFlightUsers[f.bob.ID]
+			f.srv.decisionBell.mu.Unlock()
+			assert.True(t, inFlight, "inline write must hold inFlightUsers while writing")
+			seed("b")
+			f.srv.enqueueDecisionBellUser(f.bob.ID, false)
+		}
+		spy.getNotifHook.Store(&hook)
+
+		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		waitDecisionBellIdle(t, f.srv)
+
+		row, err := spy.Store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+		require.NoError(t, err)
+		assert.Equal(t, "2", row.ResourceID, "worker must run queued update after inline write clears inFlightUsers")
+	})
 }
