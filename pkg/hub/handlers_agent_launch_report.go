@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 	"unicode"
 
@@ -167,6 +168,13 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		// synchronous dispatch (ptone/scion#4818), so a report the launch
 		// fencing rejects writes none of it.
 		sr.AgentConfig = brokerAgentConfigOf(req.Agent)
+		if rs := req.Agent.RuntimeState; rs != "" && len(rs) <= 256 && !hasControlCharacter(rs) {
+			if req.Agent.ID != "" && !strings.Contains(rs, "container:") {
+				sr.RuntimeState = "container:" + req.Agent.ID + ";" + rs
+			} else {
+				sr.RuntimeState = rs
+			}
+		}
 	}
 
 	answer, updated, err := s.store.ApplyLaunchReport(ctx, agentID, brokerID, sr)

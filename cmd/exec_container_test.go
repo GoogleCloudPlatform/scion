@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -292,4 +293,41 @@ func TestResolveLocalProjectAgentID_PrecedenceAndAmbiguity(t *testing.T) {
 	_, err = resolveLocalProjectAgentID(t.Context(), client, projID, "dup")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ambiguous")
+}
+
+func TestPrintExecContainerStatus_HomePersistent(t *testing.T) {
+	tVal := true
+	fVal := false
+
+	var buf bytes.Buffer
+	printExecContainerStatus(&buf, &hubclient.ExecContainerStatus{
+		Configured: true,
+		State:      "ready",
+		Agent: &hubclient.ExecContainerAgent{
+			ID:             "11111111-2222-3333-4444-555555555555",
+			Name:           "ops",
+			ProjectID:      "proj-1",
+			Phase:          "running",
+			Activity:       "idle",
+			HomePersistent: &tVal,
+		},
+	})
+	assert.Contains(t, buf.String(), "HOME PERSISTENT")
+	assert.Contains(t, buf.String(), "yes")
+
+	buf.Reset()
+	printExecContainerStatus(&buf, &hubclient.ExecContainerStatus{
+		Configured: true,
+		State:      "ready",
+		Agent: &hubclient.ExecContainerAgent{
+			ID:             "11111111-2222-3333-4444-555555555555",
+			Name:           "ops",
+			ProjectID:      "proj-1",
+			Phase:          "running",
+			Activity:       "idle",
+			HomePersistent: &fVal,
+		},
+	})
+	assert.Contains(t, buf.String(), "HOME PERSISTENT")
+	assert.Contains(t, buf.String(), "will not survive a restart")
 }

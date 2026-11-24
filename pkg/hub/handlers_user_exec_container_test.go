@@ -768,3 +768,85 @@ func TestHandleExistingAgent_ShellTaskRefused(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeTaskNotSupported)
 }
+
+// TestExecContainer_HomePersistent verifies P4 (ptone/scion#8820, design §3.6 & §4.2):
+// ResolveExecContainer and GET/PUT /api/v1/users/me/exec-container report
+// homePersistent=true, homePersistent=false (explicitly serialized), and omit
+// homePersistent when unknown, and applyBrokerResponse records it from the broker.
+func TestExecContainer_HomePersistent(t *testing.T) {
+	srv, s := testServer(t)
+	setExperimentOverrides(t, srv, map[string]bool{experiments.ExecContainers: true})
+	ctx := context.Background()
+
+	u := ecUser(t, s, store.UserRoleMember)
+	proj := ecProject(t, s, "Home Persist Project")
+	grantProjectAccessOnly(t, s, u.ID, proj.ID)
+	ident, cred := interactiveUser(u)
+
+	// 1. Unknown (no home_persistent token in RuntimeState) -> nil / omitted in JSON.
+	unknownAgent := ecAgent(t, s, proj.ID, u.ID, u.ID, config.ShellHarnessConfigName, string(state.PhaseRunning), string(state.ActivityIdle))
+	rec := doECRequest(t, srv, http.MethodPut, map[string]any{"agentId": unknownAgent.ID}, ident, cred)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), `"homePersistent"`)
+	res, err := srv.ResolveExecContainer(ctx, u.ID)
+	require.NoError(t, err)
+	assert.Nil(t, res.HomePersistent)
+
+	// 2. Persistent (home_persistent=true) -> true in resolver, PUT, and GET.
+	persistAgent := ecAgent(t, s, proj.ID, u.ID, u.ID, config.ShellHarnessConfigName, string(state.PhaseRunning), string(state.ActivityIdle))
+	persistAgent.RuntimeState = "container:c-1;home_persistent=true"
+	require.NoError(t, s.UpdateAgent(ctx, persistAgent))
+
+	putRec := doECRequest(t, srv, http.MethodPut, map[string]any{"agentId": persistAgent.ID}, ident, cred)
+	require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
+	assert.Contains(t, putRec.Body.String(), `"homePersistent":true`)
+	putOut := decodeECResponse(t, putRec)
+	require.NotNil(t, putOut.Agent)
+	require.NotNil(t, putOut.Agent.HomePersistent)
+	assert.True(t, *putOut.Agent.HomePersistent)
+
+	getRec := doECRequest(t, srv, http.MethodGet, nil, ident, cred)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	assert.Contains(t, getRec.Body.String(), `"homePersistent":true`)
+
+	res, err = srv.ResolveExecContainer(ctx, u.ID)
+	require.NoError(t, err)
+	require.NotNil(t, res.HomePersistent)
+	assert.True(t, *res.HomePersistent)
+
+	// 3. Non-persistent (home_persistent=false) -> false explicitly serialized in JSON.
+	ephemeralAgent := ecAgent(t, s, proj.ID, u.ID, u.ID, config.ShellHarnessConfigName, string(state.PhaseRunning), string(state.ActivityIdle))
+	ephemeralAgent.RuntimeState = "container:c-2;home_persistent=false"
+	require.NoError(t, s.UpdateAgent(ctx, ephemeralAgent))
+
+	putRec = doECRequest(t, srv, http.MethodPut, map[string]any{"agentId": ephemeralAgent.ID}, ident, cred)
+	require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
+	assert.Contains(t, putRec.Body.String(), `"homePersistent":false`)
+	putOut = decodeECResponse(t, putRec)
+	require.NotNil(t, putOut.Agent)
+	require.NotNil(t, putOut.Agent.HomePersistent)
+	assert.False(t, *putOut.Agent.HomePersistent)
+
+	getRec = doECRequest(t, srv, http.MethodGet, nil, ident, cred)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	assert.Contains(t, getRec.Body.String(), `"homePersistent":false`)
+
+	res, err = srv.ResolveExecContainer(ctx, u.ID)
+	require.NoError(t, err)
+	require.NotNil(t, res.HomePersistent)
+	assert.False(t, *res.HomePersistent)
+
+	// 4. applyBrokerResponse preserves container:<id> and appends home_persistent.
+	d := &HTTPAgentDispatcher{store: s, log: slog.Default()}
+	a := &store.Agent{ID: ephemeralAgent.ID, Name: ephemeralAgent.Name}
+	d.applyBrokerResponse(ctx, a, &RemoteAgentResponse{
+		Agent: &RemoteAgentInfo{
+			ID:           "ctr-99",
+			RuntimeState: "home_persistent=false",
+		},
+	})
+	assert.Equal(t, "container:ctr-99;home_persistent=false", a.RuntimeState)
+	p, ok := api.ParseHomePersistentRuntimeState(a.RuntimeState)
+	assert.True(t, ok)
+	assert.False(t, p)
+}

@@ -1640,7 +1640,13 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *st
 			agent.Activity = resp.Agent.Activity
 		}
 		agent.ContainerStatus = resp.Agent.ContainerStatus
-		if resp.Agent.ID != "" {
+		if rs := resp.Agent.RuntimeState; rs != "" && len(rs) <= 256 && !hasControlCharacter(rs) {
+			if resp.Agent.ID != "" && !strings.Contains(rs, "container:") {
+				agent.RuntimeState = "container:" + resp.Agent.ID + ";" + rs
+			} else {
+				agent.RuntimeState = rs
+			}
+		} else if resp.Agent.ID != "" {
 			agent.RuntimeState = "container:" + resp.Agent.ID
 		}
 		applyBrokerAgentConfig(agent, resp.Agent)

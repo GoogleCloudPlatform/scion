@@ -2118,6 +2118,7 @@ type RemoteAgentInfo struct {
 	Activity        string            `json:"activity,omitempty"`  // Runtime activity
 	Status          string            `json:"status"`              // Legacy: kept for backward compat with older brokers
 	ContainerStatus string            `json:"containerStatus,omitempty"`
+	RuntimeState    string            `json:"runtimeState,omitempty"`
 	// Warnings mirrors runtimebroker.AgentResponse.Warnings: the broker's
 	// hub-only env drop warnings (for example a broker-local TZ that was
 	// ignored). Older brokers omit it.

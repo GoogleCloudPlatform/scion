@@ -23,13 +23,14 @@ import (
 // ExecContainerAgent holds the agent metadata returned by
 // GET/PUT /api/v1/users/me/exec-container when the container is available.
 type ExecContainerAgent struct {
-	ID          string `json:"id"`
-	Slug        string `json:"slug"`
-	Name        string `json:"name"`
-	ProjectID   string `json:"projectId"`
-	ProjectName string `json:"projectName"`
-	Phase       string `json:"phase"`
-	Activity    string `json:"activity"`
+	ID             string `json:"id"`
+	Slug           string `json:"slug"`
+	Name           string `json:"name"`
+	ProjectID      string `json:"projectId"`
+	ProjectName    string `json:"projectName"`
+	Phase          string `json:"phase"`
+	Activity       string `json:"activity"`
+	HomePersistent *bool  `json:"homePersistent,omitempty"`
 }
 
 // ExecContainerStatus is the response shape of
