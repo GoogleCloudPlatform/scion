@@ -1367,6 +1367,142 @@ check_contains "explicit SOURCE_DATE_EPOCH with the git shim: wins" "--build-arg
 RUN_ENV=()
 RUN_PATH=""
 
+# ---------------------------------------------------------------------------
+# --binaries source|release option, tag/checkout checks, and builder emission
+# ---------------------------------------------------------------------------
+
+# Usage text documents --binaries
+run_bi "${OFF}" --help
+check_rc "binaries: --help exit 0" 0 "${RC}"
+check_contains "binaries: --help documents --binaries" "--binaries <mode>" "${OUT}"
+
+# Invalid --binaries values rejected with usage error
+run_bi "${OFF}" --binaries bogus --dry-run
+check_rc "binaries: invalid value exits 1" 1 "${RC}"
+check_contains "binaries: invalid value error" "Error: unknown --binaries 'bogus'" "${OUT}"
+check_contains "binaries: invalid value prints usage" "Usage: build-images.sh" "${OUT}"
+
+run_bi "${OFF}" --binaries
+check_rc "binaries: missing value exits 1" 1 "${RC}"
+check_contains "binaries: missing value error" "--binaries requires an argument" "${OUT}"
+
+# Release tag validation in release mode
+run_bi "${ON}" --binaries release --dry-run --target scion-base --allow-stale-base
+check_rc "binaries release: default tag 'latest' rejected" 1 "${RC}"
+check_contains "binaries release: explains release tag form" "requires --tag to be a release tag" "${OUT}"
+check_contains "binaries release: explains checkout and labels" "image labels (VERSION, GIT_COMMIT)" "${OUT}"
+
+run_bi "${ON}" --binaries release --tag dev-123 --dry-run --target scion-base --allow-stale-base
+check_rc "binaries release: non-release tag 'dev-123' rejected" 1 "${RC}"
+check_contains "binaries release: names bad tag" "got 'dev-123'" "${OUT}"
+
+run_bi "${ON}" --binaries release --tag v01.2.3 --dry-run --target scion-base --allow-stale-base
+check_rc "binaries release: leading-zero tag 'v01.2.3' rejected" 1 "${RC}"
+check_contains "binaries release: leading-zero tag error" "requires --tag to be a release tag" "${OUT}"
+
+# Checkout exact-match validation in release mode
+run_bi "${OFF}" --binaries release --tag v9.9.9 --dry-run --target scion-base --allow-stale-base
+check_rc "binaries release: off-tag checkout rejected" 1 "${RC}"
+check_contains "binaries release: off-tag error names tag" "requires the checkout to be exactly at tag 'v9.9.9'" "${OUT}"
+check_contains "binaries release: off-tag error explains labels" "image labels (VERSION, GIT_COMMIT)" "${OUT}"
+check_contains "binaries release: off-tag error notes v* precedence over nightly" "prefers v*" "${OUT}"
+
+run_bi "${PAST}" --binaries release --tag v9.9.9 --dry-run --target scion-base --allow-stale-base
+check_rc "binaries release: commit past tag rejected" 1 "${RC}"
+check_contains "binaries release: commit past tag error" "exact_tag_version resolved '<none>'" "${OUT}"
+
+run_bi "${ON}" --binaries release --tag v9.9.8 --dry-run --target scion-base --allow-stale-base
+check_rc "binaries release: mismatched tag on HEAD rejected" 1 "${RC}"
+check_contains "binaries release: mismatched tag shows resolved VERSION" "exact_tag_version resolved 'v9.9.9'" "${OUT}"
+
+# Valid release tags: stable (v9.9.9), preview, rc, nightly
+PREVIEW="${TMP}/preview"
+cp -R "${OFF}" "${PREVIEW}"
+git -C "${PREVIEW}" tag v0.4.0-preview.3
+RC_REPO="${TMP}/rc_repo"
+cp -R "${OFF}" "${RC_REPO}"
+git -C "${RC_REPO}" tag v1.0.0-rc.2
+
+for row in "${ON}|v9.9.9" "${PREVIEW}|v0.4.0-preview.3" "${RC_REPO}|v1.0.0-rc.2" "${NIGHTLY}|nightly-20261106"; do
+  r="${row%%|*}"; t="${row#*|}"
+  run_bi "${r}" --binaries release --tag "${t}" --dry-run --target all
+  check_rc "binaries release (${t}): local-docker dry-run exit 0" 0 "${RC}"
+  check_contains "binaries release (${t}): banner shows release" "Binaries: release (${t})" "${OUT}"
+  check_contains "binaries release (${t}): scion-base gets SCION_BINARIES=release" "--build-arg SCION_BINARIES=release" "$(line_for scion-base)"
+  check_contains "binaries release (${t}): scion-base gets SCION_RELEASE_TAG" "--build-arg SCION_RELEASE_TAG=${t}" "$(line_for scion-base)"
+  check_not_contains "binaries release (${t}): core-base does not get SCION_BINARIES" "SCION_BINARIES" "$(line_for core-base)"
+  check_not_contains "binaries release (${t}): scion-hub does not get SCION_BINARIES" "SCION_BINARIES" "$(line_for scion-hub)"
+done
+
+# Default source mode emits no SCION_BINARIES / SCION_RELEASE_TAG build-args
+run_bi "${ON}" --tag v9.9.9 --dry-run --target all
+check_rc "binaries source (default): exit 0" 0 "${RC}"
+check_contains "binaries source (default): banner shows source" "Binaries: source" "${OUT}"
+check_not_contains "binaries source (default): scion-base omits SCION_BINARIES" "SCION_BINARIES" "$(line_for scion-base)"
+check_not_contains "binaries source (default): scion-base omits SCION_RELEASE_TAG" "SCION_RELEASE_TAG" "$(line_for scion-base)"
+
+# Explicit --binaries source works off-tag with :latest
+run_bi "${OFF}" --binaries source --dry-run --target all
+check_rc "binaries source (explicit): exit 0" 0 "${RC}"
+check_not_contains "binaries source (explicit): scion-base omits SCION_BINARIES" "SCION_BINARIES" "$(line_for scion-base)"
+
+# Omni target emits SCION_BINARIES and SCION_RELEASE_TAG in release mode, omits in source mode
+run_bi "${ON}" --binaries release --tag v9.9.9 --dry-run --target scion-omni --allow-stale-base
+check_rc "binaries release: scion-omni local-docker exit 0" 0 "${RC}"
+check_contains "binaries release: scion-omni gets SCION_BINARIES=release" "--build-arg SCION_BINARIES=release" "$(line_for scion-omni)"
+check_contains "binaries release: scion-omni gets SCION_RELEASE_TAG=v9.9.9" "--build-arg SCION_RELEASE_TAG=v9.9.9" "$(line_for scion-omni)"
+
+run_bi "${ON}" --binaries source --tag v9.9.9 --dry-run --target scion-omni --allow-stale-base
+check_rc "binaries source: scion-omni local-docker exit 0" 0 "${RC}"
+check_not_contains "binaries source: scion-omni omits SCION_BINARIES" "SCION_BINARIES" "$(line_for scion-omni)"
+
+# local-podman builder emits build-args in release mode and omits in source mode
+podman_line_for() { printf '%s\n' "${OUT}" | grep '^\[dry-run\] podman build' | grep -- "-t $1:" | head -n 1 || true; }
+run_bi "${ON}" --builder local-podman --binaries release --tag v9.9.9 --dry-run --target scion-base --allow-stale-base
+check_rc "binaries release: local-podman exit 0" 0 "${RC}"
+check_contains "binaries release: local-podman gets SCION_BINARIES=release" "--build-arg SCION_BINARIES=release" "$(podman_line_for scion-base)"
+check_contains "binaries release: local-podman gets SCION_RELEASE_TAG=v9.9.9" "--build-arg SCION_RELEASE_TAG=v9.9.9" "$(podman_line_for scion-base)"
+
+run_bi "${ON}" --builder local-podman --binaries source --tag v9.9.9 --dry-run --target scion-base --allow-stale-base
+check_rc "binaries source: local-podman exit 0" 0 "${RC}"
+check_not_contains "binaries source: local-podman omits SCION_BINARIES" "SCION_BINARIES" "$(podman_line_for scion-base)"
+
+# cloud-build builder substitutions in release mode vs source mode
+for cb_target in all common scion-base thick omni; do
+  run_bi "${ON}" --builder cloud-build --registry reg.example/x --binaries release --tag v9.9.9 --dry-run --target "${cb_target}" --allow-stale-base
+  check_rc "binaries release: cloud-build ${cb_target} exit 0" 0 "${RC}"
+  check_contains "binaries release: cloud-build ${cb_target} passes _SCION_BINARIES=release" "_SCION_BINARIES=release" "${OUT}"
+  check_contains "binaries release: cloud-build ${cb_target} passes _SCION_RELEASE_TAG=v9.9.9" "_SCION_RELEASE_TAG=v9.9.9" "${OUT}"
+
+  run_bi "${ON}" --builder cloud-build --registry reg.example/x --binaries source --tag v9.9.9 --dry-run --target "${cb_target}" --allow-stale-base
+  check_rc "binaries source: cloud-build ${cb_target} exit 0" 0 "${RC}"
+  check_not_contains "binaries source: cloud-build ${cb_target} omits _SCION_BINARIES" "_SCION_BINARIES" "${OUT}"
+  check_not_contains "binaries source: cloud-build ${cb_target} omits _SCION_RELEASE_TAG" "_SCION_RELEASE_TAG" "${OUT}"
+done
+
+# cloud-build targets that do NOT build scion-base/omni never receive _SCION_BINARIES
+for cb_target in core-base harnesses hub scion-claude; do
+  run_bi "${ON}" --builder cloud-build --registry reg.example/x --binaries release --tag v9.9.9 --dry-run --target "${cb_target}" --allow-stale-base
+  check_rc "binaries release: cloud-build ${cb_target} exit 0" 0 "${RC}"
+  check_not_contains "binaries release: cloud-build ${cb_target} omits _SCION_BINARIES" "_SCION_BINARIES" "${OUT}"
+  check_not_contains "binaries release: cloud-build ${cb_target} omits _SCION_RELEASE_TAG" "_SCION_RELEASE_TAG" "${OUT}"
+done
+
+# Every Cloud Build config that builds scion-base or scion-omni passes
+# SCION_BINARIES and SCION_RELEASE_TAG and defaults them.
+for f in cloudbuild.yaml cloudbuild-common.yaml cloudbuild-scion-base.yaml cloudbuild-thick.yaml cloudbuild-omni.yaml; do
+  y="${IMAGE_BUILD_SRC}/${f}"
+  want="$(grep -cE "image-build/(scion-base|omni)/Dockerfile" "${y}" || true)"
+  # shellcheck disable=SC2016 # literal yaml lines, not expansions
+  got_bin="$(grep -c 'SCION_BINARIES=\$_SCION_BINARIES' "${y}" || true)"
+  # shellcheck disable=SC2016
+  got_tag="$(grep -c 'SCION_RELEASE_TAG=\$_SCION_RELEASE_TAG' "${y}" || true)"
+  check_eq "cloudbuild: ${f} passes SCION_BINARIES to each of its ${want} scion-base/omni builds" "${want}" "${got_bin}"
+  check_eq "cloudbuild: ${f} passes SCION_RELEASE_TAG to each of its ${want} scion-base/omni builds" "${want}" "${got_tag}"
+  check_contains "cloudbuild: ${f} defaults _SCION_BINARIES to source" "_SCION_BINARIES: 'source'" "$(cat "${y}")"
+  check_contains "cloudbuild: ${f} defaults _SCION_RELEASE_TAG to empty" "_SCION_RELEASE_TAG: ''" "$(cat "${y}")"
+done
+
 echo ""
 echo "${PASSES} passed, ${FAILS} failed"
 [ "${FAILS}" -eq 0 ]

@@ -45,6 +45,7 @@ DRY_RUN="false"
 CONTINUE_ON_ERROR="false"
 ALLOW_STALE_BASE="false"
 STRICT_BASE="false"
+BINARIES="source"
 
 # shellcheck source=lib/targets.sh
 source "${SCRIPT_DIR}/lib/targets.sh"
@@ -98,6 +99,14 @@ Options:
                         is always added when run inside a git repo. When HEAD is
                         exactly on a git tag and --tag is not given, a warning
                         suggests --tag <that tag>; the default stays latest.
+  --binaries <mode>     How to obtain scion and sciontool in scion-base and omni
+                        (default: source)
+                          source   - compile from source in the container build
+                          release  - download Linux release tarballs and SHA256SUMS
+                                     from GitHub Releases for --tag. Requires --tag
+                                     to be a release tag (vX.Y.Z, vX.Y.Z-preview.N,
+                                     vX.Y.Z-rc.N, or nightly-YYYYMMDD) and HEAD to
+                                     be checked out exactly at that tag.
   --platform <plat>     Target platform(s) (default: builder's native arch)
                           all         - linux/amd64,linux/arm64
                           Or pass a value directly: linux/amd64,linux/arm64
@@ -134,6 +143,12 @@ while [[ $# -gt 0 ]]; do
     --registry) REGISTRY="$2"; REGISTRY_EXPLICIT="true"; shift 2 ;;
     --target)   TARGET="$2"; shift 2 ;;
     --tag)      TAG="$2"; TAG_EXPLICIT="true"; shift 2 ;;
+    --binaries)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --binaries requires an argument (source or release)" >&2
+        usage 1
+      fi
+      BINARIES="$2"; shift 2 ;;
     --platform) PLATFORM="$2"; PLATFORM_EXPLICIT="true"; shift 2 ;;
     --push)     PUSH="true"; shift ;;
     --continue-on-error) CONTINUE_ON_ERROR="true"; shift ;;
@@ -172,6 +187,12 @@ if [[ "${TARGET}" == "omni" ]]; then
   OMNI_BUILD="true"
 fi
 export OMNI_BUILD
+
+# Validate --binaries mode.
+if [[ "${BINARIES}" != "source" && "${BINARIES}" != "release" ]]; then
+  echo "Error: unknown --binaries '${BINARIES}' (allowed: source, release)" >&2
+  usage 1
+fi
 
 # Validate builder against allow-list.
 builder_ok="false"
@@ -337,6 +358,33 @@ if [[ -n "${SOURCE_DATE_EPOCH}" ]]; then
 fi
 export SHORT_SHA COMMIT_SHA VERSION BUILD_TIME
 
+# Release-binaries mode: --tag names the GitHub Release to download, and the
+# checkout must sit exactly on that tag so image labels (VERSION, GIT_COMMIT)
+# and files copied from the checkout match the downloaded binaries.
+RELEASE_TAG=""
+if [[ "${BINARIES}" == "release" ]]; then
+  if [[ -z "$(release_tag_or_empty "${TAG}" 2>/dev/null)" ]]; then
+    echo "Error: --binaries release requires --tag to be a release tag" >&2
+    echo "  (vX.Y.Z, vX.Y.Z-preview.N, vX.Y.Z-rc.N, or nightly-YYYYMMDD), got '${TAG}'." >&2
+    echo "  In release mode, --tag names the GitHub Release to download and HEAD must" >&2
+    echo "  sit exactly on that tag so image labels (VERSION, GIT_COMMIT) and files" >&2
+    echo "  copied from the checkout match the downloaded binaries." >&2
+    exit 1
+  fi
+  if [[ "${VERSION}" != "${TAG}" ]]; then
+    echo "Error: --binaries release requires the checkout to be exactly at tag '${TAG}'" >&2
+    echo "  (exact_tag_version resolved '${VERSION:-<none>}')." >&2
+    echo "  In release mode, --tag must be a release tag and HEAD must sit exactly" >&2
+    echo "  on that tag so image labels (VERSION, GIT_COMMIT) and files copied from" >&2
+    echo "  the checkout match the downloaded binaries." >&2
+    echo "  If HEAD carries both a v* tag and a nightly tag, use the v* tag (exact_tag_version prefers v*)." >&2
+    echo "  Run: git checkout ${TAG}" >&2
+    exit 1
+  fi
+  RELEASE_TAG="${TAG}"
+fi
+export BINARIES RELEASE_TAG
+
 # Source the selected builder. The allow-list above guarantees the file
 # name is one of a fixed set.
 # shellcheck source=builders/local-docker.sh
@@ -358,6 +406,7 @@ echo "Builder:  ${BUILDER}  (mode: ${BUILDER_MODE})"
 echo "Target:   ${TARGET}"
 echo "Registry: ${REGISTRY:-<none — bare local tags>}"
 echo "Tag:      ${TAG}${SHORT_SHA:+ (+ :${SHORT_SHA})}"
+echo "Binaries: ${BINARIES}${RELEASE_TAG:+ (${RELEASE_TAG})}"
 echo "Version:  ${VERSION:-<none — HEAD is not on a tag>}"
 echo "Built at: ${BUILD_TIME:-<build host clock>}${SOURCE_DATE_EPOCH:+ (SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH})}"
 if [[ "${BUILDER_MODE}" == "per-image" ]]; then
@@ -920,7 +969,7 @@ else
     tags="$(compute_tags "${image_name}")"
 
     BASE_TAG="$(resolve_base_tag "${step}")"
-    export BASE_TAG REGISTRY TAG SHORT_SHA COMMIT_SHA VERSION BUILD_TIME
+    export BASE_TAG REGISTRY TAG SHORT_SHA COMMIT_SHA VERSION BUILD_TIME BINARIES RELEASE_TAG
 
     # Collect build-args for this step.
     build_arg_flags=()
