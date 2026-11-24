@@ -97,7 +97,7 @@ func TestEvaluate_PrecomputedSortedPermsByteIdentical(t *testing.T) {
 // UAT scope/boundary, and View-as-member session (ptone/scion#9157).
 func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 	ctx := context.Background()
-	rawStore, err := newTestStore(t, ":memory:")
+	rawStore, _, err := newTestStoreWithClient(t)
 	require.NoError(t, err)
 	srv, s := testServerOnMigratedStore(t, rawStore)
 
