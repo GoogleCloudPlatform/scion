@@ -215,7 +215,9 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	engEval, ok := engDec.Detail.(*systemone.Evaluation)
 	require.True(t, ok)
 	assert.Equal(t, probeResp.Evaluation.Class, engEval.Class)
-	assert.Equal(t, probeResp.Evaluation.Rule.ContentHash, engEval.Rule.ContentHash)
+	assert.NotEmpty(t, engEval.Rule.ContentHash)
+	assert.NotEqual(t, probeResp.Evaluation.Rule.ContentHash, engEval.Rule.ContentHash,
+		"content hash commits to environment name (probe vs consumer-owned environment)")
 	assert.Equal(t, probeResp.Evaluation.ConfiguredModel, engEval.ConfiguredModel)
 	assert.Equal(t, probeResp.Evaluation.ResolvedModel, engEval.ResolvedModel)
 	assert.Equal(t, probeResp.Evaluation.Input, engEval.Input)
