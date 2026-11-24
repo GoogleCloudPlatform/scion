@@ -464,12 +464,35 @@ func TestBrokerPolicy_ResponsesAndCapabilities(t *testing.T) {
 	}
 }
 
+// concurrentAdminManagedFlipStore flips admin_managed via the dedicated writer
+// just before UpdateRuntimeBroker runs for target, simulating a concurrent
+// admin change between an owner PATCH's initial read and its whole-row write.
+type concurrentAdminManagedFlipStore struct {
+	store.Store
+	fault  *storeFaultSwitch
+	target string
+	value  bool
+	hooked bool
+}
+
+func (w *concurrentAdminManagedFlipStore) UpdateRuntimeBroker(ctx context.Context, b *store.RuntimeBroker) error {
+	if w.fault.Active() && b.ID == w.target && !w.hooked {
+		w.hooked = true
+		if _, err := w.Store.SetRuntimeBrokerAdminManaged(ctx, b.ID, w.value); err != nil {
+			return err
+		}
+	}
+	return w.Store.UpdateRuntimeBroker(ctx, b)
+}
+
 // TestBrokerPolicy_WholeRowWriteBackPreservesAdminManaged verifies that whole-row
 // Runtime Broker updates (direct stale write-backs, broker join, and owner
 // re-registration/settings updates) cannot overwrite an admin's change to
 // admin_managed (ptone/scion#8915).
 func TestBrokerPolicy_WholeRowWriteBackPreservesAdminManaged(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s, flipStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *concurrentAdminManagedFlipStore {
+		return &concurrentAdminManagedFlipStore{Store: inner, fault: f}
+	})
 	ctx := context.Background()
 
 	capture := &captureBrokerPolicyAuditLogger{AuditLogger: srv.auditLogger}
@@ -534,15 +557,20 @@ func TestBrokerPolicy_WholeRowWriteBackPreservesAdminManaged(t *testing.T) {
 	assert.False(t, gotJoined.AdminManaged, "CompleteBrokerJoin must preserve adminManaged=false")
 	assert.Equal(t, "1.2.3", gotJoined.Version)
 
-	// 3. Owner label PATCH does not alter admin_managed and does not attribute a
-	//    concurrent admin_managed change in its audit event.
+	// 3. Owner label PATCH racing with a concurrent admin_managed change
+	//    preserves the concurrent change and does not attribute it in the
+	//    owner's audit event.
 	capture.events = nil
+	flipStore.target = broker.ID
+	flipStore.value = true
+	fault.Arm()
 	rec = doBrokerRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID,
 		map[string]any{"labels": map[string]string{"env": "dev"}}, bearer(ownerJWT))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.True(t, flipStore.hooked, "expected concurrent admin_managed flip during owner PATCH")
 	got, err = s.GetRuntimeBroker(ctx, broker.ID)
 	require.NoError(t, err)
-	assert.False(t, got.AdminManaged)
+	assert.True(t, got.AdminManaged, "owner label PATCH must preserve concurrent admin_managed=true")
 	assert.Equal(t, "dev", got.Labels["env"])
 	require.NotEmpty(t, capture.events)
 	ev := capture.events[len(capture.events)-1]
