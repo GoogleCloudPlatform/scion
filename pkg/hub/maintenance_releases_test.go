@@ -831,11 +831,8 @@ func TestRunReleaseUpdateCheck_ReleaseSelection(t *testing.T) {
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
 			Installer: newTestInstaller(maintenance.StrategySymlink)}
 		putReleaseSelection(t, s, ReleaseSelection{Mode: UpdateModeRelease, Channel: "nightly", Pin: "nightly-20261020"})
-		p := &releaseCheckProbe{checkResult: releaseCheckResult(true), executor: newParamRecordingExecutor()}
+		p := &releaseCheckProbe{checkResult: releaseCheckResult(true)}
 		srv.runReleaseUpdateCheck(ctx, p.deps("nightly-20261020"))
-		if p.resolved != 0 {
-			t.Fatal("the update executor was resolved for a pinned hub")
-		}
 		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 0 {
 			t.Fatalf("a pinned hub was auto-updated: %+v", runs)
 		}
@@ -844,23 +841,21 @@ func TestRunReleaseUpdateCheck_ReleaseSelection(t *testing.T) {
 		}
 	})
 
-	t.Run("auto follows the selected channel", func(t *testing.T) {
+	t.Run("auto policy checks selected channel and only notifies", func(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
 			Installer: newTestInstaller(maintenance.StrategySymlink)}
 		putReleaseSelection(t, s, ReleaseSelection{Mode: UpdateModeRelease, Channel: "preview", Pin: maintenance.PinLatest})
-		exec := newParamRecordingExecutor()
-		p := &releaseCheckProbe{checkResult: releaseCheckResult(true), executor: exec}
+		p := &releaseCheckProbe{checkResult: releaseCheckResult(true)}
 		srv.runReleaseUpdateCheck(ctx, p.deps("nightly-20261020"))
-		select {
-		case <-exec.ran:
-		case <-time.After(5 * time.Second):
-			t.Fatal("auto update executor never ran")
+		if p.gotOpts.Channel != "preview" {
+			t.Errorf("checked channel %q, want preview", p.gotOpts.Channel)
 		}
-		exec.mu.Lock()
-		defer exec.mu.Unlock()
-		if exec.params[maintenance.ParamTargetVersion] != "latest:preview" {
-			t.Errorf("params = %v, want latest:preview", exec.params)
+		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 0 {
+			t.Fatalf("release-update-check must not start a run: %+v", runs)
+		}
+		if _, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable); err != nil {
+			t.Fatalf("the update must be notified: %v", err)
 		}
 	})
 
@@ -868,7 +863,7 @@ func TestRunReleaseUpdateCheck_ReleaseSelection(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto"}
 		putReleaseSelection(t, s, ReleaseSelection{Mode: UpdateModeGit})
-		p := &releaseCheckProbe{checkResult: releaseCheckResult(true), executor: newParamRecordingExecutor()}
+		p := &releaseCheckProbe{checkResult: releaseCheckResult(true)}
 		srv.runReleaseUpdateCheck(ctx, p.deps("nightly-20261020"))
 		if p.checks != 0 {
 			t.Fatal("a hub whose selection is git mode must not be checked")

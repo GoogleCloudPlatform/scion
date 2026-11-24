@@ -7511,6 +7511,16 @@ func (s *Server) registerSchedulerHandlers() {
 			s.releaseUpdateCheckHandler(),
 		)
 	}
+
+	// Always register the daily release auto-update singleton (~10 min).
+	// The handler reads system.auto_update on each tick so UI toggles take
+	// effect without a restart even when the hub booted with policy disabled.
+	s.scheduler.RegisterRecurringSingleton(
+		"release-auto-update",
+		releaseAutoUpdateIntervalMinutes,
+		store.LockReleaseAutoUpdate,
+		s.releaseAutoUpdateHandler(),
+	)
 }
 
 // StartBackgroundServices initializes and starts the scheduler and notification
