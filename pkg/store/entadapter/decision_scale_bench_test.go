@@ -642,7 +642,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 			})
 
 			var nextCur string
-			coldRecentP1, medRecentP1 := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldRecentP1, medRecentP1, tailMedRecentP1, tailMaxRecentP1 := measureColdAndWarmStats(t, warmRuns, func() error {
 				recentPage1, nc, err := f.cs.ListDecisionAnswersForProjects(ctx, f.projectIDs, f.keysByProject, store.ProjectDecisionAnswerFilter{}, "", 20)
 				if err != nil {
 					return err
@@ -653,7 +653,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldRecentP2, medRecentP2 := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldRecentP2, medRecentP2, tailMedRecentP2, tailMaxRecentP2 := measureColdAndWarmStats(t, warmRuns, func() error {
 				recentPage2, _, err := f.cs.ListDecisionAnswersForProjects(ctx, f.projectIDs, f.keysByProject, store.ProjectDecisionAnswerFilter{}, nextCur, 20)
 				if err != nil {
 					return err
@@ -662,7 +662,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldPerProj, medPerProj := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldPerProj, medPerProj, tailMedPerProj, tailMaxPerProj := measureColdAndWarmStats(t, warmRuns, func() error {
 				byProj, err := f.cs.ListDecisionAnswersPerProject(ctx, f.projectIDs, f.keysByProject, store.ProjectDecisionAnswerFilter{}, 6)
 				if err != nil {
 					return err
@@ -671,7 +671,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldSingleAns, medSingleAns := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldSingleAns, medSingleAns, tailMedSingleAns, tailMaxSingleAns := measureColdAndWarmStats(t, warmRuns, func() error {
 				singleAns, _, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs[1:2], f.keysByProject[f.projectIDs[1]], store.ProjectDecisionAnswerFilter{}, "", 20)
 				if err != nil {
 					return err
@@ -680,7 +680,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldDMHeavyAns, medDMHeavyAns := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldDMHeavyAns, medDMHeavyAns, tailMedDMHeavyAns, tailMaxDMHeavyAns := measureColdAndWarmStats(t, warmRuns, func() error {
 				dmHeavyAns, _, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs[:1], f.keysByProject[f.projectIDs[0]], store.ProjectDecisionAnswerFilter{}, "", 20)
 				if err != nil {
 					return err
@@ -726,11 +726,11 @@ func TestDecisionsScaleStore(t *testing.T) {
 			t.Logf("  ListProjectDecisionAgentsForProjects(%d)   = %v / %v / %v / %v", sc.numProjects, coldAgentsBatch, medAgentsBatch, tailMedAgentsBatch, tailMaxAgentsBatch)
 			t.Logf("  ProjectsWithUnsettledDecisions(%d open)    = %v / %v / %v / %v", sc.numProjects, coldUnsettled, medUnsettled, tailMedUnsettled, tailMaxUnsettled)
 			t.Logf("  ListOpenPrompts(%d open)                   = %v / %v / %v / %v", sc.numProjects*sc.openPerProject, coldOpen, medOpen, tailMedOpen, tailMaxOpen)
-			t.Logf("  ListDecisionAnswers(recent p1, 20)         = cold %v / warm-med %v", coldRecentP1, medRecentP1)
-			t.Logf("  ListDecisionAnswers(recent p2, 20)         = cold %v / warm-med %v", coldRecentP2, medRecentP2)
-			t.Logf("  ListDecisionAnswersPerProject(6/proj)      = cold %v / warm-med %v", coldPerProj, medPerProj)
-			t.Logf("  ListDecisionAnswers(single normal, 20)     = cold %v / warm-med %v", coldSingleAns, medSingleAns)
-			t.Logf("  ListDecisionAnswers(single DM-heavy, 20)   = cold %v / warm-med %v", coldDMHeavyAns, medDMHeavyAns)
+			t.Logf("  ListDecisionAnswers(recent p1, 20)         = %v / %v / %v / %v", coldRecentP1, medRecentP1, tailMedRecentP1, tailMaxRecentP1)
+			t.Logf("  ListDecisionAnswers(recent p2, 20)         = %v / %v / %v / %v", coldRecentP2, medRecentP2, tailMedRecentP2, tailMaxRecentP2)
+			t.Logf("  ListDecisionAnswersPerProject(6/proj)      = %v / %v / %v / %v", coldPerProj, medPerProj, tailMedPerProj, tailMaxPerProj)
+			t.Logf("  ListDecisionAnswers(single normal, 20)     = %v / %v / %v / %v", coldSingleAns, medSingleAns, tailMedSingleAns, tailMaxSingleAns)
+			t.Logf("  ListDecisionAnswers(single DM-heavy, 20)   = %v / %v / %v / %v", coldDMHeavyAns, medDMHeavyAns, tailMedDMHeavyAns, tailMaxDMHeavyAns)
 			t.Logf("  ProjectsWithUnsettledDecisions(quiet)      = %v / %v / %v / %v", coldQuietUnsettled, medQuietUnsettled, tailMedQuietUnsettled, tailMaxQuietUnsettled)
 			t.Logf("  ListOpenPrompts(quiet)                     = %v / %v / %v / %v", coldQuietOpen, medQuietOpen, tailMedQuietOpen, tailMaxQuietOpen)
 		})
