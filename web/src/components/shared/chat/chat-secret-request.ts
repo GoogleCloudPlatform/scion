@@ -382,6 +382,7 @@ export class ScionChatSecretRequest extends LitElement {
       align-items: center;
       flex-wrap: wrap;
       gap: 0.5rem;
+      min-height: 1.875rem;
       margin-top: 0.4rem;
     }
 
@@ -735,21 +736,90 @@ export class ScionChatSecretRequest extends LitElement {
     this.formRevision++;
   }
 
-  private onValuePaste(rowId: string, e: ClipboardEvent): void {
-    const pasted = e.clipboardData?.getData('text/plain') ?? '';
-    if (!pasted) return;
+  private isRowCaptured(rowId: string): boolean {
+    const value = this.formValues.get(rowId) ?? '';
+    return (
+      value.length > 0 &&
+      (this.capturedRows.has(rowId) || value.includes('\n') || value.includes('\r'))
+    );
+  }
+
+  private applyMaskedInsert(
+    rowId: string,
+    target: HTMLInputElement | null,
+    incoming: string,
+    e: Event
+  ): void {
+    const hasNewline = incoming.includes('\n') || incoming.includes('\r');
+    const isCaptured = this.isRowCaptured(rowId);
+
+    // Non-captured row receiving single-line text: let the browser handle it
+    // natively so password bullets, selection, and caret position are preserved.
+    if (!isCaptured && !hasNewline) {
+      return;
+    }
+
     e.preventDefault();
-    this.formValues.set(rowId, pasted);
-    this.capturedRows.add(rowId);
-    const target = e.target as HTMLInputElement | null;
-    if (target) {
-      target.value = '';
+    if (!incoming) return;
+
+    let nextValue: string;
+    if (isCaptured) {
+      nextValue = incoming;
+    } else {
+      const current = target?.value ?? this.formValues.get(rowId) ?? '';
+      const selStart = target?.selectionStart ?? current.length;
+      const selEnd = target?.selectionEnd ?? selStart;
+      nextValue = current.slice(0, selStart) + incoming + current.slice(selEnd);
+    }
+
+    this.formValues.set(rowId, nextValue);
+    if (nextValue.includes('\n') || nextValue.includes('\r')) {
+      this.capturedRows.add(rowId);
+      if (target) target.value = '';
+    } else {
+      this.capturedRows.delete(rowId);
+      if (target) {
+        target.value = nextValue;
+        target.setSelectionRange?.(nextValue.length, nextValue.length);
+      }
     }
     this.pendingFulfillIdempotencyKey = '';
     if (this.errorMessage) {
       this.errorMessage = '';
     }
     this.formRevision++;
+  }
+
+  private onMaskedBeforeInput(rowId: string, e: InputEvent): void {
+    const target = e.target as HTMLInputElement | null;
+    let incoming: string;
+    switch (e.inputType) {
+      case 'insertFromPaste':
+      case 'insertFromDrop':
+      case 'insertReplacementText':
+      case 'insertText':
+        incoming = e.dataTransfer?.getData('text/plain') ?? e.data ?? '';
+        break;
+      case 'insertLineBreak':
+      case 'insertParagraph':
+        incoming = '\n';
+        break;
+      default:
+        return;
+    }
+    this.applyMaskedInsert(rowId, target, incoming, e);
+  }
+
+  private onMaskedPaste(rowId: string, e: ClipboardEvent): void {
+    const pasted = e.clipboardData?.getData('text/plain') ?? '';
+    if (!pasted) return;
+    this.applyMaskedInsert(rowId, e.target as HTMLInputElement | null, pasted, e);
+  }
+
+  private onMaskedDrop(rowId: string, e: DragEvent): void {
+    const dropped = e.dataTransfer?.getData('text/plain') ?? '';
+    if (!dropped) return;
+    this.applyMaskedInsert(rowId, e.target as HTMLInputElement | null, dropped, e);
   }
 
   private triggerFilePicker(rowId: string): void {
@@ -786,6 +856,7 @@ export class ScionChatSecretRequest extends LitElement {
 
       let decoded: string;
       try {
+        // TextDecoder strips a leading UTF-8 BOM by default (intentional for text secret files).
         decoded = new TextDecoder('utf-8', { fatal: true }).decode(buf);
       } catch {
         this.errorMessage = `File for ${row.key} is not valid UTF-8 text. Binary files are not supported.`;
@@ -1189,7 +1260,9 @@ export class ScionChatSecretRequest extends LitElement {
                   data-1p-ignore="true"
                   ?disabled=${disabled}
                   .value=${hasCapturedValue ? '' : value}
-                  @paste=${(e: ClipboardEvent): void => this.onValuePaste(row.rowId, e)}
+                  @beforeinput=${(e: InputEvent): void => this.onMaskedBeforeInput(row.rowId, e)}
+                  @paste=${(e: ClipboardEvent): void => this.onMaskedPaste(row.rowId, e)}
+                  @drop=${(e: DragEvent): void => this.onMaskedDrop(row.rowId, e)}
                   @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
                 />
               `}
@@ -1206,54 +1279,48 @@ export class ScionChatSecretRequest extends LitElement {
             <sl-icon name=${revealed ? 'eye-slash' : 'eye'} aria-hidden="true"></sl-icon>
           </button>
         </div>
-        ${isFile || hasCapturedValue
-          ? html`
-              <div class="file-controls">
-                ${isFile
-                  ? html`
-                      <input
-                        type="file"
-                        tabindex="-1"
-                        class="file-picker-input"
-                        data-file-input=${row.key}
-                        data-row-id=${row.rowId}
-                        aria-label=${`Load secret file for ${row.key}`}
-                        ?disabled=${disabled}
-                        @change=${(e: Event): void => void this.onFileSelected(row, e)}
-                      />
-                      <sl-button
-                        type="button"
-                        size="small"
-                        variant="default"
-                        class="load-file-btn"
-                        data-load-file=${row.key}
-                        ?disabled=${disabled}
-                        @click=${(): void => this.triggerFilePicker(row.rowId)}
-                      >
-                        <sl-icon slot="prefix" name="upload" aria-hidden="true"></sl-icon>
-                        Load from file
-                      </sl-button>
-                    `
-                  : nothing}
-                ${hasCapturedValue
-                  ? html`
-                      <span
-                        class="file-value-status"
-                        data-testid="file-value-masked"
-                        role="status"
-                        aria-label=${`Secret value for ${row.key} entered, hidden`}
-                      >
-                        <sl-icon name="lock" aria-hidden="true"></sl-icon>
-                        <span aria-hidden="true"
-                          >&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span
-                        >
-                        <span>Value entered (hidden)</span>
-                      </span>
-                    `
-                  : nothing}
-              </div>
-            `
-          : nothing}
+        <div class="file-controls">
+          ${isFile
+            ? html`
+                <input
+                  type="file"
+                  tabindex="-1"
+                  class="file-picker-input"
+                  data-file-input=${row.key}
+                  data-row-id=${row.rowId}
+                  aria-label=${`Load secret file for ${row.key}`}
+                  ?disabled=${disabled}
+                  @change=${(e: Event): void => void this.onFileSelected(row, e)}
+                />
+                <sl-button
+                  type="button"
+                  size="small"
+                  variant="default"
+                  class="load-file-btn"
+                  data-load-file=${row.key}
+                  ?disabled=${disabled}
+                  @click=${(): void => this.triggerFilePicker(row.rowId)}
+                >
+                  <sl-icon slot="prefix" name="upload" aria-hidden="true"></sl-icon>
+                  Load from file
+                </sl-button>
+              `
+            : nothing}
+          ${hasCapturedValue
+            ? html`
+                <span
+                  class="file-value-status"
+                  data-testid="file-value-masked"
+                  role="status"
+                  aria-label=${`Secret value for ${row.key} entered, hidden`}
+                >
+                  <sl-icon name="lock" aria-hidden="true"></sl-icon>
+                  <span aria-hidden="true">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span>
+                  <span>Value entered (hidden)</span>
+                </span>
+              `
+            : nothing}
+        </div>
       `;
     }
 

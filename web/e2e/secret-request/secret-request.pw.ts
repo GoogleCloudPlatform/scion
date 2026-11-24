@@ -315,6 +315,10 @@ test('variable secret row masks natively as password input, hides value from AX 
 
   const multilineVar = '{\n "a": 1,\n "secret": "super-secret-variable-42"\n}';
 
+  // Snapshot Submit button Y before paste to verify reserved status-line space prevents layout shift
+  const submitBtn = page.locator('sl-button.submit-btn');
+  const submitYBefore = (await submitBtn.boundingBox())?.y ?? 0;
+
   // Multi-line paste while masked preserves newlines and hides value from AX tree
   await input.evaluate((el, text) => {
     const dt = new DataTransfer();
@@ -325,6 +329,8 @@ test('variable secret row masks natively as password input, hides value from AX 
   }, multilineVar);
 
   await expect(page.locator('[data-testid="file-value-masked"]')).toBeVisible();
+  const submitYAfter = (await submitBtn.boundingBox())?.y ?? 0;
+  expect(Math.abs(submitYAfter - submitYBefore)).toBeLessThanOrEqual(1);
 
   // Verify the CDP accessibility tree does not expose the masked value
   const cdp = await page.context().newCDPSession(page);
@@ -352,9 +358,130 @@ test('variable secret row masks natively as password input, hides value from AX 
   await expect(input).toHaveValue('');
   await expect(toggleBtn).toHaveAttribute('aria-pressed', 'false');
 
-  const submitBtn = page.locator('sl-button.submit-btn');
   await submitBtn.click();
   await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
   expect(fulfills).toHaveLength(1);
   expect(fulfills[0].body.values).toEqual({ API_CONFIG: multilineVar });
+});
+
+for (const secretType of ['file', 'variable'] as const) {
+  test(`trusted dragTo of multi-line text onto ${secretType} row preserves newlines`, async ({
+    page,
+  }) => {
+    const fulfills = await installMockSecretRequestHub(page, {
+      messageId: `msg-drop-${secretType}`,
+      key: 'DROP_KEY',
+      secretType,
+    });
+
+    await page.goto(`/secret-requests/msg-drop-${secretType}`, { waitUntil: 'domcontentloaded' });
+
+    const input = page.locator('input[data-key="DROP_KEY"]');
+    await expect(input).toBeVisible();
+
+    // Create a draggable source element carrying multi-line text
+    await page.evaluate(() => {
+      const src = document.createElement('div');
+      src.id = 'drag-src';
+      src.draggable = true;
+      src.textContent = 'Drag secret';
+      src.style.cssText =
+        'position:fixed;top:8px;left:8px;padding:8px;background:#ccc;z-index:9999';
+      src.addEventListener('dragstart', (ev) => {
+        ev.dataTransfer?.setData('text/plain', 'D1\nD2\nD3');
+      });
+      document.body.appendChild(src);
+    });
+
+    await page.locator('#drag-src').dragTo(input);
+
+    await expect(page.locator('[data-testid="file-value-masked"]')).toBeVisible();
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills).toHaveLength(1);
+    expect(fulfills[0].body.values).toEqual({ DROP_KEY: 'D1\nD2\nD3' });
+  });
+}
+
+test('keyboard.insertText with LF and CRLF preserves newlines verbatim', async ({ page }) => {
+  for (const [idx, text] of [
+    ['lf', 'X1\nX2'],
+    ['crlf', 'Y1\r\nY2'],
+  ] as const) {
+    const fulfills = await installMockSecretRequestHub(page, {
+      messageId: `msg-insert-${idx}`,
+      key: 'INSERT_KEY',
+      secretType: 'variable',
+    });
+
+    await page.goto(`/secret-requests/msg-insert-${idx}`, { waitUntil: 'domcontentloaded' });
+    const input = page.locator('input[data-key="INSERT_KEY"]');
+    await expect(input).toBeVisible();
+    await input.click();
+    await page.keyboard.insertText(text);
+
+    await expect(page.locator('[data-testid="file-value-masked"]')).toBeVisible();
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills).toHaveLength(1);
+    expect(fulfills[0].body.values).toEqual({ INSERT_KEY: text });
+  }
+});
+
+test('type-then-paste composes at caret (end and middle) for both single-line and multi-line paste', async ({
+  page,
+}) => {
+  // 1. Single-line paste at end ("abc" + "def" -> "abcdef")
+  const f1 = await installMockSecretRequestHub(page, {
+    messageId: 'msg-compose-end',
+    key: 'COMP_KEY',
+    secretType: 'environment',
+  });
+  await page.goto('/secret-requests/msg-compose-end', { waitUntil: 'domcontentloaded' });
+  const input1 = page.locator('input[data-key="COMP_KEY"]');
+  await input1.click();
+  await page.keyboard.type('abc');
+  await page.keyboard.insertText('def');
+  await page.locator('sl-button.submit-btn').click();
+  await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+  expect(f1[0].body.values).toEqual({ COMP_KEY: 'abcdef' });
+
+  // 2. Single-line paste in middle ("abc", caret at 1, insert "def" -> "adefbc")
+  const f2 = await installMockSecretRequestHub(page, {
+    messageId: 'msg-compose-mid',
+    key: 'COMP_KEY',
+    secretType: 'environment',
+  });
+  await page.goto('/secret-requests/msg-compose-mid', { waitUntil: 'domcontentloaded' });
+  const input2 = page.locator('input[data-key="COMP_KEY"]');
+  await input2.click();
+  await page.keyboard.type('abc');
+  await input2.evaluate((el: HTMLInputElement) => el.setSelectionRange(1, 1));
+  await page.keyboard.insertText('def');
+  await page.locator('sl-button.submit-btn').click();
+  await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+  expect(f2[0].body.values).toEqual({ COMP_KEY: 'adefbc' });
+
+  // 3. Multi-line paste in middle ("abc", caret at 1, paste "X\nY" -> "aX\nYbc")
+  const f3 = await installMockSecretRequestHub(page, {
+    messageId: 'msg-compose-multi',
+    key: 'COMP_KEY',
+    secretType: 'environment',
+  });
+  await page.goto('/secret-requests/msg-compose-multi', { waitUntil: 'domcontentloaded' });
+  const input3 = page.locator('input[data-key="COMP_KEY"]');
+  await input3.click();
+  await page.keyboard.type('abc');
+  await input3.evaluate((el: HTMLInputElement) => el.setSelectionRange(1, 1));
+  await input3.evaluate((el) => {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', 'X\nY');
+    el.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+    );
+  });
+  await expect(page.locator('[data-testid="file-value-masked"]')).toBeVisible();
+  await page.locator('sl-button.submit-btn').click();
+  await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+  expect(f3[0].body.values).toEqual({ COMP_KEY: 'aX\nYbc' });
 });

@@ -898,6 +898,20 @@ describe('scion-chat-secret-request', () => {
     await el.updateComplete;
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
     expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+
+    // 5. Loading a file while Show is active automatically hides the value
+    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    toggleBtn.click();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).not.toBeNull();
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
+
+    await triggerFile(new File(['reloaded-secret\nline2'], 'cert2.pem', { type: 'text/plain' }));
+    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
+    expect(el.shadowRoot!.querySelector('input[data-key="DEPLOY_KEY"]')).not.toBeNull();
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    expect(el.shadowRoot!.textContent).not.toContain('reloaded-secret');
   });
 
   it('clears form values on pagehide (bfcache protection)', async () => {
@@ -1592,5 +1606,62 @@ describe('scion-chat-secret-request', () => {
       (rolling.shadowRoot!.querySelector('input[data-key="GITHUB_TOKEN"]') as HTMLInputElement)
         .disabled
     ).toBe(false);
+  });
+
+  it('composes type-then-paste at selection and captures beforeinput/drop multi-line text', async () => {
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'r-1', key: 'TOKEN', secretType: 'environment' })],
+    });
+    const input = el.shadowRoot!.querySelector('input[data-key="TOKEN"]') as HTMLInputElement;
+
+    // 1. Single-line paste on non-captured row does NOT preventDefault (native browser compose)
+    input.value = 'abc';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    const singlePaste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(singlePaste, 'clipboardData', {
+      value: { getData: (t: string) => (t === 'text/plain' ? 'def' : '') },
+    });
+    input.dispatchEvent(singlePaste);
+    expect(singlePaste.defaultPrevented).toBe(false);
+
+    // 2. Multi-line paste with caret in the middle composes at selection
+    input.setSelectionRange(1, 1);
+    const multiPaste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(multiPaste, 'clipboardData', {
+      value: { getData: (t: string) => (t === 'text/plain' ? 'X\nY' : '') },
+    });
+    input.dispatchEvent(multiPaste);
+    await el.updateComplete;
+    expect(multiPaste.defaultPrevented).toBe(true);
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.get('r-1')).toBe(
+      'aX\nYbc'
+    );
+
+    // 3. beforeinput insertText with \r\n replaces captured value verbatim
+    const bi = new InputEvent('beforeinput', {
+      bubbles: true,
+      cancelable: true,
+      inputType: 'insertText',
+      data: 'Y1\r\nY2',
+    });
+    input.dispatchEvent(bi);
+    await el.updateComplete;
+    expect(bi.defaultPrevented).toBe(true);
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.get('r-1')).toBe(
+      'Y1\r\nY2'
+    );
+
+    // 4. drop event with multi-line text replaces captured value verbatim
+    const dropEv = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(dropEv, 'dataTransfer', {
+      value: { getData: (t: string) => (t === 'text/plain' ? 'D1\nD2\nD3' : '') },
+    });
+    input.dispatchEvent(dropEv);
+    await el.updateComplete;
+    expect(dropEv.defaultPrevented).toBe(true);
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.get('r-1')).toBe(
+      'D1\nD2\nD3'
+    );
   });
 });
