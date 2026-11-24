@@ -22,11 +22,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -157,7 +159,26 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 	}
 	assert.Equal(t, InboxStateOK, sessResp.Categories[InboxCategoryApprovals].State)
 	assert.Equal(t, 1, sessResp.Categories[InboxCategoryApprovals].Count)
-	for _, disabledKey := range []string{InboxCategoryDecisions, InboxCategoryWaiting, InboxCategoryReviews, InboxCategoryChat} {
+	assert.Equal(t, InboxStateOK, sessResp.Categories[InboxCategoryWaiting].State)
+	assert.Equal(t, 0, sessResp.Categories[InboxCategoryWaiting].Count)
+	assert.Equal(t, "/agents", sessResp.Categories[InboxCategoryWaiting].Href)
+	assert.NotNil(t, sessResp.Categories[InboxCategoryWaiting].AgentIDs)
+	assert.Empty(t, sessResp.Categories[InboxCategoryWaiting].AgentIDs)
+
+	// Verify raw JSON wire shape: waiting always emits "agentIds": [] when state=="ok"
+	// and count==0, while other categories omit "agentIds".
+	var rawResp struct {
+		Categories map[string]map[string]any `json:"categories"`
+	}
+	require.NoError(t, json.Unmarshal(sessRec.Body.Bytes(), &rawResp))
+	waitingRawAgentIDs, hasWaitingAgentIDs := rawResp.Categories[InboxCategoryWaiting]["agentIds"]
+	assert.True(t, hasWaitingAgentIDs, "waiting category must always include agentIds when state is ok")
+	assert.Equal(t, []any{}, waitingRawAgentIDs)
+	for _, otherKey := range []string{InboxCategoryApprovals, InboxCategoryDecisions, InboxCategoryReviews, InboxCategoryChat} {
+		_, hasAgentIDs := rawResp.Categories[otherKey]["agentIds"]
+		assert.False(t, hasAgentIDs, "category %s must omit agentIds", otherKey)
+	}
+	for _, disabledKey := range []string{InboxCategoryDecisions, InboxCategoryReviews, InboxCategoryChat} {
 		cat := sessResp.Categories[disabledKey]
 		assert.Equal(t, InboxStateDisabled, cat.State, "category %s", disabledKey)
 		assert.Equal(t, 0, cat.Count, "category %s", disabledKey)
@@ -326,12 +347,24 @@ func TestUserMeInboxSummary_SourceErrorIsolation(t *testing.T) {
 
 type inboxCountingStore struct {
 	store.Store
-	listPendingCalls atomic.Int32
+	listPendingCalls  atomic.Int32
+	listAgentsCalls   atomic.Int32
+	listProjectsCalls atomic.Int32
 }
 
 func (s *inboxCountingStore) ListPendingSecretsByOwner(ctx context.Context, scope, scopeID string) ([]store.PendingSecret, error) {
 	s.listPendingCalls.Add(1)
 	return s.Store.ListPendingSecretsByOwner(ctx, scope, scopeID)
+}
+
+func (s *inboxCountingStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
+	s.listAgentsCalls.Add(1)
+	return s.Store.ListAgents(ctx, filter, opts)
+}
+
+func (s *inboxCountingStore) ListProjectSummaries(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	s.listProjectsCalls.Add(1)
+	return s.Store.ListProjectSummaries(ctx, filter, opts)
 }
 
 func TestUserMeInboxSummary_StoreCallCount(t *testing.T) {
@@ -353,9 +386,58 @@ func TestUserMeInboxSummary_StoreCallCount(t *testing.T) {
 	require.NoError(t, rawStore.CreateUser(ctx, u))
 
 	counter.listPendingCalls.Store(0)
+	counter.listAgentsCalls.Store(0)
+	counter.listProjectsCalls.Store(0)
 	rec := doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil)
 	decodeInboxSummary(t, rec)
-	assert.Equal(t, int32(1), counter.listPendingCalls.Load(), "P1 summary must issue exactly one pending-secrets store query")
+	assert.Equal(t, int32(1), counter.listPendingCalls.Load(), "summary must issue exactly one pending-secrets store query")
+	assert.Equal(t, int32(1), counter.listAgentsCalls.Load(), "summary must issue exactly one waiting-agents store query")
+	assert.Equal(t, int32(0), counter.listProjectsCalls.Load(), "no project lookup when there are no waiting previews")
+
+	// Seed 2 projects and 4 waiting agents; store calls stay constant regardless of agent/project count.
+	for i := 0; i < 2; i++ {
+		p := &store.Project{
+			ID:      api.NewUUID(),
+			Slug:    "spy-proj-" + string(rune('a'+i)),
+			Name:    "Spy Project " + string(rune('A'+i)),
+			OwnerID: u.ID,
+			Created: time.Now().UTC(),
+		}
+		require.NoError(t, rawStore.CreateProject(ctx, p))
+		for j := 0; j < 2; j++ {
+			a := &store.Agent{
+				ID:        api.NewUUID(),
+				Slug:      "spy-agent-" + string(rune('a'+i)) + "-" + string(rune('0'+j)),
+				Name:      "Spy Agent",
+				ProjectID: p.ID,
+				OwnerID:   u.ID,
+				Phase:     string(state.PhaseRunning),
+				Activity:  string(state.ActivityWaitingForInput),
+				Message:   "waiting",
+			}
+			require.NoError(t, rawStore.CreateAgent(ctx, a))
+		}
+	}
+
+	counter.listPendingCalls.Store(0)
+	counter.listAgentsCalls.Store(0)
+	counter.listProjectsCalls.Store(0)
+	rec = doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil)
+	resp := decodeInboxSummary(t, rec)
+	assert.Equal(t, 4, resp.Categories[InboxCategoryWaiting].Count)
+	assert.Equal(t, int32(1), counter.listPendingCalls.Load())
+	assert.Equal(t, int32(1), counter.listAgentsCalls.Load())
+	assert.Equal(t, int32(1), counter.listProjectsCalls.Load(), "preview project names resolved in one batched query")
+
+	// Badge mode (previews=0) skips project name lookup entirely.
+	counter.listPendingCalls.Store(0)
+	counter.listAgentsCalls.Store(0)
+	counter.listProjectsCalls.Store(0)
+	rec = doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath+"?previews=0", nil)
+	decodeInboxSummary(t, rec)
+	assert.Equal(t, int32(1), counter.listPendingCalls.Load())
+	assert.Equal(t, int32(1), counter.listAgentsCalls.Load())
+	assert.Equal(t, int32(0), counter.listProjectsCalls.Load())
 }
 
 func TestUserMeInboxSummary_SingleflightCoalescing(t *testing.T) {
@@ -596,4 +678,370 @@ func TestUserMeInboxSummary_PendingSecretApproveRejectHints(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	expectApprovalsHint(ownerCh)
 	drainNoEvent(otherCh, "non-owner on reject")
+}
+
+func TestUserMeInboxSummary_WaitingCategory(t *testing.T) {
+	f := newChatFixture(t)
+	setInboxDashboardExperiment(t, f.srv, true)
+	ctx := context.Background()
+
+	memberUser, err := f.s.GetUser(ctx, f.member)
+	require.NoError(t, err)
+
+	seedAgent := func(projectID, ownerID, slug, name, phase, activity, msg string, deleted bool) *store.Agent {
+		a := &store.Agent{
+			ID:        api.NewUUID(),
+			Slug:      slug,
+			Name:      name,
+			ProjectID: projectID,
+			OwnerID:   ownerID,
+			Phase:     phase,
+			Activity:  activity,
+			Message:   msg,
+		}
+		require.NoError(t, f.s.CreateAgent(ctx, a))
+		if deleted {
+			got, gErr := f.s.GetAgent(ctx, a.ID)
+			require.NoError(t, gErr)
+			got.DeletedAt = time.Now().UTC()
+			require.NoError(t, f.s.UpdateAgent(ctx, got))
+		}
+		return a
+	}
+
+	// Create 4 waiting agents owned by f.member across projA (3) and projB (1)
+	// with staggered creation/activity times so oldest ActivitySince comes first.
+	longQuestion := strings.Repeat("q", 250)
+	a1 := seedAgent(f.projA, f.member, "wait-1", "Wait One", string(state.PhaseRunning), string(state.ActivityWaitingForInput), longQuestion, false)
+	time.Sleep(5 * time.Millisecond)
+	a2 := seedAgent(f.projB, f.member, "wait-2", "Wait Two", string(state.PhaseRunning), string(state.ActivityWaitingForInput), "Need staging creds?", false)
+	time.Sleep(5 * time.Millisecond)
+	a3 := seedAgent(f.projA, f.member, "wait-3", "Wait Three", string(state.PhaseRunning), string(state.ActivityWaitingForInput), "Approve deploy?", false)
+	time.Sleep(5 * time.Millisecond)
+	a4 := seedAgent(f.projA, f.member, "wait-4", "Wait Four", string(state.PhaseRunning), string(state.ActivityWaitingForInput), "Fourth agent", false)
+
+	// Non-matching agents that must be excluded:
+	// - owned, running, different activity
+	seedAgent(f.projA, f.member, "think-1", "Thinking", string(state.PhaseRunning), string(state.ActivityThinking), "working", false)
+	// - owned, stopped
+	seedAgent(f.projA, f.member, "stop-1", "Stopped", string(state.PhaseStopped), "", "stopped", false)
+	// - owned, soft-deleted while waiting
+	seedAgent(f.projA, f.member, "del-1", "Deleted", string(state.PhaseRunning), string(state.ActivityWaitingForInput), "deleted", true)
+	// - other user's waiting agent in the same project
+	seedAgent(f.projA, f.owner, "other-wait", "Other Wait", string(state.PhaseRunning), string(state.ActivityWaitingForInput), "other user", false)
+
+	// 1. Session view: sees all 4 owned waiting agents, ordered oldest first, capped at 3 previews.
+	rec := doRequestAsUser(t, f.srv, memberUser, http.MethodGet, userMeInboxSummaryPath, nil)
+	resp := decodeInboxSummary(t, rec)
+	assert.Equal(t, 4, resp.Total)
+	assert.False(t, resp.TotalCapped)
+
+	waiting := resp.Categories[InboxCategoryWaiting]
+	assert.Equal(t, InboxStateOK, waiting.State)
+	assert.Equal(t, 4, waiting.Count)
+	assert.False(t, waiting.Capped)
+	assert.True(t, waiting.CountsTowardTotal)
+	assert.Equal(t, "/agents", waiting.Href)
+	assert.Equal(t, []string{a1.ID, a2.ID, a3.ID, a4.ID}, waiting.AgentIDs)
+	require.Len(t, waiting.Previews, 3)
+
+	var previews []InboxWaitingAgentPreview
+	for _, raw := range waiting.Previews {
+		b, mErr := json.Marshal(raw)
+		require.NoError(t, mErr)
+		var p InboxWaitingAgentPreview
+		require.NoError(t, json.Unmarshal(b, &p))
+		previews = append(previews, p)
+	}
+	assert.Equal(t, []string{a1.ID, a2.ID, a3.ID}, []string{previews[0].AgentID, previews[1].AgentID, previews[2].AgentID})
+	assert.Equal(t, a1.ID, previews[0].ID)
+	assert.Equal(t, f.projA, previews[0].ProjectID)
+	assert.NotEmpty(t, previews[0].ProjectName)
+	assert.Equal(t, "Wait One", previews[0].AgentName)
+	assert.Equal(t, "wait-1", previews[0].AgentSlug)
+	assert.Equal(t, "/agents/"+a1.ID, previews[0].Href)
+	assert.Equal(t, 200, len([]rune(previews[0].Question)), "question must be truncated to 200 runes")
+	assert.True(t, strings.HasSuffix(previews[0].Question, "…"))
+	assert.False(t, previews[0].Since.IsZero())
+	assert.Equal(t, "Need staging creds?", previews[1].Question)
+	assert.Equal(t, "/agents/"+a2.ID, previews[1].Href)
+
+	// 2. previews=0 returns count and agentIds with empty previews.
+	respZero := decodeInboxSummary(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, userMeInboxSummaryPath+"?previews=0", nil))
+	assert.Equal(t, 4, respZero.Categories[InboxCategoryWaiting].Count)
+	assert.Equal(t, []string{a1.ID, a2.ID, a3.ID, a4.ID}, respZero.Categories[InboxCategoryWaiting].AgentIDs)
+	assert.Empty(t, respZero.Categories[InboxCategoryWaiting].Previews)
+
+	// 3. Hub-bounded UAT with inbox:read sees all 4 owned waiting agents.
+	tokHub := f.mint(t, f.member, hubBoundary(), "inbox:read")
+	hubResp := decodeInboxSummary(t, f.call(t, tokHub, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, 4, hubResp.Total)
+	assert.Equal(t, 4, hubResp.Categories[InboxCategoryWaiting].Count)
+	assert.Equal(t, []string{a1.ID, a2.ID, a3.ID, a4.ID}, hubResp.Categories[InboxCategoryWaiting].AgentIDs)
+
+	// 4. Project-bounded UAT for projA sees ONLY projA's 3 waiting agents (not a2 in projB).
+	tokProjA := f.mint(t, f.member, projectBoundary(f.projA), "inbox:read")
+	projAResp := decodeInboxSummary(t, f.call(t, tokProjA, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, 3, projAResp.Total)
+	assert.Equal(t, 3, projAResp.Categories[InboxCategoryWaiting].Count)
+	assert.Equal(t, []string{a1.ID, a3.ID, a4.ID}, projAResp.Categories[InboxCategoryWaiting].AgentIDs)
+}
+
+type inboxStubAgentsStore struct {
+	store.Store
+	agents []store.Agent
+	err    error
+}
+
+func (s *inboxStubAgentsStore) ListAgents(_ context.Context, _ store.AgentFilter, _ store.ListOptions) (*store.ListResult[store.Agent], error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &store.ListResult[store.Agent]{Items: s.agents}, nil
+}
+
+func TestUserMeInboxSummary_WaitingCappedAndErrors(t *testing.T) {
+	srv, rawStore := testServer(t)
+	now := time.Now().UTC()
+
+	agents := make([]store.Agent, inboxWaitingLimit)
+	for i := range agents {
+		since := now.Add(time.Duration(i) * time.Second)
+		agents[i] = store.Agent{
+			ID:            api.NewUUID(),
+			Slug:          "cap-agent",
+			Name:          "Cap Agent",
+			ProjectID:     api.NewUUID(),
+			Phase:         string(state.PhaseRunning),
+			Activity:      string(state.ActivityWaitingForInput),
+			ActivitySince: &since,
+			Created:       since,
+		}
+	}
+
+	stub, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *inboxStubAgentsStore {
+		return &inboxStubAgentsStore{Store: inner, agents: agents}
+	})
+	setInboxDashboardExperiment(t, srv, true)
+
+	u := &store.User{
+		ID:          tid("inbox-waiting-cap-user"),
+		Email:       "waitcap@example.com",
+		DisplayName: "Wait Cap",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     now,
+	}
+	require.NoError(t, rawStore.CreateUser(context.Background(), u))
+
+	// 200 returned -> capped=true, totalCapped=true, agentIds has all 200, previews capped at 3.
+	resp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil))
+	waiting := resp.Categories[InboxCategoryWaiting]
+	assert.Equal(t, InboxStateOK, waiting.State)
+	assert.Equal(t, inboxWaitingLimit, waiting.Count)
+	assert.True(t, waiting.Capped)
+	assert.True(t, resp.TotalCapped)
+	assert.Equal(t, inboxWaitingLimit, resp.Total)
+	assert.Len(t, waiting.AgentIDs, inboxWaitingLimit)
+	assert.Len(t, waiting.Previews, inboxSummaryDefaultPreviews)
+
+	// Store error -> waiting state="error" (internal), HTTP 200, approvals intact.
+	stub.err = errors.New("db unavailable")
+	errResp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, InboxStateError, errResp.Categories[InboxCategoryWaiting].State)
+	assert.Equal(t, InboxErrorInternal, errResp.Categories[InboxCategoryWaiting].ErrorCode)
+	assert.Equal(t, 0, errResp.Categories[InboxCategoryWaiting].Count)
+	assert.Equal(t, InboxStateOK, errResp.Categories[InboxCategoryApprovals].State)
+
+	// Timeout error -> waiting state="error" (timeout).
+	stub.err = context.DeadlineExceeded
+	timeoutResp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, InboxStateError, timeoutResp.Categories[InboxCategoryWaiting].State)
+	assert.Equal(t, InboxErrorTimeout, timeoutResp.Categories[InboxCategoryWaiting].ErrorCode)
+}
+
+func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
+	srv, _ := testServer(t)
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+	srv.SetEventPublisher(pub)
+
+	ownerID := tid("inbox-wait-hint-owner")
+	otherID := tid("inbox-wait-hint-other")
+
+	ownerCh, unsubOwner := pub.Subscribe("user." + ownerID + ".inbox")
+	defer unsubOwner()
+	otherCh, unsubOther := pub.Subscribe("user." + otherID + ".inbox")
+	defer unsubOther()
+
+	drainNoEvent := func(ch <-chan Event, label string) {
+		t.Helper()
+		select {
+		case evt := <-ch:
+			t.Fatalf("%s: unexpected event on %s: %s", label, evt.Subject, string(evt.Data))
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	expectWaitingHint := func(ch <-chan Event, wantAgentID, wantActivity string) {
+		t.Helper()
+		select {
+		case evt := <-ch:
+			assert.Equal(t, "user."+ownerID+".inbox", evt.Subject)
+			var hint InboxHint
+			require.NoError(t, json.Unmarshal(evt.Data, &hint))
+			assert.Equal(t, InboxCategoryWaiting, hint.Category)
+			assert.Equal(t, wantAgentID, hint.AgentID)
+			assert.Equal(t, wantActivity, hint.Activity)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for waiting hint (%s, %s)", wantAgentID, wantActivity)
+		}
+	}
+
+	ctx := context.Background()
+	agent := &store.Agent{
+		ID:        api.NewUUID(),
+		ProjectID: api.NewUUID(),
+		OwnerID:   ownerID,
+		Phase:     string(state.PhaseRunning),
+		Activity:  string(state.ActivityWaitingForInput),
+	}
+
+	// Flag OFF: PublishAgentStatus emits no inbox hint.
+	pub.PublishAgentStatus(ctx, agent)
+	drainNoEvent(ownerCh, "flag off enter waiting")
+
+	// Flag ON: entering and leaving waiting_for_input emit hints to owner only.
+	setInboxDashboardExperiment(t, srv, true)
+
+	pub.PublishAgentStatus(ctx, agent)
+	expectWaitingHint(ownerCh, agent.ID, string(state.ActivityWaitingForInput))
+	drainNoEvent(otherCh, "non-owner on enter")
+
+	agent.Activity = string(state.ActivityThinking)
+	pub.PublishAgentStatus(ctx, agent)
+	expectWaitingHint(ownerCh, agent.ID, string(state.ActivityThinking))
+	drainNoEvent(otherCh, "non-owner on leave")
+
+	// PublishAgentDeleted sends no inbox hint (§5.2).
+	pub.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
+	drainNoEvent(ownerCh, "agent deleted")
+}
+
+func TestUserMeInboxSummary_WaitingOrderingByActivitySince(t *testing.T) {
+	srv, rawStore := testServer(t)
+	base := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	t0 := base
+	t1 := base.Add(1 * time.Minute)
+	t2 := base.Add(2 * time.Minute)
+	t3 := base.Add(3 * time.Minute)
+	t4 := base.Add(4 * time.Minute)
+	t5 := base.Add(5 * time.Minute)
+
+	// Created earlier (t0), but entered waiting_for_input later (ActivitySince = t3).
+	olderCreatedNewerSince := store.Agent{
+		ID:            api.NewUUID(),
+		Slug:          "older-created",
+		Name:          "Older Created",
+		ProjectID:     api.NewUUID(),
+		Phase:         string(state.PhaseRunning),
+		Activity:      string(state.ActivityWaitingForInput),
+		Created:       t0,
+		ActivitySince: &t3,
+	}
+	// Created later (t2), but has an older ActivitySince (t1) -> MUST sort first.
+	newerCreatedOlderSince := store.Agent{
+		ID:            api.NewUUID(),
+		Slug:          "newer-created-older-since",
+		Name:          "Newer Created Older Since",
+		ProjectID:     api.NewUUID(),
+		Phase:         string(state.PhaseRunning),
+		Activity:      string(state.ActivityWaitingForInput),
+		Created:       t2,
+		ActivitySince: &t1,
+	}
+	// Nil ActivitySince falls back to LastActivityEvent (t2) -> sorts second.
+	nilSinceLastActivity := store.Agent{
+		ID:                api.NewUUID(),
+		Slug:              "nil-since-last-activity",
+		Name:              "Nil Since LastActivity",
+		ProjectID:         api.NewUUID(),
+		Phase:             string(state.PhaseRunning),
+		Activity:          string(state.ActivityWaitingForInput),
+		Created:           t4,
+		LastActivityEvent: t2,
+	}
+	// Nil ActivitySince and zero LastActivityEvent falls back to Updated (t4) -> sorts fourth.
+	nilSinceUpdated := store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "nil-since-updated",
+		Name:      "Nil Since Updated",
+		ProjectID: api.NewUUID(),
+		Phase:     string(state.PhaseRunning),
+		Activity:  string(state.ActivityWaitingForInput),
+		Created:   t0,
+		Updated:   t4,
+	}
+	// Nil ActivitySince and zero LastActivityEvent/Updated falls back to Created (t5) -> sorts fifth.
+	nilSinceCreated := store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "nil-since-created",
+		Name:      "Nil Since Created",
+		ProjectID: api.NewUUID(),
+		Phase:     string(state.PhaseRunning),
+		Activity:  string(state.ActivityWaitingForInput),
+		Created:   t5,
+	}
+
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *inboxStubAgentsStore {
+		return &inboxStubAgentsStore{
+			Store: inner,
+			agents: []store.Agent{
+				olderCreatedNewerSince,
+				nilSinceCreated,
+				nilSinceUpdated,
+				newerCreatedOlderSince,
+				nilSinceLastActivity,
+			},
+		}
+	})
+	setInboxDashboardExperiment(t, srv, true)
+
+	u := &store.User{
+		ID:          tid("inbox-wait-order-user"),
+		Email:       "waitorder@example.com",
+		DisplayName: "Wait Order",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     base,
+	}
+	require.NoError(t, rawStore.CreateUser(context.Background(), u))
+
+	resp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath+"?previews=5", nil))
+	waiting := resp.Categories[InboxCategoryWaiting]
+	assert.Equal(t, InboxStateOK, waiting.State)
+	assert.Equal(t, 5, waiting.Count)
+
+	wantOrder := []string{
+		newerCreatedOlderSince.ID,
+		nilSinceLastActivity.ID,
+		olderCreatedNewerSince.ID,
+		nilSinceUpdated.ID,
+		nilSinceCreated.ID,
+	}
+	assert.Equal(t, wantOrder, waiting.AgentIDs)
+
+	require.Len(t, waiting.Previews, 5)
+	gotPreviewIDs := make([]string, 5)
+	gotSince := make([]time.Time, 5)
+	for i, raw := range waiting.Previews {
+		b, err := json.Marshal(raw)
+		require.NoError(t, err)
+		var p InboxWaitingAgentPreview
+		require.NoError(t, json.Unmarshal(b, &p))
+		gotPreviewIDs[i] = p.AgentID
+		gotSince[i] = p.Since
+	}
+	assert.Equal(t, wantOrder, gotPreviewIDs)
+	assert.Equal(t, []time.Time{t1, t2, t3, t4, t5}, gotSince)
 }

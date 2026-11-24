@@ -271,4 +271,100 @@ describe('InboxSummaryStore', () => {
     expect(store.unavailable404).toBe(true);
     expect(store.summary).toBeNull();
   });
+
+  describe('waiting-hint filter (§5.2)', () => {
+    function makeWaitingSummary(agentIds: string[]): InboxSummaryResponse {
+      const s = makeSummary(0);
+      s.total = agentIds.length;
+      s.categories.waiting = {
+        state: 'ok',
+        count: agentIds.length,
+        capped: false,
+        countsTowardTotal: true,
+        href: '/agents',
+        previews: [],
+        agentIds,
+      };
+      return s;
+    }
+
+    beforeEach(async () => {
+      setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(makeWaitingSummary(['agent-known'])), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      );
+      store.ensureStarted('user-1');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('refetches when an unknown agent enters waiting_for_input', async () => {
+      stateManager.dispatchEvent(
+        new CustomEvent('inbox-changed', {
+          detail: { category: 'waiting', agentId: 'agent-new', activity: 'waiting_for_input' },
+        })
+      );
+      await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('ignores waiting_for_input hint for an already-known agent', async () => {
+      stateManager.dispatchEvent(
+        new CustomEvent('inbox-changed', {
+          detail: { category: 'waiting', agentId: 'agent-known', activity: 'waiting_for_input' },
+        })
+      );
+      await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('refetches when a known agent leaves waiting_for_input (non-waiting or cleared activity)', async () => {
+      stateManager.dispatchEvent(
+        new CustomEvent('inbox-changed', {
+          detail: { category: 'waiting', agentId: 'agent-known', activity: 'thinking' },
+        })
+      );
+      await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      // Cleared/omitted activity (e.g. stopped/suspended) also counts as leaving waiting_for_input.
+      stateManager.dispatchEvent(
+        new CustomEvent('inbox-changed', {
+          detail: { category: 'waiting', agentId: 'agent-known' },
+        })
+      );
+      await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('ignores non-waiting activity hints for an unknown agent', async () => {
+      stateManager.dispatchEvent(
+        new CustomEvent('inbox-changed', {
+          detail: { category: 'waiting', agentId: 'agent-other', activity: 'thinking' },
+        })
+      );
+      stateManager.dispatchEvent(
+        new CustomEvent('inbox-changed', {
+          detail: { category: 'waiting', agentId: 'agent-other', activity: '' },
+        })
+      );
+      await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('refetches when a waiting hint omits agentId', async () => {
+      stateManager.dispatchEvent(
+        new CustomEvent('inbox-changed', {
+          detail: { category: 'waiting' },
+        })
+      );
+      await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
 });

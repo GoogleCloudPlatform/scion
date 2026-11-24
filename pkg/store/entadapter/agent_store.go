@@ -1635,6 +1635,9 @@ func (s *AgentStore) agentFilterPredicates(ctx context.Context, filter store.Age
 	case filter.OrRunIntent != "":
 		preds = append(preds, agent.RunIntentEQ(filter.OrRunIntent))
 	}
+	if filter.Activity != "" {
+		preds = append(preds, agent.ActivityEQ(filter.Activity))
+	}
 	if filter.AncestorID != "" {
 		preds = append(preds, ancestryContains(filter.AncestorID))
 	}

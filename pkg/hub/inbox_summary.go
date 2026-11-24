@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -33,6 +35,8 @@ const (
 	inboxSummaryDefaultPreviews = 3
 	inboxSummaryMaxPreviews     = 10
 	inboxCategoryTimeout        = 1500 * time.Millisecond
+	inboxWaitingLimit           = 200
+	inboxPreviewQuestionMax     = 200
 
 	// InboxCategory* are the five stable keys returned in InboxSummaryResponse.Categories.
 	InboxCategoryDecisions = "decisions"
@@ -81,6 +85,24 @@ type InboxCategory struct {
 	Breakdown         map[string]int `json:"breakdown,omitempty"`
 }
 
+// MarshalJSON preserves a non-nil empty AgentIDs slice as `"agentIds": []`
+// (for the "waiting" category when state == "ok" and count == 0) while
+// omitting the field when AgentIDs is nil (all other categories and error state).
+func (c InboxCategory) MarshalJSON() ([]byte, error) {
+	type alias InboxCategory
+	if c.AgentIDs != nil && len(c.AgentIDs) == 0 {
+		type withEmptyAgentIDs struct {
+			alias
+			AgentIDs []string `json:"agentIds"`
+		}
+		return json.Marshal(withEmptyAgentIDs{
+			alias:    alias(c),
+			AgentIDs: []string{},
+		})
+	}
+	return json.Marshal(alias(c))
+}
+
 // InboxApprovalPreview is one preview item in the "approvals" category.
 // Never contains secret values or ValueRef.
 type InboxApprovalPreview struct {
@@ -96,6 +118,20 @@ type InboxApprovalPreview struct {
 	ReplacesExisting bool      `json:"replacesExisting"`
 	AllowProgeny     bool      `json:"allowProgeny"`
 	ExpiresAt        time.Time `json:"expiresAt"`
+}
+
+// InboxWaitingAgentPreview is one preview item in the "waiting" category.
+type InboxWaitingAgentPreview struct {
+	ID          string    `json:"id"`
+	ProjectID   string    `json:"projectId"`
+	ProjectName string    `json:"projectName"`
+	CreatedAt   time.Time `json:"createdAt"`
+	Href        string    `json:"href"`
+	AgentID     string    `json:"agentId"`
+	AgentName   string    `json:"agentName"`
+	AgentSlug   string    `json:"agentSlug"`
+	Question    string    `json:"question"`
+	Since       time.Time `json:"since"`
 }
 
 type inboxViewer struct {
@@ -238,7 +274,7 @@ func (s *Server) inboxSources() []inboxSourceEntry {
 	}
 	return []inboxSourceEntry{
 		{key: InboxCategoryApprovals, run: s.inboxApprovalsCategory},
-		{key: InboxCategoryWaiting, run: inboxDisabledCategory("/agents")},
+		{key: InboxCategoryWaiting, run: s.inboxWaitingCategory},
 		{key: InboxCategoryReviews, run: inboxDisabledCategory("/artifacts?review_pending=1&owner=me")},
 		{key: InboxCategoryChat, run: inboxDisabledCategory("/chat?filter=unread")},
 		{key: InboxCategoryDecisions, run: inboxDisabledCategory("/profile/decisions?tab=pending")},
@@ -382,5 +418,150 @@ func (s *Server) inboxApprovalsCategory(ctx context.Context, v inboxViewer, prev
 		CountsTowardTotal: true,
 		Href:              href,
 		Previews:          items,
+	}
+}
+
+func waitingAgentSince(a store.Agent) time.Time {
+	if a.ActivitySince != nil && !a.ActivitySince.IsZero() {
+		return a.ActivitySince.UTC()
+	}
+	if !a.LastActivityEvent.IsZero() {
+		return a.LastActivityEvent.UTC()
+	}
+	if !a.Updated.IsZero() {
+		return a.Updated.UTC()
+	}
+	return a.Created.UTC()
+}
+
+func inboxAgentDetailHref(agentID string) string {
+	return "/agents/" + agentID
+}
+
+func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previews int, _ string) InboxCategory {
+	const href = "/agents"
+
+	filter := store.AgentFilter{
+		OwnerID:  v.userID,
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWaitingForInput),
+	}
+	if v.token != nil {
+		if boundaryProject := tokenBoundaryProject(v.token); boundaryProject != "" {
+			filter.ProjectID = boundaryProject
+		}
+	}
+
+	res, err := s.store.ListAgents(ctx, filter, store.ListOptions{
+		Limit:          inboxWaitingLimit,
+		SkipTotalCount: true,
+	})
+	if err != nil {
+		code := inboxCategoryErrorCode(ctx, err)
+		slog.Warn("inbox summary: category source failed",
+			"category", InboxCategoryWaiting,
+			"error_code", code,
+			"error", err)
+		return InboxCategory{
+			State:             InboxStateError,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: true,
+			Href:              href,
+			ErrorCode:         code,
+			Previews:          []any{},
+		}
+	}
+
+	capped := len(res.Items) >= inboxWaitingLimit
+
+	var matched []store.Agent
+	if v.token != nil {
+		scopeCheck := s.newSelfScopeCheck(ctx, v.token, permInboxRead)
+		matched = make([]store.Agent, 0, len(res.Items))
+		for _, a := range res.Items {
+			if scopeCheck.allows(a.ProjectID) {
+				matched = append(matched, a)
+			}
+		}
+	} else {
+		// Copy before sorting in place so callers sharing the slice are unaffected.
+		matched = append([]store.Agent(nil), res.Items...)
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		si, sj := waitingAgentSince(matched[i]), waitingAgentSince(matched[j])
+		if !si.Equal(sj) {
+			return si.Before(sj)
+		}
+		if !matched[i].Created.Equal(matched[j].Created) {
+			return matched[i].Created.Before(matched[j].Created)
+		}
+		return matched[i].ID < matched[j].ID
+	})
+
+	agentIDs := make([]string, len(matched))
+	for i, a := range matched {
+		agentIDs[i] = a.ID
+	}
+
+	capN := previews
+	if capN > len(matched) {
+		capN = len(matched)
+	}
+
+	projectNames := make(map[string]string, capN)
+	if capN > 0 {
+		seen := make(map[string]struct{}, capN)
+		projIDs := make([]string, 0, capN)
+		for i := 0; i < capN; i++ {
+			pid := matched[i].ProjectID
+			if pid == "" {
+				continue
+			}
+			if _, ok := seen[pid]; !ok {
+				seen[pid] = struct{}{}
+				projIDs = append(projIDs, pid)
+			}
+		}
+		if len(projIDs) > 0 {
+			if projRes, pErr := s.store.ListProjectSummaries(ctx, store.ProjectFilter{
+				MemberProjectIDs: projIDs,
+			}, store.ListOptions{
+				Limit:          len(projIDs),
+				SkipTotalCount: true,
+			}); pErr == nil && projRes != nil {
+				for _, p := range projRes.Items {
+					projectNames[p.ID] = p.Name
+				}
+			}
+		}
+	}
+
+	items := make([]any, 0, capN)
+	for i := 0; i < capN; i++ {
+		a := matched[i]
+		items = append(items, InboxWaitingAgentPreview{
+			ID:          a.ID,
+			ProjectID:   a.ProjectID,
+			ProjectName: projectNames[a.ProjectID],
+			CreatedAt:   a.Created,
+			Href:        inboxAgentDetailHref(a.ID),
+			AgentID:     a.ID,
+			AgentName:   a.Name,
+			AgentSlug:   a.Slug,
+			Question:    truncateRunes(a.Message, inboxPreviewQuestionMax),
+			Since:       waitingAgentSince(a),
+		})
+	}
+
+	return InboxCategory{
+		State:             InboxStateOK,
+		Count:             len(matched),
+		Capped:            capped,
+		CountsTowardTotal: true,
+		Href:              href,
+		Previews:          items,
+		AgentIDs:          agentIDs,
 	}
 }
