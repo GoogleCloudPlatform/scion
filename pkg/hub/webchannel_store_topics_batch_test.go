@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
@@ -154,4 +155,91 @@ func TestListTopicsByProjects_Postgres(t *testing.T) {
 	wcs := NewWebChatStore(db, "postgres")
 	require.NoError(t, wcs.Init())
 	assertListTopicsByProjectsParity(t, db, "postgres", wcs)
+}
+
+// assertListTopicsIncludingDeletedForProjectsParity checks that
+// ListTopicsIncludingDeletedForProjects returns the exact union of
+// ListTopicsIncludingDeleted over the requested projects (including
+// soft-deleted topics and preserving per-project order), excluding unrequested
+// projects and handling empty/duplicate project IDs.
+func assertListTopicsIncludingDeletedForProjectsParity(t *testing.T, db *sql.DB, dialect string, wcs WebChatStore) {
+	t.Helper()
+	ctx := context.Background()
+	at := func(h int) *time.Time {
+		ts := time.Date(2026, 3, 1, h, 0, 0, 0, time.UTC)
+		return &ts
+	}
+	seedTopicsBatchRows(t, db, dialect, []topicsBatchRow{
+		{id: "a-old", projectID: "proj-a", name: "old", activity: at(1), lastMessageID: "m1"},
+		{id: "a-new", projectID: "proj-a", name: "new", activity: at(5), lastMessageID: "m2"},
+		{id: "a-quiet", projectID: "proj-a", name: "quiet"},
+		{id: "a-gone", projectID: "proj-a", name: "gone", activity: at(9), lastMessageID: "m3", deleted: true},
+		{id: "b-only", projectID: "proj-b", name: "only", activity: at(3), lastMessageID: "m4"},
+		{id: "d-unasked", projectID: "proj-d", name: "unasked", activity: at(4), lastMessageID: "m5"},
+	})
+
+	empty, err := wcs.ListTopicsIncludingDeletedForProjects(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	requested := []string{"proj-b", "proj-c", "proj-a", "proj-a", ""}
+	got, err := wcs.ListTopicsIncludingDeletedForProjects(ctx, requested)
+	require.NoError(t, err)
+	assert.NotContains(t, got, "proj-d", "unrequested project must not appear")
+	assert.NotContains(t, got, "proj-c", "project without topics must not appear")
+
+	for _, pid := range []string{"proj-a", "proj-b"} {
+		want, err := wcs.ListTopicsIncludingDeleted(ctx, pid)
+		require.NoError(t, err)
+		require.Len(t, got[pid], len(want), "project %s", pid)
+		for i := range want {
+			assert.Equal(t, want[i].ID, got[pid][i].ID, "project %s row %d", pid, i)
+			assert.Equal(t, want[i].Name, got[pid][i].Name, "project %s row %d", pid, i)
+			assert.Equal(t, want[i].DeletedAt != nil, got[pid][i].DeletedAt != nil, "project %s row %d deleted", pid, i)
+			if want[i].DeletedAt != nil && got[pid][i].DeletedAt != nil {
+				assert.True(t, want[i].DeletedAt.Equal(*got[pid][i].DeletedAt), "project %s row %d deleted_at", pid, i)
+			}
+			assert.True(t, want[i].LastActivityAt.Equal(got[pid][i].LastActivityAt), "project %s row %d activity", pid, i)
+		}
+	}
+	assert.Len(t, got["proj-a"], 4, "soft-deleted topic must be included")
+}
+
+func TestListTopicsIncludingDeletedForProjects_SQLite(t *testing.T) {
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
+	require.NoError(t, wcs.Init())
+	assertListTopicsIncludingDeletedForProjectsParity(t, db, "sqlite", wcs)
+
+	// Verify chunking across > 500 project IDs.
+	const numProjects = 515
+	rows := make([]topicsBatchRow, numProjects)
+	ids := make([]string, numProjects)
+	for i := 0; i < numProjects; i++ {
+		pid := fmt.Sprintf("chunk-proj-%04d", i)
+		ids[i] = pid
+		rows[i] = topicsBatchRow{id: fmt.Sprintf("tp-%04d", i), projectID: pid, name: "general", deleted: i%10 == 0}
+	}
+	seedTopicsBatchRows(t, db, "sqlite", rows)
+
+	got, err := wcs.ListTopicsIncludingDeletedForProjects(context.Background(), ids)
+	require.NoError(t, err)
+	require.Len(t, got, numProjects)
+	assert.NotNil(t, got["chunk-proj-0000"][0].DeletedAt)
+	assert.Nil(t, got["chunk-proj-0001"][0].DeletedAt)
+	assert.NotNil(t, got["chunk-proj-0510"][0].DeletedAt)
+}
+
+func TestListTopicsIncludingDeletedForProjects_Postgres(t *testing.T) {
+	dsn := hubtestutil.RequirePostgresDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	pgDropWebchatTables(t, db)
+	t.Cleanup(func() { pgDropWebchatTables(t, db) })
+
+	wcs := NewWebChatStore(db, "postgres")
+	require.NoError(t, wcs.Init())
+	assertListTopicsIncludingDeletedForProjectsParity(t, db, "postgres", wcs)
 }

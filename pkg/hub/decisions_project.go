@@ -467,6 +467,27 @@ func (s *Server) resolveProjectReadableScope(
 	token *ScopedUserIdentity,
 	wcs WebChatStore,
 ) (*projectReadableScope, error) {
+	scopes, err := s.resolveProfileDecisionScopes(ctx, []*store.Project{project}, user, token, wcs)
+	if err != nil {
+		return nil, err
+	}
+	return scopes[0], nil
+}
+
+// buildProjectReadableScope assembles one project's readable conversation scope
+// from pre-fetched access, topics, asking-agent summaries, and agent rows
+// (design-scale §3.4). It performs no store or web-chat queries.
+func (s *Server) buildProjectReadableScope(
+	ctx context.Context,
+	project *store.Project,
+	viewerID string,
+	token *ScopedUserIdentity,
+	dmTokenCheck *selfScopeCheck,
+	projectChatAccess ChatAccess,
+	topics []WebChatTopic,
+	decAgents []store.ProjectDecisionActor,
+	agentsByID map[string]*store.Agent,
+) *projectReadableScope {
 	scope := &projectReadableScope{
 		project:               project,
 		conversationLabel:     make(map[string]string),
@@ -478,17 +499,11 @@ func (s *Server) resolveProjectReadableScope(
 		agentNames:            make(map[string]string),
 	}
 	seenKeys := make(map[string]bool)
-	projectChatAccess := s.chatUserAccess(ctx, user, project,
-		[]string{ChatActionRead}, chatThreadWriteActions, nil, false, false)
 
 	// 1. Readable topics in the project (including soft-deleted topics so
 	// audit history is never erased; soft-deleted topics report
 	// conversationAvailable=false and userCanPost=false).
-	if wcs != nil && projectChatAccess.Can(ChatActionRead) {
-		topics, err := wcs.ListTopicsIncludingDeleted(ctx, project.ID)
-		if err != nil {
-			return nil, fmt.Errorf("list topics: %w", err)
-		}
+	if projectChatAccess.Can(ChatActionRead) {
 		canPostInActiveTopic := projectChatAccess.Can(ChatActionPost)
 		for _, t := range topics {
 			if !seenKeys[t.ID] {
@@ -507,14 +522,7 @@ func (s *Server) resolveProjectReadableScope(
 	}
 
 	// 2. Collect distinct asking agent UUIDs that actually appear on decisions
-	// in this project (SQL GROUP BY asker_agent_id) and batch-load their agent
-	// rows once via GetAgentsByIDsIncludingDeleted. An agent with zero
-	// decisions in this project can have no DM decision rows, so candidate DM
-	// keys are derived solely from this distinct set.
-	decAgents, err := s.store.ListProjectDecisionAgents(ctx, project.ID)
-	if err != nil {
-		return nil, fmt.Errorf("list project decision agents: %w", err)
-	}
+	// in this project and populate their cached agent rows and display names.
 	candidateAgentIDs := make([]string, 0, len(decAgents))
 	for _, da := range decAgents {
 		if da.Name != "" {
@@ -522,33 +530,19 @@ func (s *Server) resolveProjectReadableScope(
 		}
 		scope.queriedAgentIDs[da.ID] = true
 		candidateAgentIDs = append(candidateAgentIDs, da.ID)
-	}
-	if len(candidateAgentIDs) > 0 {
-		agentsByID, berr := s.store.GetAgentsByIDsIncludingDeleted(ctx, candidateAgentIDs)
-		if berr != nil {
-			return nil, fmt.Errorf("batch get decision agents: %w", berr)
-		}
-		for _, id := range candidateAgentIDs {
-			ag := agentsByID[id]
-			if ag == nil {
-				continue
-			}
-			scope.agentsByID[id] = ag
+		if ag := agentsByID[da.ID]; ag != nil {
+			scope.agentsByID[da.ID] = ag
 			if name := agentDisplayName(ag); name != "" {
-				scope.agentNames[id] = name
+				scope.agentNames[da.ID] = name
 			}
 			if ag.DeletedAt.IsZero() {
-				scope.liveAgents[id] = ag
+				scope.liveAgents[da.ID] = ag
 			}
 		}
 	}
 
-	// Build viewer's canonical DM keys dm:agent:<agentUUID>:user:<viewerID>.
-	viewerID := user.ID()
-	var dmTokenCheck *selfScopeCheck
-	if token != nil {
-		dmTokenCheck = s.newSelfScopeCheck(ctx, token, permInboxRead)
-	}
+	// 3. Build viewer's canonical DM keys dm:agent:<agentUUID>:user:<viewerID>.
+	// Strictly participant-only even for project owners/admins and hub admins.
 	for _, agentID := range candidateAgentIDs {
 		dmKey, err := messages.DMConversationKey("agent", agentID, "user", viewerID)
 		if err != nil {
@@ -570,7 +564,7 @@ func (s *Server) resolveProjectReadableScope(
 		scope.userCanPost[dmKey] = true
 	}
 
-	return scope, nil
+	return scope
 }
 
 func (s *Server) listProjectDecisions(w http.ResponseWriter, r *http.Request, projectID string) {

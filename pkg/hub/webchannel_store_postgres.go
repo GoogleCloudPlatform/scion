@@ -572,6 +572,66 @@ func (s *pgWebChatStore) ListTopicsIncludingDeleted(ctx context.Context, project
 	return s.listTopics(ctx, projectID, true)
 }
 
+// ListTopicsIncludingDeletedForProjects returns all topics (including
+// soft-deleted ones) for the requested projects, keyed by project ID and
+// ordered within each project by last_activity_at DESC. Queries are chunked
+// at 500 project IDs to stay well below Postgres parameter limits.
+func (s *pgWebChatStore) ListTopicsIncludingDeletedForProjects(ctx context.Context, projectIDs []string) (map[string][]WebChatTopic, error) {
+	unique := dedupeNonEmptyStrings(projectIDs)
+	if len(unique) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]WebChatTopic, len(unique))
+	for start := 0; start < len(unique); start += webChatTopicsBatchChunkSize {
+		end := start + webChatTopicsBatchChunkSize
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = id
+		}
+		query := fmt.Sprintf(`
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       last_activity_at, deleted_at
+  FROM webchat_topic
+ WHERE project_id IN (%s)
+ ORDER BY project_id, last_activity_at DESC
+`, strings.Join(placeholders, ","))
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("webchat store: list topics including deleted for projects: %w", err)
+		}
+		for rows.Next() {
+			var t WebChatTopic
+			var activityAt *time.Time
+			var deletedAt *time.Time
+			if err := rows.Scan(&t.ID, &t.ProjectID, &t.Name, &t.IsGeneral, &t.DefaultAgent,
+				&t.ConversationID,
+				&t.CreatedBy, &t.CreatedAt, &t.LastMessageID, &activityAt, &deletedAt); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("webchat store: scan topic: %w", err)
+			}
+			if activityAt != nil {
+				t.LastActivityAt = *activityAt
+			}
+			t.DeletedAt = deletedAt
+			out[t.ProjectID] = append(out[t.ProjectID], t)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("webchat store: list topics including deleted for projects rows: %w", err)
+		}
+		_ = rows.Close()
+	}
+	return out, nil
+}
+
 func (s *pgWebChatStore) listTopics(ctx context.Context, projectID string, includeDeleted bool) ([]WebChatTopic, error) {
 	query := `
 SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),

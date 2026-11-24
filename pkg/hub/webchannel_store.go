@@ -122,6 +122,12 @@ type WebChatStore interface {
 	// ones) for a project, ordered by last_activity_at DESC.
 	ListTopicsIncludingDeleted(ctx context.Context, projectID string) ([]WebChatTopic, error)
 
+	// ListTopicsIncludingDeletedForProjects returns all topics (including
+	// soft-deleted ones) for the requested projects, keyed by project ID and
+	// ordered within each project by last_activity_at DESC. Queries are chunked
+	// at 500 project IDs. Empty projectIDs returns (nil, nil) without querying.
+	ListTopicsIncludingDeletedForProjects(ctx context.Context, projectIDs []string) (map[string][]WebChatTopic, error)
+
 	// ListTopicsByProjects returns the non-deleted topics of every project
 	// in projectIDs in one query: the union of ListTopics over those
 	// projects, ordered by project_id and then last_activity_at DESC. It
@@ -1003,10 +1009,92 @@ func (s *sqliteWebChatStore) ListTopics(ctx context.Context, projectID string) (
 	return s.listTopics(ctx, projectID, false)
 }
 
+const webChatTopicsBatchChunkSize = 500
+
+func dedupeNonEmptyStrings(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(items))
+	out := make([]string, 0, len(items))
+	for _, s := range items {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
 // ListTopicsIncludingDeleted returns all topics (including soft-deleted ones)
 // for a project, ordered by last_activity_at DESC.
 func (s *sqliteWebChatStore) ListTopicsIncludingDeleted(ctx context.Context, projectID string) ([]WebChatTopic, error) {
 	return s.listTopics(ctx, projectID, true)
+}
+
+// ListTopicsIncludingDeletedForProjects returns all topics (including
+// soft-deleted ones) for the requested projects, keyed by project ID and
+// ordered within each project by last_activity_at DESC. Queries are chunked
+// at 500 project IDs to stay well below SQLite bind-parameter limits.
+func (s *sqliteWebChatStore) ListTopicsIncludingDeletedForProjects(ctx context.Context, projectIDs []string) (map[string][]WebChatTopic, error) {
+	unique := dedupeNonEmptyStrings(projectIDs)
+	if len(unique) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]WebChatTopic, len(unique))
+	for start := 0; start < len(unique); start += webChatTopicsBatchChunkSize {
+		end := start + webChatTopicsBatchChunkSize
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		query := fmt.Sprintf(`
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       COALESCE(last_activity_at, ''), deleted_at
+  FROM webchat_topic
+ WHERE project_id IN (%s)
+ ORDER BY project_id, last_activity_at DESC
+`, strings.Join(placeholders, ","))
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("webchat store: list topics including deleted for projects: %w", err)
+		}
+		for rows.Next() {
+			var t WebChatTopic
+			var isGeneral int
+			var createdAtStr, activityStr string
+			var deletedAtStr *string
+			if err := rows.Scan(&t.ID, &t.ProjectID, &t.Name, &isGeneral, &t.DefaultAgent,
+				&t.ConversationID,
+				&t.CreatedBy, &createdAtStr, &t.LastMessageID, &activityStr, &deletedAtStr); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("webchat store: scan topic: %w", err)
+			}
+			t.IsGeneral = isGeneral != 0
+			t.CreatedAt = parseSQLiteTime(createdAtStr)
+			t.LastActivityAt = parseSQLiteTime(activityStr)
+			if deletedAtStr != nil && *deletedAtStr != "" {
+				parsed := parseSQLiteTime(*deletedAtStr)
+				t.DeletedAt = &parsed
+			}
+			out[t.ProjectID] = append(out[t.ProjectID], t)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("webchat store: list topics including deleted for projects rows: %w", err)
+		}
+		_ = rows.Close()
+	}
+	return out, nil
 }
 
 func (s *sqliteWebChatStore) listTopics(ctx context.Context, projectID string, includeDeleted bool) ([]WebChatTopic, error) {
