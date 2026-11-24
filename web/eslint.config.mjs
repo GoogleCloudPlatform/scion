@@ -155,6 +155,7 @@ export default defineConfig([
   // load src and keep their own project.
   project(
     [
+      'e2e/agent-create-secrets/*.ts',
       'e2e/agent-store-count/*.ts',
       'e2e/artifacts-access/*.ts',
       'e2e/artifacts-agent-owned/*.ts',

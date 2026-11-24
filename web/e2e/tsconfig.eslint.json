@@ -10,6 +10,7 @@
     "noEmit": true
   },
   "include": [
+    "./agent-create-secrets/*.ts",
     "./agent-store-count/*.ts",
     "./artifacts-access/*.ts",
     "./artifacts-agent-owned/*.ts",

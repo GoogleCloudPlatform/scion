@@ -38,28 +38,29 @@ const SYSTEMONE_RESERVED_PREFIX = 'systemone.instance.';
 const WEBHOOK_ENDPOINT_RESERVED_PREFIX = 'webhook_endpoint.';
 const WEBHOOK_ENDPOINT_SANITIZED_PREFIX = 'webhook_endpoint-';
 
+/** Monotonic counter for stable in-memory row IDs (never serialized). */
+let nextAgentSecretRowId = 0;
+
 /** One editable row in the create-agent Secrets tab. Held in memory only. */
 export interface AgentSecretDraftRow {
+  /** Stable in-memory row identifier for keyed list rendering (never serialized). */
+  id?: string;
   key: string;
   value: string;
   type: SecretType;
   target: string;
   injectionMode: InjectionMode;
-  revealed: boolean;
-  /** Transient UI-only flag: true while the file textarea has focus. */
-  editing?: boolean;
 }
 
 /** Creates a blank secret row with the hub's defaults (environment, as_needed). */
 export function emptyAgentSecretRow(): AgentSecretDraftRow {
   return {
+    id: `secret-row-${++nextAgentSecretRowId}`,
     key: '',
     value: '',
     type: 'environment',
     target: '',
     injectionMode: 'as_needed',
-    revealed: false,
-    editing: false,
   };
 }
 

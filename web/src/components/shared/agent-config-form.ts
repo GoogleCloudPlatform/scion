@@ -52,6 +52,7 @@
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 
 import type {
   AgentEditability,
@@ -92,9 +93,11 @@ import {
   renderServiceAccountOption,
 } from './gcp-sa-picker-options.js';
 import type { EnvEntry } from './env-editor.js';
+import type { ScionSecretValueField, SecretValueChangeDetail } from './secret-value-field.js';
 import type { TimezoneChangeDetail } from './timezone-picker.js';
 import './env-editor.js';
 import './message-mode-badge.js';
+import './secret-value-field.js';
 import './timezone-picker.js';
 
 export type { AgentConfigPlaceholder } from '../../shared/agent-config-inherited.js';
@@ -820,6 +823,11 @@ export class ScionAgentConfigForm extends LitElement {
     this.requestUpdate();
   };
 
+  /** Clears ephemeral create-time secrets on pagehide so bfcache cannot restore them. */
+  private readonly boundOnPageHide = (): void => {
+    this.clearSecrets();
+  };
+
   /** Whether the create-mode Secrets tab is enabled. */
   private get createSecretsEnabled(): boolean {
     return this.mode === 'create' && isFeatureEnabled(AGENT_SECRETS_FLAG);
@@ -1099,8 +1107,15 @@ export class ScionAgentConfigForm extends LitElement {
     return toCreateAgentSecrets(this.secretRows);
   }
 
+  private clearSecretFields(): void {
+    this.shadowRoot
+      ?.querySelectorAll<ScionSecretValueField>('scion-secret-value-field')
+      .forEach((field) => field.clear());
+  }
+
   /** Clears all in-memory create-time secret values immediately. */
   clearSecrets(): void {
+    this.clearSecretFields();
     if (this.secretRows.length === 0) return;
     this.secretRows = [];
     this.emitChange();
@@ -1123,6 +1138,7 @@ export class ScionAgentConfigForm extends LitElement {
     this.autoExpose = null;
     this.envEntries = null;
     this.labelEntries = null;
+    this.clearSecretFields();
     this.secretRows = [];
     this.emitChange();
   }
@@ -1175,6 +1191,7 @@ export class ScionAgentConfigForm extends LitElement {
     this.subscribeGcp();
     if (typeof window !== 'undefined') {
       window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+      window.addEventListener('pagehide', this.boundOnPageHide);
     }
   }
 
@@ -1184,7 +1201,9 @@ export class ScionAgentConfigForm extends LitElement {
     this.unsubscribeGcp = null;
     if (typeof window !== 'undefined') {
       window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+      window.removeEventListener('pagehide', this.boundOnPageHide);
     }
+    this.clearSecretFields();
     this.secretRows = [];
   }
 
@@ -2197,7 +2216,9 @@ export class ScionAgentConfigForm extends LitElement {
           <a href="/profile/secrets" data-testid="profile-secrets-link">Profile Secrets</a>.
         </div>
 
-        ${this.secretRows.map(
+        ${repeat(
+          this.secretRows,
+          (row, i) => row.id ?? i,
           (row, i) => html`
             <div class="secret-row" data-testid="secret-row" data-index=${i}>
               <div class="secret-row-top">
@@ -2257,64 +2278,17 @@ export class ScionAgentConfigForm extends LitElement {
               </div>
 
               <div class="secret-row-value">
-                ${row.type === 'file'
-                  ? !row.revealed && !row.editing && row.value !== ''
-                    ? html`
-                        <div class="secret-file-masked" data-testid="secret-file-masked">
-                          <sl-icon name="lock"></sl-icon>
-                          <span
-                            >&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;
-                            (${row.value.split('\n').length}
-                            ${row.value.split('\n').length === 1 ? 'line' : 'lines'}, hidden — click
-                            Show to view or edit)</span
-                          >
-                        </div>
-                      `
-                    : html`
-                        <sl-textarea
-                          size="small"
-                          label="Value"
-                          data-field="value"
-                          rows="3"
-                          resize="vertical"
-                          placeholder="Paste file contents (e.g. private key)"
-                          .value=${row.value}
-                          ?disabled=${this.disabled}
-                          @sl-focus=${() => this.updateSecretRow(i, { editing: true })}
-                          @sl-blur=${() => this.updateSecretRow(i, { editing: false })}
-                          @sl-input=${(e: Event) =>
-                            this.updateSecretRow(i, {
-                              value: (e.target as HTMLElement & { value: string }).value,
-                            })}
-                        ></sl-textarea>
-                      `
-                  : html`
-                      <sl-input
-                        size="small"
-                        label="Value"
-                        data-field="value"
-                        type=${row.revealed ? 'text' : 'password'}
-                        placeholder="Secret value"
-                        .value=${row.value}
-                        ?disabled=${this.disabled}
-                        @sl-input=${(e: Event) =>
-                          this.updateSecretRow(i, {
-                            value: (e.target as HTMLElement & { value: string }).value,
-                          })}
-                      ></sl-input>
-                    `}
-                <sl-icon-button
-                  class="secret-reveal-btn"
-                  name=${row.revealed ? 'eye-slash' : 'eye'}
-                  label=${row.revealed ? 'Hide value' : 'Show value'}
-                  data-action="toggle-reveal"
-                  ?disabled=${this.disabled}
-                  @click=${() =>
-                    this.updateSecretRow(i, {
-                      revealed: !row.revealed,
-                      editing: false,
-                    })}
-                ></sl-icon-button>
+                <scion-secret-value-field
+                  data-field="value"
+                  .label=${'Value'}
+                  .secretKey=${row.key}
+                  .rowId=${row.id ?? String(i)}
+                  .allowFileLoad=${row.type === 'file'}
+                  .disabled=${this.disabled}
+                  .showError=${true}
+                  @secret-value-change=${(e: CustomEvent<SecretValueChangeDetail>) =>
+                    this.updateSecretRow(i, { value: e.detail.value })}
+                ></scion-secret-value-field>
               </div>
 
               <div class="secret-row-target">
@@ -2589,27 +2563,13 @@ export class ScionAgentConfigForm extends LitElement {
     }
     .secret-row-value {
       display: flex;
-      align-items: flex-end;
-      gap: 0.375rem;
+      align-items: flex-start;
     }
-    .secret-row-value sl-input,
-    .secret-row-value sl-textarea,
-    .secret-file-masked {
+    .secret-row-value scion-secret-value-field {
       flex: 1 1 auto;
+      min-width: 0;
     }
-    .secret-file-masked {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 0.75rem;
-      border: 1px solid var(--scion-border, var(--sl-color-neutral-300));
-      border-radius: var(--scion-radius, var(--sl-border-radius-medium));
-      background: var(--scion-surface, var(--sl-color-neutral-0));
-      color: var(--scion-text-muted, var(--sl-color-neutral-600));
-      font-size: var(--sl-font-size-small);
-    }
-    .secret-remove-btn,
-    .secret-reveal-btn {
+    .secret-remove-btn {
       flex-shrink: 0;
     }
     .secrets-footer {
