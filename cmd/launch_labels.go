@@ -74,6 +74,7 @@ var launchCodeLabels = map[string]string{
 	api.LaunchCodeRuntimeUnavailable:                   "the container runtime is not running or could not be reached; start the container runtime and retry",
 	api.LaunchCodeImageLacksNetnsSetup:                 "the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough",
 	api.LaunchCodeFirewallRequiresMetadataInterception: "the init firewall (SCION_INIT_FIREWALL) requires metadata mode block or assign on Docker/Podman (firewall-only mode is not supported)",
+	api.LaunchCodePodmanHostGatewayUnsupported:         "podman does not support --add-host host-gateway; upgrade to Podman 4.7 or newer",
 	api.LaunchCodeContainerConfig:                      "the agent container could not be configured",
 	api.LaunchCodeCrashLoop:                            "the agent container keeps crashing on start",
 	api.LaunchCodeInitContainerFailed:                  "an init container of the agent pod failed",

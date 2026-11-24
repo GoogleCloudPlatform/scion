@@ -123,7 +123,7 @@ When no runtime is configured, Scion picks one automatically. On macOS it prefer
 - Ensure the `docker` command is available in your PATH.
 
 #### Podman (Linux/macOS)
-- Install [Podman](https://podman.io/docs/installation).
+- Install [Podman](https://podman.io/docs/installation) **4.0 or newer** (**4.7 or newer** is required for `--add-host host-gateway` support when a co-located Hub uses a custom or public domain; Debian 12's default Podman 4.3.1 lacks `host-gateway` support).
 - Ensure the `podman` command is available in your PATH.
 - On Linux, Scion supports rootless Podman out of the box.
 - On macOS, ensure `podman machine` is initialized and running.

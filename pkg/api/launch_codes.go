@@ -120,6 +120,9 @@ const (
 	// requested on Docker or Podman without runtime-managed metadata
 	// interception (block or assign mode).
 	LaunchCodeFirewallRequiresMetadataInterception = "firewall_requires_metadata_interception"
+	// LaunchCodePodmanHostGatewayUnsupported: the host's Podman version is
+	// older than 4.7 and cannot accept --add-host <host>:host-gateway.
+	LaunchCodePodmanHostGatewayUnsupported = "podman_host_gateway_unsupported"
 	// LaunchCodeContainerConfig: the runtime refused the agent container's
 	// configuration, e.g. a missing secret or volume (Kubernetes
 	// CreateContainerConfigError), or CPU and memory limits outside what
