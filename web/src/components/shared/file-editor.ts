@@ -496,24 +496,35 @@ export class ScionFileEditor extends LitElement {
    */
   async requestClose(): Promise<boolean> {
     if (this.closePromise) return this.closePromise;
-    this.closePromise = (async () => {
-      try {
-        if (this.dirty) {
-          if (!(await showConfirm('You have unsaved changes. Close anyway?'))) return false;
-        }
+    if (!this.dirty) {
+      this.dispatchEvent(
+        new CustomEvent('editor-closed', {
+          bubbles: true,
+          composed: true,
+        })
+      );
+      return true;
+    }
 
-        this.dispatchEvent(
-          new CustomEvent('editor-closed', {
-            bubbles: true,
-            composed: true,
-          })
-        );
-        return true;
-      } finally {
+    const pending = (async () => {
+      if (!(await showConfirm('You have unsaved changes. Close anyway?'))) return false;
+
+      this.dispatchEvent(
+        new CustomEvent('editor-closed', {
+          bubbles: true,
+          composed: true,
+        })
+      );
+      return true;
+    })();
+    this.closePromise = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.closePromise === pending) {
         this.closePromise = null;
       }
-    })();
-    return this.closePromise;
+    }
   }
 
   private async handleClose(): Promise<void> {

@@ -172,4 +172,32 @@ describe('scion-file-editor requestClose', () => {
     expect(await Promise.all([p1, p2])).toEqual([true, true]);
     expect(closed).toHaveBeenCalledTimes(1);
   });
+
+  it('does not retain a stale closePromise after a clean close when the same instance later becomes dirty', async () => {
+    const editor = await mountEditor('hello');
+    const closed = vi.fn();
+    editor.addEventListener('editor-closed', closed);
+
+    // First close while clean succeeds immediately.
+    expect(await editor.requestClose()).toBe(true);
+    expect(showConfirmMock).not.toHaveBeenCalled();
+    expect(closed).toHaveBeenCalledTimes(1);
+
+    // Same editor instance later becomes dirty.
+    editContent(editor, 'unsaved edit after clean close');
+    await editor.updateComplete;
+    expect(editor.dirty).toBe(true);
+
+    // Second requestClose must prompt and return false when declined.
+    showConfirmMock.mockResolvedValueOnce(false);
+    expect(await editor.requestClose()).toBe(false);
+    expect(showConfirmMock).toHaveBeenCalledTimes(1);
+    expect(closed).toHaveBeenCalledTimes(1);
+
+    // Third requestClose when confirmed must prompt, dispatch editor-closed, and return true.
+    showConfirmMock.mockResolvedValueOnce(true);
+    expect(await editor.requestClose()).toBe(true);
+    expect(showConfirmMock).toHaveBeenCalledTimes(2);
+    expect(closed).toHaveBeenCalledTimes(2);
+  });
 });
