@@ -278,6 +278,12 @@ type ServerConfig struct {
 	// AdminEmails is a list of email addresses that should be auto-promoted to admin role.
 	// Useful for bootstrapping the first admin user.
 	AdminEmails []string
+	// DeferAdminReconciliation skips reconcileSuperAdminBindings inside New so
+	// the caller can run ReconcileStartupAdminBindings after operational
+	// settings (including DB rows and SCION_SEED_* values) have been applied.
+	// Defaults to false so direct hub.New callers and unit tests keep
+	// reconciling immediately.
+	DeferAdminReconciliation bool
 	// UserAccessMode controls how user access is evaluated at login time.
 	// Values: "open" (default), "domain_restricted", "invite_only".
 	UserAccessMode string
@@ -3971,11 +3977,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Read effective default_user_role and custom-default-role experiment from
 	// DB operational settings when present (falling back to cfg), so startup
 	// admin demotion matches login-time demotion.
-	startupDefaultRole, startupCustomDefaultEnabled := startupDefaultUserRoleConfig(ctx, s, srv, cfg.DefaultUserRole)
-	if demotionSafe, err := reconcileSuperAdminBindings(ctx, s, cfg.AdminEmails, startupDefaultRole, startupCustomDefaultEnabled); err != nil {
-		slog.Error("failed to reconcile super-admin bindings — revocation may be incomplete", "error", err)
-	} else {
-		srv.demotionSafe.Store(demotionSafe)
+	// When DeferAdminReconciliation is set, the caller runs
+	// ReconcileStartupAdminBindings after operational settings (DB +
+	// SCION_SEED_*) have been applied and before serving requests.
+	if !cfg.DeferAdminReconciliation {
+		startupDefaultRole, startupCustomDefaultEnabled := startupDefaultUserRoleConfig(ctx, s, srv, cfg.DefaultUserRole)
+		if demotionSafe, err := reconcileSuperAdminBindings(ctx, s, cfg.AdminEmails, startupDefaultRole, startupCustomDefaultEnabled); err != nil {
+			slog.Error("failed to reconcile super-admin bindings — revocation may be incomplete", "error", err)
+		} else {
+			srv.demotionSafe.Store(demotionSafe)
+		}
 	}
 
 	// Seed the dev user when dev-auth is enabled so that Ent FK constraints
@@ -5437,6 +5448,30 @@ func (s *Server) DefaultUserRole() string {
 // experiment is currently enabled. Implements AccessSettingsProvider.
 func (s *Server) CustomDefaultRoleEnabled() bool {
 	return s.experimentEnabled(experiments.CustomDefaultUserRole)
+}
+
+// ReconcileStartupAdminBindings runs startup super-admin binding reconciliation
+// against the server's current effective AdminEmails, DefaultUserRole, and
+// hub.custom_default_user_role experiment state, and updates the demotionSafe
+// latch. Callers that set ServerConfig.DeferAdminReconciliation = true must
+// invoke this once operational settings have been applied and before serving
+// requests.
+func (s *Server) ReconcileStartupAdminBindings(ctx context.Context) {
+	if s.store == nil {
+		return
+	}
+	demotionSafe, err := reconcileSuperAdminBindings(
+		ctx,
+		s.store,
+		s.AdminEmails(),
+		s.DefaultUserRole(),
+		s.experimentEnabled(experiments.CustomDefaultUserRole),
+	)
+	if err != nil {
+		slog.Error("failed to reconcile super-admin bindings — revocation may be incomplete", "error", err)
+		return
+	}
+	s.demotionSafe.Store(demotionSafe)
 }
 
 // SetSecretBackend sets the secret backend for pluggable secret storage.

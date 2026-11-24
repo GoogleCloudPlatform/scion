@@ -1961,3 +1961,91 @@ func TestBuiltInMembershipRoleRowsNotSystem_ReportsAndDoesNotChange(t *testing.T
 	require.NoError(t, err)
 	assert.False(t, rd.System, "the check never changes the row")
 }
+
+// TestNew_DeferAdminReconciliation_ReconcilesAfterApplySnapshot verifies that
+// ServerConfig.DeferAdminReconciliation skips super-admin reconciliation inside
+// New and defers promotion, demotion, and latching demotionSafe until
+// ReconcileStartupAdminBindings is called after operational settings are
+// applied (ptone/scion#9143).
+func TestNew_DeferAdminReconciliation_ReconcilesAfterApplySnapshot(t *testing.T) {
+	ctx := context.Background()
+	st, _, err := newTestStoreWithClient(t)
+	require.NoError(t, err)
+
+	promoteUser := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "new-admin@example.com",
+		DisplayName: "New Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	demoteUser := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "old-admin@example.com",
+		DisplayName: "Old Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}
+	require.NoError(t, st.CreateUser(ctx, promoteUser))
+	require.NoError(t, st.CreateUser(ctx, demoteUser))
+
+	srv, err := New(ServerConfig{DeferAdminReconciliation: true}, st)
+	require.NoError(t, err)
+	defer func() { _ = srv.Shutdown(ctx) }()
+
+	// Reconciliation was deferred: demotionSafe is still false and neither
+	// user's role changed inside New().
+	assert.False(t, srv.GetDemotionSafe().Load(), "demotionSafe should remain false before deferred reconciliation")
+	gotPromote, err := st.GetUserByEmail(ctx, promoteUser.Email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleMember, gotPromote.Role)
+	gotDemote, err := st.GetUserByEmail(ctx, demoteUser.Email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleAdmin, gotDemote.Role)
+
+	// Apply operational settings snapshot (as initOperationalSettings does) and
+	// run startup admin reconciliation.
+	ApplySnapshot(srv, Layer1Snapshot{
+		AdminEmails:     []string{"new-admin@example.com"},
+		DefaultUserRole: store.UserRoleViewer,
+	})
+	srv.ReconcileStartupAdminBindings(ctx)
+
+	assert.True(t, srv.GetDemotionSafe().Load(), "demotionSafe should be true after deferred reconciliation matches an existing user")
+	gotPromote, err = st.GetUserByEmail(ctx, promoteUser.Email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleAdmin, gotPromote.Role)
+	gotDemote, err = st.GetUserByEmail(ctx, demoteUser.Email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleViewer, gotDemote.Role)
+}
+
+// TestNew_DeferAdminReconciliation_EmptyListKeepsDemotionUnsafe verifies that
+// calling ReconcileStartupAdminBindings when effective AdminEmails is still
+// empty preserves the lockout guard (demotionSafe stays false and existing
+// admins are not demoted).
+func TestNew_DeferAdminReconciliation_EmptyListKeepsDemotionUnsafe(t *testing.T) {
+	ctx := context.Background()
+	st, _, err := newTestStoreWithClient(t)
+	require.NoError(t, err)
+
+	existingAdmin := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "existing-admin@example.com",
+		DisplayName: "Existing Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}
+	require.NoError(t, st.CreateUser(ctx, existingAdmin))
+
+	srv, err := New(ServerConfig{DeferAdminReconciliation: true}, st)
+	require.NoError(t, err)
+	defer func() { _ = srv.Shutdown(ctx) }()
+
+	srv.ReconcileStartupAdminBindings(ctx)
+
+	assert.False(t, srv.GetDemotionSafe().Load(), "demotionSafe must remain false when effective AdminEmails is empty")
+	got, err := st.GetUserByEmail(ctx, existingAdmin.Email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleAdmin, got.Role, "lockout guard must not demote existing admin when AdminEmails is empty")
+}
