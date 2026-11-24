@@ -190,7 +190,7 @@ test('environment secret row masks natively as password input and submits on a s
   expect(fulfills[0].body.values).toEqual({ GITHUB_TOKEN: 'ghp_test_token_123' });
 });
 
-test('file secret row masks in place with -webkit-text-security and submits on a single click without blur shift', async ({
+test('file secret row captures multi-line paste while masked, hides value from AX tree, and submits newlines intact', async ({
   page,
 }) => {
   const fulfills = await installMockSecretRequestHub(page, {
@@ -201,22 +201,42 @@ test('file secret row masks in place with -webkit-text-security and submits on a
 
   await page.goto('/secret-requests/msg-file-1', { waitUntil: 'domcontentloaded' });
 
-  const textarea = page.locator('textarea[data-key="DEPLOY_KEY"]');
-  await expect(textarea).toBeVisible();
-  await expect(textarea).toHaveClass(/masked/);
+  const input = page.locator('input[data-key="DEPLOY_KEY"]');
+  await expect(input).toBeVisible();
+  await expect(input).toHaveAttribute('type', 'password');
+  await expect(input).toHaveAttribute('autocomplete', 'off');
 
-  const textSecurity = await textarea.evaluate((el) =>
-    getComputedStyle(el).getPropertyValue('-webkit-text-security')
+  const multilineSecret = '-----BEGIN PRIVATE KEY-----\nline-2-secret\n-----END PRIVATE KEY-----';
+
+  // Dispatch a real paste event on the password input with multi-line clipboard text
+  await input.evaluate((el, text) => {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', text);
+    el.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+    );
+  }, multilineSecret);
+
+  const maskedBadge = page.locator('[data-testid="file-value-masked"]');
+  await expect(maskedBadge).toBeVisible();
+  await expect(page.locator('textarea[data-key="DEPLOY_KEY"]')).toHaveCount(0);
+
+  // Verify no plaintext in DOM or CDP accessibility tree while masked
+  const cardText = await page.locator('scion-chat-secret-request').innerText();
+  expect(cardText).not.toContain('line-2-secret');
+
+  const cdp = await page.context().newCDPSession(page);
+  const { nodes } = (await cdp.send('Accessibility.getFullAXTree')) as {
+    nodes: Array<{ value?: { value?: unknown }; name?: { value?: unknown } }>;
+  };
+  const leaked = nodes.some(
+    (n) =>
+      (typeof n.value?.value === 'string' && n.value.value.includes('line-2-secret')) ||
+      (typeof n.name?.value === 'string' && n.name.value.includes('line-2-secret'))
   );
-  expect(textSecurity).toBe('disc');
+  expect(leaked).toBe(false);
 
-  const toggleBtn = page.locator('button[data-toggle-visibility="DEPLOY_KEY"]');
-  await expect(toggleBtn).toHaveAttribute('aria-pressed', 'false');
-
-  await textarea.click();
-  await textarea.fill('-----BEGIN PRIVATE KEY-----\nline-2\nline-3\n-----END PRIVATE KEY-----');
-
-  // Single click directly from the focused 4-row textarea must not lose the click to a blur layout shift
+  // Single click on Submit sends the verbatim multi-line value with newlines intact
   const submitBtn = page.locator('sl-button.submit-btn');
   await expect(submitBtn).toBeEnabled();
   await submitBtn.click();
@@ -224,7 +244,52 @@ test('file secret row masks in place with -webkit-text-security and submits on a
   await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
   expect(fulfills).toHaveLength(1);
   expect(fulfills[0].body.values).toEqual({
-    DEPLOY_KEY: '-----BEGIN PRIVATE KEY-----\nline-2\nline-3\n-----END PRIVATE KEY-----',
+    DEPLOY_KEY: multilineSecret,
+  });
+});
+
+test('file secret row loads UTF-8 file via file picker, stays masked, and submits newlines intact', async ({
+  page,
+}) => {
+  const fulfills = await installMockSecretRequestHub(page, {
+    messageId: 'msg-file-picker-1',
+    key: 'TLS_CERT',
+    secretType: 'file',
+  });
+
+  await page.goto('/secret-requests/msg-file-picker-1', { waitUntil: 'domcontentloaded' });
+
+  const fileContent =
+    '-----BEGIN CERTIFICATE-----\npicker-secret-line\n-----END CERTIFICATE-----\n';
+  const fileInput = page.locator('input[type="file"][data-file-input="TLS_CERT"]');
+  await fileInput.setInputFiles({
+    name: 'cert.pem',
+    mimeType: 'text/plain',
+    buffer: Buffer.from(fileContent, 'utf-8'),
+  });
+
+  await expect(page.locator('[data-testid="file-value-masked"]')).toBeVisible();
+  await expect(page.locator('textarea[data-key="TLS_CERT"]')).toHaveCount(0);
+
+  const cdp = await page.context().newCDPSession(page);
+  const { nodes } = (await cdp.send('Accessibility.getFullAXTree')) as {
+    nodes: Array<{ value?: { value?: unknown }; name?: { value?: unknown } }>;
+  };
+  const leaked = nodes.some(
+    (n) =>
+      (typeof n.value?.value === 'string' && n.value.value.includes('picker-secret-line')) ||
+      (typeof n.name?.value === 'string' && n.name.value.includes('picker-secret-line'))
+  );
+  expect(leaked).toBe(false);
+
+  const submitBtn = page.locator('sl-button.submit-btn');
+  await expect(submitBtn).toBeEnabled();
+  await submitBtn.click();
+
+  await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+  expect(fulfills).toHaveLength(1);
+  expect(fulfills[0].body.values).toEqual({
+    TLS_CERT: fileContent,
   });
 });
 

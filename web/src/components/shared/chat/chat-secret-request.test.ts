@@ -748,99 +748,143 @@ describe('scion-chat-secret-request', () => {
     expect(el.shadowRoot!.querySelector('.status-alert.blocked')).not.toBeNull();
   });
 
-  it('masks file/variable rows in place with -webkit-text-security when supported (no element swap on blur)', async () => {
-    vi.stubGlobal('CSS', {
-      supports: (prop: string, val: string) => prop === '-webkit-text-security' && val === 'disc',
-      escape: (s: string) => s,
-    });
+  it('captures multi-line paste verbatim on file rows while masked, preserves value across Show/Hide, and submits newlines intact', async () => {
+    const multilineSecret =
+      '-----BEGIN PRIVATE KEY-----\nline-two-secret\n-----END PRIVATE KEY-----';
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        rows: [
+          makeRow({
+            rowId: 'r-file',
+            key: 'DEPLOY_KEY',
+            secretType: 'file',
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-24T00:05:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+        ],
+        responseMessageId: 'resp-file-paste',
+        replayed: false,
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
 
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'DEPLOY_KEY', secretType: 'file' })],
     });
+    const input = el.shadowRoot!.querySelector('input[data-key="DEPLOY_KEY"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.type).toBe('password');
+    expect(input.autocomplete).toBe('off');
+    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
+
+    // Dispatch paste event with multi-line clipboard data
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(pasteEvent, 'clipboardData', {
+      value: {
+        getData: (type: string) => (type === 'text/plain' ? multilineSecret : ''),
+      },
+    });
+    input.dispatchEvent(pasteEvent);
+    await el.updateComplete;
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
+    const maskedStatus = el.shadowRoot!.querySelector('[data-testid="file-value-masked"]');
+    expect(maskedStatus).not.toBeNull();
+    expect(maskedStatus?.getAttribute('aria-label')).toBe(
+      'Secret value for DEPLOY_KEY entered, hidden'
+    );
+    expect(maskedStatus?.querySelector('span[aria-hidden="true"]')).not.toBeNull();
+    expect(maskedStatus?.textContent).not.toContain('line');
+    expect(el.shadowRoot!.textContent).not.toContain('line-two-secret');
+    expect(el.shadowRoot!.innerHTML).not.toContain('line-two-secret');
+
+    // Show reveals textarea with verbatim multi-line value; Hide returns to password input without losing it
+    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+    toggleBtn.click();
+    await el.updateComplete;
+
     const textarea = el.shadowRoot!.querySelector(
       'textarea[data-key="DEPLOY_KEY"]'
     ) as HTMLTextAreaElement;
     expect(textarea).not.toBeNull();
-    expect(textarea.classList.contains('masked')).toBe(true);
-
-    // Focus, type several keystrokes, and blur — same textarea stays mounted and masked throughout
-    textarea.dispatchEvent(new Event('focus'));
-    textarea.value = '-----BEGIN KEY-----\nsecret-line';
-    textarea.dispatchEvent(new Event('input'));
-    await el.updateComplete;
-    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBe(textarea);
-    expect(textarea.classList.contains('masked')).toBe(true);
-
-    textarea.dispatchEvent(new Event('blur'));
-    await el.updateComplete;
-    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBe(textarea);
-    expect(el.shadowRoot!.querySelector('[data-testid="secret-masked"]')).toBeNull();
-    expect(textarea.classList.contains('masked')).toBe(true);
-
-    // Show is the only path to plaintext; aria-pressed reflects actual visibility
-    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
-    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
-    toggleBtn.click();
-    await el.updateComplete;
-    expect(textarea.classList.contains('masked')).toBe(false);
+    expect(textarea.value).toBe(multilineSecret);
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
     toggleBtn.click();
     await el.updateComplete;
-    expect(textarea.classList.contains('masked')).toBe(true);
+    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
+    expect(el.shadowRoot!.querySelector('input[data-key="DEPLOY_KEY"]')).not.toBeNull();
+    expect(el.shadowRoot!.textContent).not.toContain('line-two-secret');
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+
+    // Submit sends exact multi-line value with newlines intact
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as { values: Record<string, string> };
+    expect(sent.values).toEqual({ DEPLOY_KEY: multilineSecret });
   });
 
-  it('falls back to accessible placeholder without plaintext or line count when -webkit-text-security is unsupported', async () => {
-    vi.stubGlobal('CSS', {
-      supports: () => false,
-      escape: (s: string) => s,
-    });
-
+  it('loads UTF-8 files via file picker, rejects binary and >64 KiB files, and clears file input value', async () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'DEPLOY_KEY', secretType: 'file' })],
     });
-    const initialTextarea = el.shadowRoot!.querySelector(
-      'textarea[data-key="DEPLOY_KEY"]'
-    ) as HTMLTextAreaElement;
-    expect(initialTextarea).not.toBeNull();
+    const fileInput = el.shadowRoot!.querySelector(
+      'input[type="file"][data-file-input="DEPLOY_KEY"]'
+    ) as HTMLInputElement;
+    expect(fileInput).not.toBeNull();
 
-    // Focus and type several keystrokes — textarea stays mounted; aria-pressed reflects visible plaintext
-    initialTextarea.dispatchEvent(new Event('focus'));
-    await el.updateComplete;
-    for (const chunk of ['ghp_', 'ghp_super_', 'ghp_super_secret\nline2']) {
-      initialTextarea.value = chunk;
-      initialTextarea.dispatchEvent(new Event('input'));
+    const triggerFile = async (file: File): Promise<void> => {
+      Object.defineProperty(fileInput, 'files', {
+        value: [file],
+        configurable: true,
+      });
+      fileInput.dispatchEvent(new Event('change'));
+      await new Promise((r) => setTimeout(r, 10));
       await el.updateComplete;
-      expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBe(initialTextarea);
-    }
-    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
-    expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
+    };
 
-    // Blur switches to focusable masked placeholder with NO plaintext and NO line count
-    initialTextarea.dispatchEvent(new Event('blur'));
+    // 1. Reject > 64 KiB before reading
+    const oversized = new File([new Uint8Array(64 * 1024 + 1)], 'big.pem');
+    await triggerFile(oversized);
+    expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain('64 KiB');
+    expect(fileInput.value).toBe('');
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+
+    // 2. Reject invalid UTF-8 (binary) file
+    const binary = new File([new Uint8Array([0xff, 0xfe, 0x00, 0x01])], 'cert.der');
+    await triggerFile(binary);
+    expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain('UTF-8');
+    expect(fileInput.value).toBe('');
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+
+    // 3. Accept valid UTF-8 multi-line file, masked by default, cleared on pagehide
+    const pemContent = '-----BEGIN CERT-----\nabc123\n-----END CERT-----\n';
+    const validFile = new File([pemContent], 'cert.pem', { type: 'text/plain' });
+    await triggerFile(validFile);
+    expect(el.shadowRoot!.querySelector('.status-alert.error')).toBeNull();
+    expect(fileInput.value).toBe('');
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    expect(el.shadowRoot!.textContent).not.toContain('abc123');
+    expect(el.shadowRoot!.innerHTML).not.toContain('abc123');
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.get('r-file')).toBe(
+      pemContent
+    );
+
+    // pagehide clears loaded file value too
+    window.dispatchEvent(new Event('pagehide'));
     await el.updateComplete;
-
-    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
-    const masked = el.shadowRoot!.querySelector(
-      '[data-testid="secret-masked"]'
-    ) as HTMLButtonElement;
-    expect(masked).not.toBeNull();
-    expect(masked.getAttribute('aria-label')).toBe('Secret value for DEPLOY_KEY entered, hidden');
-    expect(masked.querySelector('span[aria-hidden="true"]')).not.toBeNull();
-    expect(masked.textContent).not.toContain('line');
-    expect(el.shadowRoot!.textContent).not.toContain('ghp_super_secret');
-    expect(el.shadowRoot!.innerHTML).not.toContain('ghp_super_secret');
-    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
-
-    // Focusing the placeholder re-enters edit mode directly without needing Show
-    masked.dispatchEvent(new Event('focus'));
-    await el.updateComplete;
-    const reentered = el.shadowRoot!.querySelector(
-      'textarea[data-key="DEPLOY_KEY"]'
-    ) as HTMLTextAreaElement;
-    expect(reentered).not.toBeNull();
-    expect(reentered.value).toBe('ghp_super_secret\nline2');
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
   });
 
   it('clears form values on pagehide (bfcache protection)', async () => {
