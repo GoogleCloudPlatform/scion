@@ -717,6 +717,7 @@ describe('scion-page-profile-settings — execution container (ptone/scion#8819)
     };
     deleteHandler?: () => { status: number; body?: Record<string, unknown> };
     agents?: Array<Record<string, unknown>>;
+    agentsStatus?: number;
   }
 
   function makeExecFetch(opts: ExecContainerMockOpts = {}) {
@@ -746,6 +747,9 @@ describe('scion-page-profile-settings — execution container (ptone/scion#8819)
         return json(opts.getStatus ?? 200, opts.getBody ?? { configured: false });
       }
       if (path.startsWith('/api/v1/agents')) {
+        if (opts.agentsStatus && opts.agentsStatus >= 400) {
+          return json(opts.agentsStatus, { error: { message: 'backend unavailable' } });
+        }
         return json(200, { agents: opts.agents ?? [] });
       }
       return base(url, init);
@@ -1029,9 +1033,134 @@ describe('scion-page-profile-settings — execution container (ptone/scion#8819)
 
     const notice = element.shadowRoot.querySelector('[data-testid="exec-container-unavailable"]');
     expect(notice?.textContent).toContain(reason);
+    expect(notice?.getAttribute('role')).toBe('alert');
     expect(
       element.shadowRoot.querySelector('[data-testid="exec-container-configured"]')
     ).toBeNull();
     expect(element.shadowRoot.querySelector('[data-testid="exec-container-clear"]')).not.toBeNull();
+  });
+
+  it('requests server-side harnessConfig=shell filter when loading candidates', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    element = await createComponent(makeExecFetch({ getBody: { configured: false }, agents: [] }));
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const agentCalls = (fetchMock.mock.calls as Array<[unknown]>)
+      .map(([u]) => String(u))
+      .filter((u) => u.startsWith('/api/v1/agents'));
+    expect(agentCalls).toHaveLength(1);
+    expect(agentCalls[0]).toContain('harnessConfig=shell');
+  });
+
+  it('renders an alert error instead of "No execution containers available" when candidate fetch fails', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    element = await createComponent(
+      makeExecFetch({ getBody: { configured: false }, agentsStatus: 500 })
+    );
+
+    const errEl = element.shadowRoot.querySelector('[data-testid="exec-container-error"]');
+    expect(errEl).not.toBeNull();
+    expect(errEl?.getAttribute('role')).toBe('alert');
+    expect(errEl?.textContent).toContain('Could not load execution containers');
+    expect(element.shadowRoot.querySelector('.exec-container-select')).toBeNull();
+    expect(shadowText(element)).not.toContain('No execution containers available');
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-candidates-retry"]')
+    ).not.toBeNull();
+  });
+
+  it('renders only the error and Retry (not the picker) when GET /users/me/exec-container fails', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    element = await createComponent(
+      makeExecFetch({
+        getStatus: 500,
+        getBody: { error: { message: 'server error loading exec container' } },
+      })
+    );
+
+    const errEl = element.shadowRoot.querySelector('[data-testid="exec-container-error"]');
+    expect(errEl).not.toBeNull();
+    expect(errEl?.getAttribute('role')).toBe('alert');
+    expect(errEl?.textContent).toContain('server error loading exec container');
+    expect(element.shadowRoot.querySelector('[data-testid="exec-container-retry"]')).not.toBeNull();
+    expect(element.shadowRoot.querySelector('[data-testid="exec-container-picker"]')).toBeNull();
+  });
+
+  it('supports Change -> pick -> PUT from the configured state', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    let putBody: Record<string, unknown> | null = null;
+    element = await createComponent(
+      makeExecFetch({
+        getBody: {
+          configured: true,
+          state: 'ready',
+          agent: {
+            id: '11111111-1111-1111-1111-111111111111',
+            slug: 'ops-1',
+            name: 'ops-1',
+            projectId: 'p1',
+            projectName: 'infra',
+            phase: 'running',
+            activity: 'idle',
+          },
+        },
+        agents: [
+          {
+            id: '11111111-1111-1111-1111-111111111111',
+            name: 'ops-1',
+            projectId: 'p1',
+            project: 'infra',
+            harnessConfig: 'shell',
+            phase: 'running',
+          },
+          {
+            id: '22222222-2222-2222-2222-222222222222',
+            name: 'ops-2',
+            projectId: 'p2',
+            project: 'staging',
+            harnessConfig: 'shell',
+            phase: 'stopped',
+          },
+        ],
+        putHandler: (body) => {
+          putBody = body;
+          return {
+            status: 200,
+            body: {
+              configured: true,
+              state: 'stopped',
+              agent: {
+                id: '22222222-2222-2222-2222-222222222222',
+                slug: 'ops-2',
+                name: 'ops-2',
+                projectId: 'p2',
+                projectName: 'staging',
+                phase: 'stopped',
+              },
+            },
+          };
+        },
+      })
+    );
+
+    const changeBtn = element.shadowRoot.querySelector('[data-testid="exec-container-change"]');
+    changeBtn.click();
+    await settle(element);
+    await settle(element);
+
+    const sel = element.shadowRoot.querySelector('.exec-container-select') as AnyEl;
+    expect(sel).not.toBeNull();
+    sel.value = '22222222-2222-2222-2222-222222222222';
+    sel.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await settle(element);
+    await settle(element);
+
+    expect(putBody).toEqual({ agentId: '22222222-2222-2222-2222-222222222222' });
+    expect(shadowText(element)).toContain('ops-2');
+    expect(shadowText(element)).toContain('staging');
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-state"]')?.textContent?.trim()
+    ).toBe('Stopped');
+    expect(element.shadowRoot.querySelector('[data-testid="exec-container-picker"]')).toBeNull();
   });
 });

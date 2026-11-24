@@ -21,7 +21,7 @@
  * preferences via the Notification API.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
@@ -203,6 +203,9 @@ export class ScionPageProfileSettings extends LitElement {
 
   @state()
   private _execContainerCandidatesLoading = false;
+
+  @state()
+  private _execContainerCandidatesError: string | null = null;
 
   @state()
   private _execContainerSelectedId = '';
@@ -672,13 +675,18 @@ export class ScionPageProfileSettings extends LitElement {
 
   private async _loadExecContainerCandidates(): Promise<void> {
     this._execContainerCandidatesLoading = true;
+    this._execContainerCandidatesError = null;
     try {
-      const agents = await apiFetchAllPages<Agent>('/api/v1/agents?limit=100', 'agents');
+      const agents = await apiFetchAllPages<Agent>(
+        '/api/v1/agents?harnessConfig=shell&limit=100',
+        'agents'
+      );
       this._execContainerCandidates = agents
         .filter(isShellCandidate)
         .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     } catch {
       this._execContainerCandidates = [];
+      this._execContainerCandidatesError = 'Could not load execution containers';
     } finally {
       this._execContainerCandidatesLoading = false;
     }
@@ -687,6 +695,7 @@ export class ScionPageProfileSettings extends LitElement {
   private _handleExecContainerChangeStart(): void {
     this._execContainerPicking = true;
     this._execContainerError = null;
+    this._execContainerCandidatesError = null;
     this._execContainerSelectedId = '';
     void this._loadExecContainerCandidates();
   }
@@ -695,6 +704,7 @@ export class ScionPageProfileSettings extends LitElement {
     this._execContainerPicking = false;
     this._execContainerSelectedId = '';
     this._execContainerError = null;
+    this._execContainerCandidatesError = null;
   }
 
   private async _handleExecContainerSelect(e: Event): Promise<void> {
@@ -755,41 +765,70 @@ export class ScionPageProfileSettings extends LitElement {
     }
   }
 
-  private _renderExecContainerPicker(showCancel: boolean) {
+  private _renderExecContainerPicker(showCancel: boolean): TemplateResult {
     const candidates = this._execContainerCandidates;
     return html`
+      ${this._execContainerCandidatesError
+        ? html`
+            <div
+              class="permission-status status-unsupported"
+              role="alert"
+              data-testid="exec-container-error"
+            >
+              <sl-icon name="x-circle"></sl-icon>
+              <span>${this._execContainerCandidatesError}</span>
+            </div>
+          `
+        : nothing}
       <div class="exec-container-picker" data-testid="exec-container-picker">
-        <sl-select
-          class="exec-container-select"
-          label="Execution container"
-          placeholder=${this._execContainerCandidatesLoading
-            ? 'Loading execution containers…'
-            : candidates.length > 0
-              ? 'Choose…'
-              : 'No execution containers available'}
-          .value=${this._execContainerSelectedId}
-          ?disabled=${this._execContainerSaving ||
-          this._execContainerCandidatesLoading ||
-          candidates.length === 0}
-          @sl-change=${(e: Event): void => {
-            void this._handleExecContainerSelect(e);
-          }}
-        >
-          ${candidates.map(
-            (a) => html`
-              <sl-option value=${a.id}>
-                ${a.name}${a.project ? ` (${a.project})` : ''} — ${a.phase}
-              </sl-option>
+        ${this._execContainerCandidatesError
+          ? html`
+              <sl-button
+                size="small"
+                variant="default"
+                data-testid="exec-container-candidates-retry"
+                ?loading=${this._execContainerCandidatesLoading}
+                ?disabled=${this._execContainerCandidatesLoading}
+                @click=${(): void => {
+                  void this._loadExecContainerCandidates();
+                }}
+              >
+                Retry
+              </sl-button>
             `
-          )}
-        </sl-select>
+          : html`
+              <sl-select
+                class="exec-container-select"
+                label="Execution container"
+                placeholder=${this._execContainerCandidatesLoading
+                  ? 'Loading execution containers…'
+                  : candidates.length > 0
+                    ? 'Choose…'
+                    : 'No execution containers available'}
+                .value=${this._execContainerSelectedId}
+                ?disabled=${this._execContainerSaving ||
+                this._execContainerCandidatesLoading ||
+                candidates.length === 0}
+                @sl-change=${(e: Event): void => {
+                  void this._handleExecContainerSelect(e);
+                }}
+              >
+                ${candidates.map(
+                  (a) => html`
+                    <sl-option value=${a.id}>
+                      ${a.name}${a.project ? ` (${a.project})` : ''} — ${a.phase}
+                    </sl-option>
+                  `
+                )}
+              </sl-select>
+            `}
         ${showCancel
           ? html`
               <sl-button
                 size="small"
                 variant="default"
                 ?disabled=${this._execContainerSaving}
-                @click=${() => this._handleExecContainerChangeCancel()}
+                @click=${(): void => this._handleExecContainerChangeCancel()}
               >
                 Cancel
               </sl-button>
@@ -807,13 +846,14 @@ export class ScionPageProfileSettings extends LitElement {
     `;
   }
 
-  private _renderExecContainerCard() {
+  private _renderExecContainerCard(): TemplateResult | typeof nothing {
     if (!execContainersEnabled()) return nothing;
 
     const ec = this._execContainer;
     const isConfigured = ec?.configured === true;
     const isUnavailable = isConfigured && ec?.state === 'unavailable';
     const agent = ec?.agent;
+    const stateBadge = execContainerStateBadge(ec?.state);
 
     return html`
       <div class="settings-card" data-testid="exec-container-card">
@@ -835,108 +875,127 @@ export class ScionPageProfileSettings extends LitElement {
                 Loading execution container…
               </div>
             `
-          : isUnavailable
+          : ec === null
             ? html`
-                <div
-                  class="permission-status status-denied"
-                  data-testid="exec-container-unavailable"
-                >
-                  <sl-icon name="exclamation-triangle"></sl-icon>
-                  <span>${ec.reason || EXEC_CONTAINER_UNAVAILABLE_FALLBACK}</span>
-                </div>
                 <div class="exec-container-picker">
                   <sl-button
                     size="small"
                     variant="default"
-                    data-testid="exec-container-clear"
-                    ?loading=${this._execContainerSaving}
-                    ?disabled=${this._execContainerSaving}
-                    @click=${() => void this._handleExecContainerClear()}
+                    data-testid="exec-container-retry"
+                    @click=${(): void => {
+                      void this._loadExecContainer();
+                    }}
                   >
-                    Clear
+                    Retry
                   </sl-button>
-                  ${!this._execContainerPicking
-                    ? html`
+                </div>
+              `
+            : isUnavailable
+              ? html`
+                  <div
+                    class="permission-status status-denied"
+                    role="alert"
+                    data-testid="exec-container-unavailable"
+                  >
+                    <sl-icon name="exclamation-triangle"></sl-icon>
+                    <span>${ec.reason || EXEC_CONTAINER_UNAVAILABLE_FALLBACK}</span>
+                  </div>
+                  <div class="exec-container-picker">
+                    <sl-button
+                      size="small"
+                      variant="default"
+                      data-testid="exec-container-clear"
+                      ?loading=${this._execContainerSaving}
+                      ?disabled=${this._execContainerSaving}
+                      @click=${(): void => {
+                        void this._handleExecContainerClear();
+                      }}
+                    >
+                      Clear
+                    </sl-button>
+                    ${!this._execContainerPicking
+                      ? html`
+                          <sl-button
+                            size="small"
+                            variant="default"
+                            data-testid="exec-container-change"
+                            ?disabled=${this._execContainerSaving}
+                            @click=${(): void => this._handleExecContainerChangeStart()}
+                          >
+                            Change
+                          </sl-button>
+                        `
+                      : nothing}
+                  </div>
+                  ${this._execContainerPicking ? this._renderExecContainerPicker(true) : nothing}
+                `
+              : isConfigured && agent
+                ? html`
+                    <div class="exec-container-summary" data-testid="exec-container-configured">
+                      <div class="exec-container-info">
+                        <a href="/agents/${agent.id}" class="exec-container-name">${agent.name}</a>
+                        ${agent.projectName || agent.projectId
+                          ? html`
+                              <span class="exec-container-project">
+                                <sl-icon name="folder"></sl-icon>
+                                ${agent.projectName || agent.projectId}
+                              </span>
+                            `
+                          : nothing}
+                        <sl-badge variant=${stateBadge.variant} data-testid="exec-container-state"
+                          >${stateBadge.label}</sl-badge
+                        >
+                      </div>
+                      <div class="exec-container-actions">
+                        ${!this._execContainerPicking
+                          ? html`
+                              <sl-button
+                                size="small"
+                                variant="default"
+                                data-testid="exec-container-change"
+                                ?disabled=${this._execContainerSaving}
+                                @click=${(): void => this._handleExecContainerChangeStart()}
+                              >
+                                Change
+                              </sl-button>
+                            `
+                          : nothing}
                         <sl-button
                           size="small"
                           variant="default"
-                          data-testid="exec-container-change"
+                          data-testid="exec-container-clear"
+                          ?loading=${this._execContainerSaving}
                           ?disabled=${this._execContainerSaving}
-                          @click=${() => this._handleExecContainerChangeStart()}
+                          @click=${(): void => {
+                            void this._handleExecContainerClear();
+                          }}
                         >
-                          Change
+                          Clear
                         </sl-button>
-                      `
-                    : nothing}
-                </div>
-                ${this._execContainerPicking ? this._renderExecContainerPicker(true) : nothing}
-              `
-            : isConfigured && agent
-              ? html`
-                  <div class="exec-container-summary" data-testid="exec-container-configured">
-                    <div class="exec-container-info">
-                      <a href="/agents/${agent.id}" class="exec-container-name">${agent.name}</a>
-                      ${agent.projectName || agent.projectId
-                        ? html`
-                            <span class="exec-container-project">
-                              <sl-icon name="folder"></sl-icon>
-                              ${agent.projectName || agent.projectId}
-                            </span>
-                          `
-                        : nothing}
-                      ${(() => {
-                        const badge = execContainerStateBadge(ec.state);
-                        return html`<sl-badge
-                          variant=${badge.variant}
-                          data-testid="exec-container-state"
-                          >${badge.label}</sl-badge
-                        >`;
-                      })()}
+                      </div>
                     </div>
-                    <div class="exec-container-actions">
-                      ${!this._execContainerPicking
-                        ? html`
-                            <sl-button
-                              size="small"
-                              variant="default"
-                              data-testid="exec-container-change"
-                              ?disabled=${this._execContainerSaving}
-                              @click=${() => this._handleExecContainerChangeStart()}
-                            >
-                              Change
-                            </sl-button>
-                          `
-                        : nothing}
-                      <sl-button
-                        size="small"
-                        variant="default"
-                        data-testid="exec-container-clear"
-                        ?loading=${this._execContainerSaving}
-                        ?disabled=${this._execContainerSaving}
-                        @click=${() => void this._handleExecContainerClear()}
-                      >
-                        Clear
-                      </sl-button>
-                    </div>
-                  </div>
-                  ${agent.homePersistent === false
-                    ? html`
-                        <div
-                          class="permission-status status-denied"
-                          data-testid="exec-container-home-warning"
-                        >
-                          <sl-icon name="exclamation-triangle"></sl-icon>
-                          Home directory does not persist across restarts on this runtime — logins
-                          will not survive a restart.
-                        </div>
-                      `
-                    : nothing}
-                  ${this._execContainerPicking ? this._renderExecContainerPicker(true) : nothing}
-                `
-              : this._renderExecContainerPicker(false)}
+                    ${agent.homePersistent === false
+                      ? html`
+                          <div
+                            class="permission-status status-denied"
+                            data-testid="exec-container-home-warning"
+                          >
+                            <sl-icon name="exclamation-triangle"></sl-icon>
+                            Home directory does not persist across restarts on this runtime — logins
+                            will not survive a restart.
+                          </div>
+                        `
+                      : nothing}
+                    ${this._execContainerPicking ? this._renderExecContainerPicker(true) : nothing}
+                  `
+                : this._renderExecContainerPicker(false)}
         ${this._execContainerError
           ? html`
-              <div class="permission-status status-unsupported" data-testid="exec-container-error">
+              <div
+                class="permission-status status-unsupported"
+                role="alert"
+                data-testid="exec-container-error"
+              >
                 <sl-icon name="x-circle"></sl-icon>
                 <span>${this._execContainerError}</span>
               </div>
