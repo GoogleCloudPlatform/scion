@@ -898,8 +898,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// An agent already suspended by the hub (suspend_reason idle or stalled)
-	// can be converted in place to a user suspension without any broker action.
+	// An agent already in phase=suspended is handled in place without broker
+	// dispatch (idempotent 200 OK; converts idle/stalled or unheld legacy empty
+	// suspend_reason to user).
 	if action == api.AgentActionSuspend && s.convertHubSuspendToUser(ctx, w, agent) {
 		return
 	}

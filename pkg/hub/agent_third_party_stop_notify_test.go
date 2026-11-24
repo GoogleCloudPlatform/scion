@@ -723,7 +723,7 @@ func TestThirdPartyLifecycleNotify_NoRepeatWhenAlreadyInTargetState(t *testing.T
 		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
 		rec := httptest.NewRecorder()
 		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionSuspend)
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		srv.thirdPartyStopDispatches.Wait()
 
 		// Direct suspendAgent call on an already user-suspended agent also emits no notice.

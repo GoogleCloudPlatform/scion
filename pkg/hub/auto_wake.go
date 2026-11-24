@@ -415,34 +415,66 @@ func (s *Server) autoWakeParkedNotificationSubscribers(ctx context.Context) {
 // (state.SuspendReason.AutoWakes), for store queries.
 var autoWakeSuspendReasons = []string{string(state.SuspendReasonIdle), string(state.SuspendReasonStalled)}
 
-// convertHubSuspendToUser handles a user SUSPEND action on an agent that the
-// hub already suspended (suspend_reason idle or stalled): it rewrites
-// suspend_reason to user in place, with no runtime broker action, so future
-// messages do not auto-wake the agent. It returns true when it handled the
-// request (writing the response to w), or false when the caller should proceed
-// with the normal running-only suspend path (for example when the agent is
-// already user-suspended, not suspended, or a concurrent wake changed its
-// phase before the CAS write).
+// convertHubSuspendToUser handles a user SUSPEND action on an agent that is
+// already in phase=suspended, with no runtime broker action:
+//   - suspend_reason in {idle, stalled}: converts suspend_reason to user in
+//     place (unless the agent is held, in which case the existing reason is
+//     preserved), preserving retained activity, expiring held messages, and
+//     notifying third-party creators.
+//   - suspend_reason == user: idempotent 200 OK no-op.
+//   - suspend_reason == "": idempotent 200 OK; preserves "" if the agent is
+//     held, or sets suspend_reason to user for an unheld legacy row.
+//
+// It returns 409 Conflict when a start claim, active idle-suspend claim, or
+// in-process lifecycle op is held on the agent. It returns true when it
+// handled the request (writing the response to w), or false when the caller
+// should proceed with the normal running-only suspend path (for example when
+// the agent is not suspended, is reincarnating, or a concurrent wake changed
+// its phase before the CAS write).
 func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
-	if !s.experimentEnabled(experiments.IdleSuspend) {
+	if agent == nil || agent.Phase != string(state.PhaseSuspended) || reincarnationInFlight(agent) {
 		return false
 	}
-	if agent == nil || agent.Phase != string(state.PhaseSuspended) ||
-		!state.SuspendReason(agent.SuspendReason).AutoWakes() ||
-		reincarnationInFlight(agent) {
-		return false
-	}
-	if agent.StartClaimID != "" || s.lifecycleOps.active(agent.ID) {
+	if agent.StartClaimID != "" || agent.IdleSuspendClaimActive || s.lifecycleOps.active(agent.ID) {
 		writeError(w, http.StatusConflict, ErrCodeConflict,
 			"Agent has a lifecycle operation in progress; retry once it settles.", nil)
 		return true
 	}
+
+	writeOK := func(a *store.Agent) {
+		respAgent := *a
+		respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(
+			a.AppliedConfig, a.PendingConfig, canViewAgentEnv(ctx, s, a))
+		writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent})
+	}
+
+	reason := state.SuspendReason(agent.SuspendReason)
+	if reason == state.SuspendReasonUser {
+		writeOK(agent)
+		return true
+	}
+
+	held, holdErr := s.agentHeld(ctx, agent.ID)
+	if holdErr != nil {
+		writeErrorFromErr(w, holdErr, "")
+		return true
+	}
+	if held {
+		writeOK(agent)
+		return true
+	}
+
+	if !reason.AutoWakes() && reason != "" {
+		writeOK(agent)
+		return true
+	}
+
 	err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
 		Phase:            string(state.PhaseSuspended),
 		SuspendReason:    string(state.SuspendReasonUser),
 		IfPhase:          string(state.PhaseSuspended),
 		IfNoStartClaim:   true,
-		IfAutoWakeReason: true,
+		IfAutoWakeReason: reason.AutoWakes(),
 	})
 	if errors.Is(err, store.ErrClaimPredicate) {
 		writeError(w, http.StatusConflict, ErrCodeConflict,
@@ -452,6 +484,17 @@ func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWri
 	if errors.Is(err, store.ErrPhaseMismatch) {
 		if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
 			*agent = *fresh
+			if agent.Phase == string(state.PhaseSuspended) && !reincarnationInFlight(agent) {
+				if agent.StartClaimID != "" || agent.IdleSuspendClaimActive || s.lifecycleOps.active(agent.ID) {
+					writeError(w, http.StatusConflict, ErrCodeConflict,
+						"Agent has a lifecycle operation in progress; retry once it settles.", nil)
+					return true
+				}
+				if state.SuspendReason(agent.SuspendReason) == state.SuspendReasonUser {
+					writeOK(agent)
+					return true
+				}
+			}
 		}
 		return false
 	}
@@ -462,15 +505,10 @@ func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWri
 	preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason
 	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(state.SuspendReasonUser))
 	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
-	// Defensive guard: callers require AutoWakes(), so this is currently
-	// always true in production, but keeps the dedup invariant local.
 	if isRealThirdPartyLifecycleTransition(preActionPhase, preActionSuspendReason, api.AgentActionSuspend) {
 		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionSuspend, lifecycleStopReasonFromContext(ctx))
 	}
 	s.events.PublishAgentStatus(ctx, agent)
-	respAgent := *agent
-	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(
-		agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
-	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent})
+	writeOK(agent)
 	return true
 }

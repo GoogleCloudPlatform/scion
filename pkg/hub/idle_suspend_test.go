@@ -720,31 +720,124 @@ func TestSuspendConversion_HubSuspendedToUser(t *testing.T) {
 		assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason)
 	})
 
-	t.Run("already user-suspended keeps existing validation error", func(t *testing.T) {
-		for _, reason := range []state.SuspendReason{state.SuspendReasonUser, ""} {
-			srv, s, _, target, _ := autoWakeFixture(t, reason)
-			u := wakeLifecycleUser(t, s, "conv-already-"+string(reason), target.ProjectID, "agent.lifecycle", "agent.read")
+	t.Run("already user-suspended is an idempotent 200 OK no-op", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s, _, target, disp := autoWakeFixture(t, state.SuspendReasonUser)
+		target.Activity = string(state.ActivityCompleted)
+		require.NoError(t, s.UpdateAgent(ctx, target))
 
-			rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
-			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-			assert.Contains(t, rec.Body.String(), "Only running agents can be suspended.")
-		}
+		// Mark the broker offline to prove no runtime dispatch occurs.
+		broker, err := s.GetRuntimeBroker(ctx, target.RuntimeBrokerID)
+		require.NoError(t, err)
+		broker.Status = store.BrokerStatusOffline
+		require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+		u := wakeLifecycleUser(t, s, "conv-already-user", target.ProjectID, "agent.lifecycle", "agent.read")
+		rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+		assert.Equal(t, string(state.ActivityCompleted), got.Activity)
+		assert.Equal(t, string(state.SuspendReasonUser), got.SuspendReason)
+		assert.Empty(t, disp.getStartCalls())
 	})
 
-	t.Run("experiment off keeps 400 validation error on hub-suspended agent", func(t *testing.T) {
-		for _, reason := range []state.SuspendReason{state.SuspendReasonIdle, state.SuspendReasonStalled} {
+	t.Run("empty suspend_reason sets user when unheld and preserves empty when held", func(t *testing.T) {
+		t.Run("unheld legacy row sets user", func(t *testing.T) {
 			ctx := context.Background()
-			srv, s, _, target, _ := autoWakeFixture(t, reason)
-			setIdleSuspendExperiment(t, srv, false)
-			u := wakeLifecycleUser(t, s, "conv-expoff-"+string(reason), target.ProjectID, "agent.lifecycle", "agent.read")
+			srv, s, _, target, _ := autoWakeFixture(t, "")
+			target.Activity = string(state.ActivityIdle)
+			require.NoError(t, s.UpdateAgent(ctx, target))
 
+			broker, err := s.GetRuntimeBroker(ctx, target.RuntimeBrokerID)
+			require.NoError(t, err)
+			broker.Status = store.BrokerStatusOffline
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+			u := wakeLifecycleUser(t, s, "conv-empty-unheld", target.ProjectID, "agent.lifecycle", "agent.read")
 			rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
-			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-			assert.Contains(t, rec.Body.String(), "Only running agents can be suspended.")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 			got, err := s.GetAgent(ctx, target.ID)
 			require.NoError(t, err)
-			assert.Equal(t, string(reason), got.SuspendReason)
+			assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+			assert.Equal(t, string(state.ActivityIdle), got.Activity)
+			assert.Equal(t, string(state.SuspendReasonUser), got.SuspendReason)
+		})
+
+		t.Run("held row preserves empty suspend_reason", func(t *testing.T) {
+			ctx := context.Background()
+			srv, s, _, target, _ := autoWakeFixture(t, "")
+			_, err := s.CreateAgentHolds(ctx, []*store.AgentHold{{
+				AgentID:           target.ID,
+				ProjectID:         target.ProjectID,
+				Cause:             store.AgentHoldCauseOwnerAccessEnded,
+				RootPrincipalType: store.AgentHoldRootUser,
+				RootPrincipalID:   "11111111-1111-1111-1111-111111111111",
+				Trigger:           store.MembershipLossTriggerMemberRemove,
+			}})
+			require.NoError(t, err)
+
+			u := wakeLifecycleUser(t, s, "conv-empty-held", target.ProjectID, "agent.lifecycle", "agent.read")
+			rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			got, err := s.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+			assert.Empty(t, got.SuspendReason, "held agent must preserve empty suspend_reason")
+		})
+	})
+
+	t.Run("held hub-suspended agent returns 200 OK without overwriting suspend_reason", func(t *testing.T) {
+		for _, reason := range []state.SuspendReason{state.SuspendReasonIdle, state.SuspendReasonStalled} {
+			ctx := context.Background()
+			srv, s, _, target, _ := autoWakeFixture(t, reason)
+			_, err := s.CreateAgentHolds(ctx, []*store.AgentHold{{
+				AgentID:           target.ID,
+				ProjectID:         target.ProjectID,
+				Cause:             store.AgentHoldCauseOwnerAccessEnded,
+				RootPrincipalType: store.AgentHoldRootUser,
+				RootPrincipalID:   "11111111-1111-1111-1111-111111111111",
+				Trigger:           store.MembershipLossTriggerMemberRemove,
+			}})
+			require.NoError(t, err)
+
+			u := wakeLifecycleUser(t, s, "conv-held-"+string(reason), target.ProjectID, "agent.lifecycle", "agent.read")
+			rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			got, err := s.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+			assert.Equal(t, string(reason), got.SuspendReason, "held agent must skip suspend_reason overwrite")
+		}
+	})
+
+	t.Run("experiment off still converts hub-suspended agent to user", func(t *testing.T) {
+		for _, reason := range []state.SuspendReason{state.SuspendReasonIdle, state.SuspendReasonStalled} {
+			ctx := context.Background()
+			srv, s, _, target, _ := autoWakeFixture(t, reason)
+			target.Activity = string(state.ActivityCompleted)
+			require.NoError(t, s.UpdateAgent(ctx, target))
+			setIdleSuspendExperiment(t, srv, false)
+
+			broker, err := s.GetRuntimeBroker(ctx, target.RuntimeBrokerID)
+			require.NoError(t, err)
+			broker.Status = store.BrokerStatusOffline
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+			u := wakeLifecycleUser(t, s, "conv-expoff-"+string(reason), target.ProjectID, "agent.lifecycle", "agent.read")
+			rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			got, err := s.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+			assert.Equal(t, string(state.ActivityCompleted), got.Activity)
+			assert.Equal(t, string(state.SuspendReasonUser), got.SuspendReason)
 		}
 	})
 
