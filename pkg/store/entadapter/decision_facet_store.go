@@ -201,6 +201,10 @@ func applyDecisionFacetDeltas(ctx context.Context, client *ent.Client, deltas []
 
 		ub := d.Update(decisionfacetentry.Table)
 		if a.netDelta < 0 {
+			// Decrementing ref_count on supersede does not recompute name,
+			// email, or latest_at from remaining answers, so while ref_count > 0
+			// the row's snapshot metadata may still come from the superseded
+			// answer (acceptable per design-scale §3.2/§6).
 			dec := -a.netDelta
 			ub.Set(decisionfacetentry.FieldRefCount, entsql.ExprFunc(func(b *entsql.Builder) {
 				b.WriteString("CASE WHEN ref_count > ")
