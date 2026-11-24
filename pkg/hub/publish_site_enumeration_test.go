@@ -66,9 +66,13 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// before publish.
 		"notifications.go:createInboxMessage": "CreateMessage error triggers early return before publish",
 
-		// sendAgentRouted primary: CreateMessage error triggers early return
-		// before publish.
-		"handlers_chat_v2.go:sendAgentRouted:primary": "CreateMessage error triggers early return before publish",
+		// sendAgentRouted pending (pre-dispatch copy at persist time):
+		// CreateMessage error triggers early return before publish.
+		"handlers_chat_v2.go:sendAgentRouted:pending": "CreateMessage error triggers early return before pre-dispatch pending publish",
+
+		// sendAgentRouted primary (settled state after dispatch/re-read):
+		// CreateMessage error triggers early return before publish.
+		"handlers_chat_v2.go:sendAgentRouted:primary": "CreateMessage error triggers early return before settled primary publish",
 
 		// sendAgentRouted mention fan-out: publish in else branch of
 		// CreateMessage error check.
@@ -491,11 +495,15 @@ func isPublishUserMessageCall(call *ast.CallExpr) bool {
 // mapping is hard-coded for known cases.
 func persistedRowDisambiguationSuffixes(file, fn, target string, idx, total int) []string {
 	switch {
-	case file == "handlers_chat_v2.go" && fn == "sendAgentRouted" && target == "publish" && total == 2:
-		if idx == 0 {
+	case file == "handlers_chat_v2.go" && fn == "sendAgentRouted" && target == "publish" && total == 3:
+		switch idx {
+		case 0:
+			return []string{"pending"}
+		case 1:
 			return []string{"primary"}
+		case 2:
+			return []string{"mention"}
 		}
-		return []string{"mention"}
 	case file == "handlers_agent_messaging.go" && fn == "handleGroupMessage" && target == "publish" && total == 2:
 		if idx == 0 {
 			return []string{"agent"}
