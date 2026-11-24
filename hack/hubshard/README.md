@@ -47,7 +47,15 @@ make test-hub-shards                   # every shard in turn (NOSQLITE=1, RACE=1
 make test-hub-sqlite                   # every shard in turn, plus the non-hub SQLite packages
 hack/hubshard/hubshard.sh              # print the shard sizes
 hack/hubshard/hubshard.sh -v           # ... and the common files (with the reason) and groups
+hack/hubshard/shard.sh postgres all "" TestA TestB # run named tests (space-separated, not `|` regexes) on SQLite when no Postgres DSN/URL is set
 ```
+
+Despite the `postgres` subcommand name, `TAGS=""` runs named tests under
+default/SQLite tags when no `SCION_TEST_POSTGRES_*` variable is set (pass a
+shard number `K` instead of `all` to restrict to one shard). For repeated
+targeted runs or mutation checks that reuse one compiled shard binary
+(`-overlay`, `go test -c`, and `-test.run`), see
+`docs-repo/agents/sandbox-go-toolchain.md`.
 
 The make targets call [`shard.sh`](shard.sh), which builds the tool once
 and writes the overlay to a temporary directory (removed on exit), so they
