@@ -99,6 +99,11 @@ func newTestWebChatStoreV2(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
 	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
+	// Create the conversations table BEFORE Init so CreateTopic and migrations
+	// see it (CreateTopic unconditionally requires conversations).
+	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
+	require.NoError(t, err)
+
 	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())
 

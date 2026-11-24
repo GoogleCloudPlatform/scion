@@ -773,7 +773,9 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestChatSearchStatementTimeout_Postgres \
 	TestChatSearchVisibility_Postgres \
 	TestChatSearchStoreTimeoutStopsStatement_Postgres \
-	TestPromoteDM_ReallocatesConversationSeqWithoutCollision_Postgres
+	TestPromoteDM_ReallocatesConversationSeqWithoutCollision_Postgres \
+	TestTopicIdentityOwnership_Postgres \
+	TestTopicReconcile_Postgres
 
 test-webchat-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \

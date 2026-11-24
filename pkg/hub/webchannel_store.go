@@ -847,51 +847,23 @@ SELECT agent_id, COALESCE(last_message_id, ''), COALESCE(last_activity_at, ''), 
 // ---------------------------------------------------------------------------
 
 // CreateTopic inserts a new topic and, when ConversationID is set and the
-// conversations table exists, atomically creates a linked conversations row
-// inside the same transaction.
+// CreateTopic inserts a new topic and atomically creates a linked conversations
+// row inside the same transaction.
 func (s *sqliteWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) error {
-	if topic.ConversationID != "" && topic.ProjectID == "" {
+	// DEF-89: generate ConversationID unconditionally when empty so every new
+	// topic is atomically linked to a conversations row. DEF-156 P2: the
+	// external_ref is derived from (projectID, topicID) via
+	// ThreadConversationExternalRef, not ''.
+	if topic.ConversationID == "" {
+		topic.ConversationID = uuid.New().String()
+	}
+	if topic.ProjectID == "" {
 		return fmt.Errorf("webchat store: project_id is required for topic conversations")
 	}
 
 	isGeneral := 0
 	if topic.IsGeneral {
 		isGeneral = 1
-	}
-
-	// INVARIANT U-TX-1: hasConversationsTable() touches s.db — must be
-	// called BEFORE BeginTx (same pattern as EnsureGeneralTopic).
-	hasConvTable := s.hasConversationsTable()
-
-	// DEF-89: when no ConversationID is provided and the conversations table
-	// exists, generate one so the existing dual-write branch creates the
-	// conversation atomically. DEF-156 P2: the external_ref is now derived
-	// from (projectID, topicID) via ThreadConversationExternalRef, not ''.
-	if topic.ConversationID == "" && hasConvTable {
-		topic.ConversationID = uuid.New().String()
-	}
-
-	if topic.ConversationID == "" {
-		// Legacy path: no conversation linkage (conversations table absent).
-		const query = `
-INSERT INTO webchat_topic (id, project_id, name, is_general, default_agent, created_by, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`
-		_, err := s.db.ExecContext(ctx, query, topic.ID, topic.ProjectID, topic.Name,
-			isGeneral, nullableString(topic.DefaultAgent), topic.CreatedBy,
-			topic.CreatedAt.UTC().Format(time.RFC3339Nano))
-		if err != nil {
-			return fmt.Errorf("webchat store: create topic: %w", err)
-		}
-		return nil
-	}
-
-	// ConversationID is set — the handler expects an atomic dual-write
-	// (topic + conversation). If the conversations table doesn't exist,
-	// something is wrong with server initialization; fail explicitly
-	// rather than writing a dangling conversation_id (DEF-22).
-	if !hasConvTable {
-		return fmt.Errorf("webchat store: create topic: conversations table does not exist but conversation_id %q was provided", topic.ConversationID)
 	}
 
 	// DEF-156 P1/P2: derive the canonical external_ref for this topic's
@@ -1141,37 +1113,64 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	return topics, nil
 }
 
-// UpdateTopic applies partial updates to a topic. When updates.DefaultAgentID
-// is set, it also converges the linked conversation's default_agent_id in
-// the same transaction (design doc: F1 write-time convergence) — skipped
-// when the topic has no linked conversation or the conversations table
-// doesn't exist (INVARIANT U-TX-1: hasConversationsTable() is called before
-// BeginTx).
+// UpdateTopic applies partial updates to a topic. Identity fields (display_name
+// for Name, default_agent_id for DefaultAgentID) are written to the
+// authoritative conversations row first and mirrored to webchat_topic in the
+// same transaction — skipped on conversations when the topic has no linked
+// conversation or the conversations table doesn't exist (INVARIANT U-TX-1:
+// hasConversationsTable() is called before BeginTx).
 func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error {
 	var sets []string
 	var args []interface{}
+	var convSets []string
+	var convArgs []interface{}
 
 	if updates.Name != nil {
 		sets = append(sets, "name = ?")
 		args = append(args, *updates.Name)
+		convSets = append(convSets, "display_name = ?")
+		convArgs = append(convArgs, *updates.Name)
 	}
 	if updates.DefaultAgent != nil {
 		sets = append(sets, "default_agent = ?")
 		args = append(args, nullableString(*updates.DefaultAgent))
 	}
-	if len(sets) == 0 && updates.DefaultAgentID == nil {
+	if updates.DefaultAgentID != nil {
+		convSets = append(convSets, "default_agent_id = ?")
+		convArgs = append(convArgs, nullableString(*updates.DefaultAgentID))
+	}
+	if len(sets) == 0 && len(convSets) == 0 {
 		return nil
 	}
 
 	// INVARIANT U-TX-1: hasConversationsTable() touches s.db — must be
 	// called BEFORE BeginTx.
-	updateConv := updates.DefaultAgentID != nil && s.hasConversationsTable()
+	updateConv := len(convSets) > 0 && s.hasConversationsTable()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("webchat store: begin update topic tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	if updateConv {
+		// Update authoritative conversations row first, then mirror to
+		// webchat_topic below in the same transaction.
+		//
+		// The subquery naturally no-ops (zero rows affected, not an error)
+		// when the topic's conversation_id is NULL — a legacy unlinked
+		// topic. Its "AND deleted_at IS NULL" ensures a soft-deleted topic
+		// cannot modify a conversation it no longer represents.
+		cArgs := append(append([]interface{}{}, convArgs...), topicID)
+		convQuery := fmt.Sprintf(
+			`UPDATE conversations SET %s
+			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL)
+			    AND deleted_at IS NULL`,
+			strings.Join(convSets, ", "))
+		if _, err := tx.ExecContext(ctx, convQuery, cArgs...); err != nil {
+			return fmt.Errorf("webchat store: update linked conversation: %w", err)
+		}
+	}
 
 	if len(sets) > 0 {
 		topicArgs := append(append([]interface{}{}, args...), topicID)
@@ -1182,33 +1181,14 @@ func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, up
 		}
 	}
 
-	if updateConv {
-		// The subquery naturally no-ops (zero rows affected, not an error)
-		// when the topic's conversation_id is NULL — a legacy unlinked
-		// topic. This UPDATE only ever touches default_agent_id.
-		//
-		// The subquery's own "AND deleted_at IS NULL" (review round 1)
-		// matters even though the outer WHERE also filters deleted_at:
-		// without it, a soft-deleted topic would still resolve its
-		// conversation_id and change a conversation that the topic no
-		// longer represents.
-		_, err := tx.ExecContext(ctx,
-			`UPDATE conversations SET default_agent_id = ?
-			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL)
-			    AND deleted_at IS NULL`,
-			nullableString(*updates.DefaultAgentID), topicID)
-		if err != nil {
-			return fmt.Errorf("webchat store: update linked conversation default agent: %w", err)
-		}
-	}
-
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("webchat store: commit update topic tx: %w", err)
 	}
 	return nil
 }
 
-// DeleteTopic soft-deletes a topic. Returns an error if it is the last thread.
+// DeleteTopic soft-deletes a topic and its linked conversation in the same
+// transaction. Returns an error if it is the last thread.
 // The count-check and soft-delete are wrapped in a transaction to prevent a
 // TOCTOU race where two concurrent deletes both see count=2 and leave 0
 // threads. SQLite transactions serialize writes by default, so FOR UPDATE is
@@ -1222,6 +1202,10 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 		}
 		return fmt.Errorf("webchat store: delete topic check: %w", err)
 	}
+
+	// INVARIANT U-TX-1: hasConversationsTable() touches s.db — must be
+	// called BEFORE BeginTx.
+	hasConvTable := s.hasConversationsTable()
 
 	// Use LevelSerializable so the SQLite driver starts an IMMEDIATE
 	// transaction, preventing the TOCTOU race where two concurrent deletes
@@ -1258,10 +1242,25 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")
 	}
 
-	// Soft-delete within the same transaction.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if hasConvTable {
+		// Soft-delete the authoritative conversations row first while
+		// webchat_topic.deleted_at IS NULL so the subquery resolves the
+		// active topic's conversation_id. conversations is an Ent table:
+		// bind a time.Time, not RFC3339 text.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE conversations SET deleted_at = ?
+			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL)
+			    AND deleted_at IS NULL`,
+			now, topicID); err != nil {
+			return fmt.Errorf("webchat store: delete linked conversation: %w", err)
+		}
+	}
+
+	// Mirror soft-delete to webchat_topic within the same transaction.
 	_, err = tx.ExecContext(ctx,
 		"UPDATE webchat_topic SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
-		time.Now().UTC().Format(time.RFC3339Nano), topicID)
+		now.Format(time.RFC3339Nano), topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
 	}
@@ -1977,6 +1976,9 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	if err := s.backfillTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation backfill: %w", err)
 	}
+	if err := s.reconcileTopicConversations(); err != nil {
+		return fmt.Errorf("topic conversation reconcile: %w", err)
+	}
 	if err := s.addUserPrefsThreadColumns(); err != nil {
 		return fmt.Errorf("user prefs thread columns: %w", err)
 	}
@@ -2181,6 +2183,143 @@ func (s *sqliteWebChatStore) backfillTopicConversations() error {
 	}
 
 	return s.markMigrationCompleted("topic_conversation_backfill")
+}
+
+// reconcileTopicConversations is a one-time idempotent startup migration that
+// copies webchat_topic.name -> conversations.display_name and
+// webchat_topic.deleted_at -> conversations.deleted_at wherever linked rows
+// have drifted (webchat_topic wins, as it was previously the source of truth
+// for topic rename and soft-delete). It only updates values and never rewrites
+// them into a new format.
+// INVARIANT U-TX-1: hasConversationsTable() is called BEFORE BeginTx.
+func (s *sqliteWebChatStore) reconcileTopicConversations() error {
+	const migrationName = "topic_conversation_reconcile"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	// conversations is Ent-managed and may not exist in bare test setups.
+	// Leave unrecorded so the next Init reconciles once the table exists.
+	if !s.hasConversationsTable() {
+		return nil
+	}
+
+	rows, err := s.db.Query(
+		`SELECT t.conversation_id, t.name, t.deleted_at, COALESCE(c.display_name, ''), c.deleted_at
+		   FROM webchat_topic t
+		   JOIN conversations c ON c.id = t.conversation_id
+		  WHERE t.conversation_id IS NOT NULL AND t.conversation_id <> ''`)
+	if err != nil {
+		return fmt.Errorf("select linked topics for reconcile: %w", err)
+	}
+
+	type reconcileUpdate struct {
+		convID    string
+		name      string
+		deletedAt *time.Time
+	}
+	var drifted []reconcileUpdate
+	for rows.Next() {
+		var convID, topicName, convName string
+		var topicDeletedRaw, convDeletedRaw any
+		if err := rows.Scan(&convID, &topicName, &topicDeletedRaw, &convName, &convDeletedRaw); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan linked topic for reconcile: %w", err)
+		}
+		tDel := parseSQLiteNullableTime(topicDeletedRaw)
+		cDel := parseSQLiteNullableTime(convDeletedRaw)
+		if convName != topicName || !nullableTimesEqualMicro(tDel, cDel) {
+			var normDel *time.Time
+			if tDel != nil {
+				u := tDel.UTC().Truncate(time.Microsecond)
+				normDel = &u
+			}
+			drifted = append(drifted, reconcileUpdate{
+				convID:    convID,
+				name:      topicName,
+				deletedAt: normDel,
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate linked topics for reconcile: %w", err)
+	}
+	_ = rows.Close()
+
+	if len(drifted) > 0 {
+		tx, err := s.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			return fmt.Errorf("begin reconcile tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+
+		for _, u := range drifted {
+			var delArg any
+			if u.deletedAt != nil {
+				delArg = *u.deletedAt
+			}
+			if _, err := tx.Exec(
+				`UPDATE conversations SET display_name = ?, deleted_at = ? WHERE id = ?`,
+				u.name, delArg, u.convID); err != nil {
+				return fmt.Errorf("reconcile conversation %s: %w", u.convID, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit reconcile tx: %w", err)
+		}
+	}
+
+	return s.markMigrationCompleted(migrationName)
+}
+
+func parseSQLiteNullableTime(v any) *time.Time {
+	switch val := v.(type) {
+	case nil:
+		return nil
+	case time.Time:
+		if val.IsZero() {
+			return nil
+		}
+		u := val.UTC()
+		return &u
+	case string:
+		if val == "" {
+			return nil
+		}
+		parsed := parseSQLiteTime(val)
+		if parsed.IsZero() {
+			return nil
+		}
+		u := parsed.UTC()
+		return &u
+	case []byte:
+		if len(val) == 0 {
+			return nil
+		}
+		parsed := parseSQLiteTime(string(val))
+		if parsed.IsZero() {
+			return nil
+		}
+		u := parsed.UTC()
+		return &u
+	default:
+		return nil
+	}
+}
+
+func nullableTimesEqualMicro(a, b *time.Time) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.UTC().Truncate(time.Microsecond).Equal(b.UTC().Truncate(time.Microsecond))
 }
 
 // migrationCompleted checks whether a named migration has already run.

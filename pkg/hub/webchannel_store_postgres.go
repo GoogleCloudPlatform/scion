@@ -671,21 +671,29 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	return topics, nil
 }
 
-// UpdateTopic applies partial updates to a topic. When updates.DefaultAgentID
-// is set, it also converges the linked conversation's default_agent_id in
-// the same transaction (design doc: F1 write-time convergence). Postgres
-// migrations guarantee the conversations table exists (see CreateTopic's
-// DEF-89 comment above), so unlike the SQLite store there is no
-// hasConversationsTable() gate here.
+// UpdateTopic applies partial updates to a topic. Identity fields (display_name
+// for Name, default_agent_id for DefaultAgentID) are written to the
+// authoritative conversations row first and mirrored to webchat_topic in the
+// same transaction. Postgres migrations guarantee the conversations table
+// exists (see CreateTopic's DEF-89 comment above), so unlike the SQLite store
+// there is no hasConversationsTable() gate here.
 func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error {
 	var sets []string
 	var args []interface{}
 	argIdx := 1
 
+	var convSets []string
+	var convArgs []interface{}
+	convIdx := 1
+
 	if updates.Name != nil {
 		sets = append(sets, fmt.Sprintf("name = $%d", argIdx))
 		args = append(args, *updates.Name)
 		argIdx++
+
+		convSets = append(convSets, fmt.Sprintf("display_name = $%d", convIdx))
+		convArgs = append(convArgs, *updates.Name)
+		convIdx++
 	}
 	if updates.DefaultAgent != nil {
 		sets = append(sets, fmt.Sprintf("default_agent = $%d", argIdx))
@@ -696,7 +704,16 @@ func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, update
 		args = append(args, val)
 		argIdx++
 	}
-	if len(sets) == 0 && updates.DefaultAgentID == nil {
+	if updates.DefaultAgentID != nil {
+		var val interface{}
+		if *updates.DefaultAgentID != "" {
+			val = *updates.DefaultAgentID
+		}
+		convSets = append(convSets, fmt.Sprintf("default_agent_id = $%d", convIdx))
+		convArgs = append(convArgs, val)
+		convIdx++
+	}
+	if len(sets) == 0 && len(convSets) == 0 {
 		return nil
 	}
 
@@ -711,6 +728,28 @@ func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, update
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	if len(convSets) > 0 {
+		// Update authoritative conversations row first, then mirror to
+		// webchat_topic below in the same transaction.
+		//
+		// The subquery naturally no-ops (zero rows affected, not an error)
+		// when the topic's conversation_id is NULL — a legacy unlinked
+		// topic. Its "AND deleted_at IS NULL" ensures a soft-deleted topic
+		// cannot modify a conversation it no longer represents.
+		//
+		// conversations.id is a native Postgres uuid column (Ent field.UUID),
+		// while webchat_topic.conversation_id is TEXT, so we cast ::uuid.
+		cArgs := append(append([]interface{}{}, convArgs...), topicID)
+		convQuery := fmt.Sprintf(
+			`UPDATE `+conversationsTable+` SET %s
+			  WHERE id = (SELECT conversation_id::uuid FROM webchat_topic WHERE id = $%d AND deleted_at IS NULL)
+			    AND deleted_at IS NULL`,
+			strings.Join(convSets, ", "), convIdx)
+		if _, err := tx.ExecContext(ctx, convQuery, cArgs...); err != nil {
+			return fmt.Errorf("webchat store: update linked conversation: %w", err)
+		}
+	}
+
 	if len(sets) > 0 {
 		topicArgs := append(append([]interface{}{}, args...), topicID)
 		query := fmt.Sprintf("UPDATE webchat_topic SET %s WHERE id = $%d AND deleted_at IS NULL",
@@ -720,44 +759,14 @@ func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, update
 		}
 	}
 
-	if updates.DefaultAgentID != nil {
-		// The subquery naturally no-ops (zero rows affected, not an error)
-		// when the topic's conversation_id is NULL — a legacy unlinked
-		// topic. This UPDATE only ever touches default_agent_id.
-		//
-		// The subquery's own "AND deleted_at IS NULL" (review round 1)
-		// matters even though the outer WHERE also filters deleted_at:
-		// without it, a soft-deleted topic would still resolve its
-		// conversation_id and change a conversation that the topic no
-		// longer represents.
-		var val interface{}
-		if *updates.DefaultAgentID != "" {
-			val = *updates.DefaultAgentID
-		}
-		// Review round 1 finding #1 (Critical): conversations.id is a native
-		// Postgres uuid column (Ent field.UUID), but webchat_topic.conversation_id
-		// is TEXT — Postgres has no implicit text->uuid cast for a column
-		// comparison, so this failed at runtime with "operator does not
-		// exist: uuid = text" and rolled back the whole transaction,
-		// including the topic UPDATE above. The explicit ::uuid cast is safe
-		// because every conversation_id value is a minted UUID string.
-		_, err := tx.ExecContext(ctx,
-			`UPDATE `+conversationsTable+` SET default_agent_id = $1
-			  WHERE id = (SELECT conversation_id::uuid FROM webchat_topic WHERE id = $2 AND deleted_at IS NULL)
-			    AND deleted_at IS NULL`,
-			val, topicID)
-		if err != nil {
-			return fmt.Errorf("webchat store: update linked conversation default agent: %w", err)
-		}
-	}
-
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("webchat store: commit update topic tx: %w", err)
 	}
 	return nil
 }
 
-// DeleteTopic soft-deletes a topic. Returns an error if it is the last thread.
+// DeleteTopic soft-deletes a topic and its linked conversation in the same
+// transaction. Returns an error if it is the last thread.
 // The count-check and soft-delete are wrapped in a transaction with FOR UPDATE
 // to prevent a TOCTOU race where two concurrent deletes both see count=2 and
 // leave 0 threads.
@@ -769,6 +778,11 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 			return nil
 		}
 		return fmt.Errorf("webchat store: delete topic check: %w", err)
+	}
+
+	conversationsTable, err := s.table(ctx, "conversations")
+	if err != nil {
+		return err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -803,10 +817,22 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")
 	}
 
-	// Soft-delete within the same transaction.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	// Soft-delete the authoritative conversations row first while
+	// webchat_topic.deleted_at IS NULL so the subquery resolves the active
+	// topic's conversation_id.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE `+conversationsTable+` SET deleted_at = $1
+		  WHERE id = (SELECT conversation_id::uuid FROM webchat_topic WHERE id = $2 AND deleted_at IS NULL)
+		    AND deleted_at IS NULL`,
+		now, topicID); err != nil {
+		return fmt.Errorf("webchat store: delete linked conversation: %w", err)
+	}
+
+	// Mirror soft-delete to webchat_topic within the same transaction.
 	_, err = tx.ExecContext(ctx,
-		"UPDATE webchat_topic SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
-		topicID)
+		"UPDATE webchat_topic SET deleted_at = $1 WHERE id = $2 AND deleted_at IS NULL",
+		now, topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
 	}
@@ -1535,6 +1561,9 @@ func (s *pgWebChatStore) runMigrations() error {
 	if err := s.backfillTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation backfill: %w", err)
 	}
+	if err := s.reconcileTopicConversations(); err != nil {
+		return fmt.Errorf("topic conversation reconcile: %w", err)
+	}
 	if err := s.addUserPrefsThreadColumns(); err != nil {
 		return fmt.Errorf("user prefs thread columns: %w", err)
 	}
@@ -1684,6 +1713,55 @@ func (s *pgWebChatStore) backfillTopicConversations() error {
 	}
 
 	return s.markMigrationCompleted("topic_conversation_backfill")
+}
+
+// reconcileTopicConversations is a one-time idempotent startup migration that
+// copies webchat_topic.name -> conversations.display_name and
+// webchat_topic.deleted_at -> conversations.deleted_at wherever linked rows
+// have drifted (webchat_topic wins, as it was previously the source of truth
+// for topic rename and soft-delete). It only updates values and never rewrites
+// them into a new format.
+func (s *pgWebChatStore) reconcileTopicConversations() error {
+	const migrationName = "topic_conversation_reconcile"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	ctx := context.Background()
+	// conversations is Ent-managed and may not exist in bare test setups.
+	// Leave unrecorded so the next Init reconciles once the table exists.
+	exists, err := s.tableExists(ctx, "conversations")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	conversationsTable, err := s.table(ctx, "conversations")
+	if err != nil {
+		return err
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE `+conversationsTable+` c
+		    SET display_name = t.name,
+		        deleted_at = t.deleted_at
+		   FROM webchat_topic t
+		  WHERE t.conversation_id IS NOT NULL
+		    AND t.conversation_id <> ''
+		    AND c.id = t.conversation_id::uuid
+		    AND (
+		        c.display_name IS DISTINCT FROM t.name
+		        OR c.deleted_at IS DISTINCT FROM t.deleted_at
+		    )`); err != nil {
+		return fmt.Errorf("reconcile topic conversations: %w", err)
+	}
+
+	return s.markMigrationCompleted(migrationName)
 }
 
 // addUserPrefsThreadColumns adds thread_order and thread_groups columns to

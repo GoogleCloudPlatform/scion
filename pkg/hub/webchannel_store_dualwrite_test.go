@@ -158,26 +158,28 @@ func TestCreateTopic_AutoGeneratesConversation(t *testing.T) {
 	require.Equal(t, "active", c.driftState)
 }
 
-// TestCreateTopic_NoConversationsTable_LegacyPath verifies that when the
-// conversations table does not exist, CreateTopic still works without
-// creating a conversation (the legacy path).
-func TestCreateTopic_NoConversationsTable_LegacyPath(t *testing.T) {
-	s, db := newTestWebChatStoreV2(t) // no conversations table
-	defer db.Close()                  //nolint:errcheck
+// TestCreateTopic_NoConversationsTable_Fails verifies that CreateTopic no
+// longer falls back to an unlinked legacy insert when the conversations table
+// is absent — it fails explicitly instead of creating a topic without a linked
+// conversation.
+func TestCreateTopic_NoConversationsTable_Fails(t *testing.T) {
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
+	defer db.Close() //nolint:errcheck
+
+	s := NewWebChatStore(db, "sqlite")
+	require.NoError(t, s.Init())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
+	err := s.CreateTopic(ctx, WebChatTopic{
 		ID:        "topic-legacy",
 		ProjectID: "proj-1",
 		Name:      "no-conv",
 		CreatedBy: "user-1",
 		CreatedAt: time.Now().UTC(),
-	}))
-
-	// Topic created with no conversation_id.
-	require.Empty(t, hubtestutil.GetTopicConvID(t, db, "topic-legacy"))
+	})
+	require.Error(t, err, "CreateTopic must fail when conversations table is absent")
 }
 
 // ---------------------------------------------------------------------------
@@ -633,20 +635,21 @@ func TestBackfillTopicConversations_Idempotent(t *testing.T) {
 
 func TestBackfillTopicConversations_SkipsWithoutConversationsTable(t *testing.T) {
 	// Without the conversations table, backfill should succeed (no-op).
-	s, db := newTestWebChatStoreV2(t)
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 	defer db.Close() //nolint:errcheck
 
-	ctx := context.Background()
-	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
-		ID:        "topic-no-conv-table",
-		ProjectID: "proj-1",
-		Name:      "test",
-		CreatedBy: "user-1",
-		CreatedAt: time.Now().UTC(),
-	}))
+	s := NewWebChatStore(db, "sqlite")
+	require.NoError(t, s.Init())
+
+	// Seed an unlinked legacy topic directly (CreateTopic now requires conversations).
+	_, err := db.Exec(
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES ('topic-no-conv-table', 'proj-1', 'test', 0, 'user-1', ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
 
 	// Reset and re-run — should not fail even without conversations table.
-	_, err := db.Exec("DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'")
+	_, err = db.Exec("DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'")
 	require.NoError(t, err)
 	s2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s2.Init())
@@ -687,22 +690,19 @@ func TestGetTopicConversationID(t *testing.T) {
 }
 
 func TestGetTopicConversationID_NoConversationID(t *testing.T) {
-	// Use a store WITHOUT the conversations table so CreateTopic takes
-	// the legacy path and does not auto-generate a ConversationID (DEF-89).
+	// Seed a legacy unlinked topic row (conversation_id IS NULL) directly to
+	// pin GetTopicConversationID's behavior on pre-link rows.
 	s, db := newTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Create topic WITHOUT conversation_id (legacy path — no conversations table).
-	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
-		ID:        "topic-no-conv",
-		ProjectID: "proj-1",
-		Name:      "no-conv",
-		CreatedBy: "user-1",
-		CreatedAt: time.Now().UTC(),
-	}))
+	_, err := db.Exec(
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES ('topic-no-conv', 'proj-1', 'no-conv', 0, 'user-1', ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
 
 	// Should return empty string, no error.
 	got, err := s.GetTopicConversationID(ctx, "topic-no-conv")
