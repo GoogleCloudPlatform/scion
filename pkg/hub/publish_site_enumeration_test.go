@@ -66,6 +66,12 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// before publish.
 		"notifications.go:createInboxMessage": "CreateMessage error triggers early return before publish",
 
+		// sendAgentRouted interrupted (defer fallback if a panic occurs after
+		// the pre-dispatch pending publish): registered only after
+		// CreateMessage succeeded, and gated by pendingPublished after
+		// markFailed has updated the committed row.
+		"handlers_chat_v2.go:sendAgentRouted:interrupted": "Registered after CreateMessage succeeded; gated by pendingPublished after markFailed updates committed row",
+
 		// sendAgentRouted pending (pre-dispatch copy at persist time):
 		// CreateMessage error triggers early return before publish.
 		"handlers_chat_v2.go:sendAgentRouted:pending": "CreateMessage error triggers early return before pre-dispatch pending publish",
@@ -495,13 +501,15 @@ func isPublishUserMessageCall(call *ast.CallExpr) bool {
 // mapping is hard-coded for known cases.
 func persistedRowDisambiguationSuffixes(file, fn, target string, idx, total int) []string {
 	switch {
-	case file == "handlers_chat_v2.go" && fn == "sendAgentRouted" && target == "publish" && total == 3:
+	case file == "handlers_chat_v2.go" && fn == "sendAgentRouted" && target == "publish" && total == 4:
 		switch idx {
 		case 0:
-			return []string{"pending"}
+			return []string{"interrupted"}
 		case 1:
-			return []string{"primary"}
+			return []string{"pending"}
 		case 2:
+			return []string{"primary"}
+		case 3:
 			return []string{"mention"}
 		}
 	case file == "handlers_agent_messaging.go" && fn == "handleGroupMessage" && target == "publish" && total == 2:
@@ -536,7 +544,7 @@ func TestMemberFanoutFollowsPublish(t *testing.T) {
 			return false
 		}
 		switch sel.Sel.Name {
-		case "fanOutThreadMessageToMembersAsync", "recordThreadMembersThenFanOutAsync", "memberFanout":
+		case "fanOutThreadMessageToMembersAsync", "recordThreadMembersThenFanOutAsync", "recordThreadMembersThenFanOutStagedAsync", "memberFanout":
 			return true
 		}
 		return false

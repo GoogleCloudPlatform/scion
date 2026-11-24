@@ -129,7 +129,7 @@ type EventPublisher interface {
 	PublishUserInboxHint(ctx context.Context, userID string, hint InboxHint)
 	// PublishChatSendProgress publishes a transient auto-resume progress
 	// update ("resuming" or "sending") to the sending user only, on
-	// user.<id>.chat.send-progress.
+	// user.<id>.send-progress.
 	PublishChatSendProgress(ctx context.Context, userID string, evt ChatSendProgressEvent)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use

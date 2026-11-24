@@ -1662,7 +1662,7 @@ type chatSendOptions struct {
 	// failed row is kept, so the user sees the ordinary non-wake error.
 	OfferWake bool
 	// IdempotencyKey is the client-supplied send key used to correlate
-	// transient auto-resume progress SSE events (user.<id>.chat.send-progress)
+	// transient auto-resume progress SSE events (user.<id>.send-progress)
 	// to the sender's optimistic message bubble. Empty for non-interactive callers.
 	IdempotencyKey string
 	// OnPersisted, when set, is called with the message ID right after the
@@ -2178,9 +2178,30 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// makes the idempotency key done. A row the gates already settled
 	// (failed or deferred) keeps its state.
 	primarySettled := false
+	pendingPublished := false
+	var settleMemberFanout func(*store.Message)
 	defer func() {
 		if !primarySettled && storeMsg.DispatchState == store.MessageDispatchDispatched {
 			_ = s.markFailed(ctx, storeMsg.ID, chatSendInterruptedReason)
+			if pendingPublished {
+				pubCtx := context.WithoutCancel(ctx)
+				failedMsg := *storeMsg
+				failedMsg.DispatchState = store.MessageDispatchFailed
+				reason := chatSendInterruptedReason
+				failedMsg.DispatchFailureReason = &reason
+				if cur, err := s.store.GetMessage(pubCtx, storeMsg.ID); err == nil && cur != nil {
+					failedMsg.DispatchState = cur.DispatchState
+					failedMsg.DispatchFailureReason = cur.DispatchFailureReason
+				}
+				s.events.PublishUserMessage(pubCtx, &failedMsg, attachmentRefs, recordedRefs)
+				if settleMemberFanout != nil {
+					settleMemberFanout(&failedMsg)
+					settleMemberFanout = nil
+				}
+			}
+		}
+		if settleMemberFanout != nil {
+			settleMemberFanout(nil)
 		}
 	}()
 
@@ -2285,8 +2306,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		pendingMsg := *storeMsg
 		pendingMsg.DispatchState = store.MessageDispatchPending
 		s.events.PublishUserMessage(ctx, &pendingMsg, attachmentRefs, recordedRefs)
+		pendingPublished = true
 		if isNonDM {
-			s.recordThreadMembersThenFanOutAsync(ctx, threadMemberRec, &pendingMsg, attachmentRefs, recordedRefs)
+			settleMemberFanout = s.recordThreadMembersThenFanOutStagedAsync(ctx, threadMemberRec, &pendingMsg, attachmentRefs, recordedRefs)
 		}
 	}
 
@@ -2415,11 +2437,13 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	}
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
 	if isNonDM {
-		if willDispatchPrimary {
-			// Membership was already recorded at persist time above; fan out
-			// the settled state to members so off-project views update too.
-			s.fanOutThreadMessageToMembersAsync(ctx, storeMsg, attachmentRefs, recordedRefs)
-		} else {
+		if settleMemberFanout != nil {
+			// Deliver the settled snapshot to the single ordered job started
+			// at persist time so membership recording and pending fan-out
+			// always complete before the settled fan-out runs.
+			settleMemberFanout(storeMsg)
+			settleMemberFanout = nil
+		} else if !willDispatchPrimary {
 			s.recordThreadMembersThenFanOutAsync(ctx, threadMemberRec, storeMsg, attachmentRefs, recordedRefs)
 		}
 	}

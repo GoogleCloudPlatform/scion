@@ -1289,3 +1289,168 @@ func TestChatV2_AgentRoutedPublishesPendingAtPersistTimeForCoMembersAndOtherTabs
 	assert.Equal(t, store.MessageDispatchDispatched, memberSettled.DispatchState)
 	assert.Equal(t, projPending.ID, memberSettled.ID)
 }
+
+// delayEnsureParticipantStore delays EnsureParticipant calls while armed so
+// a test can deterministically exercise fast dispatch vs. thread-membership
+// recording ordering without relying on scheduler luck.
+type delayEnsureParticipantStore struct {
+	store.Store
+	fault       *storeFaultSwitch
+	dispatchEnd <-chan struct{}
+	postDelay   time.Duration
+	maxWait     time.Duration
+}
+
+func (w *delayEnsureParticipantStore) EnsureParticipant(ctx context.Context, p *store.ConversationParticipant) error {
+	if w.fault.Active() {
+		select {
+		case <-w.dispatchEnd:
+			if w.postDelay > 0 {
+				time.Sleep(w.postDelay)
+			}
+		case <-time.After(w.maxWait):
+		}
+	}
+	return w.Store.EnsureParticipant(ctx, p)
+}
+
+// TestChatV2_AgentRoutedFastDispatch_NewlyMentionedMemberReceivesPendingThenSettled
+// pins L1 (ptone/scion#9015): when an agent-routed send @mentions a project
+// member who is not yet a thread participant and broker dispatch finishes
+// rapidly, the newly mentioned member must deterministically receive the
+// pending copy followed by the settled ("dispatched") copy on
+// user.<id>.chat.message (never only pending, and never settled before
+// pending).
+func TestChatV2_AgentRoutedFastDispatch_NewlyMentionedMemberReceivesPendingThenSettled(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+
+	dispatchEnd := make(chan struct{})
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *delayEnsureParticipantStore {
+		return &delayEnsureParticipantStore{
+			Store:       inner,
+			fault:       sw,
+			dispatchEnd: dispatchEnd,
+			postDelay:   30 * time.Millisecond,
+			maxWait:     150 * time.Millisecond,
+		}
+	})
+
+	// Create a project member who is NOT yet a participant of f.topic.
+	mentioned := f.memberWithoutLifecycle(t)
+	topic, err := f.srv.webChatStore.GetTopic(t.Context(), f.topic)
+	require.NoError(t, err)
+	require.False(t, isUserParticipant(t, f.s, topic.ConversationID, mentioned.ID),
+		"mentioned user must not be a thread participant before the send")
+
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	f.srv.SetEventPublisher(pub)
+
+	memberCh, unsubMember := pub.Subscribe("user." + mentioned.ID + ".chat.message")
+	defer unsubMember()
+
+	var closeOnce sync.Once
+	f.srv.SetDispatcher(&hookDispatchDispatcher{
+		wakeTrackingDispatcher: f.disp,
+		onDispatch: func(_ context.Context, _ *store.Agent) error {
+			closeOnce.Do(func() { close(dispatchEnd) })
+			return nil
+		},
+	})
+
+	fault.Arm()
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "fast dispatch hello @Member", "idempotency_key": "idem-l1-fast"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+	sentID := decodeWakeResp(t, rec)["id"].(string)
+
+	readMemberEvent := func(label string) UserMessageEvent {
+		t.Helper()
+		select {
+		case evt := <-memberCh:
+			var payload UserMessageEvent
+			require.NoError(t, json.Unmarshal(evt.Data, &payload))
+			return payload
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s event on user.%s.chat.message", label, mentioned.ID)
+			return UserMessageEvent{}
+		}
+	}
+
+	first := readMemberEvent("pending")
+	assert.Equal(t, sentID, first.ID)
+	assert.Equal(t, store.MessageDispatchPending, first.DispatchState,
+		"newly mentioned member must receive pending first")
+
+	second := readMemberEvent("settled")
+	assert.Equal(t, sentID, second.ID)
+	assert.Equal(t, store.MessageDispatchDispatched, second.DispatchState,
+		"newly mentioned member must receive settled dispatched copy after pending")
+
+	assert.True(t, isUserParticipant(t, f.s, topic.ConversationID, mentioned.ID),
+		"mentioned user must be recorded as a thread participant")
+}
+
+// TestChatV2_AgentRoutedPanicBetweenPublishes_PublishesFailedToProjectAndMembers
+// pins the panic path of L1 (ptone/scion#9015): if a panic occurs between the
+// pre-dispatch pending publish and the post-dispatch settled publish, both
+// project subscribers and off-project thread members must receive the settled
+// "failed" copy rather than staying stuck at "pending".
+func TestChatV2_AgentRoutedPanicBetweenPublishes_PublishesFailedToProjectAndMembers(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	coMember := f.memberWithoutLifecycle(t)
+	f.srv.recordThreadMembers(t.Context(), threadMembership{
+		ProjectID: f.proj.ID,
+		ThreadKey: f.topic,
+		UserID:    coMember.ID,
+	})
+
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	f.srv.SetEventPublisher(pub)
+
+	projCh, unsubProj := pub.Subscribe("project." + f.proj.ID + ".chat.message")
+	defer unsubProj()
+	memberCh, unsubMember := pub.Subscribe("user." + coMember.ID + ".chat.message")
+	defer unsubMember()
+
+	disp := &panicDispatcher{wakeTrackingDispatcher: f.disp}
+	f.srv.SetDispatcher(disp)
+
+	func() {
+		defer func() { _ = recover() }()
+		_ = doRequest(t, f.srv, http.MethodPost, f.path(),
+			map[string]any{"content": "panic mid-dispatch", "idempotency_key": "idem-l1-panic"})
+	}()
+	require.True(t, disp.panicked, "dispatcher must have panicked")
+
+	readEvent := func(ch <-chan Event, label string) UserMessageEvent {
+		t.Helper()
+		select {
+		case evt := <-ch:
+			var payload UserMessageEvent
+			require.NoError(t, json.Unmarshal(evt.Data, &payload))
+			return payload
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s event", label)
+			return UserMessageEvent{}
+		}
+	}
+
+	projPending := readEvent(projCh, "project pending")
+	assert.Equal(t, store.MessageDispatchPending, projPending.DispatchState)
+
+	projFailed := readEvent(projCh, "project failed after panic")
+	assert.Equal(t, projPending.ID, projFailed.ID)
+	assert.Equal(t, store.MessageDispatchFailed, projFailed.DispatchState)
+	assert.Equal(t, chatSendInterruptedReason, projFailed.DispatchFailureReason)
+
+	memberPending := readEvent(memberCh, "member pending")
+	assert.Equal(t, projPending.ID, memberPending.ID)
+	assert.Equal(t, store.MessageDispatchPending, memberPending.DispatchState)
+
+	memberFailed := readEvent(memberCh, "member failed after panic")
+	assert.Equal(t, projPending.ID, memberFailed.ID)
+	assert.Equal(t, store.MessageDispatchFailed, memberFailed.DispatchState)
+	assert.Equal(t, chatSendInterruptedReason, memberFailed.DispatchFailureReason)
+}

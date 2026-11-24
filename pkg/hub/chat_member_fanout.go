@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
@@ -125,6 +126,78 @@ func (s *Server) recordThreadMembersThenFanOutAsync(ctx context.Context, m threa
 			s.fanOutThreadMessageToMembers(ctx, msg, attachments, artifactRefs)
 		}
 	}()
+}
+
+// recordThreadMembersThenFanOutStagedAsync records m's thread membership,
+// fans out pendingMsg to the thread's members, and then waits for the caller
+// to deliver the settled message snapshot via the returned settle callback
+// before fanning out the settled copy—all sequentially in one background
+// goroutine.
+//
+// Running membership recording, pending fan-out, and settled fan-out in one
+// ordered job guarantees that a fast dispatch cannot list participants before
+// a newly mentioned human or the sender is recorded, nor publish the settled
+// copy before the pending copy. Each fan-out pass re-lists and re-authorizes
+// every recipient through fanOutThreadMessageToMembers.
+//
+// The returned settle callback is safe to call more than once (subsequent
+// calls are no-ops) and never blocks the caller. Callers must ensure settle
+// is always invoked (e.g. via defer with nil on abnormal exit) so the
+// background goroutine cannot leak.
+func (s *Server) recordThreadMembersThenFanOutStagedAsync(
+	ctx context.Context,
+	m threadMembership,
+	pendingMsg *store.Message,
+	attachments []AttachmentRef,
+	artifactRefs []artifacts.MessageRef,
+) func(settled *store.Message) {
+	record := m.writable()
+	fanOut := isWebThreadMessage(pendingMsg)
+	if !record && !fanOut {
+		return nil
+	}
+	ctx = context.WithoutCancel(ctx)
+	if !fanOut {
+		s.recordThreadMembersAsync(ctx, m)
+		return nil
+	}
+	pendingMsg, attachments, artifactRefs = snapshotThreadMessage(pendingMsg, attachments, artifactRefs)
+	settledCh := make(chan *store.Message, 1)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.messageLog.Error("thread membership and staged fan-out: panic",
+					"thread", m.ThreadKey, "panic", fmt.Sprint(rec))
+			}
+		}()
+		if record {
+			memberCtx, cancel := context.WithTimeout(ctx, threadMembershipTimeout)
+			s.recordThreadMembers(memberCtx, m)
+			cancel()
+		}
+		timeout := s.chatMemberFanout.withDefaults().timeout
+		pendingCtx, cancelPending := context.WithTimeout(ctx, timeout)
+		s.fanOutThreadMessageToMembers(pendingCtx, pendingMsg, attachments, artifactRefs)
+		cancelPending()
+
+		settledMsg, ok := <-settledCh
+		if !ok || settledMsg == nil {
+			return
+		}
+		settledCtx, cancelSettled := context.WithTimeout(ctx, timeout)
+		s.fanOutThreadMessageToMembers(settledCtx, settledMsg, attachments, artifactRefs)
+		cancelSettled()
+	}()
+	var once sync.Once
+	return func(settled *store.Message) {
+		once.Do(func() {
+			if settled != nil {
+				cp := *settled
+				settledCh <- &cp
+			}
+			close(settledCh)
+		})
+	}
 }
 
 // isWebThreadMessage reports whether msg is a web chat message in a project
