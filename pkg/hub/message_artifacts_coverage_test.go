@@ -415,7 +415,7 @@ func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 	}
 	for key := range got["artifactRefResolver"] {
 		if !wantResolver[key] {
-			t.Errorf("artifactRefResolver called from %s:%s; only resolveArtifactRefs may build the in-process artifact service", key.file, key.function)
+			t.Errorf("artifactRefResolver called from %s:%s; only allow-listed request-bound callers (resolveArtifactRefs, artifactRecipientWarning, inboxReviewsCategory) may build the in-process artifact service", key.file, key.function)
 		}
 	}
 

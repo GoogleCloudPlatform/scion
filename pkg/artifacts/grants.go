@@ -491,7 +491,7 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 		return
 	}
 	var removed *Grant
-	if _, hasInbox := s.host.(InboxNotifier); hasInbox {
+	if s.inboxHintsActive(r.Context()) {
 		if grants, gerr := b.store.ListGrants(r.Context(), a.ID); gerr == nil {
 			for i := range grants {
 				if grants[i].ID == grantID {

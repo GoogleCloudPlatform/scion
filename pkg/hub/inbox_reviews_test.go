@@ -197,7 +197,8 @@ func TestUserMeInboxSummary_ReviewsCountsParityPreviewsAndDedup(t *testing.T) {
 	assert.Equal(t, "Design Doc A", previews[0].Title)
 	assert.Equal(t, p2.ID, previews[0].ScopeRef)
 	assert.Equal(t, p2.ID, previews[0].ProjectID)
-	assert.Equal(t, p2.Name, previews[0].ProjectName)
+	// owner is NOT a member of p2 (readable only via review grant), so projectName must be hidden.
+	assert.Empty(t, previews[0].ProjectName)
 	assert.Equal(t, "Bob", previews[0].RequestedBy)
 	assert.Equal(t, notifReq1Newest, previews[0].NotificationID)
 	assert.Equal(t, "/projects/"+p2.ID+"/artifacts/"+reqReadable1, previews[0].Href)
@@ -215,6 +216,7 @@ func TestUserMeInboxSummary_ReviewsCountsParityPreviewsAndDedup(t *testing.T) {
 	assert.Equal(t, InboxReviewKindRequested, previews[2].Kind)
 	assert.Equal(t, reqReadable2, previews[2].ArtifactID)
 	assert.Equal(t, "Design Doc B", previews[2].Title)
+	assert.Equal(t, p1.Name, previews[2].ProjectName)
 	assert.Equal(t, "Carol", previews[2].RequestedBy)
 	assert.Equal(t, notifReq2, previews[2].NotificationID)
 
@@ -255,12 +257,30 @@ func TestUserMeInboxSummary_ReviewsTokenScoping(t *testing.T) {
 	seedReviewRequestNotification(t, f.s, f.member, f.projA, reqA, "Other", now, false)
 	seedReviewRequestNotification(t, f.s, f.member, f.projB, reqB, "Other", now.Add(time.Second), false)
 
-	// 1. Hub-bounded UAT with inbox:read + artifact:read sees both projects (2 toAddress + 2 requested = 4).
+	// 1. Hub-bounded UAT with inbox:read + artifact:read (no project:read) sees
+	// both projects (2 toAddress + 2 requested = 4), with projectName hidden.
 	tokHubFull := f.mint(t, f.member, hubBoundary(), "inbox:read", "artifact:read")
-	hubResp := decodeInboxSummary(t, f.call(t, tokHubFull, http.MethodGet, userMeInboxSummaryPath, nil))
+	hubResp := decodeInboxSummary(t, f.call(t, tokHubFull, http.MethodGet, userMeInboxSummaryPath+"?previews=10", nil))
 	assert.Equal(t, InboxStateOK, hubResp.Categories[InboxCategoryReviews].State)
 	assert.Equal(t, 4, hubResp.Categories[InboxCategoryReviews].Count)
 	assert.Equal(t, map[string]int{"toAddress": 2, "requested": 2}, hubResp.Categories[InboxCategoryReviews].Breakdown)
+	for _, p := range decodeReviewPreviews(t, hubResp.Categories[InboxCategoryReviews]) {
+		assert.Empty(t, p.ProjectName, "UAT without project:read must not receive projectName")
+	}
+
+	// 1b. Hub-bounded UAT with inbox:read + artifact:read + project:read sees
+	// projectName only for projA (where member), not projB (non-member).
+	tokHubWithProj := f.mint(t, f.member, hubBoundary(), "inbox:read", "artifact:read", "project:read")
+	hubProjResp := decodeInboxSummary(t, f.call(t, tokHubWithProj, http.MethodGet, userMeInboxSummaryPath+"?previews=10", nil))
+	projAObj, err := f.s.GetProject(context.Background(), f.projA)
+	require.NoError(t, err)
+	for _, p := range decodeReviewPreviews(t, hubProjResp.Categories[InboxCategoryReviews]) {
+		if p.ScopeRef == f.projA {
+			assert.Equal(t, projAObj.Name, p.ProjectName)
+		} else {
+			assert.Empty(t, p.ProjectName, "non-member project name must stay hidden")
+		}
+	}
 
 	// 2. Project-bounded UAT (projA) with inbox:read + artifact:read sees only projA (1 toAddress + 1 requested = 2).
 	tokProjA := f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "artifact:read")
@@ -515,11 +535,13 @@ func TestUserMeInboxSummary_ReviewsRevokedGrantDropsRequested(t *testing.T) {
 
 	seedReviewRequestNotification(t, s, reviewer.ID, p1.ID, artID, "Owner", time.Now().UTC(), false)
 
-	// Before revocation: artifact is readable -> requested=1.
+	// Before revocation: artifact is readable -> requested=1, but non-member reviewer gets projectName == "".
 	before := decodeInboxSummary(t, doRequestAsUser(t, srv, reviewer, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, 1, before.Categories[InboxCategoryReviews].Count)
 	assert.Equal(t, map[string]int{"toAddress": 0, "requested": 1}, before.Categories[InboxCategoryReviews].Breakdown)
-	require.Len(t, decodeReviewPreviews(t, before.Categories[InboxCategoryReviews]), 1)
+	beforePreviews := decodeReviewPreviews(t, before.Categories[InboxCategoryReviews])
+	require.Len(t, beforePreviews, 1)
+	assert.Empty(t, beforePreviews[0].ProjectName, "non-member reviewer must not learn project name")
 
 	// Revoke the grant.
 	delRec := userArtifactRequest(t, srv, owner, http.MethodDelete, "/api/v1/artifacts/"+artID+"/grants/"+gResp.Grant.ID, nil)

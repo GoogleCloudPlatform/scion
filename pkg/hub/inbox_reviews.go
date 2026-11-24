@@ -207,6 +207,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 			candidates = candidates[:previews]
 		}
 
+		identity := GetIdentityFromContext(ctx)
 		projectNames := make(map[string]string, len(candidates))
 		for i := range candidates {
 			pid := candidates[i].ProjectID
@@ -215,8 +216,12 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 			}
 			name, cached := projectNames[pid]
 			if !cached {
-				if proj, perr := s.store.GetProject(ctx, pid); perr == nil && proj != nil {
-					name = proj.Name
+				if s.authzService != nil && !isNilIdentity(identity) {
+					if proj, perr := s.store.GetProject(ctx, pid); perr == nil && proj != nil {
+						if s.authzService.CheckAccess(ctx, identity, projectResource(proj), ActionRead).Allowed {
+							name = proj.Name
+						}
+					}
 				}
 				projectNames[pid] = name
 			}

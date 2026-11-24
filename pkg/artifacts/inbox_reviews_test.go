@@ -334,6 +334,25 @@ func TestInboxNotifier_PublishDeleteAndGrantRevoke(t *testing.T) {
 		t.Fatalf("grant revocation: got %v, want [%s]", got, outside.ref)
 	}
 
+	// 4b. When InboxHintsActive is false, revoking a grant skips the grant read and does not fire InboxChanged.
+	gRec2 := f.do(&userU, http.MethodPost, "/api/v1/artifacts/"+art.Artifact.ID+"/grants", grantBody, map[string]string{"Content-Type": "application/json"})
+	if gRec2.Code != http.StatusCreated {
+		t.Fatalf("re-grant review: %d %s", gRec2.Code, gRec2.Body.String())
+	}
+	var gResp2 GrantResponse
+	if err := json.Unmarshal(gRec2.Body.Bytes(), &gResp2); err != nil {
+		t.Fatal(err)
+	}
+	recHost.hintsActive = false
+	delGrantRec2 := f.do(&userU, http.MethodDelete, "/api/v1/artifacts/"+art.Artifact.ID+"/grants/"+gResp2.Grant.ID, nil, nil)
+	if delGrantRec2.Code != http.StatusNoContent {
+		t.Fatalf("delete grant (hints off): %d %s", delGrantRec2.Code, delGrantRec2.Body.String())
+	}
+	if got := recHost.takeInboxUsers(); len(got) != 0 {
+		t.Fatalf("hintsActive=false grant revocation should not fire InboxChanged, got %v", got)
+	}
+	recHost.hintsActive = true
+
 	// 5. Delete user-owned artifact -> fires InboxChanged for owner only!
 	delRec := f.do(&userU, http.MethodDelete, "/api/v1/artifacts/"+art.Artifact.ID, nil, nil)
 	if delRec.Code != http.StatusNoContent {
