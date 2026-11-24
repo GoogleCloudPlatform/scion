@@ -268,6 +268,10 @@ func isUnderDir(path, root string) bool {
 	}
 	absPath = filepath.Clean(absPath)
 	absRoot = filepath.Clean(absRoot)
+	if runtime.GOOS == "windows" {
+		absPath = strings.ToLower(absPath)
+		absRoot = strings.ToLower(absRoot)
+	}
 	if absPath == absRoot {
 		return true
 	}
