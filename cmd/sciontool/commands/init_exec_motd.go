@@ -22,11 +22,11 @@ import (
 	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
 const (
+	execContainerShellHarness      = "shell"
 	execContainerMOTDPath          = "/etc/motd"
 	execContainerProfileScriptPath = "/etc/profile.d/scion-exec-container.sh"
 )
@@ -121,7 +121,7 @@ func writeExecContainerMOTD() {
 }
 
 func writeExecContainerMOTDAt(getenv func(string) string, motdPath, profileScriptPath string) error {
-	if getenv("SCION_HARNESS") != config.ShellHarnessConfigName {
+	if getenv("SCION_HARNESS") != execContainerShellHarness {
 		return nil
 	}
 	motd := buildExecContainerMOTD(getenv)
