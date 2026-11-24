@@ -88,7 +88,7 @@ test-fast-ci:
 # tests, so GOGC=25 applies to them too; they are short). The pkg/hub
 # package itself compiles only in shards, through hack/hubshard/shard.sh,
 # which applies the same default (GOGC=25 for its compiles, unless GOGC is
-# set), plus GOMEMLIMIT=10GiB and -gcflags=-c=2 for compiles/vets. History: with the default GOGC the whole pkg/hub test-package
+# set). History: with the default GOGC the whole pkg/hub test-package
 # compile peaked at about 15 GB RSS (15.4 GB with -tags integration) on a
 # 16 GB GitHub-hosted runner, filled its 3 GB swap, and the runner was shut
 # down mid-step (exit 143, ptone/scion#4083); GOGC=25 cut that to about

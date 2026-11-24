@@ -64,13 +64,9 @@ tool the way `go run ./hack/hubshard` would, from a binary it builds into
 a temporary directory; the other make targets and CI call it. Both scripts
 build and run the tool with `GOGC=25` unless `GOGC` is set, and honour an
 optional `HUB_SHARD_DEADLINE` (a Unix time: every step runs under
-`timeout` until 60 seconds before it). `shard.sh` also defaults
-`GOMEMLIMIT=10GiB` (overridable via `GOMEMLIMIT` or `HUB_SHARD_MEMLIMIT`)
-for compiles and vets, and `-gcflags=-c=2` (`HUB_SHARD_COMPILE_C`, set to
-`0` to disable) for compiles to cap peak memory on 16 GB CI runners.
-`HUB_SHARD_RUN_GOGC` sets the `GOGC` of `shard.sh`'s test runs. Other tags
-combine as usual: `shard.sh` passes `no_sqlite` or `integration` next to
-the shard tags.
+`timeout` until 60 seconds before it). `HUB_SHARD_RUN_GOGC` sets the
+`GOGC` of `shard.sh`'s test runs. Other tags combine as usual: `shard.sh`
+passes `no_sqlite` or `integration` next to the shard tags.
 
 `make test-hub-shard` runs the shard binary with `-test.v` and rebuilds
 its stdout as without `-test.v` (the `=== RUN`, `--- PASS`, `--- SKIP`
@@ -188,11 +184,22 @@ builds only.
    members use; the one chosen has the best ratio of "group members using
    it" to "lines added to common". A group without a candidate stays whole,
    and the cut stops there.
-6. **Assignment.** Groups go, largest first (ties by name), onto the
-   lightest shard by lines. Nothing is stored: the same tree always gives
-   the same shards, and a change to the test files may move other files
-   between shards. That is invisible (no committed tags) and covered by
-   the parity check.
+6. **Common-file splitting (overlay only).** Non-helper common files (regular
+   `*_test.go` files pulled into `common` by closure or cut) are partitioned
+   in the overlay at top-level declaration granularity: only declarations
+   referenced by other files, `init`/`TestMain`, blank-identifier assertions,
+   methods on external types, and their intra-file closure stay in the
+   untagged file; unreferenced `Test*` functions and file-private helpers and
+   types (notably `store.Store`-embedding test doubles, which each generate
+   ~1,800 wrapper methods) move into a generated sharded file
+   `zz_hubshard_split_<orig>` with `//line` directives so stack traces and
+   test output keep original file names and line numbers.
+7. **Assignment.** Groups and split-out common pieces go, largest compile
+   weight first (lines plus a `store.Store`-embed penalty; ties by name), onto
+   the lightest shard. Nothing is stored: the same tree always gives the same
+   shards, and a change to the test files may move other files between
+   shards. That is invisible (no committed tags) and covered by the parity
+   check.
 
 ## Blank imports (driver registration)
 

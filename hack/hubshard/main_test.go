@@ -239,7 +239,7 @@ func fixtureSharding(t *testing.T, n int) *sharding {
 		t.Fatal(err)
 	}
 	an := analyze(files)
-	s, err := newSharding(dir, files, an, assignShards(an, files, n), n)
+	s, err := newSharding(dir, files, an, nil, assignShards(an, files, nil, n), n)
 	if err != nil {
 		t.Fatal(err)
 	}
