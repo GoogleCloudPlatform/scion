@@ -46,19 +46,26 @@ func decisionSettledFalse() predicate.Decision {
 	}
 }
 
+// directDecisionAnswerSubquery builds the correlated subquery matching any
+// direct answer row (answer, confirm, override, or dismiss) for the outer
+// decisions selector s. Shared by hasDirectDecisionAnswer (settled predicate)
+// and noDirectDecisionAnswer (open predicate) so the two stay exact
+// complements.
+func directDecisionAnswerSubquery(s *entsql.Selector) *entsql.Selector {
+	t := entsql.Table(decisionanswer.Table)
+	return entsql.Select(t.C(decisionanswer.FieldID)).
+		From(t).
+		Where(entsql.And(
+			entsql.ColumnsEQ(t.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
+			entsql.EQ(t.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
+		))
+}
+
 // hasDirectDecisionAnswer matches decisions that have at least one direct
 // answer row (including confirm, override, and dismiss outcomes).
 func hasDirectDecisionAnswer() predicate.Decision {
 	return func(s *entsql.Selector) {
-		t := entsql.Table(decisionanswer.Table)
-		s.Where(entsql.Exists(
-			entsql.Select(t.C(decisionanswer.FieldID)).
-				From(t).
-				Where(entsql.And(
-					entsql.ColumnsEQ(t.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
-					entsql.EQ(t.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
-				)),
-		))
+		s.Where(entsql.Exists(directDecisionAnswerSubquery(s)))
 	}
 }
 

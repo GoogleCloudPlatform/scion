@@ -679,15 +679,7 @@ func (c *CompositeStore) decisionAgentFacet(ctx context.Context, projectUUIDs []
 
 func noDirectDecisionAnswer() predicate.Decision {
 	return func(s *entsql.Selector) {
-		t := entsql.Table(decisionanswer.Table)
-		s.Where(entsql.NotExists(
-			entsql.Select(t.C(decisionanswer.FieldID)).
-				From(t).
-				Where(entsql.And(
-					entsql.ColumnsEQ(t.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
-					entsql.EQ(t.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
-				)),
-		))
+		s.Where(entsql.NotExists(directDecisionAnswerSubquery(s)))
 	}
 }
 
