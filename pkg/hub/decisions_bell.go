@@ -859,7 +859,30 @@ func (m decisionBellUserMapReader) GetUser(_ context.Context, id string) (*store
 
 type decisionBellStatusRecorder struct {
 	http.ResponseWriter
-	status int
+	status        int
+	hasBellCounts bool
+	bellTotal     int
+	bellProjects  int
+}
+
+func (r *decisionBellStatusRecorder) setBellCounts(total, projects int) {
+	r.hasBellCounts = true
+	r.bellTotal = total
+	r.bellProjects = projects
+}
+
+func findDecisionBellStatusRecorder(w http.ResponseWriter) *decisionBellStatusRecorder {
+	for w != nil {
+		if rec, ok := w.(*decisionBellStatusRecorder); ok {
+			return rec
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return nil
+		}
+		w = u.Unwrap()
+	}
+	return nil
 }
 
 func (r *decisionBellStatusRecorder) WriteHeader(code int) {
@@ -925,6 +948,14 @@ func (s *Server) withDecisionsBellReconcile(next http.HandlerFunc) http.HandlerF
 			return
 		}
 		if rec.status == http.StatusOK {
+			if rec.hasBellCounts {
+				ctx, cancel := context.WithTimeout(context.Background(), s.chatSearchTimeout())
+				defer cancel()
+				if err := s.writeDecisionsWaitingNotification(ctx, userID, rec.bellTotal, rec.bellProjects); err != nil {
+					slog.Warn("decisions bell: inline reconcile failed", "user_id", userID, "error", err)
+				}
+				return
+			}
 			s.reconcileDecisionBellAsync(userID)
 		}
 	}
