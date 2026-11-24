@@ -992,6 +992,12 @@ type DecisionStore interface {
 	// agents table are gone), with their newest stored asker_agent_name.
 	ListProjectDecisionAgents(ctx context.Context, projectID string) ([]ProjectDecisionActor, error)
 
+	// ListProjectDecisionAgentsForProjects returns, keyed by project ID, the
+	// distinct asking agents recorded on decisions in each projectID (including
+	// hard-deleted agents), with their newest stored asker_agent_name. Projects
+	// with no decisions are omitted. Empty projectIDs returns (nil, nil).
+	ListProjectDecisionAgentsForProjects(ctx context.Context, projectIDs []string) (map[string][]ProjectDecisionActor, error)
+
 	// ListOpenPrompts returns every decision prompt in projectIDs whose
 	// chat_key is in chatKeys and that still has at least one non-settled
 	// decision row (status == pending, or status == decided with no direct

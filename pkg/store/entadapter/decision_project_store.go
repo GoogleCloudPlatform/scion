@@ -26,15 +26,21 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
-const maxProjectDecisionFacetItems = 500
+const (
+	maxProjectDecisionFacetItems  = 500
+	projectDecisionAgentsChunkSize = 500
+	facetProbeChunkSize           = 500
+)
 
-type groupedDecisionAgent struct {
+type groupedProjectDecisionAgent struct {
+	ProjectID    uuid.UUID `json:"project_id"`
 	AskerAgentID uuid.UUID `json:"asker_agent_id"`
 	Name         string    `json:"name"`
 }
@@ -57,32 +63,184 @@ type groupedDecisionProject struct {
 	Latest    string    `json:"latest"`
 }
 
+// hasUnindexedDecisionFacets probes the facet_indexed=false partial indexes on
+// decisions and decision_answers for any row in projectUUIDs not yet reflected
+// in decision_facet_entries (design-scale §3.2 "Fallback"). Returns true iff
+// at least one unindexed row exists in scope, signaling callers to use the
+// legacy query.
+func (c *CompositeStore) hasUnindexedDecisionFacets(ctx context.Context, projectUUIDs []uuid.UUID) (bool, error) {
+	if len(projectUUIDs) == 0 {
+		return false, nil
+	}
+	drv := c.client.Driver()
+	d := entsql.Dialect(drv.Dialect())
+	for start := 0; start < len(projectUUIDs); start += facetProbeChunkSize {
+		end := start + facetProbeChunkSize
+		if end > len(projectUUIDs) {
+			end = len(projectUUIDs)
+		}
+		chunk := projectUUIDs[start:end]
+		vals := make([]any, len(chunk))
+		for i, u := range chunk {
+			vals[i] = u
+		}
+
+		decSub := d.SelectExpr(entsql.Raw("1")).
+			From(entsql.Table(decision.Table)).
+			Where(entsql.And(
+				entsql.P(func(b *entsql.Builder) {
+					b.Ident(decision.FieldFacetIndexed)
+					b.WriteString(" = false")
+				}),
+				entsql.In(decision.FieldProjectID, vals...),
+			)).
+			Limit(1)
+		ansSub := d.SelectExpr(entsql.Raw("1")).
+			From(entsql.Table(decisionanswer.Table)).
+			Where(entsql.And(
+				entsql.P(func(b *entsql.Builder) {
+					b.Ident(decisionanswer.FieldFacetIndexed)
+					b.WriteString(" = false")
+				}),
+				entsql.In(decisionanswer.FieldProjectID, vals...),
+			)).
+			Limit(1)
+
+		q := d.SelectExpr(entsql.Raw("1")).From(decSub.As("d_unidx")).
+			UnionAll(d.SelectExpr(entsql.Raw("1")).From(ansSub.As("a_unidx")))
+		query, args := q.Query()
+		rows := &entsql.Rows{}
+		if err := drv.Query(ctx, query, args, rows); err != nil {
+			return false, mapError(err)
+		}
+		found := rows.Next()
+		rowErr := rows.Err()
+		closeErr := rows.Close()
+		if rowErr != nil {
+			return false, mapError(rowErr)
+		}
+		if closeErr != nil {
+			return false, mapError(closeErr)
+		}
+		if found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // ListProjectDecisionAgents implements store.DecisionStore.
 func (c *CompositeStore) ListProjectDecisionAgents(ctx context.Context, projectID string) ([]store.ProjectDecisionActor, error) {
-	projectUUID, err := parseGetID(projectID)
+	byProject, err := c.ListProjectDecisionAgentsForProjects(ctx, []string{projectID})
 	if err != nil {
 		return nil, err
 	}
+	return byProject[projectID], nil
+}
 
-	var rows []groupedDecisionAgent
-	err = c.client.Decision.Query().
-		Where(decision.ProjectID(projectUUID)).
-		Order(ent.Asc(decision.FieldAskerAgentID)).
-		GroupBy(decision.FieldAskerAgentID).
-		Aggregate(ent.As(ent.Max(decision.FieldAskerAgentName), "name")).
-		Scan(ctx, &rows)
+// ListProjectDecisionAgentsForProjects implements store.DecisionStore.
+// Reads decision_facet_entries when all rows in projectIDs are facet-indexed,
+// falling back to listProjectDecisionAgentsForProjectsLegacy otherwise
+// (design-scale §3.2).
+func (c *CompositeStore) ListProjectDecisionAgentsForProjects(ctx context.Context, projectIDs []string) (map[string][]store.ProjectDecisionActor, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+	projectUUIDs, err := parseProjectIDs(projectIDs)
 	if err != nil {
-		return nil, mapError(err)
+		return nil, err
+	}
+	if len(projectUUIDs) == 0 {
+		return nil, nil
 	}
 
-	out := make([]store.ProjectDecisionActor, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, store.ProjectDecisionActor{
-			ID:   r.AskerAgentID.String(),
-			Name: r.Name,
+	unindexed, err := c.hasUnindexedDecisionFacets(ctx, projectUUIDs)
+	if err != nil {
+		return nil, err
+	}
+	if unindexed {
+		return c.listProjectDecisionAgentsForProjectsLegacy(ctx, projectUUIDs)
+	}
+
+	type projActorKey struct {
+		projectID string
+		actorID   string
+	}
+	type newest struct {
+		name   string
+		latest time.Time
+	}
+	byProjActor := make(map[projActorKey]newest)
+	for start := 0; start < len(projectUUIDs); start += projectDecisionAgentsChunkSize {
+		end := start + projectDecisionAgentsChunkSize
+		if end > len(projectUUIDs) {
+			end = len(projectUUIDs)
+		}
+		rows, err := c.client.DecisionFacetEntry.Query().
+			Where(
+				decisionfacetentry.KindEQ(decisionfacetentry.KindAsker),
+				decisionfacetentry.ProjectIDIn(projectUUIDs[start:end]...),
+			).
+			Select(
+				decisionfacetentry.FieldProjectID,
+				decisionfacetentry.FieldActorID,
+				decisionfacetentry.FieldName,
+				decisionfacetentry.FieldLatestAt,
+			).
+			All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, r := range rows {
+			k := projActorKey{projectID: r.ProjectID.String(), actorID: r.ActorID}
+			cur, ok := byProjActor[k]
+			if !ok || r.LatestAt.After(cur.latest) || (r.LatestAt.Equal(cur.latest) && r.Name > cur.name) {
+				byProjActor[k] = newest{name: r.Name, latest: r.LatestAt}
+			}
+		}
+	}
+
+	out := make(map[string][]store.ProjectDecisionActor, len(projectUUIDs))
+	for k, n := range byProjActor {
+		out[k.projectID] = append(out[k.projectID], store.ProjectDecisionActor{
+			ID:   k.actorID,
+			Name: n.name,
 		})
 	}
-	sortProjectDecisionActors(out)
+	for pid := range out {
+		sortProjectDecisionActors(out[pid])
+	}
+	return out, nil
+}
+
+func (c *CompositeStore) listProjectDecisionAgentsForProjectsLegacy(ctx context.Context, projectUUIDs []uuid.UUID) (map[string][]store.ProjectDecisionActor, error) {
+	out := make(map[string][]store.ProjectDecisionActor, len(projectUUIDs))
+	for start := 0; start < len(projectUUIDs); start += projectDecisionAgentsChunkSize {
+		end := start + projectDecisionAgentsChunkSize
+		if end > len(projectUUIDs) {
+			end = len(projectUUIDs)
+		}
+		var rows []groupedProjectDecisionAgent
+		err := c.client.Decision.Query().
+			Where(decision.ProjectIDIn(projectUUIDs[start:end]...)).
+			Order(ent.Asc(decision.FieldProjectID), ent.Asc(decision.FieldAskerAgentID)).
+			GroupBy(decision.FieldProjectID, decision.FieldAskerAgentID).
+			Aggregate(ent.As(ent.Max(decision.FieldAskerAgentName), "name")).
+			Scan(ctx, &rows)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, r := range rows {
+			pid := r.ProjectID.String()
+			out[pid] = append(out[pid], store.ProjectDecisionActor{
+				ID:   r.AskerAgentID.String(),
+				Name: r.Name,
+			})
+		}
+	}
+	for pid := range out {
+		sortProjectDecisionActors(out[pid])
+	}
 	return out, nil
 }
 
@@ -252,6 +410,8 @@ func (c *CompositeStore) ListDecisionAnswers(
 }
 
 // ProjectsWithDecisions implements store.DecisionStore.
+// Reads decision_facet_entries when all rows in projectIDs are facet-indexed,
+// falling back to projectsWithDecisionsLegacy otherwise (design-scale §3.2).
 func (c *CompositeStore) ProjectsWithDecisions(ctx context.Context, projectIDs []string) ([]string, error) {
 	if len(projectIDs) == 0 {
 		return nil, nil
@@ -264,8 +424,69 @@ func (c *CompositeStore) ProjectsWithDecisions(ctx context.Context, projectIDs [
 		return nil, nil
 	}
 
+	unindexed, err := c.hasUnindexedDecisionFacets(ctx, projectUUIDs)
+	if err != nil {
+		return nil, err
+	}
+	if unindexed {
+		return c.projectsWithDecisionsLegacy(ctx, projectUUIDs)
+	}
+
+	type projectLatest struct {
+		id     string
+		latest time.Time
+	}
+	byProj := make(map[string]time.Time, len(projectUUIDs))
+	for start := 0; start < len(projectUUIDs); start += facetProbeChunkSize {
+		end := start + facetProbeChunkSize
+		if end > len(projectUUIDs) {
+			end = len(projectUUIDs)
+		}
+		var rows []groupedDecisionProject
+		err = c.client.DecisionFacetEntry.Query().
+			Where(
+				decisionfacetentry.KindEQ(decisionfacetentry.KindAsker),
+				decisionfacetentry.ProjectIDIn(projectUUIDs[start:end]...),
+			).
+			GroupBy(decisionfacetentry.FieldProjectID).
+			Aggregate(ent.As(ent.Max(decisionfacetentry.FieldLatestAt), "latest")).
+			Scan(ctx, &rows)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, r := range rows {
+			pid := r.ProjectID.String()
+			ts := parseAggregateTime(r.Latest)
+			if cur, ok := byProj[pid]; !ok || ts.After(cur) {
+				byProj[pid] = ts
+			}
+		}
+	}
+	if len(byProj) == 0 {
+		return nil, nil
+	}
+
+	ordered := make([]projectLatest, 0, len(byProj))
+	for pid, ts := range byProj {
+		ordered = append(ordered, projectLatest{id: pid, latest: ts})
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if !ordered[i].latest.Equal(ordered[j].latest) {
+			return ordered[i].latest.After(ordered[j].latest)
+		}
+		return ordered[i].id < ordered[j].id
+	})
+
+	out := make([]string, len(ordered))
+	for i, p := range ordered {
+		out[i] = p.id
+	}
+	return out, nil
+}
+
+func (c *CompositeStore) projectsWithDecisionsLegacy(ctx context.Context, projectUUIDs []uuid.UUID) ([]string, error) {
 	var rows []groupedDecisionProject
-	err = c.client.Decision.Query().
+	err := c.client.Decision.Query().
 		Where(decision.ProjectIDIn(projectUUIDs...)).
 		GroupBy(decision.FieldProjectID).
 		Aggregate(ent.As(ent.Max(decision.FieldCreatedAt), "latest")).
@@ -575,6 +796,8 @@ func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*e
 }
 
 // ListDecisionFacets implements store.DecisionStore.
+// Reads decision_facet_entries when all rows in projectIDs are facet-indexed,
+// falling back to listDecisionFacetsLegacy otherwise (design-scale §3.2).
 func (c *CompositeStore) ListDecisionFacets(
 	ctx context.Context,
 	projectIDs []string,
@@ -589,6 +812,146 @@ func (c *CompositeStore) ListDecisionFacets(
 		return nil, nil, nil, nil
 	}
 
+	unindexed, err := c.hasUnindexedDecisionFacets(ctx, projectUUIDs)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if unindexed {
+		return c.listDecisionFacetsLegacy(ctx, projectUUIDs, keys)
+	}
+
+	rows, err := c.client.DecisionFacetEntry.Query().
+		Where(
+			decisionfacetentry.ProjectIDIn(projectUUIDs...),
+			decisionFacetEntryChatKeyIn(len(projectUUIDs), keys),
+			decisionfacetentry.Or(
+				decisionfacetentry.KindEQ(decisionfacetentry.KindAsker),
+				decisionfacetentry.RefCountGT(0),
+			),
+		).
+		Select(
+			decisionfacetentry.FieldKind,
+			decisionfacetentry.FieldActorID,
+			decisionfacetentry.FieldProjectID,
+			decisionfacetentry.FieldChatKey,
+			decisionfacetentry.FieldName,
+			decisionfacetentry.FieldEmail,
+			decisionfacetentry.FieldLatestAt,
+		).
+		All(ctx)
+	if err != nil {
+		return nil, nil, nil, mapError(err)
+	}
+
+	type newestAgent struct {
+		name      string
+		projectID string
+		latest    time.Time
+	}
+	type newestAnswerer struct {
+		name   string
+		email  string
+		latest time.Time
+	}
+
+	byAgent := make(map[string]newestAgent)
+	byAnswerer := make(map[string]newestAnswerer)
+	seenConv := make(map[string]bool)
+	var convKeys []string
+
+	for _, r := range rows {
+		switch r.Kind {
+		case decisionfacetentry.KindAsker:
+			cur, ok := byAgent[r.ActorID]
+			if !ok || r.LatestAt.After(cur.latest) || (r.LatestAt.Equal(cur.latest) && r.Name > cur.name) {
+				byAgent[r.ActorID] = newestAgent{
+					name:      r.Name,
+					projectID: r.ProjectID.String(),
+					latest:    r.LatestAt,
+				}
+			}
+			if !seenConv[r.ChatKey] {
+				seenConv[r.ChatKey] = true
+				convKeys = append(convKeys, r.ChatKey)
+			}
+		case decisionfacetentry.KindAnswerer:
+			cur, ok := byAnswerer[r.ActorID]
+			if !ok || facetDeltaNewer(r.LatestAt, r.Name, r.Email, cur.latest, cur.name, cur.email) {
+				byAnswerer[r.ActorID] = newestAnswerer{
+					name:   r.Name,
+					email:  r.Email,
+					latest: r.LatestAt,
+				}
+			}
+		}
+	}
+
+	agents := make([]store.ProjectDecisionActor, 0, len(byAgent))
+	for id, n := range byAgent {
+		agents = append(agents, store.ProjectDecisionActor{
+			ID:        id,
+			Name:      n.name,
+			ProjectID: n.projectID,
+		})
+	}
+	sortProjectDecisionActors(agents)
+
+	// Cap answerers at maxProjectDecisionFacetItems ordered by user ID ASC
+	// before display-name sorting, matching listDecisionFacetsLegacy.
+	answererIDs := make([]string, 0, len(byAnswerer))
+	for id := range byAnswerer {
+		answererIDs = append(answererIDs, id)
+	}
+	sort.Strings(answererIDs)
+	if len(answererIDs) > maxProjectDecisionFacetItems {
+		answererIDs = answererIDs[:maxProjectDecisionFacetItems]
+	}
+	answerers := make([]store.ProjectDecisionActor, 0, len(answererIDs))
+	for _, id := range answererIDs {
+		a := byAnswerer[id]
+		name := a.name
+		if name == "" {
+			name = a.email
+		}
+		answerers = append(answerers, store.ProjectDecisionActor{ID: id, Name: name})
+	}
+	sortProjectDecisionActors(answerers)
+
+	return agents, answerers, convKeys, nil
+}
+
+// decisionFacetEntryChatKeyIn applies the same SQLite +chat_key planner hint
+// as decisionChatKeyIn when querying multiple projects so SQLite seeks
+// project_id on the index instead of doing a Cartesian project x chat_key loop.
+func decisionFacetEntryChatKeyIn(projectCount int, keys []string) predicate.DecisionFacetEntry {
+	if projectCount <= 1 {
+		return decisionfacetentry.ChatKeyIn(keys...)
+	}
+	vals := make([]any, len(keys))
+	for i, k := range keys {
+		vals[i] = k
+	}
+	return func(s *entsql.Selector) {
+		if s.Dialect() != dialect.SQLite {
+			decisionfacetentry.ChatKeyIn(keys...)(s)
+			return
+		}
+		col := s.C(decisionfacetentry.FieldChatKey)
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.WriteByte('+')
+			b.Ident(col)
+			b.WriteString(" IN (")
+			b.Args(vals...)
+			b.WriteByte(')')
+		}))
+	}
+}
+
+func (c *CompositeStore) listDecisionFacetsLegacy(
+	ctx context.Context,
+	projectUUIDs []uuid.UUID,
+	keys []string,
+) ([]store.ProjectDecisionActor, []store.ProjectDecisionActor, []string, error) {
 	agents, err := c.decisionAgentFacet(ctx, projectUUIDs, keys)
 	if err != nil {
 		return nil, nil, nil, err
