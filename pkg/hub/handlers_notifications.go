@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -554,6 +555,59 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 	MethodNotAllowed(w, http.MethodPost)
 }
 
+// allowedTriggerActivities is the canonical list of valid notification trigger
+// activity values accepted by subscription and template endpoints.
+var allowedTriggerActivities = []string{
+	"COMPLETED",
+	"IDLE",
+	"WAITING_FOR_INPUT",
+	"LIMITS_EXCEEDED",
+	"STALLED",
+	"ERROR",
+	NotificationStatusHarnessError,
+	NotificationStatusHalted,
+	"SUSPENDED",
+	"STOPPED",
+	"DELETED",
+}
+
+var allowedTriggerActivitySet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(allowedTriggerActivities))
+	for _, a := range allowedTriggerActivities {
+		m[a] = struct{}{}
+	}
+	return m
+}()
+
+// validateTriggerActivities checks that triggers is non-empty and every entry
+// names an allowed notification trigger activity (matched case-insensitively).
+// On success it returns the trimmed, uppercased, deduplicated trigger names
+// preserving first-seen order.
+func validateTriggerActivities(triggers []string) ([]string, error) {
+	if len(triggers) == 0 {
+		return nil, errors.New("triggerActivities must be non-empty")
+	}
+	normalized := make([]string, 0, len(triggers))
+	seen := make(map[string]struct{}, len(triggers))
+	var invalid []string
+	for _, raw := range triggers {
+		upper := strings.ToUpper(strings.TrimSpace(raw))
+		if _, ok := allowedTriggerActivitySet[upper]; !ok {
+			invalid = append(invalid, fmt.Sprintf("%q", raw))
+			continue
+		}
+		if _, ok := seen[upper]; !ok {
+			seen[upper] = struct{}{}
+			normalized = append(normalized, upper)
+		}
+	}
+	if len(invalid) > 0 {
+		return nil, fmt.Errorf("invalid triggerActivities %s; allowed values: %s",
+			strings.Join(invalid, ", "), strings.Join(allowedTriggerActivities, ", "))
+	}
+	return normalized, nil
+}
+
 // createSubscriptionRequest is the request body for POST /api/v1/notifications/subscriptions.
 type createSubscriptionRequest struct {
 	Scope             string   `json:"scope"`
@@ -597,10 +651,12 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "bad_request", "projectId is required", nil)
 			return
 		}
-		if len(req.TriggerActivities) == 0 {
-			writeError(w, http.StatusBadRequest, "bad_request", "triggerActivities must be non-empty", nil)
+		normalizedTriggers, err := validateTriggerActivities(req.TriggerActivities)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 			return
 		}
+		req.TriggerActivities = normalizedTriggers
 		// Agent callers may only subscribe within their own project, and may
 		// only watch agents in it.
 		if !s.agentMaySubscribe(w, r, caller, &req, nil) {
@@ -721,10 +777,12 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body", nil)
 			return
 		}
-		if len(req.TriggerActivities) == 0 {
-			writeError(w, http.StatusBadRequest, "bad_request", "triggerActivities must be non-empty", nil)
+		normalizedTriggers, err := validateTriggerActivities(req.TriggerActivities)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 			return
 		}
+		req.TriggerActivities = normalizedTriggers
 
 		if err := s.store.UpdateNotificationSubscriptionTriggers(ctx, subID, req.TriggerActivities); err != nil {
 			writeErrorFromErr(w, err, "Subscription")
@@ -899,12 +957,17 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 }
 
 // subscriptionRequestWellFormed reports whether a bulk create entry is one
-// bulk create files; malformed entries are skipped.
+// bulk create files; malformed entries are skipped. When well-formed, it
+// normalizes req.TriggerActivities in place.
 func subscriptionRequestWellFormed(req *createSubscriptionRequest) bool {
 	if req.Scope != store.SubscriptionScopeAgent && req.Scope != store.SubscriptionScopeProject {
 		return false
 	}
-	if req.ProjectID == "" || len(req.TriggerActivities) == 0 {
+	if req.ProjectID == "" {
+		return false
+	}
+	normalized, err := validateTriggerActivities(req.TriggerActivities)
+	if err != nil {
 		return false
 	}
 	if req.Scope == store.SubscriptionScopeAgent && req.AgentID == "" {
@@ -917,6 +980,7 @@ func subscriptionRequestWellFormed(req *createSubscriptionRequest) bool {
 	if req.Scope == store.SubscriptionScopeProject && req.AgentID != "" {
 		return false
 	}
+	req.TriggerActivities = normalized
 	return true
 }
 
@@ -954,10 +1018,12 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			writeError(w, http.StatusBadRequest, "bad_request", "name is required", nil)
 			return
 		}
-		if len(req.TriggerActivities) == 0 {
-			writeError(w, http.StatusBadRequest, "bad_request", "triggerActivities must be non-empty", nil)
+		normalizedTriggers, err := validateTriggerActivities(req.TriggerActivities)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 			return
 		}
+		req.TriggerActivities = normalizedTriggers
 		if req.Scope == "" {
 			req.Scope = store.SubscriptionScopeProject
 		}

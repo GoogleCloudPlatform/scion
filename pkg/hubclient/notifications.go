@@ -166,6 +166,7 @@ type Subscription struct {
 	ID                string    `json:"id"`
 	Scope             string    `json:"scope"`
 	AgentID           string    `json:"agentId,omitempty"`
+	AgentSlug         string    `json:"agentSlug,omitempty"`
 	SubscriberType    string    `json:"subscriberType"`
 	SubscriberID      string    `json:"subscriberId"`
 	ProjectID         string    `json:"projectId"`

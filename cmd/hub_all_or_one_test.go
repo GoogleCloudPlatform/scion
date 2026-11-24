@@ -53,9 +53,9 @@ func TestHubAllOrOneActions(t *testing.T) {
 		},
 		{
 			name:       "notification",
-			path:       "/api/v1/notifications/notif-1/ack",
-			output:     "Notification notif-1 acknowledged.\n",
-			args:       []string{"notif-1"},
+			path:       "/api/v1/notifications/11111111-1111-4111-8111-111111111111/ack",
+			output:     "Notification 11111111-1111-4111-8111-111111111111 acknowledged.\n",
+			args:       []string{"11111111-1111-4111-8111-111111111111"},
 			run:        runNotificationsAck,
 			setAllFlag: func(all bool) { notificationsAckAll = all },
 		},

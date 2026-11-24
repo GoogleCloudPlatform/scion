@@ -1133,3 +1133,82 @@ func TestHandleSubscriptions_AgentBulkCreate(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&deleted))
 	assert.Equal(t, 2, deleted["deleted"])
 }
+
+func TestHandleSubscriptions_TriggerActivityValidation(t *testing.T) {
+	srv, s, _ := setupNotificationHandlerTest(t)
+	ctx := context.Background()
+	projectID := tid("project-notif-handler")
+
+	// Create a valid subscription to exercise PATCH validation.
+	createReq := createSubscriptionRequest{
+		Scope:             store.SubscriptionScopeProject,
+		ProjectID:         projectID,
+		TriggerActivities: []string{"completed"},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var sub store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sub))
+	assert.Equal(t, []string{"COMPLETED"}, sub.TriggerActivities, "valid lowercase trigger should normalize to uppercase")
+
+	// POST create rejects invalid trigger names with 400 and lists allowed values.
+	for _, bad := range [][]string{{"BOGUS"}, {"COMPLETED", "COMPLETE"}, {"FAILED"}, {""}} {
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createSubscriptionRequest{
+			Scope:             store.SubscriptionScopeProject,
+			ProjectID:         projectID,
+			TriggerActivities: bad,
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "create with %v: %s", bad, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "allowed values")
+		assert.Contains(t, rec.Body.String(), "COMPLETED")
+	}
+
+	// PATCH rejects invalid trigger names with 400 and leaves stored triggers unchanged.
+	for _, bad := range [][]string{{"NOT_A_TRIGGER"}, {"COMPLETED", "TYPO"}, {"FAILED"}, {"  "}} {
+		rec = doRequest(t, srv, http.MethodPatch, "/api/v1/notifications/subscriptions/"+sub.ID,
+			updateSubscriptionRequest{TriggerActivities: bad})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "patch with %v: %s", bad, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "allowed values")
+		assert.Contains(t, rec.Body.String(), "WAITING_FOR_INPUT")
+	}
+	stored, err := s.GetNotificationSubscription(ctx, sub.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"COMPLETED"}, stored.TriggerActivities)
+
+	// PATCH accepts all allowed triggers (case-insensitively), normalizes to uppercase, and deduplicates.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/notifications/subscriptions/"+sub.ID,
+		updateSubscriptionRequest{TriggerActivities: []string{"completed", "COMPLETED", "WAITING_FOR_INPUT", "deleted", "stopped", "deleted"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var updated store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&updated))
+	assert.Equal(t, []string{"COMPLETED", "WAITING_FOR_INPUT", "DELETED", "STOPPED"}, updated.TriggerActivities)
+
+	// POST template rejects invalid trigger names with 400 and lists allowed values.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/notifications/templates", createTemplateRequest{
+		Name:              "bad-trigger-tmpl",
+		Scope:             store.SubscriptionScopeProject,
+		ProjectID:         projectID,
+		TriggerActivities: []string{"BOGUS_TRIGGER"},
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "allowed values")
+
+	// Bulk create skips entries with invalid trigger names and normalizes/deduplicates valid ones.
+	bulkProjectID := tid("project-notif-bulk")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   bulkProjectID,
+		Name: "Bulk Test Project",
+		Slug: "bulk-test-project",
+	}))
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions/bulk", []createSubscriptionRequest{
+		{Scope: store.SubscriptionScopeProject, ProjectID: projectID, TriggerActivities: []string{"BOGUS_BULK"}},
+		{Scope: store.SubscriptionScopeProject, ProjectID: bulkProjectID, TriggerActivities: []string{"completed", "COMPLETED", "error"}},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var bulkResult []store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&bulkResult))
+	require.Len(t, bulkResult, 1)
+	assert.Equal(t, bulkProjectID, bulkResult[0].ProjectID)
+	assert.Equal(t, []string{"COMPLETED", "ERROR"}, bulkResult[0].TriggerActivities)
+}
