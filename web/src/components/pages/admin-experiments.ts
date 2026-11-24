@@ -366,17 +366,24 @@ export class ScionAdminExperiments extends LitElement {
   }
 
   private renderFilterBar(): ReturnType<typeof html> {
-    const counts = {
-      all: this.experiments.length,
-      on: this.experiments.filter((e) => e.enabled).length,
-      off: this.experiments.filter((e) => !e.enabled).length,
-      overridden: this.experiments.filter((e) => e.override !== null).length,
-    };
+    let on = 0;
+    let off = 0;
+    let overridden = 0;
+    for (const exp of this.experiments) {
+      if (exp.enabled) {
+        on++;
+      } else {
+        off++;
+      }
+      if (exp.override !== null) {
+        overridden++;
+      }
+    }
     const options: Array<{ id: ExperimentFilter; label: string; count: number }> = [
-      { id: 'all', label: 'All', count: counts.all },
-      { id: 'on', label: 'On', count: counts.on },
-      { id: 'off', label: 'Off', count: counts.off },
-      { id: 'overridden', label: 'Overridden', count: counts.overridden },
+      { id: 'all', label: 'All', count: this.experiments.length },
+      { id: 'on', label: 'On', count: on },
+      { id: 'off', label: 'Off', count: off },
+      { id: 'overridden', label: 'Overridden', count: overridden },
     ];
     return html`
       <div class="filter-bar">
