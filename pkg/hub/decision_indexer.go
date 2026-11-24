@@ -71,6 +71,14 @@ func (s *Server) decisionIndexSteps() []decisionIndexStep {
 			name: "settled",
 			run:  s.store.SweepSettledDecisionsPage,
 		},
+		{
+			name: "facet_decisions",
+			run:  s.store.IndexDecisionFacetsDecisionsPage,
+		},
+		{
+			name: "facet_answers",
+			run:  s.store.IndexDecisionFacetsAnswersPage,
+		},
 	}
 }
 
@@ -145,6 +153,7 @@ func (s *Server) runDecisionIndexPass(ctx context.Context) (decisionIndexPassSta
 	}
 
 	log := logging.Subsystem("hub.decision_indexer")
+	start := time.Now()
 	pending, err := s.store.HasPendingDecisionIndexWork(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -153,11 +162,32 @@ func (s *Server) runDecisionIndexPass(ctx context.Context) (decisionIndexPassSta
 		return stats, err
 	}
 	if !pending {
+		// Still run the O(distinct actors + projects) reconciler at most once
+		// per pass so older-binary user/project deletions heal even when no
+		// unindexed decisions/answers remain (design-scale §3.6).
+		reconciled, rErr := s.store.ReconcileDecisionFacets(ctx)
+		if rErr != nil {
+			if ctx.Err() == nil {
+				log.Warn("decision indexer reconcile step failed", "error", rErr)
+			}
+			return stats, rErr
+		}
+		if reconciled > 0 {
+			stats.HadPending = true
+			stats.StepCounts["reconcile"] = reconciled
+			stats.Pages++
+			log.Info("decision indexer pass complete",
+				"updated", reconciled,
+				"reconcile", reconciled,
+				"pages", stats.Pages,
+				"pending", false,
+				"duration", time.Since(start).Round(time.Millisecond),
+			)
+		}
 		return stats, nil
 	}
 	stats.HadPending = true
 
-	start := time.Now()
 	pageSize := decisionIndexPageSize
 	if pageSize <= 0 {
 		pageSize = entadapter.DefaultDecisionIndexPageSize
@@ -207,6 +237,19 @@ func (s *Server) runDecisionIndexPass(ctx context.Context) (decisionIndexPassSta
 		}
 	}
 
+	reconciled, rErr := s.store.ReconcileDecisionFacets(ctx)
+	if rErr != nil {
+		if ctx.Err() == nil {
+			log.Warn("decision indexer reconcile step failed", "error", rErr)
+		}
+		return stats, rErr
+	}
+	if reconciled > 0 {
+		stats.StepCounts["reconcile"] = reconciled
+		totalUpdated += reconciled
+		stats.Pages++
+	}
+
 	stillPending, probeErr := s.store.HasPendingDecisionIndexWork(ctx)
 	if probeErr != nil && ctx.Err() == nil {
 		log.Warn("decision indexer post-pass probe failed", "error", probeErr)
@@ -214,6 +257,9 @@ func (s *Server) runDecisionIndexPass(ctx context.Context) (decisionIndexPassSta
 	log.Info("decision indexer pass complete",
 		"updated", totalUpdated,
 		"settled", stats.StepCounts["settled"],
+		"facet_decisions", stats.StepCounts["facet_decisions"],
+		"facet_answers", stats.StepCounts["facet_answers"],
+		"reconcile", stats.StepCounts["reconcile"],
 		"pages", stats.Pages,
 		"pending", stillPending,
 		"duration", time.Since(start).Round(time.Millisecond),
