@@ -429,7 +429,7 @@ func TestDecisionSettled_ListOpenPromptsDifferential(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Interpreted awaiting confirm (open)
+	// Interpreted awaiting confirm via RecordInterpretedAnswers (open)
 	_, rInterpOpen := post(p2, agent2, topic2, "k-interp-open", false, false)
 	_, err = cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
 		InterpretedByAgentID: agent2, SourceMessageID: uuid.NewString(),
@@ -442,6 +442,21 @@ func TestDecisionSettled_ListOpenPromptsDifferential(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+
+	// Interpreted awaiting confirm via RecordAnswer(provenance=agent_interpreted) (open)
+	_, rInterpSingle := post(p1, agent1, topic1, "k-interp-single", false, false)
+	_, _, err = cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+		DecisionRowID: rInterpSingle, ChoiceID: "a",
+		AnsweredByUserID: aliceID, AnsweredByName: "Alice", AnsweredByEmail: "alice@example.com",
+		Provenance: store.DecisionProvenanceAgentInterpreted, Surface: store.DecisionSurfaceNative,
+		InterpretedByAgentID: agent1, SourceMessageID: uuid.NewString(),
+		ResponseMessage: &store.Message{
+			ID: uuid.NewString(), ProjectID: p1, Sender: "agent:bot", SenderID: agent1,
+			Recipient: "chat", ThreadID: topic1, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+	})
+	require.NoError(t, err)
+	assert.False(t, decisionSettledFlag(t, cs, rInterpSingle), "RecordAnswer(agent_interpreted) must leave settled=false")
 
 	// Interpreted confirmed (settled)
 	_, rInterpConfirmed := post(p2, agent2, topic2, "k-interp-conf", false, false)
