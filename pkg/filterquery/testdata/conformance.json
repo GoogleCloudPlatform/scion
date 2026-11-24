@@ -318,6 +318,13 @@
       "knownKeys": ["phase", "label"],
       "expect": { "mode": "text", "text": "\ufeffhello\ufeff" },
       "canonical": "\ufeffhello\ufeff"
+    },
+    {
+      "name": "URL scheme stays pure text",
+      "input": "https://example.com/x",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "https://example.com/x" },
+      "canonical": "https://example.com/x"
     }
   ],
   "eval": {

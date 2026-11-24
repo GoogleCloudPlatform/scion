@@ -172,6 +172,15 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     expect(v.warnings.some((w) => w.code === 'repeated_key')).toBe(true);
   });
 
+  it('does not emit unknown-key warning for URL schemes like https://', () => {
+    const raw = 'https://example.com/x';
+    const res = parse(raw, knownKeysFor(agentsSchema));
+    expect(res.error).toBeUndefined();
+    const v = validate(res.query as Query, agentsSchema, raw);
+    expect(v.error).toBeUndefined();
+    expect(v.warnings).toEqual([]);
+  });
+
   it('strips client-only keys in serverSubset', () => {
     const schemaWithClient: ViewSchema = {
       ...agentsSchema,

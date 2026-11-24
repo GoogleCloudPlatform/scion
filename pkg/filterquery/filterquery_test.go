@@ -277,6 +277,14 @@ func TestLimits(t *testing.T) {
 		t.Errorf("over MaxInputBytes: got %v, want limit error", err)
 	}
 
+	// Multi-byte UTF-8 rune straddling byte 512 must back offset up to the rune start.
+	straddling := strings.Repeat("a", filterquery.MaxInputBytes-1) + "é"
+	if _, err := filterquery.Parse(straddling, known); err == nil {
+		t.Errorf("straddling MaxInputBytes: got nil, want limit error")
+	} else if err.Code != filterquery.ErrCodeLimit || err.Offset != filterquery.MaxInputBytes-1 || err.Length != 2 {
+		t.Errorf("straddling MaxInputBytes: got code=%q offset=%d length=%d, want limit/511/2", err.Code, err.Offset, err.Length)
+	}
+
 	// > 200 runes in pure text
 	longText := strings.Repeat("x", filterquery.MaxTextRunes+1)
 	if _, err := filterquery.Parse(longText, known); err == nil || err.Code != filterquery.ErrCodeLimit {

@@ -32,11 +32,15 @@ func trimASCIISpace(s string) string {
 // the trimmed input verbatim (no quote or '-' processing).
 func Parse(input string, known func(key string) bool) (Query, *Error) {
 	if len(input) > MaxInputBytes {
+		offset := MaxInputBytes
+		for offset > 0 && !utf8.RuneStart(input[offset]) {
+			offset--
+		}
 		return Query{}, &Error{
 			Code:    ErrCodeLimit,
 			Message: fmt.Sprintf("filter query exceeds maximum length of %d bytes", MaxInputBytes),
-			Offset:  MaxInputBytes,
-			Length:  len(input) - MaxInputBytes,
+			Offset:  offset,
+			Length:  len(input) - offset,
 		}
 	}
 	if !utf8.ValidString(input) {

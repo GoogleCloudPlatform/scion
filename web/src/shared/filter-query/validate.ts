@@ -99,8 +99,11 @@ function findUnknownKeyWarnings(rawInput: string, schema: ViewSchema): FilterWar
     while (i < n && !/\s/.test(rawInput[i])) i++;
     const prefix = scanKeyPrefix(rawInput, scanStart);
     if (prefix && !lookupKey(schema, prefix.key)) {
-      // Skip single-letter drive prefixes like C:\temp.
-      if (prefix.key.length === 1 && rawInput[prefix.colonPos + 1] === '\\') {
+      // Skip single-letter drive prefixes like C:\temp and URL schemes like https://...
+      if (
+        (prefix.key.length === 1 && rawInput[prefix.colonPos + 1] === '\\') ||
+        rawInput[prefix.colonPos + 1] === '/'
+      ) {
         continue;
       }
       warnings.push({
