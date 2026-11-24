@@ -375,6 +375,91 @@
       "input": "label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a",
       "knownKeys": ["phase", "label"],
       "error": { "code": "limit", "offset": 0, "length": 263 }
+    },
+    {
+      "name": "limit: exactly 512 ASCII bytes accepted",
+      "input": "label:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [
+          {
+            "key": "label",
+            "values": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+            "negate": false,
+            "offset": 0,
+            "length": 512
+          }
+        ]
+      }
+    },
+    {
+      "name": "limit: exactly 200 runes pure text accepted",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "text",
+        "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "name": "limit: exactly 20 values per key accepted",
+      "input": "label:a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [
+          {
+            "key": "label",
+            "values": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t"],
+            "negate": false,
+            "offset": 0,
+            "length": 45
+          }
+        ]
+      }
+    },
+    {
+      "name": "limit: exactly 32 terms accepted",
+      "input": "label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a label:a",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [
+          { "key": "label", "values": ["a"], "negate": false, "offset": 0, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 8, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 16, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 24, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 32, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 40, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 48, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 56, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 64, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 72, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 80, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 88, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 96, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 104, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 112, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 120, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 128, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 136, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 144, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 152, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 160, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 168, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 176, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 184, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 192, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 200, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 208, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 216, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 224, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 232, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 240, "length": 7 },
+          { "key": "label", "values": ["a"], "negate": false, "offset": 248, "length": 7 }
+        ]
+      }
     }
   ],
   "eval": {
