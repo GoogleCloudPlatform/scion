@@ -771,7 +771,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 
 	t.Run("project_scope_on_demand_resolves_and_file_and_internal_refused", func(t *testing.T) {
 		const projID = "proj-sysone-od"
-		ctxWithProj := systemoneprovider.WithProjectID(context.Background(), projID)
+		ctxWithProj := systemoneruntime.WithEvalProjectID(context.Background(), projID)
 
 		srvOK := &Server{
 			hubID: hubID,
