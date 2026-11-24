@@ -38,6 +38,8 @@ import {
   runtimeTargetRows,
 } from '../../shared/runtime-target.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import type { AdminStatus } from '../../lib/admin-permissions.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import { visibleInterval } from '../../client/visible-interval.js';
@@ -109,6 +111,11 @@ export class ScionPageBrokerDetail extends LitElement {
 
   @state()
   private brokerSettingsError: string | null = null;
+
+  @state()
+  private adminStatus: AdminStatus | null = null;
+
+  private adminStatusUserId: string | null = null;
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
   private stopRelativeTimeTick: (() => void) | null = null;
@@ -504,6 +511,7 @@ export class ScionPageBrokerDetail extends LitElement {
     }
 
     void this.loadData();
+    void this.loadAdminStatusForUser();
 
     if (this.brokerId) {
       stateManager.setScope({ type: 'broker-detail', brokerId: this.brokerId });
@@ -646,8 +654,29 @@ export class ScionPageBrokerDetail extends LitElement {
     return (dateString && formatInstantWithZone(dateString)) || '—';
   }
 
+  override updated(changedProperties: Map<string, unknown>): void {
+    if (changedProperties.has('pageData')) {
+      void this.loadAdminStatusForUser();
+    }
+  }
+
+  private async loadAdminStatusForUser(): Promise<void> {
+    const userId = this.pageData?.user?.id ?? null;
+    if (!userId) {
+      this.adminStatusUserId = null;
+      this.adminStatus = null;
+      return;
+    }
+    if (userId === this.adminStatusUserId) return;
+    this.adminStatusUserId = userId;
+    const status = await loadAdminStatus(userId);
+    if (this.adminStatusUserId === userId) {
+      this.adminStatus = status;
+    }
+  }
+
   private get isAdmin(): boolean {
-    return this.pageData?.user?.role === 'admin';
+    return this.adminStatus?.isAdmin === true;
   }
 
   @state()

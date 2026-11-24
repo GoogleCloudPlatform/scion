@@ -389,3 +389,42 @@ func otelValue(value attribute.Value) any {
 
 var _ slog.Handler = (*captureSlogHandler)(nil)
 var _ sdklog.Exporter = (*captureOTelExporter)(nil)
+
+func TestCredentialSessionModeRendersInJSONAndSlog(t *testing.T) {
+	t.Parallel()
+
+	ref, err := NewCredentialRef(CredentialRefInput{
+		Kind:        CredentialInteractive,
+		SessionMode: SessionModeViewAsMember,
+	})
+	require.NoError(t, err)
+
+	event := validCreateEvent(t)
+	event.Credential = &ref
+
+	rendered, err := Render(event)
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(rendered, &decoded))
+	assert.Equal(t, float64(SchemaVersion), decoded["schema_version"])
+	credObj, ok := decoded["credential"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, SessionModeViewAsMember, credObj["session_mode"])
+
+	handler := &captureSlogHandler{}
+	sink, err := NewSlogSink(slog.New(handler))
+	require.NoError(t, err)
+	require.NoError(t, sink.Emit(context.Background(), event))
+	records := handler.Records()
+	require.Len(t, records, 1)
+	assert.JSONEq(t, string(rendered), string(recordAttrsJSON(t, records[0])))
+
+	// Empty session_mode is omitted from both JSON and slog output.
+	plainRef, err := NewCredentialRef(CredentialRefInput{Kind: CredentialInteractive})
+	require.NoError(t, err)
+	plainEvent := validCreateEvent(t)
+	plainEvent.Credential = &plainRef
+	plainRendered, err := Render(plainEvent)
+	require.NoError(t, err)
+	assert.NotContains(t, string(plainRendered), "session_mode")
+}

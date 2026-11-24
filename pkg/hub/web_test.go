@@ -1361,7 +1361,13 @@ func TestSessionToBearerMiddleware_RefreshTokenInAccessSlot(t *testing.T) {
 		require.NoError(t, err)
 		ws.SetUserTokenService(tokenSvc)
 
-		_, refreshTok, _, err := tokenSvc.MintTokenPair("user-1", "u@example.com", "User One", "member", 0, ClientTypeWeb)
+		_, refreshTok, _, err := tokenSvc.MintTokenPair(UserTokenSubject{
+			UserID:      "user-1",
+			Email:       "u@example.com",
+			DisplayName: "User One",
+			Role:        "member",
+			ClientType:  ClientTypeWeb,
+		})
 		require.NoError(t, err)
 
 		var capturedAuthHeader string
@@ -1402,7 +1408,13 @@ func TestSessionToBearerMiddleware_RefreshTokenInAccessSlot(t *testing.T) {
 		require.NoError(t, err)
 		ws.SetUserTokenService(tokenSvc)
 
-		_, refreshTok, _, err := tokenSvc.MintTokenPair("user-1", "u@example.com", "User One", "member", 0, ClientTypeWeb)
+		_, refreshTok, _, err := tokenSvc.MintTokenPair(UserTokenSubject{
+			UserID:      "user-1",
+			Email:       "u@example.com",
+			DisplayName: "User One",
+			Role:        "member",
+			ClientType:  ClientTypeWeb,
+		})
 		require.NoError(t, err)
 
 		downstreamCalled := false

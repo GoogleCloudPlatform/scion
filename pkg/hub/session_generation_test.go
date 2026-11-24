@@ -68,7 +68,14 @@ func newSessionGenFixture(t *testing.T) *sessionGenFixture {
 func (f *sessionGenFixture) mintPair(t *testing.T, gen int64, ct ClientType) (access, refresh string) {
 	t.Helper()
 	u := f.user
-	access, refresh, _, err := f.srv.userTokenService.MintTokenPair(u.ID, u.Email, u.DisplayName, u.Role, gen, ct)
+	access, refresh, _, err := f.srv.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            u.ID,
+		Email:             u.Email,
+		DisplayName:       u.DisplayName,
+		Role:              u.Role,
+		SessionGeneration: gen,
+		ClientType:        ct,
+	})
 	require.NoError(t, err)
 	return access, refresh
 }
@@ -195,7 +202,13 @@ func TestSessionGen_BearerArm_RefreshTokenAsBearer_DeniedAfterRevoke(t *testing.
 func TestSessionGen_BearerArm_GEExchangeToken_DeniedAfterRevoke(t *testing.T) {
 	f := newSessionGenFixture(t)
 	u := f.user
-	tok, _, err := f.srv.userTokenService.MintAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, 0, ClientTypeAPI, 10*time.Minute)
+	tok, _, err := f.srv.userTokenService.MintAccessTokenWithTTL(UserTokenSubject{
+		UserID:      u.ID,
+		Email:       u.Email,
+		DisplayName: u.DisplayName,
+		Role:        u.Role,
+		ClientType:  ClientTypeAPI,
+	}, 10*time.Minute)
 	require.NoError(t, err)
 	f.assertDeniedAfterRevoke(t, tok)
 }
@@ -642,7 +655,14 @@ func webSessionAfter(t *testing.T, ws *WebServer, rec *httptest.ResponseRecorder
 func (f *sessionGenFixture) expiredAccessToken(t *testing.T, gen int64) string {
 	t.Helper()
 	u := f.user
-	tok, _, err := f.srv.userTokenService.MintAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, gen, ClientTypeWeb, -time.Hour)
+	tok, _, err := f.srv.userTokenService.MintAccessTokenWithTTL(UserTokenSubject{
+		UserID:            u.ID,
+		Email:             u.Email,
+		DisplayName:       u.DisplayName,
+		Role:              u.Role,
+		SessionGeneration: gen,
+		ClientType:        ClientTypeWeb,
+	}, -time.Hour)
 	require.NoError(t, err)
 	return tok
 }
@@ -823,7 +843,14 @@ func (f *sessionGenFixture) devGeneration(t *testing.T) int64 {
 // generation gen and holding a hub token pair minted at gen.
 func (f *sessionGenFixture) devSessionCookies(t *testing.T, ws *WebServer, gen int64) []*http.Cookie {
 	t.Helper()
-	access, refresh, _, err := f.srv.userTokenService.MintTokenPair(DevUserID, "dev@localhost", "Development User", store.UserRoleAdmin, gen, ClientTypeWeb)
+	access, refresh, _, err := f.srv.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            DevUserID,
+		Email:             "dev@localhost",
+		DisplayName:       "Development User",
+		Role:              store.UserRoleAdmin,
+		SessionGeneration: gen,
+		ClientType:        ClientTypeWeb,
+	})
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()

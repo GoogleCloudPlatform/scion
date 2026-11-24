@@ -22,6 +22,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 import type { Capabilities, PageData, UserRole } from '../../shared/types.js';
+import { clearAdminStatus } from '../../client/admin-status.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 
 /** happy-dom has no EventSource; setScope opens one. */
@@ -49,9 +50,16 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function createFetchHandler(opts: { projectCaps: Capabilities; hubCaps?: Capabilities }) {
+function createFetchHandler(
+  opts: { projectCaps: Capabilities; hubCaps?: Capabilities },
+  role: UserRole
+) {
   return (url: string | URL | Request): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+    if (path.includes('/api/v1/auth/admin-status')) {
+      const isAdmin = role === 'admin';
+      return Promise.resolve(jsonResponse({ isAdmin, isSuperAdmin: isAdmin, permissions: [] }));
+    }
     if (path.includes('/api/v1/projects?limit=1')) {
       return Promise.resolve(
         jsonResponse({ projects: [], ...(opts.hubCaps ? { _capabilities: opts.hubCaps } : {}) })
@@ -78,7 +86,7 @@ async function createComponent(
   opts: { projectCaps: Capabilities; hubCaps?: Capabilities },
   role: UserRole = 'member'
 ): Promise<HTMLElement> {
-  vi.stubGlobal('fetch', vi.fn(createFetchHandler(opts)));
+  vi.stubGlobal('fetch', vi.fn(createFetchHandler(opts, role)));
   const el = document.createElement('scion-page-project-detail') as HTMLElement & {
     updateComplete: Promise<boolean>;
     pageData: PageData | null;
@@ -116,6 +124,7 @@ describe('scion-page-project-detail — Clone / Create Template gating', () => {
 
   beforeEach(() => {
     vi.stubGlobal('EventSource', FakeEventSource);
+    clearAdminStatus();
     resetHubProjectCapabilitiesCache();
   });
 

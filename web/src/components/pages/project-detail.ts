@@ -47,6 +47,8 @@ import {
 } from '../../shared/types.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import type { AdminStatus } from '../../lib/admin-permissions.js';
 import { current, projectsRoot } from '../../client/crumbs.js';
 import { projectDisplayName } from '../../client/project-label.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
@@ -1258,6 +1260,11 @@ export class ScionPageProjectDetail extends LitElement {
     }
   `;
 
+  @state()
+  private adminStatus: AdminStatus | null = null;
+
+  private adminStatusUserId: string | null = null;
+
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
 
   override connectedCallback(): void {
@@ -1346,6 +1353,7 @@ export class ScionPageProjectDetail extends LitElement {
 
     void this.loadData();
     void this.loadHubProjectCapabilities();
+    void this.loadAdminStatusForUser();
 
     // Listen for real-time updates
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
@@ -1399,8 +1407,26 @@ export class ScionPageProjectDetail extends LitElement {
 
   override updated(changed: Map<string, unknown>): void {
     super.updated(changed);
+    if (changed.has('pageData')) {
+      void this.loadAdminStatusForUser();
+    }
     this.observeFilesSection();
     this.noteRowsReady();
+  }
+
+  private async loadAdminStatusForUser(): Promise<void> {
+    const userId = this.pageData?.user?.id ?? null;
+    if (!userId) {
+      this.adminStatusUserId = null;
+      this.adminStatus = null;
+      return;
+    }
+    if (userId === this.adminStatusUserId) return;
+    this.adminStatusUserId = userId;
+    const status = await loadAdminStatus(userId);
+    if (this.adminStatusUserId === userId) {
+      this.adminStatus = status;
+    }
   }
 
   /**
@@ -2882,7 +2908,7 @@ export class ScionPageProjectDetail extends LitElement {
               `
             : nothing}
           ${can(this.project?._capabilities, 'read') && can(this.hubProjectCapabilities, 'create')
-            ? this.pageData?.user?.role === 'admin'
+            ? this.adminStatus?.isAdmin === true
               ? html`
                   <sl-dropdown>
                     <sl-button slot="trigger" size="small" caret>

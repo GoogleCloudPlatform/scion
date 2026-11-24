@@ -195,6 +195,12 @@ const ExecSchedules = "hub.exec_schedules"
 // config name and shell-agent security protections apply unconditionally.
 const ExecContainers = "hub.exec_containers"
 
+// ViewAsMember gates the "View as member" session toggle for hub admins
+// (ptone/scion#8648). The hub checks it when a session enters the mode;
+// existing sessions in the mode remain honoured and exit stays available
+// even while it is off.
+const ViewAsMember = "hub.view_as_member"
+
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
 // /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
 // every artifact surface.
@@ -1277,6 +1283,17 @@ var compiled = []Experiment{
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#8136",
 		Owner:       "hub",
+		ReviewBy:    "2027-05-31",
+	},
+	{
+		Name:        ViewAsMember,
+		Title:       "View as member",
+		Description: "Hub admins can switch their browser session to view the hub as a member: hub-level admin grants are dropped for that session (API and UI), project memberships are kept. Exiting is always possible.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8648",
+		Owner:       "@ptone",
 		ReviewBy:    "2027-05-31",
 	},
 }

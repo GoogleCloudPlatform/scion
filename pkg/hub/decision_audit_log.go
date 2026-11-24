@@ -293,6 +293,7 @@ func mapDecisionEnvelope(ctx context.Context, rec *store.DecisionAuditRecord) (a
 			ID:                rec.CredentialID,
 			BoundaryKind:      auditevent.CredentialBoundaryKind(rec.CredentialBoundaryKind),
 			BoundaryProjectID: rec.CredentialBoundaryProjectID,
+			SessionMode:       rec.SessionMode,
 		})
 		if err != nil {
 			return zero, decisionAuditExcludedCredential

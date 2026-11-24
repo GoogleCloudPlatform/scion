@@ -108,8 +108,14 @@ func TestPortViewSessionGen_RevokedTokenRefused(t *testing.T) {
 	owner, err := f.store.GetUser(ctx, f.launched.OwnerID)
 	require.NoError(t, err)
 	mint := func(gen int64) string {
-		tok, _, _, err := f.srv.userTokenService.MintTokenPair(
-			owner.ID, owner.Email, owner.DisplayName, owner.Role, gen, ClientTypeWeb)
+		tok, _, _, err := f.srv.userTokenService.MintTokenPair(UserTokenSubject{
+			UserID:            owner.ID,
+			Email:             owner.Email,
+			DisplayName:       owner.DisplayName,
+			Role:              owner.Role,
+			SessionGeneration: gen,
+			ClientType:        ClientTypeWeb,
+		})
 		require.NoError(t, err)
 		return tok
 	}

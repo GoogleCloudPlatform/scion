@@ -33,6 +33,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Agent, DeletionInfo } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
+import { clearAdminStatus } from '../../client/admin-status.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import { AgentDrainRunner } from '../../client/agent-drain.js';
 import {
@@ -328,6 +329,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     // A real scope change clears the store and its completeness flag.
     stateManager.setScope({ type: 'brokers-list' });
+    clearAdminStatus();
     resetHubProjectCapabilitiesCache();
     localStorage.clear();
     setScopeSpy = vi.spyOn(stateManager, 'setScope');

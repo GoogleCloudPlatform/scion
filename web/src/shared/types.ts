@@ -55,6 +55,8 @@ export interface User {
   preferences?: UserPreferences | undefined;
   /** Set only for a test identity web session (GET /auth/me). */
   testIdentity?: TestIdentitySessionInfo | undefined;
+  /** True while a hub admin's browser session is in "View as member" mode (ptone/scion#8648). */
+  viewAsMember?: boolean | undefined;
 }
 
 /** The testIdentity member of GET /auth/me for a test identity web session. */
@@ -78,6 +80,7 @@ export interface AuthMeResponse {
   role?: UserRole;
   preferences?: UserPreferences;
   testIdentity?: TestIdentitySessionInfo;
+  viewAsMember?: boolean;
 }
 
 /**

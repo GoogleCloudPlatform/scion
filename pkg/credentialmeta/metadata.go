@@ -93,6 +93,11 @@ func invalid(field, rule string) error {
 	return &ValidationError{Field: field, Rule: rule}
 }
 
+// SessionModeViewAsMember is the canonical session_mode value recorded when a
+// hub admin operates their web session in "View as member" mode
+// (ptone/scion#8648).
+const SessionModeViewAsMember = "view_as_member"
+
 // RefInput is accepted only by NewRef, which returns an immutable validated
 // credential reference suitable for serialization at an audit boundary.
 type RefInput struct {
@@ -102,6 +107,7 @@ type RefInput struct {
 	BoundaryKind      BoundaryKind
 	BoundaryProjectID string
 	Labels            map[string]string
+	SessionMode       string
 }
 
 // Ref is validated descriptive credential metadata. Its fields are private so
@@ -113,6 +119,7 @@ type Ref struct {
 	boundaryKind      BoundaryKind
 	boundaryProjectID string
 	labels            map[string]string
+	sessionMode       string
 }
 
 // NewRef validates and defensively copies descriptive credential metadata.
@@ -124,6 +131,7 @@ func NewRef(input RefInput) (Ref, error) {
 		boundaryKind:      input.BoundaryKind,
 		boundaryProjectID: input.BoundaryProjectID,
 		labels:            cloneLabels(input.Labels),
+		sessionMode:       input.SessionMode,
 	}
 	if err := ref.Validate(); err != nil {
 		return Ref{}, err
@@ -161,6 +169,11 @@ func (r Ref) Validate() error {
 	if err := validateString("boundary_project_id", r.boundaryProjectID, MaxIDBytes, false); err != nil {
 		return err
 	}
+	switch r.sessionMode {
+	case "", SessionModeViewAsMember:
+	default:
+		return invalid("session_mode", "must be a canonical session mode")
+	}
 	return validateLabels(r.labels)
 }
 
@@ -170,6 +183,7 @@ func (r Ref) Name() string               { return r.name }
 func (r Ref) BoundaryKind() BoundaryKind { return r.boundaryKind }
 func (r Ref) BoundaryProjectID() string  { return r.boundaryProjectID }
 func (r Ref) Labels() map[string]string  { return cloneLabels(r.labels) }
+func (r Ref) SessionMode() string        { return r.sessionMode }
 func (r Ref) IsZero() bool               { return r.kind == "" }
 
 // ValidateIssuance preserves the existing UAT issuance behavior for optional

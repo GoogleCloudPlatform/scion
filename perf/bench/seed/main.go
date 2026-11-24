@@ -387,11 +387,23 @@ func run(dbPath string, agentCount int, secret, projectSlug, projectName string,
 	}
 	// Session generation 0: these tokens work only for users whose sessions
 	// were never revoked (the hub refuses any other generation).
-	ownerToken, _, err := tokenSvc.MintAccessToken(owner.ID, owner.Email, owner.DisplayName, owner.Role, 0, hub.ClientTypeCLI)
+	ownerToken, _, err := tokenSvc.MintAccessToken(hub.UserTokenSubject{
+		UserID:      owner.ID,
+		Email:       owner.Email,
+		DisplayName: owner.DisplayName,
+		Role:        owner.Role,
+		ClientType:  hub.ClientTypeCLI,
+	})
 	if err != nil {
 		return fmt.Errorf("mint owner token: %w", err)
 	}
-	memberToken, _, err := tokenSvc.MintAccessToken(member.ID, member.Email, member.DisplayName, member.Role, 0, hub.ClientTypeCLI)
+	memberToken, _, err := tokenSvc.MintAccessToken(hub.UserTokenSubject{
+		UserID:      member.ID,
+		Email:       member.Email,
+		DisplayName: member.DisplayName,
+		Role:        member.Role,
+		ClientType:  hub.ClientTypeCLI,
+	})
 	if err != nil {
 		return fmt.Errorf("mint member token: %w", err)
 	}

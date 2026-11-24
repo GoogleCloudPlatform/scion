@@ -102,10 +102,12 @@ func contextWithAuthType(ctx context.Context, authType string) context.Context {
 // credential established on ctx. See contextWithAuthType.
 func requestAuthAttrs(ctx context.Context) []slog.Attr {
 	var attrs []slog.Attr
+	var principalID string
 	// isNilIdentity, not a plain interface comparison: a typed-nil identity
 	// (see isNilIdentity) must not reach identity.ID() below.
 	if identity := GetIdentityFromContext(ctx); !isNilIdentity(identity) {
-		attrs = append(attrs, slog.String(logging.AttrUserID, identity.ID()))
+		principalID = identity.ID()
+		attrs = append(attrs, slog.String(logging.AttrUserID, principalID))
 		if pc := principalContextForIdentity(identity); pc.Kind != "" {
 			attrs = append(attrs, slog.String("principal_kind", string(pc.Kind)))
 		}
@@ -115,6 +117,9 @@ func requestAuthAttrs(ctx context.Context) []slog.Attr {
 	// auth_type and user_id, per plan §3.1(2) ("emit them only when set").
 	if cc := GetCredentialContextFromContext(ctx); cc.Decoration != nil {
 		attrs = append(attrs, slog.Any("credential", *cc.Decoration))
+	}
+	if mode := viewAsMemberSessionModeFor(ctx, principalID); mode != "" {
+		attrs = append(attrs, slog.String("session_mode", mode))
 	}
 	return attrs
 }

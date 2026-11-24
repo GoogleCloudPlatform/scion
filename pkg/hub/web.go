@@ -109,6 +109,7 @@ const (
 	sessKeyHubRefreshToken   = "hubRefreshToken"
 	sessKeyHubTokenExpiry    = "hubTokenExpiry"
 	sessKeySessionGeneration = "sessGen"
+	sessKeyViewAsMember      = "vam"
 )
 
 // webUserContextKey is the key for storing the web session user in the request context.
@@ -122,11 +123,12 @@ type dbUserContextKey struct{}
 
 // webSessionUser represents an authenticated user from the web session.
 type webSessionUser struct {
-	UserID    string `json:"id"`
-	Email     string `json:"email"`
-	Name      string `json:"displayName"`
-	AvatarURL string `json:"avatarUrl,omitempty"`
-	Role      string `json:"role,omitempty"`
+	UserID       string `json:"id"`
+	Email        string `json:"email"`
+	Name         string `json:"displayName"`
+	AvatarURL    string `json:"avatarUrl,omitempty"`
+	Role         string `json:"role,omitempty"`
+	ViewAsMember bool   `json:"viewAsMember,omitempty"`
 
 	// Preferences is populated only by handleAuthMe, from a live store read,
 	// never cached on the session. It is nil wherever webSessionUser is
@@ -136,6 +138,23 @@ type webSessionUser struct {
 	// TestIdentity is set only by handleAuthMe, for a valid test identity
 	// web session (ptone/scion#4240, WS1).
 	TestIdentity *webTestIdentityInfo `json:"testIdentity,omitempty"`
+
+	// storedRole holds the session's real (unclamped) role from sessKeyUserRole.
+	// Unexported so it is never serialized to JSON; only RealByDesign gates
+	// (such as adminModeWebMiddleware, ptone/scion#8648 D4) read it via realRole.
+	storedRole string
+}
+
+// realRole returns the user's real (stored) role, falling back to Role when
+// constructed directly in tests without storedRole.
+func (u *webSessionUser) realRole() string {
+	if u == nil {
+		return ""
+	}
+	if u.storedRole != "" {
+		return u.storedRole
+	}
+	return u.Role
 }
 
 // getWebSessionUser retrieves the web session user from the request context.
@@ -325,6 +344,9 @@ type WebServer struct {
 	// testIdentityHub is the hub whose test identity state backs test
 	// identity web sessions (SetTestIdentityWebSessions), or nil.
 	testIdentityHub *Server
+	// viewAsMemberHub is the hub whose policy, audit, and SSE hooks back
+	// POST /auth/view-as-member (SetViewAsMemberHub), or nil.
+	viewAsMemberHub viewAsMemberHub
 	// testIdentityRedeemLimiter rate-limits POST /auth/test-identity/redeem
 	// per source IP, and in proxy mode also per verified proxy assertion
 	// email (a separate key, testIdentityRedeemEmailRateKey).
@@ -1382,6 +1404,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		// tiSessionNotFixture / tiSessionUserMissing: an ordinary account
 		// (a missing one is refused by the hub's row block); continue.
 
+		sessionVam := sessionViewAsMember(session)
 		accessToken, _ := session.Values[sessKeyHubAccessToken].(string)
 		if accessToken == "" {
 			// Session has no Hub token — this happens when the OAuth callback's
@@ -1397,7 +1420,15 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 				// read: a session established before a revocation yields a
 				// token the hub refuses. A cookie without the key reads 0.
 				gen, _ := session.Values[sessKeySessionGeneration].(int64)
-				if tok, _, err := ws.userTokenSvc.MintAccessToken(uid, email, name, role, gen, ClientTypeWeb); err == nil {
+				if tok, _, err := ws.userTokenSvc.MintAccessToken(UserTokenSubject{
+					UserID:            uid,
+					Email:             email,
+					DisplayName:       name,
+					Role:              role,
+					SessionGeneration: gen,
+					ClientType:        ClientTypeWeb,
+					ViewAsMember:      sessionVam,
+				}); err == nil {
 					accessToken = tok
 				} else {
 					ws.logger().Warn("Failed to regenerate Bearer token for cookie-overflow session", "error", err, "user", uid)
@@ -1423,11 +1454,18 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 
 		// Validate the access token. If the signing key was rotated,
 		// the token will fail signature verification and we must
-		// force the user to re-authenticate.
+		// force the user to re-authenticate. If the token's vam claim
+		// disagrees with the session cookie, heal to the cookie by
+		// re-minting from session values (the cookie is the source of truth).
 		tokenValid := false
+		vamMismatch := false
 		if ws.userTokenSvc != nil {
 			if claims, err := ws.userTokenSvc.ValidateUserToken(accessToken); err == nil && isBearerTokenType(claims.TokenType) {
-				tokenValid = true
+				if claims.ViewAsMember != sessionVam {
+					vamMismatch = true
+				} else {
+					tokenValid = true
+				}
 			}
 		} else {
 			// No token service — pass through and let Hub decide.
@@ -1435,6 +1473,36 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		}
 
 		saved := false
+		if vamMismatch && ws.userTokenSvc != nil {
+			if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
+				email, _ := session.Values[sessKeyUserEmail].(string)
+				name, _ := session.Values[sessKeyUserName].(string)
+				role, _ := session.Values[sessKeyUserRole].(string)
+				gen, _ := session.Values[sessKeySessionGeneration].(int64)
+				if newAccess, newRefresh, expiresIn, err := ws.userTokenSvc.MintTokenPair(UserTokenSubject{
+					UserID:            uid,
+					Email:             email,
+					DisplayName:       name,
+					Role:              role,
+					SessionGeneration: gen,
+					ClientType:        ClientTypeWeb,
+					ViewAsMember:      sessionVam,
+				}); err == nil {
+					accessToken = newAccess
+					tokenValid = true
+					session.Values[sessKeyHubAccessToken] = newAccess
+					session.Values[sessKeyHubRefreshToken] = newRefresh
+					session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+					saved = true
+					ws.applyDevSessionCookieOptions(session)
+					if err := session.Save(r, w); err != nil {
+						ws.logger().Warn("Failed to persist healed Hub token to session", "error", err)
+					}
+				} else {
+					ws.logger().Warn("Failed to re-mint Hub token on view-as-member mismatch", "error", err, "user", uid)
+				}
+			}
+		}
 		// If token is invalid (expired or bad signature), try to refresh.
 		if !tokenValid {
 			refreshToken, _ := session.Values[sessKeyHubRefreshToken].(string)
@@ -1576,7 +1644,15 @@ func (ws *WebServer) refreshHubTokens(ctx context.Context, refreshToken string) 
 			return "", "", 0, errHubRefreshRefused
 		}
 	}
-	return ws.userTokenSvc.MintTokenPair(claims.UserID, claims.Email, claims.DisplayName, claims.Role, claims.SessionGeneration, claims.ClientType)
+	return ws.userTokenSvc.MintTokenPair(UserTokenSubject{
+		UserID:            claims.UserID,
+		Email:             claims.Email,
+		DisplayName:       claims.DisplayName,
+		Role:              claims.Role,
+		SessionGeneration: claims.SessionGeneration,
+		ClientType:        claims.ClientType,
+		ViewAsMember:      claims.ViewAsMember && claims.ClientType == ClientTypeWeb,
+	})
 }
 
 // registerRoutes sets up the web server routes.
@@ -1592,6 +1668,7 @@ func (ws *WebServer) registerRoutes() {
 	ws.mux.HandleFunc("/auth/callback/", ws.handleOAuthCallback)
 	ws.mux.HandleFunc("/auth/logout", ws.handleLogout)
 	ws.mux.HandleFunc("/auth/me", ws.handleAuthMe)
+	ws.mux.HandleFunc("/auth/view-as-member", ws.handleViewAsMember)
 	ws.mux.HandleFunc("/auth/providers", ws.handleAuthProviders)
 	ws.mux.HandleFunc("/auth/debug", ws.handleAuthDebug)
 	ws.mux.HandleFunc(devLaunchPath, ws.handleDevLaunch)
@@ -2024,11 +2101,12 @@ func resolveAPIPath(urlPath string) string {
 func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 	// Build user info from session context (set by auth middleware).
 	type pageUser struct {
-		ID        string `json:"id"`
-		Email     string `json:"email"`
-		Name      string `json:"name"`
-		AvatarURL string `json:"avatarUrl,omitempty"`
-		Role      string `json:"role,omitempty"`
+		ID           string `json:"id"`
+		Email        string `json:"email"`
+		Name         string `json:"name"`
+		AvatarURL    string `json:"avatarUrl,omitempty"`
+		Role         string `json:"role,omitempty"`
+		ViewAsMember bool   `json:"viewAsMember,omitempty"`
 		// TestIdentity is set for a test identity web session (WS1), as
 		// in GET /auth/me; the web shell shows the identity chip from it.
 		TestIdentity *webTestIdentityInfo `json:"testIdentity,omitempty"`
@@ -2062,11 +2140,12 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 	// Populate user from session context.
 	if u := getWebSessionUser(r.Context()); u != nil {
 		envelope.User = &pageUser{
-			ID:        u.UserID,
-			Email:     u.Email,
-			Name:      u.Name,
-			AvatarURL: u.AvatarURL,
-			Role:      u.Role,
+			ID:           u.UserID,
+			Email:        u.Email,
+			Name:         u.Name,
+			AvatarURL:    u.AvatarURL,
+			Role:         u.Role,
+			ViewAsMember: u.ViewAsMember,
 		}
 		// The session middleware admitted this request; a test identity
 		// row here means a valid test identity web session.
@@ -2542,6 +2621,21 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		}
 		if !membershipChangedNames(evt, streamUserID) {
 			return false
+		}
+		// A session-mode toggle (view-as-member enter or exit) updates the
+		// session cookie, which this stream's connect-time context cannot
+		// observe. Skip the subject re-check and unconditionally force a
+		// reconnect so the client re-reads the cookie and re-expands wildcards
+		// (ptone/scion#9073).
+		// Client contract (consumed by web SSE client in Phase 4):
+		// `event: reconnect` with JSON payload `{"reason":"session_mode"}` —
+		// do not rename the reason value without coordinating with the frontend.
+		if membershipChangedReason(evt) == membershipChangedReasonSessionMode {
+			n, _ := fmt.Fprintf(w, "event: reconnect\ndata: {\"reason\":%q}\n\n", membershipChangedReasonSessionMode)
+			flusher.Flush()
+			stream.RecordBytes(n)
+			closeReason = eventstreams.CloseAccessChanged
+			return true
 		}
 		// Fail closed: a subject the caller may no longer read, or a
 		// re-check that cannot decide, ends the stream with a reconnect
@@ -3542,14 +3636,7 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 				}
 			}
 
-			user := &webSessionUser{
-				UserID:    uid,
-				Email:     sessionString(session, sessKeyUserEmail),
-				Name:      sessionString(session, sessKeyUserName),
-				AvatarURL: sessionString(session, sessKeyUserAvatar),
-				Role:      sessionString(session, sessKeyUserRole),
-			}
-			ctx := context.WithValue(r.Context(), webUserContextKey{}, user)
+			ctx := ws.webSessionContextFromCookie(r.Context(), session, uid, "")
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -3688,14 +3775,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				if currentRole == expectedRole {
 					// Role unchanged — inject user into context and proceed
 					// without saving session (avoids redundant write).
-					user := &webSessionUser{
-						UserID:    uid,
-						Email:     email,
-						Name:      sessionString(session, sessKeyUserName),
-						AvatarURL: sessionString(session, sessKeyUserAvatar),
-						Role:      currentRole,
-					}
-					ctx := context.WithValue(r.Context(), webUserContextKey{}, user)
+					ctx := ws.webSessionContextFromCookie(r.Context(), session, uid, email)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -3713,9 +3793,15 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					// row read (see the cookie-overflow mint in
 					// sessionToBearerMiddleware).
 					gen, _ := session.Values[sessKeySessionGeneration].(int64)
-					accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
-						uid, email, name, expectedRole, gen, ClientTypeWeb,
-					)
+					accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(UserTokenSubject{
+						UserID:            uid,
+						Email:             email,
+						DisplayName:       name,
+						Role:              expectedRole,
+						SessionGeneration: gen,
+						ClientType:        ClientTypeWeb,
+						ViewAsMember:      sessionViewAsMember(session),
+					})
 					if err == nil {
 						session.Values[sessKeyHubAccessToken] = accessToken
 						session.Values[sessKeyHubRefreshToken] = refreshToken
@@ -3935,9 +4021,14 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
 		if ws.userTokenSvc != nil {
-			accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
-				user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
-			)
+			accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(UserTokenSubject{
+				UserID:            user.ID,
+				Email:             user.Email,
+				DisplayName:       user.DisplayName,
+				Role:              user.Role,
+				SessionGeneration: user.SessionGeneration,
+				ClientType:        ClientTypeWeb,
+			})
 			if err == nil {
 				session.Values[sessKeyHubAccessToken] = accessToken
 				session.Values[sessKeyHubRefreshToken] = refreshToken
@@ -3949,6 +4040,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Populate session
 		ws.dropTestIdentityValues(w, session)
+		delete(session.Values, sessKeyViewAsMember)
 		session.Values[sessKeyUserID] = user.ID
 		session.Values[sessKeyUserEmail] = user.Email
 		session.Values[sessKeyUserName] = user.DisplayName
@@ -4066,14 +4158,7 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, dbUserContextKey{}, dbUser)
 			}
 
-			user := &webSessionUser{
-				UserID:    uid,
-				Email:     sessionString(session, sessKeyUserEmail),
-				Name:      sessionString(session, sessKeyUserName),
-				AvatarURL: sessionString(session, sessKeyUserAvatar),
-				Role:      sessionString(session, sessKeyUserRole),
-			}
-			ctx = context.WithValue(ctx, webUserContextKey{}, user)
+			ctx = ws.webSessionContextFromCookie(ctx, session, uid, "")
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -4447,9 +4532,14 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 	// Generate Hub tokens if token service is available
 	if ws.userTokenSvc != nil {
-		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
-			user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
-		)
+		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(UserTokenSubject{
+			UserID:            user.ID,
+			Email:             user.Email,
+			DisplayName:       user.DisplayName,
+			Role:              user.Role,
+			SessionGeneration: user.SessionGeneration,
+			ClientType:        ClientTypeWeb,
+		})
 		if err != nil {
 			ws.logger().Warn("Failed to generate Hub tokens", "error", err)
 		} else {
@@ -4461,6 +4551,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 	// Store user info in session
 	ws.dropTestIdentityValues(w, session)
+	delete(session.Values, sessKeyViewAsMember)
 	session.Values[sessKeyUserID] = user.ID
 	session.Values[sessKeyUserEmail] = user.Email
 	session.Values[sessKeyUserName] = user.DisplayName
@@ -4498,11 +4589,34 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// In proxy mode, the hub does not own the session.
 	if ws.config.AuthMode == "proxy" {
-		// A test identity web session is still cleared here.
+		// A test identity web session is still cleared here; a view-as-member
+		// flag is also cleared so IAP sign-out ends the mode.
 		if ws.sessionStore == nil {
 			// No session store: nothing to clear.
-		} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.classifyTestIdentitySession(r, session, nil).isTestIdentitySession() {
-			ws.clearTestIdentitySession(w, r, session)
+		} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
+			if ws.classifyTestIdentitySession(r, session, nil).isTestIdentitySession() {
+				ws.clearTestIdentitySession(w, r, session)
+			} else if sessionViewAsMember(session) {
+				uid := sessionString(session, sessKeyUserID)
+				delete(session.Values, sessKeyViewAsMember)
+				delete(session.Values, sessKeyHubAccessToken)
+				delete(session.Values, sessKeyHubRefreshToken)
+				delete(session.Values, sessKeyHubTokenExpiry)
+				if saveErr := session.Save(r, w); saveErr != nil {
+					ws.logger().Error("Failed to clear view-as-member on proxy logout", "error", saveErr)
+				}
+				if ws.viewAsMemberHub != nil && uid != "" {
+					ws.viewAsMemberHub.RecordViewAsMemberTransition(withoutViewAsMember(r.Context()), uid, false, viewAsMemberReasonSignOut)
+					defer func() {
+						if flusher, ok := w.(http.Flusher); ok {
+							flusher.Flush()
+						}
+						ws.viewAsMemberHub.PublishSessionModeChanged(r.Context(), uid)
+					}()
+				}
+			} else if _, present := ws.readTestIdentityMarker(r); present {
+				ws.expireTestIdentityMarker(w)
+			}
 		} else if _, present := ws.readTestIdentityMarker(r); present {
 			ws.expireTestIdentityMarker(w)
 		}
@@ -4525,6 +4639,9 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 		session, _ = ws.sessionStore.New(r, webSessionName)
 	}
 
+	wasVam := sessionViewAsMember(session)
+	vamUID := sessionString(session, sessKeyUserID)
+
 	// Clear all session values
 	for key := range session.Values {
 		delete(session.Values, key)
@@ -4535,6 +4652,15 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, present := ws.readTestIdentityMarker(r); present {
 		ws.expireTestIdentityMarker(w)
+	}
+	if wasVam && ws.viewAsMemberHub != nil && vamUID != "" {
+		ws.viewAsMemberHub.RecordViewAsMemberTransition(withoutViewAsMember(r.Context()), vamUID, false, viewAsMemberReasonSignOut)
+		defer func() {
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			ws.viewAsMemberHub.PublishSessionModeChanged(r.Context(), vamUID)
+		}()
 	}
 
 	if isBrowserRequest(r) {
@@ -4619,13 +4745,7 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := &webSessionUser{
-		UserID:    uid,
-		Email:     sessionString(session, sessKeyUserEmail),
-		Name:      sessionString(session, sessKeyUserName),
-		AvatarURL: sessionString(session, sessKeyUserAvatar),
-		Role:      sessionString(session, sessKeyUserRole),
-	}
+	user := ws.webSessionUserFromCookie(session, uid, "")
 	user.Preferences = loadUserPreferences(r.Context(), ws.store, uid)
 
 	w.Header().Set("Content-Type", "application/json")

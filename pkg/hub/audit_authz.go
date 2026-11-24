@@ -131,6 +131,8 @@ func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decisio
 		record.ExecutorID = ec.ID
 	}
 
+	record.SessionMode = viewAsMemberSessionModeFor(ctx, principalID)
+
 	return record
 }
 

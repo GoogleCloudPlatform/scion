@@ -25,7 +25,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
 import type { Project } from '../../shared/types.js';
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
@@ -1237,6 +1237,10 @@ export class ScionTokenList extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
   readonly _zone = new DisplayZoneController(this);
 
+  /** True when the current browser session is in "View as member" mode. */
+  @property({ type: Boolean })
+  viewAsMember = false;
+
   @state() private loading = true;
   @state() private tokens: AccessToken[] = [];
   @state() private projects: Project[] = [];
@@ -2219,6 +2223,20 @@ export class ScionTokenList extends LitElement {
         @sl-request-close=${this.closeCreateDialog}
       >
         <form class="dialog-form" @submit=${this.handleCreate}>
+          ${this.viewAsMember
+            ? html`
+                <sl-alert
+                  variant="primary"
+                  open
+                  class="view-as-member-token-note"
+                  data-testid="view-as-member-token-note"
+                >
+                  <sl-icon slot="icon" name="info-circle"></sl-icon>
+                  Viewing as member: tokens created in this mode are frozen at member permissions
+                  for their lifetime.
+                </sl-alert>
+              `
+            : nothing}
           <sl-input
             label="Name"
             placeholder="e.g. github-actions, ci-deploy"

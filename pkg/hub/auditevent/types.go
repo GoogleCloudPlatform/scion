@@ -98,6 +98,8 @@ const (
 
 	CredentialBoundaryProject = credentialmeta.BoundaryProject
 	CredentialBoundaryHub     = credentialmeta.BoundaryHub
+
+	SessionModeViewAsMember = credentialmeta.SessionModeViewAsMember
 )
 
 func NewCredentialRef(input CredentialRefInput) (CredentialRef, error) {

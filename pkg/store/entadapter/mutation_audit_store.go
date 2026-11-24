@@ -70,6 +70,7 @@ func entMutationAuditToStore(ma *ent.MutationAudit) *store.MutationAuditRecord {
 		AgentDelegationCode:       ma.AgentDelegationCode,
 
 		ProvenanceBasis: ma.ProvenanceBasis,
+		SessionMode:     ma.SessionMode,
 	}
 }
 
@@ -158,6 +159,9 @@ func (s *MutationAuditStore) CreateMutationAudit(ctx context.Context, record *st
 	if record.ProvenanceBasis != "" {
 		builder.SetProvenanceBasis(record.ProvenanceBasis)
 	}
+	if record.SessionMode != "" {
+		builder.SetSessionMode(record.SessionMode)
+	}
 
 	created, err := builder.Save(ctx)
 	if err != nil {
@@ -197,6 +201,9 @@ func (s *MutationAuditStore) ListMutationAudits(ctx context.Context, filter stor
 	}
 	if filter.ExecutorID != "" {
 		query = query.Where(mutationaudit.ExecutorIDEQ(filter.ExecutorID))
+	}
+	if filter.SessionMode != "" {
+		query = query.Where(mutationaudit.SessionModeEQ(filter.SessionMode))
 	}
 	if !filter.Since.IsZero() {
 		query = query.Where(mutationaudit.TimestampGTE(filter.Since))

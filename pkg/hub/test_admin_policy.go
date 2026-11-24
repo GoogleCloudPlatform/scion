@@ -394,6 +394,41 @@ var testAdminLegacyRoutePolicy = map[string]testAdminPolicy{
 	"users.sessions.revoke": testAdminPolicyAllow,
 }
 
+// viewAsMemberGateKind classifies how an admin gate, DB-row role read, or
+// identity-rebuild site behaves when the caller's web session is in
+// "View as member" mode (ptone/scion#8648, design §4.2.4).
+// The zero value is intentionally invalid so omitting ViewAsMember fails the
+// census test. Additional census-only kinds (denied_first, not_a_request_gate)
+// and the census validator live in test_admin_policy_census_test.go.
+type viewAsMemberGateKind string
+
+const (
+	// viewAsMemberEffective means the site honours view-as-member by
+	// construction (effective Role(), clamped AuthzService store, or
+	// applyViewAsMemberFromContext / viewAsMemberUserFromContext).
+	viewAsMemberEffective viewAsMemberGateKind = "effective"
+	// viewAsMemberRealByDesign means the site intentionally evaluates real
+	// (unclamped) admin status (e.g., maintenance admission per D4,
+	// AuthorizeViewAsMemberChange, or non-caller principal checks). Requires
+	// Reason.
+	viewAsMemberRealByDesign viewAsMemberGateKind = "real_by_design"
+)
+
+// viewAsMemberGate records the view-as-member classification of a single site.
+type viewAsMemberGate struct {
+	Kind   viewAsMemberGateKind
+	Reason string
+	By     string
+}
+
+func vamEffective() viewAsMemberGate {
+	return viewAsMemberGate{Kind: viewAsMemberEffective}
+}
+
+func vamRealByDesign(reason string) viewAsMemberGate {
+	return viewAsMemberGate{Kind: viewAsMemberRealByDesign, Reason: reason}
+}
+
 // testAdminRoleGate is the classification of one role-claim admin gate: a
 // function that admits an unscoped local platform admin (or a stored or
 // claimed admin role) outside the legacy admin routes.
@@ -401,8 +436,9 @@ type testAdminRoleGate struct {
 	Policy testAdminPolicy
 	// EnforcedIn names the function that calls testAdminPolicyRefuses for
 	// this gate (deny entries only; empty means the gate's own function).
-	EnforcedIn string
-	Reason     string
+	EnforcedIn   string
+	Reason       string
+	ViewAsMember viewAsMemberGate
 }
 
 // testAdminRoleGatePolicy classifies every role-claim admin gate, keyed
@@ -410,51 +446,52 @@ type testAdminRoleGate struct {
 // them: the callers of IsUnscopedLocalPlatformAdmin, IsSystemAdmin and
 // IsHubAdmin, and the role gates of testAdminRoleAdminCensus).
 var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
-	"authorize.go:requireAdminAt":                                 {Policy: testAdminPolicyAllow, Reason: "legacy admin routes: classified per route in testAdminLegacyRoutePolicy and enforced in requireAdminAt"},
-	"admin_delegation_adoption.go:isDelegationAdoptionAdmin":      {Policy: testAdminPolicyDeny, Reason: "agent authority migration"},
-	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin": {Policy: testAdminPolicyDeny, Reason: "agent authority migration"},
-	"admin_mode.go:adminModeMiddleware":                           {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (the mode itself is hub.admin_mode.update, deny)"},
-	"admin_mode.go:adminModeWebMiddleware":                        {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (web)"},
-	"agent_pending_config_authz.go:deferDuringMaintenance":        {Policy: testAdminPolicyAllow, Reason: "a held edit's fold mirrors adminModeMiddleware: an admin saver's keys are not deferred while admin mode is on"},
-	"gcp_iam_settings.go:gcpIAMHubAdmin":                          {Policy: testAdminPolicyDeny, EnforcedIn: "requireGCPIAMHubAdmin", Reason: "GCP permission check settings are runtime configuration"},
-	"handlers_env_secrets.go:authorizeHubEnvVarList":              {Policy: testAdminPolicyDeny, Reason: "hub environment variables (hub.env_vars.read)"},
-	"handlers_env_secrets.go:resolveEnvSecretAccess":              {Policy: testAdminPolicyDeny, Reason: "hub-scope environment variables and secrets"},
-	"handlers_env_secrets.go:authorizeBrokerMaterial":             {Policy: testAdminPolicyDeny, Reason: "runtime broker environment variables and secrets, matching the material root scopes"},
-	"handlers_runtime_brokers.go:updateRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker update, except a broker the test identity registered (the co-located broker)"},
-	"handlers_runtime_brokers.go:deleteRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker deregistration, except a broker the test identity registered (the co-located broker)"},
-	"web.go:authorizeSSESubjects":                                 {Policy: testAdminPolicyAllow, Reason: "event subscriptions (read)"},
-	"passthrough_gate.go:evaluatePassthroughIdentity":             {Policy: testAdminPolicyDeny, Reason: "exposes the co-located broker's host GCP identity to agents"},
-	"handlers_auth.go:handleAuthAdminStatus":                      {Policy: testAdminPolicyAllow, Reason: "display of the caller's own admin status"},
-	"perftrace_middleware.go:perfHeadersAllowed":                  {Policy: testAdminPolicyAllow, Reason: "request timing headers"},
-	"project_messaging_policy.go:messagingPolicyOwnerRule":        {Policy: testAdminPolicyAllow, Reason: "project messaging policy (project.set_messaging_policy is allow)"},
-	"handlers_message_policies.go:messagePolicyOwnerOrAdminRule":  {Policy: testAdminPolicyAllow, Reason: "project message policies (project.manage_message_policies is allow)"},
-	"authorize_message.go:authorizeAgentMessage":                  {Policy: testAdminPolicyAllow, Reason: "messaging agents"},
-	"handlers_agent_message_mode.go:handleSetMessageMode":         {Policy: testAdminPolicyAllow, Reason: "agent message mode"},
-	"deletion_redact.go:callerSeesDeletionDetail":                 {Policy: testAdminPolicyAllow, Reason: "deletion detail display"},
-	"authz_candelegate.go:CanDelegate":                            {Policy: testAdminPolicyAllow, Reason: "the role-claim shortcut runs after refuseTestAdminDeniedGrant, which refuses any grant by an admin kind holding a deny-classified permission (census-pinned), and refuseTestAdminUnshapedGrant; what remains is forced to expire with the identity by the store's grant shaping (A3)"},
+	"authorize.go:requireAdminAt":                                 {Policy: testAdminPolicyAllow, Reason: "legacy admin routes: classified per route in testAdminLegacyRoutePolicy and enforced in requireAdminAt", ViewAsMember: vamEffective()},
+	"admin_delegation_adoption.go:isDelegationAdoptionAdmin":      {Policy: testAdminPolicyDeny, Reason: "agent authority migration", ViewAsMember: vamEffective()},
+	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin": {Policy: testAdminPolicyDeny, Reason: "agent authority migration", ViewAsMember: vamEffective()},
+	"admin_mode.go:adminModeMiddleware":                           {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (the mode itself is hub.admin_mode.update, deny)", ViewAsMember: vamRealByDesign("maintenance admission uses real stored admin status (D4) so an admin in view-as-member stays admitted and can exit")},
+	"admin_mode.go:adminModeWebMiddleware":                        {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (web)", ViewAsMember: vamRealByDesign("maintenance admission uses real stored admin status (D4) so an admin in view-as-member stays admitted and can exit")},
+	"agent_pending_config_authz.go:deferDuringMaintenance":        {Policy: testAdminPolicyAllow, Reason: "a held edit's fold mirrors adminModeMiddleware: an admin saver's keys are not deferred while admin mode is on", ViewAsMember: vamRealByDesign("maintenance deferral mirrors adminModeMiddleware using real stored admin status (D4)")},
+	"gcp_iam_settings.go:gcpIAMHubAdmin":                          {Policy: testAdminPolicyDeny, EnforcedIn: "requireGCPIAMHubAdmin", Reason: "GCP permission check settings are runtime configuration", ViewAsMember: vamEffective()},
+	"handlers_env_secrets.go:authorizeHubEnvVarList":              {Policy: testAdminPolicyDeny, Reason: "hub environment variables (hub.env_vars.read)", ViewAsMember: vamEffective()},
+	"handlers_env_secrets.go:resolveEnvSecretAccess":              {Policy: testAdminPolicyDeny, Reason: "hub-scope environment variables and secrets", ViewAsMember: vamEffective()},
+	"handlers_env_secrets.go:authorizeBrokerMaterial":             {Policy: testAdminPolicyDeny, Reason: "runtime broker environment variables and secrets, matching the material root scopes", ViewAsMember: vamEffective()},
+	"handlers_runtime_brokers.go:updateRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker update, except a broker the test identity registered (the co-located broker)", ViewAsMember: vamEffective()},
+	"handlers_runtime_brokers.go:deleteRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker deregistration, except a broker the test identity registered (the co-located broker)", ViewAsMember: vamEffective()},
+	"web.go:authorizeSSESubjects":                                 {Policy: testAdminPolicyAllow, Reason: "event subscriptions (read)", ViewAsMember: vamEffective()},
+	"passthrough_gate.go:evaluatePassthroughIdentity":             {Policy: testAdminPolicyDeny, Reason: "exposes the co-located broker's host GCP identity to agents", ViewAsMember: vamEffective()},
+	"handlers_auth.go:handleAuthAdminStatus":                      {Policy: testAdminPolicyAllow, Reason: "display of the caller's own admin status", ViewAsMember: vamEffective()},
+	"perftrace_middleware.go:perfHeadersAllowed":                  {Policy: testAdminPolicyAllow, Reason: "request timing headers", ViewAsMember: vamEffective()},
+	"project_messaging_policy.go:messagingPolicyOwnerRule":        {Policy: testAdminPolicyAllow, Reason: "project messaging policy (project.set_messaging_policy is allow)", ViewAsMember: vamEffective()},
+	"handlers_message_policies.go:messagePolicyOwnerOrAdminRule":  {Policy: testAdminPolicyAllow, Reason: "project message policies (project.manage_message_policies is allow)", ViewAsMember: vamEffective()},
+	"authorize_message.go:authorizeAgentMessage":                  {Policy: testAdminPolicyAllow, Reason: "messaging agents", ViewAsMember: vamEffective()},
+	"handlers_agent_message_mode.go:handleSetMessageMode":         {Policy: testAdminPolicyAllow, Reason: "agent message mode", ViewAsMember: vamEffective()},
+	"deletion_redact.go:callerSeesDeletionDetail":                 {Policy: testAdminPolicyAllow, Reason: "deletion detail display", ViewAsMember: vamEffective()},
+	"authz_candelegate.go:CanDelegate":                            {Policy: testAdminPolicyAllow, Reason: "the role-claim shortcut runs after refuseTestAdminDeniedGrant, which refuses any grant by an admin kind holding a deny-classified permission (census-pinned), and refuseTestAdminUnshapedGrant; what remains is forced to expire with the identity by the store's grant shaping (A3)", ViewAsMember: vamEffective()},
 	// System-admin binding checks outside decide (IsSystemAdmin, IsHubAdmin).
-	"handlers_agent_create_helpers.go:brokerProviderHasOwnerConsent": {Policy: testAdminPolicyAllow, Reason: "reads whether the broker provider's linker (not the caller) is a system admin"},
-	"handlers_brokers.go:brokerRemintTargetAuthorized":               {Policy: testAdminPolicyDeny, Reason: "runtime broker credential remint (key material)"},
-	"handlers_brokers.go:authorizedForBrokerRotate":                  {Policy: testAdminPolicyDeny, Reason: "runtime broker secret rotation (key material)"},
-	"broker_policy.go:authorizeBrokerManage":                         {Policy: testAdminPolicyDeny, Reason: "approving or revoking admin-managed runtime broker status (ptone/scion#7829)"},
-	"authz_delegation_ceiling.go:evaluateUserDelegatorAuthority":     {Policy: testAdminPolicyAllow, Reason: "delegation ceiling of a system-admin delegator; an agent rooted at a test admin is issued no scope covering a deny-classified permission (clampTestAdminRootedScopes, A3)"},
-	"project_deletion_service.go:Delete":                             {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
-	"project_deletion_service.go:checkDeletionGovernance":            {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
+	"handlers_agent_create_helpers.go:brokerProviderHasOwnerConsent": {Policy: testAdminPolicyAllow, Reason: "reads whether the broker provider's linker (not the caller) is a system admin", ViewAsMember: vamRealByDesign("checks the broker provider linker's admin status, not the caller's; clamp is keyed on caller user ID")},
+	"handlers_brokers.go:brokerRemintTargetAuthorized":               {Policy: testAdminPolicyDeny, Reason: "runtime broker credential remint (key material)", ViewAsMember: vamEffective()},
+	"handlers_brokers.go:authorizedForBrokerRotate":                  {Policy: testAdminPolicyDeny, Reason: "runtime broker secret rotation (key material)", ViewAsMember: vamEffective()},
+	"broker_policy.go:authorizeBrokerManage":                         {Policy: testAdminPolicyDeny, Reason: "approving or revoking admin-managed runtime broker status (ptone/scion#7829)", ViewAsMember: vamEffective()},
+	"authz_delegation_ceiling.go:evaluateUserDelegatorAuthority":     {Policy: testAdminPolicyAllow, Reason: "delegation ceiling of a system-admin delegator; an agent rooted at a test admin is issued no scope covering a deny-classified permission (clampTestAdminRootedScopes, A3)", ViewAsMember: vamEffective()},
+	"project_deletion_service.go:Delete":                             {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance", ViewAsMember: vamEffective()},
+	"project_deletion_service.go:checkDeletionGovernance":            {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance", ViewAsMember: vamEffective()},
 	// Test identity issuance and management: deny states the intent; each
 	// also refuses every test identity kind by kind or by the route
 	// permission.
-	"handlers_test_admin_identities.go:canIssueTestAdmin":                  {Policy: testAdminPolicyDeny, Reason: "test identities never issue (design 3.6.1: test_identity.issue* are deny); also refused by kind in testAdminIssuer"},
-	"handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities": {Policy: testAdminPolicyDeny, Reason: "revoke-all is for human super-admins only (design 3.3); also refused by kind first"},
-	"handlers_test_identities.go:testIdentityCallerSeesAll":                {Policy: testAdminPolicyDeny, Reason: "issuance and list visibility of every test identity (test_identity.issue routes are deny)"},
-	"handlers_test_admin_identities.go:recheckTestAdminDelegationGrantor":  {Policy: testAdminPolicyAllow, Reason: "reads the super-admin binding of a workload delegation's grantor (not of the caller, a workload) inside the issuance transaction, after requiring the grantor's stored kind to be human; test kinds never hold a delegation (delegation create refuses them)"},
-	"test_admin_purge.go:canPurgeTestAdminIdentity":                        {Policy: testAdminPolicyDeny, Reason: "purging an admin-kind identity is for its issuer or a human super-admin (A3); test identities are also refused as purge callers by testIdentityCaller"},
-	"test_admin_residue.go:handleTestAdminResidue":                         {Policy: testAdminPolicyDeny, Reason: "the residue report is for human super-admins only (A3); also refused by kind first"},
+	"handlers_test_admin_identities.go:canIssueTestAdmin":                  {Policy: testAdminPolicyDeny, Reason: "test identities never issue (design 3.6.1: test_identity.issue* are deny); also refused by kind in testAdminIssuer", ViewAsMember: vamEffective()},
+	"handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities": {Policy: testAdminPolicyDeny, Reason: "revoke-all is for human super-admins only (design 3.3); also refused by kind first", ViewAsMember: vamEffective()},
+	"handlers_test_identities.go:testIdentityCallerSeesAll":                {Policy: testAdminPolicyDeny, Reason: "issuance and list visibility of every test identity (test_identity.issue routes are deny)", ViewAsMember: vamEffective()},
+	"handlers_test_admin_identities.go:recheckTestAdminDelegationGrantor":  {Policy: testAdminPolicyAllow, Reason: "reads the super-admin binding of a workload delegation's grantor (not of the caller, a workload) inside the issuance transaction, after requiring the grantor's stored kind to be human; test kinds never hold a delegation (delegation create refuses them)", ViewAsMember: vamRealByDesign("checks a workload delegation grantor's super-admin binding, not a web session caller")},
+	"test_admin_purge.go:canPurgeTestAdminIdentity":                        {Policy: testAdminPolicyDeny, Reason: "purging an admin-kind identity is for its issuer or a human super-admin (A3); test identities are also refused as purge callers by testIdentityCaller", ViewAsMember: vamEffective()},
+	"test_admin_residue.go:handleTestAdminResidue":                         {Policy: testAdminPolicyDeny, Reason: "the residue report is for human super-admins only (A3); also refused by kind first", ViewAsMember: vamEffective()},
+	"view_as_member.go:AuthorizeViewAsMemberChange":                        {Policy: testAdminPolicyDeny, Reason: "view-as-member toggle is for human hub admins only; test identities are refused by kind first", ViewAsMember: vamRealByDesign("evaluates real (unclamped) admin eligibility to enter view-as-member")},
 	// The role-claim fast path itself, moved to pkg/hub/internal/principal
 	// (GoogleCloudPlatform/scion#3316) and scanned there since
 	// GoogleCloudPlatform/scion#3472. testAdminRoleAdminCensus labels it a
 	// role gate, so the census requires an entry here. It is not a gate of
 	// its own: every caller above is classified separately.
-	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": {Policy: testAdminPolicyAllow, Reason: "definition of the role-claim admin fast path, not a gate; a test_super_admin does pass it, so each caller is its own classified gate in this table (an unclassified caller fails the census)"},
+	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": {Policy: testAdminPolicyAllow, Reason: "definition of the role-claim admin fast path, not a gate; a test_super_admin does pass it, so each caller is its own classified gate in this table (an unclassified caller fails the census)", ViewAsMember: vamEffective()},
 }
 
 // testAdminSettingsSectionPolicy classifies every operational settings
@@ -709,6 +746,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.TemplateConfigValidation:     testAdminPolicyDeny,
 	experiments.AgentSecrets:                 testAdminPolicyDeny,
 	experiments.CodeSpanMentions:             testAdminPolicyDeny,
+	experiments.ViewAsMember:                 testAdminPolicyDeny,
 	experiments.ExecContainers:               testAdminPolicyDeny,
 	experiments.SuspendScreen:                testAdminPolicyDeny,
 }

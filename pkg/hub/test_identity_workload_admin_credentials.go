@@ -261,7 +261,14 @@ func (s *Server) handleIssueTestAdminTokenThroughDelegation(w http.ResponseWrite
 			return err
 		}
 		var err error
-		token, expiresIn, err = s.userTokenService.MintAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, u.SessionGeneration, ClientTypeAPI, tokenTTL)
+		token, expiresIn, err = s.userTokenService.MintAccessTokenWithTTL(UserTokenSubject{
+			UserID:            u.ID,
+			Email:             u.Email,
+			DisplayName:       u.DisplayName,
+			Role:              u.Role,
+			SessionGeneration: u.SessionGeneration,
+			ClientType:        ClientTypeAPI,
+		}, tokenTTL)
 		if err != nil {
 			return fmt.Errorf("issue token: %w", err)
 		}

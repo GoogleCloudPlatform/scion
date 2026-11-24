@@ -30,6 +30,7 @@ import '../shared/status-badge.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
 import { apiFetch } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
 import { AgentMemberIndex } from '../../client/agent-member-index.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import { dropTombstoned, dropTombstonedPairs } from '../../client/agent-merge.js';
@@ -344,15 +345,16 @@ export class ScionPageHome extends LitElement {
 
   private async loadData(): Promise<void> {
     try {
-      const isAdmin = this.pageData?.user?.role === 'admin';
       const [, projectsResp, inviteStatsResp] = await Promise.all([
         this.fetchAgents(),
         apiFetch('/api/v1/projects'),
-        isAdmin
-          ? apiFetch('/api/v1/admin/invites/stats', {
-              suppressAccessDeniedToast: true,
-            }).catch(() => null)
-          : Promise.resolve(null),
+        loadAdminStatus(this.pageData?.user?.id).then((status) =>
+          status?.isAdmin
+            ? apiFetch('/api/v1/admin/invites/stats', {
+                suppressAccessDeniedToast: true,
+              }).catch(() => null)
+            : null
+        ),
       ]);
 
       if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;

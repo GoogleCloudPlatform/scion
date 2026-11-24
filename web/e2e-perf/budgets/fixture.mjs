@@ -191,6 +191,7 @@ export function buildFixture() {
           'hub.system_one': false,
           'hub.triggers': false,
           'hub.user_delete_force_cascade': false,
+          'hub.view_as_member': false,
           'hub.welcome_project': false,
           'lifecycle.idle_suspend': false,
           'web.agent_badges': false,
@@ -212,6 +213,7 @@ export function buildFixture() {
         // A plain hub member: isAdmin is true only for hub and super admins.
         isAdmin: false,
         isSuperAdmin: false,
+        viewAsMember: false,
         permissions: [
           'broker.create',
           'broker.list',

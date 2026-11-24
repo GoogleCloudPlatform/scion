@@ -86,13 +86,27 @@ func TestSessionGen_ConduitRelayAdmit_RevokedJWT_Refused(t *testing.T) {
 	require.Error(t, err, "the pre-revoke JWT is refused at relay admit")
 	assert.Equal(t, http.StatusUnauthorized, refusalStatus(t, err), "pre-revoke JWT")
 
-	ahead, _, _, err := f.srv.userTokenService.MintTokenPair(f.user.ID(), "renew@conduit.test", "Renew", store.UserRoleMember, row+1, ClientTypeWeb)
+	ahead, _, _, err := f.srv.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            f.user.ID(),
+		Email:             "renew@conduit.test",
+		DisplayName:       "Renew",
+		Role:              store.UserRoleMember,
+		SessionGeneration: row + 1,
+		ClientType:        ClientTypeWeb,
+	})
 	require.NoError(t, err)
 	_, err = f.ops.admit(t, bearer(ahead), "user-ahead")
 	require.Error(t, err)
 	assert.Equal(t, http.StatusUnauthorized, refusalStatus(t, err), "JWT ahead of the row")
 
-	current, _, _, err := f.srv.userTokenService.MintTokenPair(f.user.ID(), "renew@conduit.test", "Renew", store.UserRoleMember, row, ClientTypeWeb)
+	current, _, _, err := f.srv.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            f.user.ID(),
+		Email:             "renew@conduit.test",
+		DisplayName:       "Renew",
+		Role:              store.UserRoleMember,
+		SessionGeneration: row,
+		ClientType:        ClientTypeWeb,
+	})
 	require.NoError(t, err)
 	f.ops.mustAdmit(t, bearer(current), "user-current")
 }
@@ -119,7 +133,14 @@ func TestSessionGen_ConduitRelayAdmit_AuthctxVisibleInAdmission(t *testing.T) {
 	}
 	t.Cleanup(func() { conduitRelayAdmissionObserve = prev })
 
-	jwt, _, _, err := f.srv.userTokenService.MintTokenPair(f.user.ID(), "renew@conduit.test", "Renew", store.UserRoleMember, row, ClientTypeWeb)
+	jwt, _, _, err := f.srv.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            f.user.ID(),
+		Email:             "renew@conduit.test",
+		DisplayName:       "Renew",
+		Role:              store.UserRoleMember,
+		SessionGeneration: row,
+		ClientType:        ClientTypeWeb,
+	})
 	require.NoError(t, err)
 	f.ops.mustAdmit(t, bearer(jwt), "user-authctx")
 	require.Len(t, got, 1, "the admission writer ran once")

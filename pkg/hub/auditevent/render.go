@@ -46,6 +46,7 @@ type serializedCredentialRef struct {
 	BoundaryKind      CredentialBoundaryKind `json:"boundary_kind,omitempty"`
 	BoundaryProjectID string                 `json:"boundary_project_id,omitempty"`
 	Labels            map[string]string      `json:"labels,omitempty"`
+	SessionMode       string                 `json:"session_mode,omitempty"`
 }
 
 // renderSnapshot owns every reference that validation or JSON encoding reads.
@@ -140,6 +141,7 @@ func serializeCredential(credential *CredentialRef) *serializedCredentialRef {
 		BoundaryKind:      credential.BoundaryKind(),
 		BoundaryProjectID: credential.BoundaryProjectID(),
 		Labels:            credential.Labels(),
+		SessionMode:       credential.SessionMode(),
 	}
 }
 

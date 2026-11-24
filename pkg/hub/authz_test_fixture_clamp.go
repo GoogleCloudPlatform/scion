@@ -56,6 +56,18 @@ type testFixtureGrantClamp struct {
 	cache *testFixtureClampCache
 }
 
+// Cross-request authz-result cache audit (ptone/scion#8648, design §4.2.3):
+// View-as-member clamps bindings per request via ctx, so no cross-request cache
+// may store authorization results or binding lists keyed only by user ID.
+// Audited all *Cache types in pkg/hub/authz*.go and pkg/hub/auth*.go:
+//   - ProjectAdmissionCache (authz_boundary.go), mintEligibilityCache
+//     (authz_boundary.go), delegationCeilingCache (authz_delegation_ceiling.go),
+//     and authzInputMemo (authz_request_inputs.go) are all request/call-scoped
+//     and live inside the clamped request context.
+//   - testFixtureClampCache (below) is process-wide, but caches only immutable
+//     metadata (user Kind/ExpiresAt and seeded role-definition classification),
+//     never authorization results or user binding lists.
+
 // testFixtureClampCache holds the clamp's lookups. One cache is shared by
 // the server's authorization service and every transaction-bound one
 // (Server.authzFor), so each user's kind and each role's class are read
@@ -75,6 +87,16 @@ type testFixtureClampCache struct {
 	// successful lookups are cached; a failed lookup is retried on the next
 	// read and, meanwhile, its bindings are dropped.
 	roleAllowed map[string]bool
+	// roleIsSuperAdmin caches, per role definition ID, whether it is the
+	// seeded super-admin system role for view-as-member D2 synthesis. Only
+	// super-admin is a strict superset of hub-member (hub-admin is additive on
+	// top of hub-member and does not include hub-member permissions on its
+	// own), so D2 synthesis triggers only when super-admin was dropped and no
+	// hub-member/hub-viewer binding remains. Only successful lookups are cached.
+	roleIsSuperAdmin map[string]bool
+	// hubMemberRoleID caches the seeded system hub-member role definition ID
+	// for view-as-member D2 synthesis. Only a successful lookup is cached.
+	hubMemberRoleID string
 	// adminTier reports whether an admin test identity kind is enabled on
 	// this hub (Server.testAdminTierEnabled). Nil means every admin kind is
 	// off, so an authorization service built without the server's wiring
@@ -351,6 +373,10 @@ func (c *testFixtureGrantClamp) allowedRoles(ctx context.Context, ids []string) 
 	defer c.cache.mu.Unlock()
 	if c.cache.roleAllowed == nil || len(c.cache.roleAllowed) >= testFixtureClampCacheMax {
 		c.cache.roleAllowed = make(map[string]bool)
+		c.cache.roleIsSuperAdmin = make(map[string]bool)
+	}
+	if c.cache.roleIsSuperAdmin == nil {
+		c.cache.roleIsSuperAdmin = make(map[string]bool)
 	}
 	for _, id := range missing {
 		rd, ok := defs[id]
@@ -360,6 +386,7 @@ func (c *testFixtureGrantClamp) allowedRoles(ctx context.Context, ids []string) 
 		// Only the seeded (System) hub-member and hub-viewer roles count.
 		v := rd.System && rd.ScopeType == store.RoleScopeSystem && (rd.Name == store.SystemRoleHubMember || rd.Name == store.SystemRoleHubViewer)
 		c.cache.roleAllowed[id] = v
+		c.cache.roleIsSuperAdmin[id] = rd.System && rd.ScopeType == store.RoleScopeSystem && rd.Name == store.SystemRoleSuperAdmin
 		out[id] = v
 	}
 	return out
@@ -373,6 +400,18 @@ type kindResolver func(ctx context.Context, userID string) (principalKind, error
 
 func (c *testFixtureGrantClamp) defaultKindResolver(ctx context.Context, userID string) (principalKind, error) {
 	return kindForPrincipalVia(ctx, c.Store, c.cache, userID)
+}
+
+// isSuperAdminRole reports whether roleDefID is the cached seeded super-admin
+// system role (populated by allowedRoles).
+func (c *testFixtureGrantClamp) isSuperAdminRole(roleDefID string) bool {
+	if c.cache == nil {
+		return false
+	}
+	c.cache.mu.Lock()
+	v := c.cache.roleIsSuperAdmin[roleDefID]
+	c.cache.mu.Unlock()
+	return v
 }
 
 // clamp drops the system-scoped bindings a test identity may not hold when
@@ -523,19 +562,114 @@ func (c *testFixtureGrantClamp) clampTestAdminWith(ctx context.Context, principa
 	return out, nil
 }
 
-// clampAllWith applies the member clamp and then its admin-kind sibling using
-// kindOf to classify user principals. Callers MUST pass a single user's
-// principal list — never a multi-user batch — because one test identity would
-// clamp the entire list and an expired/disabled test admin would empty it.
+// containsUserPrincipal reports whether principals includes the given user ID.
+func containsUserPrincipal(principals []store.PrincipalRef, userID string) bool {
+	for _, p := range principals {
+		if p.Type == store.RoleBindingPrincipalUser && p.ID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// hubMemberRoleDefID returns the seeded system hub-member role definition ID,
+// caching a successful lookup on c.cache. Returns "" if not found or on error.
+func (c *testFixtureGrantClamp) hubMemberRoleDefID(ctx context.Context) string {
+	if c.cache != nil {
+		c.cache.mu.Lock()
+		id := c.cache.hubMemberRoleID
+		c.cache.mu.Unlock()
+		if id != "" {
+			return id
+		}
+	}
+	rd, err := c.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	if err != nil || rd == nil || !rd.System || rd.ID == "" {
+		return ""
+	}
+	if c.cache != nil {
+		c.cache.mu.Lock()
+		c.cache.hubMemberRoleID = rd.ID
+		c.cache.mu.Unlock()
+	}
+	return rd.ID
+}
+
+// clampViewAsMember drops every system-scoped binding whose role is not
+// hub-member or hub-viewer when ctx carries the view-as-member marker for a
+// user present in principals (ptone/scion#8648). Project-scoped bindings pass
+// through untouched.
+//
+// Decision D2: when at least one system-scoped binding was dropped and no
+// hub-member or hub-viewer system binding remains, an in-memory hub-member
+// system binding is synthesized for the user so an admin who holds only
+// super-admin sees a faithful member view. Because hub-member permissions are
+// a strict subset of the dropped admin roles, this never exceeds real
+// authority.
+func (c *testFixtureGrantClamp) clampViewAsMember(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding) []*store.RoleBinding {
+	uid, ok := viewAsMemberUserFromContext(ctx)
+	if !ok || !containsUserPrincipal(principals, uid) {
+		return bindings
+	}
+	var systemRoleIDs []string
+	for _, b := range bindings {
+		if b != nil && b.ScopeType == store.RoleScopeSystem {
+			systemRoleIDs = append(systemRoleIDs, b.RoleDefinitionID)
+		}
+	}
+	if len(systemRoleIDs) == 0 {
+		return bindings
+	}
+	allowed := c.allowedRoles(ctx, systemRoleIDs)
+	out := make([]*store.RoleBinding, 0, len(bindings))
+	droppedSuperAdmin := false
+	hasAllowedSystem := false
+	for _, b := range bindings {
+		if b != nil && b.ScopeType == store.RoleScopeSystem {
+			if !allowed[b.RoleDefinitionID] {
+				if c.isSuperAdminRole(b.RoleDefinitionID) {
+					droppedSuperAdmin = true
+				}
+				continue
+			}
+			hasAllowedSystem = true
+		}
+		out = append(out, b)
+	}
+	if droppedSuperAdmin && !hasAllowedSystem {
+		if hubMemberID := c.hubMemberRoleDefID(ctx); hubMemberID != "" {
+			out = append(out, &store.RoleBinding{
+				ID:               "synthetic:view-as-member:hub-member:" + uid,
+				PrincipalType:    store.RoleBindingPrincipalUser,
+				PrincipalID:      uid,
+				RoleDefinitionID: hubMemberID,
+				ScopeType:        store.RoleScopeSystem,
+				ScopeID:          "",
+			})
+		}
+	}
+	return out
+}
+
+// clampAllWith applies the member clamp, its admin-kind sibling, and the
+// view-as-member session clamp using kindOf to classify user principals.
+// Callers MUST pass a single user's principal list — never a multi-user batch —
+// because one test identity would clamp the entire list and an expired/disabled
+// test admin would empty it.
 func (c *testFixtureGrantClamp) clampAllWith(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding, kindOf kindResolver) ([]*store.RoleBinding, error) {
 	bindings, err := c.clampWith(ctx, principals, bindings, kindOf)
 	if err != nil {
 		return nil, err
 	}
-	return c.clampTestAdminWith(ctx, principals, bindings, kindOf)
+	bindings, err = c.clampTestAdminWith(ctx, principals, bindings, kindOf)
+	if err != nil {
+		return nil, err
+	}
+	return c.clampViewAsMember(ctx, principals, bindings), nil
 }
 
-// clampAll applies the member clamp and then its admin-kind sibling.
+// clampAll applies the member clamp, its admin-kind sibling, and the
+// view-as-member session clamp.
 func (c *testFixtureGrantClamp) clampAll(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
 	return c.clampAllWith(ctx, principals, bindings, c.defaultKindResolver)
 }

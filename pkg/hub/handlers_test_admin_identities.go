@@ -949,7 +949,14 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		if err := s.testIdentities.hooks.syncGrants(ctx, tx, u.ID, u.Role, store.TestIdentityIssuanceCreatedBy); err != nil {
 			return fmt.Errorf("sync hub role grants: %w", err)
 		}
-		token, expiresIn, err = s.userTokenService.MintAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, u.SessionGeneration, ClientTypeAPI, tokenTTL)
+		token, expiresIn, err = s.userTokenService.MintAccessTokenWithTTL(UserTokenSubject{
+			UserID:            u.ID,
+			Email:             u.Email,
+			DisplayName:       u.DisplayName,
+			Role:              u.Role,
+			SessionGeneration: u.SessionGeneration,
+			ClientType:        ClientTypeAPI,
+		}, tokenTTL)
 		if err != nil {
 			return fmt.Errorf("issue token: %w", err)
 		}

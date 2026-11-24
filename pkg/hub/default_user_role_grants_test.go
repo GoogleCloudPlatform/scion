@@ -392,9 +392,13 @@ func TestCustomDefaultUserRole_AdminDemotion(t *testing.T) {
 
 	// 2. Token refresh demotion.
 	demoteRefresh := seedDemotableAdmin("demote-refresh", "demote-refresh@example.com")
-	_, refreshTok, _, err := srv.userTokenService.MintTokenPair(
-		demoteRefresh.ID, demoteRefresh.Email, demoteRefresh.DisplayName, store.UserRoleAdmin, 0, ClientTypeCLI,
-	)
+	_, refreshTok, _, err := srv.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:      demoteRefresh.ID,
+		Email:       demoteRefresh.Email,
+		DisplayName: demoteRefresh.DisplayName,
+		Role:        store.UserRoleAdmin,
+		ClientType:  ClientTypeCLI,
+	})
 	require.NoError(t, err)
 	body, _ := json.Marshal(map[string]string{"refreshToken": refreshTok})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewReader(body))

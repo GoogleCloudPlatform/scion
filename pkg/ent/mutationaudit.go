@@ -74,7 +74,9 @@ type MutationAudit struct {
 	AgentDelegationCode string `json:"agent_delegation_code,omitempty"`
 	// ProvenanceBasis holds the value of the "provenance_basis" field.
 	ProvenanceBasis string `json:"provenance_basis,omitempty"`
-	selectValues    sql.SelectValues
+	// SessionMode holds the value of the "session_mode" field.
+	SessionMode  string `json:"session_mode,omitempty"`
+	selectValues sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -82,7 +84,7 @@ func (*MutationAudit) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case mutationaudit.FieldMutationType, mutationaudit.FieldActorPrincipalKind, mutationaudit.FieldActorPrincipalID, mutationaudit.FieldActorCredentialID, mutationaudit.FieldActorCredentialType, mutationaudit.FieldTargetType, mutationaudit.FieldTargetID, mutationaudit.FieldBeforeSummary, mutationaudit.FieldAfterSummary, mutationaudit.FieldCanDelegateResult, mutationaudit.FieldCanDelegateReason, mutationaudit.FieldCredentialName, mutationaudit.FieldCredentialBoundaryKind, mutationaudit.FieldCredentialBoundaryProjectID, mutationaudit.FieldCredentialLabels, mutationaudit.FieldCorrelationID, mutationaudit.FieldExecutorKind, mutationaudit.FieldExecutorID, mutationaudit.FieldActorAgentID, mutationaudit.FieldAuthorizingUserID, mutationaudit.FieldSourceGrantID, mutationaudit.FieldParentGrantID, mutationaudit.FieldDelegationEdgeID, mutationaudit.FieldExchangeAgentCredentialID, mutationaudit.FieldActorKind, mutationaudit.FieldAgentDelegationCode, mutationaudit.FieldProvenanceBasis:
+		case mutationaudit.FieldMutationType, mutationaudit.FieldActorPrincipalKind, mutationaudit.FieldActorPrincipalID, mutationaudit.FieldActorCredentialID, mutationaudit.FieldActorCredentialType, mutationaudit.FieldTargetType, mutationaudit.FieldTargetID, mutationaudit.FieldBeforeSummary, mutationaudit.FieldAfterSummary, mutationaudit.FieldCanDelegateResult, mutationaudit.FieldCanDelegateReason, mutationaudit.FieldCredentialName, mutationaudit.FieldCredentialBoundaryKind, mutationaudit.FieldCredentialBoundaryProjectID, mutationaudit.FieldCredentialLabels, mutationaudit.FieldCorrelationID, mutationaudit.FieldExecutorKind, mutationaudit.FieldExecutorID, mutationaudit.FieldActorAgentID, mutationaudit.FieldAuthorizingUserID, mutationaudit.FieldSourceGrantID, mutationaudit.FieldParentGrantID, mutationaudit.FieldDelegationEdgeID, mutationaudit.FieldExchangeAgentCredentialID, mutationaudit.FieldActorKind, mutationaudit.FieldAgentDelegationCode, mutationaudit.FieldProvenanceBasis, mutationaudit.FieldSessionMode:
 			values[i] = new(sql.NullString)
 		case mutationaudit.FieldTimestamp:
 			values[i] = new(sql.NullTime)
@@ -277,6 +279,12 @@ func (_m *MutationAudit) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ProvenanceBasis = value.String
 			}
+		case mutationaudit.FieldSessionMode:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field session_mode", values[i])
+			} else if value.Valid {
+				_m.SessionMode = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -396,6 +404,9 @@ func (_m *MutationAudit) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("provenance_basis=")
 	builder.WriteString(_m.ProvenanceBasis)
+	builder.WriteString(", ")
+	builder.WriteString("session_mode=")
+	builder.WriteString(_m.SessionMode)
 	builder.WriteByte(')')
 	return builder.String()
 }

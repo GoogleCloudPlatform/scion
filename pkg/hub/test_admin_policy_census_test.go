@@ -292,6 +292,7 @@ func TestTestAdminPolicy_RoleGateCensus(t *testing.T) {
 	for key, g := range testAdminRoleGatePolicy {
 		assert.True(t, found[key], "stale TestAdminPolicy role gate %s: no such gate", key)
 		assert.NotEmpty(t, g.Reason, key)
+		assertValidViewAsMemberGate(t, "testAdminRoleGatePolicy", key, g.ViewAsMember)
 		if g.Policy != testAdminPolicyDeny {
 			assert.Empty(t, g.EnforcedIn, "%s: only deny entries name an enforcing function", key)
 			continue
@@ -301,6 +302,271 @@ func TestTestAdminPolicy_RoleGateCensus(t *testing.T) {
 			fn = key[strings.Index(key, ":")+1:]
 		}
 		assert.True(t, refusals[fn][key], "deny gate %s is not enforced: %s does not call testAdminPolicyRefuses(..., %q)", key, fn, key)
+	}
+}
+
+const (
+	// viewAsMemberDeniedFirst means the site is strictly preceded by a
+	// denying identity/Decide/RouteHubAdmin gate. Requires By.
+	viewAsMemberDeniedFirst viewAsMemberGateKind = "denied_first"
+	// viewAsMemberNotARequestGate means the site is not a request-path caller
+	// authorization gate (e.g., login/provisioning/seed/background/non-web
+	// credential authentication). Requires Reason.
+	viewAsMemberNotARequestGate viewAsMemberGateKind = "not_a_request_gate"
+)
+
+func vamDeniedFirst(by string) viewAsMemberGate {
+	return viewAsMemberGate{Kind: viewAsMemberDeniedFirst, By: by}
+}
+
+func vamNotARequestGate(reason string) viewAsMemberGate {
+	return viewAsMemberGate{Kind: viewAsMemberNotARequestGate, Reason: reason}
+}
+
+// viewAsMemberDBRoleReadPolicy classifies every function in pkg/hub that
+// compares a struct's .Role field with "admin" / store.UserRoleAdmin and is
+// not already classified in testAdminRoleGatePolicy (ptone/scion#8648,
+// design §4.2.4).
+var viewAsMemberDBRoleReadPolicy = map[string]viewAsMemberGate{
+	"google_identity_resolver.go:provisionNewUser": vamNotARequestGate("sign-in user provisioning: syncs super-admin binding for newly provisioned user"),
+	"handlers_auth.go:provisionUser":               vamNotARequestGate("sign-in user provisioning: syncs super-admin binding at login"),
+	"handlers_test_login.go:handleTestLogin":       vamNotARequestGate("dev/test sign-in: syncs super-admin binding and clears view-as-member"),
+	"handlers_users_core.go:updateUser":            vamNotARequestGate("target user role mutation: inspects requested *updates.Role, not caller role; gated by RouteHubAdmin"),
+	"seed.go:backfillUserRoleBindings":             vamNotARequestGate("startup migration: backfills super-admin role bindings"),
+	"seed.go:reconcileSuperAdminBindings":          vamNotARequestGate("startup reconciliation: reconciles User.Role with super-admin bindings"),
+	"sign_in_policy.go:applyLiveSignInPolicy":      vamNotARequestGate("sign-in policy: syncs super-admin binding on login"),
+	"web.go:handleOAuthCallback":                   vamNotARequestGate("OAuth callback sign-in: syncs super-admin binding and clears view-as-member"),
+	"web.go:proxyAuthMiddleware":                   vamNotARequestGate("proxy sign-in/reconcile: syncs super-admin binding and stored sessKeyUserRole"),
+}
+
+// viewAsMemberIdentityRebuildPolicy classifies every function in pkg/hub that
+// constructs an *AuthenticatedUser via NewAuthenticatedUser (ptone/scion#8648).
+// Request-path helpers that rebuild the caller's identity from a *store.User
+// row must honour view-as-member via applyViewAsMemberFromContext (Effective)
+// or be explicitly classified here.
+var viewAsMemberIdentityRebuildPolicy = map[string]viewAsMemberGate{
+	// Sanctioned entry points and request-path caller rebuilders (Effective).
+	"auth.go:UnifiedAuthMiddleware":               vamEffective(),
+	"decisions_agent.go:loadSourceAuthorIdentity": vamEffective(),
+	"port_view.go:portViewIdentity":               vamEffective(),
+	"web.go:authorizeSSESubjects":                 vamEffective(),
+	"web.go:expandProjectWildcard":                vamEffective(),
+	"web.go:newSSEMessageViewer":                  vamEffective(),
+	// Admin-only routes denied before the rebuild runs.
+	"agent_scope_reissue.go:planUserDelegatorReissue": vamDeniedFirst("hub.auth_reset.execute (authorizeScopeReissue)"),
+	"agent_scope_reissue.go:reissueUATIdentity":       vamDeniedFirst("hub.auth_reset.execute (authorizeScopeReissue)"),
+	"audit_authz.go:handleAuthzExplain":               vamDeniedFirst("RouteHubAdmin (hub.authz.explain)"),
+	"audit_authz.go:resolveExplainPrincipal":          vamDeniedFirst("RouteHubAdmin (hub.authz.explain)"),
+	// RealByDesign: intentionally checks real stored role.
+	"view_as_member.go:AuthorizeViewAsMemberChange": vamRealByDesign("evaluates real (unclamped) admin eligibility to enter view-as-member"),
+	// Non-caller, background, audit, or non-web-session credential builders.
+	"agent_delegation.go:issuerPrincipal":                               vamNotARequestGate("builds PrincipalContext for an agent delegation issuer, not a web session caller"),
+	"agent_pending_config_authz.go:resolvePendingUserSaver":             vamNotARequestGate("background held-edit fold rebuilds the saver from DB; maintenance deferral is RealByDesign (D4)"),
+	"agent_standing.go:userAdmissionAs":                                 vamNotARequestGate("evaluates an agent's standing root/delegator user, not a web session caller"),
+	"artifacts_host.go:recordedDelegator":                               vamNotARequestGate("evaluates an artifact's recorded delegator, not a web session caller"),
+	"artifacts_host.go:sponsorReadsHomeThroughRole":                     vamNotARequestGate("evaluates an artifact sponsor's role via clamped AuthzService"),
+	"artifacts_recipient.go:recipientIdentity":                          vamNotARequestGate("evaluates a target share recipient user, not a caller admin gate"),
+	"artifacts_subject_user.go:namedUserSubject":                        vamNotARequestGate("resolves a named target subject user for an artifact access grant"),
+	"auth.go:MakeProxyUserProvisioner":                                  vamNotARequestGate("proxy direct API auth (no scion_sess cookie; §4.4 unaffected)"),
+	"auth.go:extractProxyUser":                                          vamNotARequestGate("proxy direct API auth (no scion_sess cookie; §4.4 unaffected)"),
+	"auth_external_bearer.go:authenticateExternalBearer":                vamNotARequestGate("external Google bearer auth (no scion_sess cookie; §4.4 unaffected)"),
+	"authz_delegation_ceiling.go:userRelationshipAuthority":             vamNotARequestGate("evaluates a delegator's relationship authority via clamped AuthzService"),
+	"authz_execution_project.go:sourceUserExecutionAdmission":           vamNotARequestGate("evaluates a trigger/agent source user's project admission, not a web session caller"),
+	"authz_provenance_root.go:ResolveProvenanceRoot":                    vamNotARequestGate("evaluates an agent's provenance root user, not a web session caller"),
+	"authz_resource_parent_ceiling.go:loadUserSecretSourceInputs":       vamNotARequestGate("evaluates a secret source user's bindings via clamped AuthzService"),
+	"authz_resource_parent_ceiling.go:parentCeilingSourceIdentity":      vamNotARequestGate("evaluates a parent-ceiling source user, not a web session caller"),
+	"broker_inbound_sender.go:resolveBrokerInboundSender":               vamNotARequestGate("broker-authenticated inbound message sender (no web session)"),
+	"brokerauth.go:resolveOnBehalfOf":                                   vamNotARequestGate("broker-authenticated on-behalf-of user (no web session)"),
+	"chat_member_fanout.go:fanOutThreadMessageToMembers":                vamNotARequestGate("chat member fanout checks each member via clamped AuthzService.CheckAccess"),
+	"chat_scheduled_send.go:checkScheduledFire":                         vamNotARequestGate("background worker; durable state must use real authority"),
+	"conduit_authz.go:conduitRenewalIdentity":                           vamNotARequestGate("background conduit renewal identity (no web session)"),
+	"conduit_relay_ops.go:relayUserIdentity":                            vamNotARequestGate("conduit relay credential identity (no web session)"),
+	"decisions_bell.go:expandDecisionBellTopic":                         vamNotARequestGate("background worker; durable state must use real authority"),
+	"decisions_profile.go:waitingOnYouTotal":                            vamNotARequestGate("background worker; durable state must use real authority"),
+	"exec_container.go:ResolveExecContainer":                            vamNotARequestGate("resolves exec container owner via clamped AuthzService, not a caller admin gate"),
+	"firecore_authority.go:resolveFireUser":                             vamNotARequestGate("background trigger/schedule fire authority (no web session)"),
+	"github_app_association_authz.go:AuthorizeGitHubTokenSourceProject": vamNotARequestGate("evaluates GitHub token source user via clamped AuthzService"),
+	"github_app_association_authz.go:githubBindingUserIsAdmin":          vamNotARequestGate("evaluates GitHub binding user via clamped AuthzService.Decide"),
+	"lifecycle_hook_fire_authority.go:authorizeHookFire":                vamNotARequestGate("background lifecycle hook fire authority (no web session)"),
+	"message_hold_redrive.go:revalidateDelegatedHeldMessage":            vamNotARequestGate("background/redrive revalidation of held delegated message issuer"),
+	"message_hold_redrive.go:revalidateUserHeldMessage":                 vamNotARequestGate("background/redrive revalidation of held message sender"),
+	"passthrough_translation_review.go:reviewTranslatedAgent":           vamNotARequestGate("evaluates an agent's launching user for passthrough translation review"),
+	"skill_dispatch_resolve.go:creatorIdentityForAgent":                 vamNotARequestGate("evaluates an agent's creator for skill dispatch, not a web session caller"),
+	"test_identity_workload_issuer.go:authenticate":                     vamNotARequestGate("workload delegation grantor identity (workload auth, no web session)"),
+	"thread_group_migration.go:tgmAllowedGroups":                        vamNotARequestGate("background thread-group migration (no web session)"),
+	"useraccesstoken.go:ValidateToken":                                  vamNotARequestGate("UAT (scion_pat_*) authentication (no scion_sess cookie; §4.4 unaffected)"),
+}
+
+// validateViewAsMemberGate returns a diagnostic string if g is missing or
+// invalid for its kind, or "" if valid (ptone/scion#8648, design §4.2.4, §11 item 9).
+func validateViewAsMemberGate(table, key string, g viewAsMemberGate) string {
+	switch g.Kind {
+	case viewAsMemberEffective:
+		if g.By != "" {
+			return table + "[" + key + "]: Effective must not set By"
+		}
+		return ""
+	case viewAsMemberRealByDesign:
+		if strings.TrimSpace(g.Reason) == "" {
+			return table + "[" + key + "]: RealByDesign requires a Reason"
+		}
+		if g.By != "" {
+			return table + "[" + key + "]: RealByDesign must not set By"
+		}
+		return ""
+	case viewAsMemberDeniedFirst:
+		if strings.TrimSpace(g.By) == "" {
+			return table + "[" + key + "]: DeniedFirst requires By naming the preceding denying gate"
+		}
+		return ""
+	case viewAsMemberNotARequestGate:
+		if strings.TrimSpace(g.Reason) == "" {
+			return table + "[" + key + "]: NotARequestGate requires a Reason"
+		}
+		if g.By != "" {
+			return table + "[" + key + "]: NotARequestGate must not set By"
+		}
+		return ""
+	default:
+		return table + "[" + key + "]: ViewAsMember.Kind=" + strconv.Quote(string(g.Kind)) + " is missing or invalid (must be effective, real_by_design, denied_first, or not_a_request_gate)"
+	}
+}
+
+// assertValidViewAsMemberGate validates that a viewAsMemberGate classification
+// is present and carries the required fields for its kind (ptone/scion#8648,
+// design §4.2.4, §11 item 9).
+func assertValidViewAsMemberGate(t *testing.T, table, key string, g viewAsMemberGate) {
+	t.Helper()
+	if msg := validateViewAsMemberGate(table, key, g); msg != "" {
+		assert.Fail(t, msg)
+	}
+}
+
+// TestViewAsMember_MissingClassificationFails verifies design §11 item 9:
+// omitting or malforming a ViewAsMember classification is rejected.
+func TestViewAsMember_MissingClassificationFails(t *testing.T) {
+	assert.NotEmpty(t, validateViewAsMemberGate("tbl", "k", viewAsMemberGate{}), "zero-value ViewAsMember must fail")
+	assert.NotEmpty(t, validateViewAsMemberGate("tbl", "k", viewAsMemberGate{Kind: "bogus"}))
+	assert.NotEmpty(t, validateViewAsMemberGate("tbl", "k", viewAsMemberGate{Kind: viewAsMemberRealByDesign}))
+	assert.NotEmpty(t, validateViewAsMemberGate("tbl", "k", viewAsMemberGate{Kind: viewAsMemberDeniedFirst}))
+	assert.NotEmpty(t, validateViewAsMemberGate("tbl", "k", viewAsMemberGate{Kind: viewAsMemberNotARequestGate}))
+	assert.Empty(t, validateViewAsMemberGate("tbl", "k", vamEffective()))
+	assert.Empty(t, validateViewAsMemberGate("tbl", "k", vamRealByDesign("D4")))
+	assert.Empty(t, validateViewAsMemberGate("tbl", "k", vamDeniedFirst("RouteHubAdmin")))
+	assert.Empty(t, validateViewAsMemberGate("tbl", "k", vamNotARequestGate("seed")))
+}
+
+// isRoleFieldExpr matches struct field accesses like u.Role, user.Role,
+// sessionUser.Role, and *updates.Role (not Role() method calls).
+func isRoleFieldExpr(e ast.Expr) bool {
+	switch x := e.(type) {
+	case *ast.SelectorExpr:
+		return x.Sel.Name == "Role"
+	case *ast.StarExpr:
+		return isRoleFieldExpr(x.X)
+	}
+	return false
+}
+
+// TestViewAsMember_DBRoleReadCensus scans every pkg/hub function comparing a
+// struct .Role field with "admin" / store.UserRoleAdmin and requires it to be
+// classified for view-as-member in either testAdminRoleGatePolicy or
+// viewAsMemberDBRoleReadPolicy (ptone/scion#8648, design §4.2.4).
+func TestViewAsMember_DBRoleReadCensus(t *testing.T) {
+	found := map[string]bool{}
+	walkPkgHubFuncs(t, func(file string, fn *ast.FuncDecl, _ *token.FileSet) {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			bin, ok := n.(*ast.BinaryExpr)
+			if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
+				return true
+			}
+			if (isRoleFieldExpr(bin.X) && isAdminRoleLiteral(bin.Y)) ||
+				(isRoleFieldExpr(bin.Y) && isAdminRoleLiteral(bin.X)) {
+				found[file+":"+fn.Name.Name] = true
+			}
+			return true
+		})
+	})
+	require.NotEmpty(t, found)
+
+	for key := range found {
+		if g, ok := testAdminRoleGatePolicy[key]; ok {
+			assertValidViewAsMemberGate(t, "testAdminRoleGatePolicy", key, g.ViewAsMember)
+			assert.NotContains(t, viewAsMemberDBRoleReadPolicy, key,
+				"%s is already classified in testAdminRoleGatePolicy; do not duplicate in viewAsMemberDBRoleReadPolicy", key)
+			continue
+		}
+		g, ok := viewAsMemberDBRoleReadPolicy[key]
+		if !assert.True(t, ok, "DB-row .Role admin comparison %s has no ViewAsMember classification in testAdminRoleGatePolicy or viewAsMemberDBRoleReadPolicy", key) {
+			continue
+		}
+		assertValidViewAsMemberGate(t, "viewAsMemberDBRoleReadPolicy", key, g)
+	}
+	for key, g := range viewAsMemberDBRoleReadPolicy {
+		assert.True(t, found[key], "stale viewAsMemberDBRoleReadPolicy entry %s: no .Role admin comparison in function", key)
+		assertValidViewAsMemberGate(t, "viewAsMemberDBRoleReadPolicy", key, g)
+	}
+}
+
+// TestViewAsMember_IdentityRebuildCensus scans every pkg/hub function calling
+// NewAuthenticatedUser (outside its definition) and requires a ViewAsMember
+// classification in viewAsMemberIdentityRebuildPolicy. Effective rebuilders
+// outside UnifiedAuthMiddleware and webSessionUser-based SSE helpers must call
+// applyViewAsMemberFromContext so rebuilt caller identities cannot bypass the
+// effective-role lever (ptone/scion#8648, design §4.2.4).
+func TestViewAsMember_IdentityRebuildCensus(t *testing.T) {
+	// Sanctioned Effective sites that do not rebuild from a DB *store.User row:
+	// UnifiedAuthMiddleware applies WithViewAsMember directly; the web.go SSE
+	// helpers construct from webSessionUser.Role (already effective "member").
+	directEffectiveSites := map[string]bool{
+		"auth.go:UnifiedAuthMiddleware": true,
+		"web.go:authorizeSSESubjects":   true,
+		"web.go:expandProjectWildcard":  true,
+		"web.go:newSSEMessageViewer":    true,
+	}
+
+	found := map[string]*ast.FuncDecl{}
+	walkPkgHubFuncs(t, func(file string, fn *ast.FuncDecl, _ *token.FileSet) {
+		key := file + ":" + fn.Name.Name
+		if key == "internal/principal/identity.go:NewAuthenticatedUser" {
+			return
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := ""
+			switch f := call.Fun.(type) {
+			case *ast.Ident:
+				name = f.Name
+			case *ast.SelectorExpr:
+				name = f.Sel.Name
+			}
+			if name == "NewAuthenticatedUser" {
+				found[key] = fn
+			}
+			return true
+		})
+	})
+	require.NotEmpty(t, found)
+
+	for key, fn := range found {
+		g, ok := viewAsMemberIdentityRebuildPolicy[key]
+		if !assert.True(t, ok, "NewAuthenticatedUser caller %s has no ViewAsMember classification in viewAsMemberIdentityRebuildPolicy", key) {
+			continue
+		}
+		assertValidViewAsMemberGate(t, "viewAsMemberIdentityRebuildPolicy", key, g)
+		if g.Kind == viewAsMemberEffective && !directEffectiveSites[key] {
+			refs := identRefs(fn)
+			assert.True(t, refs["applyViewAsMemberFromContext"],
+				"viewAsMemberIdentityRebuildPolicy[%s] is classified Effective but does not call applyViewAsMemberFromContext", key)
+		}
+	}
+	for key, g := range viewAsMemberIdentityRebuildPolicy {
+		_, ok := found[key]
+		assert.True(t, ok, "stale viewAsMemberIdentityRebuildPolicy entry %s: function does not call NewAuthenticatedUser", key)
+		assertValidViewAsMemberGate(t, "viewAsMemberIdentityRebuildPolicy", key, g)
 	}
 }
 

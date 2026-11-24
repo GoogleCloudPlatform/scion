@@ -8,7 +8,8 @@
         "isAdmin:boolean",
         "isSuperAdmin:boolean",
         "permissions:array",
-        "permissions[]:string"
+        "permissions[]:string",
+        "viewAsMember:boolean"
       ]
     },
     "/api/v1/chat/dms": {
@@ -55,6 +56,7 @@
         "experiments.hub.system_one:boolean",
         "experiments.hub.triggers:boolean",
         "experiments.hub.user_delete_force_cascade:boolean",
+        "experiments.hub.view_as_member:boolean",
         "experiments.hub.welcome_project:boolean",
         "experiments.lifecycle.idle_suspend:boolean",
         "experiments.web.agent_badges:boolean",

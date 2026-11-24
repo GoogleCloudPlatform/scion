@@ -401,7 +401,7 @@ func (s *Server) portViewIdentity(ctx context.Context, userID string, agent *sto
 		}
 		return nil, false
 	}
-	base := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb))
+	base := applyViewAsMemberFromContext(ctx, NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb)))
 	identity := NewScopedUserIdentity(base, agent.ProjectID, []string{portViewScope})
 	if !s.userPortAccessAllowed(ctx, identity, agent, ActionPortAccess) {
 		return nil, false

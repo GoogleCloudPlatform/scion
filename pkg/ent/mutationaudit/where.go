@@ -195,6 +195,11 @@ func ProvenanceBasis(v string) predicate.MutationAudit {
 	return predicate.MutationAudit(sql.FieldEQ(FieldProvenanceBasis, v))
 }
 
+// SessionMode applies equality check predicate on the "session_mode" field. It's identical to SessionModeEQ.
+func SessionMode(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldSessionMode, v))
+}
+
 // TimestampEQ applies the EQ predicate on the "timestamp" field.
 func TimestampEQ(v time.Time) predicate.MutationAudit {
 	return predicate.MutationAudit(sql.FieldEQ(FieldTimestamp, v))
@@ -2208,6 +2213,81 @@ func ProvenanceBasisEqualFold(v string) predicate.MutationAudit {
 // ProvenanceBasisContainsFold applies the ContainsFold predicate on the "provenance_basis" field.
 func ProvenanceBasisContainsFold(v string) predicate.MutationAudit {
 	return predicate.MutationAudit(sql.FieldContainsFold(FieldProvenanceBasis, v))
+}
+
+// SessionModeEQ applies the EQ predicate on the "session_mode" field.
+func SessionModeEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldSessionMode, v))
+}
+
+// SessionModeNEQ applies the NEQ predicate on the "session_mode" field.
+func SessionModeNEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNEQ(FieldSessionMode, v))
+}
+
+// SessionModeIn applies the In predicate on the "session_mode" field.
+func SessionModeIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIn(FieldSessionMode, vs...))
+}
+
+// SessionModeNotIn applies the NotIn predicate on the "session_mode" field.
+func SessionModeNotIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotIn(FieldSessionMode, vs...))
+}
+
+// SessionModeGT applies the GT predicate on the "session_mode" field.
+func SessionModeGT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGT(FieldSessionMode, v))
+}
+
+// SessionModeGTE applies the GTE predicate on the "session_mode" field.
+func SessionModeGTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGTE(FieldSessionMode, v))
+}
+
+// SessionModeLT applies the LT predicate on the "session_mode" field.
+func SessionModeLT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLT(FieldSessionMode, v))
+}
+
+// SessionModeLTE applies the LTE predicate on the "session_mode" field.
+func SessionModeLTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLTE(FieldSessionMode, v))
+}
+
+// SessionModeContains applies the Contains predicate on the "session_mode" field.
+func SessionModeContains(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContains(FieldSessionMode, v))
+}
+
+// SessionModeHasPrefix applies the HasPrefix predicate on the "session_mode" field.
+func SessionModeHasPrefix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasPrefix(FieldSessionMode, v))
+}
+
+// SessionModeHasSuffix applies the HasSuffix predicate on the "session_mode" field.
+func SessionModeHasSuffix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasSuffix(FieldSessionMode, v))
+}
+
+// SessionModeIsNil applies the IsNil predicate on the "session_mode" field.
+func SessionModeIsNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIsNull(FieldSessionMode))
+}
+
+// SessionModeNotNil applies the NotNil predicate on the "session_mode" field.
+func SessionModeNotNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotNull(FieldSessionMode))
+}
+
+// SessionModeEqualFold applies the EqualFold predicate on the "session_mode" field.
+func SessionModeEqualFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEqualFold(FieldSessionMode, v))
+}
+
+// SessionModeContainsFold applies the ContainsFold predicate on the "session_mode" field.
+func SessionModeContainsFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContainsFold(FieldSessionMode, v))
 }
 
 // And groups predicates with the AND operator between them.

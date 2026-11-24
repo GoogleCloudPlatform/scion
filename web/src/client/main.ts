@@ -64,6 +64,7 @@ import {
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { clearAdminStatus, loadAdminStatus } from './admin-status.js';
+import { setAdminPathChecker } from './view-as-member.js';
 import { chatRecentFiles } from './chat-recent-files.js';
 import { isInPagePop, pushRouteEntry, type RouteShell } from './route-history.js';
 import {
@@ -418,6 +419,7 @@ async function fetchCurrentUser(): Promise<User | null> {
       testIdentity: data.testIdentity?.expiresAt
         ? { expiresAt: data.testIdentity.expiresAt }
         : undefined,
+      viewAsMember: data.viewAsMember === true ? true : undefined,
     };
   } catch {
     return null;
@@ -932,6 +934,8 @@ const ADMIN_ROUTES = new Set([
   'scion-page-health-dashboard',
   'scion-page-metrics',
 ]);
+
+setAdminPathChecker((pathname) => ADMIN_ROUTES.has(resolveRoute(pathname).tag));
 
 // ---------------------------------------------------------------------------
 // Global error boundary — registered once so all shells share it.

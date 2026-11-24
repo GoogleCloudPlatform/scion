@@ -128,8 +128,11 @@ func adminModeMiddleware(state *MaintenanceState) func(http.Handler) http.Handle
 				return
 			}
 
-			// Allow admin users through.
-			if user := GetUserIdentityFromContext(r.Context()); IsUnscopedLocalPlatformAdmin(user) {
+			// Allow admin users through. Maintenance admission uses real (stored)
+			// admin status (ptone/scion#8648 D4, RealByDesign) so an admin in
+			// view-as-member mode stays admitted and can always reach Exit;
+			// downstream handlers still evaluate effective member authority.
+			if user := GetUserIdentityFromContext(r.Context()); IsUnscopedLocalPlatformAdmin(unclampedUserForMaintenance(user)) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -183,10 +186,14 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Allow admin users through.
-		if user := getWebSessionUser(r.Context()); user != nil && user.Role == "admin" {
-			next.ServeHTTP(w, r)
-			return
+		// Allow admin users through. Maintenance admission uses real (stored)
+		// admin status (ptone/scion#8648 D4, RealByDesign) so an admin in
+		// view-as-member mode stays admitted and can always reach Exit.
+		if user := getWebSessionUser(r.Context()); user != nil {
+			if realRole := user.realRole(); realRole == "admin" {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 
 		// Block everyone else with a maintenance page.

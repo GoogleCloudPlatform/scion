@@ -338,6 +338,11 @@ func accessConstraintAuditCredential(ctx context.Context) (*auditevent.Credentia
 		input.BoundaryProjectID = decoration.Boundary.ProjectID
 		input.Labels = decoration.Labels
 	}
+	principalID := ""
+	if identity := GetIdentityFromContext(ctx); !isNilIdentity(identity) {
+		principalID = identity.ID()
+	}
+	input.SessionMode = viewAsMemberSessionModeFor(ctx, principalID)
 	ref, err := auditevent.NewCredentialRef(input)
 	if err != nil {
 		return nil, err

@@ -179,3 +179,32 @@ func TestNewRefAcceptsDelegatedAgentKind(t *testing.T) {
 		t.Fatalf("NewRef() kind = %q, want %q", ref.Kind(), KindDelegatedAgent)
 	}
 }
+
+func TestNewRefSessionModeValidation(t *testing.T) {
+	t.Parallel()
+
+	ref, err := NewRef(RefInput{Kind: KindInteractive, SessionMode: SessionModeViewAsMember})
+	if err != nil {
+		t.Fatalf("NewRef() rejected canonical session mode: %v", err)
+	}
+	if ref.SessionMode() != SessionModeViewAsMember {
+		t.Fatalf("NewRef() sessionMode = %q, want %q", ref.SessionMode(), SessionModeViewAsMember)
+	}
+
+	emptyRef, err := NewRef(RefInput{Kind: KindInteractive})
+	if err != nil {
+		t.Fatalf("NewRef() rejected empty session mode: %v", err)
+	}
+	if emptyRef.SessionMode() != "" {
+		t.Fatalf("NewRef() sessionMode = %q, want empty", emptyRef.SessionMode())
+	}
+
+	_, err = NewRef(RefInput{Kind: KindInteractive, SessionMode: "unknown_mode"})
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) || validationErr.Field != "session_mode" {
+		t.Fatalf("NewRef() error = %v, want ValidationError on session_mode", err)
+	}
+	if strings.Contains(err.Error(), "unknown_mode") {
+		t.Fatalf("NewRef() reflected rejected session_mode value: %q", err)
+	}
+}

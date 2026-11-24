@@ -49,6 +49,7 @@ func TestMutationAuditStore_NewFieldsRoundTrip(t *testing.T) {
 		CorrelationID:               "e2a-f8-mut-correlation",
 		ExecutorKind:                "schedule_evaluator",
 		ExecutorID:                  "schedule:e2a-f8",
+		SessionMode:                 "view_as_member",
 	}
 	require.NoError(t, s.CreateMutationAudit(ctx, record))
 	require.NotEmpty(t, record.ID)
@@ -65,6 +66,18 @@ func TestMutationAuditStore_NewFieldsRoundTrip(t *testing.T) {
 	require.Equal(t, "e2a-f8-mut-correlation", got[0].CorrelationID)
 	require.Equal(t, "schedule_evaluator", got[0].ExecutorKind)
 	require.Equal(t, "schedule:e2a-f8", got[0].ExecutorID)
+	require.Equal(t, "view_as_member", got[0].SessionMode)
+
+	byMode, modeTotal, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{SessionMode: "view_as_member", Limit: 10})
+	require.NoError(t, err)
+	require.Equal(t, 1, modeTotal)
+	require.Len(t, byMode, 1)
+	require.Equal(t, record.ID, byMode[0].ID)
+
+	none, noneTotal, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{SessionMode: "other_mode", Limit: 10})
+	require.NoError(t, err)
+	require.Equal(t, 0, noneTotal)
+	require.Empty(t, none)
 }
 
 func TestMutationAuditStore_NewFieldsDefaultEmpty(t *testing.T) {
@@ -92,4 +105,5 @@ func TestMutationAuditStore_NewFieldsDefaultEmpty(t *testing.T) {
 	require.Empty(t, got[0].CorrelationID)
 	require.Empty(t, got[0].ExecutorKind)
 	require.Empty(t, got[0].ExecutorID)
+	require.Empty(t, got[0].SessionMode)
 }

@@ -45,6 +45,7 @@ import '../components/terminal/terminal-pane.js';
 import { render as litRender } from 'lit';
 import { keyed } from 'lit/directives/keyed.js';
 import { renderTestHubBanner } from '../components/shared/test-hub-banner.js';
+import { renderViewAsMemberBanner } from '../components/shared/view-as-member-banner.js';
 import {
   TEST_INFRA_STATUS_EVENT,
   getTestInfraStatus,
@@ -223,6 +224,8 @@ export class TerminalWorkspaceRoot {
   private readonly header: ScionHeader = document.createElement('scion-header');
   /** Holds the test-hub banner, above the header (shared/test-hub-banner.ts). */
   private readonly testHubBannerHost = document.createElement('div');
+  /** Holds the view-as-member banner, below the test-hub banner and above the header. */
+  private readonly viewAsMemberBannerHost = document.createElement('div');
   private readonly shell = document.createElement('div');
   private readonly rail = document.createElement('aside');
   private readonly railList = document.createElement('div');
@@ -456,8 +459,10 @@ export class TerminalWorkspaceRoot {
 
     this.shell.append(this.rail, this.createPaneArea());
     this.testHubBannerHost.className = 'terminal-test-hub-banner';
+    this.viewAsMemberBannerHost.className = 'terminal-view-as-member-banner';
     this.element.append(
       this.testHubBannerHost,
+      this.viewAsMemberBannerHost,
       this.header,
       this.shell,
       this.ariaLive,
@@ -466,6 +471,7 @@ export class TerminalWorkspaceRoot {
     window.addEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
     window.addEventListener(TERMINAL_DROPDOWN_SELECT_EVENT, this.handleDropdownSelect);
     this.renderTestHubBanner();
+    this.renderViewAsMemberBanner();
     if (!getTestInfraStatus()) void loadTestInfraStatus();
 
     // Subscribe to layout state (lives as long as the workspace root).
@@ -650,6 +656,7 @@ export class TerminalWorkspaceRoot {
   setUser(user: User | null): void {
     this.user = user;
     this.header.user = user;
+    this.renderViewAsMemberBanner();
     for (const pane of this.panes.values()) {
       pane.userId = user?.id ?? '';
     }
@@ -673,12 +680,24 @@ export class TerminalWorkspaceRoot {
    */
   private renderTestHubBanner(): void {
     if (this.testHubBannerHost.parentNode !== this.element) {
-      this.element.insertBefore(this.testHubBannerHost, this.header);
+      this.element.insertBefore(
+        this.testHubBannerHost,
+        this.viewAsMemberBannerHost.parentNode === this.element
+          ? this.viewAsMemberBannerHost
+          : this.header
+      );
     }
     litRender(
       keyed(this.currentPath, renderTestHubBanner(getTestInfraStatus())),
       this.testHubBannerHost
     );
+  }
+
+  private renderViewAsMemberBanner(): void {
+    if (this.viewAsMemberBannerHost.parentNode !== this.element) {
+      this.element.insertBefore(this.viewAsMemberBannerHost, this.header);
+    }
+    litRender(renderViewAsMemberBanner(this.user), this.viewAsMemberBannerHost);
   }
 
   /**
@@ -2296,14 +2315,27 @@ export class TerminalWorkspaceRoot {
       #terminal-workspace > scion-header {
         padding-inline: 1.5rem;
       }
-      .terminal-test-hub-banner {
+      .terminal-test-hub-banner,
+      .terminal-view-as-member-banner {
         flex-shrink: 0;
       }
-      .terminal-test-hub-banner sl-alert.test-hub-banner {
+      .terminal-test-hub-banner sl-alert.test-hub-banner,
+      .terminal-view-as-member-banner sl-alert.view-as-member-banner {
         display: block;
       }
-      .terminal-test-hub-banner sl-alert.test-hub-banner::part(base) {
+      .terminal-test-hub-banner sl-alert.test-hub-banner::part(base),
+      .terminal-view-as-member-banner sl-alert.view-as-member-banner::part(base) {
         border-radius: 0;
+      }
+      .terminal-view-as-member-banner .view-as-member-banner-body {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+      .terminal-view-as-member-banner .view-as-member-exit-btn {
+        flex-shrink: 0;
       }
       .terminal-workspace-shell {
         flex: 1;
@@ -2822,6 +2854,7 @@ export class TerminalWorkspaceRoot {
          what is left through their own ResizeObserver. Nothing hidden here holds a text field, so
          hiding it cannot blur the field that raised the keyboard. */
       html[data-keyboard='open'] #terminal-workspace > .terminal-test-hub-banner,
+      html[data-keyboard='open'] #terminal-workspace > .terminal-view-as-member-banner,
       html[data-keyboard='open'] #terminal-workspace > scion-header,
       html[data-keyboard='open'] #terminal-workspace .terminal-rail,
       html[data-keyboard='open'] #terminal-workspace .terminal-layout-bar {

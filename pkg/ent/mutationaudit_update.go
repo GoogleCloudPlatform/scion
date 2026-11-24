@@ -517,6 +517,26 @@ func (_u *MutationAuditUpdate) ClearAgentDelegationCode() *MutationAuditUpdate {
 	return _u
 }
 
+// SetSessionMode sets the "session_mode" field.
+func (_u *MutationAuditUpdate) SetSessionMode(v string) *MutationAuditUpdate {
+	_u.mutation.SetSessionMode(v)
+	return _u
+}
+
+// SetNillableSessionMode sets the "session_mode" field if the given value is not nil.
+func (_u *MutationAuditUpdate) SetNillableSessionMode(v *string) *MutationAuditUpdate {
+	if v != nil {
+		_u.SetSessionMode(*v)
+	}
+	return _u
+}
+
+// ClearSessionMode clears the value of the "session_mode" field.
+func (_u *MutationAuditUpdate) ClearSessionMode() *MutationAuditUpdate {
+	_u.mutation.ClearSessionMode()
+	return _u
+}
+
 // Mutation returns the MutationAuditMutation object of the builder.
 func (_u *MutationAuditUpdate) Mutation() *MutationAuditMutation {
 	return _u.mutation
@@ -734,6 +754,12 @@ func (_u *MutationAuditUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.ProvenanceBasisCleared() {
 		_spec.ClearField(mutationaudit.FieldProvenanceBasis, field.TypeString)
+	}
+	if value, ok := _u.mutation.SessionMode(); ok {
+		_spec.SetField(mutationaudit.FieldSessionMode, field.TypeString, value)
+	}
+	if _u.mutation.SessionModeCleared() {
+		_spec.ClearField(mutationaudit.FieldSessionMode, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -1245,6 +1271,26 @@ func (_u *MutationAuditUpdateOne) ClearAgentDelegationCode() *MutationAuditUpdat
 	return _u
 }
 
+// SetSessionMode sets the "session_mode" field.
+func (_u *MutationAuditUpdateOne) SetSessionMode(v string) *MutationAuditUpdateOne {
+	_u.mutation.SetSessionMode(v)
+	return _u
+}
+
+// SetNillableSessionMode sets the "session_mode" field if the given value is not nil.
+func (_u *MutationAuditUpdateOne) SetNillableSessionMode(v *string) *MutationAuditUpdateOne {
+	if v != nil {
+		_u.SetSessionMode(*v)
+	}
+	return _u
+}
+
+// ClearSessionMode clears the value of the "session_mode" field.
+func (_u *MutationAuditUpdateOne) ClearSessionMode() *MutationAuditUpdateOne {
+	_u.mutation.ClearSessionMode()
+	return _u
+}
+
 // Mutation returns the MutationAuditMutation object of the builder.
 func (_u *MutationAuditUpdateOne) Mutation() *MutationAuditMutation {
 	return _u.mutation
@@ -1492,6 +1538,12 @@ func (_u *MutationAuditUpdateOne) sqlSave(ctx context.Context) (_node *MutationA
 	}
 	if _u.mutation.ProvenanceBasisCleared() {
 		_spec.ClearField(mutationaudit.FieldProvenanceBasis, field.TypeString)
+	}
+	if value, ok := _u.mutation.SessionMode(); ok {
+		_spec.SetField(mutationaudit.FieldSessionMode, field.TypeString, value)
+	}
+	if _u.mutation.SessionModeCleared() {
+		_spec.ClearField(mutationaudit.FieldSessionMode, field.TypeString)
 	}
 	_node = &MutationAudit{config: _u.config}
 	_spec.Assign = _node.assignValues

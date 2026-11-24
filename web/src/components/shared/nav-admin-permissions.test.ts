@@ -43,11 +43,9 @@ async function mount(user: Pick<User, 'id' | 'role'>): Promise<ScionNav> {
   el.user = { email: `${user.id}@test.com`, name: user.id, ...user };
   document.body.appendChild(el);
   await el.updateComplete;
-  if (user.role !== 'admin') {
-    await vi.waitFor(() => expect(adminStatusRequested()).toBe(true));
-    // Let the admin-status response resolve and the nav re-render.
-    await new Promise((r) => setTimeout(r, 0));
-  }
+  await vi.waitFor(() => expect(adminStatusRequested()).toBe(true));
+  // Let the admin-status response resolve and the nav re-render.
+  await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
   await el.updateComplete;
   return el;
@@ -109,6 +107,7 @@ describe('sidebar Admin section permission gating', () => {
   });
 
   it('shows a super admin every admin page, including Diagnostics and Maintenance', async () => {
+    adminStatusBody = { isAdmin: true, isSuperAdmin: true, permissions: [] };
     const el = await mount({ id: 'u-admin', role: 'admin' });
     const links = adminLinks(el);
     expect(links).toContain('/settings');
