@@ -357,14 +357,18 @@ func (m *authzInputMemo) entryFor(key principalKey) *memoEntry {
 
 // principalInputs is a per-decision handle over one principal's UNFILTERED
 // authorization inputs, returned by AuthzService.inputsFor. It serves no
-// query shape other than the one authorizationPrincipals / decide steps
+// store query shape other than the one authorizationPrincipals / decide steps
 // 2-4 use: the full closure, its bindings with (nil, nil) scope filters, and
-// role definitions for exactly those bindings. Callers that filter by scope
-// or query a different ref set — authz_candelegate.go, authz_boundary.go's
-// project-scoped grant resolvers, hasActiveSystemRole, getEffectivePermissions
-// — must NOT use it; they keep their own direct loads, which this design
-// does not touch. ProjectMembershipEvidence uses it (via inputsForPrincipal)
-// because it issues exactly this unfiltered closure-plus-bindings query.
+// role definitions for exactly those bindings. Non-explain decide() calls may
+// read an in-memory scope-filtered view of those already-loaded unfiltered
+// bindings via BindingsForProject (which lazily indexes entry.bindings by
+// project ScopeID without issuing any scope-filtered store query). Callers
+// that filter by scope at the store or query a different ref set —
+// authz_candelegate.go, authz_boundary.go's project-scoped grant resolvers,
+// hasActiveSystemRole, getEffectivePermissions — must NOT use it; they keep
+// their own direct loads, which this design does not touch.
+// ProjectMembershipEvidence uses it (via inputsForPrincipal) because it issues
+// exactly this unfiltered closure-plus-bindings query.
 //
 // A handle is used for exactly one decision (or one ResolveListScopes call)
 // and must not be reused across decisions or shared between goroutines.
