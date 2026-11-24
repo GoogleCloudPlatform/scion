@@ -1108,26 +1108,49 @@ export class ScionChatSecretRequest extends LitElement {
       const isEnvironment = !row.secretType || row.secretType === 'environment';
       const isVariable = row.secretType === 'variable';
 
-      if (isEnvironment || (isVariable && !revealed)) {
+      if (isEnvironment || isVariable) {
         return html`
           <div class="input-wrap" data-form-rev=${this.formRevision}>
-            <input
-              class="secret-input"
-              type=${revealed ? 'text' : 'password'}
-              data-key=${row.key}
-              data-row-id=${row.rowId}
-              aria-label=${`Secret value for ${row.key}`}
-              placeholder=${`Enter value for ${row.key}…`}
-              autocomplete="off"
-              autocorrect="off"
-              autocapitalize="off"
-              spellcheck="false"
-              data-lpignore="true"
-              data-1p-ignore="true"
-              ?disabled=${disabled}
-              .value=${value}
-              @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
-            />
+            ${isVariable && revealed
+              ? html`
+                  <textarea
+                    class="secret-textarea"
+                    style="--secret-rows: 2"
+                    data-key=${row.key}
+                    data-row-id=${row.rowId}
+                    aria-label=${`Secret value for ${row.key}`}
+                    placeholder=${`Enter value for ${row.key}…`}
+                    autocomplete="off"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    rows="2"
+                    ?disabled=${disabled}
+                    .value=${value}
+                    @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
+                  ></textarea>
+                `
+              : html`
+                  <input
+                    class="secret-input"
+                    type=${revealed ? 'text' : 'password'}
+                    data-key=${row.key}
+                    data-row-id=${row.rowId}
+                    aria-label=${`Secret value for ${row.key}`}
+                    placeholder=${`Enter value for ${row.key}…`}
+                    autocomplete="off"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    ?disabled=${disabled}
+                    .value=${value}
+                    @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
+                  />
+                `}
             <button
               type="button"
               class="toggle-visibility"
@@ -1139,43 +1162,6 @@ export class ScionChatSecretRequest extends LitElement {
               @click=${(): void => this.toggleReveal(row.rowId, revealed)}
             >
               <sl-icon name=${revealed ? 'eye-slash' : 'eye'} aria-hidden="true"></sl-icon>
-            </button>
-          </div>
-        `;
-      }
-
-      if (isVariable) {
-        return html`
-          <div class="input-wrap" data-form-rev=${this.formRevision}>
-            <textarea
-              class="secret-textarea"
-              style="--secret-rows: 2"
-              data-key=${row.key}
-              data-row-id=${row.rowId}
-              aria-label=${`Secret value for ${row.key}`}
-              placeholder=${`Enter value for ${row.key}…`}
-              autocomplete="off"
-              autocorrect="off"
-              autocapitalize="off"
-              spellcheck="false"
-              data-lpignore="true"
-              data-1p-ignore="true"
-              rows="2"
-              ?disabled=${disabled}
-              .value=${value}
-              @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
-            ></textarea>
-            <button
-              type="button"
-              class="toggle-visibility"
-              data-toggle-visibility=${row.key}
-              aria-pressed="true"
-              aria-label=${`Hide value for ${row.key}`}
-              title="Hide value"
-              ?disabled=${disabled}
-              @click=${(): void => this.toggleReveal(row.rowId, true)}
-            >
-              <sl-icon name="eye-slash" aria-hidden="true"></sl-icon>
             </button>
           </div>
         `;

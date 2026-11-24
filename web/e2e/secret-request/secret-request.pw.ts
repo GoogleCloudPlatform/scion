@@ -254,8 +254,8 @@ test('variable secret row masks natively as password input, hides value from AX 
   };
   const leaked = nodes.some(
     (n) =>
-      String(n.value?.value ?? '').includes('super-secret-variable-42') ||
-      String(n.name?.value ?? '').includes('super-secret-variable-42')
+      (typeof n.value?.value === 'string' && n.value.value.includes('super-secret-variable-42')) ||
+      (typeof n.name?.value === 'string' && n.name.value.includes('super-secret-variable-42'))
   );
   expect(leaked).toBe(false);
 
