@@ -543,3 +543,66 @@ func TestPoll_ClosedWakeChannelDoesNotSpin(t *testing.T) {
 	st.mu.Unlock()
 	assert.LessOrEqual(t, calls, 6, "Poll must not busy-spin on a closed wakeCh")
 }
+
+// Phase 3: StopCh ends a blocking wait early with empty events, TimedOut=false,
+// and the current NextCursor (while client ctx cancellation still returns ctx.Err()).
+func TestPoll_StopChEarlyReturn(t *testing.T) {
+	st := newFakeStore()
+	wk := newFakeWaker()
+	feed := NewFeed(st, wk)
+	feed.RecheckInterval = 5 * time.Second
+
+	convID := "conv-stopch"
+	st.append(convID, store.Message{ID: "m1", Sender: "agent:a1", SenderID: "a1", Msg: "seed"})
+
+	// 1. Closing StopCh mid-wait returns early with TimedOut=false and current cursor.
+	stopCh := make(chan struct{})
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		close(stopCh)
+	}()
+
+	start := time.Now()
+	res, err := feed.Poll(context.Background(), Principal{Kind: "user", ID: "u1"}, allowAuthz, PollRequest{
+		ConversationID: convID,
+		Start:          StartHead,
+		Wait:           5 * time.Second,
+		StopCh:         stopCh,
+		StopRetryAfter: time.Second,
+	})
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+	assert.Empty(t, res.Events)
+	assert.False(t, res.TimedOut)
+	assert.Equal(t, time.Second, res.RetryAfter)
+	assert.Equal(t, EncodeCursor(convID, 1), res.NextCursor)
+
+	// 2. Pre-closed StopCh returns immediately without waiting.
+	preClosed := make(chan struct{})
+	close(preClosed)
+	start = time.Now()
+	res2, err := feed.Poll(context.Background(), Principal{Kind: "user", ID: "u1"}, allowAuthz, PollRequest{
+		ConversationID: convID,
+		Start:          StartHead,
+		Wait:           5 * time.Second,
+		StopCh:         preClosed,
+		StopRetryAfter: time.Second,
+	})
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 200*time.Millisecond)
+	assert.Empty(t, res2.Events)
+	assert.False(t, res2.TimedOut)
+	assert.Equal(t, time.Second, res2.RetryAfter)
+	assert.Equal(t, EncodeCursor(convID, 1), res2.NextCursor)
+
+	// 3. When ctx is also canceled, ctx.Err() takes precedence over StopCh.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = feed.Poll(ctx, Principal{Kind: "user", ID: "u1"}, allowAuthz, PollRequest{
+		ConversationID: convID,
+		Start:          StartHead,
+		Wait:           5 * time.Second,
+		StopCh:         preClosed,
+	})
+	assert.ErrorIs(t, err, context.Canceled)
+}

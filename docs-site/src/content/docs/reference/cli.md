@@ -595,6 +595,7 @@ Conversations are referenced using one of three forms:
     - `join <conversation-ref> <principal-kind> <principal-id>`: Add a participant to a conversation.
     - `leave <conversation-ref>`: Leave a conversation.
     - `catch-up <conversation-ref>`: Show recent messages in a conversation.
+    - `watch <conversation-ref>`: Wait for new messages in a conversation via server-side long-polling (host-only). See [`scion conversation watch`](#scion-conversation-watch) below.
     - `group <command>`: Manage the project's thread groups. See [`scion conversation group`](#scion-conversation-group) below.
 - **Flags (on `list`):**
     - `--kind <string>`: Filter by kind (`direct`, `group`).
@@ -616,6 +617,31 @@ Conversations are referenced using one of three forms:
     - `--json`: Output in JSON format.
 - **Flags (on `get-message`):**
     - `--json`: Output in JSON format.
+
+### `scion conversation watch`
+
+Waits for new messages in a conversation using server-side long-polling (`GET /api/v1/conversations/{id}/watch`, gated by [`hub.conversation_watch`](/scion/reference/experiments/#server-experiments-with-notes)). Host-only: removed in agent mode because Scion agents receive push delivery. Available on Windows. See [Receiving Replies from Scion Agents](/scion/hosted/user/receiving-replies/) for a full third-party agent walkthrough and token recipe.
+
+**Usage:** `scion conversation watch <conversation-ref> [flags]`
+
+- **Modes:**
+    - **One-shot (`--once`):** Blocks until at least one matching message arrives (returning the available batch up to `--limit`) or `--timeout` elapses, prints the result, and exits. Under `--json`, prints a single compact JSON object matching the HTTP response (`events`, `nextCursor`, `hasMore`, `truncated`, `timedOut`, `retryAfterMs`) — including on timeout (`exit 124`). In plain output, prints `next-cursor: <cursor>` to stderr.
+    - **Stream (default, without `--once`):** Loops long-poll requests continuously, advancing the cursor in memory and retrying transient network/5xx/429 errors with jittered backoff. Plain output prints each message as `[<timestamp>] <sender> -> <recipient>` followed by its body, and writes `next-cursor: <cursor>` to stderr on exit. Under `--json`, emits NDJSON (one compact `Event` object per line, flushed per event) plus a cursor heartbeat line (`{"type":"cursor","nextCursor":"..."}`) when a poll times out empty.
+- **Flags:**
+    - `--once`: Return as soon as at least one matching message arrives, or on `--timeout`.
+    - `--timeout <duration>`: Total time budget (`0` means wait indefinitely). Reaching it exits `124` in `--once` mode and `0` in stream mode.
+    - `--cursor <cursor>`: Resume strictly after an opaque cursor returned by a previous watch call (takes precedence over `--after-message` and `--from-start`).
+    - `--after-message <id>`: Resume after a specific message ID in the conversation (for example the message you just sent).
+    - `--from-start`: With no `--cursor` or `--after-message`, replay retained history from the beginning (`start=beginning`) instead of starting from now (`start=head`).
+    - `--filter <string>`: Message filter: `others` (default; excludes caller's own sends), `all` (includes all messages), or `addressed` (for a user, matches messages not sent by you that were sent explicitly to you as `recipient`, or where you have a `message_addressees` row — no production path writes user addressee rows today; body `@`-mentions in group threads do not match, so use `others` for group threads).
+    - `--limit <int>`: Maximum number of messages per poll / one-shot result (`1`–`200`, default `50`).
+    - `--json` / `--format json`: Machine-readable output (single JSON object in `--once` mode; NDJSON in stream mode).
+- **Exit codes:**
+    - `0`: At least one message delivered (`--once`), or stream mode ended normally (timeout or `SIGINT`/`SIGTERM`).
+    - `124`: `--once` timed out with no matching messages.
+    - `3`: Cursor expired (`410 Gone`); restart with `--after-message` or no cursor.
+    - `130`: Interrupted (`SIGINT`/`SIGTERM`) in `--once` mode.
+    - `1`: Any error (authentication, authorization, invalid flags/cursor, `404` route/experiment off, or exhausted retries).
 
 ### `scion conversation group`
 

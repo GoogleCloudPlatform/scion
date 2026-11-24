@@ -21,6 +21,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -135,4 +136,129 @@ func TestCreateMessage_ConcurrentSeqAllocation_Postgres(t *testing.T) {
 	for i := 0; i < n; i++ {
 		assert.Equal(t, int64(i+1), seqs[i])
 	}
+}
+
+// TestBackfillConversationMessageSeqs_DuplicateSeqs_Postgres verifies that
+// BackfillConversationMessageSeqs repairs both NULL and duplicate
+// (conversation_id, conversation_seq) pairs on Postgres and is idempotent.
+//
+// Always compiled; skips unless built with -tags integration and
+// SCION_TEST_POSTGRES_URL is set.
+func TestBackfillConversationMessageSeqs_DuplicateSeqs_Postgres(t *testing.T) {
+	url := enttest.NewSchemaURL(t)
+	ctx := context.Background()
+
+	client, err := entc.OpenPostgres(url, entc.PoolConfig{MaxOpenConns: 8, MaxIdleConns: 2})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	cs := NewCompositeStore(client)
+	projectID := uuid.NewString()
+	conv := seedFeedConversation(t, cs, projectID)
+	convUUID := uuid.MustParse(conv.ID)
+	projUUID := uuid.MustParse(projectID)
+
+	t1 := time.Date(2026, 11, 21, 10, 0, 1, 0, time.UTC)
+	t2 := time.Date(2026, 11, 21, 10, 0, 2, 0, time.UTC)
+	t3 := time.Date(2026, 11, 21, 10, 0, 3, 0, time.UTC)
+
+	idKeep1 := uuid.MustParse("00000000-0000-0000-0000-000000000101")
+	idDup1 := uuid.MustParse("00000000-0000-0000-0000-000000000102")
+	idNull := uuid.MustParse("00000000-0000-0000-0000-000000000103")
+
+	insertMsg := func(id uuid.UUID, created time.Time, seq *int64, body string) {
+		b := client.Message.Create().
+			SetID(id).
+			SetProjectID(projUUID).
+			SetConversationID(convUUID).
+			SetSender("user:alice").
+			SetSenderID("u1").
+			SetRecipient("agent:a").
+			SetRecipientID("a1").
+			SetMsg(body).
+			SetType("chat").
+			SetDispatchState(store.MessageDispatchDispatched).
+			SetCreated(created)
+		if seq != nil {
+			b = b.SetConversationSeq(*seq)
+		}
+		_, saveErr := b.Save(ctx)
+		require.NoError(t, saveErr)
+	}
+
+	seq1 := int64(1)
+	insertMsg(idKeep1, t1, &seq1, "orig-1")
+	insertMsg(idDup1, t2, &seq1, "dup-1")
+	insertMsg(idNull, t3, nil, "null-row")
+
+	_, err = cs.DB().ExecContext(ctx, "UPDATE conversations SET last_message_seq = 1 WHERE id = $1::uuid", conv.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+
+	s1, err := cs.MessageConversationSeq(ctx, conv.ID, idKeep1.String())
+	require.NoError(t, err)
+	s2, err := cs.MessageConversationSeq(ctx, conv.ID, idDup1.String())
+	require.NoError(t, err)
+	s3, err := cs.MessageConversationSeq(ctx, conv.ID, idNull.String())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), s1)
+	assert.Equal(t, int64(2), s2)
+	assert.Equal(t, int64(3), s3)
+
+	head, err := cs.ConversationHeadSeq(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), head)
+
+	// Idempotent re-run.
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+	head2, err := cs.ConversationHeadSeq(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), head2)
+
+	// Duplicate-only conversation (NO NULL rows): exercises the UNION ... HAVING COUNT(*) > 1
+	// branch independently of NULL-seq detection on Postgres.
+	convDupOnly := seedFeedConversation(t, cs, projectID)
+	convDupOnlyUUID := uuid.MustParse(convDupOnly.ID)
+	idOnly1 := uuid.MustParse("00000000-0000-0000-0000-000000000201")
+	idOnly2 := uuid.MustParse("00000000-0000-0000-0000-000000000202")
+	for _, tc := range []struct {
+		id      uuid.UUID
+		created time.Time
+		body    string
+	}{
+		{idOnly1, t1, "pg-dup-only-orig"},
+		{idOnly2, t2, "pg-dup-only-collision"},
+	} {
+		_, saveErr := client.Message.Create().
+			SetID(tc.id).
+			SetProjectID(projUUID).
+			SetConversationID(convDupOnlyUUID).
+			SetSender("user:alice").
+			SetSenderID("u1").
+			SetRecipient("agent:a").
+			SetRecipientID("a1").
+			SetMsg(tc.body).
+			SetType("chat").
+			SetDispatchState(store.MessageDispatchDispatched).
+			SetCreated(tc.created).
+			SetConversationSeq(1).
+			Save(ctx)
+		require.NoError(t, saveErr)
+	}
+	_, err = cs.DB().ExecContext(ctx, "UPDATE conversations SET last_message_seq = 1 WHERE id = $1::uuid", convDupOnly.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+
+	sOnly1, err := cs.MessageConversationSeq(ctx, convDupOnly.ID, idOnly1.String())
+	require.NoError(t, err)
+	sOnly2, err := cs.MessageConversationSeq(ctx, convDupOnly.ID, idOnly2.String())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), sOnly1)
+	assert.Equal(t, int64(2), sOnly2)
+
+	dupOnlyHead, err := cs.ConversationHeadSeq(ctx, convDupOnly.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), dupOnlyHead)
 }

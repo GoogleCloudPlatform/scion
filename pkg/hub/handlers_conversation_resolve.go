@@ -80,7 +80,7 @@ func (s *Server) handleConversationResolve(w http.ResponseWriter, r *http.Reques
 		}
 
 		// Verify caller is a canonical participant.
-		if conv.Kind == "direct" && !isCanonicalDMParticipant(conv.ExternalRef, identity.Type(), identity.ID()) {
+		if conv.Kind == "direct" && !authorizeDMRead(conv, identity.Type(), identity.ID()) {
 			NotFound(w, "Conversation")
 			return
 		}
@@ -229,7 +229,7 @@ func (s *Server) resolveAgentConversation(
 	}
 
 	// Look up existing DM — do NOT create one.
-	callerKind := identity.Type()
+	callerKind := normalizeFeedPrincipalKind(identity.Type())
 	callerID := identity.ID()
 
 	// Compute the DM key.
@@ -288,7 +288,7 @@ func (s *Server) resolveThreadConversation(
 	ctx := r.Context()
 
 	// List group conversations accessible to the caller.
-	convs, err := s.store.GetConversationsForPrincipal(ctx, identity.Type(), identity.ID())
+	convs, err := s.store.GetConversationsForPrincipal(ctx, normalizeFeedPrincipalKind(identity.Type()), identity.ID())
 	if err != nil {
 		NotFound(w, "Conversation")
 		return

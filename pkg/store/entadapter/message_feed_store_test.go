@@ -192,6 +192,158 @@ func TestBackfillConversationMessageSeqs(t *testing.T) {
 	assert.Equal(t, int64(4), head3)
 }
 
+// Regression test (ptone/scion#8794): BackfillConversationMessageSeqs also
+// repairs duplicate (conversation_id, conversation_seq) pairs left behind when
+// an older binary re-stamps conversation_id (PromoteDM / SetMessageConversationID)
+// after a downgrade, assigning new seqs above last_message_seq in (created, id)
+// order and remaining idempotent on subsequent runs.
+func TestBackfillConversationMessageSeqs_RepairsDuplicateSeqs(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	projectID := uuid.NewString()
+	conv := seedFeedConversation(t, cs, projectID)
+	convUUID := uuid.MustParse(conv.ID)
+	projUUID := uuid.MustParse(projectID)
+
+	t1 := time.Date(2026, 11, 21, 10, 0, 1, 0, time.UTC)
+	t2 := time.Date(2026, 11, 21, 10, 0, 2, 0, time.UTC)
+	t3 := time.Date(2026, 11, 21, 10, 0, 3, 0, time.UTC)
+	t4 := time.Date(2026, 11, 21, 10, 0, 4, 0, time.UTC)
+
+	idKeep1 := uuid.MustParse("00000000-0000-0000-0000-000000000010")
+	idKeep2 := uuid.MustParse("00000000-0000-0000-0000-000000000020")
+	idDup1A := uuid.MustParse("00000000-0000-0000-0000-000000000030")
+	idDup1B := uuid.MustParse("00000000-0000-0000-0000-000000000031")
+	idDup2 := uuid.MustParse("00000000-0000-0000-0000-000000000040")
+	idNull := uuid.MustParse("00000000-0000-0000-0000-000000000050")
+
+	insertMsg := func(id uuid.UUID, created time.Time, seq *int64, body string) {
+		b := client.Message.Create().
+			SetID(id).
+			SetProjectID(projUUID).
+			SetConversationID(convUUID).
+			SetSender("user:alice").
+			SetSenderID("u1").
+			SetRecipient("agent:a").
+			SetRecipientID("a1").
+			SetMsg(body).
+			SetType("chat").
+			SetDispatchState(store.MessageDispatchDispatched).
+			SetCreated(created)
+		if seq != nil {
+			b = b.SetConversationSeq(*seq)
+		}
+		_, err := b.Save(ctx)
+		require.NoError(t, err)
+	}
+
+	seq1, seq2 := int64(1), int64(2)
+	// Original messages at seq 1 and seq 2.
+	insertMsg(idKeep1, t1, &seq1, "orig-1")
+	insertMsg(idKeep2, t1, &seq2, "orig-2")
+	// Simulated stale seqs re-stamped into this conversation by an older binary:
+	// two duplicates of seq 1 (same timestamp t2, ordered by id), one duplicate of seq 2 (t3),
+	// plus a NULL-seq row (t4).
+	insertMsg(idDup1B, t2, &seq1, "dup-1-b")
+	insertMsg(idDup1A, t2, &seq1, "dup-1-a")
+	insertMsg(idDup2, t3, &seq2, "dup-2")
+	insertMsg(idNull, t4, nil, "null-row")
+
+	// Set conversations.last_message_seq = 2 (matching the original head).
+	require.NoError(t, client.Conversation.UpdateOneID(convUUID).SetLastMessageSeq(2).Exec(ctx))
+
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+
+	// Earliest row per seq keeps its original seq; duplicates + NULL get 3..6 in (created, id) order.
+	got := func(id uuid.UUID) int64 {
+		seq, qErr := cs.MessageConversationSeq(ctx, conv.ID, id.String())
+		require.NoError(t, qErr)
+		return seq
+	}
+	assert.Equal(t, int64(1), got(idKeep1))
+	assert.Equal(t, int64(2), got(idKeep2))
+	assert.Equal(t, int64(3), got(idDup1A))
+	assert.Equal(t, int64(4), got(idDup1B))
+	assert.Equal(t, int64(5), got(idDup2))
+	assert.Equal(t, int64(6), got(idNull))
+
+	head, err := cs.ConversationHeadSeq(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(6), head)
+
+	// Feed returns all 6 messages in strictly increasing seq order with no gaps.
+	page, err := cs.ListConversationFeed(ctx, store.ConversationFeedQuery{
+		ConversationID: conv.ID,
+		AfterSeq:       0,
+		Filter:         store.ConversationFeedFilterAll,
+	})
+	require.NoError(t, err)
+	require.Len(t, page.Messages, 6)
+	assert.False(t, page.Truncated)
+	for i, m := range page.Messages {
+		assert.Equal(t, int64(i+1), m.ConversationSeq)
+	}
+
+	// Idempotent re-run leaves seqs and head unchanged.
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+	head2, err := cs.ConversationHeadSeq(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(6), head2)
+	assert.Equal(t, int64(3), got(idDup1A))
+
+	// Duplicate-only conversation (NO NULL rows): exercises the UNION ... HAVING COUNT(*) > 1
+	// branch of listConversationsNeedingSeqBackfill independently of NULL-seq detection.
+	convDupOnly := seedFeedConversation(t, cs, projectID)
+	convDupOnlyUUID := uuid.MustParse(convDupOnly.ID)
+	idOnly1 := uuid.MustParse("00000000-0000-0000-0000-000000000060")
+	idOnly2 := uuid.MustParse("00000000-0000-0000-0000-000000000061")
+	for _, tc := range []struct {
+		id      uuid.UUID
+		created time.Time
+		body    string
+	}{
+		{idOnly1, t1, "dup-only-orig"},
+		{idOnly2, t2, "dup-only-collision"},
+	} {
+		_, saveErr := client.Message.Create().
+			SetID(tc.id).
+			SetProjectID(projUUID).
+			SetConversationID(convDupOnlyUUID).
+			SetSender("user:alice").
+			SetSenderID("u1").
+			SetRecipient("agent:a").
+			SetRecipientID("a1").
+			SetMsg(tc.body).
+			SetType("chat").
+			SetDispatchState(store.MessageDispatchDispatched).
+			SetCreated(tc.created).
+			SetConversationSeq(1).
+			Save(ctx)
+		require.NoError(t, saveErr)
+	}
+	require.NoError(t, client.Conversation.UpdateOneID(convDupOnlyUUID).SetLastMessageSeq(1).Exec(ctx))
+
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+
+	sOnly1, err := cs.MessageConversationSeq(ctx, convDupOnly.ID, idOnly1.String())
+	require.NoError(t, err)
+	sOnly2, err := cs.MessageConversationSeq(ctx, convDupOnly.ID, idOnly2.String())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), sOnly1)
+	assert.Equal(t, int64(2), sOnly2)
+
+	dupOnlyHead, err := cs.ConversationHeadSeq(ctx, convDupOnly.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), dupOnlyHead)
+
+	// Idempotent re-run on duplicate-only conversation.
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+	dupOnlyHead2, err := cs.ConversationHeadSeq(ctx, convDupOnly.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), dupOnlyHead2)
+}
+
 // Criterion 11: ListConversationFeed applies others/addressed/all correctly,
 // and user and agent principals with colliding UUID namespaces do not cross-match.
 func TestListConversationFeed_FiltersAndNamespaceIsolation(t *testing.T) {
