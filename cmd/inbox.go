@@ -299,6 +299,9 @@ func inboxCategoryOKDetail(key string, cat hubclient.InboxCategory, hubBaseURL s
 			toAddr := cat.Breakdown["toAddress"]
 			req := cat.Breakdown["requested"]
 			parts = append(parts, fmt.Sprintf("(%d to address, %d requested)", toAddr, req))
+			if req > 0 {
+				parts = append(parts, "scion notifications")
+			}
 		}
 		if target := inboxWebTarget(hubBaseURL, cat.Href); target != "" {
 			parts = append(parts, target)

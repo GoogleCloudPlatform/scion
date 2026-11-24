@@ -34,6 +34,14 @@ import (
 
 // TestInboxSummaryClientTypeMatchesHub keeps hubclient.InboxSummaryResponse
 // and hubclient.InboxApprovalPreview in step with pkg/hub's wire types.
+//
+// TODO(ptone/scion#8962): add parity pairs once the remaining category preview
+// types land on main:
+//   - hub.InboxWaitingAgentPreview <-> hubclient.InboxWaitingAgentPreview (P2)
+//   - hub.InboxDecisionPreview     <-> hubclient.InboxDecisionPreview     (P3)
+//   - hub.InboxDecisionInline      <-> hubclient.InboxDecisionInline      (P3)
+//   - hub.InboxReviewPreview       <-> hubclient.InboxReviewPreview       (P4)
+//   - hub.InboxChatPreview         <-> hubclient.InboxChatPreview         (P5)
 func TestInboxSummaryClientTypeMatchesHub(t *testing.T) {
 	pairs := []struct {
 		name       string
@@ -294,7 +302,8 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
 		assert.Contains(t, out, "Approvals         2+")
 		assert.Contains(t, out, "/profile/secrets")
 		assert.Contains(t, out, "• STRIPE_API_KEY · billing-dev · core-api · expires in 2h")
-		assert.Contains(t, out, "Reviews            2   (1 to address, 1 requested)")
+		assert.Contains(t, out, "Reviews            2   (1 to address, 1 requested)  scion notifications")
+		assert.Contains(t, out, "/artifacts?review_pending=1&owner=me")
 		assert.Contains(t, out, "• [to address] API Migration Spec · core-api · 1h ago")
 		assert.Contains(t, out, "• [requested] UI Design Doc · web · from alice · 30m ago")
 		assert.Contains(t, out, "Chat              14   (2 DMs, 1 mention)")
@@ -537,4 +546,112 @@ func TestInboxCmd_CLIModePlatformGateAndProjectRequirement(t *testing.T) {
 		require.NoError(t, root.Execute())
 		assert.Equal(t, []string{"inbox"}, *ran)
 	})
+}
+
+func TestInboxCmd_UnknownCategoryRendersAfterChat(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 24, 18, 2, 0, 0, time.UTC)
+	restoreNow := clitime.SetNow(func() time.Time { return fixedNow })
+	defer restoreNow()
+	clitime.SetZone(time.UTC)
+	defer clitime.SetZone(nil)
+
+	const fixture = `{
+  "generatedAt": "2026-11-24T18:02:00Z",
+  "total": 2,
+  "totalCapped": false,
+  "categories": {
+    "chat": {
+      "state": "ok",
+      "count": 1,
+      "capped": false,
+      "countsTowardTotal": true,
+      "href": "/chat?filter=unread",
+      "previews": []
+    },
+    "foo": {
+      "state": "ok",
+      "count": 1,
+      "capped": false,
+      "countsTowardTotal": true,
+      "href": "/foo",
+      "previews": [
+        {
+          "id": "f1",
+          "projectName": "core-api",
+          "title": "Custom future item",
+          "createdAt": "2026-11-24T17:52:00Z"
+        }
+      ]
+    }
+  }
+}`
+
+	withInboxFakeHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fixture))
+	})
+
+	out, err := runInboxCmdForTest(t, "")
+	require.NoError(t, err)
+	assert.Contains(t, out, "foo                1   http://")
+	assert.Contains(t, out, "/foo")
+	assert.Contains(t, out, "• core-api · Custom future item · 10m ago")
+	assert.Less(t, strings.Index(out, "Chat"), strings.Index(out, "foo"),
+		"unknown categories must render after Chat:\n%s", out)
+}
+
+func TestInboxCmd_SanitisesUntrustedPreviewText(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 24, 18, 2, 0, 0, time.UTC)
+	restoreNow := clitime.SetNow(func() time.Time { return fixedNow })
+	defer restoreNow()
+	clitime.SetZone(time.UTC)
+	defer clitime.SetZone(nil)
+
+	fixture := map[string]any{
+		"generatedAt": "2026-11-24T18:02:00Z",
+		"total":       1,
+		"totalCapped": false,
+		"categories": map[string]any{
+			"waiting": map[string]any{
+				"state":             "ok",
+				"count":             1,
+				"capped":            false,
+				"countsTowardTotal": true,
+				"href":              "/agents",
+				"previews": []map[string]any{
+					{
+						"id":          "a1",
+						"projectId":   "p1",
+						"projectName": "web",
+						"createdAt":   "2026-11-24T17:48:00Z",
+						"href":        "/agents/a1",
+						"agentId":     "a1",
+						"agentName":   "Frontend Dev",
+						"agentSlug":   "fe-dev",
+						"question":    "\x1b[2JNeed creds\nsecond line",
+						"since":       "2026-11-24T17:48:00Z",
+					},
+				},
+			},
+		},
+	}
+
+	withInboxFakeHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(fixture)
+	})
+
+	out, err := runInboxCmdForTest(t, "")
+	require.NoError(t, err)
+	assert.NotContains(t, out, "\x1b", "raw ANSI escape must be sanitised")
+
+	var previewLines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "  • ") {
+			previewLines = append(previewLines, line)
+		}
+	}
+	require.Len(t, previewLines, 1, "expected exactly one preview line in output:\n%s", out)
+	assert.Contains(t, previewLines[0], "\uFFFD[2JNeed creds\uFFFDsecond line", "control chars and newlines must be replaced with U+FFFD on one line")
+	assert.NotContains(t, out, "\nsecond line", "embedded newline must not split output onto a second line")
 }

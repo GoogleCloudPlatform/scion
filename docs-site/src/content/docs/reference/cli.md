@@ -544,7 +544,7 @@ Sets the message mode for an agent, controlling which users and agents can send 
 
 See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes) for details on each mode. The `hub` mode enables [cross-project messaging](/scion/hosted/user/messaging/#cross-project-messaging).
 
-### `scion messages` (aliases: `msgs`, `inbox`)
+### `scion messages` (alias: `msgs`)
 
 View and manage messages sent to you by agents. Running `scion messages` without a subcommand lists your unread messages.
 
