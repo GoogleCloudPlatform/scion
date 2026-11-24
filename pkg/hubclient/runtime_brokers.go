@@ -234,9 +234,21 @@ type AttachmentOutcome struct {
 	Reason       string `json:"reason,omitempty"`
 }
 
+// MessageDelivery identifies a hub message that the broker successfully
+// injected into the recipient agent's session (ptone/scion#9015).
+type MessageDelivery struct {
+	MessageID string `json:"messageId"`
+	AgentID   string `json:"agentId,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
+}
+
 // MessageFailuresReport is the body of a message-failures report.
 type MessageFailuresReport struct {
 	Failures []MessageFailure `json:"failures"`
+	// Deliveries are hub messages whose session injection succeeded on the
+	// broker (ptone/scion#9015). Additive and optional so older hubs ignore
+	// it cleanly.
+	Deliveries []MessageDelivery `json:"deliveries,omitempty"`
 	// AttachmentOutcomes are the per-file outcomes of attachment deliveries
 	// (ptone/scion#4596). The hub logs and counts them; they never change a
 	// message's state.
@@ -246,9 +258,10 @@ type MessageFailuresReport struct {
 // MessageFailuresResponse is the decoded body of a 200 answer from
 // POST /api/v1/runtime-brokers/{id}/message-failures.
 type MessageFailuresResponse struct {
-	Marked  int `json:"marked,omitempty"`
-	Held    int `json:"held,omitempty"`
-	Ignored int `json:"ignored,omitempty"`
+	Marked    int `json:"marked,omitempty"`
+	Delivered int `json:"delivered,omitempty"`
+	Held      int `json:"held,omitempty"`
+	Ignored   int `json:"ignored,omitempty"`
 }
 
 // runtimeBrokerService is the implementation of RuntimeBrokerService.

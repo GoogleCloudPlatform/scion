@@ -718,3 +718,44 @@ func TestBrokerAgentDeliver_SimultaneousSameIDAdmission(t *testing.T) {
 		})
 	}
 }
+
+func TestConduitDeliver_DeliveredPublishesLiveSSE(t *testing.T) {
+	f := newDeliverFixture(t)
+	f.startDeliverAgent(t, 0, "")
+	ctx := context.Background()
+
+	ev := NewChannelEventPublisher()
+	defer ev.Close()
+	f.srv.SetEventPublisher(ev)
+	ch, unsub := ev.Subscribe("agent." + f.launched.ID + ".message")
+	defer unsub()
+
+	msgID := uuid.NewString()
+	require.NoError(t, f.store.CreateMessage(ctx, &store.Message{
+		ID:            msgID,
+		ProjectID:     f.launched.ProjectID,
+		Sender:        "user:alice@example.com",
+		SenderID:      "user-conduit-1",
+		Recipient:     "agent:" + f.launched.Slug,
+		RecipientID:   f.launched.ID,
+		Msg:           "hello over conduit",
+		Type:          "instruction",
+		AgentID:       f.launched.ID,
+		DispatchState: store.MessageDispatchDispatched,
+	}))
+
+	code, resp := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d-sse-1", msgID))
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, agentcontrol.OutcomeDelivered, resp.Outcome)
+	assert.Equal(t, store.MessageDispatchDelivered, f.state(t, msgID))
+
+	select {
+	case evt := <-ch:
+		var payload UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &payload))
+		assert.Equal(t, msgID, payload.ID)
+		assert.Equal(t, store.MessageDispatchDelivered, payload.DispatchState)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected live SSE event when conduit delivery marks message delivered")
+	}
+}

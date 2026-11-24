@@ -60,6 +60,9 @@ func (f *fakeDispatchStore) HasCompletedBrokerDispatchSince(_ context.Context, _
 func (f *fakeDispatchStore) MarkMessageDispatched(_ context.Context, _ string) (bool, error) {
 	return false, nil
 }
+func (f *fakeDispatchStore) MarkMessageDelivered(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
 func (f *fakeDispatchStore) MarkMessageFailed(_ context.Context, _, _ string) error {
 	return nil
 }

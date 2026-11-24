@@ -467,3 +467,76 @@ func TestDeliveryFailureHandlerContext(t *testing.T) {
 		t.Fatal("handler from context was not the one stored")
 	}
 }
+
+func TestDeliverySuccessHandlerContext(t *testing.T) {
+	ctx := context.Background()
+	if DeliverySuccessHandlerFromContext(ctx) != nil {
+		t.Fatal("expected nil handler on bare context")
+	}
+	if WithDeliverySuccessHandler(ctx, nil) != ctx {
+		t.Fatal("nil handler must not wrap the context")
+	}
+	called := false
+	ctx = WithDeliverySuccessHandler(ctx, func() { called = true })
+	DeliverySuccessHandlerFromContext(ctx)()
+	if !called {
+		t.Fatal("handler from context was not the one stored")
+	}
+}
+
+func TestMessageBuffer_SuccessHandlerInvokedOnFlushAndSkippedOnFailure(t *testing.T) {
+	t.Run("invoked_for_each_coalesced_message_on_success", func(t *testing.T) {
+		var delivered int32
+		done := make(chan struct{}, 2)
+		buf := NewMessageBuffer(15*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+			return nil
+		})
+		defer buf.Close()
+
+		for range 2 {
+			buf.SendWithOutcomeHandlers("a", "p", "hi",
+				func(error) { t.Error("unexpected failure callback") },
+				func() {
+					atomic.AddInt32(&delivered, 1)
+					done <- struct{}{}
+				},
+			)
+		}
+		for range 2 {
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for success callbacks")
+			}
+		}
+		if got := atomic.LoadInt32(&delivered); got != 2 {
+			t.Fatalf("delivered callbacks = %d, want 2", got)
+		}
+	})
+
+	t.Run("not_invoked_on_failure", func(t *testing.T) {
+		var successCalls int32
+		failed := make(chan error, 1)
+		buf := NewMessageBuffer(15*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+			return errors.New("tmux failed")
+		})
+		tuneFlushRetry(buf, 1, time.Millisecond)
+		defer buf.Close()
+
+		buf.SendWithOutcomeHandlers("a", "p", "hi",
+			func(err error) { failed <- err },
+			func() { atomic.AddInt32(&successCalls, 1) },
+		)
+		select {
+		case err := <-failed:
+			if err == nil {
+				t.Fatal("expected non-nil delivery error")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for failure callback")
+		}
+		if got := atomic.LoadInt32(&successCalls); got != 0 {
+			t.Fatalf("success callbacks = %d, want 0", got)
+		}
+	})
+}

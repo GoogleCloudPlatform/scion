@@ -300,3 +300,136 @@ func TestSendMessage_AwaitingSessionCodeReported(t *testing.T) {
 		}
 	})
 }
+
+type bufferingSuccessManager struct {
+	*mockManager
+	buf *agent.MessageBuffer
+}
+
+func (m *bufferingSuccessManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
+	if interrupt {
+		if fn := agent.DeliverySuccessHandlerFromContext(ctx); fn != nil {
+			fn()
+		}
+		return nil
+	}
+	m.buf.SendWithOutcomeHandlers(agentID, projectID, message,
+		agent.DeliveryFailureHandlerFromContext(ctx),
+		agent.DeliverySuccessHandlerFromContext(ctx),
+	)
+	return nil
+}
+
+// TestSendMessage_DeliveryConfirmationReportedToHub verifies ptone/scion#9015:
+// buffered and interrupt exec deliveries post additive Deliveries reports to
+// the originating hub, failures never report Deliveries, and older hubs that
+// ignore the additive field answer 200 cleanly.
+func TestSendMessage_DeliveryConfirmationReportedToHub(t *testing.T) {
+	t.Run("buffered_exec_success_reports_delivery_to_originating_hub", func(t *testing.T) {
+		srv := newTestServer(t)
+		base := srv.manager.(*mockManager)
+		sm := &bufferingSuccessManager{
+			mockManager: base,
+			buf: agent.NewMessageBuffer(20*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+				return nil
+			}),
+		}
+		t.Cleanup(sm.buf.Close)
+		srv.manager = sm
+
+		hubA := &mockRuntimeBrokerService{}
+		hubB := &mockRuntimeBrokerService{}
+		srv.hubMu.Lock()
+		srv.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-on-a", HubClient: &stubBrokerHubClient{brokers: hubA}}
+		srv.hubConnections["hub-b"] = &HubConnection{Name: "hub-b", BrokerID: "broker-on-b", HubClient: &stubBrokerHubClient{brokers: hubB}}
+		srv.hubMu.Unlock()
+
+		w := postBrokerMessage(t, srv, "hub-a", MessageRequest{Message: "hello", MessageID: "msg-deliv-1", ProjectID: "proj-1"})
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		reports := waitForReports(t, hubA, 1)
+		if len(reports[0].Failures) != 0 {
+			t.Fatalf("expected 0 failures, got %+v", reports[0].Failures)
+		}
+		if len(reports[0].Deliveries) != 1 {
+			t.Fatalf("expected 1 delivery, got %+v", reports[0].Deliveries)
+		}
+		d := reports[0].Deliveries[0]
+		if d.MessageID != "msg-deliv-1" || d.AgentID != "test-agent-1" || d.ProjectID != "proj-1" {
+			t.Fatalf("unexpected delivery payload: %+v", d)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if got := len(hubB.getMessageFailureReports()); got != 0 {
+			t.Fatalf("non-originating hub received %d reports, want 0", got)
+		}
+	})
+
+	t.Run("interrupt_exec_success_reports_delivery", func(t *testing.T) {
+		srv := newTestServer(t)
+		base := srv.manager.(*mockManager)
+		sm := &bufferingSuccessManager{mockManager: base}
+		srv.manager = sm
+
+		hubA := &mockRuntimeBrokerService{}
+		srv.hubMu.Lock()
+		srv.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-on-a", HubClient: &stubBrokerHubClient{brokers: hubA}}
+		srv.hubMu.Unlock()
+
+		w := postBrokerMessage(t, srv, "hub-a", MessageRequest{
+			Message:   "urgent",
+			MessageID: "msg-int-deliv-1",
+			ProjectID: "proj-1",
+			Interrupt: true,
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		reports := waitForReports(t, hubA, 1)
+		if len(reports[0].Deliveries) != 1 || reports[0].Deliveries[0].MessageID != "msg-int-deliv-1" {
+			t.Fatalf("unexpected interrupt delivery report: %+v", reports[0])
+		}
+	})
+
+	t.Run("new_broker_to_old_hub_ignores_deliveries_field_cleanly", func(t *testing.T) {
+		var received map[string]any
+		oldHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v1/runtime-brokers/broker-old/message-failures" {
+				http.NotFound(w, r)
+				return
+			}
+			// Simulate an old hub that only decodes Failures and ignores unknown fields.
+			var raw map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			received = raw
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"marked":0,"ignored":0}`))
+		}))
+		defer oldHub.Close()
+
+		hc, err := hubclient.New(oldHub.URL)
+		if err != nil {
+			t.Fatalf("hubclient.New: %v", err)
+		}
+		srv := newTestServer(t)
+		srv.hubMu.Lock()
+		srv.hubConnections["old-hub"] = &HubConnection{Name: "old-hub", BrokerID: "broker-old", HubClient: hc}
+		srv.hubMu.Unlock()
+
+		srv.reportMessageDelivery("old-hub", hubclient.MessageDelivery{
+			MessageID: "msg-compat-1",
+			AgentID:   "agent-1",
+			ProjectID: "proj-1",
+		})
+		if received == nil {
+			t.Fatal("expected old hub to receive report")
+		}
+		if _, ok := received["deliveries"]; !ok {
+			t.Fatalf("expected additive deliveries key in JSON body, got %v", received)
+		}
+	})
+}

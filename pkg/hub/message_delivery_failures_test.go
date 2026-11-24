@@ -23,16 +23,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -510,4 +513,375 @@ func TestAgentUsesConduitDelivery_BrokerResolution(t *testing.T) {
 			RuntimeBrokerID: mixedID,
 		}))
 	})
+}
+
+func postMessageReport(t *testing.T, srv *Server, pathBrokerID, callerBrokerID string, req messageDeliveryFailuresRequest) (*httptest.ResponseRecorder, messageDeliveryFailuresResponse) {
+	t.Helper()
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/"+pathBrokerID+"/message-failures", bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	if callerBrokerID != "" {
+		httpReq = httpReq.WithContext(contextWithBrokerIdentity(httpReq.Context(), NewBrokerIdentity(callerBrokerID)))
+	}
+	rr := httptest.NewRecorder()
+	srv.handleRuntimeBrokerByIDInternal(rr, httpReq, pathBrokerID, "message-failures")
+	var resp messageDeliveryFailuresResponse
+	if rr.Code == http.StatusOK {
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	}
+	return rr, resp
+}
+
+func TestHandleBrokerMessageFailures_Deliveries(t *testing.T) {
+	t.Run("owner_broker_marks_delivered_and_publishes_live_SSE_for_human_sender", func(t *testing.T) {
+		srv, s, _, _, target, _, _ := deliverySetup(t)
+		ctx := context.Background()
+
+		ev := NewChannelEventPublisher()
+		defer ev.Close()
+		srv.SetEventPublisher(ev)
+		ch, unsub := ev.Subscribe("agent." + target.ID + ".message")
+		defer unsub()
+
+		msgID := api.NewUUID()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID:            msgID,
+			ProjectID:     target.ProjectID,
+			Sender:        "user:alice@example.com",
+			SenderID:      "user-sender-1",
+			Recipient:     "agent:" + target.Slug,
+			RecipientID:   target.ID,
+			Msg:           "hello agent",
+			Type:          messages.TypeInstruction,
+			AgentID:       target.ID,
+			DispatchState: store.MessageDispatchDispatched,
+		}))
+
+		rr, resp := postMessageReport(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailuresRequest{
+			Failures:   []messageDeliveryFailure{},
+			Deliveries: []messageDeliveryConfirmation{{MessageID: msgID, AgentID: target.ID, ProjectID: target.ProjectID}},
+		})
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, 1, resp.Delivered)
+		assert.Equal(t, 0, resp.Marked)
+		assert.Equal(t, 0, resp.Ignored)
+
+		row, err := s.GetMessage(ctx, msgID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchDelivered, row.DispatchState)
+
+		select {
+		case evt := <-ch:
+			var payload UserMessageEvent
+			require.NoError(t, json.Unmarshal(evt.Data, &payload))
+			assert.Equal(t, msgID, payload.ID)
+			assert.Equal(t, store.MessageDispatchDelivered, payload.DispatchState)
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected live SSE event for delivered message")
+		}
+
+		// Repeat delivery report is idempotent (ignored, no duplicate SSE).
+		rr, resp = postMessageReport(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailuresRequest{
+			Deliveries: []messageDeliveryConfirmation{{MessageID: msgID}},
+		})
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, 0, resp.Delivered)
+		assert.Equal(t, 1, resp.Ignored)
+	})
+
+	t.Run("foreign_broker_delivery_report_ignored", func(t *testing.T) {
+		srv, s, project, sender, target, _, _ := deliverySetup(t)
+		ctx := context.Background()
+
+		result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "owned-by-other"))
+		require.Nil(t, dmErr)
+
+		otherBroker := tid("foreign-delivery-broker")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID: otherBroker, Name: "foreign-broker", Slug: "foreign-broker", Status: store.BrokerStatusOnline,
+		}))
+		// Give the foreign broker its own agent and send that agent's ID in
+		// the request body to pin that ownership uses the stored
+		// msg.RecipientID rather than trusting the body's agentId/projectId.
+		foreignAgent := &store.Agent{
+			ID:              tid("foreign-owned-agent"),
+			Slug:            "foreign-owned-agent",
+			Name:            "foreign-owned-agent",
+			ProjectID:       project.ID,
+			RuntimeBrokerID: otherBroker,
+			Phase:           "running",
+		}
+		require.NoError(t, s.CreateAgent(ctx, foreignAgent))
+
+		rr, resp := postMessageReport(t, srv, otherBroker, otherBroker, messageDeliveryFailuresRequest{
+			Deliveries: []messageDeliveryConfirmation{{
+				MessageID: result.MessageID,
+				AgentID:   foreignAgent.ID,
+				ProjectID: foreignAgent.ProjectID,
+			}},
+		})
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, 0, resp.Delivered)
+		assert.Equal(t, 1, resp.Ignored)
+
+		row, err := s.GetMessage(ctx, result.MessageID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchDispatched, row.DispatchState)
+	})
+
+	t.Run("non_agent_recipient_delivery_report_ignored", func(t *testing.T) {
+		srv, s, _, _, target, _, _ := deliverySetup(t)
+		ctx := context.Background()
+
+		msgID := api.NewUUID()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID:            msgID,
+			ProjectID:     target.ProjectID,
+			Sender:        "agent:" + target.Slug,
+			SenderID:      target.ID,
+			Recipient:     "user:bob@example.com",
+			RecipientID:   target.ID,
+			Msg:           "to human",
+			Type:          messages.TypeInstruction,
+			AgentID:       target.ID,
+			DispatchState: store.MessageDispatchDispatched,
+		}))
+
+		rr, resp := postMessageReport(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailuresRequest{
+			Deliveries: []messageDeliveryConfirmation{{MessageID: msgID, AgentID: target.ID, ProjectID: target.ProjectID}},
+		})
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, 0, resp.Delivered)
+		assert.Equal(t, 1, resp.Ignored)
+
+		row, err := s.GetMessage(ctx, msgID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchDispatched, row.DispatchState)
+	})
+
+	t.Run("never_overwrites_failed_or_terminal_states", func(t *testing.T) {
+		srv, s, _, sender, target, _, _ := deliverySetup(t)
+		ctx := context.Background()
+
+		result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "already-failed"))
+		require.Nil(t, dmErr)
+		require.NoError(t, s.MarkMessageFailed(ctx, result.MessageID, "broker failed"))
+
+		rr, resp := postMessageReport(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailuresRequest{
+			Deliveries: []messageDeliveryConfirmation{{MessageID: result.MessageID}},
+		})
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, 0, resp.Delivered)
+		assert.Equal(t, 1, resp.Ignored)
+
+		row, err := s.GetMessage(ctx, result.MessageID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchFailed, row.DispatchState)
+	})
+
+	t.Run("rejects_oversized_deliveries_report", func(t *testing.T) {
+		srv, _, _, _, target, _, _ := deliverySetup(t)
+		deliveries := make([]messageDeliveryConfirmation, maxMessageFailuresPerReport+1)
+		for i := range deliveries {
+			deliveries[i] = messageDeliveryConfirmation{MessageID: api.NewUUID()}
+		}
+		rr, _ := postMessageReport(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailuresRequest{
+			Deliveries: deliveries,
+		})
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("old_broker_payload_without_deliveries_field_still_works", func(t *testing.T) {
+		srv, _, _, sender, target, _, _ := deliverySetup(t)
+		ctx := context.Background()
+
+		result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "old-broker"))
+		require.Nil(t, dmErr)
+
+		// Exact legacy JSON shape (no deliveries key).
+		legacyBody := fmt.Sprintf(`{"failures":[{"messageId":%q,"reason":"legacy failure"}]}`, result.MessageID)
+		httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/"+target.RuntimeBrokerID+"/message-failures", strings.NewReader(legacyBody))
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq = httpReq.WithContext(contextWithBrokerIdentity(httpReq.Context(), NewBrokerIdentity(target.RuntimeBrokerID)))
+		rr := httptest.NewRecorder()
+		srv.handleRuntimeBrokerByIDInternal(rr, httpReq, target.RuntimeBrokerID, "message-failures")
+		require.Equal(t, http.StatusOK, rr.Code)
+
+		var resp messageDeliveryFailuresResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		assert.Equal(t, 1, resp.Marked)
+		assert.Equal(t, 0, resp.Delivered)
+	})
+
+	t.Run("cas_loss_to_concurrent_failure_or_delivery_ignored_without_sse", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			raceWrite func(ctx context.Context, inner store.Store, msgID string) error
+			wantState string
+		}{
+			{
+				name: "already_failed_before_cas",
+				raceWrite: func(ctx context.Context, inner store.Store, msgID string) error {
+					return inner.MarkMessageFailed(ctx, msgID, "concurrent failure")
+				},
+				wantState: store.MessageDispatchFailed,
+			},
+			{
+				name: "already_delivered_before_cas",
+				raceWrite: func(ctx context.Context, inner store.Store, msgID string) error {
+					won, err := inner.MarkMessageDelivered(ctx, msgID)
+					if err != nil {
+						return err
+					}
+					if !won {
+						return fmt.Errorf("expected concurrent MarkMessageDelivered to win")
+					}
+					return nil
+				},
+				wantState: store.MessageDispatchDelivered,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *casLossDeliveryStore {
+					return &casLossDeliveryStore{
+						Store: inner,
+						fault: f,
+						onBefore: func(ctx context.Context, msgID string) error {
+							return tc.raceWrite(ctx, inner, msgID)
+						},
+					}
+				})
+				ctx := context.Background()
+
+				projectID := setupBrokerTestProject(t, s)
+				target := setupBrokerTestAgent(t, s, projectID, "cas-loss-target", "running")
+
+				ev := NewChannelEventPublisher()
+				defer ev.Close()
+				srv.SetEventPublisher(ev)
+				ch, unsub := ev.Subscribe("agent." + target.ID + ".message")
+				defer unsub()
+
+				msgID := api.NewUUID()
+				require.NoError(t, s.CreateMessage(ctx, &store.Message{
+					ID:            msgID,
+					ProjectID:     projectID,
+					Sender:        "user:alice@example.com",
+					SenderID:      tid("user-alice-cas"),
+					Recipient:     "agent:" + target.Slug,
+					RecipientID:   target.ID,
+					Msg:           "hello cas race",
+					Type:          messages.TypeInstruction,
+					AgentID:       target.ID,
+					CreatedAt:     time.Now(),
+					DispatchState: store.MessageDispatchDispatched,
+				}))
+
+				fault.Arm()
+				rr, resp := postMessageReport(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailuresRequest{
+					Deliveries: []messageDeliveryConfirmation{{MessageID: msgID, AgentID: target.ID, ProjectID: target.ProjectID}},
+				})
+				require.Equal(t, http.StatusOK, rr.Code)
+				assert.Equal(t, int32(1), wrapped.calls.Load(),
+					"must reach MarkMessageDelivered CAS (not stop at pre-CAS switch)")
+				assert.Equal(t, 0, resp.Delivered)
+				assert.Equal(t, 1, resp.Ignored)
+
+				row, err := s.GetMessage(ctx, msgID)
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantState, row.DispatchState)
+
+				select {
+				case evt := <-ch:
+					t.Fatalf("unexpected live SSE event published on CAS loss: %s", string(evt.Data))
+				default:
+				}
+			})
+		}
+	})
+
+	t.Run("publishes_SSE_with_live_finalization_context_when_request_cancelled_during_cas", func(t *testing.T) {
+		var reqCancel context.CancelFunc
+		srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *casLossDeliveryStore {
+			return &casLossDeliveryStore{
+				Store: inner,
+				fault: f,
+				onBefore: func(_ context.Context, _ string) error {
+					if reqCancel != nil {
+						reqCancel()
+					}
+					return nil
+				},
+			}
+		})
+		ctx := context.Background()
+
+		projectID := setupBrokerTestProject(t, s)
+		target := setupBrokerTestAgent(t, s, projectID, "fin-ctx-target", "running")
+
+		pub := &ctxCheckEventPublisher{}
+		srv.SetEventPublisher(pub)
+
+		msgID := api.NewUUID()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID:            msgID,
+			ProjectID:     projectID,
+			Sender:        "user:alice@example.com",
+			SenderID:      tid("user-alice-finctx"),
+			Recipient:     "agent:" + target.Slug,
+			RecipientID:   target.ID,
+			Msg:           "hello finCtx",
+			Type:          messages.TypeInstruction,
+			AgentID:       target.ID,
+			CreatedAt:     time.Now(),
+			DispatchState: store.MessageDispatchDispatched,
+		}))
+
+		reqCtx, cancel := context.WithCancel(ctx)
+		reqCancel = cancel
+		defer cancel()
+
+		fault.Arm()
+		ok := srv.applyBrokerMessageDeliveryOutcome(reqCtx, target.RuntimeBrokerID, messageDeliveryConfirmation{
+			MessageID: msgID,
+			AgentID:   target.ID,
+			ProjectID: target.ProjectID,
+		})
+		assert.True(t, ok)
+		assert.ErrorIs(t, reqCtx.Err(), context.Canceled, "request context should have been cancelled during CAS")
+		assert.True(t, pub.called, "expected live SSE event to be published")
+		assert.NoError(t, pub.ctxErr, "PublishUserMessage must receive a live finalization context, not the cancelled request context")
+	})
+}
+
+type ctxCheckEventPublisher struct {
+	noopEventPublisher
+	called bool
+	ctxErr error
+}
+
+func (p *ctxCheckEventPublisher) PublishUserMessage(ctx context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef, _ ...ChatEventOption) {
+	p.called = true
+	p.ctxErr = ctx.Err()
+}
+
+type casLossDeliveryStore struct {
+	store.Store
+	fault    *storeFaultSwitch
+	onBefore func(ctx context.Context, msgID string) error
+	calls    atomic.Int32
+}
+
+func (w *casLossDeliveryStore) MarkMessageDelivered(ctx context.Context, id string) (bool, error) {
+	if !w.fault.Active() {
+		return w.Store.MarkMessageDelivered(ctx, id)
+	}
+	w.calls.Add(1)
+	if w.onBefore != nil {
+		if err := w.onBefore(ctx, id); err != nil {
+			return false, err
+		}
+	}
+	return w.Store.MarkMessageDelivered(ctx, id)
 }

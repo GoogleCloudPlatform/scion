@@ -5861,28 +5861,44 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	s.enableConduitDelivery(mgr)
 
 	msgCtx := agent.WithDeliveryMessageID(ctx, req.MessageID)
-	if !req.Interrupt && req.MessageID != "" {
-		// Non-interrupt messages are buffered and delivered after this
-		// handler has already answered 200. Register a callback so a
-		// later delivery failure is reported back to the hub, which
-		// then marks the message failed instead of "dispatched" (#1820).
-		failure := hubclient.MessageFailure{
+	connName := r.Header.Get("X-Scion-Hub-Connection")
+	if req.MessageID != "" {
+		projID := projectID
+		if projID == "" {
+			projID = req.ProjectID
+		}
+		// Report successful session injection back to the hub so the
+		// message moves from "dispatched" (Accepted) to "delivered"
+		// (ptone/scion#9015). AgentManager only invokes this on the exec
+		// injection path, never on conduit deliveries which the hub
+		// already finalizes directly.
+		delivery := hubclient.MessageDelivery{
 			MessageID: req.MessageID,
 			AgentID:   id,
-			ProjectID: projectID,
+			ProjectID: projID,
 		}
-		if failure.ProjectID == "" {
-			failure.ProjectID = req.ProjectID
-		}
-		connName := r.Header.Get("X-Scion-Hub-Connection")
-		msgCtx = agent.WithDeliveryFailureHandler(msgCtx, func(deliveryErr error) {
-			f := failure
-			if errors.Is(deliveryErr, agent.ErrAwaitingSession) {
-				f.Code = hubclient.MessageFailureCodeAwaitingSession
-			}
-			f.Reason = "broker delivery failed: " + deliveryErr.Error()
-			go s.reportMessageFailure(connName, f)
+		msgCtx = agent.WithDeliverySuccessHandler(msgCtx, func() {
+			go s.reportMessageDelivery(connName, delivery)
 		})
+		if !req.Interrupt {
+			// Non-interrupt messages are buffered and delivered after this
+			// handler has already answered 200. Register a callback so a
+			// later delivery failure is reported back to the hub, which
+			// then marks the message failed instead of "dispatched" (#1820).
+			failure := hubclient.MessageFailure{
+				MessageID: req.MessageID,
+				AgentID:   id,
+				ProjectID: projID,
+			}
+			msgCtx = agent.WithDeliveryFailureHandler(msgCtx, func(deliveryErr error) {
+				f := failure
+				if errors.Is(deliveryErr, agent.ErrAwaitingSession) {
+					f.Code = hubclient.MessageFailureCodeAwaitingSession
+				}
+				f.Reason = "broker delivery failed: " + deliveryErr.Error()
+				go s.reportMessageFailure(connName, f)
+			})
+		}
 	}
 	// Attachments (ptone/scion#4596): their capabilities are redeemed now,
 	// at receipt, on a context detached from this request; the files are

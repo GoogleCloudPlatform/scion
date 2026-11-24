@@ -152,6 +152,11 @@ type agentBuffer struct {
 	// accepted and has no other way to learn it was lost (#1820).
 	onFailure []DeliveryFailureHandler
 
+	// onSuccess holds per-message delivery-success callbacks registered by
+	// the sender (nil entries allowed), aligned with messages. Invoked when
+	// exec session injection succeeds (never for conduit-finalized flushes).
+	onSuccess []DeliverySuccessHandler
+
 	// pre holds per-message PreDelivery work (nil entries allowed), aligned
 	// with messages.
 	pre []PreDelivery
@@ -180,12 +185,15 @@ type bufferedFlush struct {
 	// PreDelivery text, and hub id), aligned with the failure handlers. A
 	// flush too large for one conduit delivery is split along them.
 	parts []deliveryPart
+	// onSuccess holds per-message success callbacks aligned with parts.
+	onSuccess []DeliverySuccessHandler
 }
 
 // deliveryPart is one coalesced message of a flush.
 type deliveryPart struct {
-	text string
-	id   string
+	text      string
+	id        string
+	onSuccess DeliverySuccessHandler
 }
 
 // splitDeliveryError is a split flush that stopped at a sub-flush: the
@@ -218,6 +226,11 @@ func (e *finalDeliveryError) Unwrap() error { return e.Err }
 // delivered after the caller was told it was accepted. It is invoked from
 // the buffer's timer goroutine and must not block for long.
 type DeliveryFailureHandler func(err error)
+
+// DeliverySuccessHandler is called when a message's session injection
+// succeeds (on the exec path; conduit deliveries are finalized directly by
+// the hub). It must not block for long.
+type DeliverySuccessHandler func()
 
 // PartialDeliveryError marks a deliverFunc failure as unsafe to retry: some
 // of the coalesced message content already reached the agent's terminal
@@ -254,6 +267,29 @@ func DeliveryFailureHandlerFromContext(ctx context.Context) DeliveryFailureHandl
 		return nil
 	}
 	fn, _ := ctx.Value(deliveryFailureHandlerKey{}).(DeliveryFailureHandler)
+	return fn
+}
+
+type deliverySuccessHandlerKey struct{}
+
+// WithDeliverySuccessHandler returns a context carrying fn. When passed to
+// AgentManager.Message, fn is invoked when exec session injection succeeds.
+// Only the value is read from ctx; its cancellation does not affect buffered
+// delivery.
+func WithDeliverySuccessHandler(ctx context.Context, fn DeliverySuccessHandler) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, deliverySuccessHandlerKey{}, fn)
+}
+
+// DeliverySuccessHandlerFromContext returns the handler attached with
+// WithDeliverySuccessHandler, or nil.
+func DeliverySuccessHandlerFromContext(ctx context.Context) DeliverySuccessHandler {
+	if ctx == nil {
+		return nil
+	}
+	fn, _ := ctx.Value(deliverySuccessHandlerKey{}).(DeliverySuccessHandler)
 	return fn
 }
 
@@ -299,9 +335,20 @@ func (mb *MessageBuffer) SendWithHooks(agentID, projectID string, message string
 	mb.sendWithID(agentID, projectID, message, "", onFailure, pre)
 }
 
+// SendWithOutcomeHandlers is SendWithFailureHandler with an additional
+// onSuccess callback invoked when the coalesced delivery succeeds.
+func (mb *MessageBuffer) SendWithOutcomeHandlers(agentID, projectID string, message string, onFailure DeliveryFailureHandler, onSuccess DeliverySuccessHandler) {
+	mb.sendWithIDAndSuccess(agentID, projectID, message, "", onFailure, onSuccess, nil)
+}
+
 // sendWithID is SendWithHooks for a message with hub message id messageID
 // ("" for none).
 func (mb *MessageBuffer) sendWithID(agentID, projectID string, message, messageID string, onFailure DeliveryFailureHandler, pre PreDelivery) {
+	mb.sendWithIDAndSuccess(agentID, projectID, message, messageID, onFailure, nil, pre)
+}
+
+// sendWithIDAndSuccess is sendWithID with an optional success callback.
+func (mb *MessageBuffer) sendWithIDAndSuccess(agentID, projectID string, message, messageID string, onFailure DeliveryFailureHandler, onSuccess DeliverySuccessHandler, pre PreDelivery) {
 	mb.mu.Lock()
 	if mb.closed {
 		mb.mu.Unlock()
@@ -329,6 +376,7 @@ func (mb *MessageBuffer) sendWithID(agentID, projectID string, message, messageI
 	// Append the message to the pending list.
 	buf.messages = append(buf.messages, message)
 	buf.onFailure = append(buf.onFailure, onFailure)
+	buf.onSuccess = append(buf.onSuccess, onSuccess)
 	buf.pre = append(buf.pre, pre)
 	buf.messageIDs = append(buf.messageIDs, messageID)
 	util.Debugf("msgbuffer: queued message for agent %s project %s (%d pending)", agentID, projectID, len(buf.messages))
@@ -403,6 +451,7 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 	// Take ownership of the pending messages and clean up the buffer entry.
 	pending := buf.messages
 	handlers := buf.onFailure
+	successHandlers := buf.onSuccess
 	pres := buf.pre
 	ids := buf.messageIDs
 	projectID := buf.projectID
@@ -426,7 +475,7 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 	util.Debugf("msgbuffer: flushing %d message(s) for agent %s project %s", len(pending), agentID, projectID)
 
 	f := bufferedFlush{agentID: agentID, projectID: projectID, text: combined,
-		readyWanted: waitForReady && mb.waitReady != nil}
+		readyWanted: waitForReady && mb.waitReady != nil, onSuccess: successHandlers}
 	for _, pd := range pres {
 		if pd != nil {
 			f.hasAttachments = true
@@ -437,7 +486,11 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 		if i < len(ids) {
 			id = ids[i]
 		}
-		f.parts = append(f.parts, deliveryPart{text: text, id: id})
+		var onSucc DeliverySuccessHandler
+		if i < len(successHandlers) {
+			onSucc = successHandlers[i]
+		}
+		f.parts = append(f.parts, deliveryPart{text: text, id: id, onSuccess: onSucc})
 	}
 	for _, id := range ids {
 		if id == "" {
@@ -455,6 +508,13 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 			err = mb.deliverFunc(agentID, projectID, combined, false)
 		}
 		if err == nil {
+			if mb.deliverFlush == nil {
+				for _, fn := range successHandlers {
+					if fn != nil {
+						fn()
+					}
+				}
+			}
 			return
 		}
 

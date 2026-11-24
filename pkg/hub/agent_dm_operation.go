@@ -917,9 +917,11 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			}, nil
 		}
 		if !dispatched {
-			// CAS miss — already transitioned by concurrent process.
-			// The dispatch itself succeeded; log for visibility but not an error.
-			s.messageLog.Warn("agent DM: MarkMessageDispatched CAS miss (already transitioned)",
+			// CAS miss — already transitioned by a concurrent process (for
+			// example, a fast interrupt DM whose broker delivery confirmation
+			// already transitioned pending->delivered before this call ran).
+			// The dispatch itself succeeded; keep at Debug to avoid Warn noise.
+			s.messageLog.Debug("agent DM: MarkMessageDispatched CAS miss (already transitioned)",
 				"message_id", msgID)
 		}
 	}

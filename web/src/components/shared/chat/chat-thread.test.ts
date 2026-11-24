@@ -1648,6 +1648,280 @@ describe('scion-chat-thread dispatch state from send response', () => {
     expect(msg?.createdAt).toBe('2026-01-01T00:00:01Z');
   });
 
+  // ptone/scion#9015: delivery state is monotonic — once "delivered", an
+  // out-of-order "dispatched", "pending", or omitted dispatchState never
+  // downgrades it back to a lower state, while "failed" stays terminal.
+  it('upgrades dispatched to delivered and never downgrades delivered in mergeMessages', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      mergeMessages(msgs: Message[]): void;
+    };
+
+    const base: Message = {
+      id: 'server-delivered-monotonic',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'hello',
+      type: 'instruction',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'dispatched',
+    };
+
+    internals.mergeMessages([base]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('dispatched');
+
+    // Broker confirmation arrives -> upgrades to delivered.
+    internals.mergeMessages([{ ...base, dispatchState: 'delivered' }]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('delivered');
+
+    // Out-of-order dispatched, pending, or omitted dispatchState must not downgrade.
+    internals.mergeMessages([{ ...base, dispatchState: 'dispatched' }]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('delivered');
+
+    internals.mergeMessages([{ ...base, dispatchState: 'pending' }]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('delivered');
+
+    const { dispatchState: _omitted, ...withoutState } = base;
+    internals.mergeMessages([withoutState]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('delivered');
+
+    // A stale synchronous timeout "failed" must not overwrite a confirmed "delivered".
+    internals.mergeMessages([
+      {
+        ...base,
+        dispatchState: 'failed',
+        dispatchFailureReason: 'broker request timed out',
+        dispatchFailureCode: 'dispatch_error',
+      },
+    ]);
+    const stillDelivered = internals.messageMap.get(base.id);
+    expect(stillDelivered?.dispatchState).toBe('delivered');
+    expect(stillDelivered?.dispatchFailureReason).toBeUndefined();
+    expect(stillDelivered?.dispatchFailureCode).toBeUndefined();
+  });
+
+  // ptone/scion#9015 (sec1 L1 W3): dispatched must not downgrade to pending or waking.
+  it('never downgrades dispatched to pending or waking in mergeMessages', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      mergeMessages(msgs: Message[]): void;
+    };
+
+    const base: Message = {
+      id: 'server-dispatched-monotonic',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'hello',
+      type: 'instruction',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'dispatched',
+    };
+
+    internals.mergeMessages([base]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('dispatched');
+
+    internals.mergeMessages([{ ...base, dispatchState: 'pending' }]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('dispatched');
+
+    internals.mergeMessages([{ ...base, dispatchState: 'waking' }]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('dispatched');
+  });
+
+  // ptone/scion#9015 (sec1 L2): if a synchronous dispatch timed out after the
+  // broker injected and confirmed delivery, the HTTP 201 response can carry a
+  // stale "failed" while the DB holds "delivered". Because the store never
+  // transitions failed -> delivered, a server-emitted "delivered" (SSE or
+  // history refetch) is authoritative and must converge the UI to "delivered"
+  // while clearing stale failure metadata.
+  it('converges stale timeout failed state to delivered when server emits delivered in mergeMessages', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      mergeMessages(msgs: Message[]): void;
+    };
+
+    const staleFailed: Message = {
+      id: 'server-timeout-then-delivered',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'stop now',
+      type: 'instruction',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'broker request timed out',
+      dispatchFailureCode: 'dispatch_error',
+    };
+
+    internals.mergeMessages([staleFailed]);
+    expect(internals.messageMap.get(staleFailed.id)?.dispatchState).toBe('failed');
+
+    // Later SSE or history refetch carries the authoritative DB state: delivered.
+    internals.mergeMessages([
+      {
+        ...staleFailed,
+        dispatchState: 'delivered',
+        dispatchFailureReason: undefined,
+        dispatchFailureCode: undefined,
+      },
+    ]);
+    const converged = internals.messageMap.get(staleFailed.id);
+    expect(converged?.dispatchState).toBe('delivered');
+    expect(converged?.dispatchFailureReason).toBeUndefined();
+    expect(converged?.dispatchFailureCode).toBeUndefined();
+  });
+
+  // ptone/scion#9015 (sec1 L1 W2 & L2): the sseVersion branch must never
+  // downgrade an SSE-delivered "delivered" message when HTTP resolves afterward
+  // with "dispatched" or a stale synchronous timeout "failed".
+  it('never downgrades a delivered message when HTTP resolves as dispatched or stale failed after the SSE echo (sseVersion branch)', async () => {
+    for (const httpCase of [
+      {
+        id: 'server-sse-first-delivered-http-dispatched',
+        body: { id: 'server-sse-first-delivered-http-dispatched', dispatchState: 'dispatched' },
+      },
+      {
+        id: 'server-sse-first-delivered-http-failed',
+        body: {
+          id: 'server-sse-first-delivered-http-failed',
+          dispatchState: 'failed',
+          dispatchFailureReason: 'broker request timed out',
+          dispatchFailureCode: 'dispatch_error',
+        },
+      },
+    ]) {
+      const el = await mount();
+      el.currentUserId = 'user-me';
+      const internals = el as unknown as {
+        messageMap: Map<string, Message>;
+        handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+      };
+
+      let resolveSend!: (response: Response) => void;
+      apiFetch.mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSend = resolve;
+          })
+      );
+      apiFetch.mockResolvedValue(emptyHistory());
+
+      const sendPromise = internals.handleChatSendV2(
+        new CustomEvent<ChatSendDetail>('chat-send', {
+          detail: {
+            text: 'hello',
+            plain: false,
+            interrupt: false,
+            onSuccess: vi.fn(),
+            mentions: [],
+            attachmentIds: [],
+          },
+        })
+      );
+
+      internals.messageMap.set(httpCase.id, {
+        id: httpCase.id,
+        projectId: '',
+        sender: 'me@example.com',
+        senderId: 'user-me',
+        recipient: 'agent:coder',
+        recipientId: 'coder',
+        msg: 'hello',
+        type: 'instruction',
+        agentId: '',
+        createdAt: '2026-01-01T00:00:00Z',
+        dispatchState: 'delivered',
+      });
+
+      resolveSend({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve(httpCase.body),
+      } as unknown as Response);
+
+      await sendPromise;
+
+      const msg = internals.messageMap.get(httpCase.id);
+      expect(msg?.dispatchState).toBe('delivered');
+      expect(msg?.dispatchFailureReason).toBeUndefined();
+      expect(msg?.dispatchFailureCode).toBeUndefined();
+    }
+  });
+
+  // ptone/scion#9015: mirror mergeMessages' dispatched monotonic guard in the
+  // sseVersion branch so a stale or out-of-order HTTP 201 carrying "pending" or
+  // "waking" never downgrades an SSE-delivered "dispatched" message.
+  it('never downgrades a dispatched message when HTTP resolves as pending or waking after the SSE echo (sseVersion branch)', async () => {
+    for (const staleState of ['pending', 'waking'] as const) {
+      const id = `server-sse-first-dispatched-http-${staleState}`;
+      const el = await mount();
+      el.currentUserId = 'user-me';
+      const internals = el as unknown as {
+        messageMap: Map<string, Message>;
+        handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+      };
+
+      let resolveSend!: (response: Response) => void;
+      apiFetch.mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSend = resolve;
+          })
+      );
+      apiFetch.mockResolvedValue(emptyHistory());
+
+      const sendPromise = internals.handleChatSendV2(
+        new CustomEvent<ChatSendDetail>('chat-send', {
+          detail: {
+            text: 'hello',
+            plain: false,
+            interrupt: false,
+            onSuccess: vi.fn(),
+            mentions: [],
+            attachmentIds: [],
+          },
+        })
+      );
+
+      internals.messageMap.set(id, {
+        id,
+        projectId: '',
+        sender: 'me@example.com',
+        senderId: 'user-me',
+        recipient: 'agent:coder',
+        recipientId: 'coder',
+        msg: 'hello',
+        type: 'instruction',
+        agentId: '',
+        createdAt: '2026-01-01T00:00:00Z',
+        dispatchState: 'dispatched',
+      });
+
+      resolveSend({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ id, dispatchState: staleState }),
+      } as unknown as Response);
+
+      await sendPromise;
+
+      expect(internals.messageMap.get(id)?.dispatchState).toBe('dispatched');
+    }
+  });
+
   // Round 4, item 2: the sseVersion branch of handleChatSendV2 (the SSE echo
   // lands before the HTTP response) has the same never-downgrade guard as
   // mergeMessages, but no test exercised an actual downgrade attempt there —

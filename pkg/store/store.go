@@ -2212,6 +2212,13 @@ type BrokerDispatchStore interface {
 	// MarkMessageDispatched CAS-flips a message pending->dispatched (dedupes drains).
 	MarkMessageDispatched(ctx context.Context, id string) (dispatched bool, err error)
 
+	// MarkMessageDelivered CAS-flips a pending or dispatched message to
+	// delivered when the runtime broker confirms session injection succeeded.
+	// Terminal or conduit-bound states (failed, delivered, deferred,
+	// no_recipient, delivering, partial, awaiting_session) are never
+	// overwritten. It reports whether this call made the transition.
+	MarkMessageDelivered(ctx context.Context, id string) (bool, error)
+
 	// MarkMessageFailed sets a message's dispatch_state to "failed" with a
 	// reason. A failed or delivered row is left alone; a delivering row
 	// also gets the stored outcome DeliveryOutcomeUnknownPartial.

@@ -296,7 +296,16 @@ func (s *Server) unbindDeliveryWithProof(r *http.Request, req *agentcontrol.Deli
 func (s *Server) finishDelivery(r *http.Request, req *agentcontrol.DeliverRequest, state, outcome string) {
 	ctx, cancel := finalizationContext(r.Context())
 	defer cancel()
-	if _, err := s.store.FinishMessageDelivery(ctx, req.DeliveryID, req.MessageIDs, state, outcome); err != nil {
+	n, err := s.store.FinishMessageDelivery(ctx, req.DeliveryID, req.MessageIDs, state, outcome)
+	if err != nil {
 		s.messageLog.Error("message delivery: recording the outcome failed", "delivery_id", req.DeliveryID, "error", err)
+		return
+	}
+	if n > 0 && state == store.MessageDispatchDelivered && s.events != nil {
+		for _, msgID := range req.MessageIDs {
+			if msg, gerr := s.store.GetMessage(ctx, msgID); gerr == nil && msg != nil && msg.DispatchState == store.MessageDispatchDelivered {
+				s.notifyStoredMessageSenderDelivered(ctx, msg)
+			}
+		}
 	}
 }
