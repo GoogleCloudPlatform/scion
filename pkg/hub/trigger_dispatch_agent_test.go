@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -446,8 +448,8 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 	})
 
 	t.Run("reserved_label_keys_and_label_count", func(t *testing.T) {
-		for _, k := range []string{"trigger", "trigger_event", "trigger_source"} {
-			req := baseReq("res-lbl-" + k)
+		for _, k := range []string{"trigger", "trigger_event", "trigger_source", githubTokenSourceProjectLabel} {
+			req := baseReq("res-lbl-" + api.Slugify(k))
 			req.Action.Labels = map[string]string{k: "val"}
 			assertErrCode(t, postTrigger(userCtx, req), http.StatusBadRequest, "reserved_label_key")
 		}
@@ -1705,4 +1707,423 @@ func TestScheduleDispatchAgent_IgnoresStrayAgentRoleAndCleanCollisionError(t *te
 	out2 := f.sched.srv.fireAction(ctx, req)
 	assert.Equal(t, hubfire.FireStatusFailed, out2.Status)
 	assert.Equal(t, `agent "sched-stray-role" already exists in project`, out2.Error)
+}
+
+func TestTriggerDispatchAgent_AuthoringAuthorityAndSelfSufficientValidate(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "authz-consol")
+	userCtx := f.userAuth(t, f.sched.creator)
+	epResp := f.createEndpoint(t, userCtx, "consol-ep")
+	ep, err := f.sched.store.GetWebhookEndpoint(ctx, epResp.ID)
+	require.NoError(t, err)
+
+	validPayload, err := json.Marshal(DispatchAgentEventPayload{
+		Template: "default",
+		Task:     "Run ${event.id}",
+	})
+	require.NoError(t, err)
+
+	action := &dispatchAgentAction{srv: f.sched.srv}
+	webhookCtx := withDispatchAgentAuthoringOpts(ctx, dispatchAgentAuthoringOpts{
+		sourceKind: store.TriggerSourceKindWebhook,
+		endpoint:   ep,
+	})
+
+	t.Run("self_sufficient_validate_requires_replay_protected_source", func(t *testing.T) {
+		caller := GetIdentityFromContext(userCtx)
+		_, err := action.Validate(ctx, caller, f.sched.proj.ID, string(validPayload))
+		var ve *dispatchAgentValidationError
+		require.ErrorAs(t, err, &ve)
+		assert.Equal(t, http.StatusBadRequest, ve.status)
+		assert.Equal(t, "source_not_replay_protected", ve.code)
+	})
+
+	t.Run("self_sufficient_validate_enforces_github_experiment_gate", func(t *testing.T) {
+		// hub.github_triggers is disabled by default in newTriggerDispatchAgentFixture.
+		caller := GetIdentityFromContext(userCtx)
+		ghCtx := withDispatchAgentAuthoringOpts(ctx, dispatchAgentAuthoringOpts{
+			sourceKind: store.TriggerSourceKindGitHub,
+		})
+		_, err := action.Validate(ghCtx, caller, f.sched.proj.ID, string(validPayload))
+		var ve *dispatchAgentValidationError
+		require.ErrorAs(t, err, &ve)
+		assert.Equal(t, http.StatusBadRequest, ve.status)
+		assert.Equal(t, ErrCodeExperimentDisabled, ve.code)
+	})
+
+	t.Run("agent_project_mismatch_refused", func(t *testing.T) {
+		otherProj := &store.Project{ID: api.NewUUID(), Name: "other-proj", Slug: "other-proj"}
+		require.NoError(t, f.sched.store.CreateProject(ctx, otherProj))
+		otherAg := &store.Agent{
+			ID:            api.NewUUID(),
+			Slug:          "other-proj-agent",
+			Name:          "other-proj-agent",
+			ProjectID:     otherProj.ID,
+			Phase:         "running",
+			AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+		}
+		require.NoError(t, f.sched.store.CreateAgent(ctx, otherAg))
+		otherIdent := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: otherAg.ID},
+			ProjectID: otherProj.ID,
+			Scopes:    []AgentTokenScope{ScopeAgentCreate},
+			Ancestry:  []string{f.sched.creator.ID},
+		}}
+		_, err := action.Validate(webhookCtx, otherIdent, f.sched.proj.ID, string(validPayload))
+		var ve *dispatchAgentValidationError
+		require.ErrorAs(t, err, &ve)
+		assert.Equal(t, http.StatusForbidden, ve.status)
+		assert.Contains(t, ve.message, "own project")
+	})
+
+	t.Run("non_agent_non_user_identity_refused", func(t *testing.T) {
+		brokerIdent := NewBrokerIdentity("broker-1")
+		_, err := action.Validate(webhookCtx, brokerIdent, f.sched.proj.ID, string(validPayload))
+		var ve *dispatchAgentValidationError
+		require.ErrorAs(t, err, &ve)
+		assert.Equal(t, http.StatusForbidden, ve.status)
+	})
+
+	t.Run("suspended_agent_author_standing_refused", func(t *testing.T) {
+		// Create a dedicated root user for this agent so suspending the root
+		// user puts only this agent out of standing without affecting other subtests.
+		rootUser := &store.User{
+			ID:          api.NewUUID(),
+			Email:       "suspended-root@example.com",
+			DisplayName: "Suspended Root",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+		}
+		require.NoError(t, f.sched.store.CreateUser(ctx, rootUser))
+		grantProjectRole(t, f.sched.store, rootUser.ID, f.sched.proj.ID, store.ProjectRoleOwner)
+
+		heldAg := &store.Agent{
+			ID:            api.NewUUID(),
+			Slug:          "held-author",
+			Name:          "held-author",
+			ProjectID:     f.sched.proj.ID,
+			Phase:         "running",
+			CreatedBy:     rootUser.ID,
+			OwnerID:       rootUser.ID,
+			Ancestry:      []string{rootUser.ID},
+			AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+		}
+		require.NoError(t, f.sched.store.CreateAgent(ctx, heldAg))
+		require.NoError(t, f.sched.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
+			ID:            api.NewUUID(),
+			DelegatorType: store.DelegationPrincipalUser,
+			DelegatorID:   rootUser.ID,
+			DelegateType:  store.DelegationPrincipalAgent,
+			DelegateID:    heldAg.ID,
+			ScopeType:     store.RoleScopeProject,
+			ScopeID:       f.sched.proj.ID,
+			Role:          string(AgentRoleFull),
+			Active:        true,
+			EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		}))
+		heldCtx := f.agentAuth(t, heldAg, AgentRoleFull)
+		heldEPResp := f.createEndpoint(t, heldCtx, "held-ep")
+		heldEP, err := f.sched.store.GetWebhookEndpoint(ctx, heldEPResp.ID)
+		require.NoError(t, err)
+
+		// Place an active hold on the authoring agent while keeping its root
+		// user and delegation chain live: agentCreateDecision still allows, so
+		// refusal must come from agentStanding (ptone/scion#3433).
+		heldIdent := GetIdentityFromContext(heldCtx)
+		require.True(t, f.sched.srv.agentCreateDecision(ctx, heldIdent, f.sched.proj.ID).Allowed,
+			"precondition: delegation chain must admit before placing hold")
+		_, err = f.sched.store.CreateAgentHolds(ctx, []*store.AgentHold{{
+			AgentID:           heldAg.ID,
+			ProjectID:         f.sched.proj.ID,
+			Cause:             store.AgentHoldCauseOwnerAccessEnded,
+			RootPrincipalType: store.AgentHoldRootUser,
+			RootPrincipalID:   rootUser.ID,
+			Trigger:           store.MembershipLossTriggerMemberRemove,
+			ActorKind:         "system",
+			ActorID:           "hub",
+			CorrelationID:     "test-standing-author",
+		}})
+		require.NoError(t, err)
+		require.True(t, f.sched.srv.agentCreateDecision(ctx, heldIdent, f.sched.proj.ID).Allowed,
+			"precondition: agentCreateDecision must still allow with live chain so agentStanding is exercised")
+
+		// Direct Validate fails in agentStanding with DeniedByDelegationCeiling.
+		heldValidateCtx := withDispatchAgentAuthoringOpts(ctx, dispatchAgentAuthoringOpts{
+			sourceKind: store.TriggerSourceKindWebhook,
+			endpoint:   heldEP,
+		})
+		_, err = action.Validate(heldValidateCtx, heldIdent, f.sched.proj.ID, string(validPayload))
+		var ve *dispatchAgentValidationError
+		require.ErrorAs(t, err, &ve)
+		assert.Equal(t, http.StatusForbidden, ve.status)
+		assert.Equal(t, DeniedByDelegationCeiling, ve.deniedBy)
+		assert.Contains(t, ve.reason, "not in good standing")
+
+		// HTTP POST /triggers also refuses the out-of-standing agent (404 from
+		// resolveTriggerWebhookSource's standing/endpoint-probing mask, or 403).
+		rec := f.doJSON(t, heldCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   "from-held-author",
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: heldEP.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+				Action: TriggerActionSpec{
+					Type:     store.TriggerActionDispatchAgent,
+					Template: "default",
+					Task:     "Run ${event.id}",
+				},
+			})
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
+
+	t.Run("self_sufficient_validate_enforces_uat_hop_ceiling_without_precomputed_ceiling", func(t *testing.T) {
+		base := NewAuthenticatedUser(f.sched.creator.ID, f.sched.creator.Email, f.sched.creator.DisplayName, f.sched.creator.Role, "user")
+		uatPerms := append(
+			agentScopeCoverage(ScopesForRole(AgentRoleReadOnly)),
+			"agent.create",
+			"trigger.create",
+			"webhook_endpoint.read",
+		)
+		uatIdent := NewScopedUserIdentityWithCeiling(
+			base,
+			f.sched.proj.ID,
+			[]string{"project:read", "agent:create", "agent:read", "agent:list", "trigger:create", "webhook_endpoint:read"},
+			api.NewUUID(),
+			permissions.FrozenPermissionCeiling{
+				Version:       1,
+				PermissionIDs: sortedUniqueIDs(uatPerms),
+			},
+		)
+		fullPayload, mErr := json.Marshal(DispatchAgentEventPayload{
+			Template:  "default",
+			Task:      "Run ${event.id}",
+			AgentRole: string(AgentRoleFull),
+		})
+		require.NoError(t, mErr)
+		_, err := action.Validate(webhookCtx, uatIdent, f.sched.proj.ID, string(fullPayload))
+		var ve *dispatchAgentValidationError
+		require.ErrorAs(t, err, &ve)
+		assert.Equal(t, http.StatusForbidden, ve.status)
+		assert.Equal(t, DeniedByDelegationCeiling, ve.deniedBy)
+	})
+}
+
+type recordingTemplateRefusalAuditSink struct {
+	mu      sync.Mutex
+	records []trigger.TemplateRefusalAuditRecord
+}
+
+func (s *recordingTemplateRefusalAuditSink) RecordTemplateRefusal(_ context.Context, rec trigger.TemplateRefusalAuditRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = append(s.records, rec)
+}
+
+func (s *recordingTemplateRefusalAuditSink) snapshot() []trigger.TemplateRefusalAuditRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]trigger.TemplateRefusalAuditRecord, len(s.records))
+	copy(out, s.records)
+	return out
+}
+
+func TestTriggerDispatchAgent_TemplateRefusalTypedAudit(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "tmpl-audit")
+	userCtx := f.userAuth(t, f.sched.creator)
+	ep := f.createEndpoint(t, userCtx, "audit-ep")
+
+	sink := &recordingTemplateRefusalAuditSink{}
+	f.sched.srv.SetTriggerTemplateRefusalAuditSink(sink)
+	t.Cleanup(func() { f.sched.srv.SetTriggerTemplateRefusalAuditSink(nil) })
+
+	const secretVal = "SUPER_SECRET_SENTINEL_NEVER_AUDIT_12345"
+
+	raw, err := json.Marshal(DispatchAgentEventPayload{
+		Template:      "default",
+		Task:          "Do work",
+		AgentName:     "pr-${event.payload.bad_name}",
+		UntrustedVars: []string{"event.payload.bad_name"},
+	})
+	require.NoError(t, err)
+
+	trigID := api.NewUUID()
+	evID := api.NewUUID()
+	fireID := api.NewUUID()
+	out := f.sched.srv.fireAction(ctx, hubfire.FireRequest{
+		ProjectID: f.sched.proj.ID,
+		Authority: hubfire.RecordedAuthority{
+			Attribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+				InitiatorPrincipalID:    f.sched.creator.ID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+				AttributionVersion:      1,
+				AuthorizationRevision:   1,
+			},
+			Ceiling:        store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			DefinitionKind: hubfire.DefinitionKindTrigger,
+			DefinitionID:   trigID,
+			FireID:         fireID,
+		},
+		ActionType: store.TriggerActionDispatchAgent,
+		Payload:    string(raw),
+		Event: &hubfire.FireEvent{
+			ID:         evID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   ep.ID,
+			Type:       "webhook.received",
+			ReceivedAt: time.Now().UTC(),
+			Payload:    []byte(`{"bad_name":"` + secretVal + `"}`),
+			Trigger:    &hubfire.FireTriggerRef{ID: trigID, Name: "audit-trig"},
+		},
+	})
+	require.Equal(t, hubfire.FireStatusRefused, out.Status)
+	assert.Equal(t, string(triggertemplate.KindValueRejected), out.Error)
+
+	recs := sink.snapshot()
+	require.Len(t, recs, 1)
+	assert.Equal(t, f.sched.proj.ID, recs[0].ProjectID)
+	assert.Equal(t, trigID, recs[0].TriggerID)
+	assert.Equal(t, evID, recs[0].EventID)
+	assert.Equal(t, fireID, recs[0].FireID)
+	assert.Equal(t, triggertemplate.SlotName, recs[0].Slot)
+	assert.Equal(t, "event.payload.bad_name", recs[0].Path)
+	assert.Equal(t, string(triggertemplate.KindValueRejected), recs[0].Reason)
+	recJSON, _ := json.Marshal(recs[0])
+	assert.NotContains(t, string(recJSON), secretVal)
+}
+
+func TestTriggerHandlers_RefuseCrossActionFields(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "cross-action")
+	userCtx := f.userAuth(t, f.sched.creator)
+	ep := f.createEndpoint(t, userCtx, "cross-ep")
+
+	targetAg := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "cross-target",
+		Name:      "cross-target",
+		ProjectID: f.sched.proj.ID,
+		Phase:     "running",
+		CreatedBy: f.sched.creator.ID,
+		OwnerID:   f.sched.creator.ID,
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, targetAg))
+
+	postTrig := func(action TriggerActionSpec) *httptest.ResponseRecorder {
+		return f.doJSON(t, userCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   "cross-" + api.NewUUID()[:8],
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+				Action: action,
+			})
+	}
+
+	// message action carrying dispatch_agent / github.comment fields -> 400.
+	msgBadCases := []struct {
+		name      string
+		action    TriggerActionSpec
+		wantField string
+	}{
+		{
+			name:      "message_with_task",
+			action:    TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAg.ID, Message: "hi", Task: "do work"},
+			wantField: "action.task",
+		},
+		{
+			name:      "message_with_labels",
+			action:    TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAg.ID, Message: "hi", Labels: map[string]string{"k": "v"}},
+			wantField: "action.labels",
+		},
+		{
+			name:      "message_with_agentRole",
+			action:    TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAg.ID, Message: "hi", AgentRole: "baseline"},
+			wantField: "action.agentRole",
+		},
+		{
+			name:      "message_with_body",
+			action:    TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAg.ID, Message: "hi", Body: "comment"},
+			wantField: "action.body",
+		},
+	}
+	for _, tc := range msgBadCases {
+		t.Run("create_"+tc.name, func(t *testing.T) {
+			rec := postTrig(tc.action)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.wantField)
+		})
+	}
+
+	// dispatch_agent action carrying message / github.comment fields -> 400.
+	dispatchBadCases := []struct {
+		name      string
+		action    TriggerActionSpec
+		wantField string
+	}{
+		{
+			name:      "dispatch_with_message",
+			action:    TriggerActionSpec{Type: store.TriggerActionDispatchAgent, Template: "default", Task: "run", Message: "hi"},
+			wantField: "action.message",
+		},
+		{
+			name:      "dispatch_with_agentId",
+			action:    TriggerActionSpec{Type: store.TriggerActionDispatchAgent, Template: "default", Task: "run", AgentID: targetAg.ID},
+			wantField: "action.agentId",
+		},
+		{
+			name:      "dispatch_with_interrupt",
+			action:    TriggerActionSpec{Type: store.TriggerActionDispatchAgent, Template: "default", Task: "run", Interrupt: true},
+			wantField: "action.interrupt",
+		},
+		{
+			name:      "dispatch_with_wake",
+			action:    TriggerActionSpec{Type: store.TriggerActionDispatchAgent, Template: "default", Task: "run", Wake: true},
+			wantField: "action.wake",
+		},
+	}
+	for _, tc := range dispatchBadCases {
+		t.Run("create_"+tc.name, func(t *testing.T) {
+			rec := postTrig(tc.action)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.wantField)
+		})
+	}
+
+	// PATCH with cross-action fields -> 400 (requires project-admin role for trigger.update).
+	adminUser := hubMemberUser(t, f.sched.store, api.NewUUID())
+	grantProjectRole(t, f.sched.store, adminUser.ID, f.sched.proj.ID, store.ProjectRoleAdmin)
+	adminCtx := f.userAuth(t, adminUser)
+
+	validRec := postTrig(TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAg.ID, Message: "ok"})
+	require.Equal(t, http.StatusCreated, validRec.Code, validRec.Body.String())
+	var created TriggerResponse
+	require.NoError(t, json.Unmarshal(validRec.Body.Bytes(), &created))
+
+	patchMsgRec := f.doJSON(t, adminCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", f.sched.proj.ID, created.ID),
+		UpdateTriggerRequest{
+			Action: &TriggerActionSpec{
+				Type:    store.TriggerActionMessage,
+				AgentID: targetAg.ID,
+				Message: "updated",
+				Task:    "stray-task",
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, patchMsgRec.Code, patchMsgRec.Body.String())
+	assert.Contains(t, patchMsgRec.Body.String(), "action.task")
+
+	patchDispatchRec := f.doJSON(t, adminCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", f.sched.proj.ID, created.ID),
+		UpdateTriggerRequest{
+			Action: &TriggerActionSpec{
+				Type:     store.TriggerActionDispatchAgent,
+				Template: "default",
+				Task:     "run",
+				Wake:     true,
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, patchDispatchRec.Code, patchDispatchRec.Body.String())
+	assert.Contains(t, patchDispatchRec.Body.String(), "action.wake")
 }

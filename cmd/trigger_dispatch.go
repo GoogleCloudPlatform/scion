@@ -169,6 +169,82 @@ func deriveDispatchUntrustedVars(action *hubclient.TriggerActionSpec) ([]string,
 	return derived, nil
 }
 
+func hasDispatchAgentFlagValues(v *dispatchAgentFlagValues) (string, bool) {
+	if v == nil {
+		return "", false
+	}
+	switch {
+	case strings.TrimSpace(v.template) != "":
+		return "--template", true
+	case v.task != "":
+		return "--task", true
+	case strings.TrimSpace(v.taskFile) != "":
+		return "--task-file", true
+	case strings.TrimSpace(v.agentName) != "":
+		return "--agent-name", true
+	case strings.TrimSpace(v.onNameConflict) != "":
+		return "--on-name-conflict", true
+	case strings.TrimSpace(v.branch) != "":
+		return "--branch", true
+	case len(v.labels) > 0:
+		return "--label", true
+	case v.ephemeral:
+		return "--ephemeral", true
+	case v.reuseMessage != "":
+		return "--reuse-message", true
+	case strings.TrimSpace(v.githubToken) != "":
+		return "--github-token", true
+	case strings.TrimSpace(v.agentRole) != "":
+		return "--agent-role", true
+	case len(v.allow) > 0:
+		return "--allow", true
+	default:
+		return "", false
+	}
+}
+
+func hasMessageFlagValues(agent, message string, interrupt, wake, plain bool) (string, bool) {
+	switch {
+	case strings.TrimSpace(agent) != "":
+		return "--agent", true
+	case message != "":
+		return "--message", true
+	case interrupt:
+		return "--interrupt", true
+	case wake:
+		return "--wake", true
+	case plain:
+		return "--plain", true
+	default:
+		return "", false
+	}
+}
+
+func validateUpdateCrossActionFlags(flags *pflag.FlagSet, targetType string) error {
+	if flags == nil {
+		return nil
+	}
+	var disallowed []string
+	switch targetType {
+	case "message":
+		disallowed = []string{
+			"template", "task", "task-file", "agent-name", "on-name-conflict",
+			"branch", "label", "ephemeral", "reuse-message", "github-token",
+			"agent-role", "allow",
+		}
+	case "dispatch_agent":
+		disallowed = []string{"agent", "message", "interrupt", "wake", "plain"}
+	default:
+		return nil
+	}
+	for _, name := range disallowed {
+		if flags.Changed(name) {
+			return newUsageError("--%s cannot be used with action type %q", name, targetType)
+		}
+	}
+	return nil
+}
+
 func buildDispatchAgentActionSpec(v *dispatchAgentFlagValues, allowExplicit bool) (hubclient.TriggerActionSpec, []string, error) {
 	taskText := v.task
 	taskFile := strings.TrimSpace(v.taskFile)
@@ -489,13 +565,20 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 			targetType = normalized
 		}
 
+		if err := validateUpdateCrossActionFlags(flags, targetType); err != nil {
+			return err
+		}
+
 		switch targetType {
 		case "message":
-			var spec hubclient.TriggerActionSpec
+			spec := hubclient.TriggerActionSpec{Type: "message"}
 			if existing.Action.Type == "message" {
-				spec = existing.Action
-			} else {
-				spec = hubclient.TriggerActionSpec{Type: "message"}
+				spec.AgentID = existing.Action.AgentID
+				spec.AgentName = existing.Action.AgentName
+				spec.Message = existing.Action.Message
+				spec.Interrupt = existing.Action.Interrupt
+				spec.Plain = existing.Action.Plain
+				spec.Wake = existing.Action.Wake
 			}
 			if flags.Changed("agent") {
 				agentRef := strings.TrimSpace(triggerUpdateAgent)
@@ -528,17 +611,27 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 			if flags.Changed("task") && flags.Changed("task-file") {
 				return newUsageError("--task and --task-file cannot be used together")
 			}
-			var spec hubclient.TriggerActionSpec
+			spec := hubclient.TriggerActionSpec{Type: "dispatch_agent"}
 			if existing.Action.Type == "dispatch_agent" {
-				spec = existing.Action
+				spec.AgentName = existing.Action.AgentName
+				spec.NameConflict = existing.Action.NameConflict
+				spec.Template = existing.Action.Template
+				spec.Task = existing.Action.Task
+				spec.Branch = existing.Action.Branch
+				spec.Ephemeral = existing.Action.Ephemeral
+				spec.GithubToken = existing.Action.GithubToken
+				spec.AgentRole = existing.Action.AgentRole
+				spec.ReuseMessage = existing.Action.ReuseMessage
+				spec.NoAuth = existing.Action.NoAuth
 				if existing.Action.Labels != nil {
 					spec.Labels = make(map[string]string, len(existing.Action.Labels))
 					for k, v := range existing.Action.Labels {
 						spec.Labels[k] = v
 					}
 				}
-			} else {
-				spec = hubclient.TriggerActionSpec{Type: "dispatch_agent"}
+				if existing.Action.UntrustedVars != nil {
+					spec.UntrustedVars = append([]string(nil), existing.Action.UntrustedVars...)
+				}
 			}
 			if flags.Changed("template") {
 				spec.Template = strings.TrimSpace(triggerUpdateDispatch.template)

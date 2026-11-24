@@ -674,3 +674,79 @@ func TestTriggerUpdate_PinsRevisionWhenActionChangedAndMaps409(t *testing.T) {
 	assert.Equal(t, 7, *gotPatch.ExpectedRevision)
 	assert.Contains(t, err.Error(), "revision conflict")
 }
+
+func TestTriggerCLI_RefusesCrossActionFlags(t *testing.T) {
+	t.Run("create_message_refuses_dispatch_flags", func(t *testing.T) {
+		resetTriggerDispatchTestFlags(t)
+		triggerName = "bad-msg"
+		triggerWebhookRef = "ep-1"
+		triggerAction = "message"
+		triggerAgent = "lead"
+		triggerMessage = "hi"
+		triggerDispatch.task = "stray task"
+
+		_, _, err := buildCreateTriggerRequestWithAllow(false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--task cannot be used with --action message")
+	})
+
+	t.Run("create_dispatch_refuses_message_flags", func(t *testing.T) {
+		resetTriggerDispatchTestFlags(t)
+		triggerName = "bad-dispatch"
+		triggerWebhookRef = "ep-1"
+		triggerAction = "dispatch-agent"
+		triggerDispatch.template = "default"
+		triggerDispatch.task = "run"
+		triggerMessage = "stray message"
+
+		_, _, err := buildCreateTriggerRequestWithAllow(false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--message cannot be used with --action dispatch-agent")
+	})
+
+	t.Run("update_refuses_cross_action_flags", func(t *testing.T) {
+		resetTriggerDispatchTestFlags(t)
+		const trigID = "55555555-5555-5555-5555-555555555555"
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodGet {
+				_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+					ID:                    trigID,
+					ProjectID:             "proj-1",
+					Name:                  "msg-trig",
+					AuthorizationRevision: 1,
+					Action: hubclient.TriggerActionSpec{
+						Type:      "message",
+						AgentName: "lead",
+						Message:   "hello",
+					},
+					Status: "active",
+				})
+				return
+			}
+			t.Errorf("unexpected %s request when cross-action flags should have failed client-side", r.Method)
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		origFn := triggerHubContextFn
+		t.Cleanup(func() { triggerHubContextFn = origFn })
+		triggerHubContextFn = func() (*HubContext, string, context.Context, context.CancelFunc, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			return &HubContext{Client: client, Endpoint: srv.URL}, "proj-1", ctx, cancel, nil
+		}
+
+		require.NoError(t, triggerUpdateCmd.Flags().Set("task", "not-for-message"))
+		t.Cleanup(func() {
+			_ = triggerUpdateCmd.Flags().Set("task", "")
+			triggerUpdateCmd.Flags().Lookup("task").Changed = false
+		})
+
+		err = runTriggerUpdate(triggerUpdateCmd, []string{trigID})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--task cannot be used with action type \"message\"")
+	})
+}

@@ -358,10 +358,19 @@ func validateTriggerPresetApplyAction(cmd *cobra.Command, dryRun bool) (hubclien
 
 	switch actionKind {
 	case "dispatch_agent":
+		if badFlag, ok := hasMessageFlagValues(triggerPresetApplyAgent, triggerPresetApplyMessage, triggerPresetApplyInterrupt, triggerPresetApplyWake, triggerPresetApplyPlain); ok {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("%s cannot be used with --action dispatch-agent", badFlag)
+		}
 		allowExplicit := cmd != nil && cmd.Flags().Changed("allow")
 		return buildDispatchAgentActionSpec(&triggerPresetApplyDispatchFlags, allowExplicit)
 
 	default:
+		if badFlag, ok := hasDispatchAgentFlagValues(&triggerPresetApplyDispatchFlags); ok {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("%s cannot be used with --action message", badFlag)
+		}
+		if cmd != nil && cmd.Flags().Changed("allow") {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("--allow cannot be used with --action message")
+		}
 		agentRef := strings.TrimSpace(triggerPresetApplyAgent)
 		if agentRef == "" {
 			return hubclient.TriggerActionSpec{}, nil, newUsageError("--agent is required")

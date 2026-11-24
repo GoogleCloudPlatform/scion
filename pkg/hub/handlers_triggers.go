@@ -352,6 +352,114 @@ func setTriggerETag(w http.ResponseWriter, rev int) {
 	w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("%d", rev)))
 }
 
+// validateTriggerActionCrossFields refuses action payloads carrying fields
+// that do not belong to actionType rather than silently dropping them
+// (P1c-1 rev-3 N2). Unknown action types return true here so the caller's
+// action-type switch reports the unsupported action type error.
+func validateTriggerActionCrossFields(w http.ResponseWriter, actionType string, spec *TriggerActionSpec) bool {
+	if spec == nil {
+		return true
+	}
+	var badField string
+	switch actionType {
+	case store.TriggerActionMessage:
+		switch {
+		case spec.NameConflict != "":
+			badField = "nameConflict"
+		case spec.Template != "":
+			badField = "template"
+		case spec.Task != "":
+			badField = "task"
+		case spec.Branch != "":
+			badField = "branch"
+		case len(spec.Labels) > 0:
+			badField = "labels"
+		case spec.Ephemeral:
+			badField = "ephemeral"
+		case spec.GithubToken != "":
+			badField = "githubToken"
+		case spec.AgentRole != "":
+			badField = "agentRole"
+		case spec.ReuseMessage != "":
+			badField = "reuseMessage"
+		case len(spec.UntrustedVars) > 0:
+			badField = "untrustedVars"
+		case spec.NoAuth:
+			badField = "noAuth"
+		case spec.Body != "":
+			badField = "body"
+		case spec.Target != "":
+			badField = "target"
+		case spec.ReplyInThread:
+			badField = "replyInThread"
+		}
+	case store.TriggerActionDispatchAgent:
+		switch {
+		case spec.AgentID != "":
+			badField = "agentId"
+		case spec.Message != "":
+			badField = "message"
+		case spec.Interrupt:
+			badField = "interrupt"
+		case spec.Plain:
+			badField = "plain"
+		case spec.Wake:
+			badField = "wake"
+		case spec.Body != "":
+			badField = "body"
+		case spec.Target != "":
+			badField = "target"
+		case spec.ReplyInThread:
+			badField = "replyInThread"
+		}
+	case store.TriggerActionGitHubComment:
+		switch {
+		case spec.AgentID != "":
+			badField = "agentId"
+		case spec.AgentName != "":
+			badField = "agentName"
+		case spec.Message != "":
+			badField = "message"
+		case spec.Interrupt:
+			badField = "interrupt"
+		case spec.Plain:
+			badField = "plain"
+		case spec.Wake:
+			badField = "wake"
+		case spec.NameConflict != "":
+			badField = "nameConflict"
+		case spec.Template != "":
+			badField = "template"
+		case spec.Task != "":
+			badField = "task"
+		case spec.Branch != "":
+			badField = "branch"
+		case len(spec.Labels) > 0:
+			badField = "labels"
+		case spec.Ephemeral:
+			badField = "ephemeral"
+		case spec.GithubToken != "":
+			badField = "githubToken"
+		case spec.AgentRole != "":
+			badField = "agentRole"
+		case spec.ReuseMessage != "":
+			badField = "reuseMessage"
+		case spec.NoAuth:
+			badField = "noAuth"
+		}
+	default:
+		return true
+	}
+	if badField != "" {
+		ValidationError(w, fmt.Sprintf("action.%s is not supported for action type %q", badField, actionType), map[string]any{
+			"field":      "action." + badField,
+			"actionType": actionType,
+		})
+		return false
+	}
+	return true
+}
+
 // readTriggerRequestJSON caps trigger and webhook-endpoint write request bodies
 // at maxTriggerRequestBodyBytes (64 KiB) via http.MaxBytesReader and maps
 // *http.MaxBytesError to 413 payload_too_large.
@@ -480,6 +588,9 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	actionType := strings.TrimSpace(req.Action.Type)
+	if !validateTriggerActionCrossFields(w, actionType, &req.Action) {
+		return
+	}
 	var actionPayload string
 	switch actionType {
 	case store.TriggerActionMessage:
@@ -1000,6 +1111,9 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			return
 		}
 		if req.Action != nil {
+			if !validateTriggerActionCrossFields(w, tr.ActionType, req.Action) {
+				return
+			}
 			var actionPayload string
 			switch tr.ActionType {
 			case store.TriggerActionMessage:

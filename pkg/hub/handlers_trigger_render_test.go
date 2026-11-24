@@ -23,6 +23,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"sync"
 	"testing"
@@ -471,4 +472,141 @@ func TestTriggerRender_GetProjectErrors(t *testing.T) {
 		rec := f.doTrigger(t, f.memberAuth, renderSubPath, http.MethodPost, nil)
 		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	})
+}
+
+func TestTriggerRender_GitHubFramingParityAndApproximationNotes(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	// Seed a GitHub-source dispatch_agent trigger with githubToken=installation
+	// directly in the store so we can test both with and without an installation.
+	rawPayload, err := json.Marshal(DispatchAgentEventPayload{
+		Template:      "default",
+		Task:          "Review PR ${event.payload.number}",
+		GithubToken:   DispatchAgentGitHubTokenInstallation,
+		UntrustedVars: []string{"event.payload.number"},
+	})
+	require.NoError(t, err)
+
+	tr := &store.Trigger{
+		ID:            api.NewUUID(),
+		ProjectID:     f.projectID,
+		Name:          "gh-render-parity",
+		SourceKind:    store.TriggerSourceKindGitHub,
+		MatchTypes:    []string{"github.pull_request.opened"},
+		ActionType:    store.TriggerActionDispatchAgent,
+		ActionPayload: string(rawPayload),
+		SubjectMode:   store.TriggerSubjectModeNew,
+		Status:        store.TriggerStatusActive,
+		CreatedBy:     f.owner.ID,
+	}
+	require.NoError(t, f.store.CreateTrigger(ctx, tr))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	ev := &store.TriggerEvent{
+		ID:           api.NewUUID(),
+		ProjectID:    f.projectID,
+		SourceKind:   store.TriggerSourceKindGitHub,
+		SourceID:     "acme/widgets",
+		Type:         "github.pull_request.opened",
+		Subject:      "pr:99",
+		DedupKey:     "gh-render-parity-1",
+		OccurredAt:   now,
+		ReceivedAt:   now,
+		Payload:      `{"number":99}`,
+		PayloadBytes: 13,
+		Status:       store.TriggerEventStatusProcessed,
+		CreatedAt:    now,
+	}
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
+
+	renderPath := tr.ID + "/render?eventId=" + url.QueryEscape(ev.ID)
+
+	// 1. Project has no GitHub App installation -> trailer includes Source: GitHub App
+	// AND the unavailable note, plus authority-free approximation note in resp.Notes.
+	recNoInstall := f.doTrigger(t, f.memberAuth, renderPath, http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, recNoInstall.Code, recNoInstall.Body.String())
+	var respNoInstall TriggerRenderResponse
+	require.NoError(t, json.Unmarshal(recNoInstall.Body.Bytes(), &respNoInstall))
+	require.Empty(t, respNoInstall.Errors)
+	require.NotNil(t, respNoInstall.Slots.Task)
+	assert.Contains(t, respNoInstall.Slots.Task.Rendered, "Source: GitHub App")
+	assert.Contains(t, respNoInstall.Slots.Task.Rendered, githubAccessUnavailableNote)
+	require.NotEmpty(t, respNoInstall.Notes)
+	assert.Contains(t, respNoInstall.Notes[0], "authority-free")
+
+	// 2. Project has an installation + wired minter -> trailer includes Source: GitHub App
+	// and omits the unavailable note.
+	installID := int64(4242)
+	require.NoError(t, f.store.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: installID,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          7,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	proj, err := f.store.GetProject(ctx, f.projectID)
+	require.NoError(t, err)
+	proj.GitHubInstallationID = &installID
+	require.NoError(t, f.store.UpdateProject(ctx, proj))
+
+	disp := NewHTTPAgentDispatcher(f.store, false, slog.Default())
+	disp.SetGitHubAppMinter(&recordingGitHubAppMinter{allowSource: true})
+	f.srv.SetDispatcher(disp)
+
+	recWithInstall := f.doTrigger(t, f.memberAuth, renderPath, http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, recWithInstall.Code, recWithInstall.Body.String())
+	var respWithInstall TriggerRenderResponse
+	require.NoError(t, json.Unmarshal(recWithInstall.Body.Bytes(), &respWithInstall))
+	require.Empty(t, respWithInstall.Errors)
+	require.NotNil(t, respWithInstall.Slots.Task)
+	assert.Contains(t, respWithInstall.Slots.Task.Rendered, "Source: GitHub App")
+	assert.NotContains(t, respWithInstall.Slots.Task.Rendered, githubAccessUnavailableNote)
+}
+
+func TestAuthorizeTriggerEventRow_EnforcesProjectOwnership(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	otherProj := &store.Project{ID: api.NewUUID(), Name: "other-ev-proj", Slug: "other-ev-proj"}
+	require.NoError(t, f.store.CreateProject(ctx, otherProj))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	otherEv := &store.TriggerEvent{
+		ID:           api.NewUUID(),
+		ProjectID:    otherProj.ID,
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     api.NewUUID(),
+		Type:         "webhook.received",
+		Subject:      "s",
+		DedupKey:     "other-proj-ev",
+		OccurredAt:   now,
+		ReceivedAt:   now,
+		Payload:      `{"secret":"cross-project"}`,
+		PayloadBytes: 26,
+		Status:       store.TriggerEventStatusProcessed,
+		CreatedAt:    now,
+	}
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, otherEv))
+
+	for _, tc := range []struct {
+		name string
+		auth Identity
+	}{
+		{name: "member", auth: f.memberAuth},
+		{name: "owner", auth: f.ownerAuth},
+		{name: "agent", auth: f.agentAAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := contextWithIdentity(ctx, tc.auth)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+f.projectID+"/trigger-events/"+otherEv.ID, nil).WithContext(reqCtx)
+			rec := httptest.NewRecorder()
+
+			assert.False(t, f.srv.authorizeTriggerEventRow(rec, req, f.projectID, ActionRead, otherEv))
+			assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+			d := f.srv.triggerEventAccessDecision(reqCtx, f.projectID, ActionRead, otherEv)
+			assert.False(t, d.allowed)
+		})
+	}
 }

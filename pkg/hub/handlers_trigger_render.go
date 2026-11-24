@@ -68,6 +68,7 @@ type TriggerRenderError struct {
 type TriggerRenderResponse struct {
 	Slots  TriggerRenderSlots   `json:"slots"`
 	Errors []TriggerRenderError `json:"errors"`
+	Notes  []string             `json:"notes,omitempty"`
 }
 
 // renderTrigger handles POST /api/v1/projects/{projectId}/triggers/{id}/render?eventId=<id>.
@@ -172,16 +173,6 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 		signatureMode: signatureMode,
 	})
 
-	frameCtx := triggertemplate.FrameContext{
-		EndpointName:  sourceName,
-		SignatureMode: signatureMode,
-		EventID:       ev.ID,
-	}
-	if ev.SourceKind == store.TriggerSourceKindGitHub {
-		frameCtx.Source = "GitHub App"
-	}
-	frameOpt := triggertemplate.WithFrame(frameCtx)
-
 	resp := TriggerRenderResponse{
 		Errors: []TriggerRenderError{},
 	}
@@ -198,6 +189,22 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
+
+		// Render stays authority-free: compute the GitHub-unavailable trailer
+		// note from the stored githubToken mode and the project's GitHub App
+		// installation without evaluating the trigger's recorded FireAuthority.
+		effectiveGitHubToken := resolveEffectiveDispatchGitHubToken(p.GithubToken, ev.SourceKind)
+		githubAccessUnavailable := effectiveGitHubToken == DispatchAgentGitHubTokenInstallation &&
+			!s.hasProjectGitHubMintInstallation(project)
+		frameOpt := triggertemplate.WithFrame(buildDispatchFrameContext(
+			ev.SourceKind,
+			sourceName,
+			signatureMode,
+			ev.ID,
+			githubAccessUnavailable,
+		))
+		resp.Notes = append(resp.Notes,
+			"Preview is authority-free: it does not evaluate the trigger's recorded author standing, parent-agent githubToken inheritance, or live GitHub App token minting.")
 
 		if res, rErr := renderSlotPreview(p.Task, triggertemplate.SlotTask, vars, p.UntrustedVars, frameOpt); rErr != nil {
 			resp.Errors = append(resp.Errors, toTriggerRenderError(triggertemplate.SlotTask, rErr))

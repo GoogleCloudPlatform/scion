@@ -30,6 +30,7 @@ const (
 	AuditEventReceived        = "trigger.event.received"
 	AuditEventSignatureFailed = "trigger.webhook.signature_failed"
 	AuditFirePrefix           = "trigger.fire."
+	AuditFireTemplateRefused  = AuditFirePrefix + "template_refused"
 
 	FailureAuditInterval   = time.Minute
 	maxFailureAuditEntries = 10000
@@ -269,4 +270,47 @@ func (s *SlogAuditSink) RecordFire(ctx context.Context, rec FireAuditRecord) {
 		attrs = append(attrs, slog.String(logging.AttrRequestID, reqID))
 	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, evType, attrs...)
+}
+
+// TemplateRefusalAuditRecord carries content-free metadata for a trigger fire
+// refused during template compilation or rendering (Stage 2 design §5.2, §5.3).
+// It carries only the slot name, placeholder path (when known), and closed
+// refusal reason — never expanded event values or rendered text.
+type TemplateRefusalAuditRecord struct {
+	ProjectID string
+	TriggerID string
+	EventID   string
+	FireID    string
+	Slot      string
+	Path      string
+	Reason    string
+}
+
+// TemplateRefusalAuditSink records content-free trigger.fire.template_refused
+// audit events.
+type TemplateRefusalAuditSink interface {
+	RecordTemplateRefusal(ctx context.Context, rec TemplateRefusalAuditRecord)
+}
+
+// RecordTemplateRefusal emits one content-free trigger.fire.template_refused
+// audit record carrying slot, path, and reason without ever logging expanded
+// values or rendered text.
+func (s *SlogAuditSink) RecordTemplateRefusal(ctx context.Context, rec TemplateRefusalAuditRecord) {
+	if s == nil {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.String("event_type", AuditFireTemplateRefused),
+		slog.String("project_id", rec.ProjectID),
+		slog.String("trigger_id", rec.TriggerID),
+		slog.String("event_id", rec.EventID),
+		slog.String("fire_id", rec.FireID),
+		slog.String("slot", rec.Slot),
+		slog.String("path", rec.Path),
+		slog.String("reason", rec.Reason),
+	}
+	if reqID := logging.RequestIDFromContext(ctx); reqID != "" {
+		attrs = append(attrs, slog.String(logging.AttrRequestID, reqID))
+	}
+	s.log.LogAttrs(ctx, slog.LevelWarn, AuditFireTemplateRefused, attrs...)
 }

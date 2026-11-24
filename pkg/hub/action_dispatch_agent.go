@@ -37,7 +37,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 const (
@@ -60,12 +59,15 @@ const (
 
 	hubAppliedTriggerLabelCount = 3
 	maxNameCollisionRetries     = 3
+
+	githubAccessUnavailableNote = "GitHub access is not available for this run."
 )
 
 var reservedTriggerLabelKeys = map[string]bool{
-	triggerLabelKeyTrigger:       true,
-	triggerLabelKeyTriggerEvent:  true,
-	triggerLabelKeyTriggerSource: true,
+	triggerLabelKeyTrigger:        true,
+	triggerLabelKeyTriggerEvent:   true,
+	triggerLabelKeyTriggerSource:  true,
+	githubTokenSourceProjectLabel: true,
 }
 
 var errDispatchAgentProjectLookup = errors.New("dispatch_agent project lookup failed")
@@ -80,16 +82,42 @@ func (e *dispatchAgentProjectNotFoundError) Error() string {
 
 // dispatchAgentValidationError carries a structured authoring-time error from
 // dispatchAgentAction.Validate so HTTP handlers can emit the exact §5.1 error
-// code and details without echoing sensitive values.
+// code, details, and denial attribution without echoing sensitive values.
 type dispatchAgentValidationError struct {
-	status  int
-	code    string
-	message string
-	details map[string]any
+	status   int
+	code     string
+	message  string
+	reason   string
+	deniedBy DeniedBy
+	cause    DenyCause
+	details  map[string]any
 }
 
 func (e *dispatchAgentValidationError) Error() string {
 	return e.message
+}
+
+type dispatchAgentAuthoringOpts struct {
+	sourceKind string
+	endpoint   *store.WebhookEndpoint
+	ceiling    *store.EffectCeiling
+	provenance *store.AuthorityProvenance
+}
+
+type dispatchAgentAuthoringOptsKey struct{}
+
+func withDispatchAgentAuthoringOpts(ctx context.Context, opts dispatchAgentAuthoringOpts) context.Context {
+	return context.WithValue(ctx, dispatchAgentAuthoringOptsKey{}, opts)
+}
+
+func dispatchAgentAuthoringOptsFromContext(ctx context.Context) dispatchAgentAuthoringOpts {
+	if ctx == nil {
+		return dispatchAgentAuthoringOpts{}
+	}
+	if opts, ok := ctx.Value(dispatchAgentAuthoringOptsKey{}).(dispatchAgentAuthoringOpts); ok {
+		return opts
+	}
+	return dispatchAgentAuthoringOpts{}
 }
 
 // dispatchAgentAction implements FireAction and FirePayloadValidator for
@@ -124,32 +152,54 @@ func (a *dispatchAgentAction) Detaches(_ hubfire.FireRequest) bool {
 	return false
 }
 
-// Validate parses, validates, and normalizes a trigger dispatch_agent payload
-// at authoring time (Stage 2 design §5.1). It is not sufficient on its own to
-// authorize trigger authoring: authorizeTriggerDispatchAgentAuthoring holds
-// the replay-protected-source, github-source, subject-skip, and caller
-// delegation-ceiling checks. Schedule authoring handlers continue authorizing
-// through authorizeScheduledDispatchAgentAuthoring.
+// Validate parses, validates, authorizes, and normalizes a trigger
+// dispatch_agent payload at authoring time (Stage 2 design §5.1, §5.1a, §5.5,
+// §7.3). It is self-sufficient: it runs replay-protected-source, github-source
+// experiment, payload/template/label, authorizeAgentCreateDecision (including
+// agent-project equality, identity default-deny, and agentStanding), role caps,
+// CanDelegate, and caller UAT-hop ceiling checks through the single
+// validateForAuthoring entry point. Callers without a replay-protected source
+// in context fail closed with source_not_replay_protected. Schedule authoring
+// handlers continue authorizing through authorizeScheduledDispatchAgentAuthoring.
 func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, projectID string, rawPayload string) (string, error) {
-	normalized, _, _, err := a.validateWithRole(ctx, caller, projectID, "", rawPayload)
-	return normalized, err
+	return a.validateForAuthoring(ctx, caller, projectID, rawPayload, dispatchAgentAuthoringOptsFromContext(ctx))
 }
 
-func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Identity, projectID string, sourceKind string, rawPayload string) (string, AgentRole, bool, error) {
+func (a *dispatchAgentAction) validateForAuthoring(
+	ctx context.Context,
+	caller Identity,
+	projectID string,
+	rawPayload string,
+	opts dispatchAgentAuthoringOpts,
+) (string, error) {
 	if a == nil || a.srv == nil {
-		return "", "", false, errors.New("dispatch_agent action: server not configured")
+		return "", errors.New("dispatch_agent action: server not configured")
 	}
 	if caller == nil {
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusUnauthorized,
 			code:    ErrCodeUnauthorized,
 			message: "authentication required",
 		}
 	}
+	if opts.sourceKind == store.TriggerSourceKindGitHub && !a.srv.githubTriggersEnabled() {
+		return "", &dispatchAgentValidationError{
+			status:  http.StatusBadRequest,
+			code:    ErrCodeExperimentDisabled,
+			message: "GitHub triggers require the hub.github_triggers experiment to be enabled",
+		}
+	}
+	if !trigger.SourceReplayProtected(opts.sourceKind, opts.endpoint) {
+		return "", &dispatchAgentValidationError{
+			status:  http.StatusBadRequest,
+			code:    "source_not_replay_protected",
+			message: "dispatch_agent triggers require a replay-protected source",
+		}
+	}
 
 	var payload DispatchAgentEventPayload
 	if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: "invalid dispatch_agent payload",
@@ -158,7 +208,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 
 	// Template is literal only (S1 §5.8 rule 1, S2 §5.1).
 	if strings.Contains(payload.Template, "${") {
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_template",
 			message: "template must be a literal template name and cannot contain template placeholders",
@@ -170,7 +220,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 		}
 	}
 	if !templateRefAllowed(payload.Template) {
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: templateRefRefusal,
@@ -179,7 +229,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 
 	// Task <= 16 KiB before rendering (§5.1).
 	if len(payload.Task) > triggertemplate.MaxTaskBytes {
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: fmt.Sprintf("action.task exceeds maximum length of %d bytes", triggertemplate.MaxTaskBytes),
@@ -190,7 +240,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 	switch payload.NameConflict {
 	case "", DispatchAgentNameConflictSuffix, DispatchAgentNameConflictSkip:
 	default:
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
 			message: fmt.Sprintf("unsupported nameConflict %q (supported: suffix, skip)", payload.NameConflict),
@@ -200,7 +250,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 
 	// Ephemeral capability gate (§5.5).
 	if payload.Ephemeral {
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "ephemeral_unsupported",
 			message: "ephemeral agents are not yet supported",
@@ -213,14 +263,14 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 	// otherwise.
 	switch payload.GithubToken {
 	case "":
-		if sourceKind == store.TriggerSourceKindGitHub {
+		if opts.sourceKind == store.TriggerSourceKindGitHub {
 			payload.GithubToken = DispatchAgentGitHubTokenInstallation
 		} else {
 			payload.GithubToken = DispatchAgentGitHubTokenUserPreferred
 		}
 	case DispatchAgentGitHubTokenUserPreferred, DispatchAgentGitHubTokenInstallation:
 	default:
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
 			message: fmt.Sprintf("unsupported githubToken %q (supported: %s, %s)", payload.GithubToken, DispatchAgentGitHubTokenInstallation, DispatchAgentGitHubTokenUserPreferred),
@@ -230,7 +280,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 
 	// AgentRole syntax validation (§5.1, rev 2.2).
 	if payload.AgentRole != "" && !ValidAgentRole(AgentRole(payload.AgentRole)) {
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
 			message: fmt.Sprintf("invalid agentRole %q", payload.AgentRole),
@@ -238,7 +288,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 		}
 	}
 	if payload.NoAuth && payload.AgentRole != "" && AgentRole(payload.AgentRole) != AgentRoleNone {
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
 			message: fmt.Sprintf("cannot request agentRole %q together with noAuth", payload.AgentRole),
@@ -250,7 +300,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 	if len(payload.UntrustedVars) > 0 {
 		deduped, err := validateUntrustedVars(payload.UntrustedVars)
 		if err != nil {
-			return "", "", false, err
+			return "", err
 		}
 		payload.UntrustedVars = deduped
 	}
@@ -258,7 +308,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 	// Validate labels: reserved keys, count <= 16 including 3 hub labels,
 	// key syntax via pkg/labels, and values as label-slot templates (§5.1, §5.4).
 	if len(payload.Labels)+hubAppliedTriggerLabelCount > labels.MaxLabels {
-		return "", "", false, &dispatchAgentValidationError{
+		return "", &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: fmt.Sprintf("too many labels: at most %d author labels allowed (%d reserved for hub provenance)", labels.MaxLabels-hubAppliedTriggerLabelCount, hubAppliedTriggerLabelCount),
@@ -271,7 +321,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 	slices.Sort(labelKeys)
 	for _, k := range labelKeys {
 		if reservedTriggerLabelKeys[k] {
-			return "", "", false, &dispatchAgentValidationError{
+			return "", &dispatchAgentValidationError{
 				status:  http.StatusBadRequest,
 				code:    "reserved_label_key",
 				message: fmt.Sprintf("label key %q is reserved for hub trigger provenance", k),
@@ -279,32 +329,32 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 			}
 		}
 		if err := labels.Validate(map[string]string{k: "x"}); err != nil {
-			return "", "", false, &dispatchAgentValidationError{
+			return "", &dispatchAgentValidationError{
 				status:  http.StatusBadRequest,
 				code:    ErrCodeValidationError,
 				message: fmt.Sprintf("invalid label key %q: %v", k, err),
 			}
 		}
 		if _, err := validateTemplateSlot(payload.Labels[k], triggertemplate.SlotLabel, payload.UntrustedVars); err != nil {
-			return "", "", false, err
+			return "", err
 		}
 	}
 
 	// Parse and check untrustedVars coverage for all template slots (§5.1, §5.2).
 	if _, err := validateTemplateSlot(payload.Task, triggertemplate.SlotTask, payload.UntrustedVars); err != nil {
-		return "", "", false, err
+		return "", err
 	}
 	if payload.AgentName != "" {
 		nameTmpl, err := validateTemplateSlot(payload.AgentName, triggertemplate.SlotName, payload.UntrustedVars)
 		if err != nil {
-			return "", "", false, err
+			return "", err
 		}
 		// When agentName is a literal (no placeholders), run the same create-path
 		// name checks at authoring so reserved or non-canonical names fail early.
 		if len(nameTmpl.Placeholders()) == 0 {
 			rendered, _, rErr := nameTmpl.Render(nil, nil)
 			if rErr != nil {
-				return "", "", false, &dispatchAgentValidationError{
+				return "", &dispatchAgentValidationError{
 					status:  http.StatusBadRequest,
 					code:    "invalid_value",
 					message: fmt.Sprintf("invalid literal agentName: %v", rErr),
@@ -312,7 +362,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 				}
 			}
 			if _, dErr := api.ValidateDisplayName(rendered); dErr != nil {
-				return "", "", false, &dispatchAgentValidationError{
+				return "", &dispatchAgentValidationError{
 					status:  http.StatusBadRequest,
 					code:    "invalid_value",
 					message: fmt.Sprintf("invalid literal agentName: %v", dErr),
@@ -321,7 +371,7 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 			}
 			slug, aErr := api.ValidateAgentName(rendered)
 			if aErr != nil || slug != rendered {
-				return "", "", false, &dispatchAgentValidationError{
+				return "", &dispatchAgentValidationError{
 					status:  http.StatusBadRequest,
 					code:    "invalid_value",
 					message: "invalid literal agentName: must already be in canonical slug form",
@@ -332,26 +382,33 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 	}
 	if payload.Branch != "" {
 		if _, err := validateTemplateSlot(payload.Branch, triggertemplate.SlotBranch, payload.UntrustedVars); err != nil {
-			return "", "", false, err
+			return "", err
 		}
 	}
 	if payload.ReuseMessage != "" {
 		if _, err := validateTemplateSlot(payload.ReuseMessage, triggertemplate.SlotMessage, payload.UntrustedVars); err != nil {
-			return "", "", false, err
+			return "", err
 		}
 	}
 
-	// Caller authority & agentRole capping (§5.1).
-	preCapRole, roleExplicit, err := a.srv.validateDispatchAgentAuthoringAuthority(ctx, caller, projectID, AgentRole(payload.AgentRole), payload.NoAuth)
-	if err != nil {
-		return "", "", false, err
+	// Caller authority, standing, role capping, and UAT-hop ceiling (§5.1).
+	if err := a.srv.validateDispatchAgentAuthoringAuthority(
+		ctx,
+		caller,
+		projectID,
+		AgentRole(payload.AgentRole),
+		payload.NoAuth,
+		opts.ceiling,
+		opts.provenance,
+	); err != nil {
+		return "", err
 	}
 
 	normalized, err := json.Marshal(payload)
 	if err != nil {
-		return "", "", false, fmt.Errorf("marshal dispatch_agent payload: %w", err)
+		return "", fmt.Errorf("marshal dispatch_agent payload: %w", err)
 	}
-	return string(normalized), preCapRole, roleExplicit, nil
+	return string(normalized), nil
 }
 
 func validateTemplateSlot(raw, slot string, allowed []string) (*triggertemplate.Template, error) {
@@ -452,35 +509,38 @@ func (s *Server) validateDispatchAgentAuthoringAuthority(
 	projectID string,
 	requestedRole AgentRole,
 	noAuth bool,
-) (AgentRole, bool, error) {
-	if caller.Type() == "agent" {
-		agentIdent, ok := caller.(AgentIdentity)
-		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
-			return "", false, &dispatchAgentValidationError{
-				status:  http.StatusForbidden,
-				code:    ErrCodeForbidden,
-				message: "agent caller lacks required scope to author dispatch_agent triggers",
-			}
+	ceiling *store.EffectCeiling,
+	prov *store.AuthorityProvenance,
+) error {
+	if d := s.authorizeAgentCreateDecision(ctx, caller, projectID); d != nil {
+		code := ErrCodeForbidden
+		if d.status == http.StatusUnauthorized {
+			code = ErrCodeUnauthorized
 		}
-	}
-	if decision := s.agentCreateDecision(ctx, caller, projectID); !decision.Allowed {
-		return "", false, &dispatchAgentValidationError{
-			status:  http.StatusForbidden,
-			code:    ErrCodeForbidden,
-			message: "not authorized to create agents in this project",
+		msg := d.message
+		if msg == "" && d.status == http.StatusForbidden {
+			msg = agentCreateDenyMessage
+		}
+		return &dispatchAgentValidationError{
+			status:   d.status,
+			code:     code,
+			message:  msg,
+			reason:   d.reason,
+			deniedBy: d.deniedBy,
+			cause:    d.cause,
 		}
 	}
 
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return "", false, &dispatchAgentValidationError{
+			return &dispatchAgentValidationError{
 				status:  http.StatusNotFound,
 				code:    ErrCodeNotFound,
 				message: "project not found",
 			}
 		}
-		return "", false, fmt.Errorf("resolve project %q: %w", projectID, err)
+		return fmt.Errorf("resolve project %q: %w", projectID, err)
 	}
 
 	auth := FireAuthority{
@@ -489,7 +549,7 @@ func (s *Server) validateDispatchAgentAuthoringAuthority(
 	}
 	preCapRole, roleExplicit, _, err := s.resolveHeadlessPreCapRole(ctx, project, auth, requestedRole, noAuth)
 	if err != nil {
-		return "", false, &dispatchAgentValidationError{
+		return &dispatchAgentValidationError{
 			status:  http.StatusForbidden,
 			code:    ErrCodeForbidden,
 			message: err.Error(),
@@ -505,14 +565,41 @@ func (s *Server) validateDispatchAgentAuthoringAuthority(
 			ScopeID:   projectID,
 		})
 		if !delegateDecision.Allowed {
-			return "", false, &dispatchAgentValidationError{
+			return &dispatchAgentValidationError{
 				status:  http.StatusForbidden,
 				code:    ErrCodeForbidden,
 				message: fmt.Sprintf("cannot delegate agent role %q: %s", preCapRole, delegateDecision.Reason),
 			}
 		}
 	}
-	return preCapRole, roleExplicit, nil
+
+	resolvedCeiling, resolvedProv, err := s.resolveDispatchAgentAuthoringCeiling(ctx, caller, ceiling, prov)
+	if err != nil {
+		return err
+	}
+
+	// Enforce the caller's hop effect ceiling against both explicit and
+	// omitted (default-ladder) agentRole (mirrors interactive create's
+	// applyCreateEffectCeiling; §5.1).
+	if _, cause, fits := childRoleWithinCeiling(
+		uatHopEffectCeiling(resolvedProv.SourcePrincipalKind, resolvedProv.SourcePrincipalID, resolvedProv, resolvedCeiling),
+		preCapRole,
+		roleExplicit,
+	); !fits {
+		msg := "requested agentRole exceeds caller's delegation ceiling: " + string(cause)
+		if !roleExplicit {
+			msg = "no agent role fits caller's delegation ceiling: " + string(cause)
+		}
+		return &dispatchAgentValidationError{
+			status:   http.StatusForbidden,
+			code:     ErrCodeForbidden,
+			message:  msg,
+			reason:   msg,
+			deniedBy: DeniedByDelegationCeiling,
+		}
+	}
+
+	return nil
 }
 
 func principalKindForIdentity(identity Identity) string {
@@ -916,7 +1003,51 @@ func renderTemplateSlot(raw, slot string, vars triggertemplate.Vars, allowed []s
 	return rendered, nil
 }
 
-func (a *dispatchAgentAction) refuseTemplateRender(req hubfire.FireRequest, fallbackSlot string, err error) hubfire.FireOutcome {
+func resolveEffectiveDispatchGitHubToken(stored, sourceKind string) string {
+	if stored == "" && sourceKind == store.TriggerSourceKindGitHub {
+		return DispatchAgentGitHubTokenInstallation
+	}
+	return stored
+}
+
+// hasProjectGitHubMintInstallation reports whether project itself has a
+// configured GitHub App installation and the hub dispatcher has a minter wired.
+// Unlike hasGitHubMintProjectForHeadless, this check is authority-free (it does
+// not resolve FireAuthority or evaluate cross-project token-source labels) and
+// is used by the read-only trigger render preview.
+func (s *Server) hasProjectGitHubMintInstallation(project *store.Project) bool {
+	if s == nil || project == nil || project.GitHubInstallationID == nil {
+		return false
+	}
+	disp, ok := s.GetDispatcher().(*HTTPAgentDispatcher)
+	return ok && disp != nil && disp.githubAppMinter != nil
+}
+
+// buildDispatchFrameContext constructs the triggertemplate.FrameContext shared
+// by both dispatch_agent fire execution and trigger render preview so the
+// framing trailer's Source line and GitHub-unavailable note always agree.
+func buildDispatchFrameContext(
+	sourceKind string,
+	sourceName string,
+	signatureMode string,
+	eventID string,
+	githubAccessUnavailable bool,
+) triggertemplate.FrameContext {
+	fc := triggertemplate.FrameContext{
+		EndpointName:  sourceName,
+		SignatureMode: signatureMode,
+		EventID:       eventID,
+	}
+	if sourceKind == store.TriggerSourceKindGitHub {
+		fc.Source = "GitHub App"
+	}
+	if githubAccessUnavailable {
+		fc.Notes = append(fc.Notes, githubAccessUnavailableNote)
+	}
+	return fc
+}
+
+func (a *dispatchAgentAction) refuseTemplateRender(ctx context.Context, req hubfire.FireRequest, fallbackSlot string, err error) hubfire.FireOutcome {
 	slot := fallbackSlot
 	path := ""
 	reason := string(triggertemplate.KindValueRejected)
@@ -944,15 +1075,20 @@ func (a *dispatchAgentAction) refuseTemplateRender(req hubfire.FireRequest, fall
 		}
 	}
 
+	eventID := ""
+	if req.Event != nil {
+		eventID = req.Event.ID
+	}
 	// Never log expanded values or rendered output (§5.2, §5.3).
-	logging.Subsystem("hub.audit").Warn("trigger.fire.template_refused",
-		"event_type", "trigger.fire.template_refused",
-		"fire_id", req.Authority.FireID,
-		"trigger_id", req.Authority.DefinitionID,
-		"project_id", req.ProjectID,
-		"slot", slot,
-		"path", path,
-		"reason", reason)
+	a.srv.triggerTemplateRefusalAudit().RecordTemplateRefusal(ctx, trigger.TemplateRefusalAuditRecord{
+		ProjectID: req.ProjectID,
+		TriggerID: req.Authority.DefinitionID,
+		EventID:   eventID,
+		FireID:    req.Authority.FireID,
+		Slot:      slot,
+		Path:      path,
+		Reason:    reason,
+	})
 	return hubfire.FireOutcome{
 		Status: hubfire.FireStatusRefused,
 		Error:  reason,
@@ -1069,7 +1205,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		for _, k := range keys {
 			val, rErr := renderTemplateSlot(da.payload.Labels[k], triggertemplate.SlotLabel, vars, da.payload.UntrustedVars)
 			if rErr != nil {
-				return a.refuseTemplateRender(req, triggertemplate.SlotLabel, rErr), nil
+				return a.refuseTemplateRender(ctx, req, triggertemplate.SlotLabel, rErr), nil
 			}
 			mergedLabels[k] = val
 		}
@@ -1078,21 +1214,13 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	mergedLabels[triggerLabelKeyTriggerEvent] = ev.ID
 	mergedLabels[triggerLabelKeyTriggerSource] = ev.SourceKind
 	if err := labels.Validate(mergedLabels); err != nil {
-		return a.refuseTemplateRender(req, triggertemplate.SlotLabel, &triggertemplate.RenderError{
+		return a.refuseTemplateRender(ctx, req, triggertemplate.SlotLabel, &triggertemplate.RenderError{
 			Kind: triggertemplate.KindValueRejected,
 			Slot: triggertemplate.SlotLabel,
 		}), nil
 	}
 
-	fc := triggertemplate.FrameContext{
-		EndpointName:  da.sourceName,
-		SignatureMode: da.signatureMode,
-		EventID:       ev.ID,
-	}
-	effectiveGitHubToken := da.payload.GithubToken
-	if effectiveGitHubToken == "" && ev.SourceKind == store.TriggerSourceKindGitHub {
-		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
-	}
+	effectiveGitHubToken := resolveEffectiveDispatchGitHubToken(da.payload.GithubToken, ev.SourceKind)
 	parentUsesInst, err := a.srv.parentAgentUsesInstallationGitHubToken(ctx, da.auth)
 	if err != nil {
 		return hubfire.FireOutcome{}, fmt.Errorf("%w: %s: %w", errAgentCreatorUnreadable, da.auth.PrincipalID, err)
@@ -1100,22 +1228,26 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	if parentUsesInst {
 		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
 	}
-	if effectiveGitHubToken == DispatchAgentGitHubTokenInstallation &&
-		!a.srv.hasGitHubMintProjectForHeadless(ctx, da.project, da.auth, mergedLabels) {
-		fc.Notes = append(fc.Notes, "GitHub access is not available for this run.")
-	}
-	frameOpt := triggertemplate.WithFrame(fc)
+	githubAccessUnavailable := effectiveGitHubToken == DispatchAgentGitHubTokenInstallation &&
+		!a.srv.hasGitHubMintProjectForHeadless(ctx, da.project, da.auth, mergedLabels)
+	frameOpt := triggertemplate.WithFrame(buildDispatchFrameContext(
+		ev.SourceKind,
+		da.sourceName,
+		da.signatureMode,
+		ev.ID,
+		githubAccessUnavailable,
+	))
 
 	renderedTask, err := renderTemplateSlot(da.payload.Task, triggertemplate.SlotTask, vars, da.payload.UntrustedVars, frameOpt)
 	if err != nil {
-		return a.refuseTemplateRender(req, triggertemplate.SlotTask, err), nil
+		return a.refuseTemplateRender(ctx, req, triggertemplate.SlotTask, err), nil
 	}
 
 	var renderedName string
 	if da.payload.AgentName != "" {
 		renderedName, err = renderTemplateSlot(da.payload.AgentName, triggertemplate.SlotName, vars, da.payload.UntrustedVars)
 		if err != nil {
-			return a.refuseTemplateRender(req, triggertemplate.SlotName, err), nil
+			return a.refuseTemplateRender(ctx, req, triggertemplate.SlotName, err), nil
 		}
 	}
 
@@ -1123,13 +1255,13 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	if da.payload.Branch != "" {
 		renderedBranch, err = renderTemplateSlot(da.payload.Branch, triggertemplate.SlotBranch, vars, da.payload.UntrustedVars)
 		if err != nil {
-			return a.refuseTemplateRender(req, triggertemplate.SlotBranch, err), nil
+			return a.refuseTemplateRender(ctx, req, triggertemplate.SlotBranch, err), nil
 		}
 		// Strip an author's literal refs/heads/ prefix so downstream git
 		// operations never double-prefix refs/heads/refs/heads/... (§5.3).
 		if trimmed, ok := strings.CutPrefix(renderedBranch, "refs/heads/"); ok {
 			if err := gitref.ValidBranch(trimmed); err != nil {
-				return a.refuseTemplateRender(req, triggertemplate.SlotBranch, &triggertemplate.RenderError{
+				return a.refuseTemplateRender(ctx, req, triggertemplate.SlotBranch, &triggertemplate.RenderError{
 					Kind: triggertemplate.KindValueRejected,
 					Slot: triggertemplate.SlotBranch,
 				}), nil
@@ -1148,14 +1280,14 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		}
 	}
 	if _, err := api.ValidateDisplayName(baseName); err != nil {
-		return a.refuseTemplateRender(req, triggertemplate.SlotName, &triggertemplate.RenderError{
+		return a.refuseTemplateRender(ctx, req, triggertemplate.SlotName, &triggertemplate.RenderError{
 			Kind: triggertemplate.KindValueRejected,
 			Slot: triggertemplate.SlotName,
 		}), nil
 	}
 	baseSlug, err := api.ValidateAgentName(baseName)
 	if err != nil {
-		return a.refuseTemplateRender(req, triggertemplate.SlotName, &triggertemplate.RenderError{
+		return a.refuseTemplateRender(ctx, req, triggertemplate.SlotName, &triggertemplate.RenderError{
 			Kind: triggertemplate.KindValueRejected,
 			Slot: triggertemplate.SlotName,
 		}), nil

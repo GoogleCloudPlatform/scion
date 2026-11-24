@@ -42,13 +42,40 @@ import (
 // triggerRuntime holds the hub's shared trigger.event durablequeue handle and
 // background drainer lifecycle state. The zero value is ready to use.
 type triggerRuntime struct {
-	mu          sync.Mutex
-	queue       *durablequeue.StoreQueue
-	ruleMetrics *trigger.OTelRuleEvalMetrics
-	drainer     *durablequeue.Drainer
-	cancel      context.CancelFunc
-	done        chan struct{}
-	started     bool
+	mu                   sync.Mutex
+	queue                *durablequeue.StoreQueue
+	ruleMetrics          *trigger.OTelRuleEvalMetrics
+	templateRefusalAudit trigger.TemplateRefusalAuditSink
+	drainer              *durablequeue.Drainer
+	cancel               context.CancelFunc
+	done                 chan struct{}
+	started              bool
+}
+
+// SetTriggerTemplateRefusalAuditSink overrides the audit sink used for
+// trigger.fire.template_refused records (primarily for tests). Passing nil
+// restores the default SlogAuditSink.
+func (s *Server) SetTriggerTemplateRefusalAuditSink(sink trigger.TemplateRefusalAuditSink) {
+	if s == nil {
+		return
+	}
+	s.triggers.mu.Lock()
+	s.triggers.templateRefusalAudit = sink
+	s.triggers.mu.Unlock()
+}
+
+func (s *Server) triggerTemplateRefusalAudit() trigger.TemplateRefusalAuditSink {
+	if s != nil {
+		s.triggers.mu.Lock()
+		sink := s.triggers.templateRefusalAudit
+		if sink == nil {
+			sink = trigger.NewSlogAuditSink(trigger.SlogAuditConfig{})
+			s.triggers.templateRefusalAudit = sink
+		}
+		s.triggers.mu.Unlock()
+		return sink
+	}
+	return trigger.NewSlogAuditSink(trigger.SlogAuditConfig{})
 }
 
 // TriggerEventQueue returns the hub's shared durablequeue.StoreQueue for

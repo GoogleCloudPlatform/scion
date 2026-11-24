@@ -522,6 +522,12 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 	)
 	switch actionKind {
 	case "message":
+		if badFlag, ok := hasDispatchAgentFlagValues(&triggerDispatch); ok {
+			return nil, nil, newUsageError("%s cannot be used with --action message", badFlag)
+		}
+		if allowExplicit {
+			return nil, nil, newUsageError("--allow cannot be used with --action message")
+		}
 		agentRef := strings.TrimSpace(triggerAgent)
 		if agentRef == "" {
 			return nil, nil, newUsageError("--agent is required")
@@ -542,6 +548,9 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 			action.AgentName = agentRef
 		}
 	case "dispatch_agent":
+		if badFlag, ok := hasMessageFlagValues(triggerAgent, triggerMessage, triggerInterrupt, triggerWake, triggerPlain); ok {
+			return nil, nil, newUsageError("%s cannot be used with --action dispatch-agent", badFlag)
+		}
 		action, derivedUntrusted, err = buildDispatchAgentActionSpec(&triggerDispatch, allowExplicit)
 		if err != nil {
 			return nil, nil, err
