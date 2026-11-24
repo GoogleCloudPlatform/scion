@@ -470,6 +470,73 @@ describe('scion-secret-value-field', () => {
     expect(shadow2.querySelector('[data-testid="file-value-masked"]')).toBeNull();
     expect(shadow2.querySelector('[data-testid="secret-value-error"]')).toBeNull();
     el2.remove();
+
+    // 3. Catch-path stale guard: pending A -> select oversize B (rejected) -> A REJECTS => B's error kept, no value
+    const el3 = await mountField({ secretKey: 'RACE_FILE', allowFileLoad: true, showError: true });
+    const shadow3 = el3.shadowRoot!;
+    const fileInput3 = shadow3.querySelector(
+      'input[type="file"][data-file-input="RACE_FILE"]'
+    ) as HTMLInputElement;
+
+    let rejectA3!: (err: unknown) => void;
+    const fileA3 = new File(['stale-file-a'], 'a.pem', { type: 'text/plain' });
+    fileA3.arrayBuffer = (): Promise<ArrayBuffer> =>
+      new Promise<ArrayBuffer>((_, rej) => {
+        rejectA3 = rej;
+      });
+    Object.defineProperty(fileInput3, 'files', { value: [fileA3], configurable: true });
+    fileInput3.dispatchEvent(new Event('change'));
+    await el3.updateComplete;
+
+    const oversizeB3 = new File([new Uint8Array(65 * 1024)], 'b.pem', { type: 'text/plain' });
+    Object.defineProperty(fileInput3, 'files', { value: [oversizeB3], configurable: true });
+    fileInput3.dispatchEvent(new Event('change'));
+    await el3.updateComplete;
+    expect(shadow3.querySelector('[data-testid="secret-value-error"]')?.textContent).toContain(
+      'exceeds the 64 KiB limit'
+    );
+
+    rejectA3(new DOMException('Permission denied', 'NotReadableError'));
+    await new Promise((r) => setTimeout(r, 10));
+    await el3.updateComplete;
+
+    expect(el3.value).toBe('');
+    expect(shadow3.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(shadow3.querySelector('[data-testid="secret-value-error"]')?.textContent).toContain(
+      'exceeds the 64 KiB limit'
+    );
+    el3.remove();
+
+    // 4. Paste-path token bump: pending A -> paste a multi-line value -> A resolves => pasted value kept
+    const el4 = await mountField({ secretKey: 'RACE_FILE', allowFileLoad: true, showError: true });
+    const shadow4 = el4.shadowRoot!;
+    const fileInput4 = shadow4.querySelector(
+      'input[type="file"][data-file-input="RACE_FILE"]'
+    ) as HTMLInputElement;
+
+    let resolveA4!: (buf: ArrayBuffer) => void;
+    const fileA4 = new File(['stale-file-a'], 'a.pem', { type: 'text/plain' });
+    fileA4.arrayBuffer = (): Promise<ArrayBuffer> =>
+      new Promise<ArrayBuffer>((res) => {
+        resolveA4 = res;
+      });
+    Object.defineProperty(fileInput4, 'files', { value: [fileA4], configurable: true });
+    fileInput4.dispatchEvent(new Event('change'));
+    await el4.updateComplete;
+
+    const input4 = shadow4.querySelector('input[data-key="RACE_FILE"]') as HTMLInputElement;
+    const pasteEv = dispatchPaste(input4, 'pasted-line-1\npasted-line-2');
+    await el4.updateComplete;
+    expect(pasteEv.defaultPrevented).toBe(true);
+
+    resolveA4(new TextEncoder().encode('stale-file-a').buffer);
+    await new Promise((r) => setTimeout(r, 10));
+    await el4.updateComplete;
+
+    expect(el4.value).toBe('pasted-line-1\npasted-line-2');
+    expect(shadow4.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    expect(shadow4.querySelector('[data-testid="secret-value-error"]')).toBeNull();
+    el4.remove();
   });
 
   it('clears value on pagehide, clearToken increment, and disconnect', async () => {
