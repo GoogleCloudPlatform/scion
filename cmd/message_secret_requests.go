@@ -86,9 +86,6 @@ func validateSecretRequestFlags(agentTarget, group bool) error {
 	if agentTarget || group {
 		return errors.New("secret requests can be sent only to a user or a conversation (user:<email>, @<email>, conv:<id>, #<thread>), not to an agent or a group")
 	}
-	if msgIn != "" || msgAt != "" {
-		return newUsageError("--secret-request cannot be combined with --in or --at")
-	}
 	for _, f := range []struct {
 		name string
 		set  bool
@@ -96,9 +93,6 @@ func validateSecretRequestFlags(agentTarget, group bool) error {
 		{"--attach", len(msgAttach) > 0},
 		{"--artifact", len(msgArtifacts) > 0},
 		{"--wake", msgWake},
-		{"--cc", len(msgCC) > 0},
-		{"--channel", msgChannel != ""},
-		{"--thread-id", msgThreadID != ""},
 	} {
 		if f.set {
 			return newUsageError("--secret-request cannot be combined with %s", f.name)
