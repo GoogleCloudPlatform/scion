@@ -461,3 +461,46 @@ func TestUserMeInboxSummary_DecisionsForcedErrorIsolation(t *testing.T) {
 	assert.Equal(t, 0, respTO.Categories[InboxCategoryDecisions].Count)
 	assert.Equal(t, InboxErrorTimeout, respTO.Categories[InboxCategoryDecisions].ErrorCode)
 }
+
+type cancelAfterListOpenPromptsStore struct {
+	store.Store
+	fault  *storeFaultSwitch
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+func (s *cancelAfterListOpenPromptsStore) setCancel(fn context.CancelFunc) {
+	s.mu.Lock()
+	s.cancel = fn
+	s.mu.Unlock()
+}
+
+func (s *cancelAfterListOpenPromptsStore) ListOpenPrompts(ctx context.Context, projectIDs, chatKeys []string) ([]*store.ProjectDecisionPrompt, error) {
+	prompts, err := s.Store.ListOpenPrompts(ctx, projectIDs, chatKeys)
+	if err == nil && s.fault.Active() {
+		s.mu.Lock()
+		fn := s.cancel
+		s.mu.Unlock()
+		if fn != nil {
+			fn()
+		}
+	}
+	return prompts, err
+}
+
+func TestWaitingOnYouSummary_PropagatesContextCancellation(t *testing.T) {
+	srv, rawStore, alice, bob, project, cancelStore, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, sw *storeFaultSwitch) *cancelAfterListOpenPromptsStore {
+		return &cancelAfterListOpenPromptsStore{Store: inner, fault: sw}
+	})
+	f := newDecisionsFixtureOn(t, srv, rawStore, alice, bob, project)
+	f.topicPrompt(t, oneDecision, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelStore.setCancel(cancel)
+	fault.Arm()
+
+	viewer := NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, string(ClientTypeWeb))
+	_, err := f.srv.waitingOnYouSummary(withAuthzInputMemo(ctx), viewer, nil, 3)
+	require.ErrorIs(t, err, context.Canceled, "context cancellation during classifyProjectOpenPrompts must propagate instead of returning partial counts")
+}

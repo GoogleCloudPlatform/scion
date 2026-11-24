@@ -1033,7 +1033,7 @@ func (s *Server) waitingOnYouSummary(
 		return waitingOnYouDecisionSummary{}, err
 	}
 	counts, classified, err := s.classifyProjectOpenPrompts(ctx, user, token, wcs, set.projectReadableScope, openPrompts)
-	if err == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if err == nil && ctx.Err() != nil {
 		err = ctx.Err()
 	}
 	if err != nil {
