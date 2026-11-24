@@ -57,7 +57,7 @@ func labelContains(key, value string) predicate.Agent {
 			s.Where(entsql.P(func(b *entsql.Builder) {
 				b.WriteString(col).
 					WriteString(" @> ").
-					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
+					Arg(postgresLabelJSONOperand(key, value)).
 					WriteString("::jsonb")
 			}))
 		default: // SQLite
@@ -186,7 +186,7 @@ func projectLabelContains(key, value string) predicate.Project {
 			s.Where(entsql.P(func(b *entsql.Builder) {
 				b.WriteString(col).
 					WriteString(" @> ").
-					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
+					Arg(postgresLabelJSONOperand(key, value)).
 					WriteString("::jsonb")
 			}))
 		default: // SQLite
@@ -214,7 +214,7 @@ func projectLabelNotContains(key, value string) predicate.Project {
 				b.WriteString("(NOT (").
 					WriteString(col).
 					WriteString(" @> ").
-					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
+					Arg(postgresLabelJSONOperand(key, value)).
 					WriteString("::jsonb)").
 					WriteString(" OR ").
 					WriteString(col).
