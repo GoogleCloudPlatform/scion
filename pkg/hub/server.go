@@ -7449,7 +7449,7 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 		// Update event status. If the handler returned an error, record as
 		// failed rather than fired — matches fireEvent semantics (O-R3-1).
 		_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, status, &firedAt, errMsg)
-		if nextRunAt.IsZero() {
+		if evt.Manual || nextRunAt.IsZero() {
 			// Manual run: record outcome without touching next_run_at.
 			_ = s.store.RecordScheduleRun(ctx, sched.ID, now, errMsg)
 		} else {

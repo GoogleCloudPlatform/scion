@@ -1292,12 +1292,17 @@ func (s *Server) runScheduleNow(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
-	s.runScheduleFire(r.Context(), log, *schedule, evt, now, time.Time{}, nil)
-	reloaded, err := s.store.GetScheduledEvent(r.Context(), evt.ID)
+	// Detach from request cancellation so a client disconnect after the event
+	// is persisted or delivered cannot abort status/run-count recording and
+	// strand the manual event in "pending" (which loadPersistedTimers would
+	// replay on restart). Values on r.Context() are preserved.
+	fireCtx := context.WithoutCancel(r.Context())
+	s.runScheduleFire(fireCtx, log, *schedule, evt, now, time.Time{}, nil)
+	reloaded, err := s.store.GetScheduledEvent(fireCtx, evt.ID)
 	if err == nil && reloaded != nil {
 		evt = *reloaded
 	}
-	writeJSON(w, http.StatusOK, s.scheduledEventResponse(r.Context(), s.newExecRevealer(r.Context()), evt))
+	writeJSON(w, http.StatusOK, s.scheduledEventResponse(fireCtx, s.newExecRevealer(fireCtx), evt))
 }
 
 // getScheduleHistory handles GET /api/v1/projects/{projectId}/schedules/{id}/history

@@ -27,11 +27,46 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type runNowHookAction struct {
+	FireAction
+	onFire func(ctx context.Context, req hubfire.FireRequest, a FireAuthorized) (hubfire.FireOutcome, error)
+}
+
+func (w *runNowHookAction) Fire(ctx context.Context, req hubfire.FireRequest, a FireAuthorized) (hubfire.FireOutcome, error) {
+	if w.onFire != nil {
+		return w.onFire(ctx, req, a)
+	}
+	return w.FireAction.Fire(ctx, req, a)
+}
+
+func requestAsCredential(t *testing.T, srv *Server, identity Identity, cred CredentialContext, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	ctx := contextWithIdentity(req.Context(), identity)
+	ctx = contextWithCredentialContext(ctx, cred)
+	if user, ok := identity.(UserIdentity); ok {
+		ctx = context.WithValue(ctx, userContextKey{}, user)
+	}
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req.WithContext(ctx))
+	return rec
+}
 
 func requestAsSession(t *testing.T, srv *Server, identity Identity, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
@@ -403,4 +438,285 @@ func TestScheduleRunNow_OverlapWithCronAndConcurrentManual(t *testing.T) {
 	}
 	assert.True(t, foundManualFired, "expected manual run to succeed")
 	assert.True(t, foundCronSkipped, "expected overlapping cron tick to be skipped")
+}
+
+// TestScheduleRunNow_ClientDisconnectDoesNotStrandPendingEvent verifies that
+// cancelling the HTTP request context after a synchronous manual fire delivers
+// does not abort status/run-count persistence and leave the manual event
+// "pending" (which loadPersistedTimers would replay on restart).
+func TestScheduleRunNow_ClientDisconnectDoesNotStrandPendingEvent(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name:      "disconnect-check",
+		CronExpr:  "0 9 * * *",
+		EventType: "message",
+		AgentName: "all",
+		Message:   "deliver once even if client disconnects",
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&created))
+
+	origAction, ok := srv.LookupAction("message")
+	require.True(t, ok, "message FireAction must be registered")
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	cancelledDuringFire := false
+	srv.RegisterAction(&runNowHookAction{
+		FireAction: origAction,
+		onFire: func(fctx context.Context, req hubfire.FireRequest, a FireAuthorized) (hubfire.FireOutcome, error) {
+			out, err := origAction.Fire(fctx, req, a)
+			// Simulate the HTTP client disconnecting immediately after delivery.
+			cancelReq()
+			cancelledDuringFire = true
+			return out, err
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/run", nil).WithContext(reqCtx)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.True(t, cancelledDuringFire, "wrapped message action must have fired and cancelled request context")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var evtResp ScheduledEventResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evtResp))
+	assert.NotEqual(t, store.ScheduledEventPending, evtResp.Status, "manual event must not remain pending after disconnect")
+
+	storedEvt, err := s.GetScheduledEvent(ctx, evtResp.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, store.ScheduledEventPending, storedEvt.Status, "persisted event must transition out of pending")
+	assert.Equal(t, storedEvt.Status, evtResp.Status, "response status must reflect persisted terminal status")
+
+	pending, err := s.ListPendingScheduledEvents(ctx)
+	require.NoError(t, err)
+	for _, pe := range pending {
+		assert.NotEqual(t, evtResp.ID, pe.ID, "manual event must not remain in pending queue for restart replay")
+	}
+
+	after, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, after.RunCount, "schedule RunCount must be recorded even after client disconnect")
+}
+
+// TestScheduleRunNow_UsesRunnerAttributionAndCeilingNotAuthor verifies the
+// confused-deputy invariant: when user B manually runs a schedule authored by
+// user A, the materialized event and fire-time request carry B's attribution
+// and authority ceiling, while the schedule row retains A's attribution.
+func TestScheduleRunNow_UsesRunnerAttributionAndCeilingNotAuthor(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	// Create a live target agent in the project.
+	agent := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "target-worker",
+		Name:      "Target Worker",
+		ProjectID: projectID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// User A (author) creates the schedule under an interactive session.
+	authorID := uuid.NewString()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          authorID,
+		Email:       "author-a@test.local",
+		DisplayName: "Author A",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}))
+	bindPermsToUser(t, s, authorID, []string{
+		"scheduled_event.create", "scheduled_event.read", "scheduled_event.update",
+		"project.read", "agent.read", "agent.message",
+	})
+	authorA := NewAuthenticatedUser(authorID, "author-a@test.local", "Author A", store.UserRoleMember, "api")
+
+	createRec := requestAsSession(t, srv, authorA, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name:      "authored-by-a",
+		CronExpr:  "0 9 * * *",
+		EventType: "message",
+		AgentName: agent.Slug,
+		Message:   "hello from manual runner",
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var sched store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&sched))
+
+	origSched, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	require.Equal(t, authorA.ID(), origSched.InitiatorAttribution.InitiatorPrincipalID)
+
+	// User B (runner) is a different user calling with a real project-scoped UAT
+	// so both principal ID and authority ceiling differ from A's session revision
+	// and fire-time recorded-authority resolution succeeds against the stored token.
+	runnerID := uuid.NewString()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          runnerID,
+		Email:       "runner-b@test.local",
+		DisplayName: "Runner B",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}))
+	// Bind project-admin on projectID so runnerB can mint a project-scoped UAT
+	// with scheduled_event:update and agent:message.
+	projAdminRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: projAdminRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      runnerID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test-setup",
+	})
+	require.NoError(t, err)
+	runnerBUser := NewAuthenticatedUser(runnerID, "runner-b@test.local", "Runner B", store.UserRoleMember, "api")
+	uatKey, _, err := srv.uatService.CreateToken(rs4MintContext(runnerID), runnerID, "runner-b-uat", projectID, []string{
+		"scheduled_event:update", "agent:message", "agent:read", "project:read",
+	}, nil)
+	require.NoError(t, err)
+
+	// Intercept the fire request to verify fire-time attribution and ceiling.
+	origAction, ok := srv.LookupAction("message")
+	require.True(t, ok)
+	var observedReq hubfire.FireRequest
+	var fireCalled bool
+	srv.RegisterAction(&runNowHookAction{
+		FireAction: origAction,
+		onFire: func(fctx context.Context, req hubfire.FireRequest, a FireAuthorized) (hubfire.FireOutcome, error) {
+			observedReq = req
+			fireCalled = true
+			return origAction.Fire(fctx, req, a)
+		},
+	})
+
+	runReq := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+sched.ID+"/run", nil)
+	runReq.Header.Set("Authorization", "Bearer "+uatKey)
+	runRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(runRec, runReq)
+	require.Equal(t, http.StatusOK, runRec.Code, runRec.Body.String())
+
+	var evtResp ScheduledEventResponse
+	require.NoError(t, json.NewDecoder(runRec.Body).Decode(&evtResp))
+	assert.True(t, evtResp.Manual)
+
+	storedEvt, err := s.GetScheduledEvent(ctx, evtResp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, runnerBUser.ID(), storedEvt.CreatedBy, "manual event CreatedBy must be runner B, not author A")
+	assert.Equal(t, runnerBUser.ID(), storedEvt.InitiatorAttribution.InitiatorPrincipalID, "manual event initiator must be runner B, not author A")
+	assert.Equal(t, store.InitiatorCredentialKindUAT, storedEvt.InitiatorAttribution.InitiatorCredentialKind)
+	assert.Equal(t, store.EffectCeilingBounded, storedEvt.AuthorityCeiling.Kind, "manual event must carry runner B's bounded UAT ceiling")
+	assert.Equal(t, projectID, storedEvt.AuthorityCeiling.BoundaryProjectID)
+	assert.NotEqual(t, origSched.AuthorityCeiling.Kind, storedEvt.AuthorityCeiling.Kind)
+
+	require.True(t, fireCalled, "wrapped message action must have fired under runner B's authority")
+	assert.Equal(t, runnerBUser.ID(), observedReq.Authority.Attribution.InitiatorPrincipalID, "fire-time authority must be runner B")
+	assert.Equal(t, store.EffectCeilingBounded, observedReq.Authority.Ceiling.Kind, "fire-time ceiling must be runner B's")
+
+	// Schedule row's own stored attribution must remain author A's.
+	afterSched, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, authorA.ID(), afterSched.InitiatorAttribution.InitiatorPrincipalID)
+	assert.Equal(t, origSched.AuthorityCeiling, afterSched.AuthorityCeiling)
+}
+
+// TestScheduleRunNow_MessageAuthzDenied verifies that a caller holding
+// scheduled_event.update but lacking agent.message on the schedule's target
+// agent is refused on /run (no confused-deputy message delivery).
+func TestScheduleRunNow_MessageAuthzDenied(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	agent := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "restricted-worker",
+		Name:      "Restricted Worker",
+		ProjectID: projectID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name:      "msg-authz-check",
+		CronExpr:  "0 9 * * *",
+		EventType: "message",
+		AgentName: agent.Slug,
+		Message:   "restricted ping",
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var sched store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&sched))
+
+	// Caller has scheduled_event.update and agent.read, but NOT agent.message.
+	noMsgUser := setupNonAdminUser(t, s, []string{
+		"scheduled_event.read", "scheduled_event.update", "project.read", "agent.read",
+	})
+	rec := requestAsSession(t, srv, noMsgUser, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+sched.ID+"/run", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	after, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, after.RunCount, "denied manual run must not fire or increment RunCount")
+}
+
+// TestScheduleRunNow_AuthoringCredentialGateRefused verifies that /run enforces
+// the schedule authoring credential gate before permission checks and rejects
+// disallowed credential kinds even for a fully-permitted caller.
+func TestScheduleRunNow_AuthoringCredentialGateRefused(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name:      "cred-gate-check",
+		CronExpr:  "0 9 * * *",
+		EventType: "message",
+		AgentName: "all",
+		Message:   "cred gate ping",
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var sched store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&sched))
+
+	adminID := uuid.NewString()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          adminID,
+		Email:       "cred-admin@test.local",
+		DisplayName: "Cred Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}))
+	admin := NewAuthenticatedUser(adminID, "cred-admin@test.local", "Cred Admin", store.UserRoleAdmin, "api")
+	scoped := NewScopedUserIdentity(admin, projectID, []string{"scheduled_event:update", "agent:message"})
+	fedSvc := NewFederatedServiceIdentity("https://issuer.example", "svc", "svc@test.local", nil)
+
+	cases := []struct {
+		name     string
+		identity Identity
+		kind     CredentialKind
+	}{
+		{"plain user with hub delivery credential", admin, CredentialKindHubDelivery},
+		{"scoped UAT with mismatched interactive credential", scoped, CredentialKindInteractive},
+		{"federated service identity", fedSvc, CredentialKindFederation},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := requestAsCredential(t, srv, tc.identity, CredentialContext{Kind: tc.kind},
+				http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+sched.ID+"/run", nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, ErrCodeForbidden, errResp.Error.Code)
+			assert.Equal(t, scheduleAuthoringCredentialRefusedMessage, errResp.Error.Message)
+		})
+	}
+
+	after, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, after.RunCount, "credential-gated refusals must not fire the schedule")
 }
