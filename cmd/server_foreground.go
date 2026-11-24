@@ -3885,7 +3885,7 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	if len(hubSrv.AdminEmails()) == 0 &&
 		strings.TrimSpace(os.Getenv("SCION_SERVER_HUB_ADMINEMAILS")) == "" &&
 		strings.TrimSpace(os.Getenv("SCION_SEED_SERVER_HUB_ADMINEMAILS")) != "" {
-		slog.Warn("Effective runtime admin_emails list is empty despite SCION_SEED_SERVER_HUB_ADMINEMAILS being set — seed values may be superseded by a managed access row in the database; admin reconciliation is disabled",
+		slog.Warn("Effective runtime admin_emails list is empty despite SCION_SEED_SERVER_HUB_ADMINEMAILS being set — seed values may be superseded (e.g. by a managed access row in the database) or sanitize to empty; admin reconciliation is disabled",
 			"seed_env_var", "SCION_SEED_SERVER_HUB_ADMINEMAILS",
 			"server_env_var", "SCION_SERVER_HUB_ADMINEMAILS")
 	}

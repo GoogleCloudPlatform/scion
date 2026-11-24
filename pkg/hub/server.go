@@ -5469,9 +5469,16 @@ func (s *Server) ReconcileStartupAdminBindings(ctx context.Context) {
 	)
 	if err != nil {
 		slog.Error("failed to reconcile super-admin bindings — revocation may be incomplete", "error", err)
-		return
+	} else {
+		s.demotionSafe.Store(demotionSafe)
 	}
-	s.demotionSafe.Store(demotionSafe)
+	// Restore base startup ordering where seedDevUser ran after
+	// reconcileSuperAdminBindings: when dev-auth is enabled, ensure the dev
+	// pseudo-user retains its system super-admin role binding even when
+	// admin_emails is non-empty and does not list the dev user's email.
+	if s.config.DevAuthToken != "" {
+		ensureDevUserRoleBinding(ctx, s.store)
+	}
 }
 
 // SetSecretBackend sets the secret backend for pluggable secret storage.

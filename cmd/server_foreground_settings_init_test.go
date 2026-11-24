@@ -34,6 +34,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -673,5 +674,201 @@ func TestInitOperationalSettings_EmptyAdminEmailsWarningWhenManagedSupersedesSee
 	}
 	if strings.Contains(logs, "seed-admin@example.com") {
 		t.Errorf("warning log must not leak email address value, got:\n%s", logs)
+	}
+}
+
+// TestInitOperationalSettings_DevAuthPreservesSuperAdminBindingAcrossBoots
+// is a two-boot regression test for ptone/scion#9143 R1: on a dev-auth hub
+// with a non-empty admin_emails matching a real user (so demotionSafe=true),
+// deferred startup reconciliation via initOperationalSettings must preserve
+// the dev user's system super-admin binding on both the first and second boot
+// of the same store.
+func TestInitOperationalSettings_DevAuthPreservesSuperAdminBindingAcrossBoots(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "")
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "")
+
+	globalDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsYAML := "schema_version: \"1\"\nserver:\n  hub:\n    admin_emails:\n      - real@example.com\n"
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := newTestStore(t)
+	if err := st.CreateUser(ctx, &store.User{
+		ID:          uuid.NewString(),
+		Email:       "real@example.com",
+		DisplayName: "Real Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}); err != nil {
+		t.Fatalf("CreateUser(real): %v", err)
+	}
+
+	cfg := &config.GlobalConfig{}
+	cfg.Database.Driver = "sqlite3"
+
+	for boot := 1; boot <= 2; boot++ {
+		srv, err := hub.New(hub.ServerConfig{
+			DeferAdminReconciliation: true,
+			DevAuthToken:             "scion_dev_testtoken",
+		}, st)
+		if err != nil {
+			t.Fatalf("boot %d: hub.New: %v", boot, err)
+		}
+
+		if err := initOperationalSettings(ctx, cfg, srv, st, globalDir); err != nil {
+			_ = srv.Shutdown(ctx)
+			t.Fatalf("boot %d: initOperationalSettings: %v", boot, err)
+		}
+
+		if !srv.GetDemotionSafe().Load() {
+			_ = srv.Shutdown(ctx)
+			t.Fatalf("boot %d: expected demotionSafe == true", boot)
+		}
+
+		superAdminRD, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+		if err != nil {
+			_ = srv.Shutdown(ctx)
+			t.Fatalf("boot %d: GetRoleDefinitionByName(super-admin): %v", boot, err)
+		}
+
+		bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, hub.DevUserID)
+		if err != nil {
+			_ = srv.Shutdown(ctx)
+			t.Fatalf("boot %d: ListRoleBindingsForPrincipal(dev): %v", boot, err)
+		}
+		var superAdminCount int
+		for _, b := range bindings {
+			if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == superAdminRD.ID {
+				superAdminCount++
+			}
+		}
+		if superAdminCount != 1 {
+			_ = srv.Shutdown(ctx)
+			t.Fatalf("boot %d: dev user super-admin bindings = %d, want 1", boot, superAdminCount)
+		}
+
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Fatalf("boot %d: Shutdown: %v", boot, err)
+		}
+	}
+}
+
+// TestInitHubServer_DefersAdminReconciliationForHubSettingStore verifies that
+// initHubServer sets DeferAdminReconciliation=true when the store implements
+// store.HubSettingStore, so hub.New does not run a transient reconcile against
+// a stale CLI/settings.yaml adminEmailList before initOperationalSettings loads
+// the DB-managed access row.
+func TestInitHubServer_DefersAdminReconciliationForHubSettingStore(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "")
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "")
+
+	globalDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := newTestStore(t)
+	hss, ok := st.(store.HubSettingStore)
+	if !ok {
+		t.Fatal("test store does not implement HubSettingStore")
+	}
+	if _, err := hss.UpsertHubSetting(ctx, "access", json.RawMessage(`{"admin_emails":["db-admin@example.com"]}`), "admin@example.com", -1, "managed"); err != nil {
+		t.Fatalf("UpsertHubSetting(access): %v", err)
+	}
+
+	// Seed built-in role definitions once so we can attach a known super-admin
+	// binding to db-admin@example.com before calling initHubServer.
+	seedSrv, err := hub.New(hub.ServerConfig{DeferAdminReconciliation: true}, st)
+	if err != nil {
+		t.Fatalf("seed hub.New: %v", err)
+	}
+	if err := seedSrv.Shutdown(ctx); err != nil {
+		t.Fatalf("seed Shutdown: %v", err)
+	}
+
+	dbAdmin := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "db-admin@example.com",
+		DisplayName: "DB Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}
+	staleAdmin := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "stale-admin@example.com",
+		DisplayName: "Stale Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := st.CreateUser(ctx, dbAdmin); err != nil {
+		t.Fatalf("CreateUser(dbAdmin): %v", err)
+	}
+	if err := st.CreateUser(ctx, staleAdmin); err != nil {
+		t.Fatalf("CreateUser(staleAdmin): %v", err)
+	}
+
+	superAdminRD, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("GetRoleDefinitionByName(super-admin): %v", err)
+	}
+	origBinding, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      dbAdmin.ID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil {
+		t.Fatalf("CreateRoleBinding(dbAdmin): %v", err)
+	}
+
+	cfg := &config.GlobalConfig{}
+	cfg.Database.Driver = "sqlite3"
+
+	// Pass a stale adminEmailList matching staleAdmin. If initHubServer did not
+	// set DeferAdminReconciliation=true, hub.New would transiently demote
+	// dbAdmin and delete origBinding before initOperationalSettings re-created
+	// a new binding with a different ID.
+	srv, err := initHubServer(ctx, cfg, st, nil, hub.HubEndpoints{}, "", []string{"stale-admin@example.com"}, false, "", nil, nil, nil, globalDir, scionplugin.NewManager(slog.Default()), nil)
+	if err != nil {
+		t.Fatalf("initHubServer: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(ctx) }()
+
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, dbAdmin.ID)
+	if err != nil {
+		t.Fatalf("ListRoleBindingsForPrincipal(dbAdmin): %v", err)
+	}
+	foundOrig := false
+	for _, b := range bindings {
+		if b.ID == origBinding.ID {
+			foundOrig = true
+			break
+		}
+	}
+	if !foundOrig {
+		t.Fatalf("db-admin@example.com lost its original super-admin binding %s during initHubServer; DeferAdminReconciliation was not honored", origBinding.ID)
+	}
+
+	gotStale, err := st.GetUserByEmail(ctx, staleAdmin.Email)
+	if err != nil {
+		t.Fatalf("GetUserByEmail(staleAdmin): %v", err)
+	}
+	if gotStale.Role != store.UserRoleMember {
+		t.Errorf("stale-admin role = %q, want %q", gotStale.Role, store.UserRoleMember)
 	}
 }

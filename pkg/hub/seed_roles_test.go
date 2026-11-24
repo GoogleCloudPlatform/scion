@@ -1986,15 +1986,28 @@ func TestNew_DeferAdminReconciliation_ReconcilesAfterApplySnapshot(t *testing.T)
 		Role:        store.UserRoleAdmin,
 		Status:      "active",
 	}
+	staleAdmin := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "stale-admin@example.com",
+		DisplayName: "Stale Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
 	require.NoError(t, st.CreateUser(ctx, promoteUser))
 	require.NoError(t, st.CreateUser(ctx, demoteUser))
+	require.NoError(t, st.CreateUser(ctx, staleAdmin))
 
-	srv, err := New(ServerConfig{DeferAdminReconciliation: true}, st)
+	// Pass a non-empty ServerConfig.AdminEmails that differs from the snapshot
+	// to prove New() does not run startup reconciliation when deferred.
+	srv, err := New(ServerConfig{
+		DeferAdminReconciliation: true,
+		AdminEmails:              []string{"stale-admin@example.com"},
+	}, st)
 	require.NoError(t, err)
 	defer func() { _ = srv.Shutdown(ctx) }()
 
-	// Reconciliation was deferred: demotionSafe is still false and neither
-	// user's role changed inside New().
+	// Reconciliation was deferred: demotionSafe is still false, neither user's
+	// role changed, and staleAdmin received no super-admin binding inside New().
 	assert.False(t, srv.GetDemotionSafe().Load(), "demotionSafe should remain false before deferred reconciliation")
 	gotPromote, err := st.GetUserByEmail(ctx, promoteUser.Email)
 	require.NoError(t, err)
@@ -2002,6 +2015,17 @@ func TestNew_DeferAdminReconciliation_ReconcilesAfterApplySnapshot(t *testing.T)
 	gotDemote, err := st.GetUserByEmail(ctx, demoteUser.Email)
 	require.NoError(t, err)
 	assert.Equal(t, store.UserRoleAdmin, gotDemote.Role)
+	gotStale, err := st.GetUserByEmail(ctx, staleAdmin.Email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleMember, gotStale.Role)
+	superAdminRD, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	preBindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, staleAdmin.ID)
+	require.NoError(t, err)
+	for _, b := range preBindings {
+		assert.False(t, b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == superAdminRD.ID,
+			"expected no super-admin binding for staleAdmin inside New() when deferred")
+	}
 
 	// Apply operational settings snapshot (as initOperationalSettings does) and
 	// run startup admin reconciliation.
@@ -2018,6 +2042,58 @@ func TestNew_DeferAdminReconciliation_ReconcilesAfterApplySnapshot(t *testing.T)
 	gotDemote, err = st.GetUserByEmail(ctx, demoteUser.Email)
 	require.NoError(t, err)
 	assert.Equal(t, store.UserRoleViewer, gotDemote.Role)
+	gotStale, err = st.GetUserByEmail(ctx, staleAdmin.Email)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleMember, gotStale.Role)
+}
+
+// TestReconcileStartupAdminBindings_PreservesDevUserBinding verifies that when
+// dev-auth is enabled and admin_emails is non-empty (matching a real user so
+// demotionSafe=true), deferred startup reconciliation re-ensures the dev
+// user's system super-admin binding across repeated boots of the same store
+// (ptone/scion#9143 R1).
+func TestReconcileStartupAdminBindings_PreservesDevUserBinding(t *testing.T) {
+	ctx := context.Background()
+	st, _, err := newTestStoreWithClient(t)
+	require.NoError(t, err)
+
+	realAdmin := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "real@example.com",
+		DisplayName: "Real Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, st.CreateUser(ctx, realAdmin))
+
+	for boot := 1; boot <= 2; boot++ {
+		srv, err := New(ServerConfig{
+			DeferAdminReconciliation: true,
+			DevAuthToken:             "scion_dev_testtoken",
+		}, st)
+		require.NoError(t, err)
+
+		ApplySnapshot(srv, Layer1Snapshot{
+			AdminEmails: []string{"real@example.com"},
+		})
+		srv.ReconcileStartupAdminBindings(ctx)
+
+		assert.True(t, srv.GetDemotionSafe().Load(), "boot %d: demotionSafe should be true", boot)
+
+		superAdminRD, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+		require.NoError(t, err)
+		bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, DevUserID)
+		require.NoError(t, err)
+		var devSuperAdminCount int
+		for _, b := range bindings {
+			if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == superAdminRD.ID {
+				devSuperAdminCount++
+			}
+		}
+		assert.Equal(t, 1, devSuperAdminCount, "boot %d: dev user must retain its system super-admin binding", boot)
+
+		require.NoError(t, srv.Shutdown(ctx))
+	}
 }
 
 // TestNew_DeferAdminReconciliation_EmptyListKeepsDemotionUnsafe verifies that
