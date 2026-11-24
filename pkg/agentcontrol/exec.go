@@ -177,7 +177,7 @@ type ExecStartRequest struct {
 	Argv           []string `json:"argv"`
 	TimeoutS       int      `json:"timeout_s"`
 	NotAfterUnixMS int64    `json:"not_after_unix_ms"`
-	Capture string `json:"capture,omitempty"`
+	Capture        string   `json:"capture,omitempty"`
 	// TriggerContext is the optional bounded JSON object delivered to
 	// trigger-routed exec runs as SCION_TRIGGER_CONTEXT. Sent only when the
 	// session advertises FeatureExecContextV1.
