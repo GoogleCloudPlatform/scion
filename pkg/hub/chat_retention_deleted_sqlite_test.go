@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -348,4 +349,72 @@ func TestChatRetention_ListsAndUnreadAfterPurgeSQLite(t *testing.T) {
 	mentions, err = f.wcs.UnreadMentionKeys(f.ctx, f.alice.ID, []string{topicKey})
 	require.NoError(t, err)
 	assert.False(t, mentions[topicKey])
+}
+
+// TestChatRetention_DeleteTopicSweepSQLite verifies the identity-ownership
+// retention invariant: after DeleteTopic soft-deletes a topic and its linked
+// conversation atomically, a retention sweep past the grace period finds both
+// soft-deleted rows, purges their messages exactly once (no double-count
+// between deleted-conversations and deleted-topics passes), keeps the keeper
+// topic's messages, and leaves neither row live without the other.
+func TestChatRetention_DeleteTopicSweepSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+
+	keeperID := api.NewUUID()
+	topicID := api.NewUUID()
+	convID := api.NewUUID()
+	require.NoError(t, f.wcs.CreateTopic(f.ctx, WebChatTopic{
+		ID:        keeperID,
+		ProjectID: f.project.ID,
+		Name:      "keeper",
+		CreatedBy: f.alice.ID,
+		CreatedAt: now.Add(-60 * day),
+	}))
+	require.NoError(t, f.wcs.CreateTopic(f.ctx, WebChatTopic{
+		ID:             topicID,
+		ProjectID:      f.project.ID,
+		Name:           "doomed",
+		ConversationID: convID,
+		CreatedBy:      f.alice.ID,
+		CreatedAt:      now.Add(-60 * day),
+	}))
+	keeperConvID, err := f.wcs.GetTopicConversationID(f.ctx, keeperID)
+	require.NoError(t, err)
+
+	mConv := f.message(chatRetentionSeed{created: now.Add(-time.Hour), channel: "web", conv: convID, thread: topicID})
+	mLegacy := f.message(chatRetentionSeed{created: now.Add(-time.Hour), channel: "web", thread: topicID})
+	mKeep := f.message(chatRetentionSeed{created: now.Add(-time.Hour), channel: "web", conv: keeperConvID, thread: keeperID})
+
+	require.NoError(t, f.wcs.DeleteTopic(f.ctx, topicID))
+
+	// Both webchat_topic and conversations must now have deleted_at set.
+	snap := readIdentitySnapshot(t, f.db, "sqlite", topicID, convID)
+	require.NotNil(t, snap.topicDeletedAt, "webchat_topic.deleted_at must be set by DeleteTopic")
+	require.NotNil(t, snap.convDeletedAt, "conversations.deleted_at must be set by DeleteTopic")
+
+	// Run the retention sweeper with a clock past the default 30-day grace window.
+	cfg := opsettings.DefaultChatRetentionConfig()
+	cfg.Enabled, cfg.PauseMS = true, 0
+	sweepNow := now.Add(35 * day)
+	sw := newChatRetentionSweeper(f.crs)
+	res, err := sw.RunTick(f.ctx, newChatRetentionPolicy(true, cfg, sweepNow))
+	require.NoError(t, err)
+	assert.True(t, res.DeletedDone)
+
+	// Messages of the deleted topic/conversation are purged exactly once; keeper stays.
+	assert.False(t, f.exists(mConv), "conversation-stamped message must be purged")
+	assert.False(t, f.exists(mLegacy), "legacy thread-only message must be purged")
+	assert.True(t, f.exists(mKeep), "keeper topic message must survive")
+	assert.Equal(t, int64(2), res.Purged.DeletedConv, "messages must be counted once across conversation+topic passes")
+	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, f.db))
+
+	// Neither row is left live without the other after the sweep.
+	after := readIdentitySnapshot(t, f.db, "sqlite", topicID, convID)
+	assert.NotNil(t, after.topicDeletedAt, "webchat_topic stays soft-deleted")
+	assert.NotNil(t, after.convDeletedAt, "conversations stays soft-deleted")
+	keeperAfter := readIdentitySnapshot(t, f.db, "sqlite", keeperID, keeperConvID)
+	assert.Nil(t, keeperAfter.topicDeletedAt, "keeper topic remains live")
+	assert.Nil(t, keeperAfter.convDeletedAt, "keeper conversation remains live")
 }

@@ -1859,6 +1859,8 @@ func newTwoServerSQLite(t *testing.T, n int) *twoServerSQLite {
 		db, err := sql.Open("sqlite", webchatDSN)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
+		_, err = db.Exec(conversationsTableDDL)
+		require.NoError(t, err)
 		wcs := NewWebChatStore(db, "sqlite")
 		require.NoError(t, wcs.Init())
 		srv.SetWebChatStore(wcs)

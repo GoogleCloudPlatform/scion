@@ -1242,17 +1242,22 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")
 	}
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
+	var convID sql.NullString
 	if hasConvTable {
-		// Soft-delete the authoritative conversations row first while
-		// webchat_topic.deleted_at IS NULL so the subquery resolves the
-		// active topic's conversation_id. conversations is an Ent table:
-		// bind a time.Time, not RFC3339 text.
+		if err := tx.QueryRowContext(ctx,
+			"SELECT conversation_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL",
+			topicID).Scan(&convID); err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("webchat store: delete topic conversation lookup: %w", err)
+		}
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if hasConvTable && convID.Valid && convID.String != "" {
+		// Soft-delete the authoritative conversations row first.
+		// conversations is an Ent table: bind a time.Time, not RFC3339 text.
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE conversations SET deleted_at = ?
-			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL)
-			    AND deleted_at IS NULL`,
-			now, topicID); err != nil {
+			`UPDATE conversations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`,
+			now, convID.String); err != nil {
 			return fmt.Errorf("webchat store: delete linked conversation: %w", err)
 		}
 	}

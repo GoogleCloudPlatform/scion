@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS messages (
 `)
 	require.NoError(t, err)
 
+	_, err = db.Exec(hubtestutil.ConversationsTableDDL)
+	require.NoError(t, err)
+
 	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())
 

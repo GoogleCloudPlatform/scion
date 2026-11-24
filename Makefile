@@ -695,6 +695,7 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestHubInternal_ReplayAcrossHubReplicas \
 	TestChatRetention_Postgres_CascadeAndReplicaRace \
 	TestChatRetention_Postgres_DeletedConversationsAndAttachments \
+	TestChatRetention_Postgres_DeleteTopicSweep \
 	TestProjectQuota_TwoHubReplicasPostgres_OneAdmission \
 	TestEncryptionScan_ClassifiesByAuthenticatingKey \
 	TestEncryptionScan_PagesCoverEveryRow \
