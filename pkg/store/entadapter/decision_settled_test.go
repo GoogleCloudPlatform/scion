@@ -298,6 +298,32 @@ func TestDecisionSettled_AllWriters(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, decisionSettledFlag(t, cs, rowDsmPending), "dismiss pending must set settled=true")
 	assert.True(t, decisionSettledFlag(t, cs, rowDsmInterp), "dismiss interpreted must set settled=true")
+
+	// 9. Repost (MarkReplaced) of a decided-interpreted row -> v1 replaced + settled=true, v2 pending + settled=false.
+	_, resInterpRep1 := createPrompt(false, messages.Decision{Key: "k-interp-replace", Question: "Interp Rep V1?", Choices: choices})
+	rowInterpRepV1 := resInterpRep1.Decisions[0].RowID
+	_, err = cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: agentID,
+		SourceMessageID:      uuid.NewString(),
+		AnsweredByUserID:     aliceID,
+		AnsweredByName:       "Alice",
+		AnsweredByEmail:      "alice@example.com",
+		Surface:              store.DecisionSurfaceNative,
+		Answers:              []store.InterpretedAnswerPair{{DecisionRowID: rowInterpRepV1, ChoiceID: "yes"}},
+		ResponseMessage: &store.Message{
+			ID: uuid.NewString(), ProjectID: projectID, Sender: "agent:bot", SenderID: agentID,
+			Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+	})
+	require.NoError(t, err)
+	assert.False(t, decisionSettledFlag(t, cs, rowInterpRepV1), "decided-interpreted row starts settled=false")
+	_, resInterpRep2 := createPrompt(true, messages.Decision{Key: "k-interp-replace", Question: "Interp Rep V2?", Choices: choices})
+	rowInterpRepV2 := resInterpRep2.Decisions[0].RowID
+	v1After, err := cs.GetDecision(ctx, rowInterpRepV1)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusReplaced, v1After.Status, "repost of decided-interpreted row must mark v1 replaced")
+	assert.True(t, decisionSettledFlag(t, cs, rowInterpRepV1), "repost (MarkReplaced) of decided-interpreted row must set settled=true")
+	assert.False(t, decisionSettledFlag(t, cs, rowInterpRepV2), "new repost version must start settled=false")
 }
 
 // legacyListOpenPromptMessageIDs is the exact pre-P1 oracle query without the
