@@ -384,8 +384,6 @@ func validateTriggerActionCrossFields(w http.ResponseWriter, actionType string, 
 			badField = "reuseMessage"
 		case spec.AckComment != nil:
 			badField = "ackComment"
-		case len(spec.UntrustedVars) > 0:
-			badField = "untrustedVars"
 		case spec.NoAuth:
 			badField = "noAuth"
 		case spec.Body != "":
@@ -407,6 +405,10 @@ func validateTriggerActionCrossFields(w http.ResponseWriter, actionType string, 
 			badField = "plain"
 		case spec.Wake:
 			badField = "wake"
+		case spec.Offline != "":
+			badField = "offline"
+		case spec.QueueTTLSeconds != 0:
+			badField = "queueTtlSeconds"
 		case spec.Body != "":
 			badField = "body"
 		case spec.Target != "":
@@ -428,6 +430,10 @@ func validateTriggerActionCrossFields(w http.ResponseWriter, actionType string, 
 			badField = "plain"
 		case spec.Wake:
 			badField = "wake"
+		case spec.Offline != "":
+			badField = "offline"
+		case spec.QueueTTLSeconds != 0:
+			badField = "queueTtlSeconds"
 		case spec.NameConflict != "":
 			badField = "nameConflict"
 		case spec.Template != "":

@@ -198,8 +198,6 @@ func hasDispatchAgentFlagValues(v *dispatchAgentFlagValues) (string, bool) {
 		return "--github-token", true
 	case strings.TrimSpace(v.agentRole) != "":
 		return "--agent-role", true
-	case len(v.allow) > 0:
-		return "--allow", true
 	default:
 		return "", false
 	}
@@ -232,7 +230,7 @@ func validateUpdateCrossActionFlags(flags *pflag.FlagSet, targetType string) err
 		disallowed = []string{
 			"template", "task", "task-file", "agent-name", "on-name-conflict",
 			"branch", "label", "ephemeral", "reuse-message", "github-token",
-			"agent-role", "allow",
+			"agent-role",
 		}
 	case "dispatch_agent":
 		disallowed = []string{"agent", "message", "interrupt", "wake", "plain", "offline", "queue-ttl"}

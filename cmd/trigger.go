@@ -527,9 +527,6 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 		if badFlag, ok := hasDispatchAgentFlagValues(&triggerDispatch); ok {
 			return nil, nil, newUsageError("%s cannot be used with --action message", badFlag)
 		}
-		if allowExplicit {
-			return nil, nil, newUsageError("--allow cannot be used with --action message")
-		}
 		agentRef := strings.TrimSpace(triggerAgent)
 		if agentRef == "" {
 			return nil, nil, newUsageError("--agent is required")
