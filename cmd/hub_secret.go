@@ -52,13 +52,15 @@ Secrets are write-only values that can never be retrieved after creation.
 They are injected into agents at runtime but never exposed via the API.
 
 Secrets can be scoped to:
+  - Broker: Available to agents running on a specific Runtime Broker
   - Hub: Available to all agents across the entire hub (admin-only writes)
-  - User (default): Available to all your agents
   - Project: Available to agents in a specific project
-  - Broker: Available to agents running on a specific broker
+  - User (default): Available to all your agents
+  - Agent: Bound to a single agent (--agent <name|id>; requires hub.agent_secrets)
 
-Secrets are resolved hierarchically when an agent starts:
-  hub -> user -> project -> broker -> agent config
+Secrets are resolved hierarchically when an agent starts (highest wins):
+  runtime_broker < hub < project < user < agent
+Non-empty create-request environment values still take precedence over all scopes.
 
 Examples:
   # Set a user-scoped secret
