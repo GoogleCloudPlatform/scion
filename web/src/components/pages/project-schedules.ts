@@ -43,6 +43,7 @@ export class ScionPageProjectSchedules extends LitElement {
   pageData: PageData | null = null;
 
   @state() private projectId = '';
+  @state() private initialScheduleId = '';
   @state() private project: Project | null = null;
   @state() private loading = true;
   @state() private error: string | null = null;
@@ -135,6 +136,7 @@ export class ScionPageProjectSchedules extends LitElement {
     if (match) {
       this.projectId = decodeURIComponent(match[1]);
     }
+    this.initialScheduleId = new URLSearchParams(window.location.search).get('schedule') ?? '';
   }
 
   private async loadProject(): Promise<void> {
@@ -212,7 +214,10 @@ export class ScionPageProjectSchedules extends LitElement {
       </div>
       <p class="subtitle">Automated recurring tasks for ${projectName}.</p>
 
-      <scion-schedule-list .projectId=${this.projectId}></scion-schedule-list>
+      <scion-schedule-list
+        .projectId=${this.projectId}
+        .initialScheduleId=${this.initialScheduleId}
+      ></scion-schedule-list>
     `;
   }
 }

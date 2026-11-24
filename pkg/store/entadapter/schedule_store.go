@@ -359,6 +359,9 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	if filter.LastRunStatus != "" {
 		query.Where(schedule.LastRunStatusEQ(filter.LastRunStatus))
 	}
+	if filter.CreatedBy != "" {
+		query.Where(schedule.CreatedByEQ(filter.CreatedBy))
+	}
 	if filter.InitiatorAgentID != "" {
 		query.Where(scheduleRecordedAuthorityIs(store.DelegationPrincipalAgent, filter.InitiatorAgentID))
 	}
