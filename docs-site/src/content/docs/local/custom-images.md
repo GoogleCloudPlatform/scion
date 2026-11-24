@@ -283,6 +283,8 @@ If any higher-priority override specifies a full image path, `image_registry` do
 
 :::note
 `image_registry` only rewrites images whose name starts with `scion-`. Fully custom images (e.g., `mycompany/custom-agent:v2`) are never rewritten.
+
+Custom images passed with `--image` must ship a `sciontool` binary new enough to support the harness's ready strategy (for example, execution containers started with `--harness shell` require a `sciontool` that supports the `idle` ready strategy).
 :::
 
 ## Build Script Reference

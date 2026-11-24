@@ -137,7 +137,7 @@ flight continue to be started or followed. Note that starting an existing
 - **Flags:**
     - `-b, --branch <string>`: Target branch for the agent workspace.
     - `-t, --type <string>`: Template to use (default "gemini").
-    - `-i, --image <string>`: Override container image.
+    - `-i, --image <string>`: Override container image. Custom images must include a `sciontool` binary new enough to support the harness's ready strategy (for example, execution containers started with `--harness shell` require a `sciontool` that supports the `idle` ready strategy).
     - `-a, --attach`: Attach to the agent immediately after starting.
     - `--no-auth`: Disable authentication propagation (also sent to the Hub; applies when the agent is created).
     - `-d, --detached`: Run in detached mode (default true).
@@ -282,7 +282,7 @@ failed start.
     - `[task]`: (Optional) The task, written to `prompt.md` for when the agent starts.
 - **Flags:**
     - `-t, --type <string>`: Template to use (a single path component, or a template ID).
-    - `-i, --image <string>`: Override container image.
+    - `-i, --image <string>`: Override container image. Custom images must include a `sciontool` binary new enough to support the harness's ready strategy (for example, execution containers started with `--harness shell` require a `sciontool` that supports the `idle` ready strategy).
     - `-b, --branch <string>`: Git branch to use for the agent workspace.
     - `-w, --workspace <string>`: Host path or project-relative subdirectory to mount as `/workspace`.
     - `--config <path>`: Path to inline agent config file (YAML/JSON), or `-` for stdin.
@@ -1020,6 +1020,16 @@ support `--broker`, upgrade the Hub.
 A self-migration with `--broker` follows the same contract as any self-migration: the CLI prints that
 the container will be stopped shortly, and does not set a status such as `blocked`. An agent can move itself
 only to a Runtime Broker that already serves its project.
+
+### `scion exec-container`
+
+Inspects, sets, or clears your default [execution container](/scion/glossary/#execution-container) on the Hub. An execution container is an agent running the reserved built-in `shell` harness (`scion start <name> --harness shell`) where you log into CLI tools manually so approved commands can run without exposing those credentials to LLM agents.
+
+Requires a Hub connection with an interactive session or dev credential (user access tokens, personal access tokens, and agent tokens are refused with `403`). Human-mode only (unavailable inside agent containers) and not enabled on Windows in v1. `show` and `set` require the [`hub.exec_containers`](/scion/reference/experiments/#server-experiments-with-notes) experiment; `clear` works even while the experiment is off.
+
+- `scion exec-container show`: Shows your registered execution container, its current state (`ready`, `starting`, `stopped`, `suspended`, or `unavailable`), and whether `$HOME` persists across restarts on its runtime (`homePersistent`), or `Not configured` when none is set.
+- `scion exec-container set <agent>`: Resolves `<agent>` locally within the current project (matching exact UUID, then slug, then unambiguous name) and registers it as your default execution container via `PUT /api/v1/users/me/exec-container`. The Hub validates that the target is a non-deleted execution container you can attach to.
+- `scion exec-container clear`: Clears your registered execution container (`DELETE /api/v1/users/me/exec-container`). Idempotent.
 
 ## Configuration & Workspace
 
