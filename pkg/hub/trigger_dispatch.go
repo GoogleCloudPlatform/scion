@@ -91,12 +91,17 @@ type serverTriggerCore struct {
 }
 
 var (
-	_ trigger.Core               = serverTriggerCore{}
-	_ trigger.FireAdmitter       = serverTriggerCore{}
-	_ trigger.SourceAuthorizer   = serverTriggerCore{}
-	_ trigger.SourceEnricher     = serverTriggerCore{}
-	_ trigger.PostEvaluationHook = serverTriggerCore{}
+	_ trigger.Core                 = serverTriggerCore{}
+	_ trigger.FireAdmitter         = serverTriggerCore{}
+	_ trigger.SourceAuthorizer     = serverTriggerCore{}
+	_ trigger.SourceEnricher       = serverTriggerCore{}
+	_ trigger.PostEvaluationHook   = serverTriggerCore{}
+	_ trigger.ReuseMessageRenderer = serverTriggerCore{}
 )
+
+func (c serverTriggerCore) RenderReuseMessage(ctx context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
+	return c.srv.renderDispatchReuseMessage(ctx, req)
+}
 
 func (c serverTriggerCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
 	out, action, rawErr := c.srv.fireActionWithError(ctx, req)
@@ -433,12 +438,13 @@ func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durableq
 	}
 	metrics := serverTriggerMetrics{srv: s}
 	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
-		Store:       s.store,
-		Core:        core,
-		Rules:       s.TriggerRules(),
-		RuleMetrics: s.triggers.ruleMetrics,
-		Metrics:     metrics,
-		Logger:      logger,
+		Store:         s.store,
+		Core:          core,
+		SubjectClaims: trigger.NewSubjectClaims(s.store, s.store, nil),
+		Rules:         s.TriggerRules(),
+		RuleMetrics:   s.triggers.ruleMetrics,
+		Metrics:       metrics,
+		Logger:        logger,
 	})
 	if err != nil {
 		return nil, err

@@ -50,8 +50,13 @@ const (
 	TriggerActionExec          = "exec"
 	TriggerActionGitHubComment = "github.comment"
 
-	TriggerSubjectModeNew  = "new"
-	TriggerSubjectModeSkip = "skip"
+	TriggerSubjectModeNew   = "new"
+	TriggerSubjectModeSkip  = "skip"
+	TriggerSubjectModeReuse = "reuse"
+
+	// MaxTriggerCoalesceWindowSeconds is the maximum allowed subject
+	// coalesce_window duration in seconds (10 minutes, Stage 3 §6.3).
+	MaxTriggerCoalesceWindowSeconds = 600
 
 	TriggerStatusActive = "active"
 	TriggerStatusPaused = "paused"
@@ -69,13 +74,15 @@ const (
 	TriggerEventStatusFailed    = "failed"
 )
 
-// TriggerFire statuses (§4.4, §5.5).
+// TriggerFire statuses (§4.4, §5.5, Stage 3 §6.2, §6.3).
 const (
-	TriggerFireStatusFiring  = "firing"
-	TriggerFireStatusFired   = "fired"
-	TriggerFireStatusFailed  = "failed"
-	TriggerFireStatusRefused = "refused"
-	TriggerFireStatusSkipped = "skipped"
+	TriggerFireStatusCoalescing = "coalescing"
+	TriggerFireStatusDeferred   = "deferred"
+	TriggerFireStatusFiring     = "firing"
+	TriggerFireStatusFired      = "fired"
+	TriggerFireStatusFailed     = "failed"
+	TriggerFireStatusRefused    = "refused"
+	TriggerFireStatusSkipped    = "skipped"
 )
 
 // TriggerSubjectClaim states (Stage 2 §5.6).
@@ -150,32 +157,33 @@ type TriggerMatchRule struct {
 
 // Trigger represents a project-scoped event trigger definition (§4.2).
 type Trigger struct {
-	ID             string             `json:"id"`
-	ProjectID      string             `json:"projectId"`
-	Name           string             `json:"name"`
-	Description    string             `json:"description,omitempty"`
-	SourceKind     string             `json:"sourceKind"`
-	SourceID       string             `json:"sourceId"`
-	MatchTypes     []string           `json:"matchTypes"`
-	MatchDialect   string             `json:"matchDialect,omitempty"`
-	MatchRule      string             `json:"matchRule,omitempty"`
-	MatchRules     []TriggerMatchRule `json:"matchRules"`
-	MatchForm      string             `json:"matchForm,omitempty"`
-	ActionType     string             `json:"actionType"`
-	ActionPayload  string             `json:"actionPayload"`
-	SubjectDialect string             `json:"subjectDialect"`
-	SubjectRule    string             `json:"subjectRule,omitempty"`
-	SubjectMode    string             `json:"subjectMode"`
-	Status         string             `json:"status"`
-	StatusReason   string             `json:"statusReason,omitempty"`
-	LastFireAt     *time.Time         `json:"lastFireAt,omitempty"`
-	LastFireStatus string             `json:"lastFireStatus,omitempty"`
-	LastFireError  string             `json:"lastFireError,omitempty"`
-	FireCount      int                `json:"fireCount"`
-	ErrorCount     int                `json:"errorCount"`
-	CreatedBy      string             `json:"createdBy,omitempty"`
-	CreatedAt      time.Time          `json:"createdAt"`
-	UpdatedAt      time.Time          `json:"updatedAt"`
+	ID                    string             `json:"id"`
+	ProjectID             string             `json:"projectId"`
+	Name                  string             `json:"name"`
+	Description           string             `json:"description,omitempty"`
+	SourceKind            string             `json:"sourceKind"`
+	SourceID              string             `json:"sourceId"`
+	MatchTypes            []string           `json:"matchTypes"`
+	MatchDialect          string             `json:"matchDialect,omitempty"`
+	MatchRule             string             `json:"matchRule,omitempty"`
+	MatchRules            []TriggerMatchRule `json:"matchRules"`
+	MatchForm             string             `json:"matchForm,omitempty"`
+	ActionType            string             `json:"actionType"`
+	ActionPayload         string             `json:"actionPayload"`
+	SubjectDialect        string             `json:"subjectDialect"`
+	SubjectRule           string             `json:"subjectRule,omitempty"`
+	SubjectMode           string             `json:"subjectMode"`
+	CoalesceWindowSeconds int                `json:"coalesceWindowSeconds,omitempty"`
+	Status                string             `json:"status"`
+	StatusReason          string             `json:"statusReason,omitempty"`
+	LastFireAt            *time.Time         `json:"lastFireAt,omitempty"`
+	LastFireStatus        string             `json:"lastFireStatus,omitempty"`
+	LastFireError         string             `json:"lastFireError,omitempty"`
+	FireCount             int                `json:"fireCount"`
+	ErrorCount            int                `json:"errorCount"`
+	CreatedBy             string             `json:"createdBy,omitempty"`
+	CreatedAt             time.Time          `json:"createdAt"`
+	UpdatedAt             time.Time          `json:"updatedAt"`
 
 	InitiatorAttribution `json:"-"`
 	AuthorityCeiling     EffectCeiling     `json:"-"`
@@ -205,21 +213,22 @@ type TriggerFilter struct {
 // write. Status writes both status and status_reason together, matching
 // ScheduleFieldMask.
 type TriggerFieldMask struct {
-	Name           bool
-	Description    bool
-	SourceKind     bool
-	SourceID       bool
-	MatchTypes     bool
-	MatchDialect   bool
-	MatchRule      bool
-	MatchRules     bool
-	MatchForm      bool
-	ActionType     bool
-	ActionPayload  bool
-	SubjectDialect bool
-	SubjectRule    bool
-	SubjectMode    bool
-	Status         bool
+	Name                  bool
+	Description           bool
+	SourceKind            bool
+	SourceID              bool
+	MatchTypes            bool
+	MatchDialect          bool
+	MatchRule             bool
+	MatchRules            bool
+	MatchForm             bool
+	ActionType            bool
+	ActionPayload         bool
+	SubjectDialect        bool
+	SubjectRule           bool
+	SubjectMode           bool
+	CoalesceWindowSeconds bool
+	Status                bool
 }
 
 // TriggerEvent represents a durable inbox event record (§4.3).
@@ -275,6 +284,8 @@ type TriggerFire struct {
 	ExecutorKind   string     `json:"executorKind,omitempty"`
 	ExecutorID     string     `json:"executorId,omitempty"`
 	LeaseUntil     time.Time  `json:"leaseUntil"`
+	NotBefore      *time.Time `json:"notBefore,omitempty"`
+	DeferredAt     *time.Time `json:"deferredAt,omitempty"`
 	StartedAt      time.Time  `json:"startedAt"`
 	FinishedAt     *time.Time `json:"finishedAt,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
@@ -303,6 +314,11 @@ type TriggerSubjectClaim struct {
 	ClaimedAt  time.Time  `json:"claimedAt"`
 	BoundAt    *time.Time `json:"boundAt,omitempty"`
 	ReleasedAt *time.Time `json:"releasedAt,omitempty"`
+
+	// Agent is populated in-memory by SubjectClaims.Live from the GetAgent
+	// lookup it already performs, so callers can inspect phase/launch state
+	// without a second store lookup or type assertion. Never persisted.
+	Agent *Agent `json:"-"`
 }
 
 // TriggerStore manages webhook endpoints, triggers, trigger events, and
@@ -358,10 +374,15 @@ type TriggerStore interface {
 	// Trigger fires
 	ClaimTriggerFire(ctx context.Context, fire *TriggerFire) (claimed bool, existing *TriggerFire, err error)
 	ClaimTriggerFireSubjectSkip(ctx context.Context, fire *TriggerFire, skipError string, now time.Time) (claimed bool, skippedBusy bool, existing *TriggerFire, err error)
+	ClaimTriggerFireCoalescing(ctx context.Context, fire *TriggerFire, coalesceError string, now, notBefore time.Time) (claimed bool, promoted bool, superseded []TriggerFire, existing *TriggerFire, err error)
+	DeferTriggerFire(ctx context.Context, id string, deferredAt, notBefore, leaseUntil time.Time) (bool, error)
+	FinishPendingTriggerFire(ctx context.Context, id, status, errMsg, matchedThrough, decidedDialect, ruleTrace string, finishedAt time.Time) (bool, error)
 	FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error)
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)
 	HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error)
+	HasLiveTriggerFireForSubjectExcluding(ctx context.Context, triggerID, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error)
+	HasPendingTriggerFiresForEvent(ctx context.Context, eventID string) (bool, error)
 	AgentHasFiredTriggerForEvent(ctx context.Context, eventID, agentID string) (bool, error)
 	EventHasTriggerFireForResultRef(ctx context.Context, eventID, resultRef string) (bool, error)
 	ReapExpiredTriggerFires(ctx context.Context, now time.Time, limit int) (int, error)

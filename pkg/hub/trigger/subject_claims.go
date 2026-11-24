@@ -157,6 +157,7 @@ func (s *StoreSubjectClaims) Live(ctx context.Context, triggerID, subject string
 		}
 		return nil, nil
 	}
+	claim.Agent = ag
 	return claim, nil
 }
 

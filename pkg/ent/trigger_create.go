@@ -404,6 +404,20 @@ func (_c *TriggerCreate) SetNillableSubjectMode(v *string) *TriggerCreate {
 	return _c
 }
 
+// SetCoalesceWindowSeconds sets the "coalesce_window_seconds" field.
+func (_c *TriggerCreate) SetCoalesceWindowSeconds(v int) *TriggerCreate {
+	_c.mutation.SetCoalesceWindowSeconds(v)
+	return _c
+}
+
+// SetNillableCoalesceWindowSeconds sets the "coalesce_window_seconds" field if the given value is not nil.
+func (_c *TriggerCreate) SetNillableCoalesceWindowSeconds(v *int) *TriggerCreate {
+	if v != nil {
+		_c.SetCoalesceWindowSeconds(*v)
+	}
+	return _c
+}
+
 // SetStatus sets the "status" field.
 func (_c *TriggerCreate) SetStatus(v string) *TriggerCreate {
 	_c.mutation.SetStatus(v)
@@ -641,6 +655,10 @@ func (_c *TriggerCreate) defaults() {
 		v := trigger.DefaultSubjectMode
 		_c.mutation.SetSubjectMode(v)
 	}
+	if _, ok := _c.mutation.CoalesceWindowSeconds(); !ok {
+		v := trigger.DefaultCoalesceWindowSeconds
+		_c.mutation.SetCoalesceWindowSeconds(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := trigger.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -739,6 +757,9 @@ func (_c *TriggerCreate) check() error {
 	}
 	if _, ok := _c.mutation.SubjectMode(); !ok {
 		return &ValidationError{Name: "subject_mode", err: errors.New(`ent: missing required field "Trigger.subject_mode"`)}
+	}
+	if _, ok := _c.mutation.CoalesceWindowSeconds(); !ok {
+		return &ValidationError{Name: "coalesce_window_seconds", err: errors.New(`ent: missing required field "Trigger.coalesce_window_seconds"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "Trigger.status"`)}
@@ -910,6 +931,10 @@ func (_c *TriggerCreate) createSpec() (*Trigger, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.SubjectMode(); ok {
 		_spec.SetField(trigger.FieldSubjectMode, field.TypeString, value)
 		_node.SubjectMode = value
+	}
+	if value, ok := _c.mutation.CoalesceWindowSeconds(); ok {
+		_spec.SetField(trigger.FieldCoalesceWindowSeconds, field.TypeInt, value)
+		_node.CoalesceWindowSeconds = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)
@@ -1420,6 +1445,24 @@ func (u *TriggerUpsert) SetSubjectMode(v string) *TriggerUpsert {
 // UpdateSubjectMode sets the "subject_mode" field to the value that was provided on create.
 func (u *TriggerUpsert) UpdateSubjectMode() *TriggerUpsert {
 	u.SetExcluded(trigger.FieldSubjectMode)
+	return u
+}
+
+// SetCoalesceWindowSeconds sets the "coalesce_window_seconds" field.
+func (u *TriggerUpsert) SetCoalesceWindowSeconds(v int) *TriggerUpsert {
+	u.Set(trigger.FieldCoalesceWindowSeconds, v)
+	return u
+}
+
+// UpdateCoalesceWindowSeconds sets the "coalesce_window_seconds" field to the value that was provided on create.
+func (u *TriggerUpsert) UpdateCoalesceWindowSeconds() *TriggerUpsert {
+	u.SetExcluded(trigger.FieldCoalesceWindowSeconds)
+	return u
+}
+
+// AddCoalesceWindowSeconds adds v to the "coalesce_window_seconds" field.
+func (u *TriggerUpsert) AddCoalesceWindowSeconds(v int) *TriggerUpsert {
+	u.Add(trigger.FieldCoalesceWindowSeconds, v)
 	return u
 }
 
@@ -2117,6 +2160,27 @@ func (u *TriggerUpsertOne) SetSubjectMode(v string) *TriggerUpsertOne {
 func (u *TriggerUpsertOne) UpdateSubjectMode() *TriggerUpsertOne {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateSubjectMode()
+	})
+}
+
+// SetCoalesceWindowSeconds sets the "coalesce_window_seconds" field.
+func (u *TriggerUpsertOne) SetCoalesceWindowSeconds(v int) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetCoalesceWindowSeconds(v)
+	})
+}
+
+// AddCoalesceWindowSeconds adds v to the "coalesce_window_seconds" field.
+func (u *TriggerUpsertOne) AddCoalesceWindowSeconds(v int) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.AddCoalesceWindowSeconds(v)
+	})
+}
+
+// UpdateCoalesceWindowSeconds sets the "coalesce_window_seconds" field to the value that was provided on create.
+func (u *TriggerUpsertOne) UpdateCoalesceWindowSeconds() *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateCoalesceWindowSeconds()
 	})
 }
 
@@ -3006,6 +3070,27 @@ func (u *TriggerUpsertBulk) SetSubjectMode(v string) *TriggerUpsertBulk {
 func (u *TriggerUpsertBulk) UpdateSubjectMode() *TriggerUpsertBulk {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateSubjectMode()
+	})
+}
+
+// SetCoalesceWindowSeconds sets the "coalesce_window_seconds" field.
+func (u *TriggerUpsertBulk) SetCoalesceWindowSeconds(v int) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetCoalesceWindowSeconds(v)
+	})
+}
+
+// AddCoalesceWindowSeconds adds v to the "coalesce_window_seconds" field.
+func (u *TriggerUpsertBulk) AddCoalesceWindowSeconds(v int) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.AddCoalesceWindowSeconds(v)
+	})
+}
+
+// UpdateCoalesceWindowSeconds sets the "coalesce_window_seconds" field to the value that was provided on create.
+func (u *TriggerUpsertBulk) UpdateCoalesceWindowSeconds() *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateCoalesceWindowSeconds()
 	})
 }
 

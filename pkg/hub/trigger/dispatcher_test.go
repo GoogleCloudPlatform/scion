@@ -353,6 +353,109 @@ func (m *memTriggerStore) ClaimTriggerFireSubjectSkip(_ context.Context, fire *s
 	*fire = cp
 	return true, busy, nil, nil
 }
+func (m *memTriggerStore) ClaimTriggerFireCoalescing(_ context.Context, fire *store.TriggerFire, coalesceError string, now, notBefore time.Time) (bool, bool, []store.TriggerFire, *store.TriggerFire, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now = now.UTC()
+	notBefore = notBefore.UTC()
+	leaseHorizon := fire.LeaseUntil.UTC().Sub(now)
+	if leaseHorizon <= 0 {
+		leaseHorizon = trigger.FireLeaseHorizon
+	}
+	key := fire.EventID + "|" + fire.TriggerID
+	if ex, exists := m.fires[key]; exists {
+		if ex.Status == store.TriggerFireStatusCoalescing || ex.Status == store.TriggerFireStatusDeferred {
+			if ex.NotBefore != nil && ex.NotBefore.UTC().After(now) {
+				cp := *ex
+				return false, false, nil, &cp, nil
+			}
+			ex.Status = store.TriggerFireStatusFiring
+			ex.LeaseUntil = now.Add(leaseHorizon)
+			cp := *ex
+			*fire = cp
+			return true, true, nil, nil, nil
+		}
+		if ex.Status == store.TriggerFireStatusFailed &&
+			(ex.Error == trigger.ErrFireReapedDuringCoalesce || ex.Error == trigger.ErrFireReapedDuringDefer) {
+			ex.Status = store.TriggerFireStatusFiring
+			ex.Error = ""
+			ex.FinishedAt = nil
+			ex.LeaseUntil = now.Add(leaseHorizon)
+			cp := *ex
+			*fire = cp
+			return true, true, nil, nil, nil
+		}
+		cp := *ex
+		return false, false, nil, &cp, nil
+	}
+	var superseded []store.TriggerFire
+	for _, f := range m.byFireID {
+		isPendingOrReaped := f.Status == store.TriggerFireStatusCoalescing ||
+			f.Status == store.TriggerFireStatusDeferred ||
+			(f.Status == store.TriggerFireStatusFailed && (f.Error == trigger.ErrFireReapedDuringCoalesce || f.Error == trigger.ErrFireReapedDuringDefer))
+		if f.TriggerID == fire.TriggerID && f.Subject == fire.Subject && isPendingOrReaped {
+			f.Status = store.TriggerFireStatusSkipped
+			f.Error = coalesceError
+			fin := now
+			f.FinishedAt = &fin
+			superseded = append(superseded, *f)
+		}
+	}
+	cp := *fire
+	cp.Status = store.TriggerFireStatusCoalescing
+	nb := notBefore
+	cp.NotBefore = &nb
+	cp.LeaseUntil = notBefore.Add(leaseHorizon)
+	m.fires[key] = &cp
+	m.byFireID[cp.ID] = &cp
+	*fire = cp
+	return true, false, superseded, nil, nil
+}
+func (m *memTriggerStore) DeferTriggerFire(_ context.Context, id string, deferredAt, notBefore, leaseUntil time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f, ok := m.byFireID[id]
+	if !ok || f.Status != store.TriggerFireStatusFiring {
+		return false, nil
+	}
+	f.Status = store.TriggerFireStatusDeferred
+	if f.DeferredAt == nil && !deferredAt.IsZero() {
+		da := deferredAt.UTC()
+		f.DeferredAt = &da
+	}
+	nb := notBefore.UTC()
+	f.NotBefore = &nb
+	f.LeaseUntil = leaseUntil.UTC()
+	return true, nil
+}
+func (m *memTriggerStore) FinishPendingTriggerFire(_ context.Context, id, status, errMsg, matchedThrough, decidedDialect, ruleTrace string, finishedAt time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f, ok := m.byFireID[id]
+	if !ok {
+		return false, nil
+	}
+	isPendingOrReaped := f.Status == store.TriggerFireStatusCoalescing ||
+		f.Status == store.TriggerFireStatusDeferred ||
+		(f.Status == store.TriggerFireStatusFailed && (f.Error == trigger.ErrFireReapedDuringCoalesce || f.Error == trigger.ErrFireReapedDuringDefer))
+	if !isPendingOrReaped {
+		return false, nil
+	}
+	f.Status = status
+	f.Error = errMsg
+	if matchedThrough != "" {
+		f.MatchedThrough = matchedThrough
+	}
+	if decidedDialect != "" {
+		f.DecidedDialect = decidedDialect
+	}
+	if ruleTrace != "" {
+		f.RuleTrace = ruleTrace
+	}
+	t := finishedAt.UTC()
+	f.FinishedAt = &t
+	return true, nil
+}
 func (m *memTriggerStore) FinishTriggerFire(_ context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -380,16 +483,59 @@ func (m *memTriggerStore) GetTriggerFire(_ context.Context, id string) (*store.T
 	cp := *f
 	return &cp, nil
 }
-func (m *memTriggerStore) ListTriggerFires(context.Context, store.TriggerFireFilter, store.ListOptions) (*store.ListResult[store.TriggerFire], error) {
+func (m *memTriggerStore) ListTriggerFires(_ context.Context, filter store.TriggerFireFilter, _ store.ListOptions) (*store.ListResult[store.TriggerFire], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var items []store.TriggerFire
 	for _, f := range m.byFireID {
+		if filter.EventID != "" && f.EventID != filter.EventID {
+			continue
+		}
+		if filter.TriggerID != "" && f.TriggerID != filter.TriggerID {
+			continue
+		}
+		if filter.Status != "" && f.Status != filter.Status {
+			continue
+		}
 		items = append(items, *f)
 	}
 	return &store.ListResult[store.TriggerFire]{Items: items, TotalCount: len(items)}, nil
 }
-func (m *memTriggerStore) HasLiveTriggerFireForSubject(context.Context, string, string, time.Time) (bool, error) {
+func (m *memTriggerStore) HasLiveTriggerFireForSubject(_ context.Context, triggerID, subject string, now time.Time) (bool, error) {
+	return m.HasLiveTriggerFireForSubjectExcluding(context.Background(), triggerID, subject, "", true, now)
+}
+func (m *memTriggerStore) HasLiveTriggerFireForSubjectExcluding(_ context.Context, triggerID, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, f := range m.byFireID {
+		if f.ID == excludeFireID {
+			continue
+		}
+		statusMatch := f.Status == store.TriggerFireStatusCoalescing ||
+			f.Status == store.TriggerFireStatusDeferred ||
+			(includeFiring && f.Status == store.TriggerFireStatusFiring)
+		if f.TriggerID == triggerID &&
+			f.Subject == subject &&
+			statusMatch &&
+			f.LeaseUntil.After(now.UTC()) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+func (m *memTriggerStore) HasPendingTriggerFiresForEvent(_ context.Context, eventID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, f := range m.byFireID {
+		if f.EventID != eventID {
+			continue
+		}
+		if f.Status == store.TriggerFireStatusCoalescing ||
+			f.Status == store.TriggerFireStatusDeferred ||
+			(f.Status == store.TriggerFireStatusFailed && (f.Error == trigger.ErrFireReapedDuringCoalesce || f.Error == trigger.ErrFireReapedDuringDefer)) {
+			return true, nil
+		}
+	}
 	return false, nil
 }
 func (m *memTriggerStore) AgentHasFiredTriggerForEvent(context.Context, string, string) (bool, error) {

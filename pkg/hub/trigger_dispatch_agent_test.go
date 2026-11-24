@@ -142,9 +142,10 @@ func (f *triggerDispatchAgentFixture) drainOneTriggerEvent(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
 	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
-		Store: f.sched.store,
-		Core:  serverTriggerCore{srv: f.sched.srv},
-		Rules: f.sched.srv.TriggerRules(),
+		Store:         f.sched.store,
+		Core:          serverTriggerCore{srv: f.sched.srv},
+		SubjectClaims: trigger.NewSubjectClaims(f.sched.store, f.sched.store, nil),
+		Rules:         f.sched.srv.TriggerRules(),
 	})
 	require.NoError(t, err)
 
@@ -508,10 +509,14 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 		require.NoError(t, json.Unmarshal(recSkip.Body.Bytes(), &resp))
 		assert.Equal(t, store.TriggerSubjectModeSkip, resp.Subject.Mode)
 
-		// dispatch_agent + subject.mode=reuse remains refused until Stage 3.
+		// dispatch_agent + subject.mode=reuse is accepted in Stage 3 (when the author holds wake authority).
 		reqReuse := baseReq("reuse-mode")
-		reqReuse.Subject = &TriggerSubjectSpec{Mode: "reuse"}
-		assertErrCode(t, postTrigger(userCtx, reqReuse), http.StatusBadRequest, ErrCodeValidationError)
+		reqReuse.Subject = &TriggerSubjectSpec{Mode: store.TriggerSubjectModeReuse}
+		recReuse := postTrigger(userCtx, reqReuse)
+		require.Equal(t, http.StatusCreated, recReuse.Code, recReuse.Body.String())
+		var reuseResp TriggerResponse
+		require.NoError(t, json.Unmarshal(recReuse.Body.Bytes(), &reuseResp))
+		assert.Equal(t, store.TriggerSubjectModeReuse, reuseResp.Subject.Mode)
 
 		// message trigger + subject.mode=skip (Stage 1 PR 4) remains accepted.
 		msgTarget := &store.Agent{

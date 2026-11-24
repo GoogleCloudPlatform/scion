@@ -3920,6 +3920,7 @@ var (
 		{Name: "subject_dialect", Type: field.TypeString, Default: "cel"},
 		{Name: "subject_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "subject_mode", Type: field.TypeString, Default: "new"},
+		{Name: "coalesce_window_seconds", Type: field.TypeInt, Default: 0},
 		{Name: "status", Type: field.TypeString, Default: "active"},
 		{Name: "status_reason", Type: field.TypeString, Nullable: true},
 		{Name: "last_fire_at", Type: field.TypeTime, Nullable: true},
@@ -3955,7 +3956,7 @@ var (
 			{
 				Name:    "trigger_project_id_source_kind_source_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[31]},
+				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[32]},
 			},
 			{
 				Name:    "trigger_initiator_principal_id",
@@ -4044,6 +4045,8 @@ var (
 		{Name: "executor_kind", Type: field.TypeString, Default: ""},
 		{Name: "executor_id", Type: field.TypeString, Default: ""},
 		{Name: "lease_until", Type: field.TypeTime},
+		{Name: "not_before", Type: field.TypeTime, Nullable: true},
+		{Name: "deferred_at", Type: field.TypeTime, Nullable: true},
 		{Name: "started_at", Type: field.TypeTime},
 		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
@@ -4057,7 +4060,7 @@ var (
 			{
 				Name:    "triggerfire_trigger_id_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[25]},
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[27]},
 			},
 			{
 				Name:    "triggerfire_event_id_trigger_id",

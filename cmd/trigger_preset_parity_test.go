@@ -236,5 +236,70 @@ func TestTriggerPresetCLI_ParityWithDirectCompileAndCreate(t *testing.T) {
 	assert.Equal(t, directStored.SubjectDialect, cliStored.SubjectDialect)
 	assert.Equal(t, directStored.SubjectRule, cliStored.SubjectRule)
 	assert.Equal(t, directStored.SubjectMode, cliStored.SubjectMode)
+	assert.Equal(t, directStored.CoalesceWindowSeconds, cliStored.CoalesceWindowSeconds)
 	assert.Equal(t, directStored.Status, cliStored.Status)
+
+	// Parity for github.pr_updated (G6f O2): carries mode=reuse and coalesce_window=30s.
+	triggerPresetApplyName = "cli-pr-updated-trigger"
+	triggerPresetApplyDescription = "PR updated via preset apply"
+	triggerPresetApplyFields = []string{"coalesce_window=30s"}
+	triggerPresetApplyAgent = "lead"
+	triggerPresetApplyMessage = "Handle PR sync"
+	triggerPresetApplyWake = true
+	triggerPresetApplyDryRun = false
+
+	cliSyncOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.pr_updated"}))
+	})
+	assert.Contains(t, cliSyncOut, "Trigger created:")
+	assert.Contains(t, cliSyncOut, "Coalesce: 30s")
+
+	compiledSync, err := client.TriggerPresets().Compile(ctx, &hubclient.CompileTriggerPresetRequest{
+		Preset: "github.pr_updated",
+		Fields: map[string]any{"coalesce_window": "30s"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "reuse", compiledSync.Subject.Mode)
+	assert.Equal(t, "30s", compiledSync.Subject.CoalesceWindow)
+	syncFormRaw, err := json.Marshal(compiledSync.Form)
+	require.NoError(t, err)
+	syncRules := make([]hubclient.TriggerMatchRuleSpec, len(compiledSync.Match.Rules))
+	for i, r := range compiledSync.Match.Rules {
+		syncRules[i] = hubclient.TriggerMatchRuleSpec(r)
+	}
+	directSyncCreated, err := client.Triggers(proj.ID).Create(ctx, &hubclient.CreateTriggerRequest{
+		Name:        "direct-pr-updated-trigger",
+		Description: "PR updated via preset apply",
+		Source:      hubclient.TriggerSourceSpec{Kind: "github", ID: ""},
+		Match: &hubclient.TriggerMatchSpec{
+			Types: compiledSync.Match.Types,
+			Rules: syncRules,
+			Form:  json.RawMessage(syncFormRaw),
+		},
+		Subject: &hubclient.TriggerSubjectSpec{
+			Mode:           compiledSync.Subject.Mode,
+			Expr:           compiledSync.Subject.Expr,
+			CoalesceWindow: compiledSync.Subject.CoalesceWindow,
+		},
+		Action: hubclient.TriggerActionSpec{
+			Type:      "message",
+			AgentName: "lead",
+			Message:   "Handle PR sync",
+			Wake:      true,
+		},
+	})
+	require.NoError(t, err)
+
+	cliSyncStored, err := s.GetTriggerByName(ctx, proj.ID, "cli-pr-updated-trigger")
+	require.NoError(t, err)
+	directSyncStored, err := s.GetTrigger(ctx, directSyncCreated.ID)
+	require.NoError(t, err)
+
+	assert.Equal(t, store.TriggerSubjectModeReuse, cliSyncStored.SubjectMode)
+	assert.Equal(t, 30, cliSyncStored.CoalesceWindowSeconds)
+	assert.Equal(t, directSyncStored.MatchTypes, cliSyncStored.MatchTypes)
+	assert.Equal(t, directSyncStored.MatchRules, cliSyncStored.MatchRules)
+	assert.JSONEq(t, directSyncStored.MatchForm, cliSyncStored.MatchForm)
+	assert.Equal(t, directSyncStored.SubjectMode, cliSyncStored.SubjectMode)
+	assert.Equal(t, directSyncStored.CoalesceWindowSeconds, cliSyncStored.CoalesceWindowSeconds)
 }

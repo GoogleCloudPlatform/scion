@@ -508,6 +508,27 @@ func (_u *TriggerUpdate) SetNillableSubjectMode(v *string) *TriggerUpdate {
 	return _u
 }
 
+// SetCoalesceWindowSeconds sets the "coalesce_window_seconds" field.
+func (_u *TriggerUpdate) SetCoalesceWindowSeconds(v int) *TriggerUpdate {
+	_u.mutation.ResetCoalesceWindowSeconds()
+	_u.mutation.SetCoalesceWindowSeconds(v)
+	return _u
+}
+
+// SetNillableCoalesceWindowSeconds sets the "coalesce_window_seconds" field if the given value is not nil.
+func (_u *TriggerUpdate) SetNillableCoalesceWindowSeconds(v *int) *TriggerUpdate {
+	if v != nil {
+		_u.SetCoalesceWindowSeconds(*v)
+	}
+	return _u
+}
+
+// AddCoalesceWindowSeconds adds value to the "coalesce_window_seconds" field.
+func (_u *TriggerUpdate) AddCoalesceWindowSeconds(v int) *TriggerUpdate {
+	_u.mutation.AddCoalesceWindowSeconds(v)
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *TriggerUpdate) SetStatus(v string) *TriggerUpdate {
 	_u.mutation.SetStatus(v)
@@ -879,6 +900,12 @@ func (_u *TriggerUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.SubjectMode(); ok {
 		_spec.SetField(trigger.FieldSubjectMode, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CoalesceWindowSeconds(); ok {
+		_spec.SetField(trigger.FieldCoalesceWindowSeconds, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedCoalesceWindowSeconds(); ok {
+		_spec.AddField(trigger.FieldCoalesceWindowSeconds, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)
@@ -1427,6 +1454,27 @@ func (_u *TriggerUpdateOne) SetNillableSubjectMode(v *string) *TriggerUpdateOne 
 	return _u
 }
 
+// SetCoalesceWindowSeconds sets the "coalesce_window_seconds" field.
+func (_u *TriggerUpdateOne) SetCoalesceWindowSeconds(v int) *TriggerUpdateOne {
+	_u.mutation.ResetCoalesceWindowSeconds()
+	_u.mutation.SetCoalesceWindowSeconds(v)
+	return _u
+}
+
+// SetNillableCoalesceWindowSeconds sets the "coalesce_window_seconds" field if the given value is not nil.
+func (_u *TriggerUpdateOne) SetNillableCoalesceWindowSeconds(v *int) *TriggerUpdateOne {
+	if v != nil {
+		_u.SetCoalesceWindowSeconds(*v)
+	}
+	return _u
+}
+
+// AddCoalesceWindowSeconds adds value to the "coalesce_window_seconds" field.
+func (_u *TriggerUpdateOne) AddCoalesceWindowSeconds(v int) *TriggerUpdateOne {
+	_u.mutation.AddCoalesceWindowSeconds(v)
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *TriggerUpdateOne) SetStatus(v string) *TriggerUpdateOne {
 	_u.mutation.SetStatus(v)
@@ -1828,6 +1876,12 @@ func (_u *TriggerUpdateOne) sqlSave(ctx context.Context) (_node *Trigger, err er
 	}
 	if value, ok := _u.mutation.SubjectMode(); ok {
 		_spec.SetField(trigger.FieldSubjectMode, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CoalesceWindowSeconds(); ok {
+		_spec.SetField(trigger.FieldCoalesceWindowSeconds, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedCoalesceWindowSeconds(); ok {
+		_spec.AddField(trigger.FieldCoalesceWindowSeconds, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)

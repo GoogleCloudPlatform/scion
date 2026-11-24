@@ -549,8 +549,8 @@ func TestTriggersAuthoring_Stage1b1ValidationRefusals(t *testing.T) {
 			wantMsg: "match_types",
 		},
 		{
-			name:    "unsupported subject.mode reuse refused",
-			mutate:  func(r *CreateTriggerRequest) { r.Subject = &TriggerSubjectSpec{Mode: "reuse"} },
+			name:    "unsupported subject.mode refused",
+			mutate:  func(r *CreateTriggerRequest) { r.Subject = &TriggerSubjectSpec{Mode: "bogus"} },
 			wantMsg: "unsupported subject mode",
 		},
 		{
@@ -3887,9 +3887,9 @@ func TestTriggersAuthoring_SubjectModeSkipCreatePatchAndResume(t *testing.T) {
 	assert.Equal(t, 1, created.AuthorizationRevision)
 
 	// PATCH unsupported mode or non-cel dialect -> 400.
-	reuseMode := "reuse"
+	bogusMode := "bogus"
 	badModeRec := f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
-		Subject: &TriggerSubjectPatchSpec{Mode: &reuseMode},
+		Subject: &TriggerSubjectPatchSpec{Mode: &bogusMode},
 	})
 	assert.Equal(t, http.StatusBadRequest, badModeRec.Code, badModeRec.Body.String())
 

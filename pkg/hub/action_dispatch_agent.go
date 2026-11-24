@@ -674,6 +674,10 @@ func (a *dispatchAgentAction) Authorize(
 			if !trigger.SourceReplayProtected(req.Event.SourceKind, ep) {
 				return nil, &FireRefusal{Reason: "source not replay protected"}, nil
 			}
+			// Stage 3 §4.4 defense-in-depth: refuse stale events from replay-protected sources.
+			if req.Event.Attributes["stale"] == "true" {
+				return nil, &FireRefusal{Reason: trigger.ErrFireStaleEvent}, nil
+			}
 		}
 	}
 
@@ -864,6 +868,42 @@ func buildDispatchTemplateVars(req hubfire.FireRequest, da *dispatchAgentAuthori
 	return triggertemplate.ChainVars(trusted, untrusted, payloadVars)
 }
 
+func (s *Server) renderDispatchReuseMessage(ctx context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
+	if s == nil || s.store == nil || req.Event == nil {
+		return "", nil, nil
+	}
+	payload, err := unmarshalDispatchAgentFirePayload(req.Payload, req.Authority.DefinitionKind)
+	if err != nil {
+		return "", nil, err
+	}
+	if strings.TrimSpace(payload.ReuseMessage) == "" {
+		return "", nil, nil
+	}
+	var projectName, sourceName, signatureMode string
+	if proj, pErr := s.store.GetProject(ctx, req.ProjectID); pErr == nil && proj != nil {
+		projectName = proj.Name
+	}
+	if req.Event.SourceKind == store.TriggerSourceKindWebhook && req.Event.SourceID != "" {
+		if ep, epErr := s.store.GetWebhookEndpoint(ctx, req.Event.SourceID); epErr == nil && ep != nil {
+			sourceName = ep.Name
+			signatureMode = ep.SignatureMode
+		}
+	}
+	da := &dispatchAgentAuthorized{
+		payload:       payload,
+		projectName:   projectName,
+		sourceName:    sourceName,
+		signatureMode: signatureMode,
+	}
+	vars := buildDispatchTemplateVars(req, da)
+	rendered, rErr := renderTemplateSlot(payload.ReuseMessage, triggertemplate.SlotMessage, vars, payload.UntrustedVars)
+	if rErr != nil {
+		refusal := (&dispatchAgentAction{srv: s}).refuseTemplateRender(req, triggertemplate.SlotMessage, rErr)
+		return "", &refusal, nil
+	}
+	return rendered, nil, nil
+}
+
 func renderTemplateSlot(raw, slot string, vars triggertemplate.Vars, allowed []string, opts ...triggertemplate.RenderOption) (string, error) {
 	tmpl, err := triggertemplate.Parse(raw, slot)
 	if err != nil {
@@ -957,7 +997,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		onCommitted   func(agentID string)
 		bindCommitted bool
 	)
-	if subjectMode == store.TriggerSubjectModeSkip {
+	if subjectMode == store.TriggerSubjectModeSkip || subjectMode == store.TriggerSubjectModeReuse {
 		claims := trigger.NewSubjectClaims(a.srv.store, a.srv.store, time.Now)
 		claimSubject := fireSubject
 		if claimSubject == "" {

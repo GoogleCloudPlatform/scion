@@ -448,10 +448,11 @@ func buildTriggerCreateRequestFromPreset(
 		},
 		Action: action,
 	}
-	if compiled.Subject.Mode != "" || compiled.Subject.Expr != "" {
+	if compiled.Subject.Mode != "" || compiled.Subject.Expr != "" || compiled.Subject.CoalesceWindow != "" {
 		req.Subject = &hubclient.TriggerSubjectSpec{
-			Expr: compiled.Subject.Expr,
-			Mode: compiled.Subject.Mode,
+			Expr:           compiled.Subject.Expr,
+			Mode:           compiled.Subject.Mode,
+			CoalesceWindow: compiled.Subject.CoalesceWindow,
 		}
 	}
 	return req, nil
@@ -520,15 +521,6 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 		}
 		printCompiledTriggerPreset(compiled)
 		return nil
-	}
-
-	if compiled.Subject.Mode == "reuse" || strings.TrimSpace(compiled.Subject.CoalesceWindow) != "" {
-		return newUsageError(
-			"preset %q compiles to subject policy (mode=%q, coalesce_window=%q) which is not yet supported; use --dry-run to inspect the compiled rule",
-			triggerTerminalText(presetID, false),
-			triggerTerminalText(compiled.Subject.Mode, false),
-			triggerTerminalText(compiled.Subject.CoalesceWindow, false),
-		)
 	}
 
 	sourceKind := ""
@@ -624,6 +616,9 @@ func printCreatedPresetTrigger(created *hubclient.Trigger) {
 	}
 	if created.Subject.Expr != "" {
 		fmt.Printf("  Subject: %q\n", created.Subject.Expr)
+	}
+	if created.Subject.CoalesceWindow != "" {
+		fmt.Printf("  Coalesce: %s\n", triggerTerminalText(created.Subject.CoalesceWindow, false))
 	}
 	printTriggerActionSummary(created.Action)
 	fmt.Printf("  Status:  %s\n", triggerTerminalText(triggerStatusLabel(created.Status, created.StatusReason), false))

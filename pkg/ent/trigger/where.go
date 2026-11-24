@@ -205,6 +205,11 @@ func SubjectMode(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldSubjectMode, v))
 }
 
+// CoalesceWindowSeconds applies equality check predicate on the "coalesce_window_seconds" field. It's identical to CoalesceWindowSecondsEQ.
+func CoalesceWindowSeconds(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldCoalesceWindowSeconds, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldStatus, v))
@@ -2158,6 +2163,46 @@ func SubjectModeEqualFold(v string) predicate.Trigger {
 // SubjectModeContainsFold applies the ContainsFold predicate on the "subject_mode" field.
 func SubjectModeContainsFold(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldContainsFold(FieldSubjectMode, v))
+}
+
+// CoalesceWindowSecondsEQ applies the EQ predicate on the "coalesce_window_seconds" field.
+func CoalesceWindowSecondsEQ(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldCoalesceWindowSeconds, v))
+}
+
+// CoalesceWindowSecondsNEQ applies the NEQ predicate on the "coalesce_window_seconds" field.
+func CoalesceWindowSecondsNEQ(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNEQ(FieldCoalesceWindowSeconds, v))
+}
+
+// CoalesceWindowSecondsIn applies the In predicate on the "coalesce_window_seconds" field.
+func CoalesceWindowSecondsIn(vs ...int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldIn(FieldCoalesceWindowSeconds, vs...))
+}
+
+// CoalesceWindowSecondsNotIn applies the NotIn predicate on the "coalesce_window_seconds" field.
+func CoalesceWindowSecondsNotIn(vs ...int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNotIn(FieldCoalesceWindowSeconds, vs...))
+}
+
+// CoalesceWindowSecondsGT applies the GT predicate on the "coalesce_window_seconds" field.
+func CoalesceWindowSecondsGT(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGT(FieldCoalesceWindowSeconds, v))
+}
+
+// CoalesceWindowSecondsGTE applies the GTE predicate on the "coalesce_window_seconds" field.
+func CoalesceWindowSecondsGTE(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGTE(FieldCoalesceWindowSeconds, v))
+}
+
+// CoalesceWindowSecondsLT applies the LT predicate on the "coalesce_window_seconds" field.
+func CoalesceWindowSecondsLT(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLT(FieldCoalesceWindowSeconds, v))
+}
+
+// CoalesceWindowSecondsLTE applies the LTE predicate on the "coalesce_window_seconds" field.
+func CoalesceWindowSecondsLTE(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLTE(FieldCoalesceWindowSeconds, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

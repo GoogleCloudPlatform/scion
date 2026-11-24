@@ -76,6 +76,8 @@ func (Trigger) Fields() []ent.Field {
 			Default(""),
 		field.String("subject_mode").
 			Default("new"),
+		field.Int("coalesce_window_seconds").
+			Default(0),
 		field.String("status").
 			Default("active"),
 		field.String("status_reason").

@@ -238,7 +238,7 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		if !ok {
 			return
 		}
-		subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, nil, false)
+		subjectDialect, subjectRule, subjectMode, _, ok := s.writeAndValidateTriggerSubject(w, ctx, nil, false)
 		if !ok {
 			return
 		}

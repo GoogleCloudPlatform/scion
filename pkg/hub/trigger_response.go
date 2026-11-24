@@ -126,9 +126,10 @@ type TriggerActionSpec struct {
 
 // TriggerSubjectSpec configures per-subject handling for a trigger.
 type TriggerSubjectSpec struct {
-	Dialect string `json:"dialect,omitempty"`
-	Expr    string `json:"expr,omitempty"`
-	Mode    string `json:"mode,omitempty"`
+	Dialect        string `json:"dialect,omitempty"`
+	Expr           string `json:"expr,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	CoalesceWindow string `json:"coalesce_window,omitempty"`
 }
 
 // TriggerResponse is the API representation of a trigger definition.
@@ -197,6 +198,7 @@ type TriggerFireResponse struct {
 	MatchedThrough string            `json:"matchedThrough,omitempty"`
 	DecidedDialect string            `json:"decidedDialect,omitempty"`
 	RuleTrace      *TriggerRuleTrace `json:"ruleTrace,omitempty"`
+	NotBefore      *time.Time        `json:"notBefore,omitempty"`
 	StartedAt      time.Time         `json:"startedAt"`
 	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`
 }
@@ -352,6 +354,10 @@ func buildTriggerResponse(tr store.Trigger) TriggerResponse {
 		matchSpec.Dialect = respRules[0].Dialect
 		matchSpec.Expr = respRules[0].Expr
 	}
+	var coalesceWindow string
+	if tr.CoalesceWindowSeconds > 0 {
+		coalesceWindow = (time.Duration(tr.CoalesceWindowSeconds) * time.Second).String()
+	}
 	return TriggerResponse{
 		ID:          tr.ID,
 		ProjectID:   tr.ProjectID,
@@ -364,9 +370,10 @@ func buildTriggerResponse(tr store.Trigger) TriggerResponse {
 		Match:  matchSpec,
 		Action: buildTriggerActionSpec(tr.ActionType, tr.ActionPayload),
 		Subject: TriggerSubjectSpec{
-			Dialect: tr.SubjectDialect,
-			Expr:    tr.SubjectRule,
-			Mode:    tr.SubjectMode,
+			Dialect:        tr.SubjectDialect,
+			Expr:           tr.SubjectRule,
+			Mode:           tr.SubjectMode,
+			CoalesceWindow: coalesceWindow,
 		},
 		Status:                tr.Status,
 		StatusReason:          tr.StatusReason,
@@ -425,6 +432,7 @@ func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
 		MatchedThrough: tf.MatchedThrough,
 		DecidedDialect: decidedDialect,
 		RuleTrace:      decodeTriggerFireRuleTrace(tf.RuleTrace),
+		NotBefore:      tf.NotBefore,
 		StartedAt:      tf.StartedAt,
 		FinishedAt:     tf.FinishedAt,
 	}

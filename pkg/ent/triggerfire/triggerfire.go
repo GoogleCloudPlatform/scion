@@ -58,6 +58,10 @@ const (
 	FieldExecutorID = "executor_id"
 	// FieldLeaseUntil holds the string denoting the lease_until field in the database.
 	FieldLeaseUntil = "lease_until"
+	// FieldNotBefore holds the string denoting the not_before field in the database.
+	FieldNotBefore = "not_before"
+	// FieldDeferredAt holds the string denoting the deferred_at field in the database.
+	FieldDeferredAt = "deferred_at"
 	// FieldStartedAt holds the string denoting the started_at field in the database.
 	FieldStartedAt = "started_at"
 	// FieldFinishedAt holds the string denoting the finished_at field in the database.
@@ -93,6 +97,8 @@ var Columns = []string{
 	FieldExecutorKind,
 	FieldExecutorID,
 	FieldLeaseUntil,
+	FieldNotBefore,
+	FieldDeferredAt,
 	FieldStartedAt,
 	FieldFinishedAt,
 	FieldCreated,
@@ -247,6 +253,16 @@ func ByExecutorID(opts ...sql.OrderTermOption) OrderOption {
 // ByLeaseUntil orders the results by the lease_until field.
 func ByLeaseUntil(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLeaseUntil, opts...).ToFunc()
+}
+
+// ByNotBefore orders the results by the not_before field.
+func ByNotBefore(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNotBefore, opts...).ToFunc()
+}
+
+// ByDeferredAt orders the results by the deferred_at field.
+func ByDeferredAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeferredAt, opts...).ToFunc()
 }
 
 // ByStartedAt orders the results by the started_at field.
