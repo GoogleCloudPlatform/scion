@@ -1747,7 +1747,7 @@ type mpListAgentsFaultStore struct {
 }
 
 func (w *mpListAgentsFaultStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
-	if w.sw.isArmed() {
+	if w.sw.Active() {
 		w.calls.Add(1)
 		return nil, errors.New("injected ListAgents fault")
 	}
@@ -1768,12 +1768,13 @@ func TestMessagePolicySystemOne_R2GroupSendCELOnlySkipsAgentListing(t *testing.T
 	}
 	require.NoError(t, f.s.CreateAgent(ctx, peerAgent))
 
+	projID := f.project.ID
 	conv := &store.Conversation{
-		ID:        "conv-r2-group",
-		ProjectID: f.project.ID,
-		Kind:      "group",
-		Name:      "r2-team-thread",
-		Surface:   "native",
+		ID:          "conv-r2-group",
+		ProjectID:   &projID,
+		Kind:        "group",
+		DisplayName: "r2-team-thread",
+		Surface:     "native",
 	}
 	require.NoError(t, f.s.CreateConversation(ctx, conv))
 	require.NoError(t, f.s.AddParticipant(ctx, &store.ConversationParticipant{
@@ -1804,8 +1805,7 @@ func TestMessagePolicySystemOne_R2GroupSendCELOnlySkipsAgentListing(t *testing.T
 	hook, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *mpListAgentsFaultStore {
 		return &mpListAgentsFaultStore{Store: inner, sw: sw}
 	})
-	fault.arm()
-	defer fault.disarm()
+	fault.Arm()
 
 	rr := f.sendOutbound(t, OutboundMessageRequest{
 		Recipient: "conv:" + conv.ID,
@@ -1875,7 +1875,7 @@ func TestMessagePolicySystemOne_O2UnboundRuleBeyond200InstancesL1Precheck(t *tes
 			Adapter:  "typesafe",
 			Model:    "jev-1.14.0",
 			Endpoint: "https://typesafe.example.test",
-			AuthKind: "api_key",
+			Auth:     store.SystemOneInstanceAuth{Kind: "api_key"},
 			Enabled:  true,
 			Revision: 1,
 		}))
