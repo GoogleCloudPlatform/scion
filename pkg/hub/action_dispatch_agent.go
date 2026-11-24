@@ -653,7 +653,7 @@ func (a *dispatchAgentAction) Preauthorize(ctx context.Context, req hubfire.Fire
 	// Defence in depth for callers invoking fireAction directly (bypassing
 	// trigger.Dispatcher's PreFireRefuser hook).
 	// TODO(G7): re-home behind provider action / post-fire hook (app-shaped-source-seams §2.1)
-	if refusal := a.srv.githubBotIdentityUnknownRefusal(ctx, req.Event); refusal != nil {
+	if refusal, _ := a.srv.githubBotSenderRefusal(ctx, req.Event); refusal != nil {
 		return refusal, nil
 	}
 	return nil, nil

@@ -1438,6 +1438,42 @@ func TestG4aG4b_PreFireBotGuardCoversReuseDeferAndCoalesce(t *testing.T) {
 			assert.Equal(t, store.TriggerFireStatusFired, byTrigUser[reuseTrig.ID].Status, byTrigUser[reuseTrig.ID].Error)
 			assert.Equal(t, store.TriggerFireStatusFired, byTrigUser[msgTrig.ID].Status, byTrigUser[msgTrig.ID].Error)
 			assert.Len(t, tracker.messages()[msgsBeforeUser:], 2, "both reuse wake and message trigger must fire for User sender")
+
+			// 5. Scenario (d): a bot-caused event on a coalescing dispatch_agent trigger
+			// must NOT supersede a human's pending coalescing row — the bot event is
+			// refused and the human's coalescing row promotes and fires normally.
+			createsBeforeD := createCalls.Load()
+			humanSubject := "github:acme/widgets#human-coalesce-" + tc.name
+			evHumanID, itHuman := makeItem("github.pull_request.synchronize", humanSubject, "User", "alice")
+			resHuman1 := disp.HandleItem(ctx, itHuman, nil)
+			require.False(t, resHuman1.Done, "human event must enter coalescing window")
+			require.False(t, resHuman1.RetryAt.IsZero())
+
+			now = now.Add(5 * time.Second)
+			evBotID, itBot := makeItem("github.pull_request.synchronize", humanSubject, "Bot", tc.sender)
+			resBot := disp.HandleItem(ctx, itBot, nil)
+			require.True(t, resBot.Done, "refused bot event must complete immediately, err=%v", resBot.Err)
+
+			firesBot, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evBotID, TriggerID: coalesceTrig.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, firesBot.Items, 1)
+			assert.Equal(t, store.TriggerFireStatusRefused, firesBot.Items[0].Status)
+			assert.Equal(t, tc.wantReason, firesBot.Items[0].Error)
+
+			firesHumanMid, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evHumanID, TriggerID: coalesceTrig.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, firesHumanMid.Items, 1)
+			assert.Equal(t, store.TriggerFireStatusCoalescing, firesHumanMid.Items[0].Status, "bot event must not supersede human's pending coalescing row")
+
+			now = resHuman1.RetryAt.Add(time.Second)
+			resHuman2 := disp.HandleItem(ctx, itHuman, nil)
+			require.True(t, resHuman2.Done, "human coalescing promote must succeed, err=%v", resHuman2.Err)
+
+			firesHumanEnd, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evHumanID, TriggerID: coalesceTrig.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, firesHumanEnd.Items, 1)
+			assert.Equal(t, store.TriggerFireStatusFired, firesHumanEnd.Items[0].Status, firesHumanEnd.Items[0].Error)
+			assert.Equal(t, createsBeforeD+1, createCalls.Load(), "human coalescing row must promote and create 1 agent")
 		})
 	}
 }

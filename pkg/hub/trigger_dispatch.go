@@ -131,14 +131,10 @@ func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger
 	if c.srv == nil || tr == nil || ev == nil {
 		return "", "", false
 	}
-	if tr.ActionType != store.TriggerActionDispatchAgent && tr.ActionType != store.TriggerActionGitHubComment {
+	if !trigger.ActionSubjectToPreFireGuards(tr.ActionType) {
 		return "", "", false
 	}
-	if refusal := c.srv.githubBotIdentityUnknownRefusal(ctx, ev); refusal != nil {
-		auditReason := "github_app_identity_unknown"
-		if refusal.Reason == "github own app event" {
-			auditReason = "github_own_app_event"
-		}
+	if refusal, auditReason := c.srv.githubBotSenderRefusal(ctx, ev); refusal != nil {
 		return refusal.Reason, auditReason, true
 	}
 	return "", "", false

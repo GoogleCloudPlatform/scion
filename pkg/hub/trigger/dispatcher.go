@@ -888,7 +888,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		// events (attributes.stale == "true") from a replay-protected source.
 		// message rules still receive stale events. Checked before coalescing or
 		// subject reuse so stale deliveries never coalesce, wake, or dispatch.
-		if actionRefusesStaleEvent(tr.ActionType) && ev.Attributes["stale"] == "true" {
+		if ActionSubjectToPreFireGuards(tr.ActionType) && ev.Attributes["stale"] == "true" {
 			replayProtected, rpErr := d.isEventSourceReplayProtected(ctx, ev, &webhookEPChecked, &webhookEP)
 			if rpErr != nil {
 				d.logger.Warn("trigger: failed to check source replay protection for stale event",
@@ -1301,7 +1301,10 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	return durablequeue.Result{Done: true}
 }
 
-func actionRefusesStaleEvent(actionType string) bool {
+// ActionSubjectToPreFireGuards reports whether actionType is subject to
+// pre-fire replay/loop guards (such as stale-event refusal and source
+// PreFireRefuser checks). Passive notification actions (message) return false.
+func ActionSubjectToPreFireGuards(actionType string) bool {
 	return actionType == store.TriggerActionDispatchAgent || actionType == store.TriggerActionGitHubComment
 }
 

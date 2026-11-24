@@ -247,14 +247,15 @@ func (a *githubCommentAction) Preauthorize(ctx context.Context, req hubfire.Fire
 	if req.Event != nil && req.Event.Attributes["stale"] == "true" {
 		return &FireRefusal{Reason: "stale event"}, nil
 	}
-	if refusal := a.srv.githubBotIdentityUnknownRefusal(ctx, req.Event); refusal != nil {
+	if refusal, _ := a.srv.githubBotSenderRefusal(ctx, req.Event); refusal != nil {
 		return refusal, nil
 	}
 	return nil, nil
 }
 
-// githubBotIdentityUnknownRefusal enforces the G4 own-App guard revisit
-// (G1a security S3, Option A):
+// githubBotSenderRefusal enforces the G4 own-App guard revisit
+// (G1a security S3, Option A) and returns both the sanitized refusal and its
+// structured audit reason:
 //   - while the App's bot login is unknown (GET /app failed and
 //     server.github_app.app_slug is unset), non-object-creating GitHub events
 //     from Bot senders cannot be checked against <slug>[bot] at ingress, so
@@ -262,23 +263,23 @@ func (a *githubCommentAction) Preauthorize(ctx context.Context, req hubfire.Fire
 //   - once the App's bot login is known (via GET /app recovery or app_slug),
 //     re-check queued events against <slug>[bot] so an App-authored event
 //     enqueued during the unknown window is still refused on drain.
-func (s *Server) githubBotIdentityUnknownRefusal(ctx context.Context, ev *hubfire.FireEvent) *FireRefusal {
+func (s *Server) githubBotSenderRefusal(ctx context.Context, ev *hubfire.FireEvent) (*FireRefusal, string) {
 	if s == nil || ev == nil || ev.SourceKind != store.TriggerSourceKindGitHub {
-		return nil
+		return nil, ""
 	}
 	senderType := strings.TrimSpace(ev.Attributes["sender_type"])
 	if !strings.EqualFold(senderType, "Bot") {
-		return nil
+		return nil, ""
 	}
 	botLogin := s.GitHubAppBotLogin(ctx)
 	if botLogin == "" {
-		return &FireRefusal{Reason: "github app identity unknown"}
+		return &FireRefusal{Reason: "github app identity unknown"}, "github_app_identity_unknown"
 	}
 	slug := strings.TrimSuffix(botLogin, "[bot]")
 	if githubtrigger.IsOwnAppSender(senderType, ev.Attributes["sender"], slug) {
-		return &FireRefusal{Reason: "github own app event"}
+		return &FireRefusal{Reason: "github own app event"}, "github_own_app_event"
 	}
-	return nil
+	return nil, ""
 }
 
 // authorizeGitHubCommentFire verifies the frozen effect ceiling and live
