@@ -384,3 +384,46 @@ func TestListDueSchedulesClaimPath(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
+
+func TestScheduleStore_ListSchedules_FilterByCreatedBy(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+
+	projectID := uuid.NewString()
+	agentA := uuid.NewString()
+	agentB := uuid.NewString()
+
+	for _, sc := range []*store.Schedule{
+		{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			Name:      "by-agent-a",
+			CronExpr:  "0 * * * *",
+			EventType: "message",
+			Payload:   `{"agentName":"worker","message":"a"}`,
+			Status:    store.ScheduleStatusActive,
+			CreatedBy: agentA,
+		},
+		{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			Name:      "by-agent-b",
+			CronExpr:  "0 * * * *",
+			EventType: "message",
+			Payload:   `{"agentName":"worker","message":"b"}`,
+			Status:    store.ScheduleStatusActive,
+			CreatedBy: agentB,
+		},
+	} {
+		require.NoError(t, s.CreateSchedule(ctx, sc))
+	}
+
+	res, err := s.ListSchedules(ctx, store.ScheduleFilter{
+		ProjectID: projectID,
+		CreatedBy: agentA,
+	}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 1)
+	assert.Equal(t, "by-agent-a", res.Items[0].Name)
+	assert.Equal(t, 1, res.TotalCount)
+}

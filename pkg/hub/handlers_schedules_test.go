@@ -669,3 +669,227 @@ func TestSchedule_ProjectIsolation(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+otherProject.ID+"/schedules/"+created.ID, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+func TestSchedule_ListFilterByCreatedByAndTargetAgent(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	agentA, err := s.GetAgent(ctx, authzHelperAgentID)
+	require.NoError(t, err)
+	agentB := &store.Agent{
+		ID:        tid("sched-filter-agent-b"),
+		Slug:      "beta-agent",
+		Name:      "Beta Agent",
+		ProjectID: projectID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agentB))
+
+	// Seed schedules covering all relations:
+	// 1. Created by agentA, targeting agentB by slug
+	schedCreatedByA := &store.Schedule{
+		ID:        tid("sched-created-by-a"),
+		ProjectID: projectID,
+		Name:      "created-by-a",
+		CronExpr:  "0 * * * *",
+		EventType: "message",
+		Payload:   `{"agentName":"beta-agent","message":"hi beta"}`,
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: agentA.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+			InitiatorPrincipalID:    agentA.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+	}
+	// 2. Created by user, targeting agentA by slug with wake=true
+	schedTargetABySlug := &store.Schedule{
+		ID:        tid("sched-target-a-slug"),
+		ProjectID: projectID,
+		Name:      "target-a-wake-slug",
+		CronExpr:  "*/15 * * * *",
+		EventType: "message",
+		Payload:   `{"agentName":"` + agentA.Slug + `","message":"wake up","wake":true}`,
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: tid("user-creator"),
+	}
+	// 3. Created by agentB, targeting agentA by agentId (message)
+	schedTargetAByID := &store.Schedule{
+		ID:        tid("sched-target-a-id"),
+		ProjectID: projectID,
+		Name:      "target-a-msg-id",
+		CronExpr:  "0 8 * * *",
+		EventType: "message",
+		Payload:   `{"agentId":"` + agentA.ID + `","message":"by id"}`,
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: agentB.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+			InitiatorPrincipalID:    agentB.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+	}
+	// 4. Created by user, targeting agentA via exec payload
+	schedTargetAExec := &store.Schedule{
+		ID:        tid("sched-target-a-exec"),
+		ProjectID: projectID,
+		Name:      "target-a-exec",
+		CronExpr:  "0 12 * * *",
+		EventType: scheduledEventTypeExec,
+		Payload:   `{"agentId":"` + agentA.ID + `","agentName":"` + agentA.Slug + `","command":["echo","ok"]}`,
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: tid("user-creator"),
+	}
+	// 5. Self-targeted schedule: created by agentA AND targeting agentA
+	schedSelfA := &store.Schedule{
+		ID:        tid("sched-self-a"),
+		ProjectID: projectID,
+		Name:      "self-a",
+		CronExpr:  "0 6 * * *",
+		EventType: "message",
+		Payload:   `{"agentName":"` + agentA.Slug + `","message":"self check"}`,
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: agentA.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+			InitiatorPrincipalID:    agentA.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+	}
+	// 6. Unrelated dispatch_agent schedule
+	schedDispatch := &store.Schedule{
+		ID:        tid("sched-dispatch-unrelated"),
+		ProjectID: projectID,
+		Name:      "dispatch-other",
+		CronExpr:  "0 0 * * *",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"` + agentA.Slug + `","template":"default"}`,
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: tid("user-creator"),
+	}
+	for _, sc := range []*store.Schedule{
+		schedCreatedByA, schedTargetABySlug, schedTargetAByID,
+		schedTargetAExec, schedSelfA, schedDispatch,
+	} {
+		require.NoError(t, s.CreateSchedule(ctx, sc))
+	}
+
+	namesOf := func(resp ListSchedulesResponse) []string {
+		out := make([]string, len(resp.Schedules))
+		for i, sc := range resp.Schedules {
+			out[i] = sc.Name
+		}
+		return out
+	}
+
+	t.Run("createdBy filter returns schedules created by agentA", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?createdBy="+agentA.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.ElementsMatch(t, []string{"created-by-a", "self-a"}, namesOf(resp))
+		assert.Equal(t, 2, resp.TotalCount)
+	})
+
+	t.Run("targetAgentId filter returns message, wake, and exec schedules targeting agentA", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?targetAgentId="+agentA.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.ElementsMatch(t, []string{
+			"target-a-wake-slug",
+			"target-a-msg-id",
+			"target-a-exec",
+			"self-a",
+		}, namesOf(resp))
+		assert.Equal(t, 4, resp.TotalCount)
+	})
+
+	t.Run("targetAgentId with limit returns all matching rows unpaginated", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?limit=1&targetAgentId="+agentA.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.ElementsMatch(t, []string{
+			"target-a-wake-slug",
+			"target-a-msg-id",
+			"target-a-exec",
+			"self-a",
+		}, namesOf(resp))
+		assert.Empty(t, resp.NextCursor)
+		assert.Equal(t, 4, resp.TotalCount)
+	})
+
+	t.Run("targetAgentId with cursor returns 400", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?cursor=opaque&targetAgentId="+agentA.ID, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "cursor cannot be combined with targetAgentId")
+	})
+
+	t.Run("unknown targetAgentId returns empty list", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?targetAgentId="+tid("no-such-agent"), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Empty(t, resp.Schedules)
+		assert.Equal(t, 0, resp.TotalCount)
+	})
+
+	t.Run("non-member user is denied for both filters", func(t *testing.T) {
+		nonMember := NewAuthenticatedUser(tid("sched-filter-nonmember"), "outsider@test.com", "Outsider", "member", "api")
+
+		reqCreated := authoredRequest(t, nonMember, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?createdBy="+agentA.ID, nil)
+		recCreated := httptest.NewRecorder()
+		srv.handleSchedules(recCreated, reqCreated, projectID, "")
+		assert.Equal(t, http.StatusForbidden, recCreated.Code)
+
+		reqTarget := authoredRequest(t, nonMember, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?targetAgentId="+agentA.ID, nil)
+		recTarget := httptest.NewRecorder()
+		srv.handleSchedules(recTarget, reqTarget, projectID, "")
+		assert.Equal(t, http.StatusForbidden, recTarget.Code)
+	})
+
+	t.Run("agent caller cannot see another principal's schedules via createdBy or targetAgentId", func(t *testing.T) {
+		callerA := authzHelperAgent(projectID, ScopeProjectRead)
+
+		// Asking for createdBy=agentB returns empty because callerA holds none of agentB's schedules.
+		reqCreated := authoredRequest(t, callerA, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?createdBy="+agentB.ID, nil)
+		recCreated := httptest.NewRecorder()
+		srv.handleSchedules(recCreated, reqCreated, projectID, "")
+		require.Equal(t, http.StatusOK, recCreated.Code, recCreated.Body.String())
+		var respCreated ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(recCreated.Body).Decode(&respCreated))
+		assert.Empty(t, respCreated.Schedules)
+		assert.Equal(t, ScheduleListScopeCaller, respCreated.Scope)
+
+		// Asking for targetAgentId=agentA as callerA only returns self-a (held by callerA),
+		// never user-created or agentB-created schedules targeting agentA.
+		reqTarget := authoredRequest(t, callerA, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?targetAgentId="+agentA.ID, nil)
+		recTarget := httptest.NewRecorder()
+		srv.handleSchedules(recTarget, reqTarget, projectID, "")
+		require.Equal(t, http.StatusOK, recTarget.Code, recTarget.Body.String())
+		var respTarget ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(recTarget.Body).Decode(&respTarget))
+		assert.Equal(t, []string{"self-a"}, namesOf(respTarget))
+		assert.Equal(t, ScheduleListScopeCaller, respTarget.Scope)
+	})
+}

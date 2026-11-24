@@ -99,6 +99,8 @@ import '../shared/agent-log-viewer.js';
 import type { ScionAgentLogViewer } from '../shared/agent-log-viewer.js';
 import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
+import '../shared/agent-schedules-tab.js';
+import type { ScionAgentSchedulesTab } from '../shared/agent-schedules-tab.js';
 import '../shared/agent-suspend-screen.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
@@ -1589,6 +1591,12 @@ export class ScionPageAgentDetail extends LitElement {
         viewer?.loadMessages();
       }
     }
+    if (e.detail.name === 'schedules') {
+      const schedulesTab = this.shadowRoot?.querySelector(
+        'scion-agent-schedules-tab'
+      ) as ScionAgentSchedulesTab | null;
+      void schedulesTab?.loadSchedules();
+    }
   }
 
   private handleMessageViewToggle(mode: 'chat' | 'log'): void {
@@ -1813,6 +1821,7 @@ export class ScionPageAgentDetail extends LitElement {
         <sl-tab slot="nav" panel="metrics">Metrics</sl-tab>
         <sl-tab slot="nav" panel="logs">Logs</sl-tab>
         <sl-tab slot="nav" panel="messages">Messages</sl-tab>
+        <sl-tab slot="nav" panel="schedules" data-testid="agent-schedules-tab">Schedules</sl-tab>
         <sl-tab slot="nav" panel="configuration">Configuration</sl-tab>
         ${this.agentSecretsEnabled
           ? html`<sl-tab slot="nav" panel="secrets" data-testid="agent-secrets-tab"
@@ -1835,6 +1844,12 @@ export class ScionPageAgentDetail extends LitElement {
           ></scion-agent-log-viewer>
         </sl-tab-panel>
         <sl-tab-panel name="messages"> ${this.renderMessagesPanel()} </sl-tab-panel>
+        <sl-tab-panel name="schedules" data-testid="agent-schedules-panel">
+          <scion-agent-schedules-tab
+            projectId=${this.agent.projectId || ''}
+            agentId=${this.agent.id}
+          ></scion-agent-schedules-tab>
+        </sl-tab-panel>
         <sl-tab-panel name="configuration">${this.renderConfigurationTab()}</sl-tab-panel>
         ${this.agentSecretsEnabled
           ? html`<sl-tab-panel name="secrets" data-testid="agent-secrets-panel">

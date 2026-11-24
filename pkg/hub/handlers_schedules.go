@@ -492,6 +492,10 @@ func (s *Server) loadScheduleForProject(w http.ResponseWriter, r *http.Request, 
 	return schedule, true
 }
 
+// scheduleTargetScanPageSize is the batch size used when scanning a project's
+// schedules to match payload targets for the targetAgentId list filter.
+const scheduleTargetScanPageSize = 200
+
 // listSchedules handles GET /api/v1/projects/{projectId}/schedules
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
@@ -511,7 +515,18 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 		ProjectID:        projectID,
 		Status:           query.Get("status"),
 		Name:             query.Get("name"),
+		CreatedBy:        query.Get("createdBy"),
 		InitiatorAgentID: agentID,
+	}
+
+	targetAgentID := query.Get("targetAgentId")
+	if targetAgentID != "" {
+		if query.Get("cursor") != "" {
+			ValidationError(w, "cursor cannot be combined with targetAgentId", nil)
+			return
+		}
+		s.listSchedulesByTargetAgent(w, r, projectID, scope, filter, targetAgentID)
+		return
 	}
 
 	result, err := s.store.ListSchedules(r.Context(), filter, listOptionsFromQuery(query))
@@ -526,6 +541,59 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 		Schedules:  scheduleResponses(s.newExecRevealer(r.Context()), schedules),
 		NextCursor: result.NextCursor,
 		TotalCount: totalCount,
+		ServerTime: time.Now().UTC(),
+	})
+}
+
+// listSchedulesByTargetAgent filters a project's schedules to those targeting
+// targetAgentID (message by agentId or same-project slug, or exec by agentId),
+// preserving the same read authorization and exec redaction as listSchedules.
+//
+// This filter is unpaginated: because payload targets are stored inside JSON
+// rather than an indexed column, it scans the project's schedules in batches
+// of scheduleTargetScanPageSize, ignores limit, rejects cursor (handled by the
+// caller with 400), and returns every matching schedule in one response with
+// NextCursor omitted.
+func (s *Server) listSchedulesByTargetAgent(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID, scope string,
+	filter store.ScheduleFilter,
+	targetAgentID string,
+) {
+	ctx := r.Context()
+	targetAgent := &store.Agent{ID: targetAgentID, ProjectID: projectID}
+	if a, err := s.store.GetAgent(ctx, targetAgentID); err == nil && a != nil && a.ProjectID == projectID {
+		targetAgent = a
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	opts := store.ListOptions{Limit: scheduleTargetScanPageSize, SkipTotalCount: true}
+	matched := make([]store.Schedule, 0)
+	for {
+		page, err := s.store.ListSchedules(ctx, filter, opts)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		visible, _ := visibleScheduledRows(ctx, s, projectID, page.Items, 0, scheduleRow)
+		for _, sched := range visible {
+			if scheduleTargetsAgent(sched, targetAgent) {
+				matched = append(matched, sched)
+			}
+		}
+		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
+			break
+		}
+		opts.Cursor = page.NextCursor
+	}
+
+	writeJSON(w, http.StatusOK, ListSchedulesResponse{
+		Scope:      scope,
+		Schedules:  scheduleResponses(s.newExecRevealer(ctx), matched),
+		TotalCount: len(matched),
 		ServerTime: time.Now().UTC(),
 	})
 }

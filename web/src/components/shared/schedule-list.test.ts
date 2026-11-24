@@ -1786,3 +1786,47 @@ describe('scion-schedule-list exec authoring, detail history, and PATCH (ptone/s
     );
   });
 });
+
+describe('scion-schedule-list initialScheduleId deep-link', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('auto-opens the detail dialog when initialScheduleId matches a loaded schedule', async () => {
+    const schedules = [
+      schedule({ id: 'sched-a', name: 'alpha-sched' }),
+      schedule({ id: 'sched-b', name: 'beta-sched' }),
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ schedules, totalCount: schedules.length }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
+
+    const el = document.createElement('scion-schedule-list') as HTMLElement & {
+      projectId: string;
+      initialScheduleId: string;
+      updateComplete: Promise<unknown>;
+    };
+    el.projectId = 'proj-1';
+    el.initialScheduleId = 'sched-b';
+    document.body.appendChild(el);
+    await settle(el);
+
+    const dialog = el.shadowRoot?.querySelector('sl-dialog[label="Schedule: beta-sched"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.hasAttribute('open')).toBe(true);
+  });
+});

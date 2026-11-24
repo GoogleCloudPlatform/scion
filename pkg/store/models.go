@@ -4288,6 +4288,8 @@ type ScheduleFilter struct {
 	// LastRunStatus, when set, keeps only schedules whose most recent run
 	// ended with this status (ScheduleRunSuccess, ScheduleRunError, or ScheduleRunSkipped).
 	LastRunStatus string
+	// CreatedBy, when set, keeps only schedules whose CreatedBy matches this ID.
+	CreatedBy string
 	// InitiatorAgentID, when set, keeps only rows whose current initiator
 	// principal is this agent with a recorded attribution (version 1 or
 	// later, credential kind neither empty nor legacy_unknown). It matches

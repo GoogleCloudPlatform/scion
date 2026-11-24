@@ -249,7 +249,10 @@ export class ScionScheduleList extends LitElement {
   readonly _zone = new DisplayZoneController(this);
 
   @property() projectId = '';
+  @property() initialScheduleId = '';
   @property({ type: Boolean }) compact = false;
+
+  private autoOpenedScheduleId = '';
 
   @state() private loading = true;
   @state() private schedules: Schedule[] = [];
@@ -379,6 +382,13 @@ export class ScionScheduleList extends LitElement {
       });
       if (generation !== this.loadGeneration) return;
       this.schedules = schedules;
+      if (this.initialScheduleId && this.autoOpenedScheduleId !== this.initialScheduleId) {
+        const match = schedules.find((s) => s.id === this.initialScheduleId);
+        if (match) {
+          this.autoOpenedScheduleId = this.initialScheduleId;
+          this.showDetail(match);
+        }
+      }
     } catch (err) {
       if (generation !== this.loadGeneration) return;
       console.error('Failed to load schedules:', err);
