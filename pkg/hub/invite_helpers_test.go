@@ -64,6 +64,14 @@ func (s *inviteFlowStore) IsEmailAllowListed(_ context.Context, _ string) (bool,
 	return false, nil // should not be called in new code path
 }
 
+func (s *inviteFlowStore) WithTx(_ context.Context, fn func(tx store.Store) error) error {
+	return fn(s)
+}
+
+func (s *inviteFlowStore) LockUserRow(context.Context, string, bool) error {
+	return nil
+}
+
 func (s *inviteFlowStore) GetGroupBySlug(_ context.Context, _ string) (*store.Group, error) {
 	return nil, store.ErrNotFound
 }

@@ -296,6 +296,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"seed.go:hubViewerBindingsForUser:ListRoleBindingsForPrincipal":                   "mutation: hub grant sync",
 	"seed.go:projectHasOwnerBinding:ListRoleBindingsForScope":                         "startup: legacy owner backfill",
 	"seed.go:removeProjectMembersGroupRoleBindings:ListRoleBindingsForPrincipal":      "startup: members-group binding cleanup",
+	"seed.go:removeSystemHubMembershipTx:GetGroupMembership":                          "mutation: hub grant sync",
 	"seed.go:warnOwnerOnlyLegacyProject:ListRoleBindingsForScope":                     "startup: legacy owner warning",
 }
 

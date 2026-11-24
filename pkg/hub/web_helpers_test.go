@@ -269,6 +269,14 @@ func (s *proxyAuthStore) UpdateUserLastLogin(ctx context.Context, id string, tim
 	return nil
 }
 
+func (s *proxyAuthStore) WithTx(_ context.Context, fn func(tx store.Store) error) error {
+	return fn(s)
+}
+
+func (s *proxyAuthStore) LockUserRow(context.Context, string, bool) error {
+	return nil
+}
+
 func (s *proxyAuthStore) GetGroupBySlug(_ context.Context, _ string) (*store.Group, error) {
 	return nil, store.ErrNotFound // hub-members group not found is gracefully handled
 }
