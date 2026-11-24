@@ -274,7 +274,7 @@ This runtime retrieval is accessible either via the `scion` CLI or directly thro
 #### Using the `scion` CLI inside an agent
 From inside an agent container, read secrets with `scion secret`. The calls are made as the agent, with its own hub identity:
 
-*   **List Available Secrets**: Lists metadata (keys, types, versions and update times) for all secrets in the agent's project. Values are omitted.
+*   **List Available Secrets**: Lists metadata (keys, types, versions and update times) for secrets in the agent's project. Values are omitted. When the `hub.agent_secrets` experiment is on, `scion secret list` defaults to `--scope all` and includes agent-scoped secrets alongside project secrets with a `SCOPE` column (see [Agent Self-Service](#agent-self-service)).
     ```bash
     scion secret list
     ```
