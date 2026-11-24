@@ -47,7 +47,8 @@ describe('agent-create-secrets validation and serialization', () => {
       row({ key: 'API_CFG', value: '{"a":1}', type: 'variable', target: 'api_cfg' }),
     ];
     expect(validateAgentSecretRows(rows)).toEqual([]);
-    expect(toCreateAgentSecrets(rows)).toEqual([
+    const serialized = toCreateAgentSecrets(rows);
+    expect(serialized).toEqual([
       {
         key: 'GITHUB_TOKEN',
         value: 'ghp_123',
@@ -69,6 +70,9 @@ describe('agent-create-secrets validation and serialization', () => {
         injectionMode: 'as_needed',
       },
     ]);
+    for (const item of serialized) {
+      expect(item).not.toHaveProperty('id');
+    }
   });
 
   it('rejects reserved SCION_* and GCE_METADATA_* env keys and targets', () => {

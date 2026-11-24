@@ -44,7 +44,7 @@ let nextAgentSecretRowId = 0;
 /** One editable row in the create-agent Secrets tab. Held in memory only. */
 export interface AgentSecretDraftRow {
   /** Stable in-memory row identifier for keyed list rendering (never serialized). */
-  id?: string;
+  id: string;
   key: string;
   value: string;
   type: SecretType;

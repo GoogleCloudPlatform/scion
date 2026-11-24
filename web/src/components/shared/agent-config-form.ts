@@ -2221,7 +2221,7 @@ export class ScionAgentConfigForm extends LitElement {
 
         ${repeat(
           this.secretRows,
-          (row, i) => row.id ?? i,
+          (row) => row.id,
           (row, i) => html`
             <div class="secret-row" data-testid="secret-row" data-index=${i}>
               <div class="secret-row-top">
@@ -2285,7 +2285,7 @@ export class ScionAgentConfigForm extends LitElement {
                   data-field="value"
                   .label=${'Value'}
                   .secretKey=${row.key}
-                  .rowId=${row.id ?? String(i)}
+                  .rowId=${row.id}
                   .allowFileLoad=${row.type === 'file'}
                   .disabled=${this.disabled}
                   .showError=${true}

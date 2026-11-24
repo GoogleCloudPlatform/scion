@@ -452,12 +452,12 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
     (mounted.form as unknown as { secretRows: unknown[] }).secretRows = Array.from(
       { length: 51 },
       (_, i) => ({
+        id: `bulk-row-${i}`,
         key: `K_${i}`,
         value: `v_${i}`,
         type: 'environment',
         target: '',
         injectionMode: 'as_needed',
-        revealed: false,
       })
     );
     await mounted.page.handleSubmit(new Event('submit'));
