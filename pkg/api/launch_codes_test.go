@@ -59,6 +59,7 @@ func TestLaunchVocabularyValues(t *testing.T) {
 		{LaunchCodeRuntimeUnavailable, "runtime_unavailable"},
 		{LaunchCodeImageLacksNetnsSetup, "image_lacks_netns_setup"},
 		{LaunchCodeFirewallRequiresMetadataInterception, "firewall_requires_metadata_interception"},
+		{LaunchCodePodmanHostGatewayUnsupported, "podman_host_gateway_unsupported"},
 		{LaunchCodeContainerConfig, "container_config"},
 		{LaunchCodeCrashLoop, "crash_loop"},
 		{LaunchCodeInitContainerFailed, "init_container_failed"},

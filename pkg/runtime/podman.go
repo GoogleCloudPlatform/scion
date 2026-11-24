@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -31,10 +33,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
+const (
+	// Podman added --add-host <host>:host-gateway support in 4.7.0.
+	podmanMinHostGatewayMajor = 4
+	podmanMinHostGatewayMinor = 7
+	podmanNativeHostAlias     = "host.containers.internal"
+)
+
+// ErrPodmanHostGatewayUnsupported is returned (wrapped in a *LaunchFailure)
+// when a container requires --add-host <host>:host-gateway on a Podman version
+// older than 4.7.
+var ErrPodmanHostGatewayUnsupported = errors.New("podman does not support --add-host host-gateway; upgrade to Podman 4.7 or newer")
+
 type PodmanRuntime struct {
-	Command  string
-	Host     string
-	Rootless bool // true when Podman is running in rootless mode
+	Command              string
+	Host                 string
+	Rootless             bool // true when Podman is running in rootless mode
+	hostGatewaySupported *bool
 }
 
 // NewPodmanRuntime creates a new PodmanRuntime after verifying that the podman
@@ -59,7 +74,8 @@ func NewPodmanRuntime(cmdOverride string) Runtime {
 		return &ErrorRuntime{Err: fmt.Errorf("failed to get podman version: %w", err)}
 	}
 
-	version := parsePodmanVersion(strings.TrimSpace(string(out)))
+	versionOutput := strings.TrimSpace(string(out))
+	version := parsePodmanVersion(versionOutput)
 	major, err := parseMajorVersion(version)
 	if err != nil {
 		return &ErrorRuntime{Err: fmt.Errorf("failed to parse podman version %q: %w", version, err)}
@@ -68,13 +84,122 @@ func NewPodmanRuntime(cmdOverride string) Runtime {
 		return &ErrorRuntime{Err: fmt.Errorf("podman version %s is below the minimum supported version 4.x", version)}
 	}
 
+	var hostGatewaySupported *bool
+	if maj, min, ok := parsePodmanMajorMinorVersion(versionOutput); ok {
+		supported := podmanVersionSupportsHostGateway(maj, min)
+		hostGatewaySupported = &supported
+	}
+
 	// Detect and store rootless mode
 	rootless := detectRootlessMode(command)
 
 	return &PodmanRuntime{
-		Command:  command,
-		Rootless: rootless,
+		Command:              command,
+		Rootless:             rootless,
+		hostGatewaySupported: hostGatewaySupported,
 	}
+}
+
+// PodmanSupportsHostGateway reports whether the Podman binary supports the
+// special "host-gateway" address used by --add-host. Support was added in
+// Podman 4.7; older releases (e.g. Podman 4.3.1 on Debian 12) reject it with
+// "invalid IP address in add-host: host-gateway". On any probe failure we
+// conservatively assume support is present, matching DockerSupportsHostGateway.
+func PodmanSupportsHostGateway(ctx context.Context, command string) bool {
+	if command == "" {
+		command = "podman"
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := runSimpleCommand(probeCtx, command, "--version")
+	if err != nil {
+		runtimeLog().Debug("Unable to probe Podman version for host-gateway support", "error", err)
+		return true
+	}
+	major, minor, ok := parsePodmanMajorMinorVersion(strings.TrimSpace(out))
+	if !ok {
+		runtimeLog().Debug("Unable to parse Podman version for host-gateway support", "version", out)
+		return true
+	}
+	return podmanVersionSupportsHostGateway(major, minor)
+}
+
+func podmanVersionSupportsHostGateway(major, minor int) bool {
+	return major > podmanMinHostGatewayMajor || (major == podmanMinHostGatewayMajor && minor >= podmanMinHostGatewayMinor)
+}
+
+// parsePodmanMajorMinorVersion parses the leading "major.minor" from
+// "podman --version" output (e.g. "podman version 4.7.0" or "4.3.1"). It
+// tolerates a leading "v"/"V" prefix, pre-release suffixes (e.g. "4.7-dev"),
+// and scans line-by-line so warning noise does not defeat the probe.
+func parsePodmanMajorMinorVersion(output string) (major, minor int, ok bool) {
+	for _, line := range strings.Split(output, "\n") {
+		ver := strings.TrimLeft(strings.TrimSpace(parsePodmanVersion(strings.TrimSpace(line))), "vV")
+		parts := strings.SplitN(ver, ".", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		maj, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		minorStr := parts[1]
+		if idx := strings.IndexAny(minorStr, "-+~"); idx >= 0 {
+			minorStr = minorStr[:idx]
+		}
+		min, err := strconv.Atoi(minorStr)
+		if err != nil {
+			continue
+		}
+		return maj, min, true
+	}
+	return 0, 0, false
+}
+
+func (r *PodmanRuntime) supportsHostGateway(ctx context.Context) bool {
+	if r.hostGatewaySupported != nil {
+		return *r.hostGatewaySupported
+	}
+	return PodmanSupportsHostGateway(ctx, r.Command)
+}
+
+// filterPodmanExtraHosts checks config.ExtraHosts for "host-gateway" targets
+// and guards against Podman < 4.7 rejecting them. When Podman lacks support:
+//   - host.containers.internal:host-gateway is omitted with a warning, since
+//     Podman resolves host.containers.internal natively without --add-host.
+//   - Any other <host>:host-gateway entry fails with a typed *LaunchFailure
+//     naming the minimum Podman version (4.7).
+func filterPodmanExtraHosts(ctx context.Context, extraHosts []string, supports func(context.Context) bool) ([]string, error) {
+	hasHostGateway := false
+	for _, h := range extraHosts {
+		if _, target, ok := strings.Cut(h, ":"); ok && strings.EqualFold(target, "host-gateway") {
+			hasHostGateway = true
+			break
+		}
+	}
+	if !hasHostGateway || supports(ctx) {
+		return extraHosts, nil
+	}
+
+	filtered := make([]string, 0, len(extraHosts))
+	for _, h := range extraHosts {
+		name, target, ok := strings.Cut(h, ":")
+		if !ok || !strings.EqualFold(target, "host-gateway") {
+			filtered = append(filtered, h)
+			continue
+		}
+		if strings.EqualFold(name, podmanNativeHostAlias) {
+			runtimeLog().Warn("Omitting --add-host host.containers.internal:host-gateway: Podman < 4.7 does not support host-gateway and resolves host.containers.internal natively")
+			continue
+		}
+		return nil, newLaunchFailure(
+			api.LaunchCodePodmanHostGatewayUnsupported,
+			api.LaunchStepLaunching,
+			"",
+			fmt.Errorf("%w: cannot pass --add-host %s", ErrPodmanHostGatewayUnsupported, h),
+		)
+	}
+	return filtered, nil
 }
 
 // parsePodmanVersion extracts the version string from "podman version X.Y.Z" output.
@@ -155,6 +280,12 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 	config.RuntimeName = r.Name()
+
+	extraHosts, err := filterPodmanExtraHosts(ctx, config.ExtraHosts, r.supportsHostGateway)
+	if err != nil {
+		return "", err
+	}
+	config.ExtraHosts = extraHosts
 
 	args, err := buildCommonRunArgs(config)
 	if err != nil {

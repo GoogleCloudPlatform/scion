@@ -423,7 +423,7 @@ func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName strin
 	// Podman maps host.containers.internal to the host itself, so it needs
 	// no --add-host flag on any Podman version (host-gateway arrived in
 	// Podman 4.7; older versions reject it).
-	if runtimeName == "podman" && host == podmanHostAlias {
+	if runtimeName == "podman" && strings.EqualFold(host, podmanHostAlias) {
 		return nil
 	}
 	return []string{host + ":host-gateway"}

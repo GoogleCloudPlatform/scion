@@ -16,11 +16,13 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
@@ -495,4 +497,215 @@ func TestParseMajorVersion(t *testing.T) {
 			t.Errorf("parseMajorVersion(%q) = %d, want %d", tc.input, result, tc.expected)
 		}
 	}
+}
+
+func TestParsePodmanMajorMinorVersion(t *testing.T) {
+	tests := []struct {
+		in        string
+		wantMajor int
+		wantMinor int
+		wantOK    bool
+	}{
+		{"podman version 4.3.1", 4, 3, true},
+		{"podman version 4.7.0", 4, 7, true},
+		{"podman version 4.9.3", 4, 9, true},
+		{"podman version 5.0.0", 5, 0, true},
+		{"podman version 4.7.0-rc1", 4, 7, true},
+		{"podman version 4.7-dev", 4, 7, true},
+		{"podman-remote version 4.6.2", 4, 6, true},
+		{"v4.7.1", 4, 7, true},
+		{"WARNING: something\npodman version 4.3.1", 4, 3, true},
+		{"", 0, 0, false},
+		{"garbage", 0, 0, false},
+		{"podman version 4", 0, 0, false},
+		{"podman version x.y.z", 0, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			major, minor, ok := parsePodmanMajorMinorVersion(tc.in)
+			if ok != tc.wantOK || major != tc.wantMajor || minor != tc.wantMinor {
+				t.Errorf("parsePodmanMajorMinorVersion(%q) = (%d, %d, %v), want (%d, %d, %v)",
+					tc.in, major, minor, ok, tc.wantMajor, tc.wantMinor, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestPodmanSupportsHostGateway(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		want   bool
+	}{
+		{
+			name:   "podman 4.3.1 unsupported",
+			script: "#!/bin/sh\necho 'podman version 4.3.1'\n",
+			want:   false,
+		},
+		{
+			name:   "podman 4.6.2 unsupported",
+			script: "#!/bin/sh\necho 'podman version 4.6.2'\n",
+			want:   false,
+		},
+		{
+			name:   "podman 4.7.0 supported",
+			script: "#!/bin/sh\necho 'podman version 4.7.0'\n",
+			want:   true,
+		},
+		{
+			name:   "podman 5.3.0 supported",
+			script: "#!/bin/sh\necho 'podman version 5.3.0'\n",
+			want:   true,
+		},
+		{
+			name:   "probe command failure defaults to supported",
+			script: "#!/bin/sh\nexit 1\n",
+			want:   true,
+		},
+		{
+			name:   "unparseable output defaults to supported",
+			script: "#!/bin/sh\necho 'unexpected output'\n",
+			want:   true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockPodman := filepath.Join(t.TempDir(), "mock-podman")
+			if err := os.WriteFile(mockPodman, []byte(tc.script), 0o755); err != nil {
+				t.Fatalf("failed to write mock podman: %v", err)
+			}
+			got := PodmanSupportsHostGateway(context.Background(), mockPodman)
+			if got != tc.want {
+				t.Errorf("PodmanSupportsHostGateway() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPodmanRuntime_Run_HostGatewayProbe(t *testing.T) {
+	writeMockPodman := func(t *testing.T, versionLine string) (string, string) {
+		t.Helper()
+		dir := t.TempDir()
+		mockPodman := filepath.Join(dir, "mock-podman")
+		argvFile := filepath.Join(dir, "argv")
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"--version\" ]; then\n" +
+			"  echo '" + versionLine + "'\n" +
+			"  exit 0\n" +
+			"fi\n" +
+			"if [ \"$1\" = \"info\" ]; then\n" +
+			"  echo 'false'\n" +
+			"  exit 0\n" +
+			"fi\n" +
+			"echo \"$@\" > '" + argvFile + "'\n" +
+			"echo " + mockPodmanID + "\n"
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatalf("failed to write mock podman: %v", err)
+		}
+		return mockPodman, argvFile
+	}
+
+	baseCfg := func(extraHosts []string) RunConfig {
+		return RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			Task:         "hello",
+			ExtraHosts:   extraHosts,
+		}
+	}
+
+	t.Run("podman 4.3.1 omits host.containers.internal:host-gateway", func(t *testing.T) {
+		mockPodman, argvFile := writeMockPodman(t, "podman version 4.3.1")
+		rt := &PodmanRuntime{Command: mockPodman}
+		id, err := rt.Run(context.Background(), baseCfg([]string{"host.containers.internal:host-gateway"}))
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+		if id != mockPodmanID {
+			t.Fatalf("Run() id = %q, want %q", id, mockPodmanID)
+		}
+		argv, err := os.ReadFile(argvFile)
+		if err != nil {
+			t.Fatalf("read argv: %v", err)
+		}
+		if strings.Contains(string(argv), "host-gateway") {
+			t.Errorf("expected host-gateway to be omitted on Podman 4.3.1, got args: %s", string(argv))
+		}
+	})
+
+	t.Run("podman 4.3.1 fails with typed launch failure for non-native host-gateway", func(t *testing.T) {
+		mockPodman, argvFile := writeMockPodman(t, "podman version 4.3.1")
+		rt := &PodmanRuntime{Command: mockPodman}
+		_, err := rt.Run(context.Background(), baseCfg([]string{"hub.example.com:host-gateway"}))
+		if err == nil {
+			t.Fatal("Run() error = nil, want typed launch failure")
+		}
+		if !errors.Is(err, ErrPodmanHostGatewayUnsupported) {
+			t.Errorf("Run() error = %v, want errors.Is(_, ErrPodmanHostGatewayUnsupported)", err)
+		}
+		var lf *LaunchFailure
+		if !errors.As(err, &lf) {
+			t.Fatalf("Run() error = %T (%v), want *LaunchFailure", err, err)
+		}
+		if lf.Code != api.LaunchCodePodmanHostGatewayUnsupported {
+			t.Errorf("LaunchFailure.Code = %q, want %q", lf.Code, api.LaunchCodePodmanHostGatewayUnsupported)
+		}
+		if lf.Step != api.LaunchStepLaunching {
+			t.Errorf("LaunchFailure.Step = %q, want %q", lf.Step, api.LaunchStepLaunching)
+		}
+		if !strings.Contains(err.Error(), "4.7") {
+			t.Errorf("Run() error = %q, want minimum version 4.7 mentioned", err.Error())
+		}
+		if _, statErr := os.Stat(argvFile); !os.IsNotExist(statErr) {
+			t.Errorf("expected podman run not to be invoked when host-gateway is unsupported")
+		}
+	})
+
+	t.Run("podman 4.3.1 allows explicit IP in --add-host", func(t *testing.T) {
+		mockPodman, argvFile := writeMockPodman(t, "podman version 4.3.1")
+		rt := &PodmanRuntime{Command: mockPodman}
+		if _, err := rt.Run(context.Background(), baseCfg([]string{"hub.example.com:10.0.0.1"})); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+		argv, err := os.ReadFile(argvFile)
+		if err != nil {
+			t.Fatalf("read argv: %v", err)
+		}
+		if !strings.Contains(string(argv), "--add-host hub.example.com:10.0.0.1") {
+			t.Errorf("expected --add-host hub.example.com:10.0.0.1, got: %s", string(argv))
+		}
+	})
+
+	t.Run("podman 4.7.0 passes host-gateway", func(t *testing.T) {
+		mockPodman, argvFile := writeMockPodman(t, "podman version 4.7.0")
+		rt := &PodmanRuntime{Command: mockPodman}
+		if _, err := rt.Run(context.Background(), baseCfg([]string{"hub.example.com:host-gateway"})); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+		argv, err := os.ReadFile(argvFile)
+		if err != nil {
+			t.Fatalf("read argv: %v", err)
+		}
+		if !strings.Contains(string(argv), "--add-host hub.example.com:host-gateway") {
+			t.Errorf("expected --add-host hub.example.com:host-gateway, got: %s", string(argv))
+		}
+	})
+
+	t.Run("NewPodmanRuntime caches version capability from construction", func(t *testing.T) {
+		mockPodman, _ := writeMockPodman(t, "podman version 4.3.1")
+		rt := NewPodmanRuntime(mockPodman)
+		pr, ok := rt.(*PodmanRuntime)
+		if !ok {
+			t.Fatalf("NewPodmanRuntime() = %T, want *PodmanRuntime", rt)
+		}
+		if pr.hostGatewaySupported == nil || *pr.hostGatewaySupported {
+			t.Fatalf("expected cached hostGatewaySupported = false for Podman 4.3.1, got %v", pr.hostGatewaySupported)
+		}
+		_, err := pr.Run(context.Background(), baseCfg([]string{"hub.example.com:host-gateway"}))
+		if !errors.Is(err, ErrPodmanHostGatewayUnsupported) {
+			t.Errorf("Run() error = %v, want ErrPodmanHostGatewayUnsupported", err)
+		}
+	})
 }
