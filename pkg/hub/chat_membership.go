@@ -188,10 +188,11 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 }
 
 // chatDeletedAgentPeers returns the agent peers of dms that are deleted:
-// soft-deleted, or with no agent row at all. A DM with a deleted agent is
-// not counted on the unread badge nor listed as unread in the rail; its
-// data is kept. A failed lookup is returned as an error.
-func (s *Server) chatDeletedAgentPeers(ctx context.Context, dms []WebChatDM) (map[string]bool, error) {
+// soft-deleted, or with no agent row at all, together with the loaded agent
+// records for all agent-peer DMs in a single batched lookup. A DM with a
+// deleted agent is not counted on the unread badge nor listed as unread in
+// the rail; its data is kept. A failed lookup is returned as an error.
+func (s *Server) chatDeletedAgentPeers(ctx context.Context, dms []WebChatDM) (map[string]bool, map[string]*store.Agent, error) {
 	var ids []string
 	for _, dm := range dms {
 		if dm.PeerKind == "agent" && dm.PeerID != "" {
@@ -200,18 +201,18 @@ func (s *Server) chatDeletedAgentPeers(ctx context.Context, dms []WebChatDM) (ma
 	}
 	out := make(map[string]bool)
 	if len(ids) == 0 {
-		return out, nil
+		return out, nil, nil
 	}
 	agents, err := s.store.GetAgentsByIDsIncludingDeleted(ctx, ids)
 	if err != nil {
-		return nil, fmt.Errorf("agent peers: %w", err)
+		return nil, nil, fmt.Errorf("agent peers: %w", err)
 	}
 	for _, id := range ids {
 		if agentPeerDeleted(agents[id]) {
 			out[id] = true
 		}
 	}
-	return out, nil
+	return out, agents, nil
 }
 
 // agentPeerDeleted reports whether a DM's agent peer, as looked up including

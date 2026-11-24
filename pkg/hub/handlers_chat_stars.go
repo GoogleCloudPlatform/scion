@@ -984,11 +984,17 @@ func starPermalink(projectID, key, messageID string) string {
 	return "/chat/space/" + url.PathEscape(projectID) + "/thread/" + url.PathEscape(key) + "#msg-" + url.PathEscape(messageID)
 }
 
+// chatDMWebPath returns the relative web chat route for a DM conversation key,
+// encoding ':' as %3A to match JavaScript's encodeURIComponent (chatConversationPath).
+func chatDMWebPath(key string) string {
+	return "/chat/dm/" + strings.ReplaceAll(url.PathEscape(key), ":", "%3A")
+}
+
 // starDMPermalink is the relative, same-origin link to a DM message: the
 // web chat's DM route with the key encoded as encodeURIComponent encodes
 // it (chatConversationPath), plus #msg-<id>.
 func starDMPermalink(key, messageID string) string {
-	return "/chat/dm/" + strings.ReplaceAll(url.PathEscape(key), ":", "%3A") + "#msg-" + url.PathEscape(messageID)
+	return chatDMWebPath(key) + "#msg-" + url.PathEscape(messageID)
 }
 
 // messageStarStoreProblem returns why starred messages cannot be served
