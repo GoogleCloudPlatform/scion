@@ -159,6 +159,20 @@ export interface ProfileDecisionProbeResult {
   waitingOnYou: number;
 }
 
+/**
+ * Visibility of the Decisions nav entry and Inbox sub-tab (§7):
+ * - `'unknown'`: initial probe has not resolved yet -> hidden (prevents flash on older 404 hubs)
+ * - `'visible'`: Hub supports `/api/v1/users/me/decisions` (or probe failed transiently per §7)
+ * - `'hidden'`: Hub returned 404 on `/api/v1/users/me/decisions`
+ */
+export type ProfileDecisionVisibility = 'unknown' | 'visible' | 'hidden';
+
+export interface ProfileDecisionVisibilityResolution {
+  visibility: ProfileDecisionVisibility;
+  waitingOnYou: number;
+  needsProbe: boolean;
+}
+
 /** Returns the natural default sort for a tab on `/profile/decisions` (R6). */
 export function defaultProfileDecisionsSort(tab: 'pending' | 'made'): ProfileDecisionsSort {
   return tab === 'made' ? 'recent' : 'project';
@@ -565,6 +579,50 @@ export function getCachedProfileDecisionProbe(): ProfileDecisionProbeResult | nu
  */
 export function getLastKnownProfileDecisionAvailability(): boolean | null {
   return cachedProfileDecisionProbe ? cachedProfileDecisionProbe.available : null;
+}
+
+/**
+ * Synchronously resolves initial Decisions nav/tab visibility from the cached
+ * or last-known probe state, and reports whether a network probe is needed.
+ */
+export function getInitialProfileDecisionVisibility(): ProfileDecisionVisibilityResolution {
+  const cached = getCachedProfileDecisionProbe();
+  if (cached !== null) {
+    return {
+      visibility: cached.available ? 'visible' : 'hidden',
+      waitingOnYou: cached.available ? cached.waitingOnYou : 0,
+      needsProbe: false,
+    };
+  }
+  const lastKnown = getLastKnownProfileDecisionAvailability();
+  if (lastKnown === true) {
+    return { visibility: 'visible', waitingOnYou: 0, needsProbe: true };
+  }
+  if (lastKnown === false) {
+    return { visibility: 'hidden', waitingOnYou: 0, needsProbe: true };
+  }
+  return { visibility: 'unknown', waitingOnYou: 0, needsProbe: true };
+}
+
+/**
+ * Applies a completed `fetchProfileDecisionProbe()` result to the current
+ * visibility state (§7: a transient non-404 probe error leaves an unknown
+ * entry visible).
+ */
+export function resolveProfileDecisionVisibility(
+  current: ProfileDecisionVisibility,
+  probe: ProfileDecisionProbeResult | null
+): { visibility: ProfileDecisionVisibility; waitingOnYou: number | null } {
+  if (probe === null) {
+    return {
+      visibility: current === 'unknown' ? 'visible' : current,
+      waitingOnYou: null,
+    };
+  }
+  if (!probe.available) {
+    return { visibility: 'hidden', waitingOnYou: 0 };
+  }
+  return { visibility: 'visible', waitingOnYou: probe.waitingOnYou };
 }
 
 /** Resets the module-level probe cache and any pending refresh timer (for unit tests). */

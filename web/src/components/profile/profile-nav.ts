@@ -31,10 +31,11 @@ import {
 import {
   PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
   fetchProfileDecisionProbe,
-  getCachedProfileDecisionProbe,
-  getLastKnownProfileDecisionAvailability,
+  getInitialProfileDecisionVisibility,
   isDecisionPromptMessageEvent,
+  resolveProfileDecisionVisibility,
   scheduleSharedProfileDecisionProbeRefresh,
+  type ProfileDecisionVisibility,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
 import { INBOX_SUMMARY_CHANGED_EVENT, inboxSummaryStore } from '../../client/inbox-summary.js';
@@ -153,7 +154,7 @@ export class ScionProfileNav extends LitElement {
    * - `'hidden'`: Hub returned 404 on `/api/v1/users/me/decisions`
    */
   @state()
-  private decisionsNavVisibility: 'unknown' | 'visible' | 'hidden' = 'unknown';
+  private decisionsNavVisibility: ProfileDecisionVisibility = 'unknown';
 
   /** Unfiltered `counts.waitingOnYou` across member projects (R1). */
   @state()
@@ -752,22 +753,11 @@ export class ScionProfileNav extends LitElement {
   }
 
   private syncOrProbeDecisionsCount(): void {
-    const cached = getCachedProfileDecisionProbe();
-    if (cached !== null) {
-      this.decisionsNavVisibility = cached.available ? 'visible' : 'hidden';
-      this.decisionsWaitingCount = cached.available ? cached.waitingOnYou : 0;
+    const initial = getInitialProfileDecisionVisibility();
+    this.decisionsNavVisibility = initial.visibility;
+    this.decisionsWaitingCount = initial.waitingOnYou;
+    if (!initial.needsProbe) {
       return;
-    }
-    const lastKnownAvailable = getLastKnownProfileDecisionAvailability();
-    if (lastKnownAvailable === true) {
-      this.decisionsNavVisibility = 'visible';
-      this.decisionsWaitingCount = 0;
-    } else if (lastKnownAvailable === false) {
-      this.decisionsNavVisibility = 'hidden';
-      this.decisionsWaitingCount = 0;
-    } else {
-      this.decisionsNavVisibility = 'unknown';
-      this.decisionsWaitingCount = 0;
     }
     if (this.isActive('/profile/decisions')) {
       // Let <scion-page-profile-decisions> start its page fetch first in the same
@@ -786,20 +776,11 @@ export class ScionProfileNav extends LitElement {
     if (!this.decisionsEnabled) return;
     const probe = await fetchProfileDecisionProbe();
     if (!this.isConnected || !this.decisionsEnabled) return;
-    if (probe === null) {
-      // §7: a transient non-404 probe error leaves the Decisions entry visible.
-      if (this.decisionsNavVisibility === 'unknown') {
-        this.decisionsNavVisibility = 'visible';
-      }
-      return;
+    const resolved = resolveProfileDecisionVisibility(this.decisionsNavVisibility, probe);
+    this.decisionsNavVisibility = resolved.visibility;
+    if (resolved.waitingOnYou !== null) {
+      this.decisionsWaitingCount = resolved.waitingOnYou;
     }
-    if (!probe.available) {
-      this.decisionsNavVisibility = 'hidden';
-      this.decisionsWaitingCount = 0;
-      return;
-    }
-    this.decisionsNavVisibility = 'visible';
-    this.decisionsWaitingCount = probe.waitingOnYou;
   }
 
   private renderDecisionsBadge(): TemplateResult | typeof nothing {

@@ -394,7 +394,7 @@ export class ScionPageProfileDecisions extends LitElement {
     }
 
     return html`
-      ${renderInboxTabStrip('decisions')}
+      ${renderInboxTabStrip('decisions', { decisionsVisible: !this.ctrl.hubNotFound })}
       <div class="ph">
         <h1>Decisions</h1>
       </div>
