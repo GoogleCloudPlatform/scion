@@ -2791,6 +2791,21 @@ authDone:
 		agentEnv.Set(api.EnvTriggerEventFile, resolvedTriggerEventFilePath(unixUsername), envOriginBrokerSystem)
 	}
 
+	// Execution containers (built-in "shell" harness) receive the broker's
+	// authoritative SCION_HOME_PERSISTENT signal so the container MOTD and Hub
+	// profile status can report whether $HOME survives restarts (design §3.6,
+	// ptone/scion#8820). Non-persistent runtimes are allowed with a warning (D6).
+	isShellExecContainer := harnessConfigName == config.ShellHarnessConfigName || launchedHarness == config.ShellHarnessConfigName
+	var shellHomePersistent bool
+	if isShellExecContainer {
+		shellHomePersistent = isAgentHomePersistent(homePersistenceInput{
+			Runtime:            m.Runtime.Name(),
+			HomeStorageBackend: homeStorageBackend,
+			Ephemeral:          opts.Persistence.IsEphemeral(),
+		})
+		agentEnv.Set(api.EnvHomePersistent, strconv.FormatBool(shellHomePersistent), envOriginBrokerSystem)
+	}
+
 	// The container-script provisioner reads the manifest inside the
 	// container, where the workspace is mounted at containerWorkspace, not at
 	// the host path Provision staged it with above. Claude's provisioner, for
@@ -3270,12 +3285,19 @@ authDone:
 			a.HarnessAuth = opts.HarnessAuth
 			a.Profile = profileName
 			a.WorkspacePlacement = workspacePlacement
+			if isShellExecContainer {
+				a.RuntimeState = api.EncodeHomePersistentRuntimeState(a.RuntimeState, shellHomePersistent)
+			}
 			return &a, nil
 		}
 	}
 
 	// Container ID returned but not found in listing — it may have exited and been removed
 	warnings = append(warnings, "Container started but could not be verified as running")
+	fallbackRuntimeState := ""
+	if isShellExecContainer {
+		fallbackRuntimeState = api.EncodeHomePersistentRuntimeState("", shellHomePersistent)
+	}
 	return &api.AgentInfo{
 		ID:                    id,
 		RunID:                 runID,
@@ -3296,6 +3318,7 @@ authDone:
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
 		WorkspacePlacement:    workspacePlacement,
+		RuntimeState:          fallbackRuntimeState,
 	}, nil
 }
 
@@ -3370,6 +3393,33 @@ func workspacePlacementFor(in workspacePlacementInput) string {
 		return api.WorkspacePlacementExport
 	}
 	return api.WorkspacePlacementLocal
+}
+
+// homePersistenceInput holds the resolved start properties used to determine
+// whether the agent's $HOME survives container stops and restarts (design §3.6).
+type homePersistenceInput struct {
+	Runtime            string
+	HomeStorageBackend string
+	Ephemeral          bool
+}
+
+// isAgentHomePersistent reports whether the agent's home directory persists
+// across container restarts on the given runtime and storage configuration.
+// Fails closed (false) for unknown runtimes so users receive the persistence
+// warning rather than assuming logins survive restarts.
+func isAgentHomePersistent(in homePersistenceInput) bool {
+	if in.Ephemeral {
+		return false
+	}
+	if isKubernetesRuntime(in.Runtime) || in.Runtime == "k8s" {
+		return in.HomeStorageBackend == runtime.HomeStorageNFS
+	}
+	switch in.Runtime {
+	case "docker", "podman", "container", "apple-container", "cloudrun":
+		return true
+	default:
+		return false
+	}
 }
 
 // writeAgentTokenFile writes the agent's hub credential to the canonical token

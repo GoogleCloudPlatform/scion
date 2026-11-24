@@ -237,6 +237,7 @@ type AgentResponse struct {
 	StatusReason        string            `json:"statusReason,omitempty"`
 	Ready               bool              `json:"ready,omitempty"`
 	ContainerStatus     string            `json:"containerStatus,omitempty"`
+	RuntimeState        string            `json:"runtimeState,omitempty"`
 	Config              *AgentConfig      `json:"config,omitempty"`
 	Runtime             *AgentRuntime     `json:"runtimeInfo,omitempty"` // Renamed JSON tag to avoid conflict
 	Labels              map[string]string `json:"labels,omitempty"`
@@ -840,6 +841,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Phase:                 phase,
 		Activity:              activity,
 		ContainerStatus:       info.ContainerStatus,
+		RuntimeState:          info.RuntimeState,
 		Labels:                info.Labels,
 		CreatedAt:             info.Created,
 		Ready:                 phase == string(state.PhaseRunning),
