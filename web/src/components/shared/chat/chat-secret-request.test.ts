@@ -1893,4 +1893,95 @@ describe('scion-chat-secret-request', () => {
       el.remove();
     }
   });
+
+  it('preserves CRLF pasted into an empty revealed textarea and transitions LF + CRLF paste to mixed readonly', async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse({
+          rows: [
+            makeRow({
+              rowId: 'row-1',
+              key: 'REV_PASTE',
+              secretType: 'variable',
+              status: 'fulfilled',
+              fulfilled: {
+                at: '2026-11-24T00:05:00Z',
+                byUserId: 'user-1',
+                byName: 'Me',
+                surface: 'native',
+              },
+            }),
+          ],
+          responseMessageId: 'resp-rev-paste',
+          replayed: false,
+        })
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    // 1. Empty row -> Show -> paste CRLF -> preserves CRLF
+    const el1 = await mountCard({
+      rows: [makeRow({ rowId: 'row-1', key: 'REV_PASTE', secretType: 'variable' })],
+    });
+    (el1.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement).click();
+    await el1.updateComplete;
+    const ta1 = el1.shadowRoot!.querySelector(
+      'textarea[data-key="REV_PASTE"]'
+    ) as HTMLTextAreaElement;
+    const paste1 = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(paste1, 'clipboardData', {
+      value: { getData: () => 'A\r\nB\r\nC' },
+    });
+    ta1.dispatchEvent(paste1);
+    await el1.updateComplete;
+    expect(paste1.defaultPrevented).toBe(true);
+    expect(ta1.readOnly).toBe(false);
+    (el1.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el1.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    const sent1 = JSON.parse(
+      (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string
+    ) as {
+      values: Record<string, string>;
+    };
+    expect(sent1.values).toEqual({ REV_PASTE: 'A\r\nB\r\nC' });
+    el1.remove();
+
+    // 2. LF value -> Show -> paste "\r\nX" at end -> becomes mixed readonly and submits verbatim
+    const el2 = await mountCard({
+      rows: [makeRow({ rowId: 'row-1', key: 'REV_PASTE', secretType: 'variable' })],
+    });
+    const input2 = el2.shadowRoot!.querySelector('input[data-key="REV_PASTE"]') as HTMLInputElement;
+    const lfPaste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(lfPaste, 'clipboardData', { value: { getData: () => 'L1\nL2' } });
+    input2.dispatchEvent(lfPaste);
+    await el2.updateComplete;
+
+    (el2.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement).click();
+    await el2.updateComplete;
+    const ta2 = el2.shadowRoot!.querySelector(
+      'textarea[data-key="REV_PASTE"]'
+    ) as HTMLTextAreaElement;
+    ta2.setSelectionRange(ta2.value.length, ta2.value.length);
+    const crlfAppend = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(crlfAppend, 'clipboardData', { value: { getData: () => '\r\nX' } });
+    ta2.dispatchEvent(crlfAppend);
+    await el2.updateComplete;
+    expect(crlfAppend.defaultPrevented).toBe(true);
+    expect(ta2.readOnly).toBe(true);
+    expect(el2.shadowRoot!.querySelector('[data-testid="mixed-line-endings-note"]')).not.toBeNull();
+
+    (el2.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el2.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    const sent2 = JSON.parse(
+      (fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string
+    ) as {
+      values: Record<string, string>;
+    };
+    expect(sent2.values).toEqual({ REV_PASTE: 'L1\nL2\r\nX' });
+    el2.remove();
+  });
 });

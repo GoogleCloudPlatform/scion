@@ -87,6 +87,10 @@ export interface SecretRequestRefreshedDetail {
 
 type LineEndingStyle = 'lf' | 'crlf' | 'mixed';
 
+function normalizeToLf(value: string): string {
+  return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
 function detectLineEndingStyle(value: string): LineEndingStyle {
   if (!value.includes('\r')) {
     return 'lf';
@@ -96,6 +100,25 @@ function detectLineEndingStyle(value: string): LineEndingStyle {
     return 'mixed';
   }
   return 'crlf';
+}
+
+/**
+ * Maps a character offset in an LF-normalized textarea display string back to
+ * the corresponding offset in the raw stored value (where `\r\n` takes 2 code
+ * units in raw and 1 in display).
+ */
+function displayOffsetToRawOffset(raw: string, displayOffset: number): number {
+  let rawIdx = 0;
+  let dispIdx = 0;
+  while (rawIdx < raw.length && dispIdx < displayOffset) {
+    if (raw[rawIdx] === '\r' && raw[rawIdx + 1] === '\n') {
+      rawIdx += 2;
+    } else {
+      rawIdx += 1;
+    }
+    dispIdx += 1;
+  }
+  return rawIdx;
 }
 
 @customElement('scion-chat-secret-request')
@@ -868,27 +891,29 @@ export class ScionChatSecretRequest extends LitElement {
     }
   }
 
+  private extractBeforeInputText(e: InputEvent): string | null {
+    switch (e.inputType) {
+      case 'insertFromPaste':
+      case 'insertFromDrop':
+      case 'insertReplacementText':
+      case 'insertText':
+        return e.dataTransfer?.getData('text/plain') ?? e.data ?? '';
+      case 'insertLineBreak':
+      case 'insertParagraph':
+        return '\n';
+      default:
+        return null;
+    }
+  }
+
   private onMaskedBeforeInput(rowId: string, e: InputEvent): void {
     const target = e.target as HTMLInputElement | null;
     if (e.inputType.startsWith('delete') && this.isRowCaptured(rowId)) {
       this.clearCapturedRow(rowId, target, e);
       return;
     }
-    let incoming: string;
-    switch (e.inputType) {
-      case 'insertFromPaste':
-      case 'insertFromDrop':
-      case 'insertReplacementText':
-      case 'insertText':
-        incoming = e.dataTransfer?.getData('text/plain') ?? e.data ?? '';
-        break;
-      case 'insertLineBreak':
-      case 'insertParagraph':
-        incoming = '\n';
-        break;
-      default:
-        return;
-    }
+    const incoming = this.extractBeforeInputText(e);
+    if (incoming === null) return;
     this.applyMaskedInsert(rowId, target, incoming, e);
   }
 
@@ -902,6 +927,67 @@ export class ScionChatSecretRequest extends LitElement {
     const dropped = e.dataTransfer?.getData('text/plain') ?? '';
     if (!dropped) return;
     this.applyMaskedInsert(rowId, e.target as HTMLInputElement | null, dropped, e);
+  }
+
+  private applyRevealedInsert(
+    rowId: string,
+    target: HTMLTextAreaElement | null,
+    incoming: string,
+    e: Event
+  ): void {
+    if (this.revealedLineEndings.get(rowId) === 'mixed') {
+      e.preventDefault();
+      return;
+    }
+    if (!incoming.includes('\r')) {
+      return;
+    }
+
+    e.preventDefault();
+    const rawCurrent = this.formValues.get(rowId) ?? '';
+    const displayCurrent = normalizeToLf(rawCurrent);
+    const dispStart = target?.selectionStart ?? displayCurrent.length;
+    const dispEnd = target?.selectionEnd ?? dispStart;
+    const rawStart = displayOffsetToRawOffset(rawCurrent, dispStart);
+    const rawEnd = displayOffsetToRawOffset(rawCurrent, dispEnd);
+    const rawBefore = rawCurrent.slice(0, rawStart);
+    const rawAfter = rawCurrent.slice(rawEnd);
+    const nextValue = rawBefore + incoming + rawAfter;
+
+    this.formValues.set(rowId, nextValue);
+    this.capturedRows.delete(rowId);
+    this.revealedLineEndings.set(rowId, detectLineEndingStyle(nextValue));
+
+    if (target) {
+      const nextDisplay = normalizeToLf(nextValue);
+      const nextCaret = normalizeToLf(rawBefore + incoming).length;
+      target.value = nextDisplay;
+      target.setSelectionRange?.(nextCaret, nextCaret);
+    }
+
+    this.pendingFulfillIdempotencyKey = '';
+    if (this.errorMessage) {
+      this.errorMessage = '';
+    }
+    this.formRevision++;
+  }
+
+  private onRevealedBeforeInput(rowId: string, e: InputEvent): void {
+    const incoming = this.extractBeforeInputText(e);
+    if (incoming === null) return;
+    this.applyRevealedInsert(rowId, e.target as HTMLTextAreaElement | null, incoming, e);
+  }
+
+  private onRevealedPaste(rowId: string, e: ClipboardEvent): void {
+    const pasted = e.clipboardData?.getData('text/plain') ?? '';
+    if (!pasted) return;
+    this.applyRevealedInsert(rowId, e.target as HTMLTextAreaElement | null, pasted, e);
+  }
+
+  private onRevealedDrop(rowId: string, e: DragEvent): void {
+    const dropped = e.dataTransfer?.getData('text/plain') ?? '';
+    if (!dropped) return;
+    this.applyRevealedInsert(rowId, e.target as HTMLTextAreaElement | null, dropped, e);
   }
 
   private triggerFilePicker(rowId: string): void {
@@ -1291,7 +1377,7 @@ export class ScionChatSecretRequest extends LitElement {
       const revealed = this.revealedRows.has(row.rowId);
       const lineEndingStyle = revealed ? (this.revealedLineEndings.get(row.rowId) ?? 'lf') : 'lf';
       const isReadonlyRevealed = revealed && lineEndingStyle === 'mixed';
-      const textareaValue = lineEndingStyle === 'crlf' ? value.replace(/\r\n/g, '\n') : value;
+      const textareaValue = normalizeToLf(value);
       const disabled = !this.canRespondNow || this.submitting || this.actionState.dismissSubmitting;
       const isFile = row.secretType === 'file';
       const textareaRows = isFile ? 4 : 2;
@@ -1327,6 +1413,9 @@ export class ScionChatSecretRequest extends LitElement {
                   ?disabled=${disabled}
                   ?readonly=${isReadonlyRevealed}
                   .value=${textareaValue}
+                  @beforeinput=${(e: InputEvent): void => this.onRevealedBeforeInput(row.rowId, e)}
+                  @paste=${(e: ClipboardEvent): void => this.onRevealedPaste(row.rowId, e)}
+                  @drop=${(e: DragEvent): void => this.onRevealedDrop(row.rowId, e)}
                   @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
                 ></textarea>
               `

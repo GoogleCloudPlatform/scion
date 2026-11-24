@@ -622,3 +622,338 @@ test('plain LF Show -> edit -> Hide -> Submit keeps LF unchanged', async ({ page
   expect(fulfills).toHaveLength(1);
   expect(fulfills[0].body.values).toEqual({ LF_KEY: 'L1\nL2\nL3X' });
 });
+
+async function installDynamicMockSecretRequestHub(
+  page: Page,
+  secretType: 'environment' | 'file' | 'variable',
+  key: string
+): Promise<Map<string, FulfillRecord['body']>> {
+  await installEventSourceStub(page);
+
+  await page.addInitScript(() => {
+    window.__SCION_FEATURES__ = { 'hub.agent_secrets': true };
+  });
+
+  const fulfillsByMsg = new Map<string, FulfillRecord['body']>();
+
+  await page.route('**/auth/me', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: 'user-1',
+        email: 'alice@example.test',
+        name: 'Alice',
+        role: 'admin',
+      }),
+    })
+  );
+
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const p = url.pathname;
+
+    if (p === '/api/v1/system/status') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: '{"complete":true}',
+      });
+    }
+    if (p === '/api/v1/settings/public') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ appName: 'Scion', onboardingComplete: true }),
+      });
+    }
+    if (p === '/api/v1/experiments') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ experiments: { 'hub.agent_secrets': true } }),
+      });
+    }
+    const getMatch = /^\/api\/v1\/secret-requests\/([^/]+)$/.exec(p);
+    if (getMatch && route.request().method() === 'GET') {
+      const messageId = getMatch[1];
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          messageId,
+          projectId: 'proj-1',
+          projectName: 'alpha-project',
+          agentId: 'agent-1',
+          agentName: 'release-bot',
+          canRespond: true,
+          reason: '',
+          rows: [
+            {
+              rowId: 'row-1',
+              messageId,
+              projectId: 'proj-1',
+              agentId: 'agent-1',
+              agentName: 'release-bot',
+              key,
+              version: 1,
+              description: 'Matrix test secret',
+              secretType,
+              position: 0,
+              status: 'pending',
+              createdAt: '2026-11-24T00:00:00Z',
+              expiresAt: '2026-12-01T00:00:00Z',
+            },
+          ],
+        }),
+      });
+    }
+    const fulfillMatch = /^\/api\/v1\/secret-requests\/([^/]+)\/fulfill$/.exec(p);
+    if (fulfillMatch && route.request().method() === 'POST') {
+      const messageId = fulfillMatch[1];
+      const body = route.request().postDataJSON() as FulfillRecord['body'];
+      fulfillsByMsg.set(messageId, body);
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          rows: [
+            {
+              rowId: 'row-1',
+              messageId,
+              projectId: 'proj-1',
+              agentId: 'agent-1',
+              agentName: 'release-bot',
+              key,
+              version: 1,
+              description: 'Matrix test secret',
+              secretType,
+              position: 0,
+              status: 'fulfilled',
+              createdAt: '2026-11-24T00:00:00Z',
+              expiresAt: '2026-12-01T00:00:00Z',
+              fulfilled: {
+                at: '2026-11-24T00:05:00Z',
+                byUserId: 'user-1',
+                byName: 'Alice',
+                surface: body.surface,
+              },
+            },
+          ],
+          responseMessageId: `resp-${messageId}`,
+          replayed: false,
+        }),
+      });
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
+
+  return fulfillsByMsg;
+}
+
+const MATRIX_PAYLOADS = [
+  { name: 'single-line', value: 'single-secret-val' },
+  { name: 'lf', value: 'L1\nL2\nL3' },
+  { name: 'crlf', value: 'C1\r\nC2\r\nC3' },
+  { name: 'mixed', value: 'M1\r\nM2\nM3' },
+] as const;
+
+type MatrixPath =
+  | 'masked-paste'
+  | 'masked-drop'
+  | 'masked-insertText'
+  | 'revealed-paste'
+  | 'revealed-drop'
+  | 'revealed-insertText'
+  | 'revealed-typing-edit'
+  | 'file-load';
+
+for (const secretType of ['environment', 'variable', 'file'] as const) {
+  test(`exact-bytes matrix for ${secretType} row across all entry paths and line-ending payloads`, async ({
+    page,
+  }) => {
+    const key = 'MATRIX_KEY';
+    const fulfills = await installDynamicMockSecretRequestHub(page, secretType, key);
+
+    const paths: MatrixPath[] = [
+      'masked-paste',
+      'masked-drop',
+      'masked-insertText',
+      'revealed-paste',
+      'revealed-drop',
+      'revealed-insertText',
+      'revealed-typing-edit',
+      ...(secretType === 'file' ? (['file-load'] as const) : []),
+    ];
+
+    for (const entryPath of paths) {
+      for (const payload of MATRIX_PAYLOADS) {
+        const msgId = `mx-${secretType}-${entryPath}-${payload.name}`;
+        await page.goto(`/secret-requests/${msgId}`, { waitUntil: 'domcontentloaded' });
+
+        const input = page.locator(`input[data-key="${key}"]`);
+        const toggleBtn = page.locator(`button[data-toggle-visibility="${key}"]`);
+        const textarea = page.locator(`textarea[data-key="${key}"]`);
+        await expect(input).toBeVisible();
+
+        let expectedValue: string = payload.value;
+
+        switch (entryPath) {
+          case 'masked-paste': {
+            await input.evaluate((el, text) => {
+              const dt = new DataTransfer();
+              dt.setData('text/plain', text);
+              el.dispatchEvent(
+                new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+              );
+            }, payload.value);
+            // Single-line paste lets browser handle natively; synthetic ClipboardEvent doesn't mutate value
+            if (payload.name === 'single-line') {
+              await input.fill(payload.value);
+            }
+            break;
+          }
+          case 'masked-drop': {
+            await page.evaluate((text) => {
+              document.getElementById('mx-drag-src')?.remove();
+              const src = document.createElement('div');
+              src.id = 'mx-drag-src';
+              src.draggable = true;
+              src.textContent = 'Drag';
+              src.style.cssText =
+                'position:fixed;top:8px;left:8px;padding:8px;background:#ccc;z-index:9999';
+              src.addEventListener('dragstart', (ev) => {
+                ev.dataTransfer?.setData('text/plain', text);
+              });
+              document.body.appendChild(src);
+            }, payload.value);
+            await page.locator('#mx-drag-src').dragTo(input);
+            break;
+          }
+          case 'masked-insertText': {
+            await input.click();
+            await page.keyboard.insertText(payload.value);
+            break;
+          }
+          case 'revealed-paste': {
+            await toggleBtn.click();
+            await expect(textarea).toBeVisible();
+            await textarea.evaluate((el, text) => {
+              const dt = new DataTransfer();
+              dt.setData('text/plain', text);
+              el.dispatchEvent(
+                new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+              );
+            }, payload.value);
+            if (!payload.value.includes('\r')) {
+              await textarea.fill(payload.value);
+            }
+            if (payload.name === 'mixed') {
+              await expect(textarea).toHaveAttribute('readonly', '');
+            }
+            await toggleBtn.click();
+            break;
+          }
+          case 'revealed-drop': {
+            await toggleBtn.click();
+            await expect(textarea).toBeVisible();
+            await page.evaluate((text) => {
+              document.getElementById('mx-drag-src')?.remove();
+              const src = document.createElement('div');
+              src.id = 'mx-drag-src';
+              src.draggable = true;
+              src.textContent = 'Drag';
+              src.style.cssText =
+                'position:fixed;top:8px;left:8px;padding:8px;background:#ccc;z-index:9999';
+              src.addEventListener('dragstart', (ev) => {
+                ev.dataTransfer?.setData('text/plain', text);
+              });
+              document.body.appendChild(src);
+            }, payload.value);
+            await page.locator('#mx-drag-src').dragTo(textarea);
+            if (payload.name === 'mixed') {
+              await expect(textarea).toHaveAttribute('readonly', '');
+            }
+            await toggleBtn.click();
+            break;
+          }
+          case 'revealed-insertText': {
+            await toggleBtn.click();
+            await expect(textarea).toBeVisible();
+            await textarea.click();
+            await page.keyboard.insertText(payload.value);
+            if (payload.name === 'mixed') {
+              await expect(textarea).toHaveAttribute('readonly', '');
+            }
+            await toggleBtn.click();
+            break;
+          }
+          case 'revealed-typing-edit': {
+            await input.click();
+            await page.keyboard.insertText(payload.value);
+            await toggleBtn.click();
+            await expect(textarea).toBeVisible();
+            if (payload.name === 'mixed') {
+              await expect(textarea).toHaveAttribute('readonly', '');
+              await textarea.click();
+              await page.keyboard.type('X');
+              expectedValue = payload.value;
+            } else {
+              await expect(textarea).not.toHaveAttribute('readonly', '');
+              await textarea.evaluate((el: HTMLTextAreaElement) => {
+                el.focus();
+                el.setSelectionRange(el.value.length, el.value.length);
+              });
+              await page.keyboard.type('X');
+              expectedValue = `${payload.value}X`;
+            }
+            await toggleBtn.click();
+            break;
+          }
+          case 'file-load': {
+            const fileInput = page.locator(`input[type="file"][data-file-input="${key}"]`);
+            await fileInput.setInputFiles({
+              name: `${payload.name}.txt`,
+              mimeType: 'text/plain',
+              buffer: Buffer.from(payload.value, 'utf-8'),
+            });
+            break;
+          }
+        }
+
+        await page.locator('sl-button.submit-btn').click();
+        await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+        expect(
+          fulfills.get(msgId)?.values,
+          `${secretType} / ${entryPath} / ${payload.name}`
+        ).toEqual({ [key]: expectedValue });
+      }
+    }
+
+    // Also verify LF value -> Show -> paste "\r\nX" transitions to mixed readonly and submits verbatim
+    const mixMsgId = `mx-${secretType}-lf-then-crlf-paste`;
+    await page.goto(`/secret-requests/${mixMsgId}`, { waitUntil: 'domcontentloaded' });
+    const input = page.locator(`input[data-key="${key}"]`);
+    const toggleBtn = page.locator(`button[data-toggle-visibility="${key}"]`);
+    const textarea = page.locator(`textarea[data-key="${key}"]`);
+    await input.click();
+    await page.keyboard.insertText('L1\nL2');
+    await toggleBtn.click();
+    await expect(textarea).toBeVisible();
+    await textarea.evaluate((el: HTMLTextAreaElement) => {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+      const dt = new DataTransfer();
+      dt.setData('text/plain', '\r\nX');
+      el.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+      );
+    });
+    await expect(textarea).toHaveAttribute('readonly', '');
+    await expect(page.locator('[data-testid="mixed-line-endings-note"]')).toBeVisible();
+    await toggleBtn.click();
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills.get(mixMsgId)?.values).toEqual({ [key]: 'L1\nL2\r\nX' });
+  });
+}
