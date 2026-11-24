@@ -396,8 +396,8 @@ func TestBrokerAssociation_BrokerPolicyRefusesRegisterWithUnmanagedBroker(t *tes
 		ctx := context.Background()
 		admin := newSuperAdminUser(t, f.store, "assoc-policy-reg-ok-super")
 
-		f.ownBroker.AdminManaged = true
-		require.NoError(t, f.store.UpdateRuntimeBroker(ctx, f.ownBroker))
+		_, err := f.store.SetRuntimeBrokerAdminManaged(ctx, f.ownBroker.ID, true)
+		require.NoError(t, err)
 
 		embedded := createReregistrationTestBroker(t, f.store, "assoc-policy-reg-embedded", "")
 		autoProvide := createReregistrationTestBroker(t, f.store, "assoc-policy-reg-auto", f.projectOwner.ID)

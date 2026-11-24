@@ -463,3 +463,89 @@ func TestBrokerPolicy_ResponsesAndCapabilities(t *testing.T) {
 		assert.True(t, p.PolicyEligible, "provider %s must be policyEligible=true when policy is off", p.BrokerID)
 	}
 }
+
+// TestBrokerPolicy_WholeRowWriteBackPreservesAdminManaged verifies that whole-row
+// Runtime Broker updates (direct stale write-backs, broker join, and owner
+// re-registration/settings updates) cannot overwrite an admin's change to
+// admin_managed (ptone/scion#8915).
+func TestBrokerPolicy_WholeRowWriteBackPreservesAdminManaged(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	capture := &captureBrokerPolicyAuditLogger{AuditLogger: srv.auditLogger}
+	srv.auditLogger = capture
+
+	owner := newHubMemberUser(t, s, "race-owner")
+	hubAdmin := newHubAdminUser(t, s, "race-hubadmin")
+
+	ownerJWT := mintInteractiveUserJWT(t, srv, owner)
+	hubAdminJWT := mintInteractiveUserJWT(t, srv, hubAdmin)
+
+	bearer := func(tok string) func(*http.Request) {
+		return func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+tok) }
+	}
+
+	// Policy off, experiment on so owner re-registration and admin PATCH are both allowed.
+	setBrokerPolicyState(t, srv, s, true, false)
+
+	// 1. Stale whole-row UpdateRuntimeBroker cannot undo an admin PATCH revocation.
+	broker := createTestBrokerRow(t, s, "race-stale-broker", owner.ID, false, true)
+	stale, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	require.True(t, stale.AdminManaged)
+
+	rec := doBrokerRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID,
+		map[string]any{"adminManaged": false}, bearer(hubAdminJWT))
+	require.Equal(t, http.StatusOK, rec.Code, "revoke must succeed: %s", rec.Body.String())
+
+	// Simulate a concurrent whole-row write-back holding the pre-revocation copy.
+	stale.Version = "9.9.9"
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, stale))
+
+	got, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.False(t, got.AdminManaged, "stale whole-row update must not undo adminManaged=false")
+	assert.Equal(t, "9.9.9", got.Version, "non-adminManaged fields must still be written")
+
+	// 2. Broker join racing after admin revocation preserves adminManaged=false.
+	regRec := doBrokerRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:         "race-join-broker",
+		AdminManaged: true,
+	}, bearer(hubAdminJWT))
+	require.Equal(t, http.StatusCreated, regRec.Code, regRec.Body.String())
+	var regResp CreateBrokerRegistrationResponse
+	require.NoError(t, json.Unmarshal(regRec.Body.Bytes(), &regResp))
+
+	// Admin revokes adminManaged before join completes.
+	rec = doBrokerRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+regResp.BrokerID,
+		map[string]any{"adminManaged": false}, bearer(hubAdminJWT))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	joinResp, err := srv.brokerAuthService.CompleteBrokerJoin(ctx, BrokerJoinRequest{
+		BrokerID:  regResp.BrokerID,
+		JoinToken: regResp.JoinToken,
+		Version:   "1.2.3",
+	}, "http://localhost:8080")
+	require.NoError(t, err)
+	require.NotNil(t, joinResp)
+
+	gotJoined, err := s.GetRuntimeBroker(ctx, regResp.BrokerID)
+	require.NoError(t, err)
+	assert.False(t, gotJoined.AdminManaged, "CompleteBrokerJoin must preserve adminManaged=false")
+	assert.Equal(t, "1.2.3", gotJoined.Version)
+
+	// 3. Owner label PATCH does not alter admin_managed and does not attribute a
+	//    concurrent admin_managed change in its audit event.
+	capture.events = nil
+	rec = doBrokerRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID,
+		map[string]any{"labels": map[string]string{"env": "dev"}}, bearer(ownerJWT))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err = s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.False(t, got.AdminManaged)
+	assert.Equal(t, "dev", got.Labels["env"])
+	require.NotEmpty(t, capture.events)
+	ev := capture.events[len(capture.events)-1]
+	assert.NotContains(t, ev.Details, "admin_managed.old")
+	assert.NotContains(t, ev.Details, "admin_managed.new")
+}

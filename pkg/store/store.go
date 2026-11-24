@@ -2048,6 +2048,14 @@ type RuntimeBrokerStore interface {
 	// capabilities.
 	SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (applied bool, err error)
 
+	// SetRuntimeBrokerAdminManaged sets admin_managed on a runtime broker as a
+	// compare-and-set on lock_version and returns the value it replaced (read
+	// and written atomically). UpdateRuntimeBroker never writes admin_managed:
+	// only CreateRuntimeBroker (at creation) and this dedicated writer change
+	// it, so a concurrent whole-row write-back cannot overwrite an admin's
+	// approval or revocation. Returns ErrNotFound if the broker doesn't exist.
+	SetRuntimeBrokerAdminManaged(ctx context.Context, id string, adminManaged bool) (prev bool, err error)
+
 	// SetRuntimeBrokerGCPHostIfUnset writes the GCP host service account and
 	// project together, with source, but only while the stored email and
 	// project are both empty and the source is not GCPHostSourceAdmin.

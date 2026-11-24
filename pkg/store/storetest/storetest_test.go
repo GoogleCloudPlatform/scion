@@ -140,6 +140,14 @@ func TestCompositeStore_RuntimeBrokerConversionPlan(t *testing.T) {
 	storetest.RuntimeBrokerConversionPlanConformance(t, compositeFactory)
 }
 
+// TestCompositeStore_RuntimeBrokerAdminManaged runs the admin_managed dedicated
+// writer conformance check (SetRuntimeBrokerAdminManaged, and that
+// UpdateRuntimeBroker leaves admin_managed unchanged) on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_RuntimeBrokerAdminManaged(t *testing.T) {
+	storetest.RuntimeBrokerAdminManagedWriterConformance(t, compositeFactory)
+}
+
 // TestCompositeStore_RuntimeBrokerCursorPagination is a targeted conformance
 // case, not part of the generic CRUD-parity oracle above: the oracle's
 // pagination category (storetest's internal testPaginate) only checks a

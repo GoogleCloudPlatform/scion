@@ -114,8 +114,9 @@ func TestCreateAgent_BrokerPolicyAdminManagedOnlyAutoLink(t *testing.T) {
 		f.proj.GitRemote = "github.com/test/link-authz-policy"
 		require.NoError(t, f.store.UpdateProject(ctx, f.proj))
 		f.unlinked.AutoProvide = false
-		f.unlinked.AdminManaged = false
 		require.NoError(t, f.store.UpdateRuntimeBroker(ctx, f.unlinked))
+		_, setErr := f.store.SetRuntimeBrokerAdminManaged(ctx, f.unlinked.ID, false)
+		require.NoError(t, setErr)
 		setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
 		logs := captureBrokerPolicyWarnLogs(t)
 
@@ -151,8 +152,9 @@ func TestCreateAgent_BrokerPolicyAdminManagedOnlyAutoLink(t *testing.T) {
 				name: "admin_managed",
 				setup: func(t *testing.T, f *brokerLinkAuthzFixture) {
 					f.unlinked.AutoProvide = false
-					f.unlinked.AdminManaged = true
 					require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), f.unlinked))
+					_, err := f.store.SetRuntimeBrokerAdminManaged(context.Background(), f.unlinked.ID, true)
+					require.NoError(t, err)
 				},
 			},
 			{
@@ -169,8 +171,9 @@ func TestCreateAgent_BrokerPolicyAdminManagedOnlyAutoLink(t *testing.T) {
 				name: "auto_provide",
 				setup: func(t *testing.T, f *brokerLinkAuthzFixture) {
 					f.unlinked.AutoProvide = true
-					f.unlinked.AdminManaged = false
 					require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), f.unlinked))
+					_, err := f.store.SetRuntimeBrokerAdminManaged(context.Background(), f.unlinked.ID, false)
+					require.NoError(t, err)
 				},
 			},
 		} {
@@ -212,8 +215,9 @@ func TestCreateAgent_BrokerPolicyAdminManagedOnlyAutoLink(t *testing.T) {
 				f.proj.GitRemote = "github.com/test/link-authz-off"
 				require.NoError(t, f.store.UpdateProject(ctx, f.proj))
 				f.unlinked.AutoProvide = false
-				f.unlinked.AdminManaged = false
 				require.NoError(t, f.store.UpdateRuntimeBroker(ctx, f.unlinked))
+				_, err := f.store.SetRuntimeBrokerAdminManaged(ctx, f.unlinked.ID, false)
+				require.NoError(t, err)
 				setAttachBrokerPolicyState(t, f.srv, f.store, tc.expOn, tc.policyOn)
 
 				rec := createAgentAsOwner(t, f.bypassAgentsFixture, CreateAgentRequest{

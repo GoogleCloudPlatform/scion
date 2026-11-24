@@ -323,7 +323,7 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 		AutoProvideAuthorized: autoProvideAuthorized,
 		HostSAClaim:           hostSA,
 		Apply: func(b *store.RuntimeBroker, created bool) {
-			if req.AdminManaged {
+			if created && req.AdminManaged {
 				b.AdminManaged = true
 			}
 			if preserve && !created {
@@ -351,6 +351,11 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 	})
 	if err != nil {
 		return nil, err
+	}
+	if !created && req.AdminManaged {
+		if _, err := s.store.SetRuntimeBrokerAdminManaged(ctx, row.ID, true); err != nil {
+			return nil, fmt.Errorf("failed to update flat Runtime Broker: %w", err)
+		}
 	}
 	var gcp registrationGCPHostResult
 	if !created && !preserve {
