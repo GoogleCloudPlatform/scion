@@ -60,6 +60,9 @@ class FakeStateManager extends EventTarget {
   getProject(id: string): { id: string; updatedAt?: string } | undefined {
     return this.projectsById.get(id);
   }
+  getProjects(): Array<{ id: string; updatedAt?: string }> {
+    return Array.from(this.projectsById.values());
+  }
   /** Store a project object as-is and fire `projects-updated` (state.ts handleProjectEvent). */
   setProject(project: { id: string; updatedAt?: string }): void {
     this.projectsById.set(project.id, project);

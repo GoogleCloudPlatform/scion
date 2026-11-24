@@ -36,6 +36,9 @@ class FakeStateManager extends EventTarget {
   getProject(): undefined {
     return undefined;
   }
+  getProjects(): Array<{ id: string }> {
+    return [];
+  }
   setScope(): void {}
   getCurrentUserId(): string {
     return '';
