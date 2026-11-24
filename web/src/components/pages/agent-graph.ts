@@ -142,7 +142,6 @@ export class AgentGraphPage extends LitElement {
   @state() private error: string | null = null;
   @state() private projectFilter = '';
   @state() private filterQueryText = '';
-  @state() private committedFilterKey = '';
   @state() private activeFilterQuery: Query | null = null;
   @state() private projectNamed: Named | null = null;
   private resolvedProjectId = '';
@@ -206,7 +205,6 @@ export class AgentGraphPage extends LitElement {
         const parsed = this.parseValidQuery(projectTerm);
         this.filterQueryText = projectTerm;
         this.activeFilterQuery = parsed;
-        this.committedFilterKey = parsed ? canonical(parsed) : '';
         const params = new URLSearchParams(window.location.search);
         params.set('q', projectTerm);
         params.delete('project');
@@ -263,7 +261,6 @@ export class AgentGraphPage extends LitElement {
       this.initiallyProjectScoped = migrated;
       this.filterQueryText = queryText;
       this.activeFilterQuery = this.parseValidQuery(queryText);
-      this.committedFilterKey = this.activeFilterQuery ? canonical(this.activeFilterQuery) : '';
       initialFallbackProject = initialProject;
       if (migrated) {
         if (queryText) params.set('q', queryText);
@@ -745,7 +742,6 @@ export class AgentGraphPage extends LitElement {
   private onFilterCommit(e: CustomEvent<FilterCommitDetail>): void {
     this.filterQueryText = e.detail.value;
     this.activeFilterQuery = e.detail.query;
-    this.committedFilterKey = canonical(e.detail.query);
     const params = new URLSearchParams(window.location.search);
     const trimmed = e.detail.value.trim();
     if (trimmed) {
@@ -760,7 +756,6 @@ export class AgentGraphPage extends LitElement {
 
   private onClearFilter(): void {
     this.filterQueryText = '';
-    this.committedFilterKey = '';
     this.activeFilterQuery = null;
     const params = new URLSearchParams(window.location.search);
     params.delete('q');
@@ -902,7 +897,11 @@ export class AgentGraphPage extends LitElement {
     const filteredEmpty = Boolean(
       filtered && filtered.hasActiveFilter && this.agents.length > 0 && shownAgents.length === 0
     );
-    const treeFilterKey = useDialect ? this.committedFilterKey : this.projectFilter;
+    const treeFilterKey = useDialect
+      ? this.activeFilterQuery
+        ? canonical(this.activeFilterQuery)
+        : ''
+      : this.projectFilter;
 
     return html`
       <div style="padding: var(--sl-spacing-large, 1.25rem);">

@@ -379,8 +379,8 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     box!.dispatchEvent(
       new CustomEvent('filter-input', {
         detail: {
-          value: 'project:p-1 phase:',
-          query: parseGraph('project:p-1'),
+          value: 'project:alpha phase:',
+          query: parseGraph('project:alpha'),
           valid: false,
         },
         bubbles: true,
@@ -433,6 +433,106 @@ describe('scion-page-agent-graph filter dialect integration', () => {
       .map((c) => c.target.agentId)
       .sort();
     expect(candidateIds).toEqual(['a-child', 'a-other', 'a-parent']);
+  });
+
+  it('re-flows layout deliberately on narrowing filter-input while keeping stable positions on live delete', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    const r = mkAgent({ id: 'r', name: 'Root', phase: 'running', labels: { keep: '1' } });
+    const c1 = mkAgent({
+      id: 'c1',
+      name: 'Child 1',
+      phase: 'running',
+      ancestry: ['user:u1', 'r'],
+      labels: { keep: '1' },
+    });
+    const c2 = mkAgent({
+      id: 'c2',
+      name: 'Child 2',
+      phase: 'stopped',
+      ancestry: ['user:u1', 'r'],
+      labels: { drop: '1' },
+    });
+    const c3 = mkAgent({
+      id: 'c3',
+      name: 'Child 3',
+      phase: 'running',
+      ancestry: ['user:u1', 'r'],
+      labels: { keep: '1' },
+    });
+
+    const nodePositions = (treeEl: ScionAgentTreeView): Record<string, [number, number]> => {
+      const out: Record<string, [number, number]> = {};
+      for (const wrapper of treeEl.shadowRoot!.querySelectorAll<HTMLElement>('.node-wrapper')) {
+        const id = wrapper.querySelector<HTMLElement>('a.node')?.dataset.agentId;
+        if (id) out[id] = [parseFloat(wrapper.style.left), parseFloat(wrapper.style.top)];
+      }
+      return out;
+    };
+
+    // Baseline: fresh render of the narrowed subset [r, c1, c3].
+    const freshTree = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    freshTree.agents = [r, c1, c3];
+    document.body.appendChild(freshTree);
+    await freshTree.updateComplete;
+    const expectedCompacted = nodePositions(freshTree);
+    freshTree.remove();
+
+    // Mount full graph [r, c1, c2, c3], then narrow via filter-input + debounced filter-commit.
+    vi.spyOn(stateManager, 'getAgents').mockReturnValue([r, c1, c2, c3]);
+    vi.spyOn(stateManager, 'getDeletedAgentIds').mockReturnValue(new Set());
+    window.history.replaceState({}, '', '/agents/graph');
+    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
+    document.body.appendChild(page);
+    await page.updateComplete;
+
+    const box = page.shadowRoot!.querySelector('scion-filter-box')!;
+    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    const narrowedQuery = parseGraph('phase:running');
+
+    // Narrowing filter-input updates filterKey in the same render as agents -> compacted layout.
+    box.dispatchEvent(
+      new CustomEvent('filter-input', {
+        detail: { value: 'phase:running', query: narrowedQuery, valid: true },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await page.updateComplete;
+    await tree.updateComplete;
+    expect(nodePositions(tree)).toEqual(expectedCompacted);
+
+    // Subsequent debounced filter-commit keeps the same compacted layout.
+    box.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: { value: 'phase:running', query: narrowedQuery, serverQ: '' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await page.updateComplete;
+    await tree.updateComplete;
+    expect(nodePositions(tree)).toEqual(expectedCompacted);
+
+    // Invalid keystroke leaves filterKey (and layout) unchanged.
+    const keyBeforeInvalid = tree.filterKey;
+    box.dispatchEvent(
+      new CustomEvent('filter-input', {
+        detail: { value: 'phase:running phase:', query: narrowedQuery, valid: false },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await page.updateComplete;
+    expect(tree.filterKey).toBe(keyBeforeInvalid);
+
+    // Live delete of c1 under unchanged filter takes stable delete path (c3 stays at its x/y).
+    const c3PosBeforeDelete = nodePositions(tree)['c3'];
+    stateManager.dispatchEvent(
+      new CustomEvent('agents-changed', { detail: { data: { upserted: [], deleted: ['c1'] } } })
+    );
+    await page.updateComplete;
+    await tree.updateComplete;
+    expect(nodePositions(tree)['c3']).toEqual(c3PosBeforeDelete);
   });
 });
 
