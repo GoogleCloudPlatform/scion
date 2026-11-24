@@ -49,7 +49,7 @@ Only `./cmd/scion` and packages in its `GOOS=windows` import graph (`GOOS=window
 
 ```bash
 GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
-GOOS=windows GOARCH=amd64 go vet -buildvcs=false ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/<yours>/...   # for cmd/, pass ./cmd ./cmd/scion (not ./cmd/...; ./cmd/sciontool is unix-only)
+GOOS=windows GOARCH=amd64 go vet -buildvcs=false ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/hub/maintenance/... ./pkg/runtimebroker/... ./pkg/<yours>/...   # for cmd/, pass ./cmd ./cmd/scion (not ./cmd/...; ./cmd/sciontool is unix-only)
 bash hack/winsec-guard.sh
 GOOS=windows go test -buildvcs=false -c -o /dev/null ./pkg/<yours>   # required for any test edit in .github/windows-test-packages.txt or *_windows_test.go
 ```
