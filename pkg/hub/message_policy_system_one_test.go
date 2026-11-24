@@ -2656,9 +2656,20 @@ func TestMessagePolicySystemOne_TestEndpointRateLimiting(t *testing.T) {
 		Sample:        &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Inline A or B?"},
 	}
 
-	// 1. Exhaust the 30-token burst across saved pol1, saved pol2, and inline /test
-	//    (proves changing/rotating policy IDs or saved vs inline shares one bucket).
-	for i := 0; i < 10; i++ {
+	// 1. Positive control on call #1: an allowed live /test call increments
+	//    both the secret-read counter (+1) and the provider-request counter (+1)
+	//    on the exact same counters later asserted to be +0/+0/+0 on 429.
+	sBeforeFirst := countingSecrets.getCalls.Load()
+	pBeforeFirst := providerCalls.Load()
+	firstRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+pol1.ID+"/test", sampleReq)
+	require.Equal(t, http.StatusOK, firstRec.Code, "positive control live /test: %s", firstRec.Body.String())
+	assert.Equal(t, sBeforeFirst+1, countingSecrets.getCalls.Load(), "positive control: allowed live /test must increment secret-read counter by +1")
+	assert.Equal(t, pBeforeFirst+1, providerCalls.Load(), "positive control: allowed live /test must increment provider-request counter by +1")
+
+	// Exhaust the remaining 29 tokens of the 30-token burst across saved pol1,
+	// saved pol2, and inline /test (proves changing/rotating policy IDs or
+	// saved vs inline shares one bucket).
+	for i := 1; i < 10; i++ {
 		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+pol1.ID+"/test", sampleReq)
 		require.Equal(t, http.StatusOK, rec.Code, "saved pol1 #%d: %s", i, rec.Body.String())
 	}
@@ -2759,4 +2770,30 @@ func TestMessagePolicySystemOne_TestEndpointRateLimiting(t *testing.T) {
 	require.Equal(t, http.StatusOK, refillOK.Code, "refilled token must not have been consumed by 400/403: %s", refillOK.Body.String())
 	refill429 := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+pol1.ID+"/test", sampleReq)
 	require.Equal(t, http.StatusTooManyRequests, refill429.Code, "bucket should be empty again after consuming the 1 refilled token")
+}
+
+// TestAllowMessagePolicyLiveTest_MissingIdentityFailsClosed verifies Part A
+// item 3: when no verified identity is present on the request context,
+// messagePolicyTestBucketKey and allowMessagePolicyLiveTest fail closed (401
+// Unauthorized, returning false) without creating or sharing any rate-limit
+// bucket.
+func TestAllowMessagePolicyLiveTest_MissingIdentityFailsClosed(t *testing.T) {
+	srv := &Server{
+		messagePolicyTestLimiter: newKeysRateLimiter(messagePolicyTestRatePerSecond, messagePolicyTestBurst),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/proj-1/message-policies/test", nil)
+	key, ok := messagePolicyTestBucketKey(req.Context(), "proj-1")
+	assert.False(t, ok, "missing identity must not produce a bucket key")
+	assert.Empty(t, key)
+
+	rec := httptest.NewRecorder()
+	allowed := srv.allowMessagePolicyLiveTest(rec, req, "proj-1")
+	assert.False(t, allowed, "missing identity must fail closed")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	srv.messagePolicyTestLimiter.mu.Lock()
+	bucketCount := len(srv.messagePolicyTestLimiter.buckets)
+	srv.messagePolicyTestLimiter.mu.Unlock()
+	assert.Zero(t, bucketCount, "missing identity must not allocate or share a rate-limit bucket")
 }

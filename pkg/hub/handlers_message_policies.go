@@ -615,24 +615,30 @@ const (
 	messagePolicyTestBurst         = 30.0
 )
 
-func messagePolicyTestBucketKey(ctx context.Context, projectID string) string {
+func messagePolicyTestBucketKey(ctx context.Context, projectID string) (string, bool) {
 	identity := GetIdentityFromContext(ctx)
-	if isNilIdentity(identity) {
-		return "unknown:unknown:" + projectID
+	if isNilIdentity(identity) || identity.Type() == "" || identity.ID() == "" {
+		return "", false
 	}
-	return identity.Type() + ":" + identity.ID() + ":" + projectID
+	return identity.Type() + ":" + identity.ID() + ":" + projectID, true
 }
 
 // allowMessagePolicyLiveTest enforces the per-caller per-project rate limit on
 // live System One /test evaluations. Called after authz, authoring validation,
 // scope matching, and credential-boundary checks so 400/403 and out-of-scope
 // requests are never charged, and before any secret lookup, token mint, or
-// provider call.
+// provider call. Fails closed (401 Unauthorized, no shared bucket) if no
+// verified identity is present on the request context.
 func (s *Server) allowMessagePolicyLiveTest(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	key, ok := messagePolicyTestBucketKey(r.Context(), projectID)
+	if !ok {
+		Unauthorized(w)
+		return false
+	}
 	if s.messagePolicyTestLimiter == nil {
 		return true
 	}
-	allowed, retryAfter := s.messagePolicyTestLimiter.Allow(messagePolicyTestBucketKey(r.Context(), projectID))
+	allowed, retryAfter := s.messagePolicyTestLimiter.Allow(key)
 	if allowed {
 		return true
 	}

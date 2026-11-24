@@ -91,16 +91,12 @@ func newKeysRateLimiterWithClock(ratePerSecond, burst float64, now func() time.T
 // same floor chatSendLimiter uses, since a sub-second Retry-After is not a
 // meaningful backoff signal).
 //
-// Allow is a single-bucket convenience built on reserve; a caller that must
-// check two independent limiters together and consume from neither unless
-// both allow (as ExecuteAgentKeys does for its principal+project and target
-// buckets) should use the package-level allowBoth instead, not two separate
-// Allow calls. Production code never calls Allow directly for that reason --
-// it exists as a test helper (see execute_agent_keys_test.go's
-// TestExecuteAgentKeysAllowBoth_SameLimiterInstance and
-// TestExecuteAgentKeys_TargetSaturationDoesNotChargePrincipal, and
-// keys_rate_limit_test.go's own unit tests), to drain or probe a single
-// bucket without needing a second limiter to pair it with.
+// Allow is a single-bucket convenience built on reserve, used by single-bucket
+// production callers (such as allowMessagePolicyLiveTest) and by tests to
+// drain or probe a single bucket. A caller that must check two independent
+// limiters together and consume from neither unless both allow (as
+// ExecuteAgentKeys does for its principal+project and target buckets) must use
+// the package-level allowBoth instead, not two separate Allow calls.
 func (l *keysRateLimiter) Allow(key string) (allowed bool, retryAfter time.Duration) {
 	release, retryAfter, ok := l.reserve(key)
 	if !ok {
