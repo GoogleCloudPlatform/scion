@@ -4762,11 +4762,12 @@ func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
 // at `ops != nil` and the message is delivered (B10 behaviour). With the
 // switch explicitly ON, the same request is denied.
 func TestG2_AC6_WriteDenySwitch_IntegrationChatV2(t *testing.T) {
-	srv, _, wcs, proj, _ := setupSendTest(t)
+	srv, _, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
-	// Create a topic WITHOUT calling setTopicConversationID — conversation
-	// resolution will fail because there is no conversation_id on the topic.
+	// Create a legacy unlinked topic (conversation_id NULL) so conversation
+	// resolution fails. CreateTopic now always mints a conversation_id, so
+	// clear it explicitly to simulate a pre-link topic row.
 	topicID := tid("g2-ac6-topic")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
 		ID:        topicID,
@@ -4776,6 +4777,9 @@ func TestG2_AC6_WriteDenySwitch_IntegrationChatV2(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE webchat_topic SET conversation_id = NULL WHERE id = ?`, topicID); err != nil {
+		t.Fatalf("clear conversation_id: %v", err)
 	}
 
 	body := map[string]string{"content": "AC-G2-6 probe"}
@@ -4873,10 +4877,10 @@ func enableEnvelopeSwitchViaStaleKeys(t *testing.T, srv *Server) {
 // upgrading to the Phase 9a code with NO messaging row gets the write-deny
 // gate live by default. This is the never-configured-hub case.
 func TestPhase9a_UpgradeCutover_WriteDenyLiveByDefault(t *testing.T) {
-	srv, _, wcs, proj, _ := setupSendTest(t)
+	srv, _, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
-	// Create a topic WITHOUT setTopicConversationID — resolution will fail.
+	// Create a legacy unlinked topic (conversation_id NULL) so resolution fails.
 	topicID := tid("9a-absent-row")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
 		ID:        topicID,
@@ -4886,6 +4890,9 @@ func TestPhase9a_UpgradeCutover_WriteDenyLiveByDefault(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE webchat_topic SET conversation_id = NULL WHERE id = ?`, topicID); err != nil {
+		t.Fatalf("clear conversation_id: %v", err)
 	}
 
 	// Wire OperationalSettings with no messaging row — absent → ON.
@@ -4921,10 +4928,10 @@ func TestPhase9a_UpgradeCutover_WriteDenyLiveByDefault(t *testing.T) {
 // the key its operator never set. The new key is absent, so the compiled
 // default (ON) takes effect.
 func TestPhase9a_UpgradeCutover_StaleKeysOnly_WriteDenyLive(t *testing.T) {
-	srv, _, wcs, proj, _ := setupSendTest(t)
+	srv, _, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
-	// Create a topic WITHOUT setTopicConversationID — resolution will fail.
+	// Create a legacy unlinked topic (conversation_id NULL) so resolution fails.
 	topicID := tid("9a-stale-keys")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
 		ID:        topicID,
@@ -4934,6 +4941,9 @@ func TestPhase9a_UpgradeCutover_StaleKeysOnly_WriteDenyLive(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE webchat_topic SET conversation_id = NULL WHERE id = ?`, topicID); err != nil {
+		t.Fatalf("clear conversation_id: %v", err)
 	}
 
 	// Wire OperationalSettings with stale keys only — new key absent → ON.
