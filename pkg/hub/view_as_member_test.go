@@ -75,6 +75,10 @@ func TestViewAsMember_ExperimentRegistered(t *testing.T) {
 // TestViewAsMember_ContextSetterCensus enforces design §4.2.1 and D4:
 //   - only UnifiedAuthMiddleware (auth.go) and webSessionContextFromCookie
 //     (view_as_member.go) may call contextWithViewAsMember;
+//   - only RecordViewAsMemberTransition (view_as_member.go) may call
+//     withoutViewAsMember;
+//   - no file outside view_as_member.go may construct a viewAsMemberKey{}
+//     composite literal;
 //   - only unclampedUserForMaintenance (view_as_member.go) may call
 //     (*AuthenticatedUser).WithoutViewAsMember;
 //   - only adminModeMiddleware (admin_mode.go) and deferDuringMaintenance
@@ -84,6 +88,9 @@ func TestViewAsMember_ContextSetterCensus(t *testing.T) {
 		"auth.go:UnifiedAuthMiddleware":                 true,
 		"view_as_member.go:webSessionContextFromCookie": true,
 	}
+	allowedShadow := map[string]bool{
+		"view_as_member.go:RecordViewAsMemberTransition": true,
+	}
 	allowedWithout := map[string]bool{
 		"view_as_member.go:unclampedUserForMaintenance": true,
 	}
@@ -92,11 +99,19 @@ func TestViewAsMember_ContextSetterCensus(t *testing.T) {
 		"agent_pending_config_authz.go:deferDuringMaintenance": true,
 	}
 	foundSetters := map[string]bool{}
+	foundShadow := map[string]bool{}
 	foundWithout := map[string]bool{}
 	foundUnclamp := map[string]bool{}
+	var badKeyLiterals []string
 	walkPkgHubFuncs(t, func(file string, fn *ast.FuncDecl, _ *token.FileSet) {
 		key := file + ":" + fn.Name.Name
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.CompositeLit); ok {
+				if id, ok := lit.Type.(*ast.Ident); ok && id.Name == "viewAsMemberKey" && file != "view_as_member.go" {
+					badKeyLiterals = append(badKeyLiterals, key)
+				}
+				return true
+			}
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -106,6 +121,8 @@ func TestViewAsMember_ContextSetterCensus(t *testing.T) {
 				switch f.Name {
 				case "contextWithViewAsMember":
 					foundSetters[key] = true
+				case "withoutViewAsMember":
+					foundShadow[key] = true
 				case "unclampedUserForMaintenance":
 					foundUnclamp[key] = true
 				}
@@ -118,6 +135,8 @@ func TestViewAsMember_ContextSetterCensus(t *testing.T) {
 		})
 	})
 	assert.Equal(t, allowedSetters, foundSetters, "contextWithViewAsMember must only be called from its two sanctioned entry points")
+	assert.Equal(t, allowedShadow, foundShadow, "withoutViewAsMember must only be called from RecordViewAsMemberTransition")
+	assert.Empty(t, badKeyLiterals, "viewAsMemberKey{} composite literals are only permitted in view_as_member.go")
 	assert.Equal(t, allowedWithout, foundWithout, "WithoutViewAsMember must only be called from unclampedUserForMaintenance")
 	assert.Equal(t, allowedUnclamp, foundUnclamp, "unclampedUserForMaintenance must only be called from D4 RealByDesign maintenance gates")
 }
@@ -2439,4 +2458,130 @@ func TestViewAsMember_PublishAfterResponseFlush(t *testing.T) {
 	assert.JSONEq(t, `{"viewAsMember":true}`, publishBody, "response JSON body must be written before publish")
 	require.NotEmpty(t, publishSetCookies, "Set-Cookie header must be written before publish")
 	assert.Contains(t, strings.Join(publishSetCookies, ";"), webSessionName+"=")
+}
+
+// TestViewAsMember_RecordTransitionShadowsAmbientMarker directly exercises
+// withoutViewAsMember inside RecordViewAsMemberTransition: when ctx carries
+// BOTH an authenticated identity for user U (with matching credential context)
+// AND the view-as-member marker for U, an exit transition (enter=false) must
+// still persist an empty SessionMode. Without the shadow, ApplyActor would
+// match the principal and stamp SessionMode="view_as_member" onto the exit
+// record.
+func TestViewAsMember_RecordTransitionShadowsAmbientMarker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	uid := api.NewUUID()
+	u := NewAuthenticatedUser(uid, "shadow-admin@example.com", "Shadow Admin", store.UserRoleAdmin, string(ClientTypeWeb)).WithViewAsMember()
+	markedCtx := contextWithIdentity(ctx, u)
+	markedCtx = contextWithCredentialContext(markedCtx, credentialContextForIdentity(u))
+	markedCtx = contextWithViewAsMember(markedCtx, uid)
+
+	srv.RecordViewAsMemberTransition(markedCtx, uid, false, viewAsMemberReasonUser)
+
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: viewAsMemberAuditExit,
+		TargetID:     uid,
+	})
+	require.NoError(t, err)
+	require.Len(t, audits, 1)
+	assert.Equal(t, uid, audits[0].ActorPrincipalID)
+	assert.Equal(t, string(CredentialKindInteractive), audits[0].ActorCredentialType)
+	assert.Empty(t, audits[0].SessionMode,
+		"RecordViewAsMemberTransition(enter=false) must shadow ambient marker so exit record has empty SessionMode")
+}
+
+// TestViewAsMember_LogoutPublishAfterResponseFlush pins the logout transition
+// audit and publish-after-flush ordering for both browser (HTML redirect) and
+// API (JSON) sign-out requests while view-as-member is active.
+func TestViewAsMember_LogoutPublishAfterResponseFlush(t *testing.T) {
+	cases := []struct {
+		name           string
+		accept         string
+		wantStatus     int
+		wantLocation   string
+		wantBodySubstr string
+	}{
+		{
+			name:         "browser_redirect",
+			accept:       "text/html",
+			wantStatus:   http.StatusFound,
+			wantLocation: "/login",
+		},
+		{
+			name:           "json_api",
+			accept:         "application/json",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: `"success":true`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := NewWebServer(WebServerConfig{
+				Host:          "127.0.0.1",
+				SessionSecret: "test-session-secret-32-bytes-ok!",
+			})
+
+			seedReq := httptest.NewRequest(http.MethodGet, "/", nil)
+			seedRec := httptest.NewRecorder()
+			sess, err := ws.sessionStore.New(seedReq, webSessionName)
+			require.NoError(t, err)
+			sess.Values[sessKeyUserID] = "admin-logout-order"
+			sess.Values[sessKeyUserEmail] = "admin-logout@example.com"
+			sess.Values[sessKeyUserName] = "Logout Admin"
+			sess.Values[sessKeyUserRole] = store.UserRoleAdmin
+			sess.Values[sessKeyViewAsMember] = true
+			require.NoError(t, sess.Save(seedReq, seedRec))
+
+			rec := httptest.NewRecorder()
+			var (
+				auditCalled       bool
+				auditFlushed      bool
+				publishCalled     bool
+				publishStatus     int
+				publishFlushed    bool
+				publishBody       string
+				publishLocation   string
+				publishSetCookies []string
+			)
+			ws.SetViewAsMemberHub(&orderCheckViewAsMemberHub{
+				onAudit: func() {
+					auditCalled = true
+					auditFlushed = rec.Flushed
+				},
+				onPublish: func() {
+					publishCalled = true
+					publishStatus = rec.Code
+					publishFlushed = rec.Flushed
+					publishBody = rec.Body.String()
+					publishLocation = rec.Header().Get("Location")
+					publishSetCookies = append([]string(nil), rec.Header().Values("Set-Cookie")...)
+				},
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+			req.Header.Set("Accept", tc.accept)
+			for _, c := range seedRec.Result().Cookies() {
+				req.AddCookie(c)
+			}
+
+			ws.handleLogout(rec, req)
+
+			require.True(t, auditCalled, "logout transition audit must run")
+			assert.False(t, auditFlushed, "logout transition audit must run before response is flushed")
+
+			require.True(t, publishCalled, "logout must call PublishSessionModeChanged when view-as-member was active")
+			assert.Equal(t, tc.wantStatus, publishStatus, "response status must be written before publish")
+			assert.True(t, publishFlushed, "response must be flushed before publish")
+			if tc.wantLocation != "" {
+				assert.Equal(t, tc.wantLocation, publishLocation)
+			}
+			if tc.wantBodySubstr != "" {
+				assert.Contains(t, publishBody, tc.wantBodySubstr)
+			}
+			require.NotEmpty(t, publishSetCookies, "Set-Cookie clearing scion_sess must be written before publish")
+			assert.Contains(t, strings.Join(publishSetCookies, ";"), webSessionName+"=")
+		})
+	}
 }

@@ -457,7 +457,7 @@ func (ws *WebServer) handleViewAsMember(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if ws.viewAsMemberHub != nil {
-		ws.viewAsMemberHub.RecordViewAsMemberTransition(withoutViewAsMember(r.Context()), uid, enter, viewAsMemberReasonUser)
+		ws.viewAsMemberHub.RecordViewAsMemberTransition(r.Context(), uid, enter, viewAsMemberReasonUser)
 	}
 
 	w.Header().Set("Cache-Control", "no-store")

@@ -4606,7 +4606,7 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 					ws.logger().Error("Failed to clear view-as-member on proxy logout", "error", saveErr)
 				}
 				if ws.viewAsMemberHub != nil && uid != "" {
-					ws.viewAsMemberHub.RecordViewAsMemberTransition(withoutViewAsMember(r.Context()), uid, false, viewAsMemberReasonSignOut)
+					ws.viewAsMemberHub.RecordViewAsMemberTransition(r.Context(), uid, false, viewAsMemberReasonSignOut)
 					defer func() {
 						if flusher, ok := w.(http.Flusher); ok {
 							flusher.Flush()
@@ -4654,7 +4654,7 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 		ws.expireTestIdentityMarker(w)
 	}
 	if wasVam && ws.viewAsMemberHub != nil && vamUID != "" {
-		ws.viewAsMemberHub.RecordViewAsMemberTransition(withoutViewAsMember(r.Context()), vamUID, false, viewAsMemberReasonSignOut)
+		ws.viewAsMemberHub.RecordViewAsMemberTransition(r.Context(), vamUID, false, viewAsMemberReasonSignOut)
 		defer func() {
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
