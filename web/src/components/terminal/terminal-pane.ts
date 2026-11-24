@@ -25,14 +25,25 @@ import { LitElement, html, css, nothing, unsafeCSS, type PropertyValues } from '
 import { customElement, state } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
 
-import type {
-  Agent,
-  AgentPhase,
-  AgentActivity,
-  ExposedPort,
-  SharedDir,
+import {
+  canLifecycle,
+  isAgentLaunching,
+  isIncompleteCreate,
+  lifecycleActionRequestInit,
+  type Agent,
+  type AgentPhase,
+  type AgentActivity,
+  type ExposedPort,
+  type SharedDir,
 } from '../../shared/types.js';
-import { activityTooltip, agentStatusBadge } from '../../shared/agent-state-display.js';
+import {
+  activityTooltip,
+  agentStatusBadge,
+  suspendReasonHint,
+} from '../../shared/agent-state-display.js';
+import { lifecycleActionErrorMessage } from '../../client/agent-delete.js';
+import { showResponseBodyWarnings } from '../../client/response-warnings.js';
+import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import {
   TerminalSessionRegistry,
   type TerminalSession,
@@ -220,6 +231,20 @@ export class ScionTerminalPane extends LitElement {
   /** True while the settings/public fetch that gates the scope dialog is in flight. */
   @state()
   private captureAuthSettingsLoading = false;
+
+  /** Tracks an in-progress Resume initiated from this terminal pane (#8954). */
+  @state()
+  private resumeState: 'idle' | 'resuming' | 'starting' = 'idle';
+
+  /** Error message from a failed Resume attempt or an agent that stopped before connecting. */
+  @state()
+  private resumeError: string | null = null;
+
+  /** Monotonic sequence guarding async resume responses against disposal or supersession. */
+  private resumeRequestSeq = 0;
+
+  /** True once metadata has moved off 'suspended' after a resume was accepted. */
+  private resumeSawTransition = false;
 
   // --- Drag-and-drop file upload state ---
   @state() private uploadEnabled = false;
@@ -560,6 +585,13 @@ export class ScionTerminalPane extends LitElement {
       text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
     }
 
+    .disconnected-overlay .overlay-resume-status {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+    }
+
     .disconnected-overlay.unavailable .overlay-title {
       color: #f59e0b;
     }
@@ -599,6 +631,37 @@ export class ScionTerminalPane extends LitElement {
     .disconnected-overlay .overlay-reconnect:disabled {
       opacity: 0.5;
       cursor: default;
+    }
+
+    .disconnected-overlay .overlay-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+    }
+
+    .disconnected-overlay .overlay-actions .overlay-reconnect {
+      margin-top: 0;
+    }
+
+    .disconnected-overlay .overlay-resume-error {
+      color: var(--scion-status-danger, #ef4444);
+      font-size: 0.875rem;
+      max-width: 400px;
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    /* Always rendered so screen readers see the live regions before text
+       arrives; positioned out of flex flow while idle so gap adds no space. */
+    .disconnected-overlay .overlay-resume-status.idle,
+    .disconnected-overlay .overlay-resume-error.idle {
+      position: absolute;
+      height: 0;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      pointer-events: none;
     }
 
     .idle-overlay {
@@ -708,6 +771,18 @@ export class ScionTerminalPane extends LitElement {
       margin: 0 0 1rem 0;
     }
 
+    .error-state .resume-progress {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .error-state p.resume-status-title {
+      color: var(--scion-text, #1e293b);
+      font-weight: 500;
+      margin: 1rem 0 0.5rem 0;
+    }
+
     .error-state .error-detail {
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
@@ -726,6 +801,60 @@ export class ScionTerminalPane extends LitElement {
 
     .error-state button:hover {
       background: var(--scion-primary-hover, #2563eb);
+    }
+
+    .error-state .suspend-hint,
+    .error-state .resume-unauthorized {
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.8125rem;
+      max-width: 420px;
+      margin-bottom: 0.75rem;
+      line-height: 1.5;
+    }
+
+    .error-state .resume-error {
+      color: var(--scion-badge-danger-text, #991b1b);
+      font-size: 0.8125rem;
+      max-width: 420px;
+      margin-bottom: 0.75rem;
+      line-height: 1.5;
+    }
+
+    /* Always rendered so screen readers see the live regions before text
+       arrives; they take no space while idle. */
+    .error-state .resume-progress.idle,
+    .error-state .resume-error.idle {
+      height: 0;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .error-state .error-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-top: 0.25rem;
+    }
+
+    .error-state .secondary-retry-btn {
+      background: transparent;
+      color: var(--scion-text-muted, #64748b);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      padding: 0.375rem 1rem;
+      border-radius: var(--scion-radius-sm);
+      font-size: 0.8125rem;
+    }
+
+    .error-state .secondary-retry-btn:hover:not(:disabled) {
+      border-color: var(--scion-primary, #3b82f6);
+      color: var(--scion-primary, #3b82f6);
+      background: transparent;
+    }
+
+    .error-state .secondary-retry-btn:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
 
     /* Always rendered so screen readers see the live region before its
@@ -1041,6 +1170,14 @@ export class ScionTerminalPane extends LitElement {
       delete this.dataset.focused;
       this.terminal?.blur();
       this.cancelResize();
+      // Navigating away cancels any in-flight resume wait and disarms
+      // resume-triggered auto-connect.
+      if (this.resumeState !== 'idle') {
+        this.resumeRequestSeq++;
+        this.resumeState = 'idle';
+        this.resumeSawTransition = false;
+      }
+      this.session?.disarmResumeConnect();
       // Remove drop prevention so Chat/Dashboard drops are unaffected.
       this.removeWindowListeners();
     }
@@ -1110,6 +1247,18 @@ export class ScionTerminalPane extends LitElement {
     this.reconnectFailed = state.reconnectFailed;
     this.reconnectFailedManual = state.reconnectFailedManual;
     if (state.connection !== 'loading') this.loading = false;
+    if (
+      state.connection === 'connecting' ||
+      state.connection === 'connected' ||
+      (state.connection === 'loading' && this.resumeState === 'starting')
+    ) {
+      this.resumeState = 'idle';
+      this.resumeError = null;
+      this.resumeSawTransition = false;
+    } else if (state.connection === 'disconnected' || state.disconnectReason === 'agent-deleted') {
+      this.resumeState = 'idle';
+      this.resumeSawTransition = false;
+    }
     if (newlyConnected) {
       this.wasConnected = true;
       if (this.measurable()) {
@@ -1154,6 +1303,42 @@ export class ScionTerminalPane extends LitElement {
     if (previousName !== agent.name)
       dispatchPageTitle(this, 'Terminal', agent.name || this.agentId);
     if (this.projectId && previousProject !== this.projectId) void this.resolveUploadTarget();
+    this.reconcileResumeWithMetadata(value, agent);
+  }
+
+  private reconcileResumeWithMetadata(value: TerminalAgentMetadata, agent: Agent): void {
+    if (this.resumeState === 'idle') return;
+    if (value.availability === 'deleted') {
+      this.resumeState = 'idle';
+      this.resumeSawTransition = false;
+      this.session?.disarmResumeConnect();
+      return;
+    }
+    if (agent.phase === 'running' && agent.activity !== 'offline') {
+      this.resumeSawTransition = true;
+      this.session?.noteAgentAvailable();
+      return;
+    }
+    if (agent.phase === 'starting' || agent.phase === 'provisioning') {
+      this.resumeSawTransition = true;
+      return;
+    }
+    if (this.resumeState === 'starting') {
+      if (agent.phase === 'stopped' || agent.phase === 'error') {
+        this.resumeState = 'idle';
+        this.resumeSawTransition = false;
+        this.session?.disarmResumeConnect();
+        this.resumeError =
+          agent.phase === 'error'
+            ? 'Agent failed to start.'
+            : 'Agent stopped before the terminal could connect.';
+      } else if (agent.phase === 'suspended' && this.resumeSawTransition) {
+        this.resumeState = 'idle';
+        this.resumeSawTransition = false;
+        this.session?.disarmResumeConnect();
+        this.resumeError = 'Agent returned to suspended before the terminal could connect.';
+      }
+    }
   }
 
   private async initTerminal(signal: AbortSignal): Promise<TerminalResources> {
@@ -1675,6 +1860,9 @@ export class ScionTerminalPane extends LitElement {
   private cleanup(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.resumeRequestSeq++;
+    this.resumeState = 'idle';
+    this.resumeSawTransition = false;
     this.sessionUnsubscribe?.();
     this.sessionUnsubscribe = null;
     this.connected = false;
@@ -2018,6 +2206,86 @@ export class ScionTerminalPane extends LitElement {
     await this.registry?.metadata.refresh(this.agentId);
   }
 
+  private get isSuspended(): boolean {
+    return (
+      this.agent?.phase === 'suspended' &&
+      this.disconnectReason !== 'agent-deleted' &&
+      this.registry?.metadata.get(this.agentId)?.availability !== 'deleted'
+    );
+  }
+
+  /**
+   * Matches agent-detail.ts / agents.ts / project-detail.ts authorization for
+   * explicit Resume on a suspended agent: requires `agent.lifecycle` and that
+   * the agent is neither already launching nor an incomplete create.
+   */
+  private get canResumeAgent(): boolean {
+    const agent = this.agent;
+    if (!agent || !this.isSuspended) return false;
+    return (
+      canLifecycle(agent._capabilities) && !isAgentLaunching(agent) && !isIncompleteCreate(agent)
+    );
+  }
+
+  private get showResumeUnauthorizedHint(): boolean {
+    return this.isSuspended && !!this.agent && !canLifecycle(this.agent._capabilities);
+  }
+
+  private get isResumingOrStarting(): boolean {
+    return this.resumeState === 'resuming' || this.resumeState === 'starting';
+  }
+
+  private async handleResume(): Promise<void> {
+    const agent = this.agent;
+    if (!agent || this.isResumingOrStarting || !this.canResumeAgent) return;
+
+    const reqSeq = ++this.resumeRequestSeq;
+    this.resumeState = 'resuming';
+    this.resumeError = null;
+    this.resumeSawTransition = false;
+    this.session?.armResumeConnect();
+
+    try {
+      const response = await apiFetch(
+        `/api/v1/agents/${agent.id}/start`,
+        lifecycleActionRequestInit('resume')
+      );
+      if (this.disposed || reqSeq !== this.resumeRequestSeq) return;
+
+      if (!response.ok) {
+        const msg = await lifecycleActionErrorMessage(response, 'Failed to resume agent');
+        if (this.disposed || reqSeq !== this.resumeRequestSeq) return;
+        this.session?.disarmResumeConnect();
+        this.resumeState = 'idle';
+        this.resumeError = msg;
+        void this.refreshAgentData();
+        return;
+      }
+
+      await showResponseBodyWarnings(response);
+      void showPendingSecretsStartHint();
+      if (this.disposed || reqSeq !== this.resumeRequestSeq) return;
+
+      // SSE may have already delivered 'running' and kicked off the connect
+      // while the POST response was in flight.
+      if (this.connected || this.attempting) {
+        this.resumeState = 'idle';
+        this.resumeSawTransition = false;
+        return;
+      }
+
+      this.resumeState = 'starting';
+      void this.refreshAgentData();
+    } catch (err) {
+      if (this.disposed || reqSeq !== this.resumeRequestSeq) return;
+      this.session?.disarmResumeConnect();
+      const msg = err instanceof Error ? err.message : 'Failed to resume agent';
+      this.resumeState = 'idle';
+      this.resumeError = msg;
+      void this.refreshAgentData();
+    }
+  }
+
   private handleReconnect(): void {
     if (this.metadataError) void this.refreshAgentData();
     if (this.session) {
@@ -2030,16 +2298,18 @@ export class ScionTerminalPane extends LitElement {
 
   /**
    * Whether the Reconnect button should be disabled in the current state.
-   * Disabled when already reconnecting, or for deleted agents.
+   * Disabled when already reconnecting, resuming/starting, or for deleted agents.
    */
   private get reconnectDisabled(): boolean {
-    if (this.reconnectInProgress) return true;
+    if (this.reconnectInProgress || this.isResumingOrStarting) return true;
     if (this.disconnectReason === 'agent-deleted') return true;
     return false;
   }
 
   /** Human-readable overlay title for disconnected/unavailable states. */
   private get overlayTitle(): string {
+    if (this.resumeState === 'resuming') return 'RESUMING...';
+    if (this.resumeState === 'starting') return 'STARTING AGENT...';
     // While an attempt (automatic or manual) is running, the overlay always
     // shows "Reconnecting...", regardless of the reason that preceded it.
     // Connection state covers the attempt through the handshake;
@@ -2076,6 +2346,9 @@ export class ScionTerminalPane extends LitElement {
    * wrong). Both share the same trailing punctuation.
    */
   private get overlayDetail(): string | null {
+    if (this.resumeState === 'resuming') return 'Sending resume request...';
+    if (this.resumeState === 'starting')
+      return 'Waiting for agent to start. Terminal will reconnect automatically.';
     if (this.reconnectFailed && !this.attempting) {
       return this.reconnectFailedManual
         ? 'Reconnection failed, try manually reconnecting later'
@@ -2204,6 +2477,8 @@ export class ScionTerminalPane extends LitElement {
 
     // Metadata availability must not remove the host during independent PTY setup.
     if (this.session?.state.error && !this.terminal) {
+      const suspendHint =
+        this.isSuspended && this.agent ? suspendReasonHint(this.agent) : undefined;
       return html`
         <div class="toolbar">
           ${this.renderBackLinks()}
@@ -2215,11 +2490,81 @@ export class ScionTerminalPane extends LitElement {
             : ''}
         </div>
         <div class="error-state">
-          <p>${this.isUnavailableState ? 'Agent Unavailable' : 'Terminal Unavailable'}</p>
-          <div class="error-detail">${this.error}</div>
-          <button ?disabled=${this.reconnectDisabled} @click=${() => this.handleReconnect()}>
-            ${this.reconnectInProgress ? 'Reconnecting...' : 'Retry'}
-          </button>
+          <div
+            class="resume-progress ${this.isResumingOrStarting ? '' : 'idle'}"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            ${this.isResumingOrStarting
+              ? html`
+                  <div class="spinner"></div>
+                  <p class="resume-status-title">
+                    ${this.resumeState === 'resuming' ? 'Resuming Agent' : 'Starting Agent'}
+                  </p>
+                  <div class="error-detail">
+                    ${this.resumeState === 'resuming'
+                      ? 'Sending resume request...'
+                      : 'Waiting for agent to start. Terminal will connect automatically.'}
+                  </div>
+                `
+              : nothing}
+          </div>
+          ${this.isResumingOrStarting
+            ? nothing
+            : html`
+                <p>${this.isUnavailableState ? 'Agent Unavailable' : 'Terminal Unavailable'}</p>
+                <div class="error-detail">${this.error}</div>
+                ${suspendHint ? html`<div class="suspend-hint">${suspendHint}</div>` : nothing}
+              `}
+          <div
+            class="resume-error ${!this.isResumingOrStarting && this.resumeError ? '' : 'idle'}"
+            role="alert"
+            data-testid="terminal-resume-error"
+          >
+            ${!this.isResumingOrStarting && this.resumeError ? this.resumeError : nothing}
+          </div>
+          ${this.isResumingOrStarting
+            ? nothing
+            : html`
+                ${this.showResumeUnauthorizedHint
+                  ? html`<div
+                      class="resume-unauthorized"
+                      data-testid="terminal-resume-unauthorized"
+                    >
+                      Only the agent's owner or a project owner/admin can resume it.
+                    </div>`
+                  : nothing}
+                ${this.canResumeAgent
+                  ? html`
+                      <div class="error-actions">
+                        <sl-button
+                          variant="success"
+                          size="small"
+                          data-testid="terminal-resume-btn"
+                          @click=${() => void this.handleResume()}
+                        >
+                          <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                          Resume
+                        </sl-button>
+                        <button
+                          class="secondary-retry-btn"
+                          ?disabled=${this.reconnectDisabled}
+                          @click=${() => this.handleReconnect()}
+                        >
+                          ${this.reconnectInProgress ? 'Reconnecting...' : 'Retry'}
+                        </button>
+                      </div>
+                    `
+                  : html`
+                      <button
+                        ?disabled=${this.reconnectDisabled}
+                        @click=${() => this.handleReconnect()}
+                      >
+                        ${this.reconnectInProgress ? 'Reconnecting...' : 'Retry'}
+                      </button>
+                    `}
+              `}
         </div>
       `;
     }
@@ -2340,22 +2685,83 @@ export class ScionTerminalPane extends LitElement {
         ${!this.connected && this.wasConnected
           ? html`<div
               class="disconnected-overlay ${this.isUnavailableState ? 'unavailable' : ''} ${this
-                .attempting
+                .attempting || this.isResumingOrStarting
                 ? 'reconnecting'
                 : ''}"
             >
-              ${this.attempting ? html`<sl-spinner></sl-spinner>` : nothing}
-              <span class="overlay-title">${this.overlayTitle}</span>
-              ${this.overlayDetail
-                ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
+              ${this.attempting || this.isResumingOrStarting
+                ? html`<sl-spinner></sl-spinner>`
                 : nothing}
-              <button
-                class="overlay-reconnect"
-                ?disabled=${this.reconnectDisabled}
-                @click=${() => this.handleReconnect()}
+              <div
+                class="overlay-resume-status ${this.isResumingOrStarting ? '' : 'idle'}"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
               >
-                ${this.attempting ? 'Reconnecting...' : 'Reconnect'}
-              </button>
+                ${this.isResumingOrStarting
+                  ? html`<span class="overlay-title">${this.overlayTitle}</span>
+                      ${this.overlayDetail
+                        ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
+                        : nothing}`
+                  : nothing}
+              </div>
+              ${this.isResumingOrStarting
+                ? nothing
+                : html`<span class="overlay-title">${this.overlayTitle}</span>
+                    ${this.overlayDetail
+                      ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
+                      : nothing}`}
+              ${!this.attempting && !this.isResumingOrStarting && this.isSuspended && this.agent
+                ? (() => {
+                    const hint = suspendReasonHint(this.agent);
+                    return hint ? html`<span class="overlay-detail">${hint}</span>` : nothing;
+                  })()
+                : nothing}
+              <span
+                class="overlay-resume-error ${!this.attempting &&
+                !this.isResumingOrStarting &&
+                this.resumeError
+                  ? ''
+                  : 'idle'}"
+                role="alert"
+                data-testid="terminal-resume-error"
+                >${!this.attempting && !this.isResumingOrStarting && this.resumeError
+                  ? this.resumeError
+                  : nothing}</span
+              >
+              ${!this.attempting && !this.isResumingOrStarting && this.showResumeUnauthorizedHint
+                ? html`<span class="overlay-detail" data-testid="terminal-resume-unauthorized"
+                    >Only the agent's owner or a project owner/admin can resume it.</span
+                  >`
+                : nothing}
+              ${this.isResumingOrStarting
+                ? nothing
+                : this.canResumeAgent && !this.attempting
+                  ? html`<div class="overlay-actions">
+                      <sl-button
+                        variant="success"
+                        size="small"
+                        data-testid="terminal-resume-btn"
+                        @click=${() => void this.handleResume()}
+                      >
+                        <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                        Resume
+                      </sl-button>
+                      <button
+                        class="overlay-reconnect"
+                        ?disabled=${this.reconnectDisabled}
+                        @click=${() => this.handleReconnect()}
+                      >
+                        Reconnect
+                      </button>
+                    </div>`
+                  : html`<button
+                      class="overlay-reconnect"
+                      ?disabled=${this.reconnectDisabled}
+                      @click=${() => this.handleReconnect()}
+                    >
+                      ${this.attempting ? 'Reconnecting...' : 'Reconnect'}
+                    </button>`}
             </div>`
           : ''}
         <div

@@ -182,6 +182,16 @@ export interface TerminalSession {
    * next attempt, manual or automatic.
    */
   noteAgentDown(): void;
+  /**
+   * Arms a single automatic connect attempt when the agent next becomes
+   * available (`noteAgentAvailable()`), even if this session has never
+   * connected before (e.g. opened directly on a suspended agent and resumed
+   * from the terminal pane). Consumed on the first attempt, or cleared by
+   * `disarmResumeConnect()`, `markUnavailable()`, or `close()`.
+   */
+  armResumeConnect(): void;
+  /** Cancels a pending `armResumeConnect()` without touching transport state. */
+  disarmResumeConnect(): void;
   /** Immediate transport write, including xterm protocol responses. Never queues input. */
   sendData(data: string): boolean;
   resize(cols: number, rows: number): void;
@@ -407,6 +417,13 @@ class Session implements TerminalSession {
    * attempt was automatic or a manual reconnect.
    */
   private agentSeenDown = false;
+  /**
+   * True after an explicit resume from the terminal pane, authorizing a single
+   * automatic connect on the next `noteAgentAvailable()` even when this session
+   * has never connected (`!everConnected`). Consumed on the first attempt and
+   * cleared by `disarmResumeConnect()`, `markUnavailable()`, or `close()`.
+   */
+  private resumeConnectArmed = false;
   /** Which trigger started the in-flight/most recent attempt. */
   private currentAttemptManual = true;
   /** The only background timer this session runs: FAILED -> DISCONNECTED after 2 min. */
@@ -508,10 +525,12 @@ class Session implements TerminalSession {
     this.clearBackgroundResetTimer();
     this.clearReconnectDelayTimer();
     this.attemptReachedOpen = false;
-    // Consume the seen-down observation: it authorized at most this one
-    // attempt (manual or automatic). A subsequent stale/duplicate "running"
-    // signal must not dial again without a fresh down observation.
+    // Consume the seen-down observation and any pending resume arm: they
+    // authorized at most this one attempt (manual or automatic). A subsequent
+    // stale/duplicate "running" signal must not dial again without a fresh
+    // down observation.
     this.agentSeenDown = false;
+    this.resumeConnectArmed = false;
     this.currentAttemptManual = manual;
     const wasEverConnected = this.everConnected;
     const controller = new AbortController();
@@ -582,6 +601,7 @@ class Session implements TerminalSession {
     this.controller?.abort();
     // Not armed until a fresh noteAgentAvailable() call re-arms it.
     this.autoArmed = false;
+    this.resumeConnectArmed = false;
     // A markUnavailable('agent-stopped') call is itself a direct observation
     // that the agent is down (it is how the SSE bridge reports that), so it
     // satisfies noteAgentAvailable()'s gate the same as an explicit
@@ -601,6 +621,16 @@ class Session implements TerminalSession {
     this.agentSeenDown = true;
   }
 
+  armResumeConnect(): void {
+    if (['closed', 'connected', 'connecting'].includes(this.state.connection)) return;
+    this.resumeConnectArmed = true;
+    this.agentSeenDown = true;
+  }
+
+  disarmResumeConnect(): void {
+    this.resumeConnectArmed = false;
+  }
+
   setFrontmost(frontmost: boolean): void {
     if (this.state.connection === 'closed' || this.frontmost === frontmost) return;
     this.frontmost = frontmost;
@@ -616,8 +646,13 @@ class Session implements TerminalSession {
         return;
       }
       this.maybeAutoAttempt();
-    } else if (this.state.reconnectFailed) {
-      this.armBackgroundResetTimer();
+    } else {
+      // Navigating away cancels a pending resume-triggered auto-connect so
+      // returning later does not unexpectedly dial on a stale resume request.
+      this.resumeConnectArmed = false;
+      if (this.state.reconnectFailed) {
+        this.armBackgroundResetTimer();
+      }
     }
   }
 
@@ -627,7 +662,7 @@ class Session implements TerminalSession {
       !AGENT_UNAVAILABLE_REASONS.has(this.state.disconnectReason)
     )
       return;
-    if (!this.everConnected) return;
+    if (!this.everConnected && !this.resumeConnectArmed) return;
     // Require an independent down observation first: see the doc comment on
     // the interface method and on agentSeenDown. Without this, a "running"
     // snapshot that is merely stale relative to an agent-stopped close would
@@ -641,7 +676,8 @@ class Session implements TerminalSession {
   /** Runs the single owed attempt, if this session is armed and frontmost. */
   private maybeAutoAttempt(): void {
     if (this.reconnectDelayTimer) return; // the jitter delay calls back when it ends
-    if (!this.frontmost || !this.everConnected || this.pending) return;
+    if (!this.frontmost || (!this.everConnected && !this.resumeConnectArmed) || this.pending)
+      return;
     if (this.state.reconnectFailed || !this.autoArmed) return;
     void this.startAttempt(false);
   }
@@ -1086,6 +1122,7 @@ class Session implements TerminalSession {
         this.sendData('\x02d');
       });
     this.controller?.abort();
+    this.resumeConnectArmed = false;
     attempt(() => this.stopHeartbeat());
     attempt(() => this.clearConnectGuard());
     attempt(() => this.clearBackgroundResetTimer());

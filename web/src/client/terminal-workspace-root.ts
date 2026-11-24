@@ -1233,9 +1233,12 @@ export class TerminalWorkspaceRoot {
             entry.session.markUnavailable('agent-deleted', next.error ?? 'Agent was deleted.');
           } else if (
             // A crashed container reports phase 'error', not 'stopped'
-            // (ptone/scion#2096); treat both the same so a crashed agent's
-            // pane also re-arms once it is running again.
-            (next.agent?.phase === 'stopped' || next.agent?.phase === 'error') &&
+            // (ptone/scion#2096), and a suspended agent stops its container
+            // too (ptone/scion#8954); treat all three the same so the pane
+            // records the down observation and re-arms once running again.
+            (next.agent?.phase === 'stopped' ||
+              next.agent?.phase === 'error' ||
+              next.agent?.phase === 'suspended') &&
             entry.session.state.connection !== 'closed' &&
             // Idle entries (restored, not yet connected) stay idle while
             // their agent is stopped: marking a never-connected entry
@@ -1245,7 +1248,11 @@ export class TerminalWorkspaceRoot {
             entry.session.state.connection !== 'idle'
           ) {
             if (entry.session.state.connection !== 'unavailable') {
-              entry.session.markUnavailable('agent-stopped', AGENT_STOPPED_MESSAGE);
+              const message =
+                next.agent.phase === 'suspended'
+                  ? 'Agent phase is suspended. Terminal is not available until the agent has started.'
+                  : AGENT_STOPPED_MESSAGE;
+              entry.session.markUnavailable('agent-stopped', message);
             } else {
               // The session is already unavailable — most often because a
               // WebSocket close already reported agent_stopped before this
