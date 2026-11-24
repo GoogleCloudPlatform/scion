@@ -492,6 +492,10 @@ func (s *Server) loadScheduleForProject(w http.ResponseWriter, r *http.Request, 
 	return schedule, true
 }
 
+// scheduleTargetScanPageSize is the batch size used when scanning a project's
+// schedules to match payload targets for the targetAgentId list filter.
+const scheduleTargetScanPageSize = 200
+
 // listSchedules handles GET /api/v1/projects/{projectId}/schedules
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
@@ -517,6 +521,10 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 
 	targetAgentID := query.Get("targetAgentId")
 	if targetAgentID != "" {
+		if query.Get("cursor") != "" {
+			ValidationError(w, "cursor cannot be combined with targetAgentId", nil)
+			return
+		}
 		s.listSchedulesByTargetAgent(w, r, projectID, scope, filter, targetAgentID)
 		return
 	}
@@ -540,6 +548,12 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 // listSchedulesByTargetAgent filters a project's schedules to those targeting
 // targetAgentID (message by agentId or same-project slug, or exec by agentId),
 // preserving the same read authorization and exec redaction as listSchedules.
+//
+// This filter is unpaginated: because payload targets are stored inside JSON
+// rather than an indexed column, it scans the project's schedules in batches
+// of scheduleTargetScanPageSize, ignores limit, rejects cursor (handled by the
+// caller with 400), and returns every matching schedule in one response with
+// NextCursor omitted.
 func (s *Server) listSchedulesByTargetAgent(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -556,7 +570,7 @@ func (s *Server) listSchedulesByTargetAgent(
 		return
 	}
 
-	opts := store.ListOptions{Limit: scheduleCreatorPausePageSize, SkipTotalCount: true}
+	opts := store.ListOptions{Limit: scheduleTargetScanPageSize, SkipTotalCount: true}
 	matched := make([]store.Schedule, 0)
 	for {
 		page, err := s.store.ListSchedules(ctx, filter, opts)

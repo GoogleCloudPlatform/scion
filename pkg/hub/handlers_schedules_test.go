@@ -815,6 +815,30 @@ func TestSchedule_ListFilterByCreatedByAndTargetAgent(t *testing.T) {
 		assert.Equal(t, 4, resp.TotalCount)
 	})
 
+	t.Run("targetAgentId with limit returns all matching rows unpaginated", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?limit=1&targetAgentId="+agentA.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.ElementsMatch(t, []string{
+			"target-a-wake-slug",
+			"target-a-msg-id",
+			"target-a-exec",
+			"self-a",
+		}, namesOf(resp))
+		assert.Empty(t, resp.NextCursor)
+		assert.Equal(t, 4, resp.TotalCount)
+	})
+
+	t.Run("targetAgentId with cursor returns 400", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet,
+			"/api/v1/projects/"+projectID+"/schedules?cursor=opaque&targetAgentId="+agentA.ID, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "cursor cannot be combined with targetAgentId")
+	})
+
 	t.Run("unknown targetAgentId returns empty list", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodGet,
 			"/api/v1/projects/"+projectID+"/schedules?targetAgentId="+tid("no-such-agent"), nil)
