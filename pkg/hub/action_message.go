@@ -532,14 +532,12 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 		renderCreatedAt = storeMsg.CreatedAt
 		dispatchCtx = withDispatchMessageID(retryCtx, storeMsg.ID)
 	}
-	if s.writeDenyEnabled() {
-		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-			MessageID:  renderMessageID,
-			ConvResult: nil,
-			Msg:        structuredMsg,
-			CreatedAt:  renderCreatedAt,
-		})
-	}
+	structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+		MessageID:  renderMessageID,
+		ConvResult: nil,
+		Msg:        structuredMsg,
+		CreatedAt:  renderCreatedAt,
+	})
 
 	if _, err := s.holdOrDispatch(dispatchCtx, agent, holdMsgID, storeMsg, func() error {
 		return dispatchWithBrokerRetry(

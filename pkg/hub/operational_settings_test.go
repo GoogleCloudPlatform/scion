@@ -964,122 +964,44 @@ func TestBuildLayer1SnapshotFromFile_NoFederation(t *testing.T) {
 	}
 }
 
-// --- Consolidated envelope switch tests (AC-9-7 acceptance criteria) ---
-//
-// Phase 9a: conversation_read_switch and conversation_write_deny_switch are
-// replaced by a single conversation_envelope_switch that defaults ON when
-// absent or omitted, and OFF when the document is malformed (DEF-92).
+// --- Messaging operational settings tests ---
 
-func TestConversationEnvelopeSwitch_AC97_AbsentRow(t *testing.T) {
-	// AC-9-7: no messaging row at all → ON (compiled default).
+func TestMessagingSettings_StaleSwitchKeysIgnored(t *testing.T) {
+	// A stored messaging row containing removed switch keys must refresh
+	// cleanly (Malformed=false) and preserve active settings.
 	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false,"conversation_read_switch":false,"conversation_write_deny_switch":false,"cross_project_messaging_enabled":true,"offload_threshold_runes":2500}`))
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if !ops.ConversationEnvelopeSwitch() {
-		t.Error("ConversationEnvelopeSwitch: want true (absent row → compiled default ON), got false")
+	ops.mu.RLock()
+	state, ok := ops.cache["messaging"]
+	ops.mu.RUnlock()
+	if !ok {
+		t.Fatal("messaging section not in cache after Refresh")
+	}
+	if state.Malformed {
+		t.Error("expected Malformed=false when stale switch keys are present")
+	}
+	if !ops.CrossProjectMessagingEnabled() {
+		t.Error("expected CrossProjectMessagingEnabled=true")
+	}
+	if got := ops.OffloadThresholdRunes(); got != 2500 {
+		t.Errorf("expected OffloadThresholdRunes=2500, got %d", got)
 	}
 }
 
-func TestConversationEnvelopeSwitch_AC97_KeyOmitted(t *testing.T) {
-	// AC-9-7: row present, key omitted (e.g. {}) → ON (compiled default).
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("messaging", json.RawMessage(`{}`))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if !ops.ConversationEnvelopeSwitch() {
-		t.Error("ConversationEnvelopeSwitch: want true (empty doc → key omitted → default ON), got false")
-	}
-}
-
-func TestConversationEnvelopeSwitch_AC97_ExplicitlyFalse(t *testing.T) {
-	// AC-9-7: row present, key explicitly false → OFF.
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false}`))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if ops.ConversationEnvelopeSwitch() {
-		t.Error("ConversationEnvelopeSwitch: want false (explicitly false), got true")
-	}
-}
-
-func TestConversationEnvelopeSwitch_AC97_ExplicitlyTrue(t *testing.T) {
-	// AC-9-7: row present, key explicitly true → ON.
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if !ops.ConversationEnvelopeSwitch() {
-		t.Error("ConversationEnvelopeSwitch: want true (explicitly true), got false")
-	}
-}
-
-func TestConversationEnvelopeSwitch_AC97_MalformedJSON(t *testing.T) {
-	// AC-9-7: malformed JSON → OFF, and an error is logged at Refresh.
+func TestMessagingSettings_MalformedJSON_FailsClosed(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	fakeStore.seed("messaging", json.RawMessage(`not valid json`))
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if ops.ConversationEnvelopeSwitch() {
-		t.Error("ConversationEnvelopeSwitch: want false (malformed JSON → fail-closed), got true")
+	if ops.CrossProjectMessagingEnabled() {
+		t.Error("CrossProjectMessagingEnabled: want false (malformed JSON → fail-closed), got true")
 	}
-}
-
-func TestConversationEnvelopeSwitch_AC97a_StaleKeysCutoverToON(t *testing.T) {
-	// AC-9-7a: a hub whose messaging row contains ONLY the two stale keys
-	// (conversation_read_switch, conversation_write_deny_switch), both false,
-	// cuts over to ON after upgrade with no migration run.
-	//
-	// This is the single most important test in Phase 9a: it is the one that
-	// would have caught key reuse. The new key is absent, so the getter takes
-	// the compiled default (ON). The stale keys are ignored by the new getter.
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_read_switch":false,"conversation_write_deny_switch":false}`))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if !ops.ConversationEnvelopeSwitch() {
-		t.Error("ConversationEnvelopeSwitch: want true (stale keys only → new key absent → compiled default ON), got false")
-	}
-}
-
-func TestConversationEnvelopeSwitch_AC97b_MalformedLoggedOncePerRefresh(t *testing.T) {
-	// AC-9-7b: the malformed-JSON error is logged once per refresh, not once
-	// per getter call. We assert this by counting: after one Refresh and N
-	// getter calls, the error should have been logged exactly once (at Refresh).
-	//
-	// The log is emitted by Refresh via slog.Error. Since we cannot easily
-	// intercept slog in this test, we verify the structural guarantee: the
-	// Malformed flag is set at Refresh time and the getter reads it without
-	// re-parsing. We call the getter N times and verify it returns the same
-	// result (OFF) without panicking — the parse-time-only property is
-	// asserted by code structure (Refresh sets Malformed; getter reads it).
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("messaging", json.RawMessage(`not valid json`))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-
-	// Call the getter N times — each must return false (fail-closed).
-	const N = 10
-	for i := 0; i < N; i++ {
-		if ops.ConversationEnvelopeSwitch() {
-			t.Fatalf("getter call %d: want false (malformed → fail-closed), got true", i)
-		}
-	}
-
-	// Verify the Malformed flag is set on the cached state.
 	ops.mu.RLock()
 	state, ok := ops.cache["messaging"]
 	ops.mu.RUnlock()
@@ -1091,26 +1013,19 @@ func TestConversationEnvelopeSwitch_AC97b_MalformedLoggedOncePerRefresh(t *testi
 	}
 }
 
-func TestConversationEnvelopeSwitch_TypeMismatch_DetectedAtRefresh(t *testing.T) {
-	// A document like {"conversation_envelope_switch":"yes"} is valid JSON but
-	// fails to unmarshal into *bool. Without the type-mismatch check at ingest
-	// time, this would fall through to the compiled default (ON), silently
-	// enabling the switch on a hub where an operator made a typo.
-	//
-	// With the fix, Refresh detects the unmarshal failure, sets Malformed=true,
-	// and the getter returns OFF.
+func TestMessagingSettings_TypeMismatch_DetectedAtRefresh(t *testing.T) {
+	// A document like {"cross_project_messaging_enabled":"yes"} is valid JSON
+	// but fails to unmarshal into *bool. Refresh detects the unmarshal failure,
+	// sets Malformed=true, and the getter fails closed.
 	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":"yes"}`))
+	fakeStore.seed("messaging", json.RawMessage(`{"cross_project_messaging_enabled":"yes"}`))
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-
-	if ops.ConversationEnvelopeSwitch() {
-		t.Error("ConversationEnvelopeSwitch: want false (type-mismatch → fail-closed), got true")
+	if ops.CrossProjectMessagingEnabled() {
+		t.Error("CrossProjectMessagingEnabled: want false (type-mismatch → fail-closed), got true")
 	}
-
-	// Verify Malformed is set.
 	ops.mu.RLock()
 	state, ok := ops.cache["messaging"]
 	ops.mu.RUnlock()

@@ -477,18 +477,11 @@ type BrokerPolicySettings struct {
 // MessagingSettings holds Layer-1 messaging configuration.
 // DB-only (runtime state), no settings.yaml representation.
 //
-// ConversationEnvelopeSwitch is the consolidated switch that replaces the
-// former conversation_read_switch and conversation_write_deny_switch.
-// It defaults ON when absent or omitted, and OFF when the document is
-// malformed (Phase 9a §4.6).
-//
-// The two stale fields are retained for deserialization of existing rows
-// (Go's json.Unmarshal ignores unknown fields, but keeping them lets us
-// read old documents cleanly). They are never written by new code and
-// self-clean on first PUT via the admin endpoint.
+// Stale switch keys (conversation_envelope_switch, conversation_read_switch,
+// conversation_write_deny_switch) are ignored on deserialization (Go's
+// json.Unmarshal skips unknown fields) and self-clean on first PUT via the
+// admin endpoint.
 type MessagingSettings struct {
-	ConversationEnvelopeSwitch *bool `json:"conversation_envelope_switch,omitempty"`
-
 	// CrossProjectMessagingEnabled controls whether agents may communicate
 	// across project boundaries on this Hub. Default false (off).
 	// This is a security-critical flag requiring revision/ETag concurrency.
@@ -520,11 +513,6 @@ type MessagingSettings struct {
 	// with its dependent rows. Compiled default 7; values below 1 are
 	// treated as the default.
 	FailedMessageRetentionDays *int `json:"failed_message_retention_days,omitempty"`
-
-	// Stale fields — kept for backward-compatible deserialization only.
-	// New code must not read or write these.
-	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`
-	ConversationWriteDenySwitch *bool `json:"conversation_write_deny_switch,omitempty"`
 }
 
 // ProfilingSettings holds the operational switches for in-app profiling.

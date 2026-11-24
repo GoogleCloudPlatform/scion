@@ -63,10 +63,6 @@ type MessageBrokerProxy struct {
 	// the thread's members on their user subjects (see
 	// Server.fanOutThreadMessageToMembersAsync).
 	memberFanout func(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, opts ...ChatEventOption)
-	// writeDenyEnabled returns whether the G2 write-deny switch is on.
-	// When nil or returning false, conversation resolution failures are non-fatal
-	// (B10 contract). When returning true, they deny the write (G2 contract).
-	writeDenyEnabled func() bool
 
 	// messageAuthorizer, when non-nil, is called by deliverToAgent to
 	// reauthorize cross-project messages at delivery/retry time (Phase 2, D5).
@@ -674,18 +670,14 @@ func userRecordLoggedFromContext(ctx context.Context) bool {
 }
 
 // canPersistUserDM reports whether deliverToUser can persist a DM addressed
-// to recipientID. Under G2 write-deny a DM row needs a resolved conversation,
-// and DM conversation keys only accept canonical UUIDs
-// (messages.DMConversationKey), so a federated or otherwise non-canonical
-// principal cannot be persisted there. deliverToUser applies it only when
-// both principal kinds are determined (it persists undetermined-kind DMs
-// without a conversation); notifications always have determined kinds
-// (agent:<slug> to user:<id>). Shared with the notifier's persistsViaInbox
-// so the two cannot drift.
-func canPersistUserDM(recipientID string, writeDeny bool) bool {
-	if !writeDeny {
-		return true
-	}
+// to recipientID. A DM row needs a resolved conversation, and DM conversation
+// keys only accept canonical UUIDs (messages.DMConversationKey), so a
+// federated or otherwise non-canonical principal cannot be persisted there.
+// deliverToUser applies it only when both principal kinds are determined (it
+// persists undetermined-kind DMs without a conversation); notifications always
+// have determined kinds (agent:<slug> to user:<id>). Shared with the notifier's
+// persistsViaInbox so the two cannot drift.
+func canPersistUserDM(recipientID string) bool {
 	u, err := uuid.Parse(recipientID)
 	return err == nil && u.String() == recipientID
 }
@@ -956,12 +948,9 @@ func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context,
 		var convErr error
 		convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 		if convErr != nil {
-			if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc("mb.user.thread")
-				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-				return false
-			}
-			p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			messaging.WriteDenialMetrics.Inc("mb.user.thread")
+			p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+			return false
 		}
 	} else if msg.SenderID != "" && msg.RecipientID != "" {
 		senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
@@ -970,21 +959,18 @@ func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context,
 			// Only here, where DM key derivation would fail anyway: the
 			// undetermined-kind branch below persists without a
 			// conversation, as before.
-			if !canPersistUserDM(msg.RecipientID, p.writeDenyEnabled != nil && p.writeDenyEnabled()) {
+			if !canPersistUserDM(msg.RecipientID) {
 				messaging.WriteDenialMetrics.Inc("mb.user.dm")
-				p.log.Error("DM recipient is not a canonical UUID under write-deny, message not persisted",
+				p.log.Error("DM recipient is not a canonical UUID, message not persisted",
 					"notification_id", notificationIDFromContext(ctx))
 				return false
 			}
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
 			if convErr != nil {
-				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("mb.user.dm")
-					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-					return false
-				}
-				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+				messaging.WriteDenialMetrics.Inc("mb.user.dm")
+				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+				return false
 			}
 		} else {
 			p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
@@ -1256,24 +1242,18 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
 			if convErr != nil {
-				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("mb.agent.thread")
-					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-					return
-				}
-				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+				messaging.WriteDenialMetrics.Inc("mb.agent.thread")
+				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+				return
 			}
 		} else if msg.SenderID != "" && agent.ID != "" {
 			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
 				var convErr error
 				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
 				if convErr != nil {
-					if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
-						messaging.WriteDenialMetrics.Inc("mb.agent.dm")
-						p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-						return
-					}
-					p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+					messaging.WriteDenialMetrics.Inc("mb.agent.dm")
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return
 				}
 			} else {
 				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
@@ -1316,18 +1296,14 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		return
 	}
 
-	// Phase 9b(ii): render the delivery envelope from the persisted message
-	// row and conversation result when the envelope switch is ON. The broker
-	// delivers DeliveryText verbatim; when empty, it falls back to
-	// FormatForDelivery (legacy path).
-	if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
-		msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-			MessageID:  storeMsg.ID,
-			ConvResult: convResult,
-			Msg:        msg,
-			CreatedAt:  storeMsg.CreatedAt,
-		})
-	}
+	// Render the delivery envelope from the persisted message row and
+	// conversation result. The broker delivers DeliveryText verbatim.
+	msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+		MessageID:  storeMsg.ID,
+		ConvResult: convResult,
+		Msg:        msg,
+		CreatedAt:  storeMsg.CreatedAt,
+	})
 
 	// The hub's message record, written before the gate and the dispatch
 	// outcome (see logMessageRecord). It is logged from a copy so the

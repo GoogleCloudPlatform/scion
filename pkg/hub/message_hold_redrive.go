@@ -916,34 +916,32 @@ func (s *Server) processClaimedHeldRow(
 		}
 	}
 
-	if s.writeDenyEnabled() {
-		var convRes *messaging.ConversationResult
-		if row.ConversationID != "" {
-			conv, cerr := s.store.GetConversation(ctx, row.ConversationID)
-			if cerr != nil && !errors.Is(cerr, store.ErrNotFound) {
-				slog.Warn("message-hold: transient error loading conversation; re-holding row",
-					"agent_id", agentID, "message_id", row.ID, "error", cerr)
-				s.reholdOrFailClaimedRow(ctx, agentID, row)
-				return claimedRowReheldTransient
-			}
-			if conv != nil {
-				convRes = &messaging.ConversationResult{
-					ConversationID: conv.ID,
-					ExternalRef:    conv.ExternalRef,
-					Kind:           conv.Kind,
-					Surface:        conv.Surface,
-					DisplayName:    conv.DisplayName,
-				}
+	var convRes *messaging.ConversationResult
+	if row.ConversationID != "" {
+		conv, cerr := s.store.GetConversation(ctx, row.ConversationID)
+		if cerr != nil && !errors.Is(cerr, store.ErrNotFound) {
+			slog.Warn("message-hold: transient error loading conversation; re-holding row",
+				"agent_id", agentID, "message_id", row.ID, "error", cerr)
+			s.reholdOrFailClaimedRow(ctx, agentID, row)
+			return claimedRowReheldTransient
+		}
+		if conv != nil {
+			convRes = &messaging.ConversationResult{
+				ConversationID: conv.ID,
+				ExternalRef:    conv.ExternalRef,
+				Kind:           conv.Kind,
+				Surface:        conv.Surface,
+				DisplayName:    conv.DisplayName,
 			}
 		}
-		sm.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-			MessageID:  row.ID,
-			ConvResult: convRes,
-			Msg:        sm,
-			CreatedAt:  row.CreatedAt,
-			IsMention:  row.Type == messages.TypeMention,
-		})
 	}
+	sm.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+		MessageID:  row.ID,
+		ConvResult: convRes,
+		Msg:        sm,
+		CreatedAt:  row.CreatedAt,
+		IsMention:  row.Type == messages.TypeMention,
+	})
 
 	if ctx.Err() != nil {
 		s.reholdOrFailClaimedRow(ctx, agentID, row)

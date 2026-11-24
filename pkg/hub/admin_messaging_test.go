@@ -44,7 +44,7 @@ func newAdminMessagingServer(t *testing.T, store *fakeHubSettingStore) *Server {
 // --- HTTP-level tests for handleAdminMessaging ---
 
 func TestHandleAdminMessaging_GetAbsentRow(t *testing.T) {
-	// GET with no DB row returns compiled default: switch ON (Phase 9a).
+	// GET with no DB row returns compiled defaults and no conversation_envelope_switch key.
 	srv := newAdminMessagingServer(t, newFakeHubSettingStore())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/messaging", nil)
@@ -56,17 +56,28 @@ func TestHandleAdminMessaging_GetAbsentRow(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("failed to decode raw response: %v", err)
+	}
+	if _, exists := raw["conversation_envelope_switch"]; exists {
+		t.Errorf("GET response unexpectedly contains removed key conversation_envelope_switch: %s", rr.Body.String())
+	}
+
 	var body messagingResponse
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if body.ConversationEnvelopeSwitch == nil || *body.ConversationEnvelopeSwitch != true {
-		t.Errorf("expected conversation_envelope_switch=true (compiled default ON), got %v", body.ConversationEnvelopeSwitch)
+	if body.CrossProjectMessagingEnabled == nil || *body.CrossProjectMessagingEnabled != false {
+		t.Errorf("expected cross_project_messaging_enabled=false, got %v", body.CrossProjectMessagingEnabled)
+	}
+	if body.OffloadThresholdRunes == nil || *body.OffloadThresholdRunes != 0 {
+		t.Errorf("expected offload_threshold_runes=0, got %v", body.OffloadThresholdRunes)
 	}
 }
 
 func TestHandleAdminMessaging_GetEmptyRow(t *testing.T) {
-	// An empty JSON doc `{}` in the DB row → switch ON (key omitted → default).
+	// An empty JSON doc `{}` in the DB row returns compiled defaults.
 	store := newFakeHubSettingStore()
 	store.seed("messaging", json.RawMessage(`{}`))
 	srv := newAdminMessagingServer(t, store)
@@ -84,13 +95,13 @@ func TestHandleAdminMessaging_GetEmptyRow(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if body.ConversationEnvelopeSwitch == nil || *body.ConversationEnvelopeSwitch != true {
-		t.Errorf("expected conversation_envelope_switch=true (empty doc → omitted → default ON), got %v", body.ConversationEnvelopeSwitch)
+	if body.CrossProjectMessagingEnabled == nil || *body.CrossProjectMessagingEnabled != false {
+		t.Errorf("expected cross_project_messaging_enabled=false, got %v", body.CrossProjectMessagingEnabled)
 	}
 }
 
 func TestHandleAdminMessaging_GetMalformedRow(t *testing.T) {
-	// Malformed JSON in the DB row → switch OFF (fail-closed, DEF-92).
+	// Malformed JSON in the DB row fails closed to defaults.
 	store := newFakeHubSettingStore()
 	store.seed("messaging", json.RawMessage(`not valid json`))
 	srv := newAdminMessagingServer(t, store)
@@ -108,15 +119,17 @@ func TestHandleAdminMessaging_GetMalformedRow(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if body.ConversationEnvelopeSwitch == nil || *body.ConversationEnvelopeSwitch != false {
-		t.Errorf("expected conversation_envelope_switch=false (malformed → fail-closed), got %v", body.ConversationEnvelopeSwitch)
+	if body.CrossProjectMessagingEnabled == nil || *body.CrossProjectMessagingEnabled != false {
+		t.Errorf("expected cross_project_messaging_enabled=false (malformed → fail-closed), got %v", body.CrossProjectMessagingEnabled)
 	}
 }
 
-func TestHandleAdminMessaging_GetExplicitlyFalse(t *testing.T) {
-	// Explicitly false value → switch OFF.
+func TestHandleAdminMessaging_GetIgnoresStaleSwitchKeys(t *testing.T) {
+	// A stored row containing the legacy conversation_envelope_switch key
+	// does not break GET; active fields still read normally and the response
+	// omits conversation_envelope_switch.
 	store := newFakeHubSettingStore()
-	store.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false}`))
+	store.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false,"cross_project_messaging_enabled":true,"offload_threshold_runes":4000}`))
 	srv := newAdminMessagingServer(t, store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/messaging", nil)
@@ -128,86 +141,30 @@ func TestHandleAdminMessaging_GetExplicitlyFalse(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var body messagingResponse
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("failed to decode raw response: %v", err)
 	}
-	if body.ConversationEnvelopeSwitch == nil || *body.ConversationEnvelopeSwitch != false {
-		t.Errorf("expected conversation_envelope_switch=false, got %v", body.ConversationEnvelopeSwitch)
-	}
-}
-
-func TestHandleAdminMessaging_GetExplicitlyTrue(t *testing.T) {
-	// Explicitly true value → switch ON.
-	store := newFakeHubSettingStore()
-	store.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
-	srv := newAdminMessagingServer(t, store)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/messaging", nil)
-	req = adminContext(req)
-	rr := httptest.NewRecorder()
-	srv.handleAdminMessaging(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	if _, exists := raw["conversation_envelope_switch"]; exists {
+		t.Errorf("GET response unexpectedly contains removed key conversation_envelope_switch: %s", rr.Body.String())
 	}
 
 	var body messagingResponse
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if body.ConversationEnvelopeSwitch == nil || *body.ConversationEnvelopeSwitch != true {
-		t.Errorf("expected conversation_envelope_switch=true, got %v", body.ConversationEnvelopeSwitch)
+	if body.CrossProjectMessagingEnabled == nil || *body.CrossProjectMessagingEnabled != true {
+		t.Errorf("expected cross_project_messaging_enabled=true, got %v", body.CrossProjectMessagingEnabled)
 	}
-}
-
-func TestHandleAdminMessaging_PutSwitch(t *testing.T) {
-	// PUT the switch to false and verify.
-	srv := newAdminMessagingServer(t, newFakeHubSettingStore())
-
-	putBody := `{"conversation_envelope_switch": false}`
-	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
-		bytes.NewBufferString(putBody))
-	putReq.Header.Set("Content-Type", "application/json")
-	putReq = adminContext(putReq)
-	putRR := httptest.NewRecorder()
-	srv.handleAdminMessaging(putRR, putReq)
-
-	if putRR.Code != http.StatusOK {
-		t.Fatalf("PUT expected 200, got %d: %s", putRR.Code, putRR.Body.String())
-	}
-
-	var putResp messagingResponse
-	if err := json.NewDecoder(putRR.Body).Decode(&putResp); err != nil {
-		t.Fatalf("failed to decode PUT response: %v", err)
-	}
-	if putResp.ConversationEnvelopeSwitch == nil || *putResp.ConversationEnvelopeSwitch != false {
-		t.Errorf("PUT response: expected conversation_envelope_switch=false, got %v", putResp.ConversationEnvelopeSwitch)
-	}
-
-	// GET to verify persistence.
-	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/messaging", nil)
-	getReq = adminContext(getReq)
-	getRR := httptest.NewRecorder()
-	srv.handleAdminMessaging(getRR, getReq)
-
-	if getRR.Code != http.StatusOK {
-		t.Fatalf("GET expected 200, got %d: %s", getRR.Code, getRR.Body.String())
-	}
-
-	var getResp messagingResponse
-	if err := json.NewDecoder(getRR.Body).Decode(&getResp); err != nil {
-		t.Fatalf("failed to decode GET response: %v", err)
-	}
-	if getResp.ConversationEnvelopeSwitch == nil || *getResp.ConversationEnvelopeSwitch != false {
-		t.Errorf("GET after PUT: expected conversation_envelope_switch=false, got %v", getResp.ConversationEnvelopeSwitch)
+	if body.OffloadThresholdRunes == nil || *body.OffloadThresholdRunes != 4000 {
+		t.Errorf("expected offload_threshold_runes=4000, got %v", body.OffloadThresholdRunes)
 	}
 }
 
 func TestHandleAdminMessaging_PutEmptyDocPreserves(t *testing.T) {
 	// PUT {} should preserve existing value (presence-aware: no fields sent).
 	store := newFakeHubSettingStore()
-	store.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false}`))
+	store.seed("messaging", json.RawMessage(`{"offload_threshold_runes":4000}`))
 	srv := newAdminMessagingServer(t, store)
 
 	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
@@ -225,16 +182,16 @@ func TestHandleAdminMessaging_PutEmptyDocPreserves(t *testing.T) {
 	if err := json.NewDecoder(putRR.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if resp.ConversationEnvelopeSwitch == nil || *resp.ConversationEnvelopeSwitch != false {
-		t.Errorf("expected conversation_envelope_switch=false (preserved), got %v", resp.ConversationEnvelopeSwitch)
+	if resp.OffloadThresholdRunes == nil || *resp.OffloadThresholdRunes != 4000 {
+		t.Errorf("expected offload_threshold_runes=4000 (preserved), got %v", resp.OffloadThresholdRunes)
 	}
 }
 
 func TestHandleAdminMessaging_PutInvalidPayload(t *testing.T) {
-	// PUT with a non-boolean value should return 400.
+	// PUT with a non-boolean value for a boolean field should return 400.
 	srv := newAdminMessagingServer(t, newFakeHubSettingStore())
 
-	payload := `{"conversation_envelope_switch": "yes"}`
+	payload := `{"cross_project_messaging_enabled": "yes"}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
 		bytes.NewBufferString(payload))
 	req.Header.Set("Content-Type", "application/json")
@@ -266,7 +223,7 @@ func TestHandleAdminMessaging_FileSQLiteMode_PutNotImplemented(t *testing.T) {
 	srv := newAdminMessagingServer(t, nil) // nil store = file/SQLite mode
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
-		bytes.NewBufferString(`{"conversation_envelope_switch": true}`))
+		bytes.NewBufferString(`{"offload_threshold_runes": 100}`))
 	req.Header.Set("Content-Type", "application/json")
 	req = adminContext(req)
 	rr := httptest.NewRecorder()
@@ -282,7 +239,7 @@ func TestHandleAdminMessaging_PutRecordsUpdatedBy(t *testing.T) {
 	store := newFakeHubSettingStore()
 	srv := newAdminMessagingServer(t, store)
 
-	putBody := `{"conversation_envelope_switch": false}`
+	putBody := `{"offload_threshold_runes": 100}`
 	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
 		bytes.NewBufferString(putBody))
 	putReq.Header.Set("Content-Type", "application/json")
@@ -319,11 +276,7 @@ func TestHandleAdminMessaging_PutRecordsUpdatedBy(t *testing.T) {
 // route metadata entry exists below.
 
 func TestHandleAdminMessaging_GetNilOperationalSettings(t *testing.T) {
-	// GET with nil OperationalSettings (init failed) → switch OFF.
-	// Enforcement sites read `ops != nil && ops.ConversationEnvelopeSwitch()`,
-	// which yields false when ops is nil. The GET must report the same value
-	// enforcement would actually use — not the compiled default, which is
-	// unreachable when there is no OperationalSettings to evaluate it.
+	// GET with nil OperationalSettings reports enforcement defaults (false/0).
 	srv := newAdminMessagingServer(t, nil) // nil store = no OperationalSettings
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/messaging", nil)
@@ -339,9 +292,11 @@ func TestHandleAdminMessaging_GetNilOperationalSettings(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	// nil ops → enforcement yields false → GET reports false.
-	if body.ConversationEnvelopeSwitch == nil || *body.ConversationEnvelopeSwitch != false {
-		t.Errorf("expected conversation_envelope_switch=false (nil ops → enforcement OFF), got %v", body.ConversationEnvelopeSwitch)
+	if body.CrossProjectMessagingEnabled == nil || *body.CrossProjectMessagingEnabled != false {
+		t.Errorf("expected cross_project_messaging_enabled=false, got %v", body.CrossProjectMessagingEnabled)
+	}
+	if body.OffloadThresholdRunes == nil || *body.OffloadThresholdRunes != 0 {
+		t.Errorf("expected offload_threshold_runes=0, got %v", body.OffloadThresholdRunes)
 	}
 }
 
@@ -356,16 +311,16 @@ func TestAdminMessagingRouteMetadataExists(t *testing.T) {
 	}
 }
 
-// --- AC-9-7c: after one PUT, stored document contains new key and no stale keys ---
+// --- Self-cleaning of stale switch keys on PUT ---
 
-func TestHandleAdminMessaging_AC97c_PutCleansStaleKeys(t *testing.T) {
-	// Start with a row containing ONLY stale keys (pre-upgrade state).
+func TestHandleAdminMessaging_PutCleansStaleKeys(t *testing.T) {
+	// Start with a row containing legacy switch keys (pre-upgrade state).
 	store := newFakeHubSettingStore()
-	store.seed("messaging", json.RawMessage(`{"conversation_read_switch":false,"conversation_write_deny_switch":false}`))
+	store.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false,"conversation_read_switch":false,"conversation_write_deny_switch":false,"offload_threshold_runes":1000}`))
 	srv := newAdminMessagingServer(t, store)
 
-	// PUT the new switch to false (any explicit value triggers a write).
-	putBody := `{"conversation_envelope_switch": false}`
+	// PUT another field (any PUT re-writes the clean section document).
+	putBody := `{"offload_threshold_runes": 2000}`
 	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
 		bytes.NewBufferString(putBody))
 	putReq.Header.Set("Content-Type", "application/json")
@@ -390,66 +345,16 @@ func TestHandleAdminMessaging_AC97c_PutCleansStaleKeys(t *testing.T) {
 		t.Fatalf("failed to unmarshal stored doc: %v", err)
 	}
 
-	// New key must be present.
-	if _, exists := raw["conversation_envelope_switch"]; !exists {
-		t.Error("stored document missing conversation_envelope_switch after PUT")
+	// Active key must be updated.
+	if got, ok := raw["offload_threshold_runes"].(float64); !ok || got != 2000 {
+		t.Errorf("expected offload_threshold_runes=2000, got %v", raw["offload_threshold_runes"])
 	}
 
-	// Stale keys must be absent (self-cleaning).
-	if _, exists := raw["conversation_read_switch"]; exists {
-		t.Error("stored document still contains stale key conversation_read_switch after PUT")
-	}
-	if _, exists := raw["conversation_write_deny_switch"]; exists {
-		t.Error("stored document still contains stale key conversation_write_deny_switch after PUT")
-	}
-}
-
-// --- AC-9-7d: explicit-null reset returns switch to compiled default (ON) ---
-
-func TestHandleAdminMessaging_AC97d_NullResetReturnsDefault(t *testing.T) {
-	// Start with switch explicitly false.
-	store := newFakeHubSettingStore()
-	store.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false}`))
-	srv := newAdminMessagingServer(t, store)
-
-	// PUT with explicit null for the switch.
-	putBody := `{"conversation_envelope_switch": null}`
-	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
-		bytes.NewBufferString(putBody))
-	putReq.Header.Set("Content-Type", "application/json")
-	putReq = adminContext(putReq)
-	putRR := httptest.NewRecorder()
-	srv.handleAdminMessaging(putRR, putReq)
-
-	if putRR.Code != http.StatusOK {
-		t.Fatalf("PUT expected 200, got %d: %s", putRR.Code, putRR.Body.String())
-	}
-
-	var resp messagingResponse
-	if err := json.NewDecoder(putRR.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	// The null reset must return the compiled default: ON.
-	if resp.ConversationEnvelopeSwitch == nil || *resp.ConversationEnvelopeSwitch != true {
-		t.Errorf("expected conversation_envelope_switch=true (null reset → compiled default ON), got %v", resp.ConversationEnvelopeSwitch)
-	}
-
-	// Verify the section was reset to default (PR#1705: per-field reset writes
-	// the merged document back, so the section persists with compiled defaults).
-	store.mu.Lock()
-	storedSetting, exists := store.settings["messaging"]
-	store.mu.Unlock()
-	if !exists {
-		t.Fatal("expected messaging section to exist with default values after null reset")
-	}
-	var stored opsettings.MessagingSettings
-	if err := json.Unmarshal(storedSetting.Value, &stored); err != nil {
-		t.Fatalf("failed to unmarshal stored messaging section: %v", err)
-	}
-	if stored.ConversationEnvelopeSwitch == nil {
-		t.Errorf("expected stored conversation_envelope_switch=true (compiled default), got nil")
-	} else if !*stored.ConversationEnvelopeSwitch {
-		t.Errorf("expected stored conversation_envelope_switch=true (compiled default), got false")
+	// Stale switch keys must be absent (self-cleaning).
+	for _, stale := range []string{"conversation_envelope_switch", "conversation_read_switch", "conversation_write_deny_switch"} {
+		if _, exists := raw[stale]; exists {
+			t.Errorf("stored document still contains stale key %s after PUT", stale)
+		}
 	}
 }
 

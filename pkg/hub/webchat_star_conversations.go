@@ -77,9 +77,6 @@ type StarredConversationFilter struct {
 	// Channel limits stars to messages of one channel ("web" for native
 	// chat); empty matches every channel.
 	Channel string
-	// ByConversationID selects messages by the key's conversation ID (the
-	// read switch on) instead of by thread ID (off).
-	ByConversationID bool
 	// ProjectID, when set, keeps the threads of that project and the DMs
 	// whose stars are stored under it (its agents' DMs); never a DM
 	// between users.
@@ -201,9 +198,7 @@ func sqliteStarredConversationsQuery(f StarredConversationFilter) (string, []any
   LEFT JOIN users u ON d.peer_kind = 'user' AND u.id = d.peer_id
   LEFT JOIN agents a ON d.peer_kind = 'agent' AND a.id = d.peer_id`
 	}
-	selector := `m.thread_id = st.conversation_key`
-	if f.ByConversationID {
-		selector = `m.conversation_id IN (
+	selector := `m.conversation_id IN (
                      SELECT lower(t2.conversation_id) FROM webchat_topic t2
                       WHERE t2.id = st.conversation_key AND COALESCE(t2.conversation_id, '') <> ''
                      UNION ALL
@@ -212,7 +207,6 @@ func sqliteStarredConversationsQuery(f StarredConversationFilter) (string, []any
                         AND c.external_ref = st.conversation_key
                         -- These two terms mirror the predicate of the partial unique index on (surface, external_ref).
                         AND c.external_ref <> '' AND c.deleted_at IS NULL)`
-	}
 	args = append(args, f.UserID, f.Channel, f.Channel, f.UserID)
 	var conds []string
 	if f.ProjectID != "" {

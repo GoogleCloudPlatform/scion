@@ -85,7 +85,7 @@ func TestOffloadThresholdRunes_HotReload(t *testing.T) {
 	require.Equal(t, 0, ops.OffloadThresholdRunes())
 
 	rev, err := ops.Update(context.Background(), "messaging",
-		[]byte(`{"conversation_envelope_switch":true,"offload_threshold_runes":4000}`), "test", 0, "managed")
+		[]byte(`{"offload_threshold_runes":4000}`), "test", 0, "managed")
 	require.NoError(t, err)
 	require.Greater(t, rev, int64(0))
 	assert.Equal(t, 4000, ops.OffloadThresholdRunes(), "Update must take effect without a restart")
@@ -94,7 +94,7 @@ func TestOffloadThresholdRunes_HotReload(t *testing.T) {
 	// (see handlePutMessaging); Update itself just writes whatever doc it's
 	// given, so simulate the reset doc directly here.
 	_, err = ops.Update(context.Background(), "messaging",
-		[]byte(`{"conversation_envelope_switch":true,"offload_threshold_runes":0}`), "test", rev, "managed")
+		[]byte(`{"offload_threshold_runes":0}`), "test", rev, "managed")
 	require.NoError(t, err)
 	assert.Equal(t, 0, ops.OffloadThresholdRunes())
 }
@@ -107,7 +107,7 @@ func TestOffloadPolicy_DerivedFromOperationalSettings(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 	_, err := ops.Update(context.Background(), "messaging",
-		[]byte(`{"conversation_envelope_switch":true,"offload_threshold_runes":4000}`), "test", 0, "managed")
+		[]byte(`{"offload_threshold_runes":4000}`), "test", 0, "managed")
 	require.NoError(t, err)
 	srv.SetOperationalSettings(ops)
 	assert.Equal(t, 4000, srv.offloadPolicy().ThresholdRunes)

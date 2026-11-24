@@ -217,12 +217,11 @@ func TestPhase9f_Scheduler_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
 // Notification dispatch — DeliveryText
 // ---------------------------------------------------------------------------
 
-// TestPhase9f_Notification_DeliveryText_StampedWhenSwitchOn verifies that the
+// TestPhase9f_Notification_DeliveryText_Stamped verifies that the
 // notification dispatcher stamps DeliveryText on the dispatched
-// StructuredMessage when the envelope switch is ON.
-func TestPhase9f_Notification_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
+// StructuredMessage.
+func TestPhase9f_Notification_DeliveryText_Stamped(t *testing.T) {
 	env := setupNotificationTest(t)
-	env.nd.writeDenyEnabled = func() bool { return true }
 	env.nd.Start()
 	defer env.nd.Stop()
 
@@ -235,29 +234,6 @@ func TestPhase9f_Notification_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 	calls := env.dispatcher.getCalls()
 	require.NotNil(t, calls[0].StructuredMessage)
 	if calls[0].StructuredMessage.DeliveryText == "" {
-		t.Error("DeliveryText is empty — envelope switch is ON, notifications should use the new envelope")
-	}
-}
-
-// TestPhase9f_Notification_DeliveryText_EmptyWhenSwitchOff verifies that the
-// notification dispatcher does NOT stamp DeliveryText when the envelope
-// switch is OFF (writeDenyEnabled is nil, the default).
-func TestPhase9f_Notification_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
-	env := setupNotificationTest(t)
-	// writeDenyEnabled is nil by default in setupNotificationTest — switch OFF.
-	env.nd.Start()
-	defer env.nd.Stop()
-
-	env.publishStatus("completed")
-
-	require.Eventually(t, func() bool {
-		return len(env.dispatcher.getCalls()) == 1
-	}, 2*time.Second, 50*time.Millisecond)
-
-	calls := env.dispatcher.getCalls()
-	require.NotNil(t, calls[0].StructuredMessage)
-	if calls[0].StructuredMessage.DeliveryText != "" {
-		t.Errorf("DeliveryText should be empty when envelope switch is OFF, got %q",
-			calls[0].StructuredMessage.DeliveryText)
+		t.Error("DeliveryText is empty — notifications should use the delivery envelope")
 	}
 }

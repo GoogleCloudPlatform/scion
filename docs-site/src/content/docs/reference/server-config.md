@@ -1922,7 +1922,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `agent_secrets` | `user_scope_only` |
 | `broker_policy` | `admin_managed_only` (gated by experiment `hub.admin_managed_brokers`; live-applied; refused to user access tokens; env: `SCION_SERVER_BROKERPOLICY_ADMINMANAGEDONLY`; see [Admin-Managed Runtime Brokers](/scion/reference/security/#7-admin-managed-runtime-brokers)) |
 | `agent_delegation_policy` | `remove` map per boundary kind (`project`, `hub`) listing permissions removed from what may be delegated to agents; it can only narrow (`hub.agent_delegation` experiment; runtime/DB-only; refused to user access tokens) |
-| `messaging` | `conversation_envelope_switch`, `cross_project_messaging_enabled`, `offload_threshold_runes`, `attachment_delivery_max_bytes`, `attachment_inbox_retention_days`, `failed_message_retention_days` (managed via `/api/v1/admin/messaging`) |
+| `messaging` | `cross_project_messaging_enabled`, `offload_threshold_runes`, `attachment_delivery_max_bytes`, `attachment_inbox_retention_days`, `failed_message_retention_days` (managed via `/api/v1/admin/messaging`) |
 | `runtimes` | The whole `runtimes` map |
 | `profiles` | The whole `profiles` map |
 | `harness_configs` | The whole `harness_configs` map |

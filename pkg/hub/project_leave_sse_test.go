@@ -566,19 +566,6 @@ func TestProjectLeave_AgentMessageAfterMembershipChangeNeverReachesLeaver(t *tes
 		require.NoError(t, err)
 		leaveAgentMessageOrderRounds(t, x, agent, conv.ID)
 	})
-	t.Run("envelope switch off, participant filter only", func(t *testing.T) {
-		x := newLeaveSSEFixture(t)
-		settings := newFakeHubSettingStore()
-		overrides, err := json.Marshal(map[string]map[string]bool{"overrides": {experiments.ProjectSelfLeave: true}})
-		require.NoError(t, err)
-		settings.seed("experiments", json.RawMessage(overrides))
-		settings.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false}`))
-		ops := NewOperationalSettings(settings, emptyKoanf(), emptyKoanf())
-		_, err = ops.Refresh(context.Background())
-		require.NoError(t, err)
-		x.f.srv.SetOperationalSettings(ops)
-		leaveAgentMessageOrderRounds(t, x, leaveOrderAgent(t, x), "")
-	})
 }
 
 // leaveOrderAgent creates the owner's running agent in the fixture project.

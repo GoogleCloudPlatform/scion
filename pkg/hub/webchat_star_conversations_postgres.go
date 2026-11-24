@@ -83,10 +83,7 @@ func (s *pgWebChatStore) ListStarredConversationCandidates(ctx context.Context, 
 	if len(conds) > 0 {
 		where = " WHERE " + strings.Join(conds, " AND ")
 	}
-	// The read switch's one selector, as the other star paths apply it.
-	selector := `m.thread_id = st.conversation_key`
-	if f.ByConversationID {
-		selector = `m.conversation_id IN (
+	selector := `m.conversation_id IN (
                      SELECT ` + pgUUIDText("lower(t2.conversation_id)") + ` FROM webchat_topic t2
                       WHERE t2.id = st.conversation_key
                      UNION ALL
@@ -95,7 +92,6 @@ func (s *pgWebChatStore) ListStarredConversationCandidates(ctx context.Context, 
                         AND c.external_ref = st.conversation_key
                         -- These two terms mirror the predicate of the partial unique index on (surface, external_ref).
                         AND c.external_ref <> '' AND c.deleted_at IS NULL)`
-	}
 	limit := a.add(f.Limit + 1)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT c.ckey, c.is_dm, c.project_id, c.topic_name, c.activity, c.sort_value FROM (

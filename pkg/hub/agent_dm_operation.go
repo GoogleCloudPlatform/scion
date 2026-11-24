@@ -677,16 +677,14 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// target once, before any render; the dispatcher issues their
 	// capabilities from the plan (ptone/scion#4596).
 	s.applyAttachmentPlan(ctx, input.TargetAgent, structuredMsg)
-	if s.writeDenyEnabled() {
-		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-			MessageID:  storeMsg.ID,
-			ConvResult: input.ConvResult,
-			Msg:        structuredMsg,
-			CreatedAt:  storeMsg.CreatedAt,
-			IsMention:  input.Type == messages.TypeMention,
-			Plan:       structuredMsg.AttachmentPlan,
-		})
-	}
+	structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+		MessageID:  storeMsg.ID,
+		ConvResult: input.ConvResult,
+		Msg:        structuredMsg,
+		CreatedAt:  storeMsg.CreatedAt,
+		IsMention:  input.Type == messages.TypeMention,
+		Plan:       structuredMsg.AttachmentPlan,
+	})
 
 	// 11. Dispatch to target agent runtime (#1689).
 	// Migration gate: skip dispatch entirely for a migrating target — the
@@ -733,16 +731,14 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			FetchByID:            false, // P1/P2: literal false (design §8.1, §10 P1/P2).
 		}, pol)
 		if off.Offloaded {
-			if s.writeDenyEnabled() {
-				deliverMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-					MessageID:  storeMsg.ID,
-					ConvResult: input.ConvResult,
-					Msg:        deliverMsg,
-					CreatedAt:  storeMsg.CreatedAt,
-					IsMention:  input.Type == messages.TypeMention,
-					Plan:       deliverMsg.AttachmentPlan,
-				})
-			}
+			deliverMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  storeMsg.ID,
+				ConvResult: input.ConvResult,
+				Msg:        deliverMsg,
+				CreatedAt:  storeMsg.CreatedAt,
+				IsMention:  input.Type == messages.TypeMention,
+				Plan:       deliverMsg.AttachmentPlan,
+			})
 			dispatchMsg = deliverMsg
 		}
 	}

@@ -5419,14 +5419,6 @@ func (s *Server) GetOperationalSettings() *OperationalSettings {
 	return s.operationalSettings.Load()
 }
 
-// writeDenyEnabled returns whether the consolidated conversation envelope
-// switch is ON (which subsumes the former write-deny behaviour).
-// Safe for concurrent use. Returns false when operational settings are absent.
-func (s *Server) writeDenyEnabled() bool {
-	ops := s.GetOperationalSettings()
-	return ops != nil && ops.ConversationEnvelopeSwitch()
-}
-
 // recordLog returns the logger for message records: the dedicated message
 // logger if configured, otherwise the standard subsystem message logger
 // (the same choice as logMessage).
@@ -5932,10 +5924,6 @@ func (s *Server) StartNotificationDispatcher() {
 	nd.autoWakeFn = s.autoWakeNotificationSubscriber
 	nd.idleSuspendGateFn = s.idleSuspendDeliveryGateActive
 	nd.autoSuspendThresholdFn = s.autoSuspendThreshold
-	nd.writeDenyEnabled = func() bool {
-		ops := s.GetOperationalSettings()
-		return ops != nil && ops.ConversationEnvelopeSwitch()
-	}
 	s.notificationDispatcher = nd
 	s.notificationDispatcher.Start()
 }
@@ -5996,10 +5984,6 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 	proxy.messageLog = s.dedicatedMessageLog
 	proxy.webChatStore = s.webChatStore // DM watermark stamping after persist
 	proxy.memberFanout = s.fanOutThreadMessageToMembersAsync
-	proxy.writeDenyEnabled = func() bool {
-		ops := s.GetOperationalSettings()
-		return ops != nil && ops.ConversationEnvelopeSwitch()
-	}
 	// Phase 2 D5: inject cross-project message authorization into the broker.
 	// At delivery/retry time, re-evaluate authorization using the current
 	// policy state (not the cached state from enqueue time).

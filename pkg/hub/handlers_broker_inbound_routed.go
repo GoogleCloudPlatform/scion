@@ -545,14 +545,10 @@ func (s *Server) dispatchRoutedRecipient(
 				result.Error = "conversation resolution failed"
 				return result
 			}
-			if s.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc("broker.routed.phase11")
-				result.Status = "conversation_not_resolved"
-				result.Error = "conversation resolution failed"
-				return result
-			}
-			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)",
-				"agent_slug", agent.Slug, "error", convErr)
+			messaging.WriteDenialMetrics.Inc("broker.routed.phase11")
+			result.Status = "conversation_not_resolved"
+			result.Error = "conversation resolution failed"
+			return result
 		} else {
 			effectiveConv = convResult
 		}
@@ -568,14 +564,10 @@ func (s *Server) dispatchRoutedRecipient(
 			if params.req.Message.ThreadID != "" {
 				metricKey = "broker.routed.thread"
 			}
-			if s.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc(metricKey)
-				result.Status = "conversation_not_resolved"
-				result.Error = "conversation resolution failed"
-				return result
-			}
-			s.messageLog.Warn("Phase 5 conversation resolution failed (write-deny OFF, continuing)",
-				"agent_slug", agent.Slug, "error", convErr)
+			messaging.WriteDenialMetrics.Inc(metricKey)
+			result.Status = "conversation_not_resolved"
+			result.Error = "conversation resolution failed"
+			return result
 		} else {
 			effectiveConv = convFromPhase5
 		}
@@ -584,31 +576,25 @@ func (s *Server) dispatchRoutedRecipient(
 	// Validate attributed conversation.
 	if effectiveConv != nil {
 		if err := messaging.ValidateAttributed(effectiveConv.ConversationID); err != nil {
-			if s.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc("broker.routed.validate")
-				result.Status = "conversation_not_resolved"
-				result.Error = err.Error()
-				return result
-			}
-			s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)",
-				"agent_slug", agent.Slug, "error", err)
+			messaging.WriteDenialMetrics.Inc("broker.routed.validate")
+			result.Status = "conversation_not_resolved"
+			result.Error = err.Error()
+			return result
 		}
 	}
 
 	// --- Render delivery envelope ---
-	if s.writeDenyEnabled() {
-		renderInput := messaging.RenderDeliveryInput{
-			MessageID:  msgID,
-			ConvResult: effectiveConv,
-			Msg:        msg,
-			CreatedAt:  params.now,
-			IsMention:  !params.isPrimary,
-		}
-		if len(params.coAddressees) > 0 {
-			renderInput.CoAddressees = params.coAddressees
-		}
-		msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
+	renderInput := messaging.RenderDeliveryInput{
+		MessageID:  msgID,
+		ConvResult: effectiveConv,
+		Msg:        msg,
+		CreatedAt:  params.now,
+		IsMention:  !params.isPrimary,
 	}
+	if len(params.coAddressees) > 0 {
+		renderInput.CoAddressees = params.coAddressees
+	}
+	msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
 
 	// --- Persist before dispatch when hub.conduit_deliver is enabled (ptone/scion#7881, REQ-4) ---
 	// Persisting before dispatch allows Conduit row binding (withDispatchMessageID)

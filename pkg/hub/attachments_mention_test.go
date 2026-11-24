@@ -195,7 +195,7 @@ func TestMentionCopy_StoppedMentionWritesNoRow(t *testing.T) {
 		d := &store.Agent{ID: uuid.NewString(), ProjectID: f.projA.ID, Name: "dee", Slug: "dee", Phase: "running",
 			OwnerID: f.ua.ID, CreatedBy: f.ua.ID, RuntimeBrokerID: f.brokerID, MessageMode: store.MessageModeProject, Ancestry: []string{f.ua.ID}}
 		require.NoError(t, f.st.CreateAgent(ctx, d))
-		f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{"conversation_envelope_switch": true}`)) // write-deny on
+		f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{}`))
 		f.faults.failUpsertConv = true
 		f.fault.Arm()
 		out := f.srv.deliverAgentMentionCopy(ctx, ctx, mentionInput(t, f, primary), d, "body")

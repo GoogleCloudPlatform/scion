@@ -263,7 +263,6 @@ func TestMessageID3881_SchedulerCarriesStoredMessageIDWithConduitDeliver(t *test
 // Status notifications store no message row either.
 func TestMessageID3881_NotificationOmitsMessageID(t *testing.T) {
 	env := setupNotificationTest(t)
-	env.nd.writeDenyEnabled = func() bool { return true }
 	env.nd.Start()
 	defer env.nd.Stop()
 

@@ -24,17 +24,15 @@ import (
 
 // handleAdminMessaging handles GET/PUT /api/v1/admin/messaging.
 //
-// GET returns the current messaging switch (merged with compiled default).
+// GET returns the current messaging settings (merged with compiled defaults).
 // PUT accepts a partial update to the messaging opsettings section.
 //
 // Both endpoints are admin-gated (same auth check as handleAdminMaintenance).
 // The section follows the maintenance pattern: DB-only, no settings.yaml
 // representation, with a dedicated admin API endpoint.
 //
-// Phase 9a: the two former switches (conversation_read_switch and
-// conversation_write_deny_switch) are consolidated into a single
-// conversation_envelope_switch that defaults ON. Stale keys self-clean
-// on first PUT.
+// Stale switch keys (conversation_envelope_switch, conversation_read_switch,
+// conversation_write_deny_switch) are ignored on read and self-clean on PUT.
 func (s *Server) handleAdminMessaging(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -48,7 +46,6 @@ func (s *Server) handleAdminMessaging(w http.ResponseWriter, r *http.Request) {
 
 // messagingResponse is the GET/PUT response shape for the admin messaging endpoint.
 type messagingResponse struct {
-	ConversationEnvelopeSwitch   *bool `json:"conversation_envelope_switch"`
 	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled"`
 	// OffloadThresholdRunes is the large-DM offload threshold
 	// (ptone/scion#2257). Compiled default 0 (disabled).
@@ -68,7 +65,6 @@ type messagingResponse struct {
 // messagingPutRequest is the typed request for PUT /admin/messaging.
 // All fields are optional pointers; omitted = unchanged.
 type messagingPutRequest struct {
-	ConversationEnvelopeSwitch   *bool  `json:"conversation_envelope_switch,omitempty"`
 	CrossProjectMessagingEnabled *bool  `json:"cross_project_messaging_enabled,omitempty"`
 	OffloadThresholdRunes        *int   `json:"offload_threshold_runes,omitempty"`
 	AttachmentDeliveryMaxBytes   *int64 `json:"attachment_delivery_max_bytes,omitempty"`
@@ -81,7 +77,6 @@ type messagingPutRequest struct {
 // Reports what enforcement sites would actually do: when OperationalSettings
 // is nil (init failed), enforcement reads false/0, so GET reports false/0.
 func (s *Server) handleGetMessaging(w http.ResponseWriter) {
-	envelopeSwitch := false
 	crossProjectEnabled := false
 	offloadThreshold := 0
 	deliveryMax := DefaultAttachmentDeliveryMaxBytes
@@ -90,7 +85,6 @@ func (s *Server) handleGetMessaging(w http.ResponseWriter) {
 	var revision int64
 
 	if ops := s.GetOperationalSettings(); ops != nil {
-		envelopeSwitch = ops.ConversationEnvelopeSwitch()
 		crossProjectEnabled = ops.CrossProjectMessagingEnabled()
 		offloadThreshold = ops.OffloadThresholdRunes()
 		deliveryMax = ops.AttachmentDeliveryMaxBytes()
@@ -100,7 +94,6 @@ func (s *Server) handleGetMessaging(w http.ResponseWriter) {
 	}
 
 	writeJSON(w, http.StatusOK, messagingResponse{
-		ConversationEnvelopeSwitch:   &envelopeSwitch,
 		CrossProjectMessagingEnabled: &crossProjectEnabled,
 		OffloadThresholdRunes:        &offloadThreshold,
 		AttachmentDeliveryMaxBytes:   &deliveryMax,
@@ -116,7 +109,6 @@ func (s *Server) handleGetMessaging(w http.ResponseWriter) {
 // Semantics:
 //   - Omitted field = unchanged
 //   - Explicit null = reset ONLY that field to its compiled default
-//   - Resetting conversation_envelope_switch does NOT reset cross_project_messaging_enabled
 //   - Changing cross_project_messaging_enabled requires expected_revision for CAS
 //
 // The handler merges the request with current state, preserving any
@@ -148,7 +140,6 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the merged messaging section from current values.
-	currentEnvelope := ops.ConversationEnvelopeSwitch()
 	currentCrossProject := ops.CrossProjectMessagingEnabled()
 	currentOffloadThreshold := ops.OffloadThresholdRunes()
 	currentDeliveryMax := ops.AttachmentDeliveryMaxBytes()
@@ -157,7 +148,6 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	currentRevision := ops.SectionRevision("messaging")
 
 	ms := opsettings.MessagingSettings{
-		ConversationEnvelopeSwitch:   &currentEnvelope,
 		CrossProjectMessagingEnabled: &currentCrossProject,
 		OffloadThresholdRunes:        &currentOffloadThreshold,
 		AttachmentDeliveryMaxBytes:   &currentDeliveryMax,
@@ -166,15 +156,6 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Apply per-field updates or resets.
-
-	// conversation_envelope_switch:
-	if body.ConversationEnvelopeSwitch != nil {
-		ms.ConversationEnvelopeSwitch = body.ConversationEnvelopeSwitch
-	} else if fp != nil && fp.has("conversation_envelope_switch") {
-		// Explicit null → reset to compiled default (ON).
-		defaultVal := true
-		ms.ConversationEnvelopeSwitch = &defaultVal
-	}
 
 	// cross_project_messaging_enabled:
 	if body.CrossProjectMessagingEnabled != nil {
@@ -208,7 +189,7 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 
 	// offload_threshold_runes (ptone/scion#2257): not security-critical
 	// (reversible, no data loss — see design §8.4), so no expected_revision
-	// requirement, matching conversation_envelope_switch.
+	// requirement.
 	if body.OffloadThresholdRunes != nil {
 		ms.OffloadThresholdRunes = body.OffloadThresholdRunes
 	} else if fp != nil && fp.has("offload_threshold_runes") {
@@ -288,7 +269,6 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read back the applied state.
-	resultEnvelope := ops.ConversationEnvelopeSwitch()
 	resultCrossProject := ops.CrossProjectMessagingEnabled()
 	resultOffloadThreshold := ops.OffloadThresholdRunes()
 	resultDeliveryMax := ops.AttachmentDeliveryMaxBytes()
@@ -296,7 +276,6 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	resultFailedRetention := ops.FailedMessageRetentionDays()
 	resultRevision := ops.SectionRevision("messaging")
 	writeJSON(w, http.StatusOK, messagingResponse{
-		ConversationEnvelopeSwitch:   &resultEnvelope,
 		CrossProjectMessagingEnabled: &resultCrossProject,
 		OffloadThresholdRunes:        &resultOffloadThreshold,
 		AttachmentDeliveryMaxBytes:   &resultDeliveryMax,

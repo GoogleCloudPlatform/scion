@@ -200,21 +200,12 @@ func chatHistoryChannel(identity Identity) string {
 // resolveChatReadTarget returns the history selector of an authorized
 // conversation key. topic is the thread's topic (nil for a DM key).
 //
-// Phase 8 read-switch: when ConversationReadSwitch is ON, the
-// conversation is resolved and history is queried by ConversationID
-// instead of Channel+ThreadID. G3: the fallback to channel+thread is
-// REMOVED; an unresolved thread conversation is a typed 409 so failures
-// are observable, not silent.
+// History is queried by ConversationID. An unresolved thread conversation
+// returns a typed 409 so failures are observable, not silent.
 func (s *Server) resolveChatReadTarget(ctx context.Context, wcs WebChatStore, key string, topic *WebChatTopic, identity Identity) (chatReadTarget, *chatReadError) {
 	isDM := strings.HasPrefix(key, "dm:")
 	target := chatReadTarget{Key: key, IsDM: isDM, Topic: topic}
 	historyChannel := chatHistoryChannel(identity)
-
-	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.ConversationEnvelopeSwitch() {
-		target.Filter = store.MessageFilter{Channel: historyChannel, ThreadID: key}
-		return target, nil
-	}
 
 	var convResult *messaging.ConversationResult
 	if isDM {

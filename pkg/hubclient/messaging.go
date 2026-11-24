@@ -132,14 +132,12 @@ func (s *messagingService) ResolveConversation(ctx context.Context, reference st
 
 // HubMessagingSettings is the hub-level messaging configuration.
 type HubMessagingSettings struct {
-	ConversationEnvelopeSwitch   *bool `json:"conversation_envelope_switch"`
 	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled"`
 	Revision                     int64 `json:"revision"`
 }
 
 // UpdateHubMessagingRequest is the request to update hub messaging settings.
 type UpdateHubMessagingRequest struct {
-	ConversationEnvelopeSwitch   *bool  `json:"conversation_envelope_switch,omitempty"`
 	CrossProjectMessagingEnabled *bool  `json:"cross_project_messaging_enabled,omitempty"`
 	ExpectedRevision             *int64 `json:"expected_revision,omitempty"`
 }

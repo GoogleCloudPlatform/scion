@@ -58,7 +58,7 @@ func enableCPM(t *testing.T, srv *Server, s store.Store) {
 	envK := koanf.New(".")
 	ops := NewOperationalSettings(fakeStore, fileK, envK)
 	// Seed the messaging section with cross-project enabled.
-	doc := []byte(`{"conversation_envelope_switch":true,"cross_project_messaging_enabled":true}`)
+	doc := []byte(`{"cross_project_messaging_enabled":true}`)
 	rev, err := ops.Update(context.Background(), "messaging", doc, "test", 0, "managed")
 	require.NoError(t, err, "failed to seed messaging opsettings")
 	require.Greater(t, rev, int64(0), "expected positive revision")
