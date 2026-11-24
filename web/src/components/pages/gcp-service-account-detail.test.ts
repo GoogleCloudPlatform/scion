@@ -32,6 +32,7 @@
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 
+import { crumbTuples } from '../../test-utils/crumbs.js';
 import type { GCPServiceAccount, GCPServiceAccountStatus } from '../../shared/types.js';
 import {
   K8S_WORKLOAD_IDENTITY_SETUP_FLAG,
@@ -590,9 +591,13 @@ describe('GCP service account detail: status sections', () => {
 
     expect(el.shadowRoot.querySelector('scion-detail-header')?.getAttribute('heading')).toBe(EMAIL);
     expect(buttonLabels(el)).toEqual([]);
-    expect(el.shadowRoot.querySelector('scion-back-link')?.getAttribute('href')).toBe(
-      '/projects/proj-1/settings?tab=gcp-sa'
-    );
+    expect(crumbTuples(el.shadowRoot)).toEqual([
+      ['Projects', '/projects'],
+      ['proj-1', '/projects/proj-1'],
+      ['Settings', '/projects/proj-1/settings'],
+      ['Service Accounts', '/projects/proj-1/settings?tab=gcp-sa'],
+      [EMAIL, undefined],
+    ]);
     const urls = apiFetch.mock.calls.map((c) => c[0] as string);
     expect(urls).not.toContain('/api/v1/gcp-service-accounts/sa-p');
     await statusRoot(el);
@@ -622,10 +627,15 @@ describe('GCP service account detail: status sections', () => {
       expect(text).toContain(`Could not load this account in project proj-1: HTTP ${status}`);
       expect(el.shadowRoot.querySelector('scion-detail-header')).toBeNull();
       expect(buttonLabels(el)).toEqual([]);
-      expect(el.shadowRoot.querySelector('scion-back-link')?.getAttribute('href')).toBe(
-        '/projects/proj-1/settings?tab=gcp-sa'
-      );
-      const urls = apiFetch.mock.calls.map((c) => c[0] as string);
+      expect(crumbTuples(el.shadowRoot)).toEqual([
+        ['Projects', '/projects'],
+        ['proj-1', '/projects/proj-1'],
+        ['Settings', '/projects/proj-1/settings'],
+        ['Service Accounts', '/projects/proj-1/settings?tab=gcp-sa'],
+      ]);
+      const urls = apiFetch.mock.calls
+        .map((c) => c[0] as string)
+        .filter((u) => u !== '/api/v1/projects/proj-1');
       expect(urls).toEqual(['/api/v1/projects/proj-1/gcp-service-accounts/sa-p/status']);
     });
   }

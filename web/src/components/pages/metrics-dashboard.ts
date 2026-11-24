@@ -14,11 +14,14 @@
  * limitations under the License.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { Chart, registerables } from 'chart.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current, projectTrail, type Named } from '../../client/crumbs.js';
+import { projectLabelNow, resolveProjectLabel } from '../../client/project-label.js';
+import '../shared/breadcrumb.js';
 import { formatNumber } from '../../utils/format-number.js';
 import {
   DISPLAY_TIMEZONE_CHANGED_EVENT,
@@ -111,7 +114,9 @@ export class ScionPageMetrics extends LitElement {
   @state() private sessions: SessionsData | null = null;
   @state() private modelCalls: ModelCallsData | null = null;
   @state() private tokens: TokensData | null = null;
+  @state() private projectNamed: Named | null = null;
 
+  private resolvedProjectId = '';
   private charts: Map<string, Chart> = new Map();
 
   /** Increments for every metrics request the page issues. */
@@ -275,10 +280,35 @@ export class ScionPageMetrics extends LitElement {
     // Parse projectId from URL if not set as property (same pattern as project-detail.ts)
     if (!this.projectId && typeof window !== 'undefined') {
       const match = window.location.pathname.match(/\/projects\/([^/]+)\/metrics/);
-      if (match) this.projectId = match[1];
+      if (match) this.projectId = decodeURIComponent(match[1]);
     }
+    this.syncProjectLabel();
     window.addEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.handleDisplayZoneChanged);
     void this.loadView('summary');
+  }
+
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    if (changed.has('projectId')) {
+      this.syncProjectLabel();
+    }
+  }
+
+  private syncProjectLabel(): void {
+    const id = (this.projectId ?? '').trim();
+    if (!id) {
+      this.projectNamed = null;
+      this.resolvedProjectId = '';
+      return;
+    }
+    if (id === this.resolvedProjectId) return;
+    this.resolvedProjectId = id;
+    this.projectNamed = projectLabelNow(id);
+    void resolveProjectLabel(id).then((resolved) => {
+      if (this.isConnected && (this.projectId ?? '').trim() === id) {
+        this.projectNamed = resolved;
+      }
+    });
   }
 
   override disconnectedCallback(): void {
@@ -591,8 +621,22 @@ export class ScionPageMetrics extends LitElement {
     return [...points].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   }
 
+  private projectCrumbs() {
+    const id = this.projectId.trim();
+    if (!id) return [];
+    const project = this.projectNamed?.id === id ? this.projectNamed : projectLabelNow(id);
+    const hasData = Boolean(this.summary || this.sessions || this.modelCalls || this.tokens);
+    if ((this.loading && !hasData) || this.error) {
+      return projectTrail(project);
+    }
+    return [...projectTrail(project), current('Metrics', false)];
+  }
+
   override render() {
     return html`
+      ${this.projectId
+        ? html`<scion-breadcrumb .crumbs=${this.projectCrumbs()}></scion-breadcrumb>`
+        : nothing}
       <div class="header">
         <div class="header-left">
           <sl-icon name="graph-up"></sl-icon>

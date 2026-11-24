@@ -14,10 +14,13 @@
  * limitations under the License.
  */
 
-import { LitElement, html, nothing } from 'lit';
+import { LitElement, html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
+import { current, projectTrail, type Named } from '../../client/crumbs.js';
+import { projectLabelNow, resolveProjectLabel } from '../../client/project-label.js';
+import '../shared/breadcrumb.js';
 import { stateManager } from '../../client/state.js';
 import { READINESS_MARKS, markReady, resetReadinessMarks } from '../../client/readiness-marks.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
@@ -112,6 +115,8 @@ export class AgentGraphPage extends LitElement {
   @state() private reloading = false;
   @state() private error: string | null = null;
   @state() private projectFilter = '';
+  @state() private projectNamed: Named | null = null;
+  private resolvedProjectId = '';
   /** Graph flow direction, persisted in the URL as ?dir=horizontal (absent = vertical). */
   @state() private orientation: Orientation = 'vertical';
   /** Set when the shown graph is not the complete set of its scope. */
@@ -184,6 +189,7 @@ export class AgentGraphPage extends LitElement {
     const params = new URLSearchParams(window.location.search);
     this.projectFilter = params.get('project') || '';
     this.initiallyProjectScoped = !!params.get('project');
+    this.syncProjectLabel();
     this.focusId = params.get('focus') || '';
     this.orientation = params.get('dir') === 'horizontal' ? 'horizontal' : 'vertical';
 
@@ -654,9 +660,47 @@ export class AgentGraphPage extends LitElement {
     `;
   }
 
+  protected override willUpdate(changed: PropertyValues): void {
+    super.willUpdate(changed);
+    if (changed.has('projectFilter')) {
+      this.syncProjectLabel();
+    }
+  }
+
+  private syncProjectLabel(): void {
+    const id = (this.projectFilter ?? '').trim();
+    if (!id) {
+      this.projectNamed = null;
+      this.resolvedProjectId = '';
+      return;
+    }
+    if (id === this.resolvedProjectId) return;
+    this.resolvedProjectId = id;
+    this.projectNamed = projectLabelNow(id);
+    void resolveProjectLabel(id).then((resolved) => {
+      if (this.isConnected && (this.projectFilter ?? '').trim() === id) {
+        this.projectNamed = resolved;
+      }
+    });
+  }
+
+  private graphCrumbs() {
+    const id = this.projectFilter.trim();
+    const ancestorsOnly = this.loading || Boolean(this.error);
+    if (id) {
+      const project = this.projectNamed?.id === id ? this.projectNamed : projectLabelNow(id);
+      return ancestorsOnly
+        ? projectTrail(project)
+        : [...projectTrail(project), current('Agent graph', false)];
+    }
+    const root = [{ label: 'Agents', href: '/agents' }];
+    return ancestorsOnly ? root : [...root, current('Graph', false)];
+  }
+
   override render() {
     return html`
       <div style="padding: var(--sl-spacing-large, 1.25rem);">
+        <scion-breadcrumb .crumbs=${this.graphCrumbs()}></scion-breadcrumb>
         <div
           style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;"
         >

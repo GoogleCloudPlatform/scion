@@ -16,7 +16,14 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { agentParentTrail, current, projectTrail, projectsRoot } from './crumbs.js';
+import {
+  agentParentTrail,
+  current,
+  projectSettingsTrail,
+  projectTrail,
+  projectsRoot,
+  scopedResourceTrail,
+} from './crumbs.js';
 
 describe('crumbs trail builders', () => {
   it('builds the Projects root crumb', () => {
@@ -32,6 +39,55 @@ describe('crumbs trail builders', () => {
     expect(projectTrail({ id: 'org/p?a=1', label: 'org/p?a=1', pending: true })).toEqual([
       { label: 'Projects', href: '/projects' },
       { label: 'org/p?a=1', href: '/projects/org%2Fp%3Fa%3D1', truncate: true, pending: true },
+    ]);
+  });
+
+  it('builds projectSettingsTrail with URL encoding', () => {
+    expect(projectSettingsTrail({ id: 'org/p?a=1', label: 'Payments', pending: true })).toEqual([
+      { label: 'Projects', href: '/projects' },
+      { label: 'Payments', href: '/projects/org%2Fp%3Fa%3D1', truncate: true, pending: true },
+      { label: 'Settings', href: '/projects/org%2Fp%3Fa%3D1/settings' },
+    ]);
+  });
+
+  it('builds scopedResourceTrail for project, hub, and user scopes', () => {
+    const templateSpec = {
+      plural: 'Templates',
+      projectTab: 'templates',
+      hubTab: 'templates',
+      profilePath: '/profile/templates',
+    };
+
+    expect(
+      scopedResourceTrail(
+        { kind: 'project', project: { id: 'org/p?a=1', label: 'Payments' } },
+        templateSpec
+      )
+    ).toEqual([
+      { label: 'Projects', href: '/projects' },
+      { label: 'Payments', href: '/projects/org%2Fp%3Fa%3D1', truncate: true },
+      { label: 'Settings', href: '/projects/org%2Fp%3Fa%3D1/settings' },
+      { label: 'Templates', href: '/projects/org%2Fp%3Fa%3D1/settings?tab=templates' },
+    ]);
+
+    expect(scopedResourceTrail({ kind: 'hub' }, templateSpec)).toEqual([
+      { label: 'Hub Resources', href: '/settings' },
+      { label: 'Templates', href: '/settings?tab=templates' },
+    ]);
+
+    expect(scopedResourceTrail({ kind: 'user' }, templateSpec)).toEqual([
+      { label: 'Profile', href: '/profile' },
+      { label: 'Templates', href: '/profile/templates' },
+    ]);
+
+    expect(
+      scopedResourceTrail(
+        { kind: 'user' },
+        { plural: 'Service Accounts', projectTab: 'gcp-sa', hubTab: 'service-accounts' }
+      )
+    ).toEqual([
+      { label: 'Profile', href: '/profile' },
+      { label: 'Service Accounts', href: '/profile' },
     ]);
   });
 

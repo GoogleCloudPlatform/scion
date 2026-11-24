@@ -38,8 +38,10 @@ import type {
   ProjectMessagingPolicy,
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
+import { current, projectTrail, projectsRoot, type Named } from '../../client/crumbs.js';
 import { brokerPolicyStyles, renderPolicyBlockedTag } from '../shared/broker-policy-badges.js';
-import { cachedProjectLabel, projectDisplayName } from '../../client/project-label.js';
+import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
+import '../shared/breadcrumb.js';
 import { projectVisitorsVisible } from '../../shared/project-visitors.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
@@ -500,20 +502,6 @@ export class ScionPageProjectSettings extends LitElement {
     css`
       :host {
         display: block;
-      }
-
-      .back-link {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        color: var(--scion-text-muted, #64748b);
-        text-decoration: none;
-        font-size: 0.875rem;
-        margin-bottom: 1rem;
-      }
-
-      .back-link:hover {
-        color: var(--scion-primary, #3b82f6);
       }
 
       .header {
@@ -2738,6 +2726,24 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
+  private projectNamed(allowPending: boolean): Named | null {
+    const id = this.projectId.trim();
+    if (!id) return null;
+    if (this.project) {
+      return {
+        id,
+        label: projectDisplayName(this.project, id),
+      };
+    }
+    const cached = projectLabelNow(id);
+    return allowPending ? cached : { id: cached.id, label: cached.label };
+  }
+
+  private ancestorCrumbs(allowPending: boolean) {
+    const project = this.projectNamed(allowPending);
+    return project ? projectTrail(project) : [projectsRoot()];
+  }
+
   override render() {
     if (this.loading) {
       return this.renderLoading();
@@ -2749,16 +2755,10 @@ export class ScionPageProjectSettings extends LitElement {
 
     const projectLabel = projectDisplayName(this.project);
     const backLabel = projectLabel || 'Project';
+    const crumbs = [...this.ancestorCrumbs(false), current('Settings', false)];
 
     return html`
-      <a
-        href="/projects/${encodeURIComponent(this.projectId)}"
-        class="back-link"
-        title=${projectLabel || nothing}
-      >
-        <sl-icon name="arrow-left"></sl-icon>
-        ${backLabel}
-      </a>
+      <scion-breadcrumb .crumbs=${crumbs}></scion-breadcrumb>
 
       <div class="header">
         <sl-icon name="gear"></sl-icon>
@@ -4217,6 +4217,7 @@ export class ScionPageProjectSettings extends LitElement {
 
   private renderLoading() {
     return html`
+      <scion-breadcrumb .crumbs=${this.ancestorCrumbs(true)}></scion-breadcrumb>
       <div class="loading-state">
         <sl-spinner></sl-spinner>
         <p>Loading settings...</p>
@@ -4322,10 +4323,7 @@ export class ScionPageProjectSettings extends LitElement {
   private renderError() {
     if (this.noAccess) {
       return html`
-        <a href="/projects" class="back-link">
-          <sl-icon name="arrow-left"></sl-icon>
-          Back to Projects
-        </a>
+        <scion-breadcrumb .crumbs=${[projectsRoot()]}></scion-breadcrumb>
 
         <div class="error-state" data-project-no-access>
           <sl-icon name="exclamation-triangle"></sl-icon>
@@ -4334,16 +4332,8 @@ export class ScionPageProjectSettings extends LitElement {
         </div>
       `;
     }
-    const cachedLabel = cachedProjectLabel(this.projectId);
     return html`
-      <a
-        href="/projects/${encodeURIComponent(this.projectId)}"
-        class="back-link"
-        title=${cachedLabel || nothing}
-      >
-        <sl-icon name="arrow-left"></sl-icon>
-        ${cachedLabel || 'Back to Project'}
-      </a>
+      <scion-breadcrumb .crumbs=${this.ancestorCrumbs(false)}></scion-breadcrumb>
 
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>

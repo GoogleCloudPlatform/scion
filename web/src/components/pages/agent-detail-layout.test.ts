@@ -17,7 +17,8 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 
-import type { Agent } from '../../shared/types.js';
+import type { Agent, Project } from '../../shared/types.js';
+import { stateManager } from '../../client/state.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import { crumbTuples, type CrumbTuple } from '../../test-utils/crumbs.js';
 import { styleRules } from './__fixtures__/css-rules.js';
@@ -288,6 +289,37 @@ describe('agent detail layout', () => {
     const back = host.querySelectorAll('scion-detail-header > [slot="back"]');
     expect(Array.from(back).map((n) => n.tagName.toLowerCase())).toEqual(['scion-breadcrumb']);
     expect(crumbTuples(host)).toEqual(expected);
+  });
+
+  it('uses projectLabelNow on cold load when agent.projectId is cached in stateManager', () => {
+    const internal = stateManager as unknown as { state: { projects: Map<string, Project> } };
+    stateManager.seedProjects([
+      {
+        id: 'p-cached',
+        name: 'Cached Payments',
+        slug: 'cached-payments',
+        path: '/tmp/p-cached',
+        status: 'active',
+        agentCount: 0,
+      },
+    ]);
+    try {
+      const el = document.createElement('scion-page-agent-detail');
+      Object.assign(el, {
+        agentId: 'a-1',
+        agent: makeAgent({ projectId: 'p-cached' }),
+        project: null,
+      });
+      const host = document.createElement('div');
+      render((el as unknown as { renderHeader: () => TemplateResult }).renderHeader(), host);
+      expect(crumbTuples(host)).toEqual([
+        ['Projects', '/projects'],
+        ['Cached Payments', '/projects/p-cached'],
+        [AGENT_NAME, undefined],
+      ]);
+    } finally {
+      internal.state.projects.clear();
+    }
   });
 
   it('renders an ancestor-only breadcrumb in loading, error, and deleted states', () => {

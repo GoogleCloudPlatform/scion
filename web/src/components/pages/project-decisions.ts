@@ -24,13 +24,16 @@
  * renderers with `<scion-page-profile-decisions>` (`scope="project"` vs `scope="profile"`).
  */
 
-import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
+import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current, projectTrail, projectsRoot, type Named } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
+import '../shared/breadcrumb.js';
 import {
   fetchProjectMadeDecisions,
   fetchProjectPendingDecisions,
@@ -122,29 +125,7 @@ export class ScionPageProjectDecisions extends LitElement {
       }),
   });
 
-  static override styles = [
-    decisionsPageSharedStyles,
-    css`
-      .crumbs {
-        font-size: 0.8125rem;
-        color: var(--scion-text-muted, #64748b);
-        margin-bottom: 0.35rem;
-        display: flex;
-        align-items: center;
-        gap: 0.35rem;
-        flex-wrap: wrap;
-      }
-
-      .crumbs a {
-        color: var(--scion-primary, #3b82f6);
-        text-decoration: none;
-      }
-
-      .crumbs a:hover {
-        text-decoration: underline;
-      }
-    `,
-  ];
+  static override styles = [decisionsPageSharedStyles];
 
   private async loadProjectSummary(): Promise<void> {
     try {
@@ -189,35 +170,52 @@ export class ScionPageProjectDecisions extends LitElement {
     `;
   }
 
+  private projectNamed(allowPending: boolean): Named | null {
+    if (!this.projectId) return null;
+    if (this.project) {
+      return {
+        id: this.projectId,
+        label: projectDisplayName(this.project, this.projectId),
+      };
+    }
+    const cached = projectLabelNow(this.projectId);
+    return allowPending ? cached : { id: cached.id, label: cached.label };
+  }
+
+  private ancestorCrumbs(allowPending: boolean) {
+    const project = this.projectNamed(allowPending);
+    return project ? projectTrail(project) : [projectsRoot()];
+  }
+
   override render(): TemplateResult {
     if (!this.ctrl.enabled) {
       return html`<scion-page-404 .pageData=${this.pageData}></scion-page-404>`;
     }
 
     if (this.ctrl.initialLoading) {
-      return renderDecisionsLoadingState();
+      return html`
+        <scion-breadcrumb .crumbs=${this.ancestorCrumbs(true)}></scion-breadcrumb>
+        ${renderDecisionsLoadingState()}
+      `;
     }
 
     if (this.ctrl.error) {
-      return renderDecisionsErrorState({
-        heading: 'Failed to Load Decisions',
-        message: this.ctrl.error,
-        retryAttr: 'data-retry-pending',
-        showPrefixIcon: true,
-        onRetry: this.ctrl.retryAll,
-      });
+      return html`
+        <scion-breadcrumb .crumbs=${this.ancestorCrumbs(false)}></scion-breadcrumb>
+        ${renderDecisionsErrorState({
+          heading: 'Failed to Load Decisions',
+          message: this.ctrl.error,
+          retryAttr: 'data-retry-pending',
+          showPrefixIcon: true,
+          onRetry: this.ctrl.retryAll,
+        })}
+      `;
     }
 
-    const projectName = this.project?.name || this.project?.slug || this.projectId;
+    const crumbs = [...this.ancestorCrumbs(false), current('Decisions', false)];
 
     return html`
-      <nav class="crumbs" aria-label="Breadcrumb">
-        <a href="/projects">Projects</a>
-        <span aria-hidden="true">/</span>
-        <a href="/projects/${encodeURIComponent(this.projectId)}">${projectName}</a>
-        <span aria-hidden="true">/</span>
-        <span>Decisions</span>
-      </nav>
+      <scion-breadcrumb .crumbs=${crumbs}></scion-breadcrumb>
 
       <div class="ph">
         <h1>Decisions</h1>

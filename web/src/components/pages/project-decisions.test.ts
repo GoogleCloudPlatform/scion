@@ -1564,9 +1564,12 @@ describe('<scion-page-project-decisions>', () => {
 
       expect(root.querySelector('.error-state')).toBeNull();
       expect(root.querySelector('[data-prompt-card="m-1"]')).not.toBeNull();
-      expect(root.querySelector('.crumbs a[href="/projects/p-1"]')?.textContent?.trim()).toBe(
-        'p-1'
-      );
+      const bc = root.querySelector('scion-breadcrumb');
+      expect(bc?.crumbs.map((c) => [c.label, c.href])).toEqual([
+        ['Projects', '/projects'],
+        ['p-1', '/projects/p-1'],
+        ['Decisions', undefined],
+      ]);
       expect(titleEvents).toContainEqual(['Decisions', 'p-1']);
     } finally {
       document.removeEventListener(PAGE_TITLE_EVENT, onTitle);
