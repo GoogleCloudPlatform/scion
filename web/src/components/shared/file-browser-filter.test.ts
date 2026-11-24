@@ -385,4 +385,81 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
 
     expect(searchFiles).not.toHaveBeenCalled();
   });
+
+  it('keeps stale backend rows hidden while a second search is held pending', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    let resolveSecond: ((r: FileListResult) => void) | null = null;
+    const searchFiles = vi.fn((q: string) => {
+      if (q === 'foo') {
+        return Promise.resolve({
+          files: [makeEntry('deep/foo.ts')],
+          totalSize: 10,
+          totalCount: 1,
+        });
+      }
+      return new Promise<FileListResult>((resolve) => {
+        resolveSecond = resolve;
+      });
+    });
+    const source = makeSource(['src/other.ts'], searchFiles);
+    const el = await mountBrowser(source);
+
+    const box = el.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    const input = box.shadowRoot?.querySelector('input') as HTMLInputElement;
+
+    // First search resolves with deep/foo.ts
+    input.value = 'foo';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+    expect(renderedPaths(el)).toEqual(['deep/foo.ts']);
+
+    // Second search ("bar") is committed and held pending: stale deep/foo.ts must stay hidden
+    input.value = 'bar';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
+    expect(searchFiles).toHaveBeenCalledTimes(2);
+    expect(renderedPaths(el)).toEqual([]);
+
+    // Resolve the second search and confirm its result appears
+    resolveSecond?.({
+      files: [makeEntry('deep/bar.ts')],
+      totalSize: 10,
+      totalCount: 1,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+    expect(renderedPaths(el)).toEqual(['deep/bar.ts']);
+  });
+
+  it('preserves a server-only fuzzy hit through the post-filter branch while enforcing ext:', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    // Simulate a server-only hit ("deep/srv_hit.ts") whose path does not match the client
+    // regex for "button" — it must survive postFilterFilesByQuery once settled, while
+    // "deep/srv_hit.go" is excluded by ext:ts.
+    const searchFiles = vi.fn(() =>
+      Promise.resolve({
+        files: [makeEntry('deep/srv_hit.ts'), makeEntry('deep/srv_hit.go')],
+        totalSize: 20,
+        totalCount: 2,
+      })
+    );
+    const source = makeSource(['src/local.md'], searchFiles);
+    const el = await mountBrowser(source);
+
+    const box = el.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    const input = box.shadowRoot?.querySelector('input') as HTMLInputElement;
+
+    input.value = 'ext:ts button';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    expect(searchFiles).toHaveBeenCalledTimes(1);
+    expect(searchFiles.mock.calls[0]?.[0]).toBe('button');
+    expect(renderedPaths(el)).toEqual(['deep/srv_hit.ts']);
+  });
 });

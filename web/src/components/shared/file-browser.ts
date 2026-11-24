@@ -597,7 +597,10 @@ export class ScionFileBrowser extends LitElement {
   private readonly initialLimit = 500;
   private _searchAbortController: AbortController | null = null;
   private _searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private _lastBackendQuery = '';
+  /** The text query most recently committed / in flight for commit deduplication. */
+  private _committedBackendQuery = '';
+  /** The text query that `backendResults` actually answered (set only on successful response). */
+  private _backendResultsQuery = '';
 
   /**
    * The data source instance an initial load has already been requested for.
@@ -968,7 +971,8 @@ export class ScionFileBrowser extends LitElement {
       this.backendResults = [];
       this.backendError = false;
       this.backendHasMore = false;
-      this._lastBackendQuery = '';
+      this._committedBackendQuery = '';
+      this._backendResultsQuery = '';
     } catch (err) {
       if (token !== this._loadToken) return;
       console.error('Failed to load files:', err);
@@ -1050,7 +1054,8 @@ export class ScionFileBrowser extends LitElement {
       this.backendResults = [];
       this.backendHasMore = false;
       this.backendSearching = false;
-      this._lastBackendQuery = '';
+      this._committedBackendQuery = '';
+      this._backendResultsQuery = '';
       this._cancelSearch();
     }
   };
@@ -1067,15 +1072,16 @@ export class ScionFileBrowser extends LitElement {
       this.backendResults = [];
       this.backendHasMore = false;
       this.backendSearching = false;
-      this._lastBackendQuery = '';
+      this._committedBackendQuery = '';
+      this._backendResultsQuery = '';
       this._cancelSearch();
       return;
     }
 
     if (!this.dataSource?.searchFiles) return;
-    if (textPart === this._lastBackendQuery && !hadError) return;
+    if (textPart === this._committedBackendQuery && !hadError) return;
 
-    this._lastBackendQuery = textPart;
+    this._committedBackendQuery = textPart;
     void this._runBackendSearch(textPart);
   };
 
@@ -1093,6 +1099,7 @@ export class ScionFileBrowser extends LitElement {
       const result = await this.dataSource.searchFiles(query, this.initialLimit, signal);
       if (signal.aborted) return;
       this.backendResults = result.files || [];
+      this._backendResultsQuery = query;
       this.backendHasMore = result.hasMore ?? false;
       this.backendError = false;
     } catch (err) {
@@ -1100,7 +1107,8 @@ export class ScionFileBrowser extends LitElement {
       console.warn('Backend search failed:', err);
       this.backendError = true;
       this.backendResults = [];
-      this._lastBackendQuery = '';
+      this._backendResultsQuery = '';
+      this._committedBackendQuery = '';
     } finally {
       if (!signal.aborted) {
         this.backendSearching = false;
@@ -1125,7 +1133,7 @@ export class ScionFileBrowser extends LitElement {
     if (this.isDialectEnabled) {
       const textPart = extractFileQueryText(this.activeQuery);
       filteredBackend =
-        textPart === this._lastBackendQuery
+        textPart === this._backendResultsQuery
           ? postFilterFilesByQuery(filteredBackend, this.activeQuery)
           : filterFilesByQuery(filteredBackend, this.activeQuery);
     }
