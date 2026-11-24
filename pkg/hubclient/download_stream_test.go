@@ -148,7 +148,7 @@ func TestDownloadStream_ResponseContract(t *testing.T) {
 								}
 							}
 						}
-						if status >= 400 && !(endpoint == "delivery" && status == http.StatusNotFound) {
+						if status >= 400 && (endpoint != "delivery" || status != http.StatusNotFound) {
 							var apiErr *apiclient.APIError
 							if !errors.As(err, &apiErr) || apiErr.StatusCode != status || apiErr.Code != "refused" || apiErr.RequestID != "trace-fixture" || apiErr.RetryAfterSeconds != 7 {
 								t.Errorf("error = %#v; want original API error metadata", err)
