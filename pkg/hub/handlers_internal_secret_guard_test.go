@@ -129,7 +129,7 @@ func TestInternalSecretGuard_HiddenAndRefusedAcrossScopes(t *testing.T) {
 		rec = doRequest(t, srv, http.MethodPut, "/api/v1/secrets/"+escaped, map[string]any{
 			"value":    "overwrite",
 			"encoding": "raw",
-			"type":     "variable",
+			"type":     "environment",
 			"scope":    "hub",
 		})
 		assertConflictInternal(t, rec.Code, rec.Body.Bytes())
@@ -159,7 +159,7 @@ func TestInternalSecretGuard_HiddenAndRefusedAcrossScopes(t *testing.T) {
 		rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/"+projInternalKey, map[string]any{
 			"value":    "overwrite",
 			"encoding": "raw",
-			"type":     "variable",
+			"type":     "environment",
 		})
 		assertConflictInternal(t, rec.Code, rec.Body.Bytes())
 
@@ -184,7 +184,7 @@ func TestInternalSecretGuard_HiddenAndRefusedAcrossScopes(t *testing.T) {
 		rec = doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/agents/"+agent.ID+"/secrets/"+projInternalKey, map[string]any{
 			"value":    "overwrite",
 			"encoding": "raw",
-			"type":     "variable",
+			"type":     "environment",
 			"force":    true,
 			"scope":    "project",
 		}, agentToken)
@@ -211,7 +211,7 @@ func TestInternalSecretGuard_HiddenAndRefusedAcrossScopes(t *testing.T) {
 		rec = doRequest(t, srv, http.MethodPut, "/api/v1/secrets/"+escaped, map[string]any{
 			"value":    "overwrite",
 			"encoding": "raw",
-			"type":     "variable",
+			"type":     "environment",
 			"scope":    "user",
 		})
 		assertConflictInternal(t, rec.Code, rec.Body.Bytes())
@@ -222,7 +222,7 @@ func TestInternalSecretGuard_HiddenAndRefusedAcrossScopes(t *testing.T) {
 		rec = doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/agents/"+agent.ID+"/secrets/"+escaped, map[string]any{
 			"value":    "overwrite",
 			"encoding": "raw",
-			"type":     "variable",
+			"type":     "environment",
 			"scope":    "user",
 		}, agentToken)
 		assertConflictInternal(t, rec.Code, rec.Body.Bytes())
@@ -310,7 +310,7 @@ func TestWebhookEndpointReservedSecretPrefix_RefusedAcrossGenericWrites(t *testi
 			rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/"+escaped, map[string]any{
 				"value":    "planted",
 				"encoding": "raw",
-				"type":     "variable",
+				"type":     "environment",
 				"scope":    sc.scope,
 				"scopeId":  sc.scopeID,
 			})
@@ -321,7 +321,7 @@ func TestWebhookEndpointReservedSecretPrefix_RefusedAcrossGenericWrites(t *testi
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/"+escaped, map[string]any{
 			"value":    "planted",
 			"encoding": "raw",
-			"type":     "variable",
+			"type":     "environment",
 		})
 		assertValidationReserved(t, rec.Code, rec.Body.Bytes())
 
@@ -339,7 +339,7 @@ func TestWebhookEndpointReservedSecretPrefix_RefusedAcrossGenericWrites(t *testi
 			rec = doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/agents/"+agent.ID+"/secrets/"+escaped, map[string]any{
 				"value":    "planted",
 				"encoding": "raw",
-				"type":     "variable",
+				"type":     "environment",
 				"scope":    agScope,
 			}, agentToken)
 			assertValidationReserved(t, rec.Code, rec.Body.Bytes())
@@ -358,7 +358,7 @@ func TestWebhookEndpointReservedSecretPrefix_RefusedAcrossGenericWrites(t *testi
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/WEBHOOK_ENDPOINT_URL", map[string]any{
 		"value":    "https://example.com/hook",
 		"encoding": "raw",
-		"type":     "variable",
+		"type":     "environment",
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }

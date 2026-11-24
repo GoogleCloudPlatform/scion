@@ -1337,6 +1337,13 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	if scope == "" {
 		scope = store.ScopeUser
 	}
+	if secretType == store.SecretTypeOnDemand && scope != store.ScopeProject && scope != store.ScopeAgent {
+		ValidationError(w, "on_demand secrets are only supported at project and agent scope", map[string]interface{}{
+			"field": "scope",
+			"scope": scope,
+		})
+		return
+	}
 
 	scopeID, resolvedAgent, ok := s.resolveEnvSecretAccessWithAgent(w, r, scope, req.ScopeID, true)
 	if !ok {
@@ -1349,14 +1356,6 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 	if rejectWebhookEndpointReservedSecretWrite(w, key) {
-		return
-	}
-
-	if secretType == store.SecretTypeOnDemand && scope != store.ScopeProject && scope != store.ScopeAgent {
-		ValidationError(w, "on_demand secrets are only supported at project and agent scope", map[string]interface{}{
-			"field": "scope",
-			"scope": scope,
-		})
 		return
 	}
 

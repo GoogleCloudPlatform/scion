@@ -263,6 +263,10 @@ func TestStartWithAuth_Unchanged(t *testing.T) {
 				if c.key == "NA_ENV_SECRET_USER_SHARED" {
 					continue // decided by the owner-path chain check, not by this change
 				}
+				if strings.HasPrefix(c.key, "NA_VAR_SECRET_") {
+					assert.Empty(t, delivered[c.key], "%s is on_demand and must never be delivered at start", c.key)
+					continue
+				}
 				assert.Equal(t, c.value, delivered[c.key], "%s is delivered to an agent with credentials", c.key)
 			}
 			// The normal order: the owner's token outranks the
