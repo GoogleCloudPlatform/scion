@@ -1028,4 +1028,54 @@ describe('artifacts list page with filters.query_dialect', () => {
     );
     expect(toggleIsFlagInQuery('report', 'mine', ['shared'], schema)).toBe('is:mine report');
   });
+
+  it('migrates legacy drill-in params to ?q=, strips them from URL, and stays clear after reload', async () => {
+    const m = mockFetch({ '': { artifacts: [item(1)] } });
+    const el = await mountWithDialect('?review_pending=1&owner=me');
+    const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+      value: string;
+    };
+    expect(box.value).toBe('is:review is:mine');
+    const paramsAfterMount = new URLSearchParams(window.location.search);
+    expect(paramsAfterMount.get('q')).toBe('is:review is:mine');
+    expect(paramsAfterMount.get('review_pending')).toBeNull();
+    expect(paramsAfterMount.get('owner')).toBeNull();
+    expect(listUrls(m)[0].get('q')).toBe('is:mine is:review');
+
+    // Clear the filter via filter-commit and simulate a reload (remount).
+    box.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: { value: '', query: { mode: 'text', text: '' }, serverQ: '' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
+    expect(window.location.search).toBe('');
+
+    el.remove();
+    const reloaded = document.createElement('scion-page-artifacts') as ScionPageArtifacts;
+    reloaded.pageData = {
+      path: '/artifacts',
+      title: 'Artifacts',
+      user: { id: ME, email: 'me@example.com', name: 'Me' },
+    } as ScionPageArtifacts['pageData'];
+    document.body.appendChild(reloaded);
+    await settle(reloaded);
+    const reloadedBox = reloaded.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+      value: string;
+    };
+    expect(reloadedBox.value).toBe('');
+    expect(listUrls(m).at(-1)!.get('q')).toBeNull();
+  });
+
+  it('prefers ?q= over legacy drill-in params when both are present', async () => {
+    const m = mockFetch({ '': { artifacts: [item(1)] } });
+    const el = await mountWithDialect('?q=project%3Aweb-app&review_pending=1&owner=me');
+    const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+      value: string;
+    };
+    expect(box.value).toBe('project:web-app');
+    expect(listUrls(m)[0].get('q')).toBe('project:web-app');
+  });
 });

@@ -307,12 +307,16 @@ export class ScionPageArtifacts extends LitElement {
     if (filtersQueryDialectEnabled()) {
       const params = new URLSearchParams(window.location.search);
       let urlQ = params.get('q') ?? '';
+      let migratedLegacy = false;
       if (!urlQ) {
         const migrated: string[] = [];
         const reviewParam = params.get('review_pending');
         if (reviewParam === '1' || reviewParam === 'true') migrated.push('is:review');
         if (params.get('owner') === 'me') migrated.push('is:mine');
-        if (migrated.length > 0) urlQ = migrated.join(' ');
+        if (migrated.length > 0) {
+          urlQ = migrated.join(' ');
+          migratedLegacy = true;
+        }
       }
       if (urlQ) {
         this.filterQueryText = urlQ;
@@ -322,6 +326,9 @@ export class ScionPageArtifacts extends LitElement {
           if (!v.error) {
             this.committedServerQ = serverSubset(parsed.query, ARTIFACTS_FILTER_SCHEMA);
           }
+        }
+        if (migratedLegacy) {
+          this.syncQueryToUrl(urlQ);
         }
       }
     } else {
@@ -595,6 +602,10 @@ export class ScionPageArtifacts extends LitElement {
       params.set('q', trimmed);
     } else {
       params.delete('q');
+    }
+    params.delete('review_pending');
+    if (params.get('owner') === 'me') {
+      params.delete('owner');
     }
     replaceSearch(params);
   }
