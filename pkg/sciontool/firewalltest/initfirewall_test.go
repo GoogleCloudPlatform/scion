@@ -127,6 +127,11 @@ echo "iptables-save $*" >> %q
 	writeExecutable(t, filepath.Join(binDir, "ipset"), fmt.Sprintf(`#!/bin/sh
 echo "ipset $*" >> %q
 state=%q
+exist=0
+if [ "$1" = "-exist" ] || [ "$1" = "-!" ]; then
+    exist=1
+    shift
+fi
 case "$1" in
     destroy)
         rm -f "$state"
@@ -135,9 +140,8 @@ case "$1" in
         : > "$state"
         ;;
     add)
-        exist=0
         shift
-        if [ "$1" = "-exist" ]; then
+        if [ "$1" = "-exist" ] || [ "$1" = "-!" ]; then
             exist=1
             shift
         fi
@@ -177,8 +181,7 @@ echo "default via %s dev eth0"
 	defaultDomains := map[string][]string{
 		"registry.npmjs.org":           {"104.16.0.1"},
 		"api.anthropic.com":            {"160.79.104.10"},
-		"sentry.io":                    {"35.186.247.156"},
-		"statsig.anthropic.com":        {"160.79.104.20"},
+		"sentry.io":                    {"160.79.104.20"},
 		"statsig.com":                  {"160.79.104.20"}, // intentional duplicate IP
 		"marketplace.visualstudio.com": {"13.107.42.18"},
 		"vscode.blob.core.windows.net": {"20.60.178.33"},
@@ -396,9 +399,9 @@ func TestInitFirewall_DefaultHardening(t *testing.T) {
 		t.Errorf("unexpected SSH port 22 rule by default:\n%s", strings.Join(res.calls, "\n"))
 	}
 
-	// Duplicate IP (statsig.anthropic.com & statsig.com both 160.79.104.20) succeeded via -exist.
-	if !hasCall(res.calls, "ipset add -exist allowed-domains 160.79.104.20") {
-		t.Errorf("expected ipset add -exist for duplicate IP")
+	// Duplicate IP (sentry.io & statsig.com both 160.79.104.20) succeeded via -exist.
+	if !hasCall(res.calls, "ipset -exist add allowed-domains 160.79.104.20") {
+		t.Errorf("expected ipset -exist add for duplicate IP")
 	}
 
 	// IPv6 verification check ran because IPV6_FILTERED=1 and eth0 disable_ipv6=0.
@@ -609,8 +612,8 @@ func TestInitFirewall_ExtraDomains(t *testing.T) {
 		for _, want := range []string{
 			"getent ahostsv4 pypi.org",
 			"getent ahostsv4 files.pythonhosted.org",
-			"ipset add -exist allowed-domains 151.101.0.223",
-			"ipset add -exist allowed-domains 151.101.64.223",
+			"ipset -exist add allowed-domains 151.101.0.223",
+			"ipset -exist add allowed-domains 151.101.64.223",
 		} {
 			if !hasCall(res.calls, want) {
 				t.Errorf("missing expected call %q", want)

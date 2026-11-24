@@ -80,6 +80,7 @@ func runInitFirewall(t *testing.T, digResponses map[string]digResult) firewallRu
 
 	writeStub(t, binDir, "iptables-save", `exit 0`)
 	writeStub(t, binDir, "iptables", `exit 0`)
+	writeStub(t, binDir, "ip6tables", `exit 0`)
 	writeStub(t, binDir, "ipset", fmt.Sprintf(`printf '%%s\n' "$*" >> %q
 exist=0
 args=()
@@ -126,26 +127,44 @@ esac`)
 done
 exit 1`)
 
-	var digCases strings.Builder
+	var getentCases strings.Builder
 	for domain, res := range digResponses {
-		fmt.Fprintf(&digCases, "  %q)\n", domain)
+		fmt.Fprintf(&getentCases, "  %q)\n", domain)
 		for _, ip := range res.ips {
-			fmt.Fprintf(&digCases, "    echo %q\n", fmt.Sprintf("%s. 60 IN A %s", domain, ip))
+			fmt.Fprintf(&getentCases, "    printf '%%s STREAM %%s\\n' %q %q\n", ip, domain)
 		}
-		fmt.Fprintf(&digCases, "    exit %d\n    ;;\n", res.exitCode)
+		fmt.Fprintf(&getentCases, "    exit %d\n    ;;\n", res.exitCode)
 	}
-	writeStub(t, binDir, "dig", fmt.Sprintf(`domain="${!#}"
+	writeStub(t, binDir, "getent", fmt.Sprintf(`if [ "$1" != "ahostsv4" ]; then
+  exit 2
+fi
+domain="$2"
 printf '%%s\n' "$domain" >> %q
 case "$domain" in
 %s  *)
-    exit 0
+    exit 2
     ;;
-esac`, digLogPath, digCases.String()))
+esac`, digLogPath, getentCases.String()))
+
+	procRoot := filepath.Join(logDir, "proc")
+	eth0Dir := filepath.Join(procRoot, "sys", "net", "ipv6", "conf", "eth0")
+	if err := os.MkdirAll(eth0Dir, 0o755); err != nil {
+		t.Fatalf("mkdir proc eth0: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(eth0Dir, "disable_ipv6"), []byte("1\n"), 0o644); err != nil {
+		t.Fatalf("write disable_ipv6: %v", err)
+	}
+	resolvPath := filepath.Join(logDir, "resolv.conf")
+	if err := os.WriteFile(resolvPath, []byte("nameserver 127.0.0.11\n"), 0o644); err != nil {
+		t.Fatalf("write resolv.conf: %v", err)
+	}
 
 	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = []string{
 		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
+		"SCION_FW_PROC_ROOT=" + procRoot,
+		"SCION_FW_RESOLV_CONF=" + resolvPath,
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
