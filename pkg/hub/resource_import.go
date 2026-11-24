@@ -54,7 +54,7 @@ const resourceImportConcurrency = 6
 
 // resourceDir pairs a derived resource name with its on-disk directory.
 type resourceDir struct {
-	name, path, sourceURL string
+	name, path, sourceURL, sourceCommit string
 	// nameFromConfig is set when name was read from the directory's
 	// config.yaml before collection; the import then requires the collected
 	// config.yaml to carry the same name.
@@ -227,10 +227,11 @@ func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, source
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
 
-	cachePath, err := s.fetchRemoteForImport(ctx, scope, projectID, sourceURL)
+	fetched, err := s.fetchRemoteForImportWithResult(ctx, scope, projectID, sourceURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch remote %s: %w", kind.noun, err)
 	}
+	cachePath := fetched.Path
 	defer func() { _ = os.RemoveAll(cachePath) }()
 
 	dirs, skipped, err := discoverResourceDirs(cachePath, sourceURL, kind)
@@ -239,6 +240,9 @@ func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, source
 	}
 	if len(dirs) == 0 {
 		return nil, fmt.Errorf("no scion %s found at the source", kind.noun)
+	}
+	for i := range dirs {
+		dirs[i].sourceCommit = fetched.Commit
 	}
 
 	dirs, skipped = selectDirs(dirs, skipped)
@@ -557,6 +561,7 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 				if kind.createOnly {
 					rstore.setCreateOnly(scope, scopeID)
 				}
+				rstore.setSourceCommit(rd.sourceCommit)
 				_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, rd.sourceURL, true)
 			}
 			done := int(completed.Add(1))

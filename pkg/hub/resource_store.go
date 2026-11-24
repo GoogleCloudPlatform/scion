@@ -64,10 +64,11 @@ type ResourceRecord struct {
 	StoragePath   string
 	// Layout is the storage layout (store.Template.Layout,
 	// store.HarnessConfig.Layout).
-	Layout    string
-	Files     []store.TemplateFile
-	Status    string
-	SourceURL string
+	Layout       string
+	Files        []store.TemplateFile
+	Status       string
+	SourceURL    string
+	SourceCommit string
 }
 
 // Resource lifecycle states. Templates and harness-configs use identical string
@@ -184,6 +185,9 @@ type ResourceStore struct {
 	// Bootstrap's existing-row branch (used for agent-initiated template
 	// imports).
 	createOnly bool
+	// sourceCommit is the validated 40-char git commit SHA attested by a
+	// GitHub import/refresh caller; empty for non-GitHub or local sources.
+	sourceCommit string
 }
 
 // templateStore returns a ResourceStore for templates.
@@ -229,6 +233,11 @@ func (rs *ResourceStore) setCreateOnly(scope, scopeID string) {
 		p.createOnlyScope = scope
 		p.createOnlyScopeID = scopeID
 	}
+}
+
+// setSourceCommit sets the validated source commit SHA for this Bootstrap call.
+func (rs *ResourceStore) setSourceCommit(commit string) {
+	rs.sourceCommit = validateSourceCommit(commit)
 }
 
 // collectFiles opens an os.Root at dir (openRealDirRoot) and collects the
@@ -430,6 +439,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			StorageBucket: stor.Bucket(),
 			StorageURI:    storage.ResourceStorageURI(rs.hubID, stor.Bucket(), kind, scope, scopeID, slug),
 			SourceURL:     sourceURL,
+			SourceCommit:  rs.sourceCommit,
 		}
 		if err := p.Create(ctx, rec, cd); err != nil {
 			return false, err
@@ -460,6 +470,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	// Existing resource — short-circuit on unchanged content unless forced.
 	if !force {
 		if rs.srv.computeContentHash(toResourceFiles(files)) == existing.ContentHash {
+			existing.SourceCommit = rs.sourceCommit
 			return p.OnHashMatch(ctx, existing, cd)
 		}
 	}
@@ -486,6 +497,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	if sourceURL != "" {
 		existing.SourceURL = sourceURL
 	}
+	existing.SourceCommit = rs.sourceCommit
 	// Activate the record now that the upload succeeded. This also recovers a
 	// record left in "pending" by a prior bootstrap that failed mid-upload: the
 	// retry re-syncs and flips it to active rather than leaving it stuck.
@@ -543,6 +555,7 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, _
 		Status:        rec.Status,
 		StorageBucket: rec.StorageBucket,
 		SourceURL:     rec.SourceURL,
+		SourceCommit:  rec.SourceCommit,
 	}
 	// New templates are created in the blob layout, with a row-unique
 	// storage path (ptone/scion#4221).
@@ -588,7 +601,13 @@ func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, c
 		p.ensureStoragePath(t)
 	}
 	apply(t)
-	err := p.s.commitTemplateFiles(ctx, t, rec.Files, commitOpts{collected: cd, written: p.written})
+	opts := commitOpts{
+		collected:       cd,
+		written:         p.written,
+		sourceCommit:    rec.SourceCommit,
+		setSourceCommit: true,
+	}
+	err := p.s.commitTemplateFiles(ctx, t, rec.Files, opts)
 	if errors.Is(err, store.ErrTemplateConflict) {
 		// Another commit changed the row since it was read: re-read it and
 		// commit the directory's files once more against the fresh row
@@ -599,7 +618,7 @@ func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, c
 		fresh, err = p.rereadAfterConflict(ctx, t)
 		if err == nil {
 			apply(fresh)
-			if err = p.s.commitTemplateFiles(ctx, fresh, rec.Files, commitOpts{collected: cd, written: p.written}); err == nil {
+			if err = p.s.commitTemplateFiles(ctx, fresh, rec.Files, opts); err == nil {
 				p.model = fresh
 				t = fresh
 			}
@@ -637,12 +656,19 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 	if err != nil {
 		return false, fmt.Errorf("%s: failed to re-derive template %q: %w", p.Label(), t.Name, err)
 	}
-	if templateIndexMatches(t, idx) {
+	indexMatches := templateIndexMatches(t, idx)
+	commitMatches := t.SourceCommit == rec.SourceCommit
+	if indexMatches && commitMatches {
 		return false, nil
 	}
 	prevStoragePath := t.StoragePath
 	p.ensureStoragePath(t)
-	err = p.s.commitTemplateFiles(ctx, t, t.Files, commitOpts{collected: cd})
+	opts := commitOpts{
+		collected:       cd,
+		sourceCommit:    rec.SourceCommit,
+		setSourceCommit: true,
+	}
+	err = p.s.commitTemplateFiles(ctx, t, t.Files, opts)
 	if errors.Is(err, store.ErrTemplateConflict) {
 		var fresh *store.Template
 		fresh, err = p.rereadAfterConflict(ctx, t)
@@ -654,7 +680,7 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 				return false, nil
 			}
 			p.ensureStoragePath(fresh)
-			if err = p.s.commitTemplateFiles(ctx, fresh, fresh.Files, commitOpts{collected: cd}); err == nil {
+			if err = p.s.commitTemplateFiles(ctx, fresh, fresh.Files, opts); err == nil {
 				p.model = fresh
 				t = fresh
 			}
@@ -664,10 +690,12 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 		t.StoragePath = prevStoragePath
 		return false, fmt.Errorf("%s: failed to re-derive template %q: %w", p.Label(), t.Name, err)
 	}
-	p.s.importTemplateHarnessConfigs(ctx, cd, t.Scope, t.ScopeID)
-	p.s.templateLog.Info(p.Label()+": re-derived template index",
-		"template", t.Name, "harness", t.Harness, "defaultHarnessConfig", t.DefaultHarnessConfig)
-	return false, nil
+	if !indexMatches {
+		p.s.importTemplateHarnessConfigs(ctx, cd, t.Scope, t.ScopeID)
+		p.s.templateLog.Info(p.Label()+": re-derived template index",
+			"template", t.Name, "harness", t.Harness, "defaultHarnessConfig", t.DefaultHarnessConfig)
+	}
+	return !commitMatches, nil
 }
 
 // UploadFiles writes the directory's files as blobs under the template's
@@ -871,6 +899,7 @@ func templateToRecord(t *store.Template) *ResourceRecord {
 		Files:         t.Files,
 		Status:        t.Status,
 		SourceURL:     t.SourceURL,
+		SourceCommit:  t.SourceCommit,
 	}
 }
 

@@ -104,6 +104,7 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		Layout:               e.Layout,
 		BaseTemplate:         e.BaseTemplate,
 		SourceURL:            e.SourceURL,
+		SourceCommit:         e.SourceCommit,
 		Status:               string(e.Status),
 		OwnerID:              e.OwnerID,
 		CreatedBy:            e.CreatedBy,
@@ -170,6 +171,7 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Temp
 		SetFiles(marshalJSONString(template.Files)).
 		SetBaseTemplate(template.BaseTemplate).
 		SetSourceURL(template.SourceURL).
+		SetSourceCommit(template.SourceCommit).
 		SetStatus(enttemplate.Status(template.Status)).
 		SetOwnerID(template.OwnerID).
 		SetCreatedBy(template.CreatedBy).
@@ -224,7 +226,7 @@ func (s *TemplateStore) GetTemplateBySlug(ctx context.Context, slug, scope, scop
 
 // UpdateTemplate updates an existing template's metadata. It leaves the
 // content columns (files, content_hash, harness, default_harness_config,
-// agent_config, source_url, status) and the storage columns (layout,
+// agent_config, source_url, source_commit, status) and the storage columns (layout,
 // storage_path, storage_bucket, storage_uri) alone; see
 // store.TemplateStore.UpdateTemplate.
 func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Template) error {
@@ -299,6 +301,7 @@ func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *sto
 		SetLayout(template.Layout).
 		SetFiles(marshalJSONString(template.Files)).
 		SetSourceURL(template.SourceURL).
+		SetSourceCommit(template.SourceCommit).
 		SetStatus(enttemplate.Status(template.Status)).
 		SetUpdatedBy(template.UpdatedBy).
 		SetUpdated(updated).

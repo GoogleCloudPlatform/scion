@@ -123,8 +123,12 @@ func buildTarGz(t *testing.T, entries []tarEntry) []byte {
 			tf = tar.TypeReg
 		}
 		if tf == tar.TypeXGlobalHeader {
+			comment := e.body
+			if comment == "" {
+				comment = "abc123"
+			}
 			require.NoError(t, tw.WriteHeader(&tar.Header{
-				Typeflag: tf, Name: e.name, PAXRecords: map[string]string{"comment": "abc123"},
+				Typeflag: tf, Name: e.name, PAXRecords: map[string]string{"comment": comment},
 			}))
 			continue
 		}
@@ -401,16 +405,60 @@ func TestExtractTemplateSource(t *testing.T) {
 
 	t.Run("extracts only the requested folder", func(t *testing.T) {
 		dest := t.TempDir()
+		const wantCommit = "0123456789abcdef0123456789abcdef01234567"
 		archive := buildTarGz(t, []tarEntry{
-			{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader},
+			{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: wantCommit},
 			{name: "repo-main/README.md", body: "root"},
 			{name: "repo-main/templates/a/scion-agent.yaml", body: "a"},
 			{name: "repo-main/templatesX/b", body: "b"},
 		})
-		require.NoError(t, extractTemplateSource(archive, "templates", dest, lim))
+		commit, err := extractTemplateSource(archive, "templates", dest, lim)
+		require.NoError(t, err)
+		assert.Equal(t, wantCommit, commit)
 		assert.Equal(t, "a", readFile(t, filepath.Join(dest, "a", "scion-agent.yaml")))
 		assert.NoFileExists(t, filepath.Join(dest, "README.md"))
 		assert.NoFileExists(t, filepath.Join(dest, "b"))
+	})
+
+	t.Run("PAX commit header absent or malformed returns empty", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			entries []tarEntry
+		}{
+			{
+				name: "absent",
+				entries: []tarEntry{
+					{name: "repo-main/t/a", body: "a"},
+				},
+			},
+			{
+				name: "short hex",
+				entries: []tarEntry{
+					{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: "abc123"},
+					{name: "repo-main/t/a", body: "a"},
+				},
+			},
+			{
+				name: "uppercase hex",
+				entries: []tarEntry{
+					{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: "0123456789ABCDEF0123456789ABCDEF01234567"},
+					{name: "repo-main/t/a", body: "a"},
+				},
+			},
+			{
+				name: "non-hex",
+				entries: []tarEntry{
+					{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: strings.Repeat("z", 40)},
+					{name: "repo-main/t/a", body: "a"},
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				commit, err := extractTemplateSource(buildTarGz(t, tc.entries), "t", t.TempDir(), lim)
+				require.NoError(t, err)
+				assert.Empty(t, commit)
+			})
+		}
 	})
 
 	t.Run("skips links and names that leave the folder", func(t *testing.T) {
@@ -423,7 +471,8 @@ func TestExtractTemplateSource(t *testing.T) {
 			{name: "repo-main/t/../../../outside", body: "x"},
 			{name: "../../outside2", body: "x"},
 		})
-		require.NoError(t, extractTemplateSource(archive, "t", dest, lim))
+		_, err := extractTemplateSource(archive, "t", dest, lim)
+		require.NoError(t, err)
 		assert.FileExists(t, filepath.Join(dest, "ok"))
 		assert.NoFileExists(t, filepath.Join(dest, "link"))
 		assert.NoFileExists(t, filepath.Join(dest, "hard"))
@@ -436,7 +485,7 @@ func TestExtractTemplateSource(t *testing.T) {
 			{name: "repo-main/t/a", body: strings.Repeat("a", 40)},
 			{name: "repo-main/t/b", body: strings.Repeat("b", 40)},
 		})
-		err := extractTemplateSource(archive, "t", t.TempDir(), lim)
+		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
 		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
 	})
 
@@ -447,7 +496,7 @@ func TestExtractTemplateSource(t *testing.T) {
 			{name: "repo-main/t/d3/", typeflag: tar.TypeDir},
 			{name: "repo-main/t/d4/", typeflag: tar.TypeDir},
 		})
-		err := extractTemplateSource(archive, "t", t.TempDir(), lim)
+		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
 		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
 	})
 
@@ -458,7 +507,7 @@ func TestExtractTemplateSource(t *testing.T) {
 			{name: "repo-main/t/3", body: "3"},
 			{name: "repo-main/t/4", body: "4"},
 		})
-		err := extractTemplateSource(archive, "t", t.TempDir(), lim)
+		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
 		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
 	})
 
@@ -467,19 +516,19 @@ func TestExtractTemplateSource(t *testing.T) {
 			{name: "repo-main/huge", body: strings.Repeat("z", 2<<20)},
 			{name: "repo-main/t/a", body: "a"},
 		})
-		err := extractTemplateSource(archive, "t", t.TempDir(), lim)
+		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
 		assert.ErrorIs(t, err, errTemplateSourceTooLarge)
 	})
 
 	t.Run("missing folder", func(t *testing.T) {
 		archive := buildTarGz(t, []tarEntry{{name: "repo-main/other/a", body: "a"}})
-		err := extractTemplateSource(archive, "t", t.TempDir(), lim)
+		_, err := extractTemplateSource(archive, "t", t.TempDir(), lim)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found")
 	})
 
 	t.Run("not an archive", func(t *testing.T) {
-		err := extractTemplateSource([]byte("<html>"), "t", t.TempDir(), lim)
+		_, err := extractTemplateSource([]byte("<html>"), "t", t.TempDir(), lim)
 		require.Error(t, err)
 	})
 }
@@ -920,7 +969,8 @@ func TestExtractTemplateSource_FileModes(t *testing.T) {
 		{name: "repo-main/t/group-write.txt", body: "x", mode: 0o664},
 	})
 	lim := templateSourceLimits{MaxUnpacked: 1 << 20, MaxExtract: 1 << 20, MaxFiles: 100}
-	require.NoError(t, extractTemplateSource(archive, "t", dest, lim))
+	_, err := extractTemplateSource(archive, "t", dest, lim)
+	require.NoError(t, err)
 
 	for name, want := range map[string]os.FileMode{
 		"plain.txt":       0o644,
@@ -967,4 +1017,42 @@ func TestTemplateReimport_UnchangedSourceKeepsHash(t *testing.T) {
 	second, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)
 	assert.Equal(t, first.ContentHash, second.ContentHash, "an unchanged source must keep the content hash")
+}
+
+func TestTemplateReimport_RecordsAndAdvancesSourceCommit(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-commit", "my-template", store.TemplateScopeGlobal, "", reimportTestSource)
+
+	const commit1 = "1111111111111111111111111111111111111111"
+	const commit2 = "2222222222222222222222222222222222222222"
+
+	fetcher := &fakeTemplateSourceFetcher{body: buildTarGz(t, []tarEntry{
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit1},
+		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates/my-template/README.md", body: "v1"},
+	})}
+	srv.templateSourceFetcher = fetcher
+	reimportPath := "/api/v1/templates/" + tmpl.ID + "/reimport"
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, commit1, got.SourceCommit)
+	firstHash := got.ContentHash
+
+	// Refresh again with identical files at a newer commit: hash stays, commit advances.
+	fetcher.body = buildTarGz(t, []tarEntry{
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: commit2},
+		{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+		{name: "repo-main/templates/my-template/README.md", body: "v1"},
+	})
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, reimportPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err = s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, firstHash, got.ContentHash)
+	assert.Equal(t, commit2, got.SourceCommit)
 }

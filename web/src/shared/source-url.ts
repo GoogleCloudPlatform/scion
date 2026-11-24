@@ -79,3 +79,52 @@ export function describeSourceUrl(sourceUrl: string | undefined | null): SourceD
   }
   return { text: NON_WEB_SOURCE_LABEL, href: null };
 }
+
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * Builds a GitHub tree link pinned to a specific commit SHA for a template's
+ * GitHub source URL (`https://github.com/<owner>/<repo>/tree/<sha>[/<path>]`).
+ * Returns null if sourceUrl is not a GitHub folder/repo URL or commit is not a
+ * 40-char lowercase hex SHA.
+ */
+export function githubCommitTreeUrl(
+  sourceUrl: string | undefined | null,
+  commit: string | undefined | null
+): string | null {
+  if (!sourceUrl || !commit || !COMMIT_SHA_RE.test(commit)) return null;
+  let u: URL;
+  try {
+    u = new URL(sourceUrl.trim().replace(/^git\+/, ''));
+  } catch {
+    return null;
+  }
+  if (
+    u.protocol !== 'https:' ||
+    u.hostname.toLowerCase() !== 'github.com' ||
+    u.username !== '' ||
+    u.password !== ''
+  ) {
+    return null;
+  }
+  const parts = u.pathname.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  const owner = parts[0];
+  const repo = parts[1].replace(/\.git$/, '');
+  if (!owner || !repo) return null;
+
+  let subPath = '';
+  const rest = parts.slice(2);
+  if (rest.length > 0) {
+    if (rest[0] === 'tree') {
+      if (rest.length < 2) return null;
+      subPath = rest.slice(2).join('/');
+    } else if (rest[0] === 'archive' || rest[0] === 'blob' || rest[0] === 'releases') {
+      return null;
+    } else {
+      subPath = rest.join('/');
+    }
+  }
+  const base = `https://github.com/${owner}/${repo}/tree/${commit}`;
+  return subPath ? `${base}/${subPath}` : base;
+}

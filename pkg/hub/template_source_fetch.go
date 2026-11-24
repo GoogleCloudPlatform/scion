@@ -122,7 +122,23 @@ var (
 	githubRepoRe   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 	githubBranchRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
 	githubPathRe   = regexp.MustCompile(`^[A-Za-z0-9._ @+-]{1,255}$`)
+	sourceCommitRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
+
+// validateSourceCommit returns raw trimmed if it is a valid 40-character
+// lowercase hex git commit SHA; otherwise it returns "" and logs at debug
+// level when raw is non-empty.
+func validateSourceCommit(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if !sourceCommitRe.MatchString(trimmed) {
+		slog.Debug("ignoring invalid template source commit", "raw", trimmed)
+		return ""
+	}
+	return trimmed
+}
 
 // errTemplateSourceUnsupported is returned for a source URL reimport does not
 // support. Its message is fixed text and never includes the URL.
@@ -220,22 +236,24 @@ func (c *cappedReader) Read(p []byte) (int, error) {
 }
 
 // extractTemplateSource extracts the files under subPath from a GitHub
-// archive (a gzip tarball with one top-level directory) into dest. Only
-// regular files and directories are written, files with mode 0755 or 0644
-// (see extractFileMode); links and other entry types
-// are skipped, as are entries whose names would leave dest. It fails when
-// the archive exceeds the unpacked, extracted-size or file-count limits, or
-// when nothing exists at subPath.
-func extractTemplateSource(archive []byte, subPath, dest string, lim templateSourceLimits) error {
+// archive (a gzip tarball with one top-level directory) into dest, returning
+// the validated 40-char commit SHA from the archive's PAX global header
+// (comment record) when present. Only regular files and directories are
+// written, files with mode 0755 or 0644 (see extractFileMode); links and other
+// entry types are skipped, as are entries whose names would leave dest. It
+// fails when the archive exceeds the unpacked, extracted-size or file-count
+// limits, or when nothing exists at subPath.
+func extractTemplateSource(archive []byte, subPath, dest string, lim templateSourceLimits) (string, error) {
 	gzr, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
-		return fmt.Errorf("template source is not a valid archive: %w", err)
+		return "", fmt.Errorf("template source is not a valid archive: %w", err)
 	}
 	defer func() { _ = gzr.Close() }()
 	tr := tar.NewReader(&cappedReader{r: gzr, remaining: lim.MaxUnpacked})
 
 	subPath = strings.Trim(subPath, "/")
 	var written int64
+	var sourceCommit string
 	files := 0
 	found := false
 
@@ -246,9 +264,15 @@ func extractTemplateSource(archive []byte, subPath, dest string, lim templateSou
 		}
 		if err != nil {
 			if errors.Is(err, errTemplateSourceTooLarge) {
-				return errTemplateSourceTooLarge
+				return "", errTemplateSourceTooLarge
 			}
-			return fmt.Errorf("template source is not a valid archive: %w", err)
+			return "", fmt.Errorf("template source is not a valid archive: %w", err)
+		}
+		if hdr.Typeflag == tar.TypeXGlobalHeader {
+			if sourceCommit == "" {
+				sourceCommit = validateSourceCommit(hdr.PAXRecords["comment"])
+			}
+			continue
 		}
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir {
 			continue
@@ -281,52 +305,52 @@ func extractTemplateSource(archive []byte, subPath, dest string, lim templateSou
 		// Directories count toward the entry limit as well as files.
 		files++
 		if files > lim.MaxFiles {
-			return errTemplateSourceTooLarge
+			return "", errTemplateSourceTooLarge
 		}
 
 		if hdr.Typeflag == tar.TypeDir {
 			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
+				return "", err
 			}
 			continue
 		}
 
 		if hdr.Size < 0 || written+hdr.Size > lim.MaxExtract {
-			return errTemplateSourceTooLarge
+			return "", errTemplateSourceTooLarge
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
+			return "", err
 		}
 		mode := extractFileMode(hdr.Mode)
 		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 		if err != nil {
-			return err
+			return "", err
 		}
 		// Apply the mode exactly, independent of the process umask.
 		if err := f.Chmod(mode); err != nil {
 			_ = f.Close()
-			return err
+			return "", err
 		}
 		n, copyErr := io.Copy(f, io.LimitReader(tr, lim.MaxExtract-written+1))
 		closeErr := f.Close()
 		written += n
 		if copyErr != nil {
 			if errors.Is(copyErr, errTemplateSourceTooLarge) {
-				return errTemplateSourceTooLarge
+				return "", errTemplateSourceTooLarge
 			}
-			return fmt.Errorf("template source is not a valid archive: %w", copyErr)
+			return "", fmt.Errorf("template source is not a valid archive: %w", copyErr)
 		}
 		if written > lim.MaxExtract {
-			return errTemplateSourceTooLarge
+			return "", errTemplateSourceTooLarge
 		}
 		if closeErr != nil {
-			return closeErr
+			return "", closeErr
 		}
 	}
 	if !found {
-		return errors.New("the source folder was not found in the repository")
+		return "", errors.New("the source folder was not found in the repository")
 	}
-	return nil
+	return sourceCommit, nil
 }
 
 // extractFileMode returns the mode a regular file from the archive is written
@@ -484,7 +508,8 @@ func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *temp
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	if err := extractTemplateSource(res.Body, src.Path, dir, lim); err != nil {
+	sourceCommit, err := extractTemplateSource(res.Body, src.Path, dir, lim)
+	if err != nil {
 		return nil, err
 	}
 
@@ -502,6 +527,7 @@ func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *temp
 	// Report and write under the target's own name; the store resolves the
 	// record by tmpl.ID regardless of the folder name.
 	selected.name = tmpl.Name
+	selected.sourceCommit = sourceCommit
 	kind.newStore = func(string) (*ResourceStore, error) { return s.targetTemplateStore(tmpl.ID), nil }
 	return s.importResourceDirs(ctx, []resourceDir{selected}, nil, tmpl.Scope, tmpl.ScopeID, kind, progress), nil
 }

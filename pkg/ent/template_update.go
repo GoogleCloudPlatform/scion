@@ -438,6 +438,26 @@ func (_u *TemplateUpdate) ClearSourceURL() *TemplateUpdate {
 	return _u
 }
 
+// SetSourceCommit sets the "source_commit" field.
+func (_u *TemplateUpdate) SetSourceCommit(v string) *TemplateUpdate {
+	_u.mutation.SetSourceCommit(v)
+	return _u
+}
+
+// SetNillableSourceCommit sets the "source_commit" field if the given value is not nil.
+func (_u *TemplateUpdate) SetNillableSourceCommit(v *string) *TemplateUpdate {
+	if v != nil {
+		_u.SetSourceCommit(*v)
+	}
+	return _u
+}
+
+// ClearSourceCommit clears the value of the "source_commit" field.
+func (_u *TemplateUpdate) ClearSourceCommit() *TemplateUpdate {
+	_u.mutation.ClearSourceCommit()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *TemplateUpdate) SetUpdated(v time.Time) *TemplateUpdate {
 	_u.mutation.SetUpdated(v)
@@ -633,6 +653,12 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(template.FieldSourceURL, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceCommit(); ok {
+		_spec.SetField(template.FieldSourceCommit, field.TypeString, value)
+	}
+	if _u.mutation.SourceCommitCleared() {
+		_spec.ClearField(template.FieldSourceCommit, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(template.FieldUpdated, field.TypeTime, value)
@@ -1067,6 +1093,26 @@ func (_u *TemplateUpdateOne) ClearSourceURL() *TemplateUpdateOne {
 	return _u
 }
 
+// SetSourceCommit sets the "source_commit" field.
+func (_u *TemplateUpdateOne) SetSourceCommit(v string) *TemplateUpdateOne {
+	_u.mutation.SetSourceCommit(v)
+	return _u
+}
+
+// SetNillableSourceCommit sets the "source_commit" field if the given value is not nil.
+func (_u *TemplateUpdateOne) SetNillableSourceCommit(v *string) *TemplateUpdateOne {
+	if v != nil {
+		_u.SetSourceCommit(*v)
+	}
+	return _u
+}
+
+// ClearSourceCommit clears the value of the "source_commit" field.
+func (_u *TemplateUpdateOne) ClearSourceCommit() *TemplateUpdateOne {
+	_u.mutation.ClearSourceCommit()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *TemplateUpdateOne) SetUpdated(v time.Time) *TemplateUpdateOne {
 	_u.mutation.SetUpdated(v)
@@ -1292,6 +1338,12 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(template.FieldSourceURL, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceCommit(); ok {
+		_spec.SetField(template.FieldSourceCommit, field.TypeString, value)
+	}
+	if _u.mutation.SourceCommitCleared() {
+		_spec.ClearField(template.FieldSourceCommit, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(template.FieldUpdated, field.TypeTime, value)

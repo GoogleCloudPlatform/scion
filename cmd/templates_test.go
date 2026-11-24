@@ -22,7 +22,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"text/tabwriter"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -642,5 +645,204 @@ func TestRunTemplateList_HubListErrors(t *testing.T) {
 		assert.Contains(t, stdout, "global-tpl")
 		assert.Contains(t, stderr, "Warning: could not list project templates on the hub")
 		assert.Contains(t, stderr, "Warning: could not list user templates on the hub")
+	})
+}
+
+func TestDisplayHubTemplateShow_SourceCommit(t *testing.T) {
+	const fullSHA = "0123456789abcdef0123456789abcdef01234567"
+
+	t.Run("text shows 7-char source commit when set", func(t *testing.T) {
+		prevJSON := outputFormat
+		outputFormat = ""
+		defer func() { outputFormat = prevJSON }()
+
+		match := &TemplateMatch{
+			Name:     "my-tpl",
+			Location: LocationHubProject,
+			HubTemplate: &hubclient.Template{
+				ID:           "tpl-1",
+				Name:         "my-tpl",
+				Harness:      "claude",
+				Scope:        "project",
+				Status:       "active",
+				SourceURL:    "https://github.com/acme/repo/tree/main/.scion/templates/my-tpl",
+				SourceCommit: fullSHA,
+			},
+		}
+		var err error
+		stdout, _ := captureStdIO(t, func() { err = displayHubTemplateShow(match) })
+		require.NoError(t, err)
+		assert.Contains(t, stdout, "Source URL: https://github.com/acme/repo/tree/main/.scion/templates/my-tpl")
+		assert.Contains(t, stdout, "Source Commit: 0123456\n")
+		assert.NotContains(t, stdout, fullSHA)
+	})
+
+	t.Run("text omits source commit when empty", func(t *testing.T) {
+		prevJSON := outputFormat
+		outputFormat = ""
+		defer func() { outputFormat = prevJSON }()
+
+		match := &TemplateMatch{
+			Name:     "my-tpl",
+			Location: LocationHubProject,
+			HubTemplate: &hubclient.Template{
+				ID:      "tpl-1",
+				Name:    "my-tpl",
+				Harness: "claude",
+				Scope:   "project",
+				Status:  "active",
+			},
+		}
+		var err error
+		stdout, _ := captureStdIO(t, func() { err = displayHubTemplateShow(match) })
+		require.NoError(t, err)
+		assert.NotContains(t, stdout, "Source Commit:")
+	})
+
+	t.Run("json includes full 40-char sourceCommit when set and omits when empty", func(t *testing.T) {
+		prevJSON := outputFormat
+		outputFormat = "json"
+		defer func() { outputFormat = prevJSON }()
+
+		withCommit := &TemplateMatch{
+			Name:     "my-tpl",
+			Location: LocationHubProject,
+			HubTemplate: &hubclient.Template{
+				ID:           "tpl-1",
+				Name:         "my-tpl",
+				Harness:      "claude",
+				Scope:        "project",
+				Status:       "active",
+				SourceURL:    "https://github.com/acme/repo/tree/main/.scion/templates/my-tpl",
+				SourceCommit: fullSHA,
+			},
+		}
+		var err error
+		stdout, _ := captureStdIO(t, func() { err = displayHubTemplateShow(withCommit) })
+		require.NoError(t, err)
+		var decoded map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(stdout), &decoded))
+		assert.Equal(t, fullSHA, decoded["sourceCommit"])
+
+		withoutCommit := &TemplateMatch{
+			Name:     "my-tpl",
+			Location: LocationHubProject,
+			HubTemplate: &hubclient.Template{
+				ID:      "tpl-1",
+				Name:    "my-tpl",
+				Harness: "claude",
+				Scope:   "project",
+				Status:  "active",
+			},
+		}
+		stdout, _ = captureStdIO(t, func() { err = displayHubTemplateShow(withoutCommit) })
+		require.NoError(t, err)
+		decoded = nil
+		require.NoError(t, json.Unmarshal([]byte(stdout), &decoded))
+		_, hasCommit := decoded["sourceCommit"]
+		assert.False(t, hasCommit)
+	})
+}
+
+func TestTemplateList_CommitColumnAndJSON(t *testing.T) {
+	const fullSHA = "0123456789abcdef0123456789abcdef01234567"
+
+	t.Run("table shows COMMIT column for hub sections and leaves local unchanged", func(t *testing.T) {
+		var buf strings.Builder
+		w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
+		printTemplateListHubMode(
+			w,
+			[]*config.Template{{Name: "local-tpl", Path: "/tmp/local-tpl"}},
+			nil,
+			[]hubclient.Template{
+				{Name: "gh-tpl", ID: "id-1", ContentHash: "sha256:1234567890abcdef", SourceCommit: fullSHA},
+				{Name: "plain-tpl", ID: "id-2", ContentHash: "sha256:fedcba9876543210"},
+			},
+			nil,
+			nil,
+		)
+		require.NoError(t, w.Flush())
+		out := buf.String()
+		assert.Contains(t, out, "NAME")
+		assert.Contains(t, out, "PATH")
+		assert.Contains(t, out, "COMMIT")
+		assert.Contains(t, out, "0123456")
+		assert.NotContains(t, out, fullSHA)
+		// Empty source commit renders as "-"
+		lines := strings.Split(out, "\n")
+		var foundPlain bool
+		for _, line := range lines {
+			if strings.Contains(line, "plain-tpl") {
+				foundPlain = true
+				assert.True(t, strings.HasSuffix(strings.TrimSpace(line), "-"), "line=%q", line)
+			}
+		}
+		assert.True(t, foundPlain)
+	})
+
+	t.Run("json includes sourceUrl and full sourceCommit for hub templates", func(t *testing.T) {
+		orig := saveTemplateTestState()
+		defer orig.restore()
+		prevJSON := outputFormat
+		outputFormat = "json"
+		defer func() { outputFormat = prevJSON }()
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/healthz":
+				_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+				if r.URL.Query().Get("scope") == "global" {
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"templates": []map[string]string{
+							{
+								"id":           "g-1",
+								"name":         "gh-tpl",
+								"contentHash":  "sha256:aaa",
+								"sourceUrl":    "https://github.com/acme/repo/tree/main/templates/gh-tpl",
+								"sourceCommit": fullSHA,
+							},
+							{
+								"id":          "g-2",
+								"name":        "plain-tpl",
+								"contentHash": "sha256:bbb",
+							},
+						},
+					})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": []interface{}{}})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+		t.Setenv("SCION_DEV_TOKEN", "scion_dev_tpl")
+		t.Setenv("SCION_PROJECT_ID", "tpl-project")
+		globalMode, projectPath = false, ""
+		t.Chdir(t.TempDir())
+
+		var err error
+		stdout, _ := captureStdIO(t, func() { err = runTemplateList(nil, nil) })
+		require.NoError(t, err)
+
+		var decoded struct {
+			Hub struct {
+				Global []map[string]interface{} `json:"global"`
+			} `json:"hub"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(stdout), &decoded))
+		require.Len(t, decoded.Hub.Global, 2)
+		// Sorted by name: gh-tpl then plain-tpl
+		assert.Equal(t, "gh-tpl", decoded.Hub.Global[0]["name"])
+		assert.Equal(t, "https://github.com/acme/repo/tree/main/templates/gh-tpl", decoded.Hub.Global[0]["sourceUrl"])
+		assert.Equal(t, fullSHA, decoded.Hub.Global[0]["sourceCommit"])
+		assert.Equal(t, "plain-tpl", decoded.Hub.Global[1]["name"])
+		_, hasURL := decoded.Hub.Global[1]["sourceUrl"]
+		_, hasCommit := decoded.Hub.Global[1]["sourceCommit"]
+		assert.False(t, hasURL)
+		assert.False(t, hasCommit)
 	})
 }

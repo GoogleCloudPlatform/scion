@@ -742,6 +742,8 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	if resolvedTemplate != nil {
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
 		agent.AppliedConfig.TemplateHash = resolvedTemplate.ContentHash
+		agent.AppliedConfig.TemplateSourceURL = resolvedTemplate.SourceURL
+		agent.AppliedConfig.TemplateSourceCommit = resolvedTemplate.SourceCommit
 
 		// The template's job keys are not copied here. Its model is filled
 		// by deriveAgentConfig's template rung, from the AgentConfig

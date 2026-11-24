@@ -65,6 +65,65 @@ func TestCreateAndGetTemplate(t *testing.T) {
 	assert.Equal(t, "home/.bashrc", got.Files[0].Path)
 }
 
+func TestTemplateSourceCommit_RoundTripAndMetadataPreservation(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	const commit1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const commit2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	tmpl := &store.Template{
+		ID:           uuid.New().String(),
+		Name:         "from-gh",
+		Slug:         "from-gh",
+		Harness:      "claude",
+		Scope:        store.TemplateScopeGlobal,
+		ContentHash:  "sha256:h1",
+		SourceURL:    "https://github.com/acme/repo/tree/main/.scion/templates/from-gh",
+		SourceCommit: commit1,
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, commit1, got.SourceCommit)
+
+	// Metadata update (UpdateTemplate) must not touch source_commit even if the
+	// caller passes a different value.
+	got.Description = "updated description"
+	got.SourceCommit = ""
+	require.NoError(t, ts.UpdateTemplate(ctx, got))
+
+	afterMeta, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "updated description", afterMeta.Description)
+	assert.Equal(t, commit1, afterMeta.SourceCommit)
+
+	// Content update (UpdateTemplateContent) writes source_commit.
+	afterMeta.ContentHash = "sha256:h2"
+	afterMeta.SourceCommit = commit2
+	require.NoError(t, ts.UpdateTemplateContent(ctx, afterMeta, store.TemplateContentPrecondition{
+		ContentHash: "sha256:h1",
+		Layout:      afterMeta.Layout,
+	}))
+
+	afterContent, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, commit2, afterContent.SourceCommit)
+
+	// Clearing source_commit via UpdateTemplateContent persists empty string.
+	afterContent.ContentHash = "sha256:h3"
+	afterContent.SourceCommit = ""
+	require.NoError(t, ts.UpdateTemplateContent(ctx, afterContent, store.TemplateContentPrecondition{
+		ContentHash: "sha256:h2",
+		Layout:      afterContent.Layout,
+	}))
+
+	afterClear, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Empty(t, afterClear.SourceCommit)
+}
+
 func TestGetTemplateNotFound(t *testing.T) {
 	ts := newTestTemplateStore(t)
 	_, err := ts.GetTemplate(context.Background(), uuid.New().String())

@@ -308,6 +308,20 @@ func (_c *TemplateCreate) SetNillableSourceURL(v *string) *TemplateCreate {
 	return _c
 }
 
+// SetSourceCommit sets the "source_commit" field.
+func (_c *TemplateCreate) SetSourceCommit(v string) *TemplateCreate {
+	_c.mutation.SetSourceCommit(v)
+	return _c
+}
+
+// SetNillableSourceCommit sets the "source_commit" field if the given value is not nil.
+func (_c *TemplateCreate) SetNillableSourceCommit(v *string) *TemplateCreate {
+	if v != nil {
+		_c.SetSourceCommit(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *TemplateCreate) SetCreated(v time.Time) *TemplateCreate {
 	_c.mutation.SetCreated(v)
@@ -572,6 +586,10 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.SourceURL(); ok {
 		_spec.SetField(template.FieldSourceURL, field.TypeString, value)
 		_node.SourceURL = value
+	}
+	if value, ok := _c.mutation.SourceCommit(); ok {
+		_spec.SetField(template.FieldSourceCommit, field.TypeString, value)
+		_node.SourceCommit = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(template.FieldCreated, field.TypeTime, value)
@@ -996,6 +1014,24 @@ func (u *TemplateUpsert) UpdateSourceURL() *TemplateUpsert {
 // ClearSourceURL clears the value of the "source_url" field.
 func (u *TemplateUpsert) ClearSourceURL() *TemplateUpsert {
 	u.SetNull(template.FieldSourceURL)
+	return u
+}
+
+// SetSourceCommit sets the "source_commit" field.
+func (u *TemplateUpsert) SetSourceCommit(v string) *TemplateUpsert {
+	u.Set(template.FieldSourceCommit, v)
+	return u
+}
+
+// UpdateSourceCommit sets the "source_commit" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateSourceCommit() *TemplateUpsert {
+	u.SetExcluded(template.FieldSourceCommit)
+	return u
+}
+
+// ClearSourceCommit clears the value of the "source_commit" field.
+func (u *TemplateUpsert) ClearSourceCommit() *TemplateUpsert {
+	u.SetNull(template.FieldSourceCommit)
 	return u
 }
 
@@ -1486,6 +1522,27 @@ func (u *TemplateUpsertOne) UpdateSourceURL() *TemplateUpsertOne {
 func (u *TemplateUpsertOne) ClearSourceURL() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearSourceURL()
+	})
+}
+
+// SetSourceCommit sets the "source_commit" field.
+func (u *TemplateUpsertOne) SetSourceCommit(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetSourceCommit(v)
+	})
+}
+
+// UpdateSourceCommit sets the "source_commit" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateSourceCommit() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateSourceCommit()
+	})
+}
+
+// ClearSourceCommit clears the value of the "source_commit" field.
+func (u *TemplateUpsertOne) ClearSourceCommit() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearSourceCommit()
 	})
 }
 
@@ -2145,6 +2202,27 @@ func (u *TemplateUpsertBulk) UpdateSourceURL() *TemplateUpsertBulk {
 func (u *TemplateUpsertBulk) ClearSourceURL() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearSourceURL()
+	})
+}
+
+// SetSourceCommit sets the "source_commit" field.
+func (u *TemplateUpsertBulk) SetSourceCommit(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetSourceCommit(v)
+	})
+}
+
+// UpdateSourceCommit sets the "source_commit" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateSourceCommit() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateSourceCommit()
+	})
+}
+
+// ClearSourceCommit clears the value of the "source_commit" field.
+func (u *TemplateUpsertBulk) ClearSourceCommit() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearSourceCommit()
 	})
 }
 
