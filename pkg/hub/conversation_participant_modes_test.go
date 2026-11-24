@@ -77,7 +77,7 @@ func TestGetConversation_ParticipantMessageModes(t *testing.T) {
 	project, caller, conv := setupConvTestData(t, s)
 	grantAgentProjectAccess(t, s, caller.ID, project.ID)
 
-	peer := createModeTestAgent(t, s, project.ID, "branch-peer", store.MessageModeBranch)
+	peer := createModeTestAgent(t, s, project.ID, "branch-peer", store.MessageModeDirect)
 	other := createModeTestProject(t, s, "other-project")
 	foreign := createModeTestAgent(t, s, other.ID, "foreign-agent", store.MessageModeHub)
 
@@ -96,7 +96,7 @@ func TestGetConversation_ParticipantMessageModes(t *testing.T) {
 	require.Len(t, got, 4)
 	assert.Equal(t, store.MessageModeProject, got[caller.ID]["messageMode"],
 		"an agent created without a mode is stored as project")
-	assert.Equal(t, store.MessageModeBranch, got[peer.ID]["messageMode"])
+	assert.Equal(t, store.MessageModeDirect, got[peer.ID]["messageMode"])
 	assert.NotContains(t, got[foreign.ID], "messageMode", "cross-project agent must not expose its mode")
 	assert.NotContains(t, got["user-1"], "messageMode", "users have no message mode")
 }
@@ -120,7 +120,7 @@ func TestGetConversation_ParticipantMessageModes_UserCaller(t *testing.T) {
 	require.NoError(t, s.CreateUser(context.Background(), user))
 	grantUserProjectAccess(t, s, userID, project.ID)
 
-	peer := createModeTestAgent(t, s, project.ID, "lineage-peer", store.MessageModeLineage)
+	peer := createModeTestAgent(t, s, project.ID, "lineage-peer", store.MessageModeOwner)
 	other := createModeTestProject(t, s, "other-project-u")
 	foreign := createModeTestAgent(t, s, other.ID, "foreign-agent-u", store.MessageModeHub)
 
@@ -139,7 +139,7 @@ func TestGetConversation_ParticipantMessageModes_UserCaller(t *testing.T) {
 	got := participantsByID(t, rr.Body.Bytes())
 	require.Len(t, got, 4)
 	assert.Equal(t, store.MessageModeProject, got[member.ID]["messageMode"])
-	assert.Equal(t, store.MessageModeLineage, got[peer.ID]["messageMode"])
+	assert.Equal(t, store.MessageModeOwner, got[peer.ID]["messageMode"])
 	assert.NotContains(t, got[foreign.ID], "messageMode", "cross-project agent must not expose its mode")
 	assert.NotContains(t, got[userID], "messageMode", "users have no message mode")
 }
@@ -152,7 +152,7 @@ func TestConversationParticipantViews_DirectConversations(t *testing.T) {
 	projA := createModeTestProject(t, s, "proj-a")
 	projB := createModeTestProject(t, s, "proj-b")
 	agentA := createModeTestAgent(t, s, projA.ID, "agent-a", store.MessageModeHub)
-	agentA2 := createModeTestAgent(t, s, projA.ID, "agent-a2", store.MessageModeLineage)
+	agentA2 := createModeTestAgent(t, s, projA.ID, "agent-a2", store.MessageModeOwner)
 	agentB := createModeTestAgent(t, s, projB.ID, "agent-b", store.MessageModeProject)
 
 	dm := &store.Conversation{ID: api.NewUUID(), Kind: "direct", Surface: "native", CreatedAt: time.Now()}
@@ -182,7 +182,7 @@ func TestConversationParticipantViews_DirectConversations(t *testing.T) {
 			part("agent", agentA.ID), part("agent", agentA2.ID),
 		}))
 		assert.Equal(t, store.MessageModeHub, got[agentA.ID])
-		assert.Equal(t, store.MessageModeLineage, got[agentA2.ID])
+		assert.Equal(t, store.MessageModeOwner, got[agentA2.ID])
 	})
 
 	t.Run("user caller, DM agent mode hidden", func(t *testing.T) {

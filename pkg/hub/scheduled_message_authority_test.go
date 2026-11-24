@@ -397,7 +397,7 @@ func TestScheduledMessageAuthority(t *testing.T) {
 		t.Run("branch-mode target without a relationship is denied by the agent message rule", func(t *testing.T) {
 			f := newSchedMsg(t, "smsg-r9-br")
 			sender := f.sessionAgent(t, "smsg-r9-br-sender")
-			f.target.MessageMode = store.MessageModeBranch
+			f.target.MessageMode = store.MessageModeDirect
 			require.NoError(t, f.store.UpdateAgent(ctx, f.target))
 			evt := withAgentRevision(t, f.srv, f.msgEvent(), sender.ID)
 			err := authorizeScheduledMessageFireFor(f.srv, evt, f.target)

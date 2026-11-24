@@ -247,7 +247,7 @@ func TestOutboundDMAuthz_SenderModeNone_Denied(t *testing.T) {
 
 func TestOutboundDMAuthz_LineageMode_Denied(t *testing.T) {
 	srv, s, project, sender, target, convID, dispatcher := authzDMSetup(t,
-		store.MessageModeLineage, store.MessageModeProject)
+		store.MessageModeOwner, store.MessageModeProject)
 	_ = target // unused but kept for clarity
 
 	rr := sendAuthzDM(t, srv, sender, convID, project.ID, "lineage mode denied")
@@ -260,7 +260,7 @@ func TestOutboundDMAuthz_LineageMode_Denied(t *testing.T) {
 
 func TestOutboundDMAuthz_BranchModeNonParentChild_Denied(t *testing.T) {
 	srv, s, project, sender, _, convID, dispatcher := authzDMSetup(t,
-		store.MessageModeBranch, store.MessageModeBranch)
+		store.MessageModeDirect, store.MessageModeDirect)
 
 	// Neither agent is the other's parent → denied.
 	rr := sendAuthzDM(t, srv, sender, convID, project.ID, "branch no relation")

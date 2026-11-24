@@ -115,7 +115,7 @@ func phase5Setup(t *testing.T) phase5Fixture {
 		Slug:        "branch-agent-b",
 		Name:        "Branch Agent B",
 		ProjectID:   base.projectB,
-		MessageMode: store.MessageModeBranch,
+		MessageMode: store.MessageModeDirect,
 		Ancestry:    []string{base.ownerB.ID},
 		Phase:       "running",
 		Created:     time.Now(),
@@ -415,7 +415,7 @@ func TestScheduledMessageCrossProject_ModeChanged(t *testing.T) {
 	ctx := context.Background()
 
 	branchAgent := *f.hubAgentB
-	branchAgent.MessageMode = store.MessageModeBranch
+	branchAgent.MessageMode = store.MessageModeDirect
 
 	evt := store.ScheduledEvent{
 		ID:        tid("p5-evt-3"),

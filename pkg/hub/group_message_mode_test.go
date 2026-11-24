@@ -37,20 +37,14 @@ import (
 
 // Tests for message modes in group conversations (group_message_mode.go).
 
-var groupModeTestModes = []string{
-	store.MessageModeNone,
-	store.MessageModeLineage,
-	store.MessageModeBranch,
-	store.MessageModeProject,
-	store.MessageModeHub,
-}
+var groupModeTestModes = store.MessageModes()
 
 func groupModeIsProjectCell(mode string) bool {
 	return mode == store.MessageModeProject || mode == store.MessageModeHub
 }
 
 func groupModeIsNarrow(mode string) bool {
-	return mode == store.MessageModeLineage || mode == store.MessageModeBranch
+	return store.IsNarrowMessageMode(mode)
 }
 
 // groupModeAgent creates a running agent with the given mode in projectID.
@@ -404,8 +398,8 @@ func TestGroupMessageMode_InboundRecipientJoin(t *testing.T) {
 	brokerID := target0.RuntimeBrokerID
 
 	t.Run("branch-parent-agent-sender", func(t *testing.T) {
-		parent := groupModeAgent(t, s, projectID, brokerID, store.MessageModeBranch)
-		child := groupModeAgent(t, s, projectID, brokerID, store.MessageModeBranch, parent.ID)
+		parent := groupModeAgent(t, s, projectID, brokerID, store.MessageModeDirect)
+		child := groupModeAgent(t, s, projectID, brokerID, store.MessageModeDirect, parent.ID)
 		conv := groupModeConversation(t, s, projectID, "")
 		addConvParticipant(t, s, conv.ID, "agent", parent.ID)
 
@@ -585,8 +579,8 @@ func TestGroupMessageMode_MentionJoin(t *testing.T) {
 		require.NoError(t, s.CreateAgent(ctx, a))
 		return a
 	}
-	parent := newAgent("gmm-mj-parent", store.MessageModeBranch, append([]string{}, sender.Ancestry...))
-	child := newAgent("gmm-mj-child", store.MessageModeBranch, append(append([]string{}, parent.Ancestry...), parent.ID))
+	parent := newAgent("gmm-mj-parent", store.MessageModeDirect, append([]string{}, sender.Ancestry...))
+	child := newAgent("gmm-mj-child", store.MessageModeDirect, append(append([]string{}, parent.Ancestry...), parent.ID))
 	peer := newAgent("gmm-mj-peer", store.MessageModeProject, append([]string{}, sender.Ancestry...))
 
 	t.Run("branch-child", func(t *testing.T) {

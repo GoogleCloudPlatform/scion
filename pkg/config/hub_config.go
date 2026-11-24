@@ -303,7 +303,7 @@ type HubServerConfig struct {
 // defaultMessageModeValues are the values server.hub.default_message_mode
 // accepts. "hub" is not one of them: hub mode reaches agents in other
 // projects and must be granted per agent, never by a hub-wide default.
-var defaultMessageModeValues = []string{"none", "lineage", "branch", "project"}
+var defaultMessageModeValues = []string{"none", "owner", "direct", "tree", "project"}
 
 // ValidateDefaultMessageMode checks server.hub.default_message_mode. Empty
 // (unset) is valid and means "project".
@@ -315,6 +315,10 @@ func ValidateDefaultMessageMode(mode string) error {
 		if mode == v {
 			return nil
 		}
+	}
+	if repl, retired := api.RetiredMessageModeHint(mode); retired {
+		return fmt.Errorf("invalid server.hub.default_message_mode %q (%q was renamed to %q): must be one of %s",
+			mode, mode, repl, strings.Join(defaultMessageModeValues, ", "))
 	}
 	return fmt.Errorf("invalid server.hub.default_message_mode %q: must be one of %s", mode, strings.Join(defaultMessageModeValues, ", "))
 }

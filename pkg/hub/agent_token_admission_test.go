@@ -484,7 +484,7 @@ func TestSetMessageModeToken_ProjectAdminDenialStillApplies(t *testing.T) {
 
 	got, err := f.store.GetAgent(ctx, f.agent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, store.MessageModeLineage, got.MessageMode, "the refused request leaves the mode")
+	assert.Equal(t, store.MessageModeOwner, got.MessageMode, "the refused request leaves the mode")
 }
 
 // TestSetMessageModeToken_ProjectBoundaryTokensCannotGrantHubMode pins that

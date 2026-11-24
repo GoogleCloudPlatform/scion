@@ -291,7 +291,7 @@ type CreateAgentRequest struct {
 	// inherit the parent role. The project maximum caps both paths.
 	AgentRole string `json:"agentRole,omitempty"`
 	// MessageMode specifies the initial message mode for the agent.
-	// Valid values: "none", "lineage", "branch", "project", "hub".
+	// Valid values: "none", "owner", "direct", "tree", "project", "hub".
 	// When omitted, resolved from template, parent inheritance, or "project" default.
 	MessageMode string `json:"messageMode,omitempty"`
 	// SuspendPolicy sets the agent's automatic suspension policy ("auto" or "never").
@@ -2413,13 +2413,13 @@ func (s *Server) createAgentInProject(
 	}
 	if req.MessageMode != "" {
 		if !store.IsValidMessageMode(req.MessageMode) {
-			ValidationError(w, "invalid message mode: "+req.MessageMode, nil)
+			ValidationError(w, "invalid message mode: "+req.MessageMode+retiredMessageModeHintSuffix(req.MessageMode, false), nil)
 			return
 		}
 		agent.MessageMode = req.MessageMode
 	} else if templateMessageMode != "" {
 		if !store.IsValidMessageMode(templateMessageMode) {
-			ValidationError(w, "invalid template message mode: "+templateMessageMode, nil)
+			ValidationError(w, "invalid template message mode: "+templateMessageMode+retiredMessageModeHintSuffix(templateMessageMode, true), nil)
 			return
 		}
 		agent.MessageMode = templateMessageMode

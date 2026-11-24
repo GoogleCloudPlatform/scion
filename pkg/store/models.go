@@ -159,7 +159,7 @@ type Agent struct {
 	// Ownership
 	CreatedBy   string `json:"createdBy,omitempty"`
 	OwnerID     string `json:"ownerId,omitempty"`
-	MessageMode string `json:"messageMode"` // none, lineage, branch, project, hub
+	MessageMode string `json:"messageMode"` // none, owner, direct, tree, project, hub
 
 	// Ancestry chain for transitive access control.
 	// Ordered list of ancestor IDs: [root, ..., parent].
@@ -2491,16 +2491,45 @@ const (
 // choke point.
 const (
 	MessageModeNone    = "none"    // Sealed: no message-plane delivery except super-admin (D6)
-	MessageModeLineage = "lineage" // Ancestry users + project owners only; zero agent-to-agent edges (D4)
-	MessageModeBranch  = "branch"  // Ancestry users + project owners + direct parent/child agents (both must be branch mode)
-	MessageModeProject = "project" // Bidirectional with all agents and users in project (default; matches pre-mode behavior)
+	MessageModeOwner   = "owner"   // Owner (origin user) + project owners only; zero agent-to-agent edges
+	MessageModeDirect  = "direct"  // Direct plus owner: owner + direct parent/child agents (direct/tree)
+	MessageModeTree    = "tree"    // Tree plus owner: owner + agents in the same creation tree
+	MessageModeProject = "project" // Bidirectional with all agents and users in project (default)
 	MessageModeHub     = "hub"     // Project messaging plus permitted agents in other projects on this Hub
 )
 
-// IsValidMessageMode returns true if mode is one of the five valid message modes.
+var messageModes = []string{
+	MessageModeNone,
+	MessageModeOwner,
+	MessageModeDirect,
+	MessageModeTree,
+	MessageModeProject,
+	MessageModeHub,
+}
+
+// MessageModes returns a copy of all valid message modes in canonical order.
+func MessageModes() []string {
+	out := make([]string, len(messageModes))
+	copy(out, messageModes)
+	return out
+}
+
+// IsValidMessageMode returns true if mode is one of the six valid message modes.
 func IsValidMessageMode(mode string) bool {
 	switch mode {
-	case MessageModeNone, MessageModeLineage, MessageModeBranch, MessageModeProject, MessageModeHub:
+	case MessageModeNone, MessageModeOwner, MessageModeDirect, MessageModeTree, MessageModeProject, MessageModeHub:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsNarrowMessageMode returns true if mode is one of the narrow modes
+// (owner, direct, tree) that admit only the origin owner on the user path
+// and do not auto-join group conversations.
+func IsNarrowMessageMode(mode string) bool {
+	switch mode {
+	case MessageModeOwner, MessageModeDirect, MessageModeTree:
 		return true
 	default:
 		return false

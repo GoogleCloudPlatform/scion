@@ -456,7 +456,7 @@ func TestAgentDelegatedMessage_SuperAdminIssuerPiercesNoMode(t *testing.T) {
 	require.Len(t, calls, 1)
 	assert.Equal(t, "agent:"+adminAgent.Slug, calls[0].StructuredMessage.Sender)
 
-	for _, mode := range []string{store.MessageModeNone, store.MessageModeLineage, store.MessageModeBranch} {
+	for _, mode := range []string{store.MessageModeNone, store.MessageModeOwner, store.MessageModeDirect} {
 		t.Run(mode, func(t *testing.T) {
 			f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.MessageMode = mode })
 			defer func() {
@@ -628,9 +628,9 @@ func TestAgentDelegatedMessage_OnlyTheRouteTarget(t *testing.T) {
 		{"same project, hub", f.agentA.ProjectID, store.MessageModeHub, true, ""},
 		{"same project, project", f.agentA.ProjectID, store.MessageModeProject, true, ""},
 		{"same project, empty", f.agentA.ProjectID, "", false, ""},
-		{"same project, lineage", f.agentA.ProjectID, store.MessageModeLineage, false, ""},
+		{"same project, lineage", f.agentA.ProjectID, store.MessageModeOwner, false, ""},
 		{"same project, none", f.agentA.ProjectID, store.MessageModeNone, false, ""},
-		{"other project, lineage", b.ProjectID, store.MessageModeLineage, false, MessageDenialCrossProjectTargetMode},
+		{"other project, lineage", b.ProjectID, store.MessageModeOwner, false, MessageDenialCrossProjectTargetMode},
 		{"other project, hub", b.ProjectID, store.MessageModeHub, true, ""},
 	} {
 		moded := *b

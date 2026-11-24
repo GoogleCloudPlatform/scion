@@ -389,7 +389,7 @@ func TestAuthoritativeSettings_ModeChecksUseCurrentRecords(t *testing.T) {
 	}
 
 	// Target in branch mode — should be denied.
-	targetBranch := msgAuthzAgent(t, f.store, "mode-target-branch", f.projectB, store.MessageModeBranch,
+	targetBranch := msgAuthzAgent(t, f.store, "mode-target-branch", f.projectB, store.MessageModeDirect,
 		[]string{f.ownerB.ID})
 	decision = f.srv.EvaluateAgentMessage(ctx, senderIdent, targetBranch)
 	if decision.Allowed {

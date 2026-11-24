@@ -34,7 +34,7 @@ import (
 //     made a participant of one.
 //   - project, hub: the agent may post to any group conversation of its
 //     project and is registered as a participant when it does.
-//   - lineage, branch: the agent may post only to a group conversation it
+//   - owner, direct, tree: the agent may post only to a group conversation it
 //     is already an active participant of, and posting never makes it a
 //     participant. It becomes a participant only when a human whom its
 //     mode already lets message it (an ancestor, the project owner, or a
@@ -85,7 +85,7 @@ func (s *Server) agentGroupPostDecision(ctx context.Context, sender *store.Agent
 		return groupPostDecision{Reason: groupModeReasonSenderNone}, nil
 	case store.MessageModeProject, store.MessageModeHub:
 		return groupPostDecision{Allowed: true, MayJoin: true, Reason: groupModeReasonProjectCell}, nil
-	case store.MessageModeLineage, store.MessageModeBranch:
+	case store.MessageModeOwner, store.MessageModeDirect, store.MessageModeTree:
 		// isConversationParticipant uses ListParticipants, which returns
 		// only active rows (left_at IS NULL); a left row must not count.
 		member, err := isConversationParticipant(ctx, s.store, conversationID, "agent", sender.ID)
@@ -115,7 +115,7 @@ func (s *Server) groupAgentJoinAllowed(ctx context.Context, adder Identity, targ
 		return true, groupModeReasonProjectCell
 	case store.MessageModeNone:
 		return false, groupModeReasonTargetNone
-	case store.MessageModeLineage, store.MessageModeBranch:
+	case store.MessageModeOwner, store.MessageModeDirect, store.MessageModeTree:
 		// Only a human adder qualifies, decided by the identity's type,
 		// not its Type() string.
 		if isNilIdentity(adder) {
@@ -178,7 +178,7 @@ func writeGroupModeDenied(w http.ResponseWriter, reason, mode string) {
 
 // precheckThreadGroupPost decides, before a thread conversation is
 // resolved (which may create it), whether sender's message mode can allow
-// the post at all. project and hub senders go on. A lineage or branch
+// the post at all. project and hub senders go on. An owner, direct, or tree
 // sender goes on only when the thread conversation already exists, since
 // it can post only as an existing participant; the full decision runs
 // after resolution. none and unknown modes are refused. A refusal or a
@@ -192,7 +192,7 @@ func (s *Server) precheckThreadGroupPost(ctx context.Context, w http.ResponseWri
 	switch mode {
 	case store.MessageModeProject, store.MessageModeHub:
 		return true
-	case store.MessageModeLineage, store.MessageModeBranch:
+	case store.MessageModeOwner, store.MessageModeDirect, store.MessageModeTree:
 		exists, err := s.threadConversationExists(ctx, projectID, extRef, threadID, surface)
 		if err != nil {
 			s.messageLog.Error("group post: thread conversation lookup failed",

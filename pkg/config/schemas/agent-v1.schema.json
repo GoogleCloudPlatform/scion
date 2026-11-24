@@ -99,7 +99,7 @@
     },
     "message_mode": {
       "type": "string",
-      "enum": ["none", "lineage", "branch", "project", "hub"],
+      "enum": ["none", "owner", "direct", "tree", "project", "hub"],
       "description": "Initial message mode for agents created from this template on a Hub, used when the create request names none."
     },
     "args": {

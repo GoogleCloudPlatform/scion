@@ -183,7 +183,7 @@ func acceptanceSetup(t *testing.T) acceptanceFixture {
 		Slug:            "acc-branch-b",
 		Name:            "AccBranchAgentB",
 		ProjectID:       projectB,
-		MessageMode:     store.MessageModeBranch,
+		MessageMode:     store.MessageModeDirect,
 		Ancestry:        []string{ownerB.ID},
 		Phase:           "running",
 		RuntimeBrokerID: brokerID,

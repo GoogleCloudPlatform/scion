@@ -252,7 +252,7 @@ func (s *Server) chatUserAccess(ctx context.Context, user UserIdentity, project 
 // agentThreadPostPolicy decides what agent may do in a thread by its
 // message mode, exactly as agentGroupPostDecision does: project and hub
 // modes may post (including the cross-project posting hub mode permits by
-// design), lineage and branch only as an existing participant of
+// design), owner, direct, and tree only as an existing participant of
 // conversationID, and none and unknown modes may not. Project read and
 // project equality are not applied.
 //
@@ -269,7 +269,7 @@ func (s *Server) agentThreadPostPolicy(ctx context.Context, agent *store.Agent, 
 	// resolve it (chatThreadRef.ConversationID).
 	if agent != nil && conversationID == "" {
 		switch effectiveGroupMessageMode(agent.MessageMode) {
-		case store.MessageModeLineage, store.MessageModeBranch:
+		case store.MessageModeOwner, store.MessageModeDirect, store.MessageModeTree:
 			return ChatAccess{}, errChatThreadUnresolved
 		}
 	}

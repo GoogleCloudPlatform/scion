@@ -1122,7 +1122,7 @@ func TestAutoWake_ChatSecondary(t *testing.T) {
 
 	t.Run("a woken lineage-mode secondary becomes a group participant", func(t *testing.T) {
 		f, second := setup(t, state.SuspendReasonIdle)
-		second.MessageMode = store.MessageModeLineage
+		second.MessageMode = store.MessageModeOwner
 		second.Ancestry = []string{DevUserID}
 		require.NoError(t, f.s.UpdateAgent(t.Context(), second))
 		awReadyOnStart(t, f.s, second.ID)

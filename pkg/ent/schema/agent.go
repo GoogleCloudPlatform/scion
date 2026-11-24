@@ -83,7 +83,7 @@ func (Agent) Fields() []ent.Field {
 		field.Bool("delegation_enabled").
 			Default(false),
 		field.Enum("message_mode").
-			Values("none", "lineage", "branch", "project", "hub").
+			Values("none", "owner", "direct", "tree", "project", "hub").
 			Default("project"),
 
 		// --- Metadata (stored as JSON) ---

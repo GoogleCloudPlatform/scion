@@ -47,4 +47,8 @@ package version
 //     binaries use a denylist delivery path that would fetch and send on_demand
 //     values to brokers, reject on_demand in validators, and return the stored
 //     target in runtime-read responses.
+//   - agents.message_mode rewrites retired values ("lineage" -> "owner",
+//     "branch" -> "direct") and adds "tree" (ptone/scion#9158); older binaries
+//     reject the new enum values in Ent MessageModeValidator and deny unknown
+//     modes in message authorization.
 const DowngradeFloor = "nightly-20261126"

@@ -38,8 +38,8 @@ func TestCreateAgent_HubDefaultMessageMode(t *testing.T) {
 		wantMode                              string
 	}{
 		{name: "unset hub default: project", wantMode: store.MessageModeProject},
-		{name: "hub default applies", hubDefault: store.MessageModeLineage, wantMode: store.MessageModeLineage},
-		{name: "template wins over hub default", hubDefault: store.MessageModeLineage, snapshot: store.MessageModeBranch, wantMode: store.MessageModeBranch},
+		{name: "hub default applies", hubDefault: store.MessageModeOwner, wantMode: store.MessageModeOwner},
+		{name: "template wins over hub default", hubDefault: store.MessageModeOwner, snapshot: store.MessageModeDirect, wantMode: store.MessageModeDirect},
 		{name: "request wins over hub default", hubDefault: store.MessageModeNone, requested: store.MessageModeProject, wantMode: store.MessageModeProject},
 		{name: "hub value never applies as a default", hubDefault: store.MessageModeHub, wantMode: store.MessageModeProject},
 	}

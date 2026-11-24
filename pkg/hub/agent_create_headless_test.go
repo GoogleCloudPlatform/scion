@@ -1733,7 +1733,7 @@ func TestHeadlessCreate_HubDefaultMessageMode(t *testing.T) {
 	}{
 		{name: "unset hub default: project", wantMode: store.MessageModeProject},
 		{name: "hub default applies", hubDefault: store.MessageModeNone, wantMode: store.MessageModeNone},
-		{name: "template wins over hub default", hubDefault: store.MessageModeNone, tmplMode: store.MessageModeBranch, wantMode: store.MessageModeBranch},
+		{name: "template wins over hub default", hubDefault: store.MessageModeNone, tmplMode: store.MessageModeDirect, wantMode: store.MessageModeDirect},
 		{name: "hub value never applies as a default", hubDefault: store.MessageModeHub, wantMode: store.MessageModeProject},
 	}
 

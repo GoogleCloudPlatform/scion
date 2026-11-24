@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -257,7 +258,7 @@ func TestSetMessageMode_ProjectOwnerAllowed(t *testing.T) {
 		[]string{owner.ID})
 
 	ownerIdent := msgAuthzUserIdentity(owner.ID)
-	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "lineage"}, ownerIdent)
+	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "owner"}, ownerIdent)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for project owner, got %d: %s", rr.Code, rr.Body.String())
@@ -267,8 +268,8 @@ func TestSetMessageMode_ProjectOwnerAllowed(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
-	if resp.Mode != "lineage" {
-		t.Fatalf("expected mode=lineage, got %q", resp.Mode)
+	if resp.Mode != "owner" {
+		t.Fatalf("expected mode=owner, got %q", resp.Mode)
 	}
 	if resp.Previous != "project" {
 		t.Fatalf("expected previous_mode=project, got %q", resp.Previous)
@@ -279,7 +280,7 @@ func TestSetMessageMode_ProjectOwnerAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get agent: %v", err)
 	}
-	if updated.MessageMode != "lineage" {
+	if updated.MessageMode != "owner" {
 		t.Fatalf("store should reflect new mode, got %q", updated.MessageMode)
 	}
 }
@@ -313,7 +314,7 @@ func TestSetMessageMode_LineageOwnerAllowed(t *testing.T) {
 	require_NoError(t, s.UpdateAgent(ctx, agent))
 
 	lineageIdent := msgAuthzUserIdentity(lineageUser.ID)
-	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "branch"}, lineageIdent)
+	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "direct"}, lineageIdent)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for lineage owner, got %d: %s", rr.Code, rr.Body.String())
@@ -324,8 +325,8 @@ func TestSetMessageMode_LineageOwnerAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get agent: %v", err)
 	}
-	if updated.MessageMode != "branch" {
-		t.Fatalf("expected branch, got %q", updated.MessageMode)
+	if updated.MessageMode != "direct" {
+		t.Fatalf("expected direct, got %q", updated.MessageMode)
 	}
 }
 
@@ -455,8 +456,8 @@ func TestSetMessageMode_AllTransitionsLegal(t *testing.T) {
 
 	modes := []string{
 		store.MessageModeNone,
-		store.MessageModeLineage,
-		store.MessageModeBranch,
+		store.MessageModeOwner,
+		store.MessageModeDirect,
 		store.MessageModeProject,
 	}
 
@@ -511,7 +512,7 @@ func TestSetMessageMode_Cascade(t *testing.T) {
 
 	ownerIdent := msgAuthzUserIdentity(owner.ID)
 	rr := smmDoRequest(t, srv, root.ID, SetMessageModeRequest{
-		Mode:    "branch",
+		Mode:    "tree",
 		Cascade: true,
 	}, ownerIdent)
 
@@ -523,8 +524,8 @@ func TestSetMessageMode_Cascade(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Mode != "branch" {
-		t.Fatalf("expected mode=branch, got %q", resp.Mode)
+	if resp.Mode != "tree" {
+		t.Fatalf("expected mode=tree, got %q", resp.Mode)
 	}
 
 	// Verify cascade result.
@@ -542,8 +543,8 @@ func TestSetMessageMode_Cascade(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to get agent %s: %v", id, err)
 		}
-		if agent.MessageMode != "branch" {
-			t.Fatalf("agent %s: expected mode=branch, got %q", id, agent.MessageMode)
+		if agent.MessageMode != "tree" {
+			t.Fatalf("agent %s: expected mode=tree, got %q", id, agent.MessageMode)
 		}
 	}
 
@@ -662,7 +663,7 @@ func TestSetMessageMode_InvalidModeRejected(t *testing.T) {
 func TestSetMessageMode_TemplateConfigRefused(t *testing.T) {
 	srv, _, _, _, _, _ := smmSetup(t)
 
-	for _, mode := range []string{"branch", "invalid_mode"} {
+	for _, mode := range []string{"direct", "invalid_mode"} {
 		t.Run(mode, func(t *testing.T) {
 			body := map[string]interface{}{
 				"name":   "mode-template-" + mode,
@@ -720,18 +721,37 @@ func TestSetMessageMode_NoOp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsValidMessageMode(t *testing.T) {
-	valid := []string{"none", "lineage", "branch", "project"}
+	valid := []string{"none", "owner", "direct", "tree", "project", "hub"}
 	for _, m := range valid {
 		if !store.IsValidMessageMode(m) {
 			t.Errorf("expected %q to be valid", m)
 		}
 	}
 
-	invalid := []string{"", "invalid", "None", "PROJECT", "all", "public"}
+	invalid := []string{"", "invalid", "None", "PROJECT", "all", "public", "lineage", "branch"}
 	for _, m := range invalid {
 		if store.IsValidMessageMode(m) {
 			t.Errorf("expected %q to be invalid", m)
 		}
+	}
+}
+
+func TestSetMessageMode_RetiredNamesRejectedWithHint(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+	agent := smmAgent(t, s, "smm-retired-hint", projectID, store.MessageModeProject, []string{owner.ID})
+	ownerIdent := msgAuthzUserIdentity(owner.ID)
+
+	for old, repl := range map[string]string{"lineage": "owner", "branch": "direct"} {
+		t.Run(old, func(t *testing.T) {
+			rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: old}, ownerIdent)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for retired mode %q, got %d: %s", old, rr.Code, rr.Body.String())
+			}
+			body := rr.Body.String()
+			if !strings.Contains(body, repl) {
+				t.Fatalf("expected error body to hint %q, got: %s", repl, body)
+			}
+		})
 	}
 }
 
@@ -793,7 +813,7 @@ func TestSetMessageMode_APIRouting(t *testing.T) {
 
 	// Verify the action is routable — the action is recognized (not 404).
 	ownerIdent := msgAuthzUserIdentity(owner.ID)
-	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "lineage"}, ownerIdent)
+	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "owner"}, ownerIdent)
 	if rr.Code == http.StatusNotFound {
 		t.Fatal("set_message_mode should be a recognized action, got 404")
 	}
@@ -815,7 +835,7 @@ func TestSetMessageMode_FullRoleAgentAllowed(t *testing.T) {
 		[]string{owner.ID})
 	callerIdent := msgAuthzAgentIdentity(caller.ID, projectID, caller.Ancestry, ScopesForRole(AgentRoleFull)...)
 
-	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "branch"}, callerIdent)
+	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "direct"}, callerIdent)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for full-role agent caller, got %d: %s", rr.Code, rr.Body.String())
@@ -825,8 +845,8 @@ func TestSetMessageMode_FullRoleAgentAllowed(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
-	if resp.Mode != "branch" {
-		t.Fatalf("expected mode=branch, got %q", resp.Mode)
+	if resp.Mode != "direct" {
+		t.Fatalf("expected mode=direct, got %q", resp.Mode)
 	}
 	if resp.Previous != "project" {
 		t.Fatalf("expected previous_mode=project, got %q", resp.Previous)
@@ -837,7 +857,7 @@ func TestSetMessageMode_FullRoleAgentAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get agent: %v", err)
 	}
-	if updated.MessageMode != "branch" {
+	if updated.MessageMode != "direct" {
 		t.Fatalf("store should reflect new mode, got %q", updated.MessageMode)
 	}
 }

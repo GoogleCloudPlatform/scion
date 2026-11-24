@@ -40,7 +40,7 @@ func TestLoadConfigMessageMode(t *testing.T) {
 		return cfg.MessageMode, nil
 	}
 
-	for _, mode := range []string{"none", "lineage", "branch", "project", "hub"} {
+	for _, mode := range []string{"none", "owner", "direct", "tree", "project", "hub"} {
 		got, err := load(t, "message_mode: "+mode+"\n")
 		if err != nil {
 			t.Fatalf("message_mode %q: unexpected error: %v", mode, err)
@@ -49,7 +49,7 @@ func TestLoadConfigMessageMode(t *testing.T) {
 			t.Errorf("message_mode %q parsed as %q", mode, got)
 		}
 	}
-	if got, err := load(t, "message-mode: lineage\n"); err != nil || got != "lineage" {
+	if got, err := load(t, "message-mode: owner\n"); err != nil || got != "owner" {
 		t.Errorf("hyphenated key: got %q, %v", got, err)
 	}
 	if got, err := load(t, "model: m\n"); err != nil || got != "" {
@@ -58,17 +58,23 @@ func TestLoadConfigMessageMode(t *testing.T) {
 	if _, err := load(t, "message_mode: everyone\n"); err == nil || !strings.Contains(err.Error(), "message_mode") {
 		t.Errorf("invalid mode: want a message_mode error, got %v", err)
 	}
+	if _, err := load(t, "message_mode: lineage\n"); err == nil || !strings.Contains(err.Error(), "owner") {
+		t.Errorf("retired lineage: want error hinting owner, got %v", err)
+	}
+	if _, err := load(t, "message_mode: branch\n"); err == nil || !strings.Contains(err.Error(), "direct") {
+		t.Errorf("retired branch: want error hinting direct, got %v", err)
+	}
 }
 
 // TestMergeScionConfigMessageMode: a template-chain merge keeps the job key
 // message_mode: an override's value wins, and an unset override keeps the
 // base value.
 func TestMergeScionConfigMessageMode(t *testing.T) {
-	base := &api.ScionConfig{MessageMode: "lineage"}
-	if got := MergeScionConfig(base, &api.ScionConfig{MessageMode: "branch"}).MessageMode; got != "branch" {
-		t.Errorf("override: got %q, want branch", got)
+	base := &api.ScionConfig{MessageMode: "owner"}
+	if got := MergeScionConfig(base, &api.ScionConfig{MessageMode: "direct"}).MessageMode; got != "direct" {
+		t.Errorf("override: got %q, want direct", got)
 	}
-	if got := MergeScionConfig(base, &api.ScionConfig{Model: "m"}).MessageMode; got != "lineage" {
-		t.Errorf("unset override: got %q, want lineage", got)
+	if got := MergeScionConfig(base, &api.ScionConfig{Model: "m"}).MessageMode; got != "owner" {
+		t.Errorf("unset override: got %q, want owner", got)
 	}
 }

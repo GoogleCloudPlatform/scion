@@ -1143,7 +1143,7 @@ func TestCPMAcceptance_AC1_ModeMatrix_AllPairs(t *testing.T) {
 		Slug:        "acc-lineage-a",
 		Name:        "LineageAgentA",
 		ProjectID:   f.projectA,
-		MessageMode: store.MessageModeLineage,
+		MessageMode: store.MessageModeOwner,
 		Ancestry:    []string{f.ownerA.ID},
 		Phase:       "running",
 		Created:     time.Now(),
@@ -1154,7 +1154,7 @@ func TestCPMAcceptance_AC1_ModeMatrix_AllPairs(t *testing.T) {
 		Slug:        "acc-branch-a",
 		Name:        "BranchAgentA",
 		ProjectID:   f.projectA,
-		MessageMode: store.MessageModeBranch,
+		MessageMode: store.MessageModeDirect,
 		Ancestry:    []string{f.ownerA.ID},
 		Phase:       "running",
 		Created:     time.Now(),
@@ -1163,8 +1163,8 @@ func TestCPMAcceptance_AC1_ModeMatrix_AllPairs(t *testing.T) {
 	require.NoError(t, f.store.CreateAgent(ctx, lineageAgent))
 	require.NoError(t, f.store.CreateAgent(ctx, branchAgent))
 
-	modes[store.MessageModeLineage] = lineageAgent
-	modes[store.MessageModeBranch] = branchAgent
+	modes[store.MessageModeOwner] = lineageAgent
+	modes[store.MessageModeDirect] = branchAgent
 
 	type modeResult struct {
 		sender, target string
@@ -1174,32 +1174,32 @@ func TestCPMAcceptance_AC1_ModeMatrix_AllPairs(t *testing.T) {
 	expected := []modeResult{
 		// none sender: all denied
 		{store.MessageModeNone, store.MessageModeNone, false},
-		{store.MessageModeNone, store.MessageModeLineage, false},
-		{store.MessageModeNone, store.MessageModeBranch, false},
+		{store.MessageModeNone, store.MessageModeOwner, false},
+		{store.MessageModeNone, store.MessageModeDirect, false},
 		{store.MessageModeNone, store.MessageModeProject, false},
 		{store.MessageModeNone, store.MessageModeHub, false},
 		// lineage sender: all denied (no agent-to-agent edges)
-		{store.MessageModeLineage, store.MessageModeNone, false},
-		{store.MessageModeLineage, store.MessageModeLineage, false},
-		{store.MessageModeLineage, store.MessageModeBranch, false},
-		{store.MessageModeLineage, store.MessageModeProject, false},
-		{store.MessageModeLineage, store.MessageModeHub, false},
+		{store.MessageModeOwner, store.MessageModeNone, false},
+		{store.MessageModeOwner, store.MessageModeOwner, false},
+		{store.MessageModeOwner, store.MessageModeDirect, false},
+		{store.MessageModeOwner, store.MessageModeProject, false},
+		{store.MessageModeOwner, store.MessageModeHub, false},
 		// branch sender: all denied (no parent/child in test)
-		{store.MessageModeBranch, store.MessageModeNone, false},
-		{store.MessageModeBranch, store.MessageModeLineage, false},
-		{store.MessageModeBranch, store.MessageModeBranch, false},
-		{store.MessageModeBranch, store.MessageModeProject, false},
-		{store.MessageModeBranch, store.MessageModeHub, false},
+		{store.MessageModeDirect, store.MessageModeNone, false},
+		{store.MessageModeDirect, store.MessageModeOwner, false},
+		{store.MessageModeDirect, store.MessageModeDirect, false},
+		{store.MessageModeDirect, store.MessageModeProject, false},
+		{store.MessageModeDirect, store.MessageModeHub, false},
 		// project sender: none/lineage/branch denied; project and hub allowed
 		{store.MessageModeProject, store.MessageModeNone, false},
-		{store.MessageModeProject, store.MessageModeLineage, false},
-		{store.MessageModeProject, store.MessageModeBranch, false},
+		{store.MessageModeProject, store.MessageModeOwner, false},
+		{store.MessageModeProject, store.MessageModeDirect, false},
 		{store.MessageModeProject, store.MessageModeProject, true},
 		{store.MessageModeProject, store.MessageModeHub, true},
 		// hub sender: none/lineage/branch denied; project and hub allowed
 		{store.MessageModeHub, store.MessageModeNone, false},
-		{store.MessageModeHub, store.MessageModeLineage, false},
-		{store.MessageModeHub, store.MessageModeBranch, false},
+		{store.MessageModeHub, store.MessageModeOwner, false},
+		{store.MessageModeHub, store.MessageModeDirect, false},
 		{store.MessageModeHub, store.MessageModeProject, true},
 		{store.MessageModeHub, store.MessageModeHub, true},
 	}

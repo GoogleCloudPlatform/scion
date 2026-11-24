@@ -661,7 +661,7 @@ func TestVisitorAgents_MessageableFilter(t *testing.T) {
 
 	lineal := &store.Agent{
 		ID: tid(t.Name() + "-lineal"), Name: "lineal", Slug: "lineal", ProjectID: f.projectID,
-		RuntimeBrokerID: f.agent.RuntimeBrokerID, Phase: "running", MessageMode: store.MessageModeLineage,
+		RuntimeBrokerID: f.agent.RuntimeBrokerID, Phase: "running", MessageMode: store.MessageModeOwner,
 	}
 	require.NoError(t, f.st.CreateAgent(ctx, lineal))
 

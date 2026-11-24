@@ -190,11 +190,11 @@ func TestTemplate_SourceURLRoundTrip(t *testing.T) {
 // (ptone/scion#4223); a legacy "config" member is ignored.
 func TestTemplate_AgentConfigDecodes(t *testing.T) {
 	var tmpl Template
-	data := `{"id":"t1","name":"t","agentConfig":{"model":"opus","message_mode":"lineage"},"config":{"model":"row"}}`
+	data := `{"id":"t1","name":"t","agentConfig":{"model":"opus","message_mode":"owner"},"config":{"model":"row"}}`
 	if err := json.Unmarshal([]byte(data), &tmpl); err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
-	if tmpl.AgentConfig == nil || tmpl.AgentConfig.Model != "opus" || tmpl.AgentConfig.MessageMode != "lineage" {
-		t.Errorf("AgentConfig = %+v, want model opus, message_mode lineage", tmpl.AgentConfig)
+	if tmpl.AgentConfig == nil || tmpl.AgentConfig.Model != "opus" || tmpl.AgentConfig.MessageMode != "owner" {
+		t.Errorf("AgentConfig = %+v, want model opus, message_mode owner", tmpl.AgentConfig)
 	}
 }

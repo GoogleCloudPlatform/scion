@@ -14,29 +14,42 @@
 
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateDefaultMessageMode(t *testing.T) {
-	for _, ok := range []string{"", "none", "lineage", "branch", "project"} {
+	for _, ok := range []string{"", "none", "owner", "direct", "tree", "project"} {
 		if err := ValidateDefaultMessageMode(ok); err != nil {
 			t.Errorf("ValidateDefaultMessageMode(%q) = %v, want nil", ok, err)
 		}
 	}
 	// hub mode is granted per agent, never as a hub-wide default.
-	for _, bad := range []string{"hub", "Project", "bogus", " none"} {
+	for _, bad := range []string{"hub", "Project", "bogus", " none", "lineage", "branch"} {
 		if err := ValidateDefaultMessageMode(bad); err == nil {
 			t.Errorf("ValidateDefaultMessageMode(%q) = nil, want error", bad)
+		}
+	}
+	// Retired names must include an actionable rename hint.
+	for old, repl := range map[string]string{"lineage": "owner", "branch": "direct"} {
+		err := ValidateDefaultMessageMode(old)
+		if err == nil {
+			t.Fatalf("ValidateDefaultMessageMode(%q) = nil, want error", old)
+		}
+		if !strings.Contains(err.Error(), repl) {
+			t.Errorf("ValidateDefaultMessageMode(%q) = %q, want hint naming %q", old, err.Error(), repl)
 		}
 	}
 }
 
 func TestDefaultMessageMode_V1RoundTrip(t *testing.T) {
-	gc := ConvertV1ServerToGlobalConfig(&V1ServerConfig{Hub: &V1ServerHubConfig{DefaultMessageMode: "lineage"}})
-	if gc.Hub.DefaultMessageMode != "lineage" {
-		t.Fatalf("Hub.DefaultMessageMode = %q, want lineage", gc.Hub.DefaultMessageMode)
+	gc := ConvertV1ServerToGlobalConfig(&V1ServerConfig{Hub: &V1ServerHubConfig{DefaultMessageMode: "owner"}})
+	if gc.Hub.DefaultMessageMode != "owner" {
+		t.Fatalf("Hub.DefaultMessageMode = %q, want owner", gc.Hub.DefaultMessageMode)
 	}
 	v1 := ConvertGlobalToV1ServerConfig(gc)
-	if v1.Hub == nil || v1.Hub.DefaultMessageMode != "lineage" {
+	if v1.Hub == nil || v1.Hub.DefaultMessageMode != "owner" {
 		t.Fatalf("round trip lost server.hub.default_message_mode: %+v", v1.Hub)
 	}
 }

@@ -37,7 +37,7 @@ func lineageAgent(t *testing.T, s store.Store, projectID, suffix string, ancestr
 		ProjectID:   projectID,
 		Phase:       string(state.PhaseRunning),
 		Ancestry:    ancestry,
-		MessageMode: store.MessageModeLineage,
+		MessageMode: store.MessageModeOwner,
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), agent))
 	return agent

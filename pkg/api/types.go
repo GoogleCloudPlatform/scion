@@ -322,21 +322,52 @@ func (v VolumeMount) Validate() error {
 	return nil
 }
 
+// validMessageModesOrder lists the agent message modes in canonical order.
+// They match the hub's store.MessageModes() (TestValidateMessageMode_MatchesStore pins that).
+var validMessageModesOrder = []string{
+	"none", "owner", "direct", "tree", "project", "hub",
+}
+
 // validMessageModes are the agent message modes a scion-agent config may name
-// in message_mode. They match the hub's store.MessageMode* constants
-// (TestValidateMessageMode_MatchesStore pins that).
+// in message_mode.
 var validMessageModes = map[string]struct{}{
-	"none": {}, "lineage": {}, "branch": {}, "project": {}, "hub": {},
+	"none": {}, "owner": {}, "direct": {}, "tree": {}, "project": {}, "hub": {},
+}
+
+// retiredMessageModeHints maps retired message mode names to their replacements
+// for actionable error messages. Retired names are never accepted as aliases.
+var retiredMessageModeHints = map[string]string{
+	"lineage": "owner",
+	"branch":  "direct",
+}
+
+// ValidMessageModes returns a copy of the valid agent message modes in canonical order.
+func ValidMessageModes() []string {
+	out := make([]string, len(validMessageModesOrder))
+	copy(out, validMessageModesOrder)
+	return out
+}
+
+// RetiredMessageModeHint reports whether mode is a retired message mode name
+// and returns its replacement identifier.
+func RetiredMessageModeHint(mode string) (string, bool) {
+	repl, ok := retiredMessageModeHints[mode]
+	return repl, ok
 }
 
 // ValidateMessageMode returns an error when mode is set and is not one of the
-// five agent message modes. An empty mode is valid (unset).
+// six agent message modes. An empty mode is valid (unset).
 func ValidateMessageMode(mode string) error {
 	if mode == "" {
 		return nil
 	}
 	if _, ok := validMessageModes[mode]; !ok {
-		return fmt.Errorf("invalid message_mode %q: must be one of none, lineage, branch, project, hub", mode)
+		if repl, retired := RetiredMessageModeHint(mode); retired {
+			return fmt.Errorf("invalid message_mode %q (%q was renamed to %q): must be one of %s",
+				mode, mode, repl, strings.Join(validMessageModesOrder, ", "))
+		}
+		return fmt.Errorf("invalid message_mode %q: must be one of %s",
+			mode, strings.Join(validMessageModesOrder, ", "))
 	}
 	return nil
 }
