@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
@@ -475,10 +476,21 @@ func TestHarnessConfigEnv_ReservedLifecycleKeysIgnored(t *testing.T) {
 			return "mock-id", nil
 		},
 	})
-	if _, err := mgr.Start(context.Background(), api.StartOptions{
+	info, err := mgr.Start(context.Background(), api.StartOptions{
 		Name: "env-agent", ProjectPath: e.scion, HarnessConfig: "hc-env", NoAuth: true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+	foundReservedWarning := false
+	for _, w := range info.Warnings {
+		if strings.Contains(w, `"SCION_HOOKS_DIR"`) && strings.Contains(w, "reserved") && strings.Contains(w, "ignored") {
+			foundReservedWarning = true
+			break
+		}
+	}
+	if !foundReservedWarning {
+		t.Errorf("expected Start warnings to include upstream reserved-key warning for SCION_HOOKS_DIR, got %v", info.Warnings)
 	}
 
 	gotEnv := map[string]string{}
@@ -557,6 +569,31 @@ func TestHarnessConfigEnv_ReservedLifecycleKeysIgnored(t *testing.T) {
 		}
 		if opts.Env["KEEP_ME"] != "1" {
 			t.Errorf("KEEP_ME = %q, want 1", opts.Env["KEEP_ME"])
+		}
+	})
+
+	t.Run("env_template-only bundle preserves declarative harness type and still refuses reserved keys", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		e.projectHC(t, "hc-tpl-only", strings.Join([]string{
+			"harness: generic",
+			"image: scion-base:test",
+			"env_template:",
+			`  SCION_HOOKS_DIR: "{{ .AgentHome }}/.custom-hooks"`,
+			"",
+		}, "\n"))
+		resolved, err := harness.Resolve(context.Background(), harness.ResolveOptions{
+			Name:        "hc-tpl-only",
+			ProjectPath: e.scion,
+		})
+		if err != nil {
+			t.Fatalf("harness.Resolve: %v", err)
+		}
+		if _, ok := resolved.Harness.(*harness.DeclarativeGenericHarness); !ok {
+			t.Fatalf("expected *harness.DeclarativeGenericHarness for env_template-only bundle, got %T", resolved.Harness)
+		}
+		env := resolved.Harness.GetEnv("tpl-only-agent", "/home/scion", "scion")
+		if val, exists := env["SCION_HOOKS_DIR"]; exists {
+			t.Errorf("SCION_HOOKS_DIR leaked through GetEnv with value %q", val)
 		}
 	})
 }
@@ -1011,12 +1048,23 @@ func TestHarnessConfigEnv_LogsWarnForDroppedReservedKeys(t *testing.T) {
 
 	const secretVal = "do-not-log-this-value"
 	e := newPolicyTestEnv(t)
-	e.projectHC(t, "hc-warn", policyTestDecl+"env:\n  SCION_HOOKS_DIR: "+secretVal+"\n")
+	e.projectHC(t, "hc-warn", policyTestDecl+"env_template:\n  SCION_HOOKS_DIR: "+secretVal+"\n")
 	if _, err := config.LoadHarnessConfigDir(filepath.Join(e.scion, "harness-configs", "hc-warn")); err != nil {
 		t.Fatalf("LoadHarnessConfigDir: %v", err)
 	}
+	if logBuf.Len() != 0 {
+		t.Errorf("LoadHarnessConfigDir should not emit warn logs on plain load, got %q", logBuf.String())
+	}
+	resolved, err := harness.Resolve(context.Background(), harness.ResolveOptions{
+		Name:        "hc-warn",
+		ProjectPath: e.scion,
+	})
+	if err != nil {
+		t.Fatalf("harness.Resolve: %v", err)
+	}
+	_ = resolved.Harness.GetEnv("warn-agent", "/home/scion", "scion")
 	if !strings.Contains(logBuf.String(), "level=WARN") || !strings.Contains(logBuf.String(), "SCION_HOOKS_DIR") {
-		t.Errorf("expected WARN naming SCION_HOOKS_DIR on config.yaml load, got %q", logBuf.String())
+		t.Errorf("expected WARN naming SCION_HOOKS_DIR on GetEnv, got %q", logBuf.String())
 	}
 	if strings.Contains(logBuf.String(), secretVal) {
 		t.Errorf("warn log leaked dropped value: %s", logBuf.String())
