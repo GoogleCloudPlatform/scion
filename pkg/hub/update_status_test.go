@@ -400,7 +400,7 @@ func TestHandleUpdateStatus_Shape(t *testing.T) {
 	}
 	body := getUpdateStatus(t, srv)
 
-	for _, k := range []string{"current", "mode", "channel", "pin", "installer", "updatePolicy", "pendingUpdate", "lastUpdate"} {
+	for _, k := range []string{"current", "mode", "channel", "pin", "installer", "updatePolicy", "autoUpdate", "pendingUpdate", "lastUpdate"} {
 		if _, ok := body[k]; !ok {
 			t.Errorf("missing key %q in %v", k, body)
 		}

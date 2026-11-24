@@ -527,6 +527,7 @@ type updateStatusResponse struct {
 	Pin           string                      `json:"pin"`
 	Installer     maintenance.InstallerStatus `json:"installer"`
 	UpdatePolicy  string                      `json:"updatePolicy"`
+	AutoUpdate    updateStatusAutoUpdate      `json:"autoUpdate"`
 	Downgrade     updateStatusDowngrade       `json:"downgrade"`
 	PendingUpdate *PendingUpdate              `json:"pendingUpdate"`
 	LastUpdate    *LastUpdate                 `json:"lastUpdate"`
@@ -581,6 +582,10 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 	if err != nil {
 		return nil, err
 	}
+	autoUpdateSetting, _, err := s.readAutoUpdateSetting(ctx)
+	if err != nil {
+		return nil, err
+	}
 	channel, source := effectiveReleaseChannel(mc, cur.Version, sel)
 	isGit := !update.IsReleaseTag(cur.Version)
 	displayVersion := cur.Version
@@ -593,6 +598,10 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 		}
 	}
 
+	modeEff := effectiveUpdateMode(mc, sel)
+	pinEff := effectivePin(sel)
+	instStatus := redactInstallerStatus(s.updateInstaller().Status(), mc.RepoPath)
+
 	resp := &updateStatusResponse{
 		Current: updateStatusCurrent{
 			Version:    displayVersion,
@@ -602,7 +611,7 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 			IsGitBuild: isGit,
 		},
 		Mode: updateStatusMode{
-			Effective:      effectiveUpdateMode(mc, sel),
+			Effective:      modeEff,
 			RepoConfigured: mc.RepoPath != "",
 			RepoBranch:     mc.RepoBranch,
 		},
@@ -611,9 +620,18 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 			Configured: mc.ReleaseChannel,
 			Source:     source,
 		},
-		Pin:          effectivePin(sel),
-		Installer:    redactInstallerStatus(s.updateInstaller().Status(), mc.RepoPath),
+		Pin:          pinEff,
+		Installer:    instStatus,
 		UpdatePolicy: mc.UpdatePolicy,
+		AutoUpdate: buildAutoUpdateStatus(
+			mc,
+			autoUpdateSetting,
+			modeEff,
+			channel,
+			pinEff,
+			instStatus.Supported,
+			s.maintenance != nil && s.maintenance.IsEnabled(),
+		),
 		Downgrade: updateStatusDowngrade{
 			Floor:              downgradeFloor,
 			SnapshotsSupported: s.updateSnapshotter(ctx).SnapshotStatus().Supported,

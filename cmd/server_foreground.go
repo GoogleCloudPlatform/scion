@@ -5333,6 +5333,7 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 			}
 			if m.UpdatePolicy != "" {
 				mc.UpdatePolicy = m.UpdatePolicy
+				mc.UpdatePolicyExplicit = true
 			}
 			if m.CheckIntervalHours > 0 {
 				mc.CheckIntervalHours = m.CheckIntervalHours
