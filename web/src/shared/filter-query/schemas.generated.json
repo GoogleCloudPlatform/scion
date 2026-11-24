@@ -77,5 +77,18 @@
       }
     ],
     "textHelp": "Matches artifact title or key"
+  },
+  {
+    "view": "files",
+    "keys": [
+      {
+        "name": "ext",
+        "help": "File extension without leading dot (e.g. ts, go)",
+        "kind": "string",
+        "exec": "client",
+        "multiValued": false
+      }
+    ],
+    "textHelp": "Matches file path by regex, falling back to fuzzy match"
   }
 ]

@@ -51,3 +51,11 @@ Text search matches artifact **title** or **key** (case-insensitive substring).
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
 | `is` | flag_set | `shared` | server | `is:shared`, `-is:shared` | Artifacts shared with this project |
+
+### `files` (File browser)
+
+Text search matches file **path** as a case-insensitive regular expression, falling back to an ordered-character fuzzy match. For workspace and shared-directory sources, only the text part is sent to the server (`?q=`); key terms post-filter the merged results on the client. Template and harness-config sources filter entirely on the client. Dotfiles visibility remains controlled by the **show .dot files** toggle.
+
+| Key | Kind | Values | Execution | Example | Description |
+| --- | --- | --- | --- | --- | --- |
+| `ext` | string | File extension without leading dot (case-insensitive) | client | `ext:ts,tsx`, `-ext:map` | File extension without leading dot (e.g. ts, go) |
