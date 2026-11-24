@@ -119,7 +119,68 @@ describe('<scion-filter-box>', () => {
     await el.updateComplete;
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
     await el.updateComplete;
-    expect(el.value).toMatch(/^(label|phase):$/);
+    expect(el.value).toMatch(/^[a-z_]+:$/);
+
+    // Accepting a key suggestion opens value suggestions and suppresses the
+    // immediate "expected value" error while the listbox is open.
+    expect(el.shadowRoot?.querySelector('.feedback.error')).toBeNull();
+    expect(el.shadowRoot?.querySelector('.input-shell')?.classList.contains('has-error')).toBe(
+      false
+    );
+
+    // Pressing Escape closes the value list and reveals the error if still empty.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.feedback.error')?.textContent).toContain(
+      'expected value'
+    );
+  });
+
+  it('highlights the offending span in the error feedback line', async () => {
+    const el = await mount();
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'phase:running OR phase:error';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    const mark = el.shadowRoot?.querySelector('.feedback.error mark.error-span');
+    expect(mark).not.toBeNull();
+    expect(mark?.textContent).toBe('OR');
+  });
+
+  it('does not cancel a pending debounced commit when a subsequent edit is invalid', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    const commits: FilterCommitDetail[] = [];
+    el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'phase:running';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    vi.advanceTimersByTime(100);
+    input.value = 'phase:running label:';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    vi.advanceTimersByTime(250);
+    expect(commits).toHaveLength(1);
+    expect(commits[0].serverQ).toBe('phase:running');
+  });
+
+  it('renders full schema-generated help popover including client-only badge', async () => {
+    const el = await mount();
+    const helpBtn = el.shadowRoot?.querySelector('.help-btn') as HTMLElement;
+    helpBtn.click();
+    await el.updateComplete;
+
+    const popover = el.shadowRoot?.querySelector('.help-popover');
+    expect(popover).not.toBeNull();
+    expect(popover?.textContent).toContain('activity:');
+    expect(popover?.textContent).toContain('project:');
+    expect(popover?.textContent).toContain('mode:');
+    expect(popover?.textContent).toContain('local');
   });
 
   it('does not hijack Tab on an empty focused box', async () => {

@@ -31,6 +31,15 @@ export { canonical, serverSubset, hasClientOnlyKeys } from './canonical.js';
 export { match } from './match.js';
 export { getSuggestions, type Suggestion, type ValueSuggestionProvider } from './suggest.js';
 export { getActiveSingleKeyValue, setSingleKeyInQuery } from './query-edit.js';
+export {
+  agentToFilterRow,
+  buildAgentValueSuggestions,
+  clientEvaluableAgentQuery,
+  hasScopeTermInQuery,
+  matchAgentQuery,
+  phasePredicateForQuery,
+  type AgentFilterContext,
+} from './agent-accessors.js';
 
 export const VIEW_SCHEMAS: readonly ViewSchema[] = rawSchemas as ViewSchema[];
 

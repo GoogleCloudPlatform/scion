@@ -67,7 +67,7 @@ export function formatValue(v: string): string {
   return needsQuotingValue(v) ? quoteString(v) : v;
 }
 
-function formatText(t: string): string {
+export function formatText(t: string): string {
   return needsQuotingText(t) ? quoteString(t) : t;
 }
 

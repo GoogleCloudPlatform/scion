@@ -81,16 +81,20 @@ import { replaceSearch } from '../../client/navigation.js';
 import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
 import {
+  buildAgentValueSuggestions,
   filtersQueryDialectEnabled,
   getActiveSingleKeyValue,
   getViewSchema,
+  hasClientOnlyKeys,
+  hasScopeTermInQuery,
   knownKeysFor,
-  match as matchFilterQuery,
+  matchAgentQuery,
   parse as parseFilterQuery,
+  phasePredicateForQuery,
   serverSubset,
   setSingleKeyInQuery,
   validate as validateFilterQuery,
-  type FilterRow,
+  type AgentFilterContext,
   type Query as FilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
@@ -120,45 +124,6 @@ const AGENTS_FILTER_SCHEMA: ViewSchema = getViewSchema('agents') ?? {
   keys: [],
   textHelp: '',
 };
-
-function agentToFilterRow(agent: Agent): FilterRow {
-  return {
-    values(key: string): string[] {
-      if (key === 'phase') return agent.phase ? [agent.phase] : [];
-      if (key === 'label') {
-        if (!agent.labels) return [];
-        const out: string[] = [];
-        for (const [k, v] of Object.entries(agent.labels)) {
-          out.push(k, `${k}=${v}`);
-        }
-        return out;
-      }
-      return [];
-    },
-    text(): string[] {
-      const out: string[] = [];
-      if (agent.name) out.push(agent.name);
-      if (agent.slug) out.push(agent.slug);
-      return out;
-    },
-  };
-}
-
-/**
- * Build a phase-only predicate from `fq` for off-page unknown deltas that
- * carry only `phase` (ignoring label/text terms so they never falsely evict).
- */
-function phasePredicateForQuery(fq: FilterQuery | null): ((phase: string) => boolean) | null {
-  if (!fq || fq.mode !== 'structured') return null;
-  const phaseTerms = fq.terms.filter((t) => t.key.toLowerCase() === 'phase');
-  if (phaseTerms.length === 0) return null;
-  const phaseOnly: FilterQuery = { mode: 'structured', terms: phaseTerms };
-  return (phase: string): boolean =>
-    matchFilterQuery(phaseOnly, {
-      values: (key: string): string[] => (key === 'phase' ? [phase] : []),
-      text: (): string[] => [],
-    });
-}
 
 const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-agents';
 
@@ -307,6 +272,19 @@ export class ScionPageAgents extends LitElement {
 
   /** Canonical server `?q=` string committed to hub requests. */
   private committedServerQ = '';
+  private committedHasClientOnly = false;
+
+  private get filterContext(): AgentFilterContext {
+    return {
+      currentUserId: this.pageData?.user?.id,
+      currentUserEmail: this.pageData?.user?.email,
+    };
+  }
+
+  private readonly agentValueSuggestions = buildAgentValueSuggestions(
+    () => (this.agentWindow.state === 'paged' ? this.agentWindow.items : this.agents),
+    () => this.filterContext
+  );
 
   @state()
   private modeFilter = '';
@@ -358,7 +336,8 @@ export class ScionPageAgents extends LitElement {
     isAddable: (agent: Agent): boolean => {
       if (this.loadedScope !== 'all') return false;
       if (filtersQueryDialectEnabled() && this.committedFilterQuery) {
-        return matchFilterQuery(this.committedFilterQuery, agentToFilterRow(agent));
+        if (hasScopeTermInQuery(this.committedFilterQuery)) return false;
+        return matchAgentQuery(this.committedFilterQuery, agent, this.filterContext);
       }
       return true;
     },
@@ -682,35 +661,61 @@ export class ScionPageAgents extends LitElement {
     }
 
     // Read persisted scope filter
-    if (this.pageData?.user) {
-      const scope = localStorage.getItem('scion-scope-agents');
-      if (scope === 'mine' || scope === 'shared') {
-        this.agentScope = scope;
-      }
-    }
-
-    // Read persisted phase filter (or migrate once to ?q= when dialect is on)
+    // Read persisted scope, phase, and mode filters (or migrate once to ?q= when dialect is on)
     if (filtersQueryDialectEnabled()) {
       const urlParams = new URLSearchParams(window.location.search);
       const urlQ = urlParams.get('q');
+      const storedScope = this.pageData?.user ? localStorage.getItem('scion-scope-agents') : null;
+      if (storedScope !== null) {
+        localStorage.removeItem('scion-scope-agents');
+      }
       const storedPhase = localStorage.getItem('scion-filter-agents-phase');
       if (storedPhase !== null) {
         localStorage.removeItem('scion-filter-agents-phase');
       }
+      const storedMode = localStorage.getItem('scion-filter-agents-mode');
+      if (storedMode !== null) {
+        localStorage.removeItem('scion-filter-agents-mode');
+      }
       if (urlQ !== null) {
         this.filterQueryText = urlQ;
-      } else if (
-        storedPhase === 'running' ||
-        storedPhase === 'stopping' ||
-        storedPhase === 'stopped' ||
-        storedPhase === 'suspended' ||
-        storedPhase === 'error'
-      ) {
-        this.filterQueryText = `phase:${storedPhase}`;
-        this.syncQueryToUrl(this.filterQueryText);
+      } else {
+        const migrated: string[] = [];
+        if (storedScope === 'mine' || storedScope === 'shared') {
+          migrated.push(`is:${storedScope}`);
+        }
+        if (
+          storedPhase === 'running' ||
+          storedPhase === 'stopping' ||
+          storedPhase === 'stopped' ||
+          storedPhase === 'suspended' ||
+          storedPhase === 'error'
+        ) {
+          migrated.push(`phase:${storedPhase}`);
+        }
+        if (
+          storedMode === 'project' ||
+          storedMode === 'branch' ||
+          storedMode === 'lineage' ||
+          storedMode === 'none' ||
+          storedMode === 'can_message' ||
+          storedMode === 'cannot_message'
+        ) {
+          migrated.push(`mode:${storedMode}`);
+        }
+        if (migrated.length > 0) {
+          this.filterQueryText = migrated.join(' ');
+          this.syncQueryToUrl(this.filterQueryText);
+        }
       }
       this.applyInitialFilterQuery(this.filterQueryText);
     } else {
+      if (this.pageData?.user) {
+        const scope = localStorage.getItem('scion-scope-agents');
+        if (scope === 'mine' || scope === 'shared') {
+          this.agentScope = scope;
+        }
+      }
       const storedPhase = localStorage.getItem('scion-filter-agents-phase');
       if (
         storedPhase === 'running' ||
@@ -721,12 +726,10 @@ export class ScionPageAgents extends LitElement {
       ) {
         this.phaseFilter = storedPhase;
       }
-    }
-
-    // Read persisted mode filter
-    const storedMode = localStorage.getItem('scion-filter-agents-mode');
-    if (storedMode) {
-      this.modeFilter = storedMode;
+      const storedMode = localStorage.getItem('scion-filter-agents-mode');
+      if (storedMode) {
+        this.modeFilter = storedMode;
+      }
     }
 
     // Read persisted sort
@@ -811,6 +814,7 @@ export class ScionPageAgents extends LitElement {
     if (filtersQueryDialectEnabled()) {
       const fq = this.filterQuery;
       const cfq = this.committedFilterQuery;
+      const ctx = this.filterContext;
       return {
         phaseFilter: '',
         label: '',
@@ -818,11 +822,10 @@ export class ScionPageAgents extends LitElement {
         sortDir: this.sortDir,
         pageSize: this.pagerPageSize,
         view: listViewOf(this.viewMode),
-        modeFilter: this.modeFilter,
-        filterPredicate: fq ? (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)) : null,
-        committedFilterPredicate: cfq
-          ? (a: Agent) => matchFilterQuery(cfq, agentToFilterRow(a))
-          : null,
+        modeFilter: '',
+        hasClientOnlyFilter: this.committedHasClientOnly,
+        filterPredicate: fq ? (a: Agent) => matchAgentQuery(fq, a, ctx) : null,
+        committedFilterPredicate: cfq ? (a: Agent) => matchAgentQuery(cfq, a, ctx) : null,
         committedPhasePredicate: phasePredicateForQuery(cfq),
         serverQuery: this.committedServerQ,
       };
@@ -846,12 +849,14 @@ export class ScionPageAgents extends LitElement {
         this.filterQuery = parsed.query;
         this.committedFilterQuery = parsed.query;
         this.committedServerQ = serverSubset(parsed.query, AGENTS_FILTER_SCHEMA);
+        this.committedHasClientOnly = hasClientOnlyKeys(parsed.query, AGENTS_FILTER_SCHEMA);
         return;
       }
     }
     this.filterQuery = null;
     this.committedFilterQuery = null;
     this.committedServerQ = '';
+    this.committedHasClientOnly = false;
   }
 
   private syncQueryToUrl(raw: string): void {
@@ -869,8 +874,9 @@ export class ScionPageAgents extends LitElement {
     this.filterQueryText = e.detail.value;
     this.filterQuery = e.detail.query;
     const fq = e.detail.query;
+    const ctx = this.filterContext;
     this.agentWindow.setViewState({
-      filterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
+      filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
     });
   }
 
@@ -878,22 +884,28 @@ export class ScionPageAgents extends LitElement {
     this.filterQueryText = e.detail.value;
     this.filterQuery = e.detail.query;
     this.syncQueryToUrl(e.detail.value);
-    const nextQ = e.detail.serverQ;
-    if (nextQ === this.committedServerQ) return;
-    this.committedServerQ = nextQ;
-    this.committedFilterQuery = e.detail.query;
     const fq = e.detail.query;
+    const nextQ = e.detail.serverQ;
+    const nextHasClientOnly = hasClientOnlyKeys(fq, AGENTS_FILTER_SCHEMA);
+    const serverChanged = nextQ !== this.committedServerQ;
+    const clientOnlyChanged = nextHasClientOnly !== this.committedHasClientOnly;
+    if (!serverChanged && !clientOnlyChanged) return;
+    this.committedServerQ = nextQ;
+    this.committedFilterQuery = fq;
+    this.committedHasClientOnly = nextHasClientOnly;
+    const ctx = this.filterContext;
     this.agentWindow.setViewState({
-      filterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
-      committedFilterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
+      filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
+      committedFilterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
       committedPhasePredicate: phasePredicateForQuery(fq),
       serverQuery: nextQ,
+      hasClientOnlyFilter: nextHasClientOnly,
     });
     void this.loadAgents('label-commit');
   }
 
-  private setPhaseChipInQuery(phase: AgentPhase | ''): void {
-    const next = setSingleKeyInQuery(this.filterQueryText, 'phase', phase, AGENTS_FILTER_SCHEMA);
+  private setChipInQuery(key: string, value: string): void {
+    const next = setSingleKeyInQuery(this.filterQueryText, key, value, AGENTS_FILTER_SCHEMA);
     if (next === this.filterQueryText) return;
     this.filterQueryText = next;
     this.syncQueryToUrl(next);
@@ -903,14 +915,18 @@ export class ScionPageAgents extends LitElement {
       if (!v.error) {
         const fq = parsed.query;
         const nextQ = serverSubset(fq, AGENTS_FILTER_SCHEMA);
+        const nextHasClientOnly = hasClientOnlyKeys(fq, AGENTS_FILTER_SCHEMA);
         this.filterQuery = fq;
         this.committedFilterQuery = fq;
         this.committedServerQ = nextQ;
+        this.committedHasClientOnly = nextHasClientOnly;
+        const ctx = this.filterContext;
         this.agentWindow.setViewState({
-          filterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
-          committedFilterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
+          filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
+          committedFilterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
           committedPhasePredicate: phasePredicateForQuery(fq),
           serverQuery: nextQ,
+          hasClientOnlyFilter: nextHasClientOnly,
         });
         void this.loadAgents('label-commit');
       }
@@ -1188,7 +1204,8 @@ export class ScionPageAgents extends LitElement {
           isMember: (agent) =>
             requestedScope === 'all' &&
             (useDialect
-              ? fq === null || matchFilterQuery(fq, agentToFilterRow(agent))
+              ? !hasScopeTermInQuery(fq) &&
+                (fq === null || matchAgentQuery(fq, agent, this.filterContext))
               : matchesCommittedLabel(agent, label)),
         }).agents;
         this.agentWindow.setSmall(epoch.sawResync);
@@ -1237,11 +1254,11 @@ export class ScionPageAgents extends LitElement {
       // Scope `all` adds live creates (today's add rule). For mine and
       // shared, membership cannot be decided on the client: a live create
       // is not added and the set is marked stale.
-      ...(scope === 'all'
+      ...(scope === 'all' && !(useDialect && hasScopeTermInQuery(fq))
         ? {
             isMember: (agent: Agent): boolean =>
               useDialect
-                ? fq === null || matchFilterQuery(fq, agentToFilterRow(agent))
+                ? fq === null || matchAgentQuery(fq, agent, this.filterContext)
                 : matchesCommittedLabel(agent, label),
           }
         : {}),
@@ -1612,33 +1629,48 @@ export class ScionPageAgents extends LitElement {
         <h1>Agents</h1>
         <div class="header-actions">
           ${this.pageData?.user
-            ? html`
-                <div class="scope-toggle">
-                  <button
-                    class=${this.agentScope === 'all' ? 'active' : ''}
-                    title="All agents"
-                    @click=${() => this.setScope('all')}
-                  >
-                    All
-                  </button>
-                  <button
-                    class=${this.agentScope === 'mine' ? 'active' : ''}
-                    title="Agents I created"
-                    @click=${() => this.setScope('mine')}
-                  >
-                    <sl-icon name="person"></sl-icon>
-                    Mine
-                  </button>
-                  <button
-                    class=${this.agentScope === 'shared' ? 'active' : ''}
-                    title="Agents in shared projects"
-                    @click=${() => this.setScope('shared')}
-                  >
-                    <sl-icon name="people"></sl-icon>
-                    Shared
-                  </button>
-                </div>
-              `
+            ? (() => {
+                const useDialect = filtersQueryDialectEnabled();
+                const activeScope = useDialect
+                  ? getActiveSingleKeyValue(this.filterQueryText, 'is', AGENTS_FILTER_SCHEMA)
+                  : this.agentScope === 'all'
+                    ? ''
+                    : this.agentScope;
+                const onScopeClick = (scope: 'all' | 'mine' | 'shared'): void => {
+                  if (useDialect) {
+                    this.setChipInQuery('is', scope === 'all' ? '' : scope);
+                  } else {
+                    this.setScope(scope);
+                  }
+                };
+                return html`
+                  <div class="scope-toggle">
+                    <button
+                      class=${activeScope === '' ? 'active' : ''}
+                      title="All agents"
+                      @click=${() => onScopeClick('all')}
+                    >
+                      All
+                    </button>
+                    <button
+                      class=${activeScope === 'mine' ? 'active' : ''}
+                      title="Agents I created"
+                      @click=${() => onScopeClick('mine')}
+                    >
+                      <sl-icon name="person"></sl-icon>
+                      Mine
+                    </button>
+                    <button
+                      class=${activeScope === 'shared' ? 'active' : ''}
+                      title="Agents in shared projects"
+                      @click=${() => onScopeClick('shared')}
+                    >
+                      <sl-icon name="people"></sl-icon>
+                      Shared
+                    </button>
+                  </div>
+                `;
+              })()
             : nothing}
           <scion-view-toggle
             .view=${this.viewMode}
@@ -1721,7 +1753,7 @@ export class ScionPageAgents extends LitElement {
       : this.phaseFilter;
     const onPhaseClick = (phase: AgentPhase | ''): void => {
       if (useDialect) {
-        this.setPhaseChipInQuery(phase);
+        this.setChipInQuery('phase', phase);
       } else {
         this.setPhaseFilter(phase);
       }
@@ -1770,6 +1802,7 @@ export class ScionPageAgents extends LitElement {
               <scion-filter-box
                 view="agents"
                 .value=${this.filterQueryText}
+                .valueSuggestions=${this.agentValueSuggestions}
                 placeholder="Filter agents… (try phase:running,error -label:tmp)"
                 @filter-input=${this.handleFilterInput}
                 @filter-commit=${this.handleFilterCommit}
@@ -1792,51 +1825,59 @@ export class ScionPageAgents extends LitElement {
                 <sl-icon slot="prefix" name="tag"></sl-icon>
               </sl-input>
             `}
-        <sl-dropdown>
-          <sl-button slot="trigger" size="small" outline>
-            ${this.modeFilter &&
-            this.modeFilter !== 'can_message' &&
-            this.modeFilter !== 'cannot_message'
-              ? html`<sl-icon
-                  slot="prefix"
-                  name=${MESSAGE_MODE_DISPLAY[this.modeFilter as MessageMode]?.icon || 'funnel'}
-                ></sl-icon>`
-              : html`<sl-icon slot="prefix" name="funnel"></sl-icon>`}
-            ${this.getModeFilterLabel()}
-          </sl-button>
-          <sl-menu
-            @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
-              this.setModeFilter(e.detail.item.value)}
-          >
-            <sl-menu-item value="" ?checked=${this.modeFilter === ''}>All Modes</sl-menu-item>
-            <sl-divider></sl-divider>
-            <sl-menu-item value="project" ?checked=${this.modeFilter === 'project'}>
-              <sl-icon slot="prefix" name="globe2"></sl-icon>
-              Project
-            </sl-menu-item>
-            <sl-menu-item value="branch" ?checked=${this.modeFilter === 'branch'}>
-              <sl-icon slot="prefix" name="diagram-3"></sl-icon>
-              Branch
-            </sl-menu-item>
-            <sl-menu-item value="lineage" ?checked=${this.modeFilter === 'lineage'}>
-              <sl-icon slot="prefix" name="person-lines-fill"></sl-icon>
-              Lineage
-            </sl-menu-item>
-            <sl-menu-item value="none" ?checked=${this.modeFilter === 'none'}>
-              <sl-icon slot="prefix" name="shield-lock"></sl-icon>
-              Sealed
-            </sl-menu-item>
-            <sl-divider></sl-divider>
-            <sl-menu-item value="can_message" ?checked=${this.modeFilter === 'can_message'}>
-              <sl-icon slot="prefix" name="check-circle"></sl-icon>
-              Can message
-            </sl-menu-item>
-            <sl-menu-item value="cannot_message" ?checked=${this.modeFilter === 'cannot_message'}>
-              <sl-icon slot="prefix" name="x-circle"></sl-icon>
-              Cannot message
-            </sl-menu-item>
-          </sl-menu>
-        </sl-dropdown>
+        ${useDialect
+          ? nothing
+          : html`
+              <sl-dropdown>
+                <sl-button slot="trigger" size="small" outline>
+                  ${this.modeFilter &&
+                  this.modeFilter !== 'can_message' &&
+                  this.modeFilter !== 'cannot_message'
+                    ? html`<sl-icon
+                        slot="prefix"
+                        name=${MESSAGE_MODE_DISPLAY[this.modeFilter as MessageMode]?.icon ||
+                        'funnel'}
+                      ></sl-icon>`
+                    : html`<sl-icon slot="prefix" name="funnel"></sl-icon>`}
+                  ${this.getModeFilterLabel()}
+                </sl-button>
+                <sl-menu
+                  @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
+                    this.setModeFilter(e.detail.item.value)}
+                >
+                  <sl-menu-item value="" ?checked=${this.modeFilter === ''}>All Modes</sl-menu-item>
+                  <sl-divider></sl-divider>
+                  <sl-menu-item value="project" ?checked=${this.modeFilter === 'project'}>
+                    <sl-icon slot="prefix" name="globe2"></sl-icon>
+                    Project
+                  </sl-menu-item>
+                  <sl-menu-item value="branch" ?checked=${this.modeFilter === 'branch'}>
+                    <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+                    Branch
+                  </sl-menu-item>
+                  <sl-menu-item value="lineage" ?checked=${this.modeFilter === 'lineage'}>
+                    <sl-icon slot="prefix" name="person-lines-fill"></sl-icon>
+                    Lineage
+                  </sl-menu-item>
+                  <sl-menu-item value="none" ?checked=${this.modeFilter === 'none'}>
+                    <sl-icon slot="prefix" name="shield-lock"></sl-icon>
+                    Sealed
+                  </sl-menu-item>
+                  <sl-divider></sl-divider>
+                  <sl-menu-item value="can_message" ?checked=${this.modeFilter === 'can_message'}>
+                    <sl-icon slot="prefix" name="check-circle"></sl-icon>
+                    Can message
+                  </sl-menu-item>
+                  <sl-menu-item
+                    value="cannot_message"
+                    ?checked=${this.modeFilter === 'cannot_message'}
+                  >
+                    <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                    Cannot message
+                  </sl-menu-item>
+                </sl-menu>
+              </sl-dropdown>
+            `}
         ${this.viewMode === 'grid'
           ? html`
               <sl-dropdown>

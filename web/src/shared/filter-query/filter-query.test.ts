@@ -20,12 +20,14 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   VIEW_SCHEMAS,
+  buildAgentValueSuggestions,
   canonical,
   getActiveSingleKeyValue,
   getSuggestions,
   getViewSchema,
   knownKeysFor,
   match,
+  matchAgentQuery,
   parse,
   serverSubset,
   setSingleKeyInQuery,
@@ -35,6 +37,7 @@ import {
   type Term,
   type ViewSchema,
 } from './index.js';
+import type { Agent } from '../types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..');
@@ -68,6 +71,12 @@ interface ConformanceFile {
       name: string;
       slug: string;
       phase: string;
+      activity?: string;
+      project?: string;
+      harness?: string;
+      broker?: string;
+      template?: string;
+      owner?: string;
       labels: Record<string, string>;
     }>;
     cases: Array<{
@@ -126,6 +135,12 @@ describe('filter-query conformance (eval)', () => {
     row: {
       values(key: string): string[] {
         if (key === 'phase') return r.phase ? [r.phase] : [];
+        if (key === 'activity') return r.activity ? [r.activity] : [];
+        if (key === 'project') return r.project ? [r.project] : [];
+        if (key === 'harness') return r.harness ? [r.harness] : [];
+        if (key === 'broker') return r.broker ? [r.broker] : [];
+        if (key === 'template') return r.template ? [r.template] : [];
+        if (key === 'owner') return r.owner ? [r.owner] : [];
         if (key === 'label') {
           const out: string[] = [];
           for (const [k, v] of Object.entries(r.labels)) {
@@ -255,8 +270,92 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     expect(setSingleKeyInQuery('phase:running label:"a  b"', 'phase', '', agentsSchema)).toBe(
       'label:"a  b"'
     );
+    expect(getActiveSingleKeyValue('', 'phase', agentsSchema)).toBe('');
+    expect(getActiveSingleKeyValue('label:a', 'phase', agentsSchema)).toBe('');
     expect(getActiveSingleKeyValue('phase:running label:a', 'phase', agentsSchema)).toBe('running');
-    expect(getActiveSingleKeyValue('phase:running,error', 'phase', agentsSchema)).toBe('');
+    expect(getActiveSingleKeyValue('phase:running,error', 'phase', agentsSchema)).toBeNull();
+    expect(getActiveSingleKeyValue('-phase:stopped', 'phase', agentsSchema)).toBeNull();
+    expect(getActiveSingleKeyValue('phase:running phase:error', 'phase', agentsSchema)).toBeNull();
+    expect(getActiveSingleKeyValue('phase:', 'phase', agentsSchema)).toBeNull();
+
+    // Promoting pure text to structured mode preserves its literal meaning.
+    expect(setSingleKeyInQuery('-foo', 'phase', 'running', agentsSchema)).toBe(
+      'phase:running "-foo"'
+    );
+    expect(setSingleKeyInQuery('a OR b', 'phase', 'running', agentsSchema)).toBe(
+      'phase:running "a OR b"'
+    );
+    expect(setSingleKeyInQuery('"hello"', 'phase', 'running', agentsSchema)).toBe(
+      'phase:running "\\"hello\\""'
+    );
+    expect(setSingleKeyInQuery('foo', 'phase', 'running', agentsSchema)).toBe('phase:running foo');
+  });
+
+  it('matches all P2 agent keys and builds dynamic value suggestions from loaded rows', () => {
+    const rows: Agent[] = [
+      {
+        id: '1',
+        name: 'alpha-agent',
+        slug: 'alpha-agent',
+        projectId: 'p1',
+        projectSlug: 'proj-alpha',
+        template: 'developer',
+        phase: 'running',
+        activity: 'working',
+        harnessConfig: 'claude',
+        runtimeBrokerId: 'b1',
+        runtimeBrokerName: 'broker-east',
+        ownerId: 'u-me',
+        messageMode: 'lineage',
+        _messageability: { canMessage: true },
+        labels: { team: 'ui', env: 'prod' },
+      },
+      {
+        id: '2',
+        name: 'beta-agent',
+        slug: 'beta-agent',
+        projectId: 'p2',
+        projectSlug: 'proj-beta',
+        template: 'reviewer',
+        phase: 'stopped',
+        harnessConfig: 'antigravity',
+        runtimeBrokerId: 'b2',
+        runtimeBrokerName: 'broker-west',
+        ownerId: 'u-other',
+        messageMode: 'none',
+        _messageability: { canMessage: false },
+      },
+    ];
+    const ctx = { currentUserId: 'u-me', currentUserEmail: 'me@example.com' };
+    const known = knownKeysFor(agentsSchema);
+    const evalIds = (q: string) => {
+      const parsed = parse(q, known);
+      expect(parsed.error).toBeUndefined();
+      return rows.filter((a) => matchAgentQuery(parsed.query as Query, a, ctx)).map((a) => a.id);
+    };
+
+    expect(evalIds('activity:working')).toEqual(['1']);
+    expect(evalIds('project:proj-alpha')).toEqual(['1']);
+    expect(evalIds('harness:antigravity')).toEqual(['2']);
+    expect(evalIds('broker:broker-east')).toEqual(['1']);
+    expect(evalIds('template:reviewer')).toEqual(['2']);
+    expect(evalIds('owner:me')).toEqual(['1']);
+    expect(evalIds('mode:lineage')).toEqual(['1']);
+    expect(evalIds('mode:can_message')).toEqual(['1']);
+    expect(evalIds('mode:cannot_message')).toEqual(['2']);
+    // is:mine is server-resolved and does not falsely hide loaded rows on the client.
+    expect(evalIds('is:mine phase:running')).toEqual(['1']);
+
+    const provider = buildAgentValueSuggestions(
+      () => rows,
+      () => ctx
+    );
+    expect(provider('project', '')).toEqual(expect.arrayContaining(['proj-alpha', 'proj-beta']));
+    expect(provider('harness', '')).toEqual(expect.arrayContaining(['claude', 'antigravity']));
+    expect(provider('broker', '')).toEqual(expect.arrayContaining(['broker-east', 'broker-west']));
+    expect(provider('template', '')).toEqual(expect.arrayContaining(['developer', 'reviewer']));
+    expect(provider('owner', '')).toEqual(expect.arrayContaining(['me', 'u-me', 'u-other']));
+    expect(provider('label', '')).toEqual(expect.arrayContaining(['team', 'team=ui', 'env=prod']));
   });
 });
 

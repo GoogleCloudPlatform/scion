@@ -14,33 +14,42 @@
  * limitations under the License.
  */
 
+import { formatText } from './canonical.js';
 import { parse, trimASCIISpace } from './parse.js';
 import type { ViewSchema } from './types.js';
 
 /**
- * Return the single positive value for `key` if the query has exactly one
- * non-negated term for `key` with one value and no negated terms for `key`,
- * or `''` otherwise. Used by quick-toggle chips (e.g. agent phase buttons)
- * to highlight their active state from the query text.
+ * Return the active chip state for `key`:
+ * - `''` when the query is valid and has no terms for `key` (so an "All" chip is active),
+ * - the lowercased single value when there is exactly one positive term for `key` with one value,
+ * - `null` when `key` has a negated term, multiple values, multiple terms, or the query has a syntax error
+ *   (so no chip, not even "All", is highlighted).
  */
-export function getActiveSingleKeyValue(input: string, key: string, schema: ViewSchema): string {
+export function getActiveSingleKeyValue(
+  input: string,
+  key: string,
+  schema: ViewSchema
+): string | null {
   const known = (k: string) => schema.keys.some((sk) => sk.name.toLowerCase() === k);
   const res = parse(input, known);
-  if (!res.query || res.query.mode !== 'structured') return '';
+  if (res.error || !res.query) return null;
+  if (res.query.mode !== 'structured') return '';
   const target = key.toLowerCase();
   const matching = res.query.terms.filter((t) => t.key.toLowerCase() === target);
-  if (matching.length !== 1) return '';
+  if (matching.length === 0) return '';
+  if (matching.length !== 1) return null;
   const only = matching[0];
-  if (only.negate || only.values.length !== 1) return '';
+  if (only.negate || only.values.length !== 1) return null;
   return only.values[0].toLowerCase();
 }
 
 /**
- * Edit `input` to set or clear a single-valued key (e.g. `phase`).
+ * Edit `input` to set or clear a single-valued key (e.g. `phase` or `is`).
  * - When `value` is empty, removes all `key:` / `-key:` terms from `input`.
  * - When `value` is non-empty, replaces any existing `key:` / `-key:` terms
  *   with `key:value` (or prepends it if none existed), preserving all other
- *   terms and free text verbatim.
+ *   terms and free text. When promoting pure-text input to structured mode,
+ *   the text remainder is quoted if needed so its literal meaning is preserved.
  */
 export function setSingleKeyInQuery(
   input: string,
@@ -57,10 +66,16 @@ export function setSingleKeyInQuery(
   }
 
   const res = parse(input, known);
-  if (!res.query || res.query.mode !== 'structured') {
-    // Pure-text or currently invalid input: prepend the key term if setting.
+  if (res.error || !res.query) {
+    // Currently invalid input: prepend the key term if setting.
     if (!value) return trimmed;
     return `${target}:${value} ${trimmed}`;
+  }
+  if (res.query.mode !== 'structured') {
+    // Promoting pure text to structured mode: quote the remainder when needed
+    // so leading '-', 'OR'/'AND', quotes, spaces, or parens keep their literal meaning.
+    if (!value) return trimmed;
+    return `${target}:${value} ${formatText(res.query.text)}`;
   }
 
   const keyTerms = res.query.terms.filter((t) => t.key.toLowerCase() === target);

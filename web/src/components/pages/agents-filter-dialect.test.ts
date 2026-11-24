@@ -19,6 +19,8 @@ import { resetServerFlagStateForTests, setFeatureFlag } from '../../utils/featur
 import { FILTERS_QUERY_DIALECT_FLAG } from '../../shared/filter-query/index.js';
 import './agents.js';
 import type { ScionPageAgents } from './agents.js';
+import './project-detail.js';
+import type { ScionPageProjectDetail } from './project-detail.js';
 
 describe('<scion-page-agents> unified filter dialect (P1)', () => {
   let fetchUrls: string[];
@@ -31,7 +33,14 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     vi.stubGlobal(
       'EventSource',
       class {
-        addEventListener(): void {}
+        onopen: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        constructor() {
+          queueMicrotask(() => this.onopen?.());
+        }
+        addEventListener(type: string, cb: () => void): void {
+          if (type === 'open') queueMicrotask(cb);
+        }
         removeEventListener(): void {}
         close(): void {}
       }
@@ -139,5 +148,112 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     // With experiment off and zero total agents returned, legacy renders "No Agents Found".
     const heading = el.shadowRoot?.querySelector('.empty-state h2')?.textContent?.trim();
     expect(heading).toBe('No Agents Found');
+  });
+
+  it('retires old mode dropdown and migrates scope/mode from localStorage when dialect is on', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    localStorage.setItem('scion-scope-agents', 'mine');
+    localStorage.setItem('scion-filter-agents-mode', 'lineage');
+
+    const el = document.createElement('scion-page-agents') as ScionPageAgents;
+    el.pageData = {
+      path: '/agents',
+      title: 'Agents',
+      user: { id: 'u1', email: 'u1@example.com', name: 'U1', role: 'admin' },
+    };
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    expect(localStorage.getItem('scion-scope-agents')).toBeNull();
+    expect(localStorage.getItem('scion-filter-agents-mode')).toBeNull();
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:mine mode:lineage');
+
+    // Mode dropdown is retired; only is:mine is sent to hub (mode: stripped).
+    expect(el.shadowRoot?.querySelector('sl-menu-item[value="lineage"]')).toBeNull();
+    const agentFetches = fetchUrls.filter((u) => u.includes('/api/v1/agents'));
+    expect(agentFetches.length).toBeGreaterThan(0);
+    expect(agentFetches.some((u) => u.includes('q=is%3Amine') && !u.includes('mode'))).toBe(true);
+  });
+
+  it('edits is:mine / is:shared via scope chips and highlights no phase chip for multi-value phase', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    window.history.replaceState(null, '', '/agents?q=phase%3Arunning%2Cerror');
+
+    const el = document.createElement('scion-page-agents') as ScionPageAgents;
+    el.pageData = {
+      path: '/agents',
+      title: 'Agents',
+      user: { id: 'u1', email: 'u1@example.com', name: 'U1', role: 'admin' },
+    };
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    // No phase chip (not even "All") is active for phase:running,error.
+    const activePhaseBtns = el.shadowRoot?.querySelectorAll(
+      '.filter-bar .scope-toggle button.active'
+    );
+    expect(activePhaseBtns?.length ?? 0).toBe(0);
+
+    // Clicking Mine in the header scope toggle writes is:mine into ?q=.
+    const scopeBtns = Array.from(
+      el.shadowRoot?.querySelectorAll('.header-actions .scope-toggle button') ?? []
+    );
+    const mineBtn = scopeBtns.find((b) => b.textContent?.includes('Mine')) as HTMLButtonElement;
+    expect(mineBtn).toBeDefined();
+    mineBtn.click();
+    await el.updateComplete;
+    expect(new URLSearchParams(window.location.search).get('q')).toBe(
+      'is:mine phase:running,error'
+    );
+  });
+
+  it('renders <scion-filter-box view="project_agents"> on project detail when dialect is on', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    window.history.replaceState(null, '', '/projects/proj-123?q=harness%3Aclaude');
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        fetchUrls.push(url);
+        if (url.includes('/api/v1/projects/proj-123/agents')) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ agents: [], complete: true, totalCount: 0 }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 'proj-123',
+              name: 'Proj 123',
+              slug: 'proj-123',
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      })
+    );
+
+    const el = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    el.projectId = 'proj-123';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    const box = el.shadowRoot?.querySelector('scion-filter-box');
+    expect(box).not.toBeNull();
+    expect(box?.view).toBe('project_agents');
+    expect(box?.value).toBe('harness:claude');
+    expect(
+      fetchUrls.some(
+        (u) => u.includes('/api/v1/projects/proj-123/agents') && u.includes('q=harness%3Aclaude')
+      )
+    ).toBe(true);
   });
 });

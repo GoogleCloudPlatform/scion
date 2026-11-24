@@ -78,8 +78,11 @@ function findUnknownKeyWarnings(rawInput: string, schema: ViewSchema): FilterWar
   while (i < n) {
     while (i < n && /\s/.test(rawInput[i])) i++;
     if (i >= n) break;
-    if (rawInput[i] === '"') {
-      i++;
+    const tokenStart = i;
+    let scanStart = i;
+    if (rawInput[scanStart] === '-') scanStart++;
+    if (scanStart < n && rawInput[scanStart] === '"') {
+      i = scanStart + 1;
       while (i < n) {
         if (rawInput[i] === '\\' && i + 1 < n) {
           i += 2;
@@ -93,9 +96,6 @@ function findUnknownKeyWarnings(rawInput: string, schema: ViewSchema): FilterWar
       }
       continue;
     }
-    const tokenStart = i;
-    let scanStart = i;
-    if (rawInput[scanStart] === '-') scanStart++;
     while (i < n && !/\s/.test(rawInput[i])) i++;
     const prefix = scanKeyPrefix(rawInput, scanStart);
     if (prefix && !lookupKey(schema, prefix.key)) {

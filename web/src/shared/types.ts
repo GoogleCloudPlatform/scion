@@ -1123,6 +1123,7 @@ export interface Agent {
   image?: string;
   runtime?: string;
   createdBy?: string;
+  ownerId?: string;
   // The creator's display name. Set on compact list items, which carry no
   // appliedConfig; full items carry it as appliedConfig.creatorName.
   creatorName?: string;

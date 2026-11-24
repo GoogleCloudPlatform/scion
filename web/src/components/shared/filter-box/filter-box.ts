@@ -79,6 +79,9 @@ export class ScionFilterBox extends LitElement {
   @state()
   private warning: FilterWarning | null = null;
 
+  @state()
+  private suppressExpectedValueError = false;
+
   @query('input')
   private inputEl?: HTMLInputElement;
 
@@ -214,6 +217,10 @@ export class ScionFilterBox extends LitElement {
       margin-top: 0.25rem;
       min-height: 0;
       line-height: 1.3;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.375rem;
     }
 
     .feedback.error {
@@ -224,16 +231,50 @@ export class ScionFilterBox extends LitElement {
       color: var(--scion-warning-700);
     }
 
+    .feedback-excerpt {
+      font-family: var(--scion-font-mono);
+      font-size: 0.6875rem;
+      color: var(--scion-text-secondary);
+      background: var(--scion-bg-subtle);
+      padding: 0.0625rem 0.25rem;
+      border-radius: var(--scion-radius-sm, var(--scion-radius));
+      white-space: pre;
+    }
+
+    .error-span {
+      background: var(--scion-danger-100);
+      color: var(--scion-danger-800);
+      border-radius: var(--scion-radius-sm, var(--scion-radius));
+      padding: 0 0.125rem;
+      text-decoration: underline wavy var(--scion-danger-500);
+    }
+
     .help-popover {
       background: var(--scion-surface-raised, var(--scion-surface));
       border: 1px solid var(--scion-border);
       border-radius: var(--scion-radius);
       box-shadow: var(--scion-shadow-md, 0 4px 12px var(--scion-border));
       padding: 0.75rem;
-      width: 320px;
+      width: 380px;
       max-width: 90vw;
       font-size: 0.75rem;
       color: var(--scion-text);
+    }
+
+    .help-table-wrap {
+      max-height: 280px;
+      overflow-y: auto;
+    }
+
+    .help-exec {
+      display: inline-block;
+      margin-left: 0.25rem;
+      font-size: 0.625rem;
+      padding: 0 0.25rem;
+      border-radius: var(--scion-radius-sm, var(--scion-radius));
+      background: var(--scion-bg-subtle);
+      color: var(--scion-text-muted);
+      vertical-align: middle;
     }
 
     .help-title {
@@ -353,6 +394,36 @@ export class ScionFilterBox extends LitElement {
     }
   }
 
+  private get visibleError(): FilterError | null {
+    if (!this.error) return null;
+    if (
+      this.suppressExpectedValueError &&
+      this.open &&
+      this.error.code === 'syntax' &&
+      this.error.message.startsWith('expected value after ')
+    ) {
+      return null;
+    }
+    return this.error;
+  }
+
+  private renderErrorSpan(err: FilterError) {
+    if (err.length <= 0 || err.offset < 0 || err.offset >= this.value.length) {
+      return nothing;
+    }
+    const end = Math.min(this.value.length, err.offset + err.length);
+    const contextRadius = 16;
+    const snipStart = Math.max(0, err.offset - contextRadius);
+    const snipEnd = Math.min(this.value.length, end + contextRadius);
+    const before = this.value.slice(snipStart, err.offset);
+    const bad = this.value.slice(err.offset, end);
+    const after = this.value.slice(end, snipEnd);
+    return html`<code class="feedback-excerpt"
+      >${snipStart > 0 ? '\u2026' : ''}${before}<mark class="error-span">${bad}</mark
+      >${after}${snipEnd < this.value.length ? '\u2026' : ''}</code
+    >`;
+  }
+
   private evaluateAndEmit(raw: string, immediateCommit: boolean): void {
     this.lastEmittedValue = raw;
     const schema = this.schema;
@@ -383,13 +454,15 @@ export class ScionFilterBox extends LitElement {
       })
     );
 
+    // An invalid edit within the debounce window must NOT cancel a pending
+    // commit of the last valid query.
+    if (!valid) {
+      return;
+    }
+
     if (this.commitTimer !== null) {
       clearTimeout(this.commitTimer);
       this.commitTimer = null;
-    }
-
-    if (!valid) {
-      return;
     }
 
     const emitCommit = (): void => {
@@ -422,6 +495,7 @@ export class ScionFilterBox extends LitElement {
 
   private onInput(e: Event): void {
     const target = e.target as HTMLInputElement;
+    this.suppressExpectedValueError = false;
     this.value = target.value;
     this.refreshSuggestions();
     this.open = this.suggestions.length > 0;
@@ -437,6 +511,7 @@ export class ScionFilterBox extends LitElement {
     // Allow mousedown on option to fire before closing.
     setTimeout(() => {
       this.open = false;
+      this.suppressExpectedValueError = false;
     }, 120);
   }
 
@@ -445,6 +520,7 @@ export class ScionFilterBox extends LitElement {
       if (this.open) {
         e.preventDefault();
         this.open = false;
+        this.suppressExpectedValueError = false;
       } else if (this.helpOpen) {
         e.preventDefault();
         this.helpOpen = false;
@@ -477,6 +553,7 @@ export class ScionFilterBox extends LitElement {
       }
       if (e.key === 'Tab') {
         this.open = false;
+        this.suppressExpectedValueError = false;
         return;
       }
     }
@@ -484,6 +561,7 @@ export class ScionFilterBox extends LitElement {
     if (e.key === 'Enter') {
       e.preventDefault();
       this.open = false;
+      this.suppressExpectedValueError = false;
       this.evaluateAndEmit(this.value, true);
     }
   }
@@ -493,6 +571,16 @@ export class ScionFilterBox extends LitElement {
       this.value.slice(0, s.replaceStart) + s.insertText + this.value.slice(s.replaceEnd);
     const nextCursor = s.replaceStart + s.insertText.length;
     this.value = nextValue;
+    this.suppressExpectedValueError = Boolean(s.continueSuggest);
+    if (s.continueSuggest) {
+      // Refresh value suggestions synchronously so `this.open` is true before
+      // rendering the suppressed state.
+      this.suggestions = getSuggestions(nextValue, nextCursor, this.schema, this.valueSuggestions);
+      this.activeIndex = -1;
+      this.open = this.suggestions.length > 0;
+    } else {
+      this.open = false;
+    }
     this.evaluateAndEmit(nextValue, !s.continueSuggest);
 
     void this.updateComplete.then(() => {
@@ -501,16 +589,11 @@ export class ScionFilterBox extends LitElement {
         this.inputEl.setSelectionRange(nextCursor, nextCursor);
         this.inputEl.focus();
       }
-      if (s.continueSuggest) {
-        this.refreshSuggestions();
-        this.open = this.suggestions.length > 0;
-      } else {
-        this.open = false;
-      }
     });
   }
 
   private onClear(): void {
+    this.suppressExpectedValueError = false;
     this.value = '';
     this.open = false;
     this.evaluateAndEmit('', true);
@@ -520,9 +603,10 @@ export class ScionFilterBox extends LitElement {
   override render() {
     const activeOptionId =
       this.open && this.activeIndex >= 0 ? `${this.listboxId}-opt-${this.activeIndex}` : undefined;
+    const shownError = this.visibleError;
 
     return html`
-      <div class="input-shell ${this.error ? 'has-error' : ''}">
+      <div class="input-shell ${shownError ? 'has-error' : ''}">
         <sl-icon class="prefix-icon" name="funnel"></sl-icon>
         <input
           type="text"
@@ -531,7 +615,7 @@ export class ScionFilterBox extends LitElement {
           aria-expanded=${this.open ? 'true' : 'false'}
           aria-controls=${this.listboxId}
           aria-activedescendant=${activeOptionId ?? nothing}
-          aria-invalid=${this.error ? 'true' : 'false'}
+          aria-invalid=${shownError ? 'true' : 'false'}
           aria-label="Filter query"
           .value=${this.value}
           placeholder=${this.placeholder}
@@ -591,10 +675,16 @@ export class ScionFilterBox extends LitElement {
         : nothing}
 
       <div
-        class="feedback ${this.error ? 'error' : this.warning ? 'warning' : ''}"
+        class="feedback ${shownError ? 'error' : this.warning ? 'warning' : ''}"
         aria-live="polite"
       >
-        ${this.error ? this.error.message : this.warning ? this.warning.message : nothing}
+        ${shownError
+          ? html`<span class="feedback-msg">${shownError.message}</span>${this.renderErrorSpan(
+                shownError
+              )}`
+          : this.warning
+            ? this.warning.message
+            : nothing}
       </div>
     `;
   }
