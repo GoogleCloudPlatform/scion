@@ -81,6 +81,10 @@ type UserService interface {
 	// ClearExecContainer clears the caller's execution container registration
 	// through DELETE /api/v1/users/me/exec-container.
 	ClearExecContainer(ctx context.Context) error
+
+	// InboxSummary returns the caller's aggregated inbox summary across
+	// categories through GET /api/v1/users/me/inbox/summary.
+	InboxSummary(ctx context.Context, opts *InboxSummaryOptions) (*InboxSummaryResponse, error)
 }
 
 // userService is the implementation of UserService.
