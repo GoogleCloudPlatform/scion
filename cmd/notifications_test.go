@@ -640,3 +640,243 @@ func TestNotificationsBareAndUnknownSubcommand(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveSubscriptionID(t *testing.T) {
+	const (
+		subA = "a1b2c3d4-1111-4000-8000-000000000001"
+		subB = "a1b2c3d4-2222-4000-8000-000000000002"
+		subC = "deadbeef-3333-4000-8000-000000000003"
+	)
+
+	var listCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/notifications/subscriptions" && r.Method == http.MethodGet {
+			listCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]hubclient.Subscription{
+				{ID: subA},
+				{ID: subB},
+				{ID: subC},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	t.Run("full UUID skips list", func(t *testing.T) {
+		listCalls = 0
+		got, err := resolveSubscriptionID(context.Background(), client, subA)
+		require.NoError(t, err)
+		assert.Equal(t, subA, got)
+		assert.Equal(t, 0, listCalls)
+	})
+
+	t.Run("unique 8-char prefix", func(t *testing.T) {
+		listCalls = 0
+		got, err := resolveSubscriptionID(context.Background(), client, "deadbeef")
+		require.NoError(t, err)
+		assert.Equal(t, subC, got)
+		assert.Equal(t, 1, listCalls)
+	})
+
+	t.Run("unique 12-char table prefix", func(t *testing.T) {
+		listCalls = 0
+		got, err := resolveSubscriptionID(context.Background(), client, "a1b2c3d4-111")
+		require.NoError(t, err)
+		assert.Equal(t, subA, got)
+		assert.Equal(t, 1, listCalls)
+	})
+
+	t.Run("ambiguous prefix returns clear error", func(t *testing.T) {
+		_, err := resolveSubscriptionID(context.Background(), client, "a1b2c3d4")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ambiguous subscription ID prefix")
+		assert.Contains(t, err.Error(), subA)
+		assert.Contains(t, err.Error(), subB)
+	})
+
+	t.Run("not found prefix returns clear error", func(t *testing.T) {
+		_, err := resolveSubscriptionID(context.Background(), client, "ffffffff")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no subscription found matching")
+	})
+
+	t.Run("empty ref returns usage error", func(t *testing.T) {
+		_, err := resolveSubscriptionID(context.Background(), client, "   ")
+		require.Error(t, err)
+		assert.True(t, isUsageError(err))
+	})
+}
+
+func TestResolveNotificationID(t *testing.T) {
+	const (
+		unackedA = "a1b2c3d4-1111-4000-8000-000000000001"
+		unackedB = "a1b2c3d4-2222-4000-8000-000000000002"
+		ackedC   = "cafebabe-3333-4000-8000-000000000003"
+	)
+
+	var listQueries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/notifications" && r.Method == http.MethodGet {
+			ackParam := r.URL.Query().Get("acknowledged")
+			listQueries = append(listQueries, ackParam)
+			w.Header().Set("Content-Type", "application/json")
+			if ackParam == "true" {
+				_ = json.NewEncoder(w).Encode([]hubclient.Notification{
+					{ID: unackedA},
+					{ID: unackedB},
+					{ID: ackedC, Acknowledged: true},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]hubclient.Notification{
+				{ID: unackedA},
+				{ID: unackedB},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	t.Run("full UUID skips list", func(t *testing.T) {
+		listQueries = nil
+		got, err := resolveNotificationID(context.Background(), client, unackedA)
+		require.NoError(t, err)
+		assert.Equal(t, unackedA, got)
+		assert.Empty(t, listQueries)
+	})
+
+	t.Run("unique 12-char prefix in unacknowledged", func(t *testing.T) {
+		listQueries = nil
+		got, err := resolveNotificationID(context.Background(), client, "a1b2c3d4-111")
+		require.NoError(t, err)
+		assert.Equal(t, unackedA, got)
+		assert.Equal(t, []string{""}, listQueries)
+	})
+
+	t.Run("ambiguous prefix in unacknowledged fails immediately", func(t *testing.T) {
+		listQueries = nil
+		_, err := resolveNotificationID(context.Background(), client, "a1b2c3d4")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ambiguous notification ID prefix")
+		assert.Equal(t, []string{""}, listQueries)
+	})
+
+	t.Run("falls back to acknowledged notifications", func(t *testing.T) {
+		listQueries = nil
+		got, err := resolveNotificationID(context.Background(), client, "cafebabe")
+		require.NoError(t, err)
+		assert.Equal(t, ackedC, got)
+		assert.Equal(t, []string{"", "true"}, listQueries)
+	})
+
+	t.Run("not found returns clear error", func(t *testing.T) {
+		listQueries = nil
+		_, err := resolveNotificationID(context.Background(), client, "ffffffff")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no notification found matching")
+	})
+}
+
+func TestNotificationsPrefixCommandsEndToEnd(t *testing.T) {
+	const (
+		subA   = "1111aaaa-1111-4000-8000-000000000001"
+		subB   = "1111bbbb-2222-4000-8000-000000000002"
+		notifA = "2222aaaa-1111-4000-8000-000000000001"
+	)
+
+	origProjectPath := projectPath
+	origUpdateTriggers := updateTriggers
+	origUnsubAll := unsubscribeAll
+	origAckAll := notificationsAckAll
+	origOutputFormat := outputFormat
+	defer func() {
+		projectPath = origProjectPath
+		updateTriggers = origUpdateTriggers
+		unsubscribeAll = origUnsubAll
+		notificationsAckAll = origAckAll
+		outputFormat = origOutputFormat
+	}()
+	clearHubContextEnv(t)
+
+	var patchedID, deletedID, ackedID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/notifications/subscriptions":
+			_ = json.NewEncoder(w).Encode([]hubclient.Subscription{
+				{ID: subA, TriggerActivities: []string{"COMPLETED"}},
+				{ID: subB, TriggerActivities: []string{"COMPLETED"}},
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/notifications/subscriptions/"+subA:
+			patchedID = subA
+			_ = json.NewEncoder(w).Encode(hubclient.Subscription{
+				ID:                subA,
+				TriggerActivities: []string{"COMPLETED", "ERROR"},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/notifications/subscriptions/"+subB:
+			deletedID = subB
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/notifications":
+			_ = json.NewEncoder(w).Encode([]hubclient.Notification{
+				{ID: notifA},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/notifications/"+notifA+"/ack":
+			ackedID = notifA
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_PROJECT_ID", "proj-1")
+	t.Setenv("SCION_AUTH_TOKEN", "test-token")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectDir := filepath.Join(tmpHome, "proj", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+	projectPath = projectDir
+	outputFormat = ""
+
+	// Update by unique 8-char prefix
+	updateTriggers = []string{"COMPLETED,ERROR"}
+	out := captureStdout(t, func() {
+		require.NoError(t, runNotificationsUpdate(nil, []string{"1111aaaa"}))
+	})
+	assert.Equal(t, subA, patchedID)
+	assert.Contains(t, out, subA)
+
+	// Update by ambiguous 4-char prefix fails before PATCH
+	patchedID = ""
+	err := runNotificationsUpdate(nil, []string{"1111"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous subscription ID prefix")
+	assert.Empty(t, patchedID)
+
+	// Unsubscribe by unique 12-char prefix
+	unsubscribeAll = false
+	out = captureStdout(t, func() {
+		require.NoError(t, runNotificationsUnsubscribe(nil, []string{"1111bbbb-222"}))
+	})
+	assert.Equal(t, subB, deletedID)
+	assert.Contains(t, out, subB)
+
+	// Ack by unique 8-char prefix
+	notificationsAckAll = false
+	out = captureStdout(t, func() {
+		require.NoError(t, runNotificationsAck(nil, []string{"2222aaaa"}))
+	})
+	assert.Equal(t, notifA, ackedID)
+	assert.Contains(t, out, notifA)
+}

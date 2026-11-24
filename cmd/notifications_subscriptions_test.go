@@ -376,3 +376,35 @@ func TestNotificationsSubscriptions_ProjectFlagSlugAndContextOutsideLocalProject
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not linked to a hub")
 }
+
+func TestNotificationsSubscriptions_JSONIncludesAgentSlug(t *testing.T) {
+	_ = isolateSubscriptionsCLIState(t)
+
+	agentSub := hubclient.Subscription{
+		ID:                "a1b2c3d4-5678-4000-8000-000000000001",
+		Scope:             store.SubscriptionScopeAgent,
+		AgentID:           "99999999-aaaa-4000-8000-000000000001",
+		AgentSlug:         "worker-alpha",
+		SubscriberType:    store.SubscriberTypeUser,
+		SubscriberID:      "user-1",
+		ProjectID:         testHubProjectID,
+		TriggerActivities: []string{"COMPLETED", "ERROR"},
+		CreatedAt:         time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC),
+		CreatedBy:         "user-1",
+	}
+
+	_, srv := newSubscriptionsMockServer(t, []hubclient.Subscription{agentSub})
+	saveTestContext(t, srv.URL, testHubProjectID)
+	t.Setenv("SCION_HUB_TOKEN", "user-token")
+
+	jsonOut, _, err := executeSubscriptionsCLI(t, "--json")
+	require.NoError(t, err)
+	var raw []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &raw))
+	require.Len(t, raw, 1)
+	assert.Equal(t, "worker-alpha", raw[0]["agentSlug"])
+
+	tableOut, _, err := executeSubscriptionsCLI(t)
+	require.NoError(t, err)
+	assert.Contains(t, tableOut, "worker-alpha")
+}
