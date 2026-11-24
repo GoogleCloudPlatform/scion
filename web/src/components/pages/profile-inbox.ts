@@ -41,8 +41,18 @@ import {
   PENDING_SECRETS_API,
   PENDING_SECRETS_CHANGED_EVENT,
 } from '../../client/pending-secrets.js';
+import {
+  PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+  fetchProfileDecisionProbe,
+  getCachedProfileDecisionProbe,
+  getLastKnownProfileDecisionAvailability,
+} from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
-import { FEATURE_FLAGS_CHANGED_EVENT, isInboxDashboardEnabled } from '../../utils/feature-flags.js';
+import {
+  FEATURE_FLAGS_CHANGED_EVENT,
+  decisionsEnabled,
+  isInboxDashboardEnabled,
+} from '../../utils/feature-flags.js';
 import { showToast } from '../../utils/toast.js';
 import { inboxTabStripStyles, renderInboxTabStrip } from '../shared/inbox-tabs.js';
 import './not-found.js';
@@ -85,6 +95,10 @@ export class ScionPageProfileInbox extends LitElement {
   @state()
   private confirmApproval: InboxApprovalPreview | null = null;
 
+  /** Mirrors `<scion-profile-nav>`'s 404 probe state for the Decisions sub-tab. */
+  @state()
+  private decisionsNavVisibility: 'unknown' | 'visible' | 'hidden' = 'unknown';
+
   private unmountPage: (() => void) | null = null;
 
   private boundOnSummaryChanged = (): void => {
@@ -93,12 +107,29 @@ export class ScionPageProfileInbox extends LitElement {
 
   private boundOnFeatureFlagsChanged = (): void => {
     const next = isInboxDashboardEnabled();
-    if (next === this.enabled) return;
-    this.enabled = next;
-    if (next) {
-      this.startStore();
+    if (next !== this.enabled) {
+      this.enabled = next;
+      if (next) {
+        this.startStore();
+      } else {
+        this.stopStore();
+      }
+    }
+    if (this.enabled && decisionsEnabled()) {
+      this.syncOrProbeDecisionsAvailability();
     } else {
-      this.stopStore();
+      this.decisionsNavVisibility = 'unknown';
+    }
+  };
+
+  private boundOnProfileDecisionsCountChanged = (e: Event): void => {
+    const detail = (e as CustomEvent<{ available?: boolean; waitingOnYou?: number }>).detail;
+    if (detail?.available === false) {
+      this.decisionsNavVisibility = 'hidden';
+      return;
+    }
+    if (typeof detail?.waitingOnYou === 'number') {
+      this.decisionsNavVisibility = 'visible';
     }
   };
 
@@ -324,8 +355,15 @@ export class ScionPageProfileInbox extends LitElement {
     this.enabled = isInboxDashboardEnabled();
     window.addEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.boundOnSummaryChanged);
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.addEventListener(
+      PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+      this.boundOnProfileDecisionsCountChanged
+    );
     if (this.enabled) {
       this.startStore();
+      if (decisionsEnabled()) {
+        this.syncOrProbeDecisionsAvailability();
+      }
     }
   }
 
@@ -333,7 +371,41 @@ export class ScionPageProfileInbox extends LitElement {
     super.disconnectedCallback();
     window.removeEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.boundOnSummaryChanged);
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.removeEventListener(
+      PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+      this.boundOnProfileDecisionsCountChanged
+    );
     this.stopStore();
+  }
+
+  private syncOrProbeDecisionsAvailability(): void {
+    const cached = getCachedProfileDecisionProbe();
+    if (cached !== null) {
+      this.decisionsNavVisibility = cached.available ? 'visible' : 'hidden';
+      return;
+    }
+    const lastKnownAvailable = getLastKnownProfileDecisionAvailability();
+    if (lastKnownAvailable === true) {
+      this.decisionsNavVisibility = 'visible';
+    } else if (lastKnownAvailable === false) {
+      this.decisionsNavVisibility = 'hidden';
+    } else {
+      this.decisionsNavVisibility = 'unknown';
+    }
+    void this.probeDecisionsAvailability();
+  }
+
+  private async probeDecisionsAvailability(): Promise<void> {
+    if (!decisionsEnabled()) return;
+    const probe = await fetchProfileDecisionProbe();
+    if (!this.isConnected || !decisionsEnabled()) return;
+    if (probe === null) {
+      if (this.decisionsNavVisibility === 'unknown') {
+        this.decisionsNavVisibility = 'visible';
+      }
+      return;
+    }
+    this.decisionsNavVisibility = probe.available ? 'visible' : 'hidden';
   }
 
   private startStore(): void {
@@ -621,7 +693,9 @@ export class ScionPageProfileInbox extends LitElement {
         </sl-button>
       </div>
 
-      ${renderInboxTabStrip('overview')}
+      ${renderInboxTabStrip('overview', {
+        decisionsVisible: this.decisionsNavVisibility === 'visible',
+      })}
       ${this.loading && !this.summary
         ? html`
             <div class="loading-state" data-inbox-loading>

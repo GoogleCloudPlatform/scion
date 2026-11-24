@@ -40,7 +40,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/navigation.js';
+import { navigateTo, replaceSearch, stripBasePath } from '../../client/navigation.js';
 import {
   ARTIFACTS_FLAG,
   artifactListUrl,
@@ -183,8 +183,53 @@ export class ScionPageArtifacts extends LitElement {
       this.loading = false;
       return;
     }
+    this.hydrateFiltersFromUrl();
     void this.load();
     void this.checkPublishAccess();
+  }
+
+  /**
+   * Hydrates filter toggles from URL query parameters on mount so drill-in
+   * links such as `/artifacts?review_pending=1&owner=me` land pre-filtered
+   * (design §6.5, AC12).
+   */
+  private hydrateFiltersFromUrl(): void {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const reviewParam = params.get('review_pending');
+    this.reviewPending = reviewParam === '1' || reviewParam === 'true';
+    if (params.get('owner') === 'me') {
+      this.ownedOnly = true;
+      this.sharedOnly = false;
+    }
+  }
+
+  /**
+   * Keeps `review_pending` and `owner=me` query parameters in sync with the
+   * filter toggles via `replaceSearch()` without creating history entries.
+   */
+  private syncUrlFromFilters(): void {
+    if (typeof window === 'undefined') return;
+    const appPath = stripBasePath(window.location.pathname);
+    if (appPath !== '/artifacts' && appPath !== '/artifacts/') {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    if (this.reviewPending) {
+      params.set('review_pending', '1');
+    } else {
+      params.delete('review_pending');
+    }
+    if (this.ownedOnly) {
+      params.set('owner', 'me');
+    } else if (params.get('owner') === 'me') {
+      params.delete('owner');
+    }
+    const nextSearch = params.toString();
+    const currentSearch = window.location.search.replace(/^\?/, '');
+    if (nextSearch !== currentSearch) {
+      replaceSearch(params);
+    }
   }
 
   /** Stops the running publish check, if any; its result is dropped. */
@@ -373,6 +418,7 @@ export class ScionPageArtifacts extends LitElement {
 
   private onStatusChange(e: Event): void {
     this.reviewPending = (e.target as HTMLElement & { value: string }).value === 'review';
+    this.syncUrlFromFilters();
     void this.load();
   }
 
@@ -380,12 +426,14 @@ export class ScionPageArtifacts extends LitElement {
     this.ownedOnly = (e.target as HTMLElement & { checked: boolean }).checked;
     // An owned artifact is never shared with its owner: the filters exclude each other.
     if (this.ownedOnly) this.sharedOnly = false;
+    this.syncUrlFromFilters();
     void this.load();
   }
 
   private onSharedChange(e: Event): void {
     this.sharedOnly = (e.target as HTMLElement & { checked: boolean }).checked;
     if (this.sharedOnly) this.ownedOnly = false;
+    this.syncUrlFromFilters();
     void this.load();
   }
 

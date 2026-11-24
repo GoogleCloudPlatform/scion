@@ -20,15 +20,22 @@
  * Provides the main sidebar navigation with Shoelace integration
  */
 
-import { LitElement, html, css, type TemplateResult } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts-flag.js';
 import {
+  INBOX_SUMMARY_CHANGED_EVENT,
+  ensureInboxSummaryStarted,
+  formatInboxSummaryBadge,
+} from '../../client/inbox-summary-loader.js';
+import {
   FEATURE_FLAGS_CHANGED_EVENT,
+  INBOX_DASHBOARD_FLAG,
   isFeatureEnabled,
+  isInboxDashboardEnabled,
   SYSTEM_ONE_FLAG,
 } from '../../utils/feature-flags.js';
 import {
@@ -49,6 +56,8 @@ interface NavItem {
   icon: string;
   /** Feature flag the item needs; the item is hidden while it is off. */
   flag?: string;
+  /** Optional badge text rendered on the right of the link; hidden when null. */
+  badge?: () => string | null;
 }
 
 interface NavSection {
@@ -62,7 +71,16 @@ interface NavSection {
 const NAV_SECTIONS: NavSection[] = [
   {
     title: 'Overview',
-    items: [{ path: '/', label: 'Dashboard', icon: 'house' }],
+    items: [
+      { path: '/', label: 'Dashboard', icon: 'house' },
+      {
+        path: '/profile/inbox',
+        label: 'Inbox',
+        icon: 'inbox',
+        flag: INBOX_DASHBOARD_FLAG,
+        badge: () => formatInboxSummaryBadge(),
+      },
+    ],
   },
   {
     title: 'Management',
@@ -161,22 +179,37 @@ export class ScionNav extends LitElement {
   private adminCheckUserId: string | null = null;
 
   private readonly onFeatureFlagsChanged = (): void => {
+    if (isInboxDashboardEnabled()) {
+      ensureInboxSummaryStarted(this.user?.id || undefined);
+    }
+    this.requestUpdate();
+  };
+
+  private readonly onInboxSummaryChanged = (): void => {
     this.requestUpdate();
   };
 
   override connectedCallback(): void {
     super.connectedCallback();
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFeatureFlagsChanged);
+    window.addEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.onInboxSummaryChanged);
+    if (isInboxDashboardEnabled()) {
+      ensureInboxSummaryStarted(this.user?.id || undefined);
+    }
   }
 
   override disconnectedCallback(): void {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFeatureFlagsChanged);
+    window.removeEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.onInboxSummaryChanged);
     super.disconnectedCallback();
   }
 
   override updated(changedProperties: Map<PropertyKey, unknown>): void {
     if (changedProperties.has('user')) {
       void this.checkAdminCapabilities();
+      if (isInboxDashboardEnabled() && this.user?.id) {
+        ensureInboxSummaryStarted(this.user.id);
+      }
     }
   }
 
@@ -399,6 +432,29 @@ export class ScionNav extends LitElement {
       pointer-events: none;
     }
 
+    .nav-badge {
+      margin-left: auto;
+      min-width: 1.25rem;
+      padding: 0 0.375rem;
+      border-radius: var(--scion-radius-full, 9999px);
+      font-size: 0.6875rem;
+      font-weight: 600;
+      line-height: 1.25rem;
+      text-align: center;
+      flex-shrink: 0;
+      background: var(--sl-color-primary-100, #dbeafe);
+      color: var(--sl-color-primary-700, #1d4ed8);
+    }
+
+    .nav-link.active .nav-badge {
+      background: color-mix(in srgb, var(--scion-primary-text, #ffffff) 22%, transparent);
+      color: var(--scion-primary-text, #ffffff);
+    }
+
+    :host([collapsed]) .nav-badge {
+      display: none;
+    }
+
     /* Collapse toggle */
     .collapse-toggle {
       display: flex;
@@ -533,6 +589,7 @@ export class ScionNav extends LitElement {
   }
 
   private renderNavItem(item: NavItem): TemplateResult {
+    const badge = item.badge?.() ?? null;
     return html`
       <li class="nav-item">
         <sl-tooltip
@@ -549,6 +606,15 @@ export class ScionNav extends LitElement {
           >
             <sl-icon name="${item.icon}"></sl-icon>
             <span class="nav-link-text">${item.label}</span>
+            ${badge
+              ? html`<span
+                  class="nav-badge"
+                  data-nav-badge
+                  title=${`${badge} items waiting in ${item.label}`}
+                  aria-label=${`${badge} items waiting in ${item.label}`}
+                  >${badge}</span
+                >`
+              : nothing}
           </a>
         </sl-tooltip>
       </li>

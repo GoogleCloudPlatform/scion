@@ -21,9 +21,19 @@
  */
 
 import { css, html, nothing, type TemplateResult } from 'lit';
+import { getLastKnownProfileDecisionAvailability } from '../../client/profile-decisions.js';
 import { decisionsEnabled, isInboxDashboardEnabled } from '../../utils/feature-flags.js';
 
 export type InboxTabId = 'overview' | 'decisions';
+
+export interface InboxTabStripOptions {
+  /**
+   * Whether the Decisions tab should be shown, mirroring `decisionsNavVisibility === 'visible'`
+   * in `<scion-profile-nav>`. When omitted, defaults to checking
+   * `getLastKnownProfileDecisionAvailability() === true`.
+   */
+  decisionsVisible?: boolean;
+}
 
 export const inboxTabStripStyles = css`
   .inbox-tab-strip {
@@ -65,9 +75,15 @@ export const inboxTabStripStyles = css`
   }
 `;
 
-export function renderInboxTabStrip(active: InboxTabId): TemplateResult | typeof nothing {
+export function renderInboxTabStrip(
+  active: InboxTabId,
+  options?: InboxTabStripOptions
+): TemplateResult | typeof nothing {
   if (!isInboxDashboardEnabled()) return nothing;
-  const showDecisions = decisionsEnabled();
+  const showDecisions =
+    options?.decisionsVisible !== undefined
+      ? decisionsEnabled() && options.decisionsVisible
+      : decisionsEnabled() && getLastKnownProfileDecisionAvailability() === true;
   return html`
     <nav class="inbox-tab-strip" aria-label="Inbox views" data-inbox-tab-strip>
       <a

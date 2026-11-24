@@ -30,12 +30,16 @@
  */
 
 import { apiFetch } from './api.js';
+import {
+  INBOX_SUMMARY_CHANGED_EVENT,
+  resetInboxSummaryBadgeCacheForTests,
+} from './inbox-summary-loader.js';
 import { PENDING_SECRETS_CHANGED_EVENT } from './pending-secrets.js';
 import { stateManager } from './state.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, isInboxDashboardEnabled } from '../utils/feature-flags.js';
 
+export { INBOX_SUMMARY_CHANGED_EVENT };
 export const INBOX_SUMMARY_API = '/api/v1/users/me/inbox/summary';
-export const INBOX_SUMMARY_CHANGED_EVENT = 'scion:inbox-summary-changed';
 export const INBOX_LOCK_NAME = 'scion-inbox-summary';
 export const INBOX_SHARE_KEY = 'scion:inbox-summary';
 export const INBOX_MOUNT_KEY = 'scion:inbox-page-mounted';
@@ -445,6 +449,7 @@ export class InboxSummaryStore {
   /** @internal test-only reset. */
   resetForTests(): void {
     this.stop();
+    resetInboxSummaryBadgeCacheForTests();
     this.userId = '';
     this.pageMountCount = 0;
     this._summary = null;

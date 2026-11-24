@@ -38,7 +38,17 @@ import {
 } from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
-import { FEATURE_FLAGS_CHANGED_EVENT, decisionsEnabled } from '../../utils/feature-flags.js';
+import {
+  FEATURE_FLAGS_CHANGED_EVENT,
+  decisionsEnabled,
+  isInboxDashboardEnabled,
+} from '../../utils/feature-flags.js';
+import {
+  INBOX_SUMMARY_CHANGED_EVENT,
+  ensureInboxSummaryStarted,
+  formatInboxSummaryBadge,
+  getInboxSummaryTotal,
+} from '../../client/inbox-summary-loader.js';
 import { navigateTo } from '../../client/navigation.js';
 import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-refresh.js';
 import { visibleInterval } from '../../client/visible-interval.js';
@@ -246,6 +256,11 @@ export class ScionNotificationTray extends LitElement {
   @state() private pushEnabled = false;
   @state() private pushPermission: PushPermissionState = 'default';
 
+  /** Mirrors `web.inbox_dashboard` flag and `InboxSummaryStore` total/badge (design §6.1). */
+  @state() private inboxEnabled = false;
+  @state() private inboxTotal = 0;
+  @state() private inboxBadge: string | null = null;
+
   /** Stops the fallback poll; paused while the tab is hidden. */
   private stopPollTimer: (() => void) | null = null;
   /** Whether the shared SSE stream has reported a drop without yet reconnecting. */
@@ -262,6 +277,7 @@ export class ScionNotificationTray extends LitElement {
   private boundOnWindowFocus = (): void => this.onWindowFocus();
   private boundOnPushPreference = (): void => this.syncPushState();
   private boundOnFeatureFlagsChanged = (): void => this.onFeatureFlagsChanged();
+  private boundOnInboxSummaryChanged = (): void => this.syncInboxState();
 
   /** IDs already seen — used to detect genuinely new notifications. */
   private seenIds = new Set<string>();
@@ -320,12 +336,15 @@ export class ScionNotificationTray extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     this.decisionsFlagEnabled = decisionsEnabled();
+    this.inboxEnabled = isInboxDashboardEnabled();
     this.syncPushState();
     // Keep in step with the profile settings page, which writes the same
     // preference. Two toggles disagreeing about one setting is worse than one.
     window.addEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.addEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.boundOnInboxSummaryChanged);
     this.syncUser();
+    this.syncInboxState();
   }
 
   override disconnectedCallback(): void {
@@ -336,6 +355,7 @@ export class ScionNotificationTray extends LitElement {
     this.activeUserId = null;
     window.removeEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.removeEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.boundOnInboxSummaryChanged);
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
@@ -367,8 +387,13 @@ export class ScionNotificationTray extends LitElement {
       if (!this.isConnected) return;
       this.activeUserId = id;
       this.decisionsFlagEnabled = decisionsEnabled();
+      this.inboxEnabled = isInboxDashboardEnabled();
       void this.fetchNotifications();
       this.reconcileDecisionsBell();
+      if (this.inboxEnabled) {
+        ensureInboxSummaryStarted(id);
+        this.syncInboxState();
+      }
       this.startPolling();
       this.listenForNotifications();
     } else {
@@ -376,21 +401,49 @@ export class ScionNotificationTray extends LitElement {
       this.stopPolling();
       this.stopListeningForNotifications();
       this.notifications = [];
+      this.inboxTotal = 0;
+      this.inboxBadge = null;
     }
   }
 
   private onFeatureFlagsChanged(): void {
     const enabled = decisionsEnabled();
-    if (enabled === this.decisionsFlagEnabled) return;
-    this.decisionsFlagEnabled = enabled;
-    if (!this.activeUserId) return;
-    if (enabled) {
-      this.reconcileDecisionsBell();
-      void this.fetchNotifications();
-    } else {
-      this.lastDecisionsCount = 0;
-      this.notifications = this.notifications.filter((n) => !isDecisionsWaiting(n));
+    if (enabled !== this.decisionsFlagEnabled) {
+      this.decisionsFlagEnabled = enabled;
+      if (this.activeUserId) {
+        if (enabled) {
+          this.reconcileDecisionsBell();
+          void this.fetchNotifications();
+        } else {
+          this.lastDecisionsCount = 0;
+          this.notifications = this.notifications.filter((n) => !isDecisionsWaiting(n));
+        }
+      }
     }
+
+    const nextInbox = isInboxDashboardEnabled();
+    if (nextInbox !== this.inboxEnabled) {
+      this.inboxEnabled = nextInbox;
+      if (nextInbox) {
+        if (this.activeUserId) {
+          ensureInboxSummaryStarted(this.activeUserId);
+        }
+        this.syncInboxState();
+      } else {
+        this.inboxTotal = 0;
+        this.inboxBadge = null;
+      }
+    }
+  }
+
+  private syncInboxState(): void {
+    if (!this.inboxEnabled) {
+      this.inboxTotal = 0;
+      this.inboxBadge = null;
+      return;
+    }
+    this.inboxTotal = getInboxSummaryTotal();
+    this.inboxBadge = formatInboxSummaryBadge();
   }
 
   /**
@@ -943,6 +996,36 @@ export class ScionNotificationTray extends LitElement {
       margin: 0;
     }
 
+    .panel-header-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .inbox-link {
+      color: var(--scion-primary, #3b82f6);
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-decoration: none;
+      padding: 0.25rem 0.5rem;
+      border-radius: var(--scion-radius-sm);
+      transition: background 0.15s ease;
+    }
+
+    .inbox-link:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .empty-inbox-link {
+      color: var(--scion-primary, #3b82f6);
+      font-weight: 500;
+      text-decoration: none;
+    }
+
+    .empty-inbox-link:hover {
+      text-decoration: underline;
+    }
+
     .mark-all-btn {
       border: none;
       background: transparent;
@@ -1253,15 +1336,32 @@ export class ScionNotificationTray extends LitElement {
 
   private renderPanel() {
     const count = this.notifications.length;
+    const inboxOn = this.isConnected ? this.inboxEnabled : isInboxDashboardEnabled();
+    const inboxBadge = this.isConnected ? this.inboxBadge : formatInboxSummaryBadge();
     return html`
       <div class="panel" role="dialog" aria-label="Notifications">
         <div class="panel-header">
           <h3 class="panel-title">Notifications</h3>
-          ${count > 0
-            ? html`<button class="mark-all-btn" @click=${(): void => void this.ackAll()}>
-                Mark all read
-              </button>`
-            : nothing}
+          ${inboxOn
+            ? html`<div class="panel-header-actions">
+                <a
+                  href="/profile/inbox"
+                  class="inbox-link"
+                  data-tray-inbox-link
+                  @click=${(e: Event): void => this.navigateToPath(e, '/profile/inbox')}
+                  >${inboxBadge ? `Inbox \u00b7 ${inboxBadge} \u2192` : 'Inbox \u2192'}</a
+                >
+                ${count > 0
+                  ? html`<button class="mark-all-btn" @click=${(): void => void this.ackAll()}>
+                      Mark all read
+                    </button>`
+                  : nothing}
+              </div>`
+            : count > 0
+              ? html`<button class="mark-all-btn" @click=${(): void => void this.ackAll()}>
+                  Mark all read
+                </button>`
+              : nothing}
         </div>
         <div class="panel-list">
           ${count > 0 ? this.notifications.map((n) => this.renderItem(n)) : this.renderEmpty()}
@@ -1389,10 +1489,23 @@ export class ScionNotificationTray extends LitElement {
   }
 
   private renderEmpty() {
+    const inboxOn = this.isConnected ? this.inboxEnabled : isInboxDashboardEnabled();
+    const inboxTotal = this.isConnected ? this.inboxTotal : getInboxSummaryTotal();
     return html`
       <div class="empty-state">
         <sl-icon name="bell-slash"></sl-icon>
-        <span>No notifications</span>
+        ${inboxOn && inboxTotal > 0
+          ? html`<span>
+              No new notifications.
+              <a
+                href="/profile/inbox"
+                class="empty-inbox-link"
+                data-tray-empty-inbox-link
+                @click=${(e: Event): void => this.navigateToPath(e, '/profile/inbox')}
+                >Open Inbox</a
+              >
+            </span>`
+          : html`<span>No notifications</span>`}
       </div>
     `;
   }
