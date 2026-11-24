@@ -4298,6 +4298,33 @@ export class ScionChatThread extends LitElement {
     );
   }
 
+  /**
+   * A secret-request card's "Jump to vN": scrolls to the replacement card
+   * within the current conversation when possible, else opens the standalone
+   * `/secret-requests/:messageId` route.
+   */
+  private handleSecretRequestJump(e: CustomEvent<{ messageId: string }>): void {
+    const targetId = e.detail?.messageId;
+    if (!targetId) return;
+    if (this.filtered) {
+      this.handleScrollToMessage(e);
+      return;
+    }
+    void this.jumpToSecretRequest(targetId);
+  }
+
+  private async jumpToSecretRequest(targetId: string): Promise<void> {
+    const startFetchId = this.fetchId;
+    const scrollPromise = this.scrollToMessageById(targetId, true, false, '');
+    const jumpSeq = this._jumpSeq;
+    await scrollPromise;
+    if (this.fetchId !== startFetchId || this._jumpSeq !== jumpSeq) return;
+    const found = Boolean(this.shadowRoot?.getElementById(`msg-${targetId}`));
+    if (!found) {
+      navigateTo(`/secret-requests/${encodeURIComponent(targetId)}`);
+    }
+  }
+
   private unsubscribeDecisionUpdated(): void {
     if (this._unsubscribeDecisionUpdated) {
       this._unsubscribeDecisionUpdated();
@@ -6680,7 +6707,7 @@ export class ScionChatThread extends LitElement {
       if (
         node instanceof Element &&
         node.matches(
-          'a, button, summary, sl-button, sl-icon-button, scion-chat-decisions, .entity-link, .mention, .reply-preview'
+          'a, button, summary, sl-button, sl-icon-button, scion-chat-decisions, scion-chat-secret-request, .entity-link, .mention, .reply-preview'
         )
       ) {
         return;
@@ -8087,6 +8114,7 @@ export class ScionChatThread extends LitElement {
             @decision-answered=${this.handleDecisionAnswered}
             @decision-jump=${this.handleDecisionJump}
             @decision-answer-denied=${this.handleDecisionAnswerDenied}
+            @secret-request-jump=${this.handleSecretRequestJump}
             dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
             ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
             dispatchFailureReason=${msg.dispatchFailureReason || ''}

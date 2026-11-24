@@ -55,6 +55,7 @@ import {
   buildArtifactLinkElement,
 } from '../../../utils/chat-file-links.js';
 import {
+  agentSecretsEnabled,
   codeSpanMentionsEnabled,
   decisionsEnabled,
   FEATURE_FLAGS_CHANGED_EVENT,
@@ -77,6 +78,11 @@ import {
 } from './prose-mentions.js';
 import './chat-decisions.js';
 import './chat-decision-response.js';
+import './chat-secret-request.js';
+import {
+  fetchSecretRequestCard,
+  type SecretRequestCardResponse,
+} from '../../../client/secret-requests.js';
 import { ANSWERABLE } from '../../../client/decision-prompts.js';
 import type { AskerAnswerability } from '../../../client/decision-prompts.js';
 import type {
@@ -1649,19 +1655,76 @@ export class ScionChatMessage extends LitElement {
       position: relative;
     }
 
-    /* A decision-response is a compact line in the answerer's lane (design §4.6). */
-    .decision-response-row {
+    /* A decision-response or secret-response is a compact line in the responder's lane (design §4.6). */
+    .decision-response-row,
+    .secret-response-row {
       display: flex;
       padding: 0.25rem 1rem;
     }
 
-    .decision-response-row.own {
+    .decision-response-row.own,
+    .secret-response-row.own {
       justify-content: flex-end;
     }
 
-    .decision-response-row.other {
+    .decision-response-row.other,
+    .secret-response-row.other {
       justify-content: flex-start;
       padding-left: 3.5rem;
+    }
+
+    .secret-response-line {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.45rem;
+      max-width: 640px;
+      padding: 0.35rem 0.65rem;
+      border-radius: var(--scion-radius);
+      background: var(--scion-bg);
+      border: 1px solid var(--scion-border);
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-secondary);
+      line-height: 1.5;
+    }
+
+    .secret-response-line sl-icon {
+      flex-shrink: 0;
+      margin-top: 0.2rem;
+      color: var(--scion-primary);
+    }
+
+    .secret-response-body {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .secret-response-body .md-content p:first-child {
+      margin-top: 0;
+    }
+
+    .secret-response-body .md-content p:last-child {
+      margin-bottom: 0;
+    }
+
+    .secret-request-status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.65rem 0.85rem;
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-lg);
+      background: var(--scion-surface);
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-secondary);
+    }
+
+    .secret-request-status.error {
+      background: var(--scion-error-bg);
+      color: var(--scion-error-text);
+    }
+
+    .secret-request-status sl-icon {
+      flex-shrink: 0;
     }
 
     /* A choice card needs room for its buttons (design §4.1). */
@@ -2706,12 +2769,14 @@ export class ScionChatMessage extends LitElement {
         padding-right: 0.5rem;
       }
 
-      .decision-response-row {
+      .decision-response-row,
+      .secret-response-row {
         padding-left: 0.5rem;
         padding-right: 0.5rem;
       }
 
-      .decision-response-row.other {
+      .decision-response-row.other,
+      .secret-response-row.other {
         padding-left: 3rem;
       }
 
@@ -2734,9 +2799,26 @@ export class ScionChatMessage extends LitElement {
     }
   };
 
+  /** Loaded secret-request card metadata/rows for `messageType === 'secret-request'`. */
+  @state()
+  private secretRequestCard: SecretRequestCardResponse | null = null;
+
+  @state()
+  private secretRequestLoading = false;
+
+  @state()
+  private secretRequestError = '';
+
+  @state()
+  private secretRequestErrorStatus = 0;
+
+  private secretRequestAbort: AbortController | null = null;
+  private secretRequestLoadedMsgId = '';
+
   private readonly handleFeatureFlagsChanged = (): void => {
     const codeSpans = codeSpanMentionsEnabled();
-    const cardMode = this.showsDecisionCard;
+    const cardMode = this.showsDecisionCard || this.showsSecretRequestCard;
+    this.syncSecretRequestCard();
     if (codeSpans !== this.renderedCodeSpanMentions || cardMode !== this.renderedCardMode) {
       this.renderedCodeSpanMentions = codeSpans;
       this.renderedCardMode = cardMode;
@@ -2745,6 +2827,9 @@ export class ScionChatMessage extends LitElement {
         : '';
       void this.renderContent();
     }
+    if (this.messageType === 'secret-request' || this.messageType === 'secret-response') {
+      this.requestUpdate();
+    }
   };
 
   override connectedCallback(): void {
@@ -2752,12 +2837,13 @@ export class ScionChatMessage extends LitElement {
     this.renderRoot.addEventListener('pointerdown', this.boundRecordContextPress, true);
     this.addEventListener('pointerdown', this.boundHostContextPress, true);
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFeatureFlagsChanged);
-    this.renderedCardMode = this.showsDecisionCard;
+    this.renderedCardMode = this.showsDecisionCard || this.showsSecretRequestCard;
     this.renderedCodeSpanMentions = codeSpanMentionsEnabled();
     this.renderedKnownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     this.renderedKnownMentionSlugsKey = this.renderedCodeSpanMentions
       ? knownMentionSlugsKey(this.effectiveKnownMentionSlugs())
       : '';
+    this.syncSecretRequestCard();
     void this.renderContent();
   }
 
@@ -2767,6 +2853,9 @@ export class ScionChatMessage extends LitElement {
     this.removeEventListener('pointerdown', this.boundHostContextPress, true);
     this._contextPress = null;
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFeatureFlagsChanged);
+    this.secretRequestAbort?.abort();
+    this.secretRequestAbort = null;
+    this.secretRequestLoadedMsgId = '';
     this.previewObserver?.disconnect();
     this.previewObserver = null;
     this.observedPreviews = new WeakSet();
@@ -2843,6 +2932,9 @@ export class ScionChatMessage extends LitElement {
     if (changed.has('authorizingUserId')) {
       this.resolveAuthorizer();
     }
+    if (changed.has('messageType') || changed.has('messageId') || changed.has('deletedAt')) {
+      this.syncSecretRequestCard();
+    }
   }
 
   /**
@@ -2873,7 +2965,7 @@ export class ScionChatMessage extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    const cardMode = this.showsDecisionCard;
+    const cardMode = this.showsDecisionCard || this.showsSecretRequestCard;
     const codeSpans = codeSpanMentionsEnabled();
     const knownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     const knownMentionSlugsKeyNow = codeSpans
@@ -2883,6 +2975,8 @@ export class ScionChatMessage extends LitElement {
       changed.has('body') ||
       changed.has('plain') ||
       changed.has('decisionIntro') ||
+      changed.has('secretRequestCard') ||
+      changed.has('secretRequestError') ||
       knownUsersKey !== this.renderedKnownUsersKey ||
       codeSpans !== this.renderedCodeSpanMentions ||
       knownMentionSlugsKeyNow !== this.renderedKnownMentionSlugsKey ||
@@ -3223,9 +3317,71 @@ export class ScionChatMessage extends LitElement {
     return this.messageType === 'decision-prompt' && !!d && d.length > 0 && decisionsEnabled();
   }
 
-  /** The text the bubble renders: the intro alone under a choice card. */
+  /**
+   * Whether this message renders as an inline secret-request card (design §4.6):
+   * `messageType === 'secret-request'` with `hub.agent_secrets` enabled.
+   */
+  private get showsSecretRequestCard(): boolean {
+    return (
+      this.messageType === 'secret-request' &&
+      Boolean(this.messageId) &&
+      !this.deletedAt &&
+      agentSecretsEnabled()
+    );
+  }
+
+  /**
+   * Whether this message renders as a compact secret-response line (design §4.6):
+   * `messageType === 'secret-response'` with `hub.agent_secrets` enabled.
+   */
+  private get showsSecretResponse(): boolean {
+    return this.messageType === 'secret-response' && agentSecretsEnabled();
+  }
+
+  private syncSecretRequestCard(force = false): void {
+    if (!this.showsSecretRequestCard) {
+      this.secretRequestAbort?.abort();
+      this.secretRequestAbort = null;
+      this.secretRequestCard = null;
+      this.secretRequestLoading = false;
+      this.secretRequestError = '';
+      this.secretRequestErrorStatus = 0;
+      this.secretRequestLoadedMsgId = '';
+      return;
+    }
+    if (!force && this.secretRequestLoadedMsgId === this.messageId) {
+      return;
+    }
+    this.secretRequestAbort?.abort();
+    const controller = new AbortController();
+    this.secretRequestAbort = controller;
+    const msgId = this.messageId;
+    this.secretRequestLoadedMsgId = msgId;
+    this.secretRequestLoading = true;
+    this.secretRequestError = '';
+    this.secretRequestErrorStatus = 0;
+    this.secretRequestCard = null;
+
+    void fetchSecretRequestCard(msgId, { signal: controller.signal }).then((res) => {
+      if (controller.signal.aborted || this.messageId !== msgId) return;
+      this.secretRequestLoading = false;
+      if (!res.ok) {
+        this.secretRequestError = res.message;
+        this.secretRequestErrorStatus = res.status;
+        return;
+      }
+      this.secretRequestCard = res.card;
+    });
+  }
+
+  /** The text the bubble renders: the intro alone under an action card, or fallback body on secret-request load error. */
   private get displayBody(): string {
-    return this.showsDecisionCard ? (this.decisionIntro ?? '') : this.body;
+    if (this.showsDecisionCard) return this.decisionIntro ?? '';
+    if (this.showsSecretRequestCard) {
+      if (this.secretRequestError) return this.body;
+      return this.secretRequestCard?.intro ?? '';
+    }
+    return this.body;
   }
 
   private async renderContent(): Promise<void> {
@@ -3508,14 +3664,17 @@ export class ScionChatMessage extends LitElement {
 
   override render() {
     if (this.showsDecisionResponse && !this.deletedAt) return this.renderDecisionResponse();
+    if (this.showsSecretResponse && !this.deletedAt) return this.renderSecretResponse();
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
     const groupClass = !this.showHeader ? ' grouped' : '';
     const isDeleted = !!this.deletedAt;
     // An attachment-only message (ptone/scion#6146) has no text: its
     // attachments render without an empty text bubble above them.
     const decisionCard = this.showsDecisionCard;
+    const secretRequestCard = this.showsSecretRequestCard && !isDeleted;
+    const hasActionCard = decisionCard || secretRequestCard;
     const attachmentOnly =
-      !decisionCard &&
+      !hasActionCard &&
       !(this.body ?? '').trim() &&
       ((this.attachmentRefs?.length ?? 0) > 0 || (this.attachments?.length ?? 0) > 0);
     // The More actions dots sit inside the text bubble, in a reserved corner.
@@ -3537,7 +3696,7 @@ export class ScionChatMessage extends LitElement {
         <div
           class="bubble${attachmentOnly && !isDeleted && this.actionsEnabled
             ? ' actions-corner'
-            : ''}${decisionCard && !isDeleted ? ' decision' : ''}"
+            : ''}${hasActionCard && !isDeleted ? ' decision' : ''}"
         >
           ${this.showHeader && this.fromAgent
             ? html`
@@ -3578,11 +3737,13 @@ export class ScionChatMessage extends LitElement {
             : attachmentOnly
               ? nothing
               : html`<div class="bubble-content${contentActions}">
-                  ${decisionCard && !this.displayBody.trim()
+                  ${hasActionCard && !this.displayBody.trim()
                     ? nothing
                     : this.renderBody()}${decisionCard
                     ? this.renderDecisionCard()
-                    : nothing}${this.renderActionsButton()}
+                    : secretRequestCard
+                      ? this.renderSecretRequestCard()
+                      : nothing}${this.renderActionsButton()}
                 </div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
           ${isDeleted ? nothing : this.renderArtifactChips()}
@@ -3865,6 +4026,59 @@ export class ScionChatMessage extends LitElement {
       .createdAt=${this.timestamp}
       .conversationLabel=${this.conversationLabel}
     ></scion-chat-decisions>`;
+  }
+
+  private renderSecretRequestCard(): TemplateResult {
+    if (this.secretRequestLoading) {
+      return html`<div class="secret-request-status" role="status">
+        <sl-spinner></sl-spinner>
+        <span>Loading secret request…</span>
+      </div>`;
+    }
+    if (this.secretRequestError || !this.secretRequestCard) {
+      return html`<div class="secret-request-status error" role="alert">
+        <sl-icon name="exclamation-circle" aria-hidden="true"></sl-icon>
+        <span>${this.secretRequestError || 'Unable to load secret request.'}</span>
+        ${this.secretRequestErrorStatus !== 403 && this.secretRequestErrorStatus !== 404
+          ? html`<sl-button size="small" @click=${(): void => this.syncSecretRequestCard(true)}>
+              Retry
+            </sl-button>`
+          : nothing}
+      </div>`;
+    }
+    const card = this.secretRequestCard;
+    return html`<scion-chat-secret-request
+      .messageId=${card.messageId}
+      .rows=${card.rows}
+      .agentName=${card.agentName}
+      .projectName=${card.projectName ?? ''}
+      .threadId=${card.threadId ?? ''}
+      .currentUserId=${this.currentUserId}
+      .canRespond=${card.canRespond}
+      .reason=${card.reason ?? ''}
+      surface="native"
+      @secret-request-refreshed=${(e: CustomEvent<{ card: SecretRequestCardResponse }>): void => {
+        if (e.detail?.card) {
+          this.secretRequestCard = e.detail.card;
+        }
+      }}
+    ></scion-chat-secret-request>`;
+  }
+
+  private renderSecretResponse(): TemplateResult {
+    const own = Boolean(
+      this.currentUserId && this.senderId && this.senderId === this.currentUserId
+    );
+    const lane = own ? 'own' : 'other';
+    return html`<div class="secret-response-row ${lane}" data-testid="secret-response-row">
+      <div class="secret-response-line">
+        <sl-icon name="shield-lock" aria-hidden="true"></sl-icon>
+        <div class="secret-response-body">${this.renderBody()}</div>
+        ${this.timestamp
+          ? html`<span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>`
+          : nothing}
+      </div>
+    </div>`;
   }
 
   /**

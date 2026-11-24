@@ -168,4 +168,51 @@ describe('scion-page-secret-request', () => {
     expect(link.getAttribute('href')).toBe('/secret-requests/msg-200');
     expect(link.textContent).toContain('v2');
   });
+
+  it('updates replacement banner live via the embedded card controller without duplicate stateManager subscriptions', async () => {
+    const addListenerSpy = vi.spyOn(stateManager, 'addEventListener');
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(makeCard()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const page = document.createElement('scion-page-secret-request') as ScionPageSecretRequest;
+    page.pageData = { path: '/secret-requests/msg-100', title: 'Scion' };
+    document.body.appendChild(page);
+
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('scion-chat-secret-request')).not.toBeNull();
+    });
+    await page.updateComplete;
+
+    const actionSubscriptions = addListenerSpy.mock.calls.filter(
+      ([eventName]) => eventName === 'message-action-updated'
+    );
+    expect(actionSubscriptions).toHaveLength(1);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('message-action-updated', {
+        detail: {
+          data: {
+            kind: 'secret_request',
+            messageId: 'msg-100',
+            secret_request: {
+              ...makeCard().rows[0],
+              status: 'replaced',
+              replacedBy: {
+                rowId: 'row-2',
+                messageId: 'msg-201',
+                version: 2,
+                at: '2026-11-22T23:59:00Z',
+              },
+            },
+          },
+        },
+      })
+    );
+
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('.replacement-banner')).not.toBeNull();
+    });
+    const link = page.shadowRoot?.querySelector('a.replacement-link') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/secret-requests/msg-201');
+  });
 });

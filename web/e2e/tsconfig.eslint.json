@@ -21,6 +21,7 @@
     "./chat-palette/*.ts",
     "./dialog-nested-popup/*.ts",
     "./project-files-tabs/*.ts",
+    "./secret-request/*.ts",
     "./terminal-entrypoints/*.ts",
     "./terminal-hidden/*.ts",
     "./terminal-pane/*.ts",
