@@ -212,8 +212,6 @@ html .sl-theme-light,
   --scion-transition-normal: 250ms ease;
   --scion-transition-slow: 350ms ease;
 
-  --scion-graph-context-opacity: 0.45;
-
   /* Shoelace Overrides (Light Mode) */
   --sl-color-primary-50: var(--scion-primary-50);
   --sl-color-primary-100: var(--scion-primary-100);

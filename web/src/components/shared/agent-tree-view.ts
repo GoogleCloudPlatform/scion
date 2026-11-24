@@ -368,6 +368,7 @@ export class ScionAgentTreeView extends LitElement {
   static override styles = css`
     :host {
       display: block;
+      --scion-graph-context-opacity: 0.45;
     }
 
     .toolbar {
@@ -470,7 +471,7 @@ export class ScionAgentTreeView extends LitElement {
     }
 
     .edge.context {
-      opacity: var(--scion-graph-context-opacity);
+      opacity: var(--scion-graph-context-opacity, 0.45);
     }
 
     .edge.dim {
@@ -537,7 +538,7 @@ export class ScionAgentTreeView extends LitElement {
     }
 
     .node.context {
-      opacity: var(--scion-graph-context-opacity);
+      opacity: var(--scion-graph-context-opacity, 0.45);
     }
 
     .node.context:hover,
