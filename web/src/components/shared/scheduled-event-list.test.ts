@@ -72,8 +72,7 @@ describe('scion-scheduled-event-list fire time in the display zone', () => {
     const el = document.createElement('scion-scheduled-event-list') as AnyEl;
     document.body.appendChild(el);
     await el.updateComplete;
-    el.loading = false;
-    el.events = events;
+    el.updateTab('pending', { loading: false, loaded: true, events });
     await el.updateComplete;
     return el;
   }
@@ -192,8 +191,7 @@ describe('scion-scheduled-event-list detail dialog wake and interrupt (ptone/sci
     const el = document.createElement('scion-scheduled-event-list') as AnyEl;
     document.body.appendChild(el);
     await el.updateComplete;
-    el.loading = false;
-    el.events = events;
+    el.updateTab('pending', { loading: false, loaded: true, events });
     await el.updateComplete;
     return el;
   }
@@ -317,7 +315,7 @@ describe('scion-scheduled-event-list detail dialog wake and interrupt (ptone/sci
   });
 });
 
-describe('scion-scheduled-event-list pagination (nextCursor)', () => {
+describe('scion-scheduled-event-list tabs and on-demand pagination (ptone/scion#9082)', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     vi.restoreAllMocks();
@@ -337,21 +335,23 @@ describe('scion-scheduled-event-list pagination (nextCursor)', () => {
     await el.updateComplete;
   }
 
-  function eventRow(id: string, agentName: string): Record<string, unknown> {
+  function eventRow(id: string, agentName: string, status = 'pending'): Record<string, unknown> {
     return {
       id,
       projectId: 'p1',
       eventType: 'message',
       fireAt: '2026-10-01T15:00:00Z',
+      ...(status !== 'pending' && status !== 'firing' ? { firedAt: '2026-10-01T15:00:05Z' } : {}),
       payload: JSON.stringify({ agentName }),
-      status: 'pending',
+      status,
       createdAt: '2026-10-01T11:00:00Z',
       createdBy: 'u1',
     };
   }
 
-  it('follows nextCursor across pages and renders every event', async () => {
+  it('loads one page of 25 on mount and appends on Load more click', async () => {
     const mod = await import('./scheduled-event-list.js');
+    expect((mod as AnyEl).SCHEDULED_EVENT_PAGE_SIZE).toBe(25);
     const urls: string[] = [];
     const pages: Record<string, Record<string, unknown>[]> = {
       '': [eventRow('e1', 'agent-page-1')],
@@ -365,10 +365,15 @@ describe('scion-scheduled-event-list pagination (nextCursor)', () => {
         const raw =
           typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         urls.push(raw);
-        const cursor = new URL(raw, 'http://x').searchParams.get('cursor') ?? '';
+        const u = new URL(raw, 'http://x');
+        const cursor = u.searchParams.get('cursor') ?? '';
         const next = cursors[cursors.indexOf(cursor) + 1];
         return Promise.resolve(
-          json({ events: pages[cursor] ?? [], ...(next ? { nextCursor: next } : {}) })
+          json({
+            events: pages[cursor] ?? [],
+            totalCount: 3,
+            ...(next ? { nextCursor: next } : {}),
+          })
         );
       })
     );
@@ -378,17 +383,40 @@ describe('scion-scheduled-event-list pagination (nextCursor)', () => {
     document.body.appendChild(el);
     await settle(el);
 
-    const text = el.shadowRoot!.textContent ?? '';
-    expect(text).toContain('agent-page-1');
-    expect(text).toContain('agent-page-2');
-    expect(text).toContain('agent-page-3');
-    expect(urls).toHaveLength(3);
-    expect(urls[0]).toContain(`limit=${(mod as AnyEl).SCHEDULED_EVENT_PAGE_SIZE}`);
+    // Only page 1 is fetched on mount.
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain('group=pending');
+    expect(urls[0]).toContain('sort=fire_at_asc');
+    expect(urls[0]).toContain('limit=25');
+    expect(el.shadowRoot!.textContent).toContain('agent-page-1');
+    expect(el.shadowRoot!.textContent).not.toContain('agent-page-2');
+    expect(el.shadowRoot!.textContent).toContain('Showing 1 of 3');
+
+    const loadMoreBtn = () =>
+      el.shadowRoot!.querySelector('sl-button.load-more-btn') as HTMLElement | null;
+    expect(loadMoreBtn()).not.toBeNull();
+
+    // Click Load more -> page 2.
+    loadMoreBtn()!.click();
+    await settle(el);
+    expect(urls).toHaveLength(2);
     expect(urls[1]).toContain('cursor=cur2');
+    expect(el.shadowRoot!.textContent).toContain('agent-page-1');
+    expect(el.shadowRoot!.textContent).toContain('agent-page-2');
+    expect(el.shadowRoot!.textContent).toContain('Showing 2 of 3');
+    expect(loadMoreBtn()).not.toBeNull();
+
+    // Click Load more -> page 3 (final page, button disappears).
+    loadMoreBtn()!.click();
+    await settle(el);
+    expect(urls).toHaveLength(3);
     expect(urls[2]).toContain('cursor=cur3');
+    expect(el.shadowRoot!.textContent).toContain('agent-page-3');
+    expect(loadMoreBtn()).toBeNull();
   });
 
-  it('surfaces the hub error and shows no partial list when a later page fails', async () => {
+  it('preserves loaded rows and shows an inline error when Load more fails', async () => {
+    let failPage2 = true;
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
@@ -397,11 +425,120 @@ describe('scion-scheduled-event-list pagination (nextCursor)', () => {
         const cursor = new URL(raw, 'http://x').searchParams.get('cursor') ?? '';
         if (!cursor) {
           return Promise.resolve(
-            json({ events: [eventRow('e1', 'agent-page-1')], nextCursor: 'cur2' })
+            json({ events: [eventRow('e1', 'agent-page-1')], totalCount: 2, nextCursor: 'cur2' })
+          );
+        }
+        if (failPage2) {
+          return Promise.resolve(
+            json({ error: { code: 'internal', message: 'events page 2 failed' } }, 500)
+          );
+        }
+        return Promise.resolve(json({ events: [eventRow('e2', 'agent-page-2')], totalCount: 2 }));
+      })
+    );
+
+    const el = document.createElement('scion-scheduled-event-list') as AnyEl;
+    el.projectId = 'p1';
+    document.body.appendChild(el);
+    await settle(el);
+
+    const loadMoreBtn = () =>
+      el.shadowRoot!.querySelector('sl-button.load-more-btn') as HTMLElement | null;
+    loadMoreBtn()!.click();
+    await settle(el);
+
+    // Loaded rows from page 1 are preserved and inline error is displayed.
+    expect(el.shadowRoot!.textContent).toContain('agent-page-1');
+    expect(el.shadowRoot!.querySelector('.load-more-error')?.textContent).toContain(
+      'events page 2 failed'
+    );
+    expect(loadMoreBtn()).not.toBeNull();
+
+    // Retrying Load more succeeds and clears the error.
+    failPage2 = false;
+    loadMoreBtn()!.click();
+    await settle(el);
+    expect(el.shadowRoot!.textContent).toContain('agent-page-1');
+    expect(el.shadowRoot!.textContent).toContain('agent-page-2');
+    expect(el.shadowRoot!.querySelector('.load-more-error')).toBeNull();
+  });
+
+  it('loads Past tab with completed_desc on tab switch and stops sl-tab-show bubbling', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        urls.push(raw);
+        const group = new URL(raw, 'http://x').searchParams.get('group');
+        if (group === 'past') {
+          return Promise.resolve(
+            json({ events: [eventRow('e-past', 'past-agent', 'fired')], totalCount: 1 })
           );
         }
         return Promise.resolve(
-          json({ error: { code: 'internal', message: 'events page 2 failed' } }, 500)
+          json({ events: [eventRow('e-pend', 'pending-agent', 'pending')], totalCount: 1 })
+        );
+      })
+    );
+
+    const parent = document.createElement('div');
+    let parentSawTabShow = false;
+    parent.addEventListener('sl-tab-show', () => {
+      parentSawTabShow = true;
+    });
+    const el = document.createElement('scion-scheduled-event-list') as AnyEl;
+    el.projectId = 'p1';
+    parent.appendChild(el);
+    document.body.appendChild(parent);
+    await settle(el);
+
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain('group=pending');
+
+    const tabGroup = el.shadowRoot!.querySelector('sl-tab-group.events-tab-group')!;
+    tabGroup.dispatchEvent(
+      new CustomEvent('sl-tab-show', {
+        detail: { name: 'past' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
+
+    expect(parentSawTabShow).toBe(false);
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toContain('group=past');
+    expect(urls[1]).toContain('sort=completed_desc');
+    expect(urls[1]).toContain('limit=25');
+    expect(el.shadowRoot!.textContent).toContain('past-agent');
+  });
+
+  it('refreshes active tab on Cancel and marks Past tab stale', async () => {
+    let pendingListCount = 0;
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        urls.push(`${init?.method ?? 'GET'} ${raw}`);
+        if (init?.method === 'DELETE') {
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        const group = new URL(raw, 'http://x').searchParams.get('group');
+        if (group === 'pending') {
+          pendingListCount++;
+          return Promise.resolve(
+            json({
+              events: pendingListCount === 1 ? [eventRow('evt-1', 'to-cancel', 'pending')] : [],
+              totalCount: pendingListCount === 1 ? 1 : 0,
+            })
+          );
+        }
+        return Promise.resolve(
+          json({ events: [eventRow('evt-1', 'to-cancel', 'cancelled')], totalCount: 1 })
         );
       })
     );
@@ -411,10 +548,18 @@ describe('scion-scheduled-event-list pagination (nextCursor)', () => {
     document.body.appendChild(el);
     await settle(el);
 
-    expect(el.shadowRoot!.querySelector('tbody')).toBeNull();
-    expect(el.shadowRoot!.querySelector('.error-details')?.textContent).toContain(
-      'events page 2 failed'
-    );
+    // Pre-mark past tab as loaded, then cancel a pending event.
+    el.updateTab('past', { loaded: true });
+    const cancelBtn = el.shadowRoot!.querySelector(
+      'sl-tab-panel[name="pending"] sl-icon-button[label="Cancel"]'
+    ) as HTMLElement;
+    expect(cancelBtn).not.toBeNull();
+    cancelBtn.click();
+    await settle(el);
+
+    expect(urls.some((u) => u.startsWith('DELETE '))).toBe(true);
+    expect(pendingListCount).toBe(2);
+    expect(el.tabs.past.loaded).toBe(false);
   });
 });
 
@@ -498,7 +643,7 @@ describe('scion-scheduled-event-list overlapping loads', () => {
     const text = el.shadowRoot!.textContent ?? '';
     expect(text).toContain('newer-event-agent');
     expect(text).not.toContain('older-event-agent');
-    expect(el.loading).toBe(false);
+    expect(el.tabs.pending.loading).toBe(false);
   });
 
   it('ignores an older load that fails after the newer one succeeded', async () => {
@@ -511,7 +656,7 @@ describe('scion-scheduled-event-list overlapping loads', () => {
 
     expect(el.shadowRoot!.textContent ?? '').toContain('newer-event-agent');
     expect(el.shadowRoot!.querySelector('.error-details')).toBeNull();
-    expect(el.loading).toBe(false);
+    expect(el.tabs.pending.loading).toBe(false);
   });
 
   it('stops fetching further pages of a superseded multi-page load', async () => {
@@ -732,52 +877,55 @@ describe('scion-scheduled-event-list exec authoring and detail (ptone/scion#7886
     const el = document.createElement('scion-scheduled-event-list') as AnyEl;
     document.body.appendChild(el);
     await el.updateComplete;
-    el.loading = false;
-    el.events = [
-      {
-        id: 'evt-revealed',
-        projectId: 'p1',
-        eventType: 'exec',
-        fireAt: '2026-10-01T15:00:00Z',
-        firedAt: '2026-10-01T15:00:01Z',
-        payload: JSON.stringify({
-          agentId: 'a-1',
-          agentName: 'worker',
-          command: ['pytest', '-q'],
-          timeoutSeconds: 90,
-        }),
-        status: 'fired',
-        createdAt: '2026-10-01T11:00:00Z',
-        createdBy: 'alice@example.com',
-        execSummary: {
-          outcome: 'nonzero',
-          exitCode: 2,
-          durationMs: 1500,
-          outputBytes: 4096,
-          startedAt: '2026-10-01T15:00:01Z',
-          finishedAt: '2026-10-01T15:00:02.5Z',
+    el.updateTab('pending', {
+      loading: false,
+      loaded: true,
+      events: [
+        {
+          id: 'evt-revealed',
+          projectId: 'p1',
+          eventType: 'exec',
+          fireAt: '2026-10-01T15:00:00Z',
+          firedAt: '2026-10-01T15:00:01Z',
+          payload: JSON.stringify({
+            agentId: 'a-1',
+            agentName: 'worker',
+            command: ['pytest', '-q'],
+            timeoutSeconds: 90,
+          }),
+          status: 'fired',
+          createdAt: '2026-10-01T11:00:00Z',
+          createdBy: 'alice@example.com',
+          execSummary: {
+            outcome: 'nonzero',
+            exitCode: 2,
+            durationMs: 1500,
+            outputBytes: 4096,
+            startedAt: '2026-10-01T15:00:01Z',
+            finishedAt: '2026-10-01T15:00:02.5Z',
+          },
         },
-      },
-      {
-        id: 'evt-redacted',
-        projectId: 'p1',
-        eventType: 'exec',
-        fireAt: '2026-10-01T16:00:00Z',
-        payload: JSON.stringify({
-          agentId: 'a-2',
-          agentName: 'secret-worker',
-          timeoutSeconds: 60,
-          commandRedacted: true,
-          argc: 4,
-          commandSha256: 'abcd1234ef56',
-          command: ['sh', '-c', sentinel],
-        }),
-        status: 'skipped',
-        error: 'agent not running (phase=stopped)',
-        createdAt: '2026-10-01T11:00:00Z',
-        createdBy: 'bob@example.com',
-      },
-    ];
+        {
+          id: 'evt-redacted',
+          projectId: 'p1',
+          eventType: 'exec',
+          fireAt: '2026-10-01T16:00:00Z',
+          payload: JSON.stringify({
+            agentId: 'a-2',
+            agentName: 'secret-worker',
+            timeoutSeconds: 60,
+            commandRedacted: true,
+            argc: 4,
+            commandSha256: 'abcd1234ef56',
+            command: ['sh', '-c', sentinel],
+          }),
+          status: 'skipped',
+          error: 'agent not running (phase=stopped)',
+          createdAt: '2026-10-01T11:00:00Z',
+          createdBy: 'bob@example.com',
+        },
+      ],
+    });
     await el.updateComplete;
 
     const rows = el.shadowRoot!.querySelectorAll('tbody tr');

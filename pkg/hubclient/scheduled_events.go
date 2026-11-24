@@ -112,6 +112,8 @@ type ScheduledEvent struct {
 // ListScheduledEventsOptions configures scheduled event listing.
 type ListScheduledEventsOptions struct {
 	Status    string
+	Group     string
+	Sort      string
 	EventType string
 	Page      apiclient.PageOptions
 }
@@ -158,6 +160,12 @@ func (s *scheduledEventService) List(ctx context.Context, opts *ListScheduledEve
 	if opts != nil {
 		if opts.Status != "" {
 			query.Set("status", opts.Status)
+		}
+		if opts.Group != "" {
+			query.Set("group", opts.Group)
+		}
+		if opts.Sort != "" {
+			query.Set("sort", opts.Sort)
 		}
 		if opts.EventType != "" {
 			query.Set("eventType", opts.EventType)

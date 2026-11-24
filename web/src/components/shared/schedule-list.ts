@@ -223,6 +223,26 @@ interface ListResponse {
 /** Page size requested when loading the schedule list; every page is followed. */
 export const SCHEDULE_PAGE_SIZE = 100;
 
+/**
+ * Extracts whether wake is enabled for a schedule.
+ * Returns true/false for `message` schedules, and null for other types
+ * (`dispatch_agent`, `exec`) where wake does not apply.
+ */
+export function parseScheduleWake(sched: Pick<Schedule, 'eventType' | 'payload'>): boolean | null {
+  if (sched.eventType !== 'message') {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(sched.payload);
+    if (parsed && typeof parsed === 'object') {
+      return (parsed as Record<string, unknown>).wake === true;
+    }
+  } catch {
+    // Malformed payload: fall back to false for message schedules
+  }
+  return false;
+}
+
 @customElement('scion-schedule-list')
 export class ScionScheduleList extends LitElement {
   /** Re-renders next-run instants when the display timezone changes. */
@@ -914,6 +934,7 @@ export class ScionScheduleList extends LitElement {
               <th>Cron</th>
               <th>Next Run</th>
               <th>Status</th>
+              <th>Wake</th>
               <th class="hide-mobile">Runs</th>
               <th>Actions</th>
             </tr>
@@ -936,6 +957,7 @@ export class ScionScheduleList extends LitElement {
     // are never confused.
     const nextRunAbsolute =
       isActive && sched.nextRunAt ? formatInstantWithZone(sched.nextRunAt) : '';
+    const wake = parseScheduleWake(sched);
 
     return html`
       <tr @click=${() => this.showDetail(sched)} style="cursor: pointer;">
@@ -959,6 +981,9 @@ export class ScionScheduleList extends LitElement {
         <td>
           <span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span>
           ${this.renderStatusReason(sched)}
+        </td>
+        <td>
+          <span class="meta-text">${wake === null ? '—' : wake ? 'Yes' : 'No'}</span>
         </td>
         <td class="hide-mobile">
           <span class="meta-text"

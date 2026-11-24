@@ -576,10 +576,71 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 		})
 		return
 	}
+	rawStatus := query.Get("status")
+	group := query.Get("group")
+	if rawStatus != "" && group != "" {
+		ValidationError(w, "cannot specify both status and group", nil)
+		return
+	}
+
+	var (
+		statusFilter   string
+		statusesFilter []string
+	)
+	switch group {
+	case "":
+		if rawStatus != "" {
+			if strings.Contains(rawStatus, ",") {
+				for _, part := range strings.Split(rawStatus, ",") {
+					trimmed := strings.TrimSpace(part)
+					if trimmed != "" {
+						statusesFilter = append(statusesFilter, trimmed)
+					}
+				}
+				if len(statusesFilter) == 0 {
+					ValidationError(w, "status must not be empty", nil)
+					return
+				}
+				if len(statusesFilter) == 1 {
+					statusFilter = statusesFilter[0]
+					statusesFilter = nil
+				}
+			} else {
+				statusFilter = rawStatus
+			}
+		}
+	case "pending":
+		statusesFilter = []string{store.ScheduledEventPending, store.ScheduledEventFiring}
+	case "past":
+		statusesFilter = []string{
+			store.ScheduledEventFired,
+			store.ScheduledEventFailed,
+			store.ScheduledEventCancelled,
+			store.ScheduledEventExpired,
+			store.ScheduledEventSkipped,
+		}
+	default:
+		ValidationError(w, `group must be "pending" or "past"`, nil)
+		return
+	}
+
+	sortParam := query.Get("sort")
+	switch sortParam {
+	case "",
+		store.ScheduledEventSortCreatedDesc,
+		store.ScheduledEventSortFireAtAsc,
+		store.ScheduledEventSortCompletedDesc:
+	default:
+		ValidationError(w, "sort must be one of created_desc, fire_at_asc, completed_desc", nil)
+		return
+	}
+
 	filter := store.ScheduledEventFilter{
 		ProjectID:        projectID,
 		EventType:        query.Get("eventType"),
-		Status:           query.Get("status"),
+		Status:           statusFilter,
+		Statuses:         statusesFilter,
+		Sort:             sortParam,
 		InitiatorAgentID: agentID,
 	}
 

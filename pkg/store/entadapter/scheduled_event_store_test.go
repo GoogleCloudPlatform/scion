@@ -397,3 +397,135 @@ func TestListFiringScheduledEvents(t *testing.T) {
 	require.Len(t, paged, 1)
 	assert.Equal(t, oldest.ID, paged[0].ID)
 }
+
+func TestListScheduledEvents_StatusesSortsAndCursors(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+	mkEvent := func(id string, status string, created, fireAt time.Time, firedAt *time.Time) *store.ScheduledEvent {
+		evt := &store.ScheduledEvent{
+			ID:        id,
+			ProjectID: projectID,
+			EventType: "message",
+			FireAt:    fireAt,
+			Payload:   `{"text":"hello"}`,
+			Status:    status,
+			CreatedAt: created,
+			CreatedBy: "user-1",
+			FiredAt:   firedAt,
+		}
+		require.NoError(t, s.CreateScheduledEvent(ctx, evt))
+		return evt
+	}
+
+	// Deterministic UUIDs so tie-break order is predictable.
+	idA := "00000000-0000-4000-8000-000000000001"
+	idB := "00000000-0000-4000-8000-000000000002"
+	idC := "00000000-0000-4000-8000-000000000003"
+	idD := "00000000-0000-4000-8000-000000000004"
+	idE := "00000000-0000-4000-8000-000000000005"
+	idF := "00000000-0000-4000-8000-000000000006"
+	idG := "00000000-0000-4000-8000-000000000007"
+	idH := "00000000-0000-4000-8000-000000000008"
+
+	// Pending group (pending + firing), including a tie on fire_at (idB < idC).
+	mkEvent(idA, store.ScheduledEventFiring, base.Add(-1*time.Hour), base.Add(10*time.Minute), nil)
+	mkEvent(idC, store.ScheduledEventPending, base.Add(-2*time.Hour), base.Add(20*time.Minute), nil)
+	mkEvent(idB, store.ScheduledEventPending, base.Add(-30*time.Minute), base.Add(20*time.Minute), nil)
+	mkEvent(idD, store.ScheduledEventPending, base.Add(-5*time.Minute), base.Add(60*time.Minute), nil)
+
+	// Past group (fired, failed, cancelled, skipped), testing COALESCE(fired_at, created) DESC, id DESC:
+	// - idE: created oldest (-5h), fired most recently (-1m) -> 1st
+	// - idF: cancelled (nil fired_at), created at -2m -> 2nd (ties with idG on completion time -2m; idG > idF so idG before idF)
+	// - idG: failed, created at -4h, fired_at at -2m -> 2nd (ahead of idF by id DESC)
+	// - idH: skipped, created at -1h, fired_at at -30m -> 4th
+	tMinus1m := base.Add(-1 * time.Minute)
+	tMinus2m := base.Add(-2 * time.Minute)
+	tMinus30m := base.Add(-30 * time.Minute)
+	mkEvent(idE, store.ScheduledEventFired, base.Add(-5*time.Hour), base.Add(-1*time.Minute), &tMinus1m)
+	mkEvent(idF, store.ScheduledEventCancelled, tMinus2m, base.Add(5*time.Hour), nil)
+	mkEvent(idG, store.ScheduledEventFailed, base.Add(-4*time.Hour), base.Add(-2*time.Minute), &tMinus2m)
+	mkEvent(idH, store.ScheduledEventSkipped, base.Add(-1*time.Hour), base.Add(-30*time.Minute), &tMinus30m)
+
+	pendingFilter := store.ScheduledEventFilter{
+		ProjectID: projectID,
+		Statuses:  []string{store.ScheduledEventPending, store.ScheduledEventFiring},
+		Sort:      store.ScheduledEventSortFireAtAsc,
+	}
+	var gotPending []string
+	var pendingFirstCursor string
+	cursor := ""
+	for {
+		res, err := s.ListScheduledEvents(ctx, pendingFilter, store.ListOptions{Limit: 2, Cursor: cursor})
+		require.NoError(t, err)
+		assert.Equal(t, 4, res.TotalCount)
+		for _, item := range res.Items {
+			gotPending = append(gotPending, item.ID)
+		}
+		if pendingFirstCursor == "" {
+			pendingFirstCursor = res.NextCursor
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		cursor = res.NextCursor
+	}
+	assert.Equal(t, []string{idA, idB, idC, idD}, gotPending, "pending sorted by fire_at ASC, id ASC")
+	require.NotEmpty(t, pendingFirstCursor)
+
+	pastFilter := store.ScheduledEventFilter{
+		ProjectID: projectID,
+		Statuses: []string{
+			store.ScheduledEventFired,
+			store.ScheduledEventFailed,
+			store.ScheduledEventCancelled,
+			store.ScheduledEventExpired,
+			store.ScheduledEventSkipped,
+		},
+		Sort: store.ScheduledEventSortCompletedDesc,
+	}
+	var gotPast []string
+	var pastFirstCursor string
+	cursor = ""
+	for {
+		res, err := s.ListScheduledEvents(ctx, pastFilter, store.ListOptions{Limit: 2, Cursor: cursor})
+		require.NoError(t, err)
+		assert.Equal(t, 4, res.TotalCount)
+		for _, item := range res.Items {
+			gotPast = append(gotPast, item.ID)
+		}
+		if pastFirstCursor == "" {
+			pastFirstCursor = res.NextCursor
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		cursor = res.NextCursor
+	}
+	assert.Equal(t, []string{idE, idG, idF, idH}, gotPast, "past sorted by COALESCE(fired_at, created) DESC, id DESC")
+	require.NotEmpty(t, pastFirstCursor)
+
+	// Default sort produces an unbound cursor.
+	defaultRes, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 2})
+	require.NoError(t, err)
+	require.NotEmpty(t, defaultRes.NextCursor)
+
+	// Cross-mode cursor replay must be rejected as ErrInvalidCursor.
+	_, err = s.ListScheduledEvents(ctx, pastFilter, store.ListOptions{Limit: 2, Cursor: pendingFirstCursor})
+	assert.ErrorIs(t, err, store.ErrInvalidCursor)
+
+	_, err = s.ListScheduledEvents(ctx, pendingFilter, store.ListOptions{Limit: 2, Cursor: pastFirstCursor})
+	assert.ErrorIs(t, err, store.ErrInvalidCursor)
+
+	_, err = s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{Limit: 2, Cursor: pendingFirstCursor})
+	assert.ErrorIs(t, err, store.ErrInvalidCursor)
+
+	_, err = s.ListScheduledEvents(ctx, pendingFilter, store.ListOptions{Limit: 2, Cursor: defaultRes.NextCursor})
+	assert.ErrorIs(t, err, store.ErrInvalidCursor)
+
+	// Unsupported sort value returns ErrInvalidInput.
+	_, err = s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, Sort: "bogus"}, store.ListOptions{})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
