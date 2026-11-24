@@ -462,3 +462,92 @@ func TestMigration0015_ReviewDrafts(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewDraftStoreListKeys(t *testing.T) {
+	forEachDraftBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		if _, err := st.ListReviewDraftKeys(ctx, nil, 0); err == nil {
+			t.Fatalf("ListReviewDraftKeys(limit=0) = nil, want error")
+		}
+		empty, err := st.ListReviewDraftKeys(ctx, nil, 10)
+		if err != nil || len(empty) != 0 {
+			t.Fatalf("ListReviewDraftKeys on empty = %v, %v", empty, err)
+		}
+
+		a1, _, _, _ := seedArtifact(t, st, "")
+		a2, _, _, _ := seedArtifact(t, st, "")
+		now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+		drafts := []ReviewDraft{
+			testDraft(a1, PrincipalKindUser, "u2", 1, "doc.md", "b1", ""),
+			testDraft(a1, PrincipalKindAgent, "a1", 1, "doc.md", "b2", ""),
+			testDraft(a1, PrincipalKindUser, "u1", 1, "doc.md", "b3", ""),
+			testDraft(a2, PrincipalKindUser, "u1", 1, "doc.md", "b4", ""),
+			testDraft(a2, PrincipalKindAgent, "a2", 1, "doc.md", "b5", ""),
+		}
+		for _, d := range drafts {
+			if _, err := st.PutReviewDraft(ctx, d, 0, now, 200); err != nil {
+				t.Fatalf("PutReviewDraft(%s, %s:%s): %v", d.ArtifactID, d.PrincipalKind, d.PrincipalRef, err)
+			}
+		}
+
+		// Walk all 5 keys in pages of 2; verify strict PK ordering.
+		var walked []ReviewDraftKey
+		var after *ReviewDraftKey
+		for {
+			page, err := st.ListReviewDraftKeys(ctx, after, 2)
+			if err != nil {
+				t.Fatalf("ListReviewDraftKeys: %v", err)
+			}
+			walked = append(walked, page...)
+			if len(page) < 2 {
+				break
+			}
+			last := page[len(page)-1]
+			after = &last
+		}
+		if len(walked) != 5 {
+			t.Fatalf("walked %d keys, want 5: %+v", len(walked), walked)
+		}
+		for i := 1; i < len(walked); i++ {
+			prev, cur := walked[i-1], walked[i]
+			less := prev.ArtifactID < cur.ArtifactID ||
+				(prev.ArtifactID == cur.ArtifactID && (prev.PrincipalKind < cur.PrincipalKind ||
+					(prev.PrincipalKind == cur.PrincipalKind && prev.PrincipalRef < cur.PrincipalRef)))
+			if !less {
+				t.Fatalf("keys not strictly ordered at %d: %+v >= %+v", i, prev, cur)
+			}
+		}
+
+		// Deleting rows mid-walk does not skip subsequent keys.
+		after = nil
+		var seenWhileDeleting []ReviewDraftKey
+		for {
+			page, err := st.ListReviewDraftKeys(ctx, after, 2)
+			if err != nil {
+				t.Fatalf("ListReviewDraftKeys while deleting: %v", err)
+			}
+			if len(page) == 0 {
+				break
+			}
+			for _, k := range page {
+				seenWhileDeleting = append(seenWhileDeleting, k)
+				if deleted, err := st.DeleteReviewDraft(ctx, k.ArtifactID, k.PrincipalKind, k.PrincipalRef, 0); err != nil || !deleted {
+					t.Fatalf("DeleteReviewDraft(%+v) = %v, %v", k, deleted, err)
+				}
+			}
+			if len(page) < 2 {
+				break
+			}
+			last := page[len(page)-1]
+			after = &last
+		}
+		if len(seenWhileDeleting) != 5 {
+			t.Fatalf("seenWhileDeleting = %d, want 5", len(seenWhileDeleting))
+		}
+		rem, err := st.ListReviewDraftKeys(ctx, nil, 10)
+		if err != nil || len(rem) != 0 {
+			t.Fatalf("remaining keys after walk-delete = %v, %v", rem, err)
+		}
+	})
+}

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -24,19 +25,23 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-// Send-time recipient warning (ptone/scion#4575) and open-review access
-// filter (ptone/scion#7650): the hub side of artifacts.RecipientAuthority.
+// Send-time recipient warning (ptone/scion#4575), open-review access filter
+// (ptone/scion#7650), and lost-access review-draft reaper (ptone/scion#8475):
+// the hub side of artifacts.RecipientAuthority.
 //
 // These methods answer for a NAMED principal (the direct recipient of a
-// message, or a reviewer with a recorded review session), not for the caller
-// of ctx. They are ADVISORY-ONLY: nothing here grants access, serves content
-// or is consulted by any read route. The identity ResolveRecipient builds
-// (recipientIdentity) is used only as the subject of policy reads
-// (CheckAccess, the delegation chain walk and the agent scope check, all run
-// under maskAllAuthzMemo) and never enters a context, so it can never be
-// taken for the caller: the artifact service learns its caller only from ctx
-// (artifactHost.Principal), which still refuses every in-process identity.
-// TestRecipientIdentityNeverEntersAContext pins that.
+// message, a reviewer with a recorded review session, or a reviewer with a
+// saved review draft), not for the caller of ctx. They are NON-ACCESS-GRANTING:
+// nothing here ever grants access, serves content, or is consulted by any read
+// route; besides advisory warnings and filtering, a recipient check may also
+// withhold or remove the principal's own data on a definitive deny. The
+// identity ResolveRecipient builds (recipientIdentity) is used only as the
+// subject of policy reads (CheckAccess, the delegation chain walk and the
+// agent scope check, all run under maskAllAuthzMemo) and never enters a
+// context, so it can never be taken for the caller: the artifact service
+// learns its caller only from ctx (artifactHost.Principal), which still
+// refuses every in-process identity. TestRecipientIdentityNeverEntersAContext
+// pins that.
 
 var _ artifacts.RecipientAuthority = (*artifactHost)(nil)
 
@@ -106,9 +111,9 @@ func (r *recipientSubject) Permits(ctx context.Context, scopeRef, permission str
 // AuthzService.CheckAccess with the principal as the subject, the same
 // question Authorize asks for a caller (without the credential step, which
 // Permits answers), under maskAllAuthzMemo so nothing memoized for the
-// caller's request is observed. CheckAccess reports no lookup error: a policy
-// evaluation that cannot complete is a deny, so it may count toward the
-// warning and drops an unverified open review.
+// caller's request is observed. An indeterminate decision (a store or
+// resolution fault) is returned as an error so callers can distinguish a
+// transient lookup failure from a policy deny and fail safe.
 func (r *recipientSubject) Authorize(ctx context.Context, scopeRef, permission string) (bool, error) {
 	perm, ok := artifactPermission(permission)
 	h := r.host
@@ -120,6 +125,9 @@ func (r *recipientSubject) Authorize(ctx context.Context, scopeRef, permission s
 		ParentType: permissions.ResourceProject,
 		ParentID:   scopeRef,
 	}, Action(perm.Action))
+	if decision.IsIndeterminate() {
+		return false, fmt.Errorf("artifacts: authorization check indeterminate: %s", decision.Reason)
+	}
 	return decision.Allowed, nil
 }
 

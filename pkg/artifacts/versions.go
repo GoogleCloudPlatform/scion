@@ -613,11 +613,20 @@ func (s *Service) canWriteErr(ctx context.Context, b backend, a *Artifact) (writ
 // rule, and ptone/scion#5548's bounded review grant, which must not read
 // on its own, depends on it.
 func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifact, permitted bool) (writeAccess, error) {
-	kind, ref, _, ok := s.host.Principal(ctx)
+	return canWriteWith(ctx, s.host, a, time.Now(), permitted, func() ([]Grant, error) {
+		return b.store.ListGrants(ctx, a.ID)
+	})
+}
+
+// canWriteWith evaluates the single write/review-access decision for host on
+// artifact a at now, given permitted = host.Permits(ctx, a.ScopeRef,
+// PermissionCreate). grants loads a's grants only if ownership does not
+// already decide it.
+func canWriteWith(ctx context.Context, host Host, a *Artifact, now time.Time, permitted bool, grants func() ([]Grant, error)) (writeAccess, error) {
+	kind, ref, _, ok := host.Principal(ctx)
 	if !ok {
 		return accessNone, nil
 	}
-	now := time.Now()
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
 		return accessNone, nil
 	}
@@ -627,15 +636,15 @@ func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifa
 	if kind == a.OwnerKind && ref == a.OwnerRef {
 		return accessOwner, nil
 	}
-	grants, err := b.store.ListGrants(ctx, a.ID)
+	gs, err := grants()
 	if err != nil {
 		return accessNone, err
 	}
-	if grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false) {
+	if grantAllows(ctx, host, a, gs, now, kind, ref, grantsForWrite, PermissionCreate, false) {
 		return accessWriteGrant, nil
 	}
-	if grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForReview, PermissionCreate, false) &&
-		canReadWith(ctx, s.host, a, func() ([]Grant, error) { return grants, nil }) {
+	if grantAllows(ctx, host, a, gs, now, kind, ref, grantsForReview, PermissionCreate, false) &&
+		canReadWithAt(ctx, host, a, now, func() ([]Grant, error) { return gs, nil }) {
 		return accessReviewGrant, nil
 	}
 	return accessNone, nil

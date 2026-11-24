@@ -242,11 +242,12 @@ func (s *Service) readableOpenReviews(ctx context.Context, b backend, a *Artifac
 		if subject == nil {
 			continue
 		}
-		rh := &recipientHost{kind: o.kind, ref: o.id, subject: subject}
-		if !canReadWith(ctx, rh, a, loadGrants) || rh.err != nil {
-			if rh.err != nil {
-				slog.WarnContext(ctx, "artifacts: checking open reviewer access failed", "error", rh.err)
-			}
+		can, err := principalCanRead(ctx, subject, a, o.kind, o.id, time.Now(), loadGrants)
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: checking open reviewer access failed", "error", err)
+			continue
+		}
+		if !can {
 			continue
 		}
 		kept = append(kept, o)

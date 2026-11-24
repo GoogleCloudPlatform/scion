@@ -114,10 +114,12 @@ const logActionReviewEnded = "review_session_ended"
 // review draft (ptone/scion#7116, ptone/scion#8470); a DELETE when no draft
 // exists is not logged, and individual draft saves are not logged.
 // logActionDraftReapPass is the count-only summary of a TTL review-draft reap
-// pass.
+// pass. logActionDraftAccessReapPass is the count-only summary of a
+// lost-access and deleted-principal review-draft reap pass (ptone/scion#8475).
 const (
-	logActionReviewDraftDeleted = "review_draft_deleted"
-	logActionDraftReapPass      = "review_draft_reap"
+	logActionReviewDraftDeleted  = "review_draft_deleted"
+	logActionDraftReapPass       = "review_draft_reap"
+	logActionDraftAccessReapPass = "review_draft_access_reap"
 )
 
 // Log reasons: why a refusal or a failure happened. Never free text.

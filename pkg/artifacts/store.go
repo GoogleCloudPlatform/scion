@@ -421,6 +421,11 @@ type Store interface {
 	// (updated_at) before cutoff and returns how many it deleted.
 	ReapReviewDrafts(ctx context.Context, cutoff time.Time, limit int) (int, error)
 
+	// ListReviewDraftKeys returns up to limit saved review draft keys ordered
+	// by (artifact_id, principal_kind, principal_ref), strictly after after
+	// when non-nil. It reads only the key columns, never bodies or notes.
+	ListReviewDraftKeys(ctx context.Context, after *ReviewDraftKey, limit int) ([]ReviewDraftKey, error)
+
 	// GetArtifact returns the artifact with id unless it is absent or
 	// soft-deleted, in which case it returns ErrNotFound.
 	GetArtifact(ctx context.Context, id string) (*Artifact, error)

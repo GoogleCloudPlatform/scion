@@ -153,6 +153,209 @@ func ReapReviewDrafts(ctx context.Context, st Store, now time.Time, limit int, l
 	return reaped, err
 }
 
+// defaultDraftAccessReapPageSize is the page size used when
+// ReapLostAccessReviewDrafts is called with a non-positive pageSize.
+const defaultDraftAccessReapPageSize = 200
+
+// maxDraftAccessPrincipalCache bounds the per-pass principal resolution cache.
+const maxDraftAccessPrincipalCache = 1000
+
+// DraftAccessReapResult reports one lost-access and deleted-principal review
+// draft reap pass (ptone/scion#8475).
+type DraftAccessReapResult struct {
+	// Checked is the number of draft rows inspected in this pass.
+	Checked int
+	// Deleted is the number of draft rows removed because their author no
+	// longer exists or no longer has review access to the artifact (or the
+	// artifact is gone).
+	Deleted int
+	// Errors is the number of draft rows skipped because a transient store,
+	// principal-resolution or authorization lookup error prevented a
+	// definitive access decision. Those drafts are left intact for the next
+	// pass.
+	Errors int
+}
+
+// ReapLostAccessReviewDrafts walks saved review draft keys in primary-key
+// order and deletes any draft whose author no longer exists or no longer has
+// review access to the artifact (evaluated through RecipientAuthority using
+// the same canReadWith + canWriteWith rule as the draft routes).
+//
+// It runs whether or not FeatureReviewDrafts is enabled. A nil store or nil
+// authority is a no-op. Any transient error (store read, principal lookup,
+// grant read, or indeterminate authorization decision) skips that draft
+// without deleting it, increments res.Errors, and records the first error so
+// callers can log it without aborting the rest of the pass.
+//
+// When any drafts were deleted or any error occurred, it writes one
+// count-only summary entry to the artifact decision log (never logging draft
+// bodies, notes or principal details).
+func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAuthority, now time.Time, pageSize int, log *slog.Logger) (DraftAccessReapResult, error) {
+	var res DraftAccessReapResult
+	if st == nil || auth == nil {
+		return res, nil
+	}
+	if pageSize <= 0 {
+		pageSize = defaultDraftAccessReapPageSize
+	}
+	if log == nil {
+		log = discardLogger
+	}
+	var firstErr error
+	recordErr := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	type resolvedPrincipal struct {
+		subject RecipientSubject
+		err     error
+	}
+	principals := make(map[string]resolvedPrincipal)
+
+	var (
+		after        *ReviewDraftKey
+		curArtID     string
+		curArt       *Artifact
+		curArtGone   bool
+		curArtErr    error
+		grantsLoaded bool
+		grants       []Grant
+		grantsErr    error
+	)
+	loadCurGrants := func() ([]Grant, error) {
+		if !grantsLoaded {
+			grants, grantsErr = st.ListGrants(ctx, curArtID)
+			grantsLoaded = true
+		}
+		return grants, grantsErr
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			recordErr(err)
+			break
+		}
+		page, err := st.ListReviewDraftKeys(ctx, after, pageSize)
+		if err != nil {
+			recordErr(err)
+			break
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, k := range page {
+			if err := ctx.Err(); err != nil {
+				recordErr(err)
+				break
+			}
+			res.Checked++
+			if k.ArtifactID != curArtID {
+				curArtID = k.ArtifactID
+				curArt = nil
+				curArtGone = false
+				curArtErr = nil
+				grantsLoaded = false
+				grants = nil
+				grantsErr = nil
+				a, aerr := st.GetArtifact(ctx, k.ArtifactID)
+				switch {
+				case errors.Is(aerr, ErrNotFound):
+					curArtGone = true
+				case aerr != nil:
+					curArtErr = aerr
+				default:
+					curArt = a
+				}
+			}
+			if curArtErr != nil {
+				res.Errors++
+				recordErr(curArtErr)
+				continue
+			}
+			if curArtGone {
+				deleted, derr := st.DeleteReviewDraft(ctx, k.ArtifactID, k.PrincipalKind, k.PrincipalRef, 0)
+				if derr != nil {
+					res.Errors++
+					recordErr(derr)
+					continue
+				}
+				if deleted {
+					res.Deleted++
+				}
+				continue
+			}
+
+			var subject RecipientSubject
+			if k.PrincipalKind != "" && k.PrincipalRef != "" {
+				pref := PrincipalRef(k.PrincipalKind, k.PrincipalRef)
+				rp, cached := principals[pref]
+				if !cached {
+					sub, rerr := auth.ResolveRecipient(ctx, k.PrincipalKind, k.PrincipalRef)
+					rp = resolvedPrincipal{subject: sub, err: rerr}
+					if len(principals) >= maxDraftAccessPrincipalCache {
+						clear(principals)
+					}
+					principals[pref] = rp
+				}
+				if rp.err != nil {
+					res.Errors++
+					recordErr(rp.err)
+					continue
+				}
+				subject = rp.subject
+			}
+
+			canReview, rerr := principalCanReview(ctx, subject, curArt, k.PrincipalKind, k.PrincipalRef, now, loadCurGrants)
+			if rerr != nil {
+				res.Errors++
+				recordErr(rerr)
+				continue
+			}
+			if canReview {
+				continue
+			}
+			deleted, derr := st.DeleteReviewDraft(ctx, k.ArtifactID, k.PrincipalKind, k.PrincipalRef, 0)
+			if derr != nil {
+				res.Errors++
+				recordErr(derr)
+				continue
+			}
+			if deleted {
+				res.Deleted++
+			}
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		if len(page) < pageSize {
+			break
+		}
+		last := page[len(page)-1]
+		after = &last
+	}
+
+	if res.Deleted > 0 || firstErr != nil {
+		outcome, level := logOutcomeAllowed, slog.LevelInfo
+		attrs := make([]slog.Attr, 0, 7)
+		if firstErr != nil {
+			outcome, level = logOutcomeError, slog.LevelWarn
+			attrs = append(attrs, slog.String(logKeyReason, logReasonStoreError))
+		}
+		attrs = append(attrs,
+			slog.String(logKeyAction, logActionDraftAccessReapPass),
+			slog.String(logKeyOutcome, outcome),
+			slog.String(logKeyPrincipalKind, reconcilerActor.Kind),
+			slog.String(logKeyPrincipalID, reconcilerActor.Ref),
+			slog.String(logKeyAuthority, reconcilerActor.Authority),
+			slog.Int(logKeyCount, res.Deleted),
+		)
+		log.LogAttrs(ctx, level, "artifacts: "+logActionDraftAccessReapPass, attrs...)
+	}
+	return res, firstErr
+}
+
 // handleReviewDraft implements GET, PUT and DELETE
 // /api/v1/artifacts/{id}/review-draft in the exact C2 authorization order:
 //  0. FeatureEnabled (off -> 404), method check (405), Principal (none -> 404)

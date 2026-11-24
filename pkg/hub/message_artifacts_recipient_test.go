@@ -239,14 +239,16 @@ func TestDirectUserRecipient(t *testing.T) {
 // moduleFuncKey names a function by its file's path from the module root.
 type moduleFuncKey struct{ path, function string }
 
-// recipientCheckSymbols are the advisory named-principal check entry points
-// (the send-time recipient warning and the open-review access filter), each
-// with the only functions in the module that may call it.
+// recipientCheckSymbols are the non-access-granting named-principal check
+// entry points (the send-time recipient warning, the open-review access
+// filter, and the lost-access review-draft reaper), each with the only
+// functions in the module that may call it.
 var recipientCheckSymbols = map[string]map[moduleFuncKey]bool{
 	"RecipientMayNotRead": {{"pkg/hub/message_artifacts.go", "artifactRecipientWarning"}: true},
 	"ResolveRecipient": {
-		{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}:       true,
-		{"pkg/artifacts/review_sessions.go", "readableOpenReviews"}: true,
+		{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}:            true,
+		{"pkg/artifacts/review_sessions.go", "readableOpenReviews"}:      true,
+		{"pkg/artifacts/review_drafts.go", "ReapLostAccessReviewDrafts"}: true,
 	},
 	"readableOpenReviews": {{"pkg/artifacts/review_sessions.go", "checkOpenReviews"}: true},
 	"recipientIdentity":   {{"pkg/hub/artifacts_recipient.go", "ResolveRecipient"}: true},
@@ -306,11 +308,14 @@ func forEachModuleGoFile(t *testing.T, fn func(path string, f *ast.File)) {
 }
 
 // TestArtifactRecipientCheckIsWarningOnly pins, across the whole module,
-// that the recipient check only ever feeds the sender's warning:
+// that the named-principal recipient check never grants access or serves
+// content — it may only feed the sender's warning, filter open reviews, or
+// withhold/remove the principal's own data on a definitive deny:
 // RecipientMayNotRead is called only by artifactRecipientWarning, whose
 // result admitMessageArtifacts only appends to the warning;
-// ResolveRecipient only by RecipientMayNotRead; and the hub's recipient
-// identity and chain walk only from the resolved recipient's own methods.
+// ResolveRecipient only by RecipientMayNotRead, readableOpenReviews, and
+// ReapLostAccessReviewDrafts; and the hub's recipient identity and chain
+// walk only from the resolved recipient's own methods.
 func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 	seen := map[string]int{}
 	forEachModuleGoFile(t, func(path string, f *ast.File) {

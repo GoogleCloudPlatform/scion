@@ -17,6 +17,7 @@ package artifacts
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // Send-time recipient warning (ptone/scion#4575).
@@ -29,12 +30,13 @@ import (
 // ResolveRefs under its own credential.
 
 // RecipientAuthority is an optional extension of Host for non-access-granting
-// read checks about a named principal (kind, ref) rather than the caller of
-// ctx: the send-time recipient warning (RecipientMayNotRead, ptone/scion#4575)
-// and the open-review access filter (readableOpenReviews, ptone/scion#7650),
-// where neither the message recipient nor a prior reviewer has a credential
-// in the caller's request. Nothing built from it ever grants access or
-// serves content.
+// read and review-access checks about a named principal (kind, ref) rather
+// than the caller of ctx: the send-time recipient warning (RecipientMayNotRead,
+// ptone/scion#4575), the open-review access filter (readableOpenReviews,
+// ptone/scion#7650), and the lost-access review-draft reaper
+// (ReapLostAccessReviewDrafts, ptone/scion#8475), where none of those
+// principals has a credential in a caller's request. Nothing built from it
+// ever grants access or serves content.
 type RecipientAuthority interface {
 	// ResolveRecipient looks the principal up once, for every question
 	// one check asks about it. It returns a nil subject and no error for
@@ -89,13 +91,12 @@ func (s *Service) RecipientMayNotRead(ctx context.Context, refs []MessageRef, ki
 	if err != nil {
 		return 0, err
 	}
-	h := &recipientHost{kind: kind, ref: ref, subject: subject}
 	readable := make(map[string]bool, len(refs))
 	count := 0
 	for _, r := range refs {
 		can, done := readable[r.ArtifactID]
 		if !done {
-			can, err = s.recipientCanRead(ctx, b, h, r.ArtifactID)
+			can, err = s.recipientCanRead(ctx, b, subject, kind, ref, r.ArtifactID)
 			if err != nil {
 				return 0, err
 			}
@@ -108,10 +109,11 @@ func (s *Service) RecipientMayNotRead(ctx context.Context, refs []MessageRef, ki
 	return count, nil
 }
 
-// recipientCanRead is canReadWith for the recipient h, with the artifact's
-// grants loaded like canReadErr loads them. Any failure, of a lookup here
-// or of a question h answered, is returned as the error.
-func (s *Service) recipientCanRead(ctx context.Context, b backend, h *recipientHost, id string) (bool, error) {
+// recipientCanRead is canReadWith for the resolved principal (kind, ref),
+// with the artifact's grants loaded like canReadErr loads them. Any failure,
+// of a lookup here or of a question subject answered, is returned as the
+// error.
+func (s *Service) recipientCanRead(ctx context.Context, b backend, subject RecipientSubject, kind, ref, id string) (bool, error) {
 	if !canonicalID(id) {
 		return true, nil
 	}
@@ -122,19 +124,78 @@ func (s *Service) recipientCanRead(ctx context.Context, b backend, h *recipientH
 	if err != nil {
 		return false, err
 	}
+	return principalCanRead(ctx, subject, a, kind, ref, time.Now(), func() ([]Grant, error) {
+		return b.store.ListGrants(ctx, a.ID)
+	})
+}
+
+// principalCanRead evaluates the single read rule (canReadWithAt) for a
+// resolved named principal (kind, ref) on artifact a at now. A nil subject
+// answers (false, nil). Any grant-load or subject-policy lookup error is
+// returned as a non-nil error rather than a definitive refusal.
+func principalCanRead(ctx context.Context, subject RecipientSubject, a *Artifact, kind, ref string, now time.Time, loadGrants func() ([]Grant, error)) (bool, error) {
+	if subject == nil {
+		return false, nil
+	}
+	rh := &recipientHost{kind: kind, ref: ref, subject: subject}
 	var loadErr error
-	can := canReadWith(ctx, h, a, func() ([]Grant, error) {
-		gs, err := b.store.ListGrants(ctx, a.ID)
+	can := canReadWithAt(ctx, rh, a, now, func() ([]Grant, error) {
+		gs, err := loadGrants()
 		loadErr = err
 		return gs, err
 	})
 	if loadErr != nil {
 		return false, loadErr
 	}
-	if h.err != nil {
-		return false, h.err
+	if rh.err != nil {
+		return false, rh.err
 	}
 	return can, nil
+}
+
+// principalCanReview evaluates the single review-access decision
+// (canReadWithAt followed by canWriteWith != accessNone, matching
+// handleReviewDraft) for a resolved named principal (kind, ref) on artifact a
+// at now. A nil subject (deleted, inactive or unknown principal) answers
+// (false, nil). Any grant-load or subject-policy lookup error is returned as
+// a non-nil error so callers fail safe and never delete data on transient
+// errors.
+func principalCanReview(ctx context.Context, subject RecipientSubject, a *Artifact, kind, ref string, now time.Time, loadGrants func() ([]Grant, error)) (bool, error) {
+	if subject == nil {
+		return false, nil
+	}
+	rh := &recipientHost{kind: kind, ref: ref, subject: subject}
+	var loadErr error
+	trackedGrants := func() ([]Grant, error) {
+		gs, err := loadGrants()
+		loadErr = err
+		return gs, err
+	}
+	canRead := canReadWithAt(ctx, rh, a, now, trackedGrants)
+	if loadErr != nil {
+		return false, loadErr
+	}
+	if rh.err != nil {
+		return false, rh.err
+	}
+	if !canRead {
+		return false, nil
+	}
+	permitted := rh.Permits(ctx, a.ScopeRef, PermissionCreate)
+	if rh.err != nil {
+		return false, rh.err
+	}
+	access, err := canWriteWith(ctx, rh, a, now, permitted, trackedGrants)
+	if err != nil {
+		return false, err
+	}
+	if loadErr != nil {
+		return false, loadErr
+	}
+	if rh.err != nil {
+		return false, rh.err
+	}
+	return access != accessNone, nil
 }
 
 // recipientHost is the Host canReadWith sees for a recipient check: its

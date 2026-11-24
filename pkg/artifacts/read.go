@@ -106,11 +106,16 @@ func (s *Service) canReadErr(ctx context.Context, b backend, a *Artifact) (bool,
 // request, and a loader that reads the grants of a window of candidates at
 // a time (grantsWindow).
 func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]Grant, error)) bool {
+	return canReadWithAt(ctx, host, a, time.Now(), grants)
+}
+
+// canReadWithAt is canReadWith evaluated at now, used by background passes
+// that supply an explicit clock.
+func canReadWithAt(ctx context.Context, host Host, a *Artifact, now time.Time, grants func() ([]Grant, error)) bool {
 	kind, ref, _, ok := host.Principal(ctx)
 	if !ok {
 		return false
 	}
-	now := time.Now()
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
 		return false
 	}

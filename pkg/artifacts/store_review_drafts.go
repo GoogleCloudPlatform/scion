@@ -43,6 +43,15 @@ type ReviewDraft struct {
 	ClientSavedAt  *time.Time
 }
 
+// ReviewDraftKey identifies one saved review draft row without its body or
+// note. It is used by the periodic lost-access reaper to walk drafts in
+// primary-key order.
+type ReviewDraftKey struct {
+	ArtifactID    string
+	PrincipalKind string
+	PrincipalRef  string
+}
+
 // ErrDraftConflict is wrapped by *DraftConflictError when a conditional write
 // or delete of a review draft finds a different stored revision.
 var ErrDraftConflict = errors.New("artifacts: review draft conflict")
@@ -400,4 +409,45 @@ func (s *sqlStore) ReapReviewDrafts(ctx context.Context, cutoff time.Time, limit
 		return 0, fmt.Errorf("artifacts: reap review drafts: %w", err)
 	}
 	return int(n), nil
+}
+
+// ListReviewDraftKeys implements Store.
+func (s *sqlStore) ListReviewDraftKeys(ctx context.Context, after *ReviewDraftKey, limit int) ([]ReviewDraftKey, error) {
+	if limit <= 0 {
+		return nil, errors.New("artifacts: ListReviewDraftKeys needs a positive limit")
+	}
+	var (
+		query string
+		args  []any
+	)
+	if after == nil {
+		query = `SELECT artifact_id, principal_kind, principal_ref
+			FROM artifact_review_draft
+			ORDER BY artifact_id, principal_kind, principal_ref
+			LIMIT ` + strconv.Itoa(limit)
+	} else {
+		query = `SELECT artifact_id, principal_kind, principal_ref
+			FROM artifact_review_draft
+			WHERE (artifact_id, principal_kind, principal_ref) > (?, ?, ?)
+			ORDER BY artifact_id, principal_kind, principal_ref
+			LIMIT ` + strconv.Itoa(limit)
+		args = []any{after.ArtifactID, after.PrincipalKind, after.PrincipalRef}
+	}
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: list review draft keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ReviewDraftKey
+	for rows.Next() {
+		var k ReviewDraftKey
+		if err := rows.Scan(&k.ArtifactID, &k.PrincipalKind, &k.PrincipalRef); err != nil {
+			return nil, fmt.Errorf("artifacts: scan review draft key: %w", err)
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("artifacts: list review draft keys: %w", err)
+	}
+	return out, nil
 }
