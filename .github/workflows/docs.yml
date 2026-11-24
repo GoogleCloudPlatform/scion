@@ -113,7 +113,8 @@ jobs:
   build-docs:
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (needs.check-trigger.outputs.should_build == 'true') }}
     needs: check-trigger
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     # Per-ref group on active builds only: PR pushes cancel older runs on the same PR,
     # while main pushes and snapshot-assembly runs never cancel mid-run.
     concurrency:

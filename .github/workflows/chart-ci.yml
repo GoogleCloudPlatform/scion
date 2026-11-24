@@ -78,7 +78,8 @@ jobs:
   helm-template:
     name: Helm Template (${{ matrix.name }})
     if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -125,10 +126,11 @@ jobs:
 
       - name: Install kubeconform
         run: |
-          curl -sSLo kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
-          tar xzf kubeconform.tar.gz
-          sudo mv kubeconform /usr/local/bin/
-          kubeconform -v
+          curl -sSLo "${RUNNER_TEMP}/kubeconform.tar.gz" https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          mkdir -p "${RUNNER_TEMP}/kubeconform-bin"
+          tar xzf "${RUNNER_TEMP}/kubeconform.tar.gz" -C "${RUNNER_TEMP}/kubeconform-bin"
+          echo "${RUNNER_TEMP}/kubeconform-bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/kubeconform-bin/kubeconform" -v
 
       - name: Render and validate
         run: |
