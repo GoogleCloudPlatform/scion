@@ -975,3 +975,83 @@ func TestExecWorkdirFallback(t *testing.T) {
 		t.Errorf("no usable home: got %q, want /", got)
 	}
 }
+
+// TestExecTriggerContextEnvAndBinding verifies that v1 exec-start with optional
+// trigger_context delivers it exclusively via SCION_TRIGGER_CONTEXT without
+// touching argv, binds trigger_context into run_id replay mismatch checks, and
+// rejects malformed trigger_context or unsupported versions without spawning.
+func TestExecTriggerContextEnvAndBinding(t *testing.T) {
+	f := newExecFixture(t)
+	ctxJSON := `{"event_id":"evt-1","trigger_id":"trg-1","fire_id":"fire-1","attributes":{"env":"prod"}}`
+
+	req := f.startReq(50, "trig")
+	req.V = agentcontrol.ExecVersion
+	req.ScheduleID = uuidN(700)
+	req.TriggerContext = ctxJSON
+
+	code, resp := f.start(t, req)
+	if code != http.StatusAccepted || resp.State != agentcontrol.ExecStateRunning {
+		t.Fatalf("start with trigger_context = %d %+v, want 202 running", code, resp)
+	}
+
+	// Verify spawned spec received SCION_TRIGGER_CONTEXT and literal argv.
+	f.fx.mu.Lock()
+	proc := f.fx.procs["trig"]
+	f.fx.mu.Unlock()
+	if proc == nil {
+		t.Fatal("no proc spawned for tag trig")
+	}
+	gotSpec := proc.specs
+	if got := envValue(gotSpec.env, agentcontrol.ExecTriggerContextEnvName); got != ctxJSON {
+		t.Fatalf("SCION_TRIGGER_CONTEXT = %q, want %q", got, ctxJSON)
+	}
+	if len(gotSpec.argv) != 2 || gotSpec.argv[0] != "true" || gotSpec.argv[1] != "trig" {
+		t.Fatalf("argv mutated: %v", gotSpec.argv)
+	}
+
+	// Same run_id with different trigger_context must return 409 mismatch.
+	altered := req
+	altered.TriggerContext = `{"event_id":"evt-1","trigger_id":"trg-1","fire_id":"fire-1","attributes":{"env":"evil"}}`
+	if code, resp := f.start(t, altered); code != http.StatusConflict || resp.Outcome != agentcontrol.ExecOutcomeMismatch {
+		t.Fatalf("altered trigger_context replay = %d %+v, want 409 mismatch", code, resp)
+	}
+
+	// Malformed trigger_context is refused 400 invalid without spawning.
+	badCtx := f.startReq(51, "bad-ctx")
+	badCtx.TriggerContext = `["not-an-object"]`
+	if code, resp := f.start(t, badCtx); code != http.StatusBadRequest || resp.Outcome != agentcontrol.ExecOutcomeInvalid || resp.Field != agentcontrol.FieldTriggerContext {
+		t.Fatalf("malformed trigger_context = %d %+v, want 400 invalid trigger_context", code, resp)
+	}
+
+	// Unsupported version v=2 is refused 400 invalid v without spawning.
+	badVer := f.startReq(52, "bad-ver")
+	badVer.V = 2
+	if code, resp := f.start(t, badVer); code != http.StatusBadRequest || resp.Outcome != agentcontrol.ExecOutcomeInvalid || resp.Field != agentcontrol.FieldV {
+		t.Fatalf("v2 request = %d %+v, want 400 invalid v", code, resp)
+	}
+
+	// Schedule-originated run (TriggerContext == "") must unset any inherited
+	// SCION_TRIGGER_CONTEXT from the harness environment so it never leaks.
+	fLeak := newExecFixture(t, func(o *ExecOptions) {
+		o.Env = func() ([]string, error) {
+			return []string{
+				"PATH=/usr/bin:/bin",
+				"HOME=/tmp",
+				agentcontrol.ExecTriggerContextEnvName + `={"leaked":true}`,
+			}, nil
+		}
+	})
+	schedReq := fLeak.startReq(53, "sched-clean")
+	if code, resp := fLeak.start(t, schedReq); code != http.StatusAccepted || resp.State != agentcontrol.ExecStateRunning {
+		t.Fatalf("schedule start = %d %+v, want 202 running", code, resp)
+	}
+	fLeak.fx.mu.Lock()
+	schedProc := fLeak.fx.procs["sched-clean"]
+	fLeak.fx.mu.Unlock()
+	if schedProc == nil {
+		t.Fatal("no proc spawned for tag sched-clean")
+	}
+	if got := envValue(schedProc.specs.env, agentcontrol.ExecTriggerContextEnvName); got != "" {
+		t.Fatalf("schedule run inherited SCION_TRIGGER_CONTEXT = %q, want unset", got)
+	}
+}

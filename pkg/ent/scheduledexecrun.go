@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/google/uuid"
 )
 
@@ -20,9 +21,13 @@ type ScheduledExecRun struct {
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
 	// EventID holds the value of the "event_id" field.
-	EventID uuid.UUID `json:"event_id,omitempty"`
+	EventID *uuid.UUID `json:"event_id,omitempty"`
+	// FireID holds the value of the "fire_id" field.
+	FireID *uuid.UUID `json:"fire_id,omitempty"`
 	// ScheduleID holds the value of the "schedule_id" field.
 	ScheduleID *uuid.UUID `json:"schedule_id,omitempty"`
+	// OverlapKey holds the value of the "overlap_key" field.
+	OverlapKey string `json:"overlap_key,omitempty"`
 	// ProjectID holds the value of the "project_id" field.
 	ProjectID uuid.UUID `json:"project_id,omitempty"`
 	// TargetAgentID holds the value of the "target_agent_id" field.
@@ -85,9 +90,11 @@ type ScheduledExecRun struct {
 type ScheduledExecRunEdges struct {
 	// Event holds the value of the event edge.
 	Event *ScheduledEvent `json:"event,omitempty"`
+	// TriggerFire holds the value of the trigger_fire edge.
+	TriggerFire *TriggerFire `json:"trigger_fire,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [1]bool
+	loadedTypes [2]bool
 }
 
 // EventOrErr returns the Event value or an error if the edge
@@ -101,20 +108,31 @@ func (e ScheduledExecRunEdges) EventOrErr() (*ScheduledEvent, error) {
 	return nil, &NotLoadedError{edge: "event"}
 }
 
+// TriggerFireOrErr returns the TriggerFire value or an error if the edge
+// was not loaded in eager-loading, or loaded but was not found.
+func (e ScheduledExecRunEdges) TriggerFireOrErr() (*TriggerFire, error) {
+	if e.TriggerFire != nil {
+		return e.TriggerFire, nil
+	} else if e.loadedTypes[1] {
+		return nil, &NotFoundError{label: triggerfire.Label}
+	}
+	return nil, &NotLoadedError{edge: "trigger_fire"}
+}
+
 // scanValues returns the types for scanning values from sql.Rows.
 func (*ScheduledExecRun) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case scheduledexecrun.FieldScheduleID:
+		case scheduledexecrun.FieldEventID, scheduledexecrun.FieldFireID, scheduledexecrun.FieldScheduleID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case scheduledexecrun.FieldAuthorizationRevision, scheduledexecrun.FieldArgc, scheduledexecrun.FieldTimeoutSeconds, scheduledexecrun.FieldExitCode, scheduledexecrun.FieldDurationMs, scheduledexecrun.FieldOutputBytes, scheduledexecrun.FieldPollSeq:
 			values[i] = new(sql.NullInt64)
-		case scheduledexecrun.FieldInitiatorPrincipalKind, scheduledexecrun.FieldInitiatorPrincipalID, scheduledexecrun.FieldInitiatorCredentialKind, scheduledexecrun.FieldInitiatorCredentialID, scheduledexecrun.FieldExecutorKind, scheduledexecrun.FieldExecutorID, scheduledexecrun.FieldCommandSha256, scheduledexecrun.FieldOutcome, scheduledexecrun.FieldCaptureMode, scheduledexecrun.FieldOutputStatus, scheduledexecrun.FieldRuntime, scheduledexecrun.FieldLaunchID:
+		case scheduledexecrun.FieldOverlapKey, scheduledexecrun.FieldInitiatorPrincipalKind, scheduledexecrun.FieldInitiatorPrincipalID, scheduledexecrun.FieldInitiatorCredentialKind, scheduledexecrun.FieldInitiatorCredentialID, scheduledexecrun.FieldExecutorKind, scheduledexecrun.FieldExecutorID, scheduledexecrun.FieldCommandSha256, scheduledexecrun.FieldOutcome, scheduledexecrun.FieldCaptureMode, scheduledexecrun.FieldOutputStatus, scheduledexecrun.FieldRuntime, scheduledexecrun.FieldLaunchID:
 			values[i] = new(sql.NullString)
 		case scheduledexecrun.FieldStartedAt, scheduledexecrun.FieldNotAfter, scheduledexecrun.FieldLeaseUntil, scheduledexecrun.FieldFinishedAt, scheduledexecrun.FieldLastPolledAt:
 			values[i] = new(sql.NullTime)
-		case scheduledexecrun.FieldID, scheduledexecrun.FieldEventID, scheduledexecrun.FieldProjectID, scheduledexecrun.FieldTargetAgentID:
+		case scheduledexecrun.FieldID, scheduledexecrun.FieldProjectID, scheduledexecrun.FieldTargetAgentID:
 			values[i] = new(uuid.UUID)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -138,10 +156,18 @@ func (_m *ScheduledExecRun) assignValues(columns []string, values []any) error {
 				_m.ID = *value
 			}
 		case scheduledexecrun.FieldEventID:
-			if value, ok := values[i].(*uuid.UUID); !ok {
+			if value, ok := values[i].(*sql.NullScanner); !ok {
 				return fmt.Errorf("unexpected type %T for field event_id", values[i])
-			} else if value != nil {
-				_m.EventID = *value
+			} else if value.Valid {
+				_m.EventID = new(uuid.UUID)
+				*_m.EventID = *value.S.(*uuid.UUID)
+			}
+		case scheduledexecrun.FieldFireID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field fire_id", values[i])
+			} else if value.Valid {
+				_m.FireID = new(uuid.UUID)
+				*_m.FireID = *value.S.(*uuid.UUID)
 			}
 		case scheduledexecrun.FieldScheduleID:
 			if value, ok := values[i].(*sql.NullScanner); !ok {
@@ -149,6 +175,12 @@ func (_m *ScheduledExecRun) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ScheduleID = new(uuid.UUID)
 				*_m.ScheduleID = *value.S.(*uuid.UUID)
+			}
+		case scheduledexecrun.FieldOverlapKey:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field overlap_key", values[i])
+			} else if value.Valid {
+				_m.OverlapKey = value.String
 			}
 		case scheduledexecrun.FieldProjectID:
 			if value, ok := values[i].(*uuid.UUID); !ok {
@@ -328,6 +360,11 @@ func (_m *ScheduledExecRun) QueryEvent() *ScheduledEventQuery {
 	return NewScheduledExecRunClient(_m.config).QueryEvent(_m)
 }
 
+// QueryTriggerFire queries the "trigger_fire" edge of the ScheduledExecRun entity.
+func (_m *ScheduledExecRun) QueryTriggerFire() *TriggerFireQuery {
+	return NewScheduledExecRunClient(_m.config).QueryTriggerFire(_m)
+}
+
 // Update returns a builder for updating this ScheduledExecRun.
 // Note that you need to call ScheduledExecRun.Unwrap() before calling this method if this ScheduledExecRun
 // was returned from a transaction, and the transaction was committed or rolled back.
@@ -351,13 +388,23 @@ func (_m *ScheduledExecRun) String() string {
 	var builder strings.Builder
 	builder.WriteString("ScheduledExecRun(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
-	builder.WriteString("event_id=")
-	builder.WriteString(fmt.Sprintf("%v", _m.EventID))
+	if v := _m.EventID; v != nil {
+		builder.WriteString("event_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.FireID; v != nil {
+		builder.WriteString("fire_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
 	builder.WriteString(", ")
 	if v := _m.ScheduleID; v != nil {
 		builder.WriteString("schedule_id=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("overlap_key=")
+	builder.WriteString(_m.OverlapKey)
 	builder.WriteString(", ")
 	builder.WriteString("project_id=")
 	builder.WriteString(fmt.Sprintf("%v", _m.ProjectID))

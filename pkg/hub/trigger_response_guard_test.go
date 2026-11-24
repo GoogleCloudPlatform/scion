@@ -67,7 +67,7 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 	assert.NotContains(t, bareCreatedMap, "triggerId", "bare WebhookEndpointCreatedResponse must omit triggerId")
 	assert.NotContains(t, bareCreatedMap, "trigger", "bare WebhookEndpointCreatedResponse must omit trigger")
 
-	trRespForCreated := buildTriggerResponse(store.Trigger{
+	trRespForCreated := buildTriggerResponse(nil, store.Trigger{
 		ID:         "tr-default-1",
 		ProjectID:  "proj-1",
 		Name:       "deploy-hook",
@@ -112,7 +112,7 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 		assert.NotContains(t, nestedTrMap, forbidden, "nested TriggerResponse must not expose %q", forbidden)
 	}
 
-	trResp := buildTriggerResponse(store.Trigger{
+	trResp := buildTriggerResponse(nil, store.Trigger{
 		ID:             "tr-1",
 		ProjectID:      "proj-1",
 		Name:           "notify-lead",
@@ -172,7 +172,7 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 	assert.NotContains(t, matchMap, "expr", "0-element TriggerResponse.match must not mirror expr")
 	assert.NotContains(t, matchMap, "rulesBroken", "healthy TriggerResponse.match must omit rulesBroken")
 
-	corruptRaw, err := json.Marshal(buildTriggerResponse(store.Trigger{
+	corruptRaw, err := json.Marshal(buildTriggerResponse(nil, store.Trigger{
 		ID:                "tr-corrupt",
 		ProjectID:         "proj-1",
 		Name:              "corrupt-rule",
@@ -194,7 +194,7 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 	assert.NotContains(t, corruptMatch, "dialect")
 	assert.NotContains(t, corruptMatch, "expr")
 
-	oneRuleRaw, err := json.Marshal(buildTriggerResponse(store.Trigger{
+	oneRuleRaw, err := json.Marshal(buildTriggerResponse(nil, store.Trigger{
 		ID:         "tr-one",
 		ProjectID:  "proj-1",
 		Name:       "one-rule",
@@ -213,7 +213,7 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 	assert.Equal(t, "cel", oneMatch["dialect"])
 	assert.Equal(t, "event.type == 'webhook.received'", oneMatch["expr"])
 
-	twoRuleRaw, err := json.Marshal(buildTriggerResponse(store.Trigger{
+	twoRuleRaw, err := json.Marshal(buildTriggerResponse(nil, store.Trigger{
 		ID:         "tr-two",
 		ProjectID:  "proj-1",
 		Name:       "two-rule",

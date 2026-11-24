@@ -27,15 +27,15 @@ import (
 )
 
 // ScheduledExecRun holds the schema definition for the ScheduledExecRun
-// entity: one row per admitted run of a scheduled exec event
-// (ptone/scion#7883, exec-schedules design "Schema: scheduled_exec_runs").
+// entity: one row per admitted exec run, owned by either a scheduled event
+// (event_id) or a trigger fire (fire_id), never both
+// (ptone/scion#7883, ptone/scion#8241).
 //
-// event_id is the scheduled event's id: one run per event (unique), with a
-// foreign key to scheduled_events that cascades on delete. Every hard
-// delete of an event (the purge, project deletion) removes its run with it,
-// and a run can never be inserted for an event that is already gone. The
-// purge and project deletion also delete runs explicitly, first, in the
-// same transaction.
+// Exactly one of event_id or fire_id is non-NULL (enforced by a table CHECK
+// constraint). Each owner column is unique and immutable, with a cascading
+// foreign key to its owner table. overlap_key scopes per-schedule or
+// per-trigger overlap protection without overloading schedule_id (which keeps
+// its recurring-schedule accounting meaning and is always NULL for trigger runs).
 //
 // The row is written before exec-start is sent and is the durable record of
 // the run (SEC-P6): the initiator, revision, executor and command digest
@@ -51,13 +51,26 @@ func (ScheduledExecRun) Fields() []ent.Field {
 			Default(uuid.New).
 			Immutable(),
 		field.UUID("event_id", uuid.UUID{}).
+			Optional().
+			Nillable().
+			Unique().
+			Immutable(),
+		field.UUID("fire_id", uuid.UUID{}).
+			Optional().
+			Nillable().
 			Unique().
 			Immutable(),
 		// schedule_id is the recurring schedule of the event, NULL for a
-		// one-shot event (the overlap scope).
+		// one-shot event or a trigger-owned run.
 		field.UUID("schedule_id", uuid.UUID{}).
 			Optional().
 			Nillable().
+			Immutable(),
+		// overlap_key scopes overlap protection ("schedule:<id>" or
+		// "trigger:<id>") without overloading schedule_id.
+		field.String("overlap_key").
+			Default("").
+			MaxLen(128).
 			Immutable(),
 		field.UUID("project_id", uuid.UUID{}).
 			Immutable(),
@@ -158,7 +171,11 @@ func (ScheduledExecRun) Edges() []ent.Edge {
 			Ref("exec_run").
 			Field("event_id").
 			Unique().
-			Required().
+			Immutable(),
+		edge.From("trigger_fire", TriggerFire.Type).
+			Ref("exec_run").
+			Field("fire_id").
+			Unique().
 			Immutable(),
 	}
 }
@@ -167,6 +184,7 @@ func (ScheduledExecRun) Edges() []ent.Edge {
 func (ScheduledExecRun) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("schedule_id", "finished_at"),
+		index.Fields("overlap_key", "finished_at"),
 		index.Fields("target_agent_id", "finished_at"),
 		index.Fields("target_agent_id", "finished_at", "poll_seq"),
 		index.Fields("project_id"),
@@ -178,6 +196,11 @@ func (ScheduledExecRun) Indexes() []ent.Index {
 // Annotations of the ScheduledExecRun.
 func (ScheduledExecRun) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "scheduled_exec_runs"},
+		entsql.Annotation{
+			Table: "scheduled_exec_runs",
+			Checks: map[string]string{
+				"scheduled_exec_runs_single_owner": "((event_id IS NOT NULL AND fire_id IS NULL) OR (event_id IS NULL AND fire_id IS NOT NULL))",
+			},
+		},
 	}
 }

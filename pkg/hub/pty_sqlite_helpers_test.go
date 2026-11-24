@@ -70,6 +70,9 @@ type ptyConduitFixture struct {
 	// agentClock fires the timers of the sciontool agent started last
 	// (startSciontoolAgent); its time reads f.clock.
 	agentClock *clock.Fake
+	// controlFeatures, when non-nil, overrides Hello.capabilities.features
+	// for control agents started by startControlAgentWithOptions.
+	controlFeatures []string
 }
 
 // newPTYConduitFixture builds the fixture; mods adjust the relay options
@@ -259,7 +262,12 @@ func (f *ptyConduitFixture) startControlAgentAsWithFeatures(t *testing.T, hubURL
 		NoPTY:     true,
 		Session:   conduit.Config{RPCHandler: counted},
 		RPCRoutes: routes,
-		Features:  features,
+		Features: func() []string {
+			if f.controlFeatures != nil {
+				return f.controlFeatures
+			}
+			return features
+		}(),
 	})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())

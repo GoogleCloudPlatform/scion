@@ -18,8 +18,12 @@ const (
 	FieldID = "id"
 	// FieldEventID holds the string denoting the event_id field in the database.
 	FieldEventID = "event_id"
+	// FieldFireID holds the string denoting the fire_id field in the database.
+	FieldFireID = "fire_id"
 	// FieldScheduleID holds the string denoting the schedule_id field in the database.
 	FieldScheduleID = "schedule_id"
+	// FieldOverlapKey holds the string denoting the overlap_key field in the database.
+	FieldOverlapKey = "overlap_key"
 	// FieldProjectID holds the string denoting the project_id field in the database.
 	FieldProjectID = "project_id"
 	// FieldTargetAgentID holds the string denoting the target_agent_id field in the database.
@@ -74,6 +78,8 @@ const (
 	FieldPollSeq = "poll_seq"
 	// EdgeEvent holds the string denoting the event edge name in mutations.
 	EdgeEvent = "event"
+	// EdgeTriggerFire holds the string denoting the trigger_fire edge name in mutations.
+	EdgeTriggerFire = "trigger_fire"
 	// Table holds the table name of the scheduledexecrun in the database.
 	Table = "scheduled_exec_runs"
 	// EventTable is the table that holds the event relation/edge.
@@ -83,13 +89,22 @@ const (
 	EventInverseTable = "scheduled_events"
 	// EventColumn is the table column denoting the event relation/edge.
 	EventColumn = "event_id"
+	// TriggerFireTable is the table that holds the trigger_fire relation/edge.
+	TriggerFireTable = "scheduled_exec_runs"
+	// TriggerFireInverseTable is the table name for the TriggerFire entity.
+	// It exists in this package in order to avoid circular dependency with the "triggerfire" package.
+	TriggerFireInverseTable = "trigger_fires"
+	// TriggerFireColumn is the table column denoting the trigger_fire relation/edge.
+	TriggerFireColumn = "fire_id"
 )
 
 // Columns holds all SQL columns for scheduledexecrun fields.
 var Columns = []string{
 	FieldID,
 	FieldEventID,
+	FieldFireID,
 	FieldScheduleID,
+	FieldOverlapKey,
 	FieldProjectID,
 	FieldTargetAgentID,
 	FieldInitiatorPrincipalKind,
@@ -129,6 +144,10 @@ func ValidColumn(column string) bool {
 }
 
 var (
+	// DefaultOverlapKey holds the default value on creation for the "overlap_key" field.
+	DefaultOverlapKey string
+	// OverlapKeyValidator is a validator for the "overlap_key" field. It is called by the builders before save.
+	OverlapKeyValidator func(string) error
 	// DefaultInitiatorPrincipalKind holds the default value on creation for the "initiator_principal_kind" field.
 	DefaultInitiatorPrincipalKind string
 	// DefaultInitiatorPrincipalID holds the default value on creation for the "initiator_principal_id" field.
@@ -206,9 +225,19 @@ func ByEventID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldEventID, opts...).ToFunc()
 }
 
+// ByFireID orders the results by the fire_id field.
+func ByFireID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFireID, opts...).ToFunc()
+}
+
 // ByScheduleID orders the results by the schedule_id field.
 func ByScheduleID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldScheduleID, opts...).ToFunc()
+}
+
+// ByOverlapKey orders the results by the overlap_key field.
+func ByOverlapKey(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOverlapKey, opts...).ToFunc()
 }
 
 // ByProjectID orders the results by the project_id field.
@@ -347,10 +376,24 @@ func ByEventField(field string, opts ...sql.OrderTermOption) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newEventStep(), sql.OrderByField(field, opts...))
 	}
 }
+
+// ByTriggerFireField orders the results by trigger_fire field.
+func ByTriggerFireField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newTriggerFireStep(), sql.OrderByField(field, opts...))
+	}
+}
 func newEventStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(EventInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2O, true, EventTable, EventColumn),
+	)
+}
+func newTriggerFireStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(TriggerFireInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, true, TriggerFireTable, TriggerFireColumn),
 	)
 }

@@ -61,9 +61,19 @@ func EventID(v uuid.UUID) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldEventID, v))
 }
 
+// FireID applies equality check predicate on the "fire_id" field. It's identical to FireIDEQ.
+func FireID(v uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldFireID, v))
+}
+
 // ScheduleID applies equality check predicate on the "schedule_id" field. It's identical to ScheduleIDEQ.
 func ScheduleID(v uuid.UUID) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldScheduleID, v))
+}
+
+// OverlapKey applies equality check predicate on the "overlap_key" field. It's identical to OverlapKeyEQ.
+func OverlapKey(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldOverlapKey, v))
 }
 
 // ProjectID applies equality check predicate on the "project_id" field. It's identical to ProjectIDEQ.
@@ -211,6 +221,46 @@ func EventIDNotIn(vs ...uuid.UUID) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldNotIn(FieldEventID, vs...))
 }
 
+// EventIDIsNil applies the IsNil predicate on the "event_id" field.
+func EventIDIsNil() predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIsNull(FieldEventID))
+}
+
+// EventIDNotNil applies the NotNil predicate on the "event_id" field.
+func EventIDNotNil() predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotNull(FieldEventID))
+}
+
+// FireIDEQ applies the EQ predicate on the "fire_id" field.
+func FireIDEQ(v uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldFireID, v))
+}
+
+// FireIDNEQ applies the NEQ predicate on the "fire_id" field.
+func FireIDNEQ(v uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNEQ(FieldFireID, v))
+}
+
+// FireIDIn applies the In predicate on the "fire_id" field.
+func FireIDIn(vs ...uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIn(FieldFireID, vs...))
+}
+
+// FireIDNotIn applies the NotIn predicate on the "fire_id" field.
+func FireIDNotIn(vs ...uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotIn(FieldFireID, vs...))
+}
+
+// FireIDIsNil applies the IsNil predicate on the "fire_id" field.
+func FireIDIsNil() predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIsNull(FieldFireID))
+}
+
+// FireIDNotNil applies the NotNil predicate on the "fire_id" field.
+func FireIDNotNil() predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotNull(FieldFireID))
+}
+
 // ScheduleIDEQ applies the EQ predicate on the "schedule_id" field.
 func ScheduleIDEQ(v uuid.UUID) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldScheduleID, v))
@@ -259,6 +309,71 @@ func ScheduleIDIsNil() predicate.ScheduledExecRun {
 // ScheduleIDNotNil applies the NotNil predicate on the "schedule_id" field.
 func ScheduleIDNotNil() predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldNotNull(FieldScheduleID))
+}
+
+// OverlapKeyEQ applies the EQ predicate on the "overlap_key" field.
+func OverlapKeyEQ(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldOverlapKey, v))
+}
+
+// OverlapKeyNEQ applies the NEQ predicate on the "overlap_key" field.
+func OverlapKeyNEQ(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNEQ(FieldOverlapKey, v))
+}
+
+// OverlapKeyIn applies the In predicate on the "overlap_key" field.
+func OverlapKeyIn(vs ...string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIn(FieldOverlapKey, vs...))
+}
+
+// OverlapKeyNotIn applies the NotIn predicate on the "overlap_key" field.
+func OverlapKeyNotIn(vs ...string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotIn(FieldOverlapKey, vs...))
+}
+
+// OverlapKeyGT applies the GT predicate on the "overlap_key" field.
+func OverlapKeyGT(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGT(FieldOverlapKey, v))
+}
+
+// OverlapKeyGTE applies the GTE predicate on the "overlap_key" field.
+func OverlapKeyGTE(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGTE(FieldOverlapKey, v))
+}
+
+// OverlapKeyLT applies the LT predicate on the "overlap_key" field.
+func OverlapKeyLT(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLT(FieldOverlapKey, v))
+}
+
+// OverlapKeyLTE applies the LTE predicate on the "overlap_key" field.
+func OverlapKeyLTE(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLTE(FieldOverlapKey, v))
+}
+
+// OverlapKeyContains applies the Contains predicate on the "overlap_key" field.
+func OverlapKeyContains(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldContains(FieldOverlapKey, v))
+}
+
+// OverlapKeyHasPrefix applies the HasPrefix predicate on the "overlap_key" field.
+func OverlapKeyHasPrefix(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldHasPrefix(FieldOverlapKey, v))
+}
+
+// OverlapKeyHasSuffix applies the HasSuffix predicate on the "overlap_key" field.
+func OverlapKeyHasSuffix(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldHasSuffix(FieldOverlapKey, v))
+}
+
+// OverlapKeyEqualFold applies the EqualFold predicate on the "overlap_key" field.
+func OverlapKeyEqualFold(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEqualFold(FieldOverlapKey, v))
+}
+
+// OverlapKeyContainsFold applies the ContainsFold predicate on the "overlap_key" field.
+func OverlapKeyContainsFold(v string) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldContainsFold(FieldOverlapKey, v))
 }
 
 // ProjectIDEQ applies the EQ predicate on the "project_id" field.
@@ -1611,6 +1726,29 @@ func HasEvent() predicate.ScheduledExecRun {
 func HasEventWith(preds ...predicate.ScheduledEvent) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(func(s *sql.Selector) {
 		step := newEventStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
+// HasTriggerFire applies the HasEdge predicate on the "trigger_fire" edge.
+func HasTriggerFire() predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, TriggerFireTable, TriggerFireColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasTriggerFireWith applies the HasEdge predicate on the "trigger_fire" edge with a given conditions (other predicates).
+func HasTriggerFireWith(preds ...predicate.TriggerFire) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(func(s *sql.Selector) {
+		step := newTriggerFireStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

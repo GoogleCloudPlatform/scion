@@ -17,8 +17,10 @@ package agentcontrol
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -142,5 +144,112 @@ func TestExecStartRequestValidateIsFieldOnly(t *testing.T) {
 	}
 	if got := err.Error(); got != "exec control: invalid field argv" {
 		t.Fatalf("error text %q must name the field only", got)
+	}
+}
+
+func TestExecStartRequestTriggerContextValidation(t *testing.T) {
+	validBase := func() ExecStartRequest {
+		return ExecStartRequest{
+			V:              ExecVersion,
+			RunID:          "00000000-0000-4000-8000-000000000001",
+			ScheduleID:     "00000000-0000-4000-8000-000000000002",
+			Argv:           []string{"echo", "ok"},
+			TimeoutS:       30,
+			NotAfterUnixMS: 1000,
+			TriggerContext: `{"event_id":"e1","trigger_id":"t1","fire_id":"f1"}`,
+		}
+	}
+
+	base := validBase()
+	if err := base.Validate(); err != nil {
+		t.Fatalf("valid v1 request with trigger_context rejected: %v", err)
+	}
+
+	// Empty TriggerContext on v1 remains valid (standard scheduled exec).
+	noCtx := validBase()
+	noCtx.TriggerContext = ""
+	if err := noCtx.Validate(); err != nil {
+		t.Fatalf("valid v1 request without trigger_context rejected: %v", err)
+	}
+
+	// Simulated old sciontool decoder (without trigger_context) rejects the
+	// optional field via DisallowUnknownFields as a defense-in-depth backstop
+	// behind the hub's exec_context.v1 capability gate.
+	wireBytes, err := json.Marshal(validBase())
+	if err != nil {
+		t.Fatalf("marshal v1 with trigger_context: %v", err)
+	}
+	type oldV1ExecStartRequest struct {
+		V              int      `json:"v"`
+		RunID          string   `json:"run_id"`
+		ScheduleID     string   `json:"schedule_id,omitempty"`
+		Argv           []string `json:"argv"`
+		TimeoutS       int      `json:"timeout_s"`
+		NotAfterUnixMS int64    `json:"not_after_unix_ms"`
+	}
+	var oldReq oldV1ExecStartRequest
+	if err := decodeStrict(wireBytes, &oldReq); err == nil {
+		t.Fatal("old strict decoder must reject trigger_context field")
+	}
+
+	cases := []struct {
+		name      string
+		mutate    func(*ExecStartRequest)
+		wantField string
+	}{
+		{
+			name: "v2 rejected (version stays 1; capability-gated)",
+			mutate: func(r *ExecStartRequest) {
+				r.V = 2
+			},
+			wantField: FieldV,
+		},
+		{
+			name: "non-object json rejected",
+			mutate: func(r *ExecStartRequest) {
+				r.TriggerContext = `["not","an","object"]`
+			},
+			wantField: FieldTriggerContext,
+		},
+		{
+			name: "trailing json rejected",
+			mutate: func(r *ExecStartRequest) {
+				r.TriggerContext = `{"a":1}{"b":2}`
+			},
+			wantField: FieldTriggerContext,
+		},
+		{
+			name: "NUL byte rejected",
+			mutate: func(r *ExecStartRequest) {
+				r.TriggerContext = "{\"a\":\"b\x00c\"}"
+			},
+			wantField: FieldTriggerContext,
+		},
+		{
+			name: "exceeding MaxExecTriggerContextBytes rejected",
+			mutate: func(r *ExecStartRequest) {
+				r.TriggerContext = `{"a":"` + strings.Repeat("x", MaxExecTriggerContextBytes) + `"}`
+			},
+			wantField: FieldTriggerContext,
+		},
+		{
+			name: "v3 rejected",
+			mutate: func(r *ExecStartRequest) {
+				r.V = 3
+			},
+			wantField: FieldV,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := validBase()
+			tc.mutate(&r)
+			err := r.Validate()
+			var fe *ExecFieldError
+			if !errors.As(err, &fe) || fe.Field != tc.wantField {
+				t.Fatalf("got err=%v, want field %q", err, tc.wantField)
+			}
+		})
 	}
 }

@@ -3689,6 +3689,10 @@ type ScheduledExecRunStore interface {
 	// exist, keyed by event ID.
 	ListScheduledExecRunsByEvent(ctx context.Context, eventIDs []string) (map[string]ScheduledExecRun, error)
 
+	// ListScheduledExecRunsByFire returns the runs of the given trigger fires
+	// that exist, keyed by fire ID.
+	ListScheduledExecRunsByFire(ctx context.Context, fireIDs []string) (map[string]ScheduledExecRun, error)
+
 	// MarkScheduledExecRunRunning moves an unfinished run from starting to
 	// running. It reports whether the row changed; a finished run, or one
 	// already running, is left as is.

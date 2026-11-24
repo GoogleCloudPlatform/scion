@@ -9,6 +9,7 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/google/uuid"
 )
@@ -71,8 +72,31 @@ type TriggerFire struct {
 	// FinishedAt holds the value of the "finished_at" field.
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 	// Created holds the value of the "created" field.
-	Created      time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created,omitempty"`
+	// Edges holds the relations/edges for other nodes in the graph.
+	// The values are being populated by the TriggerFireQuery when eager-loading is set.
+	Edges        TriggerFireEdges `json:"edges"`
 	selectValues sql.SelectValues
+}
+
+// TriggerFireEdges holds the relations/edges for other nodes in the graph.
+type TriggerFireEdges struct {
+	// ExecRun holds the value of the exec_run edge.
+	ExecRun *ScheduledExecRun `json:"exec_run,omitempty"`
+	// loadedTypes holds the information for reporting if a
+	// type was loaded (or requested) in eager-loading or not.
+	loadedTypes [1]bool
+}
+
+// ExecRunOrErr returns the ExecRun value or an error if the edge
+// was not loaded in eager-loading, or loaded but was not found.
+func (e TriggerFireEdges) ExecRunOrErr() (*ScheduledExecRun, error) {
+	if e.ExecRun != nil {
+		return e.ExecRun, nil
+	} else if e.loadedTypes[0] {
+		return nil, &NotFoundError{label: scheduledexecrun.Label}
+	}
+	return nil, &NotLoadedError{edge: "exec_run"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -295,6 +319,11 @@ func (_m *TriggerFire) assignValues(columns []string, values []any) error {
 // This includes values selected through modifiers, order, etc.
 func (_m *TriggerFire) Value(name string) (ent.Value, error) {
 	return _m.selectValues.Get(name)
+}
+
+// QueryExecRun queries the "exec_run" edge of the TriggerFire entity.
+func (_m *TriggerFire) QueryExecRun() *ScheduledExecRunQuery {
+	return NewTriggerFireClient(_m.config).QueryExecRun(_m)
 }
 
 // Update returns a builder for updating this TriggerFire.

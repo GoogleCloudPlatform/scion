@@ -72,6 +72,10 @@ func (s *Server) createScheduledExecEvent(w http.ResponseWriter, r *http.Request
 			BadRequest(w, err.Error())
 			return
 		}
+		if len(p.ContextAttributes) > 0 {
+			ValidationError(w, "contextAttributes is not supported for schedules", nil)
+			return
+		}
 	} else {
 		p = &scheduledExecPayload{
 			AgentID:        req.AgentID,
@@ -179,6 +183,10 @@ func (s *Server) createExecSchedule(w http.ResponseWriter, r *http.Request, proj
 		var err error
 		if p, err = decodeScheduledExecPayload(req.Payload); err != nil {
 			BadRequest(w, err.Error())
+			return
+		}
+		if len(p.ContextAttributes) > 0 {
+			ValidationError(w, "contextAttributes is not supported for schedules", nil)
 			return
 		}
 	} else {
@@ -309,6 +317,10 @@ func (s *Server) prepareExecScheduleUpdate(
 		decoded, err := decodeScheduledExecPayload(req.Payload)
 		if err != nil {
 			BadRequest(w, err.Error())
+			return nil, "", false
+		}
+		if len(decoded.ContextAttributes) > 0 {
+			ValidationError(w, "contextAttributes is not supported for schedules", nil)
 			return nil, "", false
 		}
 		p = decoded

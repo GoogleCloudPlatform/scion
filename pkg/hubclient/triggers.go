@@ -222,6 +222,14 @@ type TriggerActionSpec struct {
 	ReuseMessage  string            `json:"reuseMessage,omitempty"`
 	UntrustedVars []string          `json:"untrustedVars,omitempty"`
 	NoAuth        bool              `json:"noAuth,omitempty"`
+
+	// exec action fields (Stage 2 P8, ptone/scion#8241).
+	Command           []string `json:"command,omitempty"`
+	TimeoutSeconds    int      `json:"timeoutSeconds,omitempty"`
+	ContextAttributes []string `json:"contextAttributes,omitempty"`
+	CommandRedacted   bool     `json:"commandRedacted,omitempty"`
+	Argc              int      `json:"argc,omitempty"`
+	CommandSHA256     string   `json:"commandSha256,omitempty"`
 }
 
 // TriggerRenderUsedVar describes one placeholder path expanded during trigger render preview.
@@ -375,6 +383,7 @@ type TriggerFire struct {
 	DecidedDialect string            `json:"decidedDialect,omitempty"`
 	RuleTrace      *TriggerRuleTrace `json:"ruleTrace,omitempty"`
 	NotBefore      *time.Time        `json:"notBefore,omitempty"`
+	ExecSummary    *ExecSummary      `json:"execSummary,omitempty"`
 	StartedAt      time.Time         `json:"startedAt"`
 	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`
 }

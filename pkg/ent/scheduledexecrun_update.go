@@ -231,9 +231,6 @@ func (_u *ScheduledExecRunUpdate) check() error {
 			return &ValidationError{Name: "outcome", err: fmt.Errorf(`ent: validator failed for field "ScheduledExecRun.outcome": %w`, err)}
 		}
 	}
-	if _u.mutation.EventCleared() && len(_u.mutation.EventIDs()) > 0 {
-		return errors.New(`ent: clearing a required unique edge "ScheduledExecRun.event"`)
-	}
 	return nil
 }
 
@@ -535,9 +532,6 @@ func (_u *ScheduledExecRunUpdateOne) check() error {
 		if err := scheduledexecrun.OutcomeValidator(v); err != nil {
 			return &ValidationError{Name: "outcome", err: fmt.Errorf(`ent: validator failed for field "ScheduledExecRun.outcome": %w`, err)}
 		}
-	}
-	if _u.mutation.EventCleared() && len(_u.mutation.EventIDs()) > 0 {
-		return errors.New(`ent: clearing a required unique edge "ScheduledExecRun.event"`)
 	}
 	return nil
 }

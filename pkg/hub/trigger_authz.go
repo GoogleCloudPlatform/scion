@@ -20,10 +20,12 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -649,6 +651,150 @@ func (s *Server) authorizeTriggerGitHubCommentAuthoring(
 		return "", false
 	}
 	return normalized, true
+}
+
+// authorizeTriggerExecAuthoring validates a Stage 2 P8 exec trigger action
+// (ptone/scion#8241):
+//   - requires hub.exec_schedules and hub.conduit enabled;
+//   - refuses subject mode "reuse";
+//   - requires a replay-protected source (400 source_not_replay_protected);
+//   - refuses any non-exec action fields and any "${" in command (400 templating_not_allowed_in_argv);
+//   - checks caller's effect ceiling allows agent.attach;
+//   - delegates target resolution, no-existence-oracle 404, live agent.attach,
+//     managed-runtime 422, and authoring rate limit to authorizeScheduledExecAuthoringOpts
+//     with checkQuota=false (trigger exec uses its own per-trigger caps, never
+//     the exec-schedule quotas).
+func (s *Server) authorizeTriggerExecAuthoring(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	sourceKind string,
+	ep *store.WebhookEndpoint,
+	subjectMode string,
+	spec *TriggerActionSpec,
+	ceiling store.EffectCeiling,
+	prov store.AuthorityProvenance,
+) (string, string, bool) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return "", "", false
+	}
+	if !s.execSchedulesEnabled() {
+		writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+			"exec triggers require hub.exec_schedules and hub.conduit experiments to be enabled", nil)
+		return "", "", false
+	}
+	if subjectMode == "reuse" {
+		ValidationError(w, "subject mode reuse is not supported for exec triggers", nil)
+		return "", "", false
+	}
+	if !trigger.SourceReplayProtected(sourceKind, ep) {
+		writeError(w, http.StatusBadRequest, "source_not_replay_protected",
+			"exec triggers require a replay-protected source", nil)
+		return "", "", false
+	}
+	// Allow-list of TriggerActionSpec fields valid on exec triggers: zeroing
+	// only the allowed fields must leave the rest of the struct empty so any
+	// future field added to TriggerActionSpec is rejected by default.
+	stripped := *spec
+	stripped.Type = ""
+	stripped.AgentID = ""
+	stripped.AgentName = ""
+	stripped.Command = nil
+	stripped.TimeoutSeconds = 0
+	stripped.ContextAttributes = nil
+	if !reflect.ValueOf(stripped).IsZero() {
+		ValidationError(w, "exec triggers take agentId or agentName, command, timeoutSeconds, and contextAttributes only", nil)
+		return "", "", false
+	}
+	if idx, ok := validateTriggerExecCommandNoTemplates(spec.Command); !ok {
+		writeError(w, http.StatusBadRequest, "templating_not_allowed_in_argv",
+			"template placeholders are not allowed in exec command argv",
+			map[string]any{"field": "action.command", "index": idx})
+		return "", "", false
+	}
+	p := &scheduledExecPayload{
+		AgentID:           spec.AgentID,
+		AgentName:         spec.AgentName,
+		Command:           append([]string(nil), spec.Command...),
+		TimeoutSeconds:    spec.TimeoutSeconds,
+		Wake:              spec.Wake,
+		ContextAttributes: append([]string(nil), spec.ContextAttributes...),
+	}
+	if err := p.validate(); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return "", "", false
+	}
+	if !EffectCeilingAllows(
+		uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling),
+		scheduledExecPermission,
+		false,
+	) {
+		writeForbiddenDenial(w, "caller's delegation ceiling does not allow agent.attach", DeniedByDelegationCeiling)
+		return "", "", false
+	}
+	if _, ok := s.authorizeScheduledExecAuthoringOpts(w, r, projectID, p, "", false); !ok {
+		return "", "", false
+	}
+	encoded, err := p.encode()
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return "", "", false
+	}
+	spec.AgentID = p.AgentID
+	spec.AgentName = p.AgentName
+	return encoded, p.AgentID, true
+}
+
+var (
+	errTriggerExecProjectCapExceeded = errors.New("project active exec trigger limit exceeded")
+	errTriggerExecTargetCapExceeded  = errors.New("target agent active exec trigger limit exceeded")
+)
+
+// checkTriggerExecCapsInTx enforces P8's own per-trigger-exec authoring caps
+// inside WithTx under LockTriggerQuota, independent of exec-schedule quotas.
+func checkTriggerExecCapsInTx(
+	ctx context.Context,
+	tx store.Store,
+	projectID string,
+	targetAgentID string,
+	alreadyCountedInProject bool,
+	alreadyCountedOnTarget bool,
+) error {
+	projExecCount, err := tx.CountTriggers(ctx, store.TriggerFilter{
+		ProjectID:   projectID,
+		ActionTypes: []string{store.TriggerActionExec},
+		Status:      store.TriggerStatusActive,
+	})
+	if err != nil {
+		return err
+	}
+	if alreadyCountedInProject && projExecCount > 0 {
+		projExecCount--
+	}
+	if projExecCount >= triggerExecMaxActivePerProject {
+		return errTriggerExecProjectCapExceeded
+	}
+	if targetAgentID != "" {
+		targetExecCount, err := tx.CountTriggers(ctx, store.TriggerFilter{
+			ProjectID:     projectID,
+			ActionTypes:   []string{store.TriggerActionExec},
+			TargetAgentID: targetAgentID,
+			Status:        store.TriggerStatusActive,
+		})
+		if err != nil {
+			return err
+		}
+		if alreadyCountedOnTarget && targetExecCount > 0 {
+			targetExecCount--
+		}
+		if targetExecCount >= triggerExecMaxActivePerTarget {
+			return errTriggerExecTargetCapExceeded
+		}
+	}
+	return nil
 }
 
 // triggerEventAccess is the outcome of triggerEventAccessDecision.

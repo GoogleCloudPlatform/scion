@@ -3609,6 +3609,7 @@
 |------|--------|---------|
 | scheduler_job | — | `triggerDrainer:message` |
 | scheduler_job | — | `triggerDrainer:dispatch_agent` |
+| scheduler_job | — | `triggerDrainer:exec` |
 | scheduler_job | — | `triggerDrainer:github.comment` |
 
 **Principals:** `system`

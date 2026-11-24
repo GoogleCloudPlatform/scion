@@ -44,17 +44,30 @@ const (
 	FeatureExecCapture = "exec_capture.v1"
 )
 
-// ExecVersion is the only accepted request version of both routes.
+// ExecVersion is the request version of exec-start and exec-status.
 const ExecVersion = 1
+
+// FeatureExecContextV1 is the Hello capabilities feature of a sciontool that
+// accepts the optional trigger_context field on v1 exec-start requests and
+// delivers it to the spawned process as SCION_TRIGGER_CONTEXT. The hub checks
+// for this feature before sending trigger_context and fails closed when it is
+// absent, avoiding version-number contention with other additive exec-start
+// features.
+const FeatureExecContextV1 = "exec_context.v1"
+
+// ExecTriggerContextEnvName is the single fixed environment variable name
+// through which trigger-routed exec runs receive bounded JSON event context.
+const ExecTriggerContextEnvName = "SCION_TRIGGER_CONTEXT"
 
 // Bounds and timings of the exec routes. The argv bounds are the hub's
 // payload bounds, checked again by sciontool.
 const (
-	MaxExecArgc         = 64
-	MaxExecArgBytes     = 4096
-	MaxExecArgvBytes    = 16384
-	MaxExecTimeoutSec   = 3600      // D10 = b
-	MaxExecCaptureBytes = 64 * 1024 // 64 KiB fixed output capture bound
+	MaxExecArgc                = 64
+	MaxExecArgBytes            = 4096
+	MaxExecArgvBytes           = 16384
+	MaxExecTriggerContextBytes = 16384
+	MaxExecTimeoutSec          = 3600      // D10 = b
+	MaxExecCaptureBytes        = 64 * 1024 // 64 KiB fixed output capture bound
 	// ExecNotAfter is how far after its send the hub sets
 	// not_after_unix_ms.
 	ExecNotAfter = 60 * time.Second
@@ -165,6 +178,10 @@ type ExecStartRequest struct {
 	TimeoutS       int      `json:"timeout_s"`
 	NotAfterUnixMS int64    `json:"not_after_unix_ms"`
 	Capture        string   `json:"capture,omitempty"`
+	// TriggerContext is the optional bounded JSON object delivered to
+	// trigger-routed exec runs as SCION_TRIGGER_CONTEXT. Sent only when the
+	// session advertises FeatureExecContextV1.
+	TriggerContext string `json:"trigger_context,omitempty"`
 }
 
 // ExecStatusRequest is the exec-status request body.
@@ -176,11 +193,12 @@ type ExecStatusRequest struct {
 // Fields an exec FieldError names (FieldBody, FieldV and FieldNotAfter
 // are shared with deliver-message).
 const (
-	FieldRunID      = "run_id"
-	FieldScheduleID = "schedule_id"
-	FieldArgv       = "argv"
-	FieldTimeoutS   = "timeout_s"
-	FieldCapture    = "capture"
+	FieldRunID          = "run_id"
+	FieldScheduleID     = "schedule_id"
+	FieldArgv           = "argv"
+	FieldTimeoutS       = "timeout_s"
+	FieldCapture        = "capture"
+	FieldTriggerContext = "trigger_context"
 )
 
 // States in an exec answer.
@@ -278,12 +296,51 @@ func ValidateExecArgv(argv []string) error {
 	return nil
 }
 
+// ValidateExecTriggerContext checks raw against the trigger_context bounds:
+// non-empty, at most MaxExecTriggerContextBytes, valid UTF-8, no NUL byte, and
+// a single valid JSON object.
+func ValidateExecTriggerContext(raw string) error {
+	if raw == "" || len(raw) > MaxExecTriggerContextBytes {
+		return execFieldError(FieldTriggerContext)
+	}
+	if !utf8.ValidString(raw) || strings.IndexByte(raw, 0) >= 0 {
+		return execFieldError(FieldTriggerContext)
+	}
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
+		return execFieldError(FieldTriggerContext)
+	}
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil || obj == nil {
+		return execFieldError(FieldTriggerContext)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return execFieldError(FieldTriggerContext)
+	}
+	return nil
+}
+
+// ExecTriggerContextDigest returns the hex sha256 of raw, or "" when raw is empty.
+func ExecTriggerContextDigest(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
 // Validate checks r against the fixed schema and bounds and returns a
 // *ExecFieldError naming the first field that fails, in a fixed order. It does
 // not judge not_after_unix_ms against a clock; only that it is set.
 func (r *ExecStartRequest) Validate() error {
 	if r.V != ExecVersion {
 		return execFieldError(FieldV)
+	}
+	if r.TriggerContext != "" {
+		if err := ValidateExecTriggerContext(r.TriggerContext); err != nil {
+			return err
+		}
 	}
 	if !ValidRunID(r.RunID) {
 		return execFieldError(FieldRunID)

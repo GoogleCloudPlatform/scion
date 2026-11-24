@@ -35,4 +35,9 @@ package version
 // that contains it. Setting the floor a day late causes that nightly and any
 // preview or stable release published on the same day to sort below the floor
 // and be refused as downgrade targets (below_downgrade_floor).
-const DowngradeFloor = "nightly-20261120"
+// Current floor (nightly-20261125): scheduled_exec_runs makes event_id nullable
+// and adds fire_id plus the scheduled_exec_runs_single_owner CHECK constraint
+// (Stage 2 P8, ptone/scion#8241); pre-P8 binaries fail AutoMigrate on Postgres
+// once any trigger-owned run row exists (SQLSTATE 23502 on SET NOT NULL) and on
+// SQLite table rebuild (SQLITE_CONSTRAINT_NOTNULL 1299).
+const DowngradeFloor = "nightly-20261125"

@@ -501,6 +501,9 @@ func (m *memTriggerStore) ListTriggerFires(_ context.Context, filter store.Trigg
 	}
 	return &store.ListResult[store.TriggerFire]{Items: items, TotalCount: len(items)}, nil
 }
+func (m *memTriggerStore) CountTriggerFiresSince(context.Context, string, time.Time, ...string) (int, error) {
+	return 0, nil
+}
 func (m *memTriggerStore) HasLiveTriggerFireForSubject(_ context.Context, triggerID, subject string, now time.Time) (bool, error) {
 	return m.HasLiveTriggerFireForSubjectExcluding(context.Background(), triggerID, subject, "", true, now)
 }

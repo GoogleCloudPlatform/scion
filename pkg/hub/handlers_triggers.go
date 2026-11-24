@@ -596,16 +596,19 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 	var actionPayload string
+	var execTargetID string
 	switch actionType {
 	case store.TriggerActionMessage:
 		actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &req.Action)
 	case store.TriggerActionDispatchAgent:
 		actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &req.Action, ceiling, prov)
+	case store.TriggerActionExec:
+		actionPayload, execTargetID, ok = s.authorizeTriggerExecAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &req.Action, ceiling, prov)
 	case store.TriggerActionGitHubComment:
 		actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &req.Action)
 	default:
-		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s)",
-			actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionGitHubComment), nil)
+		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s, %s)",
+			actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionExec, store.TriggerActionGitHubComment), nil)
 		return
 	}
 	if !ok {
@@ -666,6 +669,11 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if srcCount >= store.MaxActiveTriggersPerSource {
 			return errTriggerSourceLimitExceeded
 		}
+		if trigger.ActionType == store.TriggerActionExec {
+			if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, execTargetID, false, false); capErr != nil {
+				return capErr
+			}
+		}
 		return tx.CreateTrigger(ctx, &trigger)
 	})
 	if err != nil {
@@ -681,6 +689,12 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		case errors.Is(err, errTriggerSourceLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				triggerSourceLimitMessage(trigger.SourceKind), nil)
+		case errors.Is(err, errTriggerExecProjectCapExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("project has reached the maximum of %d active exec triggers", triggerExecMaxActivePerProject), nil)
+		case errors.Is(err, errTriggerExecTargetCapExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("target agent has reached the maximum of %d active exec triggers", triggerExecMaxActivePerTarget), nil)
 		case errors.Is(err, store.ErrAlreadyExists):
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"a trigger with this name already exists in this project", nil)
@@ -691,7 +705,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	setTriggerETag(w, trigger.AuthorizationRevision)
-	writeJSON(w, http.StatusCreated, buildTriggerResponse(trigger))
+	writeJSON(w, http.StatusCreated, buildTriggerResponse(s.newExecRevealer(ctx), trigger))
 }
 
 func (s *Server) listTriggers(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -727,7 +741,7 @@ func (s *Server) listTriggers(w http.ResponseWriter, r *http.Request, projectID 
 
 	writeJSON(w, http.StatusOK, ListTriggersResponse{
 		Scope:      scope,
-		Triggers:   buildTriggerResponses(result.Items),
+		Triggers:   buildTriggerResponses(s.newExecRevealer(ctx), result.Items),
 		NextCursor: result.NextCursor,
 		TotalCount: result.TotalCount,
 		ServerTime: time.Now().UTC(),
@@ -760,7 +774,7 @@ func (s *Server) getTrigger(w http.ResponseWriter, r *http.Request, projectID, t
 		return
 	}
 	setTriggerETag(w, tr.AuthorizationRevision)
-	writeJSON(w, http.StatusOK, buildTriggerResponse(*tr))
+	writeJSON(w, http.StatusOK, buildTriggerResponse(s.newExecRevealer(r.Context()), *tr))
 }
 
 func (s *Server) authorizeStoredTriggerAction(
@@ -770,22 +784,26 @@ func (s *Server) authorizeStoredTriggerAction(
 	sourceKind string,
 	ep *store.WebhookEndpoint,
 	matchTypes []string,
+	subjectMode string,
 	actionType string,
 	rawPayload string,
 	ceiling store.EffectCeiling,
 	prov store.AuthorityProvenance,
 ) (string, bool) {
-	spec := buildTriggerActionSpec(actionType, rawPayload)
+	spec := buildTriggerActionSpecRaw(actionType, rawPayload)
 	switch actionType {
 	case store.TriggerActionMessage:
 		return s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &spec)
 	case store.TriggerActionDispatchAgent:
 		return s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &spec, ceiling, prov)
+	case store.TriggerActionExec:
+		payload, _, ok := s.authorizeTriggerExecAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &spec, ceiling, prov)
+		return payload, ok
 	case store.TriggerActionGitHubComment:
 		return s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &spec)
 	default:
-		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s)",
-			actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionGitHubComment), nil)
+		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s, %s)",
+			actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionExec, store.TriggerActionGitHubComment), nil)
 		return "", false
 	}
 }
@@ -826,6 +844,8 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	oldSourceID := tr.SourceID
 	oldSourceKind := tr.SourceKind
 	oldActionType := tr.ActionType
+	oldActionPayload := tr.ActionPayload
+	oldStatus := tr.Status
 	prevRevision := tr.AuthorizationRevision
 	prevRevisionKnown := tr.AuthorizationRevision != 0
 
@@ -1031,9 +1051,10 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		actionType := strings.TrimSpace(req.Action.Type)
 		if actionType != store.TriggerActionMessage &&
 			actionType != store.TriggerActionDispatchAgent &&
+			actionType != store.TriggerActionExec &&
 			actionType != store.TriggerActionGitHubComment {
-			ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s)",
-				actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionGitHubComment), nil)
+			ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s, %s)",
+				actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionExec, store.TriggerActionGitHubComment), nil)
 			return
 		}
 		tr.ActionType = actionType
@@ -1114,6 +1135,16 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 				map[string]any{"field": "action.githubToken"})
 			return
 		}
+		if oldActionType == store.TriggerActionExec {
+			prevLive, ok := s.authorizeStoredExecTargetForUpdate(w, r, projectID, execPayloadTarget(oldActionPayload))
+			if !ok {
+				return
+			}
+			if !prevLive && tr.ActionType == store.TriggerActionExec && (req.Action == nil || len(req.Action.Command) == 0) {
+				ValidationError(w, "retargeting an exec trigger whose previous target was deleted requires command", nil)
+				return
+			}
+		}
 		if req.Action != nil {
 			if !validateTriggerActionCrossFields(w, tr.ActionType, req.Action) {
 				return
@@ -1124,6 +1155,8 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 				actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, tr.SourceKind, req.Action)
 			case store.TriggerActionDispatchAgent:
 				actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, req.Action, ceiling, prov)
+			case store.TriggerActionExec:
+				actionPayload, _, ok = s.authorizeTriggerExecAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, req.Action, ceiling, prov)
 			case store.TriggerActionGitHubComment:
 				actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, tr.SourceKind, tr.MatchTypes, req.Action)
 			}
@@ -1132,7 +1165,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			}
 			tr.ActionPayload = actionPayload
 		} else {
-			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)
+			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.MatchTypes, tr.SubjectMode, tr.ActionType, tr.ActionPayload, ceiling, prov)
 			if !ok {
 				return
 			}
@@ -1170,6 +1203,15 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 					return errTriggerSourceLimitExceeded
 				}
 			}
+			if tr.Status == store.TriggerStatusActive && tr.ActionType == store.TriggerActionExec {
+				newTarget := execPayloadTarget(tr.ActionPayload)
+				oldTarget := execPayloadTarget(oldActionPayload)
+				alreadyProj := oldStatus == store.TriggerStatusActive && oldActionType == store.TriggerActionExec
+				alreadyTarget := alreadyProj && oldTarget != "" && oldTarget == newTarget
+				if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, newTarget, alreadyProj, alreadyTarget); capErr != nil {
+					return capErr
+				}
+			}
 		}
 		return tx.UpdateTrigger(ctx, tr, fields, prevRevision, prevRevisionKnown, newAttr)
 	})
@@ -1183,6 +1225,12 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		case errors.Is(err, errTriggerSourceLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				triggerSourceLimitMessage(tr.SourceKind), nil)
+		case errors.Is(err, errTriggerExecProjectCapExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("project has reached the maximum of %d active exec triggers", triggerExecMaxActivePerProject), nil)
+		case errors.Is(err, errTriggerExecTargetCapExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("target agent has reached the maximum of %d active exec triggers", triggerExecMaxActivePerTarget), nil)
 		case errors.Is(err, store.ErrAlreadyExists):
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"a trigger with this name already exists in this project", nil)
@@ -1197,7 +1245,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	setTriggerETag(w, tr.AuthorizationRevision)
-	writeJSON(w, http.StatusOK, buildTriggerResponse(*tr))
+	writeJSON(w, http.StatusOK, buildTriggerResponse(s.newExecRevealer(ctx), *tr))
 }
 
 func (s *Server) pauseTrigger(w http.ResponseWriter, r *http.Request, projectID, triggerID string) {
@@ -1235,7 +1283,7 @@ func (s *Server) pauseTrigger(w http.ResponseWriter, r *http.Request, projectID,
 	tr.Status = store.TriggerStatusPaused
 	tr.StatusReason = store.TriggerStatusReasonNone
 	setTriggerETag(w, tr.AuthorizationRevision)
-	writeJSON(w, http.StatusOK, buildTriggerResponse(*tr))
+	writeJSON(w, http.StatusOK, buildTriggerResponse(s.newExecRevealer(ctx), *tr))
 }
 
 func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID, triggerID string) {
@@ -1307,7 +1355,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling, prov) {
 		return
 	}
-	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)
+	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.MatchTypes, tr.SubjectMode, tr.ActionType, tr.ActionPayload, ceiling, prov)
 	if !ok {
 		return
 	}
@@ -1343,6 +1391,11 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if srcCount >= store.MaxActiveTriggersPerSource {
 			return errTriggerSourceLimitExceeded
 		}
+		if tr.ActionType == store.TriggerActionExec {
+			if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, execPayloadTarget(tr.ActionPayload), false, false); capErr != nil {
+				return capErr
+			}
+		}
 		return tx.UpdateTrigger(ctx, tr, fields, prevRevision, prevRevisionKnown, &newAttr)
 	})
 	if err != nil {
@@ -1355,6 +1408,12 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		case errors.Is(err, errTriggerSourceLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				triggerSourceLimitMessage(tr.SourceKind), nil)
+		case errors.Is(err, errTriggerExecProjectCapExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("project has reached the maximum of %d active exec triggers", triggerExecMaxActivePerProject), nil)
+		case errors.Is(err, errTriggerExecTargetCapExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("target agent has reached the maximum of %d active exec triggers", triggerExecMaxActivePerTarget), nil)
 		default:
 			writeErrorFromErr(w, err, "")
 		}
@@ -1364,7 +1423,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	s.invalidateTriggerRuleCache(projectID, triggerID, int64(prevRevision))
 
 	setTriggerETag(w, tr.AuthorizationRevision)
-	writeJSON(w, http.StatusOK, buildTriggerResponse(*tr))
+	writeJSON(w, http.StatusOK, buildTriggerResponse(s.newExecRevealer(ctx), *tr))
 }
 
 func (s *Server) deleteTrigger(w http.ResponseWriter, r *http.Request, projectID, triggerID string) {
@@ -1421,7 +1480,7 @@ func (s *Server) getTriggerHistory(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	writeJSON(w, http.StatusOK, ListTriggerFiresResponse{
-		Fires:      buildTriggerFireResponses(result.Items),
+		Fires:      s.buildTriggerFireResponses(ctx, result.Items),
 		NextCursor: result.NextCursor,
 		TotalCount: result.TotalCount,
 		ServerTime: time.Now().UTC(),

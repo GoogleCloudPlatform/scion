@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -218,5 +219,40 @@ func TestNewRejectsRPCRoutesWithoutHandler(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "RPCRoutes") {
 		t.Fatalf("New = %v, want an RPCRoutes error", err)
+	}
+}
+
+// TestAgentHelloAdvertisesExecContextFeature verifies that exec_context.v1 is
+// advertised in Hello.capabilities.features when Options.Features carries it
+// (wired from control.Handler.Features() when exec routes are enabled) and
+// omitted otherwise.
+func TestAgentHelloAdvertisesExecContextFeature(t *testing.T) {
+	hubNoExec := newFakeHub(t)
+	startAgent(t, hubNoExec, func(o *Options) {
+		ctl := control.New(control.Options{KickTokenRefresh: func() {}})
+		o.Session.RPCHandler = control.RPCHandler(ctl)
+		o.RPCRoutes = ctl.Routes()
+		o.Features = ctl.Features()
+	})
+	helloNoExec := hubNoExec.nextHello(t)
+	if slices.Contains(helloNoExec.GetCapabilities().GetFeatures(), agentcontrol.FeatureExecContextV1) {
+		t.Fatalf("Hello features %v must not advertise %q without exec routes",
+			helloNoExec.GetCapabilities().GetFeatures(), agentcontrol.FeatureExecContextV1)
+	}
+
+	hubWithExec := newFakeHub(t)
+	startAgent(t, hubWithExec, func(o *Options) {
+		ctl := control.New(control.Options{
+			KickTokenRefresh: func() {},
+			Exec:             &control.ExecOptions{Env: func() ([]string, error) { return nil, nil }},
+		})
+		o.Session.RPCHandler = control.RPCHandler(ctl)
+		o.RPCRoutes = ctl.Routes()
+		o.Features = ctl.Features()
+	})
+	helloWithExec := hubWithExec.nextHello(t)
+	if !slices.Contains(helloWithExec.GetCapabilities().GetFeatures(), agentcontrol.FeatureExecContextV1) {
+		t.Fatalf("Hello features %v must advertise %q when exec routes are enabled",
+			helloWithExec.GetCapabilities().GetFeatures(), agentcontrol.FeatureExecContextV1)
 	}
 }

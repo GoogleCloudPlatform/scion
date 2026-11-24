@@ -102,7 +102,7 @@ func (s *Server) authorizeScheduledExecAuthoringOpts(
 	if allowed, retryAfter := s.scheduledExecLimiter().Allow(identity.Type() + ":" + identity.ID()); !allowed {
 		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
-			"too many exec schedule changes; retry later", nil)
+			"too many exec changes; retry later", nil)
 		return nil, false
 	}
 
