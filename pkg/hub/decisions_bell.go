@@ -554,6 +554,8 @@ func (s *Server) recomputeDecisionBellUser(ctx context.Context, userID string) e
 	if s == nil || s.store == nil || !s.decisionsBellEnabled() {
 		return nil
 	}
+	// Bump userGen here too for direct callers outside the worker loop (the
+	// worker pop bumps it as well; inline reconcile checks inequality only).
 	if uid := strings.TrimSpace(userID); uid != "" {
 		st := &s.decisionBell
 		st.mu.Lock()
@@ -1025,11 +1027,14 @@ func decisionsBellReconcileCaller(r *http.Request) string {
 // When a session-authenticated, unfiltered GET /api/v1/users/me/decisions
 // tab=pending request (including limit=0) succeeds, the handler stashes its
 // exact waiting-on-you counts and pre-read bell generation on the recorder;
-// this wrapper flushes the response and writes the notification row inline
+// this wrapper flushes buffered bytes and runs the inline notification write
 // (serialized with inFlightUsers) if no concurrent recompute or queued update
-// raced with the read. All other cases (scoped tokens, filtered or
-// project-scoped requests, /api/v1/projects/{id}/decisions, flag-off
-// reconciliation, or raced reads) enqueue an asynchronous coalesced recompute.
+// raced with the read. Flush does not terminate a chunked response (no
+// Content-Length), so the client's body completes once the inline write
+// returns; the added latency is one GetNotification when the count is
+// unchanged. All other cases (scoped tokens, filtered or project-scoped
+// requests, /api/v1/projects/{id}/decisions, flag-off reconciliation, or raced
+// reads) enqueue an asynchronous coalesced recompute.
 func (s *Server) withDecisionsBellReconcile(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
