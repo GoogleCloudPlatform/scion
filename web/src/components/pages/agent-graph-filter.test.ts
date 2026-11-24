@@ -295,6 +295,17 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     vi.spyOn(stateManager, 'setScope').mockImplementation(() => {});
     vi.spyOn(stateManager, 'sseConnected').mockResolvedValue(undefined);
     vi.spyOn(stateManager, 'isAgentSetComplete').mockReturnValue(true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
   });
 
   afterEach(() => {
@@ -304,6 +315,7 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     resetServerFlagStateForTests();
     document.body.replaceChildren();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   const parent = mkAgent({
@@ -533,6 +545,47 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     await page.updateComplete;
     await tree.updateComplete;
     expect(nodePositions(tree)['c3']).toEqual(c3PosBeforeDelete);
+  });
+
+  it('clears the filter and reveals/focuses the picked agent when selecting a hidden agent in unscoped mode', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    vi.spyOn(stateManager, 'getAgents').mockReturnValue([parent, child, other]);
+    window.history.replaceState({}, '', '/agents/graph?q=harness:antigravity');
+    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
+    document.body.appendChild(page);
+    await page.updateComplete;
+
+    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    expect(tree.agents.map((a) => a.id)).toEqual(['a-parent', 'a-child']);
+    const revealSpy = vi.spyOn(tree, 'revealAgent');
+    const focusSpy = vi.spyOn(tree, 'focusAgentNode');
+
+    page.graphPalette.open();
+    const palette = await vi.waitFor(() => {
+      const p = document.querySelector('scion-quick-palette') as
+        | (HTMLElement & { open?: boolean; groups?: { agents?: { status?: string } } })
+        | null;
+      if (!p?.open || p.groups?.agents?.status !== 'ready') throw new Error('palette not ready');
+      return p;
+    });
+
+    // Pick 'a-other', which is currently hidden by harness:antigravity.
+    palette.dispatchEvent(
+      new CustomEvent('palette-select', {
+        detail: { target: { kind: 'agent', agentId: 'a-other', displayName: 'Other' } },
+      })
+    );
+    await page.updateComplete;
+    await tree.updateComplete;
+
+    expect(window.location.search).toBe('');
+    expect(tree.agents.map((a) => a.id)).toEqual(['a-parent', 'a-child', 'a-other']);
+    expect(revealSpy).toHaveBeenCalledWith('a-other');
+
+    palette
+      .shadowRoot!.querySelector('sl-dialog')!
+      .dispatchEvent(new Event('sl-after-hide', { bubbles: true, composed: true }));
+    await vi.waitFor(() => expect(focusSpy).toHaveBeenCalledWith('a-other'));
   });
 });
 
@@ -851,5 +904,70 @@ describe('scion-page-agent-graph R1 load scope with non-held drains', () => {
       expect(drainCalls).toEqual(['/api/v1/agents?projectId=nosuchslug', '/api/v1/agents'])
     );
     expect(window.location.search).toBe('');
+  });
+
+  it('keeps project:<slug> without re-draining when picking a hidden same-project agent from palette', async () => {
+    stubProbeNotComplete();
+    const alphaStopped = mkAgent({
+      id: 'a-2',
+      name: 'Alpha Stopped',
+      slug: 'alpha-2',
+      projectId: 'proj-alpha-uuid',
+      project: 'Alpha Project',
+      projectSlug: 'alpha',
+      phase: 'stopped',
+    });
+    const drainCalls: string[] = [];
+    window.history.replaceState({}, '', '/agents/graph?q=project:alpha%20phase:running');
+    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
+    const runner = (
+      page as unknown as {
+        drainRunner: { run: (opts: { url: string }) => Promise<SeededDrainResult | null> };
+      }
+    ).drainRunner;
+    vi.spyOn(runner, 'run').mockImplementation((opts) => {
+      drainCalls.push(opts.url);
+      return Promise.resolve(drainResult([alphaAgent, alphaStopped]));
+    });
+
+    document.body.appendChild(page);
+    await vi.waitFor(() => {
+      expect(drainCalls).toEqual(['/api/v1/agents?projectId=alpha']);
+      expect(page!.shadowRoot!.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+
+    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    expect(tree.agents.map((a) => a.id)).toEqual(['a-1']);
+    const revealSpy = vi.spyOn(tree, 'revealAgent');
+    const focusSpy = vi.spyOn(tree, 'focusAgentNode');
+
+    page.graphPalette.open();
+    const palette = await vi.waitFor(() => {
+      const p = document.querySelector('scion-quick-palette') as
+        | (HTMLElement & { open?: boolean; groups?: { agents?: { status?: string } } })
+        | null;
+      if (!p?.open || p.groups?.agents?.status !== 'ready') throw new Error('palette not ready');
+      return p;
+    });
+
+    // Pick 'a-2', hidden by phase:running, in the same loaded project.
+    palette.dispatchEvent(
+      new CustomEvent('palette-select', {
+        detail: { target: { kind: 'agent', agentId: 'a-2', displayName: 'Alpha Stopped' } },
+      })
+    );
+    await page.updateComplete;
+    await tree.updateComplete;
+
+    // Keeps project:alpha, issues no second drain, reveals and focuses a-2.
+    expect(window.location.search).toBe('?q=project%3Aalpha');
+    expect(drainCalls).toEqual(['/api/v1/agents?projectId=alpha']);
+    expect(tree.agents.map((a) => a.id)).toEqual(['a-1', 'a-2']);
+    expect(revealSpy).toHaveBeenCalledWith('a-2');
+
+    palette
+      .shadowRoot!.querySelector('sl-dialog')!
+      .dispatchEvent(new Event('sl-after-hide', { bubbles: true, composed: true }));
+    await vi.waitFor(() => expect(focusSpy).toHaveBeenCalledWith('a-2'));
   });
 });
