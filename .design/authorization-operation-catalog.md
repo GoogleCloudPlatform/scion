@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 435
+**Operations:** 437
 
 ## Table of Contents
 
@@ -395,6 +395,8 @@
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.agent.deliver](#brokeragentdeliver) — Relay one deliver-message flush from a broker to an agent it runs, over the agent's conduit session (design v2.22 deliver-message)
 - [broker.agent.workspacedownload](#brokeragentworkspacedownload) — Issue signed download URLs for the uploaded workspace files of an agent the broker runs
+- [broker.agent.movebundle.uploadurl](#brokeragentmovebundleuploadurl) — Issue a signed PUT URL for one compressed part of an agent's move bundle
+- [broker.agent.movebundle.downloadurls](#brokeragentmovebundledownloadurls) — Issue signed GET URLs for the manifest parts of an agent's move bundle
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
 - [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
@@ -14801,6 +14803,76 @@
 ### Exemptions
 
 - **internal_only:** The broker authenticates with its own HMAC credential for an agent assigned to it in a project it still provides for; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
+## broker.agent.movebundle.uploadurl
+
+**Domain:** broker
+
+**Description:** Issue a signed PUT URL for one compressed part of an agent's move bundle
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/agents/{agentId}/move-bundle/{rid}/upload-url` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+- `pkg/hub:TestMoveBundleUploadURL_AuthzMatrix`
+
+### Exemptions
+
+- **internal_only:** The source broker authenticates with its own HMAC credential for a bundle move in stopping state where it is the recorded source broker; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
+## broker.agent.movebundle.downloadurls
+
+**Domain:** broker
+
+**Description:** Issue signed GET URLs for the manifest parts of an agent's move bundle
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/agents/{agentId}/move-bundle/{rid}/download-urls` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+- `pkg/hub:TestMoveBundleDownloadURLs_AuthzMatrix`
+
+### Exemptions
+
+- **internal_only:** The target broker authenticates with its own HMAC credential for a bundle move in provisioning state where it is the recorded target broker and the agent is assigned to it; no user permission applies (scope: broker self access) — waives: `base_permission`
 
 ---
 

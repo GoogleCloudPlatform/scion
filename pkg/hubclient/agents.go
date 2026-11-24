@@ -1492,16 +1492,15 @@ type ReincarnateAgentResponse struct {
 	// MoveVerdict is the move eligibility verdict of a dry-run move.
 	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
 	// TransferMode is how an accepted cross-broker move carries the
-	// workspace: "export" or "recreate" (a forced move). Empty for a plain
-	// reincarnation and from a hub that predates forced moves.
+	// workspace: "export", "bundle", or "recreate" (a forced move). Empty for
+	// a plain reincarnation and from a hub that predates forced moves.
 	TransferMode string `json:"transferMode,omitempty"`
 }
 
 // MoveVerdict is the hub's eligibility verdict for moving an agent to
 // another broker. A refused request carries it in the error details under
 // "verdict". Checks lists every check in evaluation order, each passed,
-// failed, not_evaluated or (for a forced move) waived; treat any other
-// value as not passed.
+// failed, not_evaluated or waived; treat any other value as not passed.
 type MoveVerdict struct {
 	Eligible     bool          `json:"eligible"`
 	SourceBroker MoveBrokerRef `json:"sourceBroker"`
@@ -1510,13 +1509,29 @@ type MoveVerdict struct {
 	RuntimeType  string        `json:"runtimeType,omitempty"`
 	Checks       []MoveCheck   `json:"checks"`
 	// TransferMode is how the workspace reaches the target of an eligible
-	// move: "export" (carried through a shared NFS export) or "recreate"
-	// (provisioned fresh; local state is lost). A hub that predates
-	// --force never sets it.
+	// move: "export" (carried through a shared NFS export), "bundle"
+	// (workspace and $HOME copied through Hub object storage), or "recreate"
+	// (provisioned fresh; local state is lost). A hub that predates --force
+	// never sets it.
 	TransferMode string `json:"transferMode,omitempty"`
 	// Consequences lists what an eligible move keeps, carries, recreates
 	// and loses.
 	Consequences []MoveConsequence `json:"consequences,omitempty"`
+	// BundleUnavailable explains why transfer mode "bundle" did not apply when
+	// export failed and bundle could not be used.
+	BundleUnavailable string `json:"bundleUnavailable,omitempty"`
+	// BundleEstimate carries the source broker's stat-only workspace and $HOME
+	// estimate when transfer mode "bundle" is selected.
+	BundleEstimate *MoveBundleEstimate `json:"bundleEstimate,omitempty"`
+}
+
+// MoveBundleEstimate is the stat-only size/entry estimate reported by the
+// source broker during move-bundle precheck.
+type MoveBundleEstimate struct {
+	WorkspaceBytes   int64 `json:"workspaceBytes"`
+	WorkspaceEntries int64 `json:"workspaceEntries"`
+	HomeBytes        int64 `json:"homeBytes"`
+	HomeEntries      int64 `json:"homeEntries"`
 }
 
 // MoveConsequence is one item a move keeps, carries, recreates or loses.

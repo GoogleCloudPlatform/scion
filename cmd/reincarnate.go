@@ -393,6 +393,8 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		printMoveVerdict(os.Stdout, resp.MoveVerdict)
 		if reincarnateForce && resp.MoveVerdict.TransferMode == moveTransferModeExport {
 			fmt.Println("--force was not needed: the workspace is carried through the shared NFS export.")
+		} else if reincarnateForce && resp.MoveVerdict.TransferMode == moveTransferModeBundle {
+			fmt.Println("--force was not needed: the workspace and home are copied through hub storage.")
 		}
 	}
 	printReincarnationPlan(resp.Plan)
@@ -602,6 +604,7 @@ const (
 	moveCheckResultWaived         = "waived"
 	moveCheckWorkspaceRecreatable = "workspace_recreatable"
 	moveTransferModeExport        = "export"
+	moveTransferModeBundle        = "bundle"
 	moveTransferModeRecreate      = "recreate"
 )
 
@@ -678,6 +681,13 @@ func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 	case "":
 	case moveTransferModeExport:
 		_, _ = fmt.Fprintf(w, "  %-28s %s\n", "Transfer mode:", "export (the workspace is carried through the shared NFS export)")
+	case moveTransferModeBundle:
+		desc := "bundle (workspace and home are copied through hub storage)"
+		if v.BundleEstimate != nil {
+			total := v.BundleEstimate.WorkspaceBytes + v.BundleEstimate.HomeBytes
+			desc = fmt.Sprintf("bundle (workspace and home are copied through hub storage (~%s))", formatMoveBundleSize(total))
+		}
+		_, _ = fmt.Fprintf(w, "  %-28s %s\n", "Transfer mode:", desc)
 	case moveTransferModeRecreate:
 		_, _ = fmt.Fprintf(w, "  %-28s %s\n", "Transfer mode:", "recreate (the workspace is recreated on the target)")
 	default:
@@ -685,7 +695,7 @@ func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 	}
 	for _, c := range v.Checks {
 		result := c.Result
-		if result == moveCheckResultWaived {
+		if result == moveCheckResultWaived && v.TransferMode != moveTransferModeBundle {
 			result = "waived (--force)"
 		}
 		msg := c.Message
@@ -704,6 +714,27 @@ func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 	printMoveConsequences(w, v.Consequences)
 	if v.TransferMode == moveTransferModeRecreate {
 		_, _ = fmt.Fprintln(w, "Uncommitted and unpushed work in the agent's workspace will not survive this move.")
+	}
+	if v.BundleUnavailable != "" && (!v.Eligible || v.TransferMode == moveTransferModeRecreate) {
+		_, _ = fmt.Fprintf(w, "bundle transfer unavailable: %s\n", v.BundleUnavailable)
+	}
+}
+
+func formatMoveBundleSize(b int64) string {
+	const (
+		kib = 1024
+		mib = 1024 * kib
+		gib = 1024 * mib
+	)
+	switch {
+	case b >= gib:
+		return fmt.Sprintf("%.1f GiB", float64(b)/float64(gib))
+	case b >= mib:
+		return fmt.Sprintf("%.1f MiB", float64(b)/float64(mib))
+	case b >= kib:
+		return fmt.Sprintf("%.1f KiB", float64(b)/float64(kib))
+	default:
+		return fmt.Sprintf("%d B", b)
 	}
 }
 
@@ -854,8 +885,8 @@ func isReincarnateHandoffTemplateInvocation(cmd *cobra.Command) bool {
 func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateHandoffFile, "handoff-file", "", "File whose content becomes the new generation's first task (required for self-migration)")
 	reincarnateCmd.Flags().BoolVar(&reincarnateDryRun, "dry-run", false, "Print the resolved reincarnation plan without migrating anything")
-	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID); both brokers must mount the same NFS export. The move is dry-run first and refused if not eligible")
-	reincarnateCmd.Flags().BoolVar(&reincarnateForce, "force", false, "With --broker, move even when the workspace cannot travel through a shared NFS export: the workspace is recreated on the target and uncommitted or unpushed work, the home and the harness session are lost. Run with --dry-run first to see exactly what is kept and lost")
+	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID). Uses a shared NFS export when available, or copies workspace and home through hub storage when bundle transfer is enabled. The move is dry-run first and refused if not eligible")
+	reincarnateCmd.Flags().BoolVar(&reincarnateForce, "force", false, "With --broker, move even when the workspace cannot travel through a shared NFS export or bundle: when nothing better applies, the workspace is recreated on the target and uncommitted or unpushed work, the home and the harness session are lost. Run with --dry-run first to see exactly what is kept and lost")
 	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
 	reincarnateCmd.Flags().StringVar(&reincarnateServiceAccount, "service-account", "", "GCP service account for the new generation: its id, email or display name (same access checks as create)")
 	reincarnateCmd.Flags().StringVar(&reincarnateRole, "role", "", "Agent role for the new generation: none, readonly, baseline, full (same access checks as create)")

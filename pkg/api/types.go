@@ -1718,6 +1718,12 @@ type StartOptions struct {
 	// directories marked with it.
 	MoveReincarnationID string
 
+	// WorkspaceSource, when set to WorkspaceSourceMoveBundle ("move-bundle"),
+	// instructs a marker-guarded fresh provision to leave the workspace
+	// directory empty (no clone, no worktree, no empty-repo init) while
+	// rendering $HOME normally so move-bundle/import can populate it.
+	WorkspaceSource string
+
 	// ResetHome, on a reprovision only (Manager.Reprovision), moves the
 	// agent's existing home aside after every precondition has passed, so
 	// the reprovision composes a fresh home (a harness switch,

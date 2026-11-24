@@ -646,6 +646,14 @@ const AdminManagedBrokers = "hub.admin_managed_brokers"
 // filter box. Default off.
 const FiltersQueryDialect = "filters.query_dialect"
 
+// AgentMoveBundle gates portable workspace + $HOME bundle transfer for
+// cross-broker `scion reincarnate --broker` moves (ptone/scion#8960). Checked
+// in the Hub during move eligibility evaluation (`bundle_experiment`). While
+// off, cross-broker moves behave identically to before (export or --force
+// recreate). The design names it "agent-move-bundle"; NamePattern requires a
+// dot-separated snake_case name with no hyphens.
+const AgentMoveBundle = "hub.agent_move_bundle"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -671,6 +679,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#8495",
 		Owner:       "templates",
 		ReviewBy:    "2027-05-24",
+	},
+	{
+		Name:        AgentMoveBundle,
+		Title:       "Cross-broker move bundle transfer",
+		Description: "Enables portable workspace and $HOME bundle transfer through Hub object storage for `scion reincarnate --broker` when a shared NFS export is not available. While off, cross-broker moves fall back to the existing export or --force recreate behavior.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8960",
+		Owner:       "lifecycle",
+		ReviewBy:    "2027-05-23",
 	},
 	{
 		Name:        AgentSecrets,

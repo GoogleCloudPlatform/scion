@@ -50,6 +50,10 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// has no files for the agent before provisioning it with a fresh
 		// workspace (ptone/scion#5441).
 		AgentMoveRecreate: true,
+		// This broker implements the portable workspace+$HOME bundle move
+		// endpoints (precheck, export, import) and WorkspaceSource="move-bundle"
+		// provision (ptone/scion#8960).
+		AgentMoveBundle: true,
 		// This broker's reprovision reuses an empty-per-agent workspace in
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,
@@ -135,6 +139,7 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.EphemeralPersistence, "ephemeralPersistence")
 	add(c.AgentMove, "agentMove")
 	add(c.AgentMoveRecreate, "agentMoveRecreate")
+	add(c.AgentMoveBundle, "agentMoveBundle")
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
 	for _, rt := range c.ReprovisionResetHomeRuntimes {
 		names = append(names, ReprovisionResetHomeCapabilityPrefix+rt)

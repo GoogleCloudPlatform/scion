@@ -1,6 +1,7 @@
 {
   "fields": [
     "agentMove",
+    "agentMoveBundle",
     "agentMoveRecreate",
     "asyncLaunch",
     "asyncStart",

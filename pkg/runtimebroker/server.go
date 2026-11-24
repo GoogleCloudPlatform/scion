@@ -353,6 +353,13 @@ type Server struct {
 	// defaults, see signedDownloadSettings).
 	signedDownload signedDownloadSettings
 
+	// moveBundle overrides the move-bundle export/import endpoints' object
+	// client, Hub URL fetchers, scratch dir and timing (tests only; zero
+	// values mean the defaults).
+	moveBundle     moveBundleSettings
+	moveBundleJobs atomic.Pointer[moveBundleJobRegistry]
+	moveBundleOnce sync.Once
+
 	version string
 
 	// Workspace transfer and project delete steps, like workspaceDownload:
@@ -1706,6 +1713,8 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		return s.hostSetupErr
 	}
 
+	s.sweepMoveBundleScratch()
+
 	s.mu.Lock()
 	s.startTime = time.Now()
 	s.servicesStarted = true
@@ -1882,6 +1891,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Stop the heartbeat service account report's background discovery.
 	s.saDiscovery().stop()
+
+	// Cancel any in-flight move-bundle export/import jobs.
+	if reg := s.moveBundleJobs.Load(); reg != nil {
+		reg.cancelAll()
+	}
 
 	// Close the resolution cache: wait, within a bound, for background
 	// refreshes still running, then write any entries still waiting for

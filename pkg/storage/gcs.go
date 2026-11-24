@@ -105,6 +105,15 @@ func (s *GCSStorage) GenerateSignedURL(ctx context.Context, objectPath string, o
 		signOpts.ContentType = opts.ContentType
 	}
 
+	var contentLengthRangeHeader string
+	if opts.Method == "PUT" && opts.ContentLengthRange != nil {
+		if opts.ContentLengthRange.Min < 0 || opts.ContentLengthRange.Max < opts.ContentLengthRange.Min {
+			return nil, fmt.Errorf("invalid content length range [%d,%d]", opts.ContentLengthRange.Min, opts.ContentLengthRange.Max)
+		}
+		contentLengthRangeHeader = fmt.Sprintf("%d,%d", opts.ContentLengthRange.Min, opts.ContentLengthRange.Max)
+		signOpts.Headers = append(signOpts.Headers, "x-goog-content-length-range:"+contentLengthRangeHeader)
+	}
+
 	// Response header overrides (GET only), carried as signed query
 	// parameters so the object store applies them to its response.
 	if opts.Method == "GET" || opts.Method == "" {
@@ -133,9 +142,13 @@ func (s *GCSStorage) GenerateSignedURL(ctx context.Context, objectPath string, o
 	}
 
 	// Add required headers for uploads
-	if opts.Method == "PUT" && opts.ContentType != "" {
-		result.Headers = map[string]string{
-			"Content-Type": opts.ContentType,
+	if opts.Method == "PUT" && (opts.ContentType != "" || contentLengthRangeHeader != "") {
+		result.Headers = make(map[string]string)
+		if opts.ContentType != "" {
+			result.Headers["Content-Type"] = opts.ContentType
+		}
+		if contentLengthRangeHeader != "" {
+			result.Headers["x-goog-content-length-range"] = contentLengthRangeHeader
 		}
 	}
 

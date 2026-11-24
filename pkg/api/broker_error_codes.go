@@ -163,6 +163,27 @@ const (
 	// were not created by the move (409). The message names no host path.
 	BrokerErrCodeMoveMarkerMismatch = "move_marker_mismatch"
 
+	// BrokerErrCodeMoveBundleJobConflict marks a move-bundle export or import
+	// POST refused (409) because a job for a different reincarnation ID is
+	// currently running for the same agent.
+	BrokerErrCodeMoveBundleJobConflict = "move_bundle_job_conflict"
+
+	// BrokerErrCodeMoveBundleAlreadyImported marks a move-bundle import POST
+	// refused (409) because the agent directory already carries the imported
+	// marker for this reincarnation ID.
+	BrokerErrCodeMoveBundleAlreadyImported = "move_bundle_already_imported"
+
+	// BrokerErrCodeMoveBundleUnsupported marks a move-bundle signed-URL
+	// request refused (409) because hub object storage cannot issue HTTP(S)
+	// signed URLs, or a broker export refused (409) on a non-durable runtime.
+	BrokerErrCodeMoveBundleUnsupported = "move_bundle_unsupported"
+
+	// BrokerErrCodeMoveBundleHomeRecordMissing marks a move-bundle export
+	// refused (409) because the broker-owned start record
+	// (.scion-move-bundle-home.json) is missing or invalid; the agent must be
+	// restarted once to record its resolved home and secret exclusions.
+	BrokerErrCodeMoveBundleHomeRecordMissing = "move_bundle_home_record_missing"
+
 	// BrokerErrDetailHomeReset is the error detail key every error answer
 	// to a create request with resetHome carries, whatever its status
 	// (ptone/scion#7757): BrokerHomeResetIntact when the broker did not

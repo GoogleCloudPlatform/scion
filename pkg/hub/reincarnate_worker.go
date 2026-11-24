@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 )
 
 // reincarnationStepMaxAttempts bounds the merge-and-retry loop in
@@ -675,7 +676,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			return
 		}
 		if move != nil {
-			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, recovery(fromState), move, srcAgent, move.recreates() && !provisionDispatched)
+			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, recovery(fromState), move, srcAgent, move.freshTarget() && !provisionDispatched)
 			return
 		}
 		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, fromState, errMsg, recovery(fromState))
@@ -710,11 +711,12 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// them onto the new generation, where a later stop could be classified
 	// with them (ptone/scion#5282). A failure from here on records its own
 	// phase and message.
+	lastMigratingMsg := reincarnationMigratingMessage(toGeneration)
 	agent, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateStopping,
 		phase:              string(state.PhaseStopping),
 		activity:           reincarnateStrPtr(""),
-		message:            reincarnateStrPtr(reincarnationMigratingMessage(toGeneration)),
+		message:            reincarnateStrPtr(lastMigratingMsg),
 		clearExit:          true,
 		now:                stoppingNow,
 	}, reincarnationStepMaxAttempts)
@@ -777,6 +779,29 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		s.clearExposedPortsForAgent(ctx, agentID)
 	}
 
+	// Bundle mode steps 4–5 (design §3.5): after stop, snapshot workspace and
+	// $HOME from the source broker into Hub object storage, verify every part,
+	// and persist manifest.json before assigning the agent to the target.
+	var bundleManifest bundle.Manifest
+	var bundleManifestHash string
+	if move.isBundle() {
+		var casLost bool
+		bundleManifest, bundleManifestHash, casLost, err = s.runMoveBundleExport(ctx, md, agent, reincarnationID, &lastMigratingMsg)
+		if casLost {
+			// Record ownership was lost while polling (e.g. stale sweep);
+			// stop immediately without side effects. Consistent with the
+			// existing !ok step-CAS returns, deferred conditional capacity
+			// release stays enabled since no container is running.
+			return
+		}
+		if err != nil {
+			srcName := s.moveSourceBrokerDisplayName(ctx, move.SourceBrokerID)
+			s.failReincarnationWithMessage(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping,
+				err.Error(), moveBundleExportFailureAgentMessage(srcName, err.Error()), recovery(store.AgentReincarnationStateStopping))
+			return
+		}
+	}
+
 	provisioningNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateStopping, store.AgentReincarnationStateProvisioning, reincarnationStepMaxAttempts, nil)
 	if err != nil {
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to advance record to provisioning: "+err.Error(), recovery(store.AgentReincarnationStateStopping))
@@ -812,7 +837,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// and also persisted onto AppliedConfig.Task for restart consistency.
 	requesterCtx := s.buildReincarnationRequesterContext(ctx, agent, requestedBy)
 	var recreated *recreatedWorkspace
-	if move != nil && move.recreates() {
+	if move != nil && move.transferMode() == MoveTransferModeRecreate {
 		recreated = s.recreatedWorkspaceFor(ctx, move, fresh)
 	}
 	preamble := s.buildReincarnationPreambleWith(agent, toGeneration, handoff, migrationStart, requesterCtx, plan, recreated)
@@ -862,22 +887,41 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			failAfterProvision(store.AgentReincarnationStateProvisioning, "failed to link the target broker to the project: "+err.Error())
 			return
 		}
-		moveMarkerID := ""
-		if move.recreates() {
-			moveMarkerID = reincarnationID
+		var provErr error
+		if move.isBundle() {
+			provErr = md.DispatchAgentProvisionForBundleMove(startCtx, agent, reincarnationID)
+		} else {
+			moveMarkerID := ""
+			if move.freshTarget() {
+				moveMarkerID = reincarnationID
+			}
+			provErr = md.DispatchAgentProvisionForMove(startCtx, agent, move.expectedNFSWorkspace(), moveMarkerID)
 		}
-		if err := md.DispatchAgentProvisionForMove(startCtx, agent, move.expectedNFSWorkspace(), moveMarkerID); err != nil {
-			// A forced move removes the target's files only when the
-			// provision may have created them: an error marked sent that
-			// is not the target's own refusal (moveTargetUntouched).
-			// Otherwise any files it holds for the agent predate this
-			// move and stay.
+		if provErr != nil {
+			// A fresh-target move (recreate or bundle) removes the target's
+			// files only when the provision may have created them: an error
+			// marked sent that is not the target's own refusal
+			// (moveTargetUntouched). Otherwise any files it holds for the
+			// agent predate this move and stay.
 			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, store.AgentReincarnationStateProvisioning,
-				"provision on the target broker failed: "+dispatchFailureText(err), recovery(store.AgentReincarnationStateProvisioning), move, srcAgent,
-				move.recreates() && moveTargetUntouched(err))
+				"provision on the target broker failed: "+dispatchFailureText(provErr), recovery(store.AgentReincarnationStateProvisioning), move, srcAgent,
+				move.freshTarget() && moveTargetUntouched(provErr))
 			return
 		}
 		provisionDispatched = true
+
+		// Bundle mode step 8 (design §3.5): hydrate workspace and merge $HOME
+		// on the freshly provisioned target before starting the container.
+		if move.isBundle() {
+			casLost, importErr := s.runMoveBundleImport(ctx, md, agent, reincarnationID, bundleManifest, bundleManifestHash, &lastMigratingMsg)
+			if casLost {
+				return
+			}
+			if importErr != nil {
+				failAfterProvision(store.AgentReincarnationStateProvisioning, importErr.Error())
+				return
+			}
+		}
 	}
 
 	// Step: reprovision (re-render scion-agent.json/agent-info.json, re-inject
@@ -1098,7 +1142,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		reincarnationState:    store.ReincarnationStateNone,
 		generation:            &toGeneration,
 		appliedConfig:         fresh,
-		clearMessageIfEquals:  reincarnationMigratingMessage(toGeneration),
+		clearMessageIfEquals:  lastMigratingMsg,
 		now:                   completedNow,
 		startEcho:             startEcho,
 		containerStatusBefore: beforeStart.containerStatus,
@@ -1118,6 +1162,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// and the outcome recorded, never failing the move.
 	if move != nil {
 		s.cleanUpMoveSource(ctx, md, reincarnationID, srcAgent)
+		if move.isBundle() {
+			s.cleanupMoveBundleStaging(ctx, reincarnationID)
+		}
 	}
 }
 
@@ -1346,13 +1393,17 @@ func (s *Server) failAfterReprovision(ctx context.Context, dispatcher AgentDispa
 // (design §3.4 Amendment A8.1) — see tryAdvanceReincarnation's doc comment
 // for why this must be explicit rather than read fresh off the record.
 func (s *Server) failReincarnation(ctx context.Context, agentID, reincarnationID, fromState, errMsg string, restoreConfig *store.AgentAppliedConfig) {
+	s.failReincarnationWithMessage(ctx, agentID, reincarnationID, fromState, errMsg, "", restoreConfig)
+}
+
+func (s *Server) failReincarnationWithMessage(ctx context.Context, agentID, reincarnationID, fromState, errMsg, agentMsg string, restoreConfig *store.AgentAppliedConfig) {
 	s.agentLifecycleLog.Error("reincarnation failed",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "error", errMsg)
 
 	failNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, fromState, store.AgentReincarnationStateFailed, reincarnationStepMaxAttempts+3, func(rec *store.AgentReincarnation, _ time.Time) {
 		rec.Error = errMsg
 	})
-	s.finishFailReincarnation(ctx, agentID, reincarnationID, errMsg, restoreConfig, failNow, ok, err)
+	s.finishFailReincarnation(ctx, agentID, reincarnationID, errMsg, agentMsg, restoreConfig, failNow, ok, err)
 }
 
 // failMoveAndRollBack fails a move after the agent was assigned to the
@@ -1388,13 +1439,13 @@ func (s *Server) failReincarnationUnknownState(ctx context.Context, agentID, rei
 	failNow, ok, err := s.tryAdvanceReincarnationUnknownState(ctx, reincarnationID, store.AgentReincarnationStateFailed, reincarnationStepMaxAttempts+3, func(rec *store.AgentReincarnation, _ time.Time) {
 		rec.Error = errMsg
 	})
-	s.finishFailReincarnation(ctx, agentID, reincarnationID, errMsg, restoreConfig, failNow, ok, err)
+	s.finishFailReincarnation(ctx, agentID, reincarnationID, errMsg, "", restoreConfig, failNow, ok, err)
 }
 
 // finishFailReincarnation is the shared tail of failReincarnation and
 // failReincarnationUnknownState, once the record-side CAS attempt (by
 // whichever path) has already run.
-func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarnationID, errMsg string, restoreConfig *store.AgentAppliedConfig, failNow time.Time, ok bool, err error) {
+func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarnationID, errMsg, agentMsg string, restoreConfig *store.AgentAppliedConfig, failNow time.Time, ok bool, err error) {
 	if err != nil {
 		s.agentLifecycleLog.Error("failReincarnation: failed to advance record to failed after retries, skipping the agent write",
 			"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
@@ -1405,7 +1456,7 @@ func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarna
 			"agent_id", agentID, "reincarnation_id", reincarnationID)
 		return
 	}
-	s.writeFailedAgent(ctx, agentID, reincarnationID, store.EdgeDeactivationReincarnateFailed, errMsg, restoreConfig, failNow)
+	s.writeFailedAgentWithMessage(ctx, agentID, reincarnationID, store.EdgeDeactivationReincarnateFailed, errMsg, agentMsg, restoreConfig, failNow)
 	s.reconcileFailedMove(ctx, reincarnationID)
 }
 
@@ -1424,12 +1475,19 @@ func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarna
 // keeps the new generation's configuration, and the authority records
 // written for it stay.
 func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID string, cause store.EdgeDeactivationCause, errMsg string, restoreConfig *store.AgentAppliedConfig, now time.Time) {
+	s.writeFailedAgentWithMessage(ctx, agentID, reincarnationID, cause, errMsg, "", restoreConfig, now)
+}
+
+func (s *Server) writeFailedAgentWithMessage(ctx context.Context, agentID, reincarnationID string, cause store.EdgeDeactivationCause, errMsg, agentMsg string, restoreConfig *store.AgentAppliedConfig, now time.Time) {
+	if agentMsg == "" {
+		agentMsg = "reincarnation failed: " + errMsg
+	}
 	upd := reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateFailed,
 		phase:              "error",
 		activity:           reincarnateStrPtr(""),
 		now:                now,
-		message:            reincarnateStrPtr("reincarnation failed: " + errMsg),
+		message:            reincarnateStrPtr(agentMsg),
 	}
 	if restoreConfig != nil {
 		upd.appliedConfig = restoreConfig

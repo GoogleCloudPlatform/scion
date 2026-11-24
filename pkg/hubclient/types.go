@@ -461,6 +461,11 @@ type BrokerCapabilities struct {
 	// AgentMoveRecreate indicates the broker can be the target of a forced
 	// move (store.BrokerCapabilities.AgentMoveRecreate is its counterpart).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AgentMoveBundle indicates the broker implements the portable
+	// workspace+$HOME bundle move endpoints (precheck, export, import) and
+	// WorkspaceSource="move-bundle" provision
+	// (store.BrokerCapabilities.AgentMoveBundle is its counterpart).
+	AgentMoveBundle bool `json:"agentMoveBundle,omitempty"`
 	// AttachmentDelivery indicates the broker can receive attachment
 	// deliveries (ptone/scion#4596; store.BrokerCapabilities.AttachmentDelivery
 	// is its counterpart).

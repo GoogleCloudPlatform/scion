@@ -1681,6 +1681,9 @@ type V1ServerConfig struct {
 	// Scheduler configures the Hub background task scheduler.
 	Scheduler *V1SchedulerConfig `json:"scheduler,omitempty" yaml:"scheduler,omitempty" koanf:"scheduler"`
 
+	// Reincarnate configures Hub-side reincarnation settings (including move_bundle limits).
+	Reincarnate *V1ReincarnateConfig `json:"reincarnate,omitempty" yaml:"reincarnate,omitempty" koanf:"reincarnate"`
+
 	// OIDCLogin configures an external OIDC provider for web login
 	// (the Hub as Relying Party, not as IdP).
 	OIDCLogin *V1OIDCLoginConfig `json:"oidc_login,omitempty" yaml:"oidc_login,omitempty" koanf:"oidc_login"`
@@ -1719,6 +1722,26 @@ type V1SchedulerConfig struct {
 	// pool saturation) is active out-of-the-box. Set to 0 for unlimited
 	// (pre-fix behavior), or a higher value for larger deployments.
 	MaxConcurrency *int `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty" koanf:"max_concurrency"`
+}
+
+// V1ReincarnateConfig holds Hub-side reincarnation settings in settings.yaml format.
+type V1ReincarnateConfig struct {
+	MoveBundle *V1MoveBundleConfig `json:"move_bundle,omitempty" yaml:"move_bundle,omitempty" koanf:"move_bundle"`
+}
+
+// V1MoveBundleConfig holds Hub-configured bounds and timeouts for cross-broker
+// bundle moves (server.reincarnate.move_bundle, design §3.7).
+type V1MoveBundleConfig struct {
+	WorkspaceMaxBytes   int64  `json:"workspace_max_bytes,omitempty" yaml:"workspace_max_bytes,omitempty" koanf:"workspace_max_bytes"`
+	WorkspaceMaxEntries int64  `json:"workspace_max_entries,omitempty" yaml:"workspace_max_entries,omitempty" koanf:"workspace_max_entries"`
+	HomeMaxBytes        int64  `json:"home_max_bytes,omitempty" yaml:"home_max_bytes,omitempty" koanf:"home_max_bytes"`
+	HomeMaxEntries      int64  `json:"home_max_entries,omitempty" yaml:"home_max_entries,omitempty" koanf:"home_max_entries"`
+	MaxDepth            int    `json:"max_depth,omitempty" yaml:"max_depth,omitempty" koanf:"max_depth"`
+	MaxPathLen          int    `json:"max_path_len,omitempty" yaml:"max_path_len,omitempty" koanf:"max_path_len"`
+	PartSize            int64  `json:"part_size,omitempty" yaml:"part_size,omitempty" koanf:"part_size"`
+	ExportTimeout       string `json:"export_timeout,omitempty" yaml:"export_timeout,omitempty" koanf:"export_timeout"`
+	ImportTimeout       string `json:"import_timeout,omitempty" yaml:"import_timeout,omitempty" koanf:"import_timeout"`
+	PartStallTimeout    string `json:"part_stall_timeout,omitempty" yaml:"part_stall_timeout,omitempty" koanf:"part_stall_timeout"`
 }
 
 // V1OIDCLoginConfig holds configuration for an external OIDC login provider
@@ -5203,6 +5226,33 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.Scheduler.MaxConcurrency = v1.Scheduler.MaxConcurrency // both are *int; nil propagates
 	}
 
+	// Reincarnate
+	if v1.Reincarnate != nil && v1.Reincarnate.MoveBundle != nil {
+		mb := v1.Reincarnate.MoveBundle
+		gc.Reincarnate.MoveBundle.WorkspaceMaxBytes = mb.WorkspaceMaxBytes
+		gc.Reincarnate.MoveBundle.WorkspaceMaxEntries = mb.WorkspaceMaxEntries
+		gc.Reincarnate.MoveBundle.HomeMaxBytes = mb.HomeMaxBytes
+		gc.Reincarnate.MoveBundle.HomeMaxEntries = mb.HomeMaxEntries
+		gc.Reincarnate.MoveBundle.MaxDepth = mb.MaxDepth
+		gc.Reincarnate.MoveBundle.MaxPathLen = mb.MaxPathLen
+		gc.Reincarnate.MoveBundle.PartSize = mb.PartSize
+		if mb.ExportTimeout != "" {
+			if d, err := time.ParseDuration(mb.ExportTimeout); err == nil {
+				gc.Reincarnate.MoveBundle.ExportTimeout = d
+			}
+		}
+		if mb.ImportTimeout != "" {
+			if d, err := time.ParseDuration(mb.ImportTimeout); err == nil {
+				gc.Reincarnate.MoveBundle.ImportTimeout = d
+			}
+		}
+		if mb.PartStallTimeout != "" {
+			if d, err := time.ParseDuration(mb.PartStallTimeout); err == nil {
+				gc.Reincarnate.MoveBundle.PartStallTimeout = d
+			}
+		}
+	}
+
 	// OIDC Identity Provider
 	if v1.OIDC != nil {
 		gc.OIDC = *v1.OIDC
@@ -5595,6 +5645,30 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			IntervalSeconds: gc.Scheduler.IntervalSeconds,
 			MaxConcurrency:  gc.Scheduler.MaxConcurrency,
 		}
+	}
+
+	// Reincarnate config
+	if !gc.Reincarnate.MoveBundle.IsZero() {
+		mb := gc.Reincarnate.MoveBundle
+		v1mb := &V1MoveBundleConfig{
+			WorkspaceMaxBytes:   mb.WorkspaceMaxBytes,
+			WorkspaceMaxEntries: mb.WorkspaceMaxEntries,
+			HomeMaxBytes:        mb.HomeMaxBytes,
+			HomeMaxEntries:      mb.HomeMaxEntries,
+			MaxDepth:            mb.MaxDepth,
+			MaxPathLen:          mb.MaxPathLen,
+			PartSize:            mb.PartSize,
+		}
+		if mb.ExportTimeout > 0 {
+			v1mb.ExportTimeout = mb.ExportTimeout.String()
+		}
+		if mb.ImportTimeout > 0 {
+			v1mb.ImportTimeout = mb.ImportTimeout.String()
+		}
+		if mb.PartStallTimeout > 0 {
+			v1mb.PartStallTimeout = mb.PartStallTimeout.String()
+		}
+		v1.Reincarnate = &V1ReincarnateConfig{MoveBundle: v1mb}
 	}
 
 	// OIDC Login config (external OIDC provider for web login)

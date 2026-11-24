@@ -445,7 +445,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// it has no files for the agent before provisioning it with a
 			// fresh workspace (ptone/scion#5441).
 			AgentMoveRecreate: true,
-			StartsInFlight:    s.startsInFlight != nil,
+			// This broker implements the portable workspace+$HOME bundle move
+			// endpoints (precheck, export, import) and WorkspaceSource="move-bundle"
+			// provision (ptone/scion#8960).
+			AgentMoveBundle: true,
+			StartsInFlight:  s.startsInFlight != nil,
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
@@ -1049,6 +1053,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if req.MoveReincarnationID != "" && !req.ProvisionOnly {
 		ValidationError(w, "moveReincarnationId is only valid on a provision-only request", nil)
 		return
+	}
+	if req.WorkspaceSource != "" {
+		if req.WorkspaceSource != api.WorkspaceSourceMoveBundle {
+			ValidationError(w, "unsupported workspaceSource", nil)
+			return
+		}
+		if !req.ProvisionOnly || req.Reprovision || req.ExpectExistingNFSWorkspace != agent.MoveWorkspaceFreshAgentDir || req.MoveReincarnationID == "" {
+			ValidationError(w, "workspaceSource=move-bundle is only valid on a fresh-agent-dir move provision-only request with moveReincarnationId", nil)
+			return
+		}
 	}
 	// A home reset belongs only on a reprovision (ptone/scion#7757), and its
 	// ID becomes part of a directory name.
@@ -2106,6 +2120,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// files it did not create. The provision marks the directory it
 			// creates with the move's reincarnation ID.
 			opts.MoveReincarnationID = req.MoveReincarnationID
+			opts.WorkspaceSource = req.WorkspaceSource
 			checker, ok := sc.Manager.(moveWorkspaceAbsenceChecker)
 			if !ok {
 				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
@@ -3114,6 +3129,14 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle portable move-bundle endpoints (precheck, export, import).
+	// Reached over both direct HTTP and the control channel under the broker's
+	// HMAC auth middleware.
+	if subaction, ok := strings.CutPrefix(action, "move-bundle/"); ok {
+		s.handleMoveBundle(w, r, id, projectID, subaction)
+		return
+	}
+
 	// A delete the hub fenced with a deadline is refused once that deadline
 	// has passed, before anything below (the recorded-runtime check
 	// included) can act on it (ptone/scion#2906).
@@ -3330,6 +3353,12 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// retainedPurgeRefusal), since that start may be of a restored agent.
 	if !purgeRetained {
 		s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, hubAgentID, runID)
+		if reg := s.moveBundleJobs.Load(); reg != nil {
+			if err := reg.cancelAndWaitForAgent(ctx, projectID, id); err != nil {
+				s.agentLifecycleLog.Warn("Agent delete: timed out waiting for in-flight move-bundle job to stop",
+					"agent_id", id, "project_id", projectID, "error", err)
+			}
+		}
 	}
 
 	s.agentLifecycleLog.Debug("Agent delete: resolving target",
@@ -7593,7 +7622,7 @@ func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID strin
 	defMgr, defRT, _ := s.defaultPair()
 
 	// Try the default runtime first.
-	if useDefault {
+	if useDefault && defMgr != nil {
 		agents, err := defMgr.List(ctx, filter)
 		if err == nil && len(agents) > 0 {
 			return defMgr, defRT, true
@@ -7616,7 +7645,7 @@ func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID strin
 	// This supports pre-existing containers and solo/CLI mode.
 	if projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		if useDefault {
+		if useDefault && defMgr != nil {
 			agents, err := defMgr.List(ctx, fallbackFilter)
 			if err == nil && hasAgentInProjectOrUnlabeled(agents, projectID) {
 				return defMgr, defRT, true

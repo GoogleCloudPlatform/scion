@@ -3156,6 +3156,13 @@ authDone:
 		}
 		warnings = append(warnings, claimWarnings...)
 	}
+	// Persist the broker-owned move-bundle home record (resolved in-container
+	// UnixUsername, absolute home path, and staged secret/auth exclusions)
+	// outside container-writable home/ and workspace/ so move-bundle precheck
+	// and export use the exact values start launched with (ptone/scion#8960).
+	if recErr := WriteMoveBundleHomeRecord(agentDir, runCfg); recErr != nil {
+		slog.Warn("Start: failed to write move-bundle home record", "agent", opts.Name, "error", recErr)
+	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
 		// agent-info.json was set to the pre-run phase above, before the

@@ -803,17 +803,19 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 	in := moveEligibilityInput{
-		Agent:              agent,
-		Src:                src,
-		Dst:                dst,
-		WorkspaceModeError: workspaceModeErr,
-		CloneMode:          cloneMode,
-		SelfMove:           isSelfRequest(ctx, agent),
-		Probes:             s.moveProbesFor(r, project, agent.AppliedConfig),
-		Force:              req.ForceMove,
-		EmptyPerAgent:      project.IsEmptyPerAgent(),
-		WorkspaceMode:      string(project.SharingMode()),
-		GitRemote:          project.GitRemote,
+		Agent:                   agent,
+		Src:                     src,
+		Dst:                     dst,
+		WorkspaceModeError:      workspaceModeErr,
+		CloneMode:               cloneMode,
+		SelfMove:                isSelfRequest(ctx, agent),
+		Probes:                  s.moveProbesFor(r, project, agent.AppliedConfig),
+		Force:                   req.ForceMove,
+		EmptyPerAgent:           project.IsEmptyPerAgent(),
+		WorkspaceMode:           string(project.SharingMode()),
+		GitRemote:               project.GitRemote,
+		BundleExperimentEnabled: s.experimentEnabled(experiments.AgentMoveBundle),
+		BundleStorageError:      moveBundleStorageCheck(s.GetStorage()),
 	}
 	if workspaceModeErr != "" {
 		v, ref := evaluateMoveEligibility(in)

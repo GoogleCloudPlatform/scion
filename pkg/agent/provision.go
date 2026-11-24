@@ -929,6 +929,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.MoveReincarnationID != "" {
 		ctx = withMoveReincarnationID(ctx, opts.MoveReincarnationID)
 	}
+	if opts.WorkspaceSource != "" {
+		ctx = api.ContextWithWorkspaceSource(ctx, opts.WorkspaceSource)
+	}
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 		if gc := opts.SharedWorkspaceClone; gc != nil {
@@ -2001,7 +2004,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	// A plain project's explicit path must hold its .scion entry, checked
 	// before anything is written under it (checkExplicitProjectPath).
-	ownWorkspace := api.GitCloneFromContext(ctx) != nil || api.IsEmptyPerAgentWorkspaceFromContext(ctx) || api.IsSharedWorkspaceFromContext(ctx)
+	moveBundle := api.WorkspaceSourceFromContext(ctx) == api.WorkspaceSourceMoveBundle
+	ownWorkspace := api.GitCloneFromContext(ctx) != nil || api.IsEmptyPerAgentWorkspaceFromContext(ctx) || api.IsSharedWorkspaceFromContext(ctx) || moveBundle
 	if err := checkExplicitProjectPath(projectPath, projectDir, workspace, ownWorkspace); err != nil {
 		return "", "", nil, err
 	}
@@ -2062,7 +2066,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// directory with the share's modes, so provisioning neither creates nor
 	// clears it.
 	var sharedAgentWorkspace string
-	if !sharedWorkspace && (emptyPerAgent || isClonePerAgentWorkspace(ctx)) {
+	if !sharedWorkspace && (emptyPerAgent || isClonePerAgentWorkspace(ctx) || moveBundle) {
 		sharedAgentWorkspace, err = sharedLayoutAgentWorkspace(ctx, settings, projectDir, agentName, agentDir)
 		if err != nil {
 			return "", "", nil, err
@@ -2272,7 +2276,23 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// Workspace Resolution Logic
-	if emptyPerAgent {
+	if moveBundle {
+		// Bundle move target provision (design §3.5 step 7): create an empty
+		// workspace directory (no clone, no worktree, no empty-repo init) so
+		// move-bundle/import can populate it before the container starts.
+		if workspace != "" {
+			return "", "", nil, fmt.Errorf("move-bundle workspace does not take a workspace path (got %q)", workspace)
+		}
+		if sharedWorkspace {
+			return "", "", nil, fmt.Errorf("move-bundle workspace cannot be combined with a shared workspace")
+		}
+		if sharedAgentWorkspace != "" {
+			return "", "", nil, fmt.Errorf("move-bundle workspace is not supported on a shared project storage layout")
+		}
+		if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+			return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
+		}
+	} else if emptyPerAgent {
 		// Empty-per-agent (design #2703): a private, initially empty, non-git
 		// directory at <projectDir>/agents/<slug>/workspace. Checked first so
 		// that neither settings.WorkspacePath, the global-project directory,

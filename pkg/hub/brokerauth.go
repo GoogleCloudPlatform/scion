@@ -372,6 +372,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.AgentMove = true
 		case "agentmoverecreate", "agent_move_recreate":
 			caps.AgentMoveRecreate = true
+		case "agentmovebundle", "agent_move_bundle":
+			caps.AgentMoveBundle = true
 		case "attachmentdelivery", "attachment_delivery":
 			caps.AttachmentDelivery = true
 		case "homefiles", "home_files":

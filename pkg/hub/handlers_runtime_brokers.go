@@ -348,6 +348,36 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 			s.handleWorkspaceDownload(w, r, brokerID, agentID)
 			return
 		}
+		// Broker-self move-bundle signed-URL endpoints (design §3.5):
+		// POST .../agents/{agentId}/move-bundle/{rid}/upload-url
+		// POST .../agents/{agentId}/move-bundle/{rid}/download-urls
+		if agentID, rest, ok := strings.Cut(agentPath, "/move-bundle/"); ok {
+			if agentID == "" || strings.Contains(agentID, "/") {
+				NotFound(w, "Agent")
+				return
+			}
+			rid, action, ok := strings.Cut(rest, "/")
+			if !ok || rid == "" || strings.Contains(rid, "/") {
+				NotFound(w, "MoveBundle")
+				return
+			}
+			switch action {
+			case "upload-url":
+				if r.Method != http.MethodPost {
+					MethodNotAllowed(w, http.MethodPost)
+					return
+				}
+				s.handleMoveBundleUploadURL(w, r, brokerID, agentID, rid)
+				return
+			case "download-urls":
+				if r.Method != http.MethodPost {
+					MethodNotAllowed(w, http.MethodPost)
+					return
+				}
+				s.handleMoveBundleDownloadURLs(w, r, brokerID, agentID, rid)
+				return
+			}
+		}
 	}
 
 	// Delegate to the original handler for other operations

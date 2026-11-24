@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -45,10 +47,11 @@ type reincarnationMove struct {
 	// it, as the request's check did.
 	Force bool
 	// TransferMode is the verdict's transfer mode when the move was
-	// accepted (MoveTransferModeExport or MoveTransferModeRecreate; "" is
-	// read as export, the only mode before forced moves). The re-check
-	// refuses a move whose mode has changed since, and a recreate move
-	// provisions a fresh workspace and rolls back with a files delete.
+	// accepted (MoveTransferModeExport, MoveTransferModeBundle, or
+	// MoveTransferModeRecreate; "" is read as export, the only mode before
+	// forced moves). The re-check refuses a move whose mode has changed since;
+	// recreate and bundle moves (freshTarget) provision a fresh agent
+	// directory and roll back with a marker-guarded files delete.
 	TransferMode string
 }
 
@@ -60,18 +63,26 @@ func (m *reincarnationMove) transferMode() string {
 	return m.TransferMode
 }
 
-// recreates reports whether the move provisions the workspace fresh on the
-// target (a forced move).
-func (m *reincarnationMove) recreates() bool {
-	return m.transferMode() == MoveTransferModeRecreate
+// freshTarget reports whether the move provisions a fresh agent directory on
+// the target (both recreate and bundle moves), so it uses the fresh-agent-dir
+// expectation and marker-guarded DispatchAgentDeleteRecreated rollback
+// (design §3.6).
+func (m *reincarnationMove) freshTarget() bool {
+	mode := m.transferMode()
+	return mode == MoveTransferModeRecreate || mode == MoveTransferModeBundle
+}
+
+// isBundle reports whether the move uses the portable bundle transfer mode.
+func (m *reincarnationMove) isBundle() bool {
+	return m != nil && m.transferMode() == MoveTransferModeBundle
 }
 
 // expectedNFSWorkspace is the moved-agent workspace expectation the target
 // broker checks before provisioning: for an export move, the workspace it
-// must find on its mount of the export; for a recreate move, that it has
-// nothing for the agent yet.
+// must find on its mount of the export; for a recreate or bundle move, that it
+// has nothing for the agent yet.
 func (m *reincarnationMove) expectedNFSWorkspace() string {
-	if m.recreates() {
+	if m.freshTarget() {
 		return agent.MoveWorkspaceFreshAgentDir
 	}
 	if m.AgentDirWorkspace {
@@ -118,17 +129,19 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 	}
 	allowed := func(*store.RuntimeBroker) bool { return true }
 	v, ref := evaluateMoveEligibility(moveEligibilityInput{
-		Agent:              a,
-		Src:                src,
-		Dst:                dst,
-		WorkspaceModeError: gate.workspaceModeErr,
-		CloneMode:          gate.cloneMode,
-		Profile:            mv.Profile,
-		SelfMove:           mv.SelfMove,
-		Force:              mv.Force,
-		EmptyPerAgent:      project.IsEmptyPerAgent(),
-		WorkspaceMode:      string(project.SharingMode()),
-		GitRemote:          project.GitRemote,
+		Agent:                   a,
+		Src:                     src,
+		Dst:                     dst,
+		WorkspaceModeError:      gate.workspaceModeErr,
+		CloneMode:               gate.cloneMode,
+		Profile:                 mv.Profile,
+		SelfMove:                mv.SelfMove,
+		Force:                   mv.Force,
+		EmptyPerAgent:           project.IsEmptyPerAgent(),
+		WorkspaceMode:           string(project.SharingMode()),
+		GitRemote:               project.GitRemote,
+		BundleExperimentEnabled: s.experimentEnabled(experiments.AgentMoveBundle),
+		BundleStorageError:      moveBundleStorageCheck(s.GetStorage()),
 		Probes: moveProbes{
 			Reachable:        func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
 			PolicyRefused:    func(b *store.RuntimeBroker) bool { return s.brokerPolicyRefuses(b) },
@@ -139,12 +152,23 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 			},
 			Capacity:     func(*store.RuntimeBroker) string { return "" },
 			HostSARecord: s.hostSARecordMoveProbe(ctx, a.AppliedConfig),
+			BundleSource: s.moveBundleSourceProbe(ctx),
 		},
 	})
 	if ref != nil {
+		if mv.isBundle() && v.BundleUnavailable != "" {
+			if strings.HasPrefix(v.BundleUnavailable, moveBundleErrPrefixLimit) {
+				return nil, errors.New(v.BundleUnavailable)
+			}
+			return nil, fmt.Errorf("move no longer eligible: %s", v.BundleUnavailable)
+		}
 		return nil, fmt.Errorf("move no longer eligible: %s", ref.Message)
 	}
 	if v.TransferMode != mv.transferMode() {
+		if mv.isBundle() && v.BundleUnavailable != "" {
+			return nil, fmt.Errorf("move no longer eligible: the workspace transfer mode changed from %s to %s since the move was accepted (%s)",
+				mv.transferMode(), valueOrUnknown(v.TransferMode), v.BundleUnavailable)
+		}
 		return nil, fmt.Errorf("move no longer eligible: the workspace transfer mode changed from %s to %s since the move was accepted",
 			mv.transferMode(), valueOrUnknown(v.TransferMode))
 	}
@@ -350,7 +374,7 @@ func (s *Server) ensureBrokerReservationOn(ctx context.Context, a *store.Agent, 
 // resolves the agent by name within the project. Nothing is ever sent to
 // the source. dst is the agent as assigned to the target.
 func rollbackMoveTarget(ctx context.Context, md agentMoveDispatcher, dst *store.Agent, mv *reincarnationMove, srcRunID, reincarnationID string) error {
-	if mv.recreates() {
+	if mv.freshTarget() {
 		if dst.RunID == srcRunID {
 			c := *dst
 			c.RunID = ""
@@ -417,5 +441,8 @@ func (s *Server) reconcileFailedMove(ctx context.Context, reincarnationID string
 			s.agentLifecycleLog.Warn("failed move: could not record the skipped source cleanup",
 				"agent_id", rec.AgentID, "reincarnation_id", rec.ID, "error", err)
 		}
+	}
+	if rec.TransferMode == store.TransferModeBundle {
+		s.cleanupMoveBundleStaging(ctx, rec.ID)
 	}
 }
