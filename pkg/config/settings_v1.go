@@ -2286,6 +2286,9 @@ type V1BrokerConfig struct {
 	// Must be absolute or start with ~/. Flat Runtime Broker instances do
 	// not use it. Read at startup.
 	StateDir string `json:"state_dir,omitempty" yaml:"state_dir,omitempty" koanf:"state_dir"`
+	// InitFirewall configures the operator-authoritative egress firewall
+	// policy applied when an agent opts into SCION_INIT_FIREWALL.
+	InitFirewall *V1InitFirewallConfig `json:"init_firewall,omitempty" yaml:"init_firewall,omitempty" koanf:"init_firewall"`
 	// Instances declares the flat (single-target) Runtime Broker instances
 	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
 	// Empty or absent means legacy hosting. Each key must be unique; there is
@@ -2295,6 +2298,13 @@ type V1BrokerConfig struct {
 	// Read only through LoadGlobalConfig / LoadRuntimeBrokerInstances; project
 	// settings never configure instances.
 	Instances []V1RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
+}
+
+// V1InitFirewallConfig holds the operator-authoritative egress firewall
+// policy (server.broker.init_firewall).
+type V1InitFirewallConfig struct {
+	AllowDomains []string `json:"allow_domains,omitempty" yaml:"allow_domains,omitempty" koanf:"allow_domains"`
+	AllowSSH     bool     `json:"allow_ssh,omitempty" yaml:"allow_ssh,omitempty" koanf:"allow_ssh"`
 }
 
 // V1RuntimeBrokerInstanceConfig is one flat Runtime Broker instance.
@@ -4978,6 +4988,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		} else {
 			gc.RuntimeBroker.AllowContainerScriptHarnesses = true
 		}
+		if v1.Broker.InitFirewall != nil {
+			gc.RuntimeBroker.InitFirewall = &InitFirewallConfig{
+				AllowDomains: append([]string(nil), v1.Broker.InitFirewall.AllowDomains...),
+				AllowSSH:     v1.Broker.InitFirewall.AllowSSH,
+			}
+		}
 		gc.RuntimeBroker.Instances = v1InstancesToGlobal(v1.Broker.Instances)
 	}
 
@@ -5445,6 +5461,12 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			MaxAge:         gc.RuntimeBroker.CORSMaxAge,
 		},
 		Instances: globalInstancesToV1(gc.RuntimeBroker.Instances),
+	}
+	if gc.RuntimeBroker.InitFirewall != nil {
+		v1.Broker.InitFirewall = &V1InitFirewallConfig{
+			AllowDomains: append([]string(nil), gc.RuntimeBroker.InitFirewall.AllowDomains...),
+			AllowSSH:     gc.RuntimeBroker.InitFirewall.AllowSSH,
+		}
 	}
 
 	// Database config

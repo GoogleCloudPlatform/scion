@@ -72,6 +72,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
@@ -661,6 +662,16 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 			return &serverConfigFileValidationError{msg: errors.Join(all...).Error(),
 				entries: configValidationEntries(errs, "server.broker.instances")}
 		}
+	}
+	if under("server.broker.init_firewall") && req.Server != nil && req.Server.Broker != nil && req.Server.Broker.InitFirewall != nil {
+		// LoadGlobalConfig refuses an invalid server.broker.init_firewall at
+		// startup; validate and canonicalize before writing to settings.yaml.
+		policy, err := firewallpolicy.Normalize(req.Server.Broker.InitFirewall.AllowDomains, req.Server.Broker.InitFirewall.AllowSSH)
+		if err != nil {
+			return &serverConfigFileValidationError{msg: err.Error(),
+				entries: []settingsFieldError{{Field: "server.broker.init_firewall.allow_domains", Message: err.Error()}}}
+		}
+		req.Server.Broker.InitFirewall.AllowDomains = policy.AllowDomains
 	}
 	if req.Server != nil && (under("server.project_storage") || under("server.workspace_storage") ||
 		under("server.shared_dir_storage") || under("server.home_storage")) {

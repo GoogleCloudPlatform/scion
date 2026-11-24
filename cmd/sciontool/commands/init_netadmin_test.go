@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
@@ -40,7 +41,7 @@ func withRunDropNetAdmin(t *testing.T, f func() error) {
 	t.Cleanup(func() { runDropNetAdmin = orig })
 }
 
-func withRunInitFirewall(t *testing.T, f func() error) {
+func withRunInitFirewall(t *testing.T, f func(extraEnv []string) error) {
 	t.Helper()
 	orig := runInitFirewall
 	runInitFirewall = f
@@ -119,8 +120,8 @@ func TestSetupInitFirewall(t *testing.T) {
 		t.Run(tt.value, func(t *testing.T) {
 			t.Setenv(initFirewallEnv, tt.value)
 			var called bool
-			withRunInitFirewall(t, func() error { called = true; return tt.runErr })
-			installed, err := setupInitFirewall()
+			withRunInitFirewall(t, func([]string) error { called = true; return tt.runErr })
+			installed, err := setupInitFirewall(firewallpolicy.Policy{})
 			if called != tt.wantCalled {
 				t.Errorf("firewall run = %v, want %v", called, tt.wantCalled)
 			}
@@ -181,7 +182,7 @@ func newNetAdminFixture(t *testing.T, mode string, installed bool, dropErr error
 	}
 	t.Setenv("SCION_HOOKS_DIR", hooksDir)
 
-	withRunInitFirewall(t, func() error { f.order = append(f.order, "firewall"); return nil })
+	withRunInitFirewall(t, func([]string) error { f.order = append(f.order, "firewall"); return nil })
 	withRunVerifyIPv6Blocked(t, func(context.Context) error { return nil })
 	withRunMetadataServerStart(t, func(context.Context, *metadata.Server) error {
 		f.order = append(f.order, "metadata")
@@ -502,7 +503,7 @@ func TestRunInit_FirewallNonFatalMetadataStart_DropFailure_FailsClosed(t *testin
 func TestRunInit_InitFirewallFailure_FailsClosed(t *testing.T) {
 	f := newNetAdminFixture(t, "assign", true, nil)
 	t.Setenv(initFirewallEnv, "1")
-	withRunInitFirewall(t, func() error {
+	withRunInitFirewall(t, func([]string) error {
 		f.order = append(f.order, "firewall")
 		return errors.New("exit status 1")
 	})
@@ -1425,7 +1426,7 @@ func TestRunInit_MetadataProtectionLegacyFallback(t *testing.T) {
 			t.Setenv(metadata.InterceptionSourceEnvVar, "")
 			t.Setenv(initFirewallEnv, "1")
 			creds := newCredentialFixture(t, f.agentHome)
-			withRunInitFirewall(t, func() error {
+			withRunInitFirewall(t, func([]string) error {
 				f.order = append(f.order, "firewall")
 				return errors.New("iptables-restore failed")
 			})
@@ -1503,5 +1504,35 @@ func TestRunInit_IPv6NegativeProbeFailure_CleansUp(t *testing.T) {
 				t.Errorf("agent-info = (%q, %q), want (%q, %q)", phase, msg, state.PhaseError, goldenMetadataProtectionRefusal)
 			}
 		})
+	}
+}
+
+// TestRunInit_InContainerIgnoresFirewallPolicyEnv verifies that call site B
+// (in-container init when metadata interception is not runtime-managed) ignores
+// SCION_INIT_FIREWALL_* policy env vars and runs the firewall with an empty
+// policy.
+func TestRunInit_InContainerIgnoresFirewallPolicyEnv(t *testing.T) {
+	f := newNetAdminFixture(t, "assign", true, nil)
+	t.Setenv(initFirewallEnv, "1")
+	t.Setenv(firewallpolicy.EnvAllowDomains, "evil.example.com")
+	t.Setenv(firewallpolicy.EnvAllowSSH, "true")
+
+	var gotExtraEnv []string
+	var fwCalled bool
+	withRunInitFirewall(t, func(extraEnv []string) error {
+		fwCalled = true
+		gotExtraEnv = append([]string(nil), extraEnv...)
+		f.order = append(f.order, "firewall")
+		return nil
+	})
+
+	if got := f.run(); got != 0 {
+		t.Fatalf("RunInit() = %d, want 0", got)
+	}
+	if !fwCalled {
+		t.Fatal("expected runInitFirewall to be called")
+	}
+	if len(gotExtraEnv) != 0 {
+		t.Fatalf("in-container runInitFirewall received extraEnv = %v, want empty (call site B must ignore SCION_INIT_FIREWALL_*)", gotExtraEnv)
 	}
 }

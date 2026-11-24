@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
@@ -106,8 +107,9 @@ func initFirewallRequested() (bool, error) {
 }
 
 // runInitFirewall runs the egress firewall script as root. A package-level
-// func var only so tests can observe ordering and inject failure.
-var runInitFirewall = func() error {
+// func var only so tests can observe ordering, captured policy env, and inject
+// failure.
+var runInitFirewall = func(extraEnv []string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("%s requires init to run as root", initFirewallScript)
 	}
@@ -118,7 +120,7 @@ var runInitFirewall = func() error {
 	ctx, cancel := context.WithTimeout(context.Background(), initFirewallTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path)
-	cmd.Env = rootexec.Env()
+	cmd.Env = rootexec.Env(extraEnv...)
 	out, err := procreap.CombinedOutputManaged(cmd)
 	if err != nil {
 		log.Error("%s output:\n%s", initFirewallScript, string(out))
@@ -131,7 +133,7 @@ var runInitFirewall = func() error {
 // setupInitFirewall runs the firewall when requested and reports whether
 // it was installed. A non-nil error is fatal: RunInit must not start
 // anything.
-func setupInitFirewall() (installed bool, err error) {
+func setupInitFirewall(policy firewallpolicy.Policy) (installed bool, err error) {
 	on, err := initFirewallRequested()
 	if err != nil {
 		log.Error("%v", err)
@@ -140,11 +142,29 @@ func setupInitFirewall() (installed bool, err error) {
 	if !on {
 		return false, nil
 	}
-	if err := runInitFirewall(); err != nil {
+	if err := runInitFirewall(policy.Env()); err != nil {
 		log.Error("Opt-in init firewall failed: %v", err)
 		return false, errInitFirewallFailed
 	}
 	return true, nil
+}
+
+// warnIgnoredFirewallPolicyEnv logs a single warning when any
+// SCION_INIT_FIREWALL_* policy variable is present in the agent container's
+// environment on the in-container init path (call site B). Operator firewall
+// allowlists are honoured only on the runtime-managed netns-setup path.
+func warnIgnoredFirewallPolicyEnv() {
+	var ignored []string
+	for _, key := range []string{firewallpolicy.EnvAllowDomains, firewallpolicy.EnvAllowSSH} {
+		if v, ok := os.LookupEnv(key); ok && v != "" {
+			ignored = append(ignored, key)
+		}
+	}
+	if len(ignored) == 0 {
+		return
+	}
+	log.Warn("Ignoring %s in in-container init: operator init-firewall allowlists apply only on runtime-managed netns-setup paths; running with built-in allowlist and SSH disabled",
+		strings.Join(ignored, ", "))
 }
 
 // runDropNetAdmin is netcap.DropNetAdmin behind a seam for tests. The

@@ -69,11 +69,26 @@ Key rules enforced by `init-firewall.sh`:
 - **Outbound `tcp/22` off by default:** Arbitrary outbound SSH (`tcp/22`) is no
   longer unconditionally allowed. SSH to allowlisted hosts (such as GitHub)
   continues to work because the `allowed-domains` ipset rule permits all ports
-  to allowlisted IPs.
-- **IP-set limitation:** Domain names are resolved at container startup via
-  `getent ahostsv4` into an IPv4 ipset. Shared CDN and front-end IP addresses
-  are inherent to IP-set filtering and may be shared with other services hosted
-  on the same edge IPs.
+  to allowlisted IPs. Operators can restore outbound `tcp/22` to any IPv4 host
+  by setting `server.broker.init_firewall.allow_ssh: true` in the broker's
+  `settings.yaml`.
+- **Operator domain allowlist:** Operators can add extra allowed hostnames
+  without rebuilding the image via `server.broker.init_firewall.allow_domains`
+  in the broker's `settings.yaml` (up to 64 unique lowercase DNS hostnames;
+  wildcards, IP literals, CIDRs, `localhost`, and metacharacters are rejected
+  at broker startup). The allowlist is operator-authoritative: the runtime
+  passes `SCION_INIT_FIREWALL_ALLOW_DOMAINS` and `SCION_INIT_FIREWALL_ALLOW_SSH`
+  only into the short-lived `sciontool netns-setup` container's argv from
+  broker configuration, strips all `SCION_INIT_FIREWALL_*` variables from the
+  agent container environment, and ignores them on in-container `sciontool init`
+  fallback paths. Users, templates, harness-configs, secrets, and parent agents
+  cannot widen the allowlist.
+- **IP-set limitation and CDN warning:** Domain names are resolved at container
+  startup via `getent ahostsv4` into an IPv4 ipset (IPv6 AAAA records are not
+  allowlisted). Adding a domain hosted behind a shared CDN or multi-tenant
+  front-end (for example Cloudflare, Fastly, or CloudFront) permits traffic to
+  any other service sharing those resolved edge IPs, and DNS rotation after
+  startup is not refreshed until the container restarts.
 
 Set the variable in one of these places:
 

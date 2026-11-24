@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/delegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -904,8 +905,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}
 	var firewallInstalled bool
 	if !runtimeManagedInterception {
+		warnIgnoredFirewallPolicyEnv()
 		var fwErr error
-		firewallInstalled, fwErr = setupInitFirewall()
+		firewallInstalled, fwErr = setupInitFirewall(firewallpolicy.Policy{})
 		if fwErr != nil {
 			reportInitFailure(agentHome, fwErr)
 			removeTransportTokenOnRefusal()

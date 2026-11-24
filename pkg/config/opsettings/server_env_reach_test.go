@@ -223,6 +223,9 @@ func sampleEnvValues(e schemaEnvVarEntry) []string {
 		case "boolean":
 			return []string{"true,false"}
 		default:
+			if strings.HasSuffix(e.Path, ".allow_domains") {
+				return []string{"envtest-a.example.com,envtest-b.example.com"}
+			}
 			return []string{"envtest-a@example.com,envtest-b@example.com"}
 		}
 	default:

@@ -22,6 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 )
 
 type RunConfig struct {
@@ -94,7 +95,13 @@ type RunConfig struct {
 	// override can point the *agent's own* hub calls at a different value,
 	// but must never widen the egress allowlist to match it.
 	TrustedHubEndpoint string
-	SharedDirs         []api.SharedDir
+	// InitFirewall is the operator-authoritative egress firewall policy
+	// (extra allowed domains and SSH opt-in) passed only into the
+	// netns-setup container's argv when SCION_INIT_FIREWALL is effective.
+	// Set only from operator-controlled broker/hub configuration, never
+	// from Env, templates, harness-configs, or secrets.
+	InitFirewall firewallpolicy.Policy
+	SharedDirs   []api.SharedDir
 	// SharedDirStorage holds the resolved shared-dir mounts when the
 	// broker's shared-dir Layout is on a shared backend (nfs,
 	// gke-shared-volume or cloudrun-volume; design fs-cleanup §P2): every

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 )
 
 func withNetnsSetupSeams(t *testing.T, euid int, install func(mode string, port int) error) {
@@ -73,7 +75,7 @@ func TestRunNetnsSetup_FirewallBeforeRules(t *testing.T) {
 	var order []string
 	var gotMode string
 	var gotPort int
-	withRunInitFirewall(t, func() error {
+	withRunInitFirewall(t, func([]string) error {
 		order = append(order, "firewall")
 		return nil
 	})
@@ -99,7 +101,7 @@ func TestRunNetnsSetup_FirewallFailureSkipsRules(t *testing.T) {
 	t.Setenv("SCION_METADATA_MODE", "assign")
 	t.Setenv(initFirewallEnv, "true")
 
-	withRunInitFirewall(t, func() error {
+	withRunInitFirewall(t, func([]string) error {
 		return errors.New("firewall failed")
 	})
 	var rulesCalled bool
@@ -127,5 +129,80 @@ func TestRunNetnsSetup_RulesFailureReturnsError(t *testing.T) {
 
 	if err := runNetnsSetup(); !errors.Is(err, wantErr) {
 		t.Fatalf("runNetnsSetup() = %v, want %v", err, wantErr)
+	}
+}
+
+func TestRunNetnsSetup_PassesValidatedFirewallPolicy(t *testing.T) {
+	t.Setenv("SCION_METADATA_MODE", "block")
+	t.Setenv("SCION_METADATA_PORT", "18380")
+	t.Setenv(initFirewallEnv, "true")
+	t.Setenv(firewallpolicy.EnvAllowDomains, "PyPI.org.,files.pythonhosted.org")
+	t.Setenv(firewallpolicy.EnvAllowSSH, "true")
+
+	var gotExtraEnv []string
+	withRunInitFirewall(t, func(extraEnv []string) error {
+		gotExtraEnv = append([]string(nil), extraEnv...)
+		return nil
+	})
+	withNetnsSetupSeams(t, 0, func(string, int) error { return nil })
+
+	if err := runNetnsSetup(); err != nil {
+		t.Fatalf("runNetnsSetup() = %v, want nil", err)
+	}
+	want := []string{
+		firewallpolicy.EnvAllowDomains + "=files.pythonhosted.org,pypi.org",
+		firewallpolicy.EnvAllowSSH + "=true",
+	}
+	if !reflect.DeepEqual(gotExtraEnv, want) {
+		t.Fatalf("runInitFirewall extraEnv = %v, want %v", gotExtraEnv, want)
+	}
+}
+
+func TestRunNetnsSetup_InvalidFirewallPolicyFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+	}{
+		{
+			name: "invalid domain",
+			env:  map[string]string{firewallpolicy.EnvAllowDomains: "evil;id.example.com"},
+		},
+		{
+			name: "invalid allow_ssh",
+			env:  map[string]string{firewallpolicy.EnvAllowSSH: "yes"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_METADATA_MODE", "block")
+			t.Setenv(initFirewallEnv, "true")
+			t.Setenv(firewallpolicy.EnvAllowDomains, "")
+			t.Setenv(firewallpolicy.EnvAllowSSH, "")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			var fwCalled, rulesCalled bool
+			withRunInitFirewall(t, func([]string) error {
+				fwCalled = true
+				return nil
+			})
+			withNetnsSetupSeams(t, 0, func(string, int) error {
+				rulesCalled = true
+				return nil
+			})
+
+			err := runNetnsSetup()
+			if !errors.Is(err, errInitFirewallFailed) {
+				t.Fatalf("runNetnsSetup() = %v, want errInitFirewallFailed", err)
+			}
+			if fwCalled {
+				t.Error("runInitFirewall called despite invalid policy env")
+			}
+			if rulesCalled {
+				t.Error("InstallInterceptionRules called despite invalid policy env")
+			}
+		})
 	}
 }

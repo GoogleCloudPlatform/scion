@@ -2043,10 +2043,28 @@
           "x-env-var": "SCION_SERVER_RUNTIMEBROKER_ALLOWCONTAINERSCRIPTHARNESSES"
         },
         "cors": { "$ref": "#/$defs/corsConfig" },
+        "init_firewall": { "$ref": "#/$defs/initFirewallConfig" },
         "instances": {
           "type": ["array", "null"],
           "items": { "$ref": "#/$defs/runtimeBrokerInstance" },
           "description": "Flat (single-target) Runtime Broker instances hosted by this process, each with a unique key. Empty or absent means legacy hosting. This release accepts docker entries. Read from the global settings file only."
+        }
+      }
+    },
+    "initFirewallConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Operator-authoritative egress firewall policy applied when an agent opts into SCION_INIT_FIREWALL.",
+      "properties": {
+        "allow_domains": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional DNS hostnames allowed through the opt-in egress firewall (merged with the built-in list; max 64 unique entries)."
+        },
+        "allow_ssh": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow outbound SSH (tcp/22) to any IPv4 host when the opt-in egress firewall is active."
         }
       }
     },

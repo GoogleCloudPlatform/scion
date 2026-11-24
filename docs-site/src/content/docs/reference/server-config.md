@@ -404,10 +404,22 @@ Controls the Runtime Broker service.
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
 | `allow_container_script_harnesses` | bool | `true` | Allow the Runtime Broker to run container-script harnesses (`provision.py`) and stage fallback `capture_auth.py` assets. When `false`, dispatches whose harness-config uses scripted provisioning (or whose staged hook wrapper cannot be evaluated cleanly) fail closed with `403`, and fallback `capture_auth.py` is not staged. Env: `SCION_SERVER_RUNTIMEBROKER_ALLOWCONTAINERSCRIPTHARNESSES`. |
+| `init_firewall` | object | | Operator-authoritative egress firewall policy applied when an agent opts into `SCION_INIT_FIREWALL` on a runtime-managed `netns-setup` path (see [Broker Init Firewall](#broker-init-firewall-serverbrokerinit_firewall)). |
 | `cors` | object | | Broker CORS configuration; off by default (see [Broker CORS](#broker-cors-serverbrokercors)). |
 | `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Several entries are accepted, each with a unique `key`; the Hub may run in the same process or remotely (see the link). Read only from the global `settings.yaml` (not `server.yaml` or project settings). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` (see [Flat instance runtime target](#flat-instance-runtime-target-serverbrokerinstancesruntime_target)). An entry may also set `agent_defaults`, the workload defaults of the agents it runs (see below). |
 
 **Single-process requirement for co-located flat instances.** When `server.broker.instances` runs co-located with the Hub in the same `scion server` process, each flat Runtime Broker instance ID must be hosted by at most one server process at a time. Every co-located start replaces that instance's stored HMAC secret in the Hub database, and startup refuses to activate a co-located flat instance (`instance_in_use`) when another live server process already holds its local lock or has a fresh online heartbeat for that instance ID. Multi-replica Hub deployments sharing a database must run flat Runtime Broker instances on separate remote Runtime Broker hosts rather than co-locating the same `server.broker.instances` across Hub replicas.
+
+#### Broker Init Firewall (`server.broker.init_firewall`)
+
+Controls the operator-authoritative egress allowlist and SSH opt-in applied when an agent enables the opt-in init firewall (`SCION_INIT_FIREWALL=1` or `true`). Invalid entries fail broker startup.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `allow_domains` | list | `[]` | Extra DNS hostnames appended to `init-firewall.sh`'s built-in allowlist (max 64 unique entries). Each entry is trimmed, lowercased, and validated as a multi-label ASCII DNS name; wildcards, IP literals, CIDRs, `localhost`, and shell metacharacters are rejected. Env: `SCION_SERVER_RUNTIMEBROKER_INITFIREWALL_ALLOWDOMAINS` (comma-separated). |
+| `allow_ssh` | bool | `false` | Allow outbound SSH (`tcp/22`) to any IPv4 host when the opt-in egress firewall is active. Off by default; SSH to allowlisted hosts (such as GitHub) works without this flag. Env: `SCION_SERVER_RUNTIMEBROKER_INITFIREWALL_ALLOWSSH`. |
+
+**Trust model and CDN warning.** `server.broker.init_firewall` is operator-authoritative: the Runtime Broker passes `SCION_INIT_FIREWALL_ALLOW_DOMAINS` and `SCION_INIT_FIREWALL_ALLOW_SSH` only into the short-lived `sciontool netns-setup` container's argv on Docker and Podman, strips all `SCION_INIT_FIREWALL_*` variables from the agent container environment, and ignores them on in-container `sciontool init` paths. Templates, harness-configs, secrets, and parent agents cannot widen the allowlist. Domains are resolved to IPv4 addresses at startup into an `ipset`; allowing a hostname behind a shared CDN or multi-tenant front-end permits traffic to other services sharing those edge IPs.
 
 #### Broker CORS (`server.broker.cors`)
 
