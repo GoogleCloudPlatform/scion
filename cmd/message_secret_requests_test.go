@@ -84,13 +84,9 @@ func TestValidateSecretRequestFlags(t *testing.T) {
 		{name: "two stdin readers", setup: func() { msgSecretRequestFile = "-"; msgBodyFile = "-" }, wantErr: "both read stdin", wantUsage: true},
 		{name: "agent recipient", setup: func() { msgSecretRequests = []string{"K1"} }, agent: true, wantErr: "not to an agent", wantUsage: false},
 		{name: "group recipient", setup: func() { msgSecretRequests = []string{"K1"} }, group: true, wantErr: "not to an agent or a group", wantUsage: false},
-		{name: "scheduled", setup: func() { msgSecretRequests = []string{"K1"}; msgIn = "5m" }, wantErr: "--in or --at", wantUsage: true},
 		{name: "attach", setup: func() { msgSecretRequests = []string{"K1"}; msgAttach = []string{"f"} }, wantErr: "--attach", wantUsage: true},
 		{name: "artifact", setup: func() { msgSecretRequests = []string{"K1"}; msgArtifacts = []string{"scion://artifact/a"} }, wantErr: "--artifact", wantUsage: true},
 		{name: "wake", setup: func() { msgSecretRequests = []string{"K1"}; msgWake = true }, wantErr: "--wake", wantUsage: true},
-		{name: "cc", setup: func() { msgSecretRequests = []string{"K1"}; msgCC = []string{"agent:x"} }, wantErr: "--cc", wantUsage: true},
-		{name: "channel", setup: func() { msgSecretRequests = []string{"K1"}; msgChannel = "web" }, wantErr: "--channel", wantUsage: true},
-		{name: "thread-id", setup: func() { msgSecretRequests = []string{"K1"}; msgThreadID = "t1" }, wantErr: "--thread-id", wantUsage: true},
 		{name: "no agent name", setup: func() { msgSecretRequests = []string{"K1"} }, noAgent: true, wantErr: "only by an agent", wantUsage: false},
 		{name: "human mode", setup: func() { msgSecretRequests = []string{"K1"} }, human: true, wantErr: "only by an agent", wantUsage: false},
 	}
@@ -323,4 +319,31 @@ func TestMessageSecretRequest_RootCmdArgsAndBroadcastRefusal(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--all has been removed")
 	})
+
+	for _, tc := range []struct {
+		flag  string
+		value string
+	}{
+		{"in", "5m"},
+		{"at", "2026-01-01T00:00:00Z"},
+		{"cc", "agent:x"},
+		{"channel", "web"},
+		{"thread-id", "t1"},
+	} {
+		t.Run("removed flag "+tc.flag+" refused with secret-request", func(t *testing.T) {
+			secretRequestsState(t, "asker")
+			require.NoError(t, messageCmd.Flags().Set(tc.flag, tc.value))
+			require.NoError(t, messageCmd.Flags().Set("secret-request", "GITHUB_TOKEN"))
+
+			argsErr := messageCmd.Args(messageCmd, []string{"user:alice@example.com"})
+			require.Error(t, argsErr)
+			assert.Contains(t, argsErr.Error(), "--"+tc.flag+" has been removed")
+			assert.True(t, isUsageError(argsErr))
+
+			runErr := messageCmd.RunE(messageCmd, []string{"user:alice@example.com"})
+			require.Error(t, runErr)
+			assert.Contains(t, runErr.Error(), "--"+tc.flag+" has been removed")
+			assert.True(t, isUsageError(runErr))
+		})
+	}
 }

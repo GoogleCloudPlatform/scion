@@ -524,7 +524,7 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		wantErr string
 	}{
 		{"message: --wake with user recipient", []string{"message", "user:alice", "hello", "--wake"}, "--wake cannot be used with user recipients"},
-		{"message: --update without --decisions", []string{"message", "user:alice", "hello", "--update"}, "--update is valid only with --decisions or --decisions-file"},
+		{"message: --update without --decisions", []string{"message", "user:alice", "hello", "--update"}, "--update is valid only with --decisions, --decisions-file, --secret-request, or --secret-request-file"},
 		{"start: telemetry flags", []string{"start", "a1", "--enable-telemetry", "--disable-telemetry"}, "--enable-telemetry and --disable-telemetry are mutually exclusive"},
 		{"create: bad --harness-auth", []string{"create", "a1", "--harness-auth", "bogus"}, "invalid --harness-auth value"},
 		{"list: bad --sort", []string{"list", "--sort", "bogus"}, "invalid sort field"},
