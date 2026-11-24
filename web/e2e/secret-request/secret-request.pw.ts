@@ -227,3 +227,54 @@ test('file secret row masks in place with -webkit-text-security and submits on a
     DEPLOY_KEY: '-----BEGIN PRIVATE KEY-----\nline-2\nline-3\n-----END PRIVATE KEY-----',
   });
 });
+
+test('variable secret row masks natively as password input, hides value from AX tree, and reveals textarea on Show', async ({
+  page,
+}) => {
+  const fulfills = await installMockSecretRequestHub(page, {
+    messageId: 'msg-var-1',
+    key: 'API_CONFIG',
+    secretType: 'variable',
+  });
+
+  await page.goto('/secret-requests/msg-var-1', { waitUntil: 'domcontentloaded' });
+
+  const input = page.locator('input[data-key="API_CONFIG"]');
+  await expect(input).toBeVisible();
+  await expect(input).toHaveAttribute('type', 'password');
+  await expect(input).toHaveAttribute('autocomplete', 'off');
+
+  await input.click();
+  await input.fill('super-secret-variable-42');
+
+  // Verify the CDP accessibility tree does not expose the masked value
+  const cdp = await page.context().newCDPSession(page);
+  const { nodes } = (await cdp.send('Accessibility.getFullAXTree')) as {
+    nodes: Array<{ value?: { value?: unknown }; name?: { value?: unknown } }>;
+  };
+  const leaked = nodes.some(
+    (n) =>
+      String(n.value?.value ?? '').includes('super-secret-variable-42') ||
+      String(n.name?.value ?? '').includes('super-secret-variable-42')
+  );
+  expect(leaked).toBe(false);
+
+  // Show switches to textarea with value preserved; Hide returns to password input
+  const toggleBtn = page.locator('button[data-toggle-visibility="API_CONFIG"]');
+  await expect(toggleBtn).toHaveAttribute('aria-pressed', 'false');
+  await toggleBtn.click();
+  const textarea = page.locator('textarea[data-key="API_CONFIG"]');
+  await expect(textarea).toBeVisible();
+  await expect(textarea).toHaveValue('super-secret-variable-42');
+  await expect(toggleBtn).toHaveAttribute('aria-pressed', 'true');
+
+  await toggleBtn.click();
+  await expect(input).toBeVisible();
+  await expect(toggleBtn).toHaveAttribute('aria-pressed', 'false');
+
+  const submitBtn = page.locator('sl-button.submit-btn');
+  await submitBtn.click();
+  await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+  expect(fulfills).toHaveLength(1);
+  expect(fulfills[0].body.values).toEqual({ API_CONFIG: 'super-secret-variable-42' });
+});

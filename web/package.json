@@ -33,6 +33,7 @@
     "test:e2e": "playwright test",
     "test:e2e:chat-decisions": "playwright test -c e2e/chat-decisions/playwright.config.ts",
     "test:e2e:chat-mobile": "playwright test -c e2e/chat-mobile/playwright.config.ts",
+    "test:e2e:secret-request": "playwright test -c e2e/secret-request/playwright.config.ts",
     "test:e2e:perf-budgets": "playwright test -c e2e-perf/budgets/playwright.config.ts"
   },
   "dependencies": {

@@ -170,6 +170,7 @@ jobs:
           - chat-palette
           - dialog-nested-popup
           - project-files-tabs
+          - secret-request
           - terminal-coordinator
           - terminal-entrypoints
           - terminal-hidden

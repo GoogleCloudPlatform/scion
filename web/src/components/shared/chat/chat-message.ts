@@ -4046,8 +4046,7 @@ export class ScionChatMessage extends LitElement {
 
   private renderSecretResponse(): TemplateResult {
     const own = Boolean(
-      (!this.fromAgent && !this.senderIsAgent) ||
-      (this.currentUserId && this.senderId && this.senderId === this.currentUserId)
+      this.currentUserId && this.senderId && this.senderId === this.currentUserId
     );
     const lane = own ? 'own' : 'other';
     return html`<div class="secret-response-row ${lane}" data-testid="secret-response-row">

@@ -320,6 +320,11 @@ describe('native chat secret-request wiring', () => {
     });
     expect(msg.shadowRoot?.textContent).toContain('v2');
     expect(msg.shadowRoot?.querySelector('.secret-response-row.own')).not.toBeNull();
+
+    // Another user's response renders in the 'other' lane
+    msg.senderId = 'user-2';
+    await msg.updateComplete;
+    expect(msg.shadowRoot?.querySelector('.secret-response-row.other')).not.toBeNull();
   });
 
   it('jumps to replaced secret-request card within chat when present, else navigates to standalone route', async () => {
@@ -357,6 +362,36 @@ describe('native chat secret-request wiring', () => {
     await vi.waitFor(() => {
       expect(navigateToMock).toHaveBeenCalledWith('/secret-requests/v2-other-conv');
     });
+  });
+
+  it('skips standalone navigation if the conversation changed while secret-request jump was in flight', async () => {
+    navigateToMock.mockReset();
+    const thread = document.createElement('scion-chat-thread') as ScionChatThread;
+    document.body.appendChild(thread);
+    await thread.updateComplete;
+
+    let resolveScroll: (() => void) | null = null;
+    vi.spyOn(thread, 'scrollToMessageById').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveScroll = resolve;
+        })
+    );
+
+    const t = thread as unknown as {
+      fetchId: number;
+      handleSecretRequestJump: (e: CustomEvent<{ messageId: string }>) => void;
+    };
+    t.handleSecretRequestJump(
+      new CustomEvent('secret-request-jump', { detail: { messageId: 'v2-stale-jump' } })
+    );
+
+    // Simulate switching conversation before scrollToMessageById resolves
+    t.fetchId++;
+    resolveScroll!();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(navigateToMock).not.toHaveBeenCalled();
   });
 
   it('aborts in-flight card fetch on disconnect and refetches on reconnect', async () => {

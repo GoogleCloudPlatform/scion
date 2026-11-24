@@ -193,7 +193,7 @@ describe('scion-chat-secret-request', () => {
     const input = pendingRow.querySelector('input') as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.type).toBe('password');
-    expect(input.autocomplete).toBe('new-password');
+    expect(input.autocomplete).toBe('off');
     const toggleBtn = pendingRow.querySelector('.toggle-visibility') as HTMLButtonElement;
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
     toggleBtn.click();
@@ -1183,5 +1183,93 @@ describe('scion-chat-secret-request', () => {
     expect(el.shadowRoot!.querySelector('[data-row-id="row-1"]')?.getAttribute('data-status')).toBe(
       'withdrawn'
     );
+  });
+
+  it('renders variable rows as native password input when masked and textarea only when Show is on', async () => {
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'r-var', key: 'API_CONFIG', secretType: 'variable' })],
+    });
+    const input = el.shadowRoot!.querySelector('input[data-key="API_CONFIG"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.type).toBe('password');
+    expect(input.autocomplete).toBe('off');
+    expect(el.shadowRoot!.querySelector('textarea[data-key="API_CONFIG"]')).toBeNull();
+
+    input.value = '{"token":"secret"}';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    // Show switches to textarea with value preserved in memory
+    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+    toggleBtn.click();
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelector('input[data-key="API_CONFIG"]')).toBeNull();
+    const ta = el.shadowRoot!.querySelector(
+      'textarea[data-key="API_CONFIG"]'
+    ) as HTMLTextAreaElement;
+    expect(ta).not.toBeNull();
+    expect(ta.value).toBe('{"token":"secret"}');
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
+
+    // Hide switches back to native password input
+    toggleBtn.click();
+    await el.updateComplete;
+    const maskedAgain = el.shadowRoot!.querySelector(
+      'input[data-key="API_CONFIG"]'
+    ) as HTMLInputElement;
+    expect(maskedAgain).not.toBeNull();
+    expect(maskedAgain.type).toBe('password');
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('ignores a second synchronous click on Submit while a fulfill POST is in flight', async () => {
+    let resolveFetch: ((res: Response) => void) | null = null;
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard({ surface: 'native' });
+    const input = el.shadowRoot!.querySelector(
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
+    input.value = 'tok-inflight';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    const submitBtn = el.shadowRoot!.querySelector('.submit-btn') as HTMLElement;
+    // Two synchronous clicks before updateComplete must send only one POST
+    submitBtn.click();
+    submitBtn.click();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch!(
+      jsonResponse({
+        rows: [
+          makeRow({
+            rowId: 'row-1',
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-24T00:05:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+        ],
+        responseMessageId: 'resp-1',
+        replayed: false,
+      })
+    );
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

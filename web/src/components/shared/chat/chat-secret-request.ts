@@ -1106,8 +1106,9 @@ export class ScionChatSecretRequest extends LitElement {
       const revealed = this.revealedRows.has(row.rowId);
       const disabled = !this.canRespondNow || this.submitting || this.actionState.dismissSubmitting;
       const isEnvironment = !row.secretType || row.secretType === 'environment';
+      const isVariable = row.secretType === 'variable';
 
-      if (isEnvironment) {
+      if (isEnvironment || (isVariable && !revealed)) {
         return html`
           <div class="input-wrap" data-form-rev=${this.formRevision}>
             <input
@@ -1117,7 +1118,7 @@ export class ScionChatSecretRequest extends LitElement {
               data-row-id=${row.rowId}
               aria-label=${`Secret value for ${row.key}`}
               placeholder=${`Enter value for ${row.key}…`}
-              autocomplete="new-password"
+              autocomplete="off"
               autocorrect="off"
               autocapitalize="off"
               spellcheck="false"
@@ -1143,8 +1144,45 @@ export class ScionChatSecretRequest extends LitElement {
         `;
       }
 
+      if (isVariable) {
+        return html`
+          <div class="input-wrap" data-form-rev=${this.formRevision}>
+            <textarea
+              class="secret-textarea"
+              style="--secret-rows: 2"
+              data-key=${row.key}
+              data-row-id=${row.rowId}
+              aria-label=${`Secret value for ${row.key}`}
+              placeholder=${`Enter value for ${row.key}…`}
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              data-lpignore="true"
+              data-1p-ignore="true"
+              rows="2"
+              ?disabled=${disabled}
+              .value=${value}
+              @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
+            ></textarea>
+            <button
+              type="button"
+              class="toggle-visibility"
+              data-toggle-visibility=${row.key}
+              aria-pressed="true"
+              aria-label=${`Hide value for ${row.key}`}
+              title="Hide value"
+              ?disabled=${disabled}
+              @click=${(): void => this.toggleReveal(row.rowId, true)}
+            >
+              <sl-icon name="eye-slash" aria-hidden="true"></sl-icon>
+            </button>
+          </div>
+        `;
+      }
+
       const canMaskInPlace = supportsWebkitTextSecurity();
-      const textareaRows = row.secretType === 'file' ? 4 : 2;
+      const textareaRows = 4;
       const editing = !canMaskInPlace && this.editingRows.has(row.rowId);
       const isFallbackMasked = !canMaskInPlace && !revealed && !editing && value.length > 0;
       const isPlaintextVisible = revealed || (!canMaskInPlace && editing && value.length > 0);
