@@ -255,6 +255,7 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 						// links v1 -> v2 (design-8145 D7, design-8194 section 4.8).
 						return client.Decision.Update().
 							Where(decision.ID(st.active.ID), decision.StatusIn(decision.StatusWithdrawn, decision.StatusDismissed), decision.ReplacedByIDIsNil()).
+							SetSettled(true).
 							SetReplacedAt(now).
 							SetReplacedByID(rowIDs[i]).
 							Save(ctx)
@@ -262,6 +263,7 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 					return client.Decision.Update().
 						Where(decision.ID(st.active.ID), decision.StatusNotIn(decision.StatusReplaced, decision.StatusWithdrawn, decision.StatusDismissed), decision.ReplacedByIDIsNil()).
 						SetStatus(decision.StatusReplaced).
+						SetSettled(true).
 						SetReplacedAt(now).
 						SetReplacedByID(rowIDs[i]).
 						Save(ctx)
@@ -839,10 +841,26 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 	// concurrent repost replaced the version, and the whole answer rolls
 	// back.
 	if row.Status == decision.StatusPending {
-		n, err := client.Decision.Update().
+		upd := client.Decision.Update().
 			Where(decision.ID(rowID), decision.StatusEQ(decision.StatusPending)).
 			SetStatus(decision.StatusDecided).
-			SetDecidedAt(now).
+			SetDecidedAt(now)
+		if in.Provenance == store.DecisionProvenanceDirect {
+			upd.SetSettled(true)
+		}
+		n, err := upd.Save(ctx)
+		if err != nil {
+			return nil, false, mapError(err)
+		}
+		if n != 1 {
+			return nil, false, fmt.Errorf("%w: version %d of %s was replaced concurrently", store.ErrDecisionReplaced, row.Version, row.Key)
+		}
+	} else if in.Provenance == store.DecisionProvenanceDirect {
+		// Direct answer confirming or overriding an agent_interpreted answer
+		// settles the already-decided row.
+		n, err := client.Decision.Update().
+			Where(decision.ID(rowID), decision.StatusEQ(decision.StatusDecided)).
+			SetSettled(true).
 			Save(ctx)
 		if err != nil {
 			return nil, false, mapError(err)
@@ -1100,12 +1118,29 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 		// Only the pending-to-decided transition sets decided_at. It must
 		// change exactly the row read above; none changed means a
 		// concurrent write won, and the whole set rolls back and retries.
+		// RecordAnswerSet always writes provenance=direct, so every answered
+		// row is settled (both pending->decided and confirm/override on
+		// already-decided interpreted rows).
 		if r.Status == decision.StatusPending {
 			casOK, _, casErr := casActionRows[*ent.Decision](ctx, 1, func(ctx context.Context) (int, error) {
 				return client.Decision.Update().
 					Where(decision.ID(r.ID), decision.StatusEQ(decision.StatusPending)).
 					SetStatus(decision.StatusDecided).
+					SetSettled(true).
 					SetDecidedAt(now).
+					Save(ctx)
+			}, nil)
+			if casErr != nil {
+				return nil, casErr
+			}
+			if !casOK {
+				return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errMessageActionRace, r.Version, r.Key)
+			}
+		} else {
+			casOK, _, casErr := casActionRows[*ent.Decision](ctx, 1, func(ctx context.Context) (int, error) {
+				return client.Decision.Update().
+					Where(decision.ID(r.ID), decision.StatusEQ(decision.StatusDecided)).
+					SetSettled(true).
 					Save(ctx)
 			}, nil)
 			if casErr != nil {
@@ -2287,6 +2322,7 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 			upd := client.Decision.Update().
 				Where(decision.ID(r.ID), decision.StatusEQ(decision.StatusPending)).
 				SetStatus(decision.StatusWithdrawn).
+				SetSettled(true).
 				SetWithdrawnAt(now)
 			if reason != "" {
 				upd.SetWithdrawnReason(reason)
@@ -2588,6 +2624,7 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 			return client.Decision.Update().
 				Where(decision.ID(r.ID), decision.StatusEQ(r.Status)).
 				SetStatus(decision.StatusDismissed).
+				SetSettled(true).
 				SetDismissedAt(writeNow).
 				Save(ctx)
 		}, nil)

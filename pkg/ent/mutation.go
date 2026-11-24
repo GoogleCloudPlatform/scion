@@ -39752,6 +39752,7 @@ type DecisionMutation struct {
 	intro_length      *int
 	addintro_length   *int
 	status            *decision.Status
+	settled           *bool
 	replaced_by_id    *uuid.UUID
 	created_at        *time.Time
 	decided_at        *time.Time
@@ -40742,6 +40743,42 @@ func (m *DecisionMutation) ResetStatus() {
 	m.status = nil
 }
 
+// SetSettled sets the "settled" field.
+func (m *DecisionMutation) SetSettled(b bool) {
+	m.settled = &b
+}
+
+// Settled returns the value of the "settled" field in the mutation.
+func (m *DecisionMutation) Settled() (r bool, exists bool) {
+	v := m.settled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSettled returns the old "settled" field's value of the Decision entity.
+// If the Decision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionMutation) OldSettled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSettled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSettled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSettled: %w", err)
+	}
+	return oldValue.Settled, nil
+}
+
+// ResetSettled resets all changes to the "settled" field.
+func (m *DecisionMutation) ResetSettled() {
+	m.settled = nil
+}
+
 // SetReplacedByID sets the "replaced_by_id" field.
 func (m *DecisionMutation) SetReplacedByID(u uuid.UUID) {
 	m.replaced_by_id = &u
@@ -41106,7 +41143,7 @@ func (m *DecisionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionMutation) Fields() []string {
-	fields := make([]string, 0, 27)
+	fields := make([]string, 0, 28)
 	if m.project_id != nil {
 		fields = append(fields, decision.FieldProjectID)
 	}
@@ -41166,6 +41203,9 @@ func (m *DecisionMutation) Fields() []string {
 	}
 	if m.status != nil {
 		fields = append(fields, decision.FieldStatus)
+	}
+	if m.settled != nil {
+		fields = append(fields, decision.FieldSettled)
 	}
 	if m.replaced_by_id != nil {
 		fields = append(fields, decision.FieldReplacedByID)
@@ -41236,6 +41276,8 @@ func (m *DecisionMutation) Field(name string) (ent.Value, bool) {
 		return m.IntroLength()
 	case decision.FieldStatus:
 		return m.Status()
+	case decision.FieldSettled:
+		return m.Settled()
 	case decision.FieldReplacedByID:
 		return m.ReplacedByID()
 	case decision.FieldCreatedAt:
@@ -41299,6 +41341,8 @@ func (m *DecisionMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldIntroLength(ctx)
 	case decision.FieldStatus:
 		return m.OldStatus(ctx)
+	case decision.FieldSettled:
+		return m.OldSettled(ctx)
 	case decision.FieldReplacedByID:
 		return m.OldReplacedByID(ctx)
 	case decision.FieldCreatedAt:
@@ -41461,6 +41505,13 @@ func (m *DecisionMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetStatus(v)
+		return nil
+	case decision.FieldSettled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSettled(v)
 		return nil
 	case decision.FieldReplacedByID:
 		v, ok := value.(uuid.UUID)
@@ -41733,6 +41784,9 @@ func (m *DecisionMutation) ResetField(name string) error {
 		return nil
 	case decision.FieldStatus:
 		m.ResetStatus()
+		return nil
+	case decision.FieldSettled:
+		m.ResetSettled()
 		return nil
 	case decision.FieldReplacedByID:
 		m.ResetReplacedByID()

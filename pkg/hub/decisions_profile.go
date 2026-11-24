@@ -399,7 +399,22 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	searchCtx := withAuthzInputMemo(rawSearchCtx)
 
-	scopes, truncated, err := s.profileDecisionScopes(searchCtx, user, token, wcs, pq.projectID)
+	selected, truncated, err := s.selectProfileDecisionProjects(searchCtx, user, token, pq.projectID)
+	if err != nil {
+		writeDecisionsError(w, r, searchCtx, err)
+		return
+	}
+	if pq.limit == 0 && len(selected) > 0 {
+		// A limit=0 probe returns only open-prompt counts and truncation state
+		// (no facets or answer lists), so projects without unsettled decisions
+		// contribute nothing and can skip per-project scope resolution.
+		selected, err = s.filterProjectsWithUnsettledDecisions(searchCtx, selected)
+		if err != nil {
+			writeDecisionsError(w, r, searchCtx, err)
+			return
+		}
+	}
+	scopes, err := s.resolveProfileDecisionScopes(searchCtx, selected, user, token, wcs)
 	if err != nil {
 		writeDecisionsError(w, r, searchCtx, err)
 		return
@@ -430,6 +445,27 @@ func (s *Server) profileDecisionScopes(
 	wcs WebChatStore,
 	ensureProjectID string,
 ) ([]*projectReadableScope, bool, error) {
+	selected, truncated, err := s.selectProfileDecisionProjects(ctx, user, token, ensureProjectID)
+	if err != nil || len(selected) == 0 {
+		return nil, truncated, err
+	}
+	scopes, err := s.resolveProfileDecisionScopes(ctx, selected, user, token, wcs)
+	if err != nil {
+		return nil, false, err
+	}
+	return scopes, truncated, nil
+}
+
+// selectProfileDecisionProjects selects up to maxProfileDecisionProjects
+// readable member projects that have decisions, ordered by newest decision
+// (design R2, R3, 5.2). Shared by profileDecisionScopes and waitingOnYouTotal
+// so both use identical project selection.
+func (s *Server) selectProfileDecisionProjects(
+	ctx context.Context,
+	user UserIdentity,
+	token *ScopedUserIdentity,
+	ensureProjectID string,
+) ([]*store.Project, bool, error) {
 	memberMap, err := s.chatMemberProjectIDs(ctx, user.ID())
 	if err != nil {
 		return nil, false, err
@@ -533,15 +569,51 @@ func (s *Server) profileDecisionScopes(
 		}
 	}
 
+	return selected, truncated, nil
+}
+
+// filterProjectsWithUnsettledDecisions narrows projects to the subset holding
+// at least one decision with settled=false (design-scale §3.5).
+func (s *Server) filterProjectsWithUnsettledDecisions(ctx context.Context, projects []*store.Project) ([]*store.Project, error) {
+	if len(projects) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(projects))
+	for i, p := range projects {
+		ids[i] = p.ID
+	}
+	unsettled, err := s.store.ProjectsWithUnsettledDecisions(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	if len(unsettled) == 0 {
+		return nil, nil
+	}
+	out := make([]*store.Project, 0, len(unsettled))
+	for _, p := range projects {
+		if unsettled[p.ID] {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) resolveProfileDecisionScopes(
+	ctx context.Context,
+	selected []*store.Project,
+	user UserIdentity,
+	token *ScopedUserIdentity,
+	wcs WebChatStore,
+) ([]*projectReadableScope, error) {
 	scopes := make([]*projectReadableScope, 0, len(selected))
 	for _, p := range selected {
 		sc, err := s.resolveProjectReadableScope(ctx, p, user, token, wcs)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		scopes = append(scopes, sc)
 	}
-	return scopes, truncated, nil
+	return scopes, nil
 }
 
 // decisionProjectFacetViews builds the profile projects facet from the
@@ -925,7 +997,6 @@ func (s *Server) profileMadeByProjectGroups(
 // Missing or non-active accounts (suspended, invited, pending, deleting)
 // return (0, 0, nil); store lookup faults return (0, 0, err).
 //
-//nolint:unused // unwired in non-test code until the P6 bell summary endpoint lands (ptone/scion#7997)
 func (s *Server) waitingOnYouTotal(ctx context.Context, userID string) (total, projects int, err error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
@@ -954,7 +1025,15 @@ func (s *Server) waitingOnYouTotal(ctx context.Context, userID string) (total, p
 	wcs := s.webChatStore
 	s.mu.RUnlock()
 
-	scopes, _, err := s.profileDecisionScopes(ctx, viewer, nil, wcs, "")
+	selected, _, err := s.selectProfileDecisionProjects(ctx, viewer, nil, "")
+	if err != nil || len(selected) == 0 {
+		return 0, 0, err
+	}
+	openSelected, err := s.filterProjectsWithUnsettledDecisions(ctx, selected)
+	if err != nil || len(openSelected) == 0 {
+		return 0, 0, err
+	}
+	scopes, err := s.resolveProfileDecisionScopes(ctx, openSelected, viewer, nil, wcs)
 	if err != nil || len(scopes) == 0 {
 		return 0, 0, err
 	}

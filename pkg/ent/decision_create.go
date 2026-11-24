@@ -217,6 +217,20 @@ func (_c *DecisionCreate) SetNillableStatus(v *decision.Status) *DecisionCreate 
 	return _c
 }
 
+// SetSettled sets the "settled" field.
+func (_c *DecisionCreate) SetSettled(v bool) *DecisionCreate {
+	_c.mutation.SetSettled(v)
+	return _c
+}
+
+// SetNillableSettled sets the "settled" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableSettled(v *bool) *DecisionCreate {
+	if v != nil {
+		_c.SetSettled(*v)
+	}
+	return _c
+}
+
 // SetReplacedByID sets the "replaced_by_id" field.
 func (_c *DecisionCreate) SetReplacedByID(v uuid.UUID) *DecisionCreate {
 	_c.mutation.SetReplacedByID(v)
@@ -376,6 +390,10 @@ func (_c *DecisionCreate) defaults() {
 		v := decision.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
+	if _, ok := _c.mutation.Settled(); !ok {
+		v := decision.DefaultSettled
+		_c.mutation.SetSettled(v)
+	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := decision.DefaultCreatedAt()
 		_c.mutation.SetCreatedAt(v)
@@ -484,6 +502,9 @@ func (_c *DecisionCreate) check() error {
 		if err := decision.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Decision.status": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.Settled(); !ok {
+		return &ValidationError{Name: "settled", err: errors.New(`ent: missing required field "Decision.settled"`)}
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "Decision.created_at"`)}
@@ -604,6 +625,10 @@ func (_c *DecisionCreate) createSpec() (*Decision, *sqlgraph.CreateSpec) {
 		_spec.SetField(decision.FieldStatus, field.TypeEnum, value)
 		_node.Status = value
 	}
+	if value, ok := _c.mutation.Settled(); ok {
+		_spec.SetField(decision.FieldSettled, field.TypeBool, value)
+		_node.Settled = value
+	}
 	if value, ok := _c.mutation.ReplacedByID(); ok {
 		_spec.SetField(decision.FieldReplacedByID, field.TypeUUID, value)
 		_node.ReplacedByID = &value
@@ -693,6 +718,18 @@ func (u *DecisionUpsert) SetStatus(v decision.Status) *DecisionUpsert {
 // UpdateStatus sets the "status" field to the value that was provided on create.
 func (u *DecisionUpsert) UpdateStatus() *DecisionUpsert {
 	u.SetExcluded(decision.FieldStatus)
+	return u
+}
+
+// SetSettled sets the "settled" field.
+func (u *DecisionUpsert) SetSettled(v bool) *DecisionUpsert {
+	u.Set(decision.FieldSettled, v)
+	return u
+}
+
+// UpdateSettled sets the "settled" field to the value that was provided on create.
+func (u *DecisionUpsert) UpdateSettled() *DecisionUpsert {
+	u.SetExcluded(decision.FieldSettled)
 	return u
 }
 
@@ -923,6 +960,20 @@ func (u *DecisionUpsertOne) SetStatus(v decision.Status) *DecisionUpsertOne {
 func (u *DecisionUpsertOne) UpdateStatus() *DecisionUpsertOne {
 	return u.Update(func(s *DecisionUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetSettled sets the "settled" field.
+func (u *DecisionUpsertOne) SetSettled(v bool) *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetSettled(v)
+	})
+}
+
+// UpdateSettled sets the "settled" field to the value that was provided on create.
+func (u *DecisionUpsertOne) UpdateSettled() *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateSettled()
 	})
 }
 
@@ -1338,6 +1389,20 @@ func (u *DecisionUpsertBulk) SetStatus(v decision.Status) *DecisionUpsertBulk {
 func (u *DecisionUpsertBulk) UpdateStatus() *DecisionUpsertBulk {
 	return u.Update(func(s *DecisionUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetSettled sets the "settled" field.
+func (u *DecisionUpsertBulk) SetSettled(v bool) *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetSettled(v)
+	})
+}
+
+// UpdateSettled sets the "settled" field to the value that was provided on create.
+func (u *DecisionUpsertBulk) UpdateSettled() *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateSettled()
 	})
 }
 
