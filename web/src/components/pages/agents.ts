@@ -86,7 +86,7 @@ import {
   getActiveSingleKeyValue,
   getViewSchema,
   hasClientOnlyKeys,
-  hasScopeTermInQuery,
+  hasServerOnlyAgentTerms,
   knownKeysFor,
   matchAgentQuery,
   parse as parseFilterQuery,
@@ -336,7 +336,7 @@ export class ScionPageAgents extends LitElement {
     isAddable: (agent: Agent): boolean => {
       if (this.loadedScope !== 'all') return false;
       if (filtersQueryDialectEnabled() && this.committedFilterQuery) {
-        if (hasScopeTermInQuery(this.committedFilterQuery)) return false;
+        if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) return false;
         return matchAgentQuery(this.committedFilterQuery, agent, this.filterContext);
       }
       return true;
@@ -965,7 +965,16 @@ export class ScionPageAgents extends LitElement {
       // scope filter's server-side response is the source of truth for
       // membership, so a brand-new SSE agent is not added under a filter.
       // An ID already held keeps getting its updates regardless.
-      shouldAdd: () => this.agentScope === 'all',
+      shouldAdd: (agent): boolean => {
+        if (filtersQueryDialectEnabled()) {
+          if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) return false;
+          return (
+            this.committedFilterQuery === null ||
+            matchAgentQuery(this.committedFilterQuery, agent, this.filterContext)
+          );
+        }
+        return this.agentScope === 'all';
+      },
       scopeCapabilities: this.scopeCapabilities,
     });
     if (merged !== this.agents) {
@@ -1204,7 +1213,7 @@ export class ScionPageAgents extends LitElement {
           isMember: (agent) =>
             requestedScope === 'all' &&
             (useDialect
-              ? !hasScopeTermInQuery(fq) &&
+              ? !hasServerOnlyAgentTerms(fq, this.filterContext) &&
                 (fq === null || matchAgentQuery(fq, agent, this.filterContext))
               : matchesCommittedLabel(agent, label)),
         }).agents;
@@ -1254,7 +1263,7 @@ export class ScionPageAgents extends LitElement {
       // Scope `all` adds live creates (today's add rule). For mine and
       // shared, membership cannot be decided on the client: a live create
       // is not added and the set is marked stale.
-      ...(scope === 'all' && !(useDialect && hasScopeTermInQuery(fq))
+      ...(scope === 'all' && !(useDialect && hasServerOnlyAgentTerms(fq, this.filterContext))
         ? {
             isMember: (agent: Agent): boolean =>
               useDialect

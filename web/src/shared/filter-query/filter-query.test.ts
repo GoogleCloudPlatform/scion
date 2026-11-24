@@ -25,6 +25,7 @@ import {
   getActiveSingleKeyValue,
   getSuggestions,
   getViewSchema,
+  hasServerOnlyAgentTerms,
   knownKeysFor,
   match,
   matchAgentQuery,
@@ -345,6 +346,17 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     expect(evalIds('mode:cannot_message')).toEqual(['2']);
     // is:mine is server-resolved and does not falsely hide loaded rows on the client.
     expect(evalIds('is:mine phase:running')).toEqual(['1']);
+
+    // hasServerOnlyAgentTerms flags is: and external-email owner: terms, not owner:me or self email.
+    expect(hasServerOnlyAgentTerms(parse('is:mine', known).query ?? null, ctx)).toBe(true);
+    expect(hasServerOnlyAgentTerms(parse('owner:bob@example.com', known).query ?? null, ctx)).toBe(
+      true
+    );
+    expect(hasServerOnlyAgentTerms(parse('owner:me', known).query ?? null, ctx)).toBe(false);
+    expect(hasServerOnlyAgentTerms(parse('owner:me@example.com', known).query ?? null, ctx)).toBe(
+      false
+    );
+    expect(hasServerOnlyAgentTerms(parse('phase:running', known).query ?? null, ctx)).toBe(false);
 
     const provider = buildAgentValueSuggestions(
       () => rows,

@@ -17,6 +17,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetServerFlagStateForTests, setFeatureFlag } from '../../utils/feature-flags.js';
 import { FILTERS_QUERY_DIALECT_FLAG } from '../../shared/filter-query/index.js';
+import { stateManager } from '../../client/state.js';
+import type { AgentListWindow } from '../../client/agent-list-window.js';
+import type { Agent } from '../../shared/types.js';
 import './agents.js';
 import type { ScionPageAgents } from './agents.js';
 import './project-detail.js';
@@ -255,5 +258,172 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
         (u) => u.includes('/api/v1/projects/proj-123/agents') && u.includes('q=harness%3Aclaude')
       )
     ).toBe(true);
+  });
+
+  it('refuses live-add of SSE-created agents on global page (paged) under server-only owner:<email> and is:mine, while admitting owner:me and self email', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    const makeAgent = (id: string, ownerId: string): Agent => ({
+      id,
+      name: `agent-${id}`,
+      slug: `agent-${id}`,
+      projectId: 'proj-1',
+      template: 'developer',
+      phase: 'running',
+      ownerId,
+    });
+    const pagedResponse = {
+      agents: [makeAgent('a1', 'bob-id')],
+      complete: false,
+      totalCount: 2,
+      nextCursor: 'cursor-1',
+      stats: { total: 2, running: 2, agents: [['a1', 'running']] },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(pagedResponse), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
+
+    const mountWithQ = async (q: string): Promise<ScionPageAgents> => {
+      window.history.replaceState(null, '', `/agents?q=${encodeURIComponent(q)}`);
+      const el = document.createElement('scion-page-agents') as ScionPageAgents;
+      el.pageData = {
+        path: '/agents',
+        title: 'Agents',
+        user: { id: 'me-id', email: 'me@example.com', name: 'Me', role: 'admin' },
+      };
+      document.body.appendChild(el);
+      await new Promise((r) => setTimeout(r, 15));
+      await el.updateComplete;
+      return el;
+    };
+
+    const carolAgent = makeAgent('live-carol', 'carol-id');
+    const meAgent = makeAgent('live-me', 'me-id');
+
+    // External email: live-created carol agent must NOT be added to paged member index.
+    const elEmail = await mountWithQ('owner:bob@example.com');
+    const winEmail = (elEmail as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(winEmail.state).toBe('paged');
+    const beforeEmailTotal = winEmail.stats.total;
+    stateManager.seedAgents([carolAgent]);
+    winEmail.applyChanges({
+      upserted: [carolAgent.id],
+      deleted: [],
+      unknown: new Map(),
+      generation: stateManager.scopeGeneration,
+    });
+    expect(winEmail.stats.total).toBe(beforeEmailTotal);
+    elEmail.remove();
+
+    // is:mine: live-created agent must NOT be added to paged member index.
+    const elScope = await mountWithQ('is:mine');
+    const winScope = (elScope as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(winScope.state).toBe('paged');
+    const beforeScopeTotal = winScope.stats.total;
+    stateManager.seedAgents([meAgent]);
+    winScope.applyChanges({
+      upserted: [meAgent.id],
+      deleted: [],
+      unknown: new Map(),
+      generation: stateManager.scopeGeneration,
+    });
+    expect(winScope.stats.total).toBe(beforeScopeTotal);
+    elScope.remove();
+
+    // owner:me and self email: matching live-created agent IS added.
+    for (const q of ['owner:me', 'owner:me@example.com']) {
+      const elSelf = await mountWithQ(q);
+      const winSelf = (elSelf as unknown as { agentWindow: AgentListWindow }).agentWindow;
+      expect(winSelf.state).toBe('paged');
+      const beforeTotal = winSelf.stats.total;
+      const freshMe = makeAgent(`live-me-${q}`, 'me-id');
+      stateManager.seedAgents([freshMe]);
+      winSelf.applyChanges({
+        upserted: [freshMe.id],
+        deleted: [],
+        unknown: new Map(),
+        generation: stateManager.scopeGeneration,
+      });
+      expect(winSelf.stats.total).toBe(beforeTotal + 1);
+      elSelf.remove();
+    }
+  });
+
+  it('refuses live-add on project detail under server-only owner:<email> during drain and paged state, while admitting owner:me', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    const makeAgent = (id: string, ownerId: string): Agent => ({
+      id,
+      name: `proj-agent-${id}`,
+      slug: `proj-agent-${id}`,
+      projectId: 'proj-123',
+      template: 'developer',
+      phase: 'running',
+      ownerId,
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes('/api/v1/projects/proj-123/agents')) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ agents: [makeAgent('p1', 'bob-id')], complete: true }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'proj-123', name: 'Proj 123', slug: 'proj-123' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+
+    const mountProjectWithQ = async (q: string): Promise<ScionPageProjectDetail> => {
+      window.history.replaceState(null, '', `/projects/proj-123?q=${encodeURIComponent(q)}`);
+      const el = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+      el.projectId = 'proj-123';
+      el.pageData = {
+        path: '/projects/proj-123',
+        title: 'Project',
+        user: { id: 'me-id', email: 'me@example.com', name: 'Me', role: 'admin' },
+      };
+      document.body.appendChild(el);
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+      return el;
+    };
+
+    const carolAgent = makeAgent('live-carol-proj', 'carol-id');
+    const meAgent = makeAgent('live-me-proj', 'me-id');
+
+    const elEmail = await mountProjectWithQ('owner:bob@example.com');
+    const isMemberEmail = (
+      elEmail as unknown as { isProjectMember: (a: Agent, l: string) => boolean }
+    ).isProjectMember(carolAgent, '');
+    expect(isMemberEmail).toBe(false);
+    elEmail.remove();
+
+    const elMe = await mountProjectWithQ('owner:me');
+    const isMemberMe = (
+      elMe as unknown as { isProjectMember: (a: Agent, l: string) => boolean }
+    ).isProjectMember(meAgent, '');
+    const isMemberOther = (
+      elMe as unknown as { isProjectMember: (a: Agent, l: string) => boolean }
+    ).isProjectMember(carolAgent, '');
+    expect(isMemberMe).toBe(true);
+    expect(isMemberOther).toBe(false);
+    elMe.remove();
   });
 });

@@ -17,7 +17,7 @@
 import type { Agent } from '../types.js';
 import { match } from './match.js';
 import type { ValueSuggestionProvider } from './suggest.js';
-import type { FilterRow, Query } from './types.js';
+import type { FilterRow, Query, Term } from './types.js';
 
 export interface AgentFilterContext {
   currentUserId?: string | undefined;
@@ -99,6 +99,28 @@ export function agentToFilterRow(agent: Agent, ctx?: AgentFilterContext): Filter
   };
 }
 
+function isServerOnlyAgentTerm(t: Term, ctx?: AgentFilterContext): boolean {
+  const k = t.key.toLowerCase();
+  if (k === 'is') return true;
+  if (k === 'owner') {
+    const selfEmail = ctx?.currentUserEmail?.toLowerCase();
+    return t.values.some((v) => v.includes('@') && (!selfEmail || v.toLowerCase() !== selfEmail));
+  }
+  return false;
+}
+
+/**
+ * Returns true when `fq` contains any term that can only be resolved on the
+ * server (`is:` project ownership classification, or `owner:<email>` for an
+ * email other than the current user's). Live-add membership checks MUST be
+ * conservative (refuse adds / mark stale) whenever this is true so the client
+ * never admits rows the server would exclude.
+ */
+export function hasServerOnlyAgentTerms(fq: Query | null, ctx?: AgentFilterContext): boolean {
+  if (!fq || fq.mode !== 'structured') return false;
+  return fq.terms.some((t) => isServerOnlyAgentTerm(t, ctx));
+}
+
 /**
  * Strip server-resolved-only terms (`is:` project ownership classification,
  * and `owner:<email>` for emails other than the current user's) before local
@@ -107,18 +129,7 @@ export function agentToFilterRow(agent: Agent, ctx?: AgentFilterContext): Filter
  */
 export function clientEvaluableAgentQuery(fq: Query, ctx?: AgentFilterContext): Query {
   if (fq.mode !== 'structured') return fq;
-  const selfEmail = ctx?.currentUserEmail?.toLowerCase();
-  const filteredTerms = fq.terms.filter((t) => {
-    const k = t.key.toLowerCase();
-    if (k === 'is') return false;
-    if (k === 'owner') {
-      const hasExternalEmail = t.values.some(
-        (v) => v.includes('@') && (!selfEmail || v.toLowerCase() !== selfEmail)
-      );
-      if (hasExternalEmail) return false;
-    }
-    return true;
-  });
+  const filteredTerms = fq.terms.filter((t) => !isServerOnlyAgentTerm(t, ctx));
   return { ...fq, terms: filteredTerms };
 }
 

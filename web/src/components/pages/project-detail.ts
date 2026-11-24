@@ -124,6 +124,7 @@ import {
   getActiveSingleKeyValue,
   getViewSchema,
   hasClientOnlyKeys,
+  hasServerOnlyAgentTerms,
   knownKeysFor,
   matchAgentQuery,
   parse as parseFilterQuery,
@@ -500,6 +501,14 @@ export class ScionPageProjectDetail extends LitElement {
       view: listViewOf(this.viewMode),
     },
     getProjectId: () => this.projectId,
+    isAddable: (agent: Agent): boolean => {
+      if (agent.projectId !== this.projectId) return false;
+      if (filtersQueryDialectEnabled() && this.committedFilterQuery) {
+        if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) return false;
+        return matchAgentQuery(this.committedFilterQuery, agent, this.filterContext);
+      }
+      return true;
+    },
     fetchPage: (params: PagedPageParams) => this.fetchAgentsPage(params),
     getAgent: (id: string) => stateManager.getAgent(id),
     getHeldAgents: () => this.agents,
@@ -1701,7 +1710,17 @@ export class ScionPageProjectDetail extends LitElement {
       // Today's add rule: any agent in this project, or an ID
       // already held (e.g. one whose projectId changed underneath it keeps
       // getting its updates until an explicit `deleted` removes it).
-      shouldAdd: (agent) => agent.projectId === this.projectId,
+      shouldAdd: (agent): boolean => {
+        if (agent.projectId !== this.projectId) return false;
+        if (filtersQueryDialectEnabled()) {
+          if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) return false;
+          return (
+            this.committedFilterQuery === null ||
+            matchAgentQuery(this.committedFilterQuery, agent, this.filterContext)
+          );
+        }
+        return true;
+      },
       scopeCapabilities: this.agentScopeCapabilities,
     });
     if (merged !== this.agents) {
@@ -2153,12 +2172,15 @@ export class ScionPageProjectDetail extends LitElement {
       ? `/api/v1/projects/${this.projectId}/agents?${qs}`
       : `/api/v1/projects/${this.projectId}/agents`;
 
+    const useDialect = filtersQueryDialectEnabled();
+    const hasServerOnly =
+      useDialect && hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext);
     let result: SeededDrainResult | null;
     try {
       result = await this.drainRunner.run({
         url,
         view: 'full',
-        isMember: (agent) => this.isProjectMember(agent, label),
+        ...(!hasServerOnly ? { isMember: (agent) => this.isProjectMember(agent, label) } : {}),
       });
     } catch (err) {
       if (this.isStaleAgentsLoad(gen) || this.isAbortError(err)) return false;
@@ -2186,6 +2208,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (agent.projectId !== this.projectId) return false;
     if (filtersQueryDialectEnabled()) {
       const fq = this.committedFilterQuery;
+      if (hasServerOnlyAgentTerms(fq, this.filterContext)) return false;
       return fq === null || matchAgentQuery(fq, agent, this.filterContext);
     }
     const eq = label.indexOf('=');

@@ -36,6 +36,7 @@ export {
   buildAgentValueSuggestions,
   clientEvaluableAgentQuery,
   hasScopeTermInQuery,
+  hasServerOnlyAgentTerms,
   matchAgentQuery,
   phasePredicateForQuery,
   type AgentFilterContext,
