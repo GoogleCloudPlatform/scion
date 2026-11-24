@@ -282,26 +282,21 @@ func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, proj
 }
 
 // chatSpaceRollupsStrict is chatSpaceRollups, except that a failed batch
-// read fails the whole computation instead of degrading. The unread count
-// uses it: a guessed count is worse than keeping the last one.
+// read fails the whole computation instead of degrading, and each space
+// rollup records the unread topics that incremented unreadCount. The unread
+// count and inbox summary use it: a guessed count is worse than keeping the
+// last one.
 func chatSpaceRollupsStrict(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, tracked map[string]bool, batch chatSpacesBatchSizes) (map[string]chatSpaceRollup, error) {
-	return chatSpaceRollupsMode(ctx, wcs, userID, projects, tracked, batch, true, false)
-}
-
-// chatSpaceRollupsStrictWithUnread is chatSpaceRollupsStrict and also populates
-// each space rollup's unreadTopics slice with the exact topics counted in
-// unreadCount.
-func chatSpaceRollupsStrictWithUnread(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, tracked map[string]bool, batch chatSpacesBatchSizes) (map[string]chatSpaceRollup, error) {
 	return chatSpaceRollupsMode(ctx, wcs, userID, projects, tracked, batch, true, true)
 }
 
-// chatSpaceRollupsMode implements chatSpaceRollups, chatSpaceRollupsStrict,
-// and chatSpaceRollupsStrictWithUnread. With strict set, the first failed
-// batch read is returned as an error. With collectUnread set, each space
-// rollup records the unread topics that incremented unreadCount. Unread is
-// counted only in the projects in tracked (the caller's member projects);
-// other projects get thread counts and activity but no unread, and their read
-// states are not read.
+// chatSpaceRollupsMode implements chatSpaceRollups and
+// chatSpaceRollupsStrict. With strict set, the first failed batch read is
+// returned as an error. With collectUnread set, each space rollup records the
+// unread topics that incremented unreadCount. Unread is counted only in the
+// projects in tracked (the caller's member projects); other projects get
+// thread counts and activity but no unread, and their read states are not
+// read.
 func chatSpaceRollupsMode(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, tracked map[string]bool, batch chatSpacesBatchSizes, strict, collectUnread bool) (map[string]chatSpaceRollup, error) {
 	batch = batch.withDefaults()
 	out := make(map[string]chatSpaceRollup, len(projects))

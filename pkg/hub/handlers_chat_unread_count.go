@@ -145,7 +145,7 @@ func (s *Server) chatUnreadDetail(ctx context.Context, identity Identity, userID
 			memberSpaces = append(memberSpaces, p)
 		}
 	}
-	rollups, err := chatSpaceRollupsStrictWithUnread(ctx, wcs, userID, memberSpaces, members, s.chatSpacesBatch)
+	rollups, err := chatSpaceRollupsStrict(ctx, wcs, userID, memberSpaces, members, s.chatSpacesBatch)
 	if err != nil {
 		return detail, fmt.Errorf("space rollups: %w", err)
 	}
@@ -166,7 +166,7 @@ func (s *Server) chatUnreadDetail(ctx context.Context, identity Identity, userID
 	}
 	// A DM with a deleted agent is not counted (the rail does not list it
 	// as unread either); /chat/dms flags it as peerDeleted by the same rule.
-	deletedPeers, peerAgents, err := s.chatDMDeletedAgentPeers(ctx, dms)
+	deletedPeers, peerAgents, err := s.chatDeletedAgentPeers(ctx, dms)
 	if err != nil {
 		return detail, err
 	}
