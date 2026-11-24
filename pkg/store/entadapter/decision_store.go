@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -329,6 +330,7 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 			SetQuestion(d.Question).
 			SetChoices(d.Choices).
 			SetNillableDefaultChoiceID(nullableString(d.DefaultChoiceID)).
+			SetFacetIndexed(true).
 			SetCreatedAt(now)
 		if d.Other != nil {
 			cr.SetAllowOther(true).
@@ -343,6 +345,19 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 	}
 	if _, err := client.Decision.CreateBulk(creates...).Save(ctx); err != nil {
 		return nil, markMessageActionRace(err)
+	}
+	if in.Message.ThreadID != "" {
+		if err := applyDecisionFacetDeltas(ctx, client, []facetEntryDelta{{
+			ProjectID: projectID,
+			ChatKey:   in.Message.ThreadID,
+			Kind:      decisionfacetentry.KindAsker,
+			ActorID:   agentID.String(),
+			Name:      in.AskerAgentName,
+			LatestAt:  now,
+			Delta:     len(keyed),
+		}}); err != nil {
+			return nil, err
+		}
 	}
 	return &store.DecisionPromptResult{Decisions: results, IntroLength: introLen}, nil
 }
@@ -565,6 +580,10 @@ func (c *CompositeStore) GetDecisionAnswersByResponseMessageIDs(ctx context.Cont
 // stays as an orphan row: that is accepted, as decided in the choices
 // design. It is one small row per such agent, and no agent ID is reused.
 func deleteProjectDecisions(ctx context.Context, client *ent.Client, projectID uuid.UUID, agentIDs []uuid.UUID) error {
+	if _, err := client.DecisionFacetEntry.Delete().
+		Where(decisionfacetentry.ProjectIDEQ(projectID)).Exec(ctx); err != nil {
+		return mapError(err)
+	}
 	if _, err := client.DecisionAnswer.Delete().
 		Where(decisionanswer.ProjectIDEQ(projectID)).Exec(ctx); err != nil {
 		return mapError(err)
@@ -584,10 +603,19 @@ func deleteProjectDecisions(ctx context.Context, client *ent.Client, projectID u
 
 // clearDecisionAnswerUser clears answered_by_user_id on a deleted user's
 // answers; the name and email snapshots stay (design choices v4, O2).
+// It also removes the user's answerer rows from decision_facet_entries in the
+// same transaction since cleared answers contribute 0 (design-scale §3.2).
 func clearDecisionAnswerUser(ctx context.Context, client *ent.Client, userID string) error {
 	if err := client.DecisionAnswer.Update().
 		Where(decisionanswer.AnsweredByUserID(userID)).
 		ClearAnsweredByUserID().Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	if _, err := client.DecisionFacetEntry.Delete().
+		Where(
+			decisionfacetentry.KindEQ(decisionfacetentry.KindAnswerer),
+			decisionfacetentry.ActorIDEQ(userID),
+		).Exec(ctx); err != nil {
 		return mapError(err)
 	}
 	return nil
@@ -816,6 +844,7 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		SetNillableDelegationGrantID(nullableString(in.DelegationGrantID)).
 		SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
 		SetMatchedDefault(in.ChoiceID != messages.ChoiceIDOther && row.DefaultChoiceID != nil && *row.DefaultChoiceID == in.ChoiceID).
+		SetFacetIndexed(true).
 		SetCreatedAt(now)
 	if in.InterpretedByAgentID != "" {
 		aid, err := parseUUID(in.InterpretedByAgentID)
@@ -867,6 +896,29 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		}
 		if n != 1 {
 			return nil, false, fmt.Errorf("%w: version %d of %s was replaced concurrently", store.ErrDecisionReplaced, row.Version, row.Key)
+		}
+	}
+	if row.ChatKey != nil && *row.ChatKey != "" {
+		var deltas []facetEntryDelta
+		if in.AnsweredByUserID != "" {
+			deltas = append(deltas, facetEntryDelta{
+				ProjectID: row.ProjectID,
+				ChatKey:   *row.ChatKey,
+				Kind:      decisionfacetentry.KindAnswerer,
+				ActorID:   in.AnsweredByUserID,
+				Name:      in.AnsweredByName,
+				Email:     in.AnsweredByEmail,
+				LatestAt:  now,
+				Delta:     1,
+			})
+		}
+		if in.Provenance == store.DecisionProvenanceDirect {
+			if sub, ok := supersededInterpretedFacetDelta(row.ProjectID, row.ChatKey, existing[rowID]); ok {
+				deltas = append(deltas, sub)
+			}
+		}
+		if err := applyDecisionFacetDeltas(ctx, client, deltas); err != nil {
+			return nil, false, err
 		}
 	}
 	return answerToStore(saved), false, nil
@@ -1085,6 +1137,7 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 		surface = store.DecisionSurfaceNative
 	}
 	res := &store.AnswerSetResult{BatchID: batchID.String()}
+	var facetDeltas []facetEntryDelta
 	for _, r := range rows {
 		a, ok := requested[r.ID.String()]
 		if !ok {
@@ -1110,6 +1163,7 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
 			SetBatchID(batchID).
 			SetMatchedDefault(a.ChoiceID != messages.ChoiceIDOther && r.DefaultChoiceID != nil && *r.DefaultChoiceID == a.ChoiceID).
+			SetFacetIndexed(true).
 			SetCreatedAt(now).
 			Save(ctx)
 		if err != nil {
@@ -1150,7 +1204,27 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 				return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errMessageActionRace, r.Version, r.Key)
 			}
 		}
+		if r.ChatKey != nil && *r.ChatKey != "" {
+			if in.AnsweredByUserID != "" {
+				facetDeltas = append(facetDeltas, facetEntryDelta{
+					ProjectID: r.ProjectID,
+					ChatKey:   *r.ChatKey,
+					Kind:      decisionfacetentry.KindAnswerer,
+					ActorID:   in.AnsweredByUserID,
+					Name:      in.AnsweredByName,
+					Email:     in.AnsweredByEmail,
+					LatestAt:  now,
+					Delta:     1,
+				})
+			}
+			if sub, ok := supersededInterpretedFacetDelta(r.ProjectID, r.ChatKey, existing[r.ID]); ok {
+				facetDeltas = append(facetDeltas, sub)
+			}
+		}
 		res.Answers = append(res.Answers, answerToStore(saved))
+	}
+	if err := applyDecisionFacetDeltas(ctx, client, facetDeltas); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
@@ -1915,6 +1989,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 		BatchID: batchStr,
 		Answers: make([]*store.DecisionAnswer, 0, len(validated)),
 	}
+	var facetDeltas []facetEntryDelta
 	for _, v := range validated {
 		saved, err := client.DecisionAnswer.Create().
 			SetDecisionRowID(v.row.ID).
@@ -1938,6 +2013,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
 			SetNillableBatchID(batchUUID).
 			SetMatchedDefault(v.choiceID != messages.ChoiceIDOther && v.row.DefaultChoiceID != nil && *v.row.DefaultChoiceID == v.choiceID).
+			SetFacetIndexed(true).
 			SetCreatedAt(now).
 			Save(ctx)
 		if err != nil {
@@ -1956,7 +2032,22 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 		if !casOK {
 			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errMessageActionRace, v.row.Version, v.row.Key)
 		}
+		if v.row.ChatKey != nil && *v.row.ChatKey != "" && in.AnsweredByUserID != "" {
+			facetDeltas = append(facetDeltas, facetEntryDelta{
+				ProjectID: v.row.ProjectID,
+				ChatKey:   *v.row.ChatKey,
+				Kind:      decisionfacetentry.KindAnswerer,
+				ActorID:   in.AnsweredByUserID,
+				Name:      in.AnsweredByName,
+				Email:     in.AnsweredByEmail,
+				LatestAt:  now,
+				Delta:     1,
+			})
+		}
 		res.Answers = append(res.Answers, answerToStore(saved))
+	}
+	if err := applyDecisionFacetDeltas(ctx, client, facetDeltas); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
@@ -2589,6 +2680,7 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 	responseUUID, _ := parseUUID(in.ResponseMessage.ID)
 	batchUUID := uuid.New()
 	dismissedOut := make([]*store.Decision, len(toDismiss))
+	var facetDeltas []facetEntryDelta
 
 	for i, r := range toDismiss {
 		savedAns, err := client.DecisionAnswer.Create().
@@ -2611,6 +2703,7 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
 			SetBatchID(batchUUID).
 			SetMatchedDefault(false).
+			SetFacetIndexed(true).
 			SetCreatedAt(writeNow).
 			Save(ctx)
 		if err != nil {
@@ -2635,6 +2728,24 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errMessageActionRace, r.Version, r.Key)
 		}
 
+		if r.ChatKey != nil && *r.ChatKey != "" {
+			if in.User.UserID != "" {
+				facetDeltas = append(facetDeltas, facetEntryDelta{
+					ProjectID: r.ProjectID,
+					ChatKey:   *r.ChatKey,
+					Kind:      decisionfacetentry.KindAnswerer,
+					ActorID:   in.User.UserID,
+					Name:      in.User.Name,
+					Email:     in.User.Email,
+					LatestAt:  writeNow,
+					Delta:     1,
+				})
+			}
+			if sub, ok := supersededInterpretedFacetDelta(r.ProjectID, r.ChatKey, existingAnswers[r.ID]); ok {
+				facetDeltas = append(facetDeltas, sub)
+			}
+		}
+
 		d := decisionToStore(r)
 		d.Status = store.DecisionStatusDismissed
 		nowCopy := writeNow
@@ -2643,6 +2754,10 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 		ansStore.CreatedAt = writeNow
 		d.Answers = append(answersToStore(existingAnswers[r.ID]), ansStore)
 		dismissedOut[i] = d
+	}
+
+	if err := applyDecisionFacetDeltas(ctx, client, facetDeltas); err != nil {
+		return nil, err
 	}
 
 	return &store.DismissDecisionsResult{
