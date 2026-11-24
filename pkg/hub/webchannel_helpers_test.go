@@ -93,21 +93,12 @@ func getConversation(t *testing.T, db *sql.DB, convID string) *conversationRow {
 	return &c
 }
 
-// newTestWebChatStoreV2 creates a WebChatStore backed by an in-memory SQLite DB
-// for testing wave-2 features. The caller should close the returned *sql.DB.
+// newTestWebChatStoreV2 is an alias for newTestWebChatStoreWithConversations;
+// retained for existing wave-2 test call sites now that CreateTopic always
+// requires the conversations table.
 func newTestWebChatStoreV2(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
-
-	// Create the conversations table BEFORE Init so CreateTopic and migrations
-	// see it (CreateTopic unconditionally requires conversations).
-	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
-	require.NoError(t, err)
-
-	store := NewWebChatStore(db, "sqlite")
-	require.NoError(t, store.Init())
-
-	return store, db
+	return newTestWebChatStoreWithConversations(t)
 }
 
 // conversationRow holds the relevant columns from a conversations row for test assertions.

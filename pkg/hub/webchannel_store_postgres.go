@@ -1746,6 +1746,46 @@ func (s *pgWebChatStore) reconcileTopicConversations() error {
 		return err
 	}
 
+	// Log any resurrection conflicts where a live topic points at a soft-deleted
+	// conversation whose (surface, external_ref) is already held by another live
+	// conversation. Skipping those avoids tripping the partial unique index
+	// during startup Init().
+	conflictRows, err := s.db.QueryContext(ctx,
+		`SELECT t.id, c.id::text, other.id::text, c.surface, c.external_ref
+		   FROM webchat_topic t
+		   JOIN `+conversationsTable+` c ON c.id = t.conversation_id::uuid
+		   JOIN `+conversationsTable+` other
+		     ON other.surface = c.surface
+		    AND other.external_ref = c.external_ref
+		    AND other.deleted_at IS NULL
+		    AND other.id <> c.id
+		  WHERE t.conversation_id IS NOT NULL
+		    AND t.conversation_id <> ''
+		    AND t.deleted_at IS NULL
+		    AND c.deleted_at IS NOT NULL
+		    AND c.external_ref <> ''`)
+	if err != nil {
+		return fmt.Errorf("check reconcile conflicts: %w", err)
+	}
+	for conflictRows.Next() {
+		var topicID, convID, otherID, surface, externalRef string
+		if err := conflictRows.Scan(&topicID, &convID, &otherID, &surface, &externalRef); err != nil {
+			_ = conflictRows.Close()
+			return fmt.Errorf("scan reconcile conflict: %w", err)
+		}
+		slog.Warn("webchat reconcile: skipping conversation resurrection due to live external_ref conflict",
+			"topic_id", topicID,
+			"conversation_id", convID,
+			"conflicting_conversation_id", otherID,
+			"surface", surface,
+			"external_ref", externalRef)
+	}
+	if err := conflictRows.Err(); err != nil {
+		_ = conflictRows.Close()
+		return fmt.Errorf("iterate reconcile conflicts: %w", err)
+	}
+	_ = conflictRows.Close()
+
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE `+conversationsTable+` c
 		    SET display_name = t.name,
@@ -1757,6 +1797,18 @@ func (s *pgWebChatStore) reconcileTopicConversations() error {
 		    AND (
 		        c.display_name IS DISTINCT FROM t.name
 		        OR c.deleted_at IS DISTINCT FROM t.deleted_at
+		    )
+		    AND NOT (
+		        t.deleted_at IS NULL
+		        AND c.deleted_at IS NOT NULL
+		        AND c.external_ref <> ''
+		        AND EXISTS (
+		            SELECT 1 FROM `+conversationsTable+` other
+		             WHERE other.surface = c.surface
+		               AND other.external_ref = c.external_ref
+		               AND other.deleted_at IS NULL
+		               AND other.id <> c.id
+		        )
 		    )`); err != nil {
 		return fmt.Errorf("reconcile topic conversations: %w", err)
 	}

@@ -846,7 +846,6 @@ SELECT agent_id, COALESCE(last_message_id, ''), COALESCE(last_activity_at, ''), 
 // Wave-2 Topic methods (SQLite)
 // ---------------------------------------------------------------------------
 
-// CreateTopic inserts a new topic and, when ConversationID is set and the
 // CreateTopic inserts a new topic and atomically creates a linked conversations
 // row inside the same transaction.
 func (s *sqliteWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) error {
@@ -1116,9 +1115,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 // UpdateTopic applies partial updates to a topic. Identity fields (display_name
 // for Name, default_agent_id for DefaultAgentID) are written to the
 // authoritative conversations row first and mirrored to webchat_topic in the
-// same transaction — skipped on conversations when the topic has no linked
-// conversation or the conversations table doesn't exist (INVARIANT U-TX-1:
-// hasConversationsTable() is called before BeginTx).
+// same transaction.
 func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error {
 	var sets []string
 	var args []interface{}
@@ -1143,17 +1140,13 @@ func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, up
 		return nil
 	}
 
-	// INVARIANT U-TX-1: hasConversationsTable() touches s.db — must be
-	// called BEFORE BeginTx.
-	updateConv := len(convSets) > 0 && s.hasConversationsTable()
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("webchat store: begin update topic tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	if updateConv {
+	if len(convSets) > 0 {
 		// Update authoritative conversations row first, then mirror to
 		// webchat_topic below in the same transaction.
 		//
@@ -1203,10 +1196,6 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 		return fmt.Errorf("webchat store: delete topic check: %w", err)
 	}
 
-	// INVARIANT U-TX-1: hasConversationsTable() touches s.db — must be
-	// called BEFORE BeginTx.
-	hasConvTable := s.hasConversationsTable()
-
 	// Use LevelSerializable so the SQLite driver starts an IMMEDIATE
 	// transaction, preventing the TOCTOU race where two concurrent deletes
 	// both read count=2 under a DEFERRED transaction.
@@ -1243,16 +1232,14 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 	}
 
 	var convID sql.NullString
-	if hasConvTable {
-		if err := tx.QueryRowContext(ctx,
-			"SELECT conversation_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL",
-			topicID).Scan(&convID); err != nil && err != sql.ErrNoRows {
-			return fmt.Errorf("webchat store: delete topic conversation lookup: %w", err)
-		}
+	if err := tx.QueryRowContext(ctx,
+		"SELECT conversation_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL",
+		topicID).Scan(&convID); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("webchat store: delete topic conversation lookup: %w", err)
 	}
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	if hasConvTable && convID.Valid && convID.String != "" {
+	if convID.Valid && convID.String != "" {
 		// Soft-delete the authoritative conversations row first.
 		// conversations is an Ent table: bind a time.Time, not RFC3339 text.
 		if _, err := tx.ExecContext(ctx,
@@ -2214,7 +2201,9 @@ func (s *sqliteWebChatStore) reconcileTopicConversations() error {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT t.conversation_id, t.name, t.deleted_at, COALESCE(c.display_name, ''), c.deleted_at
+		`SELECT t.id, t.conversation_id, t.name, t.deleted_at,
+		        COALESCE(c.display_name, ''), c.deleted_at,
+		        c.surface, COALESCE(c.external_ref, '')
 		   FROM webchat_topic t
 		   JOIN conversations c ON c.id = t.conversation_id
 		  WHERE t.conversation_id IS NOT NULL AND t.conversation_id <> ''`)
@@ -2223,15 +2212,19 @@ func (s *sqliteWebChatStore) reconcileTopicConversations() error {
 	}
 
 	type reconcileUpdate struct {
-		convID    string
-		name      string
-		deletedAt *time.Time
+		topicID     string
+		convID      string
+		name        string
+		deletedAt   *time.Time
+		resurrect   bool
+		surface     string
+		externalRef string
 	}
 	var drifted []reconcileUpdate
 	for rows.Next() {
-		var convID, topicName, convName string
+		var topicID, convID, topicName, convName, surface, externalRef string
 		var topicDeletedRaw, convDeletedRaw any
-		if err := rows.Scan(&convID, &topicName, &topicDeletedRaw, &convName, &convDeletedRaw); err != nil {
+		if err := rows.Scan(&topicID, &convID, &topicName, &topicDeletedRaw, &convName, &convDeletedRaw, &surface, &externalRef); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan linked topic for reconcile: %w", err)
 		}
@@ -2244,9 +2237,13 @@ func (s *sqliteWebChatStore) reconcileTopicConversations() error {
 				normDel = &u
 			}
 			drifted = append(drifted, reconcileUpdate{
-				convID:    convID,
-				name:      topicName,
-				deletedAt: normDel,
+				topicID:     topicID,
+				convID:      convID,
+				name:        topicName,
+				deletedAt:   normDel,
+				resurrect:   tDel == nil && cDel != nil,
+				surface:     surface,
+				externalRef: externalRef,
 			})
 		}
 	}
@@ -2264,6 +2261,26 @@ func (s *sqliteWebChatStore) reconcileTopicConversations() error {
 		defer tx.Rollback() //nolint:errcheck
 
 		for _, u := range drifted {
+			if u.resurrect && u.externalRef != "" {
+				var conflictID string
+				cErr := tx.QueryRow(
+					`SELECT id FROM conversations
+					  WHERE surface = ? AND external_ref = ? AND deleted_at IS NULL AND id <> ?
+					  LIMIT 1`,
+					u.surface, u.externalRef, u.convID).Scan(&conflictID)
+				if cErr != nil && cErr != sql.ErrNoRows {
+					return fmt.Errorf("check reconcile conflict for conversation %s: %w", u.convID, cErr)
+				}
+				if conflictID != "" {
+					slog.Warn("webchat reconcile: skipping conversation resurrection due to live external_ref conflict",
+						"topic_id", u.topicID,
+						"conversation_id", u.convID,
+						"conflicting_conversation_id", conflictID,
+						"surface", u.surface,
+						"external_ref", u.externalRef)
+					continue
+				}
+			}
 			var delArg any
 			if u.deletedAt != nil {
 				delArg = *u.deletedAt

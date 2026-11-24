@@ -20,11 +20,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -310,11 +313,24 @@ func assertReconcileConvergenceAndIdempotence(t *testing.T, db *sql.DB, dialect 
 		cExternal, projectID, convTime(&created), convTime(&created))
 	require.NoError(t, err)
 
+	// Case 6: live topic linked to soft-deleted conversation A, while another
+	// live conversation B already holds the same (native, thread:<P>:<T>)
+	// external_ref. Reconcile must skip resurrecting A (so the partial unique
+	// index is not violated and Init succeeds), leave A soft-deleted and B
+	// untouched, record the marker, and still converge Cases 1-3.
+	tConflict, cConflictA, cConflictB := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	seedPair(tConflict, cConflictA, "Conflict Topic", "Deleted Shadow A", nil, &staleConvDel)
+	_, err = db.Exec(rebind(
+		`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+		 VALUES (?, ?, 'group', 'native', ?, '', 'Live Shadow B', 'active', ?, ?)`),
+		cConflictB, projectID, "thread:"+projectID+":"+tConflict, convTime(&created), convTime(&created))
+	require.NoError(t, err)
+
 	// Clear the reconcile marker so Init() runs reconcileTopicConversations against our drifted fixtures.
 	_, err = db.Exec(rebind(`DELETE FROM webchat_migrations WHERE name = ?`), "topic_conversation_reconcile")
 	require.NoError(t, err)
 
-	// First run: reconcile must converge every drifted row.
+	// First run: reconcile must converge every drifted row and skip the conflict safely.
 	require.NoError(t, newStore().Init())
 
 	assertConverged := func(label string) {
@@ -345,6 +361,16 @@ func assertReconcileConvergenceAndIdempotence(t *testing.T, db *sql.DB, dialect 
 		var extName string
 		require.NoError(t, db.QueryRow(rebind(`SELECT display_name FROM conversations WHERE id = ?`), cExternal).Scan(&extName))
 		assert.Equal(t, "Discord Room", extName, "%s: external conversation untouched", label)
+
+		sConflictA := readIdentitySnapshot(t, db, dialect, tConflict, cConflictA)
+		assert.Equal(t, "Deleted Shadow A", sConflictA.convName, "%s: conflicting conversation A untouched", label)
+		require.NotNil(t, sConflictA.convDeletedAt, "%s: conflicting conversation A stays soft-deleted", label)
+		assert.True(t, nullableTimesEqualMicro(&staleConvDel, sConflictA.convDeletedAt),
+			"%s: conflicting conversation A deleted_at unchanged", label)
+
+		sConflictB := readIdentitySnapshot(t, db, dialect, tConflict, cConflictB)
+		assert.Equal(t, "Live Shadow B", sConflictB.convName, "%s: live conversation B untouched", label)
+		assert.Nil(t, sConflictB.convDeletedAt, "%s: live conversation B stays active", label)
 	}
 
 	assertConverged("after first reconcile")
@@ -371,6 +397,14 @@ func TestTopicReconcile_SQLite(t *testing.T) {
 	_, db := newTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
+	// Enforce the production partial unique index on (surface, external_ref) so
+	// Case 6 proves the resurrection conflict guard genuinely prevents a unique
+	// constraint violation.
+	_, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_surface_external_ref
+		ON conversations (surface, external_ref)
+		WHERE external_ref <> '' AND deleted_at IS NULL`)
+	require.NoError(t, err)
+
 	assertReconcileConvergenceAndIdempotence(t, db, "sqlite", func() WebChatStore {
 		return NewWebChatStore(db, "sqlite")
 	})
@@ -379,20 +413,19 @@ func TestTopicReconcile_SQLite(t *testing.T) {
 func setupPostgresWithConversations(t *testing.T) (*sql.DB, WebChatStore) {
 	t.Helper()
 	dsn := hubtestutil.RequirePostgresDSN(t)
-	db, err := sql.Open("pgx", dsn)
+	ctx := context.Background()
+	schema := "topic_identity_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:16]
+	cfg, err := pgx.ParseConfig(dsn)
 	require.NoError(t, err)
+	cfg.RuntimeParams["search_path"] = schema
+	db := stdlib.OpenDB(*cfg)
 	t.Cleanup(func() { _ = db.Close() })
 
-	pgDropWebchatTables(t, db)
-	_, err = db.Exec(`DROP TABLE IF EXISTS conversations CASCADE`)
+	_, err = db.ExecContext(ctx, "CREATE SCHEMA "+schema)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		removeMirrorFaultTrigger(t, db, "postgres")
-		pgDropWebchatTables(t, db)
-		_, _ = db.Exec(`DROP TABLE IF EXISTS conversations CASCADE`)
-	})
+	t.Cleanup(func() { _, _ = db.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE") })
 
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 CREATE TABLE conversations (
     id               UUID PRIMARY KEY,
     project_id       UUID,
@@ -408,7 +441,10 @@ CREATE TABLE conversations (
     created_at       TIMESTAMPTZ,
     archived_at      TIMESTAMPTZ,
     deleted_at       TIMESTAMPTZ
-)`)
+);
+CREATE UNIQUE INDEX idx_conversations_surface_external_ref
+    ON conversations (surface, external_ref)
+    WHERE external_ref <> '' AND deleted_at IS NULL;`)
 	require.NoError(t, err)
 
 	wcs := NewWebChatStore(db, "postgres")
