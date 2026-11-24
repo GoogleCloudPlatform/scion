@@ -30,7 +30,9 @@ import {
   filterGraphAgents,
   makeGraphValueSuggestions,
   migrateProjectParamToQuery,
+  resolveProjectLoadTarget,
 } from './agent-graph-filter.js';
+import type { SeededDrainResult } from '../../client/agent-drain.js';
 import { setFeatureFlag, resetServerFlagStateForTests } from '../../utils/feature-flags.js';
 import { stateManager } from '../../client/state.js';
 import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
@@ -365,7 +367,7 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     document.body.appendChild(page);
     await page.updateComplete;
 
-    expect(window.location.search).toBe('?q=project%3Ap-1');
+    expect(window.location.search).toBe('?q=project%3Aalpha');
     const box = page.shadowRoot!.querySelector('scion-filter-box');
     expect(box).not.toBeNull();
     expect(page.shadowRoot!.querySelector('sl-select')).toBeNull();
@@ -431,5 +433,286 @@ describe('scion-page-agent-graph filter dialect integration', () => {
       .map((c) => c.target.agentId)
       .sort();
     expect(candidateIds).toEqual(['a-child', 'a-other', 'a-parent']);
+  });
+});
+
+describe('scion-page-agent-graph R1 load scope with non-held drains', () => {
+  let page: AgentGraphPage | null = null;
+
+  beforeAll(async () => {
+    await import('./agent-graph.js');
+  });
+
+  beforeEach(() => {
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    vi.spyOn(stateManager, 'setScope').mockImplementation(() => {});
+    vi.spyOn(stateManager, 'sseConnected').mockResolvedValue(undefined);
+    vi.spyOn(stateManager, 'isAgentSetComplete').mockReturnValue(false);
+    vi.spyOn(stateManager, 'getAgents').mockReturnValue([]);
+    vi.spyOn(stateManager, 'getProjects').mockReturnValue([]);
+    vi.spyOn(stateManager, 'getDeletedAgentIds').mockReturnValue(new Set());
+  });
+
+  afterEach(() => {
+    page?.remove();
+    page = null;
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
+    document.body.replaceChildren();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const alphaAgent = mkAgent({
+    id: 'a-1',
+    name: 'Alpha One',
+    slug: 'alpha-1',
+    projectId: 'proj-alpha-uuid',
+    project: 'Alpha Project',
+    projectSlug: 'alpha',
+    phase: 'running',
+  });
+  const betaAgent = mkAgent({
+    id: 'b-1',
+    name: 'Beta One',
+    slug: 'beta-1',
+    projectId: 'proj-beta-uuid',
+    project: 'Beta Project',
+    projectSlug: 'beta',
+    phase: 'stopped',
+  });
+
+  function drainResult(
+    agents: Agent[],
+    overrides: Partial<SeededDrainResult> = {}
+  ): SeededDrainResult {
+    return {
+      agents,
+      complete: !overrides.capped,
+      capped: false,
+      stale: false,
+      requests: 1,
+      error: null,
+      firstPageFailed: false,
+      ...overrides,
+    };
+  }
+
+  function stubProbeNotComplete(): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ agents: [alphaAgent], complete: false }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
+  }
+
+  it('issues a project drain when narrowing a capped unscoped drain with project:<id>', async () => {
+    const drainCalls: string[] = [];
+    window.history.replaceState({}, '', '/agents/graph');
+    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
+    const runner = (
+      page as unknown as {
+        drainRunner: { run: (opts: { url: string }) => Promise<SeededDrainResult | null> };
+      }
+    ).drainRunner;
+    vi.spyOn(runner, 'run').mockImplementation((opts) => {
+      drainCalls.push(opts.url);
+      if (opts.url.includes('projectId=')) {
+        return Promise.resolve(drainResult([alphaAgent]));
+      }
+      return Promise.resolve(drainResult([alphaAgent, betaAgent], { capped: true }));
+    });
+
+    document.body.appendChild(page);
+    await vi.waitFor(() => expect(drainCalls).toEqual(['/api/v1/agents']));
+    await page.updateComplete;
+
+    const box = page.shadowRoot!.querySelector('scion-filter-box')!;
+    box.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: {
+          value: 'project:proj-alpha-uuid',
+          query: parseGraph('project:proj-alpha-uuid'),
+          serverQ: '',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await vi.waitFor(() =>
+      expect(drainCalls).toEqual(['/api/v1/agents', '/api/v1/agents?projectId=proj-alpha-uuid'])
+    );
+  });
+
+  it('normalises ?q=project:<slug> to projectId so live-created agents join and follow-up commits do not re-drain', async () => {
+    stubProbeNotComplete();
+    const drainCalls: string[] = [];
+    window.history.replaceState({}, '', '/agents/graph?q=project:alpha');
+    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
+    const runner = (
+      page as unknown as {
+        drainRunner: { run: (opts: { url: string }) => Promise<SeededDrainResult | null> };
+      }
+    ).drainRunner;
+    vi.spyOn(runner, 'run').mockImplementation((opts) => {
+      drainCalls.push(opts.url);
+      return Promise.resolve(drainResult([alphaAgent]));
+    });
+
+    document.body.appendChild(page);
+    await vi.waitFor(() => expect(drainCalls).toEqual(['/api/v1/agents?projectId=alpha']));
+    await page.updateComplete;
+
+    // Live-created agent in the same project must join (memberScope normalised to proj-alpha-uuid).
+    const liveAgent = mkAgent({
+      id: 'a-live',
+      name: 'Live Agent',
+      slug: 'a-live',
+      projectId: 'proj-alpha-uuid',
+      project: 'Alpha Project',
+      projectSlug: 'alpha',
+      phase: 'running',
+    });
+    vi.spyOn(stateManager, 'getAgent').mockImplementation((id) =>
+      id === 'a-live' ? liveAgent : undefined
+    );
+    stateManager.dispatchEvent(
+      new CustomEvent('agent-created', { detail: { data: { agentId: 'a-live' } } })
+    );
+    stateManager.dispatchEvent(
+      new CustomEvent('agents-changed', { detail: { data: { upserted: ['a-live'], deleted: [] } } })
+    );
+    await page.updateComplete;
+
+    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    expect(tree.agents.map((a) => a.id).sort()).toEqual(['a-1', 'a-live']);
+
+    // Adding phase:running to project:alpha must NOT issue a second drain.
+    const box = page.shadowRoot!.querySelector('scion-filter-box')!;
+    box.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: {
+          value: 'project:alpha phase:running',
+          query: parseGraph('project:alpha phase:running'),
+          serverQ: '',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await page.updateComplete;
+    expect(drainCalls).toEqual(['/api/v1/agents?projectId=alpha']);
+  });
+
+  it('drains unscoped for project:<name> on an unprobed hub so matching agents are shown (not empty)', async () => {
+    const drainCalls: string[] = [];
+    window.history.replaceState({}, '', '/agents/graph?q=project%3A%22Alpha%20Project%22');
+    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
+    const runner = (
+      page as unknown as {
+        drainRunner: { run: (opts: { url: string }) => Promise<SeededDrainResult | null> };
+      }
+    ).drainRunner;
+    vi.spyOn(runner, 'run').mockImplementation((opts) => {
+      drainCalls.push(opts.url);
+      return Promise.resolve(drainResult([alphaAgent, betaAgent]));
+    });
+
+    document.body.appendChild(page);
+    await vi.waitFor(() => {
+      expect(drainCalls).toEqual(['/api/v1/agents']);
+      expect(page!.shadowRoot!.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+
+    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    expect(tree.agents.map((a) => a.id)).toEqual(['a-1']);
+    expect(tree.filteredEmpty).toBe(false);
+  });
+
+  it('aborts an in-flight initial project drain and loads unscoped when filter is cleared', async () => {
+    stubProbeNotComplete();
+    const drainCalls: string[] = [];
+    let releaseFirstDrain!: (res: SeededDrainResult | null) => void;
+    window.history.replaceState({}, '', '/agents/graph?q=project:alpha');
+    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
+    const runner = (
+      page as unknown as {
+        drainRunner: {
+          run: (opts: { url: string }) => Promise<SeededDrainResult | null>;
+          abort: () => void;
+        };
+      }
+    ).drainRunner;
+    const abortSpy = vi.spyOn(runner, 'abort');
+    vi.spyOn(runner, 'run').mockImplementation((opts) => {
+      drainCalls.push(opts.url);
+      if (drainCalls.length === 1) {
+        return new Promise((resolve) => {
+          releaseFirstDrain = resolve;
+        });
+      }
+      return Promise.resolve(drainResult([alphaAgent, betaAgent]));
+    });
+
+    document.body.appendChild(page);
+    await vi.waitFor(() => expect(drainCalls).toEqual(['/api/v1/agents?projectId=alpha']));
+
+    // Clear while the initial project drain is still in flight (memberScope === null).
+    const box = page.shadowRoot!.querySelector('scion-filter-box')!;
+    box.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: {
+          value: '',
+          query: { mode: 'text', text: '' },
+          serverQ: '',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    releaseFirstDrain(null);
+
+    await vi.waitFor(() => {
+      expect(drainCalls).toEqual(['/api/v1/agents?projectId=alpha', '/api/v1/agents']);
+      expect(page!.shadowRoot!.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+    expect(abortSpy).toHaveBeenCalled();
+    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    expect(tree.agents.map((a) => a.id).sort()).toEqual(['a-1', 'b-1']);
+  });
+
+  it('wires tree-view clear-filter to onClearFilter and keeps filteredEmpty false when unfiltered and empty', async () => {
+    window.history.replaceState({}, '', '/agents/graph');
+    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
+    const runner = (
+      page as unknown as {
+        drainRunner: { run: (opts: { url: string }) => Promise<SeededDrainResult | null> };
+      }
+    ).drainRunner;
+    vi.spyOn(runner, 'run').mockResolvedValue(drainResult([]));
+
+    document.body.appendChild(page);
+    await vi.waitFor(() =>
+      expect(page!.shadowRoot!.querySelector('scion-agent-tree-view')).not.toBeNull()
+    );
+    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    expect(tree.filteredEmpty).toBe(false);
+
+    // Confirm resolveProjectLoadTarget handles slug/name/id normalisation directly.
+    expect(resolveProjectLoadTarget(parseGraph('project:alpha'), [alphaAgent], [])).toBe(
+      'proj-alpha-uuid'
+    );
+    expect(resolveProjectLoadTarget(parseGraph('project:"Alpha Project"'), [alphaAgent], [])).toBe(
+      'proj-alpha-uuid'
+    );
+    expect(resolveProjectLoadTarget(parseGraph('project:"Alpha Project"'), [], [])).toBe('');
   });
 });

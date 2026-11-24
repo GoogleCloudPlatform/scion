@@ -49,10 +49,11 @@ import {
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
 import {
-  extractSingleProjectScope,
   filterGraphAgents,
+  formatProjectFilterTerm,
   makeGraphValueSuggestions,
   migrateProjectParamToQuery,
+  resolveProjectLoadTarget,
 } from './agent-graph-filter.js';
 import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import { navigateTo, replaceSearch } from '../../client/navigation.js';
@@ -157,6 +158,8 @@ export class AgentGraphPage extends LitElement {
 
   /** What `agents` covers: `''` every project, a project ID that project, `null` nothing yet. */
   private memberScope: string | null = null;
+  /** The normalised project scope currently loaded or in flight (`''` all, project ID/slug, or `null`). */
+  private loadTarget: string | null = null;
   /** The fit probe was sent; it is never repeated in the page lifetime. */
   private probed = false;
   /** A load already showed more than 500 agents, so a probe cannot be complete. */
@@ -194,7 +197,22 @@ export class AgentGraphPage extends LitElement {
       filtersQueryDialectEnabled() ? this.agents : undefined,
     onSelectHidden: (agentId: string): boolean => {
       if (!filtersQueryDialectEnabled()) return false;
-      this.onClearFilter();
+      const target = this.agents.find((a) => a.id === agentId);
+      if (target && this.memberScope && this.memberScope === target.projectId) {
+        // Keep the active project scope so we don't trigger a full re-drain
+        // when the hidden agent is already in the loaded project set.
+        const projectTerm = formatProjectFilterTerm(target.projectSlug || target.projectId);
+        const parsed = this.parseValidQuery(projectTerm);
+        this.filterQueryText = projectTerm;
+        this.activeFilterQuery = parsed;
+        this.committedFilterKey = parsed ? canonical(parsed) : '';
+        const params = new URLSearchParams(window.location.search);
+        params.set('q', projectTerm);
+        params.delete('project');
+        replaceSearch(params);
+      } else {
+        this.onClearFilter();
+      }
       void this.updateComplete.then(() => {
         this.renderRoot.querySelector('scion-agent-tree-view')?.revealAgent(agentId);
       });
@@ -233,14 +251,19 @@ export class AgentGraphPage extends LitElement {
     stateManager.setScope({ type: 'dashboard' });
 
     const params = new URLSearchParams(window.location.search);
-    if (filtersQueryDialectEnabled()) {
-      const { queryText, migrated, initialProject } = migrateProjectParamToQuery(params);
+    const useDialect = filtersQueryDialectEnabled();
+    let initialFallbackProject = '';
+    if (useDialect) {
+      const { queryText, migrated, initialProject } = migrateProjectParamToQuery(
+        params,
+        stateManager.getAgents(),
+        stateManager.getProjects()
+      );
       this.initiallyProjectScoped = migrated;
       this.filterQueryText = queryText;
       this.activeFilterQuery = this.parseValidQuery(queryText);
       this.committedFilterKey = this.activeFilterQuery ? canonical(this.activeFilterQuery) : '';
-      this.projectFilter =
-        initialProject || extractSingleProjectScope(this.activeFilterQuery) || '';
+      initialFallbackProject = initialProject;
       if (migrated) {
         if (queryText) params.set('q', queryText);
         else params.delete('q');
@@ -260,7 +283,12 @@ export class AgentGraphPage extends LitElement {
     stateManager.addEventListener('agents-resync', this.onAgentsResync);
 
     this.watchFirstConnect();
-    if (stateManager.isAgentSetComplete('compact')) {
+    if (useDialect) {
+      this.syncLoadScopeForQuery(this.activeFilterQuery, {
+        initial: true,
+        fallbackProjectId: initialFallbackProject,
+      });
+    } else if (stateManager.isAgentSetComplete('compact')) {
       this.adoptHeldSet();
     } else {
       void this.load(this.projectFilter, false);
@@ -291,6 +319,7 @@ export class AgentGraphPage extends LitElement {
   private resetPageState(): void {
     this.agents = [];
     this.memberScope = null;
+    this.loadTarget = null;
     this.incomplete = null;
     this.stale = false;
     this.error = null;
@@ -344,6 +373,7 @@ export class AgentGraphPage extends LitElement {
   private adoptHeldSet(): void {
     this.agents = stateManager.getAgents();
     this.memberScope = '';
+    this.loadTarget = '';
     this.incomplete = null;
     this.error = null;
     this.loading = false;
@@ -395,6 +425,7 @@ export class AgentGraphPage extends LitElement {
    */
   private async load(target: string, keepShown: boolean): Promise<void> {
     const seq = ++this.loadSeq;
+    this.loadTarget = target;
     this.drainRunner.abort();
     this.probeController?.abort();
     if (keepShown) this.reloading = true;
@@ -488,14 +519,25 @@ export class AgentGraphPage extends LitElement {
   }
 
   /** Drain one project (compact). Never marks the store's set complete. */
-  private async drainProject(projectId: string, seq: number): Promise<void> {
+  private async drainProject(projectIdOrSlug: string, seq: number): Promise<void> {
+    const lower = projectIdOrSlug.toLowerCase();
     const result = await this.drainRunner.run({
-      url: `${GRAPH_AGENTS_URL}?projectId=${encodeURIComponent(projectId)}`,
+      url: `${GRAPH_AGENTS_URL}?projectId=${encodeURIComponent(projectIdOrSlug)}`,
       view: 'compact',
-      isMember: (agent) => agent.projectId === projectId,
+      isMember: (agent) =>
+        agent.projectId === projectIdOrSlug || agent.projectSlug?.toLowerCase() === lower,
     });
     if (!result || seq !== this.loadSeq) return;
-    this.adoptDrain(result, projectId);
+    // Normalise a slug scope to the canonical project ID returned by the hub
+    // so live deltas (agent.projectId === memberScope) and subsequent query
+    // commits compare on IDs only.
+    const resolvedId = result.agents.find((a) => a.projectId)?.projectId || projectIdOrSlug;
+    if (this.adoptDrain(result, resolvedId)) {
+      this.loadTarget = resolvedId;
+      if (this.projectFilter === projectIdOrSlug) {
+        this.projectFilter = resolvedId;
+      }
+    }
   }
 
   /**
@@ -587,6 +629,7 @@ export class AgentGraphPage extends LitElement {
     }
     if (target === '' && this.cappedAll) {
       const kept = this.cappedAll;
+      this.loadTarget = '';
       this.adopt(
         Array.from(kept.members.values()),
         '',
@@ -664,14 +707,33 @@ export class AgentGraphPage extends LitElement {
     return parsed.query;
   }
 
-  private resolveLoadScope(scope: string): string {
-    if (!scope) return '';
-    for (const a of [...this.agents, ...stateManager.getAgents()]) {
-      if (a.projectId === scope || a.projectSlug === scope || a.project === scope) {
-        return a.projectId;
+  /**
+   * Single helper that decides the load scope from a query and reconciles
+   * what the page has loaded (or is loading) against that normalised target.
+   * Called from connect, commit, and clear.
+   */
+  private syncLoadScopeForQuery(
+    query: Query | null,
+    opts?: { initial?: boolean; fallbackProjectId?: string }
+  ): void {
+    const target = resolveProjectLoadTarget(
+      query,
+      [...this.agents, ...stateManager.getAgents()],
+      stateManager.getProjects(),
+      opts?.fallbackProjectId
+    );
+    this.projectFilter = target;
+    if (opts?.initial) {
+      if (stateManager.isAgentSetComplete('compact')) {
+        this.adoptHeldSet();
+      } else {
+        void this.load(target, false);
       }
+      return;
     }
-    return '';
+    if (target !== this.loadTarget) {
+      this.applyProjectFilter(target);
+    }
   }
 
   private onFilterInput(e: CustomEvent<FilterInputDetail>): void {
@@ -692,12 +754,7 @@ export class AgentGraphPage extends LitElement {
     }
     params.delete('project');
     replaceSearch(params);
-
-    const nextScope = extractSingleProjectScope(e.detail.query) ?? '';
-    this.projectFilter = nextScope;
-    if (this.memberScope !== null && this.memberScope !== '' && this.memberScope !== nextScope) {
-      this.applyProjectFilter(this.resolveLoadScope(nextScope));
-    }
+    this.syncLoadScopeForQuery(e.detail.query);
   }
 
   private onClearFilter(): void {
@@ -708,10 +765,7 @@ export class AgentGraphPage extends LitElement {
     params.delete('q');
     params.delete('project');
     replaceSearch(params);
-    this.projectFilter = '';
-    if (this.memberScope !== null && this.memberScope !== '') {
-      this.applyProjectFilter('');
-    }
+    this.syncLoadScopeForQuery(null);
   }
 
   /** Keeps the URL's ?dir= param in sync with the graph orientation toggle. */

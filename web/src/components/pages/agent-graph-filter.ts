@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import type { Agent } from '../../shared/types.js';
+import type { Agent, Project } from '../../shared/types.js';
 import { parentIdOf } from '../../shared/lineage.js';
 import {
   match,
@@ -218,6 +218,46 @@ export function extractSingleProjectScope(q: Query | null): string | null {
   return found;
 }
 
+const SLUG_OR_ID_RE = /^[a-z0-9][a-z0-9_-]*$/;
+
+/**
+ * Resolves the single positive `project:` term of `query` (or an optional
+ * fallback project ID) to a canonical load target:
+ * - matches ID, slug, or display name (case-insensitively for slug/name)
+ *   against `knownProjects` and `knownAgents` to return the canonical `projectId`;
+ * - if no loaded project/agent matches yet, falls back to the raw value only
+ *   when it is lowercase slug/ID-shaped (which the hub's `?projectId=` resolves
+ *   server-side); otherwise returns `''` (unscoped) so display names never hit
+ *   the hub's impossible-UUID empty response.
+ */
+export function resolveProjectLoadTarget(
+  q: Query | null,
+  knownAgents: readonly Agent[],
+  knownProjects: readonly Project[],
+  fallbackId = ''
+): string {
+  const raw = extractSingleProjectScope(q) ?? (fallbackId || null);
+  if (!raw) return '';
+  const lower = raw.toLowerCase();
+
+  for (const p of knownProjects) {
+    if (p.id === raw || p.slug?.toLowerCase() === lower || p.name.toLowerCase() === lower) {
+      return p.id;
+    }
+  }
+  for (const a of knownAgents) {
+    if (
+      a.projectId === raw ||
+      a.projectSlug?.toLowerCase() === lower ||
+      a.project?.toLowerCase() === lower
+    ) {
+      return a.projectId;
+    }
+  }
+
+  return SLUG_OR_ID_RE.test(raw) ? raw : '';
+}
+
 /**
  * Formats a `project:<value>` term, quoting the value when required by the
  * filter query grammar.
@@ -235,11 +275,17 @@ export function formatProjectFilterTerm(value: string): string {
 }
 
 /**
- * Migrates a legacy `?project=<id>` URL parameter into `?q=project:<id>`.
- * If `?q=` is already present alongside `?project=`, prepends the project term
- * unless `?q=` already contains a `project:` term.
+ * Migrates a legacy `?project=<id>` URL parameter into `?q=project:<slug|id>`.
+ * Uses the project's slug when it is already known in `knownProjects` or
+ * `knownAgents`, falling back to the raw parameter value. If `?q=` is already
+ * present alongside `?project=`, prepends the project term unless `?q=`
+ * already contains a `project:` term.
  */
-export function migrateProjectParamToQuery(params: URLSearchParams): {
+export function migrateProjectParamToQuery(
+  params: URLSearchParams,
+  knownAgents: readonly Agent[] = [],
+  knownProjects: readonly Project[] = []
+): {
   queryText: string;
   migrated: boolean;
   initialProject: string;
@@ -249,7 +295,22 @@ export function migrateProjectParamToQuery(params: URLSearchParams): {
   if (!legacyProject) {
     return { queryText: existingQ, migrated: false, initialProject: '' };
   }
-  const term = formatProjectFilterTerm(legacyProject);
+  let displayVal = legacyProject;
+  for (const p of knownProjects) {
+    if (p.id === legacyProject && p.slug) {
+      displayVal = p.slug;
+      break;
+    }
+  }
+  if (displayVal === legacyProject) {
+    for (const a of knownAgents) {
+      if (a.projectId === legacyProject && a.projectSlug) {
+        displayVal = a.projectSlug;
+        break;
+      }
+    }
+  }
+  const term = formatProjectFilterTerm(displayVal);
   const trimmedQ = existingQ.trim();
   const hasProjectTerm = /(?:^|\s)-?project:/i.test(trimmedQ);
   const queryText = !trimmedQ ? term : hasProjectTerm ? trimmedQ : `${term} ${trimmedQ}`;
