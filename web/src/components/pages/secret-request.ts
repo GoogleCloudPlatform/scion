@@ -36,15 +36,14 @@ import { stateManager } from '../../client/state.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, agentSecretsEnabled } from '../../utils/feature-flags.js';
 import {
   fetchSecretRequestCard,
-  patchSecretRequests,
   type SecretRequestCardResponse,
   type SecretRequestReplacedBy,
-  type SecretRequestUpdatedEvent,
 } from '../../client/secret-requests.js';
-import { subscribeMessageActionUpdated } from '../shared/chat/message-action-state.js';
 import type {
   SecretRequestDismissedDetail,
   SecretRequestFulfilledDetail,
+  SecretRequestRefreshedDetail,
+  SecretRequestUpdatedDetail,
 } from '../shared/chat/chat-secret-request.js';
 import '../shared/chat/chat-secret-request.js';
 import './not-found.js';
@@ -74,7 +73,6 @@ export class ScionPageSecretRequest extends LitElement {
   private card: SecretRequestCardResponse | null = null;
 
   private abortController: AbortController | null = null;
-  private unsubscribeLive: (() => void) | null = null;
 
   private readonly onFlagsChanged = (): void => {
     this.requestUpdate();
@@ -214,13 +212,6 @@ export class ScionPageSecretRequest extends LitElement {
     super.connectedCallback();
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
     this.resolvedMessageId = this.extractMessageId();
-    this.unsubscribeLive = subscribeMessageActionUpdated<SecretRequestUpdatedEvent>(
-      'secret_request',
-      (payload) => this.handleLiveUpdate(payload),
-      {
-        messageId: () => this.resolvedMessageId,
-      }
-    );
     if (agentSecretsEnabled()) {
       void this.loadCard();
     } else {
@@ -233,10 +224,6 @@ export class ScionPageSecretRequest extends LitElement {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
     this.abortController?.abort();
     this.abortController = null;
-    if (this.unsubscribeLive) {
-      this.unsubscribeLive();
-      this.unsubscribeLive = null;
-    }
   }
 
   protected override updated(changed: PropertyValues): void {
@@ -307,19 +294,18 @@ export class ScionPageSecretRequest extends LitElement {
     );
   }
 
-  private handleLiveUpdate(payload: SecretRequestUpdatedEvent): void {
-    if (!this.card || !payload.secret_request) return;
-    const patched = patchSecretRequests(this.card.rows, [payload.secret_request]);
-    if (patched !== this.card.rows) {
-      this.card = { ...this.card, rows: patched };
-    }
-  }
-
   private handleCardRowsChanged(
-    e: CustomEvent<SecretRequestFulfilledDetail | SecretRequestDismissedDetail>
+    e: CustomEvent<
+      SecretRequestFulfilledDetail | SecretRequestDismissedDetail | SecretRequestUpdatedDetail
+    >
   ): void {
     if (!this.card || !e.detail?.rows) return;
     this.card = { ...this.card, rows: e.detail.rows };
+  }
+
+  private handleCardRefreshed(e: CustomEvent<SecretRequestRefreshedDetail>): void {
+    if (!e.detail?.card) return;
+    this.card = e.detail.card;
   }
 
   private handleJump(e: CustomEvent<{ messageId: string }>): void {
@@ -456,6 +442,10 @@ export class ScionPageSecretRequest extends LitElement {
             this.handleCardRowsChanged(e)}
           @secret-request-dismissed=${(e: CustomEvent<SecretRequestDismissedDetail>): void =>
             this.handleCardRowsChanged(e)}
+          @secret-request-updated=${(e: CustomEvent<SecretRequestUpdatedDetail>): void =>
+            this.handleCardRowsChanged(e)}
+          @secret-request-refreshed=${(e: CustomEvent<SecretRequestRefreshedDetail>): void =>
+            this.handleCardRefreshed(e)}
           @secret-request-jump=${(e: CustomEvent<{ messageId: string }>): void =>
             this.handleJump(e)}
         ></scion-chat-secret-request>

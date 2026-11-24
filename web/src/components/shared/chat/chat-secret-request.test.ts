@@ -183,7 +183,7 @@ describe('scion-chat-secret-request', () => {
       'Stored as a secret readable only by agent builder-1 in project my-project.'
     );
 
-    // Pending row: key label, version, description, masked textarea + show/hide toggle
+    // Pending row: key label, version, description, textarea + show/hide toggle
     const pendingRow = shadow.querySelector('[data-row-id="r-pending"]')!;
     expect(pendingRow.querySelector('.key-label')?.textContent).toBe('KEY_PENDING');
     expect(pendingRow.querySelector('.version')?.textContent).toBe('v1');
@@ -191,12 +191,11 @@ describe('scion-chat-secret-request', () => {
       'A GitHub PAT with repo scope'
     );
     const textarea = pendingRow.querySelector('textarea') as HTMLTextAreaElement;
-    expect(textarea.classList.contains('masked')).toBe(true);
+    expect(textarea).not.toBeNull();
     const toggleBtn = pendingRow.querySelector('.toggle-visibility') as HTMLButtonElement;
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
     toggleBtn.click();
     await el.updateComplete;
-    expect(textarea.classList.contains('masked')).toBe(false);
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
     // Submitting row
@@ -486,7 +485,7 @@ describe('scion-chat-secret-request', () => {
     expect(afterReconnect.value).toBe('');
   });
 
-  it('dismisses whole card (omits rowIds) with optional reason', async () => {
+  it('dismisses whole card (sends explicit rowIds) with optional reason', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       jsonResponse({
         dismissed: [
@@ -549,7 +548,7 @@ describe('scion-chat-secret-request', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/v1/secret-requests/msg-1/dismiss');
     const sent = JSON.parse(init.body as string) as Record<string, unknown>;
-    expect(sent.rowIds).toBeUndefined();
+    expect(sent.rowIds).toEqual(['r-1', 'r-2']);
     expect(sent.reason).toBe('not needed');
     expect(sent.surface).toBe('standalone_page');
     expect(typeof sent.idempotencyKey).toBe('string');
@@ -734,5 +733,416 @@ describe('scion-chat-secret-request', () => {
 
     expect(el.shadowRoot!.querySelector('textarea')).toBeNull();
     expect(el.shadowRoot!.textContent).toContain('found in cache');
+  });
+
+  it('defaults canRespond to false until explicitly enabled', async () => {
+    const el = document.createElement('scion-chat-secret-request') as ScionChatSecretRequest;
+    el.messageId = 'msg-1';
+    el.rows = [makeRow()];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(el.canRespond).toBe(false);
+    const textarea = el.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+    expect(textarea.disabled).toBe(true);
+    expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
+    expect(el.shadowRoot!.querySelector('.dismiss-btn')?.hasAttribute('disabled')).toBe(true);
+    expect(el.shadowRoot!.querySelector('.status-alert.blocked')).not.toBeNull();
+  });
+
+  it('keeps textarea mounted while typing on focus and removes plaintext from DOM when masked on blur', async () => {
+    const el = await mountCard();
+    const initialTextarea = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    expect(initialTextarea).not.toBeNull();
+
+    // Focus and type several keystrokes — textarea stays mounted throughout
+    initialTextarea.dispatchEvent(new Event('focus'));
+    await el.updateComplete;
+    for (const chunk of ['ghp_', 'ghp_super_', 'ghp_super_secret\nline2']) {
+      initialTextarea.value = chunk;
+      initialTextarea.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('textarea[data-key="GITHUB_TOKEN"]')).toBe(
+        initialTextarea
+      );
+    }
+
+    // Blur switches to read-only masked placeholder with NO plaintext in DOM
+    initialTextarea.dispatchEvent(new Event('blur'));
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelector('textarea[data-key="GITHUB_TOKEN"]')).toBeNull();
+    const masked = el.shadowRoot!.querySelector('[data-testid="secret-masked"]');
+    expect(masked).not.toBeNull();
+    expect(masked?.textContent?.replace(/\s+/g, ' ').trim()).toContain('2 lines');
+    expect(el.shadowRoot!.textContent).not.toContain('ghp_super_secret');
+    expect(el.shadowRoot!.innerHTML).not.toContain('ghp_super_secret');
+
+    // Toggle Show brings textarea back with value; toggle Hide removes plaintext again
+    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    toggleBtn.click();
+    await el.updateComplete;
+    const revealedTextarea = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    expect(revealedTextarea).not.toBeNull();
+    expect(revealedTextarea.value).toBe('ghp_super_secret\nline2');
+
+    toggleBtn.click();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('textarea[data-key="GITHUB_TOKEN"]')).toBeNull();
+    expect(el.shadowRoot!.textContent).not.toContain('ghp_super_secret');
+    expect(el.shadowRoot!.innerHTML).not.toContain('ghp_super_secret');
+  });
+
+  it('clears form values on pagehide (bfcache protection)', async () => {
+    const el = await mountCard();
+    const input = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    input.dispatchEvent(new Event('focus'));
+    input.value = 'bfcache-secret';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    window.dispatchEvent(new Event('pagehide'));
+    await el.updateComplete;
+
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    const after = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    expect(after.value).toBe('');
+    expect(el.shadowRoot!.textContent).not.toContain('bfcache-secret');
+    expect(el.shadowRoot!.innerHTML).not.toContain('bfcache-secret');
+  });
+
+  it('wires submit once (type=button) and sends a single POST per click', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        rows: [
+          makeRow({
+            rowId: 'row-1',
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-22T23:55:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+        ],
+        responseMessageId: 'resp-single',
+        replayed: false,
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard({ surface: 'native' });
+    const submitBtn = el.shadowRoot!.querySelector('.submit-btn') as HTMLElement;
+    expect(submitBtn.getAttribute('type')).toBe('button');
+
+    const input = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    input.value = 'tok-once';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    submitBtn.click();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as { surface: string };
+    expect(sent.surface).toBe('native');
+  });
+
+  it('rejects values exceeding 64 KiB UTF-8 bytes client-side without calling fetch', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard();
+    const input = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    // 22,000 3-byte UTF-8 characters = 66,000 bytes > 65,536 (even though .length < 65,536)
+    input.value = '€'.repeat(22_000);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await el.updateComplete;
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    const alert = el.shadowRoot!.querySelector('.status-alert.error');
+    expect(alert?.textContent).toContain('64 KiB');
+  });
+
+  it('refetches the card on 400 with details.field === "values"', async () => {
+    const updatedRow = makeRow({
+      rowId: 'row-1',
+      status: 'withdrawn',
+      withdrawn: {
+        at: '2026-11-22T23:58:00Z',
+        reason: 'stale card',
+        by: 'agent',
+        byName: 'builder-1',
+      },
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: 'validation_error',
+              message: 'values must contain exactly the 0 pending key(s) on this card',
+              details: { field: 'values' },
+            },
+          },
+          400
+        )
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          messageId: 'msg-1',
+          projectId: 'proj-1',
+          agentId: 'agent-1',
+          agentName: 'builder-1',
+          canRespond: false,
+          reason: 'all secret requests on this card are closed',
+          rows: [updatedRow],
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard();
+    let refreshedEventFired = false;
+    el.addEventListener('secret-request-refreshed', () => {
+      refreshedEventFired = true;
+    });
+
+    const input = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    input.value = 'tok-stale';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(refreshedEventFired).toBe(true);
+    });
+    await el.updateComplete;
+
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/secret-requests/msg-1');
+    expect(el.shadowRoot!.querySelector('[data-row-id="row-1"]')?.getAttribute('data-status')).toBe(
+      'withdrawn'
+    );
+  });
+
+  it('reuses fulfill idempotencyKey on 503 and network retry, and mints a new key after edit or 409', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: 'unavailable', message: 'backend down' } }, 503)
+      )
+      .mockRejectedValueOnce(new TypeError('network down'))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: 'submitting',
+              message: 'busy',
+            },
+          },
+          409
+        )
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: 'unavailable', message: 'retry after edit' } }, 503)
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          rows: [
+            makeRow({
+              rowId: 'row-1',
+              status: 'fulfilled',
+              fulfilled: {
+                at: '2026-11-22T23:59:00Z',
+                byUserId: 'user-1',
+                byName: 'Me',
+                surface: 'native',
+              },
+            }),
+          ],
+          responseMessageId: 'resp-ok',
+          replayed: false,
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard();
+    const input = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    input.dispatchEvent(new Event('focus'));
+    input.value = 'tok-1';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    const getSentKey = (callIdx: number): string => {
+      const [, init] = fetchMock.mock.calls[callIdx] as [string, RequestInit];
+      return (JSON.parse(init.body as string) as { idempotencyKey: string }).idempotencyKey;
+    };
+
+    // 1. Initial submit -> 503
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
+        'backend down'
+      );
+    });
+    await el.updateComplete;
+    const key1 = getSentKey(0);
+
+    // 2. Retry same value -> network error -> reuses key1
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
+        'Could not reach the server'
+      );
+    });
+    await el.updateComplete;
+    expect(getSentKey(1)).toBe(key1);
+
+    // 3. Retry after network error -> 409 submitting -> still reuses key1, then clears it
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
+        'Another submission is currently in progress'
+      );
+    });
+    await el.updateComplete;
+    expect(getSentKey(2)).toBe(key1);
+
+    // 4. Retry after 409 (without editing) -> mints a new key2 (and fails with 503)
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
+        'retry after edit'
+      );
+    });
+    await el.updateComplete;
+    const key2 = getSentKey(3);
+    expect(key2).not.toBe(key1);
+
+    // 5. Edit value -> mints a new key3
+    const textareaAfter = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    textareaAfter.value = 'tok-2';
+    textareaAfter.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(5);
+      expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    await el.updateComplete;
+    const key3 = getSentKey(4);
+    expect(key3).not.toBe(key2);
+  });
+
+  it('clears form values and displays reason on 403 refusal', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(
+          { error: { code: 'forbidden', message: 'you need agent.attach permission' } },
+          403
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard();
+    const input = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    input.value = 'secret-denied';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.querySelector('.status-alert.blocked')).not.toBeNull();
+    });
+    await el.updateComplete;
+
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    expect(el.shadowRoot!.querySelector('.status-alert.blocked')?.textContent).toContain(
+      'you need agent.attach permission'
+    );
+    const textareaAfter = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    expect(textareaAfter.value).toBe('');
+    expect(textareaAfter.disabled).toBe(true);
+  });
+
+  it('applies full secretRequest view from 409 conflict details (applyConflictDetails)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(
+        {
+          error: {
+            code: 'withdrawn',
+            message: 'conflict',
+            details: {
+              rowId: 'row-1',
+              key: 'GITHUB_TOKEN',
+              secretRequest: makeRow({
+                rowId: 'row-1',
+                status: 'withdrawn',
+                withdrawn: {
+                  at: '2026-11-22T23:57:00Z',
+                  reason: 'agent deleted',
+                  by: 'hub',
+                },
+              }),
+            },
+          },
+        },
+        409
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard();
+    const input = el.shadowRoot!.querySelector(
+      'textarea[data-key="GITHUB_TOKEN"]'
+    ) as HTMLTextAreaElement;
+    input.value = 'tok-123';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.textContent).toContain('agent deleted');
+    });
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.textContent).toContain('the hub');
+    expect(el.shadowRoot!.querySelector('[data-row-id="row-1"]')?.getAttribute('data-status')).toBe(
+      'withdrawn'
+    );
   });
 });

@@ -37,13 +37,17 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, agentSecretsEnabled } from '../../../utils/feature-flags.js';
 import {
+  MAX_SECRET_REQUEST_VALUE_BYTES,
   dismissSecretRequest,
+  fetchSecretRequestCard,
   fulfillSecretRequest,
   generateSecretRequestIdempotencyKey,
   isPendingSecretRequest,
   isSubmittingSecretRequest,
   mapSecretRequestConflictMessage,
   newerSecretRequestView,
+  utf8ByteLength,
+  type SecretRequestCardResponse,
   type SecretRequestConflictDetails,
   type SecretRequestSurface,
   type SecretRequestUpdatedEvent,
@@ -69,6 +73,16 @@ export interface SecretRequestDismissedDetail {
   rows: SecretRequestView[];
   responseMessageId: string;
   replayed: boolean;
+}
+
+export interface SecretRequestUpdatedDetail {
+  messageId: string;
+  rows: SecretRequestView[];
+}
+
+export interface SecretRequestRefreshedDetail {
+  messageId: string;
+  card: SecretRequestCardResponse;
 }
 
 @customElement('scion-chat-secret-request')
@@ -112,7 +126,7 @@ export class ScionChatSecretRequest extends LitElement {
 
   /** Whether the viewer may fulfill or dismiss pending rows on this card. */
   @property({ type: Boolean })
-  canRespond = true;
+  canRespond = false;
 
   /** Explanation shown when `canRespond` is false. */
   @property({ type: String })
@@ -145,6 +159,10 @@ export class ScionChatSecretRequest extends LitElement {
   @state()
   private revealedRows = new Set<string>();
 
+  /** Transient UI-only focus flag keeping the textarea mounted while typing (keyed by rowId). */
+  @state()
+  private editingRows = new Set<string>();
+
   /** Reactive counter bumped when in-memory form values change, without storing values in @state. */
   @state()
   private formRevision = 0;
@@ -164,8 +182,16 @@ export class ScionChatSecretRequest extends LitElement {
   /** Signature of the dismiss attempt (`rowIds` + `reason`) bound to `pendingDismissIdempotencyKey`. */
   private pendingDismissAttemptSignature = '';
 
+  /** AbortController for stale-card refetch on 400 values mismatch. */
+  private refetchAbort: AbortController | null = null;
+
   private readonly onFlagsChanged = (): void => {
     this.requestUpdate();
+  };
+
+  /** Clears ephemeral values on pagehide so bfcache navigation cannot restore secrets. */
+  private readonly onPageHide = (): void => {
+    this.clearFormValues();
   };
 
   static override styles = css`
@@ -293,9 +319,24 @@ export class ScionChatSecretRequest extends LitElement {
       line-height: 1.4;
     }
 
-    .secret-textarea.masked {
-      -webkit-text-security: disc;
-      text-security: disc;
+    .secret-masked {
+      flex: 1 1 auto;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-height: 2.25rem;
+      box-sizing: border-box;
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius);
+      background: var(--scion-surface);
+      color: var(--scion-text-muted);
+      font-size: var(--chat-fs-sm, 0.875rem);
+    }
+
+    .secret-masked sl-icon {
+      flex-shrink: 0;
     }
 
     .secret-textarea:focus {
@@ -480,16 +521,22 @@ export class ScionChatSecretRequest extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
+    window.addEventListener('pagehide', this.onPageHide);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
+    window.removeEventListener('pagehide', this.onPageHide);
+    this.refetchAbort?.abort();
+    this.refetchAbort = null;
     this.clearFormValues();
   }
 
   protected override willUpdate(changed: PropertyValues): void {
     if (changed.has('messageId')) {
+      this.refetchAbort?.abort();
+      this.refetchAbort = null;
       this.clearFormValues();
       this.localRows = new Map();
       this.errorMessage = '';
@@ -536,10 +583,11 @@ export class ScionChatSecretRequest extends LitElement {
     return this.agentName || this.views[0]?.agentName || 'this agent';
   }
 
-  /** Clears all ephemeral secret values and visibility toggles from memory. */
+  /** Clears all ephemeral secret values, focus flags, and visibility toggles from memory. */
   clearFormValues(): void {
     this.formValues.clear();
     this.revealedRows = new Set();
+    this.editingRows = new Set();
     this.pendingFulfillIdempotencyKey = '';
     this.formRevision++;
   }
@@ -563,13 +611,23 @@ export class ScionChatSecretRequest extends LitElement {
         this.revealedRows = nextRevealed;
       }
     }
+    if (this.editingRows.size > 0) {
+      const nextEditing = new Set<string>();
+      for (const rowId of this.editingRows) {
+        if (pendingIds.has(rowId)) nextEditing.add(rowId);
+        else changed = true;
+      }
+      if (nextEditing.size !== this.editingRows.size) {
+        this.editingRows = nextEditing;
+      }
+    }
     if (changed) {
       this.formRevision++;
     }
   }
 
-  private applyRowUpdates(incoming: readonly SecretRequestView[]): void {
-    if (incoming.length === 0) return;
+  private applyRowUpdates(incoming: readonly SecretRequestView[]): boolean {
+    if (incoming.length === 0) return false;
     const next = new Map(this.localRows);
     let changed = false;
     for (const upd of incoming) {
@@ -585,13 +643,39 @@ export class ScionChatSecretRequest extends LitElement {
       this.pruneNonPendingFormValues();
       this.actionState.reconcileOpenDismissDialog();
     }
+    return changed;
   }
 
   private handleLiveUpdate(payload: SecretRequestUpdatedEvent): void {
     const view = payload.secret_request;
     if (!view || !view.rowId) return;
     if (this.messageId && view.messageId && view.messageId !== this.messageId) return;
-    this.applyRowUpdates([view]);
+    if (this.applyRowUpdates([view])) {
+      this.dispatchEvent(
+        new CustomEvent<SecretRequestUpdatedDetail>('secret-request-updated', {
+          detail: {
+            messageId: this.messageId,
+            rows: this.views,
+          },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    }
+  }
+
+  private onValueFocus(rowId: string): void {
+    if (this.editingRows.has(rowId)) return;
+    const next = new Set(this.editingRows);
+    next.add(rowId);
+    this.editingRows = next;
+  }
+
+  private onValueBlur(rowId: string): void {
+    if (!this.editingRows.has(rowId)) return;
+    const next = new Set(this.editingRows);
+    next.delete(rowId);
+    this.editingRows = next;
   }
 
   private onValueInput(rowId: string, e: Event): void {
@@ -610,13 +694,42 @@ export class ScionChatSecretRequest extends LitElement {
   }
 
   private toggleReveal(rowId: string): void {
-    const next = new Set(this.revealedRows);
-    if (next.has(rowId)) {
-      next.delete(rowId);
+    const nextRevealed = new Set(this.revealedRows);
+    if (nextRevealed.has(rowId)) {
+      nextRevealed.delete(rowId);
     } else {
-      next.add(rowId);
+      nextRevealed.add(rowId);
     }
-    this.revealedRows = next;
+    this.revealedRows = nextRevealed;
+    if (this.editingRows.has(rowId)) {
+      const nextEditing = new Set(this.editingRows);
+      nextEditing.delete(rowId);
+      this.editingRows = nextEditing;
+    }
+  }
+
+  private async refetchCard(): Promise<void> {
+    if (!this.messageId) return;
+    this.refetchAbort?.abort();
+    const controller = new AbortController();
+    this.refetchAbort = controller;
+    const res = await fetchSecretRequestCard(this.messageId, { signal: controller.signal });
+    if (controller.signal.aborted || !res.ok) return;
+    this.applyRowUpdates(res.card.rows);
+    if (!res.card.canRespond && res.card.reason) {
+      this.deniedReason = res.card.reason;
+      this.clearFormValues();
+    }
+    this.dispatchEvent(
+      new CustomEvent<SecretRequestRefreshedDetail>('secret-request-refreshed', {
+        detail: {
+          messageId: this.messageId,
+          card: res.card,
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private get allPendingValuesFilled(): boolean {
@@ -718,6 +831,10 @@ export class ScionChatSecretRequest extends LitElement {
         this.errorMessage = `Please enter a value for ${row.key}.`;
         return;
       }
+      if (utf8ByteLength(val) > MAX_SECRET_REQUEST_VALUE_BYTES) {
+        this.errorMessage = `Secret value for ${row.key} exceeds the 64 KiB limit.`;
+        return;
+      }
       values[row.key] = val;
     }
 
@@ -760,6 +877,13 @@ export class ScionChatSecretRequest extends LitElement {
       return;
     }
 
+    if (result.status === 400 && result.details?.field === 'values') {
+      this.pendingFulfillIdempotencyKey = '';
+      this.errorMessage = result.message;
+      void this.refetchCard();
+      return;
+    }
+
     if (result.status === 409) {
       this.pendingFulfillIdempotencyKey = '';
       this.applyConflictDetails(result.code, result.details);
@@ -786,10 +910,9 @@ export class ScionChatSecretRequest extends LitElement {
     const checked = pending.filter((r) => this.actionState.dismissCheckedIds.has(r.rowId));
     if (checked.length === 0) return;
 
-    const isWholeCard = checked.length === pending.length;
+    const rowIds = checked.map((r) => r.rowId);
     const reason = this.actionState.dismissReasonDraft.trim();
-    const targetRowIds = isWholeCard ? null : checked.map((r) => r.rowId).sort();
-    const attemptSignature = JSON.stringify({ rowIds: targetRowIds, reason });
+    const attemptSignature = JSON.stringify({ rowIds: [...rowIds].sort(), reason });
 
     if (
       !this.pendingDismissIdempotencyKey ||
@@ -803,7 +926,7 @@ export class ScionChatSecretRequest extends LitElement {
     this.errorMessage = '';
 
     const result = await dismissSecretRequest(this.messageId, {
-      ...(isWholeCard ? {} : { rowIds: checked.map((r) => r.rowId) }),
+      rowIds,
       ...(reason ? { reason } : {}),
       surface: this.surface,
       idempotencyKey: this.pendingDismissIdempotencyKey,
@@ -883,28 +1006,51 @@ export class ScionChatSecretRequest extends LitElement {
     if (isPendingSecretRequest(row)) {
       const value = this.formValues.get(row.rowId) ?? '';
       const revealed = this.revealedRows.has(row.rowId);
+      const editing = this.editingRows.has(row.rowId);
+      const isMasked = !revealed && !editing && value.length > 0;
+      const lineCount = value ? value.split('\n').length : 0;
       const disabled = !this.canRespondNow || this.submitting || this.actionState.dismissSubmitting;
       return html`
         <div class="input-wrap" data-form-rev=${this.formRevision}>
-          <textarea
-            class="secret-textarea${revealed ? '' : ' masked'}"
-            data-key=${row.key}
-            data-row-id=${row.rowId}
-            aria-label=${`Secret value for ${row.key}`}
-            placeholder=${row.secretType === 'file'
-              ? 'Paste secret file contents…'
-              : `Enter value for ${row.key}…`}
-            autocomplete="off"
-            autocorrect="off"
-            autocapitalize="off"
-            spellcheck="false"
-            data-lpignore="true"
-            data-1p-ignore="true"
-            rows=${row.secretType === 'file' ? 4 : 2}
-            ?disabled=${disabled}
-            .value=${value}
-            @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
-          ></textarea>
+          ${isMasked
+            ? html`
+                <div
+                  class="secret-masked"
+                  data-testid="secret-masked"
+                  data-key=${row.key}
+                  data-row-id=${row.rowId}
+                >
+                  <sl-icon name="lock" aria-hidden="true"></sl-icon>
+                  <span
+                    >&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull; (${lineCount}
+                    ${lineCount === 1 ? 'line' : 'lines'}, hidden — click Show to view or
+                    edit)</span
+                  >
+                </div>
+              `
+            : html`
+                <textarea
+                  class="secret-textarea"
+                  data-key=${row.key}
+                  data-row-id=${row.rowId}
+                  aria-label=${`Secret value for ${row.key}`}
+                  placeholder=${row.secretType === 'file'
+                    ? 'Paste secret file contents…'
+                    : `Enter value for ${row.key}…`}
+                  autocomplete="off"
+                  autocorrect="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                  rows=${row.secretType === 'file' ? 4 : 2}
+                  ?disabled=${disabled}
+                  .value=${value}
+                  @focus=${(): void => this.onValueFocus(row.rowId)}
+                  @blur=${(): void => this.onValueBlur(row.rowId)}
+                  @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
+                ></textarea>
+              `}
           <button
             type="button"
             class="toggle-visibility"
@@ -1156,12 +1302,12 @@ export class ScionChatSecretRequest extends LitElement {
                 </sl-button>
                 <sl-button
                   class="submit-btn"
-                  type="submit"
+                  type="button"
                   size="small"
                   variant="primary"
                   ?disabled=${submitDisabled}
                   ?loading=${this.submitting}
-                  @click=${(e: Event): void => void this.handleSubmit(e)}
+                  @click=${(): void => void this.handleSubmit()}
                 >
                   Submit
                 </sl-button>

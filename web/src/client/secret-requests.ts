@@ -133,14 +133,23 @@ export interface SecretRequestUpdatedEvent {
   projectId?: string;
 }
 
-/** Structured conflict details returned on HTTP 409 from fulfill or dismiss. */
+/** Structured conflict or validation details returned on HTTP 400/409 from fulfill or dismiss. */
 export interface SecretRequestConflictDetails {
   rowId?: string;
   key?: string;
   version?: number;
   status?: string;
+  field?: string;
   secretRequest?: SecretRequestView;
   replacedBy?: SecretRequestReplacedBy;
+}
+
+/** Maximum UTF-8 byte length for a single secret value (mirrors hub `maxSecretRequestValueBytes`). */
+export const MAX_SECRET_REQUEST_VALUE_BYTES = 64 * 1024;
+
+/** Returns the UTF-8 byte length of a string. */
+export function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
 }
 
 /** Outcome of `GET /api/v1/secret-requests/{messageId}`. */
