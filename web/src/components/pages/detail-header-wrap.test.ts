@@ -607,6 +607,13 @@ describe('project-scoped template and harness config breadcrumbs', () => {
 /**
  * Non-detail-header pages migrated to scion-breadcrumb keep no copy of
  * back-link or ad-hoc breadcrumb CSS.
+ *
+ * Documented exemptions (out of scope for ptone/scion#8281):
+ * - `components/terminal/terminal-pane.ts`: compact mode keeps icon-only
+ *   `.back-link.compact` toolbar buttons (design §4.7, §12 criterion 7).
+ * - `components/pages/secret-request.ts`: standalone `/secret-requests/:id`
+ *   page (ptone/scion#8747); standalone pages are out of scope for #8281
+ *   (design §2) and retain their own `.back-link` return link.
  */
 describe.each([
   ['agent-detail', './agent-detail.js', 'scion-page-agent-detail'],
