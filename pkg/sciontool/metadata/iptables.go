@@ -121,23 +121,42 @@ func ip6tablesCmd(args ...string) (*exec.Cmd, error) {
 // the GCE metadata server IP (169.254.169.254) to the local metadata sidecar.
 // This ensures tools that hardcode the metadata IP (e.g., curl) are intercepted.
 //
-// It also inserts a narrowly-scoped filter OUTPUT ACCEPT rule for the
-// post-REDIRECT loopback target (127.0.0.1:<port>). In Linux netfilter's
-// NF_INET_LOCAL_OUT hook, nat OUTPUT REDIRECT rewrites the destination to
-// 127.0.0.1:<port> and reroutes the skb to lo, but state->out remains the
-// pre-NAT egress interface (e.g., eth0) during filter OUTPUT evaluation. An
-// egress firewall that only allows `-o lo` and appends a catch-all OUTPUT
-// REJECT (such as init-firewall.sh) would otherwise reject the redirected
-// metadata traffic with icmp-admin-prohibited ("no route to host"). Inserting
-// the rule at position 1 allows only TCP traffic to 127.0.0.1:<port>, leaving
-// all non-allowlisted egress (including un-redirected traffic to 169.254.169.254)
-// rejected.
+// It first inserts a narrowly-scoped filter OUTPUT ACCEPT rule at position 1
+// for the post-REDIRECT loopback target (127.0.0.1:<port>), and then appends
+// the nat OUTPUT REDIRECT rule LAST as the final interception rule installed
+// overall. In Linux netfilter's NF_INET_LOCAL_OUT hook, nat OUTPUT REDIRECT
+// rewrites the destination to 127.0.0.1:<port> and reroutes the skb to lo, but
+// state->out remains the pre-NAT egress interface (e.g., eth0) during filter
+// OUTPUT evaluation. An egress firewall that only allows `-o lo` and appends a
+// catch-all OUTPUT REJECT (such as init-firewall.sh) would otherwise reject the
+// redirected metadata traffic with icmp-admin-prohibited ("no route to host").
+// Inserting the loopback ACCEPT rule first is harmless if setup fails before
+// REDIRECT, and keeping REDIRECT as the final rule ensures init's redirect
+// probe cannot pass until every filter and IPv6 rule is in place. If the nat
+// REDIRECT step fails, the loopback ACCEPT rule is rolled back.
 //
 // Requires NET_ADMIN capability.
 func setupIPTablesRedirect(port int) error {
 	portStr := strconv.Itoa(port)
 
-	// Add a DNAT rule: redirect TCP traffic to 169.254.169.254:80 to localhost:port
+	// Allow the redirected loopback flow in filter OUTPUT ahead of any
+	// catch-all REJECT/DROP rule installed by an egress firewall. Installed
+	// before nat OUTPUT REDIRECT so REDIRECT remains the final rule overall.
+	filterArgs := []string{
+		"-I", "OUTPUT", "1",
+		"-d", loopbackIP,
+		"-p", "tcp",
+		"--dport", portStr,
+		"-j", "ACCEPT",
+	}
+
+	output, err := runIPTables(filterArgs...)
+	if err != nil {
+		return fmt.Errorf("iptables redirect filter accept setup failed: %w (output: %s)", err, string(output))
+	}
+
+	// Add the DNAT rule LAST: redirect TCP traffic to 169.254.169.254:80 to
+	// localhost:port.
 	natArgs := []string{
 		"-t", "nat",
 		"-A", "OUTPUT",
@@ -148,37 +167,20 @@ func setupIPTablesRedirect(port int) error {
 		"--to-port", portStr,
 	}
 
-	output, err := runIPTables(natArgs...)
+	output, err = runIPTables(natArgs...)
 	if err != nil {
-		return fmt.Errorf("iptables redirect setup failed: %w (output: %s)", err, string(output))
-	}
-
-	// Allow the redirected loopback flow in filter OUTPUT ahead of any
-	// catch-all REJECT/DROP rule installed by an egress firewall.
-	filterArgs := []string{
-		"-I", "OUTPUT", "1",
-		"-d", loopbackIP,
-		"-p", "tcp",
-		"--dport", portStr,
-		"-j", "ACCEPT",
-	}
-
-	output, err = runIPTables(filterArgs...)
-	if err != nil {
-		// Roll back the nat rule so partial state is not left behind.
-		cleanupNatArgs := []string{
-			"-t", "nat",
+		// Roll back the filter ACCEPT rule so partial state is not left behind.
+		cleanupFilterArgs := []string{
 			"-D", "OUTPUT",
-			"-d", metadataIP,
+			"-d", loopbackIP,
 			"-p", "tcp",
-			"--dport", "80",
-			"-j", "REDIRECT",
-			"--to-port", portStr,
+			"--dport", portStr,
+			"-j", "ACCEPT",
 		}
-		if delOut, delErr := runIPTables(cleanupNatArgs...); delErr != nil {
-			log.Debug("iptables redirect rollback failed (non-fatal): %v (output: %s)", delErr, string(delOut))
+		if delOut, delErr := runIPTables(cleanupFilterArgs...); delErr != nil {
+			log.Debug("iptables filter accept rollback failed (non-fatal): %v (output: %s)", delErr, string(delOut))
 		}
-		return fmt.Errorf("iptables redirect filter accept setup failed: %w (output: %s)", err, string(output))
+		return fmt.Errorf("iptables redirect setup failed: %w (output: %s)", err, string(output))
 	}
 
 	log.Info("iptables: redirecting %s:80 -> %s:%s", metadataIP, loopbackIP, portStr)
