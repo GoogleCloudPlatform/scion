@@ -161,7 +161,9 @@ func TestHubRestartReservation_RefusesHubBinaryRuns(t *testing.T) {
 	}
 
 	// The scheduled auto update is held back too.
-	srv.autoApplyUpdate(ctx, "nightly", newParamRecordingExecutor())
+	if runID, outcome := srv.autoApplyUpdate(ctx, "nightly", "nightly-20261024", newParamRecordingExecutor()); runID != "" || outcome != AutoUpdateOutcomeSkippedInFlight {
+		t.Fatalf("autoApplyUpdate during restart = (%q, %q), want skipped:in_flight", runID, outcome)
+	}
 	for _, key := range []string{"update-binary", "rebuild-server"} {
 		if runs, _ := s.ListMaintenanceRuns(ctx, key, 5); len(runs) != 0 {
 			t.Fatalf("%s run created during a restart: %+v", key, runs)

@@ -55,8 +55,6 @@ type releaseCheckDeps struct {
 	buildTime time.Time
 	// check runs the release check (maintenance.CheckForReleaseUpdates).
 	check func(context.Context, maintenance.ReleaseCheckOptions) (*maintenance.ReleaseUpdateCheckResult, error)
-	// updateExecutor resolves the update-binary executor for auto updates.
-	updateExecutor func() (MaintenanceExecutor, error)
 }
 
 // releaseUpdateCheckHandler returns the handler of the
@@ -66,9 +64,6 @@ func (s *Server) releaseUpdateCheckHandler() func(ctx context.Context) {
 		deps := releaseCheckDeps{
 			running: version.Version,
 			check:   maintenance.CheckForReleaseUpdates,
-			updateExecutor: func() (MaintenanceExecutor, error) {
-				return s.resolveMaintenanceExecutor("update-binary")
-			},
 		}
 		if t, err := time.Parse(time.RFC3339, version.BuildTime); err == nil {
 			deps.buildTime = t
@@ -79,13 +74,10 @@ func (s *Server) releaseUpdateCheckHandler() func(ctx context.Context) {
 
 // runReleaseUpdateCheck checks the effective channel (release selection,
 // else configuration, else the running version's) for a newer release in
-// the release catalog. Hubs whose effective mode is git are skipped. Under
-// the notify policy an update is stored in system.update_available for the
-// admin UI. Under auto it starts an update-binary run for latest:<channel>
-// through the same executor and installer as the UI. A hub pinned to a
-// release (pin != latest) stays put and is only notified (design D7), and
-// when the installer is unsupported no run is created (nothing is
-// downloaded) and the update is only stored.
+// the release catalog and stores any available update in
+// system.update_available for the admin UI banner. Hubs whose effective
+// mode is git are skipped. Automatic installation is handled separately by
+// the release-auto-update job.
 func (s *Server) runReleaseUpdateCheck(ctx context.Context, deps releaseCheckDeps) {
 	log := logging.Subsystem("hub.maintenance.release-update-check")
 	mc := s.config.MaintenanceConfig
@@ -136,32 +128,7 @@ func (s *Server) runReleaseUpdateCheck(ctx context.Context, deps releaseCheckDep
 		"current", result.CurrentVersion, "latest", result.LatestVersion,
 		"channel", result.Channel, "class", result.Class)
 
-	switch mc.UpdatePolicy {
-	case "auto":
-		if pin != maintenance.PinLatest {
-			log.Info("Auto update skipped: the hub is pinned to a release; storing a notification instead",
-				"pin", pin)
-			s.storeUpdateAvailable(ctx, result)
-			return
-		}
-		if st := s.updateInstaller().Status(); !st.Supported {
-			log.Warn("Auto update skipped: this hub cannot install releases; storing a notification instead",
-				"installer", st.Strategy, "reason", st.Reason)
-			s.storeUpdateAvailable(ctx, result)
-			return
-		}
-		executor, err := deps.updateExecutor()
-		if err != nil {
-			log.Error("Failed to resolve update-binary executor", "error", err)
-			return
-		}
-		s.autoApplyUpdate(ctx, channel, executor)
-	case "notify":
-		s.storeUpdateAvailable(ctx, result)
-	default:
-		log.Warn("Unknown update policy, treating as notify", "policy", mc.UpdatePolicy)
-		s.storeUpdateAvailable(ctx, result)
-	}
+	s.storeUpdateAvailable(ctx, result)
 }
 
 // storeUpdateAvailable writes the update metadata to the system.update_available
@@ -184,31 +151,35 @@ func (s *Server) storeUpdateAvailable(ctx context.Context, result *maintenance.R
 		"channel", result.Channel)
 }
 
-// autoApplyUpdate creates an update-binary run for latest:<channel>, started
-// by system:auto-update, and runs executor on it with the same runner and
-// parameter validation as a run requested through the API.
-func (s *Server) autoApplyUpdate(ctx context.Context, channel string, executor MaintenanceExecutor) {
-	log := logging.Subsystem("hub.maintenance.release-update-check")
+// autoApplyUpdate creates an update-binary run for an explicit release tag,
+// started by system:auto-update, and runs executor on it with the same runner
+// and parameter validation as a run requested through the API. It never passes
+// confirm_downgrade. Returns the created run ID and outcome.
+func (s *Server) autoApplyUpdate(ctx context.Context, channel, targetTag string, executor MaintenanceExecutor) (runID string, outcome string) {
+	log := logging.Subsystem("hub.maintenance.release-auto-update")
 
 	// Check for an already-running update or rebuild (one exclusive group).
 	blocking, err := s.maintenanceGroupInFlight(ctx, "update-binary")
 	if err != nil {
 		log.Error("Failed to check for running update operations", "error", err)
-		return
+		return "", AutoUpdateOutcomeSkippedError
 	}
 	if blocking != nil {
 		log.Info("Update or rebuild already in flight, skipping auto update",
 			"run_id", blocking.ID, "operation_key", blocking.OperationKey, "status", blocking.Status)
-		return
+		return "", AutoUpdateOutcomeSkippedInFlight
 	}
 
 	params := map[string]string{
-		maintenance.ParamTargetVersion: maintenance.LatestTargetPrefix + channel,
+		maintenance.ParamTargetVersion: targetTag,
+	}
+	if channel != "" {
+		params[maintenance.ParamChannel] = channel
 	}
 	if v, ok := executor.(maintenance.ParamValidator); ok {
 		if err := v.ValidateParams(params); err != nil {
-			log.Error("Auto update refused", "target_version", params[maintenance.ParamTargetVersion], "error", err)
-			return
+			log.Error("Auto update refused", "target_version", targetTag, "channel", channel, "error", err)
+			return "", AutoUpdateOutcomeSkippedRefused
 		}
 	}
 
@@ -221,21 +192,22 @@ func (s *Server) autoApplyUpdate(ctx context.Context, channel string, executor M
 	}
 	if blocking, err := s.createExclusiveMaintenanceRun(ctx, run); errors.Is(err, errHubRestartPending) {
 		log.Info("Hub restart in progress, skipping auto update")
-		return
+		return "", AutoUpdateOutcomeSkippedInFlight
 	} else if err != nil {
 		log.Error("Failed to create run record", "error", err)
-		return
+		return "", AutoUpdateOutcomeSkippedError
 	} else if blocking != nil {
 		log.Info("Update or rebuild started meanwhile, skipping auto-apply",
 			"run_id", blocking.ID, "operation_key", blocking.OperationKey)
-		return
+		return "", AutoUpdateOutcomeSkippedInFlight
 	}
-	log.Info("Auto update started", "run_id", run.ID, "target_version", params[maintenance.ParamTargetVersion])
+	log.Info("Auto update started", "run_id", run.ID, "target_version", targetTag, "channel", channel)
 
 	// Same runner as executeOperation: the run is recorded as "restarting",
 	// with the pending update, before the hub restarts. update_available
 	// stays until boot reconciliation verifies the new version.
 	s.launchMaintenanceRun(run, executor, params)
+	return run.ID, AutoUpdateOutcomeStarted
 }
 
 // ClearUpdateAvailable removes the system.update_available hub setting.

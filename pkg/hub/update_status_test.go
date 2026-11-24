@@ -663,13 +663,10 @@ func releaseCheckResult(available bool) *maintenance.ReleaseUpdateCheckResult {
 }
 
 type releaseCheckProbe struct {
-	checks       int
-	gotOpts      maintenance.ReleaseCheckOptions
-	resolved     int
-	executor     *paramRecordingExecutor
-	checkResult  *maintenance.ReleaseUpdateCheckResult
-	checkErr     error
-	resolveError error
+	checks      int
+	gotOpts     maintenance.ReleaseCheckOptions
+	checkResult *maintenance.ReleaseUpdateCheckResult
+	checkErr    error
 }
 
 func (p *releaseCheckProbe) deps(running string) releaseCheckDeps {
@@ -680,10 +677,6 @@ func (p *releaseCheckProbe) deps(running string) releaseCheckDeps {
 			p.gotOpts = o
 			return p.checkResult, p.checkErr
 		},
-		updateExecutor: func() (MaintenanceExecutor, error) {
-			p.resolved++
-			return p.executor, p.resolveError
-		},
 	}
 }
 
@@ -693,10 +686,10 @@ func TestRunReleaseUpdateCheck(t *testing.T) {
 	t.Run("git mode is skipped", func(t *testing.T) {
 		srv, _ := newTestServerWithStore(t)
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "source", UpdatePolicy: "auto"}
-		p := &releaseCheckProbe{checkResult: releaseCheckResult(true), executor: newParamRecordingExecutor()}
+		p := &releaseCheckProbe{checkResult: releaseCheckResult(true)}
 		srv.runReleaseUpdateCheck(ctx, p.deps("nightly-20261020"))
-		if p.checks != 0 || p.resolved != 0 {
-			t.Fatalf("git mode checked=%d resolved=%d", p.checks, p.resolved)
+		if p.checks != 0 {
+			t.Fatalf("git mode checked=%d", p.checks)
 		}
 	})
 
@@ -725,67 +718,27 @@ func TestRunReleaseUpdateCheck(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "notify",
 			Installer: newTestInstaller(maintenance.StrategySymlink)}
-		p := &releaseCheckProbe{checkResult: releaseCheckResult(true), executor: newParamRecordingExecutor()}
+		p := &releaseCheckProbe{checkResult: releaseCheckResult(true)}
 		srv.runReleaseUpdateCheck(ctx, p.deps("nightly-20261020"))
 		if _, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable); err != nil {
 			t.Fatalf("update_available not stored: %v", err)
 		}
-		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 0 || p.resolved != 0 {
+		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 0 {
 			t.Fatalf("notify started a run: %+v", runs)
 		}
 	})
 
-	t.Run("auto creates a latest:<channel> run", func(t *testing.T) {
+	t.Run("auto policy only stores notification and creates no run", func(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
 			Installer: newTestInstaller(maintenance.StrategySymlink)}
-		exec := newParamRecordingExecutor()
-		p := &releaseCheckProbe{checkResult: releaseCheckResult(true), executor: exec}
+		p := &releaseCheckProbe{checkResult: releaseCheckResult(true)}
 		srv.runReleaseUpdateCheck(ctx, p.deps("nightly-20261020"))
-
-		select {
-		case <-exec.ran:
-		case <-time.After(5 * time.Second):
-			t.Fatal("auto update executor never ran")
-		}
-		exec.mu.Lock()
-		params := exec.params
-		exec.mu.Unlock()
-		if len(params) != 1 || params[maintenance.ParamTargetVersion] != "latest:nightly" {
-			t.Fatalf("params = %v, want only target_version=latest:nightly", params)
-		}
-		runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5)
-		if len(runs) != 1 || runs[0].StartedBy != "system:auto-update" {
-			t.Fatalf("runs = %+v", runs)
-		}
-	})
-
-	t.Run("auto with an unsupported installer starts no run", func(t *testing.T) {
-		srv, s := newTestServerWithStore(t)
-		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
-			Installer: newTestInstaller(maintenance.StrategyUnsupported)}
-		p := &releaseCheckProbe{checkResult: releaseCheckResult(true), executor: newParamRecordingExecutor()}
-		srv.runReleaseUpdateCheck(ctx, p.deps("nightly-20261020"))
-		if p.resolved != 0 {
-			t.Fatal("the update executor was resolved for an unsupported installer")
+		if _, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable); err != nil {
+			t.Fatalf("update_available not stored under auto policy: %v", err)
 		}
 		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 0 {
-			t.Fatalf("runs = %+v", runs)
-		}
-		if _, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable); err != nil {
-			t.Fatalf("the update must still be notified: %v", err)
-		}
-	})
-
-	t.Run("auto skips while an update is in flight", func(t *testing.T) {
-		srv, s := newTestServerWithStore(t)
-		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
-			Installer: newTestInstaller(maintenance.StrategySymlink)}
-		newRestartingRun(t, s)
-		p := &releaseCheckProbe{checkResult: releaseCheckResult(true), executor: newParamRecordingExecutor()}
-		srv.runReleaseUpdateCheck(ctx, p.deps("nightly-20261020"))
-		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 1 {
-			t.Fatalf("runs = %+v", runs)
+			t.Fatalf("release-update-check under auto policy must not start a run: %+v", runs)
 		}
 	})
 
@@ -793,27 +746,31 @@ func TestRunReleaseUpdateCheck(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
 			Installer: newTestInstaller(maintenance.StrategySymlink)}
-		p := &releaseCheckProbe{checkResult: releaseCheckResult(false), executor: newParamRecordingExecutor()}
+		p := &releaseCheckProbe{checkResult: releaseCheckResult(false)}
 		srv.runReleaseUpdateCheck(ctx, p.deps("nightly-20261023"))
-		if p.resolved != 0 {
-			t.Fatal("executor resolved with no update")
-		}
 		if _, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("update_available = %v", err)
 		}
 	})
 
-	t.Run("auto with the real executor validates latest:<channel>", func(t *testing.T) {
+	t.Run("autoApplyUpdate with the real executor validates explicit target and channel", func(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
 			ReleaseChannel: "nightly"}
-		// A channel the executor does not know is refused before a run is
-		// created.
 		exec := maintenance.NewBinaryUpdateExecutor(maintenance.BinaryUpdateOptions{
 			CurrentVersion: "nightly-20261020", Installer: newTestInstaller(maintenance.StrategySymlink),
 			DowngradeFloor: downgradeFloor,
 		})
-		srv.autoApplyUpdate(ctx, "beta", exec)
+		// Channel mismatch is refused before a run is created.
+		runID, outcome := srv.autoApplyUpdate(ctx, "beta", "nightly-20261023", exec)
+		if runID != "" || outcome != AutoUpdateOutcomeSkippedRefused {
+			t.Fatalf("mismatch got runID=%q outcome=%q, want refused", runID, outcome)
+		}
+		// Downgrade without confirm_downgrade is refused before a run is created.
+		runID, outcome = srv.autoApplyUpdate(ctx, "nightly", "nightly-20261019", exec)
+		if runID != "" || outcome != AutoUpdateOutcomeSkippedRefused {
+			t.Fatalf("downgrade got runID=%q outcome=%q, want refused", runID, outcome)
+		}
 		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 0 {
 			t.Fatalf("a refused auto update created a run: %+v", runs)
 		}
