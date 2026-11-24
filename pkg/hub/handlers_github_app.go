@@ -38,8 +38,8 @@ import (
 
 // Well-known secret keys for GitHub App credentials stored via the secrets system.
 const (
-	GitHubAppSecretPrivateKey    = "GITHUB_APP_PRIVATE_KEY"
-	GitHubAppSecretWebhookSecret = "GITHUB_APP_WEBHOOK_SECRET"
+	GitHubAppSecretPrivateKey    = config.SecretGitHubAppPrivateKey
+	GitHubAppSecretWebhookSecret = config.SecretGitHubAppWebhookSecret
 )
 
 // GitHubAppConfigResponse is the API response for GitHub App configuration.

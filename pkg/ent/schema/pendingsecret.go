@@ -49,7 +49,7 @@ func (PendingSecret) Fields() []ent.Field {
 			NotEmpty().
 			Immutable(),
 		field.Enum("secret_type").
-			Values("environment", "variable", "file").
+			Values("environment", "file").
 			Default("environment").
 			Immutable(),
 		field.String("target").

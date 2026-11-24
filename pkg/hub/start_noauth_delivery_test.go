@@ -116,7 +116,7 @@ func newNAFixture(t *testing.T, name string, noAuth bool, opts ldOptions, mutate
 	// Variable secrets at project and user scope.
 	for _, scope := range []string{store.ScopeProject, store.ScopeUser} {
 		k := "NA_VAR_SECRET_" + strings.ToUpper(scope)
-		naSetSecret(t, m, k, "na-canary-var-"+scope, store.SecretTypeVariable, scope, false)
+		naSetSecret(t, m, k, "na-canary-var-"+scope, store.SecretTypeOnDemand, scope, false)
 		add(k, "na-canary-var-"+scope)
 	}
 	// The owner's user-scope rows shared with progeny, too.
@@ -223,7 +223,7 @@ func TestStartNoAuth_OwnerScopeOnly(t *testing.T) {
 		t.Run(op.name, func(t *testing.T) {
 			m := newLDFixture(t, "na-owner-"+op.name, ldOptions{})
 			var canaries []naCanary
-			for _, typ := range []string{store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeVariable} {
+			for _, typ := range []string{store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand} {
 				k := "NA_OWNER_" + strings.ToUpper(typ)
 				v := "na-canary-owner-" + typ
 				naSetSecret(t, m, k, v, typ, store.ScopeUser, false)

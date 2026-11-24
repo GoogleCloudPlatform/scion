@@ -2067,7 +2067,7 @@ func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAnd
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:          "GEMINI_API_KEY",
 		Value:         hubCanaryKey,
-		SecretType:    store.SecretTypeVariable,
+		SecretType:    store.SecretTypeEnvironment,
 		Target:        "GEMINI_API_KEY",
 		InjectionMode: store.InjectionModeAsNeeded,
 		Scope:         store.ScopeHub,
@@ -2093,7 +2093,7 @@ func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAnd
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:          "GEMINI_API_KEY",
 		Value:         projBCanaryKey,
-		SecretType:    store.SecretTypeVariable,
+		SecretType:    store.SecretTypeEnvironment,
 		Target:        "GEMINI_API_KEY",
 		InjectionMode: store.InjectionModeAsNeeded,
 		Scope:         store.ScopeProject,
@@ -2106,7 +2106,7 @@ func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAnd
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      projSecKey,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeProject,
 		ScopeID:    projRestricted.ID,
@@ -2677,7 +2677,7 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "PROJ_INTERNAL_KEY",
 		Value:      hubFallbackCanary,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "PROJ_INTERNAL_KEY",
 		Scope:      store.ScopeHub,
 		ScopeID:    srv.hubID,
@@ -2801,7 +2801,7 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      mutatedKeyCanary,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeHub,
 		ScopeID:    srv.hubID,
@@ -3047,7 +3047,7 @@ func TestSystemOneInstances_Item7_EndpointPinForNamedSecretAndADC(t *testing.T) 
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      hubSecretCanary,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeHub,
 		ScopeID:    srv.hubID,
@@ -3464,7 +3464,7 @@ func TestSystemOneInstances_Item8_ProviderPinnedSecretNames(t *testing.T) {
 		_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 			Name:       seed.name,
 			Value:      seed.val,
-			SecretType: store.SecretTypeVariable,
+			SecretType: store.SecretTypeEnvironment,
 			Target:     seed.name,
 			Scope:      seed.scope,
 			ScopeID:    seed.scopeID,
@@ -3709,7 +3709,7 @@ func TestSystemOneInstances_Item9_OperatorConfiguredExtraSecretNames(t *testing.
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY_BILLING_B",
 		Value:      billingBCanary,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY_BILLING_B",
 		Scope:      store.ScopeHub,
 		ScopeID:    "test-hub-id",
@@ -3720,7 +3720,7 @@ func TestSystemOneInstances_Item9_OperatorConfiguredExtraSecretNames(t *testing.
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "TYPESAFE_EXTRA_KEY",
 		Value:      "CANARY_ITEM9_TYPESAFE_EXTRA",
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "TYPESAFE_EXTRA_KEY",
 		Scope:      store.ScopeHub,
 		ScopeID:    "test-hub-id",
@@ -4042,7 +4042,7 @@ func TestSystemOneInstances_N1_CreateDoesNotScanProjectSecrets(t *testing.T) {
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      hubKeyCanary,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeHub,
 		ScopeID:    srv.hubID,
@@ -4308,7 +4308,7 @@ func TestSystemOneInstances_L1_ProbeProjectRequiresSecretRead(t *testing.T) {
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      projKeyCanary,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeProject,
 		ScopeID:    projWithSecret.ID,
@@ -4319,7 +4319,7 @@ func TestSystemOneInstances_L1_ProbeProjectRequiresSecretRead(t *testing.T) {
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      hubKeyCanary,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeHub,
 		ScopeID:    srv.hubID,

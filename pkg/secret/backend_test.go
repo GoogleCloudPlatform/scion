@@ -829,7 +829,7 @@ func TestMaterialSelection_BackendParity(t *testing.T) {
 		ownMeta := seed("OWN_KEY", ScopeProject, "project-1", "own-value", TypeEnvironment, false, "")
 		seed("PROGENY_KEY", ScopeUser, "alice-1", "progeny-value", TypeEnvironment, true, "alice-1")
 		seed("FILE_KEY", ScopeProject, "project-1", "file-value", TypeFile, false, "")
-		seed("VAR_KEY", ScopeProject, "project-1", "var-value", TypeVariable, false, "")
+		seed("VAR_KEY", ScopeProject, "project-1", "var-value", TypeOnDemand, false, "")
 
 		opts := &ResolveOpts{
 			AgentAncestry: []string{"alice-1", "agent-a"},
@@ -847,7 +847,7 @@ func TestMaterialSelection_BackendParity(t *testing.T) {
 			{"OWN_KEY", "own-value", TypeEnvironment},
 			{"PROGENY_KEY", "progeny-value", TypeEnvironment},
 			{"FILE_KEY", "file-value", TypeFile},
-			{"VAR_KEY", "var-value", TypeVariable},
+			{"VAR_KEY", "var-value", TypeOnDemand},
 		} {
 			sv, ok := byName[want.name]
 			if !ok {

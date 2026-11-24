@@ -508,7 +508,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 			return nil, nil, nil, err
 		}
 		for _, m := range metas {
-			if m.SecretType == store.SecretTypeInternal {
+			if !secret.DeliverableType(m.SecretType) {
 				continue
 			}
 			// An agent without credentials: only the git token candidates
@@ -553,7 +553,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 		check := startOpts.AuthzCheck
 		for i := range progeny {
 			m := *secretMetaFromStore(&progeny[i])
-			if m.SecretType == store.SecretTypeInternal {
+			if !secret.DeliverableType(m.SecretType) {
 				continue
 			}
 			if !check(m) {
@@ -674,7 +674,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 	for _, sv := range resolved {
 		// applyTestAdminSecretScopes has dropped every withheld item; this
 		// keeps an unfetched one from ever being delivered.
-		if withheld(sv.Scope) {
+		if withheld(sv.Scope) || !secret.DeliverableType(sv.SecretType) {
 			continue
 		}
 		if (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") && secret.IsReservedEnvTarget(sv.Target) {

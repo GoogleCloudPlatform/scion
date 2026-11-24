@@ -58,7 +58,7 @@ func newHubSecretReadFixture(t *testing.T) *hubSecretReadFixture {
 	for _, sec := range []store.Secret{
 		{Key: hsrEnvAlways, SecretType: store.SecretTypeEnvironment, InjectionMode: store.InjectionModeAlways},
 		{Key: hsrEnvAsNeeded, SecretType: store.SecretTypeEnvironment, InjectionMode: store.InjectionModeAsNeeded},
-		{Key: hsrVariable, SecretType: store.SecretTypeVariable, InjectionMode: store.InjectionModeAlways},
+		{Key: hsrVariable, SecretType: store.SecretTypeOnDemand, InjectionMode: store.InjectionModeAlways},
 		{Key: hsrFile, SecretType: store.SecretTypeFile, Target: "/etc/hsr/file", InjectionMode: store.InjectionModeAlways},
 		{Key: hsrInternal, SecretType: store.SecretTypeInternal, InjectionMode: store.InjectionModeAlways},
 		{Key: hsrTelemetry, SecretType: store.SecretTypeFile, Target: "~/.scion/telemetry-gcp-credentials.json", InjectionMode: store.InjectionModeAlways},

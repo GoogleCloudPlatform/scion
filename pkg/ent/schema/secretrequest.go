@@ -67,7 +67,7 @@ func (SecretRequest) Fields() []ent.Field {
 			Default("").
 			Immutable(),
 		field.Enum("secret_type").
-			Values("environment", "file", "variable").
+			Values("environment", "file", "on_demand").
 			Default("environment").
 			Immutable(),
 		field.String("target").

@@ -48,14 +48,14 @@ func seedHubScopeDeliveryMix(t *testing.T, m *ldFixture) {
 	always, asNeeded := store.InjectionModeAlways, store.InjectionModeAsNeeded
 	set("HSD_HUB_ENV_ALWAYS", store.SecretTypeEnvironment, "HSD_HUB_ENV_ALWAYS", always, store.ScopeHub)
 	set("HSD_HUB_ENV_AS_NEEDED", store.SecretTypeEnvironment, "HSD_HUB_ENV_AS_NEEDED", asNeeded, store.ScopeHub)
-	set("HSD_HUB_VARIABLE", store.SecretTypeVariable, "HSD_HUB_VARIABLE", always, store.ScopeHub)
+	set("HSD_HUB_VARIABLE", store.SecretTypeOnDemand, "HSD_HUB_VARIABLE", always, store.ScopeHub)
 	set("HSD_HUB_FILE", store.SecretTypeFile, "/etc/hsd/hub-file", always, store.ScopeHub)
 	set("HSD_HUB_INTERNAL", store.SecretTypeInternal, "HSD_HUB_INTERNAL", always, store.ScopeHub)
 	set(hsdTelemetryName, store.SecretTypeFile, hsdTelemetryTarget, always, store.ScopeHub)
-	set("HSD_SHADOWED", store.SecretTypeVariable, "HSD_SHADOWED", always, store.ScopeHub)
-	set("HSD_SHADOWED", store.SecretTypeVariable, "HSD_SHADOWED", always, store.ScopeRuntimeBroker)
+	set("HSD_SHADOWED", store.SecretTypeOnDemand, "HSD_SHADOWED", always, store.ScopeHub)
+	set("HSD_SHADOWED", store.SecretTypeEnvironment, "HSD_SHADOWED", always, store.ScopeRuntimeBroker)
 	set("HSD_PROJECT_ENV", store.SecretTypeEnvironment, "HSD_PROJECT_ENV", always, store.ScopeProject)
-	set("HSD_PROJECT_VARIABLE", store.SecretTypeVariable, "HSD_PROJECT_VARIABLE", always, store.ScopeProject)
+	set("HSD_PROJECT_VARIABLE", store.SecretTypeFile, "/etc/hsd/project-var-file", always, store.ScopeProject)
 	set("HSD_PROJECT_FILE", store.SecretTypeFile, "/etc/hsd/project-file", always, store.ScopeProject)
 }
 

@@ -899,7 +899,7 @@ func TestWebhookIngress_RefusesNonInternalSecretRow(t *testing.T) {
 		target     string
 	}{
 		{secretType: store.SecretTypeEnvironment},
-		{secretType: store.SecretTypeVariable},
+		{secretType: store.SecretTypeOnDemand},
 		{secretType: store.SecretTypeFile, target: "/tmp/planted-secret"},
 	} {
 		require.NoError(t, f.store.UpdateSecret(ctx, &store.Secret{

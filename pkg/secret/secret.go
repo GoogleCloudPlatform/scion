@@ -78,8 +78,8 @@ func (e *PermissionError) Unwrap() error {
 // Secret type constants define how a secret is projected into the agent container.
 const (
 	TypeEnvironment = "environment" // Injected as environment variable (default)
-	TypeVariable    = "variable"    // Written to ~/.scion/secrets.json for programmatic access
 	TypeFile        = "file"        // Written to a file at the specified Target path
+	TypeOnDemand    = "on_demand"   // Never injected at start; read explicitly by agents via CLI/runtime API
 )
 
 // Scope constants define the visibility of a secret.

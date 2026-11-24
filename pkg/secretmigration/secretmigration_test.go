@@ -184,8 +184,8 @@ func TestMigratePluginSecrets_InlineSecretMigrated(t *testing.T) {
 	if in.Scope != store.ScopeHub || in.ScopeID != "test-hub" {
 		t.Errorf("secret written to scope %q/%q, want %q/%q", in.Scope, in.ScopeID, store.ScopeHub, "test-hub")
 	}
-	if in.SecretType != secret.TypeVariable {
-		t.Errorf("SecretType = %q, want %q", in.SecretType, secret.TypeVariable)
+	if in.SecretType != store.SecretTypeInternal {
+		t.Errorf("SecretType = %q, want %q", in.SecretType, store.SecretTypeInternal)
 	}
 	if !strings.Contains(in.Description, "settings.yaml") {
 		t.Errorf("Description = %q, want it to name the inline source", in.Description)

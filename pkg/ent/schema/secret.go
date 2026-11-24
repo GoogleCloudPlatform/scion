@@ -50,7 +50,7 @@ func (Secret) Fields() []ent.Field {
 		field.String("secret_ref").
 			Optional(),
 		field.Enum("secret_type").
-			Values("environment", "variable", "file", "internal").
+			Values("environment", "file", "on_demand", "internal").
 			Default("environment"),
 		field.String("target").
 			Optional(),

@@ -75,7 +75,7 @@ func TestProvisionCredentials_LimitedToSkillFetchKeys(t *testing.T) {
 	project := m.agent.ProjectID
 	m.secret(t, "GH_ACME__TOOLS", "repo-value", store.SecretTypeEnvironment, store.ScopeProject, project)
 	m.secret(t, "GH_ACME", "owner-value", store.SecretTypeFile, store.ScopeProject, project)
-	m.secret(t, "GITHUB_TOKEN", "default-value", store.SecretTypeVariable, store.ScopeProject, project)
+	m.secret(t, "GITHUB_TOKEN", "default-value", store.SecretTypeOnDemand, store.ScopeProject, project)
 	m.secret(t, "BETA_TOKEN", "ghp_namedvalue", store.SecretTypeEnvironment, store.ScopeProject, project)
 	// Outside the key set.
 	m.secret(t, "GH_BETA", "beta-owner-value", store.SecretTypeEnvironment, store.ScopeProject, project)

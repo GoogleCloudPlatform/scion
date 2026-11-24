@@ -55,7 +55,7 @@ func TestScopedSecretByKeyLifecycle(t *testing.T) {
 				Encoding:      "raw",
 				Description:   "scoped description",
 				InjectionMode: store.InjectionModeAlways,
-				Type:          store.SecretTypeVariable,
+				Type:          store.SecretTypeEnvironment,
 			})
 			if rec.Code != http.StatusOK {
 				t.Fatalf("PUT status = %d, body = %s", rec.Code, rec.Body.String())
@@ -96,7 +96,7 @@ func assertScopedSecretMetadata(t *testing.T, got *store.Secret, scope, scopeID 
 	if got.Key != "SCOPED_SECRET" || got.Scope != scope || got.ScopeID != scopeID {
 		t.Fatalf("secret identity = %+v", got)
 	}
-	if got.SecretType != store.SecretTypeVariable || got.Target != "SCOPED_SECRET" {
+	if got.SecretType != store.SecretTypeEnvironment || got.Target != "SCOPED_SECRET" {
 		t.Fatalf("secret type/target = %q/%q", got.SecretType, got.Target)
 	}
 	if got.Description != "scoped description" || got.InjectionMode != store.InjectionModeAlways {

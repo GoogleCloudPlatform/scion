@@ -100,7 +100,7 @@ func MigratePluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginNa
 		if _, _, err := sb.Set(ctx, &secret.SetSecretInput{
 			Name:          m.SecretKey,
 			Value:         val,
-			SecretType:    secret.TypeVariable,
+			SecretType:    store.SecretTypeInternal,
 			InjectionMode: "as_needed",
 			Scope:         store.ScopeHub,
 			ScopeID:       hubID,

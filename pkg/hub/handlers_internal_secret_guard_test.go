@@ -99,7 +99,7 @@ func TestInternalSecretGuard_HiddenAndRefusedAcrossScopes(t *testing.T) {
 		_, _, err := srv.secretBackend.Set(ctx, &secret.SetSecretInput{
 			Name:       sc.key,
 			Value:      "ok",
-			SecretType: store.SecretTypeVariable,
+			SecretType: store.SecretTypeEnvironment,
 			Target:     sc.key,
 			Scope:      sc.scope,
 			ScopeID:    sc.scopeID,

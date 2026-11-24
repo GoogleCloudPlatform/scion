@@ -172,7 +172,7 @@ const DefaultSecretType = SecretTypeEnvironment
 const (
 	SecretTypeEnvironment SecretType = "environment"
 	SecretTypeFile        SecretType = "file"
-	SecretTypeVariable    SecretType = "variable"
+	SecretTypeOnDemand    SecretType = "on_demand"
 )
 
 func (st SecretType) String() string {
@@ -182,7 +182,7 @@ func (st SecretType) String() string {
 // SecretTypeValidator is a validator for the "secret_type" field enum values. It is called by the builders before save.
 func SecretTypeValidator(st SecretType) error {
 	switch st {
-	case SecretTypeEnvironment, SecretTypeFile, SecretTypeVariable:
+	case SecretTypeEnvironment, SecretTypeFile, SecretTypeOnDemand:
 		return nil
 	default:
 		return fmt.Errorf("secretrequest: invalid enum value for secret_type field: %q", st)

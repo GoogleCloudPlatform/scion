@@ -773,7 +773,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 		for _, secType := range []string{
 			"",
 			store.SecretTypeEnvironment,
-			store.SecretTypeVariable,
+			store.SecretTypeEnvironment,
 		} {
 			srv := &Server{
 				hubID: hubID,
@@ -885,7 +885,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 							hubLookups.Add(1)
 							require.Equal(t, hubID, scopeID)
 							return &secret.SecretWithValue{
-								SecretMeta: secret.SecretMeta{Name: name, SecretType: store.SecretTypeVariable, Version: 7},
+								SecretMeta: secret.SecretMeta{Name: name, SecretType: store.SecretTypeEnvironment, Version: 7},
 								Value:      hubCanary,
 							}, nil
 						default:
@@ -928,7 +928,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 			{
 				name: "project secret has empty/whitespace value",
 				projResp: &secret.SecretWithValue{
-					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeVariable, Version: 1},
+					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeEnvironment, Version: 1},
 					Value:      "   ",
 				},
 				wantErr: egress.ErrAuth,
@@ -936,7 +936,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 			{
 				name: "project secret has control-char value",
 				projResp: &secret.SecretWithValue{
-					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeVariable, Version: 1},
+					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeEnvironment, Version: 1},
 					Value:      projCanary + "\nline2",
 				},
 				wantErr: egress.ErrAuth,
@@ -966,7 +966,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 							if scope == store.ScopeHub {
 								hubLookups.Add(1)
 								return &secret.SecretWithValue{
-									SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeVariable, Version: 9},
+									SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeEnvironment, Version: 9},
 									Value:      hubCanary,
 								}, nil
 							}
@@ -1056,7 +1056,7 @@ func TestSystemOneNamedSecret_ProviderPinnedSecretNamePolicyBeforeLookup(t *test
 				return &secret.SecretWithValue{
 					SecretMeta: secret.SecretMeta{
 						Name:       name,
-						SecretType: store.SecretTypeVariable,
+						SecretType: store.SecretTypeEnvironment,
 						Scope:      scope,
 						ScopeID:    scopeID,
 						Version:    1,
@@ -1163,7 +1163,7 @@ func TestSystemOneNamedSecret_EndpointPinAllowedNameBeforeLookup(t *testing.T) {
 	)
 	ctx := systemoneruntime.WithEvalProjectID(context.Background(), projID)
 
-	for _, secretType := range []string{store.SecretTypeEnvironment, store.SecretTypeVariable} {
+	for _, secretType := range []string{store.SecretTypeEnvironment, store.SecretTypeEnvironment} {
 		t.Run("type_"+secretType, func(t *testing.T) {
 			var backendGetCalls atomic.Int32
 			srv := &Server{

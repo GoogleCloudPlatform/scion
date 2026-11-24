@@ -809,7 +809,7 @@ func TestEnvVar_ProjectScope_AgentRequiresSecretReadScopeForSecretMetadata(t *te
 	}
 	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/VAR_SHARED_KEY", SetSecretRequest{
 		Value: "dmFyLXNlY3JldA==",
-		Type:  store.SecretTypeVariable,
+		Type:  store.SecretTypeEnvironment,
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("seed variable secret VAR_SHARED_KEY: got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1526,7 +1526,7 @@ func TestEnvVar_NonEnvironmentSecrets_NotMerged(t *testing.T) {
 		ID:             tid("sec-var-1"),
 		Key:            "VARIABLE_SECRET",
 		EncryptedValue: "var-val",
-		SecretType:     store.SecretTypeVariable,
+		SecretType:     store.SecretTypeOnDemand,
 		Target:         "VARIABLE_SECRET",
 		Scope:          store.ScopeUser,
 		ScopeID:        DevUserID,

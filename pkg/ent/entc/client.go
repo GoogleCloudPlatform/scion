@@ -805,7 +805,10 @@ func AutoMigrate(ctx context.Context, client *ent.Client, opts ...AutoMigrateOpt
 	if err := dropTemplateLegacyColumns(ctx, client); err != nil {
 		return err
 	}
-	return MigrateSkillCoreScope(ctx, client)
+	if err := MigrateSkillCoreScope(ctx, client); err != nil {
+		return err
+	}
+	return MigrateRetireVariableSecretType(ctx, client)
 }
 
 // AutoMigrateOption configures AutoMigrate.

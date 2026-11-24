@@ -225,10 +225,11 @@ func TestAgentSecretsP2_CreateAgent_BothRoutesAndDelivery(t *testing.T) {
 				Target:   "~/.ssh/deploy_key",
 			},
 			{
-				Key:    "VAR_SECRET",
-				Value:  `{"a":1}`,
-				Type:   store.SecretTypeVariable,
-				Target: "var_secret",
+				Key:           "VAR_SECRET",
+				Value:         `{"a":1}`,
+				Type:          store.SecretTypeEnvironment,
+				Target:        "var_secret",
+				InjectionMode: store.InjectionModeAlways,
 			},
 		},
 	}
