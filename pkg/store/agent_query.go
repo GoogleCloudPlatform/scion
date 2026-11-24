@@ -93,7 +93,7 @@ func TranslateAgentQuery(q filterquery.Query, resolver AgentQueryResolver) Trans
 		if cached, ok := projectCache[key]; ok {
 			return cached
 		}
-		res := resolveOrImpossible(raw, resolver.ResolveProject)
+		res := resolveOrImpossible(key, resolver.ResolveProject)
 		projectCache[key] = res
 		return res
 	}

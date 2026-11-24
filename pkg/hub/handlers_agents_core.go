@@ -652,13 +652,14 @@ func (s *Server) buildAgentQueryResolver(ctx context.Context, identity Identity,
 			if projectInScope == nil {
 				return "", false
 			}
-			if gouuid.Validate(raw) == nil {
-				if projectInScope(raw) {
-					return raw, true
+			lower := strings.ToLower(raw)
+			if gouuid.Validate(lower) == nil {
+				if projectInScope(lower) {
+					return lower, true
 				}
 				return "", false
 			}
-			project, err := s.store.GetProjectBySlug(ctx, raw)
+			project, err := s.store.GetProjectBySlugCaseInsensitive(ctx, lower)
 			if err != nil || project == nil || !projectInScope(project.ID) {
 				return "", false
 			}

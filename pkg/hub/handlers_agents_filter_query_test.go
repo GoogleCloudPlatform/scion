@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -229,7 +230,11 @@ func TestListAgents_FilterQuery_AllServerKeysAndReferents(t *testing.T) {
 	assert.Equal(t, []string{"a1"}, queryNames(t, "activity:working"))
 	assert.Equal(t, []string{"a2"}, queryNames(t, "-activity:working"))
 	assert.Equal(t, []string{"a1"}, queryNames(t, "project:alpha-slug"))
+	assert.Equal(t, []string{"a1"}, queryNames(t, "project:Alpha-Slug"))
+	assert.Equal(t, []string{"a1"}, queryNames(t, "project:Alpha-Slug,alpha-slug"))
+	assert.Equal(t, []string{"a1"}, queryNames(t, "project:alpha-slug,Alpha-Slug"))
 	assert.Equal(t, []string{"a2"}, queryNames(t, "project:"+projB.ID))
+	assert.Equal(t, []string{"a2"}, queryNames(t, "project:"+strings.ToUpper(projB.ID)))
 	assert.Equal(t, []string{}, queryNames(t, "project:no-such-slug"))
 	assert.Equal(t, []string{"a1"}, queryNames(t, "harness:CLAUDE"))
 	assert.Equal(t, []string{"a2"}, queryNames(t, "broker:broker-west"))
@@ -270,18 +275,39 @@ func TestListAgents_FilterQuery_AllServerKeysAndReferents(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recConflict.Body.Bytes(), &respConflict))
 	assert.Empty(t, respConflict.Agents)
 
-	// Out-of-scope project slug returns empty 200 (never 403/400, never widens authz scope).
+	// Out-of-scope project slug or uppercase UUID returns empty 200 (never 403/400, never widens authz scope).
 	carolID := uuid.NewString()
 	carolUser := &store.User{
 		ID: carolID, Email: "carol@example.com", DisplayName: "Carol", Role: store.UserRoleMember, Status: "active",
 	}
 	require.NoError(t, s.CreateUser(ctx, carolUser))
-	grantProjectAccessOnly(t, s, carolID, projA.ID)
-	recOutOfScope := doRequestAsUser(t, srv, carolUser, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("project:beta-slug"), nil)
-	require.Equal(t, http.StatusOK, recOutOfScope.Code)
-	var respOutOfScope ListAgentsResponse
-	require.NoError(t, json.Unmarshal(recOutOfScope.Body.Bytes(), &respOutOfScope))
-	assert.Empty(t, respOutOfScope.Agents)
+	memberRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		RoleDefinitionID: memberRole.ID,
+		PrincipalType:    "user",
+		PrincipalID:      carolID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projA.ID,
+	})
+	require.NoError(t, err)
+	for _, q := range []string{"project:beta-slug", "project:" + strings.ToUpper(projB.ID)} {
+		recOutOfScope := doRequestAsUser(t, srv, carolUser, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape(q), nil)
+		require.Equal(t, http.StatusOK, recOutOfScope.Code)
+		var respOutOfScope ListAgentsResponse
+		require.NoError(t, json.Unmarshal(recOutOfScope.Body.Bytes(), &respOutOfScope))
+		assert.Empty(t, respOutOfScope.Agents)
+	}
+	// Explicit-scope non-admin caller can match in-scope project via uppercase UUID or mixed-case slug.
+	for _, q := range []string{"project:" + strings.ToUpper(projA.ID), "project:Alpha-Slug"} {
+		recInScope := doRequestAsUser(t, srv, carolUser, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape(q), nil)
+		require.Equal(t, http.StatusOK, recInScope.Code)
+		var respInScope ListAgentsResponse
+		require.NoError(t, json.Unmarshal(recInScope.Body.Bytes(), &respInScope))
+		require.Len(t, respInScope.Agents, 1)
+		assert.Equal(t, "a1", respInScope.Agents[0].Name)
+	}
 
 	// Two brokers sharing the same non-unique name: broker:<name> resolves to BOTH deterministically.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{

@@ -154,3 +154,31 @@ func TestTranslateAgentQuery_MemoizesRepeatedReferents(t *testing.T) {
 		t.Fatalf("expected 32 terms, got %+v", got.Terms)
 	}
 }
+
+func TestTranslateAgentQuery_ProjectCaseInsensitiveOrderIndependent(t *testing.T) {
+	const alphaID = "11111111-1111-1111-1111-111111111111"
+	resolver := AgentQueryResolver{
+		// Exact-match lowercase map, mirroring slugs stored via api.Slugify.
+		ResolveProject: func(raw string) (string, bool) {
+			if raw == "foo" {
+				return alphaID, true
+			}
+			return "", false
+		},
+	}
+
+	for _, input := range []string{"project:foo", "project:Foo", "project:Foo,foo", "project:foo,Foo"} {
+		q, fqErr := filterquery.Parse(input, schemas.Agents.HasKey)
+		if fqErr != nil {
+			t.Fatalf("Parse(%q): %v", input, fqErr)
+		}
+		got := TranslateAgentQuery(q, resolver)
+		if got.Terms == nil || len(got.Terms.Terms) != 1 {
+			t.Fatalf("%q: expected 1 term, got %+v", input, got.Terms)
+		}
+		vals := got.Terms.Terms[0].Values
+		if len(vals) != 1 || vals[0] != alphaID {
+			t.Errorf("%q: resolved values = %v, want [%s]", input, vals, alphaID)
+		}
+	}
+}
