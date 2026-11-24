@@ -179,7 +179,9 @@ func fetchListPages[T any](
 	if allItems == nil {
 		allItems = []T{}
 	}
-	if !truncated && total < len(allItems) {
+	if !truncated {
+		total = len(allItems)
+	} else if total > 0 && total < len(allItems) {
 		total = len(allItems)
 	}
 

@@ -219,4 +219,34 @@ func TestFetchListPages(t *testing.T) {
 		assert.Empty(t, res.Items)
 		assert.False(t, res.Truncated)
 	})
+
+	t.Run("non-truncated reconciles stale larger server total to fetched count", func(t *testing.T) {
+		res, err := fetchListPages(context.Background(), 50, false, 50, func(_ context.Context, _ int, _ string) ([]int, string, int, error) {
+			return []int{1, 2}, "", 10, nil
+		})
+		require.NoError(t, err)
+		assert.False(t, res.Truncated)
+		assert.Equal(t, 2, res.TotalCount)
+	})
+
+	t.Run("truncated clamps stale positive server total below fetched count", func(t *testing.T) {
+		res, err := fetchListPages(context.Background(), 4, false, 2, func(_ context.Context, _ int, cursor string) ([]int, string, int, error) {
+			if cursor == "" {
+				return []int{1, 2}, "c1", 2, nil
+			}
+			return []int{3, 4}, "c2", 2, nil
+		})
+		require.NoError(t, err)
+		assert.True(t, res.Truncated)
+		assert.Equal(t, 4, res.TotalCount)
+	})
+
+	t.Run("truncated preserves unknown zero server total", func(t *testing.T) {
+		res, err := fetchListPages(context.Background(), 2, false, 2, func(_ context.Context, _ int, _ string) ([]int, string, int, error) {
+			return []int{1, 2}, "c1", 0, nil
+		})
+		require.NoError(t, err)
+		assert.True(t, res.Truncated)
+		assert.Equal(t, 0, res.TotalCount)
+	})
 }
