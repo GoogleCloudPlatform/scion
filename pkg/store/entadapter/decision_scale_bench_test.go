@@ -139,7 +139,7 @@ func openScaleCompositeStore(tb testing.TB) *CompositeStore {
 	return cs
 }
 
-func measureColdAndWarmMedian(tb testing.TB, warmRuns int, fn func() error) (cold, warmMedian time.Duration) {
+func measureColdAndWarmStats(tb testing.TB, warmRuns int, fn func() error) (cold, warmMedian, tailMedian, tailMax time.Duration) {
 	tb.Helper()
 	t0 := time.Now()
 	require.NoError(tb, fn())
@@ -151,8 +151,22 @@ func measureColdAndWarmMedian(tb testing.TB, warmRuns int, fn func() error) (col
 		require.NoError(tb, fn())
 		samples[i] = time.Since(t1)
 	}
-	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
-	return cold, samples[len(samples)/2]
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	warmMedian = sorted[len(sorted)/2]
+
+	// Tail calls (calls 7..N, 1-indexed including cold = warm indices 5..N-1)
+	// capture Postgres pgx prepared-statement generic-plan execution after the
+	// 5th execution on one pool.
+	tailStart := 5
+	if tailStart >= len(samples) {
+		tailStart = 0
+	}
+	tail := append([]time.Duration(nil), samples[tailStart:]...)
+	sort.Slice(tail, func(i, j int) bool { return tail[i] < tail[j] })
+	tailMedian = tail[len(tail)/2]
+	tailMax = tail[len(tail)-1]
+	return cold, warmMedian, tailMedian, tailMax
 }
 
 func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled bool) *decisionScaleFixture {
@@ -502,14 +516,15 @@ var decisionScaleSmokeSpec = decisionScaleSpec{
 
 // TestDecisionsScaleStore verifies store-level scale query correctness on a
 // tiny fixture by default, or runs the full R/S(/X) timing table (cold first
-// call + warm median of 5 calls) when SCION_DECISIONS_SCALE=1 (and optionally
-// SCION_DECISIONS_SCALE_X=1 for 1M).
+// call + 10 warm calls on one pool, reporting warm median plus calls 7-10
+// median/max to exercise Postgres pgx generic-plan caching) when
+// SCION_DECISIONS_SCALE=1 (and optionally SCION_DECISIONS_SCALE_X=1 for 1M).
 func TestDecisionsScaleStore(t *testing.T) {
 	specs := []decisionScaleSpec{decisionScaleSmokeSpec}
 	warmRuns := 1
 	if os.Getenv("SCION_DECISIONS_SCALE") == "1" {
 		specs = decisionScaleSpecs
-		warmRuns = 5
+		warmRuns = 10
 	}
 	ctx := context.Background()
 	for _, sc := range specs {
@@ -521,7 +536,16 @@ func TestDecisionsScaleStore(t *testing.T) {
 			t.Logf("[%s/%s] seeded %d decisions + %d answers across %d projects in %v",
 				sc.name, f.cs.Dialect(), f.totalDecisions, f.totalAnswers, sc.numProjects, f.seedDuration)
 
-			coldPWD, medPWD := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldProbe, medProbe, tailMedProbe, tailMaxProbe := measureColdAndWarmStats(t, warmRuns, func() error {
+				unindexed, err := f.cs.hasUnindexedDecisionFacets(ctx, f.projectUUIDs)
+				if err != nil {
+					return err
+				}
+				require.False(t, unindexed)
+				return nil
+			})
+
+			coldPWD, medPWD, tailMedPWD, tailMaxPWD := measureColdAndWarmStats(t, warmRuns, func() error {
 				pwds, err := f.cs.ProjectsWithDecisions(ctx, f.projectIDs)
 				if err != nil {
 					return err
@@ -530,7 +554,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldFacets, medFacets := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldFacets, medFacets, tailMedFacets, tailMaxFacets := measureColdAndWarmStats(t, warmRuns, func() error {
 				ag, ans, ck, err := f.cs.ListDecisionFacets(ctx, f.projectIDs, f.allKeys)
 				if err != nil {
 					return err
@@ -542,7 +566,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 			})
 
 			singleKeys := f.keysByProject[f.projectIDs[0]]
-			coldFacetsSingle, medFacetsSingle := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldFacetsSingle, medFacetsSingle, tailMedFacetsSingle, tailMaxFacetsSingle := measureColdAndWarmStats(t, warmRuns, func() error {
 				ag, ans, ck, err := f.cs.ListDecisionFacets(ctx, f.projectIDs[:1], singleKeys)
 				if err != nil {
 					return err
@@ -553,7 +577,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldAgentsBatch, medAgentsBatch := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldAgentsBatch, medAgentsBatch, tailMedAgentsBatch, tailMaxAgentsBatch := measureColdAndWarmStats(t, warmRuns, func() error {
 				got, err := f.cs.ListProjectDecisionAgentsForProjects(ctx, f.projectIDs)
 				if err != nil {
 					return err
@@ -562,7 +586,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldUnsettled, medUnsettled := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldUnsettled, medUnsettled, tailMedUnsettled, tailMaxUnsettled := measureColdAndWarmStats(t, warmRuns, func() error {
 				unsettled, err := f.cs.ProjectsWithUnsettledDecisions(ctx, f.projectIDs)
 				if err != nil {
 					return err
@@ -571,7 +595,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldOpen, medOpen := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldOpen, medOpen, tailMedOpen, tailMaxOpen := measureColdAndWarmStats(t, warmRuns, func() error {
 				openPrompts, err := f.cs.ListOpenPrompts(ctx, f.projectIDs, f.allKeys)
 				if err != nil {
 					return err
@@ -587,7 +611,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				Save(ctx)
 			require.NoError(t, err)
 
-			coldQuietUnsettled, medQuietUnsettled := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldQuietUnsettled, medQuietUnsettled, tailMedQuietUnsettled, tailMaxQuietUnsettled := measureColdAndWarmStats(t, warmRuns, func() error {
 				quietUnsettled, err := f.cs.ProjectsWithUnsettledDecisions(ctx, f.projectIDs)
 				if err != nil {
 					return err
@@ -596,7 +620,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldQuietOpen, medQuietOpen := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldQuietOpen, medQuietOpen, tailMedQuietOpen, tailMaxQuietOpen := measureColdAndWarmStats(t, warmRuns, func() error {
 				quietOpen, err := f.cs.ListOpenPrompts(ctx, f.projectIDs, f.allKeys)
 				if err != nil {
 					return err
@@ -605,15 +629,16 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			t.Logf("[%s/%s] STORE TIMINGS (cold / warm median of %d):", sc.name, f.cs.Dialect(), warmRuns)
-			t.Logf("  ProjectsWithDecisions(%d)                  = cold %v / warm-med %v", sc.numProjects, coldPWD, medPWD)
-			t.Logf("  ListDecisionFacets(%d projects)            = cold %v / warm-med %v", sc.numProjects, coldFacets, medFacets)
-			t.Logf("  ListDecisionFacets(single project)         = cold %v / warm-med %v", coldFacetsSingle, medFacetsSingle)
-			t.Logf("  ListProjectDecisionAgentsForProjects(%d)   = cold %v / warm-med %v", sc.numProjects, coldAgentsBatch, medAgentsBatch)
-			t.Logf("  ProjectsWithUnsettledDecisions(%d open)    = cold %v / warm-med %v", sc.numProjects, coldUnsettled, medUnsettled)
-			t.Logf("  ListOpenPrompts(%d open)                   = cold %v / warm-med %v", sc.numProjects*sc.openPerProject, coldOpen, medOpen)
-			t.Logf("  ProjectsWithUnsettledDecisions(quiet)      = cold %v / warm-med %v", coldQuietUnsettled, medQuietUnsettled)
-			t.Logf("  ListOpenPrompts(quiet)                     = cold %v / warm-med %v", coldQuietOpen, medQuietOpen)
+			t.Logf("[%s/%s] STORE TIMINGS (cold / warm-med / calls7-10 med / calls7-10 max, warmRuns=%d):", sc.name, f.cs.Dialect(), warmRuns)
+			t.Logf("  hasUnindexedDecisionFacets(%d)             = %v / %v / %v / %v", sc.numProjects, coldProbe, medProbe, tailMedProbe, tailMaxProbe)
+			t.Logf("  ProjectsWithDecisions(%d)                  = %v / %v / %v / %v", sc.numProjects, coldPWD, medPWD, tailMedPWD, tailMaxPWD)
+			t.Logf("  ListDecisionFacets(%d projects)            = %v / %v / %v / %v", sc.numProjects, coldFacets, medFacets, tailMedFacets, tailMaxFacets)
+			t.Logf("  ListDecisionFacets(single project)         = %v / %v / %v / %v", coldFacetsSingle, medFacetsSingle, tailMedFacetsSingle, tailMaxFacetsSingle)
+			t.Logf("  ListProjectDecisionAgentsForProjects(%d)   = %v / %v / %v / %v", sc.numProjects, coldAgentsBatch, medAgentsBatch, tailMedAgentsBatch, tailMaxAgentsBatch)
+			t.Logf("  ProjectsWithUnsettledDecisions(%d open)    = %v / %v / %v / %v", sc.numProjects, coldUnsettled, medUnsettled, tailMedUnsettled, tailMaxUnsettled)
+			t.Logf("  ListOpenPrompts(%d open)                   = %v / %v / %v / %v", sc.numProjects*sc.openPerProject, coldOpen, medOpen, tailMedOpen, tailMaxOpen)
+			t.Logf("  ProjectsWithUnsettledDecisions(quiet)      = %v / %v / %v / %v", coldQuietUnsettled, medQuietUnsettled, tailMedQuietUnsettled, tailMaxQuietUnsettled)
+			t.Logf("  ListOpenPrompts(quiet)                     = %v / %v / %v / %v", coldQuietOpen, medQuietOpen, tailMedQuietOpen, tailMaxQuietOpen)
 		})
 	}
 }
