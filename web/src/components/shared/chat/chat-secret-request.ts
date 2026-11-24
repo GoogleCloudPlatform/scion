@@ -85,6 +85,19 @@ export interface SecretRequestRefreshedDetail {
   card: SecretRequestCardResponse;
 }
 
+type LineEndingStyle = 'lf' | 'crlf' | 'mixed';
+
+function detectLineEndingStyle(value: string): LineEndingStyle {
+  if (!value.includes('\r')) {
+    return 'lf';
+  }
+  const withoutCrlf = value.replace(/\r\n/g, '');
+  if (withoutCrlf.includes('\r') || withoutCrlf.includes('\n')) {
+    return 'mixed';
+  }
+  return 'crlf';
+}
+
 @customElement('scion-chat-secret-request')
 export class ScionChatSecretRequest extends LitElement {
   readonly _zone = new DisplayZoneController(this);
@@ -158,6 +171,9 @@ export class ScionChatSecretRequest extends LitElement {
   /** Per-row visibility toggle for masked inputs (keyed by rowId). */
   @state()
   private revealedRows = new Set<string>();
+
+  /** Line-ending style snapshotted when a row is revealed, to avoid HTML textarea LF normalization. */
+  private readonly revealedLineEndings = new Map<string, LineEndingStyle>();
 
   /**
    * Rows whose current value was captured via verbatim paste or file load
@@ -378,6 +394,15 @@ export class ScionChatSecretRequest extends LitElement {
       opacity: 0.6;
       cursor: not-allowed;
       background: var(--scion-bg-subtle);
+    }
+
+    .secret-textarea[readonly] {
+      background: var(--scion-bg-subtle);
+    }
+
+    .mixed-line-endings-note {
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-muted);
     }
 
     .file-controls {
@@ -649,6 +674,7 @@ export class ScionChatSecretRequest extends LitElement {
     this.pendingFocusRowId = '';
     this.formValues.clear();
     this.capturedRows.clear();
+    this.revealedLineEndings.clear();
     this.revealedRows = new Set();
     this.pendingFulfillIdempotencyKey = '';
     this.formRevision++;
@@ -676,6 +702,7 @@ export class ScionChatSecretRequest extends LitElement {
       if (!pendingIds.has(rowId)) {
         this.formValues.delete(rowId);
         this.capturedRows.delete(rowId);
+        this.revealedLineEndings.delete(rowId);
         changed = true;
       }
     }
@@ -683,7 +710,10 @@ export class ScionChatSecretRequest extends LitElement {
       const nextRevealed = new Set<string>();
       for (const rowId of this.revealedRows) {
         if (pendingIds.has(rowId)) nextRevealed.add(rowId);
-        else changed = true;
+        else {
+          this.revealedLineEndings.delete(rowId);
+          changed = true;
+        }
       }
       if (nextRevealed.size !== this.revealedRows.size) {
         this.revealedRows = nextRevealed;
@@ -741,7 +771,16 @@ export class ScionChatSecretRequest extends LitElement {
 
   private onValueInput(rowId: string, e: Event): void {
     const target = e.target as HTMLInputElement | HTMLTextAreaElement | null;
-    const value = target?.value ?? '';
+    let value = target?.value ?? '';
+    if (this.revealedRows.has(rowId)) {
+      const style = this.revealedLineEndings.get(rowId) ?? 'lf';
+      if (style === 'mixed') {
+        return;
+      }
+      if (style === 'crlf') {
+        value = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
+      }
+    }
     this.capturedRows.delete(rowId);
     if (value.length === 0) {
       this.formValues.delete(rowId);
@@ -921,6 +960,7 @@ export class ScionChatSecretRequest extends LitElement {
       if (this.revealedRows.has(row.rowId)) {
         const next = new Set(this.revealedRows);
         next.delete(row.rowId);
+        this.revealedLineEndings.delete(row.rowId);
         this.revealedRows = next;
       }
       this.pendingFulfillIdempotencyKey = '';
@@ -937,7 +977,10 @@ export class ScionChatSecretRequest extends LitElement {
     const nextRevealed = new Set(this.revealedRows);
     if (currentlyVisible) {
       nextRevealed.delete(rowId);
+      this.revealedLineEndings.delete(rowId);
     } else {
+      const current = this.formValues.get(rowId) ?? '';
+      this.revealedLineEndings.set(rowId, detectLineEndingStyle(current));
       nextRevealed.add(rowId);
       this.pendingFocusRowId = rowId;
     }
@@ -1246,6 +1289,9 @@ export class ScionChatSecretRequest extends LitElement {
     if (isPendingSecretRequest(row)) {
       const value = this.formValues.get(row.rowId) ?? '';
       const revealed = this.revealedRows.has(row.rowId);
+      const lineEndingStyle = revealed ? (this.revealedLineEndings.get(row.rowId) ?? 'lf') : 'lf';
+      const isReadonlyRevealed = revealed && lineEndingStyle === 'mixed';
+      const textareaValue = lineEndingStyle === 'crlf' ? value.replace(/\r\n/g, '\n') : value;
       const disabled = !this.canRespondNow || this.submitting || this.actionState.dismissSubmitting;
       const isFile = row.secretType === 'file';
       const textareaRows = isFile ? 4 : 2;
@@ -1279,7 +1325,8 @@ export class ScionChatSecretRequest extends LitElement {
                   data-1p-ignore="true"
                   rows=${textareaRows}
                   ?disabled=${disabled}
-                  .value=${value}
+                  ?readonly=${isReadonlyRevealed}
+                  .value=${textareaValue}
                   @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
                 ></textarea>
               `
@@ -1359,6 +1406,17 @@ export class ScionChatSecretRequest extends LitElement {
                   <sl-icon name="lock" aria-hidden="true"></sl-icon>
                   <span aria-hidden="true">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span>
                   <span>Value entered (hidden)</span>
+                </span>
+              `
+            : nothing}
+          ${isReadonlyRevealed
+            ? html`
+                <span
+                  class="mixed-line-endings-note"
+                  data-testid="mixed-line-endings-note"
+                  role="status"
+                >
+                  This value has mixed line endings; paste or load to replace it
                 </span>
               `
             : nothing}

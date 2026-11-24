@@ -509,3 +509,116 @@ test('multi-line paste then one Backspace clears captured value and disables Sub
   await expect(badge).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled();
 });
+
+for (const secretType of ['environment', 'variable', 'file'] as const) {
+  test(`all-CRLF Show -> edit -> Hide -> Submit preserves CRLF on ${secretType} row`, async ({
+    page,
+  }) => {
+    const fulfills = await installMockSecretRequestHub(page, {
+      messageId: `msg-crlf-edit-${secretType}`,
+      key: 'CRLF_KEY',
+      secretType,
+    });
+    await page.goto(`/secret-requests/msg-crlf-edit-${secretType}`, {
+      waitUntil: 'domcontentloaded',
+    });
+
+    const input = page.locator('input[data-key="CRLF_KEY"]');
+    await input.click();
+    await page.keyboard.insertText('AAA-l1\r\nBBB-l2\r\nCCC-l3');
+    await expect(page.locator('[data-testid="file-value-masked"]')).toBeVisible();
+
+    const toggleBtn = page.locator('button[data-toggle-visibility="CRLF_KEY"]');
+    await toggleBtn.click();
+
+    const textarea = page.locator('textarea[data-key="CRLF_KEY"]');
+    await expect(textarea).toBeVisible();
+    await expect(textarea).not.toHaveAttribute('readonly', '');
+    await expect(page.locator('[data-testid="mixed-line-endings-note"]')).toHaveCount(0);
+
+    // Move caret to end and type X
+    await textarea.evaluate((el: HTMLTextAreaElement) => {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+    await page.keyboard.type('X');
+
+    await toggleBtn.click();
+    await expect(input).toBeVisible();
+
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills).toHaveLength(1);
+    expect(fulfills[0].body.values).toEqual({
+      CRLF_KEY: 'AAA-l1\r\nBBB-l2\r\nCCC-l3X',
+    });
+  });
+}
+
+test('mixed line endings render revealed textarea readonly with note and submit unchanged', async ({
+  page,
+}) => {
+  const fulfills = await installMockSecretRequestHub(page, {
+    messageId: 'msg-mixed-le',
+    key: 'MIXED_KEY',
+    secretType: 'file',
+  });
+  await page.goto('/secret-requests/msg-mixed-le', { waitUntil: 'domcontentloaded' });
+
+  const input = page.locator('input[data-key="MIXED_KEY"]');
+  await input.click();
+  await page.keyboard.insertText('a\r\nb\nc');
+  await expect(page.locator('[data-testid="file-value-masked"]')).toBeVisible();
+
+  const toggleBtn = page.locator('button[data-toggle-visibility="MIXED_KEY"]');
+  await toggleBtn.click();
+
+  const textarea = page.locator('textarea[data-key="MIXED_KEY"]');
+  await expect(textarea).toBeVisible();
+  await expect(textarea).toHaveAttribute('readonly', '');
+  await expect(page.locator('[data-testid="mixed-line-endings-note"]')).toHaveText(
+    'This value has mixed line endings; paste or load to replace it'
+  );
+
+  // Attempt to type into the readonly textarea — must not modify the stored value
+  await textarea.click();
+  await page.keyboard.type('IGNORED');
+
+  await toggleBtn.click();
+  await page.locator('sl-button.submit-btn').click();
+  await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+  expect(fulfills).toHaveLength(1);
+  expect(fulfills[0].body.values).toEqual({ MIXED_KEY: 'a\r\nb\nc' });
+});
+
+test('plain LF Show -> edit -> Hide -> Submit keeps LF unchanged', async ({ page }) => {
+  const fulfills = await installMockSecretRequestHub(page, {
+    messageId: 'msg-lf-edit',
+    key: 'LF_KEY',
+    secretType: 'variable',
+  });
+  await page.goto('/secret-requests/msg-lf-edit', { waitUntil: 'domcontentloaded' });
+
+  const input = page.locator('input[data-key="LF_KEY"]');
+  await input.click();
+  await page.keyboard.insertText('L1\nL2\nL3');
+  await expect(page.locator('[data-testid="file-value-masked"]')).toBeVisible();
+
+  const toggleBtn = page.locator('button[data-toggle-visibility="LF_KEY"]');
+  await toggleBtn.click();
+
+  const textarea = page.locator('textarea[data-key="LF_KEY"]');
+  await expect(textarea).toBeVisible();
+  await expect(textarea).not.toHaveAttribute('readonly', '');
+  await textarea.evaluate((el: HTMLTextAreaElement) => {
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  });
+  await page.keyboard.type('X');
+
+  await toggleBtn.click();
+  await page.locator('sl-button.submit-btn').click();
+  await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+  expect(fulfills).toHaveLength(1);
+  expect(fulfills[0].body.values).toEqual({ LF_KEY: 'L1\nL2\nL3X' });
+});

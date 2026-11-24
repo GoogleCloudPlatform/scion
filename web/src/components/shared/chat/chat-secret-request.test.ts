@@ -1764,4 +1764,133 @@ describe('scion-chat-secret-request', () => {
     expect(ta).not.toBeNull();
     expect(el.shadowRoot!.activeElement).toBe(ta);
   });
+
+  it('preserves CRLF line endings when editing a revealed all-CRLF value', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        rows: [
+          makeRow({
+            rowId: 'row-1',
+            key: 'CRLF_KEY',
+            secretType: 'file',
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-24T00:05:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+        ],
+        responseMessageId: 'resp-crlf',
+        replayed: false,
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'row-1', key: 'CRLF_KEY', secretType: 'file' })],
+    });
+    const input = el.shadowRoot!.querySelector('input[data-key="CRLF_KEY"]') as HTMLInputElement;
+    const pasteEv = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(pasteEv, 'clipboardData', {
+      value: { getData: () => 'AAA-l1\r\nBBB-l2\r\nCCC-l3' },
+    });
+    input.dispatchEvent(pasteEv);
+    await el.updateComplete;
+
+    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    toggleBtn.click();
+    await el.updateComplete;
+
+    const ta = el.shadowRoot!.querySelector('textarea[data-key="CRLF_KEY"]') as HTMLTextAreaElement;
+    expect(ta.readOnly).toBe(false);
+    expect(el.shadowRoot!.querySelector('[data-testid="mixed-line-endings-note"]')).toBeNull();
+
+    // Simulate browser HTML textarea LF-normalized edit
+    ta.value = 'AAA-l1\nBBB-l2\nCCC-l3X';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    await el.updateComplete;
+
+    toggleBtn.click();
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as { values: Record<string, string> };
+    expect(sent.values).toEqual({ CRLF_KEY: 'AAA-l1\r\nBBB-l2\r\nCCC-l3X' });
+  });
+
+  it('renders revealed textarea readonly with note for mixed line endings or bare CR and submits unchanged', async () => {
+    for (const [label, rawValue] of [
+      ['mixed', 'a\r\nb\nc'],
+      ['bare-cr', 'a\rb'],
+    ] as const) {
+      const fetchMock = vi.fn().mockResolvedValue(
+        jsonResponse({
+          rows: [
+            makeRow({
+              rowId: 'row-1',
+              key: 'MIXED_KEY',
+              secretType: 'environment',
+              status: 'fulfilled',
+              fulfilled: {
+                at: '2026-11-24T00:05:00Z',
+                byUserId: 'user-1',
+                byName: 'Me',
+                surface: 'native',
+              },
+            }),
+          ],
+          responseMessageId: `resp-${label}`,
+          replayed: false,
+        })
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const el = await mountCard({
+        rows: [makeRow({ rowId: 'row-1', key: 'MIXED_KEY', secretType: 'environment' })],
+      });
+      const input = el.shadowRoot!.querySelector('input[data-key="MIXED_KEY"]') as HTMLInputElement;
+      const pasteEv = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+      Object.defineProperty(pasteEv, 'clipboardData', {
+        value: { getData: () => rawValue },
+      });
+      input.dispatchEvent(pasteEv);
+      await el.updateComplete;
+
+      const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+      toggleBtn.click();
+      await el.updateComplete;
+
+      const ta = el.shadowRoot!.querySelector(
+        'textarea[data-key="MIXED_KEY"]'
+      ) as HTMLTextAreaElement;
+      expect(ta.readOnly).toBe(true);
+      const note = el.shadowRoot!.querySelector('[data-testid="mixed-line-endings-note"]');
+      expect(note?.textContent?.trim()).toBe(
+        'This value has mixed line endings; paste or load to replace it'
+      );
+
+      // Even if a synthetic input event fires, the stored value is not altered
+      ta.value = 'corrupted';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      toggleBtn.click();
+      await el.updateComplete;
+
+      (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+      await vi.waitFor(() => {
+        expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+      });
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const sent = JSON.parse(init.body as string) as { values: Record<string, string> };
+      expect(sent.values).toEqual({ MIXED_KEY: rawValue });
+      el.remove();
+    }
+  });
 });
