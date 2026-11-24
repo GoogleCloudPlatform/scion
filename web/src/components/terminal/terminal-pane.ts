@@ -56,6 +56,8 @@ import { projectDisplayName } from '../../client/project-label.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
+import '../shared/breadcrumb.js';
+import type { Crumb } from '../shared/breadcrumb.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { copyToClipboard, copyWithToast } from '../../utils/clipboard.js';
@@ -66,9 +68,6 @@ import {
   TERMINAL_PANE_DIALOG_OPEN_EVENT,
 } from '../../client/terminal-workspace-events.js';
 import { navigateTo } from '../../client/navigation.js';
-
-/** Back to Agent in a compact pane header (U+1F916 ROBOT FACE). */
-const ROBOT_EMOJI = '\u{1F916}';
 
 /**
  * Reads the clipboard text for a paste, resolving `null` instead of throwing
@@ -120,7 +119,7 @@ export class ScionTerminalPane extends LitElement {
   /**
    * Set by the workspace root when the pane header has little room (a
    * narrow viewport or the 4-up layout): Back to Project and Back to Agent
-   * show as a folder icon and a robot emoji (ptone/scion#4324).
+   * show as icon-only links (ptone/scion#4324).
    */
   @state() compactHeader = false;
 
@@ -334,13 +333,12 @@ export class ScionTerminalPane extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
-    .back-link.project-back-link {
-      display: inline-block;
-      max-width: 24ch;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      vertical-align: middle;
+    scion-breadcrumb.toolbar-crumbs {
+      width: auto;
+      margin-bottom: 0;
+      flex-shrink: 1;
+      min-width: 0;
+      container-type: normal;
     }
 
     /* Compact header (ptone/scion#4324): icon-only back links, the size of
@@ -2421,13 +2419,18 @@ export class ScionTerminalPane extends LitElement {
   }
 
   /**
-   * Back to Project (when the agent has a project) and Back to Agent. With
-   * a compact header they show as a folder icon and a robot emoji, with
-   * the same destinations, the full text as accessible name and tooltip.
+   * Breadcrumb navigation to the agent's project (when present) and agent
+   * detail page. Full mode renders `<scion-breadcrumb>` with linked crumbs
+   * (no current-page crumb, since the terminal pane is the active context).
+   * Compact mode renders icon-only links with the same destinations, full
+   * accessible names, and tooltips.
    */
   private renderBackLinks() {
-    const projectHref = `/projects/${this.projectId}`;
-    const agentHref = `/agents/${this.agentId}`;
+    if (!this.agentId) {
+      return nothing;
+    }
+    const projectHref = `/projects/${encodeURIComponent(this.projectId)}`;
+    const agentHref = `/agents/${encodeURIComponent(this.agentId)}`;
     const projectName = projectDisplayName({
       name: this.agent?.project,
       slug: this.agent?.projectSlug,
@@ -2443,18 +2446,24 @@ export class ScionTerminalPane extends LitElement {
           : nothing}
         <sl-tooltip content="Back to Agent">
           <a href=${agentHref} class="back-link compact" aria-label="Back to Agent"
-            ><span aria-hidden="true">${ROBOT_EMOJI}</span></a
-          >
+            ><sl-icon name="cpu" aria-hidden="true"></sl-icon
+          ></a>
         </sl-tooltip>`;
     }
-    const projectLink = this.projectId
-      ? projectName
-        ? html`<sl-tooltip content=${projectName}>
-            <a href=${projectHref} class="back-link project-back-link">&larr; ${projectName}</a>
-          </sl-tooltip>`
-        : html`<a href=${projectHref} class="back-link">&larr; Back to Project</a>`
-      : nothing;
-    return html`${projectLink} <a href=${agentHref} class="back-link"> &larr; Back to Agent </a>`;
+    const crumbs: Crumb[] = [];
+    if (this.projectId) {
+      crumbs.push({
+        label: projectName || this.projectId,
+        href: projectHref,
+        truncate: true,
+      });
+    }
+    crumbs.push({
+      label: this.agentName || this.agentId,
+      href: agentHref,
+      truncate: true,
+    });
+    return html`<scion-breadcrumb class="toolbar-crumbs" .crumbs=${crumbs}></scion-breadcrumb>`;
   }
 
   /** The agent name in the header, with its length for the .agent-name minimum width. */
