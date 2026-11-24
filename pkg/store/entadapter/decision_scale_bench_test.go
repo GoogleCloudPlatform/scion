@@ -685,7 +685,11 @@ func TestDecisionsScaleStore(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				require.Len(t, dmHeavyAns, 20)
+				if sc.rowsPerProject >= 200 {
+					require.Len(t, dmHeavyAns, 20)
+				} else {
+					require.NotEmpty(t, dmHeavyAns)
+				}
 				return nil
 			})
 

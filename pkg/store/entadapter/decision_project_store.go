@@ -388,6 +388,10 @@ func (c *CompositeStore) ListDecisionAnswers(
 			return nil, "", mapError(err)
 		}
 	} else {
+		// Multi-project callers in production (such as the profile made/recent
+		// handler) use ListDecisionAnswersForProjects so each arm filters only
+		// its own project's readable chat keys. Keep this multi-project branch
+		// bounded per arm for direct store callers passing a shared key slice.
 		preds := decisionAnswerFilterPredicates(filter, agentUUID, provPred)
 		if cursor != "" {
 			preds = append(preds, decisionAnswerCursorPredicate(cur))
@@ -814,7 +818,27 @@ func (c *CompositeStore) execDecisionAnswerSelector(
 	finalSel *entsql.Selector,
 	disableJIT bool,
 ) ([]*ent.DecisionAnswer, error) {
+	// Selector-swap invariant: Ent's sqlgraph builds the base Selector for
+	// decisionanswer.Columns and then applies Where predicates last. Replacing
+	// *s with *finalSel relies on sqlgraph applying this predicate last and on
+	// finalSel projecting decisionanswer.Columns in exact Ent schema order.
+	applySel := func(s *entsql.Selector) {
+		*s = *finalSel
+	}
 	if disableJIT && c.Dialect() == dialect.Postgres {
+		if c.inTx {
+			// Already inside a transaction (WithTx): SET LOCAL applies to the
+			// active transaction without attempting a nested BeginTx (which
+			// Postgres rejects).
+			if err := c.client.Driver().Exec(ctx, "SET LOCAL jit = off", []any{}, nil); err != nil {
+				return nil, mapError(err)
+			}
+			rows, err := c.client.DecisionAnswer.Query().Where(applySel).All(ctx)
+			if err != nil {
+				return nil, mapError(err)
+			}
+			return rows, nil
+		}
 		tx, err := c.client.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if err != nil {
 			return nil, mapError(err)
@@ -823,21 +847,13 @@ func (c *CompositeStore) execDecisionAnswerSelector(
 		if err := tx.Client().Driver().Exec(ctx, "SET LOCAL jit = off", []any{}, nil); err != nil {
 			return nil, mapError(err)
 		}
-		rows, err := tx.DecisionAnswer.Query().
-			Where(func(s *entsql.Selector) {
-				*s = *finalSel
-			}).
-			All(ctx)
+		rows, err := tx.DecisionAnswer.Query().Where(applySel).All(ctx)
 		if err != nil {
 			return nil, mapError(err)
 		}
 		return rows, nil
 	}
-	rows, err := c.client.DecisionAnswer.Query().
-		Where(func(s *entsql.Selector) {
-			*s = *finalSel
-		}).
-		All(ctx)
+	rows, err := c.client.DecisionAnswer.Query().Where(applySel).All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
