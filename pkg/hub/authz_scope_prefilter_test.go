@@ -19,8 +19,10 @@ package hub
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -827,4 +829,183 @@ func TestAuthzScopePrefilter_RegressionGuard(t *testing.T) {
 		assert.LessOrEqual(t, allocsPre, 1.0,
 			"evaluateBinding with precomputed sortedPerms must allocate at most 1 object (compositeKey); got %.1f", allocsPre)
 	})
+}
+
+// TestBindingScopeIndex_RandomKernelParity is a deterministic pure-kernel
+// property test verifying that buildBindingScopeIndex(bs).buildForProject(pid)
+// produces the exact same non-explain Decision as the unfiltered binding list
+// through toCandidateBindings -> applyHubWideScopeFilters -> Evaluate ->
+// kernelDecisionToDecision across 4,000 randomized binding/resource/restriction
+// combinations (security audit Low).
+func TestBindingScopeIndex_RandomKernelParity(t *testing.T) {
+	rng := rand.New(rand.NewSource(9157))
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+
+	projectIDs := []string{"p1", "p2", "p3", "", "P1", " p1"}
+	scopeTypes := []string{ScopeTypeProject, ScopeTypeProject, ScopeTypeProject, ScopeTypeSystem, "unknown_scope", "hub", ""}
+	principalTypes := []string{"user", "group", "agent"}
+	principalIDs := []string{"u1", "g1", "gX"}
+	roles := map[string]*RolePermissions{
+		"r-proj-a": NewRolePermissions("r-proj-a", "proj-a", ScopeTypeProject, []string{"project.read", "agent.read"}),
+		"r-proj-b": NewRolePermissions("r-proj-b", "proj-b", ScopeTypeProject, []string{"agent.create"}),
+		"r-sys":    NewRolePermissions("r-sys", "hub-member", ScopeTypeSystem, []string{"skill.read", "template.read", "harness_config.read", "project.read", "user.read"}),
+		"r-empty":  NewRolePermissions("r-empty", "empty", ScopeTypeProject, nil),
+	}
+	roleIDs := []string{"r-proj-a", "r-proj-b", "r-sys", "r-empty", "r-missing"}
+	perms := []string{"project.read", "agent.read", "agent.create", "skill.read", "template.read", "harness_config.read", "user.read"}
+	resourceTypes := []string{"project", "agent", "skill", "template", "harness_config", "user", "broker"}
+	scopeKinds := []string{"global", "project", "user", ""}
+	closure := map[string]struct{}{"user:u1": {}, "group:g1": {}}
+	membershipPaths := map[string][]string{"user:u1": {"u1"}, "group:g1": {"u1", "g1"}}
+
+	// normalizeNonExplain mirrors decide() Step 11 (Explain=false) so we
+	// compare the full non-explain Decision surface including Provenance.Grants
+	// and Provenance.DenyReasons.
+	normalizeNonExplain := func(d Decision) Decision {
+		if d.Provenance != nil {
+			d.Provenance = &DecisionProvenance{
+				Permission:      d.Provenance.Permission,
+				Grants:          d.Provenance.Grants,
+				DenyReasons:     d.Provenance.DenyReasons,
+				Restrictions:    []RestrictionProvenance{},
+				InactiveGrants:  []GrantDetail{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return d
+	}
+
+	const cases = 4000
+	for iter := 0; iter < cases; iter++ {
+		n := rng.Intn(9)
+		bs := make([]*store.RoleBinding, n)
+		for i := range bs {
+			b := &store.RoleBinding{
+				ID:               fmt.Sprintf("b%d", i),
+				RoleDefinitionID: roleIDs[rng.Intn(len(roleIDs))],
+				PrincipalType:    principalTypes[rng.Intn(len(principalTypes))],
+				PrincipalID:      principalIDs[rng.Intn(len(principalIDs))],
+				ScopeType:        scopeTypes[rng.Intn(len(scopeTypes))],
+				ScopeID:          projectIDs[rng.Intn(len(projectIDs))],
+			}
+			switch rng.Intn(8) {
+			case 0:
+				b.ExpiresAt = &past
+			case 1:
+				b.NotBefore = &future
+			}
+			bs[i] = b
+		}
+
+		res := Resource{Type: resourceTypes[rng.Intn(len(resourceTypes))], ID: "x"}
+		switch rng.Intn(3) {
+		case 0:
+			if res.Type == "project" {
+				res.ID = projectIDs[rng.Intn(len(projectIDs))]
+			}
+		case 1:
+			// Child-of-project resource (e.g. agent/skill/template in a project).
+			res.ParentType = "project"
+			res.ParentID = projectIDs[rng.Intn(len(projectIDs))]
+		case 2:
+			// Parentless resource (empty ProjectID).
+		}
+		if res.Type == "skill" || res.Type == "template" || res.Type == "harness_config" {
+			res.ScopeKind = scopeKinds[rng.Intn(len(scopeKinds))]
+		}
+
+		pid := projectIDForResource(res)
+		filtered := buildBindingScopeIndex(bs).buildForProject(pid)
+		require.Equal(t, len(filtered), cap(filtered), "iter %d: filtered slice must be clipped", iter)
+
+		perm := perms[rng.Intn(len(perms))]
+		var restr []Restriction
+		if rng.Intn(4) == 0 {
+			deniedPerm := perms[rng.Intn(len(perms))]
+			restr = append(restr, Restriction{
+				Kind: "credential_scope",
+				Check: func(p string) bool {
+					return p != deniedPerm
+				},
+			})
+		}
+
+		eval := func(input []*store.RoleBinding) Decision {
+			candidates := applyHubWideScopeFilters(
+				toCandidateBindings(input),
+				roles,
+				ProjectTargetClass{ResourceType: res.Type, ScopeKind: res.ScopeKind},
+			)
+			kd := Evaluate(KernelRequest{
+				Permission:        perm,
+				PrincipalClosure:  closure,
+				MembershipPaths:   membershipPaths,
+				Resource:          ResourceContext{ResourceType: res.Type, ResourceID: res.ID, ProjectID: pid},
+				CandidateBindings: candidates,
+				RoleDefinitions:   roles,
+				Restrictions:      restr,
+				Now:               now,
+			})
+			return normalizeNonExplain(kernelDecisionToDecision(kd, perm))
+		}
+
+		want := eval(bs)
+		got := eval(filtered)
+		require.Equal(t, want, got, "iter %d mismatch pid=%q perm=%q res=%+v", iter, pid, perm, res)
+	}
+}
+
+// TestBindingsForProject_SliceIsolationAndRace verifies concurrent
+// BindingsForProject calls are race-free and returned slices are clipped so
+// caller appends cannot mutate cached memo backing arrays.
+func TestBindingsForProject_SliceIsolationAndRace(t *testing.T) {
+	bs := []*store.RoleBinding{
+		{ID: "s", ScopeType: ScopeTypeSystem},
+		{ID: "a", ScopeType: ScopeTypeProject, ScopeID: "p1"},
+		{ID: "b", ScopeType: ScopeTypeProject, ScopeID: "p2"},
+	}
+	m := &authzInputMemo{principals: map[principalKey]*memoEntry{}}
+	e := &memoEntry{bindings: bs, bindingsOK: true}
+	mk := func() *principalInputs {
+		return &principalInputs{
+			ctx:              context.Background(),
+			memo:             m,
+			principalsLoaded: true,
+			bindingsLoaded:   true,
+			bindingsVal:      bs,
+			bindingsEntry:    e,
+		}
+	}
+
+	var wg sync.WaitGroup
+	targets := []string{"p1", "p2", "", "p9"}
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			out, err := mk().BindingsForProject(targets[i%len(targets)])
+			assert.NoError(t, err)
+			assert.Equal(t, len(out), cap(out), "returned slice must be clipped")
+			_ = append(out, &store.RoleBinding{ID: "evil", ScopeType: ScopeTypeSystem})
+		}(i)
+	}
+	wg.Wait()
+
+	out, err := mk().BindingsForProject("p1")
+	require.NoError(t, err)
+	assert.Equal(t, len(out), cap(out))
+	for _, b := range out {
+		assert.NotEqual(t, "evil", b.ID, "caller append must not leak into cached memo slice")
+	}
+
+	// Done ctx must return unfiltered slice cleanly without panicking.
+	doneCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h := mk()
+	h.ctx = doneCtx
+	outDone, err := h.BindingsForProject("p1")
+	require.NoError(t, err)
+	assert.Len(t, outDone, len(bs))
 }
