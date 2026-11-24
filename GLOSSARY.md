@@ -477,7 +477,12 @@ _See also_: Stalled, Auto-Suspend
 **Auto-Suspend**:
 A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. Agents whose harness does not support session resume are skipped, and so are agents whose container reported live work in the last 90 seconds. A message sent with wake (`scion message --wake`, or accepting the web UI's wake prompt) resumes the agent and then delivers it; a message without wake is not delivered (`scion message` gets `409 agent_not_running`).
 _Avoid_: idle timeout, auto-stop
-_See also_: Stalled, Phase
+_See also_: Stalled, Phase, Never suspend
+
+**Never suspend**:
+A per-agent suspend policy (`suspend_policy`, values `auto` | `never`, API field `suspendPolicy`, gated by `lifecycle.never_suspend`) that exempts an agent from automatic idle and stalled suspension so standing leads, listeners, and service agents stay running. Distinct from stopping or deleting an agent (`stop`, `delete`, `limits_exceeded`, and membership-loss holds still apply).
+_Avoid_: pinned (taken by `pinned_runtime_broker_id`), never stop, keepalive
+_See also_: Auto-Suspend, Stalled, Phase
 
 **Run intent**:
 Whether the Hub has been asked to keep an agent running (`running`) or stopped (`stopped`). It is recorded when a lifecycle request (start, restart, wake, create-and-start, stop, suspend or delete) is accepted, before dispatch to the Runtime Broker, so it reflects the request even when the dispatch is queued or fails. Kept separately from phase and not shown in the agent's API record.

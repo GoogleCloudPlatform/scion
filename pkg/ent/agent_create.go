@@ -313,6 +313,20 @@ func (_c *AgentCreate) SetNillableSuspendReason(v *string) *AgentCreate {
 	return _c
 }
 
+// SetSuspendPolicy sets the "suspend_policy" field.
+func (_c *AgentCreate) SetSuspendPolicy(v agent.SuspendPolicy) *AgentCreate {
+	_c.mutation.SetSuspendPolicy(v)
+	return _c
+}
+
+// SetNillableSuspendPolicy sets the "suspend_policy" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSuspendPolicy(v *agent.SuspendPolicy) *AgentCreate {
+	if v != nil {
+		_c.SetSuspendPolicy(*v)
+	}
+	return _c
+}
+
 // SetCurrentTurns sets the "current_turns" field.
 func (_c *AgentCreate) SetCurrentTurns(v int) *AgentCreate {
 	_c.mutation.SetCurrentTurns(v)
@@ -1526,6 +1540,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultMessageMode
 		_c.mutation.SetMessageMode(v)
 	}
+	if _, ok := _c.mutation.SuspendPolicy(); !ok {
+		v := agent.DefaultSuspendPolicy
+		_c.mutation.SetSuspendPolicy(v)
+	}
 	if _, ok := _c.mutation.CurrentTurns(); !ok {
 		v := agent.DefaultCurrentTurns
 		_c.mutation.SetCurrentTurns(v)
@@ -1720,6 +1738,14 @@ func (_c *AgentCreate) check() error {
 			return &ValidationError{Name: "message_mode", err: fmt.Errorf(`ent: validator failed for field "Agent.message_mode": %w`, err)}
 		}
 	}
+	if _, ok := _c.mutation.SuspendPolicy(); !ok {
+		return &ValidationError{Name: "suspend_policy", err: errors.New(`ent: missing required field "Agent.suspend_policy"`)}
+	}
+	if v, ok := _c.mutation.SuspendPolicy(); ok {
+		if err := agent.SuspendPolicyValidator(v); err != nil {
+			return &ValidationError{Name: "suspend_policy", err: fmt.Errorf(`ent: validator failed for field "Agent.suspend_policy": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.CurrentTurns(); !ok {
 		return &ValidationError{Name: "current_turns", err: errors.New(`ent: missing required field "Agent.current_turns"`)}
 	}
@@ -1882,6 +1908,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.SuspendReason(); ok {
 		_spec.SetField(agent.FieldSuspendReason, field.TypeString, value)
 		_node.SuspendReason = &value
+	}
+	if value, ok := _c.mutation.SuspendPolicy(); ok {
+		_spec.SetField(agent.FieldSuspendPolicy, field.TypeEnum, value)
+		_node.SuspendPolicy = value
 	}
 	if value, ok := _c.mutation.CurrentTurns(); ok {
 		_spec.SetField(agent.FieldCurrentTurns, field.TypeInt, value)
@@ -2671,6 +2701,18 @@ func (u *AgentUpsert) UpdateSuspendReason() *AgentUpsert {
 // ClearSuspendReason clears the value of the "suspend_reason" field.
 func (u *AgentUpsert) ClearSuspendReason() *AgentUpsert {
 	u.SetNull(agent.FieldSuspendReason)
+	return u
+}
+
+// SetSuspendPolicy sets the "suspend_policy" field.
+func (u *AgentUpsert) SetSuspendPolicy(v agent.SuspendPolicy) *AgentUpsert {
+	u.Set(agent.FieldSuspendPolicy, v)
+	return u
+}
+
+// UpdateSuspendPolicy sets the "suspend_policy" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSuspendPolicy() *AgentUpsert {
+	u.SetExcluded(agent.FieldSuspendPolicy)
 	return u
 }
 
@@ -4457,6 +4499,20 @@ func (u *AgentUpsertOne) UpdateSuspendReason() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearSuspendReason() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearSuspendReason()
+	})
+}
+
+// SetSuspendPolicy sets the "suspend_policy" field.
+func (u *AgentUpsertOne) SetSuspendPolicy(v agent.SuspendPolicy) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSuspendPolicy(v)
+	})
+}
+
+// UpdateSuspendPolicy sets the "suspend_policy" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSuspendPolicy() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSuspendPolicy()
 	})
 }
 
@@ -6633,6 +6689,20 @@ func (u *AgentUpsertBulk) UpdateSuspendReason() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearSuspendReason() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearSuspendReason()
+	})
+}
+
+// SetSuspendPolicy sets the "suspend_policy" field.
+func (u *AgentUpsertBulk) SetSuspendPolicy(v agent.SuspendPolicy) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSuspendPolicy(v)
+	})
+}
+
+// UpdateSuspendPolicy sets the "suspend_policy" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSuspendPolicy() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSuspendPolicy()
 	})
 }
 

@@ -83,6 +83,11 @@ type Agent struct {
 	// other than suspended or starting clears it.
 	SuspendReason string `json:"suspendReason,omitempty"`
 
+	// SuspendPolicy controls whether the agent is exempt from automatic
+	// suspension ("auto" or "never"). Written only at create (CreateAgent)
+	// and by dedicated policy setters; UpdateAgent never writes it.
+	SuspendPolicy string `json:"suspendPolicy,omitempty"`
+
 	// Runtime configuration
 	Image           string        `json:"image,omitempty"`
 	Detached        bool          `json:"detached"`
@@ -2443,6 +2448,22 @@ const (
 func IsValidMessageMode(mode string) bool {
 	switch mode {
 	case MessageModeNone, MessageModeLineage, MessageModeBranch, MessageModeProject, MessageModeHub:
+		return true
+	default:
+		return false
+	}
+}
+
+// Agent suspend policy values. Default is "auto".
+const (
+	SuspendPolicyAuto  = "auto"  // Default: eligible for idle and stalled auto-suspend
+	SuspendPolicyNever = "never" // Exempt from idle and stalled auto-suspend
+)
+
+// IsValidSuspendPolicy returns true if policy is a recognized suspend policy value.
+func IsValidSuspendPolicy(policy string) bool {
+	switch policy {
+	case SuspendPolicyAuto, SuspendPolicyNever:
 		return true
 	default:
 		return false

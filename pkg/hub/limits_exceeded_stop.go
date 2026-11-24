@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -59,6 +60,13 @@ func systemStopBlocked(a *store.Agent) bool {
 	return a.RunIntent == store.RunIntentStopped || a.Phase == string(state.PhaseSuspended) ||
 		a.Phase == string(state.PhaseHalted) || !a.DeletedAt.IsZero() ||
 		deletionActive(a) || reincarnationInFlight(a)
+}
+
+// neverSuspendActive reports whether a is exempt from automatic suspension:
+// the lifecycle.never_suspend experiment is enabled and the agent's suspend
+// policy is "never".
+func (s *Server) neverSuspendActive(a *store.Agent) bool {
+	return a != nil && s.experimentEnabled(experiments.NeverSuspend) && a.SuspendPolicy == store.SuspendPolicyNever
 }
 
 // stopRunOnLimitsExceeded arms a stop of before's run when

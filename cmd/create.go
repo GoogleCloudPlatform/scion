@@ -312,6 +312,10 @@ func createAgentViaHubWithSecrets(hubCtx *HubContext, agentName string, task str
 	// Wire --service-account flag into the GCP identity assignment.
 	applyServiceAccountFlag(req, serviceAccountFlag)
 
+	if neverSuspendFlag {
+		req.SuspendPolicy = "never"
+	}
+
 	// The inline config from --config is the base; CLI flags override
 	// specific fields (ptone/scion#4012).
 	if inlineCfg != nil {
@@ -404,4 +408,7 @@ func init() {
 
 	// GCP service account assignment flag
 	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
+
+	// Never-suspend policy flag
+	createCmd.Flags().BoolVar(&neverSuspendFlag, "never-suspend", false, "Exempt this agent from automatic idle and stalled suspension")
 }

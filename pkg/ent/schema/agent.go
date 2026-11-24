@@ -120,6 +120,12 @@ func (Agent) Fields() []ent.Field {
 		field.String("suspend_reason").
 			Optional().
 			Nillable(),
+		// suspend_policy controls whether the agent is exempt from automatic
+		// suspension ("auto" or "never"). Written only at create (CreateAgent)
+		// and by dedicated policy setters; UpdateAgent never writes it.
+		field.Enum("suspend_policy").
+			Values("auto", "never").
+			Default("auto"),
 
 		// --- Limits tracking ---
 		field.Int("current_turns").

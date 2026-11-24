@@ -1746,6 +1746,26 @@ func SuspendReasonContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldSuspendReason, v))
 }
 
+// SuspendPolicyEQ applies the EQ predicate on the "suspend_policy" field.
+func SuspendPolicyEQ(v SuspendPolicy) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSuspendPolicy, v))
+}
+
+// SuspendPolicyNEQ applies the NEQ predicate on the "suspend_policy" field.
+func SuspendPolicyNEQ(v SuspendPolicy) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldSuspendPolicy, v))
+}
+
+// SuspendPolicyIn applies the In predicate on the "suspend_policy" field.
+func SuspendPolicyIn(vs ...SuspendPolicy) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldSuspendPolicy, vs...))
+}
+
+// SuspendPolicyNotIn applies the NotIn predicate on the "suspend_policy" field.
+func SuspendPolicyNotIn(vs ...SuspendPolicy) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldSuspendPolicy, vs...))
+}
+
 // CurrentTurnsEQ applies the EQ predicate on the "current_turns" field.
 func CurrentTurnsEQ(v int) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldCurrentTurns, v))

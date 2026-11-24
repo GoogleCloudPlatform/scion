@@ -524,6 +524,15 @@ const ReincarnateHarnessSwitch = "hub.reincarnate_harness_switch"
 // is idle-suspended or woken without an explicit wake.
 const IdleSuspend = "lifecycle.idle_suspend"
 
+// NeverSuspend gates per-agent suspend policy (suspend_policy: auto|never,
+// ptone/scion#9178): exempting flagged agents from idle and stalled
+// auto-suspend. It is independent of lifecycle.idle_suspend because stalled
+// auto-suspend does not require that experiment. Server layer: while off,
+// stored values are kept but ignored by sweeps and setting suspendPolicy on
+// create or PATCH returns 400 experiment_disabled. Web layer: hides the
+// never-suspend controls while off.
+const NeverSuspend = "lifecycle.never_suspend"
+
 // ImageTagVersionDefault gates the version default of image_tag
 // (ptone/scion#6625): while it is on and image_tag is unset, a release
 // build of the hub (vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N) applies its
@@ -658,6 +667,17 @@ const AgentMoveBundle = "hub.agent_move_bundle"
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        NeverSuspend,
+		Title:       "Never-suspend agents",
+		Description: "Allows marking agents with suspend_policy=never so they are exempt from idle and stalled auto-suspend. Server layer: while off, stored values are kept but ignored by sweeps and create or PATCH requests specifying suspendPolicy return 400 experiment_disabled. Web layer: hides never-suspend controls while off.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9178",
+		Owner:       "lifecycle",
+		ReviewBy:    "2027-05-24",
+	},
 	{
 		Name:        FiltersQueryDialect,
 		Title:       "Unified filter query dialect",

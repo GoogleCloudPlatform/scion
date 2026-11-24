@@ -44,6 +44,8 @@ const (
 // required part. It is a programming error and maps to 500.
 var errAgentCreateWriteInvalid = errors.New("agent create write is incomplete")
 
+const mutationTypeAgentSuspendPolicySet = "agent.suspend_policy.set"
+
 // agentCreateWrite is everything an agent create persists before dispatch.
 // Ceiling and Provenance are supplied by the caller and copied onto Edge;
 // commitAgentCreate never derives them.
@@ -202,6 +204,21 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 		w.Audit.TargetID = agent.ID
 		if err := tx.CreateMutationAudit(ctx, w.Audit); err != nil {
 			return fmt.Errorf("agent create audit: %w", err)
+		}
+		if agent.SuspendPolicy == store.SuspendPolicyNever {
+			policyAudit := &store.MutationAuditRecord{
+				MutationType:  mutationTypeAgentSuspendPolicySet,
+				TargetType:    "agent",
+				TargetID:      agent.ID,
+				BeforeSummary: store.SuspendPolicyAuto,
+				AfterSummary:  store.SuspendPolicyNever,
+				Timestamp:     w.Audit.Timestamp,
+			}
+			auditActorFromContext(ctx).ApplyActor(policyAudit)
+			applyHubActorFallback(policyAudit)
+			if err := tx.CreateMutationAudit(ctx, policyAudit); err != nil {
+				return fmt.Errorf("agent create suspend policy audit: %w", err)
+			}
 		}
 		if w.Subscription != nil {
 			w.Subscription.AgentID = agent.ID

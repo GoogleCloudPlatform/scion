@@ -6279,7 +6279,16 @@ func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 		s.mu.RUnlock()
 
 		if autoSuspend && len(agents) > 0 {
-			s.enqueueAutoSuspend(agents)
+			var suspendable []store.Agent
+			for i := range agents {
+				if s.neverSuspendActive(&agents[i]) {
+					continue
+				}
+				suspendable = append(suspendable, agents[i])
+			}
+			if len(suspendable) > 0 {
+				s.enqueueAutoSuspend(suspendable)
+			}
 		}
 	}
 }
@@ -6331,8 +6340,9 @@ func (s *Server) agentIdleSuspendHandler() func(ctx context.Context) {
 			selected []store.Agent
 			cursor   *store.IdleSuspendCursor
 		)
+		excludeNeverSuspend := s.experimentEnabled(experiments.NeverSuspend)
 		for len(selected) < budget && tickCtx.Err() == nil {
-			page, err := s.store.ListIdleSuspendCandidates(tickCtx, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff, cursor, pageSize)
+			page, err := s.store.ListIdleSuspendCandidates(tickCtx, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff, cursor, pageSize, excludeNeverSuspend)
 			if err != nil {
 				slog.Error("Scheduler: idle auto-suspend check failed", "error", err)
 				return
@@ -6445,6 +6455,11 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	if err != nil {
 		slog.Error("Scheduler: auto-suspend could not re-read agent",
 			"agent_id", snapshot.ID, "agent_name", snapshot.Name, "error", err)
+		return false
+	}
+	if s.neverSuspendActive(agent) {
+		slog.Info("Scheduler: skipping auto-suspend; agent has never-suspend policy",
+			"agent_id", agent.ID, "agent_name", agent.Name, "suspend_reason", reason)
 		return false
 	}
 
@@ -6583,6 +6598,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			return false
 		}
 		idleCond.IdleSuspendAfter = afterNow
+		idleCond.RequireSuspendPolicyAuto = s.experimentEnabled(experiments.NeverSuspend)
 		priorIntent, intentAt, claimUntil, err = s.claimIdleSuspend(ctx, agent, idleCond)
 		if errors.Is(err, store.ErrIdleSuspendPrecondition) {
 			s.clearWorkspaceAtStop(ctx, agent)
@@ -6604,7 +6620,13 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		// the idle sweep record suspended(idle) later (recoverIdleSuspendClaims,
 		// "Suspend commit and recovery protocol").
 	} else {
-		priorIntent, intentAt, err = s.swapSystemRunIntent(ctx, agent, store.RunIntentStopped)
+		priorIntent, intentAt, err = s.swapAutoSuspendRunIntent(ctx, agent, store.RunIntentStopped, s.experimentEnabled(experiments.NeverSuspend))
+		if errors.Is(err, store.ErrAgentNeverSuspend) {
+			s.clearWorkspaceAtStop(ctx, agent)
+			slog.Info("Scheduler: skipping stalled auto-suspend; agent has never-suspend policy",
+				"agent_id", agent.ID, "agent_name", agent.Name)
+			return false
+		}
 		if errors.Is(err, store.ErrIdleSuspendPrecondition) {
 			s.clearWorkspaceAtStop(ctx, agent)
 			slog.Info("Scheduler: skipping stalled auto-suspend; active idle-suspend claim holds agent",

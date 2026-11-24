@@ -109,6 +109,9 @@ func init() {
 			"Controls which agents and users this agent can message.\n"+
 			"Default: the template's mode, else the parent agent's, else the Hub's default message mode (server.hub.default_message_mode, 'project' unless the operator sets it).")
 
+	// Never-suspend policy flag
+	startCmd.Flags().BoolVar(&neverSuspendFlag, "never-suspend", false, "Exempt this agent from automatic idle and stalled suspension")
+
 	// Hub launch wait flags
 	startCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Return once the Hub accepts the agent, without waiting for it to be running")
 	startCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "How long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")

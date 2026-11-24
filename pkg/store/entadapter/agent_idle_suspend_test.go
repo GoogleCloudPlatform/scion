@@ -62,7 +62,7 @@ func TestAgentStore_ListIdleSuspendCandidates_Activities(t *testing.T) {
 	}
 	require.Len(t, wantIDs, 3, "expected idle, completed, and harness_error to be eligible")
 
-	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0)
+	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0, false)
 	require.NoError(t, err)
 
 	gotIDs := map[string]string{}
@@ -166,7 +166,7 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
-	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0)
+	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0, false)
 	require.NoError(t, err)
 	gotIDs := []string{}
 	for _, a := range got {
@@ -179,12 +179,12 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 	tieA := makeIdle("tie-a", now.Add(-30*time.Second))
 	setSince(tieA.ID, &past)
 
-	allOrdered, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0)
+	allOrdered, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0, false)
 	require.NoError(t, err)
 	require.Len(t, allOrdered, 3)
 	assert.Equal(t, eligible.ID, allOrdered[0].ID)
 
-	limited, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 1)
+	limited, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 1, false)
 	require.NoError(t, err)
 	require.Len(t, limited, 1)
 	assert.Equal(t, eligible.ID, limited[0].ID)
@@ -192,7 +192,7 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 	var pagedIDs []string
 	var cursor *store.IdleSuspendCursor
 	for {
-		page, perr := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, cursor, 1)
+		page, perr := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, cursor, 1, false)
 		require.NoError(t, perr)
 		if len(page) == 0 {
 			break

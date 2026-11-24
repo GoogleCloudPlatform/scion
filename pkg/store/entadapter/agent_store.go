@@ -118,6 +118,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		RuntimeState:        a.RuntimeState,
 		StalledFromActivity: a.StalledFromActivity,
 		SuspendReason:       derefString(a.SuspendReason),
+		SuspendPolicy:       string(a.SuspendPolicy),
 		CurrentTurns:        a.CurrentTurns,
 		CurrentModelCalls:   a.CurrentModelCalls,
 		Image:               a.Image,
@@ -387,6 +388,14 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) (err error
 
 	if a.MessageMode != "" {
 		create.SetMessageMode(agent.MessageMode(a.MessageMode))
+	}
+	if a.SuspendPolicy != "" {
+		if !store.IsValidSuspendPolicy(a.SuspendPolicy) {
+			return fmt.Errorf("%w: invalid suspend_policy %q", store.ErrInvalidInput, a.SuspendPolicy)
+		}
+		create.SetSuspendPolicy(agent.SuspendPolicy(a.SuspendPolicy))
+	} else {
+		a.SuspendPolicy = store.SuspendPolicyAuto
 	}
 	// Pinned placement (flat Runtime Brokers) is written at create, in the
 	// same transaction as the row, and afterwards only by
@@ -3569,7 +3578,7 @@ func entTxStoreNow(ctx context.Context, tx *ent.Tx, isPostgres bool) (time.Time,
 }
 
 // ListIdleSuspendCandidates implements store.AgentStore.
-func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *store.IdleSuspendCursor, limit int) ([]store.Agent, error) {
+func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *store.IdleSuspendCursor, limit int, excludeNeverSuspend bool) ([]store.Agent, error) {
 	q := s.client.Agent.Query().Where(
 		agent.DeletedAtIsNil(),
 		agent.PhaseEQ(string(state.PhaseRunning)),
@@ -3583,6 +3592,9 @@ func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, hear
 			agent.LastLiveProcessAtLT(liveWorkCutoff.UTC()),
 		),
 	)
+	if excludeNeverSuspend {
+		q = q.Where(agent.SuspendPolicyEQ(agent.SuspendPolicyAuto))
+	}
 	if !backoffCutoff.IsZero() {
 		q = q.Where(agent.Or(
 			agent.IdleSuspendClaimUntilIsNil(),

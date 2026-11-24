@@ -62,6 +62,8 @@ const (
 	FieldStalledFromActivity = "stalled_from_activity"
 	// FieldSuspendReason holds the string denoting the suspend_reason field in the database.
 	FieldSuspendReason = "suspend_reason"
+	// FieldSuspendPolicy holds the string denoting the suspend_policy field in the database.
+	FieldSuspendPolicy = "suspend_policy"
 	// FieldCurrentTurns holds the string denoting the current_turns field in the database.
 	FieldCurrentTurns = "current_turns"
 	// FieldCurrentModelCalls holds the string denoting the current_model_calls field in the database.
@@ -302,6 +304,7 @@ var Columns = []string{
 	FieldRuntimeState,
 	FieldStalledFromActivity,
 	FieldSuspendReason,
+	FieldSuspendPolicy,
 	FieldCurrentTurns,
 	FieldCurrentModelCalls,
 	FieldImage,
@@ -541,6 +544,32 @@ func MessageModeValidator(mm MessageMode) error {
 	}
 }
 
+// SuspendPolicy defines the type for the "suspend_policy" enum field.
+type SuspendPolicy string
+
+// SuspendPolicyAuto is the default value of the SuspendPolicy enum.
+const DefaultSuspendPolicy = SuspendPolicyAuto
+
+// SuspendPolicy values.
+const (
+	SuspendPolicyAuto  SuspendPolicy = "auto"
+	SuspendPolicyNever SuspendPolicy = "never"
+)
+
+func (sp SuspendPolicy) String() string {
+	return string(sp)
+}
+
+// SuspendPolicyValidator is a validator for the "suspend_policy" field enum values. It is called by the builders before save.
+func SuspendPolicyValidator(sp SuspendPolicy) error {
+	switch sp {
+	case SuspendPolicyAuto, SuspendPolicyNever:
+		return nil
+	default:
+		return fmt.Errorf("agent: invalid enum value for suspend_policy field: %q", sp)
+	}
+}
+
 // OrderOption defines the ordering options for the Agent queries.
 type OrderOption func(*sql.Selector)
 
@@ -652,6 +681,11 @@ func ByStalledFromActivity(opts ...sql.OrderTermOption) OrderOption {
 // BySuspendReason orders the results by the suspend_reason field.
 func BySuspendReason(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSuspendReason, opts...).ToFunc()
+}
+
+// BySuspendPolicy orders the results by the suspend_policy field.
+func BySuspendPolicy(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSuspendPolicy, opts...).ToFunc()
 }
 
 // ByCurrentTurns orders the results by the current_turns field.
