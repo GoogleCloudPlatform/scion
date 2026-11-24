@@ -418,16 +418,32 @@ func BenchmarkDecisionsProfileScale(b *testing.B) {
 	}
 }
 
-// TestDecisionsScaleStore runs the store-level scale timing table (cold first
+// decisionScaleSmokeSpec is the small correctness fixture run by default when
+// SCION_DECISIONS_SCALE != "1" so TestDecisionsScaleStore and
+// TestDecisionsScaleBackfill never skip in CI (and satisfy the entadapter
+// Postgres no-unexpected-skip guard) while finishing in <1s on both dialects.
+var decisionScaleSmokeSpec = decisionScaleSpec{
+	name:             "smoke_2p_50",
+	numProjects:      2,
+	topicsPerProject: 2,
+	agentsPerProject: 2,
+	rowsPerProject:   50,
+	openPerProject:   1,
+}
+
+// TestDecisionsScaleStore verifies store-level scale query correctness on a
+// tiny fixture by default, or runs the full R/S(/X) timing table (cold first
 // call + warm median of 5 calls) when SCION_DECISIONS_SCALE=1 (and optionally
 // SCION_DECISIONS_SCALE_X=1 for 1M).
 func TestDecisionsScaleStore(t *testing.T) {
-	if os.Getenv("SCION_DECISIONS_SCALE") != "1" {
-		t.Skip("set SCION_DECISIONS_SCALE=1 to run store-level scale timings")
+	specs := []decisionScaleSpec{decisionScaleSmokeSpec}
+	warmRuns := 1
+	if os.Getenv("SCION_DECISIONS_SCALE") == "1" {
+		specs = decisionScaleSpecs
+		warmRuns = 5
 	}
-	const warmRuns = 5
 	ctx := context.Background()
-	for _, sc := range decisionScaleSpecs {
+	for _, sc := range specs {
 		if sc.name == "X_200p_1M" && os.Getenv("SCION_DECISIONS_SCALE_X") != "1" {
 			continue
 		}
@@ -498,15 +514,20 @@ func TestDecisionsScaleStore(t *testing.T) {
 	}
 }
 
-// TestDecisionsScaleBackfill measures a full Scale S (200p / 200k decisions)
-// settled-hint backfill using SweepSettledDecisionsPage with keyset pagination
-// on SQLite (file-backed, MaxOpenConns=1, no ANALYZE) and PostgreSQL.
+// TestDecisionsScaleBackfill verifies keyset-cursor settled-hint backfill
+// correctness on a small fixture by default, or measures a full Scale S (200p /
+// 200k decisions) backfill on SQLite (file-backed, MaxOpenConns=1, no ANALYZE)
+// and PostgreSQL when SCION_DECISIONS_SCALE=1.
 func TestDecisionsScaleBackfill(t *testing.T) {
-	if os.Getenv("SCION_DECISIONS_SCALE") != "1" {
-		t.Skip("set SCION_DECISIONS_SCALE=1 to run 200k backfill timings")
-	}
 	ctx := context.Background()
-	sc := decisionScaleSpecs[1] // S_200p_200k
+	sc := decisionScaleSmokeSpec
+	pageSize := 20
+	minPages := 2
+	if os.Getenv("SCION_DECISIONS_SCALE") == "1" {
+		sc = decisionScaleSpecs[1] // S_200p_200k
+		pageSize = DefaultDecisionIndexPageSize
+		minPages = 10
+	}
 	f := seedDecisionScaleFixture(t, sc, false)
 	t.Logf("[%s/%s] seeded %d decisions (all settled=false) in %v",
 		sc.name, f.cs.Dialect(), f.totalDecisions, f.seedDuration)
@@ -517,7 +538,7 @@ func TestDecisionsScaleBackfill(t *testing.T) {
 	totalStart := time.Now()
 	for {
 		pStart := time.Now()
-		n, nextCursor, err := f.cs.SweepSettledDecisionsPage(ctx, cursor, DefaultDecisionIndexPageSize)
+		n, nextCursor, err := f.cs.SweepSettledDecisionsPage(ctx, cursor, pageSize)
 		pDur := time.Since(pStart)
 		require.NoError(t, err)
 		if nextCursor == "" {
@@ -535,15 +556,19 @@ func TestDecisionsScaleBackfill(t *testing.T) {
 
 	expectedSettled := f.totalDecisions - sc.numProjects*sc.openPerProject
 	require.Equal(t, expectedSettled, totalSwept)
-	require.GreaterOrEqual(t, len(pageDurs), 10)
+	require.GreaterOrEqual(t, len(pageDurs), minPages)
 
 	median := func(ds []time.Duration) time.Duration {
 		cp := append([]time.Duration(nil), ds...)
 		sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
 		return cp[len(cp)/2]
 	}
-	first5Med := median(pageDurs[:5])
-	last5Med := median(pageDurs[len(pageDurs)-5:])
+	window := 5
+	if len(pageDurs) < window {
+		window = len(pageDurs)
+	}
+	firstMed := median(pageDurs[:window])
+	lastMed := median(pageDurs[len(pageDurs)-window:])
 	worst := pageDurs[0]
 	for _, d := range pageDurs[1:] {
 		if d > worst {
@@ -551,7 +576,7 @@ func TestDecisionsScaleBackfill(t *testing.T) {
 		}
 	}
 	t.Logf("[%s/%s] BACKFILL TIMINGS (%d rows, %d pages of %d):",
-		sc.name, f.cs.Dialect(), totalSwept, len(pageDurs), DefaultDecisionIndexPageSize)
-	t.Logf("  total=%v  first-5 med=%v  last-5 med=%v  worst-page=%v",
-		totalDur, first5Med, last5Med, worst)
+		sc.name, f.cs.Dialect(), totalSwept, len(pageDurs), pageSize)
+	t.Logf("  total=%v  first-%d med=%v  last-%d med=%v  worst-page=%v",
+		totalDur, window, firstMed, window, lastMed, worst)
 }
