@@ -2153,4 +2153,79 @@ describe('scion-chat-secret-request', () => {
     );
     expect(fileInput.value).toBe('');
   });
+
+  it('discards a pending file A read when superseded by a rejected file B or a typed edit', async () => {
+    // 1. Pending file A -> select oversize file B (rejected) -> resolve A => no value, B error kept
+    const el1 = await mountCard({
+      rows: [makeRow({ rowId: 'r-file', key: 'RACE_FILE', secretType: 'file' })],
+    });
+    const fileInput1 = el1.shadowRoot!.querySelector(
+      'input[type="file"][data-file-input="RACE_FILE"]'
+    ) as HTMLInputElement;
+
+    let resolveA1!: (buf: ArrayBuffer) => void;
+    const fileA1 = new File(['stale-file-a'], 'a.pem', { type: 'text/plain' });
+    fileA1.arrayBuffer = (): Promise<ArrayBuffer> =>
+      new Promise<ArrayBuffer>((res) => {
+        resolveA1 = res;
+      });
+    Object.defineProperty(fileInput1, 'files', { value: [fileA1], configurable: true });
+    fileInput1.dispatchEvent(new Event('change'));
+    await el1.updateComplete;
+
+    // Pick oversize file B while A is still pending
+    const oversizeB = new File([new Uint8Array(65 * 1024)], 'b.pem', { type: 'text/plain' });
+    Object.defineProperty(fileInput1, 'files', { value: [oversizeB], configurable: true });
+    fileInput1.dispatchEvent(new Event('change'));
+    await el1.updateComplete;
+    expect(el1.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
+      'exceeds the 64 KiB limit'
+    );
+
+    // Now resolve A — must be ignored
+    resolveA1(new TextEncoder().encode('stale-file-a').buffer);
+    await new Promise((r) => setTimeout(r, 10));
+    await el1.updateComplete;
+
+    expect((el1 as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    expect(el1.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(el1.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
+    expect(el1.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
+      'exceeds the 64 KiB limit'
+    );
+    el1.remove();
+
+    // 2. Pending file A -> user types a value -> resolve A => typed value kept
+    const el2 = await mountCard({
+      rows: [makeRow({ rowId: 'r-file', key: 'RACE_FILE', secretType: 'file' })],
+    });
+    const fileInput2 = el2.shadowRoot!.querySelector(
+      'input[type="file"][data-file-input="RACE_FILE"]'
+    ) as HTMLInputElement;
+
+    let resolveA2!: (buf: ArrayBuffer) => void;
+    const fileA2 = new File(['stale-file-a'], 'a.pem', { type: 'text/plain' });
+    fileA2.arrayBuffer = (): Promise<ArrayBuffer> =>
+      new Promise<ArrayBuffer>((res) => {
+        resolveA2 = res;
+      });
+    Object.defineProperty(fileInput2, 'files', { value: [fileA2], configurable: true });
+    fileInput2.dispatchEvent(new Event('change'));
+    await el2.updateComplete;
+
+    const input2 = el2.shadowRoot!.querySelector('input[data-key="RACE_FILE"]') as HTMLInputElement;
+    input2.value = 'typed-secret';
+    input2.dispatchEvent(new Event('input'));
+    await el2.updateComplete;
+
+    resolveA2(new TextEncoder().encode('stale-file-a').buffer);
+    await new Promise((r) => setTimeout(r, 10));
+    await el2.updateComplete;
+
+    expect((el2 as unknown as { formValues: Map<string, string> }).formValues.get('r-file')).toBe(
+      'typed-secret'
+    );
+    expect(el2.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    el2.remove();
+  });
 });

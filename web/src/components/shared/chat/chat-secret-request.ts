@@ -214,6 +214,9 @@ export class ScionChatSecretRequest extends LitElement {
   /** Monotonic counter bumped on `clearFormValues()` to cancel stale async file reads. */
   private clearGeneration = 0;
 
+  /** Per-row monotonic counter bumped on every edit, clear, or file pick to cancel stale async file reads. */
+  private readonly rowEditTokens = new Map<string, number>();
+
   /** Row ID whose revealed textarea should receive focus after clicking Show. */
   private pendingFocusRowId = '';
 
@@ -697,6 +700,12 @@ export class ScionChatSecretRequest extends LitElement {
     return this.agentName || this.views[0]?.agentName || 'this agent';
   }
 
+  private bumpRowEditToken(rowId: string): number {
+    const next = (this.rowEditTokens.get(rowId) ?? 0) + 1;
+    this.rowEditTokens.set(rowId, next);
+    return next;
+  }
+
   /** Clears all ephemeral secret values and visibility toggles from memory. */
   clearFormValues(): void {
     this.clearGeneration++;
@@ -704,6 +713,7 @@ export class ScionChatSecretRequest extends LitElement {
     this.formValues.clear();
     this.capturedRows.clear();
     this.revealedLineEndings.clear();
+    this.rowEditTokens.clear();
     this.revealedRows = new Set();
     this.pendingFulfillIdempotencyKey = '';
     this.formRevision++;
@@ -732,7 +742,13 @@ export class ScionChatSecretRequest extends LitElement {
         this.formValues.delete(rowId);
         this.capturedRows.delete(rowId);
         this.revealedLineEndings.delete(rowId);
+        this.rowEditTokens.delete(rowId);
         changed = true;
+      }
+    }
+    for (const rowId of [...this.rowEditTokens.keys()]) {
+      if (!pendingIds.has(rowId)) {
+        this.rowEditTokens.delete(rowId);
       }
     }
     if (this.revealedRows.size > 0) {
@@ -810,6 +826,7 @@ export class ScionChatSecretRequest extends LitElement {
         value = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
       }
     }
+    this.bumpRowEditToken(rowId);
     this.capturedRows.delete(rowId);
     if (value.length === 0) {
       this.formValues.delete(rowId);
@@ -859,6 +876,7 @@ export class ScionChatSecretRequest extends LitElement {
       nextValue = current.slice(0, selStart) + incoming + current.slice(selEnd);
     }
 
+    this.bumpRowEditToken(rowId);
     this.formValues.set(rowId, nextValue);
     if (nextValue.includes('\n') || nextValue.includes('\r')) {
       this.capturedRows.add(rowId);
@@ -879,6 +897,7 @@ export class ScionChatSecretRequest extends LitElement {
 
   private clearCapturedRow(rowId: string, target: HTMLInputElement | null, e: Event): void {
     e.preventDefault();
+    this.bumpRowEditToken(rowId);
     this.formValues.delete(rowId);
     this.capturedRows.delete(rowId);
     if (target) {
@@ -974,6 +993,7 @@ export class ScionChatSecretRequest extends LitElement {
     const rawAfter = rawCurrent.slice(rawEnd);
     const nextValue = rawBefore + incoming + rawAfter;
 
+    this.bumpRowEditToken(rowId);
     this.formValues.set(rowId, nextValue);
     this.capturedRows.delete(rowId);
     this.revealedLineEndings.set(rowId, detectLineEndingStyle(nextValue));
@@ -1044,8 +1064,15 @@ export class ScionChatSecretRequest extends LitElement {
     this.pendingFulfillIdempotencyKey = '';
     this.formRevision++;
 
+    const token = this.bumpRowEditToken(row.rowId);
     const gen = this.clearGeneration;
     const targetMsgId = this.messageId;
+
+    const isStale = (): boolean =>
+      !this.isConnected ||
+      this.messageId !== targetMsgId ||
+      this.clearGeneration !== gen ||
+      this.rowEditTokens.get(row.rowId) !== token;
 
     try {
       if (file.size > MAX_SECRET_REQUEST_VALUE_BYTES) {
@@ -1054,7 +1081,7 @@ export class ScionChatSecretRequest extends LitElement {
       }
 
       const buf = await file.arrayBuffer();
-      if (!this.isConnected || this.messageId !== targetMsgId || this.clearGeneration !== gen) {
+      if (isStale()) {
         return;
       }
       if (buf.byteLength > MAX_SECRET_REQUEST_VALUE_BYTES) {
@@ -1093,7 +1120,7 @@ export class ScionChatSecretRequest extends LitElement {
       this.errorMessage = '';
       this.formRevision++;
     } catch {
-      if (this.isConnected && this.messageId === targetMsgId && this.clearGeneration === gen) {
+      if (!isStale()) {
         this.errorMessage = `Could not read the file for ${row.key}.`;
       }
     } finally {
