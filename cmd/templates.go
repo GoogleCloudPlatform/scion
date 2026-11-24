@@ -52,6 +52,12 @@ var templatesListCmd = &cobra.Command{
 	RunE:  runTemplateList,
 }
 
+func registerTemplateListFlags(c *cobra.Command) {
+	c.Flags().Bool("local", false, "Only list local filesystem templates")
+	c.Flags().Int("limit", 50, "Maximum number of hub templates to show per scope")
+	c.Flags().Bool("all", false, "Return all hub templates without a limit")
+}
+
 func runTemplateList(cmd *cobra.Command, args []string) error {
 	// Get local templates grouped by scope
 	localGlobal, localProject, err := config.ListTemplatesGrouped()
@@ -63,16 +69,31 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 	// (D5: the offline template views stay). Otherwise hub errors are
 	// returned: there is no silent fallback to a filesystem-only list.
 	var localOnly bool
+	limit := 50
+	all := false
 	if cmd != nil {
 		localOnly, _ = cmd.Flags().GetBool("local")
+		if cmd.Flags().Lookup("limit") != nil {
+			limit, _ = cmd.Flags().GetInt("limit")
+		}
+		if cmd.Flags().Lookup("all") != nil {
+			all, _ = cmd.Flags().GetBool("all")
+		}
 	}
-	var hubGlobal, hubProject, hubUser []hubclient.Template
+	if err := validateListLimitFlags(cmd, limit, all, "limit", "all"); err != nil {
+		return err
+	}
+
+	var (
+		hubGlobal, hubProject, hubUser []hubclient.Template
+		globalRes, projectRes, userRes listPageResult[hubclient.Template]
+	)
 	if !localOnly {
 		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := listRequestContext(cmdContext(cmd), all)
 		defer cancel()
 
 		// Get project ID for filtering project-scoped templates
@@ -81,39 +102,70 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 		// Fetch global templates from Hub. A failure here is returned: the
 		// hub answered requireHub, so an empty hub section would hide a
 		// real error (no silent fallback, D5).
-		globalResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-			Scope:  "global",
-			Status: "active",
+		// Hub's authorizedList enforces a max page size of 100.
+		globalRes, err = fetchListPages(ctx, limit, all, 100, func(ctx context.Context, pageLimit int, cursor string) ([]hubclient.Template, string, int, error) {
+			resp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
+				Scope:  "global",
+				Status: "active",
+				Page: apiclient.PageOptions{
+					Limit:  pageLimit,
+					Cursor: cursor,
+				},
+			})
+			if err != nil {
+				return nil, "", 0, err
+			}
+			return resp.Templates, resp.Page.NextCursor, resp.Page.TotalCount, nil
 		})
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to list hub templates: %w", err))
 		}
-		hubGlobal = globalResp.Templates
+		hubGlobal = globalRes.Items
 
 		// Fetch project templates from Hub (if we have a project ID)
 		if projectID != "" {
-			projectResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-				Scope:     "project",
-				ProjectID: projectID,
-				Status:    "active",
+			projectRes, err = fetchListPages(ctx, limit, all, 100, func(ctx context.Context, pageLimit int, cursor string) ([]hubclient.Template, string, int, error) {
+				resp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
+					Scope:     "project",
+					ProjectID: projectID,
+					Status:    "active",
+					Page: apiclient.PageOptions{
+						Limit:  pageLimit,
+						Cursor: cursor,
+					},
+				})
+				if err != nil {
+					return nil, "", 0, err
+				}
+				return resp.Templates, resp.Page.NextCursor, resp.Page.TotalCount, nil
 			})
 			if err != nil {
 				// The global list worked, so show it and say what is missing.
 				warnTemplateScopeListFailed("project", err)
 			} else {
-				hubProject = projectResp.Templates
+				hubProject = projectRes.Items
 			}
 		}
 
 		// Fetch user-scoped templates from Hub
-		userResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-			Scope:  "user",
-			Status: "active",
+		userRes, err = fetchListPages(ctx, limit, all, 100, func(ctx context.Context, pageLimit int, cursor string) ([]hubclient.Template, string, int, error) {
+			resp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
+				Scope:  "user",
+				Status: "active",
+				Page: apiclient.PageOptions{
+					Limit:  pageLimit,
+					Cursor: cursor,
+				},
+			})
+			if err != nil {
+				return nil, "", 0, err
+			}
+			return resp.Templates, resp.Page.NextCursor, resp.Page.TotalCount, nil
 		})
 		if err != nil {
 			warnTemplateScopeListFailed("user", err)
 		} else {
-			hubUser = userResp.Templates
+			hubUser = userRes.Items
 		}
 
 		// Sort hub templates by name for consistent output
@@ -126,6 +178,15 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 		sort.Slice(hubUser, func(i, j int) bool {
 			return hubUser[i].Name < hubUser[j].Name
 		})
+	}
+
+	emitNotices := func() {
+		if localOnly {
+			return
+		}
+		printListTruncationNotice(os.Stderr, len(globalRes.Items), globalRes.TotalCount, globalRes.Truncated, "global templates", "limit", "all")
+		printListTruncationNotice(os.Stderr, len(projectRes.Items), projectRes.TotalCount, projectRes.Truncated, "project templates", "limit", "all")
+		printListTruncationNotice(os.Stderr, len(userRes.Items), userRes.TotalCount, userRes.Truncated, "user templates", "limit", "all")
 	}
 
 	if isJSONOutput() {
@@ -196,9 +257,14 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 			if len(hubSection) > 0 {
 				output["hub"] = hubSection
 			}
+			output["truncated"] = globalRes.Truncated || projectRes.Truncated || userRes.Truncated
 		}
 
-		return outputJSON(output)
+		if err := outputJSON(output); err != nil {
+			return err
+		}
+		emitNotices()
+		return nil
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -212,6 +278,7 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 	}
 
 	_ = w.Flush()
+	emitNotices()
 	return nil
 }
 
@@ -1947,7 +2014,7 @@ func init() {
 	templatesUpdateDefaultCmd.Flags().Bool("force", false, "Overwrite the existing default template")
 
 	// Flags for list command
-	templatesListCmd.Flags().Bool("local", false, "Only list local filesystem templates")
+	registerTemplateListFlags(templatesListCmd)
 
 	// Flags for show command
 	templatesShowCmd.Flags().Bool("local", false, "Only search local filesystem")
@@ -1988,7 +2055,7 @@ func init() {
 		Short: "List available templates",
 		RunE:  runTemplateList,
 	}
-	listAlias.Flags().Bool("local", false, "Only list local filesystem templates")
+	registerTemplateListFlags(listAlias)
 	templateCmd.AddCommand(listAlias)
 	showAlias := &cobra.Command{
 		Use:   "show <name>",

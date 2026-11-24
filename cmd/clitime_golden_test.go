@@ -105,12 +105,12 @@ func runRootGolden(t *testing.T, args ...string) (string, error) {
 	restoreAllSilenceUsage(t)
 	origProject, origFormat := projectPath, outputFormat
 	origTZ, origUTC := displayTZ, displayUTC
-	origShowAll, origMsgJSON := messagesShowAll, messagesJSON
+	origShowAll, origMsgJSON, origMsgLimit, origMsgAll := messagesIncludeRead, messagesJSON, messagesLimit, messagesAll
 	origSecretJSON, origSecretProject, origSecretBroker := secretOutputJSON, secretProjectScope, secretBrokerScope
 	t.Cleanup(func() {
 		projectPath, outputFormat = origProject, origFormat
 		displayTZ, displayUTC = origTZ, origUTC
-		messagesShowAll, messagesJSON = origShowAll, origMsgJSON
+		messagesIncludeRead, messagesJSON, messagesLimit, messagesAll = origShowAll, origMsgJSON, origMsgLimit, origMsgAll
 		secretOutputJSON, secretProjectScope, secretBrokerScope = origSecretJSON, origSecretProject, origSecretBroker
 		rootCmd.SetArgs(nil)
 		rootCmd.SetErr(nil)
@@ -121,7 +121,7 @@ func runRootGolden(t *testing.T, args ...string) (string, error) {
 	resetTimeZoneFlagsChanged(t)
 	t.Cleanup(func() { resetTimeZoneFlagsChanged(t) })
 	displayTZ, displayUTC, outputFormat = "", false, ""
-	messagesShowAll, messagesJSON, secretOutputJSON = false, false, false
+	messagesIncludeRead, messagesJSON, messagesLimit, messagesAll, secretOutputJSON = false, false, 50, false, false
 
 	var stderr bytes.Buffer
 	rootCmd.SetErr(&stderr)

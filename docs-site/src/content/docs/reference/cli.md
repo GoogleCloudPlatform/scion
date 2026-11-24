@@ -551,11 +551,13 @@ View and manage messages sent to you by agents. Running `scion messages` without
 **Usage:** `scion messages [flags]` or `scion messages [command] [flags]`
 
 - **Commands:**
-    - `scion messages`: List your unread messages.
+    - `scion messages`: List your unread messages. When results are truncated by `--limit`, a notice (`Showing N of M messages; use --limit or --all to see more.`) is written to stderr in both table and `--json` modes.
         - Flags:
             - `--agent <string>`: Filter by agent name or ID.
-            - `--all`: Include read messages.
-            - `--json`: Output in JSON format.
+            - `--include-read`: Include read messages.
+            - `--limit <int>`: Maximum number of messages to show (default `50`). Must be a positive integer; cannot be combined with `--all`.
+            - `--all`: Return all matching messages without a limit. Cannot be combined with `--limit`.
+            - `--json`: Output in JSON format (`items`, `nextCursor`, `totalCount`, and `truncated`).
     - `scion messages read [message-id]`: Mark one or all messages as read. Pass a message ID to mark that specific message as read, or `--all` to mark all unread messages as read (mutually exclusive).
         - Flags:
             - `--all`: Mark all messages as read.
@@ -604,17 +606,22 @@ Conversations are referenced using one of three forms:
     - `--all`: Return all matching conversations without a limit. Cannot be combined with `--limit`.
     - `--json`: Output in JSON format (`conversations`, `total`, and `truncated`).
 - **Flags (on `messages`):**
-    - `--limit <int>`: Maximum number of messages to show (default 25).
+    - `--limit <int>`: Maximum number of messages to show (default `25`). Must be a positive integer; cannot be combined with `--all`.
+    - `--all`: Return all matching messages without a limit. Cannot be combined with `--limit`.
     - `--before <time>`: Show messages before this time (RFC 3339).
     - `--after <time>`: Show messages after this time (RFC 3339).
-    - `--json`: Output in JSON format.
+    - `--json`: Output in JSON format (`items`, `nextCursor`, `totalCount`, and `truncated`).
+    - When results are truncated, a notice is written to stderr in both table and `--json` modes.
 - **Flags (on `create`):**
     - `--project <string>`: Project ID. Defaults to the Hub-linked project, then the local project. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`.
     - `--group <group>`: File the new conversation into a thread group of the same project: a group ID, or a group name resolved within the project as `scion conversation group` resolves it. The group is checked before the conversation is created, so an unknown or ambiguous group creates nothing.
     - `--json`: Output in JSON format.
 - **Flags (on `catch-up`):**
     - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
-    - `--json`: Output in JSON format.
+    - `--limit <int>`: Maximum number of messages to show (default `50`). Must be a positive integer; cannot be combined with `--all`.
+    - `--all`: Return all matching messages without a limit. Cannot be combined with `--limit`.
+    - `--json`: Output in JSON format (`items`, `nextCursor`, `totalCount`, and `truncated`).
+    - When results are truncated, a notice is written to stderr in both table and `--json` modes.
 - **Flags (on `get-message`):**
     - `--json`: Output in JSON format.
 
@@ -1298,8 +1305,8 @@ Manages shared directories for agents within a project.
 
 Manages agent templates. `scion template` (singular) is an accepted alias. Scope defaults to the project; add the root `--global` flag to target global templates.
 
-- `list`: List available templates from the Hub and the filesystem, grouped by scope. A failed global-scope Hub list is an error; a failed project or user list is a warning and the rest is still shown.
-    - Flags: `--local` (list filesystem templates only; makes no Hub request, so it works offline).
+- `list`: List available templates from the Hub and the filesystem, grouped by scope. A failed global-scope Hub list is an error; a failed project or user list is a warning and the rest is still shown. When any Hub scope is truncated, a notice is written to stderr in both table and `--format json` modes, and `--format json` includes a top-level `truncated` boolean.
+    - Flags: `--local` (list filesystem templates only; makes no Hub request, so it works offline), `--limit <int>` (maximum number of Hub templates per scope, default `50`; positive integer; cannot be combined with `--all`), `--all` (return all Hub templates without a limit).
 - `show <name>`: Show a template's resolved configuration (including its redacted `Source URL` for Hub templates when set, in both text and `--format json`).
     - Flags: `--local` (search local only), `--hub` (search Hub only). Without `--local`, a Hub error is shown rather than falling back to the filesystem; the same holds for `clone` and `delete`.
 - `create <name>`: Create a new template (seeded from the `default` template).
@@ -1418,7 +1425,8 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - A background workstation `scion server start` (with the web server on) adds the local Hub to the hub list as `local` (`local-2` and so on if that name is taken; `--foreground` does not add it), and makes it the current Hub when no Hub is current and the global settings name no other Hub. A successful `scion hub auth login` to a Hub URL given with `--hub-url` or `--hub` adds that Hub with a nickname derived from its host (`local` for the local workstation Hub).
 - `scion hub link`: Link the current local project to the Hub that applies in that directory (for example the current Hub selected with `scion use`). The project is created on the Hub if it does not exist, or, after a prompt, linked to an existing project with the same name (the repository name from the git remote, or the directory name). With no Hub configured, the command fails with `No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.` On the local workstation Hub the link confirmation is skipped; a remote Hub still asks (or needs `--yes`). On the local workstation Hub a newly registered git project gets the `worktree-per-agent` mode, so its agents get worktrees of this checkout (see [Linked git projects](/scion/local/workspace/#linked-git-projects)). In a git repository without its own `.scion`, when the project would otherwise fall back to the global project (no `--global` or `--project`), the command refuses: run `scion init` there first, or pass `--global` to link the global project. A `.scion`-less repository inside another scion project links that parent project instead. The prompt to pick among matching projects appears on both. When the project has agents left from before the hub was required that the Hub does not know, `hub link` offers to import them; see [what the import does with each agent](/scion/reference/local-mode-removal/#what-the-import-does-with-each-agent). After linking, the command records a link entry (the hub, the hub project and the directory) in the hub list, so the directory keeps resolving to that Hub whichever Hub is current, and the project appears in `scion project list` with its local path. A Hub that was not in the hub list is added. No `hub.endpoint` is written to the project's settings.
 - `scion hub unlink`: Unlink the current project from the Hub locally. It marks the project unlinked (`hub.linked: false`) and clears its Hub project ID; it does not remove the project or its agents from the Hub. Agent commands in an unlinked project refuse with a pointer to `scion hub link`. It also removes the directory's link entry from the hub list; the current context is not changed. Agents that already exist keep running on their broker; manage them with `--project <hub-slug>`, or re-link with `scion hub link`.
-- `scion hub projects` (alias `project`): List all projects registered on the Hub. For the projects on all your hubs, use `scion project list`.
+- `scion hub projects` (alias `project`): List projects registered on the Hub (or show details for a single project when given a positional `<project-name-or-id>`). For the projects on all your hubs, use `scion project list`. When results are truncated, a notice is written to stderr in both table and `--json` modes.
+    - Flags: `--limit <int>` (default `500`; positive integer; cannot be combined with `--all` or a positional project argument), `--all` (return all projects without a limit), `--json` (outputs `{"projects": [...], "total": N, "truncated": bool}`).
     - `create [git-url]`: Create a project on the Hub. With a git URL, the project is anchored to that repository. Without one, a Hub-managed project without git is created; `--name` is then required and `--branch` is not allowed.
         - Flags: `--slug`, `--name`, `--branch`, `--workspace-mode`, `--json`
         - `--workspace-mode <shared|per-agent|worktree-per-agent>`: The [workspace sharing mode](/scion/local/workspaces-and-sharing/#setting-the-mode-on-a-hub-project). On a project without git, `per-agent` gives each agent an empty private directory (empty-per-agent). The mode is set at create time only and cannot be changed later. The Hub validates the value: unknown values, and `worktree-per-agent` without a git URL, fail with the Hub's `400` message.
@@ -1426,7 +1434,8 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `delete [project-name-or-id]`: Delete a project from the Hub, given by name or project ID (UUID), with its broker provider associations. The Hub refuses while the project still has agents that are not deleted (including agents whose delete failed) and lists them; delete those agents first. `--force` deletes the project anyway: its agent records are removed and the Runtime Brokers are asked to delete the agents best-effort. With `--format json` a refusal is reported as `{status: "error", details: {projectId, projectName, agents, truncated}}`. Asks for confirmation unless `--yes` or `--non-interactive` is set. The project is resolved the same way as for `info`, so `info` shows the project that `delete` would remove.
         - Flags: `--yes`, `--non-interactive`, `--force`
 - `scion hub shadow` and `scion hub unshadow` have been removed. `scion hub shadow` fails with `'scion hub shadow' was removed; run 'scion use <project>' to work with a hub project from any directory`. Directories it created keep working and print a cleanup notice; see [Moving from `scion hub shadow`](/scion/hosted/user/multiple-hubs/#moving-from-scion-hub-shadow).
-- `scion hub brokers`: List all runtime brokers registered on the Hub.
+- `scion hub brokers`: List runtime brokers registered on the Hub. When results are truncated, a notice is written to stderr in both table and `--json` modes.
+    - Flags: `--limit <int>` (default `50`; positive integer; cannot be combined with `--all`), `--all` (return all runtime brokers without a limit), `--json` (outputs `{"brokers": [...], "total": N, "truncated": bool}`).
     - `info [broker-name-or-id]`: Show details for a Runtime Broker, given by name or ID (default: this host's registered Runtime Broker), including its status, capacity, profiles (for a legacy broker), or `Runtime target` and reported defaults (`runtimeTargetPresentation` in `--json`) for a flat Runtime Broker.
     - `join-token create <broker-name>`: Create the broker if it does not exist, and a single-use join token for it, to redeem on the broker host with `scion runtime-broker join` (see [Headless Registration with a Join Token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-join-token)). The token is printed on stdout; the instructions go to stderr. For an existing broker, only its owner or a super-admin can create a token, and the new token replaces any unused earlier one. The broker's settings are not changed. Requires the `broker.create` permission, with a sign-in or a hub-boundary user access token carrying `broker:create`; a token issues a token only for a broker its user created.
         - `--admin-managed`: Register the new Runtime Broker as admin-managed (requires `broker.manage` with an interactive sign-in or dev credential — not a user access token — and experiment `hub.admin_managed_brokers`; required for new Runtime Brokers when `broker_policy.admin_managed_only` is active).
@@ -1719,11 +1728,13 @@ Manage one-shot scheduled events and recurring cron schedules on the Hub for the
         - `--cron "<min> <hour> <dom> <mon> <dow>"` (required): Standard 5-field cron expression (zone prefixes `CRON_TZ=` and `TZ=` are rejected).
         - `--time-zone <IANA-zone>`: IANA time zone in which `--cron` is evaluated (for example `America/Los_Angeles`; defaults to `UTC` when omitted; displayed next-run times follow `--tz` / display zone).
         - `--type <message|exec>`, `--agent <name>`, `--message <text>`, `--interrupt`, `--wake`, `--timeout <duration>`, `--capture-output <none|json|tail>`, `-- <argv...>`: Same event parameters and validation rules as `create`.
-- `scion schedule list`: List recurring schedules and one-shot events in the project. When caller-scoped (`scope: "caller"` or authenticated with an agent token), the Hub returns only schedules and events whose recorded authority is that agent, and text mode prints `Note: showing only schedules and events held by this agent (other project schedules are hidden).` on stdout.
+- `scion schedule list`: List recurring schedules and one-shot events in the project. When caller-scoped (`scope: "caller"` or authenticated with an agent token), the Hub returns only schedules and events whose recorded authority is that agent, and text mode prints `Note: showing only schedules and events held by this agent (other project schedules are hidden).` on stdout. When either section is truncated, a notice is written to stderr in both table and `--format json` modes, and `--format json` includes `truncated` on each returned section (`events` / `schedules`).
     - Flags:
         - `--show <all|events|recurring>`: Filter by resource type (default: `all`).
         - `--status <status>`: Filter by status (`pending`, `firing`, `fired`, `skipped`, `cancelled`, `expired`, `failed`, `active`, `paused`).
         - `--type <message|dispatch_agent|exec>`: Filter one-shot scheduled events by event type.
+        - `--limit <int>`: Maximum number of events and schedules to show per section (default `50`). Must be a positive integer; cannot be combined with `--all`.
+        - `--all`: Return all events and schedules without a limit. Cannot be combined with `--limit`.
 - `scion schedule get <id>`: Inspect a one-shot event or recurring schedule by full UUID or unique UUID prefix. For `exec` events and schedules, displays `Command` (or `<redacted, N args, sha256:...>` when redacted), `Timeout`, `Capture` (when set), and `execSummary` fields (`Outcome`, `Exit Code`, `Duration`, `Output`, `Capture`, `Out Status` on events; `Last Outcome` and `Last Exit Code` from the latest history entry on recurring schedules).
 - `scion schedule events output <event-id>`: Fetch the captured output of an `exec` scheduled event (requires live `agent.attach` on the target agent; available in both human and agent mode). Prints pretty-printed JSON for `json` mode or raw text for `tail` mode; pass `--json` for the full response envelope.
 - `scion schedule cancel <id>`: Cancel a `pending` one-shot event (accepts full UUID or unique UUID prefix).

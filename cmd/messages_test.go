@@ -63,14 +63,18 @@ func TestMessagesBareAndUnknownSubcommand(t *testing.T) {
 	restoreAllSilenceUsage(t)
 	origProjectPath := projectPath
 	origJSON := messagesJSON
-	origShowAll := messagesShowAll
+	origIncludeRead := messagesIncludeRead
+	origLimit := messagesLimit
+	origAll := messagesAll
 	origReadAll := messagesReadAll
 	origAgent := messagesAgent
 	origOutputFormat := outputFormat
 	defer func() {
 		projectPath = origProjectPath
 		messagesJSON = origJSON
-		messagesShowAll = origShowAll
+		messagesIncludeRead = origIncludeRead
+		messagesLimit = origLimit
+		messagesAll = origAll
 		messagesReadAll = origReadAll
 		messagesAgent = origAgent
 		outputFormat = origOutputFormat
@@ -105,7 +109,9 @@ func TestMessagesBareAndUnknownSubcommand(t *testing.T) {
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	projectPath = projectDir
 	messagesJSON = false
-	messagesShowAll = false
+	messagesIncludeRead = false
+	messagesLimit = 50
+	messagesAll = false
 	messagesReadAll = false
 	messagesAgent = ""
 	outputFormat = ""
@@ -116,7 +122,9 @@ func TestMessagesBareAndUnknownSubcommand(t *testing.T) {
 			resetCommandFlags(t, messagesCmd)
 			resetCommandFlags(t, messagesReadCmd)
 			messagesJSON = false
-			messagesShowAll = false
+			messagesIncludeRead = false
+			messagesLimit = 50
+			messagesAll = false
 			messagesReadAll = false
 			messagesAgent = ""
 			outputFormat = ""
