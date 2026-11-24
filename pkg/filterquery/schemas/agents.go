@@ -60,5 +60,6 @@ func All() []filterquery.Schema {
 		Agents,
 		Artifacts,
 		ProjectArtifacts,
+		Files,
 	}
 }
