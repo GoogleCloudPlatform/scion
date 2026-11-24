@@ -124,7 +124,21 @@ var (
 	_ trigger.SourceEnricher       = serverTriggerCore{}
 	_ trigger.PostEvaluationHook   = serverTriggerCore{}
 	_ trigger.ReuseMessageRenderer = serverTriggerCore{}
+	_ trigger.PreFireRefuser       = serverTriggerCore{}
 )
+
+func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger, ev *hubfire.FireEvent) (string, string, bool) {
+	if c.srv == nil || tr == nil || ev == nil {
+		return "", "", false
+	}
+	if !trigger.ActionSubjectToPreFireGuards(tr.ActionType) {
+		return "", "", false
+	}
+	if refusal, auditReason := c.srv.githubBotSenderRefusal(ctx, ev); refusal != nil {
+		return refusal.Reason, auditReason, true
+	}
+	return "", "", false
+}
 
 func (c serverTriggerCore) RenderReuseMessage(ctx context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
 	return c.srv.renderDispatchReuseMessage(ctx, req)

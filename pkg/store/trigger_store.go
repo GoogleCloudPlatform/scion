@@ -91,6 +91,11 @@ const (
 	TriggerSubjectClaimStateReleased = "released"
 )
 
+// TriggerSubjectClaim release reasons (Stage 3 §10.3).
+const (
+	TriggerSubjectClaimReleaseReasonAssociationLost = "association_lost"
+)
+
 // MaxTriggerSubjectBytes is the maximum byte length of a trigger subject claim key (§5.6).
 const MaxTriggerSubjectBytes = 256
 
@@ -304,16 +309,17 @@ type TriggerFireFilter struct {
 // TriggerSubjectClaim represents the per-(trigger, subject) live-subject claim
 // row used by dispatch_agent triggers in mode "skip" (Stage 2 §5.6) and Stage 3 "reuse".
 type TriggerSubjectClaim struct {
-	ID         string     `json:"id"`
-	TriggerID  string     `json:"triggerId"`
-	Subject    string     `json:"subject"`
-	State      string     `json:"state"`
-	AgentID    string     `json:"agentId,omitempty"`
-	EventID    string     `json:"eventId"`
-	FireID     string     `json:"fireId"`
-	ClaimedAt  time.Time  `json:"claimedAt"`
-	BoundAt    *time.Time `json:"boundAt,omitempty"`
-	ReleasedAt *time.Time `json:"releasedAt,omitempty"`
+	ID            string     `json:"id"`
+	TriggerID     string     `json:"triggerId"`
+	Subject       string     `json:"subject"`
+	State         string     `json:"state"`
+	AgentID       string     `json:"agentId,omitempty"`
+	EventID       string     `json:"eventId"`
+	FireID        string     `json:"fireId"`
+	ClaimedAt     time.Time  `json:"claimedAt"`
+	BoundAt       *time.Time `json:"boundAt,omitempty"`
+	ReleasedAt    *time.Time `json:"releasedAt,omitempty"`
+	ReleaseReason string     `json:"releaseReason,omitempty"`
 
 	// Agent is populated in-memory by SubjectClaims.Live from the GetAgent
 	// lookup it already performs, so callers can inspect phase/launch state
@@ -394,6 +400,7 @@ type TriggerStore interface {
 	ReleaseTriggerSubjectClaim(ctx context.Context, claimID, fireID string, releasedAt time.Time) (bool, error)
 	GetActiveTriggerSubjectClaim(ctx context.Context, triggerID, subject string) (*TriggerSubjectClaim, error)
 	ReleaseTriggerSubjectClaimsForAgent(ctx context.Context, agentID string, releasedAt time.Time) (int, error)
+	ReleaseTriggerSubjectClaimsForProjectBySourceKind(ctx context.Context, projectID, sourceKind, reason string, releasedAt time.Time) (int, error)
 	ReleaseTerminalTriggerSubjectClaims(ctx context.Context, now time.Time) (int, error)
 	PurgeOldTriggerSubjectClaims(ctx context.Context, olderThan time.Time) (int, error)
 }

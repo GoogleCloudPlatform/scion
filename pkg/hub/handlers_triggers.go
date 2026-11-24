@@ -382,6 +382,8 @@ func validateTriggerActionCrossFields(w http.ResponseWriter, actionType string, 
 			badField = "agentRole"
 		case spec.ReuseMessage != "":
 			badField = "reuseMessage"
+		case spec.AckComment != nil:
+			badField = "ackComment"
 		case len(spec.UntrustedVars) > 0:
 			badField = "untrustedVars"
 		case spec.NoAuth:
@@ -444,6 +446,8 @@ func validateTriggerActionCrossFields(w http.ResponseWriter, actionType string, 
 			badField = "agentRole"
 		case spec.ReuseMessage != "":
 			badField = "reuseMessage"
+		case spec.AckComment != nil:
+			badField = "ackComment"
 		case spec.NoAuth:
 			badField = "noAuth"
 		}

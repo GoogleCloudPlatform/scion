@@ -390,6 +390,18 @@ func (a *dispatchAgentAction) validateForAuthoring(
 			return "", err
 		}
 	}
+	if payload.AckComment != nil {
+		if opts.sourceKind != store.TriggerSourceKindGitHub {
+			return "", &dispatchAgentValidationError{
+				status:  http.StatusBadRequest,
+				code:    "ack_comment_requires_github_source",
+				message: "ackComment is only supported on github triggers",
+			}
+		}
+		if err := validateGitHubAckCommentPayload(payload.AckComment, payload.UntrustedVars); err != nil {
+			return "", err
+		}
+	}
 
 	// Caller authority, standing, role capping, and UAT-hop ceiling (§5.1).
 	if err := a.srv.validateDispatchAgentAuthoringAuthority(
@@ -632,6 +644,19 @@ func unmarshalDispatchAgentFirePayload(raw, definitionKind string) (DispatchAgen
 func (a *dispatchAgentAction) ValidatePayload(req hubfire.FireRequest) error {
 	_, err := unmarshalDispatchAgentFirePayload(req.Payload, req.Authority.DefinitionKind)
 	return err
+}
+
+func (a *dispatchAgentAction) Preauthorize(ctx context.Context, req hubfire.FireRequest) (*FireRefusal, error) {
+	if req.Authority.DefinitionKind != hubfire.DefinitionKindTrigger || a == nil || a.srv == nil {
+		return nil, nil
+	}
+	// Defence in depth for callers invoking fireAction directly (bypassing
+	// trigger.Dispatcher's PreFireRefuser hook).
+	// TODO(G7): re-home behind provider action / post-fire hook (app-shaped-source-seams §2.1)
+	if refusal, _ := a.srv.githubBotSenderRefusal(ctx, req.Event); refusal != nil {
+		return refusal, nil
+	}
+	return nil, nil
 }
 
 func dispatchAgentRefusalReason(req hubfire.FireRequest, err error) *FireRefusal {
@@ -1349,6 +1374,10 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			var agentID string
 			if agent != nil {
 				agentID = agent.ID
+			}
+			// TODO(G7): re-home behind provider action / post-fire hook (app-shaped-source-seams §2.1)
+			if da.payload.AckComment != nil && ev.SourceKind == store.TriggerSourceKindGitHub && a.srv.githubTriggersEnabled() {
+				a.srv.postDispatchAgentAckComment(ctx, req, da, agent)
 			}
 			return hubfire.FireOutcome{
 				Status:        hubfire.FireStatusFired,

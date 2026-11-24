@@ -35,8 +35,10 @@ type TriggerSubjectClaim struct {
 	// BoundAt holds the value of the "bound_at" field.
 	BoundAt *time.Time `json:"bound_at,omitempty"`
 	// ReleasedAt holds the value of the "released_at" field.
-	ReleasedAt   *time.Time `json:"released_at,omitempty"`
-	selectValues sql.SelectValues
+	ReleasedAt *time.Time `json:"released_at,omitempty"`
+	// ReleaseReason holds the value of the "release_reason" field.
+	ReleaseReason string `json:"release_reason,omitempty"`
+	selectValues  sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -46,7 +48,7 @@ func (*TriggerSubjectClaim) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case triggersubjectclaim.FieldAgentID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case triggersubjectclaim.FieldSubject, triggersubjectclaim.FieldState:
+		case triggersubjectclaim.FieldSubject, triggersubjectclaim.FieldState, triggersubjectclaim.FieldReleaseReason:
 			values[i] = new(sql.NullString)
 		case triggersubjectclaim.FieldClaimedAt, triggersubjectclaim.FieldBoundAt, triggersubjectclaim.FieldReleasedAt:
 			values[i] = new(sql.NullTime)
@@ -130,6 +132,12 @@ func (_m *TriggerSubjectClaim) assignValues(columns []string, values []any) erro
 				_m.ReleasedAt = new(time.Time)
 				*_m.ReleasedAt = value.Time
 			}
+		case triggersubjectclaim.FieldReleaseReason:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field release_reason", values[i])
+			} else if value.Valid {
+				_m.ReleaseReason = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -198,6 +206,9 @@ func (_m *TriggerSubjectClaim) String() string {
 		builder.WriteString("released_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("release_reason=")
+	builder.WriteString(_m.ReleaseReason)
 	builder.WriteByte(')')
 	return builder.String()
 }

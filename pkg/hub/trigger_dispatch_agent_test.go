@@ -2033,6 +2033,11 @@ func TestTriggerHandlers_RefuseCrossActionFields(t *testing.T) {
 			wantField: "action.task",
 		},
 		{
+			name:      "message_with_ackComment",
+			action:    TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAg.ID, Message: "hi", AckComment: &DispatchAgentAckComment{Body: "ack"}},
+			wantField: "action.ackComment",
+		},
+		{
 			name:      "message_with_labels",
 			action:    TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAg.ID, Message: "hi", Labels: map[string]string{"k": "v"}},
 			wantField: "action.labels",

@@ -100,6 +100,11 @@ func ReleasedAt(v time.Time) predicate.TriggerSubjectClaim {
 	return predicate.TriggerSubjectClaim(sql.FieldEQ(FieldReleasedAt, v))
 }
 
+// ReleaseReason applies equality check predicate on the "release_reason" field. It's identical to ReleaseReasonEQ.
+func ReleaseReason(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldEQ(FieldReleaseReason, v))
+}
+
 // TriggerIDEQ applies the EQ predicate on the "trigger_id" field.
 func TriggerIDEQ(v uuid.UUID) predicate.TriggerSubjectClaim {
 	return predicate.TriggerSubjectClaim(sql.FieldEQ(FieldTriggerID, v))
@@ -538,6 +543,81 @@ func ReleasedAtIsNil() predicate.TriggerSubjectClaim {
 // ReleasedAtNotNil applies the NotNil predicate on the "released_at" field.
 func ReleasedAtNotNil() predicate.TriggerSubjectClaim {
 	return predicate.TriggerSubjectClaim(sql.FieldNotNull(FieldReleasedAt))
+}
+
+// ReleaseReasonEQ applies the EQ predicate on the "release_reason" field.
+func ReleaseReasonEQ(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldEQ(FieldReleaseReason, v))
+}
+
+// ReleaseReasonNEQ applies the NEQ predicate on the "release_reason" field.
+func ReleaseReasonNEQ(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldNEQ(FieldReleaseReason, v))
+}
+
+// ReleaseReasonIn applies the In predicate on the "release_reason" field.
+func ReleaseReasonIn(vs ...string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldIn(FieldReleaseReason, vs...))
+}
+
+// ReleaseReasonNotIn applies the NotIn predicate on the "release_reason" field.
+func ReleaseReasonNotIn(vs ...string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldNotIn(FieldReleaseReason, vs...))
+}
+
+// ReleaseReasonGT applies the GT predicate on the "release_reason" field.
+func ReleaseReasonGT(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldGT(FieldReleaseReason, v))
+}
+
+// ReleaseReasonGTE applies the GTE predicate on the "release_reason" field.
+func ReleaseReasonGTE(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldGTE(FieldReleaseReason, v))
+}
+
+// ReleaseReasonLT applies the LT predicate on the "release_reason" field.
+func ReleaseReasonLT(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldLT(FieldReleaseReason, v))
+}
+
+// ReleaseReasonLTE applies the LTE predicate on the "release_reason" field.
+func ReleaseReasonLTE(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldLTE(FieldReleaseReason, v))
+}
+
+// ReleaseReasonContains applies the Contains predicate on the "release_reason" field.
+func ReleaseReasonContains(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldContains(FieldReleaseReason, v))
+}
+
+// ReleaseReasonHasPrefix applies the HasPrefix predicate on the "release_reason" field.
+func ReleaseReasonHasPrefix(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldHasPrefix(FieldReleaseReason, v))
+}
+
+// ReleaseReasonHasSuffix applies the HasSuffix predicate on the "release_reason" field.
+func ReleaseReasonHasSuffix(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldHasSuffix(FieldReleaseReason, v))
+}
+
+// ReleaseReasonIsNil applies the IsNil predicate on the "release_reason" field.
+func ReleaseReasonIsNil() predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldIsNull(FieldReleaseReason))
+}
+
+// ReleaseReasonNotNil applies the NotNil predicate on the "release_reason" field.
+func ReleaseReasonNotNil() predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldNotNull(FieldReleaseReason))
+}
+
+// ReleaseReasonEqualFold applies the EqualFold predicate on the "release_reason" field.
+func ReleaseReasonEqualFold(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldEqualFold(FieldReleaseReason, v))
+}
+
+// ReleaseReasonContainsFold applies the ContainsFold predicate on the "release_reason" field.
+func ReleaseReasonContainsFold(v string) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldContainsFold(FieldReleaseReason, v))
 }
 
 // And groups predicates with the AND operator between them.

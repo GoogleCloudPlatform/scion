@@ -565,6 +565,9 @@ func (m *memTriggerStore) GetActiveTriggerSubjectClaim(context.Context, string, 
 func (m *memTriggerStore) ReleaseTriggerSubjectClaimsForAgent(context.Context, string, time.Time) (int, error) {
 	return 0, nil
 }
+func (m *memTriggerStore) ReleaseTriggerSubjectClaimsForProjectBySourceKind(context.Context, string, string, string, time.Time) (int, error) {
+	return 0, nil
+}
 func (m *memTriggerStore) ReleaseTerminalTriggerSubjectClaims(context.Context, time.Time) (int, error) {
 	return 0, nil
 }

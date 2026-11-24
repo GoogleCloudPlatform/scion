@@ -325,3 +325,111 @@ func TestTriggerSubjectClaimStore_ReleaseForAgentAndMaintenance(t *testing.T) {
 		assert.NoError(t, gErr, "active claim %s must never be purged", keep)
 	}
 }
+
+func TestTriggerSubjectClaimStore_ReleaseForProjectBySourceKind(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	projA := uuid.NewString()
+	projB := uuid.NewString()
+	for _, p := range []struct {
+		id, slug, name string
+	}{
+		{projA, "proj-a", "Project A"},
+		{projB, "proj-b", "Project B"},
+	} {
+		require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: p.id, Slug: p.slug, Name: p.name}))
+	}
+
+	makeTrigger := func(projectID, name, sourceKind string) string {
+		t.Helper()
+		id := uuid.NewString()
+		require.NoError(t, cs.CreateTrigger(ctx, &store.Trigger{
+			ID:            id,
+			ProjectID:     projectID,
+			Name:          name,
+			SourceKind:    sourceKind,
+			MatchTypes:    []string{"*"},
+			MatchDialect:  "cel",
+			ActionType:    store.TriggerActionDispatchAgent,
+			ActionPayload: `{"template":"default"}`,
+			SubjectMode:   store.TriggerSubjectModeSkip,
+			Status:        store.TriggerStatusActive,
+		}))
+		return id
+	}
+
+	trigAGH1 := makeTrigger(projA, "gh-1", store.TriggerSourceKindGitHub)
+	trigAGH2 := makeTrigger(projA, "gh-2", store.TriggerSourceKindGitHub)
+	trigAWH := makeTrigger(projA, "wh-1", store.TriggerSourceKindWebhook)
+	trigBGH := makeTrigger(projB, "gh-other", store.TriggerSourceKindGitHub)
+
+	t0 := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	seedClaim := func(trigID, subject string) *store.TriggerSubjectClaim {
+		t.Helper()
+		c, existing, err := cs.ClaimTriggerSubject(ctx, trigID, subject, uuid.NewString(), uuid.NewString(), t0, t0.Add(-5*time.Minute))
+		require.NoError(t, err)
+		require.Nil(t, existing)
+		require.NotNil(t, c)
+		return c
+	}
+
+	cAGH1 := seedClaim(trigAGH1, "github:acme/widgets#1")
+	cAGH2 := seedClaim(trigAGH2, "github:acme/widgets#2")
+	cAWH := seedClaim(trigAWH, "wh-subj-1")
+	cBGH := seedClaim(trigBGH, "github:acme/other#1")
+
+	// Release active GitHub claims in projA with release_reason = association_lost.
+	tRelease := t0.Add(time.Minute)
+	n, err := cs.ReleaseTriggerSubjectClaimsForProjectBySourceKind(
+		ctx, projA, store.TriggerSourceKindGitHub, store.TriggerSubjectClaimReleaseReasonAssociationLost, tRelease,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	// Idempotent on second call.
+	n2, err := cs.ReleaseTriggerSubjectClaimsForProjectBySourceKind(
+		ctx, projA, store.TriggerSourceKindGitHub, store.TriggerSubjectClaimReleaseReasonAssociationLost, tRelease.Add(time.Second),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n2)
+
+	// Both GitHub claims in projA are no longer active and have release_reason = association_lost.
+	for _, tc := range []struct {
+		trigID string
+		claim  *store.TriggerSubjectClaim
+	}{
+		{trigAGH1, cAGH1},
+		{trigAGH2, cAGH2},
+	} {
+		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, tc.trigID, tc.claim.Subject)
+		assert.ErrorIs(t, gErr, store.ErrNotFound)
+
+		row, qErr := cs.TriggerStore.client.TriggerSubjectClaim.Get(ctx, uuid.MustParse(tc.claim.ID))
+		require.NoError(t, qErr)
+		assert.Equal(t, store.TriggerSubjectClaimStateReleased, row.State)
+		assert.Equal(t, store.TriggerSubjectClaimReleaseReasonAssociationLost, row.ReleaseReason)
+		require.NotNil(t, row.ReleasedAt)
+	}
+
+	// Non-GitHub claim in projA and GitHub claim in projB remain active.
+	gotAWH, err := cs.GetActiveTriggerSubjectClaim(ctx, trigAWH, cAWH.Subject)
+	require.NoError(t, err)
+	assert.Equal(t, cAWH.ID, gotAWH.ID)
+
+	gotBGH, err := cs.GetActiveTriggerSubjectClaim(ctx, trigBGH, cBGH.Subject)
+	require.NoError(t, err)
+	assert.Equal(t, cBGH.ID, gotBGH.ID)
+
+	// Re-claiming a released row clears release_reason.
+	reclaimed, existing, err := cs.ClaimTriggerSubject(ctx, trigAGH1, cAGH1.Subject, uuid.NewString(), uuid.NewString(), tRelease.Add(2*time.Minute), tRelease)
+	require.NoError(t, err)
+	require.Nil(t, existing)
+	require.NotNil(t, reclaimed)
+	assert.Equal(t, store.TriggerSubjectClaimStateActive, reclaimed.State)
+	assert.Empty(t, reclaimed.ReleaseReason)
+
+	reclaimedRow, err := cs.TriggerStore.client.TriggerSubjectClaim.Get(ctx, uuid.MustParse(cAGH1.ID))
+	require.NoError(t, err)
+	assert.Empty(t, reclaimedRow.ReleaseReason)
+}

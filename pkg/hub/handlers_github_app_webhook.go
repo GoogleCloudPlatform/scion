@@ -831,19 +831,38 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 	}
 }
 
-// pauseGitHubTriggersForRemovedRepo pauses every active (or reason-less paused)
-// GitHub-sourced trigger in project with status_reason = source_deleted and
-// writes a mutation audit record for each paused trigger (§10.3). Triggers
-// already paused with a system reason (including source_deleted on redelivery)
-// are skipped so the operation is idempotent.
+// pauseGitHubTriggersForRemovedRepo releases the project's active GitHub
+// trigger subject claims with release_reason = association_lost, pauses every
+// active (or reason-less paused) GitHub-sourced trigger in project with
+// status_reason = source_deleted, and writes a mutation audit record for each
+// paused trigger (§10.3). Triggers already paused with a system reason
+// (including source_deleted on redelivery) are skipped so the operation is
+// idempotent.
 func (s *Server) pauseGitHubTriggersForRemovedRepo(ctx context.Context, project *store.Project, installationID int64, ownerRepo string) {
 	if project == nil || project.ID == "" {
 		return
 	}
 
-	// TODO(ptone/scion#8058): release this project's GitHub trigger subject
-	// claims with release_reason = "association_lost" (§10.3) once Stage 2's
-	// trigger_subject_claims table is merged on main.
+	// Release this project's active GitHub trigger subject claims with
+	// release_reason = "association_lost" (§10.3).
+	if releasedClaims, err := s.store.ReleaseTriggerSubjectClaimsForProjectBySourceKind(
+		ctx,
+		project.ID,
+		store.TriggerSourceKindGitHub,
+		store.TriggerSubjectClaimReleaseReasonAssociationLost,
+		timeNow().UTC(),
+	); err != nil {
+		slog.WarnContext(ctx, "Failed to release GitHub trigger subject claims after repo removal",
+			"project_id", project.ID, "installation_id", installationID, "error", err)
+	} else if releasedClaims > 0 {
+		slog.InfoContext(ctx, "Released GitHub trigger subject claims after repository removal from installation",
+			"project_id", project.ID,
+			"installation_id", installationID,
+			"repo", strings.ToLower(strings.TrimSpace(ownerRepo)),
+			"released", releasedClaims,
+			"release_reason", store.TriggerSubjectClaimReleaseReasonAssociationLost,
+		)
+	}
 
 	var matches []store.Trigger
 	opts := store.ListOptions{Limit: scheduleCreatorPausePageSize, SkipTotalCount: true}

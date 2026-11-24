@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	enttrigger "github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -40,15 +41,16 @@ func claimTimePtr(t *time.Time) *time.Time {
 
 func entTriggerSubjectClaimToStore(e *ent.TriggerSubjectClaim) *store.TriggerSubjectClaim {
 	out := &store.TriggerSubjectClaim{
-		ID:         e.ID.String(),
-		TriggerID:  e.TriggerID.String(),
-		Subject:    e.Subject,
-		State:      e.State,
-		EventID:    e.EventID.String(),
-		FireID:     e.FireID.String(),
-		ClaimedAt:  e.ClaimedAt.UTC(),
-		BoundAt:    claimTimePtr(e.BoundAt),
-		ReleasedAt: claimTimePtr(e.ReleasedAt),
+		ID:            e.ID.String(),
+		TriggerID:     e.TriggerID.String(),
+		Subject:       e.Subject,
+		State:         e.State,
+		EventID:       e.EventID.String(),
+		FireID:        e.FireID.String(),
+		ClaimedAt:     e.ClaimedAt.UTC(),
+		BoundAt:       claimTimePtr(e.BoundAt),
+		ReleasedAt:    claimTimePtr(e.ReleasedAt),
+		ReleaseReason: e.ReleaseReason,
 	}
 	if e.AgentID != nil {
 		out.AgentID = e.AgentID.String()
@@ -157,6 +159,7 @@ func (s *TriggerStore) ClaimTriggerSubject(
 			SetClaimedAt(now).
 			ClearBoundAt().
 			ClearReleasedAt().
+			ClearReleaseReason().
 			Save(ctx)
 		if err != nil {
 			return nil, nil, mapError(err)
@@ -290,6 +293,50 @@ func (s *TriggerStore) ReleaseTriggerSubjectClaimsForAgent(ctx context.Context, 
 		SetState(store.TriggerSubjectClaimStateReleased).
 		SetReleasedAt(releasedAt.UTC().Truncate(time.Microsecond)).
 		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return affected, nil
+}
+
+// ReleaseTriggerSubjectClaimsForProjectBySourceKind releases every active
+// subject claim belonging to triggers in projectID with the given sourceKind,
+// recording release_reason (e.g. "association_lost" on
+// installation_repositories.removed, Stage 3 §10.3). Idempotent on retry.
+func (s *TriggerStore) ReleaseTriggerSubjectClaimsForProjectBySourceKind(
+	ctx context.Context,
+	projectID, sourceKind, reason string,
+	releasedAt time.Time,
+) (int, error) {
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	if sourceKind == "" {
+		return 0, fmt.Errorf("%w: sourceKind is required", store.ErrInvalidInput)
+	}
+	upd := s.client.TriggerSubjectClaim.Update().
+		Where(
+			triggersubjectclaim.StateEQ(store.TriggerSubjectClaimStateActive),
+			predicate.TriggerSubjectClaim(func(sel *entsql.Selector) {
+				d := sel.Dialect()
+				tr := entsql.Dialect(d).Table(enttrigger.Table).As("tr")
+				sub := entsql.Dialect(d).Select(tr.C(enttrigger.FieldID)).
+					From(tr).
+					Where(entsql.And(
+						entsql.ColumnsEQ(tr.C(enttrigger.FieldID), sel.C(triggersubjectclaim.FieldTriggerID)),
+						entsql.EQ(tr.C(enttrigger.FieldProjectID), pid),
+						entsql.EQ(tr.C(enttrigger.FieldSourceKind), sourceKind),
+					))
+				sel.Where(entsql.Exists(sub))
+			}),
+		).
+		SetState(store.TriggerSubjectClaimStateReleased).
+		SetReleasedAt(releasedAt.UTC().Truncate(time.Microsecond))
+	if reason != "" {
+		upd = upd.SetReleaseReason(reason)
+	}
+	affected, err := upd.Save(ctx)
 	if err != nil {
 		return 0, mapError(err)
 	}

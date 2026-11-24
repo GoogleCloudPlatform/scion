@@ -125125,22 +125125,23 @@ func (m *TriggerFireMutation) ResetEdge(name string) error {
 // TriggerSubjectClaimMutation represents an operation that mutates the TriggerSubjectClaim nodes in the graph.
 type TriggerSubjectClaimMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	trigger_id    *uuid.UUID
-	subject       *string
-	state         *string
-	agent_id      *uuid.UUID
-	event_id      *uuid.UUID
-	fire_id       *uuid.UUID
-	claimed_at    *time.Time
-	bound_at      *time.Time
-	released_at   *time.Time
-	clearedFields map[string]struct{}
-	done          bool
-	oldValue      func(context.Context) (*TriggerSubjectClaim, error)
-	predicates    []predicate.TriggerSubjectClaim
+	op             Op
+	typ            string
+	id             *uuid.UUID
+	trigger_id     *uuid.UUID
+	subject        *string
+	state          *string
+	agent_id       *uuid.UUID
+	event_id       *uuid.UUID
+	fire_id        *uuid.UUID
+	claimed_at     *time.Time
+	bound_at       *time.Time
+	released_at    *time.Time
+	release_reason *string
+	clearedFields  map[string]struct{}
+	done           bool
+	oldValue       func(context.Context) (*TriggerSubjectClaim, error)
+	predicates     []predicate.TriggerSubjectClaim
 }
 
 var _ ent.Mutation = (*TriggerSubjectClaimMutation)(nil)
@@ -125610,6 +125611,55 @@ func (m *TriggerSubjectClaimMutation) ResetReleasedAt() {
 	delete(m.clearedFields, triggersubjectclaim.FieldReleasedAt)
 }
 
+// SetReleaseReason sets the "release_reason" field.
+func (m *TriggerSubjectClaimMutation) SetReleaseReason(s string) {
+	m.release_reason = &s
+}
+
+// ReleaseReason returns the value of the "release_reason" field in the mutation.
+func (m *TriggerSubjectClaimMutation) ReleaseReason() (r string, exists bool) {
+	v := m.release_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReleaseReason returns the old "release_reason" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldReleaseReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReleaseReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReleaseReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReleaseReason: %w", err)
+	}
+	return oldValue.ReleaseReason, nil
+}
+
+// ClearReleaseReason clears the value of the "release_reason" field.
+func (m *TriggerSubjectClaimMutation) ClearReleaseReason() {
+	m.release_reason = nil
+	m.clearedFields[triggersubjectclaim.FieldReleaseReason] = struct{}{}
+}
+
+// ReleaseReasonCleared returns if the "release_reason" field was cleared in this mutation.
+func (m *TriggerSubjectClaimMutation) ReleaseReasonCleared() bool {
+	_, ok := m.clearedFields[triggersubjectclaim.FieldReleaseReason]
+	return ok
+}
+
+// ResetReleaseReason resets all changes to the "release_reason" field.
+func (m *TriggerSubjectClaimMutation) ResetReleaseReason() {
+	m.release_reason = nil
+	delete(m.clearedFields, triggersubjectclaim.FieldReleaseReason)
+}
+
 // Where appends a list predicates to the TriggerSubjectClaimMutation builder.
 func (m *TriggerSubjectClaimMutation) Where(ps ...predicate.TriggerSubjectClaim) {
 	m.predicates = append(m.predicates, ps...)
@@ -125644,7 +125694,7 @@ func (m *TriggerSubjectClaimMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerSubjectClaimMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 10)
 	if m.trigger_id != nil {
 		fields = append(fields, triggersubjectclaim.FieldTriggerID)
 	}
@@ -125672,6 +125722,9 @@ func (m *TriggerSubjectClaimMutation) Fields() []string {
 	if m.released_at != nil {
 		fields = append(fields, triggersubjectclaim.FieldReleasedAt)
 	}
+	if m.release_reason != nil {
+		fields = append(fields, triggersubjectclaim.FieldReleaseReason)
+	}
 	return fields
 }
 
@@ -125698,6 +125751,8 @@ func (m *TriggerSubjectClaimMutation) Field(name string) (ent.Value, bool) {
 		return m.BoundAt()
 	case triggersubjectclaim.FieldReleasedAt:
 		return m.ReleasedAt()
+	case triggersubjectclaim.FieldReleaseReason:
+		return m.ReleaseReason()
 	}
 	return nil, false
 }
@@ -125725,6 +125780,8 @@ func (m *TriggerSubjectClaimMutation) OldField(ctx context.Context, name string)
 		return m.OldBoundAt(ctx)
 	case triggersubjectclaim.FieldReleasedAt:
 		return m.OldReleasedAt(ctx)
+	case triggersubjectclaim.FieldReleaseReason:
+		return m.OldReleaseReason(ctx)
 	}
 	return nil, fmt.Errorf("unknown TriggerSubjectClaim field %s", name)
 }
@@ -125797,6 +125854,13 @@ func (m *TriggerSubjectClaimMutation) SetField(name string, value ent.Value) err
 		}
 		m.SetReleasedAt(v)
 		return nil
+	case triggersubjectclaim.FieldReleaseReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReleaseReason(v)
+		return nil
 	}
 	return fmt.Errorf("unknown TriggerSubjectClaim field %s", name)
 }
@@ -125836,6 +125900,9 @@ func (m *TriggerSubjectClaimMutation) ClearedFields() []string {
 	if m.FieldCleared(triggersubjectclaim.FieldReleasedAt) {
 		fields = append(fields, triggersubjectclaim.FieldReleasedAt)
 	}
+	if m.FieldCleared(triggersubjectclaim.FieldReleaseReason) {
+		fields = append(fields, triggersubjectclaim.FieldReleaseReason)
+	}
 	return fields
 }
 
@@ -125858,6 +125925,9 @@ func (m *TriggerSubjectClaimMutation) ClearField(name string) error {
 		return nil
 	case triggersubjectclaim.FieldReleasedAt:
 		m.ClearReleasedAt()
+		return nil
+	case triggersubjectclaim.FieldReleaseReason:
+		m.ClearReleaseReason()
 		return nil
 	}
 	return fmt.Errorf("unknown TriggerSubjectClaim nullable field %s", name)
@@ -125893,6 +125963,9 @@ func (m *TriggerSubjectClaimMutation) ResetField(name string) error {
 		return nil
 	case triggersubjectclaim.FieldReleasedAt:
 		m.ResetReleasedAt()
+		return nil
+	case triggersubjectclaim.FieldReleaseReason:
+		m.ResetReleaseReason()
 		return nil
 	}
 	return fmt.Errorf("unknown TriggerSubjectClaim field %s", name)

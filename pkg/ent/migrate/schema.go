@@ -4213,6 +4213,7 @@ var (
 		{Name: "claimed_at", Type: field.TypeTime},
 		{Name: "bound_at", Type: field.TypeTime, Nullable: true},
 		{Name: "released_at", Type: field.TypeTime, Nullable: true},
+		{Name: "release_reason", Type: field.TypeString, Nullable: true},
 	}
 	// TriggerSubjectClaimsTable holds the schema information for the "trigger_subject_claims" table.
 	TriggerSubjectClaimsTable = &schema.Table{

@@ -118,6 +118,20 @@ func (_c *TriggerSubjectClaimCreate) SetNillableReleasedAt(v *time.Time) *Trigge
 	return _c
 }
 
+// SetReleaseReason sets the "release_reason" field.
+func (_c *TriggerSubjectClaimCreate) SetReleaseReason(v string) *TriggerSubjectClaimCreate {
+	_c.mutation.SetReleaseReason(v)
+	return _c
+}
+
+// SetNillableReleaseReason sets the "release_reason" field if the given value is not nil.
+func (_c *TriggerSubjectClaimCreate) SetNillableReleaseReason(v *string) *TriggerSubjectClaimCreate {
+	if v != nil {
+		_c.SetReleaseReason(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *TriggerSubjectClaimCreate) SetID(v uuid.UUID) *TriggerSubjectClaimCreate {
 	_c.mutation.SetID(v)
@@ -278,6 +292,10 @@ func (_c *TriggerSubjectClaimCreate) createSpec() (*TriggerSubjectClaim, *sqlgra
 		_spec.SetField(triggersubjectclaim.FieldReleasedAt, field.TypeTime, value)
 		_node.ReleasedAt = &value
 	}
+	if value, ok := _c.mutation.ReleaseReason(); ok {
+		_spec.SetField(triggersubjectclaim.FieldReleaseReason, field.TypeString, value)
+		_node.ReleaseReason = value
+	}
 	return _node, _spec
 }
 
@@ -429,6 +447,24 @@ func (u *TriggerSubjectClaimUpsert) UpdateReleasedAt() *TriggerSubjectClaimUpser
 // ClearReleasedAt clears the value of the "released_at" field.
 func (u *TriggerSubjectClaimUpsert) ClearReleasedAt() *TriggerSubjectClaimUpsert {
 	u.SetNull(triggersubjectclaim.FieldReleasedAt)
+	return u
+}
+
+// SetReleaseReason sets the "release_reason" field.
+func (u *TriggerSubjectClaimUpsert) SetReleaseReason(v string) *TriggerSubjectClaimUpsert {
+	u.Set(triggersubjectclaim.FieldReleaseReason, v)
+	return u
+}
+
+// UpdateReleaseReason sets the "release_reason" field to the value that was provided on create.
+func (u *TriggerSubjectClaimUpsert) UpdateReleaseReason() *TriggerSubjectClaimUpsert {
+	u.SetExcluded(triggersubjectclaim.FieldReleaseReason)
+	return u
+}
+
+// ClearReleaseReason clears the value of the "release_reason" field.
+func (u *TriggerSubjectClaimUpsert) ClearReleaseReason() *TriggerSubjectClaimUpsert {
+	u.SetNull(triggersubjectclaim.FieldReleaseReason)
 	return u
 }
 
@@ -602,6 +638,27 @@ func (u *TriggerSubjectClaimUpsertOne) UpdateReleasedAt() *TriggerSubjectClaimUp
 func (u *TriggerSubjectClaimUpsertOne) ClearReleasedAt() *TriggerSubjectClaimUpsertOne {
 	return u.Update(func(s *TriggerSubjectClaimUpsert) {
 		s.ClearReleasedAt()
+	})
+}
+
+// SetReleaseReason sets the "release_reason" field.
+func (u *TriggerSubjectClaimUpsertOne) SetReleaseReason(v string) *TriggerSubjectClaimUpsertOne {
+	return u.Update(func(s *TriggerSubjectClaimUpsert) {
+		s.SetReleaseReason(v)
+	})
+}
+
+// UpdateReleaseReason sets the "release_reason" field to the value that was provided on create.
+func (u *TriggerSubjectClaimUpsertOne) UpdateReleaseReason() *TriggerSubjectClaimUpsertOne {
+	return u.Update(func(s *TriggerSubjectClaimUpsert) {
+		s.UpdateReleaseReason()
+	})
+}
+
+// ClearReleaseReason clears the value of the "release_reason" field.
+func (u *TriggerSubjectClaimUpsertOne) ClearReleaseReason() *TriggerSubjectClaimUpsertOne {
+	return u.Update(func(s *TriggerSubjectClaimUpsert) {
+		s.ClearReleaseReason()
 	})
 }
 
@@ -942,6 +999,27 @@ func (u *TriggerSubjectClaimUpsertBulk) UpdateReleasedAt() *TriggerSubjectClaimU
 func (u *TriggerSubjectClaimUpsertBulk) ClearReleasedAt() *TriggerSubjectClaimUpsertBulk {
 	return u.Update(func(s *TriggerSubjectClaimUpsert) {
 		s.ClearReleasedAt()
+	})
+}
+
+// SetReleaseReason sets the "release_reason" field.
+func (u *TriggerSubjectClaimUpsertBulk) SetReleaseReason(v string) *TriggerSubjectClaimUpsertBulk {
+	return u.Update(func(s *TriggerSubjectClaimUpsert) {
+		s.SetReleaseReason(v)
+	})
+}
+
+// UpdateReleaseReason sets the "release_reason" field to the value that was provided on create.
+func (u *TriggerSubjectClaimUpsertBulk) UpdateReleaseReason() *TriggerSubjectClaimUpsertBulk {
+	return u.Update(func(s *TriggerSubjectClaimUpsert) {
+		s.UpdateReleaseReason()
+	})
+}
+
+// ClearReleaseReason clears the value of the "release_reason" field.
+func (u *TriggerSubjectClaimUpsertBulk) ClearReleaseReason() *TriggerSubjectClaimUpsertBulk {
+	return u.Update(func(s *TriggerSubjectClaimUpsert) {
+		s.ClearReleaseReason()
 	})
 }
 
