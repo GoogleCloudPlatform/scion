@@ -379,7 +379,7 @@ func TestHandleAdminMaintenanceAutoUpdate_RoundTripAndStates(t *testing.T) {
 	assert.Empty(t, putResp.InactiveReason)
 	assert.Equal(t, 6, putResp.WindowStartHourUTC)
 
-	// Verify stored row records set_by and set_at.
+	// Verify stored row records set_by (email), set_at, and updated_by (user ID).
 	stored, rev, err := srv.readAutoUpdateSetting(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
@@ -388,6 +388,9 @@ func TestHandleAdminMaintenanceAutoUpdate_RoundTripAndStates(t *testing.T) {
 	assert.Equal(t, 6, stored.WindowStartUTC)
 	assert.Equal(t, admin.Email, stored.SetBy)
 	assert.NotEmpty(t, stored.SetAt)
+	rawRow, err := s.GetHubSetting(ctx, HubSettingSectionAutoUpdate)
+	require.NoError(t, err)
+	assert.Equal(t, admin.ID, rawRow.UpdatedBy)
 
 	// Toggle off without windowStartHourUtc: preserves existing hour (6).
 	rec = doRequestAsUser(t, srv, admin, http.MethodPut, autoUpdateAdminPath, map[string]any{"enabled": false})

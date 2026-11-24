@@ -679,7 +679,6 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     super.willUpdate(changed);
     if (changed.has('status')) {
       this.autoUpdateOverride = null;
-      this.autoUpdateError = null;
       this.maybeLoadReleases();
       // An upstream check is relative to the running commit.
       const commit = this.status?.current.commit ?? null;

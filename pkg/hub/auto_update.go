@@ -253,7 +253,9 @@ func (s *Server) handleAdminMaintenanceAutoUpdate(w http.ResponseWriter, r *http
 	}
 
 	actor := ""
+	updatedBy := ""
 	if user := GetUserIdentityFromContext(ctx); user != nil {
+		updatedBy = user.ID()
 		actor = user.Email()
 		if actor == "" {
 			actor = user.ID()
@@ -266,7 +268,7 @@ func (s *Server) handleAdminMaintenanceAutoUpdate(w http.ResponseWriter, r *http
 		SetBy:          actor,
 		SetAt:          time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := s.writeAutoUpdateSetting(ctx, next, actor, rev); err != nil {
+	if err := s.writeAutoUpdateSetting(ctx, next, updatedBy, rev); err != nil {
 		if errors.Is(err, store.ErrRevisionConflict) {
 			writeError(w, http.StatusConflict, "revision_conflict",
 				"The auto-update setting was modified concurrently. Please refresh and retry.", nil)

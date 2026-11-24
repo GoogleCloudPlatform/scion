@@ -352,4 +352,40 @@ describe('scion-admin-maintenance-update-card auto-update checkbox', () => {
     expect(alert!.textContent).toContain('Disabled by server configuration.');
     expect(reloadSpy).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps the error alert visible across the status reload that follows a 409 conflict', async () => {
+    const { card } = await mount(makeStatus(), () =>
+      Promise.resolve(
+        json(
+          {
+            error: {
+              code: 'revision_conflict',
+              message:
+                'The auto-update setting was modified concurrently. Please refresh and retry.',
+            },
+          },
+          409
+        )
+      )
+    );
+    const reloadSpy = vi.fn();
+    card.addEventListener('reload-status', reloadSpy);
+
+    const cb = card.shadowRoot!.querySelector<Checkbox>('sl-checkbox.auto-update-checkbox')!;
+    cb.checked = true;
+    cb.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await settle(card);
+
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+
+    // Simulate parent reloading update-status with a fresh status object.
+    card.status = makeStatus({
+      autoUpdate: autoUpdate({ enabled: false, source: 'setting', active: false }),
+    });
+    await settle(card);
+
+    const alert = card.shadowRoot!.querySelector('sl-alert.auto-update-error');
+    expect(alert).not.toBeNull();
+    expect(alert!.textContent).toContain('modified concurrently');
+  });
 });
