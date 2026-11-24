@@ -634,6 +634,66 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 				"%s (%s) must not collapse rejected candidates into 'no candidate bindings'", res.Type, res.ScopeKind)
 		}
 	})
+
+	// O2: child resource with ParentType="project" (agent in a project) and
+	// parentless non-catalog resource (user) must match full non-explain
+	// Decision identically across member, hub-admin, and view-as-member callers.
+	t.Run("child_project_resource_and_parentless_user_resource", func(t *testing.T) {
+		agentInMemberProj := Resource{
+			Type:       "agent",
+			ID:         api.NewUUID(),
+			ParentType: "project",
+			ParentID:   pMember.ID,
+		}
+		agentInNoGrantProj := Resource{
+			Type:       "agent",
+			ID:         api.NewUUID(),
+			ParentType: "project",
+			ParentID:   pNoGrant.ID,
+		}
+		parentlessUser := Resource{
+			Type: "user",
+			ID:   api.NewUUID(),
+		}
+
+		vamCtx := contextWithViewAsMember(ctx, sysAdmin.ID)
+		vamIdent := NewAuthenticatedUser(sysAdmin.ID, sysAdmin.Email, sysAdmin.DisplayName, store.UserRoleAdmin, string(ClientTypeWeb)).WithViewAsMember()
+
+		callers := []struct {
+			name    string
+			evalCtx context.Context
+			ident   UserIdentity
+		}{
+			{"human", ctx, humanIdent},
+			{"sys_admin", ctx, userIdent(sysAdmin)},
+			{"view_as_member", vamCtx, vamIdent},
+		}
+		targets := []struct {
+			name string
+			res  Resource
+			act  Action
+		}{
+			{"agent_in_member_project", agentInMemberProj, ActionRead},
+			{"agent_in_no_grant_project", agentInNoGrantProj, ActionRead},
+			{"parentless_user", parentlessUser, ActionRead},
+		}
+		for _, c := range callers {
+			memoCtx := withAuthzInputMemo(c.evalCtx)
+			unfilteredCtx := maskAllAuthzMemo(c.evalCtx)
+			for _, tgt := range targets {
+				got := srv.authzService.CheckAccess(memoCtx, c.ident, tgt.res, tgt.act)
+				want := srv.authzService.CheckAccess(unfilteredCtx, c.ident, tgt.res, tgt.act)
+				assert.Equal(t, want, got, "%s on %s full Decision mismatch", c.name, tgt.name)
+			}
+		}
+
+		// Sanity-check expected allow/deny outcomes.
+		assert.True(t, srv.authzService.CheckAccess(withAuthzInputMemo(ctx), humanIdent, agentInMemberProj, ActionRead).Allowed)
+		assert.False(t, srv.authzService.CheckAccess(withAuthzInputMemo(ctx), humanIdent, agentInNoGrantProj, ActionRead).Allowed)
+		assert.False(t, srv.authzService.CheckAccess(withAuthzInputMemo(ctx), humanIdent, parentlessUser, ActionRead).Allowed)
+		assert.True(t, srv.authzService.CheckAccess(withAuthzInputMemo(ctx), userIdent(sysAdmin), parentlessUser, ActionRead).Allowed)
+		assert.False(t, srv.authzService.CheckAccess(withAuthzInputMemo(vamCtx), vamIdent, parentlessUser, ActionRead).Allowed)
+	})
 }
 
 // TestAuthzScopePrefilter_RegressionGuard fails if per-project authorization
