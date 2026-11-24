@@ -18,10 +18,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+type chatMemberProjectIDsMemoKey struct{}
+
+type chatMemberProjectIDsMemo struct {
+	mu      sync.Mutex
+	entries map[string]map[string]bool
+}
+
+// withChatMemberProjectIDsMemo installs a request-scoped cache for
+// chatMemberProjectIDs so read-only aggregators (such as the inbox summary,
+// where chat and decisions both need the caller's member projects) compute
+// explicit project memberships once per user.
+func withChatMemberProjectIDsMemo(ctx context.Context) context.Context {
+	if ctx.Value(chatMemberProjectIDsMemoKey{}) != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, chatMemberProjectIDsMemoKey{}, &chatMemberProjectIDsMemo{
+		entries: make(map[string]map[string]bool),
+	})
+}
 
 // chatMemberProjectIDs returns the IDs of the projects userID is an explicit
 // member of, for chat's unread state: the badge, the spaces rollup and the
@@ -41,6 +62,18 @@ import (
 // project, and chat treats a failed check as no membership. Other store
 // errors are returned.
 func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[string]bool, error) {
+	if memo, ok := ctx.Value(chatMemberProjectIDsMemoKey{}).(*chatMemberProjectIDsMemo); ok && memo != nil {
+		memo.mu.Lock()
+		cached, hit := memo.entries[userID]
+		memo.mu.Unlock()
+		if hit {
+			out := make(map[string]bool, len(cached))
+			for k, v := range cached {
+				out[k] = v
+			}
+			return out, nil
+		}
+	}
 	now := time.Now()
 	members := make(map[string]bool)
 	// Projects whose check CheckEffectiveMembership would fail: a binding
@@ -141,6 +174,15 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 
 	for id := range failed {
 		delete(members, id)
+	}
+	if memo, ok := ctx.Value(chatMemberProjectIDsMemoKey{}).(*chatMemberProjectIDsMemo); ok && memo != nil {
+		copied := make(map[string]bool, len(members))
+		for k, v := range members {
+			copied[k] = v
+		}
+		memo.mu.Lock()
+		memo.entries[userID] = copied
+		memo.mu.Unlock()
 	}
 	return members, nil
 }

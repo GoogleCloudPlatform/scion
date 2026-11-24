@@ -986,6 +986,92 @@ func (s *Server) profileMadeByProjectGroups(
 	return groups, nil
 }
 
+// waitingOnYouDecisionSummary holds the waiting-on-you decision counts,
+// truncation flag, resolved scope set, and optionally the oldest-first top-N
+// waiting-on-you classified prompts.
+type waitingOnYouDecisionSummary struct {
+	total             int
+	projects          int
+	truncatedProjects bool
+	scopeSet          *decisionScopeSet
+	prompts           []classifiedOpenPrompt
+}
+
+// waitingOnYouSummary evaluates open decisions across user's readable member
+// projects (scoped by token when non-nil) and returns both the waiting-on-you
+// count (matching /api/v1/users/me/decisions counts.waitingOnYou) and, when
+// maxPrompts > 0, up to maxPrompts waiting-on-you prompts ordered oldest first.
+func (s *Server) waitingOnYouSummary(
+	ctx context.Context,
+	user UserIdentity,
+	token *ScopedUserIdentity,
+	maxPrompts int,
+) (waitingOnYouDecisionSummary, error) {
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	selected, truncated, err := s.selectProfileDecisionProjects(ctx, user, token, "")
+	if err != nil || len(selected) == 0 {
+		return waitingOnYouDecisionSummary{truncatedProjects: truncated}, err
+	}
+	openSelected, err := s.filterProjectsWithUnsettledDecisions(ctx, selected)
+	if err != nil || len(openSelected) == 0 {
+		return waitingOnYouDecisionSummary{truncatedProjects: truncated}, err
+	}
+	scopes, err := s.resolveProfileDecisionScopes(ctx, openSelected, user, token, wcs)
+	if err != nil || len(scopes) == 0 {
+		return waitingOnYouDecisionSummary{truncatedProjects: truncated}, err
+	}
+	set := newDecisionScopeSet(scopes)
+	if len(set.chatKeys) == 0 {
+		return waitingOnYouDecisionSummary{truncatedProjects: truncated}, nil
+	}
+
+	openPrompts, err := s.store.ListOpenPrompts(ctx, set.projectIDs, set.chatKeys)
+	if err != nil {
+		return waitingOnYouDecisionSummary{}, err
+	}
+	counts, classified, err := s.classifyProjectOpenPrompts(ctx, user, token, wcs, set.projectReadableScope, openPrompts)
+	if err == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = ctx.Err()
+	}
+	if err != nil {
+		return waitingOnYouDecisionSummary{}, err
+	}
+
+	projectsWithWaiting := make(map[string]bool)
+	var waiting []classifiedOpenPrompt
+	for _, p := range classified {
+		if p.onYou > 0 {
+			projectsWithWaiting[p.raw.ProjectID] = true
+			if maxPrompts > 0 {
+				waiting = append(waiting, p)
+			}
+		}
+	}
+
+	if maxPrompts > 0 && len(waiting) > 0 {
+		sort.Slice(waiting, func(i, j int) bool {
+			if !waiting[i].raw.CreatedAt.Equal(waiting[j].raw.CreatedAt) {
+				return waiting[i].raw.CreatedAt.Before(waiting[j].raw.CreatedAt)
+			}
+			return waiting[i].raw.MessageID < waiting[j].raw.MessageID
+		})
+		if len(waiting) > maxPrompts {
+			waiting = waiting[:maxPrompts]
+		}
+	}
+
+	return waitingOnYouDecisionSummary{
+		total:             counts.WaitingOnYou,
+		projects:          len(projectsWithWaiting),
+		truncatedProjects: truncated,
+		scopeSet:          set,
+		prompts:           waiting,
+	}, nil
+}
+
 // waitingOnYouTotal returns the total count of open decisions currently
 // waiting on userID across userID's readable member projects (capped at
 // maxProfileDecisionProjects), and the count of distinct projects that hold at
@@ -1020,41 +1106,9 @@ func (s *Server) waitingOnYouTotal(ctx context.Context, userID string) (total, p
 
 	viewer := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
 	ctx = withAuthzInputMemo(ctx)
-	s.mu.RLock()
-	wcs := s.webChatStore
-	s.mu.RUnlock()
-
-	selected, _, err := s.selectProfileDecisionProjects(ctx, viewer, nil, "")
-	if err != nil || len(selected) == 0 {
-		return 0, 0, err
-	}
-	openSelected, err := s.filterProjectsWithUnsettledDecisions(ctx, selected)
-	if err != nil || len(openSelected) == 0 {
-		return 0, 0, err
-	}
-	scopes, err := s.resolveProfileDecisionScopes(ctx, openSelected, viewer, nil, wcs)
-	if err != nil || len(scopes) == 0 {
-		return 0, 0, err
-	}
-	set := newDecisionScopeSet(scopes)
-	if len(set.chatKeys) == 0 {
-		return 0, 0, nil
-	}
-
-	openPrompts, err := s.store.ListOpenPrompts(ctx, set.projectIDs, set.chatKeys)
+	res, err := s.waitingOnYouSummary(ctx, viewer, nil, 0)
 	if err != nil {
 		return 0, 0, err
 	}
-	counts, classified, err := s.classifyProjectOpenPrompts(ctx, viewer, nil, wcs, set.projectReadableScope, openPrompts)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	projectsWithWaiting := make(map[string]bool)
-	for _, p := range classified {
-		if p.onYou > 0 {
-			projectsWithWaiting[p.raw.ProjectID] = true
-		}
-	}
-	return counts.WaitingOnYou, len(projectsWithWaiting), nil
+	return res.total, res.projects, nil
 }
