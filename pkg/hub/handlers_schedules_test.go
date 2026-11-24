@@ -23,8 +23,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -946,7 +948,7 @@ func TestSchedule_CreatorNameResolution(t *testing.T) {
 		Phase:     "running",
 	}))
 
-	// 5. Soft-deleted agent (must fall back to UUID)
+	// 5. Soft-deleted agent (must fall back to UUID; exercises DeletedAt guard)
 	deletedAgentID := tid("sched-creator-deleted-agent")
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID:        deletedAgentID,
@@ -955,7 +957,13 @@ func TestSchedule_CreatorNameResolution(t *testing.T) {
 		ProjectID: projectID,
 		Phase:     "stopped",
 	}))
-	require.NoError(t, s.DeleteAgent(ctx, deletedAgentID))
+	deletedAgentRow, err := s.GetAgent(ctx, deletedAgentID)
+	require.NoError(t, err)
+	deletedAgentRow.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, deletedAgentRow))
+	reloadedDeleted, err := s.GetAgent(ctx, deletedAgentID)
+	require.NoError(t, err)
+	require.False(t, reloadedDeleted.DeletedAt.IsZero(), "agent must remain soft-deleted in store")
 
 	missingID := tid("sched-creator-missing")
 
@@ -1031,7 +1039,7 @@ func TestSchedule_CreatorNameResolution(t *testing.T) {
 		assert.Equal(t, "agent", resp.CreatedByType)
 	})
 
-	t.Run("scoped token without user.read does not resolve other users", func(t *testing.T) {
+	t.Run("scoped token without user.read does not resolve users", func(t *testing.T) {
 		scopedAlice := NewScopedUserIdentity(aliceUser, projectID, []string{"scheduled_event:read", "scheduled_event:list", "agent:read"})
 		rec := doScheduleUserRequest(t, srv, scopedAlice, http.MethodGet, projectID, "", nil)
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1044,13 +1052,177 @@ func TestSchedule_CreatorNameResolution(t *testing.T) {
 			byID[sc.ID] = sc
 		}
 
-		// Self is still readable
-		assert.Equal(t, "Alice Example", byID[aliceSchedID].CreatedByName)
-		assert.Equal(t, "user", byID[aliceSchedID].CreatedByType)
+		// Mirrors GET /api/v1/users/{id}: no user.read means no user names (self or other)
+		assert.Empty(t, byID[aliceSchedID].CreatedByName)
+		assert.Empty(t, byID[aliceSchedID].CreatedByType)
+		assert.Equal(t, aliceID, byID[aliceSchedID].CreatedBy)
 
-		// Another user's email/display name must NOT be exposed without user.read
 		assert.Empty(t, byID[bobSchedID].CreatedByName)
 		assert.Empty(t, byID[bobSchedID].CreatedByType)
 		assert.Equal(t, bobID, byID[bobSchedID].CreatedBy)
+
+		// Token has agent:read, so same-project agent still resolves
+		assert.Equal(t, "ops-bot", byID[agentSchedID].CreatedByName)
+		assert.Equal(t, "agent", byID[agentSchedID].CreatedByType)
+	})
+
+	t.Run("agent caller sees own slug only, never user names or other agents", func(t *testing.T) {
+		peerAgentID := tid("sched-creator-peer-agent")
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+			ID:        peerAgentID,
+			Slug:      "peer-bot",
+			Name:      "Peer Bot",
+			ProjectID: projectID,
+			Phase:     "running",
+		}))
+
+		mkAgentOwnedSched := func(name, createdBy string) string {
+			id := tid("sched-agent-owned-" + name)
+			sc := &store.Schedule{
+				ID:        id,
+				ProjectID: projectID,
+				Name:      name,
+				CronExpr:  "0 9 * * *",
+				EventType: "message",
+				Payload:   `{"agentName":"worker","message":"hi"}`,
+				Status:    store.ScheduleStatusActive,
+				CreatedBy: createdBy,
+				InitiatorAttribution: store.InitiatorAttribution{
+					InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+					InitiatorPrincipalID:    agentID,
+					InitiatorCredentialKind: "agent",
+					AttributionVersion:      1,
+				},
+			}
+			require.NoError(t, s.CreateSchedule(ctx, sc))
+			return id
+		}
+
+		selfOwnedID := mkAgentOwnedSched("owned-by-self", agentID)
+		userCreatedID := mkAgentOwnedSched("owned-created-by-user", aliceID)
+		peerCreatedID := mkAgentOwnedSched("owned-created-by-peer", peerAgentID)
+
+		agentIdent := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: agentID},
+			ProjectID: projectID,
+			Scopes:    []AgentTokenScope{ScopeProjectRead},
+		}}
+		rec := doScheduleAgentRequest(t, srv, agentIdent, projectID, "", http.MethodGet, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+		require.Contains(t, byID, selfOwnedID)
+		require.Contains(t, byID, userCreatedID)
+		require.Contains(t, byID, peerCreatedID)
+
+		// Self resolves to own slug
+		assert.Equal(t, "ops-bot", byID[selfOwnedID].CreatedByName)
+		assert.Equal(t, "agent", byID[selfOwnedID].CreatedByType)
+
+		// User creator is hidden from agent callers
+		assert.Empty(t, byID[userCreatedID].CreatedByName)
+		assert.Empty(t, byID[userCreatedID].CreatedByType)
+		assert.Equal(t, aliceID, byID[userCreatedID].CreatedBy)
+
+		// Another agent's slug is hidden from agent callers
+		assert.Empty(t, byID[peerCreatedID].CreatedByName)
+		assert.Empty(t, byID[peerCreatedID].CreatedByType)
+		assert.Equal(t, peerAgentID, byID[peerCreatedID].CreatedBy)
+	})
+
+	t.Run("admin scheduler authorizes creator visibility per viewer and keeps exec argv redacted", func(t *testing.T) {
+		execSentinel := "SUPER_SECRET_ADMIN_EXEC_ARGV"
+		execSchedID := tid("sched-row-admin-exec")
+		require.NoError(t, s.CreateSchedule(ctx, &store.Schedule{
+			ID:        execSchedID,
+			ProjectID: projectID,
+			Name:      "admin-exec-check",
+			CronExpr:  "0 9 * * *",
+			EventType: scheduledEventTypeExec,
+			Payload:   `{"agentId":"` + agentID + `","agentName":"ops-bot","command":["sh","-c","echo ` + execSentinel + `"]}`,
+			Status:    store.ScheduleStatusActive,
+			CreatedBy: aliceID,
+		}))
+
+		superID := hubConfigTokenUser(t, s, "sched-admin-viewer", store.SystemRoleSuperAdmin)
+
+		// 1. Hub token with hub_scheduler:read only (no user:read, no agent:read)
+		schedOnlyKey := mintHubConfigToken(t, srv, superID, hubBoundary(), "hub_scheduler:read")
+
+		userRec := doRequestWithToken(t, srv, schedOnlyKey, http.MethodGet, "/api/v1/users/"+aliceID, nil)
+		require.Equal(t, http.StatusForbidden, userRec.Code, "token without user:read must be denied GET /users/{id}")
+
+		adminRec := doRequestWithToken(t, srv, schedOnlyKey, http.MethodGet, "/api/v1/admin/scheduler", nil)
+		require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+		assert.NotContains(t, adminRec.Body.String(), execSentinel)
+
+		var adminResp struct {
+			RecurringSchedules []ScheduleResponse `json:"recurringSchedules"`
+		}
+		require.NoError(t, json.NewDecoder(adminRec.Body).Decode(&adminResp))
+		byID := make(map[string]ScheduleResponse, len(adminResp.RecurringSchedules))
+		for _, sc := range adminResp.RecurringSchedules {
+			byID[sc.ID] = sc
+		}
+		require.Contains(t, byID, aliceSchedID)
+		require.Contains(t, byID, agentSchedID)
+
+		// Must NOT expose user display name/email or agent slug without user:read / agent:read
+		assert.Empty(t, byID[aliceSchedID].CreatedByName)
+		assert.Empty(t, byID[aliceSchedID].CreatedByType)
+		assert.Equal(t, aliceID, byID[aliceSchedID].CreatedBy)
+
+		assert.Empty(t, byID[bobSchedID].CreatedByName)
+		assert.Empty(t, byID[bobSchedID].CreatedByType)
+
+		assert.Empty(t, byID[agentSchedID].CreatedByName)
+		assert.Empty(t, byID[agentSchedID].CreatedByType)
+		assert.Equal(t, agentID, byID[agentSchedID].CreatedBy)
+
+		// 2. Hub token with hub_scheduler:read + user:read + agent:read DOES resolve creators
+		fullReadKey := mintHubConfigToken(t, srv, superID, hubBoundary(), "hub_scheduler:read", "user:read", "agent:read")
+		fullRec := doRequestWithToken(t, srv, fullReadKey, http.MethodGet, "/api/v1/admin/scheduler", nil)
+		require.Equal(t, http.StatusOK, fullRec.Code, fullRec.Body.String())
+		assert.NotContains(t, fullRec.Body.String(), execSentinel)
+
+		var fullResp struct {
+			RecurringSchedules []ScheduleResponse `json:"recurringSchedules"`
+		}
+		require.NoError(t, json.NewDecoder(fullRec.Body).Decode(&fullResp))
+		fullByID := make(map[string]ScheduleResponse, len(fullResp.RecurringSchedules))
+		for _, sc := range fullResp.RecurringSchedules {
+			fullByID[sc.ID] = sc
+		}
+		assert.Equal(t, "Alice Example", fullByID[aliceSchedID].CreatedByName)
+		assert.Equal(t, "user", fullByID[aliceSchedID].CreatedByType)
+		assert.Equal(t, "ops-bot", fullByID[agentSchedID].CreatedByName)
+		assert.Equal(t, "agent", fullByID[agentSchedID].CreatedByType)
+		assert.Empty(t, fullByID[deletedAgentSchedID].CreatedByName)
+		assert.Empty(t, fullByID[deletedAgentSchedID].CreatedByType)
+
+		// 3. Interactive super-admin session resolves creators while still redacting exec argv
+		superUser := NewAuthenticatedUser(superID, superID+"@test.com", "Super Admin", store.UserRoleAdmin, "web")
+		sessRec := requestAsIdentity(t, srv, superUser, http.MethodGet, "/api/v1/admin/scheduler", nil)
+		require.Equal(t, http.StatusOK, sessRec.Code, sessRec.Body.String())
+		assert.NotContains(t, sessRec.Body.String(), execSentinel, "admin view must still redact exec argv")
+
+		var sessResp struct {
+			RecurringSchedules []ScheduleResponse `json:"recurringSchedules"`
+		}
+		require.NoError(t, json.NewDecoder(sessRec.Body).Decode(&sessResp))
+		sessByID := make(map[string]ScheduleResponse, len(sessResp.RecurringSchedules))
+		for _, sc := range sessResp.RecurringSchedules {
+			sessByID[sc.ID] = sc
+		}
+		assert.Equal(t, "Alice Example", sessByID[aliceSchedID].CreatedByName)
+		assert.Equal(t, "user", sessByID[aliceSchedID].CreatedByType)
+		assert.Equal(t, "ops-bot", sessByID[agentSchedID].CreatedByName)
+		assert.Equal(t, "agent", sessByID[agentSchedID].CreatedByType)
 	})
 }

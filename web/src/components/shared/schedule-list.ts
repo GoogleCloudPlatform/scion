@@ -1426,6 +1426,7 @@ export class ScionScheduleList extends LitElement {
     const agent = execPayload
       ? execPayload.agentName || execPayload.agentId || '-'
       : this.getPayloadAgent(sched.payload);
+    const creator = scheduleCreatorDisplay(sched);
 
     let payloadDetails: Record<string, unknown> = {};
     if (!isExec) {
@@ -1514,16 +1515,13 @@ export class ScionScheduleList extends LitElement {
                 >
               </div>`
             : nothing}
-          ${(() => {
-            const creator = scheduleCreatorDisplay(sched);
-            return html`<div class="detail-row">
-              <strong>Created:</strong> ${this.formatRelativeTime(sched.createdAt)}${creator
-                ? creator.href
-                  ? html` by <a class="creator-link" href=${creator.href}>${creator.label}</a>`
-                  : ` by ${creator.label}`
-                : ''}
-            </div>`;
-          })()}
+          <div class="detail-row">
+            <strong>Created:</strong> ${this.formatRelativeTime(sched.createdAt)}${creator
+              ? creator.href
+                ? html` by <a class="creator-link" href=${creator.href}>${creator.label}</a>`
+                : ` by ${creator.label}`
+              : ''}
+          </div>
           ${isExec
             ? renderExecHistorySection({
                 loading: this.detailHistoryLoading,

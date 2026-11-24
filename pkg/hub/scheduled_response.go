@@ -146,17 +146,21 @@ func (s *Server) newExecRevealer(ctx context.Context) *execRevealer {
 	}
 }
 
-// noExecRevealer reveals nothing (/admin/scheduler).
+// noExecRevealer reveals no exec argv (/admin/scheduler), while still carrying
+// the caller's identity so schedule creator resolution is authorized per viewer.
 func (s *Server) noExecRevealer(ctx context.Context) *execRevealer {
-	return &execRevealer{s: s, ctx: ctx, never: true, creators: map[string]resolvedScheduleCreator{}}
+	return &execRevealer{
+		s:        s,
+		ctx:      ctx,
+		identity: GetIdentityFromContext(ctx),
+		never:    true,
+		creators: map[string]resolvedScheduleCreator{},
+	}
 }
 
 // canReadCreatorUser mirrors getUser (handlers_users_core.go) so schedule
 // responses never widen who can see another user's display name or email.
 func (r *execRevealer) canReadCreatorUser(userID string) bool {
-	if r.never {
-		return true
-	}
 	if r.identity == nil {
 		return false
 	}
@@ -164,9 +168,6 @@ func (r *execRevealer) canReadCreatorUser(userID string) bool {
 		return false
 	}
 	if token, isToken := r.identity.(*ScopedUserIdentity); isToken {
-		if token.ID() == userID {
-			return true
-		}
 		if r.s.authzService == nil {
 			return false
 		}
@@ -183,9 +184,6 @@ func (r *execRevealer) canReadCreatorUser(userID string) bool {
 
 // canReadCreatorAgent reports whether the caller may read agent's identity.
 func (r *execRevealer) canReadCreatorAgent(agent *store.Agent) bool {
-	if r.never {
-		return true
-	}
 	if r.identity == nil {
 		return false
 	}
