@@ -348,8 +348,10 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     expect(page.shadowRoot!.querySelector('scion-filter-box')).toBeNull();
     expect(page.shadowRoot!.querySelector('sl-select')).not.toBeNull();
 
-    // With experiment off, selecting an unrendered/missing agent does not focus it.
+    // With experiment off, selecting a real candidate whose revealAgent returns
+    // false must not fall through to onSelectHidden or call focusAgentNode.
     const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    const revealSpy = vi.spyOn(tree, 'revealAgent').mockReturnValue(false);
     const focusSpy = vi.spyOn(tree, 'focusAgentNode');
     page.graphPalette.open();
     const palette = await vi.waitFor(() => {
@@ -361,9 +363,10 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     });
     palette.dispatchEvent(
       new CustomEvent('palette-select', {
-        detail: { target: { kind: 'agent', agentId: 'missing-id', displayName: 'Missing' } },
+        detail: { target: { kind: 'agent', agentId: 'a-other', displayName: 'Other' } },
       })
     );
+    expect(revealSpy).toHaveBeenCalledWith('a-other');
     palette
       .shadowRoot!.querySelector('sl-dialog')!
       .dispatchEvent(new Event('sl-after-hide', { bubbles: true, composed: true }));
