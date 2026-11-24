@@ -303,7 +303,8 @@ func TestAgentCompactView_KeySetIsAllowlist(t *testing.T) {
 		Phase: "suspended", Activity: "completed", SuspendReason: "idle", ContainerStatus: "Up 5 minutes",
 		Message: "Waiting for review", MessageMode: "project", Ancestry: []string{f.agentIDAt(0)},
 		CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
-		AppliedConfig: &store.AgentAppliedConfig{CreatorName: "All Keys Creator", Env: map[string]string{"A": "b"}, Harness: "claude", ModelSize: "large"},
+		HarnessConfig: "claude",
+		AppliedConfig: &store.AgentAppliedConfig{CreatorName: "All Keys Creator", Env: map[string]string{"A": "b"}, Harness: "claude", HarnessConfig: "claude", ModelSize: "large"},
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, full))
 	setRawAgentTimes(t, f.store, full.ID, "2026-03-04 05:07:00 +0000 UTC", "2026-03-04 05:08:00 +0000 UTC", "2026-03-04 05:09:00 +0000 UTC")

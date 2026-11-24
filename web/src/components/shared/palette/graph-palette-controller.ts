@@ -50,6 +50,16 @@ import { QuickPaletteHost, isQuickPaletteShortcut } from './quick-palette-host.j
 export interface GraphPaletteControllerOptions {
   /** The page's tree view, if it is rendered. */
   treeView: () => ScionAgentTreeView | null;
+  /**
+   * Optional override for the candidate agents offered by the palette.
+   * When omitted or returning undefined, defaults to `treeView().agents`.
+   */
+  candidates?: () => readonly Agent[] | undefined;
+  /**
+   * Called when the user selects a candidate that is not currently in
+   * `treeView().agents` (e.g. hidden by an active graph filter).
+   */
+  onSelectHidden?: (agentId: string) => void;
 }
 
 /** One Agents-group row per agent, in the given order. */
@@ -106,8 +116,19 @@ export class GraphPaletteController implements ReactiveController {
         return Promise.resolve(buildGraphAgentCandidates(this.candidateAgents));
       },
       onSelect: (target): void => {
-        const revealed = this.options.treeView()?.revealAgent(target.agentId) ?? false;
-        this.pickedAgentId = revealed ? target.agentId : null;
+        const tree = this.options.treeView();
+        if (!tree) {
+          this.pickedAgentId = null;
+          return;
+        }
+        if (tree.revealAgent(target.agentId)) {
+          this.pickedAgentId = target.agentId;
+        } else if (this.options.onSelectHidden) {
+          this.options.onSelectHidden(target.agentId);
+          this.pickedAgentId = target.agentId;
+        } else {
+          this.pickedAgentId = null;
+        }
       },
       onSelectionSettled: (): void => {
         const id = this.pickedAgentId;
@@ -149,11 +170,12 @@ export class GraphPaletteController implements ReactiveController {
     this.palette.open();
   }
 
-  /** The agents the rendered tree view shows; empty while none is rendered. */
+  /** The agents offered by the palette; empty while no tree view is rendered. */
   private shownAgents(): readonly Agent[] {
     const tree = this.options.treeView();
     if (!tree?.isConnected || tree.closest('[hidden]')) return [];
-    return tree.agents;
+    const custom = this.options.candidates?.();
+    return custom !== undefined ? custom : tree.agents;
   }
 
   private sync(): void {

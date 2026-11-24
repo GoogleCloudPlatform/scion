@@ -36,8 +36,31 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
+import '../shared/filter-box/filter-box.js';
+import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
+import {
+  filtersQueryDialectEnabled,
+  getViewSchema,
+  knownKeysFor,
+  parse,
+  validate,
+  type Query,
+  type ViewSchema,
+} from '../../shared/filter-query/index.js';
+import {
+  extractSingleProjectScope,
+  filterGraphAgents,
+  makeGraphValueSuggestions,
+  migrateProjectParamToQuery,
+} from './agent-graph-filter.js';
 import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import { navigateTo, replaceSearch } from '../../client/navigation.js';
+
+const GRAPH_FILTER_SCHEMA: ViewSchema = getViewSchema('graph') ?? {
+  view: 'graph',
+  keys: [],
+  textHelp: '',
+};
 
 /**
  * The fit probe of a scoped entry: one agent, plus the complete set (in
@@ -115,6 +138,8 @@ export class AgentGraphPage extends LitElement {
   @state() private reloading = false;
   @state() private error: string | null = null;
   @state() private projectFilter = '';
+  @state() private filterQueryText = '';
+  @state() private activeFilterQuery: Query | null = null;
   @state() private projectNamed: Named | null = null;
   private resolvedProjectId = '';
   /** Graph flow direction, persisted in the URL as ?dir=horizontal (absent = vertical). */
@@ -150,10 +175,28 @@ export class AgentGraphPage extends LitElement {
   /** The first live connection was not up within the drain's connect timeout. */
   private firstConnectLate = false;
 
-  /** "Jump to agent" over the graph, offering the agents its tree view shows. */
+  private readonly valueSuggestions = makeGraphValueSuggestions(() => [
+    ...this.agents,
+    ...stateManager.getAgents(),
+  ]);
+
+  /**
+   * "Jump to agent" over the graph. With `filters.query_dialect` on, keeps
+   * searching all loaded agents even when a filter hides some of them; picking
+   * a hidden agent clears the filter so it can be revealed.
+   */
   readonly graphPalette = new GraphPaletteController(this, {
     treeView: (): ScionAgentTreeView | null =>
       this.renderRoot.querySelector('scion-agent-tree-view'),
+    candidates: (): readonly Agent[] | undefined =>
+      filtersQueryDialectEnabled() ? this.agents : undefined,
+    onSelectHidden: (agentId: string): void => {
+      if (!filtersQueryDialectEnabled()) return;
+      this.onClearFilter();
+      void this.updateComplete.then(() => {
+        this.renderRoot.querySelector('scion-agent-tree-view')?.revealAgent(agentId);
+      });
+    },
   });
 
   private readonly onAgentCreated = (e: Event): void => {
@@ -187,8 +230,23 @@ export class AgentGraphPage extends LitElement {
     stateManager.setScope({ type: 'dashboard' });
 
     const params = new URLSearchParams(window.location.search);
-    this.projectFilter = params.get('project') || '';
-    this.initiallyProjectScoped = !!params.get('project');
+    if (filtersQueryDialectEnabled()) {
+      const { queryText, migrated, initialProject } = migrateProjectParamToQuery(params);
+      this.initiallyProjectScoped = migrated;
+      this.filterQueryText = queryText;
+      this.activeFilterQuery = this.parseValidQuery(queryText);
+      this.projectFilter =
+        initialProject || extractSingleProjectScope(this.activeFilterQuery) || '';
+      if (migrated) {
+        if (queryText) params.set('q', queryText);
+        else params.delete('q');
+        params.delete('project');
+        replaceSearch(params);
+      }
+    } else {
+      this.projectFilter = params.get('project') || '';
+      this.initiallyProjectScoped = !!params.get('project');
+    }
     this.syncProjectLabel();
     this.focusId = params.get('focus') || '';
     this.orientation = params.get('dir') === 'horizontal' ? 'horizontal' : 'vertical';
@@ -592,6 +650,64 @@ export class AgentGraphPage extends LitElement {
     replaceSearch(params);
   }
 
+  private parseValidQuery(raw: string): Query | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const parsed = parse(raw, knownKeysFor(GRAPH_FILTER_SCHEMA));
+    if (parsed.error || !parsed.query) return null;
+    const v = validate(parsed.query, GRAPH_FILTER_SCHEMA, raw);
+    if (v.error) return null;
+    return parsed.query;
+  }
+
+  private resolveLoadScope(scope: string): string {
+    if (!scope) return '';
+    for (const a of [...this.agents, ...stateManager.getAgents()]) {
+      if (a.projectId === scope || a.projectSlug === scope || a.project === scope) {
+        return a.projectId;
+      }
+    }
+    return '';
+  }
+
+  private onFilterInput(e: CustomEvent<FilterInputDetail>): void {
+    this.filterQueryText = e.detail.value;
+    this.activeFilterQuery = e.detail.query;
+  }
+
+  private onFilterCommit(e: CustomEvent<FilterCommitDetail>): void {
+    this.filterQueryText = e.detail.value;
+    this.activeFilterQuery = e.detail.query;
+    const params = new URLSearchParams(window.location.search);
+    const trimmed = e.detail.value.trim();
+    if (trimmed) {
+      params.set('q', trimmed);
+    } else {
+      params.delete('q');
+    }
+    params.delete('project');
+    replaceSearch(params);
+
+    const nextScope = extractSingleProjectScope(e.detail.query) ?? '';
+    this.projectFilter = nextScope;
+    if (this.memberScope !== null && this.memberScope !== '' && this.memberScope !== nextScope) {
+      this.applyProjectFilter(this.resolveLoadScope(nextScope));
+    }
+  }
+
+  private onClearFilter(): void {
+    this.filterQueryText = '';
+    this.activeFilterQuery = null;
+    const params = new URLSearchParams(window.location.search);
+    params.delete('q');
+    params.delete('project');
+    replaceSearch(params);
+    this.projectFilter = '';
+    if (this.memberScope !== null && this.memberScope !== '') {
+      this.applyProjectFilter('');
+    }
+  }
+
   /** Keeps the URL's ?dir= param in sync with the graph orientation toggle. */
   private onOrientationChange(e: CustomEvent<{ orientation: Orientation }>): void {
     this.orientation = e.detail.orientation;
@@ -698,6 +814,15 @@ export class AgentGraphPage extends LitElement {
   }
 
   override render() {
+    const useDialect = filtersQueryDialectEnabled();
+    const filtered = useDialect ? filterGraphAgents(this.agents, this.activeFilterQuery) : null;
+    const shownAgents = filtered ? filtered.agents : this.visibleAgents;
+    const contextIds = filtered ? filtered.contextIds : undefined;
+    const filteredEmpty = Boolean(
+      filtered && filtered.hasActiveFilter && this.agents.length > 0 && shownAgents.length === 0
+    );
+    const treeFilterKey = useDialect ? this.filterQueryText : this.projectFilter;
+
     return html`
       <div style="padding: var(--sl-spacing-large, 1.25rem);">
         <scion-breadcrumb .crumbs=${this.graphCrumbs()}></scion-breadcrumb>
@@ -705,23 +830,36 @@ export class AgentGraphPage extends LitElement {
           style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;"
         >
           <h1 style="margin: 0; font-size: 1.5rem;">Agents</h1>
-          <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
-            ${this.initiallyProjectScoped
-              ? nothing
-              : html`
-                  <sl-select
-                    size="small"
-                    placeholder="All projects"
-                    clearable
-                    value=${this.projectFilter}
-                    @sl-change=${this.onProjectFilterChange}
-                    style="min-width: 180px"
-                  >
-                    ${this.projects.map(
-                      (p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`
-                    )}
-                  </sl-select>
-                `}
+          <div
+            style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; flex: 1 1 auto; justify-content: flex-end;"
+          >
+            ${useDialect
+              ? html`
+                  <scion-filter-box
+                    view="graph"
+                    .value=${this.filterQueryText}
+                    .valueSuggestions=${this.valueSuggestions}
+                    placeholder="Filter graph… (try phase:running harness:antigravity)"
+                    @filter-input=${this.onFilterInput}
+                    @filter-commit=${this.onFilterCommit}
+                  ></scion-filter-box>
+                `
+              : this.initiallyProjectScoped
+                ? nothing
+                : html`
+                    <sl-select
+                      size="small"
+                      placeholder="All projects"
+                      clearable
+                      value=${this.projectFilter}
+                      @sl-change=${this.onProjectFilterChange}
+                      style="min-width: 180px"
+                    >
+                      ${this.projects.map(
+                        (p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`
+                      )}
+                    </sl-select>
+                  `}
             <scion-view-toggle view="graph" @view-change=${this.onViewChange}></scion-view-toggle>
           </div>
         </div>
@@ -747,13 +885,16 @@ export class AgentGraphPage extends LitElement {
             : html`
                 ${this.renderBanners()}
                 <scion-agent-tree-view
-                  .agents=${this.visibleAgents}
+                  .agents=${shownAgents}
+                  .contextIds=${contextIds}
+                  ?filteredEmpty=${filteredEmpty}
                   focusId=${this.focusId}
                   orientation=${this.orientation}
-                  filterKey=${this.projectFilter}
+                  filterKey=${treeFilterKey}
                   .markMissingAncestors=${this.incomplete !== null &&
                   !this.incomplete.shownComplete}
                   @orientation-change=${this.onOrientationChange}
+                  @clear-filter=${this.onClearFilter}
                 ></scion-agent-tree-view>
               `}
       </div>

@@ -215,6 +215,21 @@ export class ScionAgentTreeView extends LitElement {
   @property({ attribute: false })
   markMissingAncestors = false;
 
+  /**
+   * Agent IDs shown only as lineage context (ancestors of matching agents that
+   * do not themselves match the active filter). Rendered dimmed with an
+   * accessible description while remaining focusable and clickable.
+   */
+  @property({ attribute: false })
+  contextIds?: ReadonlySet<string>;
+
+  /**
+   * When true and `agents` is empty, renders a filtered empty state with a
+   * "Clear filter" button that dispatches a `clear-filter` event.
+   */
+  @property({ type: Boolean })
+  filteredEmpty = false;
+
   @state() private showUsers = false;
   @state() private hoverId: string | null = null;
   @state() private collapsedIds: ReadonlySet<string> = new Set();
@@ -454,6 +469,10 @@ export class ScionAgentTreeView extends LitElement {
       marker-end: url(#arrow-neutral);
     }
 
+    .edge.context {
+      opacity: var(--scion-graph-context-opacity);
+    }
+
     .edge.dim {
       opacity: 0.15;
     }
@@ -515,6 +534,15 @@ export class ScionAgentTreeView extends LitElement {
     .node:hover {
       box-shadow: var(--sl-shadow-medium, 0 3px 10px rgba(0, 0, 0, 0.18));
       transform: translateY(-1px) scale(1.02);
+    }
+
+    .node.context {
+      opacity: var(--scion-graph-context-opacity);
+    }
+
+    .node.context:hover,
+    .node.context:focus-visible {
+      opacity: 1;
     }
 
     .node.dim {
@@ -1211,7 +1239,21 @@ export class ScionAgentTreeView extends LitElement {
         ${this.renderToolbar()}
         <div class="empty-state">
           <sl-icon name="diagram-3"></sl-icon>
-          <p>No agents to display.</p>
+          <p>
+            ${this.filteredEmpty ? 'No agents match the current filter.' : 'No agents to display.'}
+          </p>
+          ${this.filteredEmpty
+            ? html`
+                <sl-button
+                  size="small"
+                  @click=${() =>
+                    this.dispatchEvent(
+                      new CustomEvent('clear-filter', { bubbles: true, composed: true })
+                    )}
+                  >Clear filter</sl-button
+                >
+              `
+            : nothing}
         </div>
       `;
     }
@@ -1407,6 +1449,7 @@ export class ScionAgentTreeView extends LitElement {
   ) {
     const lit = related !== null && related.has(e.parentId) && related.has(e.childId);
     const dim = related !== null && !lit;
+    const isContext = !lit && (this.contextIds?.has(e.childId) ?? false);
 
     // Look up agents for mode-aware edge styling. A user-node endpoint
     // (e.g. "user:<id>") is never a key in agentById, so this resolves to
@@ -1436,7 +1479,7 @@ export class ScionAgentTreeView extends LitElement {
         : '';
 
     return svg`<path
-      class="edge ${lit ? 'lit' : ''} ${dim ? 'dim' : ''}"
+      class="edge ${lit ? 'lit' : ''} ${isContext ? 'context' : ''} ${dim ? 'dim' : ''}"
       d=${this.edgePath(e)}
       stroke=${edgeStyle && !lit ? edgeStyle.stroke : nothing}
       stroke-dasharray=${edgeStyle?.dashArray || nothing}
@@ -1498,6 +1541,7 @@ export class ScionAgentTreeView extends LitElement {
     const ancestorMissing =
       this.markMissingAncestors && isRoot && (agent.ancestry?.length ?? 0) > 1;
     const dim = related !== null && !related.has(agent.id);
+    const isContext = this.contextIds?.has(agent.id) ?? false;
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);
     // The <button> (collapse chip) must NOT be nested inside the <a> (node
@@ -1513,11 +1557,11 @@ export class ScionAgentTreeView extends LitElement {
         @pointerleave=${() => (this.hoverId = null)}
       >
         <a
-          class="node ${dim ? 'dim' : ''} ${agent.id === this.focusId ? 'focus' : ''} ${agent.id ===
-          this.highlightId
-            ? 'jump-highlight'
-            : ''}"
+          class="node ${isContext ? 'context' : ''} ${dim ? 'dim' : ''} ${agent.id === this.focusId
+            ? 'focus'
+            : ''} ${agent.id === this.highlightId ? 'jump-highlight' : ''}"
           data-agent-id=${agent.id}
+          aria-description=${isContext ? 'shown as context; does not match filter' : nothing}
           href="/agents/${agent.id}"
           style="border-left-color: ${color}"
           title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}

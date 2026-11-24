@@ -59,3 +59,21 @@ Text search matches file **path** as a case-insensitive regular expression, fall
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
 | `ext` | string | File extension without leading dot (case-insensitive) | client | `ext:ts,tsx`, `-ext:map` | File extension without leading dot (e.g. ts, go) |
+
+### `graph` (Agent graph)
+
+Text search matches agent **name** or **slug** (case-insensitive substring). Non-matching ancestors of matched agents are rendered dimmed as lineage context; all other agents are hidden.
+
+| Key | Kind | Values | Execution | Example | Description |
+| --- | --- | --- | --- | --- | --- |
+| `phase` | enum | `created`, `provisioning`, `cloning`, `starting`, `running`, `suspended`, `stopping`, `stopped`, `error`, `halted` | client | `phase:running` | Agent lifecycle phase |
+| `activity` | enum | `initializing`, `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `idle`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`, `harness_error` | client | `activity:working,blocked` | Current agent activity |
+| `label` | label | `key` or `key=value` (case-sensitive) | client | `label:team=ui`, `-label:tmp` | Label key or key=value pair |
+| `project` | ref | project slug, name, or ID | client | `project:demo` | Project slug, name, or ID |
+| `template` | string | template name | client | `template:developer` | Agent template name |
+| `harness` | string | harness config name | client | `harness:antigravity` | Harness config name |
+| `mode` | enum | `hub`, `project`, `branch`, `lineage`, `none`, `can_message`, `cannot_message` | client | `mode:branch`, `mode:can_message` | Messaging mode or messageability |
+
+### `graph_project` (Project-scoped agent graph)
+
+Same keys and behaviour as `graph`, minus `project` (already scoped to the current project).
