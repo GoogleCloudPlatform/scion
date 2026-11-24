@@ -1735,6 +1735,278 @@ describe('scion-chat-thread dispatch state from send response', () => {
 
     internals.mergeMessages([{ ...base, dispatchState: 'waking' }]);
     expect(internals.messageMap.get(base.id)?.dispatchState).toBe('dispatched');
+
+    internals.mergeMessages([{ ...base, dispatchState: 'resuming' }]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('dispatched');
+  });
+
+  // ptone/scion#9015 (PR 2): auto-resume progress transitions
+  it('sets optimistic dispatchState=resuming for idle/stalled-suspended target agent, transitions via send-progress SSE to pending -> dispatched -> delivered', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    el.defaultAgent = 'coder';
+    el.agentMembers = [
+      {
+        id: 'agent-coder',
+        kind: 'agent',
+        displayName: 'Coder',
+        slug: 'coder',
+        phase: 'suspended',
+        suspendReason: 'idle',
+      },
+    ];
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      _pendingIdempotencyKeys: Set<string>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (response: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'wake up please',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    const idemKey = Array.from(internals._pendingIdempotencyKeys)[0];
+    expect(idemKey).toBeTruthy();
+    expect(internals.messageMap.get(idemKey!)?.dispatchState).toBe('resuming');
+
+    // Server emits stage=sending once wake completes before broker dispatch.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-send-progress', {
+        detail: {
+          data: {
+            conversationKey: el.conversationKey,
+            idempotencyKey: idemKey,
+            stage: 'sending',
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get(idemKey!)?.dispatchState).toBe('pending');
+
+    // Server publishes dispatched after broker accepts, and HTTP 201 returns.
+    resolveSend({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'msg-auto-resume-1', dispatchState: 'dispatched' }),
+    } as unknown as Response);
+    await sendPromise;
+    expect(internals.messageMap.get('msg-auto-resume-1')?.dispatchState).toBe('dispatched');
+
+    // Broker later confirms delivery via SSE.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'msg-auto-resume-1',
+            threadId: el.conversationKey,
+            senderId: 'user-me',
+            sender: 'user:me@example.com',
+            msg: 'wake up please',
+            type: 'chat',
+            dispatchState: 'delivered',
+            createdAt: '2026-01-01T00:00:01Z',
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get('msg-auto-resume-1')?.dispatchState).toBe('delivered');
+  });
+
+  it('does not set optimistic resuming for user-suspended or running agents, but handles SSE resuming->sending when agentMembers was stale', async () => {
+    for (const member of [
+      {
+        id: 'agent-coder',
+        kind: 'agent' as const,
+        displayName: 'Coder',
+        slug: 'coder',
+        phase: 'suspended',
+        suspendReason: 'user',
+      },
+      {
+        id: 'agent-coder',
+        kind: 'agent' as const,
+        displayName: 'Coder',
+        slug: 'coder',
+        phase: 'running',
+      },
+    ]) {
+      const el = await mount();
+      el.currentUserId = 'user-me';
+      el.defaultAgent = 'coder';
+      el.agentMembers = [member];
+      const internals = el as unknown as {
+        messageMap: Map<string, Message>;
+        _pendingIdempotencyKeys: Set<string>;
+        handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+      };
+
+      let resolveSend!: (response: Response) => void;
+      apiFetch.mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSend = resolve;
+          })
+      );
+      apiFetch.mockResolvedValue(emptyHistory());
+
+      const sendPromise = internals.handleChatSendV2(
+        new CustomEvent<ChatSendDetail>('chat-send', {
+          detail: {
+            text: 'hello',
+            plain: false,
+            interrupt: false,
+            onSuccess: vi.fn(),
+            mentions: [],
+            attachmentIds: [],
+          },
+        })
+      );
+
+      const idemKey = Array.from(internals._pendingIdempotencyKeys)[0]!;
+      expect(internals.messageMap.get(idemKey)?.dispatchState).toBe('pending');
+
+      if (member.phase === 'running') {
+        // Simulate stale client agentMembers or mid-dispatch syncAutoWakeHook:
+        // server emits resuming then sending.
+        fakeStateManager.dispatchEvent(
+          new CustomEvent('chat-send-progress', {
+            detail: {
+              data: {
+                conversationKey: el.conversationKey,
+                idempotencyKey: idemKey,
+                stage: 'resuming',
+              },
+            },
+          })
+        );
+        expect(internals.messageMap.get(idemKey)?.dispatchState).toBe('resuming');
+
+        fakeStateManager.dispatchEvent(
+          new CustomEvent('chat-send-progress', {
+            detail: {
+              data: {
+                conversationKey: el.conversationKey,
+                idempotencyKey: idemKey,
+                stage: 'sending',
+              },
+            },
+          })
+        );
+        expect(internals.messageMap.get(idemKey)?.dispatchState).toBe('pending');
+      }
+
+      resolveSend({
+        ok: true,
+        status: 201,
+        json: () =>
+          Promise.resolve({ id: 'msg-stale-' + member.phase, dispatchState: 'dispatched' }),
+      } as unknown as Response);
+      await sendPromise;
+      expect(internals.messageMap.get('msg-stale-' + member.phase)?.dispatchState).toBe(
+        'dispatched'
+      );
+    }
+  });
+
+  it('ignores chat-send-progress for other conversations or unknown keys, and handles old-hub fallback without send-progress', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    el.defaultAgent = 'coder';
+    el.agentMembers = [
+      {
+        id: 'agent-coder',
+        kind: 'agent',
+        displayName: 'Coder',
+        slug: 'coder',
+        phase: 'suspended',
+        suspendReason: 'stalled',
+      },
+    ];
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      _pendingIdempotencyKeys: Set<string>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (response: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'old hub send',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    const idemKey = Array.from(internals._pendingIdempotencyKeys)[0]!;
+    expect(internals.messageMap.get(idemKey)?.dispatchState).toBe('resuming');
+
+    // Different conversation key -> ignored.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-send-progress', {
+        detail: {
+          data: {
+            conversationKey: 'other-topic',
+            idempotencyKey: idemKey,
+            stage: 'sending',
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get(idemKey)?.dispatchState).toBe('resuming');
+
+    // Unknown idempotency key -> ignored.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-send-progress', {
+        detail: {
+          data: {
+            conversationKey: el.conversationKey,
+            idempotencyKey: 'unknown-key',
+            stage: 'sending',
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get(idemKey)?.dispatchState).toBe('resuming');
+
+    // Old hub never emits send-progress; HTTP 201 still transitions cleanly to dispatched.
+    resolveSend({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'msg-old-hub-1', dispatchState: 'dispatched' }),
+    } as unknown as Response);
+    await sendPromise;
+    expect(internals.messageMap.get('msg-old-hub-1')?.dispatchState).toBe('dispatched');
   });
 
   // ptone/scion#9015 (sec1 L2): if a synchronous dispatch timed out after the

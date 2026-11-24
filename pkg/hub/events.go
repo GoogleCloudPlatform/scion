@@ -127,6 +127,10 @@ type EventPublisher interface {
 	// user.<userID>.inbox when an inbox category changes. Only the owner is
 	// ever told.
 	PublishUserInboxHint(ctx context.Context, userID string, hint InboxHint)
+	// PublishChatSendProgress publishes a transient auto-resume progress
+	// update ("resuming" or "sending") to the sending user only, on
+	// user.<id>.chat.send-progress.
+	PublishChatSendProgress(ctx context.Context, userID string, evt ChatSendProgressEvent)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -179,6 +183,8 @@ func (noopEventPublisher) PublishChatScheduledEvent(_ context.Context, _ string,
 }
 func (noopEventPublisher) PublishChatStarsChanged(_ context.Context, _ string)           {}
 func (noopEventPublisher) PublishUserInboxHint(_ context.Context, _ string, _ InboxHint) {}
+func (noopEventPublisher) PublishChatSendProgress(_ context.Context, _ string, _ ChatSendProgressEvent) {
+}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
@@ -1269,6 +1275,29 @@ func (p *eventBuilder) PublishUserInboxHint(_ context.Context, userID string, hi
 		return
 	}
 	p.sink("user."+userID+".inbox", hint)
+}
+
+// ChatSendProgressStage constants for ChatSendProgressEvent.Stage.
+const (
+	ChatSendProgressResuming = "resuming"
+	ChatSendProgressSending  = "sending"
+)
+
+// ChatSendProgressEvent is published on user.<userID>.chat.send-progress while
+// a chat send is auto-resuming a suspended agent before broker dispatch.
+type ChatSendProgressEvent struct {
+	ConversationKey string `json:"conversationKey"`
+	IdempotencyKey  string `json:"idempotencyKey"`
+	Stage           string `json:"stage"`
+}
+
+// PublishChatSendProgress publishes a transient auto-resume progress update to
+// the sending user only, on user.<userID>.chat.send-progress.
+func (p *eventBuilder) PublishChatSendProgress(_ context.Context, userID string, evt ChatSendProgressEvent) {
+	if userID == "" || evt.IdempotencyKey == "" || evt.Stage == "" {
+		return
+	}
+	p.sink("user."+userID+".chat.send-progress", evt)
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

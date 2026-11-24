@@ -116,6 +116,26 @@ describe('StateManager user-scoped chat subjects', () => {
     expect(detail.data).toEqual({ action: 'changed' });
   });
 
+  it('routes user.{id}.chat.send-progress to chat-send-progress, never as a message', () => {
+    const sm = new StateManager();
+    const progress = vi.fn();
+    const message = vi.fn();
+    sm.addEventListener('chat-send-progress', progress);
+    sm.addEventListener('chat-message-received', message);
+
+    const payload = {
+      conversationKey: 'topic-1',
+      idempotencyKey: 'idem-1',
+      stage: 'resuming',
+    };
+    emit(sm, 'user.b.chat.send-progress', payload);
+
+    expect(message).not.toHaveBeenCalled();
+    expect(progress).toHaveBeenCalledTimes(1);
+    const detail = (progress.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual(payload);
+  });
+
   it('routes user.{id}.chat.decision.updated to decision-updated, never as a message', () => {
     const sm = new StateManager();
     const choice = vi.fn();

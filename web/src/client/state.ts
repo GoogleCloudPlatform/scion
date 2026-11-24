@@ -484,6 +484,7 @@ export type StateEventType =
   | 'chat-dm-promoted'
   | 'chat-scheduled-updated'
   | 'chat-stars-updated'
+  | 'chat-send-progress'
   | 'decision-updated'
   | 'message-action-updated'
   | 'agent-created';
@@ -875,6 +876,8 @@ export class StateManager extends EventTarget {
         // The user's own starred messages changed: a content-free
         // invalidation (owner-only; never a message). Refetch over REST.
         this.notifyWithData('chat-stars-updated', data);
+      } else if (parts[3] === 'send-progress') {
+        this.notifyWithData('chat-send-progress', data);
       } else if (parts[3] === 'typing') {
         this.notifyWithData('chat-typing-received', data);
       } else if (parts[3] === 'read-state') {

@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -807,4 +809,272 @@ func TestChatV2Interrupt_WakeInitializingIsBuffered(t *testing.T) {
 			assert.Equal(t, tc.wantInterrupt, msgs[0].Interrupt)
 		})
 	}
+}
+
+// --- Auto-resume progress events (ptone/scion#9015, PR 2) ---
+
+type progressTimeline struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (p *progressTimeline) add(entry string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.events = append(p.events, entry)
+}
+
+func (p *progressTimeline) snapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.events...)
+}
+
+type progressRecordingPublisher struct {
+	EventPublisher
+	timeline *progressTimeline
+	progress []struct {
+		userID string
+		evt    ChatSendProgressEvent
+	}
+	mu sync.Mutex
+}
+
+func (p *progressRecordingPublisher) PublishChatSendProgress(ctx context.Context, userID string, evt ChatSendProgressEvent) {
+	p.mu.Lock()
+	p.progress = append(p.progress, struct {
+		userID string
+		evt    ChatSendProgressEvent
+	}{userID: userID, evt: evt})
+	p.mu.Unlock()
+	p.timeline.add("progress:" + evt.Stage)
+	p.EventPublisher.PublishChatSendProgress(ctx, userID, evt)
+}
+
+func (p *progressRecordingPublisher) PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, opts ...ChatEventOption) {
+	p.timeline.add("publish:" + msg.DispatchState)
+	p.EventPublisher.PublishUserMessage(ctx, msg, attachments, artifactRefs, opts...)
+}
+
+type progressTimelineDispatcher struct {
+	*wakeTrackingDispatcher
+	timeline          *progressTimeline
+	onFirstMessageErr func(agent *store.Agent) error
+	firstMsgDone      bool
+	mu                sync.Mutex
+}
+
+func (d *progressTimelineDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, prompt string, cont bool) error {
+	d.timeline.add("broker:start")
+	return d.wakeTrackingDispatcher.DispatchAgentStart(ctx, agent, prompt, cont)
+}
+
+func (d *progressTimelineDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, msg string, interrupt bool, structured *messages.StructuredMessage) error {
+	d.mu.Lock()
+	first := !d.firstMsgDone
+	d.firstMsgDone = true
+	hook := d.onFirstMessageErr
+	d.mu.Unlock()
+	if first && hook != nil {
+		d.timeline.add("broker:message-idle-suspending")
+		if err := hook(agent); err != nil {
+			return err
+		}
+	}
+	d.timeline.add("broker:message")
+	return d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, msg, interrupt, structured)
+}
+
+func enableIdleSuspendForWakeTest(t *testing.T, srv *Server) {
+	t.Helper()
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		if e.Name == experiments.IdleSuspend {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+}
+
+func suspendAgentWithReason(t *testing.T, s store.Store, agent *store.Agent, reason state.SuspendReason) {
+	t.Helper()
+	require.NoError(t, s.UpdateAgentStatus(t.Context(), agent.ID, store.AgentStatusUpdate{
+		Phase:         string(state.PhaseSuspended),
+		SuspendReason: string(reason),
+	}))
+	refreshed, err := s.GetAgent(t.Context(), agent.ID)
+	require.NoError(t, err)
+	*agent = *refreshed
+}
+
+func TestChatV2AutoWake_EmitsResumingThenSendingProgressEvents(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	enableIdleSuspendForWakeTest(t, f.srv)
+	suspendAgentWithReason(t, f.s, f.agent, state.SuspendReasonIdle)
+
+	tl := &progressTimeline{}
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	recPub := &progressRecordingPublisher{EventPublisher: pub, timeline: tl}
+	f.srv.SetEventPublisher(recPub)
+	f.srv.SetDispatcher(&progressTimelineDispatcher{
+		wakeTrackingDispatcher: f.disp,
+		timeline:               tl,
+	})
+	f.markReadySoon()
+
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "wake and run", "idempotency_key": "idem-auto-1"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+	assert.Equal(t, []string{
+		"progress:resuming",
+		"broker:start",
+		"progress:sending",
+		"broker:message",
+		"publish:dispatched",
+	}, tl.snapshot(), "progress events and broker dispatch must follow strict order")
+
+	require.Len(t, recPub.progress, 2)
+	assert.Equal(t, DevUserID, recPub.progress[0].userID)
+	assert.Equal(t, f.topic, recPub.progress[0].evt.ConversationKey)
+	assert.Equal(t, "idem-auto-1", recPub.progress[0].evt.IdempotencyKey)
+	assert.Equal(t, ChatSendProgressResuming, recPub.progress[0].evt.Stage)
+	assert.Equal(t, ChatSendProgressSending, recPub.progress[1].evt.Stage)
+}
+
+func TestChatV2AutoWake_FailedWakeLeavesNoRowAndEmitsResuming(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	enableIdleSuspendForWakeTest(t, f.srv)
+	suspendAgentWithReason(t, f.s, f.agent, state.SuspendReasonIdle)
+
+	tl := &progressTimeline{}
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	recPub := &progressRecordingPublisher{EventPublisher: pub, timeline: tl}
+	f.srv.SetEventPublisher(recPub)
+	f.disp.startReturnErr = assert.AnError
+	f.srv.SetDispatcher(&progressTimelineDispatcher{
+		wakeTrackingDispatcher: f.disp,
+		timeline:               tl,
+	})
+
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "should not persist", "idempotency_key": "idem-fail-1"})
+	require.GreaterOrEqual(t, rec.Code, 500, "body=%s", rec.Body.String())
+
+	assert.Equal(t, []string{"progress:resuming", "broker:start"}, tl.snapshot(),
+		"failed wake must emit resuming, never sending or publish")
+	assert.Equal(t, 0, f.countThreadMessages(t), "failed wake must leave no message row behind")
+}
+
+func TestChatV2AutoWake_RunningAgentEmitsNoResumingEvent(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	enableIdleSuspendForWakeTest(t, f.srv)
+
+	tl := &progressTimeline{}
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	recPub := &progressRecordingPublisher{EventPublisher: pub, timeline: tl}
+	f.srv.SetEventPublisher(recPub)
+	f.srv.SetDispatcher(&progressTimelineDispatcher{
+		wakeTrackingDispatcher: f.disp,
+		timeline:               tl,
+	})
+
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "ordinary send", "idempotency_key": "idem-run-1"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+	assert.Empty(t, recPub.progress, "running agent must not emit send-progress events")
+	assert.Equal(t, []string{"broker:message", "publish:dispatched"}, tl.snapshot(),
+		"PublishUserMessage must still follow broker acceptance")
+}
+
+func TestChatV2AutoWake_SendProgressScopedToSenderOnly(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	enableIdleSuspendForWakeTest(t, f.srv)
+	suspendAgentWithReason(t, f.s, f.agent, state.SuspendReasonIdle)
+
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	f.srv.SetEventPublisher(pub)
+	f.markReadySoon()
+
+	senderCh, unsubSender := pub.Subscribe("user." + DevUserID + ".chat.send-progress")
+	defer unsubSender()
+	projectCh, unsubProject := pub.Subscribe("project." + f.proj.ID + ".>")
+	defer unsubProject()
+	otherCh, unsubOther := pub.Subscribe("user.other-user.>")
+	defer unsubOther()
+
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "private progress", "idempotency_key": "idem-scope-1"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+	var senderStages []string
+	deadline := time.After(300 * time.Millisecond)
+collectSender:
+	for len(senderStages) < 2 {
+		select {
+		case evt := <-senderCh:
+			var payload ChatSendProgressEvent
+			require.NoError(t, json.Unmarshal(evt.Data, &payload))
+			senderStages = append(senderStages, payload.Stage)
+		case <-deadline:
+			break collectSender
+		}
+	}
+	assert.Equal(t, []string{ChatSendProgressResuming, ChatSendProgressSending}, senderStages)
+
+	// Confirm no send-progress leaked onto project.> or another user's stream.
+	drain := time.After(100 * time.Millisecond)
+drainLoop:
+	for {
+		select {
+		case evt := <-projectCh:
+			assert.NotContains(t, evt.Subject, "send-progress")
+		case evt := <-otherCh:
+			t.Fatalf("unexpected event on other user's stream: %s", evt.Subject)
+		case <-drain:
+			break drainLoop
+		}
+	}
+}
+
+func TestChatV2AutoWake_MidDispatchSyncAutoWakeEmitsResumingThenSending(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	enableIdleSuspendForWakeTest(t, f.srv)
+
+	tl := &progressTimeline{}
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	recPub := &progressRecordingPublisher{EventPublisher: pub, timeline: tl}
+	f.srv.SetEventPublisher(recPub)
+	f.srv.SetDispatcher(&progressTimelineDispatcher{
+		wakeTrackingDispatcher: f.disp,
+		timeline:               tl,
+		onFirstMessageErr: func(agent *store.Agent) error {
+			// Simulate the agent suspending between lookup and dispatch.
+			suspendAgentWithReason(t, f.s, agent, state.SuspendReasonIdle)
+			f.markReadySoon()
+			return &errAgentIdleSuspending{agent: agent}
+		},
+	})
+
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "mid-dispatch wake", "idempotency_key": "idem-mid-1"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+	assert.Equal(t, []string{
+		"broker:message-idle-suspending",
+		"progress:resuming",
+		"broker:start",
+		"progress:sending",
+		"broker:message",
+		"publish:dispatched",
+	}, tl.snapshot(), "mid-dispatch syncAutoWakeHook must emit resuming -> sending before retry and publish")
 }

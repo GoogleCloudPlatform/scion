@@ -1566,8 +1566,30 @@ describe('scion-chat-message delivery state', () => {
     const state = deliveryState(el);
     expect(state).toBeTruthy();
     expect(state?.classList.contains('dispatched')).toBe(true);
-    expect(state?.textContent).toContain('Accepted');
+    expect(state?.textContent?.trim()).toBe('Accepted');
     expect(state?.textContent).not.toContain('Delivered');
+  });
+
+  // ptone/scion#9015: auto-resume progression renders "Resuming agent…"
+  // followed by "Sending…" and plain "Accepted" (no ellipsis).
+  it('shows "Resuming agent…" for dispatchState=resuming and "Sending…" for dispatchState=pending', async () => {
+    const resumingEl = await mountOutbound({
+      dispatchState: 'resuming',
+    });
+    const resumingState = deliveryState(resumingEl);
+    expect(resumingState).toBeTruthy();
+    expect(resumingState?.classList.contains('resuming')).toBe(true);
+    expect(resumingState?.textContent?.trim()).toBe('Resuming agent…');
+    expect(resumingState?.querySelector('sl-icon')?.getAttribute('name')).toBe('hourglass-split');
+
+    const pendingEl = await mountOutbound({
+      dispatchState: 'pending',
+    });
+    const pendingState = deliveryState(pendingEl);
+    expect(pendingState).toBeTruthy();
+    expect(pendingState?.classList.contains('pending')).toBe(true);
+    expect(pendingState?.textContent?.trim()).toBe('Sending…');
+    expect(pendingState?.querySelector('sl-icon')?.getAttribute('name')).toBe('clock');
   });
 
   // ptone/scion#9015: once the broker confirms session injection succeeded,
