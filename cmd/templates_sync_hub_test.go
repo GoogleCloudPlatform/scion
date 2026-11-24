@@ -859,4 +859,37 @@ func TestSyncAllTemplatesToHub_RespectsProjectFlag(t *testing.T) {
 		assert.Empty(t, *created, "must not upload CWD project-local templates into another Hub project")
 		assert.Contains(t, out, "No local project templates found to sync.")
 	})
+
+	t.Run("outside a project falls back to global source only for global scope", func(t *testing.T) {
+		nonProjDir := t.TempDir()
+		require.NoError(t, os.Chdir(nonProjDir))
+		t.Cleanup(func() { _ = os.Chdir(cwdProj) })
+
+		projectPath = ""
+		globalMode = false
+
+		t.Run("scope global syncs global templates as local global", func(t *testing.T) {
+			srv, created := newRecordingServer(t)
+			hubCtx := newTemplateSyncHubCtx(t, srv)
+
+			out := captureStdout(t, func() {
+				require.NoError(t, syncAllTemplatesToHub(hubCtx, "global"))
+			})
+			assert.Equal(t, []string{"global-tpl"}, *created, "must upload global templates when syncing --all --scope global outside a project")
+			assert.Contains(t, out, "Syncing 1 local global template(s) to Hub (global scope)...")
+			assert.Contains(t, out, "1 template(s) synced")
+		})
+
+		t.Run("scope project does not upload global templates as project templates", func(t *testing.T) {
+			srv, created := newRecordingServer(t)
+			hubCtx := newTemplateSyncHubCtx(t, srv)
+			hubCtx.ProjectID = "some-proj-id"
+
+			out := captureStdout(t, func() {
+				require.NoError(t, syncAllTemplatesToHub(hubCtx, "project"))
+			})
+			assert.Empty(t, *created, "must not upload global templates as project templates outside a project")
+			assert.Contains(t, out, "No local project templates found to sync.")
+		})
+	})
 }

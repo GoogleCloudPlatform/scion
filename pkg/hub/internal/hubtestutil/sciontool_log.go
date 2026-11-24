@@ -26,6 +26,11 @@ import (
 // hub tests) do not leak "[sciontool] INFO:" lines to stderr or append to the
 // host/container's real /home/scion/agent.log. Call after testutil.IsolateHome
 // so HOME points at the test's isolated temporary directory.
+//
+// Trade-off: SetQuiet(true) suppresses all sciontool stderr output for the
+// test binary (including ERROR lines, and once sciontool's lazy Init installs
+// its process-wide slog default, hub slog errors as well); those lines are
+// written only to the isolated $HOME/agent.log removed on IsolateHome teardown.
 func SilenceSciontoolLog() {
 	sciontoollog.SetQuiet(true)
 	if home := os.Getenv("HOME"); home != "" {
