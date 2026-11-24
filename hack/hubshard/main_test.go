@@ -239,7 +239,7 @@ func fixtureSharding(t *testing.T, n int) *sharding {
 		t.Fatal(err)
 	}
 	an := analyze(files)
-	s, err := newSharding(dir, files, an, assignShards(an, files, n), n)
+	s, err := newSharding(dir, files, an, nil, assignShards(an, files, nil, n), n)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,8 +350,13 @@ func TestParityCatchesCrossShardUse(t *testing.T) {
 		if s.assign[n] != other {
 			continue
 		}
-		s.an.uses[n] = map[string]bool{"f_test.go": true}
-		err := s.parity(io.Discard)
+		src := append(append([]byte(nil), s.genFiles[n].src...), "\nvar _ = helperF\n"...)
+		g, err := parseFile(n, src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.genFiles[n] = g
+		err = s.parity(io.Discard)
 		if err == nil || !strings.Contains(err.Error(), n+" uses f_test.go") {
 			t.Fatalf("want a cross-shard use problem, got %v", err)
 		}
@@ -471,7 +476,7 @@ func TestShards(t *testing.T) {
 		args []string
 		want string
 	}{
-		{nil, "1\n2\n3\n4\n5\n6\n"},
+		{nil, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n"},
 		{[]string{"-n", "2"}, "1\n2\n"},
 	} {
 		var b bytes.Buffer

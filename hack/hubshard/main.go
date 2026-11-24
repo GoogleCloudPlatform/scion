@@ -85,10 +85,16 @@ const shardTag = "hubshard"
 // defaultShards is the -n default. The CI matrix (.github/workflows/ci.yml,
 // job hub-shard-plan), the make targets and the nightly loops take the
 // shard list from -shards, so this is the one place the count lives.
-const defaultShards = 6
+const defaultShards = 10
 
 // defaultMaxGroupDiv is the -maxgroupdiv default.
 const defaultMaxGroupDiv = 16
+
+// storeEmbedLineWeight is the synthetic line weight added per struct type that
+// embeds store.Store. store.Store has ~900 methods, so each struct embedding
+// it generates ~1,800 wrapper methods costing ~50 MB of cmd/compile RSS —
+// roughly equivalent to 10,000 lines of ordinary test code.
+const storeEmbedLineWeight = 10000
 
 // maxGroupDiv bounds the size of a group of files that must share a shard:
 // at most (total test lines)/maxGroupDiv. Every run sets it from
@@ -104,6 +110,7 @@ type method struct {
 type fileInfo struct {
 	name         string // base name, e.g. agents_test.go
 	lines        int
+	storeEmbeds  int             // top-level struct types embedding store.Store
 	decls        []string        // top-level non-method names (functions, types, vars, consts)
 	methods      []method        // methods declared in this file
 	idents       map[string]bool // unresolved identifiers (possible package-level references)
@@ -204,7 +211,11 @@ func run(args []string, stdout io.Writer) error {
 		return fmt.Errorf("no _test.go files in %s other than generated ones", *dir)
 	}
 	an := analyze(files)
-	assign := assignShards(an, files, *n)
+	splits, err := splitCommonFiles(*dir, files, an)
+	if err != nil {
+		return err
+	}
+	assign := assignShards(an, files, splits, *n)
 	if *dump != "" {
 		var b bytes.Buffer
 		for _, name := range sortedNames(files) {
@@ -215,7 +226,7 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return os.WriteFile(*dump, b.Bytes(), 0o644)
 	}
-	sh, err := newSharding(*dir, files, an, assign, *n)
+	sh, err := newSharding(*dir, files, an, splits, assign, *n)
 	if err != nil {
 		return err
 	}
@@ -237,7 +248,7 @@ func run(args []string, stdout io.Writer) error {
 		return sh.locate(stdout, tags, flags.Args())
 	}
 
-	if err := report(stdout, an, files, assign, *n, *verbose); err != nil {
+	if err := report(stdout, an, files, splits, assign, *n, *verbose); err != nil {
 		return err
 	}
 	switch {
@@ -350,17 +361,41 @@ func parseFile(p string, src []byte) (*fileInfo, error) {
 	return f, nil
 }
 
-// splitGenerated removes the generated imports files (see imports.go) from
-// files and returns them.
+// splitGenerated removes the generated overlay files (imports and split files)
+// from files and returns them.
 func splitGenerated(files map[string]*fileInfo) map[string]*fileInfo {
 	gen := map[string]*fileInfo{}
 	for n, f := range files {
-		if isImportsFile(n) {
+		if isImportsFile(n) || isSplitFile(n) {
 			gen[n] = f
 			delete(files, n)
 		}
 	}
 	return gen
+}
+
+// weight returns the compile-memory weight of f, combining line count with a
+// heavy penalty for each struct type embedding store.Store.
+func (f *fileInfo) weight() int {
+	return f.lines + f.storeEmbeds*storeEmbedLineWeight
+}
+
+// embedsStore reports whether st directly embeds store.Store.
+func embedsStore(st *ast.StructType) bool {
+	if st == nil || st.Fields == nil {
+		return false
+	}
+	for _, field := range st.Fields.List {
+		if len(field.Names) != 0 {
+			continue
+		}
+		if sel, ok := field.Type.(*ast.SelectorExpr); ok {
+			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "store" && sel.Sel.Name == "Store" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // collect records the file's top-level declarations and the identifiers it
@@ -410,6 +445,9 @@ func collect(f *fileInfo, af *ast.File) {
 				switch s := s.(type) {
 				case *ast.TypeSpec:
 					f.decls = append(f.decls, s.Name.Name)
+					if st, ok := s.Type.(*ast.StructType); ok && embedsStore(st) {
+						f.storeEmbeds++
+					}
 				case *ast.ValueSpec:
 					for _, id := range s.Names {
 						if id.Name != "_" {
@@ -1187,28 +1225,32 @@ func components(an *analysis, names []string) [][]string {
 // ---------------------------------------------------------------------------
 // Shard assignment
 
-// assignShards places the groups, largest first, onto the lightest shard by
-// lines (ties: lowest K; groups of equal size: by first member name). The
-// result depends only on the files, so every run on the same tree gives
-// the same shards.
-func assignShards(an *analysis, files map[string]*fileInfo, shards int) map[string]int {
+// assignShards places the groups (and split-out pieces of common files),
+// largest compile-weight first, onto the lightest shard (ties: lowest K;
+// equal weight: by first member name). The result depends only on the files,
+// so every run on the same tree gives the same shards.
+func assignShards(an *analysis, files map[string]*fileInfo, splits map[string]*splitResult, shards int) map[string]int {
 	assign := map[string]int{}
 	load := make([]int, shards+1)
 	type pending struct {
 		members []string
-		lines   int
+		weight  int
 	}
 	var todo []pending
 	for _, g := range an.groups {
-		lines := 0
+		w := 0
 		for _, n := range g {
-			lines += files[n].lines
+			w += files[n].weight()
 		}
-		todo = append(todo, pending{g, lines})
+		todo = append(todo, pending{g, w})
+	}
+	for _, name := range sortedKeys(splits) {
+		sp := splits[name]
+		todo = append(todo, pending{[]string{sp.splitName}, sp.splitInfo.weight()})
 	}
 	sort.SliceStable(todo, func(i, j int) bool {
-		if todo[i].lines != todo[j].lines {
-			return todo[i].lines > todo[j].lines
+		if todo[i].weight != todo[j].weight {
+			return todo[i].weight > todo[j].weight
 		}
 		return todo[i].members[0] < todo[j].members[0]
 	})
@@ -1222,7 +1264,7 @@ func assignShards(an *analysis, files map[string]*fileInfo, shards int) map[stri
 		for _, n := range p.members {
 			assign[n] = k
 		}
-		load[k] += p.lines
+		load[k] += p.weight
 	}
 	return assign
 }
@@ -1232,25 +1274,40 @@ func assignShards(an *analysis, files map[string]*fileInfo, shards int) map[stri
 
 // report writes the summary (and with verbose the common files and groups)
 // to w.
-func report(w io.Writer, an *analysis, files map[string]*fileInfo, assign map[string]int, shards int, verbose bool) error {
+func report(w io.Writer, an *analysis, files map[string]*fileInfo, splits map[string]*splitResult, assign map[string]int, shards int, verbose bool) error {
 	var b bytes.Buffer
 	names := sortedNames(files)
-	var totalLines, commonLines, commonFiles, commonTests int
+	var totalLines, commonLines, commonFiles, commonTests, commonEmbeds int
 	shardLines := make([]int, shards+1)
 	shardFiles := make([]int, shards+1)
 	shardTests := make([]int, shards+1)
+	shardEmbeds := make([]int, shards+1)
 	for _, n := range names {
 		f := files[n]
 		totalLines += f.lines
 		if an.common[n] {
 			commonFiles++
-			commonLines += f.lines
-			commonTests += len(f.tests)
+			if sp, ok := splits[n]; ok {
+				commonLines += sp.commonInfo.lines
+				commonTests += len(sp.commonInfo.tests)
+				commonEmbeds += sp.commonInfo.storeEmbeds
+				k := assign[sp.splitName]
+				shardLines[k] += sp.splitInfo.lines
+				shardFiles[k]++
+				shardTests[k] += len(sp.splitInfo.tests)
+				shardEmbeds[k] += sp.splitInfo.storeEmbeds
+			} else {
+				commonLines += f.lines
+				commonTests += len(f.tests)
+				commonEmbeds += f.storeEmbeds
+			}
 			continue
 		}
-		shardLines[assign[n]] += f.lines
-		shardFiles[assign[n]]++
-		shardTests[assign[n]] += len(f.tests)
+		k := assign[n]
+		shardLines[k] += f.lines
+		shardFiles[k]++
+		shardTests[k] += len(f.tests)
+		shardEmbeds[k] += f.storeEmbeds
 	}
 	largest := 0
 	for _, g := range an.groups {
@@ -1264,11 +1321,12 @@ func report(w io.Writer, an *analysis, files map[string]*fileInfo, assign map[st
 	}
 	fmt.Fprintf(&b, "test files: %d (%d lines)\n", len(names), totalLines)
 	fmt.Fprintf(&b, "referenced by another test file (simple rule): %d files\n", an.directUsed)
-	fmt.Fprintf(&b, "common: %d files, %d lines (%.1f%%), %d test funcs\n",
-		commonFiles, commonLines, 100*float64(commonLines)/float64(totalLines), commonTests)
+	fmt.Fprintf(&b, "common: %d files (%d split), %d lines (%.1f%%), %d store.Store embeds, %d test funcs\n",
+		commonFiles, len(splits), commonLines, 100*float64(commonLines)/float64(totalLines), commonEmbeds, commonTests)
 	fmt.Fprintf(&b, "groups: %d (largest %d lines)\n", len(an.groups), largest)
 	for k := 1; k <= shards; k++ {
-		fmt.Fprintf(&b, "shard %d: %d files, %d lines, %d test funcs (plus the common files)\n", k, shardFiles[k], shardLines[k], shardTests[k])
+		fmt.Fprintf(&b, "shard %d: %d files, %d lines, %d store.Store embeds, %d test funcs (plus the common files)\n",
+			k, shardFiles[k], shardLines[k], shardEmbeds[k], shardTests[k])
 	}
 	if verbose {
 		reportVerbose(&b, an, files, assign, names)

@@ -154,7 +154,7 @@ func TestParityCatchesMissingDriver(t *testing.T) {
 		t.Fatal(err)
 	}
 	an := analyze(files)
-	s, err := newSharding(dir, files, an, assignShards(an, files, 2), 2)
+	s, err := newSharding(dir, files, an, nil, assignShards(an, files, nil, 2), 2)
 	if err != nil {
 		t.Fatal(err)
 	}

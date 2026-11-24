@@ -62,28 +62,44 @@ type sharding struct {
 	absDir     string
 	files      map[string]*fileInfo // the test files as on disk (no hubshard tags)
 	an         *analysis
-	assign     map[string]int // file -> shard, 0 = common
+	splits     map[string]*splitResult // orig name -> split result for split common files
+	assign     map[string]int          // file (or split file) -> shard, 0 = common
 	n          int
 	pkg        string
-	tagged     map[string][]byte    // sharded file -> its contents with the hubshard clause
+	tagged     map[string][]byte    // overlay-modified/added test file -> contents
 	imports    map[string][]byte    // generated imports file -> contents
 	genFiles   map[string]*fileInfo // every test file as the overlay build sees it
 	genImports map[string]*fileInfo // the generated imports files, parsed
 }
 
-func newSharding(dir string, files map[string]*fileInfo, an *analysis, assign map[string]int, n int) (*sharding, error) {
+func newSharding(dir string, files map[string]*fileInfo, an *analysis, splits map[string]*splitResult, assign map[string]int, n int) (*sharding, error) {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
 	}
 	s := &sharding{
-		absDir: absDir, files: files, an: an, assign: assign, n: n,
+		absDir: absDir, files: files, an: an, splits: splits, assign: assign, n: n,
 		pkg:      testPackage(files),
 		tagged:   map[string][]byte{},
 		genFiles: map[string]*fileInfo{},
 	}
 	for _, name := range sortedNames(files) {
 		f := files[name]
+		if sp, ok := splits[name]; ok {
+			s.tagged[name] = sp.commonSrc
+			s.genFiles[name] = sp.commonInfo
+			out, err := rewrite(sp.splitInfo, assign[sp.splitName])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", sp.splitName, err)
+			}
+			s.tagged[sp.splitName] = out
+			g, err := parseFile(filepath.Join(dir, sp.splitName), out)
+			if err != nil {
+				return nil, fmt.Errorf("generated %s: %w", sp.splitName, err)
+			}
+			s.genFiles[sp.splitName] = g
+			continue
+		}
 		out, err := rewrite(f, assign[name])
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
@@ -211,7 +227,10 @@ func (s *sharding) runShard(name string) int {
 // renamed or deleted test cannot drop out of a hand-maintained list
 // silently.
 func (s *sharding) locate(w io.Writer, tags []string, names []string) error {
-	m, err := testsIn(s.files, tags)
+	// Without the hubshard tag, every (!hubshard || hubshard_K) clause
+	// evaluates to true, so testsIn(s.genFiles, tags) matches the exact
+	// overlay file (including split common files) that holds each test.
+	m, err := testsIn(s.genFiles, tags)
 	if err != nil {
 		return err
 	}
@@ -280,10 +299,13 @@ func (s *sharding) parity(w io.Writer) error {
 	}
 	for _, name := range sortedNames(s.genFiles) {
 		if s.files[name] == nil {
-			problems = append(problems, fmt.Sprintf("%s: in the overlay build but not in the tree", name))
+			orig := splitOrigin(name)
+			if orig == "" || s.splits[orig] == nil {
+				problems = append(problems, fmt.Sprintf("%s: in the overlay build but not in the tree", name))
+			}
 		}
 	}
-	problems = append(problems, breakage(s.an, s.genFiles, s.assign, s.n)...)
+	problems = append(problems, breakage(analyze(s.genFiles), s.genFiles, s.assign, s.n)...)
 	problems = append(problems, importBreakage(s.genFiles, s.genImports, s.pkg)...)
 	var b bytes.Buffer
 	for _, warn := range sideEffectWarnings(s.genFiles, s.pkg) {
@@ -420,11 +442,15 @@ func (s *sharding) tagPlacement() ([]string, error) {
 	var problems []string
 	for _, name := range sortedNames(s.genFiles) {
 		g := s.genFiles[name]
-		if s.files[name] == nil {
-			continue // reported by parity
+		orig := name
+		if s.files[orig] == nil {
+			orig = splitOrigin(name)
+			if orig == "" || s.files[orig] == nil {
+				continue // reported by parity
+			}
 		}
 		for _, cfg := range parityConfigs {
-			ok, err := matchSrc(name, s.files[name].src, cfg.tags)
+			ok, err := matchSrc(orig, s.files[orig].src, cfg.tags)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", name, err)
 			}

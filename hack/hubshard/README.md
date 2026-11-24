@@ -28,7 +28,7 @@ go test -overlay /tmp/ov/overlay.json -tags hubshard,hubshard_3 ./pkg/hub
 
 CI never compiles the whole `pkg/hub` test package: the `pkg/hub shard K/N`
 jobs run the shards in parallel, and the `pkg/hub SQLite Tests` check
-passes only when all of them do (N = 6 today, from `-shards`).
+passes only when all of them do (N = 10 today, from `-shards`).
 
 ## Commands
 
@@ -99,7 +99,7 @@ the recorded output of a real one ([`testdata/skip-summary`](testdata/skip-summa
 ok  	pkg/hub shard 2 (tags: hubshard,hubshard_2)	412s
 ```
 
-Tool flags: `-n N` (shard count, default 6), `-shards` (print 1..N; the
+Tool flags: `-n N` (shard count, default 10), `-shards` (print 1..N; the
 CI matrix and `make test-hub-shards` loop over it),
 `-overlay DIR`, `-parity`, `-list K` (the tests shard K's binary compiles,
 under `-tags`), `-skip K` (the `go test -skip` pattern for shard K, see
@@ -184,11 +184,22 @@ builds only.
    members use; the one chosen has the best ratio of "group members using
    it" to "lines added to common". A group without a candidate stays whole,
    and the cut stops there.
-6. **Assignment.** Groups go, largest first (ties by name), onto the
-   lightest shard by lines. Nothing is stored: the same tree always gives
-   the same shards, and a change to the test files may move other files
-   between shards. That is invisible (no committed tags) and covered by
-   the parity check.
+6. **Common-file splitting (overlay only).** Non-helper common files (regular
+   `*_test.go` files pulled into `common` by closure or cut) are partitioned
+   in the overlay at top-level declaration granularity: only declarations
+   referenced by other files, `init`/`TestMain`, blank-identifier assertions,
+   methods on external types, and their intra-file closure stay in the
+   untagged file; unreferenced `Test*` functions and file-private helpers and
+   types (notably `store.Store`-embedding test doubles, which each generate
+   ~1,800 wrapper methods) move into a generated sharded file
+   `zz_hubshard_split_<orig>` with `//line` directives so stack traces and
+   test output keep original file names and line numbers.
+7. **Assignment.** Groups and split-out common pieces go, largest compile
+   weight first (lines plus a `store.Store`-embed penalty; ties by name), onto
+   the lightest shard. Nothing is stored: the same tree always gives the same
+   shards, and a change to the test files may move other files between
+   shards. That is invisible (no committed tags) and covered by the parity
+   check.
 
 ## Blank imports (driver registration)
 
