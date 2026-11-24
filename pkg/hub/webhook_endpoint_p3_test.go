@@ -862,19 +862,13 @@ type patchRaceLockStore struct {
 }
 
 func (r *patchRaceLockStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	return r.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&patchRaceLockStore{Store: tx, st: r.st})
-	})
-}
-
-func (r *patchRaceLockStore) LockTriggerQuota(ctx context.Context, projectID string) error {
-	if err := r.Store.LockTriggerQuota(ctx, projectID); err != nil {
-		return err
-	}
 	if r.st.armed.CompareAndSwap(true, false) && r.st.hook != nil {
+		// Commit the concurrent owner change BEFORE the admin's transaction
+		// opens (after the admin's pre-tx snapshot read), so a rollback of the
+		// admin's refused transaction does not roll back the owner's write.
 		r.st.hook(r.Store)
 	}
-	return nil
+	return r.Store.WithTx(ctx, fn)
 }
 
 // TestWebhookEndpointPatch_SnapshotRace verifies O-A (Review 3): if the owner
