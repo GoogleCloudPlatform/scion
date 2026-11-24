@@ -335,12 +335,19 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
     expect(postBodies[0]).not.toHaveProperty('secrets');
   });
 
-  it('omits secrets from POST body when hub.agent_secrets turns off after rows were entered', async () => {
+  it('omits secrets from POST body when hub.agent_secrets turns off and stays cleared if turned back on', async () => {
     const { page, form } = await mountCreate(true);
     await addAndFillRow(form, { key: 'LATE_FLAG_OFF', value: 'should-not-send' });
     expect(form.collectSecrets()).toHaveLength(1);
 
     setFeatureFlag(AGENT_SECRETS_FLAG, false);
+    await form.updateComplete;
+    await page.updateComplete;
+
+    expect(form.collectSecrets()).toEqual([]);
+
+    // Re-enabling the flag must not resurrect cleared secrets invisibly
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
     await form.updateComplete;
     await page.updateComplete;
 

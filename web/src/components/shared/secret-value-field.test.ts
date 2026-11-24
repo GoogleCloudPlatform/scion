@@ -73,8 +73,11 @@ describe('scion-secret-value-field', () => {
     expect(shadow.querySelector('input[type="file"]')).toBeNull();
 
     const changes: string[] = [];
+    const changeEvents: CustomEvent<SecretValueChangeDetail>[] = [];
     el.addEventListener('secret-value-change', (e) => {
-      changes.push((e as CustomEvent<SecretValueChangeDetail>).detail.value);
+      const ce = e as CustomEvent<SecretValueChangeDetail>;
+      changeEvents.push(ce);
+      changes.push(ce.detail.value);
     });
 
     input.value = 's3cr3t-value';
@@ -82,6 +85,8 @@ describe('scion-secret-value-field', () => {
     await el.updateComplete;
     expect(el.value).toBe('s3cr3t-value');
     expect(changes).toEqual(['s3cr3t-value']);
+    expect(changeEvents[0].bubbles).toBe(false);
+    expect(changeEvents[0].composed).toBe(false);
 
     const toggleBtn = shadow.querySelector(
       'button[data-toggle-visibility="API_KEY"]'
@@ -256,7 +261,7 @@ describe('scion-secret-value-field', () => {
     expect(ta.readOnly).toBe(true);
     expect(
       shadow.querySelector('[data-testid="mixed-line-endings-note"]')?.textContent?.trim()
-    ).toBe('This value has mixed line endings; paste or load to replace it');
+    ).toBe('This value has mixed line endings; Hide, then paste or load to replace it.');
     expect(el.value).toBe('AAA\r\nBBB\r\nCCCX\nL1\nL2');
 
     // Synthetic input on mixed readonly textarea does not alter stored value
@@ -332,11 +337,21 @@ describe('scion-secret-value-field', () => {
 
     // 1. Oversized > 64 KiB
     await triggerFile(new File([new Uint8Array(64 * 1024 + 1)], 'big.pem'));
-    expect(shadow.querySelector('[data-testid="secret-value-error"]')?.textContent).toContain(
-      '64 KiB'
+    expect(shadow.querySelector('[data-testid="secret-value-error"]')?.textContent?.trim()).toBe(
+      'File for CERT_KEY exceeds the 64 KiB limit.'
     );
     expect(fileInput.value).toBe('');
     expect(el.value).toBe('');
+
+    // 1b. Custom maxBytes derives the limit label from maxBytes
+    el.maxBytes = 16;
+    await el.updateComplete;
+    await triggerFile(new File(['12345678901234567'], 'too-big.txt', { type: 'text/plain' }));
+    expect(shadow.querySelector('[data-testid="secret-value-error"]')?.textContent?.trim()).toBe(
+      'File for CERT_KEY exceeds the 16 bytes limit.'
+    );
+    el.maxBytes = 64 * 1024;
+    await el.updateComplete;
 
     // 2. Invalid UTF-8
     await triggerFile(new File([new Uint8Array([0xff, 0xfe, 0x00, 0x01])], 'bin.der'));
@@ -563,6 +578,7 @@ describe('scion-secret-value-field', () => {
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
     el.remove();
+    await Promise.resolve();
     expect(el.value).toBe('');
   });
 });

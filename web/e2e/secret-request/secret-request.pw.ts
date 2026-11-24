@@ -577,7 +577,7 @@ test('mixed line endings render revealed textarea readonly with note and submit 
   await expect(textarea).toBeVisible();
   await expect(textarea).toHaveAttribute('readonly', '');
   await expect(page.locator('[data-testid="mixed-line-endings-note"]')).toHaveText(
-    'This value has mixed line endings; paste or load to replace it'
+    'This value has mixed line endings; Hide, then paste or load to replace it.'
   );
 
   // Attempt to type into the readonly textarea — must not modify the stored value

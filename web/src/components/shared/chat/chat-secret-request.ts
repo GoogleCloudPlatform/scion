@@ -34,6 +34,7 @@
 import { LitElement, css, html, nothing } from 'lit';
 import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, agentSecretsEnabled } from '../../../utils/feature-flags.js';
 import {
@@ -1119,7 +1120,12 @@ export class ScionChatSecretRequest extends LitElement {
           <span class="card-title">Secret Request</span>
         </div>
 
-        ${views.map((row) => this.renderRow(row))} ${this.renderStorageNotice()}
+        ${repeat(
+          views,
+          (row) => row.rowId,
+          (row) => this.renderRow(row)
+        )}
+        ${this.renderStorageNotice()}
         ${hasPending && !this.canRespondNow
           ? html`<div class="status-alert blocked" role="status">
               <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>

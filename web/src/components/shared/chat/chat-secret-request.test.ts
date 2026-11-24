@@ -1845,7 +1845,7 @@ describe('scion-chat-secret-request', () => {
       expect(ta.readOnly).toBe(true);
       const note = q(el.shadowRoot!, '[data-testid="mixed-line-endings-note"]');
       expect(note?.textContent?.trim()).toBe(
-        'This value has mixed line endings; paste or load to replace it'
+        'This value has mixed line endings; Hide, then paste or load to replace it.'
       );
 
       // Even if a synthetic input event fires, the stored value is not altered
@@ -2196,5 +2196,81 @@ describe('scion-chat-secret-request', () => {
     );
     expect(q(el2.shadowRoot!, '[data-testid="file-value-masked"]')).toBeNull();
     el2.remove();
+  });
+
+  it('keeps each field value bound to its own rowId when pending rows reorder', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        rows: [
+          makeRow({
+            rowId: 'r-2',
+            key: 'KEY_B',
+            position: 0,
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-24T00:05:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+          makeRow({
+            rowId: 'r-1',
+            key: 'KEY_A',
+            position: 1,
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-24T00:05:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+        ],
+        responseMessageId: 'resp-reorder',
+        replayed: false,
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard({
+      rows: [
+        makeRow({ rowId: 'r-1', key: 'KEY_A', position: 0 }),
+        makeRow({ rowId: 'r-2', key: 'KEY_B', position: 1 }),
+      ],
+    });
+
+    const inputA = q(el.shadowRoot!, 'input[data-key="KEY_A"]') as HTMLInputElement;
+    const inputB = q(el.shadowRoot!, 'input[data-key="KEY_B"]') as HTMLInputElement;
+    inputA.value = 'secret-a';
+    inputA.dispatchEvent(new Event('input'));
+    inputB.value = 'secret-b';
+    inputB.dispatchEvent(new Event('input'));
+    await settle(el);
+
+    // Reorder rows so r-2 comes before r-1
+    el.rows = [
+      makeRow({ rowId: 'r-2', key: 'KEY_B', position: 0 }),
+      makeRow({ rowId: 'r-1', key: 'KEY_A', position: 1 }),
+    ];
+    await settle(el);
+
+    const rowEls = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.row')];
+    expect(rowEls.map((r) => r.getAttribute('data-row-id'))).toEqual(['r-2', 'r-1']);
+
+    const fieldB = rowEls[0].querySelector<ScionSecretValueField>('scion-secret-value-field')!;
+    const fieldA = rowEls[1].querySelector<ScionSecretValueField>('scion-secret-value-field')!;
+    expect(fieldB.value).toBe('secret-b');
+    expect(fieldA.value).toBe('secret-a');
+    expect((q(rowEls[0], 'input[data-key="KEY_B"]') as HTMLInputElement).value).toBe('secret-b');
+    expect((q(rowEls[1], 'input[data-key="KEY_A"]') as HTMLInputElement).value).toBe('secret-a');
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as { values: Record<string, string> };
+    expect(sent.values).toEqual({ KEY_A: 'secret-a', KEY_B: 'secret-b' });
   });
 });

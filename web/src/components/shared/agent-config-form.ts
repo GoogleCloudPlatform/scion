@@ -820,6 +820,9 @@ export class ScionAgentConfigForm extends LitElement {
   private unsubscribeGcp: (() => void) | null = null;
 
   private readonly boundOnFeatureFlagsChanged = (): void => {
+    if (!this.createSecretsEnabled) {
+      this.clearSecrets();
+    }
     this.requestUpdate();
   };
 

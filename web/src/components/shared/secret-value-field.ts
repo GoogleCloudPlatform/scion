@@ -44,6 +44,13 @@ import { customElement, property, state } from 'lit/decorators.js';
 /** Default maximum secret value byte length (64 KiB). */
 export const MAX_SECRET_VALUE_BYTES = 64 * 1024;
 
+function formatMaxBytes(bytes: number): string {
+  if (bytes >= 1024 && bytes % 1024 === 0) {
+    return `${bytes / 1024} KiB`;
+  }
+  return `${bytes} bytes`;
+}
+
 export type LineEndingStyle = 'lf' | 'crlf' | 'mixed';
 
 export interface SecretValueChangeDetail {
@@ -367,7 +374,14 @@ export class ScionSecretValueField extends LitElement {
     if (typeof window !== 'undefined') {
       window.removeEventListener('pagehide', this.onPageHide);
     }
-    this.clear();
+    // Defer clearing by one microtask so keyed DOM moves (such as Lit repeat()
+    // reordering via insertBefore, which invokes disconnectedCallback followed
+    // synchronously by connectedCallback) preserve an active field's value.
+    queueMicrotask(() => {
+      if (!this.isConnected) {
+        this.clear();
+      }
+    });
   }
 
   protected override willUpdate(changed: PropertyValues): void {
@@ -415,8 +429,8 @@ export class ScionSecretValueField extends LitElement {
     this.dispatchEvent(
       new CustomEvent<SecretValueChangeDetail>('secret-value-change', {
         detail: { value },
-        bubbles: true,
-        composed: true,
+        bubbles: false,
+        composed: false,
       })
     );
   }
@@ -672,10 +686,11 @@ export class ScionSecretValueField extends LitElement {
     }
 
     const subject = this.keySubject();
+    const limitLabel = formatMaxBytes(this.maxBytes);
 
     try {
       if (file.size > this.maxBytes) {
-        this.setFieldError(`File${subject} exceeds the 64 KiB limit.`);
+        this.setFieldError(`File${subject} exceeds the ${limitLabel} limit.`);
         return;
       }
 
@@ -693,7 +708,7 @@ export class ScionSecretValueField extends LitElement {
         return;
       }
       if (buf.byteLength > this.maxBytes) {
-        this.setFieldError(`File${subject} exceeds the 64 KiB limit.`);
+        this.setFieldError(`File${subject} exceeds the ${limitLabel} limit.`);
         return;
       }
 
@@ -897,7 +912,7 @@ export class ScionSecretValueField extends LitElement {
                 data-testid="mixed-line-endings-note"
                 role="status"
               >
-                This value has mixed line endings; paste or load to replace it
+                This value has mixed line endings; Hide, then paste or load to replace it.
               </span>
             `
           : nothing}
