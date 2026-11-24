@@ -791,10 +791,12 @@ func TestSuspendConversion_HubSuspendedToUser(t *testing.T) {
 		})
 	})
 
-	t.Run("held hub-suspended agent returns 200 OK without overwriting suspend_reason", func(t *testing.T) {
+	t.Run("held hub-suspended agent converts suspend_reason to user and does not auto-wake after hold lift", func(t *testing.T) {
 		for _, reason := range []state.SuspendReason{state.SuspendReasonIdle, state.SuspendReasonStalled} {
 			ctx := context.Background()
-			srv, s, _, target, _ := autoWakeFixture(t, reason)
+			srv, s, sender, target, disp := autoWakeFixture(t, reason)
+			target.Activity = string(state.ActivityCompleted)
+			require.NoError(t, s.UpdateAgent(ctx, target))
 			_, err := s.CreateAgentHolds(ctx, []*store.AgentHold{{
 				AgentID:           target.ID,
 				ProjectID:         target.ProjectID,
@@ -805,6 +807,12 @@ func TestSuspendConversion_HubSuspendedToUser(t *testing.T) {
 			}})
 			require.NoError(t, err)
 
+			// Mark the broker offline to prove conversion performs no runtime dispatch.
+			broker, err := s.GetRuntimeBroker(ctx, target.RuntimeBrokerID)
+			require.NoError(t, err)
+			broker.Status = store.BrokerStatusOffline
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
 			u := wakeLifecycleUser(t, s, "conv-held-"+string(reason), target.ProjectID, "agent.lifecycle", "agent.read")
 			rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -812,7 +820,23 @@ func TestSuspendConversion_HubSuspendedToUser(t *testing.T) {
 			got, err := s.GetAgent(ctx, target.ID)
 			require.NoError(t, err)
 			assert.Equal(t, string(state.PhaseSuspended), got.Phase)
-			assert.Equal(t, string(reason), got.SuspendReason, "held agent must skip suspend_reason overwrite")
+			assert.Equal(t, string(state.ActivityCompleted), got.Activity, "conversion must preserve retained activity")
+			assert.Equal(t, string(state.SuspendReasonUser), got.SuspendReason, "held hub-suspended agent must convert suspend_reason to user")
+
+			// Lift the hold and bring the broker back online: future DMs without --wake must not auto-wake.
+			cleared, err := s.ClearAgentHolds(ctx, target.ID, store.ClearActor{
+				Kind: store.ClearActorUser,
+				ID:   "11111111-1111-1111-1111-111111111111",
+			}, "lift hold")
+			require.NoError(t, err)
+			require.Equal(t, 1, cleared)
+			broker.Status = store.BrokerStatusOnline
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+			_, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, got, "should not auto-wake after hold lift"))
+			require.NotNil(t, dmErr)
+			assert.Equal(t, ErrCodeAgentNotRunning, dmErr.Code)
+			assert.Empty(t, disp.getStartCalls())
 		}
 	})
 

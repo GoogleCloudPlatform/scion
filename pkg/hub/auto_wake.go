@@ -418,8 +418,8 @@ var autoWakeSuspendReasons = []string{string(state.SuspendReasonIdle), string(st
 // convertHubSuspendToUser handles a user SUSPEND action on an agent that is
 // already in phase=suspended, with no runtime broker action:
 //   - suspend_reason in {idle, stalled}: converts suspend_reason to user in
-//     place (unless the agent is held, in which case the existing reason is
-//     preserved), preserving retained activity, expiring held messages, and
+//     place (even if the agent is held, so lifting the hold later does not
+//     auto-wake it), preserving retained activity, expiring held messages, and
 //     notifying third-party creators.
 //   - suspend_reason == user: idempotent 200 OK no-op.
 //   - suspend_reason == "": idempotent 200 OK; preserves "" if the agent is
@@ -449,22 +449,17 @@ func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWri
 	}
 
 	reason := state.SuspendReason(agent.SuspendReason)
-	if reason == state.SuspendReasonUser {
-		writeOK(agent)
-		return true
-	}
-
-	held, holdErr := s.agentHeld(ctx, agent.ID)
-	if holdErr != nil {
-		writeErrorFromErr(w, holdErr, "")
-		return true
-	}
-	if held {
-		writeOK(agent)
-		return true
-	}
-
-	if !reason.AutoWakes() && reason != "" {
+	if reason == "" {
+		held, holdErr := s.agentHeld(ctx, agent.ID)
+		if holdErr != nil {
+			writeErrorFromErr(w, holdErr, "")
+			return true
+		}
+		if held {
+			writeOK(agent)
+			return true
+		}
+	} else if !reason.AutoWakes() {
 		writeOK(agent)
 		return true
 	}
