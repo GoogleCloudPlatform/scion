@@ -344,12 +344,16 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 		require.NoError(tb, tx.Commit())
 	}
 
-	analyzeSQL := "ANALYZE"
-	if cs.Dialect() == dialect.Postgres {
-		analyzeSQL = "ANALYZE decisions, decision_answers"
+	// On SQLite, skip ANALYZE when markSettled==false so backfill tests match
+	// production hubs (which never run ANALYZE on SQLite).
+	if markSettled || cs.Dialect() == dialect.Postgres {
+		analyzeSQL := "ANALYZE"
+		if cs.Dialect() == dialect.Postgres {
+			analyzeSQL = "ANALYZE decisions, decision_answers"
+		}
+		_, err := cs.DB().ExecContext(ctx, analyzeSQL)
+		require.NoError(tb, err)
 	}
-	_, err := cs.DB().ExecContext(ctx, analyzeSQL)
-	require.NoError(tb, err)
 
 	return &decisionScaleFixture{
 		cs:             cs,
@@ -492,4 +496,62 @@ func TestDecisionsScaleStore(t *testing.T) {
 			t.Logf("  ListOpenPrompts(quiet)                     = cold %v / warm-med %v", coldQuietOpen, medQuietOpen)
 		})
 	}
+}
+
+// TestDecisionsScaleBackfill measures a full Scale S (200p / 200k decisions)
+// settled-hint backfill using SweepSettledDecisionsPage with keyset pagination
+// on SQLite (file-backed, MaxOpenConns=1, no ANALYZE) and PostgreSQL.
+func TestDecisionsScaleBackfill(t *testing.T) {
+	if os.Getenv("SCION_DECISIONS_SCALE") != "1" {
+		t.Skip("set SCION_DECISIONS_SCALE=1 to run 200k backfill timings")
+	}
+	ctx := context.Background()
+	sc := decisionScaleSpecs[1] // S_200p_200k
+	f := seedDecisionScaleFixture(t, sc, false)
+	t.Logf("[%s/%s] seeded %d decisions (all settled=false) in %v",
+		sc.name, f.cs.Dialect(), f.totalDecisions, f.seedDuration)
+
+	var pageDurs []time.Duration
+	totalSwept := 0
+	cursor := ""
+	totalStart := time.Now()
+	for {
+		pStart := time.Now()
+		n, nextCursor, err := f.cs.SweepSettledDecisionsPage(ctx, cursor, DefaultDecisionIndexPageSize)
+		pDur := time.Since(pStart)
+		require.NoError(t, err)
+		if nextCursor == "" {
+			break
+		}
+		pageDurs = append(pageDurs, pDur)
+		totalSwept += n
+		cursor = nextCursor
+	}
+	totalDur := time.Since(totalStart)
+
+	pending, err := f.cs.HasPendingDecisionIndexWork(ctx)
+	require.NoError(t, err)
+	require.False(t, pending, "no pending settled work after full backfill")
+
+	expectedSettled := f.totalDecisions - sc.numProjects*sc.openPerProject
+	require.Equal(t, expectedSettled, totalSwept)
+	require.GreaterOrEqual(t, len(pageDurs), 10)
+
+	median := func(ds []time.Duration) time.Duration {
+		cp := append([]time.Duration(nil), ds...)
+		sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+		return cp[len(cp)/2]
+	}
+	first5Med := median(pageDurs[:5])
+	last5Med := median(pageDurs[len(pageDurs)-5:])
+	worst := pageDurs[0]
+	for _, d := range pageDurs[1:] {
+		if d > worst {
+			worst = d
+		}
+	}
+	t.Logf("[%s/%s] BACKFILL TIMINGS (%d rows, %d pages of %d):",
+		sc.name, f.cs.Dialect(), totalSwept, len(pageDurs), DefaultDecisionIndexPageSize)
+	t.Logf("  total=%v  first-5 med=%v  last-5 med=%v  worst-page=%v",
+		totalDur, first5Med, last5Med, worst)
 }

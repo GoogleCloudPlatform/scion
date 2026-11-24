@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
@@ -93,41 +94,59 @@ func (c *CompositeStore) HasPendingDecisionIndexWork(ctx context.Context) (bool,
 }
 
 // SweepSettledDecisionsPage implements store.DecisionStore.
-// It marks up to limit settled-eligible decisions whose settled hint is still
-// false as settled=true inside one transaction. The update is monotone
-// (false -> true only) and re-evaluates the exact settled predicate, so it is
-// safe against concurrent writers and multi-replica indexers.
-func (c *CompositeStore) SweepSettledDecisionsPage(ctx context.Context, limit int) (int, error) {
+// It marks up to limit settled-eligible decisions with id > afterID (when
+// afterID is non-empty) whose settled hint is still false as settled=true
+// inside one transaction. Returns the number of rows updated and the highest
+// decision ID scanned on this page (empty when no matching rows remain). The
+// update is monotone (false -> true only) and re-evaluates the exact settled
+// predicate, so it is safe against concurrent writers and multi-replica
+// indexers.
+func (c *CompositeStore) SweepSettledDecisionsPage(ctx context.Context, afterID string, limit int) (int, string, error) {
 	if limit <= 0 {
 		limit = DefaultDecisionIndexPageSize
 	}
-	if c.inTx {
-		return c.sweepSettledDecisionsPageTx(ctx, limit)
+	var afterUUID uuid.UUID
+	if afterID != "" {
+		parsed, err := uuid.Parse(afterID)
+		if err != nil {
+			return 0, "", fmt.Errorf("%w: invalid after_id %q", store.ErrInvalidInput, afterID)
+		}
+		afterUUID = parsed
 	}
-	var updated int
+	if c.inTx {
+		return c.sweepSettledDecisionsPageTx(ctx, afterUUID, limit)
+	}
+	var (
+		updated    int
+		nextCursor string
+	)
 	err := c.WithTx(ctx, func(tx store.Store) error {
 		var err error
-		updated, err = tx.(*CompositeStore).sweepSettledDecisionsPageTx(ctx, limit)
+		updated, nextCursor, err = tx.(*CompositeStore).sweepSettledDecisionsPageTx(ctx, afterUUID, limit)
 		return err
 	})
-	return updated, err
+	return updated, nextCursor, err
 }
 
 // selectDecisionIDsForIndexPage selects up to limit decision IDs matching
-// preds in deterministic ORDER BY id order. On Postgres it locks the selected
-// rows with FOR UPDATE SKIP LOCKED so concurrent replicas' sweeps and live
-// writers (e.g. repost loadKeyStates FOR UPDATE) never deadlock (SQLSTATE
-// 40P01) or stall on overlapping pages (design-scale §3.6). Reusable by P4's
-// facet-indexing steps.
+// preds with id > afterID (when afterID != uuid.Nil) in deterministic
+// ORDER BY id order. Keyset pagination avoids quadratic skip-scans of
+// SQLite's PK autoindex when ANALYZE has not been run. On Postgres it locks
+// the selected rows with FOR UPDATE SKIP LOCKED so concurrent replicas' sweeps
+// and live writers (e.g. repost loadKeyStates FOR UPDATE) never deadlock
+// (SQLSTATE 40P01) or stall on overlapping pages (design-scale §3.6). Reusable
+// by P4's facet-indexing steps.
 func (c *CompositeStore) selectDecisionIDsForIndexPage(
 	ctx context.Context,
+	afterID uuid.UUID,
 	limit int,
 	preds ...predicate.Decision,
 ) ([]uuid.UUID, error) {
-	q := c.client.Decision.Query().
-		Where(preds...).
-		Order(ent.Asc(decision.FieldID)).
-		Limit(limit)
+	q := c.client.Decision.Query().Where(preds...)
+	if afterID != uuid.Nil {
+		q = q.Where(decision.IDGT(afterID))
+	}
+	q = q.Order(ent.Asc(decision.FieldID)).Limit(limit)
 	if c.isPostgres() {
 		q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
 	}
@@ -138,14 +157,15 @@ func (c *CompositeStore) selectDecisionIDsForIndexPage(
 	return ids, nil
 }
 
-func (c *CompositeStore) sweepSettledDecisionsPageTx(ctx context.Context, limit int) (int, error) {
-	ids, err := c.selectDecisionIDsForIndexPage(ctx, limit, decisionSettledFalse(), settledDecisionPredicate())
+func (c *CompositeStore) sweepSettledDecisionsPageTx(ctx context.Context, afterID uuid.UUID, limit int) (int, string, error) {
+	ids, err := c.selectDecisionIDsForIndexPage(ctx, afterID, limit, decisionSettledFalse(), settledDecisionPredicate())
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if len(ids) == 0 {
-		return 0, nil
+		return 0, "", nil
 	}
+	nextCursor := ids[len(ids)-1].String()
 	n, err := c.client.Decision.Update().
 		Where(
 			decision.IDIn(ids...),
@@ -155,7 +175,7 @@ func (c *CompositeStore) sweepSettledDecisionsPageTx(ctx context.Context, limit 
 		SetSettled(true).
 		Save(ctx)
 	if err != nil {
-		return 0, mapError(err)
+		return 0, "", mapError(err)
 	}
-	return n, nil
+	return n, nextCursor, nil
 }

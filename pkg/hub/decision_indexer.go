@@ -50,10 +50,12 @@ type decisionIndexerRuntime struct {
 
 // decisionIndexStep is one bounded-page indexing step executed by a pass.
 // P1 registers the settled-hint sweep; P4 appends facet-indexing and
-// reconciliation steps without restructuring the loop.
+// reconciliation steps without restructuring the loop. Each step receives the
+// keyset cursor (empty on the first page of a pass) and returns the number of
+// rows updated plus the next cursor (empty when the step has drained).
 type decisionIndexStep struct {
 	name string
-	run  func(ctx context.Context, limit int) (int, error)
+	run  func(ctx context.Context, afterID string, limit int) (updated int, nextCursor string, err error)
 }
 
 // decisionIndexPassStats summarizes one indexer pass.
@@ -168,28 +170,29 @@ func (s *Server) runDecisionIndexPass(ctx context.Context) (decisionIndexPassSta
 	totalUpdated := 0
 	for _, step := range s.decisionIndexSteps() {
 		stepTotal := 0
+		cursor := ""
 		for {
 			if err := ctx.Err(); err != nil {
 				return stats, err
 			}
-			n, err := step.run(ctx, pageSize)
+			n, nextCursor, err := step.run(ctx, cursor, pageSize)
 			if err != nil {
 				if ctx.Err() == nil {
 					log.Warn("decision indexer step failed", "step", step.name, "updated_so_far", stepTotal, "error", err)
 				}
 				return stats, err
 			}
-			if n == 0 {
+			if nextCursor == "" {
 				break
 			}
-			stepTotal += n
-			totalUpdated += n
-			stats.Pages++
-			stats.StepCounts[step.name] = stepTotal
-			if n < pageSize {
-				break
+			cursor = nextCursor
+			if n > 0 {
+				stepTotal += n
+				totalUpdated += n
+				stats.Pages++
+				stats.StepCounts[step.name] = stepTotal
 			}
-			if stats.Pages%10 == 0 {
+			if stats.Pages%10 == 0 && n > 0 {
 				log.Info("decision indexer progress", "step", step.name, "updated", stepTotal, "pages", stats.Pages)
 			}
 			if yield > 0 {

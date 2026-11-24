@@ -526,15 +526,17 @@ func TestDecisionSettled_ListOpenPromptsDifferential(t *testing.T) {
 	assert.True(t, pending, "older-binary settled rows must be detected as pending work")
 	assertMatchesLegacy("simulated-old-binary-pre-sweep")
 
-	// Phase 3: sweep in small pages until drained.
+	// Phase 3: sweep in small pages with keyset cursor until drained.
 	totalSwept := 0
+	cursor := ""
 	for {
-		n, serr := cs.SweepSettledDecisionsPage(ctx, 2)
+		n, nextCursor, serr := cs.SweepSettledDecisionsPage(ctx, cursor, 2)
 		require.NoError(t, serr)
 		totalSwept += n
-		if n == 0 {
+		if nextCursor == "" {
 			break
 		}
+		cursor = nextCursor
 	}
 	assert.Equal(t, 5, totalSwept, "5 settled rows (direct, interp-confirmed, withdrawn, replaced, dismissed) must be swept")
 	pending, err = cs.HasPendingDecisionIndexWork(ctx)
@@ -627,9 +629,15 @@ func TestProjectsWithUnsettledDecisions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]bool{pSettled: true, pPending: true, pInterp: true}, got)
 
-	n, err := cs.SweepSettledDecisionsPage(ctx, 100)
+	n, nextCursor, err := cs.SweepSettledDecisionsPage(ctx, "", 100)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
+	assert.NotEmpty(t, nextCursor)
+
+	n2, nextCursor2, err := cs.SweepSettledDecisionsPage(ctx, nextCursor, 100)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n2)
+	assert.Empty(t, nextCursor2)
 
 	got, err = cs.ProjectsWithUnsettledDecisions(ctx, []string{pEmpty, pSettled, pPending, pInterp})
 	require.NoError(t, err)
@@ -740,7 +748,6 @@ func TestDecisionSettled_QueryPlans(t *testing.T) {
 		require.NoError(t, tx.Decision.CreateBulk(creates...).Exec(ctx))
 	}
 	require.NoError(t, tx.Commit())
-	require.NoError(t, base.Driver().Exec(ctx, "ANALYZE", []any{}, nil))
 
 	explain := func(t *testing.T, q recordedQuery) string {
 		t.Helper()
@@ -796,6 +803,35 @@ func TestDecisionSettled_QueryPlans(t *testing.T) {
 			}
 		}
 	}
+
+	// Verify the keyset-cursor indexer page query BEFORE ANALYZE (matching
+	// production SQLite where the hub never runs ANALYZE): it must seek via
+	// the PK autoindex (id>?) or the partial index, never full-scan decisions.
+	t.Run("SweepSettledDecisionsPage_keyset_cursor_no_analyze", func(t *testing.T) {
+		rec.mu.Lock()
+		rec.queries = nil
+		rec.mu.Unlock()
+
+		cursorID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+		_, err := cs.selectDecisionIDsForIndexPage(ctx, cursorID, 50, decisionSettledFalse(), settledDecisionPredicate())
+		require.NoError(t, err)
+
+		rec.mu.Lock()
+		queries := append([]recordedQuery(nil), rec.queries...)
+		rec.mu.Unlock()
+		require.NotEmpty(t, queries)
+		q := queries[0]
+		plan := explain(t, q)
+		t.Logf("selectDecisionIDsForIndexPage (%s, pre-ANALYZE) SQL: %s\nPLAN:\n%s", base.Driver().Dialect(), q.sql, plan)
+		if base.Driver().Dialect() == dialect.SQLite {
+			assert.Contains(t, plan, "SEARCH decisions USING", "keyset page query must range-seek decisions without ANALYZE; plan:\n%s", plan)
+			assert.NotContains(t, plan, "SCAN decisions", "keyset page query must not full-scan decisions without ANALYZE; plan:\n%s", plan)
+		} else {
+			assert.Regexp(t, `Index (Only )?Scan|Bitmap Index Scan`, plan, "Postgres keyset page query must use an index scan; plan:\n%s", plan)
+		}
+	})
+
+	require.NoError(t, base.Driver().Exec(ctx, "ANALYZE", []any{}, nil))
 
 	t.Run("ListOpenPrompts_single_project", func(t *testing.T) {
 		assertUsesPartialIndex(t, "ListOpenPrompts(single)", func() {
@@ -891,20 +927,23 @@ func TestDecisionIndex_PostgresConcurrentSweepAndRepost(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
 
-	// Two concurrent sweepers draining overlapping pages of 25 rows.
+	// Two concurrent sweepers draining overlapping pages of 25 rows using
+	// keyset cursors (continuing across short SKIP LOCKED pages until empty).
 	for s := 0; s < 2; s++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			cursor := ""
 			for {
-				n, err := cs.SweepSettledDecisionsPage(ctx, 25)
+				_, nextCursor, err := cs.SweepSettledDecisionsPage(ctx, cursor, 25)
 				if err != nil {
 					errCh <- fmt.Errorf("sweeper error: %w", err)
 					return
 				}
-				if n == 0 {
+				if nextCursor == "" {
 					return
 				}
+				cursor = nextCursor
 			}
 		}()
 	}
@@ -935,13 +974,16 @@ func TestDecisionIndex_PostgresConcurrentSweepAndRepost(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Drain any row skipped via SKIP LOCKED while the repost held its lock.
+	// Drain any row skipped via SKIP LOCKED while the repost held its lock
+	// (fresh pass from cursor "").
+	cursor := ""
 	for {
-		n, err := cs.SweepSettledDecisionsPage(ctx, 50)
+		_, nextCursor, err := cs.SweepSettledDecisionsPage(ctx, cursor, 50)
 		require.NoError(t, err)
-		if n == 0 {
+		if nextCursor == "" {
 			break
 		}
+		cursor = nextCursor
 	}
 
 	pending, err := cs.HasPendingDecisionIndexWork(ctx)
@@ -954,4 +996,83 @@ func TestDecisionIndex_PostgresConcurrentSweepAndRepost(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, settledExact, settledHint, "final settled hint count must equal exact settled predicate")
 	assert.Equal(t, 240+len(repostKeys), settledHint, "all 240 bulk + 12 terminal v1 rows must be settled")
+}
+
+// TestDecisionIndex_LinearBackfillPerPageCost verifies that sweeping a large
+// backlog with the keyset cursor maintains flat (non-quadratic) per-page cost
+// from the first pages to the last pages on SQLite without ANALYZE.
+func TestDecisionIndex_LinearBackfillPerPageCost(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	projectID := backfillTestProject(t, cs, "linear-backfill")
+	pUUID := uuid.MustParse(projectID)
+	aUUID := uuid.New()
+	chatKey := uuid.NewString()
+	choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
+	baseTime := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
+	const totalRows = 10000
+	const batchSize = 500
+	for off := 0; off < totalRows; off += batchSize {
+		creates := make([]*ent.DecisionCreate, 0, batchSize)
+		for j := 0; j < batchSize; j++ {
+			k := fmt.Sprintf("lin-%05d", off+j)
+			creates = append(creates, cs.client.Decision.Create().
+				SetProjectID(pUUID).
+				SetChatKey(chatKey).
+				SetMessageID(uuid.New()).
+				SetPosition(0).
+				SetAskerAgentID(aUUID).
+				SetAskerAgentName("bot").
+				SetKey(k).
+				SetKeyNorm(k).
+				SetKeySource(decision.KeySourceAgent).
+				SetVersion(1).
+				SetQuestion("Linear?").
+				SetChoices(choices).
+				SetStatus(decision.StatusWithdrawn).
+				SetSettled(false).
+				SetCreatedAt(baseTime.Add(time.Duration(off+j)*time.Second)).
+				SetWithdrawnAt(baseTime))
+		}
+		require.NoError(t, cs.client.Decision.CreateBulk(creates...).Exec(ctx))
+	}
+
+	var pageDurs []time.Duration
+	totalSwept := 0
+	cursor := ""
+	for {
+		start := time.Now()
+		n, nextCursor, err := cs.SweepSettledDecisionsPage(ctx, cursor, DefaultDecisionIndexPageSize)
+		dur := time.Since(start)
+		require.NoError(t, err)
+		if nextCursor == "" {
+			break
+		}
+		pageDurs = append(pageDurs, dur)
+		totalSwept += n
+		cursor = nextCursor
+	}
+
+	require.Equal(t, totalRows, totalSwept)
+	require.Equal(t, totalRows/DefaultDecisionIndexPageSize, len(pageDurs))
+
+	median := func(ds []time.Duration) time.Duration {
+		cp := append([]time.Duration(nil), ds...)
+		sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+		return cp[len(cp)/2]
+	}
+	firstMed := median(pageDurs[:5])
+	lastMed := median(pageDurs[len(pageDurs)-5:])
+	worst := pageDurs[0]
+	for _, d := range pageDurs[1:] {
+		if d > worst {
+			worst = d
+		}
+	}
+	t.Logf("[%s] 10k backfill: %d pages, first-5 med=%v, last-5 med=%v, worst=%v",
+		cs.Dialect(), len(pageDurs), firstMed, lastMed, worst)
+	assert.LessOrEqual(t, lastMed, firstMed*3+15*time.Millisecond,
+		"last-5 median page duration (%v) must stay linear vs first-5 (%v)", lastMed, firstMed)
 }
