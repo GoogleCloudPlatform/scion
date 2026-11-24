@@ -54,6 +54,7 @@ import {
   makeGraphValueSuggestions,
   migrateProjectParamToQuery,
   resolveProjectLoadTarget,
+  type GraphFilterResult,
 } from './agent-graph-filter.js';
 import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import { navigateTo, replaceSearch } from '../../client/navigation.js';
@@ -873,9 +874,29 @@ export class AgentGraphPage extends LitElement {
     return ancestorsOnly ? root : [...root, current('Graph', false)];
   }
 
+  /** Memoised filterGraphAgents result, keyed by (agents, activeFilterQuery) identity. */
+  private filterCache: {
+    agents: Agent[];
+    query: Query | null;
+    result: GraphFilterResult;
+  } | null = null;
+
+  private getFilteredGraph(): GraphFilterResult {
+    if (
+      this.filterCache &&
+      this.filterCache.agents === this.agents &&
+      this.filterCache.query === this.activeFilterQuery
+    ) {
+      return this.filterCache.result;
+    }
+    const result = filterGraphAgents(this.agents, this.activeFilterQuery);
+    this.filterCache = { agents: this.agents, query: this.activeFilterQuery, result };
+    return result;
+  }
+
   override render() {
     const useDialect = filtersQueryDialectEnabled();
-    const filtered = useDialect ? filterGraphAgents(this.agents, this.activeFilterQuery) : null;
+    const filtered = useDialect ? this.getFilteredGraph() : null;
     const shownAgents = filtered ? filtered.agents : this.visibleAgents;
     const contextIds = filtered ? filtered.contextIds : undefined;
     const filteredEmpty = Boolean(

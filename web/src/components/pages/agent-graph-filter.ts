@@ -111,7 +111,7 @@ export function filterGraphAgents(
 ): GraphFilterResult {
   if (isEmptyGraphQuery(query)) {
     return {
-      agents: [...allAgents],
+      agents: allAgents as Agent[],
       contextIds: EMPTY_SET,
       hasActiveFilter: false,
     };
