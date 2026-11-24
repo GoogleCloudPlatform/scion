@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,6 +33,7 @@ import (
 func TestTriggerOfflineQueueStore_ParkFinishAttemptListAndCaps(t *testing.T) {
 	ctx := context.Background()
 	cs := newTestCompositeStore(t)
+	t.Logf("enttest.Active()=%v (postgres=%v)", enttest.Active(), enttest.Active())
 
 	projID := uuid.NewString()
 	trID := uuid.NewString()
@@ -216,6 +218,7 @@ func TestTriggerOfflineQueueStore_ParkFinishAttemptListAndCaps(t *testing.T) {
 func TestTriggerOfflineQueueStore_ConcurrentCapEnforcement(t *testing.T) {
 	ctx := context.Background()
 	cs := newTestCompositeStore(t)
+	t.Logf("enttest.Active()=%v (postgres=%v)", enttest.Active(), enttest.Active())
 
 	projID := uuid.NewString()
 	trID := uuid.NewString()
