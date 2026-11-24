@@ -996,6 +996,80 @@ describe('scion-schedule-list detail dialog wake and interrupt (ptone/scion#7791
   });
 });
 
+describe('scion-schedule-list Wake column (ptone/scion#9082)', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('parseScheduleWake returns boolean for message schedules and null for other types', () => {
+    expect(
+      mod.parseScheduleWake({ eventType: 'message', payload: '{"agentName":"w","wake":true}' })
+    ).toBe(true);
+    expect(
+      mod.parseScheduleWake({ eventType: 'message', payload: '{"agentName":"w","wake":false}' })
+    ).toBe(false);
+    expect(mod.parseScheduleWake({ eventType: 'message', payload: '{"agentName":"w"}' })).toBe(
+      false
+    );
+    expect(mod.parseScheduleWake({ eventType: 'message', payload: 'not-json' })).toBe(false);
+    expect(
+      mod.parseScheduleWake({ eventType: 'dispatch_agent', payload: '{"wake":true}' })
+    ).toBeNull();
+    expect(
+      mod.parseScheduleWake({ eventType: 'exec', payload: '{"command":["true"]}' })
+    ).toBeNull();
+  });
+
+  it('renders Wake column with Yes/No for message schedules and em-dash for dispatch_agent/exec', async () => {
+    const el = await mount([
+      schedule({
+        id: 's-msg-wake',
+        name: 'msg-wake',
+        eventType: 'message',
+        payload: '{"agentName":"w","message":"hi","wake":true}',
+      }),
+      schedule({
+        id: 's-msg-nowake',
+        name: 'msg-nowake',
+        eventType: 'message',
+        payload: '{"agentName":"w","message":"hi"}',
+      }),
+      schedule({
+        id: 's-dispatch',
+        name: 'dispatch-sched',
+        eventType: 'dispatch_agent',
+        payload: '{"agentName":"w","template":"default","task":"build"}',
+      }),
+      schedule({
+        id: 's-exec',
+        name: 'exec-sched',
+        eventType: 'exec',
+        payload: '{"agentId":"a1","command":["true"]}',
+      }),
+    ]);
+
+    const headers = Array.from((el.shadowRoot as ShadowRoot).querySelectorAll('thead th')).map(
+      (th) => th.textContent?.trim()
+    );
+    const wakeIdx = headers.indexOf('Wake');
+    expect(wakeIdx).toBeGreaterThan(-1);
+
+    const wakeCellText = (name: string): string | undefined =>
+      rowFor(el, name).querySelectorAll('td')[wakeIdx]?.textContent?.trim();
+
+    expect(wakeCellText('msg-wake')).toBe('Yes');
+    expect(wakeCellText('msg-nowake')).toBe('No');
+    expect(wakeCellText('dispatch-sched')).toBe('—');
+    expect(wakeCellText('exec-sched')).toBe('—');
+  });
+});
+
 describe('scion-schedule-list exec authoring, detail history, and PATCH (ptone/scion#7886)', () => {
   beforeAll(async () => {
     mod = await import('./schedule-list.js');

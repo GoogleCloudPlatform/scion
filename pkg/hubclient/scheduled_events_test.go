@@ -258,3 +258,32 @@ func TestScheduledEventService_ExecRoundTrip(t *testing.T) {
 		t.Errorf("unexpected ExecOutput: %+v", out)
 	}
 }
+
+func TestScheduledEventService_ListGroupAndSort(t *testing.T) {
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ListScheduledEventsResponse{
+			Events:     []ScheduledEvent{},
+			TotalCount: 0,
+		})
+	}))
+	defer server.Close()
+
+	c, err := New(server.URL)
+	if err != nil {
+		t.Fatalf("New client: %v", err)
+	}
+
+	_, err = c.ScheduledEvents("proj-1").List(context.Background(), &ListScheduledEventsOptions{
+		Group: "pending",
+		Sort:  "fire_at_asc",
+	})
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if gotQuery != "group=pending&sort=fire_at_asc" {
+		t.Errorf("query = %q, want %q", gotQuery, "group=pending&sort=fire_at_asc")
+	}
+}

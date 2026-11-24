@@ -752,3 +752,106 @@ func TestScheduledEvent_MethodNotAllowed(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events/some-id", nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
+
+func TestScheduledEvent_ListGroupSortAndCursorBinding(t *testing.T) {
+	srv, s, projectID := setupScheduledEventTest(t)
+	ctx := context.Background()
+	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+	create := func(id, status string, created, fireAt time.Time, firedAt *time.Time) {
+		require.NoError(t, s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
+			ID:        id,
+			ProjectID: projectID,
+			EventType: "message",
+			FireAt:    fireAt,
+			Payload:   `{"message":"test"}`,
+			Status:    status,
+			CreatedAt: created,
+			FiredAt:   firedAt,
+		}))
+	}
+
+	soonID := tid("grp-soon")
+	firingID := tid("grp-firing")
+	laterID := tid("grp-later")
+	firedRecentID := tid("grp-fired-recent")
+	cancelledMidID := tid("grp-cancelled-mid")
+	failedOldID := tid("grp-failed-old")
+
+	tRecent := base.Add(-1 * time.Minute)
+	tMid := base.Add(-5 * time.Minute)
+	tOld := base.Add(-30 * time.Minute)
+
+	create(laterID, store.ScheduledEventPending, base.Add(-1*time.Minute), base.Add(3*time.Hour), nil)
+	create(soonID, store.ScheduledEventPending, base.Add(-10*time.Minute), base.Add(15*time.Minute), nil)
+	create(firingID, store.ScheduledEventFiring, base.Add(-20*time.Minute), base.Add(30*time.Minute), nil)
+	create(firedRecentID, store.ScheduledEventFired, base.Add(-2*time.Hour), base.Add(-1*time.Minute), &tRecent)
+	create(cancelledMidID, store.ScheduledEventCancelled, tMid, base.Add(5*time.Hour), nil)
+	create(failedOldID, store.ScheduledEventFailed, base.Add(-3*time.Hour), base.Add(-30*time.Minute), &tOld)
+
+	// Pending group: soonest first (fire_at ASC), paginated with limit=2.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?group=pending&sort=fire_at_asc&limit=2", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page1 ListScheduledEventsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&page1))
+	assert.Equal(t, 3, page1.TotalCount)
+	require.Len(t, page1.Events, 2)
+	assert.Equal(t, soonID, page1.Events[0].ID)
+	assert.Equal(t, firingID, page1.Events[1].ID)
+	require.NotEmpty(t, page1.NextCursor)
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?group=pending&sort=fire_at_asc&limit=2&cursor="+page1.NextCursor, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page2 ListScheduledEventsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&page2))
+	require.Len(t, page2.Events, 1)
+	assert.Equal(t, laterID, page2.Events[0].ID)
+	assert.Empty(t, page2.NextCursor)
+
+	// Past group: most recent completion time first (COALESCE(fired_at, created) DESC).
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?group=past&sort=completed_desc&limit=2", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var pastPage1 ListScheduledEventsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&pastPage1))
+	assert.Equal(t, 3, pastPage1.TotalCount)
+	require.Len(t, pastPage1.Events, 2)
+	assert.Equal(t, firedRecentID, pastPage1.Events[0].ID)
+	assert.Equal(t, cancelledMidID, pastPage1.Events[1].ID)
+	require.NotEmpty(t, pastPage1.NextCursor)
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?group=past&sort=completed_desc&limit=2&cursor="+pastPage1.NextCursor, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var pastPage2 ListScheduledEventsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&pastPage2))
+	require.Len(t, pastPage2.Events, 1)
+	assert.Equal(t, failedOldID, pastPage2.Events[0].ID)
+	assert.Empty(t, pastPage2.NextCursor)
+
+	// Replaying a pending cursor on past returns 400 invalid_cursor.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?group=past&sort=completed_desc&limit=2&cursor="+page1.NextCursor, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// Comma-separated status filter works.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?status=pending,firing", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var multiResp ListScheduledEventsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&multiResp))
+	assert.Equal(t, 3, multiResp.TotalCount)
+
+	// Single status filter trims surrounding whitespace, matching comma-separated parsing.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?status=%20pending%20", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var singleTrimResp ListScheduledEventsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&singleTrimResp))
+	assert.Equal(t, 2, singleTrimResp.TotalCount)
+
+	// Validation errors.
+	for _, qs := range []string{
+		"group=unknown",
+		"sort=invalid_sort",
+		"group=pending&status=pending",
+	} {
+		rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?"+qs, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "query %s", qs)
+	}
+}

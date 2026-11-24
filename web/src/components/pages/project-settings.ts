@@ -4021,6 +4021,7 @@ export class ScionPageProjectSettings extends LitElement {
 
         <sl-tab-group
           @sl-tab-show=${(e: CustomEvent) => {
+            if (e.target !== e.currentTarget) return;
             this.activeSchedulesTab = (e.detail as { name: string }).name;
           }}
         >

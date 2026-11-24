@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -1212,6 +1214,18 @@ func (s *ScheduleStore) CancelScheduledEventWithReason(ctx context.Context, id s
 
 // ListScheduledEvents returns events matching the filter criteria.
 func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.ScheduledEventFilter, opts store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
+	sortMode := filter.Sort
+	if sortMode == "" {
+		sortMode = store.ScheduledEventSortCreatedDesc
+	}
+	switch sortMode {
+	case store.ScheduledEventSortCreatedDesc,
+		store.ScheduledEventSortFireAtAsc,
+		store.ScheduledEventSortCompletedDesc:
+	default:
+		return nil, fmt.Errorf("%w: unsupported scheduled event sort %q", store.ErrInvalidInput, filter.Sort)
+	}
+
 	query := s.client.ScheduledEvent.Query()
 
 	if filter.ProjectID != "" {
@@ -1226,6 +1240,9 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	}
 	if filter.Status != "" {
 		query.Where(scheduledevent.StatusEQ(filter.Status))
+	}
+	if len(filter.Statuses) > 0 {
+		query.Where(scheduledevent.StatusIn(filter.Statuses...))
 	}
 	if filter.ScheduleID != "" {
 		query.Where(scheduledevent.ScheduleIDEQ(filter.ScheduleID))
@@ -1244,36 +1261,74 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 		return nil, err
 	}
 
-	// Keyset pagination on (created DESC, id DESC), as ListSchedules: the
-	// cursor is the opaque token encodeCursor makes from the previous page's
-	// last row, and the predicate matches the order, so a full traversal
-	// visits every matching row whatever the relation between UUID and
-	// creation order (ptone/scion#7883 P2-R2). An id-only cursor (the
-	// earlier format, or any non-token value) is refused as invalid.
+	// Keyset pagination bound to the sort/filter mode so cursors from
+	// Pending (fire_at ASC), Past (COALESCE(fired_at, created) DESC), and
+	// default (created DESC) cannot be mixed (ptone/scion#9082). Default
+	// created_desc with no multi-status filter preserves the unbound
+	// two-part cursor format for backwards compatibility.
+	cursorBinding := scheduledEventCursorBinding(sortMode, filter, opts.CursorBinding)
 	var (
-		cursorCreated time.Time
-		cursorID      uuid.UUID
+		cursorTS time.Time
+		cursorID uuid.UUID
 	)
 	if opts.Cursor != "" {
 		var err error
-		cursorCreated, cursorID, err = decodeCursor(opts.Cursor)
+		cursorTS, cursorID, err = decodeListCursor(opts.Cursor, cursorBinding)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		cursorCreated = cursorCreated.UTC()
-		query.Where(scheduledevent.Or(
-			scheduledevent.CreatedLT(cursorCreated),
-			scheduledevent.And(
-				scheduledevent.CreatedEQ(cursorCreated),
-				scheduledevent.IDLT(cursorID),
-			),
-		))
+		cursorTS = cursorTS.UTC()
+		switch sortMode {
+		case store.ScheduledEventSortCreatedDesc:
+			query.Where(scheduledevent.Or(
+				scheduledevent.CreatedLT(cursorTS),
+				scheduledevent.And(
+					scheduledevent.CreatedEQ(cursorTS),
+					scheduledevent.IDLT(cursorID),
+				),
+			))
+		case store.ScheduledEventSortFireAtAsc:
+			query.Where(scheduledevent.Or(
+				scheduledevent.FireAtGT(cursorTS),
+				scheduledevent.And(
+					scheduledevent.FireAtEQ(cursorTS),
+					scheduledevent.IDGT(cursorID),
+				),
+			))
+		case store.ScheduledEventSortCompletedDesc:
+			query.Where(func(s *entsql.Selector) {
+				key := scheduledEventCompletedAtExpr(s)
+				idCol := s.C(scheduledevent.FieldID)
+				tsArg := timeArg(s.Dialect(), cursorTS)
+				s.Where(entsql.P(func(b *entsql.Builder) {
+					b.WriteString("((").WriteString(key).WriteString(" < ").Arg(tsArg).
+						WriteString(") OR (").WriteString(key).WriteString(" = ").Arg(tsArg).
+						WriteString(" AND ").WriteString(idCol).WriteString(" < ").Arg(cursorID).WriteString("))")
+				}))
+			})
+		}
+	}
+
+	switch sortMode {
+	case store.ScheduledEventSortCreatedDesc:
+		query.
+			Order(scheduledevent.ByCreated(entsql.OrderDesc())).
+			Order(scheduledevent.ByID(entsql.OrderDesc()))
+	case store.ScheduledEventSortFireAtAsc:
+		query.
+			Order(scheduledevent.ByFireAt(entsql.OrderAsc())).
+			Order(scheduledevent.ByID(entsql.OrderAsc()))
+	case store.ScheduledEventSortCompletedDesc:
+		query.Order(func(s *entsql.Selector) {
+			s.OrderExpr(entsql.Raw(fmt.Sprintf("%s DESC, %s DESC",
+				scheduledEventCompletedAtExpr(s),
+				s.C(scheduledevent.FieldID),
+			)))
+		})
 	}
 
 	limit := clampLimit(opts.Limit)
 	entities, err := query.
-		Order(scheduledevent.ByCreated(entsql.OrderDesc())).
-		Order(scheduledevent.ByID(entsql.OrderDesc())).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
@@ -1290,8 +1345,8 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 		result.Items = events[:limit]
 		last := events[limit-1]
 		// No-progress guard, as ListSchedules.
-		if opts.Cursor == "" || eventCursorAdvances(last, cursorCreated, cursorID) {
-			result.NextCursor = encodeCursor(last.CreatedAt.UTC(), last.ID)
+		if opts.Cursor == "" || eventCursorAdvances(sortMode, last, cursorTS, cursorID) {
+			result.NextCursor = encodeListCursor(scheduledEventSortTime(sortMode, last), last.ID, cursorBinding)
 		}
 	} else {
 		result.Items = events
@@ -1299,12 +1354,55 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	return result, nil
 }
 
+// scheduledEventCompletedAtExpr returns the SQL expression for completion time:
+// COALESCE(fired_at, created), normalized via timeColumnExpr so SQLite and
+// Postgres both compare instants cleanly and propagate NULL fired_at.
+func scheduledEventCompletedAtExpr(s *entsql.Selector) string {
+	return fmt.Sprintf("COALESCE(%s, %s)",
+		timeColumnExpr(s, scheduledevent.FieldFiredAt),
+		timeColumnExpr(s, scheduledevent.FieldCreated),
+	)
+}
+
+func scheduledEventSortTime(sortMode string, evt store.ScheduledEvent) time.Time {
+	switch sortMode {
+	case store.ScheduledEventSortFireAtAsc:
+		return evt.FireAt.UTC()
+	case store.ScheduledEventSortCompletedDesc:
+		if evt.FiredAt != nil {
+			return evt.FiredAt.UTC()
+		}
+		return evt.CreatedAt.UTC()
+	default:
+		return evt.CreatedAt.UTC()
+	}
+}
+
+func scheduledEventCursorBinding(sortMode string, filter store.ScheduledEventFilter, explicit string) string {
+	if sortMode == store.ScheduledEventSortCreatedDesc && len(filter.Statuses) == 0 {
+		return explicit
+	}
+	statuses := append([]string(nil), filter.Statuses...)
+	sort.Strings(statuses)
+	binding := sortMode + ":" + strings.Join(statuses, "|")
+	if explicit != "" {
+		binding += ":" + explicit
+	}
+	return binding
+}
+
 // eventCursorAdvances reports whether row is strictly after the cursor
-// (created, id) in (created DESC, id DESC) order.
-func eventCursorAdvances(row store.ScheduledEvent, created time.Time, id uuid.UUID) bool {
-	rc := row.CreatedAt.UTC()
-	if !rc.Equal(created) {
-		return rc.Before(created)
+// (ts, id) in the active sortMode order.
+func eventCursorAdvances(sortMode string, row store.ScheduledEvent, ts time.Time, id uuid.UUID) bool {
+	rt := scheduledEventSortTime(sortMode, row)
+	if sortMode == store.ScheduledEventSortFireAtAsc {
+		if !rt.Equal(ts) {
+			return rt.After(ts)
+		}
+		return row.ID > id.String()
+	}
+	if !rt.Equal(ts) {
+		return rt.Before(ts)
 	}
 	return row.ID < id.String()
 }

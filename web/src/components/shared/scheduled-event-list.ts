@@ -26,7 +26,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { paginateAll, PaginationError } from '../../client/paginate-all.js';
+import { PaginationError } from '../../client/paginate-all.js';
 import { resourceStyles } from './resource-styles.js';
 import {
   effectiveTimeZone,
@@ -73,8 +73,36 @@ interface ListResponse {
   serverTime?: string;
 }
 
-/** Page size requested when loading scheduled events; every page is followed. */
-export const SCHEDULED_EVENT_PAGE_SIZE = 100;
+/** Page size requested per page when loading scheduled events. */
+export const SCHEDULED_EVENT_PAGE_SIZE = 25;
+
+export type ScheduledEventTab = 'pending' | 'past';
+
+interface TabState {
+  events: ScheduledEvent[];
+  nextCursor: string;
+  totalCount: number | null;
+  loading: boolean;
+  loadingMore: boolean;
+  loaded: boolean;
+  error: string | null;
+  loadMoreError: string | null;
+  generation: number;
+}
+
+function createTabState(loading = false): TabState {
+  return {
+    events: [],
+    nextCursor: '',
+    totalCount: null,
+    loading,
+    loadingMore: false,
+    loaded: false,
+    error: null,
+    loadMoreError: null,
+    generation: 0,
+  };
+}
 
 @customElement('scion-scheduled-event-list')
 export class ScionScheduledEventList extends LitElement {
@@ -92,9 +120,11 @@ export class ScionScheduledEventList extends LitElement {
   @property() projectId = '';
   @property({ type: Boolean }) compact = false;
 
-  @state() private loading = true;
-  @state() private events: ScheduledEvent[] = [];
-  @state() private error: string | null = null;
+  @state() private activeTab: ScheduledEventTab = 'pending';
+  @state() private tabs: Record<ScheduledEventTab, TabState> = {
+    pending: createTabState(true),
+    past: createTabState(false),
+  };
 
   // Create dialog
   @state() private dialogOpen = false;
@@ -130,9 +160,6 @@ export class ScionScheduledEventList extends LitElement {
   @state() private outputText: string | null = null;
   @state() private outputFetched = false;
 
-  /** Bumped on every load, so a slower, older walk never overwrites a newer result. */
-  private loadGeneration = 0;
-
   private readonly boundOnFlagsChanged = (): void => {
     if (!execSchedulesEnabled() && this.dialogEventType === 'exec') {
       this.dialogEventType = 'message';
@@ -157,6 +184,29 @@ export class ScionScheduledEventList extends LitElement {
         font-weight: 600;
         font-size: 0.8125rem;
       }
+      .events-tab-group {
+        margin-top: 0.25rem;
+      }
+      .load-more-footer {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem 0 0.25rem;
+      }
+      .load-more-controls {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .load-more-count {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .load-more-error {
+        font-size: 0.8125rem;
+        color: var(--scion-error-text, #991b1b);
+      }
     `,
   ];
 
@@ -171,36 +221,91 @@ export class ScionScheduledEventList extends LitElement {
     super.disconnectedCallback();
   }
 
+  private updateTab(tab: ScheduledEventTab, patch: Partial<TabState>): void {
+    this.tabs = {
+      ...this.tabs,
+      [tab]: { ...this.tabs[tab], ...patch },
+    };
+  }
+
+  private handleTabShow(e: CustomEvent): void {
+    if (e.target !== e.currentTarget) return;
+    e.stopPropagation();
+    const name = (e.detail as { name?: string } | undefined)?.name;
+    if (name !== 'pending' && name !== 'past') return;
+    if (this.activeTab === name) return;
+    this.activeTab = name;
+    const state = this.tabs[name];
+    if (!state.loaded && !state.loading) {
+      void this.loadTab(name);
+    }
+  }
+
   private async loadEvents(): Promise<void> {
+    await this.loadTab(this.activeTab);
+  }
+
+  private async loadTab(tab: ScheduledEventTab, append = false): Promise<void> {
     if (!this.projectId) return;
-    const generation = ++this.loadGeneration;
-    this.loading = true;
-    this.error = null;
+    const current = this.tabs[tab];
+    if (append && (current.loadingMore || !current.nextCursor)) return;
+
+    const generation = current.generation + 1;
+    const cursor = append ? current.nextCursor : '';
+    this.updateTab(tab, {
+      generation,
+      ...(append
+        ? { loadingMore: true, loadMoreError: null }
+        : { loading: true, loadingMore: false, error: null, loadMoreError: null }),
+    });
+
+    const sort = tab === 'pending' ? 'fire_at_asc' : 'completed_desc';
+    const params = new URLSearchParams({
+      group: tab,
+      sort,
+      limit: String(SCHEDULED_EVENT_PAGE_SIZE),
+    });
+    if (cursor) {
+      params.set('cursor', cursor);
+    }
 
     try {
-      const events = await paginateAll<ScheduledEvent>({
-        path: `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events`,
-        pageSize: SCHEDULED_EVENT_PAGE_SIZE,
-        label: 'scheduled events list',
-        parsePage: (body) => {
-          const data = body as ListResponse;
-          return { items: data.events ?? [], nextCursor: data.nextCursor ?? '' };
-        },
-        shouldContinue: () => generation === this.loadGeneration,
+      const response = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events?${params.toString()}`
+      );
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const data = (await response.json()) as ListResponse;
+      if (this.tabs[tab].generation !== generation) return;
+      const pageItems = data.events ?? [];
+      const nextEvents = append ? [...this.tabs[tab].events, ...pageItems] : pageItems;
+      this.updateTab(tab, {
+        events: nextEvents,
+        nextCursor: data.nextCursor ?? '',
+        totalCount: typeof data.totalCount === 'number' ? data.totalCount : null,
+        loaded: true,
+        loading: false,
+        loadingMore: false,
+        error: null,
+        loadMoreError: null,
       });
-      if (generation !== this.loadGeneration) return;
-      this.events = events;
     } catch (err) {
-      if (generation !== this.loadGeneration) return;
-      console.error('Failed to load scheduled events:', err);
-      this.error =
-        err instanceof PaginationError && err.hubMessage
-          ? err.hubMessage
-          : err instanceof Error
-            ? err.message
-            : 'Failed to load scheduled events';
-    } finally {
-      if (generation === this.loadGeneration) this.loading = false;
+      if (this.tabs[tab].generation !== generation) return;
+      console.error(`Failed to load ${tab} scheduled events:`, err);
+      const message = err instanceof Error ? err.message : 'Failed to load scheduled events';
+      if (append) {
+        this.updateTab(tab, {
+          loadingMore: false,
+          loadMoreError: message,
+        });
+      } else {
+        this.updateTab(tab, {
+          loading: false,
+          loadingMore: false,
+          error: message,
+        });
+      }
     }
   }
 
@@ -337,7 +442,9 @@ export class ScionScheduledEventList extends LitElement {
       }
 
       this.closeDialog();
-      await this.loadEvents();
+      const otherTab: ScheduledEventTab = this.activeTab === 'pending' ? 'past' : 'pending';
+      this.updateTab(otherTab, { loaded: false });
+      await this.loadTab(this.activeTab);
     } catch (err) {
       this.dialogError = err instanceof Error ? err.message : 'Failed to create event';
     } finally {
@@ -358,14 +465,16 @@ export class ScionScheduledEventList extends LitElement {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
 
-      await this.loadEvents();
+      this.updateTab('past', { loaded: false });
+      await this.loadTab(this.activeTab);
       if (this.detailEvent?.id === eventId) {
-        this.detailEvent = this.events.find((e) => e.id === eventId) ?? null;
+        this.detailEvent = this.tabs[this.activeTab].events.find((e) => e.id === eventId) ?? null;
         if (!this.detailEvent) this.detailOpen = false;
       }
     } catch (err) {
       console.error('Failed to cancel event:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to cancel event';
+      const message = err instanceof Error ? err.message : 'Failed to cancel event';
+      this.updateTab(this.activeTab, { error: message });
     } finally {
       this.cancellingId = null;
     }
@@ -454,6 +563,15 @@ export class ScionScheduledEventList extends LitElement {
     return this.renderFull();
   }
 
+  private formatTabLabel(tab: ScheduledEventTab): string {
+    const base = tab === 'pending' ? 'Pending' : 'Past';
+    const state = this.tabs[tab];
+    if (state.loaded && state.totalCount !== null) {
+      return `${base} (${state.totalCount})`;
+    }
+    return base;
+  }
+
   private renderCompact() {
     return html`
       <div class="section compact">
@@ -468,57 +586,12 @@ export class ScionScheduledEventList extends LitElement {
           </sl-button>
         </div>
 
-        ${this.loading
-          ? html`<div class="section-loading"><sl-spinner></sl-spinner> Loading events...</div>`
-          : this.error
-            ? html`
-                <div class="section-error">
-                  ${this.error}
-                  <sl-button size="small" @click=${() => this.loadEvents()}>Retry</sl-button>
-                </div>
-              `
-            : this.events.length === 0
-              ? html`
-                  <div class="empty-state">
-                    <sl-icon name="clock"></sl-icon>
-                    <h3>No Scheduled Events</h3>
-                    <p>Create a scheduled event to send messages at a future time.</p>
-                    <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
-                      <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                      Schedule Event
-                    </sl-button>
-                  </div>
-                `
-              : this.renderTable()}
-        ${this.renderDialog()} ${this.renderDetailDialog()}
+        ${this.renderTabGroup()} ${this.renderDialog()} ${this.renderDetailDialog()}
       </div>
     `;
   }
 
   private renderFull() {
-    if (this.loading) {
-      return html`
-        <div class="loading-state">
-          <sl-spinner></sl-spinner>
-          <p>Loading scheduled events...</p>
-        </div>
-      `;
-    }
-
-    if (this.error) {
-      return html`
-        <div class="error-state">
-          <sl-icon name="exclamation-triangle"></sl-icon>
-          <h2>Failed to Load Events</h2>
-          <div class="error-details">${this.error}</div>
-          <sl-button variant="primary" @click=${() => this.loadEvents()}>
-            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-            Retry
-          </sl-button>
-        </div>
-      `;
-    }
-
     return html`
       <div class="list-header">
         <sl-button size="small" variant="primary" @click=${this.openCreateDialog}>
@@ -527,20 +600,99 @@ export class ScionScheduledEventList extends LitElement {
         </sl-button>
       </div>
 
-      ${this.events.length === 0
-        ? html`
-            <div class="empty-state">
-              <sl-icon name="clock"></sl-icon>
-              <h3>No Scheduled Events</h3>
-              <p>Create a scheduled event to send messages at a future time.</p>
-            </div>
-          `
-        : this.renderTable()}
-      ${this.renderDialog()} ${this.renderDetailDialog()}
+      ${this.renderTabGroup()} ${this.renderDialog()} ${this.renderDetailDialog()}
     `;
   }
 
-  private renderTable() {
+  private renderTabGroup() {
+    return html`
+      <sl-tab-group
+        class="events-tab-group"
+        @sl-tab-show=${(e: CustomEvent): void => this.handleTabShow(e)}
+      >
+        <sl-tab slot="nav" panel="pending" ?active=${this.activeTab === 'pending'}
+          >${this.formatTabLabel('pending')}</sl-tab
+        >
+        <sl-tab slot="nav" panel="past" ?active=${this.activeTab === 'past'}
+          >${this.formatTabLabel('past')}</sl-tab
+        >
+
+        <sl-tab-panel name="pending" ?active=${this.activeTab === 'pending'}>
+          ${this.renderTabPanel('pending')}
+        </sl-tab-panel>
+
+        <sl-tab-panel name="past" ?active=${this.activeTab === 'past'}>
+          ${this.renderTabPanel('past')}
+        </sl-tab-panel>
+      </sl-tab-group>
+    `;
+  }
+
+  private renderTabPanel(tab: ScheduledEventTab) {
+    const state = this.tabs[tab];
+    if (state.loading) {
+      return this.compact
+        ? html`<div class="section-loading"><sl-spinner></sl-spinner> Loading events...</div>`
+        : html`
+            <div class="loading-state">
+              <sl-spinner></sl-spinner>
+              <p>Loading ${tab === 'pending' ? 'pending' : 'past'} events...</p>
+            </div>
+          `;
+    }
+
+    if (state.error) {
+      return this.compact
+        ? html`
+            <div class="section-error">
+              ${state.error}
+              <sl-button size="small" @click=${() => void this.loadTab(tab)}>Retry</sl-button>
+            </div>
+          `
+        : html`
+            <div class="error-state">
+              <sl-icon name="exclamation-triangle"></sl-icon>
+              <h2>Failed to Load Events</h2>
+              <div class="error-details">${state.error}</div>
+              <sl-button variant="primary" @click=${() => void this.loadTab(tab)}>
+                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                Retry
+              </sl-button>
+            </div>
+          `;
+    }
+
+    if (state.events.length === 0) {
+      return tab === 'pending'
+        ? html`
+            <div class="empty-state">
+              <sl-icon name="clock"></sl-icon>
+              <h3>No Pending Events</h3>
+              <p>Create a scheduled event to send messages at a future time.</p>
+              ${this.compact
+                ? html`
+                    <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
+                      <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                      Schedule Event
+                    </sl-button>
+                  `
+                : nothing}
+            </div>
+          `
+        : html`
+            <div class="empty-state">
+              <sl-icon name="clock"></sl-icon>
+              <h3>No Past Events</h3>
+              <p>Completed, failed, and cancelled events from the last 7 days appear here.</p>
+            </div>
+          `;
+    }
+
+    return this.renderTable(tab, state);
+  }
+
+  private renderTable(tab: ScheduledEventTab, state: TabState) {
+    const timeHeader = tab === 'pending' ? 'Fire At' : 'Completed';
     return html`
       <div class="table-container">
         <table>
@@ -548,24 +700,52 @@ export class ScionScheduledEventList extends LitElement {
             <tr>
               <th>Type</th>
               <th>Status</th>
-              <th>Fire At</th>
+              <th>${timeHeader}</th>
               <th class="hide-mobile">Agent</th>
               <th class="hide-mobile">Created</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
-            ${this.events.map((evt) => this.renderEventRow(evt))}
+            ${state.events.map((evt) => this.renderEventRow(evt))}
           </tbody>
         </table>
       </div>
+      ${state.nextCursor || state.loadMoreError
+        ? html`
+            <div class="load-more-footer">
+              ${state.loadMoreError
+                ? html`<div class="load-more-error">${state.loadMoreError}</div>`
+                : nothing}
+              <div class="load-more-controls">
+                ${state.totalCount !== null
+                  ? html`<span class="load-more-count"
+                      >Showing ${state.events.length} of ${state.totalCount}</span
+                    >`
+                  : nothing}
+                ${state.nextCursor
+                  ? html`
+                      <sl-button
+                        size="small"
+                        class="load-more-btn"
+                        ?loading=${state.loadingMore}
+                        @click=${(): void => void this.loadTab(tab, true)}
+                        >Load more</sl-button
+                      >
+                    `
+                  : nothing}
+              </div>
+            </div>
+          `
+        : nothing}
     `;
   }
 
   private renderEventRow(evt: ScheduledEvent) {
     const isPending = evt.status === 'pending';
-    const fireInstant = isPending ? evt.fireAt : (evt.firedAt ?? evt.fireAt);
-    const fireTimeDisplay = isPending
+    const isActivePending = evt.status === 'pending' || evt.status === 'firing';
+    const fireInstant = isActivePending ? evt.fireAt : (evt.firedAt ?? evt.createdAt);
+    const fireTimeDisplay = isActivePending
       ? this.formatFutureTime(evt.fireAt)
       : formatRelative(fireInstant);
     const agent = this.getPayloadAgent(evt.payload);
