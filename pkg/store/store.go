@@ -104,6 +104,11 @@ var (
 	// ErrVersionConflict.
 	ErrHarnessConfigConflict = fmt.Errorf("harness config content changed: %w", ErrVersionConflict)
 
+	// ErrShellAgentOwnerImmutable is returned by UpdateAgent when an attempt
+	// is made to change or clear owner_id on an execution container (shell
+	// harness; ptone/scion#8812 §3.4 S8). It wraps ErrInvalidInput.
+	ErrShellAgentOwnerImmutable = fmt.Errorf("%w: execution container ownership cannot be changed", ErrInvalidInput)
+
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
 	// Super-admin authority is conferred exclusively via User.Role (out-of-band)

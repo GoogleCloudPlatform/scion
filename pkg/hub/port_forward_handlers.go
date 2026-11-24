@@ -729,11 +729,19 @@ func (s *Server) authorizePortAccess(w http.ResponseWriter, r *http.Request, age
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only access their own port registrations", nil)
 			return nil, false
 		}
+		if isShellAgent(agent) && action == ActionPortAccess {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "execution container: port exposure and port access are not allowed", nil)
+			return nil, false
+		}
 		return agent, true
 	}
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		if !s.userPortAccessAllowed(ctx, userIdent, agent, action) {
+		if !s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), action).Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+			return nil, false
+		}
+		if isShellAgent(agent) && action == ActionPortAccess {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "execution container: port exposure and port access are not allowed", nil)
 			return nil, false
 		}
 		return agent, true
@@ -746,6 +754,9 @@ func (s *Server) authorizePortAccess(w http.ResponseWriter, r *http.Request, age
 // user take action on agent's ports. The page view route
 // (portViewIdentity) makes the same decision.
 func (s *Server) userPortAccessAllowed(ctx context.Context, user UserIdentity, agent *store.Agent, action Action) bool {
+	if isShellAgent(agent) && action == ActionPortAccess {
+		return false
+	}
 	return s.authzService.CheckAccess(ctx, user, agentResource(agent), action).Allowed
 }
 

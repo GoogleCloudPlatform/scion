@@ -99,7 +99,7 @@ func appliedConfigForWrite(ctx context.Context, ac *ent.AgentClient, uid uuid.UU
 	if lock {
 		q = q.ForUpdate()
 	}
-	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldPhase, agent.FieldActivity).Only(ctx)
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldPhase, agent.FieldActivity, agent.FieldHarnessConfig, agent.FieldOwnerID).Only(ctx)
 	stored := ""
 	switch {
 	case err == nil:

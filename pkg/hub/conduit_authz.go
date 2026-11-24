@@ -107,6 +107,13 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 	if permission == "" {
 		return fmt.Errorf("%w: no permission for action %q", errConduitForbidden, action)
 	}
+	// Execution containers hold human CLI credentials (ptone/scion#8812 §3.4 S4):
+	// port exposure and TCP port access are refused. Only ActionPortAccess
+	// (TCP streams via proxy or tunnel) is refused here; ActionAttach (PTY/SSH)
+	// routes through authorizeAgentTargetAction below.
+	if action == ActionPortAccess && isShellAgent(agent) {
+		return fmt.Errorf("%w: execution container: port access is not allowed", errConduitForbidden)
+	}
 	if authzAction == ActionAttach {
 		// The same decision every attach-gated route makes (PTY, keys).
 		if denial := s.authorizeAgentTargetAction(ctx, identity, agent, ActionAttach); denial != nil {
@@ -261,6 +268,9 @@ func conduitPTYTarget(params map[string]string) error {
 // target: never a reserved port or one on the operator deny-list, and
 // either exposed by the agent or on the operator allow-list.
 func (s *Server) authorizeConduitTCPTarget(agent *store.Agent, port int) error {
+	if isShellAgent(agent) {
+		return fmt.Errorf("%w: execution container: port access is not allowed", errConduitForbidden)
+	}
 	if reason := deniedExposedPorts[port]; reason != "" {
 		return fmt.Errorf("%w: port %d is reserved for %s", errConduitForbidden, port, reason)
 	}

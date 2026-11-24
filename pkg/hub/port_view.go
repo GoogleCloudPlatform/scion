@@ -319,7 +319,7 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.Warn("Port view: agent lookup failed", "error", err)
 	}
-	if err != nil || agent == nil || agent.ID != grant.AgentID || !agent.DeletedAt.IsZero() {
+	if err != nil || agent == nil || agent.ID != grant.AgentID || !agent.DeletedAt.IsZero() || isShellAgent(agent) {
 		unusable()
 		return
 	}

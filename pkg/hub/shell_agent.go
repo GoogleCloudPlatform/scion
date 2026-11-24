@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -24,6 +25,26 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// patchBodyHasOwnerField reports whether a raw JSON PATCH body contains an
+// ownerId or owner_id top-level key (case-insensitive, matching encoding/json).
+// Used by applyAgentUpdate to explicitly refuse ownership transfer attempts on
+// execution containers (ptone/scion#8812 §3.4 S8).
+func patchBodyHasOwnerField(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return false
+	}
+	for k := range raw {
+		if strings.EqualFold(k, "ownerId") || strings.EqualFold(k, "owner_id") {
+			return true
+		}
+	}
+	return false
+}
 
 // isShellAgent reports whether agent uses the reserved built-in "shell"
 // harness config (config.ShellHarnessConfigName).

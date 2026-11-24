@@ -4862,6 +4862,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
+	// Execution containers hold human CLI credentials (ptone/scion#8812 §3.4 S8):
+	// ownership cannot be changed. Refuse any PATCH that attempts to set or
+	// clear ownerId/owner_id on an execution container.
+	if isShellAgent(agent) && patchBodyHasOwnerField(body) {
+		writeForbidden(w, "execution container: ownership cannot be changed")
+		return
+	}
+
 	// presentConfigKeys mirrors the keys present in the request's raw
 	// "config" JSON object, for recordExplicitEdits' "present keys only"
 	// rule (see its doc comment). Left nil (and therefore inert) when
