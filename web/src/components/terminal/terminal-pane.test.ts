@@ -15,7 +15,14 @@ const showToast = vi.fn();
 vi.mock('../../utils/toast.js', () => ({ showToast }));
 
 const terminal = vi.hoisted(() => ({
-  instances: [] as Array<Record<'dispose' | 'reset' | 'focus' | 'blur', ReturnType<typeof vi.fn>>>,
+  instances: [] as Array<{
+    dispose: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+    focus: ReturnType<typeof vi.fn>;
+    blur: ReturnType<typeof vi.fn>;
+    element: HTMLElement | undefined;
+    modes: { mouseTrackingMode: string };
+  }>,
   /** When set, fit() resizes the latest terminal to this measured size. */
   fitSize: null as { cols: number; rows: number } | null,
 }));
@@ -31,7 +38,12 @@ vi.mock('@xterm/xterm', () => ({
     refresh = vi.fn();
     parser = { registerOscHandler: vi.fn() };
     loadAddon = vi.fn();
-    open = vi.fn();
+    element: HTMLElement | undefined;
+    modes = { mouseTrackingMode: 'none' };
+    open = vi.fn((parent: HTMLElement): void => {
+      this.element = document.createElement('div');
+      parent.append(this.element);
+    });
     onData = vi.fn();
     onBinary = vi.fn();
     attachCustomKeyEventHandler = vi.fn();
@@ -1879,5 +1891,120 @@ describe('clipboard guard (ptone/scion#7555)', () => {
     osc52(`c;${btoa('from the program')}`);
     await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('from the program'));
     expect(showToast).not.toHaveBeenCalled();
+  });
+});
+
+describe('touch-to-wheel scrolling', () => {
+  function touch(type: string, y: number, fingers = 1, x = 0): Event {
+    const ev = new Event(type, { cancelable: true, bubbles: true });
+    const list = Array.from({ length: fingers }, () => ({ clientX: x, clientY: y }));
+    Object.defineProperty(ev, 'touches', { value: list });
+    return ev;
+  }
+
+  /** The wheel events dispatched on the xterm element, which xterm.js reports. */
+  function wheels(el: HTMLElement): WheelEvent[] {
+    const seen: WheelEvent[] = [];
+    el.addEventListener('wheel', (ev) => seen.push(ev));
+    return seen;
+  }
+
+  it('turns a one-finger drag into wheel events only while mouse reporting is on', async () => {
+    await mountConnected();
+    const xt = terminal.instances[0];
+    const el = xt.element!;
+    Object.defineProperty(el, 'clientHeight', { value: 480 });
+    const seen = wheels(el);
+
+    // Mouse reporting off: xterm.js scrolls its own viewport.
+    const untouched = touch('touchmove', 200);
+    el.dispatchEvent(touch('touchstart', 300));
+    el.dispatchEvent(untouched);
+    expect(seen).toHaveLength(0);
+    expect(untouched.defaultPrevented).toBe(false);
+    expect(el.style.touchAction).toBe('');
+
+    xt.modes.mouseTrackingMode = 'any';
+    el.dispatchEvent(touch('touchstart', 300));
+    // The browser must not pan vertically, but may still pan sideways and
+    // pinch-zoom.
+    expect(el.style.touchAction).toBe('pan-x pinch-zoom');
+    const move = touch('touchmove', 250);
+    el.dispatchEvent(move);
+    expect(move.defaultPrevented).toBe(true);
+    // The finger moved up 50px over 20px rows: two notches down.
+    expect(seen.map((w) => [w.deltaY, w.deltaMode])).toEqual([
+      [1, WheelEvent.DOM_DELTA_LINE],
+      [1, WheelEvent.DOM_DELTA_LINE],
+    ]);
+    // The 10px left over carries into the next move; down is wheel-up.
+    el.dispatchEvent(touch('touchmove', 280));
+    expect(seen.slice(2).map((w) => w.deltaY)).toEqual([-1]);
+
+    // A second finger is a pinch-zoom, which belongs to the browser.
+    seen.length = 0;
+    const pinch = touch('touchmove', 100, 2);
+    el.dispatchEvent(pinch);
+    el.dispatchEvent(touch('touchmove', 50));
+    expect(seen).toHaveLength(0);
+    expect(pinch.defaultPrevented).toBe(false);
+
+    // The application turns mouse reporting off during a drag.
+    el.dispatchEvent(touch('touchstart', 300));
+    xt.modes.mouseTrackingMode = 'none';
+    el.dispatchEvent(touch('touchmove', 200));
+    expect(seen).toHaveLength(0);
+    el.dispatchEvent(touch('touchend', 200, 0));
+    expect(el.style.touchAction).toBe('');
+  });
+
+  it('leaves a horizontal drag to the browser, and takes a drag that starts vertical', async () => {
+    await mountConnected();
+    const xt = terminal.instances[0];
+    const el = xt.element!;
+    Object.defineProperty(el, 'clientHeight', { value: 480 });
+    const seen = wheels(el);
+    xt.modes.mouseTrackingMode = 'any';
+
+    // Sideways first: the whole gesture is the browser's, also once it
+    // turns vertical.
+    el.dispatchEvent(touch('touchstart', 300, 1, 100));
+    const sideways = touch('touchmove', 305, 1, 160);
+    const thenDown = touch('touchmove', 400, 1, 160);
+    el.dispatchEvent(sideways);
+    el.dispatchEvent(thenDown);
+    expect(seen).toHaveLength(0);
+    expect(sideways.defaultPrevented).toBe(false);
+    expect(thenDown.defaultPrevented).toBe(false);
+    el.dispatchEvent(touch('touchend', 400, 0));
+
+    // A move inside the slop decides nothing and is not consumed.
+    el.dispatchEvent(touch('touchstart', 300, 1, 100));
+    const tiny = touch('touchmove', 302, 1, 101);
+    el.dispatchEvent(tiny);
+    expect(tiny.defaultPrevented).toBe(false);
+    expect(seen).toHaveLength(0);
+    // Vertical first: it stays a scroll when the finger drifts sideways.
+    const down = touch('touchmove', 345, 1, 104);
+    const drift = touch('touchmove', 350, 1, 200);
+    el.dispatchEvent(down);
+    el.dispatchEvent(drift);
+    expect(down.defaultPrevented).toBe(true);
+    expect(drift.defaultPrevented).toBe(true);
+    // 50px down over 20px rows: two notches up.
+    expect(seen.map((w) => w.deltaY)).toEqual([-1, -1]);
+  });
+
+  it('removes its listeners when the terminal is disposed', async () => {
+    await mountConnected();
+    const xt = terminal.instances[0];
+    const el = xt.element!;
+    xt.modes.mouseTrackingMode = 'any';
+    page.dispose();
+    const move = touch('touchmove', 100);
+    el.dispatchEvent(touch('touchstart', 300));
+    el.dispatchEvent(move);
+    expect(move.defaultPrevented).toBe(false);
+    expect(el.style.touchAction).toBe('');
   });
 });
