@@ -384,8 +384,8 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 
 	// Phase 5 dual-write: resolve-or-create conversation for broker-inbound
 	// messages. Skip broadcasts — they are ephemeral and do not belong to a
-	// conversation. Resolution errors under write-deny now return 409 BEFORE
-	// dispatch (DEF-135 consequence 1: fail-closed, retry-safe).
+	// conversation. Resolution errors return 409 BEFORE dispatch (DEF-135
+	// consequence 1: fail-closed, retry-safe).
 	var convFromPhase5 *messaging.ConversationResult
 	if !req.Message.Broadcasted {
 		var convErr error
@@ -816,8 +816,8 @@ func resolveSenderUserID(ctx context.Context, st store.Store, senderID, sender s
 // Returns (nil, nil) when resolution is inapplicable (e.g. missing
 // senderUserID for a DM, or empty agentID).
 // Returns (result, nil) on success.
-// Returns (nil, err) when resolution fails — the caller must handle
-// write-deny semantics.
+// Returns (nil, err) when resolution fails — the caller must deny the
+// message rather than dispatching without a conversation.
 func (s *Server) resolvePhase5Conversation(
 	ctx context.Context,
 	threadID, projectID, senderUserID, agentID, channel string,

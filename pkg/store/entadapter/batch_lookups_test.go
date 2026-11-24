@@ -82,49 +82,6 @@ func seedLatestMessageMix(t *testing.T, s *MessageStore, keys []string, key func
 	}
 }
 
-func TestLatestMessagesByThreadIDs_MatchesListMessages(t *testing.T) {
-	withBatchLookupSize(t, 2)
-	s := newTestMessageStore(t)
-	ctx := context.Background()
-
-	keys := make([]string, 0, 10)
-	for i := 0; i < 10; i++ {
-		keys = append(keys, fmt.Sprintf("dm:agent:%d:user:u", i))
-	}
-	seedLatestMessageMix(t, s, keys, func(m *store.Message, k string) { m.ThreadID = k })
-
-	for _, opts := range []store.LatestMessageOptions{
-		{Channel: "web", ExcludeType: messages.TypeMention},
-		{Channel: "web"},
-		{},
-	} {
-		got, err := s.LatestMessagesByThreadIDs(ctx, append(keys, "", "dm:none"), opts)
-		require.NoError(t, err)
-		for _, k := range keys {
-			want, err := s.ListMessages(ctx, store.MessageFilter{Channel: opts.Channel,
-				ExcludeType: opts.ExcludeType, ThreadID: k}, store.ListOptions{Limit: 1, SkipTotalCount: true})
-			require.NoError(t, err)
-			if len(want.Items) == 0 {
-				assert.NotContains(t, got, k, "opts %+v key %s", opts, k)
-				continue
-			}
-			require.Contains(t, got, k, "opts %+v key %s", opts, k)
-			assert.Equal(t, want.Items[0].ID, got[k].ID, "opts %+v key %s", opts, k)
-		}
-		assert.NotContains(t, got, "")
-		assert.NotContains(t, got, "dm:none")
-	}
-
-	// The default scope hides groups 3 and 4 (mod 5) entirely.
-	got, err := s.LatestMessagesByThreadIDs(ctx, keys, store.LatestMessageOptions{Channel: "web", ExcludeType: messages.TypeMention})
-	require.NoError(t, err)
-	assert.Len(t, got, 6)
-
-	empty, err := s.LatestMessagesByThreadIDs(ctx, nil, store.LatestMessageOptions{})
-	require.NoError(t, err)
-	assert.Empty(t, empty)
-}
-
 func TestLatestMessagesByConversationIDs_MatchesListMessages(t *testing.T) {
 	withBatchLookupSize(t, 3)
 	s := newTestMessageStore(t)

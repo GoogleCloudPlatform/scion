@@ -188,13 +188,6 @@ type latestMessagesFaultStore struct {
 
 var errLatestMessagesFault = errors.New("injected latest-messages fault")
 
-func (s *latestMessagesFaultStore) LatestMessagesByThreadIDs(ctx context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
-	if s.fault.Active() {
-		return nil, errLatestMessagesFault
-	}
-	return s.Store.LatestMessagesByThreadIDs(ctx, ids, opts)
-}
-
 func (s *latestMessagesFaultStore) LatestMessagesByConversationIDs(ctx context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
 	if s.fault.Active() {
 		return nil, errLatestMessagesFault

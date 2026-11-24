@@ -109,11 +109,6 @@ func (s *dmCountingStore) GetConversationsByExternalRefs(ctx context.Context, su
 	return s.Store.GetConversationsByExternalRefs(ctx, surface, refs)
 }
 
-func (s *dmCountingStore) LatestMessagesByThreadIDs(ctx context.Context, ids []string, o store.LatestMessageOptions) (map[string]*store.Message, error) {
-	s.c.inc("LatestMessagesByThreadIDs")
-	return s.Store.LatestMessagesByThreadIDs(ctx, ids, o)
-}
-
 func (s *dmCountingStore) LatestMessagesByConversationIDs(ctx context.Context, ids []string, o store.LatestMessageOptions) (map[string]*store.Message, error) {
 	s.c.inc("LatestMessagesByConversationIDs")
 	return s.Store.LatestMessagesByConversationIDs(ctx, ids, o)

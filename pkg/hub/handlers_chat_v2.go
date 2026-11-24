@@ -2313,8 +2313,8 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 	}
 
-	// Phase 9b(ii): render the delivery envelope from the persisted message
-	// row and conversation result when the envelope switch is ON.
+	// Render the delivery envelope from the persisted message row and
+	// conversation result.
 	// Additive model: the primary always gets IsMention=false (type:"message").
 	// When multiple agents are engaged, CoAddressees lists all of them so
 	// the primary's envelope includes a "to" field naming the full group.
@@ -3400,8 +3400,8 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	}
 
 	// The history selector: the web chat's channel (every channel for a
-	// project visitor's own DM) plus the conversation-ID or legacy
-	// thread-ID match chosen by the read switch (resolveChatReadTarget).
+	// project visitor's own DM) plus the conversation-ID match from
+	// resolveChatReadTarget.
 	target, rerr := s.resolveChatReadTarget(ctx, wcs, key, topic, GetIdentityFromContext(ctx))
 	if rerr != nil {
 		// A never-used DM (chatReadAbsent) is an empty page.
@@ -3409,8 +3409,8 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	filter := target.Filter
-	// historyConvID is the conversation the page is listed by, when the
-	// envelope switch resolved one; reply previews are matched against it.
+	// historyConvID is the conversation the page is listed by; reply
+	// previews are matched against it.
 	historyConvID := target.ConversationID
 	// No history caller reads totalCount, and counting costs a scan of
 	// the whole conversation on every page, so the page skips it
@@ -4063,9 +4063,8 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	// The watermark must be a persisted message of this conversation:
 	// clients must never set a client-local placeholder, and a message of
 	// another conversation gets the same answer as a missing one. History
-	// lists by ConversationID when the envelope switch is on, and a visible
-	// row's ThreadID may then differ from key, so a match on either counts
-	// (sameConversation).
+	// lists by ConversationID, and a visible row's ThreadID may differ
+	// from key, so a match on either counts (sameConversation).
 	const watermarkNotInConversation = "messageId does not refer to a message in this conversation"
 	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
 	if err != nil {
@@ -4864,9 +4863,9 @@ var nativeDMMessageScope = store.LatestMessageOptions{Channel: "web", ExcludeTyp
 // nativeDMLastMessages returns the last visible message of each DM for the
 // DM list — for every key, the message conversationRecentMessages(key,
 // isDM, limit 1) would return — with a constant number of store queries:
-// one latest-message lookup, plus one conversation lookup when the
-// conversation envelope switch is on. The result maps a conversation key to
-// its last visible message; keys with no visible message are absent.
+// one conversation lookup plus one latest-message lookup. The result maps
+// a conversation key to its last visible message; keys with no visible
+// message are absent.
 //
 // A failed batched read is logged and degrades rather than failing the
 // list: every DM it covered is listed without last-message enrichment.

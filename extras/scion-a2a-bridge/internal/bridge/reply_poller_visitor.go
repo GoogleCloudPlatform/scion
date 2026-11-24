@@ -35,10 +35,7 @@ import (
 //
 // The page is the conversation's newest messages, across every channel,
 // followed by its cursor. The anchor and the selection rule are the same as
-// for a local caller (scanPages, selectReply). With the hub's conversation
-// envelope switch off, the page lists only messages filed under the
-// conversation key as a thread, which the bridge's send is not: the anchor
-// is then never seen and the call times out.
+// for a local caller (scanPages, selectReply).
 
 // visitorDMReader reads a federated user's own direct conversation with an
 // agent.

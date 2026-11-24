@@ -156,8 +156,7 @@ type routingResult struct {
 	// and it was authorized (DEF-138 Rule 1). False for derived conversations (Rules 2/3).
 	Asserted bool
 	// ConvResult holds the full conversation metadata when S4 resolved or
-	// created a conversation. Nil if conversation resolution failed (write-deny
-	// disabled) or was skipped.
+	// created a conversation. Nil if conversation resolution was skipped.
 	ConvResult *messaging.ConversationResult
 
 	// Transport (S2 + S6 output).
@@ -855,9 +854,9 @@ func (s *Server) resolveOutboundRouting(
 
 	if convRefResolved {
 		if convResult == nil {
-			// ConversationRef was resolved (S3), but conversation resolution
-			// failed (S4). This can happen when write-deny is disabled.
-			// Log and continue — downstream persistence will also skip.
+			// ConversationRef was resolved (S3), but no conversation result
+			// was produced (S4). Log and continue — downstream persistence
+			// will also skip.
 			s.messageLog.Warn("DEF-160: conv-ref resolved but conversation not resolved; skipping S6 fixups")
 		} else {
 			switch convResult.Kind {
@@ -3330,8 +3329,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			messaging.RecordStep(ctx, "sse_published")
 		}
 
-		// Phase 9b(ii): render the delivery envelope from the persisted row
-		// and conversation result when the envelope switch is ON.
+		// Render the delivery envelope from the persisted row and
+		// conversation result.
 		// The attachments delivered with this message are planned for the
 		// agent once, before any render (ptone/scion#4596).
 		s.applyAttachmentPlan(ctx, agent, structuredMsg)
@@ -5049,8 +5048,7 @@ func (s *Server) decideKeyedPostSender(w http.ResponseWriter, r *http.Request, m
 		// for every sender kind, without evaluating the empty project. Any
 		// other failure is a direct key (a dm: thread_id, or the sender and
 		// recipient pair), which is not a post into a project's
-		// conversation: the resolution step refuses it with write-deny on,
-		// and otherwise goes on without a conversation.
+		// conversation and is refused during conversation resolution.
 		if msg.ThreadID != "" && !strings.HasPrefix(msg.ThreadID, "dm:") {
 			s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "thread post: conversation key not derived")
 			return false

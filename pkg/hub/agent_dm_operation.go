@@ -114,7 +114,7 @@ type AgentDMInput struct {
 	Metadata map[string]string
 
 	// ConversationID is the resolved conversation UUID. May be empty when
-	// conversation resolution was skipped or failed with write-deny OFF.
+	// conversation resolution was skipped.
 	ConversationID string
 
 	// ConvResult holds the full conversation metadata when resolution

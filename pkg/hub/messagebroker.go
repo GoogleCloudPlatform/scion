@@ -652,8 +652,8 @@ func notificationIDFromContext(ctx context.Context) string {
 }
 
 // userRecordLoggedKey marks an in-process user-message publish whose message
-// record was already written by the caller (e.g. createInboxMessage in the
-// federated G2 write-deny corner), so deliverToUser's early-return defer does
+// record was already written by the caller (e.g. createInboxMessage for a
+// non-UUID federated subscriber), so deliverToUser's early-return defer does
 // not write a duplicate record.
 type userRecordLoggedKey struct{}
 
@@ -905,7 +905,7 @@ func (p *MessageBrokerProxy) logUserMessageDelivered(projectID, topic string, st
 // storeMsg.ConversationID, logs the routing classification and runs the
 // DEF-3 consistency check. Broadcasts are skipped: they are ephemeral and
 // belong to no conversation. It reports false when the message must not be
-// stored (a resolution failure while write-deny is on). deliverToUser and a
+// stored (conversation resolution failed). deliverToUser and a
 // sending handler that stores the message itself (ptone/scion#4596,
 // decision D2) share it.
 func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context, projectID string, storeMsg *store.Message, msg *messages.StructuredMessage) bool {

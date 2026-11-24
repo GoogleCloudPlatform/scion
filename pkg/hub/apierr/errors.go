@@ -214,13 +214,11 @@ const (
 	// results").
 	ErrCodeOutcomeUnknown = "outcome_unknown"
 
-	// Conversation resolution error codes (Tranche G read-switch)
+	// Conversation resolution error codes
 
-	// ErrCodeConversationNotResolved is returned when the read-switch is ON
-	// but the conversation could not be resolved from the request parameters.
-	// This is a client-visible behaviour change: the endpoint returns a typed
-	// error instead of silently falling back to the legacy channel+thread
-	// filter. Status 409 — see G3 brief §3.
+	// ErrCodeConversationNotResolved is returned when the conversation could
+	// not be resolved from the request parameters. The endpoint returns a
+	// typed 409 error instead of falling back to a legacy filter.
 	ErrCodeConversationNotResolved = "conversation_not_resolved"
 
 	// ErrCodeUnsupportedCapability is returned when a request exercises a

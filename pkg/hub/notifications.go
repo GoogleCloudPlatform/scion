@@ -747,11 +747,10 @@ func (nd *NotificationDispatcher) currentChannelRegistry() *ChannelRegistry {
 // persistsViaInbox reports whether the notifier itself must write the inbox
 // row for sub. Without a broker it always does. With a broker, the broker's
 // deliverToUser persists the published message instead — except for a
-// federated (non-UUID) subscriber while G2 write-deny is ON: deliverToUser
-// cannot resolve a DM conversation for a non-UUID principal and, under
-// write-deny, drops the message, whereas createInboxMessage carries the G2
-// exemption for exactly this population. The rule is canPersistUserDM,
-// shared with deliverToUser.
+// federated (non-UUID) subscriber: deliverToUser cannot resolve a DM
+// conversation for a non-UUID principal and drops the message, whereas
+// createInboxMessage carries the exemption for this population. The rule is
+// canPersistUserDM, shared with deliverToUser.
 func (nd *NotificationDispatcher) persistsViaInbox(sub *store.NotificationSubscription) bool {
 	if nd.brokerProxy == nil {
 		return true

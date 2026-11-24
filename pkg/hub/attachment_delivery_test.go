@@ -601,3 +601,37 @@ func TestSetDispatcher_InstallsAttachmentIssuer(t *testing.T) {
 	_, ok := d.attachmentIssuer.(*attachmentDelivery)
 	require.True(t, ok, "SetDispatcher installs the attachment issuer")
 }
+
+// TestLegacyAttachmentCopy pins the dispatcher's legacy-copy helper for
+// unrendered messages carrying an AttachmentPlan: (a) deliverable inbox paths
+// appear in the copy without mutating the original (no aliasing), (b) a
+// withheld entry adds no path, and (c) a message that already has DeliveryText
+// rendered is returned unchanged.
+func TestLegacyAttachmentCopy(t *testing.T) {
+	deliverablePath := "~/.scion/inbox/a1/web.txt"
+	orig := &messages.StructuredMessage{
+		Msg: "hello",
+		AttachmentPlan: []messages.AttachmentPlanEntry{
+			{Name: "web.txt", InboxPath: deliverablePath, State: messages.AttachmentDeliverable},
+		},
+	}
+
+	cp := legacyAttachmentCopy(orig)
+	require.NotSame(t, orig, cp)
+	require.Equal(t, []string{deliverablePath}, cp.Attachments)
+	require.Empty(t, orig.Attachments, "the copy must not alias or mutate the original message")
+
+	// A withheld entry puts no path in the copy sent.
+	withheld := *orig
+	withheld.AttachmentPlan = []messages.AttachmentPlanEntry{
+		{Name: "web.txt", InboxPath: "~/.scion/inbox/x/web.txt", State: messages.AttachmentWithheld},
+	}
+	require.Empty(t, legacyAttachmentCopy(&withheld).Attachments)
+
+	// A message with DeliveryText already rendered is returned unchanged.
+	rendered := *orig
+	rendered.DeliveryText = "---BEGIN SCION MESSAGE---\n{}\n---END SCION MESSAGE---"
+	gotRendered := legacyAttachmentCopy(&rendered)
+	require.Same(t, &rendered, gotRendered)
+	require.Empty(t, gotRendered.Attachments)
+}

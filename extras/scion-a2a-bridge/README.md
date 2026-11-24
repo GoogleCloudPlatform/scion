@@ -379,7 +379,7 @@ The reply is the oldest message from the agent after the caller's message: a rep
 
 - **User access tokens** need the `inbox:read` scope and access to the agent's project. Without them the call is refused with: "This access token can't read your conversation with this agent (it needs the inbox:read scope and access to the agent's project); agent replies can't be returned."
 - **Legacy mode** (no caller identity) needs `hub.user_id`: replies are read from the bridge admin user's conversation with the agent, and the Hub keys that conversation on the user ID. Without `hub.user_id` the call fails at once with "Your conversation with this agent can't be found; the agent's reply can't be returned."
-- **Federated users** are read through their own direct conversation's chat history, which needs the Hub's conversation envelope switch on (the default; the Hub also treats it as off when its messaging setting cannot be read). With it off, set `reply_poll.enabled: false`, or federated user calls time out.
+- **Federated users** are read through their own direct conversation's chat history.
 - The Hub must return the message ID of a send (`message_id`). With a Hub that does not, the bridge waits on pushed broker messages as before; on such a Hub, an agent reply pushed before the Hub has answered the send is not returned. A send the Hub delivered but did not store ends the call with "The hub did not record this message; the agent's reply can't be returned."
 
 ### Configuration

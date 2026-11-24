@@ -30,9 +30,8 @@ import (
 // The shared chat read-target resolver. Native history
 // (handleConversationHistory) and the starred-message routes both use it,
 // so the thread read check and the history selector (channel plus the
-// conversation-ID or legacy thread-ID match, chosen by the read switch)
-// cannot drift between them. Nothing here writes an HTTP response: each
-// caller maps a chatReadError to its own answer.
+// conversation-ID match) cannot drift between them. Nothing here writes
+// an HTTP response: each caller maps a chatReadError to its own answer.
 
 // chatReadErrorKind classifies a chatReadError.
 type chatReadErrorKind int
@@ -44,8 +43,8 @@ const (
 	chatReadNotFound chatReadErrorKind = iota + 1
 	// chatReadUnauthenticated: the request has no identity.
 	chatReadUnauthenticated
-	// chatReadAbsent: the read switch is on and the DM has no
-	// conversation yet (a never-used DM); its history is empty.
+	// chatReadAbsent: the DM has no conversation yet (a never-used DM);
+	// its history is empty.
 	chatReadAbsent
 	// chatReadFailure: status, code and message describe the answer.
 	chatReadFailure
@@ -109,10 +108,9 @@ type chatReadTarget struct {
 	// star routes set an agent DM's peer project (starConversation).
 	Project *store.Project
 	// Filter selects the conversation's history messages: Channel plus
-	// ConversationID (read switch on) or ThreadID (off).
+	// ConversationID.
 	Filter store.MessageFilter
-	// ConversationID is the conversation the history is listed by when
-	// the read switch resolved one ("" otherwise).
+	// ConversationID is the resolved conversation UUID that history is listed by.
 	ConversationID string
 }
 
@@ -261,6 +259,6 @@ func (s *Server) resolveChatReadTarget(ctx context.Context, wcs WebChatStore, ke
 		slog.Warn("read-switch: conversation not resolved, returning error",
 			"key", key, "is_dm", isDM)
 		return target, &chatReadError{kind: chatReadFailure, status: http.StatusConflict, code: ErrCodeConversationNotResolved,
-			message: "Conversation could not be resolved for this key; the read-switch is ON but no matching conversation record exists"}
+			message: "Conversation could not be resolved for this key; no matching conversation record exists"}
 	}
 }

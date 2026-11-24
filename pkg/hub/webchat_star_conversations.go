@@ -26,17 +26,16 @@ import (
 // The Starred rail's store query: the distinct conversations in which a
 // user has at least one live star.
 //
-// A star counts for a conversation when its message still exists, is a
-// message of the conversation under the history selector the read switch
-// chooses, exactly as the other star paths select it (resolveChatReadTarget):
-// with the switch off, messages.thread_id equals the star's conversation
-// key; with it on, messages.conversation_id is the key's conversation (the
-// topic's conversation_id for a thread, none when it is empty; the live
-// native conversation whose external_ref is the key for a DM). It must also
-// be in the history channel and not soft-deleted, and a thread must be a
-// live topic. A promotion moves both selector columns with the star. Stars are grouped by
-// that key before the page is cut, so a conversation appears once
-// whatever its number of stars, and a page boundary never splits one.
+// A star counts for a conversation when its message still exists and is a
+// message of the conversation under the history selector
+// (resolveChatReadTarget): messages.conversation_id is the key's
+// conversation (the topic's conversation_id for a thread, none when it is
+// empty; the live native conversation whose external_ref is the key for a
+// DM). It must also be in the history channel and not soft-deleted, and a
+// thread must be a live topic. A promotion moves both selector columns with
+// the star. Stars are grouped by that key before the page is cut, so a
+// conversation appears once whatever its number of stars, and a page
+// boundary never splits one.
 //
 // The order is deterministic and keyset-paged on values the query itself
 // computes, so the position a page ends at is exactly the position the

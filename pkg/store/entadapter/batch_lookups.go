@@ -119,27 +119,6 @@ func (s *ConversationStore) GetConversationsByExternalRefs(ctx context.Context, 
 	return result, nil
 }
 
-// LatestMessagesByThreadIDs returns the newest matching message per thread.
-func (s *MessageStore) LatestMessagesByThreadIDs(ctx context.Context, threadIDs []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
-	keys := make([]string, 0, len(threadIDs))
-	for _, id := range threadIDs {
-		if id != "" {
-			keys = append(keys, id)
-		}
-	}
-	result := make(map[string]*store.Message, len(keys))
-	for _, batch := range chunkKeys(keys, batchLookupSize) {
-		msgs, err := s.latestMessagesPerGroup(ctx, message.FieldThreadID, message.ThreadIDIn(batch...), opts)
-		if err != nil {
-			return nil, err
-		}
-		for _, m := range msgs {
-			result[m.ThreadID] = m
-		}
-	}
-	return result, nil
-}
-
 // LatestMessagesByConversationIDs returns the newest matching message per
 // conversation.
 func (s *MessageStore) LatestMessagesByConversationIDs(ctx context.Context, conversationIDs []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {

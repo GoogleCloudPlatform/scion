@@ -327,7 +327,7 @@ func (s *Server) resolveStarDM(r *http.Request, call starCall, permissionID, key
 	}
 	// Only the canonical key (sorted slots, canonical IDs) is accepted, so a
 	// stored DM key is always the external ref of the DM's native
-	// conversation, the form the read switch and the Starred rail look up.
+	// conversation, the form chat history and the Starred rail look up.
 	if canonical, err := canonicalStarDMKey(key); err != nil || canonical != key {
 		return starConversation{}, "", &chatReadError{kind: chatReadFailure, status: http.StatusBadRequest,
 			code: ErrCodeInvalidRequest, message: "DM key is not in canonical form"}
@@ -397,7 +397,7 @@ func canonicalStarDMKey(key string) (string, error) {
 // resolveStarConversation resolves a conversation for a star route or
 // writes the refusal: the shared 404 for a missing or unreadable
 // conversation (the reason is logged), 400 for a malformed DM key, 500
-// when a lookup failed, and the read switch's own errors otherwise.
+// when a lookup failed, and the read-target resolver's own errors otherwise.
 func (s *Server) resolveStarConversation(w http.ResponseWriter, r *http.Request, call starCall, permissionID, key string) (starConversation, bool) {
 	sc, refusal, rerr := s.resolveStarScope(r, call, permissionID, key)
 	if rerr != nil {

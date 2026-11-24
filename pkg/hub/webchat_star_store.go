@@ -36,8 +36,8 @@ import (
 
 // StarSelector is the native history scope a starred message must be in:
 // the conversation key the star is listed under, the history channel, and
-// the conversation selector history uses (the conversation ID when the
-// read switch resolved one, else the legacy thread ID).
+// the conversation selector history uses (the conversation ID when set,
+// else the thread ID).
 type StarSelector struct {
 	// ConversationKey is the topic ID (or exact DM key) the star is
 	// listed under.
