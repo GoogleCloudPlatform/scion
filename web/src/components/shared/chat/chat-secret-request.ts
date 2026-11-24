@@ -91,6 +91,12 @@ function normalizeToLf(value: string): string {
   return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
+function isUndoRedoShortcut(e: KeyboardEvent): boolean {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return false;
+  const key = e.key.toLowerCase();
+  return key === 'z' || key === 'y';
+}
+
 function detectLineEndingStyle(value: string): LineEndingStyle {
   if (!value.includes('\r')) {
     return 'lf';
@@ -886,12 +892,16 @@ export class ScionChatSecretRequest extends LitElement {
   }
 
   private onMaskedKeydown(rowId: string, e: KeyboardEvent): void {
+    if (isUndoRedoShortcut(e)) {
+      e.preventDefault();
+      return;
+    }
     if ((e.key === 'Backspace' || e.key === 'Delete') && this.isRowCaptured(rowId)) {
       this.clearCapturedRow(rowId, e.target as HTMLInputElement | null, e);
     }
   }
 
-  private extractBeforeInputText(e: InputEvent): string | null {
+  private extractBeforeInputText(e: InputEvent, includeLineBreaks: boolean): string | null {
     switch (e.inputType) {
       case 'insertFromPaste':
       case 'insertFromDrop':
@@ -900,19 +910,23 @@ export class ScionChatSecretRequest extends LitElement {
         return e.dataTransfer?.getData('text/plain') ?? e.data ?? '';
       case 'insertLineBreak':
       case 'insertParagraph':
-        return '\n';
+        return includeLineBreaks ? '\n' : null;
       default:
         return null;
     }
   }
 
   private onMaskedBeforeInput(rowId: string, e: InputEvent): void {
+    if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') {
+      e.preventDefault();
+      return;
+    }
     const target = e.target as HTMLInputElement | null;
     if (e.inputType.startsWith('delete') && this.isRowCaptured(rowId)) {
       this.clearCapturedRow(rowId, target, e);
       return;
     }
-    const incoming = this.extractBeforeInputText(e);
+    const incoming = this.extractBeforeInputText(e, true);
     if (incoming === null) return;
     this.applyMaskedInsert(rowId, target, incoming, e);
   }
@@ -929,6 +943,12 @@ export class ScionChatSecretRequest extends LitElement {
     this.applyMaskedInsert(rowId, e.target as HTMLInputElement | null, dropped, e);
   }
 
+  private onRevealedKeydown(e: KeyboardEvent): void {
+    if (isUndoRedoShortcut(e)) {
+      e.preventDefault();
+    }
+  }
+
   private applyRevealedInsert(
     rowId: string,
     target: HTMLTextAreaElement | null,
@@ -939,7 +959,7 @@ export class ScionChatSecretRequest extends LitElement {
       e.preventDefault();
       return;
     }
-    if (!incoming.includes('\r')) {
+    if (!incoming.includes('\r') && !incoming.includes('\n')) {
       return;
     }
 
@@ -973,7 +993,13 @@ export class ScionChatSecretRequest extends LitElement {
   }
 
   private onRevealedBeforeInput(rowId: string, e: InputEvent): void {
-    const incoming = this.extractBeforeInputText(e);
+    if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') {
+      e.preventDefault();
+      return;
+    }
+    // Typing Enter (insertLineBreak/insertParagraph) is handled natively so
+    // onValueInput preserves the row's current line-ending style (e.g. CRLF).
+    const incoming = this.extractBeforeInputText(e, false);
     if (incoming === null) return;
     this.applyRevealedInsert(rowId, e.target as HTMLTextAreaElement | null, incoming, e);
   }
@@ -1413,6 +1439,7 @@ export class ScionChatSecretRequest extends LitElement {
                   ?disabled=${disabled}
                   ?readonly=${isReadonlyRevealed}
                   .value=${textareaValue}
+                  @keydown=${(e: KeyboardEvent): void => this.onRevealedKeydown(e)}
                   @beforeinput=${(e: InputEvent): void => this.onRevealedBeforeInput(row.rowId, e)}
                   @paste=${(e: ClipboardEvent): void => this.onRevealedPaste(row.rowId, e)}
                   @drop=${(e: DragEvent): void => this.onRevealedDrop(row.rowId, e)}

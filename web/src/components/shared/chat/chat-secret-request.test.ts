@@ -1984,4 +1984,103 @@ describe('scion-chat-secret-request', () => {
     expect(sent2.values).toEqual({ REV_PASTE: 'L1\nL2\r\nX' });
     el2.remove();
   });
+
+  it('splices LF pasted into a CRLF revealed textarea raw (transitioning to mixed readonly) and blocks undo/redo', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        rows: [
+          makeRow({
+            rowId: 'row-1',
+            key: 'LF_IN_CRLF',
+            secretType: 'file',
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-24T00:05:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+        ],
+        responseMessageId: 'resp-lf-in-crlf',
+        replayed: false,
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'row-1', key: 'LF_IN_CRLF', secretType: 'file' })],
+    });
+    const input = el.shadowRoot!.querySelector('input[data-key="LF_IN_CRLF"]') as HTMLInputElement;
+
+    // Undo/redo blocked on masked input (both beforeinput and keydown)
+    const maskedUndoBi = new InputEvent('beforeinput', {
+      inputType: 'historyUndo',
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(maskedUndoBi);
+    expect(maskedUndoBi.defaultPrevented).toBe(true);
+
+    const maskedUndoKd = new KeyboardEvent('keydown', {
+      key: 'z',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(maskedUndoKd);
+    expect(maskedUndoKd.defaultPrevented).toBe(true);
+
+    // Seed CRLF value, reveal, paste LF "\nL1\nL2" at end -> mixed readonly, exact bytes
+    const crlfPaste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(crlfPaste, 'clipboardData', {
+      value: { getData: () => 'AAA\r\nBBB' },
+    });
+    input.dispatchEvent(crlfPaste);
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement).click();
+    await el.updateComplete;
+    const ta = el.shadowRoot!.querySelector(
+      'textarea[data-key="LF_IN_CRLF"]'
+    ) as HTMLTextAreaElement;
+
+    const revRedoBi = new InputEvent('beforeinput', {
+      inputType: 'historyRedo',
+      bubbles: true,
+      cancelable: true,
+    });
+    ta.dispatchEvent(revRedoBi);
+    expect(revRedoBi.defaultPrevented).toBe(true);
+
+    const revRedoKd = new KeyboardEvent('keydown', {
+      key: 'y',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    ta.dispatchEvent(revRedoKd);
+    expect(revRedoKd.defaultPrevented).toBe(true);
+
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    const lfPaste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(lfPaste, 'clipboardData', { value: { getData: () => '\nL1\nL2' } });
+    ta.dispatchEvent(lfPaste);
+    await el.updateComplete;
+
+    expect(lfPaste.defaultPrevented).toBe(true);
+    expect(ta.readOnly).toBe(true);
+    expect(el.shadowRoot!.querySelector('[data-testid="mixed-line-endings-note"]')).not.toBeNull();
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    const sent = JSON.parse(
+      (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string
+    ) as {
+      values: Record<string, string>;
+    };
+    expect(sent.values).toEqual({ LF_IN_CRLF: 'AAA\r\nBBB\nL1\nL2' });
+  });
 });

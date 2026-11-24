@@ -845,7 +845,7 @@ for (const secretType of ['environment', 'variable', 'file'] as const) {
                 new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
               );
             }, payload.value);
-            if (!payload.value.includes('\r')) {
+            if (payload.name === 'single-line') {
               await textarea.fill(payload.value);
             }
             if (payload.name === 'mixed') {
@@ -955,5 +955,147 @@ for (const secretType of ['environment', 'variable', 'file'] as const) {
     await page.locator('sl-button.submit-btn').click();
     await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
     expect(fulfills.get(mixMsgId)?.values).toEqual({ [key]: 'L1\nL2\r\nX' });
+
+    // LF pasted into a CRLF value is spliced raw -> becomes mixed readonly and submits verbatim
+    const lfIntoCrlfMsgId = `mx-${secretType}-crlf-then-lf-paste`;
+    await page.goto(`/secret-requests/${lfIntoCrlfMsgId}`, { waitUntil: 'domcontentloaded' });
+    await input.click();
+    await page.keyboard.insertText('AAA\r\nBBB\r\nCCC');
+    await toggleBtn.click();
+    await expect(textarea).toBeVisible();
+    await textarea.evaluate((el: HTMLTextAreaElement) => {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+      const dt = new DataTransfer();
+      dt.setData('text/plain', '\nL1\nL2');
+      el.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+      );
+    });
+    await expect(textarea).toHaveAttribute('readonly', '');
+    await expect(page.locator('[data-testid="mixed-line-endings-note"]')).toBeVisible();
+    await toggleBtn.click();
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills.get(lfIntoCrlfMsgId)?.values).toEqual({
+      [key]: 'AAA\r\nBBB\r\nCCC\nL1\nL2',
+    });
+
+    // Mid-value paste into CRLF + typing (pins displayOffsetToRawOffset and caret placement)
+    const midCrlfMsgId = `mx-${secretType}-crlf-mid-paste`;
+    await page.goto(`/secret-requests/${midCrlfMsgId}`, { waitUntil: 'domcontentloaded' });
+    await input.click();
+    await page.keyboard.insertText('AAA\r\nBBB\r\nCCC');
+    await toggleBtn.click();
+    await expect(textarea).toBeVisible();
+    await textarea.evaluate((el: HTMLTextAreaElement) => {
+      el.focus();
+      // Display is "AAA\nBBB\nCCC"; offset 5 is "AAA\nB|BB" (raw offset 6)
+      el.setSelectionRange(5, 5);
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'x\r\ny');
+      el.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+      );
+    });
+    await page.keyboard.type('Q');
+    await toggleBtn.click();
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills.get(midCrlfMsgId)?.values).toEqual({
+      [key]: 'AAA\r\nBx\r\nyQBB\r\nCCC',
+    });
+
+    // Selection spanning a CRLF replaced by pasting CRLF (pins both start & end offset mapping)
+    const spanCrlfMsgId = `mx-${secretType}-crlf-span-paste`;
+    await page.goto(`/secret-requests/${spanCrlfMsgId}`, { waitUntil: 'domcontentloaded' });
+    await input.click();
+    await page.keyboard.insertText('AAA\r\nBBB\r\nCCC');
+    await toggleBtn.click();
+    await expect(textarea).toBeVisible();
+    await textarea.evaluate((el: HTMLTextAreaElement) => {
+      el.focus();
+      // Display is "AAA\nBBB\nCCC"; offsets 2..5 select "A\nB" (raw offsets 2..6)
+      el.setSelectionRange(2, 5);
+      const dt = new DataTransfer();
+      dt.setData('text/plain', '1\r\n2');
+      el.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+      );
+    });
+    await toggleBtn.click();
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills.get(spanCrlfMsgId)?.values).toEqual({
+      [key]: 'AA1\r\n2BB\r\nCCC',
+    });
+
+    // Backspace and Cut across CRLFs in a CRLF value preserve remaining CRLFs
+    const delCrlfMsgId = `mx-${secretType}-crlf-delete-cut`;
+    await page.goto(`/secret-requests/${delCrlfMsgId}`, { waitUntil: 'domcontentloaded' });
+    await input.click();
+    await page.keyboard.insertText('AAA\r\nBBB\r\nCCC\r\nDDD');
+    await toggleBtn.click();
+    await expect(textarea).toBeVisible();
+    // Backspace across the first CRLF (display offset 4 -> "AAABBB\nCCC\nDDD")
+    await textarea.evaluate((el: HTMLTextAreaElement) => {
+      el.focus();
+      el.setSelectionRange(4, 4);
+    });
+    await page.keyboard.press('Backspace');
+    // Cut across the second CRLF ("B\nC", display offsets 5..8 -> "AAABBCC\nDDD")
+    await textarea.evaluate((el: HTMLTextAreaElement) => {
+      el.focus();
+      el.setSelectionRange(5, 8);
+    });
+    await page.keyboard.press('Control+x');
+    await toggleBtn.click();
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills.get(delCrlfMsgId)?.values).toEqual({
+      [key]: 'AAABBCC\r\nDDD',
+    });
+
+    // Undo/redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) is a no-op after masked and revealed paste
+    const undoMaskedMsgId = `mx-${secretType}-undo-masked`;
+    await page.goto(`/secret-requests/${undoMaskedMsgId}`, { waitUntil: 'domcontentloaded' });
+    await input.click();
+    await page.keyboard.type('start');
+    await input.evaluate((el) => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'L1\nL2');
+      el.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+      );
+    });
+    await page.keyboard.press('Control+z');
+    await page.keyboard.press('Control+Shift+z');
+    await page.keyboard.press('Control+y');
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills.get(undoMaskedMsgId)?.values).toEqual({ [key]: 'startL1\nL2' });
+
+    const undoRevMsgId = `mx-${secretType}-undo-revealed`;
+    await page.goto(`/secret-requests/${undoRevMsgId}`, { waitUntil: 'domcontentloaded' });
+    await toggleBtn.click();
+    await expect(textarea).toBeVisible();
+    await textarea.click();
+    await page.keyboard.type('start');
+    await textarea.evaluate((el: HTMLTextAreaElement) => {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'AAA\r\nBBB\r\nCCC');
+      el.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+      );
+    });
+    await page.keyboard.press('Control+z');
+    await page.keyboard.press('Control+Shift+z');
+    await page.keyboard.press('Control+y');
+    await toggleBtn.click();
+    await page.locator('sl-button.submit-btn').click();
+    await expect(page.locator('scion-chat-secret-request')).toContainText('Fulfilled by');
+    expect(fulfills.get(undoRevMsgId)?.values).toEqual({ [key]: 'startAAA\r\nBBB\r\nCCC' });
   });
 }
