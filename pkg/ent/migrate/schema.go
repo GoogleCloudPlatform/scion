@@ -1387,7 +1387,7 @@ var (
 		{Name: "dismiss_reason", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "interpreted_by_agent_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "source_message_id", Type: field.TypeUUID, Nullable: true},
-		{Name: "surface", Type: field.TypeEnum, Enums: []string{"native", "decisions_page", "slack", "google_chat", "discord", "telegram", "teams", "other"}},
+		{Name: "surface", Type: field.TypeEnum, Enums: []string{"native", "decisions_page", "inbox", "slack", "google_chat", "discord", "telegram", "teams", "other"}},
 		{Name: "response_message_id", Type: field.TypeUUID},
 		{Name: "authorizing_user_id", Type: field.TypeString, Nullable: true},
 		{Name: "delegation_grant_id", Type: field.TypeString, Nullable: true},

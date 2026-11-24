@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,6 +133,38 @@ type InboxWaitingAgentPreview struct {
 	AgentSlug   string    `json:"agentSlug"`
 	Question    string    `json:"question"`
 	Since       time.Time `json:"since"`
+}
+
+// InboxDecisionChoice is one selectable option in an inline decision preview.
+type InboxDecisionChoice struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// InboxDecisionInline carries the inline-answer payload for single-decision
+// prompts the viewer can answer directly from the Inbox card.
+type InboxDecisionInline struct {
+	DecisionRowID string                `json:"decisionRowId"`
+	Choices       []InboxDecisionChoice `json:"choices"`
+	AllowsOther   bool                  `json:"allowsOther"`
+}
+
+// InboxDecisionPreview is one preview item in the "decisions" category.
+type InboxDecisionPreview struct {
+	ID                string               `json:"id"`
+	ProjectID         string               `json:"projectId"`
+	ProjectName       string               `json:"projectName"`
+	CreatedAt         time.Time            `json:"createdAt"`
+	Href              string               `json:"href"`
+	PromptMessageID   string               `json:"promptMessageId"`
+	ConversationLabel string               `json:"conversationLabel"`
+	AskerAgentName    string               `json:"askerAgentName"`
+	Question          string               `json:"question"`
+	DecisionCount     int                  `json:"decisionCount"`
+	AnswerMode        string               `json:"answerMode"`
+	CanAnswer         bool                 `json:"canAnswer"`
+	DisabledReason    string               `json:"disabledReason,omitempty"`
+	Inline            *InboxDecisionInline `json:"inline,omitempty"`
 }
 
 type inboxViewer struct {
@@ -277,7 +310,7 @@ func (s *Server) inboxSources() []inboxSourceEntry {
 		{key: InboxCategoryWaiting, run: s.inboxWaitingCategory},
 		{key: InboxCategoryReviews, run: inboxDisabledCategory("/artifacts?review_pending=1&owner=me")},
 		{key: InboxCategoryChat, run: inboxDisabledCategory("/chat?filter=unread")},
-		{key: InboxCategoryDecisions, run: inboxDisabledCategory("/profile/decisions?tab=pending")},
+		{key: InboxCategoryDecisions, run: s.inboxDecisionsCategory},
 	}
 }
 
@@ -296,6 +329,7 @@ func inboxDisabledCategory(href string) inboxSourceFunc {
 
 func (s *Server) buildInboxSummary(ctx context.Context, v inboxViewer, previews int, chatFilter string) InboxSummaryResponse {
 	ctx = withAuthzInputMemo(ctx)
+	ctx = withChatMemberProjectIDsMemo(ctx)
 	ctx, cancel := context.WithTimeout(ctx, s.chatSearchTimeout())
 	defer cancel()
 
@@ -563,5 +597,124 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 		Href:              href,
 		Previews:          items,
 		AgentIDs:          agentIDs,
+	}
+}
+
+func inboxDecisionPromptHref(set *decisionScopeSet, item classifiedOpenPrompt) string {
+	const fallback = "/profile/decisions?tab=pending"
+	p := item.raw
+	if set == nil || p == nil || !set.conversationAvailable[p.ChatKey] {
+		return fallback
+	}
+	if strings.HasPrefix(p.ChatKey, "dm:") {
+		if item.promptAvail && p.MessageID != "" {
+			return starDMPermalink(p.ChatKey, p.MessageID)
+		}
+		return "/chat/dm/" + strings.ReplaceAll(url.PathEscape(p.ChatKey), ":", "%3A")
+	}
+	if p.ProjectID == "" {
+		return fallback
+	}
+	if item.promptAvail && p.MessageID != "" {
+		return starPermalink(p.ProjectID, p.ChatKey, p.MessageID)
+	}
+	return "/chat/space/" + url.PathEscape(p.ProjectID) + "/thread/" + url.PathEscape(p.ChatKey)
+}
+
+func (s *Server) inboxDecisionsCategory(ctx context.Context, v inboxViewer, previews int, _ string) InboxCategory {
+	const href = "/profile/decisions?tab=pending"
+	if !s.experimentEnabled(experiments.Decisions) {
+		return InboxCategory{
+			State:             InboxStateDisabled,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: true,
+			Href:              href,
+			Previews:          []any{},
+		}
+	}
+
+	res, err := s.waitingOnYouSummary(ctx, v.user, v.token, previews)
+	if err != nil {
+		code := inboxCategoryErrorCode(ctx, err)
+		slog.Warn("inbox summary: category source failed",
+			"category", InboxCategoryDecisions,
+			"error_code", code,
+			"error", err)
+		return InboxCategory{
+			State:             InboxStateError,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: true,
+			Href:              href,
+			ErrorCode:         code,
+			Previews:          []any{},
+		}
+	}
+
+	items := make([]any, 0, len(res.prompts))
+	for _, item := range res.prompts {
+		p := item.raw
+		if p == nil {
+			continue
+		}
+		projRef := res.scopeSet.projectRef(p.ProjectID)
+		askerName := p.AskerAgentName
+		if askerName == "" {
+			askerName = res.scopeSet.agentNames[p.AskerAgentID]
+		}
+		var question string
+		var firstDec *store.Decision
+		for _, d := range p.Decisions {
+			if d != nil {
+				firstDec = d
+				question = truncateRunes(plainLine(d.Question), decisionResponseQuestionMax)
+				break
+			}
+		}
+		decCount := len(p.Decisions)
+		answerMode := decisionAnswerMode(decCount)
+
+		var inline *InboxDecisionInline
+		if answerMode == DecisionAnswerModeSingle && decCount == 1 && item.canAnswer && firstDec != nil {
+			choices := make([]InboxDecisionChoice, 0, len(firstDec.Choices))
+			for _, c := range firstDec.Choices {
+				choices = append(choices, InboxDecisionChoice{
+					ID:    c.ID,
+					Label: c.Label,
+				})
+			}
+			inline = &InboxDecisionInline{
+				DecisionRowID: firstDec.ID,
+				Choices:       choices,
+				AllowsOther:   firstDec.Other != nil,
+			}
+		}
+
+		items = append(items, InboxDecisionPreview{
+			ID:                p.MessageID,
+			ProjectID:         p.ProjectID,
+			ProjectName:       projRef.Name,
+			CreatedAt:         p.CreatedAt,
+			Href:              inboxDecisionPromptHref(res.scopeSet, item),
+			PromptMessageID:   p.MessageID,
+			ConversationLabel: res.scopeSet.conversationLabel[p.ChatKey],
+			AskerAgentName:    askerName,
+			Question:          question,
+			DecisionCount:     decCount,
+			AnswerMode:        answerMode,
+			CanAnswer:         item.canAnswer,
+			DisabledReason:    item.disabledReason,
+			Inline:            inline,
+		})
+	}
+
+	return InboxCategory{
+		State:             InboxStateOK,
+		Count:             res.total,
+		Capped:            res.truncatedProjects,
+		CountsTowardTotal: true,
+		Href:              href,
+		Previews:          items,
 	}
 }

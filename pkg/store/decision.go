@@ -86,6 +86,7 @@ const (
 const (
 	DecisionSurfaceNative        = "native"
 	DecisionSurfaceDecisionsPage = "decisions_page"
+	DecisionSurfaceInbox         = "inbox"
 	DecisionSurfaceSlack         = "slack"
 	DecisionSurfaceGoogleChat    = "google_chat"
 	DecisionSurfaceDiscord       = "discord"
@@ -835,7 +836,7 @@ type DismissDecisionsInput struct {
 	RowIDs          []string         // optional subset; empty = every row of the prompt waiting on the user
 	User            DecisionAnswerer // id, name, email
 	Reason          string           // optional, <= 500 runes, trimmed
-	Surface         string           // native | decisions_page
+	Surface         string           // native | decisions_page | inbox
 	IdempotencyKey  string           // optional
 	ResponseMessage *Message         // the decision-response to store (built by the hub)
 	FormatMessage   func(dismissed []*Decision) string

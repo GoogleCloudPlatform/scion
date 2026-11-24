@@ -89,7 +89,7 @@
         "details": {
           "field": "surface"
         },
-        "message": "surface \"bogus\" is not supported; expected \"native\" or \"decisions_page\""
+        "message": "surface \"bogus\" is not supported; expected \"native\", \"decisions_page\", or \"inbox\""
       }
     }
   },

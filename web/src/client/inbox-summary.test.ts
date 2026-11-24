@@ -367,4 +367,36 @@ describe('InboxSummaryStore', () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
   });
+
+  it('refetches on decisions_waiting notification and decision-updated events', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(makeSummary(1)), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    store.ensureStarted('user-1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('notification-created', {
+        detail: { kind: 'decisions_waiting', status: 'DECISIONS_WAITING', resourceId: '2' },
+      })
+    );
+    await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('decision-updated', {
+        detail: { decision: { rowId: 'row-1', status: 'decided' } },
+      })
+    );
+    await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });

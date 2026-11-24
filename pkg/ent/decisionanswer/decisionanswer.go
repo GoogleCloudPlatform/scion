@@ -188,6 +188,7 @@ type Surface string
 const (
 	SurfaceNative        Surface = "native"
 	SurfaceDecisionsPage Surface = "decisions_page"
+	SurfaceInbox         Surface = "inbox"
 	SurfaceSlack         Surface = "slack"
 	SurfaceGoogleChat    Surface = "google_chat"
 	SurfaceDiscord       Surface = "discord"
@@ -203,7 +204,7 @@ func (s Surface) String() string {
 // SurfaceValidator is a validator for the "surface" field enum values. It is called by the builders before save.
 func SurfaceValidator(s Surface) error {
 	switch s {
-	case SurfaceNative, SurfaceDecisionsPage, SurfaceSlack, SurfaceGoogleChat, SurfaceDiscord, SurfaceTelegram, SurfaceTeams, SurfaceOther:
+	case SurfaceNative, SurfaceDecisionsPage, SurfaceInbox, SurfaceSlack, SurfaceGoogleChat, SurfaceDiscord, SurfaceTelegram, SurfaceTeams, SurfaceOther:
 		return nil
 	default:
 		return fmt.Errorf("decisionanswer: invalid enum value for surface field: %q", s)

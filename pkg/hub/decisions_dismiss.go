@@ -220,7 +220,7 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		MaxRowIDs:        messages.MaxDecisionsPerMessage,
 		NormalizeSurface: normalizeAnswerSurface,
 		SurfaceError: func(raw string) string {
-			return fmt.Sprintf("surface %q is not supported; expected %q or %q", raw, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage)
+			return fmt.Sprintf("surface %q is not supported; expected %q, %q, or %q", raw, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage, store.DecisionSurfaceInbox)
 		},
 	}); ferr != nil {
 		ValidationError(w, ferr.Message, map[string]interface{}{"field": ferr.Field})

@@ -60,15 +60,18 @@ type DecisionAnswerRequest struct {
 }
 
 // normalizeAnswerSurface validates the optional surface field on web answer
-// requests: empty or "native" records "native", and "decisions_page" records
-// "decisions_page". External channel surfaces ("slack", "google_chat", ...)
-// are set only by channel bridges or agent-interpreted recording.
+// requests: empty or "native" records "native", "decisions_page" records
+// "decisions_page", and "inbox" records "inbox". External channel surfaces
+// ("slack", "google_chat", ...) are set only by channel bridges or
+// agent-interpreted recording.
 func normalizeAnswerSurface(raw string) (string, bool) {
 	switch strings.TrimSpace(raw) {
 	case "", store.DecisionSurfaceNative:
 		return store.DecisionSurfaceNative, true
 	case store.DecisionSurfaceDecisionsPage:
 		return store.DecisionSurfaceDecisionsPage, true
+	case store.DecisionSurfaceInbox:
+		return store.DecisionSurfaceInbox, true
 	default:
 		return "", false
 	}
@@ -342,7 +345,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	}
 	surface, ok := normalizeAnswerSurface(req.Surface)
 	if !ok {
-		ValidationError(w, fmt.Sprintf("surface %q is not supported; expected %q or %q", req.Surface, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage),
+		ValidationError(w, fmt.Sprintf("surface %q is not supported; expected %q, %q, or %q", req.Surface, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage, store.DecisionSurfaceInbox),
 			map[string]interface{}{"field": "surface"})
 		return
 	}
