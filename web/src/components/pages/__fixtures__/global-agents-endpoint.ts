@@ -121,6 +121,9 @@ export function fakeFetch(fake: Fake) {
     if (u.pathname.startsWith('/api/v1/agents/') && method !== 'GET') {
       return Promise.resolve(jsonResponse({ stopped: 0, failed: 0 }));
     }
+    if (u.pathname === '/api/v1/auth/admin-status' && method === 'GET') {
+      return Promise.resolve(jsonResponse({ isAdmin: true, isSuperAdmin: true, permissions: [] }));
+    }
     if (u.pathname === '/api/v1/projects' && method === 'GET') {
       fake.otherRequests?.push(rawUrl);
       return Promise.resolve(

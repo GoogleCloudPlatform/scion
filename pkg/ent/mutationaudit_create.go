@@ -376,6 +376,20 @@ func (_c *MutationAuditCreate) SetNillableProvenanceBasis(v *string) *MutationAu
 	return _c
 }
 
+// SetSessionMode sets the "session_mode" field.
+func (_c *MutationAuditCreate) SetSessionMode(v string) *MutationAuditCreate {
+	_c.mutation.SetSessionMode(v)
+	return _c
+}
+
+// SetNillableSessionMode sets the "session_mode" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableSessionMode(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetSessionMode(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *MutationAuditCreate) SetID(v uuid.UUID) *MutationAuditCreate {
 	_c.mutation.SetID(v)
@@ -627,6 +641,10 @@ func (_c *MutationAuditCreate) createSpec() (*MutationAudit, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.ProvenanceBasis(); ok {
 		_spec.SetField(mutationaudit.FieldProvenanceBasis, field.TypeString, value)
 		_node.ProvenanceBasis = value
+	}
+	if value, ok := _c.mutation.SessionMode(); ok {
+		_spec.SetField(mutationaudit.FieldSessionMode, field.TypeString, value)
+		_node.SessionMode = value
 	}
 	return _node, _spec
 }
@@ -1115,6 +1133,24 @@ func (u *MutationAuditUpsert) UpdateAgentDelegationCode() *MutationAuditUpsert {
 // ClearAgentDelegationCode clears the value of the "agent_delegation_code" field.
 func (u *MutationAuditUpsert) ClearAgentDelegationCode() *MutationAuditUpsert {
 	u.SetNull(mutationaudit.FieldAgentDelegationCode)
+	return u
+}
+
+// SetSessionMode sets the "session_mode" field.
+func (u *MutationAuditUpsert) SetSessionMode(v string) *MutationAuditUpsert {
+	u.Set(mutationaudit.FieldSessionMode, v)
+	return u
+}
+
+// UpdateSessionMode sets the "session_mode" field to the value that was provided on create.
+func (u *MutationAuditUpsert) UpdateSessionMode() *MutationAuditUpsert {
+	u.SetExcluded(mutationaudit.FieldSessionMode)
+	return u
+}
+
+// ClearSessionMode clears the value of the "session_mode" field.
+func (u *MutationAuditUpsert) ClearSessionMode() *MutationAuditUpsert {
+	u.SetNull(mutationaudit.FieldSessionMode)
 	return u
 }
 
@@ -1680,6 +1716,27 @@ func (u *MutationAuditUpsertOne) UpdateAgentDelegationCode() *MutationAuditUpser
 func (u *MutationAuditUpsertOne) ClearAgentDelegationCode() *MutationAuditUpsertOne {
 	return u.Update(func(s *MutationAuditUpsert) {
 		s.ClearAgentDelegationCode()
+	})
+}
+
+// SetSessionMode sets the "session_mode" field.
+func (u *MutationAuditUpsertOne) SetSessionMode(v string) *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetSessionMode(v)
+	})
+}
+
+// UpdateSessionMode sets the "session_mode" field to the value that was provided on create.
+func (u *MutationAuditUpsertOne) UpdateSessionMode() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateSessionMode()
+	})
+}
+
+// ClearSessionMode clears the value of the "session_mode" field.
+func (u *MutationAuditUpsertOne) ClearSessionMode() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearSessionMode()
 	})
 }
 
@@ -2412,6 +2469,27 @@ func (u *MutationAuditUpsertBulk) UpdateAgentDelegationCode() *MutationAuditUpse
 func (u *MutationAuditUpsertBulk) ClearAgentDelegationCode() *MutationAuditUpsertBulk {
 	return u.Update(func(s *MutationAuditUpsert) {
 		s.ClearAgentDelegationCode()
+	})
+}
+
+// SetSessionMode sets the "session_mode" field.
+func (u *MutationAuditUpsertBulk) SetSessionMode(v string) *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetSessionMode(v)
+	})
+}
+
+// UpdateSessionMode sets the "session_mode" field to the value that was provided on create.
+func (u *MutationAuditUpsertBulk) UpdateSessionMode() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateSessionMode()
+	})
+}
+
+// ClearSessionMode clears the value of the "session_mode" field.
+func (u *MutationAuditUpsertBulk) ClearSessionMode() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearSessionMode()
 	})
 }
 

@@ -39,6 +39,8 @@ export interface AdminStatus {
   isAdmin: boolean;
   isSuperAdmin: boolean;
   permissions: string[];
+  /** True while the current browser session is in "View as member" mode. */
+  viewAsMember?: boolean;
 }
 
 // ---------------------------------------------------------------------------

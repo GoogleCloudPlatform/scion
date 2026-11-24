@@ -218,11 +218,9 @@ export class ScionNav extends LitElement {
    * endpoint, which returns hub-admin and super-admin flags plus the
    * user's system-scoped permissions.
    *
-   * Super-admin users are detected directly via `user.role === 'admin'`
-   * and skip the API call. For everyone else the permissions array alone
-   * decides which admin nav items are visible: isAdmin is true only for
-   * hub admins and super admins, while a member can hold permissions
-   * that open individual admin sections.
+   * Every signed-in user reads from admin-status (never `user.role === 'admin'`)
+   * so there is one source of truth for admin UI visibility, including while
+   * "View as member" mode is active.
    */
   private async checkAdminCapabilities(): Promise<void> {
     const userId = this.user?.id ?? null;
@@ -231,22 +229,15 @@ export class ScionNav extends LitElement {
     if (userId === this.adminCheckUserId) return;
     this.adminCheckUserId = userId;
 
-    // Super-admins always have admin capabilities — create an AdminStatus
-    // with isSuperAdmin: true so hasAnyPermission() short-circuits.
-    if (this.user?.role === 'admin') {
-      this.adminStatus = { isAdmin: true, isSuperAdmin: true, permissions: [] };
-      return;
-    }
-
     // No user = no admin access
     if (!this.user) {
       this.adminStatus = null;
       return;
     }
 
-    // The admin-status permissions decide which admin items show for
-    // hub-admin and custom-role users. The request is shared with the
-    // other nav instance and the startup code (client/admin-status.ts).
+    // The admin-status response decides which admin items show for super-admins,
+    // hub-admins, and custom-role users. The request is shared with the other
+    // nav instance and the startup code (client/admin-status.ts).
     const status = await loadAdminStatus(userId);
     // Only apply the result if the user hasn't changed during the fetch.
     if (this.adminCheckUserId === userId) {
@@ -527,7 +518,7 @@ export class ScionNav extends LitElement {
   }
 
   override render() {
-    const isSuperAdmin = this.user?.role === 'admin';
+    const isSuperAdmin = this.adminStatus?.isSuperAdmin === true;
 
     const visibleAdminItems = this.adminStatus
       ? visibleItems(ADMIN_SCOPEABLE_ITEMS).filter(

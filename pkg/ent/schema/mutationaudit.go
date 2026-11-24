@@ -109,6 +109,11 @@ func (MutationAudit) Fields() []ent.Field {
 		field.String("provenance_basis").
 			Optional().
 			Immutable(),
+
+		// Session mode active when the mutation was performed (ptone/scion#8648,
+		// design §4.6). Optional, nullable; "" or "view_as_member".
+		field.String("session_mode").
+			Optional(),
 	}
 }
 

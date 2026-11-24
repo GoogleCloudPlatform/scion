@@ -357,6 +357,93 @@ describe('SSEClient connection events', () => {
 
     expect(disconnected).not.toHaveBeenCalled();
   });
+
+  it('reloads the page on event: reconnect with reason=session_mode when tab is visible', () => {
+    const reloadPage = vi.fn();
+    const client = new SSEClient('/events', { reloadPage });
+    client.connect(['agent.>']);
+    latest().simulateOpen();
+    setVisibility('visible');
+
+    latest().dispatchEvent(
+      new MessageEvent('reconnect', { data: JSON.stringify({ reason: 'session_mode' }) })
+    );
+
+    expect(reloadPage).toHaveBeenCalledTimes(1);
+    expect(latest().closed).toBe(true);
+    // Does not schedule a background SSE reconnect because the page is reloading.
+    vi.advanceTimersByTime(5_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('defers reload on reason=session_mode while hidden and reloads once when tab becomes visible', () => {
+    const reloadPage = vi.fn();
+    const client = new SSEClient('/events', { reloadPage, hiddenCloseEnabled: () => false });
+    client.connect(['agent.>']);
+    latest().simulateOpen();
+    setVisibility('hidden');
+
+    latest().dispatchEvent(
+      new MessageEvent('reconnect', { data: JSON.stringify({ reason: 'session_mode' }) })
+    );
+
+    // Does not reload while hidden; still reconnects the stream.
+    expect(reloadPage).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1_000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+
+    // Becoming visible triggers the deferred reload exactly once.
+    setVisibility('visible');
+    expect(reloadPage).toHaveBeenCalledTimes(1);
+
+    // Subsequent hide/show transitions do not trigger a second reload.
+    setVisibility('hidden');
+    setVisibility('visible');
+    expect(reloadPage).toHaveBeenCalledTimes(1);
+    client.disconnect();
+  });
+
+  it('still reloads once when hidden-close timer closes the stream before the tab becomes visible', () => {
+    const reloadPage = vi.fn();
+    const client = new SSEClient('/events', {
+      reloadPage,
+      hiddenCloseEnabled: () => true,
+      hiddenCloseMs: 60_000,
+    });
+    client.connect(['agent.>']);
+    latest().simulateOpen();
+    setVisibility('hidden');
+
+    latest().dispatchEvent(
+      new MessageEvent('reconnect', { data: JSON.stringify({ reason: 'session_mode' }) })
+    );
+    expect(reloadPage).not.toHaveBeenCalled();
+
+    // Hidden-close timer closes the stream while still hidden.
+    vi.advanceTimersByTime(60_000);
+    expect(reloadPage).not.toHaveBeenCalled();
+
+    // Becoming visible still performs the deferred reload once.
+    setVisibility('visible');
+    expect(reloadPage).toHaveBeenCalledTimes(1);
+    client.disconnect();
+  });
+
+  it('never reloads on a plain reconnect (empty or {} data) even after becoming visible', () => {
+    const reloadPage = vi.fn();
+    const client = new SSEClient('/events', { reloadPage, hiddenCloseEnabled: () => false });
+    client.connect(['agent.>']);
+    latest().simulateOpen();
+    setVisibility('hidden');
+
+    latest().dispatchEvent(new MessageEvent('reconnect', { data: '{}' }));
+    vi.advanceTimersByTime(1_000);
+    setVisibility('visible');
+
+    expect(reloadPage).not.toHaveBeenCalled();
+    client.disconnect();
+  });
 });
 
 describe('SSEClient jitter', () => {

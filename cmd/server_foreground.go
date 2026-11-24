@@ -4371,6 +4371,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webSrv.SetDemotionSafe(hubSrv.GetDemotionSafe())
 		webSrv.SetAuthzService(hubSrv.GetAuthzService())
 		webSrv.SetTestIdentityWebSessions(hubSrv)
+		webSrv.SetViewAsMemberHub(hubSrv)
 		webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupBackgroundResources)
 
 		localHubSrv := hubSrv

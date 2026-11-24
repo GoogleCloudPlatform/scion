@@ -235,6 +235,7 @@ func (ws *WebServer) populateDevSession(ctx context.Context, session *sessions.S
 		Name:   devName,
 		Role:   "admin",
 	}
+	delete(session.Values, sessKeyViewAsMember)
 	session.Values[sessKeyUserID] = devUser.UserID
 	session.Values[sessKeyUserEmail] = devUser.Email
 	session.Values[sessKeyUserName] = devUser.Name
@@ -244,9 +245,14 @@ func (ws *WebServer) populateDevSession(ctx context.Context, session *sessions.S
 	// Hub JWTs so the session-to-bearer middleware can authenticate API
 	// requests, mirroring handleOAuthCallback.
 	if ws.userTokenSvc != nil {
-		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
-			devUser.UserID, devUser.Email, devUser.Name, devUser.Role, devGen, ClientTypeWeb,
-		)
+		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(UserTokenSubject{
+			UserID:            devUser.UserID,
+			Email:             devUser.Email,
+			DisplayName:       devUser.Name,
+			Role:              devUser.Role,
+			SessionGeneration: devGen,
+			ClientType:        ClientTypeWeb,
+		})
 		if err == nil {
 			session.Values[sessKeyHubAccessToken] = accessToken
 			session.Values[sessKeyHubRefreshToken] = refreshToken

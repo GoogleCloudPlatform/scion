@@ -184,7 +184,14 @@ func TestConduitSessionGen_RelayAdmitCapturesGeneration(t *testing.T) {
 	revokeSessions(t, f.srv, f.user.ID())
 	// A token issued after the revocation carries the new generation (1);
 	// the JWT arm refuses one that does not.
-	jwt, _, _, err := f.srv.userTokenService.MintTokenPair(f.user.ID(), "renew@conduit.test", "Renew", store.UserRoleMember, 1, ClientTypeCLI)
+	jwt, _, _, err := f.srv.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            f.user.ID(),
+		Email:             "renew@conduit.test",
+		DisplayName:       "Renew",
+		Role:              store.UserRoleMember,
+		SessionGeneration: 1,
+		ClientType:        ClientTypeCLI,
+	})
 	require.NoError(t, err)
 	fresh := f.ops.mustAdmit(t, bearer(jwt), "user-fresh")
 	assert.Equal(t, int64(1), f.admissionClaims(t, fresh.AdmissionToken, "user-fresh").SessionGen)

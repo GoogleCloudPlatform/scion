@@ -2638,6 +2638,7 @@ var (
 		{Name: "actor_kind", Type: field.TypeString, Nullable: true},
 		{Name: "agent_delegation_code", Type: field.TypeString, Nullable: true},
 		{Name: "provenance_basis", Type: field.TypeString, Nullable: true},
+		{Name: "session_mode", Type: field.TypeString, Nullable: true},
 	}
 	// MutationAuditsTable holds the schema information for the "mutation_audits" table.
 	MutationAuditsTable = &schema.Table{

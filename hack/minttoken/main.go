@@ -53,7 +53,13 @@ func main() {
 	// CLI client type → long (30-day) validity so the token outlives the test run.
 	// Session generation 0: the token works only for a user whose sessions
 	// were never revoked (the hub refuses any other generation).
-	token, _, err := svc.MintAccessToken(id, email, displayName, role, 0, hub.ClientTypeCLI)
+	token, _, err := svc.MintAccessToken(hub.UserTokenSubject{
+		UserID:      id,
+		Email:       email,
+		DisplayName: displayName,
+		Role:        role,
+		ClientType:  hub.ClientTypeCLI,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mint:", err)
 		os.Exit(1)

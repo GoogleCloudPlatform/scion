@@ -948,7 +948,14 @@ func (ws *WebServer) testIdentityAccessToken(res tiSessionResult) (string, error
 	if ttl < time.Second {
 		return "", errors.New("test identity session token: session ends within a second")
 	}
-	tok, _, err := ws.userTokenSvc.MintAccessTokenWithTTL(res.row.ID, res.row.Email, res.row.DisplayName, res.row.Role, res.row.SessionGeneration, ClientTypeWeb, ttl)
+	tok, _, err := ws.userTokenSvc.MintAccessTokenWithTTL(UserTokenSubject{
+		UserID:            res.row.ID,
+		Email:             res.row.Email,
+		DisplayName:       res.row.DisplayName,
+		Role:              res.row.Role,
+		SessionGeneration: res.row.SessionGeneration,
+		ClientType:        ClientTypeWeb,
+	}, ttl)
 	return tok, err
 }
 

@@ -410,3 +410,11 @@ export const INBOX_DASHBOARD_FLAG = 'web.inbox_dashboard';
 export function isInboxDashboardEnabled(): boolean {
   return isFeatureEnabled(INBOX_DASHBOARD_FLAG);
 }
+
+/**
+ * View as member session toggle (hub.view_as_member, ptone/scion#8648):
+ * shows the "View as member" switch in the profile sidebar for hub admins.
+ * Presentation only: the hub enforces the experiment on enter; exit and the
+ * active-mode banner are always available regardless of this flag. Default OFF.
+ */
+export const VIEW_AS_MEMBER_FLAG = 'hub.view_as_member';

@@ -36,6 +36,10 @@ import {
   renderTestHubBanner,
   testHubBannerStyles,
 } from '../shared/test-hub-banner.js';
+import {
+  renderViewAsMemberBanner,
+  viewAsMemberBannerStyles,
+} from '../shared/view-as-member-banner.js';
 
 const PROFILE_TITLES: Record<string, string> = {
   '/profile': 'Profile',
@@ -68,6 +72,7 @@ export class ScionProfileShell extends LitElement {
 
   static override styles = css`
     ${testHubBannerStyles}
+    ${viewAsMemberBannerStyles}
 
     :host {
       display: flex;
@@ -232,6 +237,7 @@ export class ScionProfileShell extends LitElement {
 
       <main class="main">
         ${keyed(this.currentPath, renderTestHubBanner(this._testHubBanner.status))}
+        ${renderViewAsMemberBanner(this.user)}
         <scion-header
           .user=${this.user}
           .currentPath=${this.currentPath}

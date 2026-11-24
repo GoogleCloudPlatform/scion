@@ -258,9 +258,14 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate tokens
-	accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
-	)
+	accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(UserTokenSubject{
+		UserID:            user.ID,
+		Email:             user.Email,
+		DisplayName:       user.DisplayName,
+		Role:              user.Role,
+		SessionGeneration: user.SessionGeneration,
+		ClientType:        ClientTypeWeb,
+	})
 	if err != nil {
 		slog.Error("test-login: failed to generate tokens", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to generate tokens", nil)
@@ -274,6 +279,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ws.dropTestIdentityValues(w, session)
+	delete(session.Values, sessKeyViewAsMember)
 	session.Values[sessKeyUserID] = user.ID
 	session.Values[sessKeyUserEmail] = user.Email
 	session.Values[sessKeyUserName] = user.DisplayName

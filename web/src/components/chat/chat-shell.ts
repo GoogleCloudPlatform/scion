@@ -48,6 +48,10 @@ import {
   renderTestHubBanner,
   testHubBannerStyles,
 } from '../shared/test-hub-banner.js';
+import {
+  renderViewAsMemberBanner,
+  viewAsMemberBannerStyles,
+} from '../shared/view-as-member-banner.js';
 
 /** Whether `el` takes typed text, and so brings up the on-screen keyboard. */
 function isTextField(el: Element | null): boolean {
@@ -124,6 +128,7 @@ export class ScionChatShell extends LitElement {
 
   static override styles = css`
     ${testHubBannerStyles}
+    ${viewAsMemberBannerStyles}
 
     :host {
       display: flex;
@@ -167,7 +172,8 @@ export class ScionChatShell extends LitElement {
        back as soon as the keyboard closes. It is not counted in
        --scion-chat-top-bar-h: whenever it shows, the frame is not short
        and the column simply starts below it. */
-    :host([text-entry]) sl-alert.test-hub-banner {
+    :host([text-entry]) sl-alert.test-hub-banner,
+    :host([text-entry]) sl-alert.view-as-member-banner {
       display: var(--scion-kb-short-display, block);
     }
 
@@ -335,6 +341,7 @@ export class ScionChatShell extends LitElement {
     return html`
       <main class="main">
         ${keyed(this.currentPath, renderTestHubBanner(this._testHubBanner.status))}
+        ${renderViewAsMemberBanner(this.user)}
         <scion-header
           .user=${this.user}
           .currentPath=${this.currentPath}

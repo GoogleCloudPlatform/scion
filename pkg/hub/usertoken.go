@@ -96,6 +96,23 @@ type UserTokenClaims struct {
 	// with the users row (see sessionGenerationRefusal). A token without the
 	// claim decodes to 0.
 	SessionGeneration int64 `json:"sg"`
+	// ViewAsMember marks a web-session token whose session has hub-level
+	// admin grants dropped (ptone/scion#8648). Only ClientTypeWeb tokens
+	// may carry it. It only ever removes authority.
+	ViewAsMember bool `json:"vam,omitempty"`
+}
+
+// UserTokenSubject holds the subject identity and session attributes carried
+// in a minted hub user JWT. Passing a struct ensures every mint call site
+// explicitly sets or preserves ViewAsMember.
+type UserTokenSubject struct {
+	UserID            string
+	Email             string
+	DisplayName       string
+	Role              string
+	SessionGeneration int64
+	ClientType        ClientType
+	ViewAsMember      bool
 }
 
 // UserTokenConfig holds configuration for user token generation.
@@ -211,14 +228,14 @@ func NewUserTokenService(config UserTokenConfig) (*UserTokenService, error) {
 }
 
 // MintTokenPair generates an access token and refresh token for a user.
-// sessionGeneration is carried in both tokens as the sg claim. Callers pass
+// sub.SessionGeneration is carried in both tokens as the sg claim. Callers pass
 // the users-row value for a fresh authentication, or the value captured in
 // the presented credential for a re-mint, never a fresh row read.
-func (s *UserTokenService) MintTokenPair(userID, email, displayName, role string, sessionGeneration int64, clientType ClientType) (accessToken, refreshToken string, expiresIn int64, err error) {
+func (s *UserTokenService) MintTokenPair(sub UserTokenSubject) (accessToken, refreshToken string, expiresIn int64, err error) {
 	// Determine access token duration based on client type
 	var accessDuration time.Duration
 	var tokenType UserTokenType
-	if clientType == ClientTypeCLI {
+	if sub.ClientType == ClientTypeCLI {
 		accessDuration = s.config.CLIAccessTokenDuration
 		tokenType = TokenTypeCLI
 	} else {
@@ -227,13 +244,13 @@ func (s *UserTokenService) MintTokenPair(userID, email, displayName, role string
 	}
 
 	// Generate access token
-	accessToken, err = s.generateToken(userID, email, displayName, role, sessionGeneration, tokenType, clientType, accessDuration)
+	accessToken, err = s.generateToken(sub, tokenType, accessDuration)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("failed to generate access token: %w", err)
 	}
 
 	// Generate refresh token
-	refreshToken, err = s.generateToken(userID, email, displayName, role, sessionGeneration, TokenTypeRefresh, clientType, s.config.RefreshTokenDuration)
+	refreshToken, err = s.generateToken(sub, TokenTypeRefresh, s.config.RefreshTokenDuration)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
@@ -243,11 +260,11 @@ func (s *UserTokenService) MintTokenPair(userID, email, displayName, role string
 }
 
 // MintAccessToken generates just an access token for a user, carrying
-// sessionGeneration as the sg claim (see MintTokenPair).
-func (s *UserTokenService) MintAccessToken(userID, email, displayName, role string, sessionGeneration int64, clientType ClientType) (string, int64, error) {
+// sub.SessionGeneration as the sg claim (see MintTokenPair).
+func (s *UserTokenService) MintAccessToken(sub UserTokenSubject) (string, int64, error) {
 	var duration time.Duration
 	var tokenType UserTokenType
-	if clientType == ClientTypeCLI {
+	if sub.ClientType == ClientTypeCLI {
 		duration = s.config.CLIAccessTokenDuration
 		tokenType = TokenTypeCLI
 	} else {
@@ -255,7 +272,7 @@ func (s *UserTokenService) MintAccessToken(userID, email, displayName, role stri
 		tokenType = TokenTypeAccess
 	}
 
-	token, err := s.generateToken(userID, email, displayName, role, sessionGeneration, tokenType, clientType, duration)
+	token, err := s.generateToken(sub, tokenType, duration)
 	if err != nil {
 		return "", 0, err
 	}
@@ -263,11 +280,11 @@ func (s *UserTokenService) MintAccessToken(userID, email, displayName, role stri
 }
 
 // MintAccessTokenWithTTL generates an access token with a specific duration,
-// carrying sessionGeneration as the sg claim (see MintTokenPair).
+// carrying sub.SessionGeneration as the sg claim (see MintTokenPair).
 // Used by GE exchange to cryptographically cap the token lifetime at
 // min(configured TTL, upstream credential expiry).
-func (s *UserTokenService) MintAccessTokenWithTTL(userID, email, displayName, role string, sessionGeneration int64, clientType ClientType, ttl time.Duration) (string, int64, error) {
-	token, err := s.generateToken(userID, email, displayName, role, sessionGeneration, TokenTypeAccess, clientType, ttl)
+func (s *UserTokenService) MintAccessTokenWithTTL(sub UserTokenSubject, ttl time.Duration) (string, int64, error) {
+	token, err := s.generateToken(sub, TokenTypeAccess, ttl)
 	if err != nil {
 		return "", 0, err
 	}
@@ -275,27 +292,31 @@ func (s *UserTokenService) MintAccessTokenWithTTL(userID, email, displayName, ro
 }
 
 // generateToken creates a signed JWT token.
-func (s *UserTokenService) generateToken(userID, email, displayName, role string, sessionGeneration int64, tokenType UserTokenType, clientType ClientType, duration time.Duration) (string, error) {
+func (s *UserTokenService) generateToken(sub UserTokenSubject, tokenType UserTokenType, duration time.Duration) (string, error) {
+	if sub.ViewAsMember && sub.ClientType != ClientTypeWeb {
+		return "", errors.New("view-as-member claim is only permitted on web tokens")
+	}
+
 	now := s.clock()
 
 	claims := UserTokenClaims{
 		Claims: jwt.Claims{
 			Issuer:    UserTokenIssuer,
-			Subject:   userID,
+			Subject:   sub.UserID,
 			Audience:  jwt.Audience{UserTokenAudience},
 			IssuedAt:  jwt.NewNumericDate(now),
 			Expiry:    jwt.NewNumericDate(now.Add(duration)),
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        generateUserTokenID(),
 		},
-		UserID:      userID,
-		Email:       email,
-		DisplayName: displayName,
-		Role:        role,
-		TokenType:   tokenType,
-		ClientType:  clientType,
-
-		SessionGeneration: sessionGeneration,
+		UserID:            sub.UserID,
+		Email:             sub.Email,
+		DisplayName:       sub.DisplayName,
+		Role:              sub.Role,
+		TokenType:         tokenType,
+		ClientType:        sub.ClientType,
+		SessionGeneration: sub.SessionGeneration,
+		ViewAsMember:      sub.ViewAsMember,
 	}
 
 	token, err := s.signClaims(claims, now)

@@ -97,6 +97,7 @@ const cases: Array<[string, PageCase]> = [
       state: {
         loading: false,
         pageData: { path: '/brokers/b-1', user: { id: 'u', role: 'admin' } },
+        adminStatus: { isAdmin: true, isSuperAdmin: true, permissions: [] },
         broker: {
           id: 'b-1',
           name: LONG_NAME,
@@ -111,7 +112,10 @@ const cases: Array<[string, PageCase]> = [
       back: [['/brokers', 'Back to Brokers']],
       badges: ['span', 'scion-status-badge'],
       meta: ['header-subtitle'],
-      noActions: { pageData: { path: '/brokers/b-1', user: { id: 'u', role: 'member' } } },
+      noActions: {
+        pageData: { path: '/brokers/b-1', user: { id: 'u', role: 'member' } },
+        adminStatus: { isAdmin: false, isSuperAdmin: false, permissions: [] },
+      },
     },
   ],
   [

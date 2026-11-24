@@ -39,11 +39,17 @@ import {
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
 import { INBOX_SUMMARY_CHANGED_EVENT, inboxSummaryStore } from '../../client/inbox-summary.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import { toggleViewAsMember } from '../../client/view-as-member.js';
+import type { AdminStatus } from '../../lib/admin-permissions.js';
 import {
   FEATURE_FLAGS_CHANGED_EVENT,
+  VIEW_AS_MEMBER_FLAG,
   decisionsEnabled,
+  isFeatureEnabled,
   isInboxDashboardEnabled,
 } from '../../utils/feature-flags.js';
+import { showToast } from '../../utils/toast.js';
 
 import type { User, Project } from '../../shared/types.js';
 import {
@@ -160,6 +166,20 @@ export class ScionProfileNav extends LitElement {
   @state()
   private decisionsWaitingCount = 0;
 
+  /** Whether `hub.view_as_member` is enabled. */
+  @state()
+  private viewAsMemberFlagEnabled = false;
+
+  /** Loaded admin status for the current user (gates the "View as member" switch). */
+  @state()
+  private adminStatus: AdminStatus | null = null;
+
+  /** True while a POST /auth/view-as-member toggle request is in flight. */
+  @state()
+  private viewAsMemberBusy = false;
+
+  private adminStatusUserId: string | null = null;
+
   private boundOnPendingSecretsChanged = (e: Event): void => {
     const count = (e as CustomEvent<{ count?: number }>).detail?.count;
     if (typeof count === 'number') this.pendingSecretCount = count;
@@ -171,6 +191,13 @@ export class ScionProfileNav extends LitElement {
   };
 
   private boundOnFeatureFlagsChanged = (): void => {
+    const nextVam = isFeatureEnabled(VIEW_AS_MEMBER_FLAG);
+    if (nextVam !== this.viewAsMemberFlagEnabled) {
+      this.viewAsMemberFlagEnabled = nextVam;
+      if (nextVam) {
+        void this.loadAdminStatusForUser();
+      }
+    }
     const nextDecisions = decisionsEnabled();
     if (nextDecisions !== this.decisionsEnabled) {
       this.decisionsEnabled = nextDecisions;
@@ -386,6 +413,24 @@ export class ScionProfileNav extends LitElement {
     .role-badge.viewer {
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #64748b);
+    }
+
+    .view-as-member-block {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .view-as-member-helper {
+      font-size: 0.75rem;
+      line-height: 1.3;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    :host([collapsed]) .view-as-member-block {
+      display: none;
     }
 
     .nav-container {
@@ -697,6 +742,10 @@ export class ScionProfileNav extends LitElement {
     super.connectedCallback();
     void this.checkGitHubApp();
     void this.loadPendingSecretCount();
+    this.viewAsMemberFlagEnabled = isFeatureEnabled(VIEW_AS_MEMBER_FLAG);
+    if (this.viewAsMemberFlagEnabled) {
+      void this.loadAdminStatusForUser();
+    }
     this.decisionsEnabled = decisionsEnabled();
     this.inboxEnabled = isInboxDashboardEnabled();
     if (this.decisionsEnabled || this.inboxEnabled) {
@@ -721,10 +770,15 @@ export class ScionProfileNav extends LitElement {
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
-    if (changedProperties.has('user') && (this.decisionsEnabled || this.inboxEnabled)) {
-      this.ensureProfileStateScope();
-      if (this.inboxEnabled && this.user?.id) {
-        inboxSummaryStore.ensureStarted(this.user.id);
+    if (changedProperties.has('user')) {
+      if (this.decisionsEnabled || this.inboxEnabled) {
+        this.ensureProfileStateScope();
+        if (this.inboxEnabled && this.user?.id) {
+          inboxSummaryStore.ensureStarted(this.user.id);
+        }
+      }
+      if (this.viewAsMemberFlagEnabled) {
+        void this.loadAdminStatusForUser();
       }
     }
   }
@@ -884,6 +938,7 @@ export class ScionProfileNav extends LitElement {
                 ${this.renderRoleBadge(this.user.role)}
               </div>
             </div>
+            ${this.renderViewAsMemberToggle()}
           `
         : ''}
 
@@ -1009,6 +1064,63 @@ export class ScionProfileNav extends LitElement {
     `;
   }
 
+  private async loadAdminStatusForUser(): Promise<void> {
+    const userId = this.user?.id ?? null;
+    if (!userId) {
+      this.adminStatusUserId = null;
+      this.adminStatus = null;
+      return;
+    }
+    if (userId === this.adminStatusUserId) return;
+    this.adminStatusUserId = userId;
+    const status = await loadAdminStatus(userId);
+    if (this.adminStatusUserId === userId) {
+      this.adminStatus = status;
+    }
+  }
+
+  private renderViewAsMemberToggle(): TemplateResult | typeof nothing {
+    if (this.collapsed || !this.user) return nothing;
+    const active = this.user.viewAsMember === true;
+    const canShow = active || (this.viewAsMemberFlagEnabled && this.adminStatus?.isAdmin === true);
+    if (!canShow) return nothing;
+
+    return html`
+      <div class="view-as-member-block" data-testid="view-as-member-block">
+        <sl-switch
+          size="small"
+          class="view-as-member-switch"
+          data-testid="view-as-member-switch"
+          ?checked=${active}
+          ?disabled=${this.viewAsMemberBusy}
+          @sl-change=${this.handleViewAsMemberChange}
+          >View as member</sl-switch
+        >
+        <span class="view-as-member-helper">Drop hub admin access in this browser session</span>
+      </div>
+    `;
+  }
+
+  private handleViewAsMemberChange = async (e: Event): Promise<void> => {
+    const target = e.currentTarget as (HTMLElement & { checked?: boolean }) | null;
+    const next = Boolean(target?.checked);
+    const current = this.user?.viewAsMember === true;
+    if (next === current || this.viewAsMemberBusy) return;
+
+    this.viewAsMemberBusy = true;
+    try {
+      await toggleViewAsMember(next);
+    } catch (err) {
+      console.error('Failed to toggle View as member mode:', err);
+      if (target) target.checked = current;
+      this.viewAsMemberBusy = false;
+      showToast(
+        err instanceof Error ? err.message : 'Failed to toggle "View as member" mode',
+        'danger'
+      );
+    }
+  };
+
   /**
    * The user's own hub role as a badge, with its meaning in a tooltip.
    * Display only: no authorization decision reads the role string. Unknown or
@@ -1017,6 +1129,15 @@ export class ScionProfileNav extends LitElement {
    */
   private renderRoleBadge(role: string | undefined): TemplateResult | typeof nothing {
     if (this.collapsed) return nothing;
+    if (this.user?.viewAsMember) {
+      const description =
+        'Viewing as a hub member in this browser session. Hub admin access is temporarily off.';
+      return html`
+        <sl-tooltip content=${description} placement="bottom-start" hoist>
+          <span class="role-badge member" tabindex="0">Hub Member (viewing as member)</span>
+        </sl-tooltip>
+      `;
+    }
     const info = role ? HUB_ROLE_BADGES.get(role) : undefined;
     if (!info) return nothing;
     return html`

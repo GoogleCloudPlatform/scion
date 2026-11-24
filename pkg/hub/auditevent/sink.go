@@ -166,6 +166,9 @@ func credentialSlogValue(credential *serializedCredentialRef) slog.Value {
 		}
 		attrs = append(attrs, slog.Attr{Key: "labels", Value: slog.GroupValue(labels...)})
 	}
+	if credential.SessionMode != "" {
+		attrs = append(attrs, slog.String("session_mode", credential.SessionMode))
+	}
 	return slog.GroupValue(attrs...)
 }
 

@@ -70,6 +70,8 @@ const (
 	FieldAgentDelegationCode = "agent_delegation_code"
 	// FieldProvenanceBasis holds the string denoting the provenance_basis field in the database.
 	FieldProvenanceBasis = "provenance_basis"
+	// FieldSessionMode holds the string denoting the session_mode field in the database.
+	FieldSessionMode = "session_mode"
 	// Table holds the table name of the mutationaudit in the database.
 	Table = "mutation_audits"
 )
@@ -105,6 +107,7 @@ var Columns = []string{
 	FieldActorKind,
 	FieldAgentDelegationCode,
 	FieldProvenanceBasis,
+	FieldSessionMode,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -280,4 +283,9 @@ func ByAgentDelegationCode(opts ...sql.OrderTermOption) OrderOption {
 // ByProvenanceBasis orders the results by the provenance_basis field.
 func ByProvenanceBasis(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldProvenanceBasis, opts...).ToFunc()
+}
+
+// BySessionMode orders the results by the session_mode field.
+func BySessionMode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSessionMode, opts...).ToFunc()
 }

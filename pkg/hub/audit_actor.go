@@ -57,6 +57,11 @@ type AuditActor struct {
 	// Empty for an ordinary live request.
 	ExecutorKind string
 	ExecutorID   string
+
+	// SessionMode marks a mutation made while the caller's web session was
+	// operating in a restricted session mode (e.g. "view_as_member",
+	// ptone/scion#8648). Empty for ordinary sessions.
+	SessionMode string
 }
 
 // auditActorFromContext builds the actor/credential/correlation snapshot for
@@ -104,6 +109,8 @@ func auditActorFromContext(ctx context.Context) AuditActor {
 		actor.ExecutorKind = ec.Kind
 		actor.ExecutorID = ec.ID
 	}
+
+	actor.SessionMode = viewAsMemberSessionModeFor(ctx, actor.PrincipalID)
 
 	// INTEGRATION POINT (D.1 broker on-behalf-of, not yet landed — see the
 	// E.2a handoff): D.1's shared hub-attested broker OBO context path will
@@ -170,6 +177,9 @@ func (a AuditActor) ApplyActor(record *store.MutationAuditRecord) {
 		}
 		if record.CredentialLabels == "" {
 			record.CredentialLabels = a.CredentialLabels
+		}
+		if record.SessionMode == "" {
+			record.SessionMode = a.SessionMode
 		}
 	}
 

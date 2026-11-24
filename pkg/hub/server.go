@@ -9417,14 +9417,14 @@ func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Cont
 		// claim, any valid user token could trigger sweeps.
 		// The synthetic identity has no users row, so its session
 		// generation is 0. Only the bridge consumes this token.
-		token, _, err := s.userTokenService.MintAccessToken(
-			"hub-scheduler",        // userID — synthetic service identity
-			"hub-scheduler@system", // email
-			"Hub Scheduler",        // displayName
-			"service",              // role — the pinned service claim
-			0,                      // sessionGeneration — no users row
-			ClientTypeAPI,          // clientType
-		)
+		token, _, err := s.userTokenService.MintAccessToken(UserTokenSubject{
+			UserID:            "hub-scheduler",        // userID — synthetic service identity
+			Email:             "hub-scheduler@system", // email
+			DisplayName:       "Hub Scheduler",        // displayName
+			Role:              "service",              // role — the pinned service claim
+			SessionGeneration: 0,                      // sessionGeneration — no users row
+			ClientType:        ClientTypeAPI,          // clientType
+		})
 		if err != nil {
 			slog.Error("a2a-bridge-sweep: failed to mint sweep token", "error", err)
 			return

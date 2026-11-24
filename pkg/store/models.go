@@ -5630,6 +5630,10 @@ type DecisionAuditRecord struct {
 	// ListFilter is the summary of a list request's item filter. Set only
 	// when RecordKind is DecisionAuditRecordKindListFilter.
 	ListFilter *DecisionAuditListFilter
+	// SessionMode marks a decision made while the caller's web session was
+	// operating in a restricted session mode (e.g. "view_as_member",
+	// ptone/scion#8648). Empty for ordinary sessions.
+	SessionMode string
 }
 
 // DecisionAuditRecordKindListFilter is the RecordKind of the one aggregated
@@ -5723,6 +5727,11 @@ type MutationAuditRecord struct {
 	// issuer cleanup (3c, ptone/scion#4240): the creation-time stamp the
 	// delete relied on and its run. Empty for every other record.
 	ProvenanceBasis string
+
+	// SessionMode marks a mutation performed while the caller's web session
+	// was operating in a restricted session mode (e.g. "view_as_member",
+	// ptone/scion#8648). Empty for ordinary sessions.
+	SessionMode string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.
@@ -5737,10 +5746,12 @@ type MutationAuditFilter struct {
 	// ExecutorID, when set, keeps only records whose executor_id equals
 	// it (for example a test identity purge's test_identity:<id>).
 	ExecutorID string
-	Since      time.Time
-	Until      time.Time
-	Limit      int
-	Offset     int
+	// SessionMode, when set, keeps only records whose session_mode equals it.
+	SessionMode string
+	Since       time.Time
+	Until       time.Time
+	Limit       int
+	Offset      int
 }
 
 // =============================================================================

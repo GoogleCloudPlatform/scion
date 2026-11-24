@@ -75715,6 +75715,7 @@ type MutationAuditMutation struct {
 	actor_kind                     *string
 	agent_delegation_code          *string
 	provenance_basis               *string
+	session_mode                   *string
 	clearedFields                  map[string]struct{}
 	done                           bool
 	oldValue                       func(context.Context) (*MutationAudit, error)
@@ -77119,6 +77120,55 @@ func (m *MutationAuditMutation) ResetProvenanceBasis() {
 	delete(m.clearedFields, mutationaudit.FieldProvenanceBasis)
 }
 
+// SetSessionMode sets the "session_mode" field.
+func (m *MutationAuditMutation) SetSessionMode(s string) {
+	m.session_mode = &s
+}
+
+// SessionMode returns the value of the "session_mode" field in the mutation.
+func (m *MutationAuditMutation) SessionMode() (r string, exists bool) {
+	v := m.session_mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionMode returns the old "session_mode" field's value of the MutationAudit entity.
+// If the MutationAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MutationAuditMutation) OldSessionMode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionMode: %w", err)
+	}
+	return oldValue.SessionMode, nil
+}
+
+// ClearSessionMode clears the value of the "session_mode" field.
+func (m *MutationAuditMutation) ClearSessionMode() {
+	m.session_mode = nil
+	m.clearedFields[mutationaudit.FieldSessionMode] = struct{}{}
+}
+
+// SessionModeCleared returns if the "session_mode" field was cleared in this mutation.
+func (m *MutationAuditMutation) SessionModeCleared() bool {
+	_, ok := m.clearedFields[mutationaudit.FieldSessionMode]
+	return ok
+}
+
+// ResetSessionMode resets all changes to the "session_mode" field.
+func (m *MutationAuditMutation) ResetSessionMode() {
+	m.session_mode = nil
+	delete(m.clearedFields, mutationaudit.FieldSessionMode)
+}
+
 // Where appends a list predicates to the MutationAuditMutation builder.
 func (m *MutationAuditMutation) Where(ps ...predicate.MutationAudit) {
 	m.predicates = append(m.predicates, ps...)
@@ -77153,7 +77203,7 @@ func (m *MutationAuditMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MutationAuditMutation) Fields() []string {
-	fields := make([]string, 0, 28)
+	fields := make([]string, 0, 29)
 	if m.timestamp != nil {
 		fields = append(fields, mutationaudit.FieldTimestamp)
 	}
@@ -77238,6 +77288,9 @@ func (m *MutationAuditMutation) Fields() []string {
 	if m.provenance_basis != nil {
 		fields = append(fields, mutationaudit.FieldProvenanceBasis)
 	}
+	if m.session_mode != nil {
+		fields = append(fields, mutationaudit.FieldSessionMode)
+	}
 	return fields
 }
 
@@ -77302,6 +77355,8 @@ func (m *MutationAuditMutation) Field(name string) (ent.Value, bool) {
 		return m.AgentDelegationCode()
 	case mutationaudit.FieldProvenanceBasis:
 		return m.ProvenanceBasis()
+	case mutationaudit.FieldSessionMode:
+		return m.SessionMode()
 	}
 	return nil, false
 }
@@ -77367,6 +77422,8 @@ func (m *MutationAuditMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldAgentDelegationCode(ctx)
 	case mutationaudit.FieldProvenanceBasis:
 		return m.OldProvenanceBasis(ctx)
+	case mutationaudit.FieldSessionMode:
+		return m.OldSessionMode(ctx)
 	}
 	return nil, fmt.Errorf("unknown MutationAudit field %s", name)
 }
@@ -77572,6 +77629,13 @@ func (m *MutationAuditMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetProvenanceBasis(v)
 		return nil
+	case mutationaudit.FieldSessionMode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionMode(v)
+		return nil
 	}
 	return fmt.Errorf("unknown MutationAudit field %s", name)
 }
@@ -77668,6 +77732,9 @@ func (m *MutationAuditMutation) ClearedFields() []string {
 	if m.FieldCleared(mutationaudit.FieldProvenanceBasis) {
 		fields = append(fields, mutationaudit.FieldProvenanceBasis)
 	}
+	if m.FieldCleared(mutationaudit.FieldSessionMode) {
+		fields = append(fields, mutationaudit.FieldSessionMode)
+	}
 	return fields
 }
 
@@ -77747,6 +77814,9 @@ func (m *MutationAuditMutation) ClearField(name string) error {
 		return nil
 	case mutationaudit.FieldProvenanceBasis:
 		m.ClearProvenanceBasis()
+		return nil
+	case mutationaudit.FieldSessionMode:
+		m.ClearSessionMode()
 		return nil
 	}
 	return fmt.Errorf("unknown MutationAudit nullable field %s", name)
@@ -77839,6 +77909,9 @@ func (m *MutationAuditMutation) ResetField(name string) error {
 		return nil
 	case mutationaudit.FieldProvenanceBasis:
 		m.ResetProvenanceBasis()
+		return nil
+	case mutationaudit.FieldSessionMode:
+		m.ResetSessionMode()
 		return nil
 	}
 	return fmt.Errorf("unknown MutationAudit field %s", name)

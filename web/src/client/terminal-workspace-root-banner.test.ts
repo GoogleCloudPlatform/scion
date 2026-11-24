@@ -107,7 +107,9 @@ describe('terminal workspace test-hub banner', () => {
     expect(first.hasAttribute('closable')).toBe(false);
     const container = root.element.querySelector(':scope > .terminal-test-hub-banner')!;
     expect(container.contains(first)).toBe(true);
-    expect(container.nextElementSibling?.tagName.toLowerCase()).toBe('scion-header');
+    const vamContainer = container.nextElementSibling;
+    expect(vamContainer?.classList.contains('terminal-view-as-member-banner')).toBe(true);
+    expect(vamContainer?.nextElementSibling?.tagName.toLowerCase()).toBe('scion-header');
 
     // Removing the banner, or even its container, then navigating brings it back.
     container.remove();
@@ -117,7 +119,9 @@ describe('terminal workspace test-hub banner', () => {
     expect(second).not.toBe(first);
     const restored = root.element.querySelector(':scope > .terminal-test-hub-banner')!;
     expect(restored.contains(second)).toBe(true);
-    expect(restored.nextElementSibling?.tagName.toLowerCase()).toBe('scion-header');
+    const restoredVam = restored.nextElementSibling;
+    expect(restoredVam?.classList.contains('terminal-view-as-member-banner')).toBe(true);
+    expect(restoredVam?.nextElementSibling?.tagName.toLowerCase()).toBe('scion-header');
   });
 
   it('renders no banner element when every gate is off', async () => {

@@ -155,6 +155,9 @@ func (s *Server) recheckDelegationAdoptionAdmin(ctx context.Context, tx store.St
 	if s.testAdminPolicyRefusesUser(ctx, u.ID, "admin_delegation_adoption.go:recheckDelegationAdoptionAdmin") {
 		return errAdoptionPermissionLost
 	}
+	if vamUID, ok := viewAsMemberUserFromContext(ctx); ok && vamUID == u.ID {
+		return errAdoptionPermissionLost
+	}
 	if u.Role == store.UserRoleAdmin {
 		return nil
 	}

@@ -515,7 +515,9 @@ func (s *Server) resolvePendingDevSaver(ctx context.Context) (pendingSaverIdenti
 // re-checked when maintenance ends. The dev user's role is admin, so a dev
 // saver is never deferred.
 func (s *Server) deferDuringMaintenance(d pendingSaverIdentity, user UserIdentity) pendingSaverIdentity {
-	if s.maintenance == nil || !s.maintenance.IsEnabled() || IsUnscopedLocalPlatformAdmin(user) {
+	// Maintenance admission uses real (stored) admin status (ptone/scion#8648 D4,
+	// RealByDesign), mirroring adminModeMiddleware.
+	if s.maintenance == nil || !s.maintenance.IsEnabled() || IsUnscopedLocalPlatformAdmin(unclampedUserForMaintenance(user)) {
 		return d
 	}
 	d.out, d.reason = saverDeferred, "maintenance mode"

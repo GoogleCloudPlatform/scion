@@ -29,15 +29,33 @@ import "time"
 
 // GenerateTokenPair mints a token pair with session generation 0.
 func (s *UserTokenService) GenerateTokenPair(userID, email, displayName, role string, clientType ClientType) (accessToken, refreshToken string, expiresIn int64, err error) {
-	return s.MintTokenPair(userID, email, displayName, role, 0, clientType)
+	return s.MintTokenPair(UserTokenSubject{
+		UserID:      userID,
+		Email:       email,
+		DisplayName: displayName,
+		Role:        role,
+		ClientType:  clientType,
+	})
 }
 
 // GenerateAccessToken mints an access token with session generation 0.
 func (s *UserTokenService) GenerateAccessToken(userID, email, displayName, role string, clientType ClientType) (string, int64, error) {
-	return s.MintAccessToken(userID, email, displayName, role, 0, clientType)
+	return s.MintAccessToken(UserTokenSubject{
+		UserID:      userID,
+		Email:       email,
+		DisplayName: displayName,
+		Role:        role,
+		ClientType:  clientType,
+	})
 }
 
 // GenerateAccessTokenWithTTL mints an access token with session generation 0.
 func (s *UserTokenService) GenerateAccessTokenWithTTL(userID, email, displayName, role string, clientType ClientType, ttl time.Duration) (string, int64, error) {
-	return s.MintAccessTokenWithTTL(userID, email, displayName, role, 0, clientType, ttl)
+	return s.MintAccessTokenWithTTL(UserTokenSubject{
+		UserID:      userID,
+		Email:       email,
+		DisplayName: displayName,
+		Role:        role,
+		ClientType:  clientType,
+	}, ttl)
 }

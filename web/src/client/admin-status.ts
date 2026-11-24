@@ -68,9 +68,12 @@ export function clearAdminStatus(): void {
 }
 
 /** A non-null, non-array JSON object; its fields are checked when read. */
-function isAdminStatusBody(
-  value: unknown
-): value is { isAdmin?: unknown; isSuperAdmin?: unknown; permissions?: unknown } {
+function isAdminStatusBody(value: unknown): value is {
+  isAdmin?: unknown;
+  isSuperAdmin?: unknown;
+  permissions?: unknown;
+  viewAsMember?: unknown;
+} {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
@@ -91,6 +94,7 @@ async function fetchAdminStatus(): Promise<{ ok: boolean; status: AdminStatus | 
         permissions: Array.isArray(data.permissions)
           ? data.permissions.filter((p): p is string => typeof p === 'string')
           : [],
+        ...(data.viewAsMember === true ? { viewAsMember: true } : {}),
       },
     };
   } catch {

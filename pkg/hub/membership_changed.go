@@ -71,10 +71,27 @@ const (
 // closes.
 var streamAuthorizedHook func(kind string)
 
+// membershipChangedReasonSessionMode is the Reason payload value published
+// when a user toggles "View as member" mode (ptone/scion#9073). Open web SSE
+// streams treat it as an unconditional reconnect trigger because their
+// connect-time context cannot observe the updated session cookie.
+const membershipChangedReasonSessionMode = "session_mode"
+
 // membershipChangedEvent is the payload of membershipChangedSubject.
 type membershipChangedEvent struct {
 	UserID    string `json:"userId"`
-	ProjectID string `json:"projectId"`
+	ProjectID string `json:"projectId,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// membershipChangedReason returns the Reason field of a membership-changed
+// event, or "" if the payload has no reason or fails to decode.
+func membershipChangedReason(evt Event) string {
+	var m membershipChangedEvent
+	if err := json.Unmarshal(evt.Data, &m); err != nil {
+		return ""
+	}
+	return m.Reason
 }
 
 // publishMembershipChanged publishes userID's membership-changed subject

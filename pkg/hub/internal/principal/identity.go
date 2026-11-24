@@ -86,6 +86,10 @@ type AuthenticatedUser struct {
 	// one was captured.
 	sessionGen    int64
 	sessionGenSet bool
+
+	// viewAsMember marks a web session that has hub-level admin grants
+	// dropped (ptone/scion#8648). When true, Role() reports "member".
+	viewAsMember bool
 }
 
 // NewAuthenticatedUser creates a new AuthenticatedUser.
@@ -111,11 +115,41 @@ func (u *AuthenticatedUser) Email() string { return u.email }
 // DisplayName returns the user display name.
 func (u *AuthenticatedUser) DisplayName() string { return u.displayName }
 
-// Role returns the user role.
-func (u *AuthenticatedUser) Role() string { return u.role }
+// Role returns the effective user role. While view-as-member is active, it
+// returns "viewer" when the stored role is "viewer" (never escalating the role
+// string) and "member" otherwise.
+func (u *AuthenticatedUser) Role() string {
+	if u.viewAsMember {
+		if u.role == "viewer" {
+			return "viewer"
+		}
+		return "member"
+	}
+	return u.role
+}
 
 // ClientType returns the client type (web, cli, api).
 func (u *AuthenticatedUser) ClientType() string { return u.clientType }
+
+// WithViewAsMember returns a copy of u operating in "view as member" mode,
+// where Role() reports "member".
+func (u *AuthenticatedUser) WithViewAsMember() *AuthenticatedUser {
+	c := *u
+	c.viewAsMember = true
+	return &c
+}
+
+// WithoutViewAsMember returns a copy of u with view-as-member cleared so
+// Role() reports the real (stored) role. Only RealByDesign gates (such as
+// maintenance admission, ptone/scion#8648 D4) may call this.
+func (u *AuthenticatedUser) WithoutViewAsMember() *AuthenticatedUser {
+	c := *u
+	c.viewAsMember = false
+	return &c
+}
+
+// ViewAsMember reports whether u is operating in "view as member" mode.
+func (u *AuthenticatedUser) ViewAsMember() bool { return u.viewAsMember }
 
 // WithCapturedSessionGeneration returns a copy of u carrying gen, the session
 // generation captured when a hub user token authenticated u.

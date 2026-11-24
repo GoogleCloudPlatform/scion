@@ -26,6 +26,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 
 import type { Agent, Project } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
+import { clearAdminStatus } from '../../client/admin-status.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import type { AgentMemberIndex } from '../../client/agent-member-index.js';
 import type { AgentListWindow } from '../../client/agent-list-window.js';
@@ -266,6 +267,7 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
   beforeEach(() => {
     vi.stubGlobal('EventSource', FakeEventSource);
     stateManager.setScope({ type: 'brokers-list' });
+    clearAdminStatus();
     resetHubProjectCapabilitiesCache();
     localStorage.clear();
     localStorage.setItem('scion-view-agents', 'list');

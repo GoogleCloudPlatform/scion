@@ -25,10 +25,10 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 
-import type { Project } from '../../shared/types.js';
+import type { PageData, Project } from '../../shared/types.js';
 
 import '../shared/token-list.js';
 
@@ -39,6 +39,9 @@ interface GitHubAppInfo {
 
 @customElement('scion-page-profile-tokens')
 export class ScionPageProfileTokens extends LitElement {
+  @property({ type: Object })
+  pageData: PageData | null = null;
+
   @state()
   private githubAppLink: string | null = null;
 
@@ -149,7 +152,9 @@ export class ScionPageProfileTokens extends LitElement {
           `
         : nothing}
 
-      <scion-token-list></scion-token-list>
+      <scion-token-list
+        ?viewAsMember=${this.pageData?.user?.viewAsMember === true}
+      ></scion-token-list>
     `;
   }
 }

@@ -825,7 +825,7 @@ func (s *Server) loadSourceAuthorIdentity(w http.ResponseWriter, ctx context.Con
 		}
 		return NewVisitorIdentity(u.ID, issuer, u.ID, email, u.DisplayName), true
 	}
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb)), true
+	return applyViewAsMemberFromContext(ctx, NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))), true
 }
 
 func formatInterpretedResponseLine(agentSlug, authorName string, items []store.InterpretedFormattedItem) string {

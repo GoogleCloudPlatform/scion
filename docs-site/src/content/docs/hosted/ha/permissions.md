@@ -598,6 +598,41 @@ Each user record carries a `session_generation` counter. When an admin revokes a
 
 User Access Tokens (`scion_pat_`), agent tokens, dev tokens, and trusted-proxy sessions are unaffected and are managed through their own revocation mechanisms.
 
+## View as Member
+
+When the `hub.view_as_member` [experiment](/scion/reference/experiments/) is enabled, a Hub administrator (a human, active, non-test, non-federated user holding `super-admin`, `hub-admin`, or unscoped local platform admin authority) can temporarily drop Hub-level admin grants for a single browser session to preview what an ordinary member sees.
+
+:::note[Preview and safety rail, not a security boundary]
+**View as member** is a server-enforced preview and a safety rail against accidental administrative actions. It is **not** a security boundary: the administrator can exit at any time and keeps full authority in other browser sessions, the CLI, and User Access Tokens.
+:::
+
+### Entering and Exiting
+
+- **Where to toggle:** Open the **Profile** area and use the **View as member** switch in the left-hand Profile navigation sidebar. The toggle appears only in the Profile sidebar (never in the top header or user menu) and is visible only to Hub administrators while `hub.view_as_member` is enabled, or whenever the session is already in the mode.
+- **Persistent banner:** While active, a non-closable banner (**Viewing as member — hub admin access is off in this browser session.**) with an **Exit** button appears across all authenticated web shells (Console, Chat, Profile, and Terminals).
+- **Transitions and open tabs:** Toggling calls `POST /auth/view-as-member` (`{"enabled": true|false}`), updates the signed `scion_sess` cookie and web JWT pair, and reloads the page (navigating to `/` when entering from an admin route). Open SSE streams for the user receive a `session_mode` reconnect event so other tabs drop `admin.*` subscriptions and reload.
+- **How the mode ends:** Click **Exit** in the banner or switch **View as member** off in the Profile sidebar. The mode also ends implicitly on sign-out, on a new sign-in, when sessions are revoked (`session_generation` bump), or when the session cookie expires.
+- **Exiting is always allowed:** Turning `hub.view_as_member` off (or demoting the user) while a session is in the mode keeps the session clamped and keeps the banner and **Exit** button available until the user exits. While the experiment is off, entering the mode answers `404`.
+
+### What Changes and What Does Not
+
+- **Hub-level admin grants dropped:** For every Web UI, Hub API (via the cookie-to-bearer bridge), and SSE request in that browser session, the Hub drops all system-scoped role bindings other than `hub-member` and `hub-viewer` (removing `super-admin`, `hub-admin`, `global-catalog-author`, and custom system roles) and reports an effective role of `member` (or `viewer` if the stored role is `viewer`). Admin routes return `403` (or match real `hub-member` reads where `hub-member` holds the route's guard permission), `GET /api/v1/auth/admin-status` returns `isAdmin: false`, `isSuperAdmin: false`, and `viewAsMember: true`, and list endpoints show only the user's own projects.
+- **Project memberships kept:** Project-scoped role bindings are untouched, so the administrator keeps their own project memberships and project roles.
+- **Admins without a `hub-member` binding:** If `super-admin` was dropped and no `hub-member` or `hub-viewer` system binding remains, the Hub synthesizes an in-memory `hub-member` system binding for the session so the view matches an ordinary member without exceeding real authority. A `hub-admin`-only holder who is not in `hub-members` receives no synthesized binding and sees their real non-admin authority.
+- **Maintenance-mode exception:** Maintenance-mode admission evaluates the user's real (stored) admin status, so an administrator viewing as a member stays admitted during maintenance and can always reach **Exit**. All other authorization in the request still runs at member level.
+- **Unaffected credentials and sessions:** CLI tokens (`ClientTypeCLI`), existing [User Access Tokens (UATs)](/scion/hosted/user/personal-access-tokens/), dev tokens, external bearer tokens, agent credentials, and other browser sessions of the same user are unaffected. Web JWTs carrying the `vam` claim are rejected with `401` if presented on a non-web token type. Agents created while in the mode have their creation-time scopes minted from the clamped session context and carry no durable "view as member" marker afterwards.
+
+### Auditing
+
+- **Transitions:** Entering and exiting write synchronous mutation audit records (`session.view_as_member.enter` and `session.view_as_member.exit`, with exit `reason` `"user"` or `"sign_out"`) and structured `audit.view_as_member` log events.
+- **Actions while active:** Requests executed in the mode are tagged with `session_mode=view_as_member` across mutation audit records (`mutation_audit.session_mode`, filterable by `SessionMode`), authorization decision audit records, the v1 audit envelope's `credential.session_mode` field, and Hub request logs.
+
+### Known Limitations
+
+- **Implicit endings emit no exit audit record:** Because `scion_sess` is a stateless signed cookie, session cookie expiry and `session_generation` revocations end the mode without writing a `session.view_as_member.exit` record.
+- **Hub downgrade:** An older Hub binary that does not recognize the `vam` JWT claim ignores it, so an active view-as-member session regains its real admin authority after a downgrade.
+- **User Access Tokens created in the mode:** A [User Access Token (UAT)](/scion/hosted/user/personal-access-tokens/) created in the Web UI while viewing as a member has its frozen permission ceiling computed from the clamped session context, so it remains frozen at member permissions for its lifetime (the token creation dialog displays a notice while the mode is active).
+
 ## Break-Glass Admin Recovery
 
 If all admin users have been removed or an organization has lost administrative access to the Hub, the `scion admin promote` CLI command provides an emergency recovery path. This command connects directly to the database — bypassing the running Hub server — and promotes an existing user to the admin role.

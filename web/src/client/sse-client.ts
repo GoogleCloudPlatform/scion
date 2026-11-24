@@ -78,6 +78,8 @@ export interface SSEClientOptions {
   hiddenCloseMs?: number;
   /** Upper bound of the full-jitter delay before the first reconnect. */
   firstReconnectJitterMs?: number;
+  /** Override for soft page reload on `event: reconnect` with `reason: session_mode`. */
+  reloadPage?: () => void;
 }
 
 /** How long a hidden tab keeps its stream open (ptone/scion#5235). */
@@ -168,6 +170,7 @@ export class SSEClient extends EventTarget {
   private readonly hiddenCloseEnabled: () => boolean;
   private readonly hiddenCloseMs: number;
   private readonly firstReconnectJitterMs: number;
+  private readonly reloadPage: () => void;
   /** Armed while the tab is hidden; closes the stream when it fires. */
   private hiddenCloseTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -176,6 +179,12 @@ export class SSEClient extends EventTarget {
    * connect()) clears it.
    */
   private hiddenClosed = false;
+  /**
+   * Set when `event: reconnect` with `reason: session_mode` arrives while the
+   * tab is hidden. Consumed on the next return to visibility so background tabs
+   * do not keep a stale admin UI (ptone/scion#9074, design §4.8 step 5).
+   */
+  private pendingSessionModeReload = false;
 
   constructor(
     private readonly endpoint = '/events',
@@ -187,6 +196,11 @@ export class SSEClient extends EventTarget {
       options.hiddenCloseEnabled ?? ((): boolean => isFeatureEnabled(SSE_HIDDEN_TAB_CLOSE_FLAG));
     this.hiddenCloseMs = options.hiddenCloseMs ?? SSE_HIDDEN_CLOSE_MS;
     this.firstReconnectJitterMs = options.firstReconnectJitterMs ?? SSE_FIRST_RECONNECT_JITTER_MS;
+    this.reloadPage =
+      options.reloadPage ??
+      ((): void => {
+        if (typeof window !== 'undefined') window.location.reload();
+      });
   }
 
   /**
@@ -319,7 +333,29 @@ export class SSEClient extends EventTarget {
       this.eventSource = null;
       this.scheduleReconnect(true);
     };
-    this.eventSource.addEventListener('reconnect', onServerClose);
+    this.eventSource.addEventListener('reconnect', (event) => {
+      if (es !== this.eventSource) return;
+      let reason: unknown;
+      try {
+        const raw: unknown = event.data;
+        if (typeof raw === 'string' && raw.length > 0) {
+          reason = (JSON.parse(raw) as { reason?: unknown })?.reason;
+        }
+      } catch {
+        // Plain reconnect without JSON reason payload.
+      }
+      if (reason === 'session_mode') {
+        if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+          this.pendingSessionModeReload = false;
+          es.close();
+          this.eventSource = null;
+          this.reloadPage();
+          return;
+        }
+        this.pendingSessionModeReload = true;
+      }
+      onServerClose();
+    });
 
     // The hub closes a stream that reached its maximum age with
     // `event: superseded` and reason max_age (phase 1 of ptone/scion#5219).
@@ -667,6 +703,12 @@ export class SSEClient extends EventTarget {
     this.onVisibilityChange = (): void => {
       if (document.visibilityState === 'visible') {
         this.clearHiddenClose();
+        if (this.pendingSessionModeReload) {
+          this.pendingSessionModeReload = false;
+          this.closeEventSource();
+          this.reloadPage();
+          return;
+        }
         // A stream closed for the hidden tab is not connected, so onResume
         // reopens it at once with a fresh backoff.
         this.onResume();
@@ -678,7 +720,15 @@ export class SSEClient extends EventTarget {
     // Every load fires pageshow; only a restore from the back/forward cache
     // (persisted) is a return to a page that was frozen.
     this.onPageShow = (event: PageTransitionEvent): void => {
-      if (event.persisted) this.onResume();
+      if (event.persisted) {
+        if (this.pendingSessionModeReload) {
+          this.pendingSessionModeReload = false;
+          this.closeEventSource();
+          this.reloadPage();
+          return;
+        }
+        this.onResume();
+      }
     };
     this.onOnline = (): void => this.onResume();
     this.onOffline = (): void => this.markSuspended();
@@ -730,6 +780,7 @@ export class SSEClient extends EventTarget {
     this.clearResumeCheck();
     this.clearHiddenClose();
     this.hiddenClosed = false;
+    this.pendingSessionModeReload = false;
     this.heartbeatSeen = false;
     this.suspendedAt = null;
 

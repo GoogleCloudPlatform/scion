@@ -23,6 +23,11 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 import type { User } from '../../shared/types.js';
+import { showToast } from '../../utils/toast.js';
+
+vi.mock('../../utils/toast.js', () => ({
+  showToast: vi.fn(),
+}));
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -872,5 +877,247 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     expect(decisionsProbeCount).toBe(2);
     expect(decisionsBadge(nav)?.textContent?.trim()).toBe('1');
     stateManager.disconnect();
+  });
+});
+
+describe('scion-profile-nav — View as member switch (ptone/scion#9074)', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({})))
+    );
+    await import('./profile-nav.js');
+  });
+
+  afterEach(async () => {
+    element?.remove();
+    element = null;
+    const { clearAdminStatus } = await import('../../client/admin-status.js');
+    clearAdminStatus();
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function mountSwitchTest(opts: {
+    flagOn: boolean;
+    isAdmin: boolean;
+    viewAsMember: boolean;
+    role?: 'admin' | 'member' | 'viewer';
+    collapsed?: boolean;
+  }): Promise<HTMLElement> {
+    const { clearAdminStatus } = await import('../../client/admin-status.js');
+    clearAdminStatus();
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    if (opts.flagOn) {
+      flags.setFeatureFlag(flags.VIEW_AS_MEMBER_FLAG, true);
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.includes('/api/v1/auth/admin-status')) {
+          return Promise.resolve(
+            jsonResponse({
+              isAdmin: opts.isAdmin,
+              isSuperAdmin: opts.isAdmin,
+              permissions: [],
+              ...(opts.viewAsMember ? { viewAsMember: true } : {}),
+            })
+          );
+        }
+        return Promise.resolve(jsonResponse({ configured: false, pendingSecrets: [] }));
+      })
+    );
+
+    const el = document.createElement('scion-profile-nav') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+      collapsed: boolean;
+    };
+    el.collapsed = opts.collapsed ?? false;
+    el.user = {
+      id: 'u-vam',
+      email: 'admin@example.com',
+      name: 'Admin User',
+      role: opts.role ?? (opts.viewAsMember ? 'member' : opts.isAdmin ? 'admin' : 'member'),
+      ...(opts.viewAsMember ? { viewAsMember: true } : {}),
+    };
+    document.body.appendChild(el);
+    for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    return el;
+  }
+
+  function vamSwitch(el: HTMLElement): (HTMLElement & { checked?: boolean }) | null {
+    return el.shadowRoot?.querySelector('[data-testid="view-as-member-switch"]') ?? null;
+  }
+
+  it.each([
+    {
+      label: 'flag off, member, vam off -> hidden',
+      flagOn: false,
+      isAdmin: false,
+      viewAsMember: false,
+      expected: false,
+    },
+    {
+      label: 'flag off, admin, vam off -> hidden',
+      flagOn: false,
+      isAdmin: true,
+      viewAsMember: false,
+      expected: false,
+    },
+    {
+      label: 'flag on, member, vam off -> hidden',
+      flagOn: true,
+      isAdmin: false,
+      viewAsMember: false,
+      expected: false,
+    },
+    {
+      label: 'flag on, admin, vam off -> visible (unchecked)',
+      flagOn: true,
+      isAdmin: true,
+      viewAsMember: false,
+      expected: true,
+    },
+    {
+      label: 'flag off, member/clamped, vam on -> visible (checked)',
+      flagOn: false,
+      isAdmin: false,
+      viewAsMember: true,
+      expected: true,
+    },
+    {
+      label: 'flag on, member/clamped, vam on -> visible (checked)',
+      flagOn: true,
+      isAdmin: false,
+      viewAsMember: true,
+      expected: true,
+    },
+  ])('$label', async ({ flagOn, isAdmin, viewAsMember, expected }) => {
+    element = await mountSwitchTest({ flagOn, isAdmin, viewAsMember });
+    const sw = vamSwitch(element);
+    if (!expected) {
+      expect(sw).toBeNull();
+    } else {
+      expect(sw).not.toBeNull();
+      expect(sw?.hasAttribute('checked')).toBe(viewAsMember);
+      expect(element.shadowRoot?.textContent).toContain(
+        'Drop hub admin access in this browser session'
+      );
+    }
+  });
+
+  it('shows "Hub Member (viewing as member)" badge when viewAsMember is true', async () => {
+    element = await mountSwitchTest({ flagOn: true, isAdmin: false, viewAsMember: true });
+    const b = badge(element);
+    expect(b?.textContent?.trim()).toBe('Hub Member (viewing as member)');
+    expect(b?.classList.contains('member')).toBe(true);
+  });
+
+  it('hides the switch while the sidebar is collapsed', async () => {
+    element = await mountSwitchTest({
+      flagOn: true,
+      isAdmin: true,
+      viewAsMember: false,
+      collapsed: true,
+    });
+    expect(vamSwitch(element)).toBeNull();
+  });
+
+  it('toggling the switch ON posts {enabled:true} to /auth/view-as-member', async () => {
+    element = await mountSwitchTest({ flagOn: true, isAdmin: true, viewAsMember: false });
+    const postCalls: Array<{ method: string | undefined; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.endsWith('/auth/view-as-member')) {
+          postCalls.push({
+            method: init?.method,
+            body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+          });
+          return Promise.resolve(jsonResponse({ viewAsMember: true }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+
+    const sw = vamSwitch(element)!;
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change', { bubbles: true }));
+
+    await vi.waitFor(() => expect(postCalls).toHaveLength(1));
+    expect(postCalls[0]).toEqual({ method: 'POST', body: { enabled: true } });
+  });
+
+  it('reverts checked state and shows a danger toast when the toggle POST fails', async () => {
+    element = await mountSwitchTest({ flagOn: true, isAdmin: true, viewAsMember: false });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.endsWith('/auth/view-as-member')) {
+          return Promise.resolve(jsonResponse({ error: { message: 'forbidden' } }, 403));
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+
+    const sw = vamSwitch(element)!;
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change', { bubbles: true }));
+
+    await vi.waitFor(() => expect(sw.checked).toBe(false));
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+    expect(sw.hasAttribute('disabled')).toBe(false);
+    expect(vi.mocked(showToast)).toHaveBeenCalledWith(expect.any(String), 'danger');
+  });
+
+  it('blocks a double submit while a toggle POST is in flight', async () => {
+    element = await mountSwitchTest({ flagOn: true, isAdmin: true, viewAsMember: false });
+    let resolvePost!: (res: Response) => void;
+    let postCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.endsWith('/auth/view-as-member')) {
+          postCount++;
+          return new Promise<Response>((resolve) => {
+            resolvePost = resolve;
+          });
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+
+    const sw = vamSwitch(element)!;
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+    expect(sw.hasAttribute('disabled')).toBe(true);
+
+    // Second change while first POST is still in flight must be ignored.
+    sw.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    expect(postCount).toBe(1);
+
+    resolvePost(jsonResponse({ viewAsMember: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(postCount).toBe(1);
   });
 });

@@ -879,6 +879,13 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						}
 					}
 				}
+				if claims.ViewAsMember && claims.ClientType != ClientTypeWeb {
+					log.Warn("JWT auth rejected: view-as-member claim on non-web token",
+						"user_id", claims.UserID, "client_type", claims.ClientType)
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token: view-as-member claim is only valid on web tokens", nil)
+					return
+				}
 				user := NewAuthenticatedUser(
 					claims.UserID,
 					claims.Email,
@@ -886,6 +893,10 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					claims.Role,
 					string(claims.ClientType),
 				)
+				if claims.ViewAsMember {
+					user = user.WithViewAsMember()
+					ctx = contextWithViewAsMember(ctx, claims.UserID)
+				}
 				ctx = context.WithValue(ctx, userContextKey{}, user)
 				ctx = contextWithIdentity(ctx, user)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))

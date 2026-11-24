@@ -131,9 +131,14 @@ func TestWebServer_RefreshHubTokens(t *testing.T) {
 	ws.SetUserTokenService(svc)
 
 	// Generate initial tokens
-	_, refreshToken, _, err := svc.MintTokenPair(
-		"user-123", "test@example.com", "Test User", "admin", 3, ClientTypeWeb,
-	)
+	_, refreshToken, _, err := svc.MintTokenPair(UserTokenSubject{
+		UserID:            "user-123",
+		Email:             "test@example.com",
+		DisplayName:       "Test User",
+		Role:              "admin",
+		SessionGeneration: 3,
+		ClientType:        ClientTypeWeb,
+	})
 	if err != nil {
 		t.Fatalf("failed to generate tokens: %v", err)
 	}

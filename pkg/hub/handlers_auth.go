@@ -51,11 +51,12 @@ type AuthLoginResponse struct {
 
 // UserResponse is the user info returned in auth responses.
 type UserResponse struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	DisplayName string `json:"displayName"`
-	Role        string `json:"role"`
-	AvatarURL   string `json:"avatarUrl,omitempty"`
+	ID           string `json:"id"`
+	Email        string `json:"email"`
+	DisplayName  string `json:"displayName"`
+	Role         string `json:"role"`
+	AvatarURL    string `json:"avatarUrl,omitempty"`
+	ViewAsMember bool   `json:"viewAsMember,omitempty"`
 
 	// Preferences is populated only by handleAuthMe, from a live store read.
 	Preferences *store.UserPreferences `json:"preferences,omitempty"`
@@ -345,9 +346,14 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
-	)
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            user.ID,
+		Email:             user.Email,
+		DisplayName:       user.DisplayName,
+		Role:              user.Role,
+		SessionGeneration: user.SessionGeneration,
+		ClientType:        ClientTypeWeb,
+	})
 	if err != nil {
 		InternalError(w)
 		return
@@ -460,9 +466,14 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, clientType,
-	)
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            user.ID,
+		Email:             user.Email,
+		DisplayName:       user.DisplayName,
+		Role:              user.Role,
+		SessionGeneration: user.SessionGeneration,
+		ClientType:        clientType,
+	})
 	if err != nil {
 		InternalError(w)
 		return
@@ -631,9 +642,15 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	// The new pair carries the presented refresh token's own session
 	// generation, never a fresh row read, so a refresh cannot move a
 	// credential to a newer generation.
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
-		userID, claims.Email, claims.DisplayName, role, claims.SessionGeneration, claims.ClientType,
-	)
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            userID,
+		Email:             claims.Email,
+		DisplayName:       claims.DisplayName,
+		Role:              role,
+		SessionGeneration: claims.SessionGeneration,
+		ClientType:        claims.ClientType,
+		ViewAsMember:      claims.ViewAsMember && claims.ClientType == ClientTypeWeb,
+	})
 	if err != nil {
 		InternalError(w)
 		return
@@ -809,11 +826,12 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, UserResponse{
-		ID:          user.ID(),
-		Email:       user.Email(),
-		DisplayName: user.DisplayName(),
-		Role:        user.Role(),
-		Preferences: loadUserPreferences(r.Context(), s.store, user.ID()),
+		ID:           user.ID(),
+		Email:        user.Email(),
+		DisplayName:  user.DisplayName(),
+		Role:         user.Role(),
+		ViewAsMember: authUserViewAsMember(user),
+		Preferences:  loadUserPreferences(r.Context(), s.store, user.ID()),
 	})
 }
 
@@ -822,6 +840,7 @@ type AdminStatusResponse struct {
 	IsAdmin      bool     `json:"isAdmin"`
 	IsSuperAdmin bool     `json:"isSuperAdmin"`
 	Permissions  []string `json:"permissions"`
+	ViewAsMember bool     `json:"viewAsMember"`
 }
 
 // handleAuthAdminStatus handles GET /api/v1/auth/admin-status.
@@ -899,6 +918,7 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 		IsAdmin:      isAdmin,
 		IsSuperAdmin: isSuperAdmin,
 		Permissions:  perms,
+		ViewAsMember: authUserViewAsMember(user),
 	})
 }
 
@@ -1411,9 +1431,14 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeCLI,
-	)
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            user.ID,
+		Email:             user.Email,
+		DisplayName:       user.DisplayName,
+		Role:              user.Role,
+		SessionGeneration: user.SessionGeneration,
+		ClientType:        ClientTypeCLI,
+	})
 	if err != nil {
 		InternalError(w)
 		return
@@ -1638,9 +1663,14 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeCLI,
-	)
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(UserTokenSubject{
+		UserID:            user.ID,
+		Email:             user.Email,
+		DisplayName:       user.DisplayName,
+		Role:              user.Role,
+		SessionGeneration: user.SessionGeneration,
+		ClientType:        ClientTypeCLI,
+	})
 	if err != nil {
 		InternalError(w)
 		return
