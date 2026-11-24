@@ -2407,8 +2407,10 @@ func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) e
 // persisting User.Role. st may be a transaction store.
 //
 //	member (non-admin-API) → if user holds an unconditional SystemDefaultRoleCreatedBy
-//	                         custom system-scope binding, skip ensureHubMembershipTx;
-//	                         otherwise ensure hub-members membership. Delete hub-viewer bindings.
+//	                         custom system-scope binding, remove hub-members membership;
+//	                         otherwise ensure hub-members membership and re-check the
+//	                         sentinel (removing hub-members if a concurrent default-role
+//	                         grant committed in the meantime). Delete hub-viewer bindings.
 //	member (admin-API)     → delete SystemDefaultRoleCreatedBy bindings; ensure hub-members
 //	                         membership; delete hub-viewer binding(s).
 //	viewer                 → remove hub-members membership; delete SystemDefaultRoleCreatedBy
@@ -2439,9 +2441,26 @@ func syncHubRoleGrants(ctx context.Context, st store.Store, userID, role, create
 		if err != nil {
 			return err
 		}
-		if !hasCustomDefault {
+		if hasCustomDefault {
+			if err := removeHubMembershipTx(ctx, st, userID); err != nil {
+				return err
+			}
+		} else {
 			if err := ensureHubMembershipTx(ctx, st, userID); err != nil {
 				return err
+			}
+			// Re-check after adding hub-members so a concurrent first sign-in
+			// or activation that committed the custom default-role binding
+			// between our first check and ensureHubMembershipTx cannot leave
+			// both hub-members and the custom default role applied.
+			hasCustomDefault, err = hasActiveSystemDefaultRoleBinding(ctx, st, userID)
+			if err != nil {
+				return err
+			}
+			if hasCustomDefault {
+				if err := removeHubMembershipTx(ctx, st, userID); err != nil {
+					return err
+				}
 			}
 		}
 		return deleteHubViewerBindingsTx(ctx, st, userID)

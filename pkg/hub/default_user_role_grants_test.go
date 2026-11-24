@@ -21,9 +21,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -810,4 +812,173 @@ func TestCustomDefaultUserRole_FallbackSyncsPersistedUserRole(t *testing.T) {
 	require.NoError(t, st.CreateUser(ctx, uMember))
 	require.NoError(t, applyDefaultUserRoleGrants(ctx, st, uMember.ID, store.UserRoleMember, store.UserRoleViewer, true))
 	grantTestAssertBuiltinHubMember(t, st, uMember.ID)
+}
+
+type addGroupMemberHookStore struct {
+	store.Store
+	beforeAdd func(ctx context.Context, member *store.GroupMember) error
+	once      sync.Once
+}
+
+func (h *addGroupMemberHookStore) AddGroupMember(ctx context.Context, member *store.GroupMember) error {
+	var hookErr error
+	h.once.Do(func() {
+		if h.beforeAdd != nil {
+			hookErr = h.beforeAdd(ctx, member)
+		}
+	})
+	if hookErr != nil {
+		return hookErr
+	}
+	return h.Store.AddGroupMember(ctx, member)
+}
+
+// TestCustomDefaultUserRole_ConcurrentFirstSignIn verifies that concurrent
+// first sign-in or invited-user activation for the same user/email cannot leave
+// both the built-in hub-members group membership and the custom default role
+// applied (ptone/scion#8710).
+func TestCustomDefaultUserRole_ConcurrentFirstSignIn(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	grantTestEnableExperiment(t, srv, st, true)
+
+	customRole := grantTestSeedRole(t, st, "custom-concurrent", store.RoleScopeSystem, []string{"user.read"})
+	srv.config.DefaultUserRole = customRole.Name
+	srv.config.UserAccessMode = "open"
+
+	t.Run("routine sync removes stale hub-members when sentinel is present", func(t *testing.T) {
+		u := &store.User{
+			ID: generateID(), Email: "stale-both@example.com", DisplayName: "Stale Both",
+			Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+		}
+		require.NoError(t, st.CreateUser(ctx, u))
+		require.NoError(t, applyDefaultUserRoleGrants(ctx, st, u.ID, store.UserRoleMember, customRole.Name, true))
+		// Simulate prior race state where both hub-members and the custom default role exist.
+		require.NoError(t, ensureHubMembershipTx(ctx, st, u.ID))
+		require.True(t, grantTestIsHubMember(t, st, u.ID))
+
+		// Non-admin-API routine sync removes hub-members while keeping the custom default role.
+		require.NoError(t, syncHubRoleGrants(ctx, st, u.ID, store.UserRoleMember, store.SystemReconcileCreatedBy))
+		grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
+
+		// Startup backfill also removes hub-members when the sentinel is present.
+		require.NoError(t, ensureHubMembershipTx(ctx, st, u.ID))
+		require.NoError(t, syncHubRoleGrants(ctx, st, u.ID, store.UserRoleMember, store.SystemBackfillCreatedBy))
+		grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
+
+		// Admin API override to built-in member still deletes the sentinel and keeps hub-members.
+		require.NoError(t, syncHubRoleGrants(ctx, st, u.ID, store.UserRoleMember, store.AdminAPICreatedBy))
+		grantTestAssertBuiltinHubMember(t, st, u.ID)
+	})
+
+	t.Run("re-check after AddGroupMember cleans up concurrent custom default grant", func(t *testing.T) {
+		// Deterministically reproduce the TOCTOU interleaving:
+		// 1. syncHubRoleGrants checks hasActiveSystemDefaultRoleBinding -> false.
+		// 2. Before syncHubRoleGrants calls AddGroupMember, concurrent first
+		//    sign-in commits applyDefaultUserRoleGrants (creating the sentinel).
+		// 3. syncHubRoleGrants adds hub-members, then re-checks the sentinel and
+		//    removes hub-members so only the custom default role remains.
+		u := &store.User{
+			ID: generateID(), Email: "toctou-race@example.com", DisplayName: "TOCTOU Race",
+			Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+		}
+		require.NoError(t, st.CreateUser(ctx, u))
+
+		hookStore := &addGroupMemberHookStore{
+			Store: st,
+			beforeAdd: func(ctx context.Context, _ *store.GroupMember) error {
+				return applyDefaultUserRoleGrants(ctx, st, u.ID, store.UserRoleMember, customRole.Name, true)
+			},
+		}
+
+		require.NoError(t, syncHubRoleGrants(ctx, hookStore, u.ID, store.UserRoleMember, store.SystemReconcileCreatedBy))
+		grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
+	})
+
+	t.Run("concurrent first sign-in for same new email", func(t *testing.T) {
+		const iterations = 10
+		const workers = 4
+
+		for i := range iterations {
+			email := fmt.Sprintf("concurrent-new-%d@example.com", i)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			errCh := make(chan error, workers)
+
+			for w := range workers {
+				wg.Add(1)
+				go func(worker int) {
+					defer wg.Done()
+					<-start
+					_, err := srv.provisionUser(ctx, &ExternalUserInfo{
+						Email:       email,
+						DisplayName: fmt.Sprintf("Concurrent New %d-%d", i, worker),
+					})
+					errCh <- err
+				}(w)
+			}
+
+			close(start)
+			wg.Wait()
+			close(errCh)
+
+			succeeded := 0
+			for err := range errCh {
+				if err == nil {
+					succeeded++
+				}
+			}
+			require.GreaterOrEqual(t, succeeded, 1, "at least one concurrent first sign-in must succeed")
+
+			u, err := st.GetUserByEmail(ctx, email)
+			require.NoError(t, err)
+			assert.Equal(t, store.UserRoleMember, u.Role)
+			grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
+		}
+	})
+
+	t.Run("concurrent invited-user activation for same email", func(t *testing.T) {
+		const iterations = 10
+		const workers = 4
+
+		for i := range iterations {
+			email := fmt.Sprintf("concurrent-inv-%d@example.com", i)
+			invited := &store.User{
+				ID: generateID(), Email: email, DisplayName: "Invited",
+				Role: store.UserRoleMember, Status: store.UserStatusInvited, Created: time.Now(),
+			}
+			require.NoError(t, st.CreateUser(ctx, invited))
+
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			errCh := make(chan error, workers)
+
+			for w := range workers {
+				wg.Add(1)
+				go func(worker int) {
+					defer wg.Done()
+					<-start
+					_, err := srv.provisionUser(ctx, &ExternalUserInfo{
+						Email:       email,
+						DisplayName: fmt.Sprintf("Concurrent Inv %d-%d", i, worker),
+					})
+					errCh <- err
+				}(w)
+			}
+
+			close(start)
+			wg.Wait()
+			close(errCh)
+
+			for err := range errCh {
+				require.NoError(t, err)
+			}
+
+			u, err := st.GetUserByEmail(ctx, email)
+			require.NoError(t, err)
+			assert.Equal(t, store.UserStatusActive, u.Status)
+			assert.Equal(t, store.UserRoleMember, u.Role)
+			grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
+		}
+	})
 }
