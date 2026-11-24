@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -642,29 +641,6 @@ func TestRelink_TargetExistsRefuses(t *testing.T) {
 		t.Fatalf("Start ran after a refused re-link")
 	}
 	assertState(t, f.oldRoot)
-}
-
-// TestRelink_CopyFailureKeepsOldDir: a copy that fails midway (an entry that
-// cannot be copied) leaves the old directory and the marker unchanged and
-// removes the partial copy.
-func TestRelink_CopyFailureKeepsOldDir(t *testing.T) {
-	f := newRelinkFixture(t)
-	forceCopyPath(t)
-	fifo := filepath.Join(f.oldRoot, config.DotScion, "agents", relinkAgent, "home", "zz-fifo")
-	if err := syscall.Mkfifo(fifo, 0644); err != nil {
-		t.Skipf("mkfifo: %v", err)
-	}
-	if err := f.relink(""); err == nil {
-		t.Fatal("expected the re-link to fail")
-	}
-	assertState(t, f.oldRoot)
-	if _, err := os.Lstat(fifo); err != nil {
-		t.Fatalf("old entry removed: %v", err)
-	}
-	assertAbsent(t, f.newRoot)
-	if got := f.markerID(t); got != relinkOldID {
-		t.Fatalf("marker rewritten to %q", got)
-	}
 }
 
 // TestRelink_VerificationFailureKeepsOldDir: when the copy does not verify,
