@@ -712,8 +712,8 @@ func TestDecisionFacets_DifferentialVsLegacy(t *testing.T) {
 	_, err = cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
 		InterpretedByAgentID: agents[1], SourceMessageID: uuid.NewString(),
 		AnsweredByUserID: users[2], AnsweredByName: "Carol", AnsweredByEmail: "diff-u2@test.com",
-		Surface: store.DecisionSurfaceNative,
-		Answers: []store.InterpretedAnswerPair{{DecisionRowID: rInterpAwait, ChoiceID: "yes"}},
+		Surface:         store.DecisionSurfaceNative,
+		Answers:         []store.InterpretedAnswerPair{{DecisionRowID: rInterpAwait, ChoiceID: "yes"}},
 		ResponseMessage: &store.Message{ID: uuid.NewString(), ProjectID: projIDs[0], Sender: "agent:a1", SenderID: agents[1], Recipient: "chat", ThreadID: allKeys[1], Channel: "web", CreatedAt: time.Now().UTC()},
 	})
 	require.NoError(t, err)
@@ -723,8 +723,8 @@ func TestDecisionFacets_DifferentialVsLegacy(t *testing.T) {
 	_, err = cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
 		InterpretedByAgentID: agents[0], SourceMessageID: uuid.NewString(),
 		AnsweredByUserID: deletedUserID, AnsweredByName: "DelUser", AnsweredByEmail: "diff-u3@test.com",
-		Surface: store.DecisionSurfaceNative,
-		Answers: []store.InterpretedAnswerPair{{DecisionRowID: rInterpDsm, ChoiceID: "yes"}},
+		Surface:         store.DecisionSurfaceNative,
+		Answers:         []store.InterpretedAnswerPair{{DecisionRowID: rInterpDsm, ChoiceID: "yes"}},
 		ResponseMessage: &store.Message{ID: uuid.NewString(), ProjectID: projIDs[0], Sender: "agent:a0", SenderID: agents[0], Recipient: "chat", ThreadID: allKeys[2], Channel: "web", CreatedAt: time.Now().UTC()},
 	})
 	require.NoError(t, err)
@@ -734,7 +734,7 @@ func TestDecisionFacets_DifferentialVsLegacy(t *testing.T) {
 		MessageID: decDsm.MessageID, RowIDs: []string{rInterpDsm},
 		User:    store.DecisionAnswerer{UserID: deletedUserID, Name: "DelUser", Email: "diff-u3@test.com"},
 		Surface: store.DecisionSurfaceDecisionsPage, MinAge: time.Nanosecond,
-		Now: func() time.Time { return time.Now().UTC().Add(time.Hour) },
+		Now:             func() time.Time { return time.Now().UTC().Add(time.Hour) },
 		ResponseMessage: &store.Message{ID: uuid.NewString(), ProjectID: projIDs[0], Sender: "user:" + deletedUserID, SenderID: deletedUserID, Recipient: "chat", ThreadID: allKeys[2], Channel: "web", CreatedAt: time.Now().UTC()},
 	})
 	require.NoError(t, err)
@@ -867,7 +867,7 @@ func TestDecisionFacets_DowngradeReconcile(t *testing.T) {
 	botID := uuid.NewString()
 	choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
 	pKeep, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
-		Message: &store.Message{ID: uuid.NewString(), ProjectID: pidKeep, Sender: "agent:bot", SenderID: botID, Recipient: "chat", ThreadID: "t-keep", Channel: "web", CreatedAt: time.Now().UTC()},
+		Message:      &store.Message{ID: uuid.NewString(), ProjectID: pidKeep, Sender: "agent:bot", SenderID: botID, Recipient: "chat", ThreadID: "t-keep", Channel: "web", CreatedAt: time.Now().UTC()},
 		AskerAgentID: botID, AskerAgentName: "bot",
 		Decisions: []messages.Decision{
 			{Key: "k-keep", Question: "Keep?", Choices: choices},
@@ -885,7 +885,7 @@ func TestDecisionFacets_DowngradeReconcile(t *testing.T) {
 		require.NoError(t, err)
 	}
 	_, err = cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
-		Message: &store.Message{ID: uuid.NewString(), ProjectID: pidOldDel, Sender: "agent:bot", SenderID: botID, Recipient: "chat", ThreadID: "t-del", Channel: "web", CreatedAt: time.Now().UTC()},
+		Message:      &store.Message{ID: uuid.NewString(), ProjectID: pidOldDel, Sender: "agent:bot", SenderID: botID, Recipient: "chat", ThreadID: "t-del", Channel: "web", CreatedAt: time.Now().UTC()},
 		AskerAgentID: botID, AskerAgentName: "bot",
 		Decisions: []messages.Decision{{Key: "k-delp", Question: "DelP?", Choices: choices}},
 	})

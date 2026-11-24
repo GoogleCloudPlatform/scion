@@ -34,9 +34,9 @@ import (
 )
 
 const (
-	maxProjectDecisionFacetItems  = 500
+	maxProjectDecisionFacetItems   = 500
 	projectDecisionAgentsChunkSize = 500
-	facetProbeChunkSize           = 500
+	facetProbeChunkSize            = 500
 )
 
 type groupedProjectDecisionAgent struct {
