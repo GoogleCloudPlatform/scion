@@ -324,7 +324,7 @@ const (
 	// LockReleaseAutoUpdate guards the periodic daily release auto-update
 	// scheduler singleton ("release-auto-update") so only one replica per
 	// tick evaluates the daily window and writes system.auto_update_state.
-	LockReleaseAutoUpdate AdvisoryLockKey = 0x5C100033
+	LockReleaseAutoUpdate AdvisoryLockKey = 0x5C100034
 
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
