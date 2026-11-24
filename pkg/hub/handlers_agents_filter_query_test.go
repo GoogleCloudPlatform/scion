@@ -143,4 +143,193 @@ func TestListAgents_FilterQuery_StructuredAndErrorsAndPagination(t *testing.T) {
 	assert.Contains(t, enumResp.Error.Message, "running")
 	assert.Equal(t, float64(0), enumResp.Error.Details["offset"])
 	assert.Equal(t, float64(12), enumResp.Error.Details["length"])
+
+	// Client-only key (mode:) -> 400 invalid_filter_query.
+	recMode := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("mode:lineage"), nil)
+	require.Equal(t, http.StatusBadRequest, recMode.Code)
+	var modeResp ErrorResponse
+	require.NoError(t, json.Unmarshal(recMode.Body.Bytes(), &modeResp))
+	assert.Equal(t, ErrCodeInvalidFilterQuery, modeResp.Error.Code)
+	assert.Contains(t, modeResp.Error.Message, "mode")
+}
+
+func TestListAgents_FilterQuery_AllServerKeysAndReferents(t *testing.T) {
+	srv, s := testServer(t)
+	enableFiltersQueryDialect(t, srv)
+	ctx := context.Background()
+
+	aliceID := uuid.NewString()
+	bobID := uuid.NewString()
+	createTestUserWithRole(t, s, aliceID, "alice@example.com", string(store.UserRoleAdmin), store.SystemRoleSuperAdmin)
+	aliceUser, err := s.GetUser(ctx, aliceID)
+	require.NoError(t, err)
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: bobID, Email: "bob@example.com", DisplayName: "Bob", Role: store.UserRoleMember, Status: "active",
+	}))
+
+	projA := &store.Project{ID: uuid.NewString(), Name: "Alpha", Slug: "alpha-slug", OwnerID: aliceID}
+	projB := &store.Project{ID: uuid.NewString(), Name: "Beta", Slug: "beta-slug", OwnerID: bobID}
+	require.NoError(t, s.CreateProject(ctx, projA))
+	require.NoError(t, s.CreateProject(ctx, projB))
+
+	ownerRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		RoleDefinitionID: ownerRole.ID,
+		PrincipalType:    "user",
+		PrincipalID:      aliceID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projA.ID,
+	})
+	require.NoError(t, err)
+
+	brokerEast := &store.RuntimeBroker{ID: uuid.NewString(), Name: "broker-east", Slug: "broker-east", Status: store.BrokerStatusOnline}
+	brokerWest := &store.RuntimeBroker{ID: uuid.NewString(), Name: "broker-west", Slug: "broker-west", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, brokerEast))
+	require.NoError(t, s.CreateRuntimeBroker(ctx, brokerWest))
+
+	agents := []store.Agent{
+		{
+			ID: uuid.NewString(), Name: "a1", Slug: "a1", ProjectID: projA.ID,
+			Phase: "running", Activity: "working", Template: "developer",
+			RuntimeBrokerID: brokerEast.ID, OwnerID: aliceID,
+			AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+		},
+		{
+			ID: uuid.NewString(), Name: "a2", Slug: "a2", ProjectID: projB.ID,
+			Phase: "running", Activity: "idle", Template: "reviewer",
+			RuntimeBrokerID: brokerWest.ID, OwnerID: bobID,
+			AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "antigravity"},
+		},
+	}
+	for i := range agents {
+		require.NoError(t, s.CreateAgent(ctx, &agents[i]))
+	}
+
+	queryNames := func(t *testing.T, rawQ string) []string {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape(rawQ), nil)
+		require.Equal(t, http.StatusOK, rec.Code, "q=%q body=%s", rawQ, rec.Body.String())
+		var resp ListAgentsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		out := make([]string, 0, len(resp.Agents))
+		for _, a := range resp.Agents {
+			out = append(out, a.Name)
+		}
+		slices.Sort(out)
+		assert.Equal(t, len(out), resp.TotalCount)
+		return out
+	}
+
+	assert.Equal(t, []string{"a1"}, queryNames(t, "activity:working"))
+	assert.Equal(t, []string{"a2"}, queryNames(t, "-activity:working"))
+	assert.Equal(t, []string{"a1"}, queryNames(t, "project:alpha-slug"))
+	assert.Equal(t, []string{"a2"}, queryNames(t, "project:"+projB.ID))
+	assert.Equal(t, []string{}, queryNames(t, "project:no-such-slug"))
+	assert.Equal(t, []string{"a1"}, queryNames(t, "harness:CLAUDE"))
+	assert.Equal(t, []string{"a2"}, queryNames(t, "broker:broker-west"))
+	assert.Equal(t, []string{"a1"}, queryNames(t, "broker:"+brokerEast.ID))
+	assert.Equal(t, []string{}, queryNames(t, "broker:no-such-broker"))
+	assert.Equal(t, []string{"a2"}, queryNames(t, "template:reviewer"))
+	assert.Equal(t, []string{"a1"}, queryNames(t, "owner:alice@example.com"))
+	assert.Equal(t, []string{"a2"}, queryNames(t, "owner:"+bobID))
+	assert.Equal(t, []string{}, queryNames(t, "owner:nobody@example.com"))
+
+	// owner:me resolves to the authenticated user's ID.
+	recMe := doRequestAsUser(t, srv, aliceUser, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("owner:me"), nil)
+	require.Equal(t, http.StatusOK, recMe.Code)
+	var respMe ListAgentsResponse
+	require.NoError(t, json.Unmarshal(recMe.Body.Bytes(), &respMe))
+	require.Len(t, respMe.Agents, 1)
+	assert.Equal(t, "a1", respMe.Agents[0].Name)
+
+	// is:mine and is:shared map to project ownership classification.
+	recMine := doRequestAsUser(t, srv, aliceUser, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("is:mine"), nil)
+	require.Equal(t, http.StatusOK, recMine.Code)
+	var respMine ListAgentsResponse
+	require.NoError(t, json.Unmarshal(recMine.Body.Bytes(), &respMine))
+	require.Len(t, respMine.Agents, 1)
+	assert.Equal(t, "a1", respMine.Agents[0].Name)
+
+	recShared := doRequestAsUser(t, srv, aliceUser, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("is:shared"), nil)
+	require.Equal(t, http.StatusOK, recShared.Code)
+	var respShared ListAgentsResponse
+	require.NoError(t, json.Unmarshal(recShared.Body.Bytes(), &respShared))
+	require.Len(t, respShared.Agents, 1)
+	assert.Equal(t, "a2", respShared.Agents[0].Name)
+
+	// Conflicting is:mine + legacy scope=shared returns empty 200.
+	recConflict := doRequestAsUser(t, srv, aliceUser, http.MethodGet, "/api/v1/agents?scope=shared&q="+url.QueryEscape("is:mine"), nil)
+	require.Equal(t, http.StatusOK, recConflict.Code)
+	var respConflict ListAgentsResponse
+	require.NoError(t, json.Unmarshal(recConflict.Body.Bytes(), &respConflict))
+	assert.Empty(t, respConflict.Agents)
+
+	// Out-of-scope project slug returns empty 200 (never 403/400, never widens authz scope).
+	carolID := uuid.NewString()
+	carolUser := &store.User{
+		ID: carolID, Email: "carol@example.com", DisplayName: "Carol", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, carolUser))
+	grantProjectAccessOnly(t, s, carolID, projA.ID)
+	recOutOfScope := doRequestAsUser(t, srv, carolUser, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("project:beta-slug"), nil)
+	require.Equal(t, http.StatusOK, recOutOfScope.Code)
+	var respOutOfScope ListAgentsResponse
+	require.NoError(t, json.Unmarshal(recOutOfScope.Body.Bytes(), &respOutOfScope))
+	assert.Empty(t, respOutOfScope.Agents)
+}
+
+func TestListProjectAgents_FilterQuery(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projA := &store.Project{ID: uuid.NewString(), Name: "ProjA", Slug: "proj-a"}
+	projB := &store.Project{ID: uuid.NewString(), Name: "ProjB", Slug: "proj-b"}
+	require.NoError(t, s.CreateProject(ctx, projA))
+	require.NoError(t, s.CreateProject(ctx, projB))
+
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: uuid.NewString(), Name: "pa-run", Slug: "pa-run", ProjectID: projA.ID,
+		Phase: "running", Activity: "working", Template: "developer",
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: uuid.NewString(), Name: "pa-stop", Slug: "pa-stop", ProjectID: projA.ID,
+		Phase: "stopped", Template: "reviewer",
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: uuid.NewString(), Name: "pb-run", Slug: "pb-run", ProjectID: projB.ID,
+		Phase: "running", Activity: "working", Template: "developer",
+	}))
+
+	// Experiment off: ignores q.
+	recOff := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("phase:running"), nil)
+	require.Equal(t, http.StatusOK, recOff.Code)
+	var respOff ListAgentsResponse
+	require.NoError(t, json.Unmarshal(recOff.Body.Bytes(), &respOff))
+	assert.Len(t, respOff.Agents, 2)
+
+	// Enable experiment.
+	enableFiltersQueryDialect(t, srv)
+
+	// Filters within project A only.
+	recOn := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("phase:running harness:claude"), nil)
+	require.Equal(t, http.StatusOK, recOn.Code)
+	var respOn ListAgentsResponse
+	require.NoError(t, json.Unmarshal(recOn.Body.Bytes(), &respOn))
+	require.Len(t, respOn.Agents, 1)
+	assert.Equal(t, "pa-run", respOn.Agents[0].Name)
+	assert.Equal(t, 1, respOn.TotalCount)
+
+	// Client-only key mode: is rejected with 400.
+	recMode := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("mode:lineage"), nil)
+	require.Equal(t, http.StatusBadRequest, recMode.Code)
+
+	// project: is not a known key on project_agents, so it searches as text and never widens to projB.
+	recProj := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("project:proj-b"), nil)
+	require.Equal(t, http.StatusOK, recProj.Code)
+	var respProj ListAgentsResponse
+	require.NoError(t, json.Unmarshal(recProj.Body.Bytes(), &respProj))
+	assert.Empty(t, respProj.Agents)
 }
