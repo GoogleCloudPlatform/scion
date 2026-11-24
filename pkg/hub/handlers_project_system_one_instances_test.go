@@ -921,3 +921,122 @@ func TestProjectSystemOneInstances_ViewAsMemberRefusesNonProjectOwnerHubAdmin(t 
 		assert.Equal(t, http.StatusForbidden, recDel.Code, "member item DELETE: %s", recDel.Body.String())
 	})
 }
+
+// TestProjectSystemOneInstances_ViewAsMemberOwnerRuleIndependentOfKernel (Info V1)
+// independently exercises projectSystemOneOwnerOrAdminRule's effective-identity
+// clamp through the HTTP handlers. A hub/super admin is granted a custom
+// project-scoped role holding project.manage_system_one_instances (not
+// project-owner/project-admin). Because project-scoped bindings are preserved
+// in View-as-member mode, the outer kernel permission check (authorizeMsg /
+// CheckAccess) ADMITS the request, so projectSystemOneOwnerOrAdminRule alone
+// decides: 403 under View-as-member, 200 in ordinary mode.
+func TestProjectSystemOneInstances_ViewAsMemberOwnerRuleIndependentOfKernel(t *testing.T) {
+	ctx := context.Background()
+	srv, s, _ := tsaServer(t)
+
+	fakeSettings := newFakeHubSettingStore()
+	fakeSettings.seed("experiments", json.RawMessage(`{"overrides":{"hub.system_one":true,"hub.view_as_member":true}}`))
+	ops := NewOperationalSettings(fakeSettings, emptyKoanf(), emptyKoanf())
+	_, err := ops.Refresh(ctx)
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+
+	otherOwner := taUser(t, s, "s1-vam-v1-owner", store.SystemRoleHubMember)
+	hubAdmin := taUser(t, s, "s1-vam-v1-hubadmin", store.SystemRoleHubAdmin)
+	superAdmin := taUser(t, s, "s1-vam-v1-superadmin", store.SystemRoleSuperAdmin)
+
+	proj := &store.Project{
+		ID:      uuid.NewString(),
+		Name:    "System One VAM V1 Rule Isolation",
+		Slug:    "s1-vam-v1-rule",
+		OwnerID: otherOwner.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+
+	// Custom project-scoped role holding project.manage_system_one_instances
+	// (not project-owner or project-admin). Preserved under View-as-member so
+	// the outer kernel check passes and projectSystemOneOwnerOrAdminRule alone decides.
+	customRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		ID:          uuid.NewString(),
+		Name:        "custom-s1-vam-v1-manager",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read", "project.manage_system_one_instances"},
+	})
+	require.NoError(t, err)
+	for _, u := range []*store.User{hubAdmin, superAdmin} {
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			ID:               uuid.NewString(),
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      u.ID,
+			RoleDefinitionID: customRole.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          proj.ID,
+		})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       uuid.NewString(),
+		Name:     "vam-v1-inst",
+		Adapter:  "typesafe",
+		Model:    "jev-1.14.0",
+		Endpoint: "https://api.typesafe.ai",
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "sec-vam-v1-inst"},
+		Enabled:  true,
+	}))
+
+	basePath := "/api/v1/projects/" + proj.ID + "/system-one/instances"
+	instList := []string{"vam-v1-inst"}
+
+	mintWeb := func(u *store.User, vam bool) string {
+		t.Helper()
+		tok, _, err := srv.GetUserTokenService().MintAccessToken(UserTokenSubject{
+			UserID:       u.ID,
+			Email:        u.Email,
+			DisplayName:  u.DisplayName,
+			Role:         u.Role,
+			ClientType:   ClientTypeWeb,
+			ViewAsMember: vam,
+		})
+		require.NoError(t, err)
+		return tok
+	}
+
+	for name, u := range map[string]*store.User{
+		"hub_admin":   hubAdmin,
+		"super_admin": superAdmin,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Precondition: verify the outer kernel permission check ADMITS the
+			// clamped identity via the custom project-scoped role, proving that
+			// projectSystemOneOwnerOrAdminRule alone is responsible for the 403 below.
+			vamCtx := contextWithViewAsMember(ctx, u.ID)
+			vamIdent := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb)).WithViewAsMember()
+			kernelDec := srv.authzService.CheckAccess(vamCtx, vamIdent, projectResource(proj), ActionManageSystemOneInstances)
+			require.True(t, kernelDec.Allowed, "precondition: outer kernel check must admit via custom project role under VAM (denied: %s)", kernelDec.Reason)
+
+			vamTok := mintWeb(u, true)
+			normalTok := mintWeb(u, false)
+
+			// Under View-as-member: handler returns 403 solely from projectSystemOneOwnerOrAdminRule.
+			recSetVAM := doRequestWithToken(t, srv, vamTok, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &instList})
+			assert.Equal(t, http.StatusForbidden, recSetVAM.Code, "VAM collection PUT: %s", recSetVAM.Body.String())
+
+			recAddVAM := doRequestWithToken(t, srv, vamTok, http.MethodPut, basePath+"/vam-v1-inst", nil)
+			assert.Equal(t, http.StatusForbidden, recAddVAM.Code, "VAM item PUT: %s", recAddVAM.Body.String())
+
+			recDelVAM := doRequestWithToken(t, srv, vamTok, http.MethodDelete, basePath+"/vam-v1-inst", nil)
+			assert.Equal(t, http.StatusForbidden, recDelVAM.Code, "VAM item DELETE: %s", recDelVAM.Body.String())
+
+			// In ordinary mode (View-as-member OFF): hub/super admin passes the owner rule (200).
+			recAdd := doRequestWithToken(t, srv, normalTok, http.MethodPut, basePath+"/vam-v1-inst", nil)
+			require.Equal(t, http.StatusOK, recAdd.Code, "normal item PUT: %s", recAdd.Body.String())
+
+			recSet := doRequestWithToken(t, srv, normalTok, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &instList})
+			require.Equal(t, http.StatusOK, recSet.Code, "normal collection PUT: %s", recSet.Body.String())
+
+			recDel := doRequestWithToken(t, srv, normalTok, http.MethodDelete, basePath+"/vam-v1-inst", nil)
+			require.Equal(t, http.StatusOK, recDel.Code, "normal item DELETE: %s", recDel.Body.String())
+		})
+	}
+}
