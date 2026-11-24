@@ -390,6 +390,49 @@ func TestHandleFireRetryItem_LifecycleBranches(t *testing.T) {
 		assert.Equal(t, trigger.FireSkipReasonEventDeleted, trigger.NormalizeFireSkipReason(trigger.ErrFireEventDeleted))
 	})
 
+	t.Run("post-attempt target terminal skips without backoff", func(t *testing.T) {
+		ms, core, disp, _, fire, item := setup(t)
+		var checkCalls atomic.Int32
+		core.targetFn = func(_ context.Context, _ string) (trigger.RetryTargetState, error) {
+			if checkCalls.Add(1) == 1 {
+				return trigger.RetryTargetOffline, nil
+			}
+			return trigger.RetryTargetTerminal, nil
+		}
+		core.fireFn = func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+			return hubfire.FireOutcome{
+				Status:        hubfire.FireStatusWaiting,
+				Error:         trigger.ErrFireTargetNotRunning,
+				TargetAgentID: fire.TargetAgentID,
+			}
+		}
+		res := disp.HandleFireRetryItem(ctx, item, nil)
+		assert.True(t, res.Done)
+		assert.NoError(t, res.Err)
+		assert.Equal(t, int32(1), core.fireCalls.Load())
+		assert.Equal(t, store.TriggerFireStatusSkipped, ms.byFireID[fire.ID].Status)
+		assert.Equal(t, trigger.ErrFireTargetNotRunning, ms.byFireID[fire.ID].Error)
+	})
+
+	t.Run("non-waiting terminal statuses return Done", func(t *testing.T) {
+		for _, status := range []string{
+			store.TriggerFireStatusFired,
+			store.TriggerFireStatusFailed,
+			store.TriggerFireStatusRefused,
+			store.TriggerFireStatusSkipped,
+			store.TriggerFireStatusExpired,
+		} {
+			t.Run(status, func(t *testing.T) {
+				_, core, disp, _, fire, item := setup(t)
+				fire.Status = status
+				res := disp.HandleFireRetryItem(ctx, item, nil)
+				assert.True(t, res.Done)
+				assert.NoError(t, res.Err)
+				assert.Zero(t, core.fireCalls.Load())
+			})
+		}
+	})
+
 	t.Run("backoff bounded by wait_until", func(t *testing.T) {
 		_, core, disp, _, fire, item := setup(t)
 		soon := now.Add(15 * time.Second)
@@ -509,11 +552,12 @@ func TestHandleFireRetryItem_AtMostOnceOnFinishFailureAndReap(t *testing.T) {
 	assert.Equal(t, store.TriggerFireStatusFiring, ms.byFireID[fire.ID].Status)
 	assert.Equal(t, 2, ms.byFireID[fire.ID].Attempts)
 
-	// Attempt 2 (drainer retry): sees status == firing (!= waiting) and returns Done
-	// without re-delivering.
+	// Attempt 2 (drainer retry while still firing): keeps the queue item alive
+	// until LeaseUntil (never re-delivers, never strands a live owner).
 	res2 := disp.HandleFireRetryItem(ctx, item, nil)
-	assert.True(t, res2.Done)
+	assert.False(t, res2.Done)
 	assert.NoError(t, res2.Err)
+	assert.Equal(t, now.Add(trigger.FireLeaseHorizon), res2.RetryAt)
 	assert.Equal(t, int32(1), deliveries.Load(), "waiting fire must never be delivered twice")
 
 	// Stuck firing row is recovered by ReapExpiredTriggerFires once lease_until expires.
@@ -523,6 +567,38 @@ func TestHandleFireRetryItem_AtMostOnceOnFinishFailureAndReap(t *testing.T) {
 	assert.Equal(t, store.TriggerFireStatusFailed, ms.byFireID[fire.ID].Status)
 	assert.Equal(t, "hub restarted during fire", ms.byFireID[fire.ID].Error)
 	assert.Equal(t, int32(1), deliveries.Load())
+
+	// Attempt 3 (after reap transitioned row to failed): completes the queue item.
+	res3 := disp.HandleFireRetryItem(ctx, item, nil)
+	assert.True(t, res3.Done)
+	assert.NoError(t, res3.Err)
+	assert.Equal(t, int32(1), deliveries.Load())
+}
+
+// barrierGetFireStore holds all N concurrent GetTriggerFire callers until every
+// worker has read the row, guaranteeing all workers observe status=waiting
+// before any worker reaches ClaimWaitingTriggerFire.
+type barrierGetFireStore struct {
+	*memTriggerStore
+	total   int32
+	arrived atomic.Int32
+	release chan struct{}
+}
+
+func (s *barrierGetFireStore) GetTriggerFire(ctx context.Context, id string) (*store.TriggerFire, error) {
+	f, err := s.memTriggerStore.GetTriggerFire(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s.arrived.Add(1) == s.total {
+		close(s.release)
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return f, nil
 }
 
 func TestHandleFireRetryItem_AtMostOnceUnderConcurrentLeaseLoss(t *testing.T) {
@@ -572,6 +648,13 @@ func TestHandleFireRetryItem_AtMostOnceUnderConcurrentLeaseLoss(t *testing.T) {
 	}
 	ms.byFireID[fire.ID] = fire
 
+	const workers = 4
+	bs := &barrierGetFireStore{
+		memTriggerStore: ms,
+		total:           workers,
+		release:         make(chan struct{}),
+	}
+
 	var deliveries atomic.Int32
 	core := &fakeRetryCore{
 		targetState: trigger.RetryTargetDeliverable,
@@ -587,6 +670,115 @@ func TestHandleFireRetryItem_AtMostOnceUnderConcurrentLeaseLoss(t *testing.T) {
 	}
 	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
 		Core:  core,
+		Store: bs,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	qp, _ := json.Marshal(trigger.FireRetryQueuePayload{Version: trigger.FireRetryQueuePayloadVersion, FireID: fire.ID})
+	item := durablequeue.Item{
+		Kind:      trigger.FireRetryQueueKind,
+		DedupKey:  trigger.FireRetryDedupPrefix + fire.ID,
+		ProjectID: tr.ProjectID,
+		Payload:   qp,
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res := disp.HandleFireRetryItem(ctx, item, nil)
+			assert.NoError(t, res.Err)
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int32(1), deliveries.Load(), "concurrent retry handlers must deliver at most once")
+	assert.Equal(t, store.TriggerFireStatusFired, ms.byFireID[fire.ID].Status)
+}
+
+// TestHandleFireRetryItem_LeaseLossDoesNotStrandWaitingFire lifts Review-2
+// probe TestP2bRev2Probe_LeaseLossStrandsWaitingFire: if replica B handles the
+// item while replica A holds the fire in status=firing, B returns RetryAt
+// (LeaseUntil) instead of Done so the queue item survives; when A returns the
+// fire to waiting, a later retry resolves it once the target is deliverable.
+func TestHandleFireRetryItem_LeaseLossDoesNotStrandWaitingFire(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	ms := newMemTriggerStore()
+	targetID := uuid.NewString()
+
+	tr := &store.Trigger{
+		ID:            uuid.NewString(),
+		ProjectID:     uuid.NewString(),
+		Name:          "lease-loss-liveness",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      uuid.NewString(),
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"` + targetID + `","message":"hi","offline":"queue"}`,
+		Status:        store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AuthorizationRevision: 1,
+		},
+	}
+	ms.triggers = append(ms.triggers, tr)
+	ev := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  tr.ProjectID,
+		SourceKind: tr.SourceKind,
+		SourceID:   tr.SourceID,
+		Type:       "webhook.received",
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusProcessed,
+	}
+	ms.events[ev.ID] = ev
+	wu := now.Add(time.Hour)
+	fire := &store.TriggerFire{
+		ID:            uuid.NewString(),
+		ProjectID:     tr.ProjectID,
+		TriggerID:     tr.ID,
+		EventID:       ev.ID,
+		ActionType:    store.TriggerActionMessage,
+		Status:        store.TriggerFireStatusWaiting,
+		TargetAgentID: targetID,
+		WaitUntil:     &wu,
+		Attempts:      1,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AuthorizationRevision: 1,
+		},
+	}
+	ms.byFireID[fire.ID] = fire
+
+	inFire := make(chan struct{})
+	release := make(chan struct{})
+	var (
+		attempt    atomic.Int32
+		deliveries atomic.Int32
+	)
+	core := &fakeRetryCore{
+		targetState: trigger.RetryTargetOffline,
+		fireFn: func(context.Context, hubfire.FireRequest) hubfire.FireOutcome {
+			if attempt.Add(1) == 1 {
+				close(inFire)
+				<-release
+				return hubfire.FireOutcome{
+					Status:        hubfire.FireStatusWaiting,
+					Error:         trigger.ErrFireTargetNotRunning,
+					TargetAgentID: targetID,
+				}
+			}
+			deliveries.Add(1)
+			return hubfire.FireOutcome{
+				Status:        hubfire.FireStatusFired,
+				ResultRef:     "msg-resolved",
+				TargetAgentID: targetID,
+			}
+		},
+	}
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
 		Store: ms,
 		Now:   func() time.Time { return now },
 	})
@@ -600,23 +792,34 @@ func TestHandleFireRetryItem_AtMostOnceUnderConcurrentLeaseLoss(t *testing.T) {
 		Payload:   qp,
 	}
 
-	const workers = 4
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			res := disp.HandleFireRetryItem(ctx, item, nil)
-			assert.True(t, res.Done)
-			assert.NoError(t, res.Err)
-		}()
-	}
-	close(start)
-	wg.Wait()
+	resACh := make(chan durablequeue.Result, 1)
+	go func() {
+		resACh <- disp.HandleFireRetryItem(ctx, item, nil)
+	}()
+	<-inFire
 
-	assert.Equal(t, int32(1), deliveries.Load(), "concurrent retry handlers must deliver at most once")
+	// Replica B runs while A owns the firing row: must NOT complete (delete)
+	// the queue item, and must NOT call Core.Fire.
+	resB := disp.HandleFireRetryItem(ctx, item, nil)
+	assert.False(t, resB.Done, "handler seeing firing row must keep queue item alive")
+	assert.NoError(t, resB.Err)
+	assert.Equal(t, now.Add(trigger.FireLeaseHorizon), resB.RetryAt)
+	assert.Equal(t, int32(1), attempt.Load())
+
+	// Replica A finishes its attempt and returns the row to waiting.
+	close(release)
+	resA := <-resACh
+	assert.False(t, resA.Done)
+	assert.Equal(t, store.TriggerFireStatusWaiting, ms.byFireID[fire.ID].Status)
+
+	// Later retry (item survived!) delivers once target is running and finishes.
+	core.mu.Lock()
+	core.targetState = trigger.RetryTargetDeliverable
+	core.mu.Unlock()
+	resC := disp.HandleFireRetryItem(ctx, item, nil)
+	assert.True(t, resC.Done)
+	assert.NoError(t, resC.Err)
+	assert.Equal(t, int32(1), deliveries.Load())
 	assert.Equal(t, store.TriggerFireStatusFired, ms.byFireID[fire.ID].Status)
 }
 

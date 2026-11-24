@@ -240,6 +240,13 @@ func (d *Dispatcher) HandleFireRetryItem(ctx context.Context, item durablequeue.
 		d.logger.Warn("trigger: failed to load waiting fire", "fireID", qp.FireID, "error", err)
 		return durablequeue.Result{Err: errors.New("trigger: load waiting fire failed")}
 	}
+	if fire.Status == store.TriggerFireStatusFiring {
+		retryAt := fire.LeaseUntil
+		if retryAt.IsZero() {
+			retryAt = d.now().UTC().Add(FireRetryInitialBackoff)
+		}
+		return durablequeue.Result{RetryAt: retryAt}
+	}
 	if fire.Status != store.TriggerFireStatusWaiting {
 		return durablequeue.Result{Done: true}
 	}
@@ -323,6 +330,13 @@ func (d *Dispatcher) HandleFireRetryItem(ctx context.Context, item durablequeue.
 		return durablequeue.Result{Err: errors.New("trigger: claim waiting fire failed")}
 	}
 	if !claimed {
+		if cur, gErr := d.store.GetTriggerFire(ctx, fire.ID); gErr == nil && cur.Status == store.TriggerFireStatusFiring {
+			retryAt := cur.LeaseUntil
+			if retryAt.IsZero() {
+				retryAt = claimNow.Add(FireRetryInitialBackoff)
+			}
+			return durablequeue.Result{RetryAt: retryAt}
+		}
 		return durablequeue.Result{Done: true}
 	}
 

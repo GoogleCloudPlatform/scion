@@ -843,3 +843,136 @@ func TestTriggerMessageP2b_NudgerOnlyQueriesOnTransitionIntoRunning(t *testing.T
 	time.Sleep(80 * time.Millisecond)
 	assert.Equal(t, int32(2), counting.listCalls.Load())
 }
+
+// TestTriggerMessageP2b_WaitingWithWakeTargetMovesToErrorSkipsWithoutDelivery
+// verifies that when a message trigger has offline=queue and wake=true, a fire
+// parked in waiting finishes as skipped ("target not running") with zero
+// deliveries if the target agent moves to PhaseError before the retry runs.
+func TestTriggerMessageP2b_WaitingWithWakeTargetMovesToErrorSkipsWithoutDelivery(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	disp := &recordingDispatcher{}
+	f.srv.SetDispatcher(disp)
+
+	dqStore, ok := f.store.(store.DurableQueueStore)
+	require.True(t, ok)
+	q := f.srv.TriggerEventQueue()
+	require.NotNil(t, q)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name: "p2b-wake-error-ep",
+	})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	trRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "msg-wake-error",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+		Action: TriggerActionSpec{
+			Type:            "message",
+			AgentID:         f.targetAgent.ID,
+			Message:         "Wake and deliver",
+			Wake:            true,
+			Offline:         MessageOfflineQueue,
+			QueueTTLSeconds: 120,
+		},
+	})
+	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &tr))
+
+	setAgentPhase := func(phase state.Phase) {
+		ag, err := f.store.GetAgent(ctx, f.targetAgent.ID)
+		require.NoError(t, err)
+		ag.Phase = string(phase)
+		ag.Activity = ""
+		require.NoError(t, f.store.UpdateAgent(ctx, ag))
+	}
+
+	// Start with target suspended; without a live broker to complete the wake,
+	// the initial fire parks in waiting.
+	setAgentPhase(state.PhaseSuspended)
+	now := time.Now().UTC().Truncate(time.Second)
+	ev := &store.TriggerEvent{
+		ID:         api.NewUUID(),
+		ProjectID:  f.projectID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   ep.ID,
+		Type:       "webhook.received",
+		Subject:    "wake-err-1",
+		DedupKey:   "wake-err-ev-1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Attributes: map[string]string{"endpoint_name": "p2b-wake-error-ep", "signature_mode": "scion_v1"},
+		Status:     store.TriggerEventStatusPending,
+		CreatedAt:  now,
+	}
+	enqueueTestTriggerEvent(t, f, ev)
+
+	tDisp, err := f.srv.newTriggerDispatcher(q)
+	require.NoError(t, err)
+	fastOpts := trigger.DrainerOptions{
+		QueueStore:   dqStore,
+		Queue:        q,
+		Owner:        "wake-error-hub",
+		PollInterval: 30 * time.Millisecond,
+	}
+	evDrainer, err := tDisp.NewDrainer(fastOpts)
+	require.NoError(t, err)
+
+	evCtx, evCancel := context.WithCancel(ctx)
+	evDone := make(chan struct{})
+	go func() {
+		defer close(evDone)
+		evDrainer.Run(evCtx)
+	}()
+
+	var waitingFire store.TriggerFire
+	require.Eventually(t, func() bool {
+		fires, lErr := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+			ProjectID: f.projectID,
+			TriggerID: tr.ID,
+			EventID:   ev.ID,
+		}, store.ListOptions{Limit: 5})
+		if lErr != nil || len(fires.Items) != 1 {
+			return false
+		}
+		waitingFire = fires.Items[0]
+		return waitingFire.Status == store.TriggerFireStatusWaiting
+	}, 5*time.Second, 20*time.Millisecond)
+	evCancel()
+	<-evDone
+
+	// Move target to PhaseError while the fire is waiting, then nudge and run
+	// the retry drainer: fire must finish as skipped with zero deliveries.
+	setAgentPhase(state.PhaseError)
+	_, err = q.Nudge(ctx, trigger.FireRetryQueueKind, []string{trigger.FireRetryDedupPrefix + waitingFire.ID})
+	require.NoError(t, err)
+
+	retryDrainer, err := tDisp.NewFireRetryDrainer(fastOpts)
+	require.NoError(t, err)
+	rCtx, rCancel := context.WithCancel(ctx)
+	rDone := make(chan struct{})
+	go func() {
+		defer close(rDone)
+		retryDrainer.Run(rCtx)
+	}()
+	t.Cleanup(func() {
+		rCancel()
+		<-rDone
+	})
+
+	require.Eventually(t, func() bool {
+		got, gErr := f.store.GetTriggerFire(ctx, waitingFire.ID)
+		return gErr == nil && got.Status == store.TriggerFireStatusSkipped
+	}, 5*time.Second, 20*time.Millisecond)
+
+	got, err := f.store.GetTriggerFire(ctx, waitingFire.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusSkipped, got.Status)
+	assert.Equal(t, trigger.ErrFireTargetNotRunning, got.Error)
+	assert.Empty(t, disp.getCalls(), "nothing must be delivered when target moved to error")
+}
