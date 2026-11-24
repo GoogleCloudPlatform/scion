@@ -38,16 +38,22 @@ var setMessageModeCmd = &cobra.Command{
 
 Valid modes:
   none     - No messaging (sealed)
-  lineage  - Ancestry users and project owners only
-  branch   - Parent/child agents and ancestry users
+  owner    - Origin owner and project owners only; no agent-to-agent messaging
+  direct   - Direct plus owner: origin owner plus direct parent/child agents
+  tree     - Tree plus owner: origin owner plus same-project agents in the same creation tree
   project  - All agents and users in the project (built-in default)
   hub      - Project messaging plus permitted agents in other projects
              on this Hub (granting it requires permission)
 
-Branch rule: two agents can message each other in branch mode only when
-both are in branch mode and one is the other's direct parent. Siblings,
-grandparents and grandchildren are denied, as is any pair that mixes
-branch with another mode.
+Direct rule: two agents in direct mode can message each other only when one is
+the other's direct parent. Siblings, grandparents and grandchildren are denied.
+A direct-mode agent may also message a direct parent or child in tree mode, but
+cannot message non-adjacent agents or agents in owner, project, or hub mode.
+
+Tree rule: a tree-mode agent can message same-project agents in its own
+creation tree (sharing the same owner-created root agent) that are in tree,
+project, or hub mode, or in direct mode when they are its direct parent or
+child. Agents in other trees or in owner mode are denied.
 
 Default for a new agent (applied once, at creation):
   1. the --message-mode flag of scion create or scion start
@@ -60,8 +66,17 @@ This command changes the mode of an existing agent; it does not re-run
 the defaults.
 
 Use --cascade to apply the mode to all descendants.
-Use --dry-run to preview cascade effects without applying.`,
+Use --dry-run to preview cascade effects without applying.
+
+Example:
+  scion set-message-mode foo tree --cascade`,
 	Args: cobra.ExactArgs(2),
+	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 1 {
+			return api.ValidMessageModes(), cobra.ShellCompDirectiveNoFileComp
+		}
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		agentName := api.Slugify(args[0])
 		mode := args[1]

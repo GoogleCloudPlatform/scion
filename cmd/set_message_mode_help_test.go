@@ -23,13 +23,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSetMessageModeHelp_DocumentsDefaultsAndBranchRule pins the help text
-// to the Hub's real behavior (ptone/scion#4411): the D10 default order in
-// createAgentInProject and the branch rule in evaluateSameProjectModes.
-func TestSetMessageModeHelp_DocumentsDefaultsAndBranchRule(t *testing.T) {
+// TestSetMessageModeHelp_DocumentsDefaultsAndDirectTreeRules pins the help text
+// to the Hub's real behavior: the default order in createAgentInProject and the
+// direct and tree rules in evaluateSameProjectModes.
+func TestSetMessageModeHelp_DocumentsDefaultsAndDirectTreeRules(t *testing.T) {
 	long := setMessageModeCmd.Long
-	assert.Contains(t, long, "  hub      - ")
-	assert.Contains(t, long, "both are in branch mode and one is the other's direct parent")
+	for _, line := range []string{"  none     - ", "  owner    - ", "  direct   - ", "  tree     - ", "  project  - ", "  hub      - "} {
+		assert.Contains(t, long, line)
+	}
+	assert.Contains(t, long, "Direct rule:")
+	assert.Contains(t, long, "Tree rule:")
+	assert.Contains(t, long, "scion set-message-mode foo tree --cascade")
 
 	flag := strings.Index(long, "the --message-mode flag")
 	tmpl := strings.Index(long, "the template's message_mode")
@@ -39,13 +43,26 @@ func TestSetMessageModeHelp_DocumentsDefaultsAndBranchRule(t *testing.T) {
 	assert.True(t, flag < tmpl && tmpl < parent && parent < hubDef, "default order must be flag, template, parent, hub default")
 }
 
-// TestMessageModeFlagHelp_ListsHub checks that create and start list every
-// mode validateMessageMode accepts, including hub, and the real default order.
-func TestMessageModeFlagHelp_ListsHub(t *testing.T) {
+// TestMessageModeFlagHelp_ListsAllModes checks that create and start list every
+// mode validateMessageMode accepts and the real default order.
+func TestMessageModeFlagHelp_ListsAllModes(t *testing.T) {
 	for name, c := range map[string]*cobra.Command{"create": createCmd, "start": startCmd} {
 		f := c.Flags().Lookup("message-mode")
 		require.NotNil(t, f, name)
-		assert.Contains(t, f.Usage, "none, lineage, branch, project, hub", name)
+		assert.Contains(t, f.Usage, "none, owner, direct, tree, project, hub", name)
 		assert.Contains(t, f.Usage, "the template's mode, else the parent agent's, else the Hub's default message mode (server.hub.default_message_mode", name)
 	}
+}
+
+func TestValidateMessageMode_RetiredHints(t *testing.T) {
+	for _, valid := range []string{"", "none", "owner", "direct", "tree", "project", "hub"} {
+		require.NoError(t, validateMessageMode(valid))
+	}
+	err := validateMessageMode("lineage")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "owner")
+
+	err = validateMessageMode("branch")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "direct")
 }

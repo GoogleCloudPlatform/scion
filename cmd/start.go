@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/spf13/cobra"
 )
 
@@ -105,9 +106,12 @@ func init() {
 
 	// Agent message mode flag
 	startCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
-		"Agent message mode: none, lineage, branch, project, hub\n"+
+		"Agent message mode: none, owner, direct, tree, project, hub\n"+
 			"Controls which agents and users this agent can message.\n"+
 			"Default: the template's mode, else the parent agent's, else the Hub's default message mode (server.hub.default_message_mode, 'project' unless the operator sets it).")
+	_ = startCmd.RegisterFlagCompletionFunc("message-mode", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return api.ValidMessageModes(), cobra.ShellCompDirectiveNoFileComp
+	})
 
 	// Never-suspend policy flag
 	startCmd.Flags().BoolVar(&neverSuspendFlag, "never-suspend", false, "Exempt this agent from automatic idle and stalled suspension")
