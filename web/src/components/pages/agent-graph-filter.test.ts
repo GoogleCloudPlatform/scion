@@ -606,6 +606,17 @@ describe('scion-page-agent-graph R1 load scope with non-held drains', () => {
     vi.spyOn(stateManager, 'getAgents').mockReturnValue([]);
     vi.spyOn(stateManager, 'getProjects').mockReturnValue([]);
     vi.spyOn(stateManager, 'getDeletedAgentIds').mockReturnValue(new Set());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
   });
 
   afterEach(() => {
