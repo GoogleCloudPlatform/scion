@@ -622,6 +622,12 @@ func TestMessagePolicyCLI_CreateUpdateGetSystemOneRule(t *testing.T) {
 	require.NotNil(t, patchedReq.OnUncertain)
 	assert.Equal(t, "reject", *patchedReq.OnUncertain)
 	assert.Equal(t, int64(1), patchedReq.ExpectedRevision)
+	// O4: partial update must leave omitted fields nil so stored values are preserved.
+	assert.Nil(t, patchedReq.SystemOneRule)
+	assert.Nil(t, patchedReq.ViolationRule)
+	assert.Nil(t, patchedReq.OnFailed)
+	assert.Nil(t, patchedReq.Scope)
+	assert.Nil(t, patchedReq.Enabled)
 	assert.Contains(t, updateOut, "Updated message policy \"no-prose-s1\"")
 	assert.Contains(t, updateOut, "System One Refs:    ts-1")
 

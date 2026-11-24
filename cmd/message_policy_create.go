@@ -201,7 +201,7 @@ Examples:
 	cmd.Flags().StringVar(&systemOneRule, "system-one-rule", "", "Optional System One judgments rule JSON (<= 16 KiB)")
 	cmd.Flags().StringVar(&systemOneRuleFile, "system-one-rule-file", "", "Read optional System One judgments rule JSON from file (- for stdin)")
 	cmd.Flags().StringVar(&onUncertain, "on-uncertain", "", "Fallback outcome on uncertain evaluation: admit or reject")
-	cmd.Flags().StringVar(&onFailed, "on-failed", "", "Fallback outcome on failed evaluation: admit or reject. Messages longer than 16 KiB fail every matching policy with body_truncated, handled by on_failed; failures such as cost_limit, timeout, budget_exhausted and body_truncated can be triggered by message content; admit lets such messages through.")
+	cmd.Flags().StringVar(&onFailed, "on-failed", "", "Fallback outcome on failed evaluation: admit or reject. For CEL-only policies, messages longer than 16 KiB fail with body_truncated (policies with a system_one_rule use on_oversize / input_too_large); failures such as cost_limit, timeout, budget_exhausted and body_truncated can be triggered by message content; admit lets such messages through.")
 	cmd.Flags().StringArrayVar(&onFailedReasons, "on-failed-reason", nil, "Per-reason failure fallback override REASON=OUTCOME (repeatable)")
 	cmd.Flags().StringVar(&rejectReason, "reject-reason", "", "Rejection reason template returned on HTTP 422")
 	cmd.Flags().StringVar(&rejectRemediation, "reject-remediation", "", "Advisory remediation template returned on HTTP 422")
