@@ -3908,6 +3908,8 @@ export class ScionChatThread extends LitElement {
               // response without dispatchState defaults to dispatched above.
               const wouldDowngrade =
                 (sseVersion.dispatchState === 'delivered' && dispatchState !== 'delivered') ||
+                (sseVersion.dispatchState === 'dispatched' &&
+                  (dispatchState === 'pending' || dispatchState === 'waking')) ||
                 ((sseVersion.dispatchState === 'failed' ||
                   sseVersion.dispatchState === 'no_recipient') &&
                   (dispatchState === 'dispatched' || dispatchState === 'pending'));

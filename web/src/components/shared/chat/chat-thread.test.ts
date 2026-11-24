@@ -1861,6 +1861,67 @@ describe('scion-chat-thread dispatch state from send response', () => {
     }
   });
 
+  // ptone/scion#9015: mirror mergeMessages' dispatched monotonic guard in the
+  // sseVersion branch so a stale or out-of-order HTTP 201 carrying "pending" or
+  // "waking" never downgrades an SSE-delivered "dispatched" message.
+  it('never downgrades a dispatched message when HTTP resolves as pending or waking after the SSE echo (sseVersion branch)', async () => {
+    for (const staleState of ['pending', 'waking'] as const) {
+      const id = `server-sse-first-dispatched-http-${staleState}`;
+      const el = await mount();
+      el.currentUserId = 'user-me';
+      const internals = el as unknown as {
+        messageMap: Map<string, Message>;
+        handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+      };
+
+      let resolveSend!: (response: Response) => void;
+      apiFetch.mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSend = resolve;
+          })
+      );
+      apiFetch.mockResolvedValue(emptyHistory());
+
+      const sendPromise = internals.handleChatSendV2(
+        new CustomEvent<ChatSendDetail>('chat-send', {
+          detail: {
+            text: 'hello',
+            plain: false,
+            interrupt: false,
+            onSuccess: vi.fn(),
+            mentions: [],
+            attachmentIds: [],
+          },
+        })
+      );
+
+      internals.messageMap.set(id, {
+        id,
+        projectId: '',
+        sender: 'me@example.com',
+        senderId: 'user-me',
+        recipient: 'agent:coder',
+        recipientId: 'coder',
+        msg: 'hello',
+        type: 'instruction',
+        agentId: '',
+        createdAt: '2026-01-01T00:00:00Z',
+        dispatchState: 'dispatched',
+      });
+
+      resolveSend({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ id, dispatchState: staleState }),
+      } as unknown as Response);
+
+      await sendPromise;
+
+      expect(internals.messageMap.get(id)?.dispatchState).toBe('dispatched');
+    }
+  });
+
   // Round 4, item 2: the sseVersion branch of handleChatSendV2 (the SSE echo
   // lands before the HTTP response) has the same never-downgrade guard as
   // mergeMessages, but no test exercised an actual downgrade attempt there —
