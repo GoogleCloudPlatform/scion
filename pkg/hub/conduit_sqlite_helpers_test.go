@@ -426,9 +426,11 @@ type fixtureClock struct {
 }
 
 // guardSciontoolLog trips sciontool/log's lazy Init (which replaces the
-// process-wide slog default, ptone/scion#2337) and restores the globals.
+// process-wide slog default, ptone/scion#2337), silences stderr output, and
+// restores the globals.
 func guardSciontoolLog() {
 	prevDefault, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	sciontoollog.SetQuiet(true)
 	sciontoollog.Init()
 	slog.SetDefault(prevDefault)
 	log.SetOutput(prevWriter)

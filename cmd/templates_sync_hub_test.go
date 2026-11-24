@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
@@ -767,5 +768,128 @@ func TestCleanupPendingTemplate_DecouplesCanceledContext(t *testing.T) {
 
 		require.Equal(t, 1, getCalls, "cleanup must query template status even when parent context is canceled")
 		require.Equal(t, 0, deleteCalls, "cleanup must not delete an active template")
+	})
+}
+
+func TestSyncAllTemplatesToHub_RespectsProjectFlag(t *testing.T) {
+	origProjectPath := projectPath
+	origGlobalMode := globalMode
+	t.Cleanup(func() {
+		projectPath = origProjectPath
+		globalMode = origGlobalMode
+	})
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	writeTemplateFile(t, filepath.Join(homeDir, config.GlobalDir, "templates", "global-tpl"), "scion-agent.yaml", "harness: codex\n")
+
+	cwdProj := t.TempDir()
+	writeTemplateFile(t, filepath.Join(cwdProj, config.DotScion, "templates", "cwd-tpl"), "scion-agent.yaml", "harness: claude\n")
+
+	otherProj := t.TempDir()
+	writeTemplateFile(t, filepath.Join(otherProj, config.DotScion, "templates", "other-tpl"), "scion-agent.yaml", "harness: gemini-cli\n")
+
+	origWd, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+	require.NoError(t, os.Chdir(cwdProj))
+
+	newRecordingServer := func(t *testing.T) (*httptest.Server, *[]string) {
+		t.Helper()
+		var created []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]any{"templates": []any{}, "totalCount": 0})
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
+				var req struct {
+					Name string `json:"name"`
+				}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+				created = append(created, req.Name)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"template":   map[string]any{"id": "tpl-" + req.Name, "name": req.Name, "status": "pending"},
+					"uploadUrls": []any{},
+				})
+			case r.Method == http.MethodPost && filepath.Base(r.URL.Path) == "upload":
+				_ = json.NewEncoder(w).Encode(map[string]any{"uploadUrls": []any{}})
+			case r.Method == http.MethodPost && filepath.Base(r.URL.Path) == "finalize":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id":          "tpl-id",
+					"name":        "ok",
+					"status":      "active",
+					"contentHash": "sha256:abc",
+				})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv, &created
+	}
+
+	t.Run("local project path reads target project instead of CWD", func(t *testing.T) {
+		srv, created := newRecordingServer(t)
+		hubCtx := newTemplateSyncHubCtx(t, srv)
+		hubCtx.ProjectID = "other-proj-id"
+		hubCtx.ProjectPath = filepath.Join(otherProj, config.DotScion)
+
+		projectPath = otherProj
+		globalMode = false
+
+		out := captureStdout(t, func() {
+			require.NoError(t, syncAllTemplatesToHub(hubCtx, "project"))
+		})
+		assert.Equal(t, []string{"other-tpl"}, *created, "must upload templates from --project dir, not CWD")
+		assert.Contains(t, out, "1 template(s) synced")
+	})
+
+	t.Run("hub project slug does not upload CWD project-local templates", func(t *testing.T) {
+		srv, created := newRecordingServer(t)
+		hubCtx := newTemplateSyncHubCtx(t, srv)
+		hubCtx.ProjectID = "hub-slug-id"
+
+		projectPath = "other-hub-slug"
+		globalMode = false
+
+		out := captureStdout(t, func() {
+			require.NoError(t, syncAllTemplatesToHub(hubCtx, "project"))
+		})
+		assert.Empty(t, *created, "must not upload CWD project-local templates into another Hub project")
+		assert.Contains(t, out, "No local project templates found to sync.")
+	})
+
+	t.Run("outside a project falls back to global source only for global scope", func(t *testing.T) {
+		nonProjDir := t.TempDir()
+		require.NoError(t, os.Chdir(nonProjDir))
+		t.Cleanup(func() { _ = os.Chdir(cwdProj) })
+
+		projectPath = ""
+		globalMode = false
+
+		t.Run("scope global syncs global templates as local global", func(t *testing.T) {
+			srv, created := newRecordingServer(t)
+			hubCtx := newTemplateSyncHubCtx(t, srv)
+
+			out := captureStdout(t, func() {
+				require.NoError(t, syncAllTemplatesToHub(hubCtx, "global"))
+			})
+			assert.Equal(t, []string{"global-tpl"}, *created, "must upload global templates when syncing --all --scope global outside a project")
+			assert.Contains(t, out, "Syncing 1 local global template(s) to Hub (global scope)...")
+			assert.Contains(t, out, "1 template(s) synced")
+		})
+
+		t.Run("scope project does not upload global templates as project templates", func(t *testing.T) {
+			srv, created := newRecordingServer(t)
+			hubCtx := newTemplateSyncHubCtx(t, srv)
+			hubCtx.ProjectID = "some-proj-id"
+
+			out := captureStdout(t, func() {
+				require.NoError(t, syncAllTemplatesToHub(hubCtx, "project"))
+			})
+			assert.Empty(t, *created, "must not upload global templates as project templates outside a project")
+			assert.Contains(t, out, "No local project templates found to sync.")
+		})
 	})
 }

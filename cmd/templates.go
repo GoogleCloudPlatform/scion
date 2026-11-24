@@ -1059,14 +1059,21 @@ func syncAllTemplatesToHub(hubCtx *HubContext, scope string) error {
 	// Source directory follows --global (globalMode) inside a project, and
 	// falls back to global outside a project (e.g. 'templates sync --all
 	// --scope global' run outside a project), independent of target --scope.
-	localGlobal, localProject, err := config.ListTemplatesGrouped()
+	// Respect --project via localProjectDir() so a local project path reads
+	// that project's templates and a hub project reference never leaks CWD's
+	// project-local templates into another project (ptone/scion#5217).
+	gp := localProjectDir()
+	if globalDir, err := config.GetGlobalDir(); err == nil && gp == globalDir {
+		gp = "" // outside a project (or --project global): no project-local source
+	}
+	localGlobal, localProject, err := config.ListTemplatesGroupedForProject(gp)
 	if err != nil {
 		return fmt.Errorf("failed to list local templates: %w", err)
 	}
 
 	sourceScope := templateScopeFromGlobalFlag()
 	if sourceScope != "global" && scope == "global" {
-		if _, inProject := config.FindProjectRoot(); !inProject {
+		if gp == "" {
 			sourceScope = "global"
 		}
 	}
