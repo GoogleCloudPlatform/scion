@@ -895,7 +895,11 @@ export class AgentGraphPage extends LitElement {
     const shownAgents = filtered ? filtered.agents : this.visibleAgents;
     const contextIds = filtered ? filtered.contextIds : undefined;
     const filteredEmpty = Boolean(
-      filtered && filtered.hasActiveFilter && this.agents.length > 0 && shownAgents.length === 0
+      filtered &&
+      filtered.hasActiveFilter &&
+      shownAgents.length === 0 &&
+      !this.loading &&
+      !this.error
     );
     const treeFilterKey = useDialect
       ? this.activeFilterQuery

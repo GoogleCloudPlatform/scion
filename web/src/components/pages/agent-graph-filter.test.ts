@@ -815,4 +815,41 @@ describe('scion-page-agent-graph R1 load scope with non-held drains', () => {
     );
     expect(resolveProjectLoadTarget(parseGraph('project:"Alpha Project"'), [], [])).toBe('');
   });
+
+  it('shows filtered empty state with Clear filter button when ?q=project:nosuchslug drains empty', async () => {
+    stubProbeNotComplete();
+    const drainCalls: string[] = [];
+    window.history.replaceState({}, '', '/agents/graph?q=project:nosuchslug');
+    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
+    const runner = (
+      page as unknown as {
+        drainRunner: { run: (opts: { url: string }) => Promise<SeededDrainResult | null> };
+      }
+    ).drainRunner;
+    vi.spyOn(runner, 'run').mockImplementation((opts) => {
+      drainCalls.push(opts.url);
+      if (opts.url.includes('projectId=nosuchslug')) {
+        return Promise.resolve(drainResult([]));
+      }
+      return Promise.resolve(drainResult([alphaAgent, betaAgent]));
+    });
+
+    document.body.appendChild(page);
+    await vi.waitFor(() => {
+      expect(drainCalls).toEqual(['/api/v1/agents?projectId=nosuchslug']);
+      expect(page!.shadowRoot!.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
+    await tree.updateComplete;
+    expect(tree.filteredEmpty).toBe(true);
+    const clearBtn = tree.shadowRoot!.querySelector('.empty-state sl-button') as HTMLElement | null;
+    expect(clearBtn).not.toBeNull();
+
+    // Clicking Clear filter clears ?q= and loads unscoped agents.
+    clearBtn!.click();
+    await vi.waitFor(() =>
+      expect(drainCalls).toEqual(['/api/v1/agents?projectId=nosuchslug', '/api/v1/agents'])
+    );
+    expect(window.location.search).toBe('');
+  });
 });
