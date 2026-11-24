@@ -39,7 +39,8 @@ func (SystemOneInstance) Fields() []ent.Field {
 		field.String("name").
 			NotEmpty().
 			MaxLen(63).
-			Comment("Unique canonical slug identifying the instance (e.g. typesafe-prod)."),
+			Immutable().
+			Comment("Unique canonical slug identifying the instance (e.g. typesafe-prod); immutable once created so project allowlists cannot drift."),
 		field.String("adapter").
 			NotEmpty().
 			Comment("Registered adapter name (e.g. typesafe, google-genai, openai-compat, anthropic, bedrock)."),

@@ -2006,13 +2006,6 @@ type ProjectStore interface {
 	// and updated sorted lists, ErrInvalidInput on an invalid name, or
 	// ErrNotFound if the project does not exist.
 	RemoveProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) (before []string, after []string, err error)
-
-	// PruneSystemOneInstanceFromAllProjects atomically removes instanceName from
-	// every project's System One instance allowlist and returns the number of
-	// projects updated. Called when a hub System One instance is deleted so
-	// recreating an instance with the same name never silently re-authorizes
-	// projects that previously allowed the deleted instance.
-	PruneSystemOneInstanceFromAllProjects(ctx context.Context, instanceName string) (int, error)
 }
 
 // MaxProjectSystemOneInstances is the maximum number of hub System One instance

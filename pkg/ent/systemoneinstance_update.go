@@ -29,20 +29,6 @@ func (_u *SystemOneInstanceUpdate) Where(ps ...predicate.SystemOneInstance) *Sys
 	return _u
 }
 
-// SetName sets the "name" field.
-func (_u *SystemOneInstanceUpdate) SetName(v string) *SystemOneInstanceUpdate {
-	_u.mutation.SetName(v)
-	return _u
-}
-
-// SetNillableName sets the "name" field if the given value is not nil.
-func (_u *SystemOneInstanceUpdate) SetNillableName(v *string) *SystemOneInstanceUpdate {
-	if v != nil {
-		_u.SetName(*v)
-	}
-	return _u
-}
-
 // SetAdapter sets the "adapter" field.
 func (_u *SystemOneInstanceUpdate) SetAdapter(v string) *SystemOneInstanceUpdate {
 	_u.mutation.SetAdapter(v)
@@ -395,11 +381,6 @@ func (_u *SystemOneInstanceUpdate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *SystemOneInstanceUpdate) check() error {
-	if v, ok := _u.mutation.Name(); ok {
-		if err := systemoneinstance.NameValidator(v); err != nil {
-			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "SystemOneInstance.name": %w`, err)}
-		}
-	}
 	if v, ok := _u.mutation.Adapter(); ok {
 		if err := systemoneinstance.AdapterValidator(v); err != nil {
 			return &ValidationError{Name: "adapter", err: fmt.Errorf(`ent: validator failed for field "SystemOneInstance.adapter": %w`, err)}
@@ -429,9 +410,6 @@ func (_u *SystemOneInstanceUpdate) sqlSave(ctx context.Context) (_node int, err 
 				ps[i](selector)
 			}
 		}
-	}
-	if value, ok := _u.mutation.Name(); ok {
-		_spec.SetField(systemoneinstance.FieldName, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Adapter(); ok {
 		_spec.SetField(systemoneinstance.FieldAdapter, field.TypeString, value)
@@ -537,20 +515,6 @@ type SystemOneInstanceUpdateOne struct {
 	fields   []string
 	hooks    []Hook
 	mutation *SystemOneInstanceMutation
-}
-
-// SetName sets the "name" field.
-func (_u *SystemOneInstanceUpdateOne) SetName(v string) *SystemOneInstanceUpdateOne {
-	_u.mutation.SetName(v)
-	return _u
-}
-
-// SetNillableName sets the "name" field if the given value is not nil.
-func (_u *SystemOneInstanceUpdateOne) SetNillableName(v *string) *SystemOneInstanceUpdateOne {
-	if v != nil {
-		_u.SetName(*v)
-	}
-	return _u
 }
 
 // SetAdapter sets the "adapter" field.
@@ -918,11 +882,6 @@ func (_u *SystemOneInstanceUpdateOne) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *SystemOneInstanceUpdateOne) check() error {
-	if v, ok := _u.mutation.Name(); ok {
-		if err := systemoneinstance.NameValidator(v); err != nil {
-			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "SystemOneInstance.name": %w`, err)}
-		}
-	}
 	if v, ok := _u.mutation.Adapter(); ok {
 		if err := systemoneinstance.AdapterValidator(v); err != nil {
 			return &ValidationError{Name: "adapter", err: fmt.Errorf(`ent: validator failed for field "SystemOneInstance.adapter": %w`, err)}
@@ -969,9 +928,6 @@ func (_u *SystemOneInstanceUpdateOne) sqlSave(ctx context.Context) (_node *Syste
 				ps[i](selector)
 			}
 		}
-	}
-	if value, ok := _u.mutation.Name(); ok {
-		_spec.SetField(systemoneinstance.FieldName, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Adapter(); ok {
 		_spec.SetField(systemoneinstance.FieldAdapter, field.TypeString, value)

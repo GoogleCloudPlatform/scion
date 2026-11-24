@@ -107,16 +107,21 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"agent.identity_token": testAdminPolicyAllow,
 
 	// Projects.
-	"project.create":                      testAdminPolicyAllow,
-	"project.read":                        testAdminPolicyAllow,
-	"project.update":                      testAdminPolicyAllow,
-	"project.delete":                      testAdminPolicyAllow,
-	"project.manage":                      testAdminPolicyAllow,
-	"project.register":                    testAdminPolicyAllow,
-	"project.set_messaging_policy":        testAdminPolicyAllow,
-	"project.manage_message_policies":     testAdminPolicyAllow,
-	"project.read_message_policies":       testAdminPolicyAllow,
-	"project.manage_system_one_instances": testAdminPolicyAllow,
+	"project.create":                  testAdminPolicyAllow,
+	"project.read":                    testAdminPolicyAllow,
+	"project.update":                  testAdminPolicyAllow,
+	"project.delete":                  testAdminPolicyAllow,
+	"project.manage":                  testAdminPolicyAllow,
+	"project.register":                testAdminPolicyAllow,
+	"project.set_messaging_policy":    testAdminPolicyAllow,
+	"project.manage_message_policies": testAdminPolicyAllow,
+	"project.read_message_policies":   testAdminPolicyAllow,
+	// System One allowlist mutation controls external model egress consent
+	// (ptone/scion#8045 D1): deny, consistent with system_one_instance.* and
+	// the hub.system_one experiment. Still grantable at project scope
+	// (testAdminGrantableAtProjectScope) so built-in project-owner and
+	// project-admin bindings remain assignable by test admins.
+	"project.manage_system_one_instances": testAdminPolicyDeny,
 	"project.clone":                       testAdminPolicyAllow,
 	"project.list":                        testAdminPolicyAllow,
 	// Posting into a project's chat threads, held by the built-in
@@ -338,12 +343,13 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 // scope. The census pins every member as deny-classified and held by a
 // built-in project role.
 var testAdminGrantableAtProjectScope = map[string]bool{
-	"agent.delegation.revoke":            true,
-	"agent.delegation.credential.revoke": true,
-	"agent.delegation.list":              true,
-	"agent.delegation.read":              true,
-	"project.manage_visitors":            true,
-	"github_trigger.configure":           true,
+	"agent.delegation.revoke":             true,
+	"agent.delegation.credential.revoke":  true,
+	"agent.delegation.list":               true,
+	"agent.delegation.read":               true,
+	"project.manage_visitors":             true,
+	"project.manage_system_one_instances": true,
+	"github_trigger.configure":            true,
 }
 
 // testAdminGrantRefuses reports whether an admin-kind test identity is
@@ -467,7 +473,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"perftrace_middleware.go:perfHeadersAllowed":                                {Policy: testAdminPolicyAllow, Reason: "request timing headers", ViewAsMember: vamEffective()},
 	"project_messaging_policy.go:messagingPolicyOwnerRule":                      {Policy: testAdminPolicyAllow, Reason: "project messaging policy (project.set_messaging_policy is allow)", ViewAsMember: vamEffective()},
 	"handlers_message_policies.go:messagePolicyOwnerOrAdminRule":                {Policy: testAdminPolicyAllow, Reason: "project message policies (project.manage_message_policies is allow)", ViewAsMember: vamEffective()},
-	"handlers_project_system_one_instances.go:projectSystemOneOwnerOrAdminRule": {Policy: testAdminPolicyAllow, Reason: "project System One instance allowlist (project.manage_system_one_instances is allow)", ViewAsMember: vamEffective()},
+	"handlers_project_system_one_instances.go:projectSystemOneOwnerOrAdminRule": {Policy: testAdminPolicyDeny, Reason: "project System One instance allowlist (project.manage_system_one_instances is deny, matching system_one_instance.* and hub.system_one)", ViewAsMember: vamEffective()},
 	"authorize_message.go:authorizeAgentMessage":                                {Policy: testAdminPolicyAllow, Reason: "messaging agents", ViewAsMember: vamEffective()},
 	"handlers_agent_message_mode.go:handleSetMessageMode":                       {Policy: testAdminPolicyAllow, Reason: "agent message mode", ViewAsMember: vamEffective()},
 	"deletion_redact.go:callerSeesDeletionDetail":                               {Policy: testAdminPolicyAllow, Reason: "deletion detail display", ViewAsMember: vamEffective()},

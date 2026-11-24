@@ -53,7 +53,7 @@ func IsValidSystemOneAuthKind(kind string) bool {
 // suitable for a System One instance (1..63 lowercase ASCII letters/digits
 // separated by single hyphens, e.g. "typesafe-prod").
 func IsValidSystemOneInstanceName(name string) bool {
-	return name != "" && api.Slugify(name) == name
+	return len(name) > 0 && len(name) <= 63 && api.Slugify(name) == name
 }
 
 // SystemOneInstanceAuth describes how the Hub authenticates to a System One
@@ -206,6 +206,10 @@ type SystemOneInstanceStore interface {
 	// UpdateSystemOneInstance updates an existing System One instance (resolved
 	// by ID when non-empty, otherwise by Name).
 	//
+	// Name is immutable once created: supplying a different non-empty Name
+	// returns ErrInvalidInput so project allowlists cannot drift to a different
+	// instance.
+	//
 	// If inst.Revision > 0, it must match the stored Revision or
 	// ErrRevisionConflict is returned. Revision is incremented by 1 whenever
 	// any of Adapter, Model, Endpoint, Auth, Options, or Limits changes;
@@ -213,11 +217,14 @@ type SystemOneInstanceStore interface {
 	// UpdatedBy) preserve Revision. Updates inst.Revision and inst.UpdatedAt.
 	UpdateSystemOneInstance(ctx context.Context, inst *SystemOneInstance) error
 
-	// DeleteSystemOneInstance deletes a System One instance by UUID.
-	// Returns ErrNotFound if no row with that ID exists.
+	// DeleteSystemOneInstance atomically prunes the instance's Name from every
+	// project's allowlist and deletes the System One instance by UUID in a
+	// single transaction. Returns ErrNotFound if no row with that ID exists.
 	DeleteSystemOneInstance(ctx context.Context, id string) error
 
-	// DeleteSystemOneInstanceByName deletes a System One instance by its unique
-	// slug Name. Returns ErrNotFound if no row with that Name exists.
+	// DeleteSystemOneInstanceByName atomically prunes the instance's Name from
+	// every project's allowlist and deletes the System One instance by its
+	// unique slug Name in a single transaction. Returns ErrNotFound if no row
+	// with that Name exists.
 	DeleteSystemOneInstanceByName(ctx context.Context, name string) error
 }

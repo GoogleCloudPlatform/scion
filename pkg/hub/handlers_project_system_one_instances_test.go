@@ -190,9 +190,11 @@ func TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate(t *testing.T) {
 
 	basePath := "/api/v1/projects/" + proj.ID + "/system-one/instances"
 
-	// 1. Experiment OFF -> 404 on GET, PUT, DELETE even for super-admin.
+	// 1. Experiment OFF -> 404 on GET, collection PUT, item PUT, DELETE even for super-admin.
 	setSystemOneExperimentLive(t, srv, false)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, superAdmin, http.MethodGet, basePath, nil).Code)
+	emptyList := []string{}
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, superAdmin, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &emptyList}).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, superAdmin, http.MethodPut, basePath+"/inst-1", nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, superAdmin, http.MethodDelete, basePath+"/inst-1", nil).Code)
 	setSystemOneExperimentLive(t, srv, true)
@@ -349,6 +351,11 @@ func TestProjectSystemOneInstances_UnknownInstanceAndDeletePrune(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, emptyBodyRec.Code, emptyBodyRec.Body.String())
 	assert.Contains(t, emptyBodyRec.Body.String(), "instances field is required")
 
+	// Instance names > 63 characters return 400 validation_error, not 422 (rev3-hub nit 5).
+	longSlug := "a123456789012345678901234567890123456789012345678901234567890123"
+	longRec := doRequestAsUser(t, srv, admin, http.MethodPut, basePath+"/"+longSlug, nil)
+	require.Equal(t, http.StatusBadRequest, longRec.Code, longRec.Body.String())
+
 	// Removing a non-existent valid slug stays idempotent (200).
 	delMissing := doRequestAsUser(t, srv, admin, http.MethodDelete, basePath+"/does-not-exist", nil)
 	require.Equal(t, http.StatusOK, delMissing.Code, delMissing.Body.String())
@@ -376,6 +383,19 @@ func TestProjectSystemOneInstances_UnknownInstanceAndDeletePrune(t *testing.T) {
 
 	addRec := doRequestAsUser(t, srv, admin, http.MethodPut, basePath+"/reusable-inst", nil)
 	require.Equal(t, http.StatusOK, addRec.Code, addRec.Body.String())
+
+	// Handler-level immutability check (rev3-hub O3 addendum): PUT/PATCH on the
+	// admin instance endpoint are refused (405 Method Not Allowed) and leave
+	// both the instance and project allowlist intact.
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		renameRec := doRequestAsUser(t, srv, admin, method, systemOneAdminPath+"/reusable-inst", map[string]any{
+			"name": "reusable-inst-renamed",
+		})
+		assert.Equal(t, http.StatusMethodNotAllowed, renameRec.Code, "method=%s body=%s", method, renameRec.Body.String())
+	}
+	gotBeforeDelete, err := s.GetProjectSystemOneInstances(ctx, proj.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"reusable-inst"}, gotBeforeDelete)
 
 	delInstRec := doRequestAsUser(t, srv, admin, http.MethodDelete, systemOneAdminPath+"/reusable-inst", nil)
 	require.Equal(t, http.StatusNoContent, delInstRec.Code, delInstRec.Body.String())

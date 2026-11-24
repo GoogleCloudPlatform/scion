@@ -1467,7 +1467,7 @@ func TestProject_SystemOneAllowedInstances(t *testing.T) {
 	_, _, err = ps.RemoveProjectSystemOneInstance(ctx, missingID, "alpha-1")
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
-	// PruneSystemOneInstanceFromAllProjects removes the named instance across projects.
+	// DeleteSystemOneInstanceByName atomically prunes the named instance across projects.
 	p2 := newProject(2)
 	p3 := newProject(3)
 	require.NoError(t, ps.CreateProject(ctx, p2))
@@ -1479,9 +1479,7 @@ func TestProject_SystemOneAllowedInstances(t *testing.T) {
 	_, _, err = ps.SetProjectSystemOneInstances(ctx, p3.ID, []string{"other-inst"})
 	require.NoError(t, err)
 
-	pruned, err := ps.PruneSystemOneInstanceFromAllProjects(ctx, "shared-inst")
-	require.NoError(t, err)
-	assert.Equal(t, 2, pruned)
+	require.NoError(t, is.DeleteSystemOneInstanceByName(ctx, "shared-inst"))
 
 	got1, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
 	require.NoError(t, err)
@@ -1493,8 +1491,26 @@ func TestProject_SystemOneAllowedInstances(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"other-inst"}, got3)
 
-	_, err = ps.PruneSystemOneInstanceFromAllProjects(ctx, "INVALID!")
+	// Names > 63 characters are rejected with ErrInvalidInput (rev3-hub nit 5).
+	longSlug := "a123456789012345678901234567890123456789012345678901234567890123"
+	require.Len(t, longSlug, 64)
+	_, _, err = ps.AddProjectSystemOneInstance(ctx, p.ID, longSlug)
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// Instance name is immutable in UpdateSystemOneInstance so a rename cannot
+	// leave an allowlist naming a different instance (rev3-hub O3).
+	keepInst, err := is.GetSystemOneInstanceByName(ctx, "keep-me")
+	require.NoError(t, err)
+	renamed := keepInst.Clone()
+	renamed.Name = "keep-me-renamed"
+	err = is.UpdateSystemOneInstance(ctx, renamed)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+	stillKeep, err := is.GetSystemOneInstance(ctx, keepInst.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "keep-me", stillKeep.Name)
+	gotAfterRenameAttempt, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"keep-me"}, gotAfterRenameAttempt)
 }
 
 func TestProject_SystemOneAllowedInstances_ConcurrentAddRemove(t *testing.T) {

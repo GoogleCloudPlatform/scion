@@ -733,32 +733,6 @@ func (s *ProjectStore) RemoveProjectSystemOneInstance(ctx context.Context, proje
 	return before, filtered, nil
 }
 
-// PruneSystemOneInstanceFromAllProjects atomically removes instanceName from
-// every project's System One instance allowlist and returns the number of
-// projects updated.
-func (s *ProjectStore) PruneSystemOneInstanceFromAllProjects(ctx context.Context, instanceName string) (int, error) {
-	name := strings.TrimSpace(instanceName)
-	if !store.IsValidSystemOneInstanceName(name) {
-		return 0, store.ErrInvalidInput
-	}
-
-	tx, err := s.client.Tx(ctx)
-	if err != nil {
-		return 0, mapError(err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	updated, err := pruneSystemOneInstanceTx(ctx, tx, s.client.Driver().Dialect() == dialect.Postgres, name)
-	if err != nil {
-		return 0, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, mapError(err)
-	}
-	return updated, nil
-}
-
 // DeleteProject removes a project by ID.
 func (s *ProjectStore) DeleteProject(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)

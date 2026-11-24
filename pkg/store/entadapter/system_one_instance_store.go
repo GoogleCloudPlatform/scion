@@ -312,6 +312,8 @@ func (s *SystemOneInstanceStore) UpdateSystemOneInstance(ctx context.Context, in
 		candidate := inst.Clone()
 		if candidate.Name == "" {
 			candidate.Name = existing.Name
+		} else if candidate.Name != existing.Name {
+			return fmt.Errorf("%w: system one instance name is immutable (%q cannot be renamed to %q)", store.ErrInvalidInput, existing.Name, candidate.Name)
 		}
 		authKind, err := validateSystemOneInstanceFields(candidate)
 		if err != nil {
@@ -335,7 +337,6 @@ func (s *SystemOneInstanceStore) UpdateSystemOneInstance(ctx context.Context, in
 				systemoneinstance.IDEQ(existing.ID),
 				systemoneinstance.RevisionEQ(existing.Revision),
 			).
-			SetName(candidate.Name).
 			SetAdapter(candidate.Adapter).
 			SetModel(candidate.Model).
 			SetEndpoint(candidate.Endpoint).

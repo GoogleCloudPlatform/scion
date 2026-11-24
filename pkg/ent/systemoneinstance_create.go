@@ -673,18 +673,6 @@ type (
 	}
 )
 
-// SetName sets the "name" field.
-func (u *SystemOneInstanceUpsert) SetName(v string) *SystemOneInstanceUpsert {
-	u.Set(systemoneinstance.FieldName, v)
-	return u
-}
-
-// UpdateName sets the "name" field to the value that was provided on create.
-func (u *SystemOneInstanceUpsert) UpdateName() *SystemOneInstanceUpsert {
-	u.SetExcluded(systemoneinstance.FieldName)
-	return u
-}
-
 // SetAdapter sets the "adapter" field.
 func (u *SystemOneInstanceUpsert) SetAdapter(v string) *SystemOneInstanceUpsert {
 	u.Set(systemoneinstance.FieldAdapter, v)
@@ -984,6 +972,9 @@ func (u *SystemOneInstanceUpsertOne) UpdateNewValues() *SystemOneInstanceUpsertO
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(systemoneinstance.FieldID)
 		}
+		if _, exists := u.create.mutation.Name(); exists {
+			s.SetIgnore(systemoneinstance.FieldName)
+		}
 		if _, exists := u.create.mutation.CreatedAt(); exists {
 			s.SetIgnore(systemoneinstance.FieldCreatedAt)
 		}
@@ -1016,20 +1007,6 @@ func (u *SystemOneInstanceUpsertOne) Update(set func(*SystemOneInstanceUpsert)) 
 		set(&SystemOneInstanceUpsert{UpdateSet: update})
 	}))
 	return u
-}
-
-// SetName sets the "name" field.
-func (u *SystemOneInstanceUpsertOne) SetName(v string) *SystemOneInstanceUpsertOne {
-	return u.Update(func(s *SystemOneInstanceUpsert) {
-		s.SetName(v)
-	})
-}
-
-// UpdateName sets the "name" field to the value that was provided on create.
-func (u *SystemOneInstanceUpsertOne) UpdateName() *SystemOneInstanceUpsertOne {
-	return u.Update(func(s *SystemOneInstanceUpsert) {
-		s.UpdateName()
-	})
 }
 
 // SetAdapter sets the "adapter" field.
@@ -1544,6 +1521,9 @@ func (u *SystemOneInstanceUpsertBulk) UpdateNewValues() *SystemOneInstanceUpsert
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(systemoneinstance.FieldID)
 			}
+			if _, exists := b.mutation.Name(); exists {
+				s.SetIgnore(systemoneinstance.FieldName)
+			}
 			if _, exists := b.mutation.CreatedAt(); exists {
 				s.SetIgnore(systemoneinstance.FieldCreatedAt)
 			}
@@ -1577,20 +1557,6 @@ func (u *SystemOneInstanceUpsertBulk) Update(set func(*SystemOneInstanceUpsert))
 		set(&SystemOneInstanceUpsert{UpdateSet: update})
 	}))
 	return u
-}
-
-// SetName sets the "name" field.
-func (u *SystemOneInstanceUpsertBulk) SetName(v string) *SystemOneInstanceUpsertBulk {
-	return u.Update(func(s *SystemOneInstanceUpsert) {
-		s.SetName(v)
-	})
-}
-
-// UpdateName sets the "name" field to the value that was provided on create.
-func (u *SystemOneInstanceUpsertBulk) UpdateName() *SystemOneInstanceUpsertBulk {
-	return u.Update(func(s *SystemOneInstanceUpsert) {
-		s.UpdateName()
-	})
 }
 
 // SetAdapter sets the "adapter" field.
