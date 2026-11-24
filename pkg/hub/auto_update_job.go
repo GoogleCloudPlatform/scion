@@ -162,15 +162,16 @@ func (s *Server) releaseAutoUpdateHandler() func(ctx context.Context) {
 // state.LastOutcome is "started" and maps terminal runs to verified, failed,
 // or rolled_back. On failed or rolled_back, state.SuppressedTag is set to
 // state.LastTarget so the same release is not retried automatically.
-func (s *Server) reconcileAutoUpdateState(ctx context.Context, state *AutoUpdateState) (bool, error) {
+// inFlight is true when the run is still pending, running, or restarting.
+func (s *Server) reconcileAutoUpdateState(ctx context.Context, state *AutoUpdateState) (changed bool, inFlight bool, err error) {
 	if state.LastRunID == "" || state.LastOutcome != AutoUpdateOutcomeStarted {
-		return false, nil
+		return false, false, nil
 	}
 
 	run, err := s.store.GetMaintenanceRun(ctx, state.LastRunID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			return false, err
+			return false, false, err
 		}
 		run = nil
 	}
@@ -181,7 +182,7 @@ func (s *Server) reconcileAutoUpdateState(ctx context.Context, state *AutoUpdate
 		run.Status == store.MaintenanceStatusRestarting ||
 		run.Status == store.MaintenanceStatusPending):
 		// Still in flight.
-		return false, nil
+		return false, true, nil
 	case run != nil && run.Status == store.MaintenanceStatusCompleted:
 		outcome = AutoUpdateOutcomeVerified
 	default:
@@ -192,7 +193,7 @@ func (s *Server) reconcileAutoUpdateState(ctx context.Context, state *AutoUpdate
 	if (outcome == AutoUpdateOutcomeFailed || outcome == AutoUpdateOutcomeRolledBack) && state.LastTarget != "" {
 		state.SuppressedTag = state.LastTarget
 	}
-	return true, nil
+	return true, false, nil
 }
 
 func (s *Server) resolveFailedAutoUpdateOutcome(ctx context.Context, runID string, run *store.MaintenanceOperationRun) string {
@@ -252,9 +253,13 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 
 	// Step 2: reconcile the previous run before checking eligibility or window
 	// so outcomes and retry suppression are recorded promptly after restart.
-	reconciled, err := s.reconcileAutoUpdateState(ctx, &state)
+	reconciled, inFlight, err := s.reconcileAutoUpdateState(ctx, &state)
 	if err != nil {
 		log.Error("Failed to reconcile previous auto-update run, skipping tick", "run_id", state.LastRunID, "error", err)
+		return
+	}
+	if inFlight {
+		log.Debug("Previous auto-update run still in flight, skipping tick", "run_id", state.LastRunID)
 		return
 	}
 	if reconciled {
@@ -271,9 +276,6 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 	sel, err := s.readReleaseSelection(ctx)
 	if err != nil {
 		log.Error("Failed to read release selection, skipping tick", "error", err)
-		return
-	}
-	if eff.Locked {
 		return
 	}
 	if mode := effectiveUpdateMode(mc, sel); mode != UpdateModeRelease {

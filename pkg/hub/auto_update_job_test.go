@@ -79,6 +79,22 @@ func enableAutoUpdateSetting(t *testing.T, srv *Server, hour int) {
 	require.NoError(t, err)
 }
 
+func waitForRunTerminal(t *testing.T, s store.Store, runID string) *store.MaintenanceOperationRun {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := s.GetMaintenanceRun(ctx, runID)
+		require.NoError(t, err)
+		if run.CompletedAt != nil {
+			return run
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("maintenance run %s did not reach terminal state before deadline", runID)
+	return nil
+}
+
 func TestAutoUpdateWindowOffsetAndWindowFor(t *testing.T) {
 	t.Run("empty hubID yields zero offset", func(t *testing.T) {
 		assert.Equal(t, time.Duration(0), autoUpdateWindowOffset(""))
@@ -263,8 +279,7 @@ func TestRunReleaseAutoUpdate_OncePerDayAndRestart(t *testing.T) {
 
 	// Simulated restart: fresh Server over the same store on the same day,
 	// after the run completed and hub booted on the new version.
-	run, err := s.GetMaintenanceRun(ctx, runs[0].ID)
-	require.NoError(t, err)
+	run := waitForRunTerminal(t, s, runs[0].ID)
 	run.Status = store.MaintenanceStatusCompleted
 	require.NoError(t, s.UpdateMaintenanceRun(ctx, run))
 
@@ -456,9 +471,9 @@ func TestRunReleaseAutoUpdate_SuppressionOnFailureRollbackAndClearOnNewer(t *tes
 			require.NoError(t, err)
 			require.NotEmpty(t, state.LastRunID)
 
-			// Simulate failed or rolled_back run.
-			run, err := s.GetMaintenanceRun(ctx, state.LastRunID)
-			require.NoError(t, err)
+			// Wait for the runner goroutine to finish writing its terminal
+			// status before overwriting the run to failed or rolled_back.
+			run := waitForRunTerminal(t, s, state.LastRunID)
 			run.Status = store.MaintenanceStatusFailed
 			if tc.rolledBack {
 				resJSON, _ := json.Marshal(map[string]any{"verification": LastUpdateRolledBack})
@@ -473,7 +488,15 @@ func TestRunReleaseAutoUpdate_SuppressionOnFailureRollbackAndClearOnNewer(t *tes
 			}
 			require.NoError(t, s.UpdateMaintenanceRun(ctx, run))
 
-			// Day 2: same tag nightly-20261124 is suppressed (reconciled first, then skipped).
+			// Tick outside window on Day 1: reconciles exact outcome and sets SuppressedTag.
+			p.now = time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+			srv.runReleaseAutoUpdate(ctx, p.deps())
+			state, err = srv.readAutoUpdateState(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantOutcome, state.LastOutcome)
+			assert.Equal(t, "nightly-20261124", state.SuppressedTag)
+
+			// Day 2: same tag nightly-20261124 is suppressed and skipped.
 			exec2 := newParamRecordingExecutor()
 			p.now = time.Date(2026, 11, 25, 4, 10, 0, 0, time.UTC)
 			p.executor = exec2
@@ -488,8 +511,7 @@ func TestRunReleaseAutoUpdate_SuppressionOnFailureRollbackAndClearOnNewer(t *tes
 			require.NoError(t, err)
 			assert.Len(t, runs, 1, "suppressed tag must not start a new run")
 
-			// Verify reconciliation outcome directly by checking before Day 2 window in a fresh scenario:
-			// Also test Day 3: newer tag nightly-20261126 clears suppression and applies!
+			// Day 3: newer tag nightly-20261126 clears suppression and applies.
 			exec3 := newParamRecordingExecutor()
 			p.now = time.Date(2026, 11, 26, 4, 10, 0, 0, time.UTC)
 			p.checkResult = &maintenance.ReleaseUpdateCheckResult{
@@ -515,6 +537,7 @@ func TestRunReleaseAutoUpdate_SuppressionOnFailureRollbackAndClearOnNewer(t *tes
 			assert.Empty(t, state.SuppressedTag, "newer tag must clear suppression")
 			assert.Equal(t, "nightly-20261126", state.LastTarget)
 			assert.Equal(t, AutoUpdateOutcomeStarted, state.LastOutcome)
+			waitForRunTerminal(t, s, state.LastRunID)
 		})
 	}
 
@@ -627,6 +650,50 @@ func TestRunReleaseAutoUpdate_InFlightDowngradeAndSelectedChannel(t *testing.T) 
 		assert.Equal(t, AutoUpdateOutcomeSkippedRefused, state.LastOutcome)
 	})
 
+	t.Run("own in-flight run ends tick and preserves started outcome", func(t *testing.T) {
+		srv, s := newAutoUpdateJobTestServer(t, MaintenanceConfig{
+			DeploymentTier: "binary", ReleaseChannel: "nightly", UpdatePolicy: "auto",
+			Installer: newTestInstaller(maintenance.StrategySymlink),
+		})
+		srv.maintenance = NewMaintenanceState(true, "planned work")
+		run := &store.MaintenanceOperationRun{
+			ID:           api.NewUUID(),
+			OperationKey: "update-binary",
+			Status:       store.MaintenanceStatusRunning,
+			StartedAt:    time.Now(),
+			StartedBy:    autoUpdateStartedBy,
+		}
+		require.NoError(t, s.CreateMaintenanceRun(ctx, run))
+		require.NoError(t, srv.writeAutoUpdateState(ctx, AutoUpdateState{
+			LastAttemptDay: "2026-11-24",
+			LastRunID:      run.ID,
+			LastTarget:     "nightly-20261124",
+			LastOutcome:    AutoUpdateOutcomeStarted,
+		}))
+
+		// Next day inside the window with maintenance mode enabled: must end the
+		// tick early and preserve LastOutcome="started" so a later failure is
+		// still reconciled and suppressed.
+		p := &autoUpdateJobProbe{
+			now:     time.Date(2026, 11, 25, 4, 15, 0, 0, time.UTC),
+			running: "nightly-20261120",
+			checkResult: &maintenance.ReleaseUpdateCheckResult{
+				Tier: "binary", UpdateAvailable: true,
+				CurrentVersion: "nightly-20261120", LatestVersion: "nightly-20261125",
+				Channel: "nightly", Class: "upgrade",
+			},
+			executor: newParamRecordingExecutor(),
+		}
+		srv.runReleaseAutoUpdate(ctx, p.deps())
+		assert.Equal(t, 0, p.checks)
+
+		state, err := srv.readAutoUpdateState(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, AutoUpdateOutcomeStarted, state.LastOutcome)
+		assert.Equal(t, run.ID, state.LastRunID)
+		assert.Equal(t, "2026-11-24", state.LastAttemptDay)
+	})
+
 	t.Run("follows selected channel", func(t *testing.T) {
 		srv, s := newAutoUpdateJobTestServer(t, MaintenanceConfig{
 			DeploymentTier: "binary", ReleaseChannel: "nightly", UpdatePolicy: "notify",
@@ -653,9 +720,14 @@ func TestRunReleaseAutoUpdate_InFlightDowngradeAndSelectedChannel(t *testing.T) 
 		}
 		assert.Equal(t, "preview", p.gotOpts.Channel)
 		exec.mu.Lock()
-		defer exec.mu.Unlock()
-		assert.Equal(t, "v0.9.0-rc.1", exec.params[maintenance.ParamTargetVersion])
-		assert.Equal(t, "preview", exec.params[maintenance.ParamChannel])
+		gotTarget := exec.params[maintenance.ParamTargetVersion]
+		gotChan := exec.params[maintenance.ParamChannel]
+		exec.mu.Unlock()
+		assert.Equal(t, "v0.9.0-rc.1", gotTarget)
+		assert.Equal(t, "preview", gotChan)
+		state, err := srv.readAutoUpdateState(ctx)
+		require.NoError(t, err)
+		waitForRunTerminal(t, s, state.LastRunID)
 	})
 }
 
