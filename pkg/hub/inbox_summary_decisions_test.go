@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -376,4 +377,87 @@ func TestDecisionAnswer_SurfaceInbox(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusBadRequest, badRec.Code)
 	assert.Contains(t, badRec.Body.String(), store.DecisionSurfaceInbox)
+}
+
+type inboxDecisionsFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	mu    sync.Mutex
+	err   error
+}
+
+func (s *inboxDecisionsFaultStore) setErr(err error) {
+	s.mu.Lock()
+	s.err = err
+	s.mu.Unlock()
+}
+
+func (s *inboxDecisionsFaultStore) ListOpenPrompts(ctx context.Context, projectIDs, chatKeys []string) ([]*store.ProjectDecisionPrompt, error) {
+	if s.fault.Active() {
+		s.mu.Lock()
+		err := s.err
+		s.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.ListOpenPrompts(ctx, projectIDs, chatKeys)
+}
+
+func TestUserMeInboxSummary_DecisionsForcedErrorIsolation(t *testing.T) {
+	srv, rawStore, alice, bob, project, faultStore, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, sw *storeFaultSwitch) *inboxDecisionsFaultStore {
+		return &inboxDecisionsFaultStore{Store: inner, fault: sw}
+	})
+	f := newDecisionsFixtureOn(t, srv, rawStore, alice, bob, project)
+	setInboxAndDecisionsExperiments(t, f.srv, true, true)
+
+	// Seed one open decision and one live pending secret for f.bob so we can
+	// verify approvals remains intact and decisions is excluded from total when
+	// ListOpenPrompts fails.
+	f.topicPrompt(t, oneDecision, false)
+	now := time.Now().UTC()
+	_, err := f.store.CreateOrReplacePendingSecret(context.Background(), &store.PendingSecret{
+		ID:          api.NewUUID(),
+		Key:         "ISOLATION_SECRET",
+		SecretType:  store.SecretTypeEnvironment,
+		Scope:       store.ScopeUser,
+		ScopeID:     f.bob.ID,
+		ValueRef:    "ref-do-not-leak",
+		ValueLen:    8,
+		AgentID:     f.agent.ID,
+		AgentSlug:   f.agent.Slug,
+		ProjectID:   f.project.ID,
+		ProjectName: f.project.Name,
+		Created:     now,
+		Updated:     now,
+		ExpiresAt:   now.Add(24 * time.Hour),
+	}, now)
+	require.NoError(t, err)
+
+	// 1. Internal store error on ListOpenPrompts -> HTTP 200, decisions error("internal"),
+	// approvals ok(1), total == 1.
+	faultStore.setErr(errors.New("forced ListOpenPrompts failure"))
+	fault.Arm()
+	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeInboxSummaryPath, nil)
+	resp := decodeInboxSummary(t, rec)
+	assert.Equal(t, 1, resp.Total, "errored decisions category must be excluded from total")
+	assert.Equal(t, InboxStateOK, resp.Categories[InboxCategoryApprovals].State)
+	assert.Equal(t, 1, resp.Categories[InboxCategoryApprovals].Count)
+	decCat := resp.Categories[InboxCategoryDecisions]
+	assert.Equal(t, InboxStateError, decCat.State)
+	assert.Equal(t, 0, decCat.Count)
+	assert.Equal(t, InboxErrorInternal, decCat.ErrorCode)
+	assert.Empty(t, decCat.Previews)
+	assert.Equal(t, "/profile/decisions?tab=pending", decCat.Href)
+
+	// 2. Timeout error on ListOpenPrompts -> HTTP 200, decisions error("timeout"),
+	// approvals still ok(1), total == 1.
+	faultStore.setErr(context.DeadlineExceeded)
+	recTO := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeInboxSummaryPath, nil)
+	respTO := decodeInboxSummary(t, recTO)
+	assert.Equal(t, 1, respTO.Total)
+	assert.Equal(t, InboxStateOK, respTO.Categories[InboxCategoryApprovals].State)
+	assert.Equal(t, InboxStateError, respTO.Categories[InboxCategoryDecisions].State)
+	assert.Equal(t, 0, respTO.Categories[InboxCategoryDecisions].Count)
+	assert.Equal(t, InboxErrorTimeout, respTO.Categories[InboxCategoryDecisions].ErrorCode)
 }
