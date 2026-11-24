@@ -104,6 +104,25 @@ export interface GitCheckResult {
 /** The update modes, as update-status reports them. */
 export type UpdateMode = 'git' | 'release';
 
+/** Daily automatic update status from GET update-status / PUT auto-update. */
+export interface AutoUpdateStatus {
+  enabled: boolean;
+  source: 'setting' | 'config' | 'default' | 'config-locked' | (string & {});
+  locked: boolean;
+  lockedReason: string;
+  active: boolean;
+  inactiveReason:
+    | ''
+    | 'pinned'
+    | 'git_mode'
+    | 'installer_unsupported'
+    | 'maintenance_mode'
+    | 'no_channel'
+    | 'config_locked'
+    | (string & {});
+  windowStartHourUtc: number;
+}
+
 /**
  * GET /api/v1/admin/maintenance/update-status. Later phases add fields;
  * unknown fields are ignored.
@@ -126,6 +145,7 @@ export interface UpdateStatus {
     migrateHint?: string;
   };
   updatePolicy: string;
+  autoUpdate?: AutoUpdateStatus;
   downgrade?: { floor?: string; snapshotsSupported?: boolean };
   pendingUpdate: PendingUpdate | null;
   lastUpdate: LastUpdate | null;
@@ -328,6 +348,7 @@ export function renderInstallerUnsupported(st: UpdateStatus): TemplateResult {
 
 const RELEASES_PATH = '/api/v1/admin/maintenance/releases';
 const GIT_CHECK_PATH = '/api/v1/admin/maintenance/check-updates?mode=git';
+const AUTO_UPDATE_PATH = '/api/v1/admin/maintenance/auto-update';
 
 @customElement('scion-admin-maintenance-update-card')
 export class ScionAdminMaintenanceUpdateCard extends LitElement {
@@ -393,6 +414,20 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
 
   /** The running commit the git check result was computed against. */
   private gitCheckForCommit: string | null = null;
+
+  /** Latest auto-update state returned by PUT /auto-update; cleared when status reloads. */
+  @state()
+  private autoUpdateOverride: AutoUpdateStatus | null = null;
+
+  /** Optimistic checkbox state while PUT /auto-update is in flight. */
+  @state()
+  private autoUpdatePendingChecked: boolean | null = null;
+
+  @state()
+  private autoUpdateSaving = false;
+
+  @state()
+  private autoUpdateError: string | null = null;
 
   /**
    * The panel shown: the toggle's pick when a maintenance repo is
@@ -571,6 +606,18 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .auto-update-control {
+      margin-top: 0.75rem;
+    }
+
+    .auto-update-note,
+    .auto-update-hint {
+      margin-top: 0.25rem;
+      margin-left: 1.5rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .update-blocked {
       color: var(--scion-text-muted, #64748b);
     }
@@ -631,6 +678,8 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
   protected override willUpdate(changed: PropertyValues<this>): void {
     super.willUpdate(changed);
     if (changed.has('status')) {
+      this.autoUpdateOverride = null;
+      this.autoUpdateError = null;
       this.maybeLoadReleases();
       // An upstream check is relative to the running commit.
       const commit = this.status?.current.commit ?? null;
@@ -803,6 +852,75 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
   private onReleaseChange(e: Event): void {
     const value = (e.target as HTMLElement & { value: string }).value;
     this.pickedRelease = value || null;
+  }
+
+  private get currentAutoUpdate(): AutoUpdateStatus | null {
+    return this.autoUpdateOverride ?? this.status?.autoUpdate ?? null;
+  }
+
+  /**
+   * Why the daily auto-update checkbox is disabled, or null when it can be
+   * toggled. Enabled only when the hub's committed state is release + latest,
+   * the installer is supported, the setting is not config-locked, and the
+   * channel/release picker matches the committed channel and latest.
+   */
+  private autoUpdateDisabledReason(): string | null {
+    const st = this.status;
+    const au = this.currentAutoUpdate;
+    if (!st || !au) return 'Update status has not loaded.';
+    if (au.locked) {
+      return au.lockedReason || 'Automatic updates are disabled by server configuration.';
+    }
+    if (!st.installer.supported) {
+      return st.installer.reason || 'This hub cannot install updates itself.';
+    }
+    if (st.mode.effective !== 'release') {
+      return 'Automatic updates are unavailable while the hub runs in Git mode. Update to a release binary first.';
+    }
+    if (st.pin && st.pin !== LATEST_VALUE) {
+      return `Paused while the hub is pinned to ${st.pin}.`;
+    }
+    if (!st.channel.effective) {
+      return 'No release channel is configured for this hub.';
+    }
+    if (this.selectedChannel !== st.channel.effective || this.selectedValue !== LATEST_VALUE) {
+      return `Applies to the hub's current channel (${st.channel.effective}, latest). Update to change channel first.`;
+    }
+    return null;
+  }
+
+  private async onAutoUpdateToggle(e: Event): Promise<void> {
+    const au = this.currentAutoUpdate;
+    if (!au || this.autoUpdateSaving || this.autoUpdateDisabledReason()) return;
+    const checkbox = e.target as HTMLElement & { checked: boolean };
+    const nextEnabled = Boolean(checkbox.checked);
+    const prevEnabled = au.enabled;
+    this.autoUpdateSaving = true;
+    this.autoUpdateError = null;
+    this.autoUpdatePendingChecked = nextEnabled;
+    try {
+      const res = await apiFetch(AUTO_UPDATE_PATH, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: nextEnabled }),
+      });
+      if (!res.ok) {
+        if (res.status === 409) {
+          this.dispatchEvent(new CustomEvent('reload-status', { bubbles: true, composed: true }));
+        }
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const updated = (await res.json()) as AutoUpdateStatus;
+      this.autoUpdateOverride = updated;
+      this.autoUpdatePendingChecked = null;
+    } catch (err) {
+      this.autoUpdatePendingChecked = null;
+      checkbox.checked = prevEnabled;
+      this.autoUpdateError =
+        err instanceof Error ? err.message : 'Failed to save automatic update setting';
+    } finally {
+      this.autoUpdateSaving = false;
+    }
   }
 
   private onUpdateClick(): void {
@@ -1065,6 +1183,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
             ? html`, pinned to ${this.status.pin}`
             : nothing}.
         </div>
+        ${this.renderAutoUpdateControl()}
         ${cat.stale
           ? html`
               <sl-alert variant="warning" open class="catalog-stale">
@@ -1096,6 +1215,42 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
             : nothing}
           ${selected?.notesUrl ? renderReleaseNotesLink(selected.notesUrl) : nothing}
         </div>
+      </div>
+    `;
+  }
+
+  private renderAutoUpdateControl(): TemplateResult | typeof nothing {
+    const au = this.currentAutoUpdate;
+    if (!au) return nothing;
+    const disabledReason = this.autoUpdateDisabledReason();
+    const checked = this.autoUpdatePendingChecked ?? au.enabled;
+    const disabled = this.autoUpdateSaving || !!disabledReason;
+    return html`
+      <div class="auto-update-control">
+        <sl-checkbox
+          class="auto-update-checkbox"
+          size="small"
+          ?checked=${checked}
+          .checked=${checked}
+          ?disabled=${disabled}
+          @sl-change=${(e: Event) => void this.onAutoUpdateToggle(e)}
+        >
+          Update automatically every day
+        </sl-checkbox>
+        ${disabledReason
+          ? html`<div class="auto-update-note">${disabledReason}</div>`
+          : html`<div class="auto-update-hint">
+              Installs the newest ${this.status?.channel.effective} release once a day. The hub
+              restarts to apply it.
+            </div>`}
+        ${this.autoUpdateError
+          ? html`
+              <sl-alert variant="danger" open class="auto-update-error">
+                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                Could not save automatic update setting: ${this.autoUpdateError}
+              </sl-alert>
+            `
+          : nothing}
       </div>
     `;
   }
