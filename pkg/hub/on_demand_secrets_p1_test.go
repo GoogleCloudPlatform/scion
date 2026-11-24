@@ -328,29 +328,6 @@ func TestOnDemandSecret_StartDeliveryShadowsLowerScopesAndBlocksProgeny(t *testi
 	srv, s, owner, _, project, agentX, _ := setupAgentSecretsTestFixture(t, true)
 	ctx := context.Background()
 
-	// Create an ancestor user whose allowProgeny secret would otherwise reach
-	// childAgent via progeny fill.
-	ancestor := &store.User{
-		ID:          api.NewUUID(),
-		Email:       "ancestor-od@example.com",
-		DisplayName: "Ancestor",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-	}
-	require.NoError(t, s.CreateUser(ctx, ancestor))
-
-	childAgent := &store.Agent{
-		ID:        api.NewUUID(),
-		Slug:      "child-od-shadow",
-		Name:      "child-od-shadow",
-		ProjectID: project.ID,
-		OwnerID:   owner.ID,
-		CreatedBy: owner.ID,
-		Ancestry:  []string{ancestor.ID, owner.ID, agentX.ID},
-		Phase:     "running",
-	}
-	require.NoError(t, s.CreateAgent(ctx, childAgent))
-
 	sb := srv.GetSecretBackend()
 	mustSet := func(in *secret.SetSecretInput) {
 		t.Helper()
@@ -358,78 +335,127 @@ func TestOnDemandSecret_StartDeliveryShadowsLowerScopesAndBlocksProgeny(t *testi
 		require.NoError(t, err)
 	}
 
-	// Case 1: agent on_demand over project environment/always of the same name.
-	mustSet(&secret.SetSecretInput{
-		Name: "SHADOW_PROJ", Value: "project-env-val", SecretType: store.SecretTypeEnvironment,
-		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: project.ID,
-	})
-	mustSet(&secret.SetSecretInput{
-		Name: "SHADOW_PROJ", Value: "agent-od-val", SecretType: store.SecretTypeOnDemand,
-		Target: "SHADOW_PROJ", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: childAgent.ID, ProjectID: project.ID,
+	// Subtest 1: agent on_demand shadows project-scope and user-scope
+	// environment/always secrets without fetching their values, while a
+	// higher-scope deliverable row over a lower-scope on_demand row still wins.
+	t.Run("shadows_project_and_user_scopes", func(t *testing.T) {
+		// Case 1: agent on_demand over project environment/always.
+		mustSet(&secret.SetSecretInput{
+			Name: "SHADOW_PROJ", Value: "project-env-val", SecretType: store.SecretTypeEnvironment,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: project.ID,
+		})
+		mustSet(&secret.SetSecretInput{
+			Name: "SHADOW_PROJ", Value: "agent-od-val", SecretType: store.SecretTypeOnDemand,
+			Target: "SHADOW_PROJ", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
+		})
+
+		// Case 2: agent on_demand over user-scope environment/always.
+		mustSet(&secret.SetSecretInput{
+			Name: "SHADOW_USER", Value: "user-env-val", SecretType: store.SecretTypeEnvironment,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: owner.ID,
+		})
+		mustSet(&secret.SetSecretInput{
+			Name: "SHADOW_USER", Value: "agent-od-user-val", SecretType: store.SecretTypeOnDemand,
+			Target: "SHADOW_USER", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
+		})
+
+		// Control 1: lower-scope on_demand does NOT shadow a higher-scope deliverable row.
+		mustSet(&secret.SetSecretInput{
+			Name: "HIGHER_ENV_WINS", Value: "project-od-val", SecretType: store.SecretTypeOnDemand,
+			Target: "HIGHER_ENV_WINS", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeProject, ScopeID: project.ID,
+		})
+		mustSet(&secret.SetSecretInput{
+			Name: "HIGHER_ENV_WINS", Value: "agent-env-val", SecretType: store.SecretTypeEnvironment,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
+		})
+
+		// Control 2: unshadowed project environment/always secret is delivered.
+		mustSet(&secret.SetSecretInput{
+			Name: "CONTROL_ENV", Value: "control-val", SecretType: store.SecretTypeEnvironment,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: project.ID,
+		})
+
+		spy := &spyFetchValuesBackend{SecretBackend: sb}
+		d := NewHTTPAgentDispatcher(s, false, nil)
+		d.SetSecretBackend(spy)
+		d.SetAuthzService(srv.authzService)
+		d.SetAgentSecretsEnabledProvider(func() bool { return srv.experimentEnabled(experiments.AgentSecrets) })
+
+		sel := newDeliverySelector(srv.authzService, agentX, PurposeDispatch)
+		resolved, asNeeded, skipped, err := d.selectDeliverySecretsWith(ctx, sel, agentX, nil)
+		require.NoError(t, err)
+		assert.Empty(t, skipped)
+		assert.Empty(t, asNeeded)
+
+		byName := make(map[string]ResolvedSecret, len(resolved))
+		for _, r := range resolved {
+			byName[r.Name] = r
+		}
+
+		assert.Contains(t, byName, "CONTROL_ENV")
+		assert.Equal(t, "control-val", byName["CONTROL_ENV"].Value)
+		assert.Contains(t, byName, "HIGHER_ENV_WINS")
+		assert.Equal(t, "agent-env-val", byName["HIGHER_ENV_WINS"].Value)
+		assert.Equal(t, store.ScopeAgent, byName["HIGHER_ENV_WINS"].Source)
+
+		for _, shadowedKey := range []string{"SHADOW_PROJ", "SHADOW_USER"} {
+			assert.NotContains(t, byName, shadowedKey, "%s must be shadowed and absent from delivered secrets", shadowedKey)
+			assert.NotContains(t, spy.fetchedNames, shadowedKey, "%s must not be passed to FetchValues", shadowedKey)
+		}
 	})
 
-	// Case 2: agent on_demand over user-scope environment/always of the same name.
-	mustSet(&secret.SetSecretInput{
-		Name: "SHADOW_USER", Value: "user-env-val", SecretType: store.SecretTypeEnvironment,
-		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: owner.ID,
+	// Subtest 2: agent on_demand blocks progeny fill without fetching either
+	// value. OwnerID is empty on progenyChild so ScopeUser is not queried
+	// directly and only the progeny path can supply owner's allowProgeny rows.
+	t.Run("blocks_progeny_fill", func(t *testing.T) {
+		progenyChild := &store.Agent{
+			ID:        api.NewUUID(),
+			Slug:      "progeny-od-shadow",
+			Name:      "progeny-od-shadow",
+			ProjectID: project.ID,
+			CreatedBy: agentX.ID,
+			Ancestry:  []string{owner.ID, agentX.ID},
+			Phase:     "running",
+		}
+		require.NoError(t, s.CreateAgent(ctx, progenyChild))
+
+		mustSet(&secret.SetSecretInput{
+			Name: "SHADOW_PROGENY", Value: "progeny-env-val", SecretType: store.SecretTypeEnvironment,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: owner.ID,
+			AllowProgeny: true, CreatedBy: owner.ID,
+		})
+		mustSet(&secret.SetSecretInput{
+			Name: "SHADOW_PROGENY", Value: "agent-od-progeny-val", SecretType: store.SecretTypeOnDemand,
+			Target: "SHADOW_PROGENY", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: progenyChild.ID, ProjectID: project.ID,
+		})
+
+		// Unshadowed progeny secret proves the progeny path is active.
+		mustSet(&secret.SetSecretInput{
+			Name: "CONTROL_PROGENY", Value: "progeny-control-val", SecretType: store.SecretTypeEnvironment,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: owner.ID,
+			AllowProgeny: true, CreatedBy: owner.ID,
+		})
+
+		spy := &spyFetchValuesBackend{SecretBackend: sb}
+		d := NewHTTPAgentDispatcher(s, false, nil)
+		d.SetSecretBackend(spy)
+		d.SetAuthzService(srv.authzService)
+		d.SetAgentSecretsEnabledProvider(func() bool { return srv.experimentEnabled(experiments.AgentSecrets) })
+
+		sel := newDeliverySelector(srv.authzService, progenyChild, PurposeDispatch)
+		resolved, asNeeded, skipped, err := d.selectDeliverySecretsWith(ctx, sel, progenyChild, nil)
+		require.NoError(t, err)
+		assert.Empty(t, skipped)
+		assert.Empty(t, asNeeded)
+
+		byName := make(map[string]ResolvedSecret, len(resolved))
+		for _, r := range resolved {
+			byName[r.Name] = r
+		}
+
+		assert.Contains(t, byName, "CONTROL_PROGENY", "unshadowed progeny secret must be delivered")
+		assert.Equal(t, "progeny-control-val", byName["CONTROL_PROGENY"].Value)
+		assert.NotContains(t, byName, "SHADOW_PROGENY", "SHADOW_PROGENY must be blocked by agent on_demand")
+		assert.NotContains(t, spy.fetchedNames, "SHADOW_PROGENY", "SHADOW_PROGENY must not be passed to FetchValues")
 	})
-	mustSet(&secret.SetSecretInput{
-		Name: "SHADOW_USER", Value: "agent-od-user-val", SecretType: store.SecretTypeOnDemand,
-		Target: "SHADOW_USER", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: childAgent.ID, ProjectID: project.ID,
-	})
-
-	// Case 3: agent on_demand against a progeny environment/always secret of the same name.
-	mustSet(&secret.SetSecretInput{
-		Name: "SHADOW_PROGENY", Value: "progeny-env-val", SecretType: store.SecretTypeEnvironment,
-		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: ancestor.ID,
-		AllowProgeny: true, CreatedBy: ancestor.ID,
-	})
-	mustSet(&secret.SetSecretInput{
-		Name: "SHADOW_PROGENY", Value: "agent-od-progeny-val", SecretType: store.SecretTypeOnDemand,
-		Target: "SHADOW_PROGENY", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: childAgent.ID, ProjectID: project.ID,
-	})
-
-	// Control 1: lower-scope on_demand does NOT shadow a higher-scope deliverable row.
-	mustSet(&secret.SetSecretInput{
-		Name: "HIGHER_ENV_WINS", Value: "project-od-val", SecretType: store.SecretTypeOnDemand,
-		Target: "HIGHER_ENV_WINS", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeProject, ScopeID: project.ID,
-	})
-	mustSet(&secret.SetSecretInput{
-		Name: "HIGHER_ENV_WINS", Value: "agent-env-val", SecretType: store.SecretTypeEnvironment,
-		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeAgent, ScopeID: childAgent.ID, ProjectID: project.ID,
-	})
-
-	// Control 2: unshadowed project environment/always secret is delivered.
-	mustSet(&secret.SetSecretInput{
-		Name: "CONTROL_ENV", Value: "control-val", SecretType: store.SecretTypeEnvironment,
-		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: project.ID,
-	})
-
-	spy := &spyFetchValuesBackend{SecretBackend: sb}
-	d := NewHTTPAgentDispatcher(s, false, nil)
-	d.SetSecretBackend(spy)
-	d.SetAuthzService(srv.authzService)
-	d.SetAgentSecretsEnabledProvider(func() bool { return srv.experimentEnabled(experiments.AgentSecrets) })
-
-	sel := newDeliverySelector(srv.authzService, childAgent, PurposeDispatch)
-	resolved, asNeeded, skipped, err := d.selectDeliverySecretsWith(ctx, sel, childAgent, nil)
-	require.NoError(t, err)
-	assert.Empty(t, skipped)
-	assert.Empty(t, asNeeded)
-
-	byName := make(map[string]ResolvedSecret, len(resolved))
-	for _, r := range resolved {
-		byName[r.Name] = r
-	}
-
-	assert.Contains(t, byName, "CONTROL_ENV")
-	assert.Equal(t, "control-val", byName["CONTROL_ENV"].Value)
-	assert.Contains(t, byName, "HIGHER_ENV_WINS")
-	assert.Equal(t, "agent-env-val", byName["HIGHER_ENV_WINS"].Value)
-	assert.Equal(t, store.ScopeAgent, byName["HIGHER_ENV_WINS"].Source)
-
-	for _, shadowedKey := range []string{"SHADOW_PROJ", "SHADOW_USER", "SHADOW_PROGENY"} {
-		assert.NotContains(t, byName, shadowedKey, "%s must be shadowed and absent from delivered secrets", shadowedKey)
-		assert.NotContains(t, spy.fetchedNames, shadowedKey, "%s must not be passed to FetchValues", shadowedKey)
-	}
 }
