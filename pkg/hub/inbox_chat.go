@@ -267,7 +267,7 @@ func (s *Server) buildInboxChatPreviews(
 			ProjectID:       projectID,
 			ProjectName:     projectName,
 			CreatedAt:       c.lastMessageAt,
-			Href:            "/chat/dm/" + url.PathEscape(ud.dm.ConversationKey),
+			Href:            chatDMWebPath(ud.dm.ConversationKey),
 			ConversationKey: ud.dm.ConversationKey,
 			Label:           inboxChatDMLabel(ud, peerUsers),
 			LastMessageAt:   c.lastMessageAt,

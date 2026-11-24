@@ -298,14 +298,16 @@ func TestUserMeInboxSummary_ChatCountsFiltersOrderingAndPrivacy(t *testing.T) {
 	assert.Equal(t, "Deploy Bot", previews[0].Label)
 	assert.Equal(t, proj.ID, previews[0].ProjectID)
 	assert.Equal(t, proj.Name, previews[0].ProjectName)
-	assert.Equal(t, "/chat/dm/"+url.PathEscape(agentDMKey), previews[0].Href)
+	assert.Equal(t, chatDMWebPath(agentDMKey), previews[0].Href)
+	assert.Contains(t, previews[0].Href, "%3A", "DM href must percent-encode colons like encodeURIComponent")
 
 	assert.Equal(t, InboxChatKindDM, previews[1].Kind)
 	assert.Equal(t, userDMKey, previews[1].ConversationKey)
 	assert.Equal(t, "Alice Example", previews[1].Label)
 	assert.Empty(t, previews[1].ProjectID)
 	assert.Empty(t, previews[1].ProjectName)
-	assert.Equal(t, "/chat/dm/"+url.PathEscape(userDMKey), previews[1].Href)
+	assert.Equal(t, chatDMWebPath(userDMKey), previews[1].Href)
+	assert.Contains(t, previews[1].Href, "%3A", "DM href must percent-encode colons like encodeURIComponent")
 
 	assert.Equal(t, InboxChatKindMention, previews[2].Kind)
 	assert.Equal(t, mentionTopic, previews[2].ConversationKey)
@@ -471,6 +473,66 @@ func TestUserMeInboxSummary_ChatDisabledAndErrorStates(t *testing.T) {
 	assert.Equal(t, InboxErrorTimeout, resp.Categories[InboxCategoryChat].ErrorCode)
 }
 
+// TestUserMeInboxSummary_ChatDMHiddenProjectNotDisclosed verifies that an
+// unread DM with a live agent whose project the caller cannot read does not
+// disclose the hidden project's ID or name, while still showing the agent's
+// name (which /api/v1/chat/dms already discloses).
+func TestUserMeInboxSummary_ChatDMHiddenProjectNotDisclosed(t *testing.T) {
+	srv, s, wcs, _ := setupSharedChatTest(t)
+	setExperimentOverrides(t, srv, map[string]bool{experiments.InboxDashboard: true})
+	ctx := context.Background()
+
+	me := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "dm-viewer@example.com",
+		DisplayName: "DM Viewer",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateUser(ctx, me))
+
+	hiddenProj := &store.Project{
+		ID:      api.NewUUID(),
+		Name:    "Secret Hidden Project",
+		Slug:    "secret-hidden-project",
+		Created: time.Now().UTC(),
+		Updated: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateProject(ctx, hiddenProj))
+
+	hiddenAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "Hidden Project Bot",
+		Slug:      "hidden-project-bot",
+		ProjectID: hiddenProj.ID,
+		Phase:     "running",
+		Created:   time.Now().UTC(),
+		Updated:   time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, hiddenAgent))
+
+	h := &inboxChatTestHelper{t: t, srv: srv, s: s, wcs: wcs}
+	dmKey, _ := h.seedAgentDM(me.ID, hiddenAgent, "ping from hidden project", time.Now().UTC().Truncate(time.Second))
+
+	rec := doRequestAsUser(t, srv, me, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=10", nil)
+	resp := h.decodeSummary(rec)
+	chatCat := resp.Categories[InboxCategoryChat]
+	assert.Equal(t, InboxStateOK, chatCat.State)
+	assert.Equal(t, 1, chatCat.Count)
+	assert.Equal(t, 1, chatCat.Breakdown["dms"])
+
+	previews := h.decodeChatPreviews(chatCat)
+	require.Len(t, previews, 1)
+	assert.Equal(t, InboxChatKindDM, previews[0].Kind)
+	assert.Equal(t, dmKey, previews[0].ConversationKey)
+	assert.Equal(t, "Hidden Project Bot", previews[0].Label)
+	assert.Empty(t, previews[0].ProjectID, "hidden project ID must not be disclosed")
+	assert.Empty(t, previews[0].ProjectName, "hidden project name must not be disclosed")
+	assert.NotContains(t, rec.Body.String(), hiddenProj.Name)
+	assert.NotContains(t, rec.Body.String(), hiddenProj.ID)
+}
+
 type inboxChatCountingWebChatStore struct {
 	WebChatStore
 	listTopicsCalls atomic.Int32
@@ -499,16 +561,48 @@ func (s *inboxChatCountingWebChatStore) UnreadMentionKeys(ctx context.Context, u
 	return s.WebChatStore.UnreadMentionKeys(ctx, userID, conversationKeys)
 }
 
+type inboxChatCountingMainStore struct {
+	store.Store
+	getUsersByIDs  atomic.Int32
+	getAgentsByIDs atomic.Int32
+	latestByThread atomic.Int32
+	latestByConv   atomic.Int32
+}
+
+func (s *inboxChatCountingMainStore) GetUsersByIDs(ctx context.Context, ids []string) (map[string]*store.User, error) {
+	s.getUsersByIDs.Add(1)
+	return s.Store.GetUsersByIDs(ctx, ids)
+}
+
+func (s *inboxChatCountingMainStore) GetAgentsByIDsIncludingDeleted(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
+	s.getAgentsByIDs.Add(1)
+	return s.Store.GetAgentsByIDsIncludingDeleted(ctx, ids)
+}
+
+func (s *inboxChatCountingMainStore) LatestMessagesByThreadIDs(ctx context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
+	s.latestByThread.Add(1)
+	return s.Store.LatestMessagesByThreadIDs(ctx, ids, opts)
+}
+
+func (s *inboxChatCountingMainStore) LatestMessagesByConversationIDs(ctx context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
+	s.latestByConv.Add(1)
+	return s.Store.LatestMessagesByConversationIDs(ctx, ids, opts)
+}
+
 // TestUserMeInboxSummary_ChatStoreCallCount verifies AC6: regardless of how
-// many unread threads and DMs exist across projects, the webchat store calls
-// remain a small constant with exactly one batched UnreadMentionKeys call.
+// many unread threads and DMs exist (N vs 2N, with 2N user-peer DMs inside the
+// preview window), both webchat-store and main-store call counts remain
+// constant, including exactly one batched UnreadMentionKeys call.
 func TestUserMeInboxSummary_ChatStoreCallCount(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
 	setExperimentOverrides(t, srv, map[string]bool{experiments.InboxDashboard: true})
 	ctx := context.Background()
 
-	spy := &inboxChatCountingWebChatStore{WebChatStore: wcs}
-	srv.SetWebChatStore(spy)
+	wcsSpy := &inboxChatCountingWebChatStore{WebChatStore: wcs}
+	srv.SetWebChatStore(wcsSpy)
+	mainSpy, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *inboxChatCountingMainStore {
+		return &inboxChatCountingMainStore{Store: inner}
+	})
 
 	me := &store.User{
 		ID:          api.NewUUID(),
@@ -524,7 +618,6 @@ func TestUserMeInboxSummary_ChatStoreCallCount(t *testing.T) {
 	h := &inboxChatTestHelper{t: t, srv: srv, s: s, wcs: wcs}
 	now := time.Now().UTC().Truncate(time.Second)
 
-	// Seed 5 unread threads across 2 projects + 4 unread DMs.
 	proj2 := &store.Project{
 		ID:      api.NewUUID(),
 		Name:    "Second Project",
@@ -535,37 +628,84 @@ func TestUserMeInboxSummary_ChatStoreCallCount(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, proj2))
 	bindProjectMember(t, s, proj2.ID, me.ID)
 
-	for i := 0; i < 3; i++ {
-		h.seedThread(proj, fmt.Sprintf("p1-t%d", i), api.NewUUID(), "msg", now.Add(time.Duration(i)*time.Second), []string{me.ID})
-	}
-	for i := 0; i < 2; i++ {
-		h.seedThread(proj2, fmt.Sprintf("p2-t%d", i), api.NewUUID(), "msg", now.Add(time.Duration(10+i)*time.Second), nil)
-	}
-	for i := 0; i < 4; i++ {
-		peer := &store.User{
-			ID:          api.NewUUID(),
-			Email:       fmt.Sprintf("peer%d@example.com", i),
-			DisplayName: fmt.Sprintf("Peer %d", i),
-			Role:        store.UserRoleMember,
-			Status:      "active",
-			Created:     now,
+	seedBatch := func(batchIdx int) {
+		offset := time.Duration(batchIdx*100) * time.Second
+		h.seedThread(proj, fmt.Sprintf("p1-b%d", batchIdx), api.NewUUID(), "msg", now.Add(offset+1*time.Second), []string{me.ID})
+		h.seedThread(proj2, fmt.Sprintf("p2-b%d", batchIdx), api.NewUUID(), "msg", now.Add(offset+2*time.Second), nil)
+
+		agent := &store.Agent{
+			ID:        api.NewUUID(),
+			Name:      fmt.Sprintf("Agent B%d", batchIdx),
+			Slug:      fmt.Sprintf("agent-b%d", batchIdx),
+			ProjectID: proj.ID,
+			Phase:     "running",
+			Created:   now,
+			Updated:   now,
 		}
-		require.NoError(t, s.CreateUser(ctx, peer))
-		h.seedUserDM(proj.ID, me.ID, peer.ID, "dm", now.Add(time.Duration(20+i)*time.Second))
+		require.NoError(t, s.CreateAgent(ctx, agent))
+		h.seedAgentDM(me.ID, agent, "agent-dm", now.Add(offset+3*time.Second))
+
+		for i := 0; i < 2; i++ {
+			peer := &store.User{
+				ID:          api.NewUUID(),
+				Email:       fmt.Sprintf("peer-b%d-%d@example.com", batchIdx, i),
+				DisplayName: fmt.Sprintf("Peer B%d-%d", batchIdx, i),
+				Role:        store.UserRoleMember,
+				Status:      "active",
+				Created:     now,
+			}
+			require.NoError(t, s.CreateUser(ctx, peer))
+			h.seedUserDM(proj.ID, me.ID, peer.ID, "dm", now.Add(offset+time.Duration(10+i)*time.Second))
+		}
 	}
 
-	spy.listTopicsCalls.Store(0)
-	spy.readStatesCalls.Store(0)
-	spy.listDMsCalls.Store(0)
-	spy.unreadMentions.Store(0)
+	type callCounts struct {
+		listTopics     int32
+		readStates     int32
+		listDMs        int32
+		unreadMentions int32
+		getUsers       int32
+		getAgents      int32
+		dmLastMessages int32
+	}
+	measure := func(wantCount int) callCounts {
+		wcsSpy.listTopicsCalls.Store(0)
+		wcsSpy.readStatesCalls.Store(0)
+		wcsSpy.listDMsCalls.Store(0)
+		wcsSpy.unreadMentions.Store(0)
+		mainSpy.getUsersByIDs.Store(0)
+		mainSpy.getAgentsByIDs.Store(0)
+		mainSpy.latestByThread.Store(0)
+		mainSpy.latestByConv.Store(0)
 
-	resp := h.decodeSummary(doRequestAsUser(t, srv, me, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=3", nil))
-	assert.Equal(t, 9, resp.Categories[InboxCategoryChat].Count)
-	assert.Equal(t, 3, resp.Categories[InboxCategoryChat].Breakdown["mentions"])
-	assert.Equal(t, 4, resp.Categories[InboxCategoryChat].Breakdown["dms"])
+		resp := h.decodeSummary(doRequestAsUser(t, srv, me, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=10", nil))
+		require.Equal(t, wantCount, resp.Categories[InboxCategoryChat].Count)
+		require.Len(t, resp.Categories[InboxCategoryChat].Previews, wantCount)
+		return callCounts{
+			listTopics:     wcsSpy.listTopicsCalls.Load(),
+			readStates:     wcsSpy.readStatesCalls.Load(),
+			listDMs:        wcsSpy.listDMsCalls.Load(),
+			unreadMentions: wcsSpy.unreadMentions.Load(),
+			getUsers:       mainSpy.getUsersByIDs.Load(),
+			getAgents:      mainSpy.getAgentsByIDs.Load(),
+			dmLastMessages: mainSpy.latestByThread.Load() + mainSpy.latestByConv.Load(),
+		}
+	}
 
-	assert.Equal(t, int32(1), spy.listTopicsCalls.Load(), "topics must be read in one batched call")
-	assert.Equal(t, int32(2), spy.readStatesCalls.Load(), "read states must be read in two batched calls (threads + DMs)")
-	assert.Equal(t, int32(1), spy.listDMsCalls.Load(), "DMs must be read in one call")
-	assert.Equal(t, int32(1), spy.unreadMentions.Load(), "UnreadMentionKeys must be called exactly once")
+	// N = 5 unread conversations (2 threads, 1 agent DM, 2 user DMs), all within previews=10.
+	seedBatch(1)
+	countsN := measure(5)
+
+	// 2N = 10 unread conversations (4 threads, 2 agent DMs, 4 user DMs), all within previews=10.
+	seedBatch(2)
+	counts2N := measure(10)
+
+	assert.Equal(t, countsN, counts2N, "store call counts must stay constant between N and 2N unread conversations")
+	assert.Equal(t, int32(1), counts2N.listTopics, "topics must be read in one batched call")
+	assert.Equal(t, int32(2), counts2N.readStates, "read states must be read in two batched calls (threads + DMs)")
+	assert.Equal(t, int32(1), counts2N.listDMs, "DMs must be read in one call")
+	assert.Equal(t, int32(1), counts2N.unreadMentions, "UnreadMentionKeys must be called exactly once")
+	assert.Equal(t, int32(1), counts2N.getUsers, "user DM peers must be loaded in one batched GetUsersByIDs call")
+	assert.Equal(t, int32(1), counts2N.getAgents, "agent DM peers must be loaded in one batched GetAgentsByIDsIncludingDeleted call")
+	assert.GreaterOrEqual(t, counts2N.dmLastMessages, int32(1), "DM last messages must be read in batched lookup(s)")
 }
