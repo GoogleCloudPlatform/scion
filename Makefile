@@ -702,6 +702,7 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestVerifyEncryption_PolicyAllowedSet \
 	TestVerifyEncryption_AllV2Passes \
 	TestInvitedUser_HubRoleGuard_ConcurrentGroupBindAndAdd_Postgres \
+	TestCustomDefaultUserRole_ConcurrentFirstSignIn_Postgres \
 	TestTriggers_ConcurrentCaps_Postgres \
 	TestWebhookIngress_ConcurrentPendingCap_Postgres
 

@@ -31,6 +31,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
@@ -816,27 +818,124 @@ func TestCustomDefaultUserRole_FallbackSyncsPersistedUserRole(t *testing.T) {
 
 type addGroupMemberHookStore struct {
 	store.Store
-	beforeAdd func(ctx context.Context, member *store.GroupMember) error
-	once      sync.Once
+	beforeAdd func(ctx context.Context, st store.Store, member *store.GroupMember) error
+	once      *sync.Once
+}
+
+func (h *addGroupMemberHookStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return h.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&addGroupMemberHookStore{
+			Store:     tx,
+			beforeAdd: h.beforeAdd,
+			once:      h.once,
+		})
+	})
 }
 
 func (h *addGroupMemberHookStore) AddGroupMember(ctx context.Context, member *store.GroupMember) error {
 	var hookErr error
-	h.once.Do(func() {
-		if h.beforeAdd != nil {
-			hookErr = h.beforeAdd(ctx, member)
-		}
-	})
+	if h.once != nil {
+		h.once.Do(func() {
+			if h.beforeAdd != nil {
+				hookErr = h.beforeAdd(ctx, h.Store, member)
+			}
+		})
+	}
 	if hookErr != nil {
 		return hookErr
 	}
 	return h.Store.AddGroupMember(ctx, member)
 }
 
+type grantLockEvent struct {
+	op        string
+	inTx      bool
+	userID    string
+	exclusive bool
+}
+
+type grantLockRecordingStore struct {
+	store.Store
+	inTx   bool
+	mu     *sync.Mutex
+	events *[]grantLockEvent
+}
+
+func (r *grantLockRecordingStore) record(ev grantLockEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	*r.events = append(*r.events, ev)
+}
+
+func (r *grantLockRecordingStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return r.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&grantLockRecordingStore{
+			Store:  tx,
+			inTx:   true,
+			mu:     r.mu,
+			events: r.events,
+		})
+	})
+}
+
+func (r *grantLockRecordingStore) LockUserRow(ctx context.Context, id string, exclusive bool) error {
+	r.record(grantLockEvent{op: "LockUserRow", inTx: r.inTx, userID: id, exclusive: exclusive})
+	return r.Store.LockUserRow(ctx, id, exclusive)
+}
+
+func (r *grantLockRecordingStore) RemoveGroupMember(ctx context.Context, groupID, memberType, memberID string) error {
+	r.record(grantLockEvent{op: "RemoveGroupMember", inTx: r.inTx, userID: memberID})
+	return r.Store.RemoveGroupMember(ctx, groupID, memberType, memberID)
+}
+
+func (r *grantLockRecordingStore) AddGroupMember(ctx context.Context, member *store.GroupMember) error {
+	r.record(grantLockEvent{op: "AddGroupMember", inTx: r.inTx, userID: member.MemberID})
+	return r.Store.AddGroupMember(ctx, member)
+}
+
+func (r *grantLockRecordingStore) ListRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	r.record(grantLockEvent{op: "ListRoleBindingsForPrincipal", inTx: r.inTx, userID: principalID})
+	return r.Store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
+}
+
+func (r *grantLockRecordingStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding) (*store.RoleBinding, error) {
+	r.record(grantLockEvent{op: "CreateRoleBinding", inTx: r.inTx, userID: rb.PrincipalID})
+	return r.Store.CreateRoleBinding(ctx, rb)
+}
+
+type afterRemoveHubMemberHookStore struct {
+	store.Store
+	afterRemove func(ctx context.Context)
+	once        *sync.Once
+}
+
+func (h *afterRemoveHubMemberHookStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return h.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&afterRemoveHubMemberHookStore{
+			Store:       tx,
+			afterRemove: h.afterRemove,
+			once:        h.once,
+		})
+	})
+}
+
+func (h *afterRemoveHubMemberHookStore) RemoveGroupMember(ctx context.Context, groupID, memberType, memberID string) error {
+	err := h.Store.RemoveGroupMember(ctx, groupID, memberType, memberID)
+	if h.once != nil {
+		h.once.Do(func() {
+			if h.afterRemove != nil {
+				h.afterRemove(ctx)
+			}
+		})
+	}
+	return err
+}
+
 // TestCustomDefaultUserRole_ConcurrentFirstSignIn verifies that concurrent
 // first sign-in or invited-user activation for the same user/email cannot leave
 // both the built-in hub-members group membership and the custom default role
-// applied (ptone/scion#8710).
+// applied (ptone/scion#8710), while preserving admin-added hub-members
+// memberships.
 func TestCustomDefaultUserRole_ConcurrentFirstSignIn(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
@@ -846,22 +945,22 @@ func TestCustomDefaultUserRole_ConcurrentFirstSignIn(t *testing.T) {
 	srv.config.DefaultUserRole = customRole.Name
 	srv.config.UserAccessMode = "open"
 
-	t.Run("routine sync removes stale hub-members when sentinel is present", func(t *testing.T) {
+	t.Run("routine sync removes stale system hub-members when sentinel is present", func(t *testing.T) {
 		u := &store.User{
 			ID: generateID(), Email: "stale-both@example.com", DisplayName: "Stale Both",
 			Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
 		}
 		require.NoError(t, st.CreateUser(ctx, u))
 		require.NoError(t, applyDefaultUserRoleGrants(ctx, st, u.ID, store.UserRoleMember, customRole.Name, true))
-		// Simulate prior race state where both hub-members and the custom default role exist.
+		// Simulate prior race state where both system-added hub-members and the custom default role exist.
 		require.NoError(t, ensureHubMembershipTx(ctx, st, u.ID))
 		require.True(t, grantTestIsHubMember(t, st, u.ID))
 
-		// Non-admin-API routine sync removes hub-members while keeping the custom default role.
+		// Non-admin-API routine sync removes system-added hub-members while keeping the custom default role.
 		require.NoError(t, syncHubRoleGrants(ctx, st, u.ID, store.UserRoleMember, store.SystemReconcileCreatedBy))
 		grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
 
-		// Startup backfill also removes hub-members when the sentinel is present.
+		// Startup backfill also removes system-added hub-members when the sentinel is present.
 		require.NoError(t, ensureHubMembershipTx(ctx, st, u.ID))
 		require.NoError(t, syncHubRoleGrants(ctx, st, u.ID, store.UserRoleMember, store.SystemBackfillCreatedBy))
 		grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
@@ -871,23 +970,81 @@ func TestCustomDefaultUserRole_ConcurrentFirstSignIn(t *testing.T) {
 		grantTestAssertBuiltinHubMember(t, st, u.ID)
 	})
 
+	t.Run("routine sync and backfill preserve admin-added hub-members membership", func(t *testing.T) {
+		u, err := srv.provisionUser(ctx, &ExternalUserInfo{
+			Email:       "admin-added-hub-member@example.com",
+			DisplayName: "Admin Added Hub Member",
+		})
+		require.NoError(t, err)
+		grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
+
+		// Drain any prior membership-loss checks before the admin add.
+		for {
+			checks, err := st.ClaimMembershipLossChecks(ctx, 100, time.Minute)
+			require.NoError(t, err)
+			if len(checks) == 0 {
+				break
+			}
+			for _, c := range checks {
+				require.NoError(t, st.CompleteMembershipLossCheck(ctx, c.ID, c.Attempts))
+			}
+		}
+
+		// Admin explicitly adds the custom-default user to hub-members via the group API.
+		hubMembersGrp, err := st.GetGroupBySlug(ctx, hubMembersSlug)
+		require.NoError(t, err)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+hubMembersGrp.ID+"/members", AddGroupMemberRequest{
+			MemberType: store.GroupMemberTypeUser,
+			MemberID:   u.ID,
+			Role:       store.GroupMemberRoleMember,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		gm, err := st.GetGroupMembership(ctx, hubMembersGrp.ID, store.GroupMemberTypeUser, u.ID)
+		require.NoError(t, err)
+		require.NotEmpty(t, gm.AddedBy, "group API must record AddedBy for admin-added hub-members membership")
+
+		// Routine sync and startup backfill must keep the admin-added membership
+		// and must not enqueue any membership-loss check for the user.
+		require.NoError(t, syncHubRoleGrants(ctx, st, u.ID, store.UserRoleMember, store.SystemReconcileCreatedBy))
+		require.NoError(t, backfillUserRoleBindings(ctx, st))
+
+		assert.True(t, grantTestIsHubMember(t, st, u.ID), "admin-added hub-members membership must survive routine sync and backfill")
+		gmAfter, err := st.GetGroupMembership(ctx, hubMembersGrp.ID, store.GroupMemberTypeUser, u.ID)
+		require.NoError(t, err)
+		assert.Equal(t, gm.AddedBy, gmAfter.AddedBy)
+
+		bindings := grantTestSystemBindings(t, st, u.ID)
+		require.Len(t, bindings, 1)
+		assert.Equal(t, customRole.ID, bindings[0].RoleDefinitionID)
+		assert.Equal(t, store.SystemDefaultRoleCreatedBy, bindings[0].CreatedBy)
+
+		checks, err := st.ClaimMembershipLossChecks(ctx, 100, time.Minute)
+		require.NoError(t, err)
+		for _, c := range checks {
+			assert.NotEqual(t, u.ID, c.UserID, "preserving admin-added hub-members must not enqueue membership-loss check")
+		}
+	})
+
 	t.Run("re-check after AddGroupMember cleans up concurrent custom default grant", func(t *testing.T) {
-		// Deterministically reproduce the TOCTOU interleaving:
+		// Deterministically reproduce the TOCTOU interleaving inside the tx:
 		// 1. syncHubRoleGrants checks hasActiveSystemDefaultRoleBinding -> false.
-		// 2. Before syncHubRoleGrants calls AddGroupMember, concurrent first
-		//    sign-in commits applyDefaultUserRoleGrants (creating the sentinel).
+		// 2. Before syncHubRoleGrants calls AddGroupMember, applyDefaultUserRoleGrants
+		//    creates the SystemDefaultRoleCreatedBy sentinel.
 		// 3. syncHubRoleGrants adds hub-members, then re-checks the sentinel and
-		//    removes hub-members so only the custom default role remains.
+		//    removes the system-added hub-members row so only the custom default role remains.
 		u := &store.User{
 			ID: generateID(), Email: "toctou-race@example.com", DisplayName: "TOCTOU Race",
 			Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
 		}
 		require.NoError(t, st.CreateUser(ctx, u))
 
+		var once sync.Once
 		hookStore := &addGroupMemberHookStore{
 			Store: st,
-			beforeAdd: func(ctx context.Context, _ *store.GroupMember) error {
-				return applyDefaultUserRoleGrants(ctx, st, u.ID, store.UserRoleMember, customRole.Name, true)
+			once:  &once,
+			beforeAdd: func(ctx context.Context, tx store.Store, _ *store.GroupMember) error {
+				return applyDefaultUserRoleGrants(ctx, tx, u.ID, store.UserRoleMember, customRole.Name, true)
 			},
 		}
 
@@ -895,8 +1052,35 @@ func TestCustomDefaultUserRole_ConcurrentFirstSignIn(t *testing.T) {
 		grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
 	})
 
-	t.Run("concurrent first sign-in for same new email", func(t *testing.T) {
-		const iterations = 10
+	t.Run("both grant paths acquire exclusive per-user row lock inside transaction", func(t *testing.T) {
+		u := &store.User{
+			ID: generateID(), Email: "lock-order@example.com", DisplayName: "Lock Order",
+			Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+		}
+		require.NoError(t, st.CreateUser(ctx, u))
+
+		var mu sync.Mutex
+		var events []grantLockEvent
+		recStore := &grantLockRecordingStore{Store: st, mu: &mu, events: &events}
+
+		// 1. applyDefaultUserRoleGrants (custom role) must take exclusive LockUserRow
+		//    inside WithTx before removing hub-members or creating the sentinel.
+		require.NoError(t, applyDefaultUserRoleGrants(ctx, recStore, u.ID, store.UserRoleMember, customRole.Name, true))
+		require.NotEmpty(t, events)
+		assert.Equal(t, grantLockEvent{op: "LockUserRow", inTx: true, userID: u.ID, exclusive: true}, events[0],
+			"applyDefaultUserRoleGrants must acquire exclusive LockUserRow first inside WithTx")
+
+		// 2. syncHubRoleGrants (non-admin member) must take exclusive LockUserRow
+		//    inside WithTx before checking the sentinel or modifying hub-members.
+		events = nil
+		require.NoError(t, syncHubRoleGrants(ctx, recStore, u.ID, store.UserRoleMember, store.SystemReconcileCreatedBy))
+		require.NotEmpty(t, events)
+		assert.Equal(t, grantLockEvent{op: "LockUserRow", inTx: true, userID: u.ID, exclusive: true}, events[0],
+			"syncHubRoleGrants must acquire exclusive LockUserRow first inside WithTx")
+	})
+
+	t.Run("concurrent first sign-in smoke test for same new email", func(t *testing.T) {
+		const iterations = 5
 		const workers = 4
 
 		for i := range iterations {
@@ -937,8 +1121,8 @@ func TestCustomDefaultUserRole_ConcurrentFirstSignIn(t *testing.T) {
 		}
 	})
 
-	t.Run("concurrent invited-user activation for same email", func(t *testing.T) {
-		const iterations = 10
+	t.Run("concurrent invited-user activation smoke test for same email", func(t *testing.T) {
+		const iterations = 5
 		const workers = 4
 
 		for i := range iterations {
@@ -981,4 +1165,63 @@ func TestCustomDefaultUserRole_ConcurrentFirstSignIn(t *testing.T) {
 			grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
 		}
 	})
+}
+
+// TestCustomDefaultUserRole_ConcurrentFirstSignIn_Postgres exercises the
+// READ COMMITTED interleaving on PostgreSQL (wired into
+// HUB_INTEGRATION_POSTGRES_TESTS): routine syncHubRoleGrants (B) is launched
+// on the non-tx store after applyDefaultUserRoleGrants (A) has run
+// removeHubMembershipTx and before A inserts the custom-role sentinel and
+// commits. Without the per-user FOR UPDATE row lock (LockUserRow) in both
+// paths, B adds hub-members and re-checks before A commits, leaving both
+// hub-members and the custom default role applied (ptone/scion#8710).
+func TestCustomDefaultUserRole_ConcurrentFirstSignIn_Postgres(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires -tags integration and SCION_TEST_POSTGRES_URL")
+	}
+	_, st := testServerWithStore(t, entadapter.NewCompositeStore(enttest.NewClient(t)))
+	ctx := context.Background()
+
+	customRole := grantTestSeedRole(t, st, "custom-pg-race", store.RoleScopeSystem, []string{"user.read"})
+	u := &store.User{
+		ID: generateID(), Email: "pg-race@example.com", DisplayName: "PG Race",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, u))
+
+	bDone := make(chan error, 1)
+	bStarted := make(chan struct{})
+	var bFinishedEarly bool
+	var hookOnce sync.Once
+	hookStore := &afterRemoveHubMemberHookStore{
+		Store: st,
+		once:  &hookOnce,
+		afterRemove: func(_ context.Context) {
+			// Launch routine sync (B) on the non-tx Postgres store while A is
+			// still inside its uncommitted transaction after removeHubMembershipTx.
+			go func() {
+				close(bStarted)
+				bDone <- syncHubRoleGrants(ctx, st, u.ID, store.UserRoleMember, store.SystemReconcileCreatedBy)
+			}()
+			<-bStarted
+			select {
+			case err := <-bDone:
+				bFinishedEarly = true
+				bDone <- err
+			case <-time.After(150 * time.Millisecond):
+			}
+		},
+	}
+
+	require.NoError(t, applyDefaultUserRoleGrants(ctx, hookStore, u.ID, store.UserRoleMember, customRole.Name, true))
+
+	select {
+	case err := <-bDone:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for concurrent syncHubRoleGrants to finish")
+	}
+
+	assert.False(t, bFinishedEarly, "routine syncHubRoleGrants must block on LockUserRow until applyDefaultUserRoleGrants commits")
+	grantTestAssertCustomDefaultOnly(t, st, u.ID, customRole.ID)
 }
