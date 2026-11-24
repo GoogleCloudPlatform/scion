@@ -184,30 +184,69 @@ func stubRunIPTables(t *testing.T, fn func(args ...string) ([]byte, error)) {
 	t.Cleanup(func() { runIPTables = orig })
 }
 
+func stubIPv6Netns(t *testing.T, hasIPv6 bool, ip6Fn func(args ...string) ([]byte, error)) {
+	t.Helper()
+	origHas, origIP6 := runNetnsHasIPv6, runIP6Tables
+	runNetnsHasIPv6 = func() bool { return hasIPv6 }
+	if ip6Fn != nil {
+		runIP6Tables = ip6Fn
+	}
+	t.Cleanup(func() {
+		runNetnsHasIPv6 = origHas
+		runIP6Tables = origIP6
+	})
+}
+
 func TestInstallInterceptionRules_IPTablesArgs(t *testing.T) {
 	tests := []struct {
 		name      string
 		mode      string
 		port      int
+		hasIPv6   bool
 		wantCalls [][]string
 	}{
 		{
-			name: "block installs nat redirect, filter output accept at pos 1, and metadata block",
+			name: "block without ipv6 installs filter reject, filter accept loopback, then nat redirect last",
 			mode: modeBlock,
 			port: 18380,
 			wantCalls: [][]string{
-				{"-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
-				{"-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18380", "-j", "ACCEPT"},
-				{"-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
+				{"iptables", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
+				{"iptables", "-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18380", "-j", "ACCEPT"},
+				{"iptables", "-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
 			},
 		},
 		{
-			name: "assign installs nat redirect and filter output accept at pos 1 without block rule",
+			name: "assign without ipv6 installs filter accept loopback then nat redirect last",
 			mode: modeAssign,
 			port: 18381,
 			wantCalls: [][]string{
-				{"-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18381"},
-				{"-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18381", "-j", "ACCEPT"},
+				{"iptables", "-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18381", "-j", "ACCEPT"},
+				{"iptables", "-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18381"},
+			},
+		},
+		{
+			name:    "block with ipv6 installs ipv6 reject, filter reject, filter accept loopback, then nat redirect last",
+			mode:    modeBlock,
+			port:    18380,
+			hasIPv6: true,
+			wantCalls: [][]string{
+				{"ip6tables", "-A", "OUTPUT", "-d", "fd20:ce::254/128", "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "tcp-reset"},
+				{"ip6tables", "-A", "OUTPUT", "-d", "fd00:ec2::254/128", "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "tcp-reset"},
+				{"iptables", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
+				{"iptables", "-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18380", "-j", "ACCEPT"},
+				{"iptables", "-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
+			},
+		},
+		{
+			name:    "assign with ipv6 installs ipv6 reject, filter accept loopback, then nat redirect last",
+			mode:    modeAssign,
+			port:    18381,
+			hasIPv6: true,
+			wantCalls: [][]string{
+				{"ip6tables", "-A", "OUTPUT", "-d", "fd20:ce::254/128", "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "tcp-reset"},
+				{"ip6tables", "-A", "OUTPUT", "-d", "fd00:ec2::254/128", "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "tcp-reset"},
+				{"iptables", "-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18381", "-j", "ACCEPT"},
+				{"iptables", "-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18381"},
 			},
 		},
 	}
@@ -215,9 +254,12 @@ func TestInstallInterceptionRules_IPTablesArgs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got [][]string
+			stubIPv6Netns(t, tt.hasIPv6, func(args ...string) ([]byte, error) {
+				got = append(got, append([]string{"ip6tables"}, args...))
+				return nil, nil
+			})
 			stubRunIPTables(t, func(args ...string) ([]byte, error) {
-				cp := append([]string(nil), args...)
-				got = append(got, cp)
+				got = append(got, append([]string{"iptables"}, args...))
 				return nil, nil
 			})
 
@@ -225,14 +267,43 @@ func TestInstallInterceptionRules_IPTablesArgs(t *testing.T) {
 				t.Fatalf("InstallInterceptionRules(%q, %d) = %v, want nil", tt.mode, tt.port, err)
 			}
 			if !reflect.DeepEqual(got, tt.wantCalls) {
-				t.Errorf("iptables calls:\ngot:  %q\nwant: %q", got, tt.wantCalls)
+				t.Errorf("rule installation calls:\ngot:  %q\nwant: %q", got, tt.wantCalls)
 			}
 		})
 	}
 }
 
-func TestSetupIPTablesRedirect_FilterAcceptFailureRollsBackNat(t *testing.T) {
+func TestSetupIPTablesRedirect_NatRedirectFailureRollsBackFilterAccept(t *testing.T) {
 	var got [][]string
+	stubIPv6Netns(t, false, nil)
+	stubRunIPTables(t, func(args ...string) ([]byte, error) {
+		cp := append([]string(nil), args...)
+		got = append(got, cp)
+		if len(args) >= 3 && args[0] == "-t" && args[1] == "nat" && args[2] == "-A" {
+			return []byte("iptables: nat redirect failed"), errors.New("exit status 1")
+		}
+		return nil, nil
+	})
+
+	err := InstallInterceptionRules(modeBlock, 18380)
+	if !errors.Is(err, ErrInterceptionUnavailable) {
+		t.Fatalf("InstallInterceptionRules() error = %v, want ErrInterceptionUnavailable", err)
+	}
+
+	wantCalls := [][]string{
+		{"-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
+		{"-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18380", "-j", "ACCEPT"},
+		{"-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
+		{"-D", "OUTPUT", "-d", loopbackIP, "-p", "tcp", "--dport", "18380", "-j", "ACCEPT"},
+	}
+	if !reflect.DeepEqual(got, wantCalls) {
+		t.Errorf("iptables calls on nat redirect failure:\ngot:  %q\nwant: %q", got, wantCalls)
+	}
+}
+
+func TestSetupIPTablesRedirect_FilterAcceptFailureSkipsNatRedirect(t *testing.T) {
+	var got [][]string
+	stubIPv6Netns(t, false, nil)
 	stubRunIPTables(t, func(args ...string) ([]byte, error) {
 		cp := append([]string(nil), args...)
 		got = append(got, cp)
@@ -248,9 +319,8 @@ func TestSetupIPTablesRedirect_FilterAcceptFailureRollsBackNat(t *testing.T) {
 	}
 
 	wantCalls := [][]string{
-		{"-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
+		{"-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
 		{"-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18380", "-j", "ACCEPT"},
-		{"-t", "nat", "-D", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
 	}
 	if !reflect.DeepEqual(got, wantCalls) {
 		t.Errorf("iptables calls on filter accept failure:\ngot:  %q\nwant: %q", got, wantCalls)
@@ -373,6 +443,7 @@ func TestFirewallAndInterceptionRuleOrdering(t *testing.T) {
 				{target: "REJECT"},
 			}
 
+			stubIPv6Netns(t, false, nil)
 			stubRunIPTables(t, func(args ...string) ([]byte, error) {
 				pos, r, ok := parseFilterRule(args)
 				if !ok {
@@ -406,5 +477,130 @@ func TestFirewallAndInterceptionRuleOrdering(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNetnsHasIPv6(t *testing.T) {
+	writeDisable := func(t *testing.T, root, iface, val string) {
+		t.Helper()
+		dir := filepath.Join(root, "sys", "net", "ipv6", "conf", iface)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "disable_ipv6"), []byte(val), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("missing proc ipv6 dir", func(t *testing.T) {
+		if netnsHasIPv6InRoot(t.TempDir()) {
+			t.Fatal("netnsHasIPv6InRoot() = true, want false when /proc/sys/net/ipv6/conf is absent")
+		}
+	})
+
+	t.Run("only pseudo and loopback interfaces enabled", func(t *testing.T) {
+		root := t.TempDir()
+		writeDisable(t, root, "all", "0\n")
+		writeDisable(t, root, "default", "0\n")
+		writeDisable(t, root, "lo", "0\n")
+		if netnsHasIPv6InRoot(root) {
+			t.Fatal("netnsHasIPv6InRoot() = true, want false when only all/default/lo have disable_ipv6=0")
+		}
+	})
+
+	t.Run("non-loopback interface disabled", func(t *testing.T) {
+		root := t.TempDir()
+		writeDisable(t, root, "lo", "0\n")
+		writeDisable(t, root, "eth0", "1\n")
+		if netnsHasIPv6InRoot(root) {
+			t.Fatal("netnsHasIPv6InRoot() = true, want false when eth0 has disable_ipv6=1")
+		}
+	})
+
+	t.Run("non-loopback interface enabled", func(t *testing.T) {
+		root := t.TempDir()
+		writeDisable(t, root, "lo", "0\n")
+		writeDisable(t, root, "eth0", "1\n")
+		writeDisable(t, root, "eth1", "0\n")
+		if !netnsHasIPv6InRoot(root) {
+			t.Fatal("netnsHasIPv6InRoot() = false, want true when eth1 has disable_ipv6=0")
+		}
+	})
+}
+
+func TestSetupIPv6MetadataBlock_RulesAndErrors(t *testing.T) {
+	orig := runIP6Tables
+	t.Cleanup(func() { runIP6Tables = orig })
+
+	t.Run("installs REJECT tcp-reset for both GCE and AWS IPv6 addresses", func(t *testing.T) {
+		var calls [][]string
+		runIP6Tables = func(args ...string) ([]byte, error) {
+			calls = append(calls, append([]string(nil), args...))
+			return nil, nil
+		}
+		if err := setupIPv6MetadataBlock(); err != nil {
+			t.Fatalf("setupIPv6MetadataBlock() = %v, want nil", err)
+		}
+		want := [][]string{
+			{"-A", "OUTPUT", "-d", "fd20:ce::254/128", "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "tcp-reset"},
+			{"-A", "OUTPUT", "-d", "fd00:ec2::254/128", "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "tcp-reset"},
+		}
+		if !reflect.DeepEqual(calls, want) {
+			t.Fatalf("ip6tables calls = %v, want %v", calls, want)
+		}
+	})
+
+	t.Run("returns error on ip6tables failure", func(t *testing.T) {
+		runIP6Tables = func(args ...string) ([]byte, error) {
+			return []byte("ip6tables: No chain/target/match"), errors.New("exit status 1")
+		}
+		if err := setupIPv6MetadataBlock(); err == nil {
+			t.Fatal("setupIPv6MetadataBlock() = nil, want error")
+		}
+	})
+}
+
+func TestIP6TablesCmd_NeverConsultsPATH(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "planted-ip6tables-ran")
+	fake := filepath.Join(dir, "ip6tables")
+	script := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatalf("write planted ip6tables: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	_ = setupIPv6MetadataBlock()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("setupIPv6MetadataBlock executed a planted ip6tables from $PATH")
+	}
+}
+
+func TestIP6TablesCmd_RealBinaryDispatchesCorrectly(t *testing.T) {
+	cmd, err := ip6tablesCmd("-V")
+	if err != nil {
+		t.Skipf("ip6tables not resolvable as a trusted binary in this environment: %v", err)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the real, resolved ip6tables -V: %v, output=%s", err, out)
+	}
+	if !strings.Contains(string(out), "ip6tables") {
+		t.Errorf("ip6tables -V output = %q, want it to mention \"ip6tables\"", out)
+	}
+}
+
+func TestIP6TablesCmd_EnvIsFromScratch(t *testing.T) {
+	t.Setenv("LD_PRELOAD", "/should/not/leak.so")
+	cmd, err := ip6tablesCmd("-V")
+	if err != nil {
+		t.Skipf("ip6tables not resolvable as a trusted binary in this environment: %v", err)
+	}
+	if cmd.Env == nil {
+		t.Fatal("ip6tablesCmd's cmd.Env is nil")
+	}
+	for _, kv := range cmd.Env {
+		if strings.Contains(kv, "should/not/leak") {
+			t.Errorf("cmd.Env = %v, leaked ambient env: %q", cmd.Env, kv)
+		}
 	}
 }

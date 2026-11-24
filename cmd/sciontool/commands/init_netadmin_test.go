@@ -9,13 +9,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -178,6 +182,7 @@ func newNetAdminFixture(t *testing.T, mode string, installed bool, dropErr error
 	t.Setenv("SCION_HOOKS_DIR", hooksDir)
 
 	withRunInitFirewall(t, func() error { f.order = append(f.order, "firewall"); return nil })
+	withRunVerifyIPv6Blocked(t, func(context.Context) error { return nil })
 	withRunMetadataServerStart(t, func(context.Context, *metadata.Server) error {
 		f.order = append(f.order, "metadata")
 		return nil
@@ -648,11 +653,18 @@ func TestMetadataProtectionRefusalText_Golden(t *testing.T) {
 	}
 }
 
-func withRunWaitForRedirect(t *testing.T, f func(context.Context, string) error) {
+func withRunWaitForRedirect(t *testing.T, f func(context.Context, string, string) error) {
 	t.Helper()
 	orig := runWaitForRedirect
 	runWaitForRedirect = f
 	t.Cleanup(func() { runWaitForRedirect = orig })
+}
+
+func withRunVerifyIPv6Blocked(t *testing.T, f func(context.Context) error) {
+	t.Helper()
+	orig := runVerifyIPv6Blocked
+	runVerifyIPv6Blocked = f
+	t.Cleanup(func() { runVerifyIPv6Blocked = orig })
 }
 
 func withPreflightEUID(t *testing.T, euid int) {
@@ -879,17 +891,24 @@ func TestRunInit_MetadataProtectionPreflight_PassesWhenUsable(t *testing.T) {
 			t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
 			t.Setenv(metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime)
 			t.Setenv(initFirewallEnv, "1") // handled by sidecar, must not run in init
-			withRunWaitForRedirect(t, func(_ context.Context, probePath string) error {
+			withRunWaitForRedirect(t, func(_ context.Context, probePath, probeToken string) error {
 				if probePath == "" {
 					t.Error("waitForRedirect called with empty probePath")
 				}
+				if probeToken == "" {
+					t.Error("waitForRedirect called with empty probeToken")
+				}
 				f.order = append(f.order, "probe")
+				return nil
+			})
+			withRunVerifyIPv6Blocked(t, func(context.Context) error {
+				f.order = append(f.order, "ipv6-probe")
 				return nil
 			})
 			if got := f.run(); got != 0 {
 				t.Fatalf("RunInit() = %d, want 0", got)
 			}
-			if want := []string{"metadata", "probe", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
+			if want := []string{"metadata", "probe", "ipv6-probe", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
 				t.Fatalf("order = %v, want %v", f.order, want)
 			}
 			if !netAdminPathExists(f.harnessFile) {
@@ -953,7 +972,7 @@ func TestRunInit_MetadataStartRefusal_AfterStaging_CleansUp(t *testing.T) {
 				harnessSecretAtStart = netAdminPathExists(creds.harnessSecretPath)
 				return nil
 			})
-			withRunWaitForRedirect(t, func(context.Context, string) error {
+			withRunWaitForRedirect(t, func(context.Context, string, string) error {
 				f.order = append(f.order, "probe")
 				return errMetadataProtectionUnavailable
 			})
@@ -1008,12 +1027,14 @@ func TestWaitForRedirect(t *testing.T) {
 	t.Cleanup(func() {
 		redirectProbeBaseURL, redirectProbeAttemptTimeout, redirectProbeDeadline, redirectProbeInterval = origBase, origAttempt, origDeadline, origInterval
 	})
-	redirectProbeAttemptTimeout = 200 * time.Millisecond
+	redirectProbeAttemptTimeout = time.Second
 	redirectProbeInterval = 10 * time.Millisecond
 
-	t.Run("retries until 204", func(t *testing.T) {
+	const wantPath = "/probe-token-path"
+	const wantToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	t.Run("retries until 200 with matching token", func(t *testing.T) {
 		var attempts atomic.Int32
-		const wantPath = "/probe-token-path"
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != wantPath {
 				w.WriteHeader(http.StatusNotFound)
@@ -1023,13 +1044,16 @@ func TestWaitForRedirect(t *testing.T) {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			w.WriteHeader(http.StatusNoContent)
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, wantToken)
 		}))
 		t.Cleanup(srv.Close)
 		redirectProbeBaseURL = srv.URL
-		redirectProbeDeadline = 2 * time.Second
+		redirectProbeDeadline = 5 * time.Second
 
-		if err := waitForRedirect(context.Background(), wantPath); err != nil {
+		if err := waitForRedirect(context.Background(), wantPath, wantToken); err != nil {
 			t.Fatalf("waitForRedirect() = %v, want nil", err)
 		}
 		if got := attempts.Load(); got != 3 {
@@ -1037,7 +1061,60 @@ func TestWaitForRedirect(t *testing.T) {
 		}
 	})
 
-	t.Run("times out when server never returns 204", func(t *testing.T) {
+	t.Run("rejects bare 204", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		t.Cleanup(srv.Close)
+		redirectProbeBaseURL = srv.URL
+		redirectProbeDeadline = 60 * time.Millisecond
+
+		err := waitForRedirect(context.Background(), wantPath, wantToken)
+		if !errors.Is(err, errMetadataProtectionUnavailable) {
+			t.Fatalf("waitForRedirect() = %v, want errMetadataProtectionUnavailable", err)
+		}
+	})
+
+	t.Run("rejects wrong token body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "wrong-token")
+		}))
+		t.Cleanup(srv.Close)
+		redirectProbeBaseURL = srv.URL
+		redirectProbeDeadline = 60 * time.Millisecond
+
+		err := waitForRedirect(context.Background(), wantPath, wantToken)
+		if !errors.Is(err, errMetadataProtectionUnavailable) {
+			t.Fatalf("waitForRedirect() = %v, want errMetadataProtectionUnavailable", err)
+		}
+	})
+
+	t.Run("rejects oversized body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, wantToken+strings.Repeat("x", maxProbeBodyBytes))
+		}))
+		t.Cleanup(srv.Close)
+		redirectProbeBaseURL = srv.URL
+		redirectProbeDeadline = 60 * time.Millisecond
+
+		err := waitForRedirect(context.Background(), wantPath, wantToken)
+		if !errors.Is(err, errMetadataProtectionUnavailable) {
+			t.Fatalf("waitForRedirect() = %v, want errMetadataProtectionUnavailable", err)
+		}
+	})
+
+	t.Run("rejects empty path or token immediately", func(t *testing.T) {
+		if err := waitForRedirect(context.Background(), "", wantToken); !errors.Is(err, errMetadataProtectionUnavailable) {
+			t.Fatalf("empty path: got %v, want errMetadataProtectionUnavailable", err)
+		}
+		if err := waitForRedirect(context.Background(), wantPath, ""); !errors.Is(err, errMetadataProtectionUnavailable) {
+			t.Fatalf("empty token: got %v, want errMetadataProtectionUnavailable", err)
+		}
+	})
+
+	t.Run("times out when server never returns valid token", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}))
@@ -1045,10 +1122,135 @@ func TestWaitForRedirect(t *testing.T) {
 		redirectProbeBaseURL = srv.URL
 		redirectProbeDeadline = 60 * time.Millisecond
 
-		err := waitForRedirect(context.Background(), "/probe-token-path")
+		err := waitForRedirect(context.Background(), wantPath, wantToken)
 		if !errors.Is(err, errMetadataProtectionUnavailable) {
 			t.Fatalf("waitForRedirect() = %v, want errMetadataProtectionUnavailable", err)
 		}
+	})
+}
+
+func TestRedirectProbeDeadline_ExceedsNetnsSetupTimeout(t *testing.T) {
+	// pkg/runtime/common.go defines netnsSetupTimeout = 3 * time.Minute.
+	const brokerNetnsSetupTimeout = 3 * time.Minute
+	if redirectProbeDeadline <= brokerNetnsSetupTimeout {
+		t.Fatalf("redirectProbeDeadline (%s) must exceed broker netnsSetupTimeout (%s)", redirectProbeDeadline, brokerNetnsSetupTimeout)
+	}
+	if legacyRedirectProbeDeadline <= 0 || legacyRedirectProbeDeadline >= redirectProbeDeadline {
+		t.Fatalf("legacyRedirectProbeDeadline (%s) must be positive and shorter than redirectProbeDeadline (%s)", legacyRedirectProbeDeadline, redirectProbeDeadline)
+	}
+}
+
+func TestVerifyIPv6MetadataBlocked(t *testing.T) {
+	origAddrs, origTimeout, origDial := ipv6ProbeAddrs, ipv6ProbeTimeout, ipv6ProbeDial
+	t.Cleanup(func() {
+		ipv6ProbeAddrs, ipv6ProbeTimeout, ipv6ProbeDial = origAddrs, origTimeout, origDial
+	})
+	ipv6ProbeTimeout = 2 * time.Second
+
+	t.Run("attempts dials and passes when IPv6 is unavailable (ENETUNREACH/EAFNOSUPPORT)", func(t *testing.T) {
+		var mu sync.Mutex
+		dialed := make(map[string]bool)
+		ipv6ProbeDial = func(_ context.Context, _ string, addr string) (net.Conn, error) {
+			mu.Lock()
+			dialed[addr] = true
+			mu.Unlock()
+			if strings.Contains(addr, "fd20:ce::254") {
+				return nil, syscall.EAFNOSUPPORT
+			}
+			return nil, syscall.ENETUNREACH
+		}
+		if err := verifyIPv6MetadataBlocked(context.Background()); err != nil {
+			t.Fatalf("verifyIPv6MetadataBlocked() = %v, want nil", err)
+		}
+		for _, want := range []string{"[fd20:ce::254]:80", "[fd00:ec2::254]:80"} {
+			if !dialed[want] {
+				t.Errorf("expected dial attempt to %s even without IPv6, dialed=%v", want, dialed)
+			}
+		}
+	})
+
+	t.Run("passes when endpoints return refused, reset, or timeout", func(t *testing.T) {
+		for _, dialErr := range []error{syscall.ECONNREFUSED, syscall.ECONNRESET, context.DeadlineExceeded} {
+			var mu sync.Mutex
+			dialed := make(map[string]bool)
+			ipv6ProbeDial = func(_ context.Context, _ string, addr string) (net.Conn, error) {
+				mu.Lock()
+				dialed[addr] = true
+				mu.Unlock()
+				return nil, dialErr
+			}
+			if err := verifyIPv6MetadataBlocked(context.Background()); err != nil {
+				t.Fatalf("verifyIPv6MetadataBlocked() with %v = %v, want nil", dialErr, err)
+			}
+			for _, want := range []string{"[fd20:ce::254]:80", "[fd00:ec2::254]:80"} {
+				if !dialed[want] {
+					t.Errorf("expected dial attempt to %s, dialed=%v", want, dialed)
+				}
+			}
+		}
+	})
+
+	t.Run("fails closed when an endpoint accepts a TCP connection regardless of NetnsHasIPv6", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				c, acceptErr := ln.Accept()
+				if acceptErr != nil {
+					return
+				}
+				_ = c.Close()
+			}
+		}()
+
+		ipv6ProbeAddrs = []string{ln.Addr().String(), "127.0.0.1:1"}
+		ipv6ProbeDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if addr == "127.0.0.1:1" {
+				return nil, syscall.ECONNREFUSED
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		}
+		// Even when NetnsHasIPv6() is false (as in IPv4-only containers),
+		// a reachable endpoint must still fail closed.
+		err = verifyIPv6MetadataBlocked(context.Background())
+		if !errors.Is(err, errMetadataProtectionUnavailable) {
+			t.Fatalf("verifyIPv6MetadataBlocked() = %v, want errMetadataProtectionUnavailable (NetnsHasIPv6=%v)", err, metadata.NetnsHasIPv6())
+		}
+	})
+
+	t.Run("fails closed when parent context is cancelled", func(t *testing.T) {
+		t.Run("cancelled before probe", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			ipv6ProbeDial = func(dialCtx context.Context, _ string, _ string) (net.Conn, error) {
+				return nil, dialCtx.Err()
+			}
+			err := verifyIPv6MetadataBlocked(ctx)
+			if !errors.Is(err, errMetadataProtectionUnavailable) {
+				t.Fatalf("verifyIPv6MetadataBlocked() = %v, want errMetadataProtectionUnavailable", err)
+			}
+		})
+
+		t.Run("cancelled during probe", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var entered atomic.Int32
+			ipv6ProbeDial = func(dialCtx context.Context, _ string, _ string) (net.Conn, error) {
+				if entered.Add(1) == 1 {
+					cancel()
+				}
+				<-dialCtx.Done()
+				return nil, dialCtx.Err()
+			}
+			err := verifyIPv6MetadataBlocked(ctx)
+			if !errors.Is(err, errMetadataProtectionUnavailable) {
+				t.Fatalf("verifyIPv6MetadataBlocked() = %v, want errMetadataProtectionUnavailable", err)
+			}
+		})
 	})
 }
 
@@ -1056,7 +1258,8 @@ func TestWaitForRedirect(t *testing.T) {
 // new-image compatibility path: when SCION_METADATA_INTERCEPTION=required and
 // SCION_METADATA_INTERCEPTION_SOURCE is absent, init runs the optional
 // firewall, starts the metadata server, installs iptables rules in-container,
-// and fatally drops CAP_NET_ADMIN before clone, hooks, sidecars, or harness.
+// verifies the redirect via probe, and fatally drops CAP_NET_ADMIN before
+// clone, hooks, sidecars, or harness.
 func TestRunInit_MetadataProtectionLegacyFallback(t *testing.T) {
 	for _, mode := range []string{"block", "assign"} {
 		t.Run(mode+"/succeeds and drops NET_ADMIN before untrusted code", func(t *testing.T) {
@@ -1073,14 +1276,26 @@ func TestRunInit_MetadataProtectionLegacyFallback(t *testing.T) {
 				f.order = append(f.order, "install-rules")
 				return nil
 			})
-			withRunWaitForRedirect(t, func(context.Context, string) error {
-				t.Error("waitForRedirect must not run on the legacy fallback path")
+			withRunWaitForRedirect(t, func(ctx context.Context, probePath, probeToken string) error {
+				if probePath == "" || probeToken == "" {
+					t.Errorf("waitForRedirect called with empty path/token: path=%q token=%q", probePath, probeToken)
+				}
+				if dl, ok := ctx.Deadline(); !ok {
+					t.Error("legacy waitForRedirect context has no deadline")
+				} else if remaining := time.Until(dl); remaining <= 0 || remaining > legacyRedirectProbeDeadline+time.Second {
+					t.Errorf("legacy waitForRedirect deadline remaining = %s, want within %s", remaining, legacyRedirectProbeDeadline)
+				}
+				f.order = append(f.order, "probe")
+				return nil
+			})
+			withRunVerifyIPv6Blocked(t, func(context.Context) error {
+				f.order = append(f.order, "ipv6-probe")
 				return nil
 			})
 			if got := f.run(); got != 0 {
 				t.Fatalf("RunInit() = %d, want 0", got)
 			}
-			if want := []string{"firewall", "metadata", "install-rules", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
+			if want := []string{"firewall", "metadata", "install-rules", "probe", "ipv6-probe", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
 				t.Fatalf("order = %v, want %v", f.order, want)
 			}
 			if gotMode != mode || gotPort != 18380 {
@@ -1127,6 +1342,43 @@ func TestRunInit_MetadataProtectionLegacyFallback(t *testing.T) {
 			}
 		})
 
+		t.Run(mode+"/probe failure fails closed and cleans up tokens", func(t *testing.T) {
+			f := newNetAdminFixture(t, mode, false, nil)
+			observeReExec(t)
+			withPreflightEUID(t, 0)
+			withPreflightNetAdminUsable(t, true, nil)
+			t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
+			t.Setenv(metadata.InterceptionSourceEnvVar, "")
+			creds := newCredentialFixture(t, f.agentHome)
+			withRunInstallInterceptionRules(t, func(string, int) error {
+				f.order = append(f.order, "install-rules")
+				return nil
+			})
+			withRunWaitForRedirect(t, func(context.Context, string, string) error {
+				f.order = append(f.order, "probe")
+				return errMetadataProtectionUnavailable
+			})
+			if got := f.run(); got != 1 {
+				t.Fatalf("RunInit() = %d, want 1", got)
+			}
+			if want := []string{"metadata", "install-rules", "probe"}; !reflect.DeepEqual(f.order, want) {
+				t.Fatalf("order = %v, want %v", f.order, want)
+			}
+			if netAdminPathExists(creds.transportPath) {
+				t.Error("transport token file still present after legacy probe refusal")
+			}
+			if netAdminPathExists(creds.hubTokenPath) {
+				t.Error("staged hub credential still present after legacy probe refusal")
+			}
+			if netAdminPathExists(f.harnessFile) {
+				t.Error("harness ran after legacy probe failure")
+			}
+			phase, msg := readAgentInfoMessage(t, f.agentHome)
+			if phase != string(state.PhaseError) || msg != goldenMetadataProtectionRefusal {
+				t.Errorf("agent-info = (%q, %q), want (%q, %q)", phase, msg, state.PhaseError, goldenMetadataProtectionRefusal)
+			}
+		})
+
 		t.Run(mode+"/CAP_NET_ADMIN drop failure is fatal even without firewall", func(t *testing.T) {
 			f := newNetAdminFixture(t, mode, false, errDropDetail)
 			observeReExec(t)
@@ -1139,10 +1391,14 @@ func TestRunInit_MetadataProtectionLegacyFallback(t *testing.T) {
 				f.order = append(f.order, "install-rules")
 				return nil
 			})
+			withRunWaitForRedirect(t, func(context.Context, string, string) error {
+				f.order = append(f.order, "probe")
+				return nil
+			})
 			if got := f.run(); got != 1 {
 				t.Fatalf("RunInit() = %d, want 1", got)
 			}
-			if want := []string{"metadata", "install-rules", "drop"}; !reflect.DeepEqual(f.order, want) {
+			if want := []string{"metadata", "install-rules", "probe", "drop"}; !reflect.DeepEqual(f.order, want) {
 				t.Fatalf("order = %v, want %v", f.order, want)
 			}
 			if netAdminPathExists(creds.transportPath) {
@@ -1191,6 +1447,60 @@ func TestRunInit_MetadataProtectionLegacyFallback(t *testing.T) {
 			phase, msg := readAgentInfoMessage(t, f.agentHome)
 			if phase != string(state.PhaseError) || msg != errInitFirewallFailed.Error() {
 				t.Errorf("agent-info = (%q, %q), want (%q, %q)", phase, msg, state.PhaseError, errInitFirewallFailed.Error())
+			}
+		})
+	}
+}
+
+func TestRunInit_IPv6NegativeProbeFailure_CleansUp(t *testing.T) {
+	paths := []struct {
+		name   string
+		source string
+		want   []string
+	}{
+		{name: "runtime", source: metadata.InterceptionSourceRuntime, want: []string{"metadata", "probe", "ipv6-probe"}},
+		{name: "legacy", source: "", want: []string{"metadata", "install-rules", "probe", "ipv6-probe"}},
+	}
+	for _, p := range paths {
+		t.Run(p.name, func(t *testing.T) {
+			f := newNetAdminFixture(t, "block", false, nil)
+			observeReExec(t)
+			withPreflightEUID(t, 0)
+			withPreflightNetAdminUsable(t, true, nil)
+			t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
+			t.Setenv(metadata.InterceptionSourceEnvVar, p.source)
+			creds := newCredentialFixture(t, f.agentHome)
+			withRunInstallInterceptionRules(t, func(string, int) error {
+				f.order = append(f.order, "install-rules")
+				return nil
+			})
+			withRunWaitForRedirect(t, func(context.Context, string, string) error {
+				f.order = append(f.order, "probe")
+				return nil
+			})
+			withRunVerifyIPv6Blocked(t, func(context.Context) error {
+				f.order = append(f.order, "ipv6-probe")
+				return errMetadataProtectionUnavailable
+			})
+
+			if got := f.run(); got != 1 {
+				t.Fatalf("RunInit() = %d, want 1", got)
+			}
+			if !reflect.DeepEqual(f.order, p.want) {
+				t.Fatalf("order = %v, want %v", f.order, p.want)
+			}
+			if netAdminPathExists(creds.transportPath) {
+				t.Error("transport token file still present after IPv6 probe refusal")
+			}
+			if netAdminPathExists(creds.hubTokenPath) {
+				t.Error("staged hub credential still present after IPv6 probe refusal")
+			}
+			if netAdminPathExists(f.harnessFile) {
+				t.Error("harness ran after IPv6 probe failure")
+			}
+			phase, msg := readAgentInfoMessage(t, f.agentHome)
+			if phase != string(state.PhaseError) || msg != goldenMetadataProtectionRefusal {
+				t.Errorf("agent-info = (%q, %q), want (%q, %q)", phase, msg, state.PhaseError, goldenMetadataProtectionRefusal)
 			}
 		})
 	}
