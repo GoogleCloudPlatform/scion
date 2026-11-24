@@ -418,3 +418,18 @@ export function isInboxDashboardEnabled(): boolean {
  * active-mode banner are always available regardless of this flag. Default OFF.
  */
 export const VIEW_AS_MEMBER_FLAG = 'hub.view_as_member';
+
+/**
+ * Execution containers (hub.exec_containers, ptone/scion#8812 / #8819):
+ * shows the Execution container card in Profile Settings, the Execution
+ * container (shell) harness option in New Agent, and the Execution container
+ * badge on the agent detail page. Presentation only: the hub enforces the
+ * experiment on shell agent creation and GET/PUT /api/v1/users/me/exec-container.
+ * Default OFF.
+ */
+export const EXEC_CONTAINERS_FLAG = 'hub.exec_containers';
+
+/** Whether execution container UI surfaces are enabled in this session. */
+export function execContainersEnabled(): boolean {
+  return isFeatureEnabled(EXEC_CONTAINERS_FLAG);
+}

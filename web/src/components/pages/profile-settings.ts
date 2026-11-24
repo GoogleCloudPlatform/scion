@@ -25,7 +25,9 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
+import type { Agent } from '../../shared/types.js';
+import { can } from '../../shared/types.js';
 import {
   canShowPushNotification,
   enablePushWithPermission,
@@ -44,11 +46,66 @@ import {
 } from '../../client/view-mode-shortcuts.js';
 import { isMacPlatform } from '../../utils/platform.js';
 import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
-import { decisionsEnabled } from '../../utils/feature-flags.js';
+import {
+  decisionsEnabled,
+  execContainersEnabled,
+  FEATURE_FLAGS_CHANGED_EVENT,
+} from '../../utils/feature-flags.js';
 import { setPreselectRecommendedChoices } from '../../client/decision-preferences.js';
 import '../shared/subscription-manager.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
+
+type ExecContainerState = 'ready' | 'starting' | 'stopped' | 'suspended' | 'unavailable';
+
+interface ExecContainerAgent {
+  id: string;
+  slug: string;
+  name: string;
+  projectId: string;
+  projectName: string;
+  phase: string;
+  activity?: string;
+  homePersistent?: boolean;
+}
+
+interface ExecContainerResponse {
+  configured: boolean;
+  state?: ExecContainerState;
+  agent?: ExecContainerAgent;
+  reason?: string;
+}
+
+const EXEC_CONTAINER_UNAVAILABLE_FALLBACK =
+  'Your registered execution container is no longer available. Register another.';
+
+function isShellCandidate(agent: Agent): boolean {
+  const hc = agent.harnessConfig || agent.appliedConfig?.harnessConfig;
+  if (hc !== 'shell') return false;
+  if ((agent.phase as string) === 'deleted') return false;
+  if (agent._capabilities && !can(agent._capabilities, 'attach')) return false;
+  return true;
+}
+
+function execContainerStateBadge(state: ExecContainerState | undefined): {
+  variant: 'success' | 'primary' | 'neutral' | 'warning' | 'danger';
+  label: string;
+} {
+  switch (state) {
+    case 'ready':
+      return { variant: 'success', label: 'Ready' };
+    case 'starting':
+      return { variant: 'primary', label: 'Starting' };
+    case 'stopped':
+      return { variant: 'neutral', label: 'Stopped' };
+    case 'suspended':
+      return { variant: 'warning', label: 'Suspended' };
+    case 'unavailable':
+      return { variant: 'danger', label: 'Unavailable' };
+    default:
+      return { variant: 'neutral', label: state || 'Unknown' };
+  }
+}
 
 @customElement('scion-page-profile-settings')
 export class ScionPageProfileSettings extends LitElement {
@@ -124,6 +181,33 @@ export class ScionPageProfileSettings extends LitElement {
    */
   @state()
   private _pickerRevision = 0;
+
+  // Execution container registration (`hub.exec_containers`, ptone/scion#8819).
+  @state()
+  private _execContainer: ExecContainerResponse | null = null;
+
+  @state()
+  private _execContainerLoading = false;
+
+  @state()
+  private _execContainerSaving = false;
+
+  @state()
+  private _execContainerError: string | null = null;
+
+  @state()
+  private _execContainerPicking = false;
+
+  @state()
+  private _execContainerCandidates: Agent[] = [];
+
+  @state()
+  private _execContainerCandidatesLoading = false;
+
+  @state()
+  private _execContainerSelectedId = '';
+
+  private _execContainerLoaded = false;
 
   static override styles = css`
     :host {
@@ -248,6 +332,90 @@ export class ScionPageProfileSettings extends LitElement {
       width: 18rem;
       max-width: 100%;
     }
+
+    .exec-container-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.75rem 1rem;
+      margin-top: 0.75rem;
+      padding: 0.75rem 1rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius);
+    }
+
+    .exec-container-info {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.75rem;
+      min-width: 0;
+    }
+
+    .exec-container-name {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      text-decoration: none;
+    }
+
+    .exec-container-name:hover {
+      color: var(--scion-primary, #3b82f6);
+      text-decoration: underline;
+    }
+
+    .exec-container-project {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .exec-container-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-shrink: 0;
+    }
+
+    .exec-container-picker {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+      margin-top: 0.75rem;
+    }
+
+    .exec-container-picker sl-select {
+      flex: 1 1 18rem;
+      max-width: 24rem;
+    }
+
+    .exec-container-create-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      color: var(--scion-primary, #3b82f6);
+      text-decoration: none;
+    }
+
+    .exec-container-create-link:hover {
+      text-decoration: underline;
+    }
+
+    .exec-container-loading {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+    }
   `;
 
   private readonly _onPushPreferenceChanged = (): void => this._initNotificationState();
@@ -263,6 +431,14 @@ export class ScionPageProfileSettings extends LitElement {
     this._viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
   };
 
+  /** Re-renders when feature flags update (e.g. server flags resolve after mount). */
+  private readonly _onFeatureFlagsChanged = (): void => {
+    if (execContainersEnabled() && !this._execContainerLoaded) {
+      void this._loadExecContainer();
+    }
+    this.requestUpdate();
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
     this._initNotificationState();
@@ -274,8 +450,12 @@ export class ScionPageProfileSettings extends LitElement {
     this._viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
     window.addEventListener(VIEW_MODE_SHORTCUTS_CHANGED_EVENT, this._onViewModeShortcutsChanged);
     window.addEventListener('storage', this._onViewModeShortcutsStorage);
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this._onFeatureFlagsChanged);
     void this._loadSystemStatus();
     void this._loadDisplayTimezone();
+    if (execContainersEnabled()) {
+      void this._loadExecContainer();
+    }
   }
 
   override disconnectedCallback(): void {
@@ -283,6 +463,7 @@ export class ScionPageProfileSettings extends LitElement {
     window.removeEventListener(PUSH_PREFERENCE_EVENT, this._onPushPreferenceChanged);
     window.removeEventListener(VIEW_MODE_SHORTCUTS_CHANGED_EVENT, this._onViewModeShortcutsChanged);
     window.removeEventListener('storage', this._onViewModeShortcutsStorage);
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this._onFeatureFlagsChanged);
   }
 
   private async _loadSystemStatus(): Promise<void> {
@@ -465,6 +646,304 @@ export class ScionPageProfileSettings extends LitElement {
       this._autoInjectGcloudADC = !enabled;
       target.checked = !enabled;
     }
+  }
+
+  private async _loadExecContainer(): Promise<void> {
+    this._execContainerLoaded = true;
+    this._execContainerLoading = true;
+    this._execContainerError = null;
+    try {
+      const res = await apiFetch('/api/v1/users/me/exec-container');
+      if (!res.ok) {
+        this._execContainerError = await extractApiError(res, 'Failed to load execution container');
+        return;
+      }
+      const data = (await res.json()) as ExecContainerResponse;
+      this._execContainer = data;
+      if (!data.configured) {
+        void this._loadExecContainerCandidates();
+      }
+    } catch {
+      this._execContainerError = 'Failed to load execution container';
+    } finally {
+      this._execContainerLoading = false;
+    }
+  }
+
+  private async _loadExecContainerCandidates(): Promise<void> {
+    this._execContainerCandidatesLoading = true;
+    try {
+      const agents = await apiFetchAllPages<Agent>('/api/v1/agents?limit=100', 'agents');
+      this._execContainerCandidates = agents
+        .filter(isShellCandidate)
+        .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    } catch {
+      this._execContainerCandidates = [];
+    } finally {
+      this._execContainerCandidatesLoading = false;
+    }
+  }
+
+  private _handleExecContainerChangeStart(): void {
+    this._execContainerPicking = true;
+    this._execContainerError = null;
+    this._execContainerSelectedId = '';
+    void this._loadExecContainerCandidates();
+  }
+
+  private _handleExecContainerChangeCancel(): void {
+    this._execContainerPicking = false;
+    this._execContainerSelectedId = '';
+    this._execContainerError = null;
+  }
+
+  private async _handleExecContainerSelect(e: Event): Promise<void> {
+    const select = e.target as HTMLElement & { value: string };
+    const agentId = select.value;
+    if (!agentId) return;
+
+    this._execContainerSelectedId = agentId;
+    this._execContainerSaving = true;
+    this._execContainerError = null;
+    try {
+      const res = await apiFetch('/api/v1/users/me/exec-container', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId }),
+      });
+      if (!res.ok) {
+        this._execContainerError = await extractApiError(res, 'Failed to set execution container');
+        this._execContainerSelectedId = '';
+        select.value = '';
+        return;
+      }
+      const data = (await res.json()) as ExecContainerResponse;
+      this._execContainer = data;
+      this._execContainerPicking = false;
+      this._execContainerSelectedId = '';
+    } catch {
+      this._execContainerError = 'Failed to set execution container';
+      this._execContainerSelectedId = '';
+      select.value = '';
+    } finally {
+      this._execContainerSaving = false;
+    }
+  }
+
+  private async _handleExecContainerClear(): Promise<void> {
+    this._execContainerSaving = true;
+    this._execContainerError = null;
+    try {
+      const res = await apiFetch('/api/v1/users/me/exec-container', {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        this._execContainerError = await extractApiError(
+          res,
+          'Failed to clear execution container'
+        );
+        return;
+      }
+      this._execContainer = { configured: false };
+      this._execContainerPicking = false;
+      this._execContainerSelectedId = '';
+      void this._loadExecContainerCandidates();
+    } catch {
+      this._execContainerError = 'Failed to clear execution container';
+    } finally {
+      this._execContainerSaving = false;
+    }
+  }
+
+  private _renderExecContainerPicker(showCancel: boolean) {
+    const candidates = this._execContainerCandidates;
+    return html`
+      <div class="exec-container-picker" data-testid="exec-container-picker">
+        <sl-select
+          class="exec-container-select"
+          label="Execution container"
+          placeholder=${this._execContainerCandidatesLoading
+            ? 'Loading execution containers…'
+            : candidates.length > 0
+              ? 'Choose…'
+              : 'No execution containers available'}
+          .value=${this._execContainerSelectedId}
+          ?disabled=${this._execContainerSaving ||
+          this._execContainerCandidatesLoading ||
+          candidates.length === 0}
+          @sl-change=${(e: Event): void => {
+            void this._handleExecContainerSelect(e);
+          }}
+        >
+          ${candidates.map(
+            (a) => html`
+              <sl-option value=${a.id}>
+                ${a.name}${a.project ? ` (${a.project})` : ''} — ${a.phase}
+              </sl-option>
+            `
+          )}
+        </sl-select>
+        ${showCancel
+          ? html`
+              <sl-button
+                size="small"
+                variant="default"
+                ?disabled=${this._execContainerSaving}
+                @click=${() => this._handleExecContainerChangeCancel()}
+              >
+                Cancel
+              </sl-button>
+            `
+          : nothing}
+        <a
+          href="/agents/new?harness=shell"
+          class="exec-container-create-link"
+          data-testid="exec-container-create-link"
+        >
+          <sl-icon name="plus-lg"></sl-icon>
+          Start a new execution container
+        </a>
+      </div>
+    `;
+  }
+
+  private _renderExecContainerCard() {
+    if (!execContainersEnabled()) return nothing;
+
+    const ec = this._execContainer;
+    const isConfigured = ec?.configured === true;
+    const isUnavailable = isConfigured && ec?.state === 'unavailable';
+    const agent = ec?.agent;
+
+    return html`
+      <div class="settings-card" data-testid="exec-container-card">
+        <h2 class="section-title">
+          <sl-icon name="terminal"></sl-icon>
+          Execution container
+        </h2>
+
+        <p class="setting-description">
+          Your default execution container is a shell-only container where you log in to CLI tools
+          for approved commands. Keep credentials in <code>$HOME</code>, never in
+          <code>/workspace</code>.
+        </p>
+
+        ${this._execContainerLoading
+          ? html`
+              <div class="exec-container-loading">
+                <sl-spinner></sl-spinner>
+                Loading execution container…
+              </div>
+            `
+          : isUnavailable
+            ? html`
+                <div
+                  class="permission-status status-denied"
+                  data-testid="exec-container-unavailable"
+                >
+                  <sl-icon name="exclamation-triangle"></sl-icon>
+                  <span>${ec.reason || EXEC_CONTAINER_UNAVAILABLE_FALLBACK}</span>
+                </div>
+                <div class="exec-container-picker">
+                  <sl-button
+                    size="small"
+                    variant="default"
+                    data-testid="exec-container-clear"
+                    ?loading=${this._execContainerSaving}
+                    ?disabled=${this._execContainerSaving}
+                    @click=${() => void this._handleExecContainerClear()}
+                  >
+                    Clear
+                  </sl-button>
+                  ${!this._execContainerPicking
+                    ? html`
+                        <sl-button
+                          size="small"
+                          variant="default"
+                          data-testid="exec-container-change"
+                          ?disabled=${this._execContainerSaving}
+                          @click=${() => this._handleExecContainerChangeStart()}
+                        >
+                          Change
+                        </sl-button>
+                      `
+                    : nothing}
+                </div>
+                ${this._execContainerPicking ? this._renderExecContainerPicker(true) : nothing}
+              `
+            : isConfigured && agent
+              ? html`
+                  <div class="exec-container-summary" data-testid="exec-container-configured">
+                    <div class="exec-container-info">
+                      <a href="/agents/${agent.id}" class="exec-container-name">${agent.name}</a>
+                      ${agent.projectName || agent.projectId
+                        ? html`
+                            <span class="exec-container-project">
+                              <sl-icon name="folder"></sl-icon>
+                              ${agent.projectName || agent.projectId}
+                            </span>
+                          `
+                        : nothing}
+                      ${(() => {
+                        const badge = execContainerStateBadge(ec.state);
+                        return html`<sl-badge
+                          variant=${badge.variant}
+                          data-testid="exec-container-state"
+                          >${badge.label}</sl-badge
+                        >`;
+                      })()}
+                    </div>
+                    <div class="exec-container-actions">
+                      ${!this._execContainerPicking
+                        ? html`
+                            <sl-button
+                              size="small"
+                              variant="default"
+                              data-testid="exec-container-change"
+                              ?disabled=${this._execContainerSaving}
+                              @click=${() => this._handleExecContainerChangeStart()}
+                            >
+                              Change
+                            </sl-button>
+                          `
+                        : nothing}
+                      <sl-button
+                        size="small"
+                        variant="default"
+                        data-testid="exec-container-clear"
+                        ?loading=${this._execContainerSaving}
+                        ?disabled=${this._execContainerSaving}
+                        @click=${() => void this._handleExecContainerClear()}
+                      >
+                        Clear
+                      </sl-button>
+                    </div>
+                  </div>
+                  ${agent.homePersistent === false
+                    ? html`
+                        <div
+                          class="permission-status status-denied"
+                          data-testid="exec-container-home-warning"
+                        >
+                          <sl-icon name="exclamation-triangle"></sl-icon>
+                          Home directory does not persist across restarts on this runtime — logins
+                          will not survive a restart.
+                        </div>
+                      `
+                    : nothing}
+                  ${this._execContainerPicking ? this._renderExecContainerPicker(true) : nothing}
+                `
+              : this._renderExecContainerPicker(false)}
+        ${this._execContainerError
+          ? html`
+              <div class="permission-status status-unsupported" data-testid="exec-container-error">
+                <sl-icon name="x-circle"></sl-icon>
+                <span>${this._execContainerError}</span>
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
   }
 
   private _renderPermissionStatus() {
@@ -651,6 +1130,7 @@ export class ScionPageProfileSettings extends LitElement {
         </div>
       </div>
 
+      ${this._renderExecContainerCard()}
       ${decisionsEnabled()
         ? html`
             <div class="settings-card">

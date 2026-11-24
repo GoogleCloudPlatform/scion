@@ -67,6 +67,7 @@ import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { getPublicSettings } from '../../client/server-feature-flags.js';
 import {
+  execContainersEnabled,
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
   isFeatureEnabled,
@@ -130,6 +131,9 @@ export class ScionPageAgentCreate extends LitElement {
 
   /** Whether the projectId was explicitly passed via URL query param */
   private projectFromUrl = false;
+
+  /** Harness prefill requested via URL query param (applied once feature flags allow). */
+  private pendingUrlHarness = '';
 
   /** Cached project settings keyed by projectId */
   private projectSettingsCache: Map<string, ProjectCreateDefaults> = new Map();
@@ -201,6 +205,10 @@ export class ScionPageAgentCreate extends LitElement {
   private unsubscribeGcp: (() => void) | null = null;
 
   private readonly boundOnFeatureFlagsChanged = (): void => {
+    if (this.pendingUrlHarness === 'shell' && execContainersEnabled() && !this.harness) {
+      this.harness = 'shell';
+      this.pendingUrlHarness = '';
+    }
     this.syncGcpTarget();
     this.requestUpdate();
   };
@@ -429,6 +437,15 @@ export class ScionPageAgentCreate extends LitElement {
 
       if (params.get('advanced') === '1') {
         this.advancedOpen = true;
+      }
+
+      const harnessParam = params.get('harness');
+      if (harnessParam === 'shell') {
+        if (execContainersEnabled()) {
+          this.harness = 'shell';
+        } else {
+          this.pendingUrlHarness = 'shell';
+        }
       }
     }
 
@@ -746,6 +763,7 @@ export class ScionPageAgentCreate extends LitElement {
    */
   private dropUnavailableHarnessPick(): void {
     if (!this.harness || this.harness === '__other__') return;
+    if (this.harness === 'shell' && execContainersEnabled()) return;
     const names: readonly string[] =
       this.harnessConfigs.length > 0
         ? this.harnessConfigs.map((hc) => hc.name)
@@ -824,6 +842,11 @@ export class ScionPageAgentCreate extends LitElement {
     return this.harness === '__other__' ? this.customHarness.trim() : this.harness;
   }
 
+  /** Whether the selected harness config is the built-in shell execution container. */
+  private get isShellHarness(): boolean {
+    return this.resolvedHarness === 'shell';
+  }
+
   /** Placeholder for the harness picker: the inherited harness config, when known. */
   private get harnessPlaceholder(): string {
     const p = this.placeholders.harnessConfig;
@@ -895,12 +918,12 @@ export class ScionPageAgentCreate extends LitElement {
         acceptAsyncLaunch: true,
       };
 
-      if (this.templateId) body.template = this.templateId;
+      if (this.templateId && !this.isShellHarness) body.template = this.templateId;
       // Only a picked harness config; unset, the hub applies its own order.
       if (this.resolvedHarness) body.harnessConfig = this.resolvedHarness;
       if (this.brokerId) body.runtimeBrokerId = this.brokerId;
       if (profile) body.profile = profile;
-      if (this.task.trim()) body.task = this.task.trim();
+      if (this.task.trim() && !this.isShellHarness) body.task = this.task.trim();
 
       // Additional Options: only what the user set. Everything else
       // (including gcp_identity with no explicit pick) is left to the hub's
@@ -1176,34 +1199,38 @@ export class ScionPageAgentCreate extends LitElement {
           `
         : nothing}
 
-      <!-- Template -->
-      <div class="form-field">
-        <label for="template">Template</label>
-        <sl-select
-          id="template"
-          placeholder="Select a template..."
-          .value=${this.templateId}
-          @sl-change=${(e: Event) => this.onTemplateChange(e)}
-        >
-          ${this.filteredTemplates.map(
-            (t) =>
-              html`<sl-option value=${t.id}
-                >${t.displayName || t.name}${t.scope === 'project'
-                  ? ' (project)'
-                  : t.scope === 'user'
-                    ? ' (user)'
-                    : t.scope === 'global'
-                      ? ' (global)'
-                      : ''}${t.description ? ` - ${t.description}` : ''}</sl-option
-              >`
-          )}
-        </sl-select>
-        ${this.templatesLoadFailed
-          ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-              Could not load templates. Reload the page to try again.
-            </div>`
-          : html`<div class="hint">Agent configuration template.</div>`}
-      </div>
+      <!-- Template (hidden for shell execution containers, which take no template) -->
+      ${!this.isShellHarness
+        ? html`
+            <div class="form-field">
+              <label for="template">Template</label>
+              <sl-select
+                id="template"
+                placeholder="Select a template..."
+                .value=${this.templateId}
+                @sl-change=${(e: Event) => this.onTemplateChange(e)}
+              >
+                ${this.filteredTemplates.map(
+                  (t) =>
+                    html`<sl-option value=${t.id}
+                      >${t.displayName || t.name}${t.scope === 'project'
+                        ? ' (project)'
+                        : t.scope === 'user'
+                          ? ' (user)'
+                          : t.scope === 'global'
+                            ? ' (global)'
+                            : ''}${t.description ? ` - ${t.description}` : ''}</sl-option
+                    >`
+                )}
+              </sl-select>
+              ${this.templatesLoadFailed
+                ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
+                    Could not load templates. Reload the page to try again.
+                  </div>`
+                : html`<div class="hint">Agent configuration template.</div>`}
+            </div>
+          `
+        : nothing}
 
       <!-- Harness Config -->
       <div class="form-field">
@@ -1232,12 +1259,17 @@ export class ScionPageAgentCreate extends LitElement {
             : KNOWN_HARNESS_NAMES.map(
                 (name) => html` <sl-option value=${name}>${harnessDisplayName(name)}</sl-option> `
               )}
+          ${execContainersEnabled() && !this.harnessConfigs.some((hc) => hc.name === 'shell')
+            ? html`<sl-option value="shell">Execution container <small>(shell)</small></sl-option>`
+            : nothing}
           <sl-option value="__other__">Other...</sl-option>
         </sl-select>
         <div class="hint">
-          ${this.templateHarnessHint
-            ? this.templateHarnessHint
-            : 'The LLM harness configuration to use. Leave unset to inherit it.'}
+          ${this.isShellHarness
+            ? 'A shell-only execution container with no LLM harness. Keep credentials in $HOME, never in /workspace.'
+            : this.templateHarnessHint
+              ? this.templateHarnessHint
+              : 'The LLM harness configuration to use. Leave unset to inherit it.'}
         </div>
       </div>
 
@@ -1310,21 +1342,25 @@ export class ScionPageAgentCreate extends LitElement {
           `
         : nothing}
 
-      <!-- Task -->
-      <div class="form-field">
-        <label for="task">Task</label>
-        <sl-textarea
-          id="task"
-          placeholder="Describe what this agent should work on..."
-          .value=${this.task}
-          @sl-input=${(e: Event) => {
-            this.task = (e.target as HTMLElement & { value: string }).value;
-          }}
-          rows="4"
-          resize="auto"
-        ></sl-textarea>
-        <div class="hint">The task or prompt to start the agent with.</div>
-      </div>
+      <!-- Task (hidden for shell execution containers, which refuse initial tasks) -->
+      ${!this.isShellHarness
+        ? html`
+            <div class="form-field">
+              <label for="task">Task</label>
+              <sl-textarea
+                id="task"
+                placeholder="Describe what this agent should work on..."
+                .value=${this.task}
+                @sl-input=${(e: Event) => {
+                  this.task = (e.target as HTMLElement & { value: string }).value;
+                }}
+                rows="4"
+                resize="auto"
+              ></sl-textarea>
+              <div class="hint">The task or prompt to start the agent with.</div>
+            </div>
+          `
+        : nothing}
 
       <!-- Notify -->
       <div class="notify-field">
