@@ -51,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
@@ -958,6 +959,25 @@ func isShellCreateRequest(req CreateAgentRequest) bool {
 	return req.Config != nil && req.Config.HarnessConfig == config.ShellHarnessConfigName
 }
 
+// validateHubInitFirewall re-validates the top-level initFirewall field sent
+// by the Hub and checks that its union with this broker's own init_firewall
+// policy does not exceed the combined cap. Any error causes the request to
+// fail closed with HTTP 400 before any side effect or container creation.
+func (s *Server) validateHubInitFirewall(raw *RemoteInitFirewall) (firewallpolicy.Policy, error) {
+	var hubPolicy firewallpolicy.Policy
+	if raw != nil {
+		var err error
+		hubPolicy, err = firewallpolicy.Normalize(raw.AllowDomains, raw.AllowSSH)
+		if err != nil {
+			return firewallpolicy.Policy{}, err
+		}
+	}
+	if _, err := firewallpolicy.Union(hubPolicy, s.config.InitFirewall); err != nil {
+		return firewallpolicy.Policy{}, err
+	}
+	return hubPolicy, nil
+}
+
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
@@ -1022,6 +1042,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// only for the templates it hydrated itself (requestTemplateAllowed).
 	if req.Config != nil && !requestTemplateAllowed(req.Config.Template) {
 		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
+
+	hubInitFirewall, fwErr := s.validateHubInitFirewall(req.InitFirewall)
+	if fwErr != nil {
+		ValidationError(w, "invalid initFirewall: "+fwErr.Error(), nil)
 		return
 	}
 
@@ -1858,6 +1884,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		RunID:              req.RunID,
 		PreviousProjectIDs: req.PreviousProjectIDs,
 		Persistence:        req.Persistence,
+		InitFirewall:       hubInitFirewall,
 		HomeFiles:          req.HomeFiles,
 		HTTPRequest:        r,
 		Operation:          opCreate,
@@ -3984,11 +4011,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// LaunchKeepaliveSeconds request an async start, under the same
 		// wire keys and meaning as a create's (CreateAgentRequest; design
 		// wave 3 §2 D-f, ptone/scion#4669).
-		AsyncLaunch            bool             `json:"asyncLaunch,omitempty"`
-		LaunchID               string           `json:"launchId,omitempty"`
-		LaunchTimeoutSeconds   int              `json:"launchTimeoutSeconds,omitempty"`
-		LaunchKeepaliveSeconds int              `json:"launchKeepaliveSeconds,omitempty"`
-		PriorStatus            *api.PriorStatus `json:"priorStatus,omitempty"`
+		AsyncLaunch            bool                `json:"asyncLaunch,omitempty"`
+		LaunchID               string              `json:"launchId,omitempty"`
+		LaunchTimeoutSeconds   int                 `json:"launchTimeoutSeconds,omitempty"`
+		LaunchKeepaliveSeconds int                 `json:"launchKeepaliveSeconds,omitempty"`
+		PriorStatus            *api.PriorStatus    `json:"priorStatus,omitempty"`
+		InitFirewall           *RemoteInitFirewall `json:"initFirewall,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -4080,6 +4108,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// agent); like create's template it must be a template slug or ID.
 	if !requestTemplateAllowed(startReq.TemplateName) {
 		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
+
+	hubInitFirewall, fwErr := s.validateHubInitFirewall(startReq.InitFirewall)
+	if fwErr != nil {
+		ValidationError(w, "invalid initFirewall: "+fwErr.Error(), nil)
 		return
 	}
 
@@ -4186,6 +4220,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		RunID:                    startReq.RunID,
 		TemplateName:             startReq.TemplateName,
 		TelemetryPolicy:          startReq.TelemetryPolicy,
+		InitFirewall:             hubInitFirewall,
 		TemplateID:               startReq.TemplateID,
 		TemplateHash:             startReq.TemplateHash,
 		HubProfile:               startReq.Profile,
@@ -5392,6 +5427,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
 		// PriorStatus mirrors the start path's field (ptone/scion#8900).
 		PriorStatus *api.PriorStatus `json:"priorStatus,omitempty"`
+		// InitFirewall carries the hub's operator-authoritative egress firewall policy.
+		InitFirewall *RemoteInitFirewall `json:"initFirewall,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -5405,6 +5442,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// As on start: the template name must be a template slug or ID.
 	if !requestTemplateAllowed(restartReq.TemplateName) {
 		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
+	hubInitFirewall, fwErr := s.validateHubInitFirewall(restartReq.InitFirewall)
+	if fwErr != nil {
+		ValidationError(w, "invalid initFirewall: "+fwErr.Error(), nil)
 		return
 	}
 	// Checked before the stop leg and any runtime call, as on start.
@@ -5518,6 +5560,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		Persistence:              restartReq.Persistence,
 		TemplateName:             restartReq.TemplateName,
 		TelemetryPolicy:          restartReq.TelemetryPolicy,
+		InitFirewall:             hubInitFirewall,
 		TemplateID:               restartReq.TemplateID,
 		TemplateHash:             restartReq.TemplateHash,
 		// The Hub-supplied project ID (the request's projectId) locates a

@@ -133,6 +133,8 @@ var layer0Prefixes = []string{
 	"server.hub.schedules",
 	// Default message mode of new agents — read into ServerConfig at startup.
 	"server.hub.default_message_mode",
+	// Hub-wide egress firewall policy — read into ServerConfig at startup.
+	"server.hub.init_firewall",
 	// Separate relay process settings (scion server --role relay) — read
 	// at startup.
 	"server.relay",

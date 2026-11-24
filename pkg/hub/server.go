@@ -72,6 +72,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -287,6 +288,10 @@ type ServerConfig struct {
 	// AgentRunScope is server.auth.agent_run_scope (ParseAgentRunScope);
 	// the zero value is off.
 	AgentRunScope AgentRunScope
+	// InitFirewall holds the hub's operator-authoritative egress firewall
+	// policy (server.hub.init_firewall), sealed onto every create, start, and
+	// restart dispatch and unioned with the broker's own policy.
+	InitFirewall firewallpolicy.Policy
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
 	// HubEndpoint is the operator endpoint URL for this Hub: resolved at
@@ -1118,6 +1123,11 @@ type StartExtras struct {
 	// before this start, resume, or restart (wire key priorStatus;
 	// ptone/scion#8900). Nil sends nothing.
 	PriorStatus *api.PriorStatus
+	// InitFirewall carries the hub's operator-authoritative egress firewall
+	// policy (wire key initFirewall). Set unconditionally by the send
+	// wrappers (sendStart, sendRestart) from the hub's server.hub.init_firewall
+	// config; any value set earlier is overwritten. Nil sends nothing.
+	InitFirewall *RemoteInitFirewall
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -1227,6 +1237,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.PriorStatus != nil {
 		payload["priorStatus"] = extras.PriorStatus
+	}
+	if extras.InitFirewall != nil {
+		payload["initFirewall"] = extras.InitFirewall
 	}
 }
 
@@ -1730,6 +1743,13 @@ func (s *Server) logStopRunMismatch(agent *store.Agent, action string, err error
 		"agent_id", agent.ID, "agent", agent.Slug, "hub_run_id", agent.RunID, "broker_run_id", current)
 }
 
+// RemoteInitFirewall carries the hub's operator-authoritative egress firewall
+// policy to a Runtime Broker on create, start, and restart dispatches.
+type RemoteInitFirewall struct {
+	AllowDomains []string `json:"allowDomains,omitempty"`
+	AllowSSH     bool     `json:"allowSsh,omitempty"`
+}
+
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.
 type RemoteCreateAgentRequest struct {
 	RequestID   string             `json:"requestId,omitempty"`
@@ -1843,6 +1863,12 @@ type RemoteCreateAgentRequest struct {
 	// RequiredSecrets contains declared secrets from the template config.
 	// Passed to the broker so it can include them in env-gather requirements.
 	RequiredSecrets []api.RequiredSecret `json:"requiredSecrets,omitempty"`
+
+	// InitFirewall carries the hub's operator-authoritative egress firewall
+	// policy. Set unconditionally by the send wrappers (sendCreate,
+	// sendCreateWithGather) from the hub's server.hub.init_firewall config;
+	// any value set earlier is overwritten. Nil sends nothing.
+	InitFirewall *RemoteInitFirewall `json:"initFirewall,omitempty"`
 
 	// PreResolvedSkills carries the Hub-registry skill references the Hub
 	// resolved at dispatch, authorized as the agent's creator (#1784). The
@@ -3328,6 +3354,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		}
 		v := *cfg.AuditRetentionDays
 		cfg.AuditRetentionDays = &v
+	}
+	if !cfg.InitFirewall.IsEmpty() {
+		normalizedFW, err := firewallpolicy.Normalize(cfg.InitFirewall.AllowDomains, cfg.InitFirewall.AllowSSH)
+		if err != nil {
+			return nil, fmt.Errorf("invalid server.hub.init_firewall: %w", err)
+		}
+		cfg.InitFirewall = normalizedFW
 	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
@@ -5952,6 +5985,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(s.store, client, s.config.Debug, logging.Subsystem("hub.dispatcher"))
 	dispatcher.SetStorageLayout(s.projectStorageLayout)
+	dispatcher.SetInitFirewall(func() firewallpolicy.Policy { return s.config.InitFirewall })
 	dispatcher.SetWorkspaceStorage(s.GetStorage)
 	dispatcher.SetHostedMode(!s.config.Workstation)
 	dispatcher.SetHostedHarnessConfigCheck(s.checkStoredHostedHarnessConfig)

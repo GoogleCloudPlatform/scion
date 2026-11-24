@@ -92,6 +92,18 @@ Controls the central Hub API server.
 | `chat` | object | | Web chat limits (see [Chat search](#chat-search-serverhubchatsearch)). |
 | `schedules` | object | | Limits on recurring schedules (see [Recurring schedules](#recurring-schedules-serverhubschedules)). |
 | `default_message_mode` | string | `"project"` | [Message mode](/scion/reference/messaging-authorization/) of a new agent when neither the create request, its template nor its parent agent sets one: `none`, `lineage`, `branch` or `project`. `hub` is refused: hub mode is granted per agent. Existing agents keep their mode. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_DEFAULTMESSAGEMODE`. |
+| `init_firewall` | object | | Hub-wide operator-authoritative egress firewall policy sealed onto every broker dispatch and unioned with `server.broker.init_firewall` when an agent opts into `SCION_INIT_FIREWALL` (see [Hub Init Firewall](#hub-init-firewall-serverhubinit_firewall)). Startup-only: restart required to change. |
+
+#### Hub Init Firewall (`server.hub.init_firewall`)
+
+Controls the hub-wide operator-authoritative egress allowlist and SSH opt-in sent on every create, start, and restart dispatch. The Runtime Broker re-validates the hub policy and takes the **union** with its own `server.broker.init_firewall` (deduped domains, `allow_ssh` enabled if either source sets it, capped at 64 entries per source and 128 combined). Invalid entries fail hub startup.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `allow_domains` | list | `[]` | Extra DNS hostnames sent to every Runtime Broker and unioned with `server.broker.init_firewall.allow_domains` and `init-firewall.sh`'s built-in allowlist (max 64 unique entries). Each entry is trimmed, lowercased, and validated as a multi-label ASCII DNS name; wildcards, IP literals, CIDRs, `localhost`, and shell metacharacters are rejected. Env: `SCION_SERVER_HUB_INITFIREWALL_ALLOWDOMAINS` (comma-separated). |
+| `allow_ssh` | bool | `false` | Allow outbound SSH (`tcp/22`) to any IPv4 host when the opt-in egress firewall is active. Off by default; SSH to allowlisted hosts (such as GitHub) works without this flag. Env: `SCION_SERVER_HUB_INITFIREWALL_ALLOWSSH`. |
+
+**Trust model and version skew.** The Hub's dispatch send wrappers unconditionally overwrite the top-level `initFirewall` wire field from `server.hub.init_firewall` immediately before every broker transport call; no user, template, harness-config, secret, or parent agent can set or widen it. Both the Hub and the Runtime Broker must support `initFirewall` for hub-sourced domains to apply; an older Runtime Broker ignores the unknown field and fails safe with its own config and the built-in list. See [Broker Init Firewall](#broker-init-firewall-serverbrokerinit_firewall) for the CDN/IP-set warning.
 
 #### Recurring schedules (`server.hub.schedules`)
 
@@ -419,7 +431,7 @@ Controls the operator-authoritative egress allowlist and SSH opt-in applied when
 | `allow_domains` | list | `[]` | Extra DNS hostnames appended to `init-firewall.sh`'s built-in allowlist (max 64 unique entries). Each entry is trimmed, lowercased, and validated as a multi-label ASCII DNS name; wildcards, IP literals, CIDRs, `localhost`, and shell metacharacters are rejected. Env: `SCION_SERVER_RUNTIMEBROKER_INITFIREWALL_ALLOWDOMAINS` (comma-separated). |
 | `allow_ssh` | bool | `false` | Allow outbound SSH (`tcp/22`) to any IPv4 host when the opt-in egress firewall is active. Off by default; SSH to allowlisted hosts (such as GitHub) works without this flag. Env: `SCION_SERVER_RUNTIMEBROKER_INITFIREWALL_ALLOWSSH`. |
 
-**Trust model and CDN warning.** `server.broker.init_firewall` is operator-authoritative: the Runtime Broker passes `SCION_INIT_FIREWALL_ALLOW_DOMAINS` and `SCION_INIT_FIREWALL_ALLOW_SSH` only into the short-lived `sciontool netns-setup` container's argv on Docker and Podman, strips all `SCION_INIT_FIREWALL_*` variables from the agent container environment, and ignores them on in-container `sciontool init` paths. Templates, harness-configs, secrets, and parent agents cannot widen the allowlist. Domains are resolved to IPv4 addresses at startup into an `ipset`; allowing a hostname behind a shared CDN or multi-tenant front-end permits traffic to other services sharing those edge IPs.
+**Trust model and CDN warning.** `server.broker.init_firewall` and `server.hub.init_firewall` are operator-authoritative: the Runtime Broker re-validates the Hub's top-level `initFirewall` policy, takes the union with its own `server.broker.init_firewall` (capped at 128 combined domains), passes `SCION_INIT_FIREWALL_ALLOW_DOMAINS` and `SCION_INIT_FIREWALL_ALLOW_SSH` only into the short-lived `sciontool netns-setup` container's argv on Docker and Podman, strips all `SCION_INIT_FIREWALL_*` variables from the agent container environment, and ignores them on in-container `sciontool init` paths. Templates, harness-configs, secrets, and parent agents cannot widen the allowlist. Domains are resolved to IPv4 addresses at startup into an `ipset`; allowing a hostname behind a shared CDN or multi-tenant front-end permits traffic to other services sharing those edge IPs.
 
 #### Broker CORS (`server.broker.cors`)
 

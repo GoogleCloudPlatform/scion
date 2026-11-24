@@ -41,3 +41,24 @@ func TestFlatInstanceServerConfig_ForwardsInitFirewall(t *testing.T) {
 	})
 	assert.Equal(t, pol, rhCfg.InitFirewall)
 }
+
+func TestBuildHubServerConfig_ForwardsInitFirewall(t *testing.T) {
+	cfg := config.DefaultGlobalConfig()
+	cfg.Hub.InitFirewall = &config.InitFirewallConfig{
+		AllowDomains: []string{"Artifactory.Corp.Example.", "pypi.org", "pypi.org"},
+		AllowSSH:     true,
+	}
+
+	hubCfg := buildHubServerConfig(&cfg, "http://localhost:8080", "", nil, false, "", nil)
+	assert.Equal(t, []string{"artifactory.corp.example", "pypi.org"}, hubCfg.InitFirewall.AllowDomains)
+	assert.True(t, hubCfg.InitFirewall.AllowSSH)
+
+	// Invalid raw values are preserved so hub.New rejects them even without
+	// runServerStart preflight.
+	badCfg := config.DefaultGlobalConfig()
+	badCfg.Hub.InitFirewall = &config.InitFirewallConfig{
+		AllowDomains: []string{"bad;name"},
+	}
+	badHubCfg := buildHubServerConfig(&badCfg, "http://localhost:8080", "", nil, false, "", nil)
+	assert.Equal(t, []string{"bad;name"}, badHubCfg.InitFirewall.AllowDomains)
+}

@@ -42,12 +42,23 @@ var brokerSendMethods = map[string]int{
 }
 
 // sealedSendWrappers are the only functions allowed to call a broker send
-// method from dispatch code; each calls its seal before its send.
+// method from dispatch code; each calls its metadata seal and its initFirewall
+// seal before its send.
 var sealedSendWrappers = map[string]string{
 	"sendCreate":           "sealCreateRequest",
 	"sendCreateWithGather": "sealCreateRequest",
 	"sendStart":            "sealDispatchMetadataEnv",
 	"sendRestart":          "sealDispatchMetadataEnv",
+}
+
+// initFirewallSealWrappers maps each send wrapper to the method it must call
+// before the broker transport send to unconditionally overwrite initFirewall
+// from the hub's operator-authoritative config.
+var initFirewallSealWrappers = map[string]string{
+	"sendCreate":           "sealCreateInitFirewall",
+	"sendCreateWithGather": "sealCreateInitFirewall",
+	"sendStart":            "sealStartInitFirewall",
+	"sendRestart":          "sealStartInitFirewall",
 }
 
 // brokerTransportTypes are the RuntimeBrokerClient implementations whose
@@ -253,6 +264,104 @@ func (c *HybridBrokerClient) RestartAgent() { c.httpClient.RestartAgent(nil, nil
 `, 0)
 	require.NoError(t, err)
 	assert.Empty(t, findSealBypasses(fset, []*ast.File{ok}, brokerSendMethods).bypass, "a sealed wrapper and a transport delegation pass")
+}
+
+// findInitFirewallSealBypasses verifies that every broker send call in files
+// goes through one of the sealed send wrappers (checked alongside
+// findSealBypasses) and that each wrapper invokes its initFirewall overwrite
+// method (sealCreateInitFirewall / sealStartInitFirewall) lexically before
+// the transport call.
+func findInitFirewallSealBypasses(fset *token.FileSet, files []*ast.File, sendMethods map[string]int) sealSiteReport {
+	rep := sealSiteReport{sealed: map[string]bool{}}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			sealMethod, isWrapper := initFirewallSealWrappers[fn.Name.Name]
+			sealPos := token.NoPos
+			transport := brokerTransportTypes[sealRecvTypeName(fn)]
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if isWrapper && sel.Sel.Name == sealMethod && sealPos == token.NoPos {
+					sealPos = call.Pos()
+				}
+				arity, isSend := sendMethods[sel.Sel.Name]
+				if !isSend || len(call.Args) != arity {
+					return true
+				}
+				pos := fset.Position(call.Pos())
+				switch {
+				case isWrapper:
+					rep.sends++
+					if sealPos == token.NoPos || sealPos > call.Pos() {
+						rep.bypass = append(rep.bypass, fmt.Sprintf("%s: %s sends before %s", pos, fn.Name.Name, sealMethod))
+					} else {
+						rep.sealed[fn.Name.Name] = true
+					}
+				case transport && fn.Name.Name == sel.Sel.Name && isTransportField(sel.X):
+					// A transport implementation delegating downwards.
+				default:
+					rep.bypass = append(rep.bypass, fmt.Sprintf("%s: %s calls %s without initFirewall seal", pos, fn.Name.Name, sel.Sel.Name))
+				}
+				return true
+			})
+		}
+	}
+	sort.Strings(rep.bypass)
+	return rep
+}
+
+// TestDispatchSendSitesSealInitFirewall enumerates every broker send site in
+// pkg/hub and its guardScanSubdirs and fails if any send bypasses the wrappers
+// or fails to overwrite initFirewall before the transport call.
+func TestDispatchSendSitesSealInitFirewall(t *testing.T) {
+	names, err := globGuardScanDirs(".", "*.go")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		require.NoError(t, err)
+		f, err := parser.ParseFile(fset, name, src, 0)
+		require.NoError(t, err)
+		files = append(files, f)
+	}
+	fromInterface := envSendMethods(t, files)
+	assert.Equal(t, brokerSendMethods, fromInterface)
+	rep := findInitFirewallSealBypasses(fset, files, fromInterface)
+	assert.Empty(t, rep.bypass, "broker sends must overwrite initFirewall inside a sealed send wrapper (dispatch_metadata_seal.go)")
+	assert.Equal(t, len(initFirewallSealWrappers), rep.sends, "each wrapper makes exactly one send")
+	for name := range initFirewallSealWrappers {
+		assert.True(t, rep.sealed[name], "%s must overwrite initFirewall before it sends", name)
+	}
+
+	// Verify the checker catches missing or out-of-order initFirewall seals.
+	cases := map[string]string{
+		"create sends before initFirewall seal":  `func (d *HTTPAgentDispatcher) sendCreate() { d.client.CreateAgent(nil, nil, nil, nil); d.sealCreateInitFirewall(nil) }`,
+		"start omits initFirewall seal":          `func (d *HTTPAgentDispatcher) sendStart() { d.client.StartAgent(` + strings.TrimSuffix(strings.Repeat("nil, ", 18), ", ") + `) }`,
+		"restart sends before initFirewall seal": `func (d *HTTPAgentDispatcher) sendRestart() { d.client.RestartAgent(nil, nil, nil, nil, nil, nil, nil); d.sealStartInitFirewall(nil) }`,
+		"direct bypass":                          `func (d *HTTPAgentDispatcher) helper() { d.client.CreateAgent(nil, nil, nil, nil) }`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "x.go", "package hub\n"+body+"\n", 0)
+			require.NoError(t, err)
+			assert.NotEmpty(t, findInitFirewallSealBypasses(fset, []*ast.File{f}, brokerSendMethods).bypass)
+		})
+	}
 }
 
 // envSendMethods reads the RuntimeBrokerClient interface from files and

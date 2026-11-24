@@ -71,18 +71,24 @@ Key rules enforced by `init-firewall.sh`:
   continues to work because the `allowed-domains` ipset rule permits all ports
   to allowlisted IPs. Operators can restore outbound `tcp/22` to any IPv4 host
   by setting `server.broker.init_firewall.allow_ssh: true` in the broker's
+  `settings.yaml` or `server.hub.init_firewall.allow_ssh: true` in the Hub's
   `settings.yaml`.
 - **Operator domain allowlist:** Operators can add extra allowed hostnames
   without rebuilding the image via `server.broker.init_firewall.allow_domains`
-  in the broker's `settings.yaml` (up to 64 unique lowercase DNS hostnames;
-  wildcards, IP literals, CIDRs, `localhost`, and metacharacters are rejected
-  at broker startup). The allowlist is operator-authoritative: the runtime
-  passes `SCION_INIT_FIREWALL_ALLOW_DOMAINS` and `SCION_INIT_FIREWALL_ALLOW_SSH`
-  only into the short-lived `sciontool netns-setup` container's argv from
-  broker configuration, strips all `SCION_INIT_FIREWALL_*` variables from the
-  agent container environment, and ignores them on in-container `sciontool init`
-  fallback paths. Users, templates, harness-configs, secrets, and parent agents
-  cannot widen the allowlist.
+  on the broker and/or `server.hub.init_firewall.allow_domains` on the Hub
+  (up to 64 unique lowercase DNS hostnames per source, 128 combined when
+  unioned; wildcards, IP literals, CIDRs, `localhost`, and metacharacters are
+  rejected at startup and re-validated on dispatch). The allowlist is
+  operator-authoritative: the Hub seals its policy onto the top-level
+  `initFirewall` dispatch field, the Runtime Broker unions it with its own
+  broker policy and passes `SCION_INIT_FIREWALL_ALLOW_DOMAINS` and
+  `SCION_INIT_FIREWALL_ALLOW_SSH` only into the short-lived
+  `sciontool netns-setup` container's argv, strips all `SCION_INIT_FIREWALL_*`
+  variables from the agent container environment, and ignores them on
+  in-container `sciontool init` fallback paths. Users, templates,
+  harness-configs, secrets, and parent agents cannot widen the allowlist.
+  Both the Hub and Runtime Broker must support `initFirewall` for hub-sourced
+  domains to apply (older brokers ignore the field and fail safe).
 - **IP-set limitation and CDN warning:** Domain names are resolved at container
   startup via `getent ahostsv4` into an IPv4 ipset (IPv6 AAAA records are not
   allowlisted). Adding a domain hosted behind a shared CDN or multi-tenant
