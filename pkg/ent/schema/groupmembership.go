@@ -95,6 +95,8 @@ func (GroupMembership) Indexes() []ent.Index {
 	return []ent.Index{
 		// The admin-kind test identity purge selects rows by issuance_id.
 		index.Fields("issuance_id"),
+		// Batch and single-user effective-group lookups filter by user_id.
+		index.Fields("user_id"),
 		index.Fields("group_id", "user_id").
 			Unique(),
 		index.Fields("group_id", "agent_id").

@@ -153,6 +153,7 @@ func TestGroupMembershipReadCensus(t *testing.T) {
 	}
 	for _, want := range []string{
 		"pkg/store/entadapter/group_store.go:GetEffectiveGroups",
+		"pkg/store/entadapter/group_store.go:GetEffectiveGroupsForUsers",
 		"pkg/store/entadapter/group_store.go:GetEffectiveGroupsForAgent",
 		"pkg/store/entadapter/group_store.go:GetUserGroups",
 		"pkg/store/entadapter/group_store.go:GetGroupMembers",

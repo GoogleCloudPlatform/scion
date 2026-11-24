@@ -105,7 +105,7 @@ func censusAuthorityReadMethods(t *testing.T) map[string]bool {
 	for _, name := range []string{
 		"ListRoleBindingsForPrincipals", "ListRoleBindingsForPrincipal", "ListRoleBindingsForScope",
 		"ListAllRoleBindings", "GetRoleBinding", "CountAllRoleBindings",
-		"GetEffectiveGroups", "GetEffectiveGroupsForAgent", "GetUserGroups", "GetParentGroups",
+		"GetEffectiveGroups", "GetEffectiveGroupsForUsers", "GetEffectiveGroupsForAgent", "GetUserGroups", "GetParentGroups",
 		"GetGroupMembers", "GetGroupMembership", "CountGroupMembersByRole",
 		"GetProjectMembership", "ListProjectMembers", "IsProjectMember",
 	} {
@@ -132,6 +132,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"authz_test_fixture_clamp.go:ListRoleBindingsForPrincipal:ListRoleBindingsForPrincipal":   "wrapper: the clamp's own read",
 	"authz_test_fixture_clamp.go:ListRoleBindingsForPrincipals:ListRoleBindingsForPrincipals": "wrapper: the clamp's own read",
 	"perftrace_store.go:GetEffectiveGroups:GetEffectiveGroups":                                "wrapper: perf-trace decorator inside the clamp",
+	"perftrace_store.go:GetEffectiveGroupsForUsers:GetEffectiveGroupsForUsers":                "wrapper: perf-trace decorator inside the clamp",
 	"perftrace_store.go:ListRoleBindingsForPrincipal:ListRoleBindingsForPrincipal":            "wrapper: perf-trace decorator inside the clamp",
 	"perftrace_store.go:ListRoleBindingsForPrincipals:ListRoleBindingsForPrincipals":          "wrapper: perf-trace decorator inside the clamp",
 
@@ -165,22 +166,24 @@ var testAdminAuthorityReadCensus = map[string]string{
 	// clamped binding read with the user principal in the same list (the
 	// clamps' invariant). Group membership itself carries no authority and
 	// no expiry in A1 (group membership expiry is A3).
-	"authz.go:authorizationPrincipals:GetEffectiveGroups":               "authz: group closure fed to the clamped binding read with the user principal",
-	"authz.go:authorizationPrincipals:GetEffectiveGroupsForAgent":       "authz: agent group closure fed to the clamped binding read",
-	"authz.go:getEffectivePermissions:GetEffectiveGroups":               "authz: group closure fed to the clamped binding read with the user principal",
-	"authz.go:getEffectivePermissions:GetEffectiveGroupsForAgent":       "authz: agent group closure fed to the clamped binding read",
-	"authz.go:hasActiveSystemRole:GetEffectiveGroups":                   "authz: group closure fed to the clamped binding read with the user principal",
-	"authz.go:isProjectOwnerOrAdmin:GetEffectiveGroups":                 "authz: group closure fed to the clamped binding read with the user principal",
-	"authz_boundary.go:loadPrincipalClosure:GetEffectiveGroups":         "authz: group closure fed to the clamped binding read with the user principal",
-	"authz_boundary.go:loadPrincipalClosure:GetEffectiveGroupsForAgent": "authz: agent group closure fed to the clamped binding read",
-	"authz_boundary.go:projectScopedGrants:GetEffectiveGroups":          "authz: group closure fed to the clamped binding read with the user principal",
-	"authz_boundary.go:projectScopedGrants:GetEffectiveGroupsForAgent":  "authz: agent group closure fed to the clamped binding read",
-	"authz_candelegate.go:canDelegateGroupMembership:GetParentGroups":   "delegation: the target group's closure, whose bindings the actor must already hold",
-	"authz_candelegate.go:grantPermissionSet:GetParentGroups":           "delegation: the group closure whose role permissions a test admin's grant would confer (test-admin policy check; counts every binding, so it only refuses more)",
-	"authz.go:buildMembershipPathChains:GetGroupMembership":             "display: decision explain membership paths",
-	"authz.go:buildMembershipPathChains:GetParentGroups":                "display: decision explain membership paths",
-	"authz.go:buildMembershipPathChains:GetUserGroups":                  "display: decision explain membership paths",
-	"authz.go:isCurrentHubMember:GetGroupMembership":                    "decision: hub-members membership (relationship grant); admin kinds count only while live and enabled (testAdminPrincipalLive)",
+	"authz.go:authorizationPrincipals:GetEffectiveGroups":                   "authz: group closure fed to the clamped binding read with the user principal",
+	"authz_preload.go:preloadUserAuthzInputs:GetEffectiveGroupsForUsers":    "authz: batch group closure fed to per-user clampAllWith with the user principal",
+	"authz_preload.go:preloadUserAuthzInputs:ListRoleBindingsForPrincipals": "authz: batch raw binding read partitioned per user and clamped one user at a time via clampAllWith (never multi-user clamped); callers enforce activation via evaluateEffectiveMembership and decide",
+	"authz.go:authorizationPrincipals:GetEffectiveGroupsForAgent":           "authz: agent group closure fed to the clamped binding read",
+	"authz.go:getEffectivePermissions:GetEffectiveGroups":                   "authz: group closure fed to the clamped binding read with the user principal",
+	"authz.go:getEffectivePermissions:GetEffectiveGroupsForAgent":           "authz: agent group closure fed to the clamped binding read",
+	"authz.go:hasActiveSystemRole:GetEffectiveGroups":                       "authz: group closure fed to the clamped binding read with the user principal",
+	"authz.go:isProjectOwnerOrAdmin:GetEffectiveGroups":                     "authz: group closure fed to the clamped binding read with the user principal",
+	"authz_boundary.go:loadPrincipalClosure:GetEffectiveGroups":             "authz: group closure fed to the clamped binding read with the user principal",
+	"authz_boundary.go:loadPrincipalClosure:GetEffectiveGroupsForAgent":     "authz: agent group closure fed to the clamped binding read",
+	"authz_boundary.go:projectScopedGrants:GetEffectiveGroups":              "authz: group closure fed to the clamped binding read with the user principal",
+	"authz_boundary.go:projectScopedGrants:GetEffectiveGroupsForAgent":      "authz: agent group closure fed to the clamped binding read",
+	"authz_candelegate.go:canDelegateGroupMembership:GetParentGroups":       "delegation: the target group's closure, whose bindings the actor must already hold",
+	"authz_candelegate.go:grantPermissionSet:GetParentGroups":               "delegation: the group closure whose role permissions a test admin's grant would confer (test-admin policy check; counts every binding, so it only refuses more)",
+	"authz.go:buildMembershipPathChains:GetGroupMembership":                 "display: decision explain membership paths",
+	"authz.go:buildMembershipPathChains:GetParentGroups":                    "display: decision explain membership paths",
+	"authz.go:buildMembershipPathChains:GetUserGroups":                      "display: decision explain membership paths",
+	"authz.go:isCurrentHubMember:GetGroupMembership":                        "decision: hub-members membership (relationship grant); admin kinds count only while live and enabled (testAdminPrincipalLive)",
 
 	// Holder-counting guards: test identities never count.
 	"access_constraint_preview.go:resolveConstraintAdmins:GetEffectiveGroups":                    censusExcludesTestIdentities,

@@ -3140,6 +3140,11 @@ type GroupStore interface {
 	// transitive memberships through nested groups.
 	GetEffectiveGroups(ctx context.Context, userID string) ([]string, error)
 
+	// GetEffectiveGroupsForUsers returns, per user, all groups each user belongs
+	// to, including transitive memberships through nested groups (same active
+	// and expiry rules and transitive closure as GetEffectiveGroups).
+	GetEffectiveGroupsForUsers(ctx context.Context, userIDs []string) (map[string][]string, error)
+
 	// GetEffectiveGroupsForAgent returns all groups an agent belongs to,
 	// including the implicit project_agents group and transitive parent groups.
 	GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error)

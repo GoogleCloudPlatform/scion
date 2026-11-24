@@ -795,14 +795,45 @@ func (s *Server) expandDecisionBellTopic(ctx context.Context, projectID, chatKey
 	}
 	userReader := decisionBellUserMapReader{users: usersByID}
 
-	ctx = withAuthzInputMemo(ctx)
-	posting := make([]string, 0, len(candidateIDs))
+	activeUsers := make(map[string]*store.User, len(candidateIDs))
+	activeIDs := make([]string, 0, len(candidateIDs))
 	for _, uid := range candidateIDs {
 		u, uerr := checkUserAccount(ctx, userReader, PrincipalContext{Kind: PrincipalKindUser, ID: uid})
 		if classifyUserAccount(u, uerr) != accountAllowed || u == nil {
 			continue
 		}
-		mem := s.CheckEffectiveMembership(ctx, uid, projectID)
+		activeUsers[uid] = u
+		activeIDs = append(activeIDs, uid)
+	}
+	if len(activeIDs) == 0 {
+		return nil
+	}
+
+	ctx = withAuthzInputMemo(ctx)
+	var preloaded map[string]*preloadedUserInputs
+	if s.authzService != nil {
+		preloaded, err = s.authzService.preloadUserAuthzInputs(ctx, activeUsers)
+		if err != nil {
+			slog.Warn("decisions bell: batch authz preload failed", "project_id", projectID, "error", err)
+			return nil
+		}
+	}
+
+	now := time.Now()
+	posting := make([]string, 0, len(activeIDs))
+	for _, uid := range activeIDs {
+		u := activeUsers[uid]
+		var mem EffectiveMembershipResult
+		if preloaded != nil {
+			in := preloaded[uid]
+			if in == nil || in.err != nil {
+				continue
+			}
+			directBindings, groupBindings := splitUserAndGroupBindings(in.bindings)
+			mem = evaluateEffectiveMembership(uid, projectID, now, directBindings, groupBindings, in.rawRoleDefs)
+		} else {
+			mem = s.CheckEffectiveMembership(ctx, uid, projectID)
+		}
 		if mem.Err != nil || !mem.IsMember {
 			continue
 		}

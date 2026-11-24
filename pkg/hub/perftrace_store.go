@@ -67,6 +67,13 @@ func (c perfAuthzStore) GetEffectiveGroups(ctx context.Context, userID string) (
 	return v, err
 }
 
+func (c perfAuthzStore) GetEffectiveGroupsForUsers(ctx context.Context, userIDs []string) (map[string][]string, error) {
+	done := perfStoreCallStart(ctx, perfStoreGetEffectiveGroupsForUsers)
+	v, err := c.Store.GetEffectiveGroupsForUsers(ctx, userIDs)
+	done()
+	return v, err
+}
+
 func (c perfAuthzStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error) {
 	done := perfStoreCallStart(ctx, perfStoreGetEffectiveGroupsForAgent)
 	v, err := c.Store.GetEffectiveGroupsForAgent(ctx, agentID)

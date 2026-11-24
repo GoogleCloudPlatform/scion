@@ -395,14 +395,23 @@ func (a *AuthzService) loadRoleDefinitions(ctx context.Context, roleDefIDs []str
 		return nil, err
 	}
 
+	return roleDefinitionsToPermissions(defs), nil
+}
+
+// roleDefinitionsToPermissions converts store RoleDefinitions to the kernel's
+// RolePermissions map, preserving membership and system flags.
+func roleDefinitionsToPermissions(defs map[string]*store.RoleDefinition) map[string]*RolePermissions {
 	result := make(map[string]*RolePermissions, len(defs))
 	for _, rd := range defs {
+		if rd == nil {
+			continue
+		}
 		rp := NewRolePermissions(rd.ID, rd.Name, rd.ScopeType, rd.Permissions)
 		rp.ConfersMembership = rd.ConfersProjectMembership()
 		rp.System = rd.System
 		result[rd.ID] = rp
 	}
-	return result, nil
+	return result
 }
 
 // toCandidateBindings converts store RoleBindings to the kernel's

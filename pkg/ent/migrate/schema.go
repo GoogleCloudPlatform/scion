@@ -1926,6 +1926,11 @@ var (
 				Columns: []*schema.Column{GroupMembershipsColumns[5]},
 			},
 			{
+				Name:    "groupmembership_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{GroupMembershipsColumns[7]},
+			},
+			{
 				Name:    "groupmembership_group_id_user_id",
 				Unique:  true,
 				Columns: []*schema.Column{GroupMembershipsColumns[6], GroupMembershipsColumns[7]},

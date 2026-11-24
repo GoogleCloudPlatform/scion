@@ -488,6 +488,9 @@ func (f *perfSentinelStore) rec(name string, args ...any) error {
 func (f *perfSentinelStore) GetEffectiveGroups(_ context.Context, a string) ([]string, error) {
 	return []string{"v-GetEffectiveGroups"}, f.rec("GetEffectiveGroups", a)
 }
+func (f *perfSentinelStore) GetEffectiveGroupsForUsers(_ context.Context, a []string) (map[string][]string, error) {
+	return map[string][]string{"u": {"v-GetEffectiveGroupsForUsers"}}, f.rec("GetEffectiveGroupsForUsers", a)
+}
 func (f *perfSentinelStore) GetEffectiveGroupsForAgent(_ context.Context, a string) ([]string, error) {
 	return []string{"v-GetEffectiveGroupsForAgent"}, f.rec("GetEffectiveGroupsForAgent", a)
 }
@@ -556,6 +559,9 @@ func TestPerfAuthzStore_AllMethodsForwardAndCountExactlyTheirOp(t *testing.T) {
 	pr := []store.PrincipalRef{{Type: "user", ID: "pr-1"}, {Type: "group", ID: "pr-2"}}
 	calls := []call{
 		{perfStoreGetEffectiveGroups, "GetEffectiveGroups[a1]", func(c context.Context, s store.Store) (any, error) { return s.GetEffectiveGroups(c, "a1") }, func(v any) string { return v.([]string)[0] }},
+		{perfStoreGetEffectiveGroupsForUsers, "GetEffectiveGroupsForUsers[[u1a u1b]]", func(c context.Context, s store.Store) (any, error) {
+			return s.GetEffectiveGroupsForUsers(c, []string{"u1a", "u1b"})
+		}, func(v any) string { return v.(map[string][]string)["u"][0] }},
 		{perfStoreGetEffectiveGroupsForAgent, "GetEffectiveGroupsForAgent[a2]", func(c context.Context, s store.Store) (any, error) { return s.GetEffectiveGroupsForAgent(c, "a2") }, func(v any) string { return v.([]string)[0] }},
 		{perfStoreGetParentGroups, "GetParentGroups[a3]", func(c context.Context, s store.Store) (any, error) { return s.GetParentGroups(c, "a3") }, func(v any) string { return v.([]string)[0] }},
 		{perfStoreGetUserGroups, "GetUserGroups[a4]", func(c context.Context, s store.Store) (any, error) { return s.GetUserGroups(c, "a4") }, func(v any) string { return v.([]store.GroupMember)[0].GroupID }},

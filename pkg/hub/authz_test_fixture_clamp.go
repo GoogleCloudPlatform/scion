@@ -191,17 +191,6 @@ func setAuthzTestAdminTier(svc *AuthzService, enabled func(kind string) bool, no
 	c.mu.Unlock()
 }
 
-// isFixture reports whether userID is a test-fixture user, reading the row
-// once per user (kindForPrincipalVia). A missing user is not a fixture and
-// is not cached; a read error is returned and never cached.
-func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (bool, error) {
-	k, err := kindForPrincipalVia(ctx, c.Store, c.cache, userID)
-	if err != nil {
-		return false, err
-	}
-	return k.Found && k.Kind == store.UserKindTestFixture, nil
-}
-
 // principalKind is the stored kind of a user principal, as read by
 // kindForPrincipalVia, the one place hub code reads it for an
 // authorization or containment decision.
@@ -376,6 +365,16 @@ func (c *testFixtureGrantClamp) allowedRoles(ctx context.Context, ids []string) 
 	return out
 }
 
+// kindResolver resolves the principalKind for a single user ID during binding
+// clamping. Existing store-wrap paths use defaultKindResolver (cached
+// kindForPrincipalVia); the N-principal preload path supplies an in-memory
+// resolver over already-fetched user rows so it issues zero GetUser queries.
+type kindResolver func(ctx context.Context, userID string) (principalKind, error)
+
+func (c *testFixtureGrantClamp) defaultKindResolver(ctx context.Context, userID string) (principalKind, error) {
+	return kindForPrincipalVia(ctx, c.Store, c.cache, userID)
+}
+
 // clamp drops the system-scoped bindings a test identity may not hold when
 // principals include a test-fixture user. When a list has a system-scoped
 // binding it reads each user principal's kind (cached per user); only for a
@@ -385,6 +384,10 @@ func (c *testFixtureGrantClamp) allowedRoles(ctx context.Context, ids []string) 
 // be read it returns the error: every caller then fails closed (the request
 // is denied), so an unreadable kind never leaves grants unclamped.
 func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
+	return c.clampWith(ctx, principals, bindings, c.defaultKindResolver)
+}
+
+func (c *testFixtureGrantClamp) clampWith(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding, kindOf kindResolver) ([]*store.RoleBinding, error) {
 	var systemRoleIDs []string
 	for _, b := range bindings {
 		if b != nil && b.ScopeType == store.RoleScopeSystem {
@@ -399,7 +402,7 @@ func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.Pr
 		if p.Type != store.RoleBindingPrincipalUser {
 			continue
 		}
-		isFx, err := c.isFixture(ctx, p.ID)
+		k, err := kindOf(ctx, p.ID)
 		if err != nil {
 			// Fail closed by design: on a cold cache, an unreadable kind
 			// denies this request for ANY principal whose binding list has
@@ -408,7 +411,7 @@ func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.Pr
 			// test identities.
 			return nil, err
 		}
-		if isFx {
+		if k.Found && k.Kind == store.UserKindTestFixture {
 			fixture = true
 			break
 		}
@@ -471,6 +474,10 @@ func (c *testFixtureClampCache) clock() time.Time {
 // so callers must evaluate a user's group bindings in one list with the
 // user principal.
 func (c *testFixtureGrantClamp) clampTestAdmin(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
+	return c.clampTestAdminWith(ctx, principals, bindings, c.defaultKindResolver)
+}
+
+func (c *testFixtureGrantClamp) clampTestAdminWith(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding, kindOf kindResolver) ([]*store.RoleBinding, error) {
 	if len(bindings) == 0 {
 		return bindings, nil
 	}
@@ -479,7 +486,7 @@ func (c *testFixtureGrantClamp) clampTestAdmin(ctx context.Context, principals [
 		if p.Type != store.RoleBindingPrincipalUser {
 			continue
 		}
-		k, err := kindForPrincipalVia(ctx, c.Store, c.cache, p.ID)
+		k, err := kindOf(ctx, p.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -516,13 +523,21 @@ func (c *testFixtureGrantClamp) clampTestAdmin(ctx context.Context, principals [
 	return out, nil
 }
 
-// clampAll applies the member clamp and then its admin-kind sibling.
-func (c *testFixtureGrantClamp) clampAll(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
-	bindings, err := c.clamp(ctx, principals, bindings)
+// clampAllWith applies the member clamp and then its admin-kind sibling using
+// kindOf to classify user principals. Callers MUST pass a single user's
+// principal list — never a multi-user batch — because one test identity would
+// clamp the entire list and an expired/disabled test admin would empty it.
+func (c *testFixtureGrantClamp) clampAllWith(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding, kindOf kindResolver) ([]*store.RoleBinding, error) {
+	bindings, err := c.clampWith(ctx, principals, bindings, kindOf)
 	if err != nil {
 		return nil, err
 	}
-	return c.clampTestAdmin(ctx, principals, bindings)
+	return c.clampTestAdminWith(ctx, principals, bindings, kindOf)
+}
+
+// clampAll applies the member clamp and then its admin-kind sibling.
+func (c *testFixtureGrantClamp) clampAll(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
+	return c.clampAllWith(ctx, principals, bindings, c.defaultKindResolver)
 }
 
 func (c *testFixtureGrantClamp) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
