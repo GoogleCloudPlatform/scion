@@ -580,16 +580,19 @@ func (c *CompositeStore) GetDecisionAnswersByResponseMessageIDs(ctx context.Cont
 // stays as an orphan row: that is accepted, as decided in the choices
 // design. It is one small row per such agent, and no agent ID is reused.
 func deleteProjectDecisions(ctx context.Context, client *ent.Client, projectID uuid.UUID, agentIDs []uuid.UUID) error {
-	if _, err := client.DecisionFacetEntry.Delete().
-		Where(decisionfacetentry.ProjectIDEQ(projectID)).Exec(ctx); err != nil {
-		return mapError(err)
-	}
 	if _, err := client.DecisionAnswer.Delete().
 		Where(decisionanswer.ProjectIDEQ(projectID)).Exec(ctx); err != nil {
 		return mapError(err)
 	}
 	if _, err := client.Decision.Delete().
 		Where(decision.ProjectIDEQ(projectID)).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	// Delete summary rows AFTER answers and decisions in the same transaction
+	// so a concurrent indexer page cannot re-insert orphan summary rows from
+	// still-visible decisions/answers.
+	if _, err := client.DecisionFacetEntry.Delete().
+		Where(decisionfacetentry.ProjectIDEQ(projectID)).Exec(ctx); err != nil {
 		return mapError(err)
 	}
 	if len(agentIDs) > 0 {
