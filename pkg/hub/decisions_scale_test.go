@@ -642,6 +642,76 @@ func TestDecisionsP3_ScopeDifferential(t *testing.T) {
 	}
 }
 
+type spyTopicsWebChatStore struct {
+	WebChatStore
+	requestedProjectIDs []string
+}
+
+func (s *spyTopicsWebChatStore) ListTopicsIncludingDeletedForProjects(ctx context.Context, projectIDs []string) (map[string][]WebChatTopic, error) {
+	s.requestedProjectIDs = append([]string(nil), projectIDs...)
+	return s.WebChatStore.ListTopicsIncludingDeletedForProjects(ctx, projectIDs)
+}
+
+// TestDecisionsP3_ChatReadGates pins both chat-read authorization gates:
+//  1. resolveProfileDecisionScopes fetches topics only for projects where
+//     ChatActionRead is granted (never querying or exposing topics for projects
+//     without chat read).
+//  2. buildProjectReadableScope excludes all topics when projectChatAccess does
+//     not grant ChatActionRead, even if topics are passed in.
+func TestDecisionsP3_ChatReadGates(t *testing.T) {
+	f, _, _ := newCountingDecisionsFixture(t)
+	ctx := context.Background()
+
+	memberRole, err := f.store.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Project A: Bob is a project-member (ChatActionRead granted).
+	pReadable := &store.Project{ID: api.NewUUID(), Name: "Read Gate Allowed", Slug: "read-gate-allowed"}
+	require.NoError(t, f.store.CreateProject(ctx, pReadable))
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.bob.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: pReadable.ID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+	tpReadable := createTestDecisionTopic(t, f.wcs, pReadable.ID, "allowed-topic", f.bob.ID)
+
+	// Project B: Bob is NOT a member (ChatActionRead denied).
+	pDenied := &store.Project{ID: api.NewUUID(), Name: "Read Gate Denied", Slug: "read-gate-denied"}
+	require.NoError(t, f.store.CreateProject(ctx, pDenied))
+	tpDenied := createTestDecisionTopic(t, f.wcs, pDenied.ID, "secret-topic", f.alice.ID)
+
+	viewer := NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, string(ClientTypeWeb))
+	memoCtx := withAuthzInputMemo(ctx)
+
+	// Gate 1: resolveProfileDecisionScopes must pass ONLY pReadable to
+	// ListTopicsIncludingDeletedForProjects and never include tpDenied.
+	spy := &spyTopicsWebChatStore{WebChatStore: f.wcs}
+	scopes, err := f.srv.resolveProfileDecisionScopes(memoCtx, []*store.Project{pReadable, pDenied}, viewer, nil, spy)
+	require.NoError(t, err)
+	require.Len(t, scopes, 2)
+	assert.Equal(t, []string{pReadable.ID}, spy.requestedProjectIDs,
+		"resolveProfileDecisionScopes must fetch topics only for chat-readable projects")
+	assert.Contains(t, scopes[0].chatKeys, tpReadable)
+	assert.NotContains(t, scopes[1].chatKeys, tpDenied)
+	assert.Empty(t, scopes[1].conversationLabel)
+
+	// Gate 2: buildProjectReadableScope must ignore passed-in topics when
+	// projectChatAccess does not grant ChatActionRead.
+	deniedTopics := []WebChatTopic{{ID: tpDenied, ProjectID: pDenied.ID, Name: "secret-topic"}}
+	deniedScope := f.srv.buildProjectReadableScope(memoCtx, pDenied, viewer.ID(), nil, nil, ChatAccess{}, deniedTopics, nil, nil)
+	assert.NotContains(t, deniedScope.chatKeys, tpDenied,
+		"buildProjectReadableScope must gate topics on projectChatAccess.Can(ChatActionRead)")
+	assert.Empty(t, deniedScope.conversationLabel)
+
+	// Positive control: buildProjectReadableScope includes topics when ChatActionRead is granted.
+	allowedAccess := f.srv.chatUserAccess(memoCtx, viewer, pReadable, []string{ChatActionRead}, chatThreadWriteActions, nil, false, false)
+	require.True(t, allowedAccess.Can(ChatActionRead))
+	allowedTopics := []WebChatTopic{{ID: tpReadable, ProjectID: pReadable.ID, Name: "allowed-topic"}}
+	allowedScope := f.srv.buildProjectReadableScope(memoCtx, pReadable, viewer.ID(), nil, nil, allowedAccess, allowedTopics, nil, nil)
+	assert.Contains(t, allowedScope.chatKeys, tpReadable)
+	assert.Equal(t, "#allowed-topic", allowedScope.conversationLabel[tpReadable])
+}
+
 // TestDecisionsScale is the opt-in hub-level scale test (design-scale §7),
 // skipped unless SCION_DECISIONS_SCALE=1.
 func TestDecisionsScale(t *testing.T) {

@@ -33,13 +33,68 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
+// legacyNotSupersededInterpretedAnswer is a verbatim copy of the pre-P3 base
+// predicate so the differential oracle does not share implementation with the
+// code under test.
+func legacyNotSupersededInterpretedAnswer() predicate.DecisionAnswer {
+	return func(s *entsql.Selector) {
+		t := entsql.Table(decisionanswer.Table).As("da_dir")
+		s.Where(entsql.Not(entsql.And(
+			entsql.EQ(s.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceAgentInterpreted),
+			entsql.Exists(
+				entsql.Select(t.C(decisionanswer.FieldID)).
+					From(t).
+					Where(entsql.And(
+						entsql.ColumnsEQ(t.C(decisionanswer.FieldDecisionRowID), s.C(decisionanswer.FieldDecisionRowID)),
+						entsql.EQ(t.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
+					)),
+			),
+		)))
+	}
+}
+
+// legacyDecisionAnswerInChatKeys is a verbatim copy of the pre-P3 base EXISTS
+// predicate so the differential oracle is independent of the bounded PK filter.
+func legacyDecisionAnswerInChatKeys(keys []string) predicate.DecisionAnswer {
+	vals := make([]any, len(keys))
+	for i, k := range keys {
+		vals[i] = k
+	}
+	return func(s *entsql.Selector) {
+		t := entsql.Table(decision.Table)
+		s.Where(entsql.Exists(
+			entsql.Select(t.C(decision.FieldID)).
+				From(t).
+				Where(entsql.And(
+					entsql.ColumnsEQ(t.C(decision.FieldID), s.C(decisionanswer.FieldDecisionRowID)),
+					entsql.ColumnsEQ(t.C(decision.FieldProjectID), s.C(decisionanswer.FieldProjectID)),
+					entsql.In(t.C(decision.FieldChatKey), vals...),
+				)),
+		))
+	}
+}
+
+// legacyDecisionAnswerCursorPredicate is a verbatim copy of the pre-P3 base
+// cursor predicate so the differential oracle is independent of the CreatedAtLTE
+// range-pushdown optimization.
+func legacyDecisionAnswerCursorPredicate(cur decisionListCursor) predicate.DecisionAnswer {
+	return decisionanswer.Or(
+		decisionanswer.CreatedAtLT(cur.CreatedAt),
+		decisionanswer.And(
+			decisionanswer.CreatedAtEQ(cur.CreatedAt),
+			decisionanswer.IDLT(cur.ID),
+		),
+	)
+}
+
 // legacyListDecisionAnswers is the pre-P3 global-ORDER-BY single query, kept
-// in tests as the differential oracle for M3 (design-scale §7 item 1).
+// in tests as an independent differential oracle for M3 (design-scale §7 item 1).
 func legacyListDecisionAnswers(
 	ctx context.Context,
 	cs *CompositeStore,
@@ -71,12 +126,12 @@ func legacyListDecisionAnswers(
 	q := cs.client.DecisionAnswer.Query().
 		Where(
 			decisionanswer.ProjectIDIn(projectUUIDs...),
-			decisionAnswerInChatKeys(keys),
-			notSupersededInterpretedAnswer(),
+			legacyDecisionAnswerInChatKeys(keys),
+			legacyNotSupersededInterpretedAnswer(),
 		)
 	q = applyDecisionAnswerFilter(q, filter, agentUUID, provPred)
 	if cursor != "" {
-		q = q.Where(decisionAnswerCursorPredicate(cur))
+		q = q.Where(legacyDecisionAnswerCursorPredicate(cur))
 	}
 	rows, err := q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
 		Limit(limit + 1).
@@ -146,8 +201,8 @@ func legacyListDecisionAnswersPerProject(
 		q := cs.client.DecisionAnswer.Query().
 			Where(
 				decisionanswer.ProjectIDEQ(pUUID),
-				decisionAnswerInChatKeys(projKeys),
-				notSupersededInterpretedAnswer(),
+				legacyDecisionAnswerInChatKeys(projKeys),
+				legacyNotSupersededInterpretedAnswer(),
 			)
 		q = applyDecisionAnswerFilter(q, projFilter, agentUUID, provPred)
 		rows, err := q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
@@ -483,6 +538,22 @@ func TestDecisionAnswersP3_Differential(t *testing.T) {
 			assertAnswerEntriesEqual(t, want, got, "ListDecisionAnswers/"+tc.name)
 			assert.Equal(t, nextOld, nextNew)
 
+			// Differential check for ListDecisionAnswersForProjects across every filter,
+			// including multi-page cursor pagination (limit=2) for agent/answerer/provenance.
+			curProj, curLeg := "", ""
+			for page := 0; page < 10; page++ {
+				gotProj, nextProj, err := cs.ListDecisionAnswersForProjects(ctx, projects, aliceKeysByProj, tc.filter, curProj, 2)
+				require.NoError(t, err)
+				wantPage, nextLeg, err := legacyListDecisionAnswers(ctx, cs, projects, aliceAllKeys, tc.filter, curLeg, 2)
+				require.NoError(t, err)
+				assertAnswerEntriesEqual(t, wantPage, gotProj, fmt.Sprintf("ListDecisionAnswersForProjects/%s/p%d", tc.name, page))
+				assert.Equal(t, nextLeg, nextProj, "ListDecisionAnswersForProjects/%s/p%d nextCursor", tc.name, page)
+				if nextProj == "" {
+					break
+				}
+				curProj, curLeg = nextProj, nextLeg
+			}
+
 			gotPP, err := cs.ListDecisionAnswersPerProject(ctx, projects, aliceKeysByProj, tc.filter, 4)
 			require.NoError(t, err)
 			wantPP, err := legacyListDecisionAnswersPerProject(ctx, cs, projects, aliceKeysByProj, tc.filter, 4)
@@ -493,6 +564,25 @@ func TestDecisionAnswersP3_Differential(t *testing.T) {
 			}
 		})
 	}
+
+	// Verify multi-project answer queries execute cleanly inside WithTx (inTx=true)
+	// on both SQLite and Postgres without attempting a nested BeginTx.
+	t.Run("WithTx_inTx_multi_project", func(t *testing.T) {
+		err := cs.WithTx(ctx, func(txStore store.Store) error {
+			gotRecent, _, err := txStore.ListDecisionAnswersForProjects(ctx, projects, aliceKeysByProj, store.ProjectDecisionAnswerFilter{}, "", 5)
+			if err != nil {
+				return err
+			}
+			require.Len(t, gotRecent, 5)
+			gotPP, err := txStore.ListDecisionAnswersPerProject(ctx, projects, aliceKeysByProj, store.ProjectDecisionAnswerFilter{}, 2)
+			if err != nil {
+				return err
+			}
+			require.NotEmpty(t, gotPP)
+			return nil
+		})
+		require.NoError(t, err)
+	})
 }
 
 // TestDecisionAnswersP3_MultiChunkMerge verifies chunking (>100 arms) for both
