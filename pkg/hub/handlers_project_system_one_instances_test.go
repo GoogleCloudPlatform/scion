@@ -443,19 +443,21 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 		MaxTotalBytes: spec.ProbeMaxBytes,
 	}))
 
-	const rawRule = `{
+	const rawSpec = `{
 	  "version": 1,
-	  "inputs": ["probe.text"],
 	  "binding": {"instance": "ts-allow"},
 	  "questions": [{"id": "q1", "type": "binary", "instructions": "Is this urgent?"}],
 	  "output": {"question": "q1"}
 	}`
+	const rawRule = `{"inputs": ["probe.text"], "spec": ` + rawSpec + `}`
 	const rawRuleMissingSec = `{
-	  "version": 1,
 	  "inputs": ["probe.text"],
-	  "binding": {"instance": "ts-missing-secret"},
-	  "questions": [{"id": "q1", "type": "binary", "instructions": "Is this urgent?"}],
-	  "output": {"question": "q1"}
+	  "spec": {
+	    "version": 1,
+	    "binding": {"instance": "ts-missing-secret"},
+	    "questions": [{"id": "q1", "type": "binary", "instructions": "Is this urgent?"}],
+	    "output": {"question": "q1"}
+	  }
 	}`
 
 	// 1. Compile with project context refuses unlisted instance (0 secret reads).
@@ -513,7 +515,7 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	probeWithProjDenied := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/ts-allow/probe", ProbeSystemOneInstanceRequest{
 		Project: proj.ID,
 		Kind:    string(spec.KindFilter),
-		Spec:    json.RawMessage(rawRule),
+		Spec:    json.RawMessage(rawSpec),
 		Probe:   &ProbeSystemOneInput{Text: "probe with project"},
 	})
 	require.Equal(t, http.StatusOK, probeWithProjDenied.Code, probeWithProjDenied.Body.String())
@@ -527,7 +529,7 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	// 5. Probe WITHOUT --project stays hub-admin-only and succeeds even with empty project allowlist.
 	probeNoProj := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/ts-allow/probe", ProbeSystemOneInstanceRequest{
 		Kind:  string(spec.KindFilter),
-		Spec:  json.RawMessage(rawRule),
+		Spec:  json.RawMessage(rawSpec),
 		Probe: &ProbeSystemOneInput{Text: "probe without project"},
 	})
 	require.Equal(t, http.StatusOK, probeNoProj.Code, probeNoProj.Body.String())
@@ -559,7 +561,7 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	probeWithProjOK := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/ts-allow/probe", ProbeSystemOneInstanceRequest{
 		Project: proj.ID,
 		Kind:    string(spec.KindFilter),
-		Spec:    json.RawMessage(rawRule),
+		Spec:    json.RawMessage(rawSpec),
 		Probe:   &ProbeSystemOneInput{Text: "probe with project allowed"},
 	})
 	require.Equal(t, http.StatusOK, probeWithProjOK.Code, probeWithProjOK.Body.String())

@@ -101,7 +101,6 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 
 	const rawSpec = `{
 	  "version": 1,
-	  "inputs": ["probe.text"],
 	  "questions": [
 	    {"id": "is_outage", "type": "binary", "instructions": "Does the text report a service outage?"},
 	    {
@@ -117,6 +116,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	  ],
 	  "output": {"question": "service"}
 	}`
+	const rawEnvelope = `{"inputs": ["probe.text"], "spec": ` + rawSpec + `}`
 	const syntheticText = "Synthetic token exchange failures observed on login."
 
 	re := srv.RuleEngine()
@@ -148,7 +148,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	// Phase 1: Initially OFF — Supports stays true for the test-granted consumer, admin routes 404, Compile returns UnsupportedDialectError.
 	assert.True(t, re.Supports(testSystemOneConsumer, systemone.DialectName))
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
-	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
+	_, err = re.Compile(ctx, systemone.DialectName, rawEnvelope, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
 		Name:     testEnvName,
 	})
@@ -195,7 +195,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	assert.Equal(t, int32(1), providerCalls.Load())
 
 	// Compile and evaluate the identical spec via srv.RuleEngine().
-	compiledWhileOn, err := re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
+	compiledWhileOn, err := re.Compile(ctx, systemone.DialectName, rawEnvelope, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
 		Name:     testEnvName,
 	})
@@ -230,7 +230,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 		"Engine.Supports reports registration and consumer grant only and remains true when experiment is off")
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
 
-	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
+	_, err = re.Compile(ctx, systemone.DialectName, rawEnvelope, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
 		Name:     testEnvName,
 	})
@@ -262,7 +262,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	setSystemOneExperimentLive(t, srv, true)
 
 	assert.Equal(t, http.StatusOK, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
-	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
+	_, err = re.Compile(ctx, systemone.DialectName, rawEnvelope, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
 		Name:     testEnvName,
 	})
@@ -317,7 +317,6 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 
 	const rawSpec = `{
 	  "version": 1,
-	  "inputs": ["probe.text"],
 	  "questions": [{"id": "q1", "type": "binary", "instructions": "Does this report an outage?"}],
 	  "output": {"question": "q1"}
 	}`
@@ -496,11 +495,13 @@ func TestSystemOneRules_DialectForwardsProjectIDForProjectScopedNamedSecret(t *t
 	}))
 
 	const rawRule = `{
-	  "version": 1,
 	  "inputs": ["probe.text"],
-	  "binding": {"instance": "gemini-proj-sec"},
-	  "questions": [{"id": "q1", "type": "binary", "instructions": "Does the text report an outage?"}],
-	  "output": {"question": "q1"}
+	  "spec": {
+	    "version": 1,
+	    "binding": {"instance": "gemini-proj-sec"},
+	    "questions": [{"id": "q1", "type": "binary", "instructions": "Does the text report an outage?"}],
+	    "output": {"question": "q1"}
+	  }
 	}`
 	compiled, err := re.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,

@@ -1525,4 +1525,90 @@ func TestProject_SystemOneAllowedInstances_ConcurrentAddRemove(t *testing.T) {
 		wantOdd = append(wantOdd, fmt.Sprintf("conc-inst-%02d", i))
 	}
 	assert.Equal(t, wantOdd, got, "concurrent removes must not lose updates")
+
+	// Concurrent remove + add on the same project must never resurrect the removed name.
+	pMix := newProject(11)
+	require.NoError(t, ps.CreateProject(ctx, pMix))
+	_, _, err = ps.SetProjectSystemOneInstances(ctx, pMix.ID, []string{"keep-base", "victim-inst"})
+	require.NoError(t, err)
+
+	const addWorkers = 12
+	mixErrs := make(chan error, addWorkers+1)
+	startMix := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-startMix
+		_, _, rErr := ps.RemoveProjectSystemOneInstance(ctx, pMix.ID, "victim-inst")
+		if rErr != nil {
+			mixErrs <- rErr
+		}
+	}()
+	for i := 0; i < addWorkers; i++ {
+		wg.Add(1)
+		name := fmt.Sprintf("mix-add-%02d", i)
+		go func() {
+			defer wg.Done()
+			<-startMix
+			_, _, aErr := ps.AddProjectSystemOneInstance(ctx, pMix.ID, name)
+			if aErr != nil {
+				mixErrs <- aErr
+			}
+		}()
+	}
+	close(startMix)
+	wg.Wait()
+	close(mixErrs)
+	for mErr := range mixErrs {
+		require.NoError(t, mErr)
+	}
+	gotMix, err := ps.GetProjectSystemOneInstances(ctx, pMix.ID)
+	require.NoError(t, err)
+	assert.NotContains(t, gotMix, "victim-inst", "concurrent adds must not resurrect a concurrently removed instance")
+	assert.Contains(t, gotMix, "keep-base")
+	for i := 0; i < addWorkers; i++ {
+		assert.Contains(t, gotMix, fmt.Sprintf("mix-add-%02d", i))
+	}
+
+	// Concurrent adds against the 64-entry cap must enforce the cap atomically.
+	pCap := newProject(12)
+	require.NoError(t, ps.CreateProject(ctx, pCap))
+	base60 := make([]string, store.MaxProjectSystemOneInstances-4)
+	for i := range base60 {
+		base60[i] = fmt.Sprintf("cap-base-%02d", i)
+	}
+	_, _, err = ps.SetProjectSystemOneInstances(ctx, pCap.ID, base60)
+	require.NoError(t, err)
+
+	const capRacers = 12
+	capResults := make(chan error, capRacers)
+	startCap := make(chan struct{})
+	for i := 0; i < capRacers; i++ {
+		wg.Add(1)
+		name := fmt.Sprintf("cap-race-%02d", i)
+		go func() {
+			defer wg.Done()
+			<-startCap
+			_, _, aErr := ps.AddProjectSystemOneInstance(ctx, pCap.ID, name)
+			capResults <- aErr
+		}()
+	}
+	close(startCap)
+	wg.Wait()
+	close(capResults)
+
+	var okCount, limitCount int
+	for rErr := range capResults {
+		if rErr == nil {
+			okCount++
+		} else {
+			assert.ErrorIs(t, rErr, store.ErrSystemOneAllowlistLimitExceeded)
+			limitCount++
+		}
+	}
+	assert.Equal(t, 4, okCount, "exactly 4 concurrent adds should fit before the 64-entry cap")
+	assert.Equal(t, capRacers-4, limitCount, "remaining concurrent adds must fail with ErrSystemOneAllowlistLimitExceeded")
+	gotCap, err := ps.GetProjectSystemOneInstances(ctx, pCap.ID)
+	require.NoError(t, err)
+	assert.Len(t, gotCap, store.MaxProjectSystemOneInstances)
 }
