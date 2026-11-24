@@ -656,8 +656,15 @@ func TestDecisionAnswersP3_MultiChunkMerge(t *testing.T) {
 		for j := 0; j < 3; j++ {
 			decID := uuid.New()
 			// Interleave timestamps across projects so chunk 2 holds rows
-			// both newer and older than chunk 1.
+			// both newer and older than chunk 1. Give 7 rows in chunk 1
+			// (p=93..99) and 5 rows in chunk 2 (p=100..104) the exact same
+			// newest created_at so 12 tied rows straddle the limit=10 page
+			// boundary and exercise sortDecisionAnswerRowsDesc's ID tie-break
+			// across chunks.
 			ts := base.Add(time.Duration(j*1000+p) * time.Second)
+			if j == 2 && p >= 93 {
+				ts = base.Add(5000 * time.Second)
+			}
 			key := fmt.Sprintf("k-%d-%d", p, j)
 			_, err := tx.Decision.Create().
 				SetID(decID).SetProjectID(pid).SetChatKey(ck).SetMessageID(uuid.New()).SetPosition(0).
