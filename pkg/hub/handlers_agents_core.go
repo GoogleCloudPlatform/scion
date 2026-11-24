@@ -4175,8 +4175,13 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		}
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
-			MissingEnvVars(w, stillMissing.Requirements.Needs,
-				s.buildEnvGatherResponse(ctx, agent, stillMissing.Requirements))
+			filteredNeeds := filterInstallationEnvGatherKeys(agent, stillMissing.Requirements.Needs)
+			if len(stillMissing.Requirements.Needs) > 0 && len(filteredNeeds) == 0 {
+				writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, ErrBrokerRequestedBlockedGitHubEnv.Error(), nil)
+				return
+			}
+			hubEnvGather := s.buildEnvGatherResponse(ctx, agent, stillMissing.Requirements)
+			MissingEnvVars(w, hubEnvGather.Needs, hubEnvGather)
 			return
 		}
 		if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
@@ -5540,11 +5545,16 @@ func removedConfigEntries(old, req *api.ScionConfig, present map[string]bool, ca
 }
 
 // removedEntriesWarnings returns the PATCH warnings naming the entries
-// removedConfigEntries reports.
+// removedConfigEntries reports. Env keys recorded in ClearedFields are removed
+// by the broker at the next start, whereas mcp_servers and volumes remain until
+// the next reincarnation.
 func removedEntriesWarnings(removed map[string][]string) []string {
 	var out []string
+	if r := removed["env"]; len(r) > 0 {
+		out = append(out, "config.env: removed "+strings.Join(r, ", ")+" now; those variables will be removed at the next start")
+	}
 	for _, w := range []struct{ key, what string }{
-		{"env", "variables"}, {"mcp_servers", "MCP servers"}, {"volumes", "volumes"},
+		{"mcp_servers", "MCP servers"}, {"volumes", "volumes"},
 	} {
 		if r := removed[w.key]; len(r) > 0 {
 			out = append(out, "config."+w.key+": removed "+strings.Join(r, ", ")+" now; the agent keeps those "+w.what+" until the next reincarnation (a plain start does not remove them)")

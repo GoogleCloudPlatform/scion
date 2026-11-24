@@ -642,13 +642,12 @@ func TestInstallationAgent_CrossAgentAttachAndLifecycleRefused(t *testing.T) {
 		}
 		require.NoError(t, f.store.UpdateAgent(ctx, f.child))
 
-		// Control: user_preferred caller sees peer non-GitHub env in project agent list,
-		// while blocked GitHub token keys (GITHUB_TOKEN, GH_TOKEN) are always stripped
-		// by the store serializer for every viewer.
+		// Control: user_preferred caller sees non-installation peer plain and GH_TOKEN env
+		// in project agent list, while GITHUB_TOKEN is always stripped by the store serializer.
 		recCtrl := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents", nil, scopes...)
 		require.Equal(t, http.StatusOK, recCtrl.Code, recCtrl.Body.String())
 		assert.Contains(t, recCtrl.Body.String(), peerPlainEnv, "control user_preferred caller sees peer plain env")
-		assert.NotContains(t, recCtrl.Body.String(), peerGHToken, "store serializer always strips GH_TOKEN for every viewer")
+		assert.Contains(t, recCtrl.Body.String(), peerGHToken, "control user_preferred caller sees non-installation peer GH_TOKEN")
 		assert.NotContains(t, recCtrl.Body.String(), "ghp_peer_pat_never_serialized")
 
 		// Switch caller to installation-only: peer env is redacted in project list,

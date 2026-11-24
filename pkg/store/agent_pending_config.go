@@ -19,8 +19,6 @@ import (
 	"maps"
 	"strings"
 	"time"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // AgentPendingConfig is an agent's pending config: config edits the hub
@@ -77,6 +75,9 @@ type AgentPendingConfig struct {
 	// it, so a response path that forgets ResponseView fails closed.
 	// Persistence bypasses MarshalJSON (see MarshalPendingConfigForStorage).
 	envResponseVisible bool
+	// githubTokenInstallationOnly widens MarshalJSON's config.env redaction
+	// from GITHUB_TOKEN to api.IsBlockedInstallationGitHubEnvKey when set.
+	githubTokenInstallationOnly bool
 }
 
 // IsEmpty reports whether p holds no pending edit.
@@ -112,23 +113,33 @@ func (p *AgentPendingConfig) Clone() *AgentPendingConfig {
 // telemetry cloud-export headers are left out; with it, GITHUB_TOKEN is
 // still never returned.
 func (p *AgentPendingConfig) ResponseView(canAttach bool) *AgentPendingConfig {
+	return p.ResponseViewForGitHubPolicy(canAttach, false)
+}
+
+// ResponseViewForGitHubPolicy is ResponseView with the agent's
+// installation-only GitHub token policy applied: when installationOnly is
+// true, all api.IsBlockedInstallationGitHubEnvKey keys are stripped from
+// config.env; otherwise only GITHUB_TOKEN is stripped.
+func (p *AgentPendingConfig) ResponseViewForGitHubPolicy(canAttach, installationOnly bool) *AgentPendingConfig {
 	if p == nil {
 		return nil
 	}
 	view := p.Clone()
 	view.envResponseVisible = canAttach
+	view.githubTokenInstallationOnly = installationOnly
 	return view
 }
 
 // MarshalJSON is the response encoding: it drops KeySavers, and
 // redacts config.env and config.telemetry.cloud.headers unless ResponseView
-// allowed them (GITHUB_TOKEN is always dropped from env).
+// allowed them (GITHUB_TOKEN is always dropped from env; installation-only
+// agents drop all api.IsBlockedInstallationGitHubEnvKey keys).
 func (p AgentPendingConfig) MarshalJSON() ([]byte, error) {
 	type alias AgentPendingConfig
 	out := alias(p)
 	out.KeySavers = nil
 	out.LimitsFormat = 0
-	out.Config = redactPendingConfigForResponse(p.Config, p.envResponseVisible)
+	out.Config = redactPendingConfigForResponse(p.Config, p.envResponseVisible, p.githubTokenInstallationOnly)
 	return json.Marshal(out)
 }
 
@@ -205,7 +216,7 @@ func UnmarshalPendingConfigFromStorage(raw string) (*AgentPendingConfig, error) 
 // escape redaction. A value that is not the expected JSON shape is dropped
 // when it could hold a redacted value, so a malformed stored value fails
 // closed.
-func redactPendingConfigForResponse(cfg map[string]json.RawMessage, canAttach bool) map[string]json.RawMessage {
+func redactPendingConfigForResponse(cfg map[string]json.RawMessage, canAttach, installationOnly bool) map[string]json.RawMessage {
 	if cfg == nil {
 		return nil
 	}
@@ -226,7 +237,7 @@ func redactPendingConfigForResponse(cfg map[string]json.RawMessage, canAttach bo
 				continue
 			}
 			for ek := range env {
-				if api.IsBlockedInstallationGitHubEnvKey(ek) {
+				if isRedactedResponseEnvKey(ek, installationOnly) {
 					delete(env, ek)
 				}
 			}

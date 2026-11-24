@@ -172,6 +172,69 @@ func TestStartTemplateEnv_GitHubTokenInstallationOnlyBlocksTemplateFallbackEnv(t
 	}
 }
 
+// TestStartTemplateEnv_GitHubTokenInstallationOnlyFiltersRunConfigFallbackEnv
+// verifies O2 layer 1 independently: templateFallbackEnv strips blocked GitHub
+// keys before constructing RunConfig.FallbackEnv (removing that delete fails
+// this test even while SuppressedFallbackKeys remains populated).
+func TestStartTemplateEnv_GitHubTokenInstallationOnlyFiltersRunConfigFallbackEnv(t *testing.T) {
+	project := templateEnvStart{tplEnv: map[string]string{
+		"GH_TOKEN":                "ghp_template_pat",
+		"GITHUB_TOKEN":            "ghp_template_pat2",
+		"GH_ENTERPRISE_TOKEN":     "ghp_template_pat3",
+		"GITHUB_ENTERPRISE_TOKEN": "ghp_template_pat4",
+		"SCION_USER_GITHUB_TOKEN": "true",
+		"SAFE_TEMPLATE_KEY":       "template_ok",
+	}}.fixture(t)
+	runCfg, _ := startTemplateEnvRunConfig(t, context.Background(), project, "inst-tpl-fb", func(o *api.StartOptions) {
+		o.GitHubTokenInstallationOnly = true
+	})
+	for _, k := range api.BlockedInstallationGitHubEnvKeys() {
+		if v, ok := runCfg.FallbackEnv[k]; ok {
+			t.Errorf("RunConfig.FallbackEnv[%q] = %q; blocked GitHub key must be stripped before RunConfig", k, v)
+		}
+	}
+	if runCfg.FallbackEnv["SAFE_TEMPLATE_KEY"] != "template_ok" {
+		t.Errorf("RunConfig.FallbackEnv[SAFE_TEMPLATE_KEY] = %q, want template_ok", runCfg.FallbackEnv["SAFE_TEMPLATE_KEY"])
+	}
+}
+
+// TestStartTemplateEnv_GitHubTokenInstallationOnlyPopulatesSuppressedFallbackKeys
+// verifies O2 layer 2 independently: RunConfig.SuppressedFallbackKeys contains
+// every blocked GitHub key, and runtime.FallbackEnvEntries suppresses all of
+// them even if a raw fallback map still contained them (removing the
+// SuppressedFallbackKeys addition in run.go fails this test even while
+// templateFallbackEnv remains filtered).
+func TestStartTemplateEnv_GitHubTokenInstallationOnlyPopulatesSuppressedFallbackKeys(t *testing.T) {
+	project := templateEnvStart{tplEnv: map[string]string{
+		"SAFE_TEMPLATE_KEY": "template_ok",
+	}}.fixture(t)
+	runCfg, _ := startTemplateEnvRunConfig(t, context.Background(), project, "inst-tpl-supp", func(o *api.StartOptions) {
+		o.GitHubTokenInstallationOnly = true
+	})
+
+	suppSet := make(map[string]bool, len(runCfg.SuppressedFallbackKeys))
+	for _, k := range runCfg.SuppressedFallbackKeys {
+		suppSet[k] = true
+	}
+	rawFallback := map[string]string{"SAFE_TEMPLATE_KEY": "template_ok"}
+	for _, k := range api.BlockedInstallationGitHubEnvKeys() {
+		if !suppSet[k] {
+			t.Errorf("RunConfig.SuppressedFallbackKeys missing blocked GitHub key %q", k)
+		}
+		rawFallback[k] = "ghp_raw_fallback"
+	}
+
+	entries := envSliceToMap(runtime.FallbackEnvEntries(rawFallback, runCfg.SuppressedFallbackKeys, nil))
+	for _, k := range api.BlockedInstallationGitHubEnvKeys() {
+		if v, ok := entries[k]; ok {
+			t.Errorf("FallbackEnvEntries emitted suppressed key %s=%q", k, v)
+		}
+	}
+	if entries["SAFE_TEMPLATE_KEY"] != "template_ok" {
+		t.Errorf("FallbackEnvEntries[SAFE_TEMPLATE_KEY] = %q, want template_ok", entries["SAFE_TEMPLATE_KEY"])
+	}
+}
+
 // TestStart_GitHubTokenInstallationOnlyRefusesHubEndpointHostEnvExpansion
 // verifies R1 (lifted from p1c4b-review-2 probe): a ${GITHUB_TOKEN} reference
 // in inline config SCION_HUB_ENDPOINT must not expand the broker host's

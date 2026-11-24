@@ -571,25 +571,30 @@ func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateI
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	for _, secretVal := range []string{"ghp_secret_1", "ghp_secret_2", "ghp_secret_3", "ghp_secret_4"} {
-		assert.NotContains(t, rec.Body.String(), secretVal, "GET must hide all blocked GitHub token keys")
-	}
+	assert.NotContains(t, rec.Body.String(), "ghp_secret_1", "GET must hide GITHUB_TOKEN for every agent")
 
-	// Separately assert that GET also hides SCION_USER_GITHUB_TOKEN when present
-	// in AppliedConfig.Env (not patched, since SCION_* keys are reserved on PATCH).
+	// For an installation-only agent, GET must hide all blocked GitHub token keys
+	// including SCION_USER_GITHUB_TOKEN.
 	hiddenAgent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.ID = api.NewUUID()
 		a.Slug = "hidden-scion-user-gh-token"
 		a.Name = "hidden-scion-user-gh-token"
 		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
 		a.AppliedConfig.Env = map[string]string{
+			"GITHUB_TOKEN":            "ghp_inst_1",
+			"GH_TOKEN":                "ghp_inst_2",
+			"GH_ENTERPRISE_TOKEN":     "ghp_inst_3",
+			"GITHUB_ENTERPRISE_TOKEN": "ghp_inst_4",
 			"SCION_USER_GITHUB_TOKEN": "scion_user_gh_hidden",
 			"FOO":                     "bar",
 		}
 	})
 	recHidden := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+hiddenAgent.ID, nil)
 	require.Equal(t, http.StatusOK, recHidden.Code, recHidden.Body.String())
-	assert.NotContains(t, recHidden.Body.String(), "scion_user_gh_hidden", "GET must hide SCION_USER_GITHUB_TOKEN")
+	for _, secretVal := range []string{"ghp_inst_1", "ghp_inst_2", "ghp_inst_3", "ghp_inst_4", "scion_user_gh_hidden"} {
+		assert.NotContains(t, recHidden.Body.String(), secretVal, "GET must hide all blocked GitHub token keys for installation-only agents")
+	}
 
 	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"env": map[string]interface{}{"FOO": "bar"},
@@ -691,4 +696,199 @@ func TestFilterInstallationEnvGatherKeys_OnlyBlockedKeysBecomesEmpty(t *testing.
 		},
 	}
 	assert.Equal(t, []string{"GITHUB_TOKEN", "GH_TOKEN"}, filterInstallationEnvGatherKeys(normalAg, []string{"GITHUB_TOKEN", "GH_TOKEN"}))
+}
+
+// TestEditEcho_NonInstallationKeepsUserTypedGHTokenAndInstallationHidesIt
+// verifies Review-3 R1 (option b, lifted from review3_gh_edit_echo_probe_test.go):
+//   - For default ("") and "user_preferred" agents, GET keeps user-typed
+//     GH_TOKEN and GH_ENTERPRISE_TOKEN visible (while still hiding GITHUB_TOKEN),
+//     so a web Edit page GET-then-echo-with-one-edit PATCH preserves them in live
+//     AppliedConfig.Env and InlineConfig.Env, records no env.GH_* in
+//     InlineConfig.ClearedFields, and emits no "removed GH_*" warning.
+//   - For an "installation" agent, GET hides all blocked GitHub token keys.
+func TestEditEcho_NonInstallationKeepsUserTypedGHTokenAndInstallationHidesIt(t *testing.T) {
+	for _, pref := range []string{"", DispatchAgentGitHubTokenUserPreferred} {
+		name := "default"
+		if pref != "" {
+			name = pref
+		}
+		t.Run("non_installation_"+name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			env := func() map[string]string {
+				return map[string]string{
+					"GITHUB_TOKEN":        "ghp_root_hidden",
+					"GH_TOKEN":            "ghp_user_typed",
+					"GH_ENTERPRISE_TOKEN": "ghe_user_typed",
+					"FOO":                 "bar",
+				}
+			}
+			ag := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Phase = string(state.PhaseCreated)
+				a.AppliedConfig.GitHubTokenPreference = pref
+				a.AppliedConfig.Env = env()
+				a.AppliedConfig.InlineConfig = &api.ScionConfig{Env: env()}
+				a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+					InlineConfig: &api.ScionConfig{Env: env()},
+				}
+			})
+
+			rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+ag.ID, nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "ghp_root_hidden", "GET must still hide GITHUB_TOKEN")
+
+			var got struct {
+				AppliedConfig struct {
+					Env map[string]string `json:"env"`
+				} `json:"appliedConfig"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			assert.Equal(t, "ghp_user_typed", got.AppliedConfig.Env["GH_TOKEN"])
+			assert.Equal(t, "ghe_user_typed", got.AppliedConfig.Env["GH_ENTERPRISE_TOKEN"])
+
+			echo := map[string]interface{}{}
+			for k, v := range got.AppliedConfig.Env {
+				echo[k] = v
+			}
+			echo["NEW"] = "1"
+			rec = patchAgentConfig(t, srv, ag.ID, map[string]interface{}{"env": echo})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			var patchResp struct {
+				Warnings []string `json:"warnings"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &patchResp))
+			for _, w := range patchResp.Warnings {
+				assert.NotContains(t, w, "GH_TOKEN", "must not emit removed GH_TOKEN warning")
+				assert.NotContains(t, w, "GH_ENTERPRISE_TOKEN", "must not emit removed GH_ENTERPRISE_TOKEN warning")
+			}
+
+			updated, err := s.GetAgent(ctx, ag.ID)
+			require.NoError(t, err)
+			for _, k := range []string{"GH_TOKEN", "GH_ENTERPRISE_TOKEN"} {
+				assert.NotEmpty(t, updated.AppliedConfig.Env[k], "live AppliedConfig.Env[%s] must survive echo PATCH", k)
+				require.NotNil(t, updated.AppliedConfig.InlineConfig)
+				assert.NotEmpty(t, updated.AppliedConfig.InlineConfig.Env[k], "live InlineConfig.Env[%s] must survive echo PATCH", k)
+				require.NotNil(t, updated.AppliedConfig.CreateInputs)
+				require.NotNil(t, updated.AppliedConfig.CreateInputs.InlineConfig)
+				assert.NotEmpty(t, updated.AppliedConfig.CreateInputs.InlineConfig.Env[k], "CreateInputs.InlineConfig.Env[%s] must survive echo PATCH", k)
+			}
+			assert.Equal(t, "1", updated.AppliedConfig.Env["NEW"])
+			if updated.AppliedConfig.InlineConfig != nil {
+				for _, c := range updated.AppliedConfig.InlineConfig.ClearedFields {
+					assert.NotEqual(t, "env.GH_TOKEN", c)
+					assert.NotEqual(t, "env.GH_ENTERPRISE_TOKEN", c)
+				}
+			}
+		})
+	}
+
+	t.Run("installation_only_get_hides_all_blocked_keys", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+		env := map[string]string{
+			"GITHUB_TOKEN":            "ghp_inst_1",
+			"GH_TOKEN":                "ghp_inst_2",
+			"GH_ENTERPRISE_TOKEN":     "ghp_inst_3",
+			"GITHUB_ENTERPRISE_TOKEN": "ghp_inst_4",
+			"SCION_USER_GITHUB_TOKEN": "scion_inst_5",
+			"FOO":                     "bar",
+		}
+		ag := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+			a.Phase = string(state.PhaseCreated)
+			a.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
+			a.AppliedConfig.Env = env
+			a.AppliedConfig.InlineConfig = &api.ScionConfig{Env: env}
+		})
+
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+ag.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		for _, v := range []string{"ghp_inst_1", "ghp_inst_2", "ghp_inst_3", "ghp_inst_4", "scion_inst_5"} {
+			assert.NotContains(t, rec.Body.String(), v, "installation-only GET must hide all blocked GitHub token keys")
+		}
+		assert.Contains(t, rec.Body.String(), "bar")
+	})
+}
+
+type finalizeStillMissingDispatcher struct {
+	runIntentDispatcher
+	reqs *RemoteEnvRequirementsResponse
+}
+
+func (d *finalizeStillMissingDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	return nil, &ErrEnvStillMissing{Requirements: d.reqs}
+}
+
+// TestFinalizeEnv_InstallationOnlyFiltersAndFailsClosedOnBlockedOnlyNeeds
+// verifies Review-3 O1: the finalize-env "still missing" path filters blocked
+// GitHub keys from MissingEnvVars (message, details.missingKeys, and
+// envGather.needs) and fails closed with ErrBrokerRequestedBlockedGitHubEnv
+// (HTTP 502) when the filtered list is empty.
+func TestFinalizeEnv_InstallationOnlyFiltersAndFailsClosedOnBlockedOnlyNeeds(t *testing.T) {
+	setupAgent := func(t *testing.T, srv *Server, s store.Store, suffix string) *store.Agent {
+		t.Helper()
+		ctx := context.Background()
+		proj := &store.Project{ID: tid("fin-o1-proj-" + suffix), Name: "fin-o1-" + suffix, Slug: "fin-o1-" + suffix}
+		require.NoError(t, s.CreateProject(ctx, proj))
+		broker := &store.RuntimeBroker{
+			ID:           tid("fin-o1-broker-" + suffix),
+			Name:         "fin-o1-broker-" + suffix,
+			Slug:         "fin-o1-broker-" + suffix,
+			Endpoint:     "http://localhost:9803",
+			Status:       store.BrokerStatusOnline,
+			Capabilities: &store.BrokerCapabilities{GitHubTokenInstallationOnly: true},
+		}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+		ag := &store.Agent{
+			ID:              api.NewUUID(),
+			Name:            "fin-o1-" + suffix,
+			Slug:            "fin-o1-" + suffix,
+			ProjectID:       proj.ID,
+			RuntimeBrokerID: broker.ID,
+			Phase:           string(state.PhaseProvisioning),
+			AppliedConfig: &store.AgentAppliedConfig{
+				GitHubTokenPreference: DispatchAgentGitHubTokenInstallation,
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		return ag
+	}
+
+	t.Run("only_blocked_keys_fails_closed_502", func(t *testing.T) {
+		srv, s := testServer(t)
+		srv.SetDispatcher(&finalizeStillMissingDispatcher{
+			reqs: &RemoteEnvRequirementsResponse{
+				Required: []string{"GITHUB_TOKEN", "GH_TOKEN"},
+				Needs:    []string{"GITHUB_TOKEN", "GH_TOKEN"},
+			},
+		})
+		ag := setupAgent(t, srv, s, "blocked")
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+ag.ID+"/env", map[string]any{
+			"env": map[string]string{"OTHER": "1"},
+		})
+		require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrBrokerRequestedBlockedGitHubEnv.Error())
+	})
+
+	t.Run("mixed_keys_filters_blocked_from_message_and_details", func(t *testing.T) {
+		srv, s := testServer(t)
+		srv.SetDispatcher(&finalizeStillMissingDispatcher{
+			reqs: &RemoteEnvRequirementsResponse{
+				Required: []string{"GITHUB_TOKEN", "OTHER_REQUIRED_KEY"},
+				Needs:    []string{"GITHUB_TOKEN", "OTHER_REQUIRED_KEY"},
+			},
+		})
+		ag := setupAgent(t, srv, s, "mixed")
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+ag.ID+"/env", map[string]any{
+			"env": map[string]string{"OTHER": "1"},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "OTHER_REQUIRED_KEY")
+		assert.NotContains(t, rec.Body.String(), "GITHUB_TOKEN")
+	})
 }
