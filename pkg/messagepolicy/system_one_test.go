@@ -610,3 +610,92 @@ func TestEvaluatePolicy_BinaryOnlyOnBinaryOnlyAdapterAndStaticClosedChoice(t *te
 	assert.Equal(t, messagepolicy.ClassViolation, clsChoice.Class)
 	assert.Equal(t, "out_of_scope", clsChoice.Judgments.Labels["topic"])
 }
+
+func TestValidateAuthoring_CELOnlyRejectsSystemOneFailureReasons(t *testing.T) {
+	ctx := context.Background()
+	ev, _ := newTestEvaluatorWithSystemOne(t, nil, func(context.Context, provider.Transport, provider.InstanceView, provider.ModelRequest) (provider.ModelResult, error) {
+		t.Fatal("authoring must never invoke provider")
+		return provider.ModelResult{}, nil
+	})
+
+	for _, badKey := range []string{string(provider.FailCapacity), string(provider.FailNoEligibleInstance), systemone.ReasonDialectDisabled} {
+		t.Run("cel_only_rejects_"+badKey, func(t *testing.T) {
+			sp := messagepolicy.AuthoringSpec{
+				Name:            "cel-only-bad-reason",
+				Scope:           messagepolicy.Scope{Surfaces: []string{messagepolicy.SurfaceAgentToUser}},
+				ViolationRule:   `!message.has_choices`,
+				OnFailed:        messagepolicy.OutcomeAdmit,
+				OnFailedReasons: map[string]string{badKey: messagepolicy.OutcomeReject},
+			}
+			_, err := ev.ValidateAuthoring(ctx, sp)
+			require.Error(t, err)
+			var ve *messagepolicy.ValidationError
+			require.ErrorAs(t, err, &ve)
+			assert.Equal(t, messagepolicy.ErrCodeValidation, ve.Code)
+			assert.Equal(t, "on_failed_reasons", ve.Field)
+		})
+	}
+}
+
+func TestEvaluatePolicy_DialectDisabledRealCompilePath(t *testing.T) {
+	ctx := context.Background()
+	var providerCalls atomic.Int32
+	var enabled atomic.Bool
+	enabled.Store(false)
+
+	ev, _ := newTestEvaluatorWithSystemOne(t, enabled.Load, func(context.Context, provider.Transport, provider.InstanceView, provider.ModelRequest) (provider.ModelResult, error) {
+		providerCalls.Add(1)
+		t.Fatal("disabled dialect must make 0 provider calls")
+		return provider.ModelResult{}, nil
+	})
+
+	const s1Rule = `{
+		"dialect": "system_one",
+		"inputs": ["message.body"],
+		"spec": {
+			"version": 1,
+			"binding": {"instance": "mp-inst"},
+			"questions": [{"id": "asks_choice", "type": "binary", "instructions": "Asks choice?"}]
+		}
+	}`
+
+	// Authoring still returns unsupported_dialect when disabled.
+	_, authErr := ev.ValidateAuthoring(ctx, messagepolicy.AuthoringSpec{
+		Name:            "disabled-author",
+		Scope:           messagepolicy.Scope{Surfaces: []string{messagepolicy.SurfaceAgentToUser}},
+		ViolationRule:   `judgment_flags.asks_choice`,
+		SystemOneRule:   s1Rule,
+		OnUncertain:     messagepolicy.OutcomeReject,
+		OnFailed:        messagepolicy.OutcomeAdmit,
+		OnFailedReasons: map[string]string{systemone.ReasonDialectDisabled: messagepolicy.OutcomeReject},
+	})
+	require.Error(t, authErr)
+	var ve *messagepolicy.ValidationError
+	require.ErrorAs(t, authErr, &ve)
+	assert.Equal(t, messagepolicy.ErrCodeUnsupportedDialect, ve.Code)
+
+	// Real gate evaluation path (no forged handle): returns ClassFailed,
+	// Reason="dialect_disabled", AdmissionError=false, and ResolveOutcome respects
+	// on_failed_reasons["dialect_disabled"] = reject over on_failed = admit.
+	facts := messagepolicy.Facts{
+		Surface: messagepolicy.SurfaceAgentToUser,
+		Message: messagepolicy.MessageFacts{Body: "Pick A or B?"},
+	}
+	cls := ev.EvaluatePolicy(
+		ctx, "pol-disabled-real", 1,
+		`judgment_flags.asks_choice`,
+		s1Rule, "proj-1", facts,
+		nil, []messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(time.Second)},
+	)
+	assert.Equal(t, messagepolicy.ClassFailed, cls.Class)
+	assert.Equal(t, systemone.ReasonDialectDisabled, cls.Reason)
+	assert.False(t, cls.AdmissionError, "disabled dialect must not be flagged as a server admission error")
+	outcome := messagepolicy.ResolveOutcome(
+		cls.Class, cls.Reason,
+		messagepolicy.OutcomeReject,
+		messagepolicy.OutcomeAdmit,
+		map[string]string{systemone.ReasonDialectDisabled: messagepolicy.OutcomeReject},
+	)
+	assert.Equal(t, messagepolicy.OutcomeReject, outcome)
+	assert.Zero(t, providerCalls.Load(), "disabled dialect must make 0 provider calls")
+}

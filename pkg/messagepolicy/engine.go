@@ -106,6 +106,22 @@ func (e *Evaluator) EvaluateSystemOne(
 	cfg := applyEvalOpts(opts)
 	compiled, err := e.CompileSystemOne(ctx, rawRule)
 	if err != nil {
+		// When hub.system_one is turned off after a policy was authored,
+		// Dialect.Compile returns UnsupportedDialectError{Reason: unknown_dialect}
+		// even though the dialect is registered and admitted for message_policy.
+		// Surface that as FailedError{Reason: dialect_disabled} (without
+		// AdmissionError) so on_failed_reasons["dialect_disabled"] is reachable
+		// on the real evaluation path while authoring stays 400 unsupported_dialect.
+		var unsup *ruleengine.UnsupportedDialectError
+		if errors.As(err, &unsup) &&
+			unsup.Dialect == systemone.DialectName &&
+			unsup.Reason == ruleengine.ReasonUnknownDialect &&
+			e.engine.Supports(ConsumerName, systemone.DialectName) {
+			return nil, ClassifyError(&ruleengine.FailedError{
+				Reason: systemone.ReasonDialectDisabled,
+				Cause:  err,
+			})
+		}
 		return nil, ClassifyError(err)
 	}
 	dec, err := e.engine.Evaluate(ctx, compiled, ruleengine.Input{

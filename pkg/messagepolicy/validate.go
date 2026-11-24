@@ -139,8 +139,10 @@ func IsCanonicalSlug(s string) bool {
 	return !prevHyphen
 }
 
-var knownFailureReasons = func() []string {
-	base := []string{
+// knownCELFailureReasons is the M1 closed failure-reason set accepted by
+// on_failed_reasons for CEL-only policies (strict M1 parity).
+var knownCELFailureReasons = func() []string {
+	out := []string{
 		celengine.ReasonCanceled,
 		celengine.ReasonCostLimit,
 		celengine.ReasonMissingInput,
@@ -160,15 +162,29 @@ var knownFailureReasons = func() []string {
 		ruleengine.ReasonEmptyConsumer,
 		ruleengine.ReasonIONotAllowed,
 		ruleengine.ReasonUnknownDialect,
-		systemone.ReasonDialectDisabled,
 	}
-	seen := make(map[string]struct{}, len(base)+len(provider.AllFailReasons()))
-	out := make([]string, 0, len(base)+len(provider.AllFailReasons()))
-	for _, r := range base {
-		if _, dup := seen[r]; !dup {
-			seen[r] = struct{}{}
-			out = append(out, r)
-		}
+	slices.Sort(out)
+	return out
+}()
+
+var knownCELFailureReasonSet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(knownCELFailureReasons))
+	for _, r := range knownCELFailureReasons {
+		m[r] = struct{}{}
+	}
+	return m
+}()
+
+var knownFailureReasons = func() []string {
+	seen := make(map[string]struct{}, len(knownCELFailureReasons)+len(provider.AllFailReasons())+1)
+	out := make([]string, 0, len(knownCELFailureReasons)+len(provider.AllFailReasons())+1)
+	for _, r := range knownCELFailureReasons {
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	if _, dup := seen[systemone.ReasonDialectDisabled]; !dup {
+		seen[systemone.ReasonDialectDisabled] = struct{}{}
+		out = append(out, systemone.ReasonDialectDisabled)
 	}
 	for _, fr := range provider.AllFailReasons() {
 		r := string(fr)
@@ -190,18 +206,34 @@ var knownFailureReasonSet = func() map[string]struct{} {
 }()
 
 // KnownFailureReasons returns a sorted copy of the closed failure-reason set
-// accepted by on_failed_reasons in M1 (CEL evaluation, ruleengine program and
-// consumer admission, and message_policy consumer failure reasons; consumer
+// accepted by on_failed_reasons for CEL-only policies (M1 parity; consumer
 // design §5.3).
 func KnownFailureReasons() []string {
+	out := slices.Clone(knownCELFailureReasons)
+	slices.Sort(out)
+	return out
+}
+
+// KnownSystemOneFailureReasons returns a sorted copy of the closed
+// failure-reason set accepted by on_failed_reasons when system_one_rule is set
+// (CEL + System One provider failure reasons + dialect_disabled).
+func KnownSystemOneFailureReasons() []string {
 	out := slices.Clone(knownFailureReasons)
 	slices.Sort(out)
 	return out
 }
 
-// IsValidFailureReason reports whether reason belongs to the closed M1 failure
-// reason set accepted as an on_failed_reasons key.
+// IsValidFailureReason reports whether reason belongs to the closed M1 CEL-only
+// failure reason set accepted as an on_failed_reasons key.
 func IsValidFailureReason(reason string) bool {
+	_, ok := knownCELFailureReasonSet[reason]
+	return ok
+}
+
+// IsValidSystemOneFailureReason reports whether reason belongs to the closed
+// System One failure reason set (CEL + System One provider reasons +
+// dialect_disabled).
+func IsValidSystemOneFailureReason(reason string) bool {
 	_, ok := knownFailureReasonSet[reason]
 	return ok
 }
@@ -357,7 +389,11 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 	}
 	for _, reason := range slices.Sorted(maps.Keys(spec.OnFailedReasons)) {
 		outcome := spec.OnFailedReasons[reason]
-		if !IsValidFailureReason(reason) {
+		validReason := IsValidFailureReason(reason)
+		if hasSystemOne {
+			validReason = IsValidSystemOneFailureReason(reason)
+		}
+		if !validReason {
 			return "", &ValidationError{
 				Code:    ErrCodeValidation,
 				Field:   "on_failed_reasons",
