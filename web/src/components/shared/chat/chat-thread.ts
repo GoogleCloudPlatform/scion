@@ -2885,7 +2885,7 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
-   * Handle sender-only auto-resume progress SSE events (`user.<id>.chat.send-progress`,
+   * Handle sender-only auto-resume progress SSE events (`user.<id>.send-progress`,
    * ptone/scion#9015) to step an in-flight optimistic bubble through
    * `Resuming agent…` -> `Sending…` before `Accepted` arrives.
    */
@@ -3072,7 +3072,15 @@ export class ScionChatThread extends LitElement {
 
       // If we have a pending optimistic message and this SSE event is from us,
       // remove the temp-keyed optimistic entry to prevent a duplicate flash.
+      // Exception (ptone/scion#9015 M2): a pre-dispatch `pending` self-echo
+      // arrives at persist time for co-members and the sender's other tabs;
+      // keep the optimistic bubble on the sender's own tab so mid-dispatch
+      // `send-progress` events (`resuming` -> `sending`) still target it until
+      // the settled echo or HTTP 201 arrives.
       if (this._pendingIdempotencyKeys.size > 0 && msg.senderId === this.selfUserId()) {
+        if (msg.dispatchState === 'pending') {
+          return;
+        }
         for (const key of this._pendingIdempotencyKeys) {
           const opt = this.messageMap.get(key);
           if (opt) {

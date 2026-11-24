@@ -1283,7 +1283,7 @@ const (
 	ChatSendProgressSending  = "sending"
 )
 
-// ChatSendProgressEvent is published on user.<userID>.chat.send-progress while
+// ChatSendProgressEvent is published on user.<userID>.send-progress while
 // a chat send is auto-resuming a suspended agent before broker dispatch.
 type ChatSendProgressEvent struct {
 	ConversationKey string `json:"conversationKey"`
@@ -1292,12 +1292,14 @@ type ChatSendProgressEvent struct {
 }
 
 // PublishChatSendProgress publishes a transient auto-resume progress update to
-// the sending user only, on user.<userID>.chat.send-progress.
+// the sending user only, on user.<userID>.send-progress (outside user.<id>.chat.>
+// so older web bundles that subscribe only to user.<id>.chat.> ignore it without
+// triggering extra refetches).
 func (p *eventBuilder) PublishChatSendProgress(_ context.Context, userID string, evt ChatSendProgressEvent) {
 	if userID == "" || evt.IdempotencyKey == "" || evt.Stage == "" {
 		return
 	}
-	p.sink("user."+userID+".chat.send-progress", evt)
+	p.sink("user."+userID+".send-progress", evt)
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

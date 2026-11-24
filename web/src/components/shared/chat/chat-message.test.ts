@@ -1592,6 +1592,19 @@ describe('scion-chat-message delivery state', () => {
     expect(pendingState?.querySelector('sl-icon')?.getAttribute('name')).toBe('clock');
   });
 
+  // ptone/scion#9015 (M2): co-members receive the pre-dispatch pending echo so
+  // the message appears promptly, but someone else's message (fromAgent=true
+  // in v2) must never render a visible "Sending…" status.
+  it('does not render dispatchState=pending on another member message', async () => {
+    const el = await mountOutbound({
+      fromAgent: true,
+      senderIsAgent: false,
+      sender: 'user:alice@example.com',
+      dispatchState: 'pending',
+    });
+    expect(deliveryState(el)).toBeNull();
+  });
+
   // ptone/scion#9015: once the broker confirms session injection succeeded,
   // the receipt moves to "Delivered", and "Seen" still takes precedence once read.
   it('shows "Delivered" for dispatchState=delivered and "Seen" when read', async () => {

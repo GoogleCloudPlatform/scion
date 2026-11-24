@@ -2009,6 +2009,254 @@ describe('scion-chat-thread dispatch state from send response', () => {
     expect(internals.messageMap.get('msg-old-hub-1')?.dispatchState).toBe('dispatched');
   });
 
+  // ptone/scion#9015 (M2): the hub publishes a pre-dispatch `pending` echo at
+  // persist time so co-members and the sender's other tabs see the message
+  // promptly. The sender's own tab must ignore that `pending` self-echo while
+  // its optimistic bubble is still in flight so mid-dispatch `send-progress`
+  // events still reach it, then replace it when the settled echo arrives.
+  it('keeps sender optimistic bubble on pending self-echo through resuming/sending until settled echo arrives', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    el.agentMembers = [
+      {
+        id: 'agent-running-m2',
+        name: 'coder',
+        slug: 'coder',
+        phase: 'running',
+      },
+    ];
+    el.defaultAgent = 'agent-running-m2';
+    await el.updateComplete;
+
+    let resolveSend!: (r: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      _pendingIdempotencyKeys: Set<string>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello mid-dispatch',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    const idemKey = Array.from(internals._pendingIdempotencyKeys)[0]!;
+    expect(idemKey).toBeTruthy();
+    expect(internals.messageMap.get(idemKey)?.dispatchState).toBe('pending');
+
+    // Pre-dispatch `pending` self-echo arrives at persist time: sender's own tab
+    // must keep its optimistic bubble keyed by idempotencyKey and not duplicate.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'msg-m2-own-1',
+            threadId: el.conversationKey,
+            sender: 'user:me@example.com',
+            senderId: 'user-me',
+            recipient: 'agent:coder',
+            msg: 'hello mid-dispatch',
+            type: 'chat',
+            dispatchState: 'pending',
+            createdAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+    expect(internals._pendingIdempotencyKeys.has(idemKey)).toBe(true);
+    expect(internals.messageMap.has(idemKey)).toBe(true);
+    expect(internals.messageMap.has('msg-m2-own-1')).toBe(false);
+
+    // Mid-dispatch auto-resume progress events still reach the optimistic bubble.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-send-progress', {
+        detail: {
+          data: {
+            conversationKey: el.conversationKey,
+            idempotencyKey: idemKey,
+            stage: 'resuming',
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get(idemKey)?.dispatchState).toBe('resuming');
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-send-progress', {
+        detail: {
+          data: {
+            conversationKey: el.conversationKey,
+            idempotencyKey: idemKey,
+            stage: 'sending',
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get(idemKey)?.dispatchState).toBe('pending');
+
+    // Settled SSE echo replaces the optimistic bubble with the server message.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'msg-m2-own-1',
+            threadId: el.conversationKey,
+            sender: 'user:me@example.com',
+            senderId: 'user-me',
+            recipient: 'agent:coder',
+            msg: 'hello mid-dispatch',
+            type: 'chat',
+            dispatchState: 'dispatched',
+            createdAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+    expect(internals._pendingIdempotencyKeys.has(idemKey)).toBe(false);
+    expect(internals.messageMap.has(idemKey)).toBe(false);
+    expect(internals.messageMap.get('msg-m2-own-1')?.dispatchState).toBe('dispatched');
+
+    resolveSend({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'msg-m2-own-1', dispatchState: 'dispatched' }),
+    } as unknown as Response);
+    await sendPromise;
+    expect(internals.messageMap.get('msg-m2-own-1')?.dispatchState).toBe('dispatched');
+  });
+
+  // ptone/scion#9015 (M2): the sender's OTHER tab (no pending idempotency key)
+  // and an old-web style subscriber that ingests `pending` under the real ID
+  // both see the message immediately at persist time and transition cleanly to
+  // the settled state (never stuck on Sending).
+  it('shows pending immediately on sender other tab and transitions to settled state (dispatched/delivered/failed)', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    await el.updateComplete;
+
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      _pendingIdempotencyKeys: Set<string>;
+    };
+    expect(internals._pendingIdempotencyKeys.size).toBe(0);
+
+    // Other tab receives pre-dispatch `pending` echo immediately.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'msg-m2-other-tab-1',
+            threadId: el.conversationKey,
+            sender: 'user:me@example.com',
+            senderId: 'user-me',
+            recipient: 'agent:coder',
+            msg: 'from tab A',
+            type: 'chat',
+            dispatchState: 'pending',
+            createdAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get('msg-m2-other-tab-1')?.dispatchState).toBe('pending');
+
+    // Settled `dispatched` echo advances it to Accepted (never stuck on Sending).
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'msg-m2-other-tab-1',
+            threadId: el.conversationKey,
+            sender: 'user:me@example.com',
+            senderId: 'user-me',
+            recipient: 'agent:coder',
+            msg: 'from tab A',
+            type: 'chat',
+            dispatchState: 'dispatched',
+            createdAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get('msg-m2-other-tab-1')?.dispatchState).toBe('dispatched');
+
+    // Broker confirmation advances it to Delivered.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'msg-m2-other-tab-1',
+            threadId: el.conversationKey,
+            sender: 'user:me@example.com',
+            senderId: 'user-me',
+            recipient: 'agent:coder',
+            msg: 'from tab A',
+            type: 'chat',
+            dispatchState: 'delivered',
+            createdAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get('msg-m2-other-tab-1')?.dispatchState).toBe('delivered');
+
+    // Failed settled echo also transitions cleanly from pending -> failed.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'msg-m2-other-tab-fail',
+            threadId: el.conversationKey,
+            sender: 'user:me@example.com',
+            senderId: 'user-me',
+            recipient: 'agent:coder',
+            msg: 'fails on broker',
+            type: 'chat',
+            dispatchState: 'pending',
+            createdAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get('msg-m2-other-tab-fail')?.dispatchState).toBe('pending');
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'msg-m2-other-tab-fail',
+            threadId: el.conversationKey,
+            sender: 'user:me@example.com',
+            senderId: 'user-me',
+            recipient: 'agent:coder',
+            msg: 'fails on broker',
+            type: 'chat',
+            dispatchState: 'failed',
+            dispatchFailureReason: 'broker offline',
+            createdAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+    expect(internals.messageMap.get('msg-m2-other-tab-fail')?.dispatchState).toBe('failed');
+  });
+
   // ptone/scion#9015 (sec1 L2): if a synchronous dispatch timed out after the
   // broker injected and confirmed delivery, the HTTP 201 response can carry a
   // stale "failed" while the DB holds "delivered". Because the store never

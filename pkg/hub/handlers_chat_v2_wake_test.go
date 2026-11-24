@@ -934,6 +934,7 @@ func TestChatV2AutoWake_EmitsResumingThenSendingProgressEvents(t *testing.T) {
 		"progress:resuming",
 		"broker:start",
 		"progress:sending",
+		"publish:pending",
 		"broker:message",
 		"publish:dispatched",
 	}, tl.snapshot(), "progress events and broker dispatch must follow strict order")
@@ -990,8 +991,8 @@ func TestChatV2AutoWake_RunningAgentEmitsNoResumingEvent(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
 
 	assert.Empty(t, recPub.progress, "running agent must not emit send-progress events")
-	assert.Equal(t, []string{"broker:message", "publish:dispatched"}, tl.snapshot(),
-		"PublishUserMessage must still follow broker acceptance")
+	assert.Equal(t, []string{"publish:pending", "broker:message", "publish:dispatched"}, tl.snapshot(),
+		"pre-dispatch pending publish must precede broker call and settled publish must follow broker acceptance")
 }
 
 func TestChatV2AutoWake_SendProgressScopedToSenderOnly(t *testing.T) {
@@ -1004,8 +1005,10 @@ func TestChatV2AutoWake_SendProgressScopedToSenderOnly(t *testing.T) {
 	f.srv.SetEventPublisher(pub)
 	f.markReadySoon()
 
-	senderCh, unsubSender := pub.Subscribe("user." + DevUserID + ".chat.send-progress")
+	senderCh, unsubSender := pub.Subscribe("user." + DevUserID + ".send-progress")
 	defer unsubSender()
+	senderChatCh, unsubSenderChat := pub.Subscribe("user." + DevUserID + ".chat.>")
+	defer unsubSenderChat()
 	projectCh, unsubProject := pub.Subscribe("project." + f.proj.ID + ".>")
 	defer unsubProject()
 	otherCh, unsubOther := pub.Subscribe("user.other-user.>")
@@ -1030,11 +1033,15 @@ collectSender:
 	}
 	assert.Equal(t, []string{ChatSendProgressResuming, ChatSendProgressSending}, senderStages)
 
-	// Confirm no send-progress leaked onto project.> or another user's stream.
+	// Confirm no send-progress leaked onto user.<self>.chat.> (old web),
+	// project.>, or another user's stream.
 	drain := time.After(100 * time.Millisecond)
 drainLoop:
 	for {
 		select {
+		case evt := <-senderChatCh:
+			assert.NotContains(t, evt.Subject, "send-progress",
+				"send-progress must not publish under user.<id>.chat.>")
 		case evt := <-projectCh:
 			assert.NotContains(t, evt.Subject, "send-progress")
 		case evt := <-otherCh:
@@ -1070,11 +1077,215 @@ func TestChatV2AutoWake_MidDispatchSyncAutoWakeEmitsResumingThenSending(t *testi
 	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
 
 	assert.Equal(t, []string{
+		"publish:pending",
 		"broker:message-idle-suspending",
 		"progress:resuming",
 		"broker:start",
 		"progress:sending",
 		"broker:message",
 		"publish:dispatched",
-	}, tl.snapshot(), "mid-dispatch syncAutoWakeHook must emit resuming -> sending before retry and publish")
+	}, tl.snapshot(), "mid-dispatch syncAutoWakeHook must emit resuming -> sending before retry and settled publish")
+}
+
+// TestChatV2Wake_ExplicitWakeEmitsNoProgressEvents pins L3 (kills audit
+// survivor m5): an explicit wake (wake:true on a user-suspended agent) must
+// never emit auto-resume send-progress events, since the web shows "Waking".
+func TestChatV2Wake_ExplicitWakeEmitsNoProgressEvents(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	enableIdleSuspendForWakeTest(t, f.srv)
+	suspendAgentWithReason(t, f.s, f.agent, state.SuspendReasonUser)
+
+	tl := &progressTimeline{}
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	recPub := &progressRecordingPublisher{EventPublisher: pub, timeline: tl}
+	f.srv.SetEventPublisher(recPub)
+	f.srv.SetDispatcher(&progressTimelineDispatcher{
+		wakeTrackingDispatcher: f.disp,
+		timeline:               tl,
+	})
+	f.markReadySoon()
+
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "explicit wake", "wake": true, "idempotency_key": "idem-explicit-wake-1"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+	assert.Empty(t, recPub.progress, "explicit wake must emit no send-progress events")
+	assert.Equal(t, []string{"broker:start", "publish:pending", "broker:message", "publish:dispatched"}, tl.snapshot())
+}
+
+type hookDispatchDispatcher struct {
+	*wakeTrackingDispatcher
+	onDispatch func(ctx context.Context, agent *store.Agent) error
+}
+
+func (d *hookDispatchDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, msg string, interrupt bool, structured *messages.StructuredMessage) error {
+	if d.onDispatch != nil {
+		if err := d.onDispatch(ctx, agent); err != nil {
+			return err
+		}
+	}
+	return d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, msg, interrupt, structured)
+}
+
+// TestChatV2_SettledPublishReReadsDeliveredState pins M1: if the broker
+// confirms delivery synchronously while DispatchAgentMessage is still running,
+// the post-dispatch settled publish must re-read the store and publish
+// "delivered" rather than a stale "dispatched" after "delivered".
+func TestChatV2_SettledPublishReReadsDeliveredState(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+
+	tl := &progressTimeline{}
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	recPub := &progressRecordingPublisher{EventPublisher: pub, timeline: tl}
+	f.srv.SetEventPublisher(recPub)
+	f.srv.SetDispatcher(&hookDispatchDispatcher{
+		wakeTrackingDispatcher: f.disp,
+		onDispatch: func(ctx context.Context, agent *store.Agent) error {
+			msgID := dispatchMessageIDFromContext(ctx)
+			require.NotEmpty(t, msgID)
+			ok := f.srv.applyBrokerMessageDeliveryOutcome(ctx, agent.RuntimeBrokerID, messageDeliveryConfirmation{
+				MessageID: msgID,
+				AgentID:   agent.ID,
+				ProjectID: agent.ProjectID,
+			})
+			require.True(t, ok, "broker delivery confirmation should mark row delivered")
+			return nil
+		},
+	})
+
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "fast broker delivery", "idempotency_key": "idem-m1-delivered"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+	resp := decodeWakeResp(t, rec)
+	assert.Equal(t, store.MessageDispatchDelivered, resp["dispatchState"])
+
+	events := tl.snapshot()
+	require.NotEmpty(t, events)
+	assert.Equal(t, "publish:delivered", events[len(events)-1], "final publish must be delivered, got %v", events)
+	assert.NotContains(t, events, "publish:dispatched", "stale dispatched must never be published after delivered: %v", events)
+}
+
+// TestChatV2_SettledPublishReReadsFailedState pins M1 (failed-wins): if the
+// store already transitioned the row to "failed" before the settled publish
+// runs, the post-dispatch publish must publish "failed", never a stale
+// "dispatched".
+func TestChatV2_SettledPublishReReadsFailedState(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+
+	tl := &progressTimeline{}
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	recPub := &progressRecordingPublisher{EventPublisher: pub, timeline: tl}
+	f.srv.SetEventPublisher(recPub)
+	f.srv.SetDispatcher(&hookDispatchDispatcher{
+		wakeTrackingDispatcher: f.disp,
+		onDispatch: func(ctx context.Context, _ *store.Agent) error {
+			msgID := dispatchMessageIDFromContext(ctx)
+			require.NotEmpty(t, msgID)
+			require.NoError(t, f.srv.markFailed(ctx, msgID, "session closed"))
+			return nil
+		},
+	})
+
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "fast async failure", "idempotency_key": "idem-m1-failed"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+	resp := decodeWakeResp(t, rec)
+	assert.Equal(t, store.MessageDispatchFailed, resp["dispatchState"])
+
+	events := tl.snapshot()
+	require.NotEmpty(t, events)
+	assert.Equal(t, "publish:failed", events[len(events)-1], "final publish must be failed, got %v", events)
+	assert.NotContains(t, events, "publish:dispatched", "stale dispatched must never be published after failed: %v", events)
+}
+
+// TestChatV2_AgentRoutedPublishesPendingAtPersistTimeForCoMembersAndOtherTabs
+// pins M2: co-members and the sender's other tabs receive the message promptly
+// at persist time (with dispatchState="pending") BEFORE the synchronous broker
+// dispatch returns, and receive the settled state ("dispatched") once dispatch
+// finishes.
+func TestChatV2_AgentRoutedPublishesPendingAtPersistTimeForCoMembersAndOtherTabs(t *testing.T) {
+	f := chatWakeSetup(t, string(state.PhaseRunning))
+	coMember := f.memberWithoutLifecycle(t)
+
+	// Record co-member as an existing thread member so fan-out targets them.
+	f.srv.recordThreadMembers(t.Context(), threadMembership{
+		ProjectID: f.proj.ID,
+		ThreadKey: f.topic,
+		UserID:    coMember.ID,
+	})
+
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	f.srv.SetEventPublisher(pub)
+
+	projCh, unsubProj := pub.Subscribe("project." + f.proj.ID + ".chat.message")
+	defer unsubProj()
+	memberCh, unsubMember := pub.Subscribe("user." + coMember.ID + ".chat.message")
+	defer unsubMember()
+
+	inDispatch := make(chan struct{})
+	releaseDispatch := make(chan struct{})
+	f.srv.SetDispatcher(&hookDispatchDispatcher{
+		wakeTrackingDispatcher: f.disp,
+		onDispatch: func(_ context.Context, _ *store.Agent) error {
+			close(inDispatch)
+			<-releaseDispatch
+			return nil
+		},
+	})
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- doRequest(t, f.srv, http.MethodPost, f.path(),
+			map[string]any{"content": "visible while dispatching", "idempotency_key": "idem-m2-prompt"})
+	}()
+
+	// Wait until broker dispatch is blocked in flight.
+	select {
+	case <-inDispatch:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for DispatchAgentMessage")
+	}
+
+	// Both the project chat stream (co-members / sender's other tabs) and the
+	// off-project co-member fan-out stream must receive the pending event BEFORE
+	// dispatch is released.
+	readState := func(ch <-chan Event, label string) UserMessageEvent {
+		t.Helper()
+		select {
+		case evt := <-ch:
+			var payload UserMessageEvent
+			require.NoError(t, json.Unmarshal(evt.Data, &payload))
+			return payload
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s event", label)
+			return UserMessageEvent{}
+		}
+	}
+
+	projPending := readState(projCh, "project pre-dispatch pending")
+	assert.Equal(t, store.MessageDispatchPending, projPending.DispatchState)
+	assert.Equal(t, "visible while dispatching", projPending.Msg)
+
+	memberPending := readState(memberCh, "co-member pre-dispatch pending")
+	assert.Equal(t, store.MessageDispatchPending, memberPending.DispatchState)
+	assert.Equal(t, projPending.ID, memberPending.ID)
+
+	// Release broker dispatch and confirm both streams receive the settled event.
+	close(releaseDispatch)
+	rec := <-done
+	require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+	projSettled := readState(projCh, "project settled")
+	assert.Equal(t, store.MessageDispatchDispatched, projSettled.DispatchState)
+	assert.Equal(t, projPending.ID, projSettled.ID)
+
+	memberSettled := readState(memberCh, "co-member settled")
+	assert.Equal(t, store.MessageDispatchDispatched, memberSettled.DispatchState)
+	assert.Equal(t, projPending.ID, memberSettled.ID)
 }

@@ -116,7 +116,7 @@ describe('StateManager user-scoped chat subjects', () => {
     expect(detail.data).toEqual({ action: 'changed' });
   });
 
-  it('routes user.{id}.chat.send-progress to chat-send-progress, never as a message', () => {
+  it('routes user.{id}.send-progress to chat-send-progress, never as a message', () => {
     const sm = new StateManager();
     const progress = vi.fn();
     const message = vi.fn();
@@ -128,7 +128,7 @@ describe('StateManager user-scoped chat subjects', () => {
       idempotencyKey: 'idem-1',
       stage: 'resuming',
     };
-    emit(sm, 'user.b.chat.send-progress', payload);
+    emit(sm, 'user.b.send-progress', payload);
 
     expect(message).not.toHaveBeenCalled();
     expect(progress).toHaveBeenCalledTimes(1);
@@ -272,6 +272,7 @@ describe('StateManager own chat subject', () => {
       expect(subjects).toContain('user.me.chat.>');
       expect(subjects).toContain('user.me.notification');
       expect(subjects).toContain('user.me.inbox');
+      expect(subjects).toContain('user.me.send-progress');
       expect(subjects).not.toContain('notification.>');
     }
   });
@@ -291,13 +292,14 @@ describe('StateManager profile scope', () => {
   ): string[] =>
     (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(scope);
 
-  it('subscribes to project.>, user.<id>.chat.>, and user.<id>.notification for profile scope', () => {
+  it('subscribes to project.>, user.<id>.chat.>, user.<id>.notification, and user.<id>.send-progress for profile scope', () => {
     const sm = new StateManager();
     expect(subjectsFor(sm, { type: 'profile', userId: 'u-1' })).toEqual([
       'project.>',
       'user.u-1.chat.>',
       'user.u-1.notification',
       'user.u-1.inbox',
+      'user.u-1.send-progress',
     ]);
 
     sm.setCurrentUserId('u-1');
@@ -305,7 +307,7 @@ describe('StateManager profile scope', () => {
     expect(deduped.filter((s) => s === 'user.u-1.chat.>')).toHaveLength(1);
   });
 
-  it('adds user.<id>.chat.> and user.<id>.notification when setCurrentUserId arrives after setScope and dedupes identical scopes', () => {
+  it('adds user.<id>.chat.>, user.<id>.notification, and user.<id>.send-progress when setCurrentUserId arrives after setScope and dedupes identical scopes', () => {
     const sm = new StateManager();
     const connect = vi.fn();
     (sm as unknown as { sseClient: { connect: (s: string[]) => void } }).sseClient.connect =
@@ -322,6 +324,7 @@ describe('StateManager profile scope', () => {
       'user.u-2.chat.>',
       'user.u-2.notification',
       'user.u-2.inbox',
+      'user.u-2.send-progress',
     ]);
 
     sm.setScope({ type: 'profile', userId: 'u-2' });
@@ -330,7 +333,7 @@ describe('StateManager profile scope', () => {
     expect(sm.scopeGeneration).toBe(gen);
   });
 
-  it('reconnects broker scopes with user.<id>.notification once currentUserId is set', () => {
+  it('reconnects broker scopes with user.<id>.notification and user.<id>.send-progress once currentUserId is set', () => {
     const sm = new StateManager();
     const connect = vi.fn();
     (sm as unknown as { sseClient: { connect: (s: string[]) => void } }).sseClient.connect =
@@ -345,6 +348,7 @@ describe('StateManager profile scope', () => {
       'user.u-3.chat.>',
       'user.u-3.notification',
       'user.u-3.inbox',
+      'user.u-3.send-progress',
     ]);
   });
 });
