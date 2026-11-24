@@ -221,15 +221,31 @@ type messagePolicyGateRuntime struct {
 }
 
 type messagePolicyShadowJob struct {
-	policies         []store.MessagePolicy
-	snapshot         h2FactSnapshot
-	facts            messagepolicy.Facts
-	hasFacts         bool
-	activation       messagepolicy.Activation
-	hasActivation    bool
-	factsUnavailable bool
-	droppedCount     int
-	messageID        string
+	policies               []store.MessagePolicy
+	snapshot               h2FactSnapshot
+	facts                  messagepolicy.Facts
+	hasFacts               bool
+	activation             messagepolicy.Activation
+	hasActivation          bool
+	factsUnavailable       bool
+	unmentionedUnavailable bool
+	droppedCount           int
+	messageID              string
+}
+
+func policyUsesUnmentionedAgentSlugs(pol *store.MessagePolicy) bool {
+	return pol != nil &&
+		strings.TrimSpace(pol.SystemOneRule) != "" &&
+		strings.Contains(pol.SystemOneRule, messagepolicy.FieldConversationUnmentionedAgentSlug)
+}
+
+func anyPolicyUsesUnmentionedAgentSlugs(pols []store.MessagePolicy) bool {
+	for i := range pols {
+		if policyUsesUnmentionedAgentSlugs(&pols[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 type h2FactSnapshot struct {
@@ -354,11 +370,13 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 			break
 		}
 	}
+	needUnmentioned := anyPolicyUsesUnmentionedAgentSlugs(job.policies)
 	factsUnavailable := job.factsUnavailable
+	unmentionedUnavailable := job.unmentionedUnavailable
 	facts := job.facts
 	act := job.activation
 	if (!bodyTruncated || hasSystemOne) && !job.hasFacts && !factsUnavailable {
-		builtFacts, _, _, factsErr := s.buildH2MessagePolicyFacts(ctx, job.snapshot, nil, false)
+		builtFacts, _, _, factsErr, unmentionedErr := s.buildH2MessagePolicyFacts(ctx, job.snapshot, nil, false, needUnmentioned)
 		if ctx.Err() != nil {
 			return
 		}
@@ -367,6 +385,9 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 		} else {
 			facts = builtFacts
 			act = messagepolicy.NewActivation(facts)
+		}
+		if unmentionedErr != nil {
+			unmentionedUnavailable = true
 		}
 	}
 	budget := s.messagePolicyGate.makeSendBudget()
@@ -388,7 +409,7 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonBodyTruncated,
 			}
-		case factsUnavailable:
+		case factsUnavailable || (unmentionedUnavailable && policyUsesUnmentionedAgentSlugs(pol)):
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonFactsUnavailable,
@@ -565,15 +586,17 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			break
 		}
 	}
+	needUnmentionedEnforce := anyPolicyUsesUnmentionedAgentSlugs(enforcePols)
 	var (
 		facts              messagepolicy.Facts
 		humanMembers       []chatMemberEntry
 		humanMembersLoaded bool
 		factsErr           error
+		unmentionedErr     error
 		act                messagepolicy.Activation
 	)
 	if !bodyTruncated || hasSystemOneEnforce {
-		facts, humanMembers, humanMembersLoaded, factsErr = s.buildH2MessagePolicyFacts(ctx, snap, nil, false)
+		facts, humanMembers, humanMembersLoaded, factsErr, unmentionedErr = s.buildH2MessagePolicyFacts(ctx, snap, nil, false, needUnmentionedEnforce)
 		if factsErr == nil {
 			act = messagepolicy.NewActivation(facts)
 		}
@@ -597,6 +620,9 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		for i := 0; i < len(enforcePols) && i < store.MaxActiveMatchingMessagePolicies; i++ {
 			pol := &enforcePols[i]
 			if strings.TrimSpace(pol.SystemOneRule) == "" {
+				continue
+			}
+			if unmentionedErr != nil && policyUsesUnmentionedAgentSlugs(pol) {
 				continue
 			}
 			wg.Add(1)
@@ -633,7 +659,7 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonBodyTruncated,
 			}
-		case factsErr != nil:
+		case factsErr != nil || (unmentionedErr != nil && policyUsesUnmentionedAgentSlugs(pol)):
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonFactsUnavailable,
@@ -703,15 +729,17 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		}
 		if len(shadowPols) > 0 {
 			s.recordMessagePolicyShadowCapDrop(snap.projectID, droppedShadow)
+			shadowCanReuseFacts := (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil && (needUnmentionedEnforce || !anyPolicyUsesUnmentionedAgentSlugs(shadowPols))
 			s.enqueueMessagePolicyShadow(messagePolicyShadowJob{
-				policies:         shadowPols,
-				snapshot:         snap,
-				facts:            facts,
-				hasFacts:         (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil,
-				activation:       act,
-				hasActivation:    (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil,
-				factsUnavailable: factsErr != nil,
-				messageID:        "",
+				policies:               shadowPols,
+				snapshot:               snap,
+				facts:                  facts,
+				hasFacts:               shadowCanReuseFacts,
+				activation:             act,
+				hasActivation:          shadowCanReuseFacts,
+				factsUnavailable:       factsErr != nil,
+				unmentionedUnavailable: needUnmentionedEnforce && unmentionedErr != nil,
+				messageID:              "",
 			})
 		}
 
@@ -766,15 +794,17 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 
 	var shadowJob *messagePolicyShadowJob
 	if len(shadowPols) > 0 {
+		shadowCanReuseFacts := (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil && (needUnmentionedEnforce || !anyPolicyUsesUnmentionedAgentSlugs(shadowPols))
 		shadowJob = &messagePolicyShadowJob{
-			policies:         shadowPols,
-			snapshot:         snap,
-			facts:            facts,
-			hasFacts:         (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil,
-			activation:       act,
-			hasActivation:    (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil,
-			factsUnavailable: factsErr != nil,
-			droppedCount:     droppedShadow,
+			policies:               shadowPols,
+			snapshot:               snap,
+			facts:                  facts,
+			hasFacts:               shadowCanReuseFacts,
+			activation:             act,
+			hasActivation:          shadowCanReuseFacts,
+			factsUnavailable:       factsErr != nil,
+			unmentionedUnavailable: needUnmentionedEnforce && unmentionedErr != nil,
+			droppedCount:           droppedShadow,
 		}
 	}
 
@@ -808,15 +838,6 @@ func (s *Server) recordAdmittedH2PolicyDecisions(ctx context.Context, out *h2Pol
 		s.recordMessagePolicyShadowCapDrop(job.snapshot.projectID, job.droppedCount)
 		s.enqueueMessagePolicyShadow(job)
 	}
-}
-
-func (s *Server) evalOneMessagePolicy(
-	ctx context.Context,
-	pol *store.MessagePolicy,
-	act messagepolicy.Activation,
-	budget *ruleengine.BudgetTracker,
-) messagepolicy.Classification {
-	return s.evalOneMessagePolicyWithFacts(ctx, pol, "", messagepolicy.Facts{}, act, budget, s.messagePolicyGate.systemOneSendBudget())
 }
 
 func (s *Server) evalOneMessagePolicyWithFacts(
@@ -961,8 +982,10 @@ func (s *Server) buildH2MessagePolicyFacts(
 	snap h2FactSnapshot,
 	preloadedHumans []chatMemberEntry,
 	humansLoaded bool,
-) (messagepolicy.Facts, []chatMemberEntry, bool, error) {
+	needUnmentioned bool,
+) (messagepolicy.Facts, []chatMemberEntry, bool, error, error) {
 	var factsErr error
+	var unmentionedErr error
 
 	mentionOpts := s.mentionOptions()
 	var (
@@ -1036,11 +1059,11 @@ func (s *Server) buildH2MessagePolicyFacts(
 					userParticipantIDs = append(userParticipantIDs, p.PrincipalID)
 				}
 			}
-			if len(agentParticipantIDs) > 0 && snap.projectID != "" {
+			if needUnmentioned && len(agentParticipantIDs) > 0 && snap.projectID != "" {
 				if !agentsLoaded {
 					agents, err := listAllProjectAgents(ctx, s.store, snap.projectID)
 					if err != nil {
-						factsErr = errors.Join(factsErr, err)
+						unmentionedErr = err
 					} else {
 						projectAgents = agents
 						agentsLoaded = true
@@ -1075,6 +1098,14 @@ func (s *Server) buildH2MessagePolicyFacts(
 		)
 	}
 
+	if unmentionedErr != nil && ctx.Err() == nil {
+		s.messageLog.Warn("message policy gate: unmentioned agent slug lookup failed",
+			"project_id", snap.projectID,
+			"surface", snap.surface,
+			"error", unmentionedErr,
+		)
+	}
+
 	facts := messagepolicy.Facts{
 		Surface: snap.surface,
 		Sender: messagepolicy.SenderFacts{
@@ -1104,7 +1135,7 @@ func (s *Server) buildH2MessagePolicyFacts(
 			UnmentionedAgentSlugs: unmentionedAgentSlugs,
 		},
 	}
-	return facts, humans, humansLoaded, factsErr
+	return facts, humans, humansLoaded, factsErr, unmentionedErr
 }
 
 func renderPolicyRejectReason(pol *store.MessagePolicy, tplData messagepolicy.TemplateData) string {

@@ -508,10 +508,12 @@ func (s *Server) authorizeMessagePolicyManage(w http.ResponseWriter, r *http.Req
 }
 
 // systemOneRuleMayReadProjectSecret reports whether evaluating rawSystemOneRule
-// could resolve a System One instance whose auth reads a project-scoped named
-// secret ("project" or "project_or_hub"). For explicitly bound rules it checks
-// the referenced instance(s); for unbound rules it checks all enabled instances.
-func (s *Server) systemOneRuleMayReadProjectSecret(ctx context.Context, rawSystemOneRule string) (bool, error) {
+// on projectID could resolve a System One instance whose auth reads a
+// project-scoped named secret ("project" or "project_or_hub"). For explicitly
+// bound rules it checks the referenced instance(s); for unbound rules it
+// mirrors Runtime.resolveBinding by checking the project's allowlist ∩ enabled
+// instances (bounded at <=64 entries, with no 200-instance page cap).
+func (s *Server) systemOneRuleMayReadProjectSecret(ctx context.Context, projectID, rawSystemOneRule string) (bool, error) {
 	refs := messagepolicy.ExtractSystemOneRefs(rawSystemOneRule)
 	if len(refs) > 0 {
 		for _, name := range refs {
@@ -528,18 +530,22 @@ func (s *Server) systemOneRuleMayReadProjectSecret(ctx context.Context, rawSyste
 		}
 		return false, nil
 	}
-	enabledTrue := true
-	res, err := s.store.ListSystemOneInstances(ctx, store.SystemOneInstanceFilter{
-		Enabled: &enabledTrue,
-	}, store.ListOptions{
-		Limit:          systemOneInstancesListPageSize,
-		SkipTotalCount: true,
-	})
+	allowed, err := s.store.GetProjectSystemOneInstances(ctx, projectID)
 	if err != nil {
 		return false, err
 	}
-	for i := range res.Items {
-		if probeRequiresProjectSecretRead(&res.Items[i]) {
+	for _, name := range allowed {
+		inst, err := s.store.GetSystemOneInstanceByName(ctx, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return false, err
+		}
+		if !inst.Enabled {
+			continue
+		}
+		if probeRequiresProjectSecretRead(inst) {
 			return true, nil
 		}
 	}
@@ -559,7 +565,7 @@ func (s *Server) authorizeMessagePolicyTestSystemOne(
 	rawSystemOneRule string,
 ) bool {
 	ctx := r.Context()
-	needsProjectSecret, err := s.systemOneRuleMayReadProjectSecret(ctx, rawSystemOneRule)
+	needsProjectSecret, err := s.systemOneRuleMayReadProjectSecret(ctx, project.ID, rawSystemOneRule)
 	if err != nil {
 		writeErrorFromErr(w, err, "System One instance")
 		return false
