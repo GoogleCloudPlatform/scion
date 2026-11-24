@@ -508,7 +508,7 @@ func BenchmarkDecisionsProfileScale(b *testing.B) {
 			b.Run("ListDecisionAnswers_MadeRecent_Page1", func(b *testing.B) {
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					entries, next, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs, f.allKeys, store.ProjectDecisionAnswerFilter{}, "", 20)
+					entries, next, err := f.cs.ListDecisionAnswersForProjects(ctx, f.projectIDs, f.keysByProject, store.ProjectDecisionAnswerFilter{}, "", 20)
 					require.NoError(b, err)
 					require.Len(b, entries, 20)
 					require.NotEmpty(b, next)
@@ -643,7 +643,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 
 			var nextCur string
 			coldRecentP1, medRecentP1 := measureColdAndWarmMedian(t, warmRuns, func() error {
-				recentPage1, nc, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs, f.allKeys, store.ProjectDecisionAnswerFilter{}, "", 20)
+				recentPage1, nc, err := f.cs.ListDecisionAnswersForProjects(ctx, f.projectIDs, f.keysByProject, store.ProjectDecisionAnswerFilter{}, "", 20)
 				if err != nil {
 					return err
 				}
@@ -654,7 +654,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 			})
 
 			coldRecentP2, medRecentP2 := measureColdAndWarmMedian(t, warmRuns, func() error {
-				recentPage2, _, err := f.cs.ListDecisionAnswers(ctx, f.projectIDs, f.allKeys, store.ProjectDecisionAnswerFilter{}, nextCur, 20)
+				recentPage2, _, err := f.cs.ListDecisionAnswersForProjects(ctx, f.projectIDs, f.keysByProject, store.ProjectDecisionAnswerFilter{}, nextCur, 20)
 				if err != nil {
 					return err
 				}

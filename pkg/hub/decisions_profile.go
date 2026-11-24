@@ -1007,7 +1007,13 @@ func (s *Server) finishProfileMadeDecisions(
 		}, nil
 	}
 
-	rawEntries, rawNext, err := s.store.ListDecisionAnswers(ctx, targetProjectIDs, listKeys, filter, pq.cursor, pq.limit)
+	keysByProject := make(map[string][]string, len(targetProjectIDs))
+	for _, k := range listKeys {
+		if pid := set.keyProject[k]; pid != "" {
+			keysByProject[pid] = append(keysByProject[pid], k)
+		}
+	}
+	rawEntries, rawNext, err := s.store.ListDecisionAnswersForProjects(ctx, targetProjectIDs, keysByProject, filter, pq.cursor, pq.limit)
 	if err != nil {
 		return nil, err
 	}

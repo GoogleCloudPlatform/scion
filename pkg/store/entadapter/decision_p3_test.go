@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
@@ -432,20 +433,24 @@ func TestDecisionAnswersP3_Differential(t *testing.T) {
 		pEmpty:     nil,
 	}
 
-	// Differential pagination over ListDecisionAnswers (unfiltered, limit=2 -> many pages across ties and DM-heavy project).
+	// Differential pagination over ListDecisionAnswers and ListDecisionAnswersForProjects.
 	t.Run("ListDecisionAnswers_pagination_unfiltered", func(t *testing.T) {
-		curNew, curOld := "", ""
+		curNew, curProj, curOld := "", "", ""
 		for page := 0; page < 20; page++ {
 			got, nextNew, err := cs.ListDecisionAnswers(ctx, projects, aliceAllKeys, store.ProjectDecisionAnswerFilter{}, curNew, 2)
 			require.NoError(t, err)
+			gotProj, nextProj, err := cs.ListDecisionAnswersForProjects(ctx, projects, aliceKeysByProj, store.ProjectDecisionAnswerFilter{}, curProj, 2)
+			require.NoError(t, err)
 			want, nextOld, err := legacyListDecisionAnswers(ctx, cs, projects, aliceAllKeys, store.ProjectDecisionAnswerFilter{}, curOld, 2)
 			require.NoError(t, err)
-			assertAnswerEntriesEqual(t, want, got, fmt.Sprintf("page %d", page))
-			assert.Equal(t, nextOld, nextNew, "page %d nextCursor", page)
+			assertAnswerEntriesEqual(t, want, got, fmt.Sprintf("flat page %d", page))
+			assertAnswerEntriesEqual(t, want, gotProj, fmt.Sprintf("per-project page %d", page))
+			assert.Equal(t, nextOld, nextNew, "flat page %d nextCursor", page)
+			assert.Equal(t, nextOld, nextProj, "per-project page %d nextCursor", page)
 			if nextNew == "" {
 				break
 			}
-			curNew, curOld = nextNew, nextOld
+			curNew, curProj, curOld = nextNew, nextProj, nextOld
 		}
 	})
 
@@ -566,6 +571,51 @@ func TestDecisionAnswersP3_MultiChunkMerge(t *testing.T) {
 	}
 }
 
+// txPlanRecordingDriver wraps planRecordingDriver so queries executed inside
+// read-only transactions (such as Postgres SET LOCAL jit = off) are also
+// recorded for EXPLAIN inspection.
+type txPlanRecordingDriver struct {
+	*planRecordingDriver
+}
+
+type txPlanRecordingTx struct {
+	dialect.Tx
+	rec *planRecordingDriver
+}
+
+func (t *txPlanRecordingTx) Query(ctx context.Context, query string, args, v any) error {
+	var copied []any
+	if s, ok := args.([]any); ok {
+		copied = append([]any(nil), s...)
+	}
+	t.rec.mu.Lock()
+	t.rec.queries = append(t.rec.queries, recordedQuery{sql: query, args: copied})
+	t.rec.mu.Unlock()
+	return t.Tx.Query(ctx, query, args, v)
+}
+
+func (d *txPlanRecordingDriver) Tx(ctx context.Context) (dialect.Tx, error) {
+	tx, err := d.Driver.Tx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &txPlanRecordingTx{Tx: tx, rec: d.planRecordingDriver}, nil
+}
+
+func (d *txPlanRecordingDriver) BeginTx(ctx context.Context, opts *sql.TxOptions) (dialect.Tx, error) {
+	type txBeginner interface {
+		BeginTx(context.Context, *sql.TxOptions) (dialect.Tx, error)
+	}
+	if b, ok := d.Driver.(txBeginner); ok {
+		tx, err := b.BeginTx(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		return &txPlanRecordingTx{Tx: tx, rec: d.planRecordingDriver}, nil
+	}
+	return d.Tx(ctx)
+}
+
 // TestDecisionAnswersP3_QueryPlans pins that multi-project ListDecisionAnswers
 // (made/recent) and ListDecisionAnswersPerProject (made/project) use the
 // per-project (project_id, created_at) index (and (project_id, asker_agent_id,
@@ -575,18 +625,19 @@ func TestDecisionAnswersP3_QueryPlans(t *testing.T) {
 	ctx := context.Background()
 	base := enttest.NewClient(t)
 	rec := &planRecordingDriver{Driver: base.Driver()}
-	recClient := ent.NewClient(ent.Driver(rec))
+	recClient := ent.NewClient(ent.Driver(&txPlanRecordingDriver{planRecordingDriver: rec}))
 	cs := NewCompositeStore(recClient)
 
 	const numProjects = 5
-	const rowsPerProject = 400
+	const rowsPerProject = 1000
 	projectIDs := make([]string, numProjects)
 	keysByProject := make(map[string][]string, numProjects)
 	allKeys := make([]string, 0, numProjects*2)
 	choices := []messages.Choice{{ID: "yes", Label: "Yes"}}
 	baseTime := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
 	uid := uuid.NewString()
-	var filterAgentID string
+	filterAgentUUID := uuid.New()
+	filterAgentID := filterAgentUUID.String()
 
 	tx, err := base.Tx(ctx)
 	require.NoError(t, err)
@@ -597,10 +648,7 @@ func TestDecisionAnswersP3_QueryPlans(t *testing.T) {
 		k2 := fmt.Sprintf("plan-topic-%d-b", p)
 		keysByProject[pid.String()] = []string{k1, k2}
 		allKeys = append(allKeys, k1, k2)
-		agID := uuid.New()
-		if p == 0 {
-			filterAgentID = agID.String()
-		}
+		otherAgentUUID := uuid.New()
 		decCreates := make([]*ent.DecisionCreate, 0, rowsPerProject)
 		ansCreates := make([]*ent.DecisionAnswerCreate, 0, rowsPerProject)
 		for j := 0; j < rowsPerProject; j++ {
@@ -608,6 +656,10 @@ func TestDecisionAnswersP3_QueryPlans(t *testing.T) {
 			ck := k1
 			if j%2 == 1 {
 				ck = k2
+			}
+			agID := filterAgentUUID
+			if j%2 == 1 {
+				agID = otherAgentUUID
 			}
 			ts := baseTime.Add(time.Duration(p*1000+j) * time.Second)
 			key := fmt.Sprintf("pk-%d-%d", p, j)
@@ -713,6 +765,14 @@ func TestDecisionAnswersP3_QueryPlans(t *testing.T) {
 		}
 	}
 
+	t.Run("ListDecisionAnswersForProjects_made_recent", func(t *testing.T) {
+		assertArmIndexPlan(t, "ListDecisionAnswersForProjects(multi)", "decisionanswer_project_id_created_at", true, func() {
+			got, _, err := cs.ListDecisionAnswersForProjects(ctx, projectIDs, keysByProject, store.ProjectDecisionAnswerFilter{}, "", 20)
+			require.NoError(t, err)
+			require.Len(t, got, 20)
+		})
+	})
+
 	t.Run("ListDecisionAnswers_multi_project_made_recent", func(t *testing.T) {
 		assertArmIndexPlan(t, "ListDecisionAnswers(multi)", "decisionanswer_project_id_created_at", true, func() {
 			got, _, err := cs.ListDecisionAnswers(ctx, projectIDs, allKeys, store.ProjectDecisionAnswerFilter{}, "", 20)
@@ -723,14 +783,14 @@ func TestDecisionAnswersP3_QueryPlans(t *testing.T) {
 
 	t.Run("ListDecisionAnswers_multi_project_agent_filter", func(t *testing.T) {
 		assertArmIndexPlan(t, "ListDecisionAnswers(multi,agent)", "decisionanswer_project_id_asker_agent_id_created_at", true, func() {
-			got, _, err := cs.ListDecisionAnswers(ctx, projectIDs, allKeys, store.ProjectDecisionAnswerFilter{AgentID: filterAgentID}, "", 20)
+			got, _, err := cs.ListDecisionAnswersForProjects(ctx, projectIDs, keysByProject, store.ProjectDecisionAnswerFilter{AgentID: filterAgentID}, "", 20)
 			require.NoError(t, err)
 			require.Len(t, got, 20)
 		})
 	})
 
 	t.Run("ListDecisionAnswersPerProject_made_project", func(t *testing.T) {
-		assertArmIndexPlan(t, "ListDecisionAnswersPerProject", "decisionanswer_project_id_created_at", false, func() {
+		assertArmIndexPlan(t, "ListDecisionAnswersPerProject", "decisionanswer_project_id_created_at", true, func() {
 			got, err := cs.ListDecisionAnswersPerProject(ctx, projectIDs, keysByProject, store.ProjectDecisionAnswerFilter{}, 6)
 			require.NoError(t, err)
 			require.Len(t, got, numProjects)

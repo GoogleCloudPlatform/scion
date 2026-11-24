@@ -1020,6 +1020,13 @@ type DecisionStore interface {
 	// (nil, "", nil).
 	ListDecisionAnswers(ctx context.Context, projectIDs, chatKeys []string, filter ProjectDecisionAnswerFilter, cursor string, limit int) (entries []*ProjectDecisionAnswerEntry, nextCursor string, err error)
 
+	// ListDecisionAnswersForProjects is the multi-project variant of
+	// ListDecisionAnswers where each project arm is scoped to its own readable
+	// keys in chatKeysByProject[projectID] (design-scale §3.3). Projects with
+	// no readable keys are skipped. Returns the globally newest page ordered
+	// by (created_at DESC, id DESC) with identical cursor semantics.
+	ListDecisionAnswersForProjects(ctx context.Context, projectIDs []string, chatKeysByProject map[string][]string, filter ProjectDecisionAnswerFilter, cursor string, limit int) (entries []*ProjectDecisionAnswerEntry, nextCursor string, err error)
+
 	// ListDecisionFacets returns, scoped strictly to decisions/answers in
 	// projectIDs whose chat_key is in chatKeys: the distinct asking agents
 	// (each with the asker_agent_name of its newest decision), the distinct
