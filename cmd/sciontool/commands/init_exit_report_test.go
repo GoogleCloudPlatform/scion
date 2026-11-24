@@ -110,6 +110,23 @@ func TestReadHarnessTail(t *testing.T) {
 	}
 }
 
+func TestReadHarnessTail_ShellHarnessReturnsEmpty(t *testing.T) {
+	_, tailFile := withHarnessExitFiles(t)
+	if err := os.WriteFile(tailFile, []byte("gh auth token\nghp_secret_value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SCION_HARNESS", "shell")
+	if got := readHarnessTail(); got != "" {
+		t.Errorf("SCION_HARNESS=shell: readHarnessTail() = %q, want empty", got)
+	}
+
+	t.Setenv("SCION_HARNESS", "claude")
+	if got, want := readHarnessTail(), "gh auth token | ghp_secret_value"; got != want {
+		t.Errorf("SCION_HARNESS=claude: readHarnessTail() = %q, want %q", got, want)
+	}
+}
+
 func TestClassifyExit_CrashReasonCarriesRedactedTail(t *testing.T) {
 	code := 1
 	t.Run("tail appended", func(t *testing.T) {

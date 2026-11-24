@@ -917,6 +917,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 // a stored environment settings read error, fails the request.
 func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *store.Agent, callerName string, secrets secretResolutionPolicy) (*RemoteCreateAgentRequest, error) {
 	buildRequestStart := time.Now()
+	if isShellAgent(agent) && agent.AppliedConfig == nil {
+		return nil, fmt.Errorf("%s: execution container has unreadable applied config", callerName)
+	}
 	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
 	if err != nil {
 		return nil, err
@@ -1048,6 +1051,14 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 				RequireLocalRuntime: gcpID.RequireLocalRuntime,
 				// Only this dispatch's own decision (markCloudRunNative),
 				// never a stored or client value.
+				NativeCloudRun: cloudRunNativeFrom(ctx),
+			}
+		} else if isShellAgent(agent) {
+			// Execution containers without an explicit GCP identity fail
+			// closed to "block" so runtimes like Kubernetes never fall back
+			// to node-identity passthrough (ptone/scion#8812 §14).
+			remoteGCPIdentity = &RemoteGCPIdentityConfig{
+				MetadataMode:   store.GCPMetadataModeBlock,
 				NativeCloudRun: cloudRunNativeFrom(ctx),
 			}
 		}
@@ -3671,6 +3682,9 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		purpose = PurposeRestart
 	default:
 		return startEnvResult{}, fmt.Errorf("%s: unsupported mint site %q for a start", caller, site)
+	}
+	if isShellAgent(agent) && agent.AppliedConfig == nil {
+		return startEnvResult{}, fmt.Errorf("%s: execution container has unreadable applied config", caller)
 	}
 	// Launch material is selected under the delivery credential: every
 	// project-, hub- and broker-scope env var and secret is authorized

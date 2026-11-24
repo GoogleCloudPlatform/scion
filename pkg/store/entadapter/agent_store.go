@@ -104,6 +104,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		Slug:                a.Slug,
 		Name:                a.Name,
 		Template:            a.Template,
+		HarnessConfig:       a.HarnessConfig,
 		ProjectID:           a.ProjectID.String(),
 		Labels:              a.Labels,
 		Annotations:         a.Annotations,
@@ -1000,9 +1001,14 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 	}
 	// Always set, never clear to NULL — see CreateAgent's identical comment
 	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
-	// AppliedConfig=nil (cleared above) still yields "" here, which is
-	// exactly the sentinel this row should carry, not NULL.
-	update.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
+	// For execution containers (HarnessConfig == "shell"), never clear or
+	// overwrite the shell marker (for example after loading a row whose
+	// applied_config failed to parse, or from a disagreeing broker report).
+	hc := harnessConfigOf(a.AppliedConfig)
+	if a.HarnessConfig == config.ShellHarnessConfigName {
+		hc = a.HarnessConfig
+	}
+	update.SetHarnessConfig(hc)
 	if a.LastSeen.IsZero() {
 		update.ClearLastSeen()
 	} else {
@@ -2520,9 +2526,15 @@ func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expe
 		update := ac.Update().
 			Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil(), keepNative).
 			SetStateVersion(newVersion).
-			SetUpdated(time.Now()).
-			// Always set, never NULL: see buildAgentUpdate.
-			SetHarnessConfig(harnessConfigOf(applied))
+			SetUpdated(time.Now())
+		if applied != nil {
+			// Always set, never NULL: see buildAgentUpdate. When applied is
+			// nil, leave harness_config untouched for all agents so
+			// pending-config clears on a row whose applied_config failed to
+			// parse do not erase an existing harness_config (including the
+			// shell marker).
+			update.SetHarnessConfig(harnessConfigOf(applied))
+		}
 		if appliedRaw != "" {
 			update.SetAppliedConfig(appliedRaw)
 		} else {

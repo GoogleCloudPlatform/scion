@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"gopkg.in/yaml.v3"
@@ -38,7 +39,7 @@ const harnessConfigsDirName = "harness-configs"
 // ShellHarnessConfigName is the reserved name of the built-in shell harness
 // config used for user-specified execution containers (ptone/scion#8812).
 // Unlike "generic", it cannot be shadowed by on-disk or Hub-stored configs.
-const ShellHarnessConfigName = "shell"
+const ShellHarnessConfigName = state.ShellHarnessName
 
 // ErrHarnessConfigNotFound marks a FindHarnessConfigDir failure where the
 // named harness-config was not found in any searched location (template,

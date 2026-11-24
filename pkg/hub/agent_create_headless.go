@@ -624,10 +624,19 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}
 	stampAgentPersistence(agent, persistence, persistenceSource)
 
-	saOrigin, err := s.applyScheduledProjectDefaultGCPIdentity(
-		contextWithIdentity(ctx, creatorIdentity), agent, project)
-	if err != nil {
-		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+	var saOrigin store.SAAssignmentOrigin
+	if s.willBeShellAgent(agent, project) {
+		// Execution containers (shell harness) never inherit project default
+		// GCP service accounts or Kubernetes default passthrough
+		// (ptone/scion#8812 §14).
+		forceShellGCPBlock(agent)
+	} else {
+		var err error
+		saOrigin, err = s.applyScheduledProjectDefaultGCPIdentity(
+			contextWithIdentity(ctx, creatorIdentity), agent, project)
+		if err != nil {
+			return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+		}
 	}
 
 	templateSuppliedShellHC := templateSuppliesShellHarnessConfig(tmpl, agent, project)
@@ -646,6 +655,15 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		TemplateSuppliedShellHC: templateSuppliedShellHC,
 	}); denial != nil {
 		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, denial)
+	}
+
+	// Post-derivation GCP identity override (ptone/scion#8812 §14): after
+	// deriveAgentConfig has resolved every harness-config tier, discard any
+	// defaulted GCP identity on an execution container and force explicit
+	// "block".
+	if isShellAgent(agent) {
+		forceShellGCPBlock(agent)
+		saOrigin = ""
 	}
 
 	// Inject allow-listed event data environment variables after deriveAgentConfig

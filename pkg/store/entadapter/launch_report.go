@@ -633,8 +633,10 @@ func failedAfterRunningObservedApplies(current *ent.Agent, r store.LaunchReport,
 // untouched.
 func applySucceededAgentInfo(upd *ent.AgentUpdateOne, current *ent.Agent, r store.LaunchReport) {
 	a := store.Agent{
+		ID:                    current.ID.String(),
 		Template:              current.Template,
 		Runtime:               current.Runtime,
+		HarnessConfig:         current.HarnessConfig,
 		PinnedRuntimeTargetID: derefString(current.PinnedRuntimeTargetID),
 	}
 	if current.AppliedConfig != "" {

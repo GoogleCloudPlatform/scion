@@ -44,6 +44,21 @@ const brokerCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
 // verbatim under the hub's response.
 const runtimeLogsUnsupportedMessage = "agent logs are not available on this agent's runtime"
 
+// authorizeAgentLogsRead enforces ActionRead on agent, and for execution
+// containers (shell harness) additionally requires ActionAttach via
+// authorizeAgentLifecycle so container stdout / rendered tmux pane output
+// cannot be read by project members without attach or by agent principals
+// (ptone/scion#8812 §3.4 I1).
+func (s *Server) authorizeAgentLogsRead(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return false
+	}
+	if isShellAgent(agent) && !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
+		return false
+	}
+	return true
+}
+
 // handleAgentLogs handles GET /api/v1/agents/{id}/logs
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/logs
 // It proxies the request to the agent's runtime broker to read agent.log.
@@ -73,7 +88,7 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 			return
 		}
 	}
-	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+	if !s.authorizeAgentLogsRead(w, r, agent) {
 		return
 	}
 
@@ -155,7 +170,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 			return
 		}
 	}
-	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+	if !s.authorizeAgentLogsRead(w, r, agent) {
 		return
 	}
 	severity, ok := logSeverityParam(w, r.URL.Query())
@@ -280,7 +295,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+	if !s.authorizeAgentLogsRead(w, r, agent) {
 		return
 	}
 	severity, ok := logSeverityParam(w, r.URL.Query())
@@ -302,6 +317,11 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 
 	// Parse query filters
 	opts := agentCloudLogQueryOptions(s.config.HubName, agent, severity, r.URL.Query())
+
+	recheckAction, recheckPermission := ActionRead, "agent.read"
+	if isShellAgent(agent) {
+		recheckAction, recheckPermission = ActionAttach, "agent.attach"
+	}
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -347,7 +367,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
 		case <-recheck:
-			if !s.streamTokenStillAuthorized(ctx, agentResource(agent), ActionRead, "agent.read") {
+			if !s.streamTokenStillAuthorized(ctx, agentResource(agent), recheckAction, recheckPermission) {
 				endStreamForCredential(ctx, w, flusher)
 				return
 			}

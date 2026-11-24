@@ -104,7 +104,7 @@ func (s *Server) captureSuspendScreen(ctx context.Context, d AgentDispatcher, a 
 	if !s.experimentEnabled(experiments.SuspendScreen) {
 		return nil
 	}
-	if d == nil || a == nil || a.RuntimeBrokerID == "" {
+	if d == nil || a == nil || a.RuntimeBrokerID == "" || isShellAgent(a) {
 		return nil
 	}
 	if a.Phase != string(state.PhaseRunning) && !a.IdleSuspendClaimActive {
@@ -250,7 +250,7 @@ func (s *Server) handleProjectAgentScreen(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) serveAgentScreen(w http.ResponseWriter, r *http.Request, targetAgent *store.Agent) {
-	if isManagedAgentRuntime(targetAgent.Runtime) {
+	if isManagedAgentRuntime(targetAgent.Runtime) || isShellAgent(targetAgent) {
 		writeError(w, http.StatusNotFound, ErrCodeNotFound, "No saved screen for this agent", nil)
 		return
 	}

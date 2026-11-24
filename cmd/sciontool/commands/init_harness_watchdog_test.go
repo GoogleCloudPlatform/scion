@@ -823,3 +823,21 @@ func TestHarnessPaneTail(t *testing.T) {
 	assert.Empty(t, harnessPaneTail(context.Background(), func(context.Context, int, int) ([]byte, error) { return nil, errors.New("no server") }, 0, 0))
 	assert.Empty(t, harnessPaneTail(context.Background(), nil, 0, 0))
 }
+
+func TestNewHarnessWatchdogConfig_ShellSkipsPaneTail(t *testing.T) {
+	capture := func(context.Context, int, int) ([]byte, error) {
+		return []byte("gh auth token\nghp_secret\n"), nil
+	}
+	shellCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
+		Getenv:      func(k string) string { return map[string]string{"SCION_HARNESS": "shell"}[k] },
+		CapturePane: capture,
+	})
+	assert.Nil(t, shellCfg.PaneTail, "shell harness must not wire PaneTail capture")
+
+	llmCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
+		Getenv:      func(k string) string { return map[string]string{"SCION_HARNESS": "claude"}[k] },
+		CapturePane: capture,
+	})
+	require.NotNil(t, llmCfg.PaneTail, "non-shell harness must wire PaneTail capture")
+	assert.Equal(t, "gh auth token | ghp_secret", llmCfg.PaneTail(context.Background()))
+}

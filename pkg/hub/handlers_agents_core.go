@@ -2377,6 +2377,13 @@ func (s *Server) createAgentInProject(
 			InternalError(w)
 			return
 		}
+	} else if s.willBeShellAgent(agent, project) {
+		// Execution containers (shell harness) never inherit project-broker,
+		// project-profile, project-wide, or hub default GCP service accounts,
+		// nor Kubernetes default passthrough. Force explicit "block" unless
+		// the owner explicitly requested a GCP identity in req.GCPIdentity
+		// above (ptone/scion#8812 §14).
+		forceShellGCPBlock(agent)
 	} else if brokerSAID, brokerLookupErr := s.brokerDefaultSA(ctx, agent, runtimeBrokerID, project); brokerLookupErr != nil || brokerSAID != "" {
 		if brokerLookupErr != nil {
 			writeErrorFromErr(w, brokerLookupErr, "")
@@ -2672,6 +2679,18 @@ func (s *Server) createAgentInProject(
 	}); denial != nil {
 		denial.write(w)
 		return
+	}
+
+	// Post-derivation GCP identity override (ptone/scion#8812 §14): after
+	// deriveAgentConfig has resolved every harness-config tier (request,
+	// project annotation, hub default), discard any defaulted GCP identity on
+	// an execution container and force explicit "block" unless the owner
+	// explicitly requested req.GCPIdentity.
+	if isShellAgent(agent) && req.GCPIdentity == nil {
+		forceShellGCPBlock(agent)
+		saOrigin = ""
+		defaultIdentityTier = nil
+		defaultIdentityMode = ""
 	}
 
 	// Quota enforcement, in order:

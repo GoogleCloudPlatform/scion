@@ -207,3 +207,67 @@ func TestHarnessWrapperLine_EmptyCommandFailsWithExplanation(t *testing.T) {
 		})
 	}
 }
+
+type shellStubHarness struct{ resumeStubHarness }
+
+func (*shellStubHarness) Name() string { return "shell" }
+
+func TestTmuxAgentWindowCmdForConfig_ShellSkipsPaneTail(t *testing.T) {
+	shellWindow := tmuxAgentWindowCmdForConfig("/bin/sh", "'while :; do bash -l; done'", RunConfig{
+		Harness: &shellStubHarness{},
+	})
+	if strings.Contains(shellWindow, "capture-pane") {
+		t.Errorf("shell harness wrapper must not invoke tmux capture-pane: %s", shellWindow)
+	}
+	if strings.Contains(shellWindow, state.HarnessTailFile) {
+		t.Errorf("shell harness wrapper must not reference tail file %s: %s", state.HarnessTailFile, shellWindow)
+	}
+	if !strings.Contains(shellWindow, state.HarnessExitCodeFile) {
+		t.Errorf("shell harness wrapper must still record exit code to %s: %s", state.HarnessExitCodeFile, shellWindow)
+	}
+
+	nonShellWindow := tmuxAgentWindowCmdForConfig("/bin/sh", "'claude'", RunConfig{
+		Harness: &resumeStubHarness{},
+	})
+	if !strings.Contains(nonShellWindow, "capture-pane") || !strings.Contains(nonShellWindow, state.HarnessTailFile) {
+		t.Errorf("non-shell harness wrapper must keep pane-tail capture: %s", nonShellWindow)
+	}
+
+	// Execute harnessWrapperLine with empty tailFile under a fake tmux and
+	// confirm exit code is recorded while tmux is never invoked.
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmuxCalled := filepath.Join(dir, "tmux-called")
+	rcFile := filepath.Join(dir, "rc")
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\ntouch "+shellQuote(tmuxCalled)+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"sh", "touch"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	window := "sh -c " + shellQuote(harnessWrapperLine(`sh -c 'exit 7'`, "", rcFile))
+	cmd := exec.Command(filepath.Join(bin, "sh"), "-c", window)
+	cmd.Env = []string{"PATH=" + bin, "TMUX_PANE=%7", "HOME=" + dir}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("wrapper run failed: %v\n%s", err, out)
+	}
+	gotRC, err := os.ReadFile(rcFile)
+	if err != nil {
+		t.Fatalf("reading rcFile: %v", err)
+	}
+	if strings.TrimSpace(string(gotRC)) != "7" {
+		t.Errorf("exit code = %q, want 7", strings.TrimSpace(string(gotRC)))
+	}
+	if _, err := os.Stat(tmuxCalled); err == nil {
+		t.Error("fake tmux was invoked despite empty tailFile")
+	}
+}

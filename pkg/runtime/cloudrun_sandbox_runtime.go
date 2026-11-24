@@ -1650,7 +1650,7 @@ func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// tmuxAgentWindowCmd for the pattern). Use absolute path for sh —
 	// this runs as a tmux window command where PATH is available, but
 	// absolute paths are used throughout buildEntrypoint for consistency.
-	agentWindowCmd := tmuxAgentWindowCmd("/bin/sh", cmdLine)
+	agentWindowCmd := tmuxAgentWindowCmdForConfig("/bin/sh", cmdLine, cfg)
 
 	// Build tmux command (buildTmuxStartCmd, adapted for sandbox via
 	// tmuxPollSession).

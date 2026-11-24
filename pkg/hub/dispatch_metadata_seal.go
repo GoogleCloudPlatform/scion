@@ -47,6 +47,8 @@ func sealDispatchMetadataEnv(ctx context.Context, agent *store.Agent, env map[st
 	mode := ""
 	if gcpID != nil {
 		mode = gcpID.MetadataMode
+	} else if isShellAgent(agent) {
+		mode = store.GCPMetadataModeBlock
 	}
 	sealMetadataEnv(ctx, env, cls, mode, gcpID)
 }

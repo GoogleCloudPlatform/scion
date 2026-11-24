@@ -2193,7 +2193,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// tmuxAgentWindowCmd for rationale). `sciontool init` reads this to
 	// report crashes accurately. K8s provides PID 1 a TTY, so attach like
 	// Docker/Podman (see buildCommonRunArgs).
-	agentWindowCmd := tmuxAgentWindowCmd("sh", cmdLine)
+	agentWindowCmd := tmuxAgentWindowCmdForConfig("sh", cmdLine, config)
 	tmuxCmd := buildTmuxStartCmd(agentWindowCmd, tmuxAttachSession)
 	// --- K8s Startup Gate ---
 	//

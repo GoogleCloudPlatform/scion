@@ -102,3 +102,37 @@ func TestApplyBrokerAgentConfig_RecordsCreateInputsProfileWhenEmpty(t *testing.T
 		assert.Equal(t, "original", a.AppliedConfig.CreateInputs.Profile)
 	})
 }
+
+func TestApplyBrokerAgentConfig_PreservesShellHarnessConfig(t *testing.T) {
+	t.Run("applied shell marker resists disagreeing broker report", func(t *testing.T) {
+		a := &Agent{
+			ID:            "shell-1",
+			HarnessConfig: "shell",
+			AppliedConfig: &AgentAppliedConfig{HarnessConfig: "shell"},
+		}
+		ApplyBrokerAgentConfig(a, fullBrokerAgentConfig())
+		assert.Equal(t, "shell", a.AppliedConfig.HarnessConfig)
+		assert.Equal(t, "img:resolved", a.AppliedConfig.Image)
+		assert.Equal(t, "kubernetes", a.Runtime)
+	})
+
+	t.Run("column-only shell marker resists disagreeing broker report", func(t *testing.T) {
+		a := &Agent{
+			ID:            "shell-2",
+			HarnessConfig: "shell",
+			AppliedConfig: &AgentAppliedConfig{},
+		}
+		ApplyBrokerAgentConfig(a, fullBrokerAgentConfig())
+		assert.Equal(t, "shell", a.AppliedConfig.HarnessConfig)
+	})
+
+	t.Run("non-shell agent still adopts broker harness config", func(t *testing.T) {
+		a := &Agent{
+			ID:            "llm-1",
+			HarnessConfig: "gemini",
+			AppliedConfig: &AgentAppliedConfig{HarnessConfig: "gemini"},
+		}
+		ApplyBrokerAgentConfig(a, fullBrokerAgentConfig())
+		assert.Equal(t, "claude", a.AppliedConfig.HarnessConfig)
+	})
+}

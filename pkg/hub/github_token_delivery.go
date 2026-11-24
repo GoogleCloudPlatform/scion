@@ -459,6 +459,14 @@ func (d *HTTPAgentDispatcher) deliverGitHubToken(
 	asNeededKeys []string,
 	operation string,
 ) (filteredSecrets []ResolvedSecret, filteredAsNeeded []string, ownAppToken string) {
+	// Execution containers (shell harness) receive only the owning user's
+	// user-scope env/secrets plus reserved SCION_* control variables, never
+	// project GitHub App credentials or SCION_GITHUB_* / SCION_USER_GITHUB_TOKEN
+	// stamping (ptone/scion#8812 §14).
+	if isShellAgent(agent) {
+		return resolvedSecrets, asNeededKeys, ""
+	}
+
 	installationOnly := usesInstallationGitHubToken(agent)
 	if installationOnly {
 		resolvedSecrets, asNeededKeys = stripNonInstallationGitHubMaterial(
