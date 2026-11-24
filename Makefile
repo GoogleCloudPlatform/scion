@@ -695,6 +695,7 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestHubInternal_ReplayAcrossHubReplicas \
 	TestChatRetention_Postgres_CascadeAndReplicaRace \
 	TestChatRetention_Postgres_DeletedConversationsAndAttachments \
+	TestChatRetention_Postgres_DeleteTopicSweep \
 	TestProjectQuota_TwoHubReplicasPostgres_OneAdmission \
 	TestEncryptionScan_ClassifiesByAuthenticatingKey \
 	TestEncryptionScan_PagesCoverEveryRow \
@@ -774,7 +775,9 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestChatSearchStatementTimeout_Postgres \
 	TestChatSearchVisibility_Postgres \
 	TestChatSearchStoreTimeoutStopsStatement_Postgres \
-	TestPromoteDM_ReallocatesConversationSeqWithoutCollision_Postgres
+	TestPromoteDM_ReallocatesConversationSeqWithoutCollision_Postgres \
+	TestTopicIdentityOwnership_Postgres \
+	TestTopicReconcile_Postgres
 
 test-webchat-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \

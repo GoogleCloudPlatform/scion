@@ -102,6 +102,8 @@ func assertTopicLookupInProject(t *testing.T, wcs WebChatStore) {
 func TestTopicConversationLookupInProject_OtherProjectNotFound(t *testing.T) {
 	t.Run("sqlite", func(t *testing.T) {
 		db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
+		_, err := db.Exec(hubtestutil.ConversationsTableDDL)
+		require.NoError(t, err)
 		wcs := NewWebChatStore(db, "sqlite")
 		require.NoError(t, wcs.Init())
 		assertTopicLookupInProject(t, wcs)

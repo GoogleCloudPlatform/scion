@@ -341,3 +341,85 @@ func TestChatRetention_Postgres_PreviewEqualsPurge(t *testing.T) {
 	}
 	assert.Equal(t, 3, count(`SELECT COUNT(*) FROM messages`), "pending, deferred and recent messages are kept")
 }
+
+// TestChatRetention_Postgres_DeleteTopicSweep verifies on Postgres that
+// DeleteTopic soft-deletes both webchat_topic and conversations in the same
+// transaction, and a retention sweep past the grace period purges the topic's
+// messages exactly once while keeping both rows consistently soft-deleted.
+func TestChatRetention_Postgres_DeleteTopicSweep(t *testing.T) {
+	requirePG(t)
+	ctx := context.Background()
+	dsn := enttest.NewSchemaURL(t)
+	_ = stdlib.GetDefaultDriver()
+	client, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 5, MaxIdleConns: 2})
+	require.NoError(t, err)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+	require.NoError(t, cs.Migrate(ctx))
+	db := cs.DB()
+	wcs := NewWebChatStore(db, "postgres")
+	require.NoError(t, wcs.Init())
+
+	project := api.NewUUID()
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+
+	keeperID := api.NewUUID()
+	topicID := api.NewUUID()
+	convID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        keeperID,
+		ProjectID: project,
+		Name:      "keeper",
+		CreatedBy: "u1",
+		CreatedAt: now.Add(-60 * day),
+	}))
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:             topicID,
+		ProjectID:      project,
+		Name:           "doomed",
+		ConversationID: convID,
+		CreatedBy:      "u1",
+		CreatedAt:      now.Add(-60 * day),
+	}))
+	keeperConvID, err := wcs.GetTopicConversationID(ctx, keeperID)
+	require.NoError(t, err)
+
+	seed := func(conv, thread string) string {
+		m := &store.Message{
+			ID: api.NewUUID(), ProjectID: project, Sender: "user:a", Recipient: "agent:b",
+			Msg: "hello", Type: "chat", Channel: "web", ConversationID: conv, ThreadID: thread,
+			DispatchState: store.MessageDispatchDispatched, CreatedAt: now.Add(-time.Hour),
+		}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+		return m.ID
+	}
+	mConv := seed(convID, topicID)
+	mLegacy := seed("", topicID)
+	mKeep := seed(keeperConvID, keeperID)
+
+	require.NoError(t, wcs.DeleteTopic(ctx, topicID))
+
+	var tDel, cDel *time.Time
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT deleted_at FROM webchat_topic WHERE id = $1`, topicID).Scan(&tDel))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT deleted_at FROM conversations WHERE id = $1`, convID).Scan(&cDel))
+	require.NotNil(t, tDel, "webchat_topic.deleted_at must be set by DeleteTopic")
+	require.NotNil(t, cDel, "conversations.deleted_at must be set by DeleteTopic")
+
+	cfg := opsettings.DefaultChatRetentionConfig()
+	cfg.Enabled, cfg.PauseMS = true, 0
+	sw := newChatRetentionSweeper(cs.ChatRetention())
+	res, err := sw.RunTick(ctx, newChatRetentionPolicy(true, cfg, now.Add(35*day)))
+	require.NoError(t, err)
+	assert.True(t, res.DeletedDone)
+	assert.Equal(t, int64(2), res.Purged.DeletedConv, "messages must be purged and counted once")
+
+	exists := func(id string) bool {
+		var n int
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id = $1`, id).Scan(&n))
+		return n > 0
+	}
+	assert.False(t, exists(mConv))
+	assert.False(t, exists(mLegacy))
+	assert.True(t, exists(mKeep))
+}

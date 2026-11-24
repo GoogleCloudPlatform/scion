@@ -70,7 +70,13 @@ func memGuardUsage() (uint64, string, bool) {
 
 func openTestMemorySQLite(t testing.TB, driver string) *sql.DB {
 	t.Helper()
-	return hubtestutil.OpenTestMemorySQLite(t, driver)
+	db := hubtestutil.OpenTestMemorySQLite(t, driver)
+	if driver == "sqlite" {
+		if _, err := db.Exec(hubtestutil.ConversationsTableDDL); err != nil {
+			t.Fatalf("create conversations table: %v", err)
+		}
+	}
+	return db
 }
 
 func requireUUID(t *testing.T, what, s string) {
