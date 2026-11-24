@@ -494,19 +494,19 @@ func TestPendingDispatchTTL_AtLeastCreateUnconfirmedHold(t *testing.T) {
 	require.GreaterOrEqual(t, defaultHold, 16*time.Minute)
 	assert.GreaterOrEqual(t, srv.pendingDispatchTTL(), defaultHold)
 
-	// Raising CreateUnconfirmedHold (within UnconfirmedHold) in server config
+	// Raising CreateUnconfirmedHold (within UnconfirmedHold) in server settings
 	// raises pendingDispatchTTL dynamically at reap time.
 	raisedHold := defaultHold + 5*time.Minute
-	srv.config.StartClaim = StartClaimSettings{
+	srv.setStartClaimSettings(StartClaimSettings{
 		UnconfirmedHold:       raisedHold + time.Minute,
 		CreateUnconfirmedHold: raisedHold,
-	}
+	})
 	assert.GreaterOrEqual(t, srv.pendingDispatchTTL(), raisedHold)
 
 	// Reset to default and verify a create row aged 12m (past the old 10m
 	// constant, inside the 16m CreateUnconfirmedHold) survives reap, while
 	// after CreateUnconfirmedHold+1m it is failed and its args are scrubbed.
-	srv.config.StartClaim = StartClaimSettings{}
+	srv.setStartClaimSettings(DefaultStartClaimSettings())
 	_, broker, agent := setupOfflineBrokerAgent(t, s, "pending-ttl-hold")
 	row := &store.BrokerDispatch{
 		ID:       api.NewUUID(),
@@ -578,6 +578,9 @@ func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateI
 	// Separately assert that GET also hides SCION_USER_GITHUB_TOKEN when present
 	// in AppliedConfig.Env (not patched, since SCION_* keys are reserved on PATCH).
 	hiddenAgent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.ID = api.NewUUID()
+		a.Slug = "hidden-scion-user-gh-token"
+		a.Name = "hidden-scion-user-gh-token"
 		a.Phase = string(state.PhaseCreated)
 		a.AppliedConfig.Env = map[string]string{
 			"SCION_USER_GITHUB_TOKEN": "scion_user_gh_hidden",
