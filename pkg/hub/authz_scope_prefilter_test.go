@@ -419,7 +419,9 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 			assert.Equal(t, wantCaps[i].Actions, gotCaps[i].Actions,
 				"project %s (%s) capabilities mismatch", p.Slug, p.ID)
 
-			// Also verify full Decision fields (Allowed, Reason, BindingID, RoleName, Scope, DenyCause).
+			// Also verify the whole non-explain Decision (including Provenance.Grants,
+			// Provenance.DenyReasons, DeniedBy, MatchedPolicy, BindingID, RoleName,
+			// MatchedGrant, Scope, Reason, DenyCause).
 			for _, act := range []Action{ActionRead, ActionChatPost} {
 				var gotD, wantD Decision
 				if IsScopedUserIdentity(ident) {
@@ -429,13 +431,7 @@ func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
 					gotD = srv.authzService.CheckAccess(memoCtx, ident, allResources[i], act)
 					wantD = srv.authzService.CheckAccess(unfilteredCtx, ident, allResources[i], act)
 				}
-				assert.Equal(t, wantD.Allowed, gotD.Allowed, "project %s action %s Allowed mismatch", p.Slug, act)
-				assert.Equal(t, wantD.Reason, gotD.Reason, "project %s action %s Reason mismatch", p.Slug, act)
-				assert.Equal(t, wantD.BindingID, gotD.BindingID, "project %s action %s BindingID mismatch", p.Slug, act)
-				assert.Equal(t, wantD.RoleName, gotD.RoleName, "project %s action %s RoleName mismatch", p.Slug, act)
-				assert.Equal(t, wantD.MatchedGrant, gotD.MatchedGrant, "project %s action %s MatchedGrant mismatch", p.Slug, act)
-				assert.Equal(t, wantD.Scope, gotD.Scope, "project %s action %s Scope mismatch", p.Slug, act)
-				assert.Equal(t, wantD.DenyCause, gotD.DenyCause, "project %s action %s DenyCause mismatch", p.Slug, act)
+				assert.Equal(t, wantD, gotD, "project %s action %s full Decision mismatch", p.Slug, act)
 			}
 
 			gotChat := srv.chatUserAccess(memoCtx, ident, p,
