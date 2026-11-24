@@ -732,7 +732,7 @@ func TestProjectSystemOneInstances_TestAdminDenied(t *testing.T) {
 	// identities before the IsUnscopedLocalPlatformAdmin / IsHubAdmin bypass.
 	testAdminUserIdent := tsaIdentity(t, s, hubKind.Identity.ID)
 	taCtx := contextWithIdentity(ctx, testAdminUserIdent)
-	taCtx = contextWithCredentialContext(taCtx, CredentialContext{Kind: CredentialKindWebSession, ID: "ta-web"})
+	taCtx = contextWithCredentialContext(taCtx, CredentialContext{Kind: CredentialKindInteractive, ID: "ta-web"})
 	assert.False(t, srv.projectSystemOneOwnerOrAdminRule(taCtx, testAdminUserIdent, proj.ID),
 		"projectSystemOneOwnerOrAdminRule must refuse test-admin identity directly")
 
