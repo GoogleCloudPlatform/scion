@@ -1499,9 +1499,20 @@ func HubAgentDefaultsFromContext(ctx context.Context) *HubAgentDefaults {
 	return v
 }
 
+// PriorStatus records the agent's last known activity status from the Hub
+// before a start, resume, or restart dispatch (ptone/scion#8900). It is used
+// to build status-aware resume/restart notices without overwriting prompt.md
+// or setting SCION_INITIAL_TASK=1.
+type PriorStatus struct {
+	Activity string    `json:"activity,omitempty"`
+	Summary  string    `json:"summary,omitempty"`
+	At       time.Time `json:"at,omitempty"`
+}
+
 type StartOptions struct {
 	Name              string
 	Task              string
+	PriorStatus       *PriorStatus
 	Template          string
 	TemplateName      string // Human-friendly template slug (overrides Template for labels when hydration replaces Template with a cache path)
 	Profile           string

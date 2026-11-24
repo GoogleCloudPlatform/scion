@@ -1109,6 +1109,10 @@ type StartExtras struct {
 	// path and leaves secret material out (buildStartContext). False sends
 	// nothing.
 	NoAuth bool
+	// PriorStatus carries the agent's last known activity status from the Hub
+	// before this start, resume, or restart (wire key priorStatus;
+	// ptone/scion#8900). Nil sends nothing.
+	PriorStatus *api.PriorStatus
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -1215,6 +1219,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.EnvClassifications != nil {
 		payload["envClassifications"] = extras.EnvClassifications
+	}
+	if extras.PriorStatus != nil {
+		payload["priorStatus"] = extras.PriorStatus
 	}
 }
 

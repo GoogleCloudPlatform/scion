@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -4142,11 +4143,20 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	priorPhase := agent.Phase
 	priorLaunchError := agent.LaunchError
 
+	priorStatus := opts.PriorStatus
+	if priorStatus == nil {
+		priorStatus = dispatchPriorStatus(agent)
+	}
+
 	// If no explicit task provided, fall back to the agent's applied config
 	// task. Skip this on a pure resume (no new message): the harness should
 	// just continue its prior session rather than be re-handed the original
-	// creation task. A wake-with-message still passes that message as task.
-	if task == "" && !resume && agent.AppliedConfig != nil {
+	// creation task. Also skip when the agent's prior run already completed
+	// (ptone/scion#8900): the broker will present a completion notice instead
+	// of replaying the original task prompt. A wake-with-message or explicit
+	// task still passes that task through.
+	priorCompleted := priorStatus != nil && strings.EqualFold(strings.TrimSpace(priorStatus.Activity), string(state.ActivityCompleted))
+	if task == "" && !resume && !priorCompleted && agent.AppliedConfig != nil {
 		task = agent.AppliedConfig.Task
 	}
 
@@ -4281,6 +4291,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		TemplateName:       agent.Template,
 		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
 		NoAuth:             launchesWithoutCredentials(agent),
+		PriorStatus:        priorStatus,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -4397,8 +4408,9 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		// The owning node mints and records its own run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)
 		args := &StartDispatchArgs{
-			Task:   task,
-			Resume: resume,
+			Task:        task,
+			Resume:      resume,
+			PriorStatus: priorStatus,
 		}
 		if opts.Async {
 			// The owner applies its own dispatcher rules; the requester
@@ -4563,6 +4575,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
 	d.warnGCPTelemetryBlockedWithoutCredentials(ctx, agent, tel, resolvedEnv, startEnv.secrets)
+	priorStatus := dispatchPriorStatusFromContext(ctx)
+	if priorStatus == nil {
+		priorStatus = dispatchPriorStatus(agent)
+	}
 	// image_tag, resolved once for both the explicit image and the hub
 	// defaults (ptone/scion#6625).
 	imageTag := d.dispatchImageTag(agent)
@@ -4585,6 +4601,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ResolvedSecrets:    startEnv.secrets,
 		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
 		NoAuth:             launchesWithoutCredentials(agent),
+		PriorStatus:        priorStatus,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -4616,7 +4633,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if errors.Is(err, ErrLifecycleDeferred) {
 		// The owning node mints and records its own run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)
-		return d.deferredRestart(ctx, agent)
+		return d.deferredRestart(ctx, agent, priorStatus)
 	}
 	d.settleFailedRun(ctx, agent, runID, previousRunID, err)
 	if err != nil {
@@ -4627,6 +4644,50 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// keep it, reporting that entry's (older) run ID.
 	d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	return nil
+}
+
+type dispatchPriorStatusCtxKey struct{}
+
+// withDispatchPriorStatus attaches a requester-captured PriorStatus to ctx so
+// cross-node execDispatchRestart can pass it into DispatchAgentRestart after
+// the requester's starting write has cleared any retained activity on the row
+// (ptone/scion#8900).
+func withDispatchPriorStatus(ctx context.Context, ps *api.PriorStatus) context.Context {
+	if ps == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, dispatchPriorStatusCtxKey{}, ps)
+}
+
+func dispatchPriorStatusFromContext(ctx context.Context) *api.PriorStatus {
+	ps, _ := ctx.Value(dispatchPriorStatusCtxKey{}).(*api.PriorStatus)
+	return ps
+}
+
+// dispatchPriorStatus snapshots the agent's last known activity status for the
+// broker so a resume or restart can build a status-aware notice without
+// replaying the original task prompt when the prior run completed
+// (ptone/scion#8900). Returns nil when no prior activity is recorded.
+func dispatchPriorStatus(agent *store.Agent) *api.PriorStatus {
+	if agent == nil {
+		return nil
+	}
+	activity := strings.ToLower(strings.TrimSpace(agent.Activity))
+	if activity == "" {
+		return nil
+	}
+	summary := strings.TrimSpace(agent.TaskSummary)
+	if summary == "" && activity != string(state.ActivityCompleted) {
+		summary = strings.TrimSpace(agent.Message)
+	}
+	ps := &api.PriorStatus{
+		Activity: activity,
+		Summary:  summary,
+	}
+	if !agent.LastActivityEvent.IsZero() {
+		ps.At = agent.LastActivityEvent.UTC()
+	}
+	return ps
 }
 
 // DispatchAgentResetAuth injects a fresh auth token into a running agent without
@@ -5116,8 +5177,8 @@ func (d *HTTPAgentDispatcher) deferredStop(ctx context.Context, agent *store.Age
 }
 
 // deferredRestart handles a cross-node agent restart.
-func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.Agent) error {
-	err := d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{}, isStartTerminal)
+func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.Agent, priorStatus *api.PriorStatus) error {
+	err := d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{PriorStatus: priorStatus}, isStartTerminal)
 	return d.deferredLaunchGuardError(ctx, agent, "deferredRestart", err)
 }
 

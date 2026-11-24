@@ -398,7 +398,8 @@ func TestUpdateAgentStatus_SuspendedHubTransitionsStillWork(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, string(state.PhaseStopped), got.Phase)
 		assert.Empty(t, got.SuspendReason)
-		assert.Empty(t, got.Activity)
+		// Completed activity is retained across stop (ptone/scion#8900).
+		assert.Equal(t, string(state.ActivityCompleted), got.Activity)
 	})
 
 	t.Run("delete of a suspended agent succeeds", func(t *testing.T) {

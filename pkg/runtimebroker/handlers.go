@@ -3984,10 +3984,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// LaunchKeepaliveSeconds request an async start, under the same
 		// wire keys and meaning as a create's (CreateAgentRequest; design
 		// wave 3 §2 D-f, ptone/scion#4669).
-		AsyncLaunch            bool   `json:"asyncLaunch,omitempty"`
-		LaunchID               string `json:"launchId,omitempty"`
-		LaunchTimeoutSeconds   int    `json:"launchTimeoutSeconds,omitempty"`
-		LaunchKeepaliveSeconds int    `json:"launchKeepaliveSeconds,omitempty"`
+		AsyncLaunch            bool             `json:"asyncLaunch,omitempty"`
+		LaunchID               string           `json:"launchId,omitempty"`
+		LaunchTimeoutSeconds   int              `json:"launchTimeoutSeconds,omitempty"`
+		LaunchKeepaliveSeconds int              `json:"launchKeepaliveSeconds,omitempty"`
+		PriorStatus            *api.PriorStatus `json:"priorStatus,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -4399,6 +4400,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			opts.Resume = true
 		}
 	}
+	opts.PriorStatus = startReq.PriorStatus
 
 	ctx = s.withHarnessConfigPolicy(ctx)
 	if ss != nil {
@@ -5388,6 +5390,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// secrets the Hub resolved for this restart, handled exactly as on
 		// start (buildStartContext). An older Hub sends none.
 		ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
+		// PriorStatus mirrors the start path's field (ptone/scion#8900).
+		PriorStatus *api.PriorStatus `json:"priorStatus,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -5671,6 +5675,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// runs after the stop above, so a refusal leaves the agent stopped, as
 	// any other start failure after the stop does. The pre-check before
 	// the stop refuses the cases visible without Start's resolution.
+	opts.PriorStatus = restartReq.PriorStatus
 	ctx = s.withHarnessConfigPolicy(ctx)
 	agentInfo, err := mgr.Start(ctx, opts)
 	err = s.completeOwnedStart(ctx, mgr, opts.RunID, err, true)

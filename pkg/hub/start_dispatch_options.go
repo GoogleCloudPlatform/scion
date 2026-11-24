@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -37,6 +38,11 @@ type StartDispatchOptions struct {
 	// PriorPhase is the effective resting phase the start was taken from
 	// (startDispatch.restingPhase), recorded as the launch's prior phase.
 	PriorPhase string
+	// PriorStatus, when non-nil, overrides snapshotting the agent row's
+	// activity in dispatchAgentStart (ptone/scion#8900). Used by cross-node
+	// execDispatchStart because the requester wrote starting before deferring,
+	// clearing any retained activity on the row.
+	PriorStatus *api.PriorStatus
 }
 
 // launchKind returns o.Kind, defaulting to store.LaunchKindStart.
