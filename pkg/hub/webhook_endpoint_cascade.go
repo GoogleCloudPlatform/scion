@@ -84,20 +84,20 @@ func (s *Server) releaseTriggerBindingsForAgent(ctx context.Context, agent *stor
 	}
 }
 
-// sweepOrphanedAgentLifetimeWebhookEndpoints is the hourly maintenance backstop
-// for agent-lifetime webhook endpoints whose bound agent is soft-deleted or
-// missing (e.g. if the best-effort deletion-engine tail step failed on a
-// transient store error). It delegates to deleteAgentLifetimeWebhookEndpoint so
-// cleanup, trigger pausing/deletion, cache invalidation, and audit records are
-// identical and idempotent.
-func (s *Server) sweepOrphanedAgentLifetimeWebhookEndpoints(ctx context.Context) int {
+// sweepOrphanedBoundWebhookEndpoints is the hourly maintenance backstop for
+// bound webhook endpoints whose bound agent is soft-deleted or missing (e.g. if
+// the best-effort deletion-engine tail step failed on a transient store error).
+// Agent-lifetime orphans are deleted via deleteAgentLifetimeWebhookEndpoint;
+// persistent-lifetime orphans are unbound via unbindPersistentWebhookEndpoint.
+// Both paths re-check under lock/predicate that no live agent exists.
+func (s *Server) sweepOrphanedBoundWebhookEndpoints(ctx context.Context) int {
 	if s == nil || s.store == nil {
 		return 0
 	}
 	const sweepBatchLimit = 100
-	orphans, err := s.store.ListOrphanedAgentLifetimeWebhookEndpoints(ctx, sweepBatchLimit)
+	orphans, err := s.store.ListOrphanedBoundWebhookEndpoints(ctx, sweepBatchLimit)
 	if err != nil {
-		s.agentLifecycleLog.Warn("Failed to list orphaned agent-lifetime webhook endpoints during maintenance",
+		s.agentLifecycleLog.Warn("Failed to list orphaned bound webhook endpoints during maintenance",
 			"error", err)
 		return 0
 	}
@@ -109,8 +109,16 @@ func (s *Server) sweepOrphanedAgentLifetimeWebhookEndpoints(ctx context.Context)
 		if ep.BoundAgentID == "" {
 			continue
 		}
-		if s.deleteAgentLifetimeWebhookEndpoint(ctx, &store.Agent{ID: ep.BoundAgentID, ProjectID: ep.ProjectID}, ep) {
-			swept++
+		ag := &store.Agent{ID: ep.BoundAgentID, ProjectID: ep.ProjectID}
+		switch ep.BoundLifetime {
+		case store.WebhookBoundLifetimeAgent:
+			if s.deleteAgentLifetimeWebhookEndpoint(ctx, ag, ep) {
+				swept++
+			}
+		case store.WebhookBoundLifetimePersistent:
+			if s.unbindPersistentWebhookEndpoint(ctx, ag, ep) {
+				swept++
+			}
 		}
 	}
 	return swept
@@ -187,7 +195,7 @@ func (s *Server) deleteAgentLifetimeWebhookEndpoint(ctx context.Context, agent *
 	return true
 }
 
-func (s *Server) unbindPersistentWebhookEndpoint(ctx context.Context, agent *store.Agent, ep store.WebhookEndpoint) {
+func (s *Server) unbindPersistentWebhookEndpoint(ctx context.Context, agent *store.Agent, ep store.WebhookEndpoint) bool {
 	var unbound bool
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		var uErr error
@@ -217,9 +225,10 @@ func (s *Server) unbindPersistentWebhookEndpoint(ctx context.Context, agent *sto
 	if err != nil {
 		s.agentLifecycleLog.Warn("Failed to unbind persistent webhook endpoint for deleted agent",
 			"agent_id", agent.ID, "project_id", ep.ProjectID, "endpoint_id", ep.ID, "error", err)
-		return
+		return false
 	}
 	if unbound && s.webhookIngress != nil {
 		s.webhookIngress.InvalidateEndpoint(ep.ID)
 	}
+	return unbound
 }

@@ -95,7 +95,7 @@ func (p *purgeCountingStore) PurgeExpiredRotatedWebhookSecrets(_ context.Context
 	return 0, nil
 }
 
-func (p *purgeCountingStore) ListOrphanedAgentLifetimeWebhookEndpoints(_ context.Context, _ int) ([]store.WebhookEndpoint, error) {
+func (p *purgeCountingStore) ListOrphanedBoundWebhookEndpoints(_ context.Context, _ int) ([]store.WebhookEndpoint, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return nil, nil

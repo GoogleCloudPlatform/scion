@@ -145,7 +145,7 @@ func (m *memTriggerStore) UnbindWebhookEndpointForAgent(context.Context, string,
 func (m *memTriggerStore) PurgeExpiredRotatedWebhookSecrets(context.Context, time.Time, time.Duration) (int, error) {
 	return 0, nil
 }
-func (m *memTriggerStore) ListOrphanedAgentLifetimeWebhookEndpoints(context.Context, int) ([]store.WebhookEndpoint, error) {
+func (m *memTriggerStore) ListOrphanedBoundWebhookEndpoints(context.Context, int) ([]store.WebhookEndpoint, error) {
 	return nil, nil
 }
 func (m *memTriggerStore) CreateTrigger(_ context.Context, tr *store.Trigger) error {

@@ -609,6 +609,18 @@ func (s *TriggerStore) DeleteWebhookEndpointForBoundAgent(ctx context.Context, p
 		if ep.ProjectID != pid || ep.BoundAgentID == nil || *ep.BoundAgentID != agentUID || ep.BoundLifetime != store.WebhookBoundLifetimeAgent {
 			return store.ErrNotFound
 		}
+		liveAgent, aErr := client.Agent.Query().
+			Where(
+				agent.IDEQ(agentUID),
+				agent.DeletedAtIsNil(),
+			).
+			Exist(ctx)
+		if aErr != nil {
+			return aErr
+		}
+		if liveAgent {
+			return store.ErrNotFound
+		}
 
 		// 1. Partition dependent triggers on this endpoint:
 		//    - Triggers authored by the bound agent are deleted (Stage 2 §4.2).
@@ -709,6 +721,18 @@ func (s *TriggerStore) UnbindWebhookEndpointForAgent(ctx context.Context, projec
 			webhookendpoint.ProjectIDEQ(pid),
 			webhookendpoint.BoundAgentIDEQ(agentUID),
 			webhookendpoint.BoundLifetimeEQ(store.WebhookBoundLifetimePersistent),
+			predicate.WebhookEndpoint(func(sel *entsql.Selector) {
+				d := sel.Dialect()
+				a := entsql.Dialect(d).Table(agent.Table).As("ag")
+				sub := entsql.Dialect(d).
+					Select(a.C(agent.FieldID)).
+					From(a).
+					Where(entsql.And(
+						entsql.ColumnsEQ(a.C(agent.FieldID), sel.C(webhookendpoint.FieldBoundAgentID)),
+						entsql.IsNull(a.C(agent.FieldDeletedAt)),
+					))
+				sel.Where(entsql.Not(entsql.Exists(sub)))
+			}),
 		).
 		ClearBoundAgentID().
 		SetBoundLifetime(store.WebhookBoundLifetimeNone).
@@ -822,13 +846,13 @@ func (s *TriggerStore) PurgeExpiredRotatedWebhookSecrets(ctx context.Context, no
 	return n, nil
 }
 
-func (s *TriggerStore) ListOrphanedAgentLifetimeWebhookEndpoints(ctx context.Context, limit int) ([]store.WebhookEndpoint, error) {
+func (s *TriggerStore) ListOrphanedBoundWebhookEndpoints(ctx context.Context, limit int) ([]store.WebhookEndpoint, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	entities, err := s.client.WebhookEndpoint.Query().
 		Where(
-			webhookendpoint.BoundLifetimeEQ(store.WebhookBoundLifetimeAgent),
+			webhookendpoint.BoundLifetimeIn(store.WebhookBoundLifetimeAgent, store.WebhookBoundLifetimePersistent),
 			webhookendpoint.BoundAgentIDNotNil(),
 			predicate.WebhookEndpoint(func(sel *entsql.Selector) {
 				d := sel.Dialect()

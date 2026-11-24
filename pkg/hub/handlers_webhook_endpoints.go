@@ -711,6 +711,16 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		if !valid {
 			return
 		}
+		bindingChanged := resolvedAgent != ep.BoundAgentID || resolvedLifetime != ep.BoundLifetime
+		if resolvedLifetime == store.WebhookBoundLifetimeAgent && bindingChanged {
+			// Setting or changing an agent-lifetime binding delegates endpoint
+			// deletion to whoever can delete the bound agent; require
+			// webhook_endpoint.delete (the same decision as DELETE) so callers
+			// with update-only cannot delete endpoints indirectly.
+			if !s.authorizeWebhookEndpointAccess(w, r, projectID, ActionDelete) {
+				return
+			}
+		}
 		updated.BoundAgentID = resolvedAgent
 		updated.BoundLifetime = resolvedLifetime
 		mask.Binding = true

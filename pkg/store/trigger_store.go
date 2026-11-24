@@ -378,20 +378,24 @@ type TriggerStore interface {
 	// DeleteWebhookEndpointForBoundAgent atomically deletes an agent-lifetime
 	// endpoint bound to boundAgentID, its internal secret rows, and any triggers
 	// on it authored by boundAgentID; triggers on it authored by others are
-	// paused with status_reason = "source_deleted" (Stage 2 §4.2).
+	// paused with status_reason = "source_deleted" (Stage 2 §4.2). Returns
+	// ErrNotFound if the endpoint is absent, no longer bound with lifetime
+	// "agent" to boundAgentID, or if a live (non-deleted) agent with
+	// id = boundAgentID still exists.
 	DeleteWebhookEndpointForBoundAgent(ctx context.Context, projectID, id, boundAgentID string) (deletedTriggerIDs []string, pausedTriggerIDs []string, deletedSecretKeys []string, err error)
 	// UnbindWebhookEndpointForAgent atomically clears bound_agent_id and
 	// bound_lifetime on a persistent endpoint currently bound to boundAgentID
-	// (Stage 2 §4.2). Returns false when the endpoint is absent or no longer bound.
+	// when no live (non-deleted) agent with id = boundAgentID exists (Stage 2 §4.2).
+	// Returns false when the endpoint is absent, no longer bound, or the agent is live.
 	UnbindWebhookEndpointForAgent(ctx context.Context, projectID, id, boundAgentID string) (unbound bool, err error)
 	// PurgeExpiredRotatedWebhookSecrets deletes hub-scoped internal secret rows
 	// for webhook endpoints whose secret version is retired and past graceWindow
 	// (or superseded by a newer rotation, Stage 2 §4.4).
 	PurgeExpiredRotatedWebhookSecrets(ctx context.Context, now time.Time, graceWindow time.Duration) (int, error)
-	// ListOrphanedAgentLifetimeWebhookEndpoints returns up to limit webhook
-	// endpoints with bound_lifetime="agent" whose bound_agent_id references a
-	// soft-deleted or missing agent row (hourly maintenance cascade backstop).
-	ListOrphanedAgentLifetimeWebhookEndpoints(ctx context.Context, limit int) ([]WebhookEndpoint, error)
+	// ListOrphanedBoundWebhookEndpoints returns up to limit webhook endpoints
+	// with bound_lifetime in ("agent", "persistent") whose bound_agent_id
+	// references a soft-deleted or missing agent row (hourly maintenance cascade backstop).
+	ListOrphanedBoundWebhookEndpoints(ctx context.Context, limit int) ([]WebhookEndpoint, error)
 
 	// Triggers
 	CreateTrigger(ctx context.Context, tr *Trigger) error

@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -673,9 +674,10 @@ func TestWebhookEndpointMaintenanceSweep_OrphanedAgentLifetime(t *testing.T) {
 	}
 	require.NoError(t, f.store.CreateTrigger(ctx, trOther))
 
-	// First sweep cleans both orphaned agent-lifetime endpoints and writes audits.
-	swept := f.srv.sweepOrphanedAgentLifetimeWebhookEndpoints(ctx)
-	assert.Equal(t, 2, swept)
+	// First sweep cleans both orphaned agent-lifetime endpoints AND unbinds
+	// the orphaned persistent endpoint, writing audits for each.
+	swept := f.srv.sweepOrphanedBoundWebhookEndpoints(ctx)
+	assert.Equal(t, 3, swept)
 
 	_, err := f.store.GetWebhookEndpoint(ctx, epOrphanSoft.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
@@ -692,25 +694,145 @@ func TestWebhookEndpointMaintenanceSweep_OrphanedAgentLifetime(t *testing.T) {
 	_, err = f.store.GetWebhookEndpoint(ctx, epOrphanMissing.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
-	// Live agent-lifetime endpoint and persistent endpoint remain untouched.
-	_, err = f.store.GetWebhookEndpoint(ctx, epLive.ID)
+	// Live agent-lifetime endpoint remains untouched; persistent orphan is unbound with secret intact.
+	gotLive, err := f.store.GetWebhookEndpoint(ctx, epLive.ID)
 	require.NoError(t, err)
-	_, err = f.store.GetWebhookEndpoint(ctx, epPersist.ID)
+	assert.Equal(t, f.agentB.ID, gotLive.BoundAgentID)
+
+	gotPersist, err := f.store.GetWebhookEndpoint(ctx, epPersist.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotPersist.BoundAgentID)
+	assert.Empty(t, gotPersist.BoundLifetime)
+	_, err = f.store.GetSecret(ctx, store.WebhookEndpointSecretKey(f.projectID, epPersist.ID, 1), store.ScopeHub, f.srv.HubID())
 	require.NoError(t, err)
 
 	audits1, _, err := f.store.ListMutationAudits(ctx, store.MutationAuditFilter{Limit: 200})
 	require.NoError(t, err)
 	delAudits := 0
+	unbindAudits := 0
 	for _, a := range audits1 {
 		if (a.TargetID == epOrphanSoft.ID || a.TargetID == epOrphanMissing.ID) && a.MutationType == mutationTypeWebhookEndpointDelete {
 			delAudits++
 		}
+		if a.TargetID == epPersist.ID && a.MutationType == mutationTypeWebhookEndpointUnbind {
+			unbindAudits++
+		}
 	}
 	assert.Equal(t, 2, delAudits)
+	assert.Equal(t, 1, unbindAudits)
 
 	// Second sweep is idempotent (0 swept, no new audits).
-	assert.Equal(t, 0, f.srv.sweepOrphanedAgentLifetimeWebhookEndpoints(ctx))
+	assert.Equal(t, 0, f.srv.sweepOrphanedBoundWebhookEndpoints(ctx))
 	audits2, _, err := f.store.ListMutationAudits(ctx, store.MutationAuditFilter{Limit: 200})
 	require.NoError(t, err)
 	assert.Equal(t, len(audits1), len(audits2))
+
+	// O1 restore race: list -> restore -> delete/unbind leaves both endpoints intact.
+	epRaceAgent := mkBoundEP("race-agent-ep", store.DelegationPrincipalUser, f.owner.ID, f.agentA.ID, store.WebhookBoundLifetimeAgent)
+	epRacePersist := mkBoundEP("race-persist-ep", store.DelegationPrincipalUser, f.owner.ID, f.agentA.ID, store.WebhookBoundLifetimePersistent)
+	orphansBeforeRestore, err := f.store.ListOrphanedBoundWebhookEndpoints(ctx, 100)
+	require.NoError(t, err)
+	require.Len(t, orphansBeforeRestore, 2)
+
+	deletedAgentA, err := f.store.GetAgent(ctx, f.agentA.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.srv.restoreAgentTx(ctx, deletedAgentA, AuditActor{}))
+
+	for _, o := range orphansBeforeRestore {
+		ag := &store.Agent{ID: o.BoundAgentID, ProjectID: o.ProjectID}
+		if o.BoundLifetime == store.WebhookBoundLifetimeAgent {
+			assert.False(t, f.srv.deleteAgentLifetimeWebhookEndpoint(ctx, ag, o), "must not delete after restore")
+		} else {
+			assert.False(t, f.srv.unbindPersistentWebhookEndpoint(ctx, ag, o), "must not unbind after restore")
+		}
+	}
+	_, err = f.store.GetWebhookEndpoint(ctx, epRaceAgent.ID)
+	require.NoError(t, err, "agent-lifetime endpoint must survive restore race")
+	gotRacePersist, err := f.store.GetWebhookEndpoint(ctx, epRacePersist.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.agentA.ID, gotRacePersist.BoundAgentID, "persistent endpoint must remain bound after restore race")
+}
+
+// TestWebhookEndpointPatch_AgentLifetimeRequiresDeletePermission verifies R1
+// (Review 2): PATCHing an endpoint into bound_lifetime="agent" (new agent or
+// persistent/unbound -> agent) requires webhook_endpoint.delete so callers with
+// webhook_endpoint.update only (e.g. project-admin) cannot delete endpoints
+// indirectly by binding them to an agent they can delete.
+func TestWebhookEndpointPatch_AgentLifetimeRequiresDeletePermission(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	f.srv.config.SoftDeleteRetention = 72 * time.Hour
+	ctx := context.Background()
+
+	adminAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "admin-agent-r1",
+		Name:      "admin-agent-r1",
+		ProjectID: f.projectID,
+		Phase:     string(state.PhaseRunning),
+		CreatedBy: f.admin.ID,
+		OwnerID:   f.admin.ID,
+		Ancestry:  []string{f.admin.ID},
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, adminAgent))
+
+	rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, map[string]any{"name": "owners-hook-r1"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	// Baseline: project-admin lacks webhook_endpoint.delete.
+	rec = f.doWebhookEndpoint(t, f.adminAuth, created.ID, http.MethodDelete, nil)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	// 1. Admin PATCH binding with boundLifetime=agent -> 403, row unchanged.
+	rec = f.doWebhookEndpoint(t, f.adminAuth, created.ID, http.MethodPatch, map[string]any{
+		"boundAgentId":  adminAgent.ID,
+		"boundLifetime": store.WebhookBoundLifetimeAgent,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	gotAfterRefusal, err := f.store.GetWebhookEndpoint(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotAfterRefusal.BoundAgentID)
+	assert.Empty(t, gotAfterRefusal.BoundLifetime)
+
+	// Deleting adminAgent does not affect the owner's endpoint.
+	delReq := authoredRequest(t, f.adminAuth, http.MethodDelete, "/api/v1/projects/"+f.projectID+"/agents/"+adminAgent.ID, nil)
+	delRec := httptest.NewRecorder()
+	f.srv.deleteAgent(delRec, delReq, adminAgent.ID)
+	require.Equal(t, http.StatusNoContent, delRec.Code, delRec.Body.String())
+	_, err = f.store.GetWebhookEndpoint(ctx, created.ID)
+	require.NoError(t, err, "owner's endpoint must survive admin agent deletion")
+
+	// 2. Admin PATCH binding with boundLifetime=persistent -> 200 (update only).
+	rec = f.doWebhookEndpoint(t, f.adminAuth, created.ID, http.MethodPatch, map[string]any{
+		"boundAgentId":  f.agentA.ID,
+		"boundLifetime": store.WebhookBoundLifetimePersistent,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 3. Admin PATCH upgrading existing persistent binding to lifetime=agent -> 403, stays persistent.
+	rec = f.doWebhookEndpoint(t, f.adminAuth, created.ID, http.MethodPatch, map[string]any{
+		"boundLifetime": store.WebhookBoundLifetimeAgent,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	gotStillPersist, err := f.store.GetWebhookEndpoint(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.agentA.ID, gotStillPersist.BoundAgentID)
+	assert.Equal(t, store.WebhookBoundLifetimePersistent, gotStillPersist.BoundLifetime)
+
+	// 4. Owner (holds webhook_endpoint.delete) PATCH lifetime=agent -> 200.
+	rec = f.doWebhookEndpoint(t, f.ownerAuth, created.ID, http.MethodPatch, map[string]any{
+		"boundLifetime": store.WebhookBoundLifetimeAgent,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	gotOwnerUpdated, err := f.store.GetWebhookEndpoint(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.agentA.ID, gotOwnerUpdated.BoundAgentID)
+	assert.Equal(t, store.WebhookBoundLifetimeAgent, gotOwnerUpdated.BoundLifetime)
+
+	// Admin PATCH rebinding an existing agent-lifetime endpoint to another agent -> 403.
+	rec = f.doWebhookEndpoint(t, f.adminAuth, created.ID, http.MethodPatch, map[string]any{
+		"boundAgentId": f.agentB.ID,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 }

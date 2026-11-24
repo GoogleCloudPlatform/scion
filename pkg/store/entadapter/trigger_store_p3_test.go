@@ -32,6 +32,7 @@ import (
 // TriggerStore methods on SQLite (default) and real PostgreSQL (when built with
 // -tags integration and SCION_TEST_POSTGRES_URL).
 func TestTriggerStore_BoundEndpointsCascadeAndRotation(t *testing.T) {
+	t.Logf("enttest.Active (Postgres) = %v", enttest.Active())
 	ctx := context.Background()
 	client := enttest.NewClient(t)
 	cs := NewCompositeStore(client)
@@ -355,7 +356,7 @@ func TestTriggerStore_BoundEndpointsCascadeAndRotation(t *testing.T) {
 	}
 	require.NoError(t, cs.CreateWebhookEndpoint(ctx, epPersistSoft))
 
-	orphans, err := cs.ListOrphanedAgentLifetimeWebhookEndpoints(ctx, 50)
+	orphans, err := cs.ListOrphanedBoundWebhookEndpoints(ctx, 50)
 	require.NoError(t, err)
 	orphanIDs := make([]string, 0, len(orphans))
 	for _, o := range orphans {
@@ -363,6 +364,41 @@ func TestTriggerStore_BoundEndpointsCascadeAndRotation(t *testing.T) {
 	}
 	assert.Contains(t, orphanIDs, epOrphanSoft.ID)
 	assert.Contains(t, orphanIDs, epOrphanMissing.ID)
+	assert.Contains(t, orphanIDs, epPersistSoft.ID, "persistent endpoint bound to soft-deleted agent must be orphaned (O2)")
 	assert.NotContains(t, orphanIDs, epOther.ID, "live agent endpoint must not be orphaned")
-	assert.NotContains(t, orphanIDs, epPersistSoft.ID, "persistent endpoint must not be orphaned")
+
+	// 7. O1 restore race: if the soft-deleted agent is restored after listing
+	//    orphans, DeleteWebhookEndpointForBoundAgent must return ErrNotFound
+	//    and UnbindWebhookEndpointForAgent must return false, leaving both intact.
+	_, err = cs.client.Agent.UpdateOneID(uuid.MustParse(softDelAgID)).ClearDeletedAt().Save(ctx)
+	require.NoError(t, err)
+
+	_, _, _, err = cs.DeleteWebhookEndpointForBoundAgent(ctx, projID, epOrphanSoft.ID, softDelAgID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "must not delete endpoint of live/restored agent")
+	_, err = cs.GetWebhookEndpoint(ctx, epOrphanSoft.ID)
+	require.NoError(t, err, "epOrphanSoft must remain after restore")
+
+	unboundRestored, err := cs.UnbindWebhookEndpointForAgent(ctx, projID, epPersistSoft.ID, softDelAgID)
+	require.NoError(t, err)
+	assert.False(t, unboundRestored, "must not unbind persistent endpoint of live/restored agent")
+	gotPersistRestored, err := cs.GetWebhookEndpoint(ctx, epPersistSoft.ID)
+	require.NoError(t, err)
+	assert.Equal(t, softDelAgID, gotPersistRestored.BoundAgentID)
+
+	// Re-soft-deleting softDelAgID allows both delete and persistent unbind to succeed.
+	_, err = cs.client.Agent.UpdateOneID(uuid.MustParse(softDelAgID)).SetDeletedAt(softDelTime).Save(ctx)
+	require.NoError(t, err)
+
+	_, _, _, err = cs.DeleteWebhookEndpointForBoundAgent(ctx, projID, epOrphanSoft.ID, softDelAgID)
+	require.NoError(t, err)
+	_, err = cs.GetWebhookEndpoint(ctx, epOrphanSoft.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	unboundOrphanPersist, err := cs.UnbindWebhookEndpointForAgent(ctx, projID, epPersistSoft.ID, softDelAgID)
+	require.NoError(t, err)
+	assert.True(t, unboundOrphanPersist)
+	gotPersistAfterUnbind, err := cs.GetWebhookEndpoint(ctx, epPersistSoft.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotPersistAfterUnbind.BoundAgentID)
+	assert.Empty(t, gotPersistAfterUnbind.BoundLifetime)
 }
