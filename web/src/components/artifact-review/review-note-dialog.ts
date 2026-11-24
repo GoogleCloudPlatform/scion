@@ -137,7 +137,8 @@ export class ScionReviewNoteDialog extends LitElement {
     }
   }
 
-  private onShow = (): void => {
+  private onShow = (e: Event): void => {
+    if (e.target !== e.currentTarget) return;
     requestAnimationFrame(() => {
       this.textarea?.focus();
       this.textarea?.select();

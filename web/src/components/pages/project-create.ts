@@ -1875,7 +1875,8 @@ export class ScionPageProjectCreate extends LitElement {
       <sl-dialog
         label="Browse Directory"
         ?open=${this.browseDialogOpen}
-        @sl-after-hide=${() => {
+        @sl-after-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.browseDialogOpen = false;
         }}
         style="--width: 36rem;"
@@ -1888,7 +1889,8 @@ export class ScionPageProjectCreate extends LitElement {
       <sl-dialog
         label="Project Already Exists"
         ?open=${this.existingProjectId !== null}
-        @sl-after-hide=${() => {
+        @sl-after-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.existingProjectId = null;
         }}
       >

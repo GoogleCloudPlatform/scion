@@ -19,6 +19,7 @@
     "./chat-file-preview/*.ts",
     "./chat-mobile/*.ts",
     "./chat-palette/*.ts",
+    "./dialog-nested-popup/*.ts",
     "./project-files-tabs/*.ts",
     "./terminal-entrypoints/*.ts",
     "./terminal-hidden/*.ts",

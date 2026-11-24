@@ -756,7 +756,8 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       <sl-dialog
         label="Pin Hash"
         ?open=${this.pinDialogOpen}
-        @sl-after-hide=${() => {
+        @sl-after-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.pinDialogOpen = false;
         }}
       >

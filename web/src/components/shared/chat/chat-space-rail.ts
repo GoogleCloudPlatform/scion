@@ -5384,7 +5384,10 @@ export class ScionChatSpaceRail extends LitElement {
       <sl-dialog
         label="Set emoji for ${space.projectName}"
         open
-        @sl-after-hide=${() => this.closeEmojiPicker()}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
+          this.closeEmojiPicker();
+        }}
       >
         <div class="emoji-grid">
           ${ScionChatSpaceRail.EMOJI_LIST.map(

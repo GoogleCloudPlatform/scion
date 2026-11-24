@@ -217,7 +217,10 @@ export class ScionProfileShell extends LitElement {
         class="mobile-drawer"
         ?open=${this._drawerOpen}
         placement="start"
-        @sl-hide=${(): void => this.handleDrawerClose()}
+        @sl-hide=${(e: Event): void => {
+          if (e.target !== e.currentTarget) return;
+          this.handleDrawerClose();
+        }}
       >
         <scion-profile-nav
           .user=${this.user}
