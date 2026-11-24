@@ -485,9 +485,6 @@ export class ScionPageProjectSettings extends LitElement {
   private messagingPolicy: ProjectMessagingPolicy | null = null;
 
   @state()
-  private messagingPolicyLoading = true;
-
-  @state()
   private messagingPolicySaving = false;
 
   @state()
@@ -1220,7 +1217,6 @@ export class ScionPageProjectSettings extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async loadMessagingPolicy(): Promise<void> {
-    this.messagingPolicyLoading = true;
     this.messagingPolicyError = null;
     try {
       const res = await apiFetch(`/api/v1/projects/${this.projectId}/messaging-policy`);
@@ -1229,8 +1225,6 @@ export class ScionPageProjectSettings extends LitElement {
       }
     } catch {
       // Non-critical — section won't render
-    } finally {
-      this.messagingPolicyLoading = false;
     }
   }
 
@@ -1337,22 +1331,14 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private renderMessagingPolicySection() {
-    // Don't render until data is loaded (or if the endpoint is unavailable)
-    if (this.messagingPolicyLoading) {
-      return html`
-        <div class="section">
-          <h2>Cross-Project Messaging</h2>
-          <p>Controls which external agents can send messages to agents in this project.</p>
-          <div style="text-align: center; padding: 1rem;"><sl-spinner></sl-spinner></div>
-        </div>
-      `;
+    // Hide the section until policy data is loaded, if the endpoint is unavailable,
+    // or when cross-project messaging is disabled by Hub administrators.
+    if (!this.messagingPolicy || !this.messagingPolicy.hubCrossProjectEnabled) {
+      return nothing;
     }
-
-    if (!this.messagingPolicy) return nothing;
 
     const canEdit = can(this.project?._capabilities, 'manage');
     const policy = this.messagingPolicy;
-    const hubDisabled = !policy.hubCrossProjectEnabled;
     const currentValue = policy.crossProjectInbound;
 
     const policyLabels: Record<CrossProjectInboundPolicy, string> = {
@@ -1377,16 +1363,6 @@ export class ScionPageProjectSettings extends LitElement {
           destination project&rsquo;s consent.
         </p>
 
-        ${hubDisabled
-          ? html`
-              <sl-alert variant="warning" open>
-                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                <strong>Disabled by Hub administrator.</strong> Cross-project messaging is turned
-                off at the Hub level. Your configured selection below is preserved and will take
-                effect when the Hub administrator enables cross-project messaging.
-              </sl-alert>
-            `
-          : ''}
         ${this.messagingPolicyError
           ? html`<div
               class="config-status error"
@@ -1437,7 +1413,7 @@ export class ScionPageProjectSettings extends LitElement {
               </p>
             `
           : ''}
-        ${currentValue !== 'none' && !hubDisabled
+        ${currentValue !== 'none'
           ? html`
               <p
                 style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);"
