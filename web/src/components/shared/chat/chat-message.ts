@@ -2931,6 +2931,9 @@ export class ScionChatMessage extends LitElement {
     if (changed.has('authorizingUserId')) {
       this.resolveAuthorizer();
     }
+    if (changed.has('messageType') || changed.has('messageId')) {
+      this.syncSecretRequestCard();
+    }
   }
 
   /**
@@ -2961,9 +2964,6 @@ export class ScionChatMessage extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('messageType') || changed.has('messageId')) {
-      this.syncSecretRequestCard();
-    }
     const cardMode = this.showsDecisionCard || this.showsSecretRequestCard;
     const codeSpans = codeSpanMentionsEnabled();
     const knownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
@@ -2975,6 +2975,7 @@ export class ScionChatMessage extends LitElement {
       changed.has('plain') ||
       changed.has('decisionIntro') ||
       changed.has('secretRequestCard') ||
+      changed.has('secretRequestError') ||
       knownUsersKey !== this.renderedKnownUsersKey ||
       codeSpans !== this.renderedCodeSpanMentions ||
       knownMentionSlugsKeyNow !== this.renderedKnownMentionSlugsKey ||
@@ -3369,10 +3370,13 @@ export class ScionChatMessage extends LitElement {
     });
   }
 
-  /** The text the bubble renders: the intro alone under an action card. */
+  /** The text the bubble renders: the intro alone under an action card, or fallback body on secret-request load error. */
   private get displayBody(): string {
     if (this.showsDecisionCard) return this.decisionIntro ?? '';
-    if (this.showsSecretRequestCard) return this.secretRequestCard?.intro ?? '';
+    if (this.showsSecretRequestCard) {
+      if (this.secretRequestError) return this.body;
+      return this.secretRequestCard?.intro ?? '';
+    }
     return this.body;
   }
 

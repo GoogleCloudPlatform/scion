@@ -20,6 +20,7 @@
     "./chat-mobile/*.ts",
     "./chat-palette/*.ts",
     "./dialog-nested-popup/*.ts",
+    "./secret-request/*.ts",
     "./project-files-tabs/*.ts",
     "./terminal-entrypoints/*.ts",
     "./terminal-hidden/*.ts",

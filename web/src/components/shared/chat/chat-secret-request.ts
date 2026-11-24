@@ -85,6 +85,15 @@ export interface SecretRequestRefreshedDetail {
   card: SecretRequestCardResponse;
 }
 
+/** Whether the current browser engine supports CSS `-webkit-text-security: disc`. */
+export function supportsWebkitTextSecurity(): boolean {
+  return (
+    typeof CSS !== 'undefined' &&
+    typeof CSS.supports === 'function' &&
+    CSS.supports('-webkit-text-security', 'disc')
+  );
+}
+
 @customElement('scion-chat-secret-request')
 export class ScionChatSecretRequest extends LitElement {
   readonly _zone = new DisplayZoneController(this);
@@ -159,9 +168,18 @@ export class ScionChatSecretRequest extends LitElement {
   @state()
   private revealedRows = new Set<string>();
 
-  /** Transient UI-only focus flag keeping the textarea mounted while typing (keyed by rowId). */
+  /**
+   * Transient UI-only focus flag for the no-text-security fallback (keyed by rowId).
+   * Unused in engines supporting `-webkit-text-security` and for `environment` password inputs.
+   */
   @state()
   private editingRows = new Set<string>();
+
+  /** Last measured height (px) of a fallback-mode textarea so its masked placeholder matches footprint. */
+  private readonly fallbackHeights = new Map<string, number>();
+
+  /** Row ID whose fallback textarea should be focused after re-entering edit mode from the placeholder. */
+  private pendingFocusRowId = '';
 
   /** Reactive counter bumped when in-memory form values change, without storing values in @state. */
   @state()
@@ -302,10 +320,46 @@ export class ScionChatSecretRequest extends LitElement {
       margin-top: 0.55rem;
     }
 
+    .secret-input {
+      flex: 1 1 auto;
+      min-width: 0;
+      height: 2.25rem;
+      box-sizing: border-box;
+      padding: 0.4rem 0.6rem;
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius);
+      background: var(--scion-surface);
+      color: var(--scion-text);
+      font-family: var(--scion-font-mono);
+      font-size: 0.875rem;
+      line-height: 1.4;
+    }
+
+    .secret-input::-ms-reveal,
+    .secret-input::-ms-clear {
+      display: none;
+    }
+
+    .secret-input:focus {
+      outline: none;
+      border-color: var(--scion-border-active);
+    }
+
+    .secret-input:focus-visible {
+      outline: 2px solid var(--scion-primary);
+      outline-offset: 1px;
+    }
+
+    .secret-input:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      background: var(--scion-bg-subtle);
+    }
+
     .secret-textarea {
       flex: 1 1 auto;
       min-width: 0;
-      min-height: 2.75rem;
+      min-height: calc(var(--secret-rows, 2) * 1.4em + 0.9rem + 2px);
       max-height: 12rem;
       resize: vertical;
       box-sizing: border-box;
@@ -319,20 +373,40 @@ export class ScionChatSecretRequest extends LitElement {
       line-height: 1.4;
     }
 
+    .secret-textarea.masked {
+      -webkit-text-security: disc;
+      text-security: disc;
+    }
+
     .secret-masked {
       flex: 1 1 auto;
       min-width: 0;
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      min-height: 2.25rem;
+      min-height: calc(var(--secret-rows, 2) * 1.4em + 0.9rem + 2px);
       box-sizing: border-box;
       padding: 0.45rem 0.6rem;
       border: 1px solid var(--scion-border);
       border-radius: var(--scion-radius);
       background: var(--scion-surface);
       color: var(--scion-text-muted);
-      font-size: var(--chat-fs-sm, 0.875rem);
+      font-family: var(--scion-font-mono);
+      font-size: 0.875rem;
+      line-height: 1.4;
+      text-align: left;
+      cursor: text;
+    }
+
+    .secret-masked:focus-visible {
+      outline: 2px solid var(--scion-primary);
+      outline-offset: 1px;
+    }
+
+    .secret-masked:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      background: var(--scion-bg-subtle);
     }
 
     .secret-masked sl-icon {
@@ -356,7 +430,9 @@ export class ScionChatSecretRequest extends LitElement {
     }
 
     @media (pointer: coarse) {
-      .secret-textarea {
+      .secret-input,
+      .secret-textarea,
+      .secret-masked {
         font-size: 1rem;
       }
     }
@@ -588,8 +664,21 @@ export class ScionChatSecretRequest extends LitElement {
     this.formValues.clear();
     this.revealedRows = new Set();
     this.editingRows = new Set();
+    this.fallbackHeights.clear();
+    this.pendingFocusRowId = '';
     this.pendingFulfillIdempotencyKey = '';
     this.formRevision++;
+  }
+
+  protected override updated(): void {
+    if (this.pendingFocusRowId) {
+      const targetId = this.pendingFocusRowId;
+      this.pendingFocusRowId = '';
+      const ta = this.shadowRoot?.querySelector<HTMLTextAreaElement>(
+        `textarea[data-row-id="${CSS.escape ? CSS.escape(targetId) : targetId}"]`
+      );
+      ta?.focus();
+    }
   }
 
   private pruneNonPendingFormValues(): void {
@@ -671,7 +760,16 @@ export class ScionChatSecretRequest extends LitElement {
     this.editingRows = next;
   }
 
-  private onValueBlur(rowId: string): void {
+  private enterFallbackEdit(rowId: string): void {
+    this.pendingFocusRowId = rowId;
+    this.onValueFocus(rowId);
+  }
+
+  private onValueBlur(rowId: string, e?: Event): void {
+    const el = e?.target as HTMLElement | null;
+    if (el && el.offsetHeight > 0) {
+      this.fallbackHeights.set(rowId, el.offsetHeight);
+    }
     if (!this.editingRows.has(rowId)) return;
     const next = new Set(this.editingRows);
     next.delete(rowId);
@@ -679,7 +777,7 @@ export class ScionChatSecretRequest extends LitElement {
   }
 
   private onValueInput(rowId: string, e: Event): void {
-    const target = e.target as HTMLTextAreaElement | null;
+    const target = e.target as HTMLInputElement | HTMLTextAreaElement | null;
     const value = target?.value ?? '';
     if (value.length === 0) {
       this.formValues.delete(rowId);
@@ -693,9 +791,9 @@ export class ScionChatSecretRequest extends LitElement {
     this.formRevision++;
   }
 
-  private toggleReveal(rowId: string): void {
+  private toggleReveal(rowId: string, currentlyVisible: boolean): void {
     const nextRevealed = new Set(this.revealedRows);
-    if (nextRevealed.has(rowId)) {
+    if (currentlyVisible) {
       nextRevealed.delete(rowId);
     } else {
       nextRevealed.add(rowId);
@@ -1006,31 +1104,79 @@ export class ScionChatSecretRequest extends LitElement {
     if (isPendingSecretRequest(row)) {
       const value = this.formValues.get(row.rowId) ?? '';
       const revealed = this.revealedRows.has(row.rowId);
-      const editing = this.editingRows.has(row.rowId);
-      const isMasked = !revealed && !editing && value.length > 0;
-      const lineCount = value ? value.split('\n').length : 0;
       const disabled = !this.canRespondNow || this.submitting || this.actionState.dismissSubmitting;
+      const isEnvironment = !row.secretType || row.secretType === 'environment';
+
+      if (isEnvironment) {
+        return html`
+          <div class="input-wrap" data-form-rev=${this.formRevision}>
+            <input
+              class="secret-input"
+              type=${revealed ? 'text' : 'password'}
+              data-key=${row.key}
+              data-row-id=${row.rowId}
+              aria-label=${`Secret value for ${row.key}`}
+              placeholder=${`Enter value for ${row.key}…`}
+              autocomplete="new-password"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              data-lpignore="true"
+              data-1p-ignore="true"
+              ?disabled=${disabled}
+              .value=${value}
+              @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
+            />
+            <button
+              type="button"
+              class="toggle-visibility"
+              data-toggle-visibility=${row.key}
+              aria-pressed=${revealed ? 'true' : 'false'}
+              aria-label=${revealed ? `Hide value for ${row.key}` : `Show value for ${row.key}`}
+              title=${revealed ? 'Hide value' : 'Show value'}
+              ?disabled=${disabled}
+              @click=${(): void => this.toggleReveal(row.rowId, revealed)}
+            >
+              <sl-icon name=${revealed ? 'eye-slash' : 'eye'} aria-hidden="true"></sl-icon>
+            </button>
+          </div>
+        `;
+      }
+
+      const canMaskInPlace = supportsWebkitTextSecurity();
+      const textareaRows = row.secretType === 'file' ? 4 : 2;
+      const editing = !canMaskInPlace && this.editingRows.has(row.rowId);
+      const isFallbackMasked = !canMaskInPlace && !revealed && !editing && value.length > 0;
+      const isPlaintextVisible = revealed || (!canMaskInPlace && editing && value.length > 0);
+      const measuredHeight = !canMaskInPlace ? this.fallbackHeights.get(row.rowId) : undefined;
+      const footprintStyle = measuredHeight
+        ? `--secret-rows: ${textareaRows}; height: ${measuredHeight}px`
+        : `--secret-rows: ${textareaRows}`;
+
       return html`
         <div class="input-wrap" data-form-rev=${this.formRevision}>
-          ${isMasked
+          ${isFallbackMasked
             ? html`
-                <div
+                <button
+                  type="button"
                   class="secret-masked"
                   data-testid="secret-masked"
                   data-key=${row.key}
                   data-row-id=${row.rowId}
+                  aria-label=${`Secret value for ${row.key} entered, hidden`}
+                  style=${footprintStyle}
+                  ?disabled=${disabled}
+                  @focus=${(): void => this.enterFallbackEdit(row.rowId)}
+                  @click=${(): void => this.enterFallbackEdit(row.rowId)}
                 >
                   <sl-icon name="lock" aria-hidden="true"></sl-icon>
-                  <span
-                    >&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull; (${lineCount}
-                    ${lineCount === 1 ? 'line' : 'lines'}, hidden — click Show to view or
-                    edit)</span
-                  >
-                </div>
+                  <span aria-hidden="true">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span>
+                </button>
               `
             : html`
                 <textarea
-                  class="secret-textarea"
+                  class="secret-textarea${canMaskInPlace && !revealed ? ' masked' : ''}"
+                  style=${footprintStyle}
                   data-key=${row.key}
                   data-row-id=${row.rowId}
                   aria-label=${`Secret value for ${row.key}`}
@@ -1043,11 +1189,13 @@ export class ScionChatSecretRequest extends LitElement {
                   spellcheck="false"
                   data-lpignore="true"
                   data-1p-ignore="true"
-                  rows=${row.secretType === 'file' ? 4 : 2}
+                  rows=${textareaRows}
                   ?disabled=${disabled}
                   .value=${value}
-                  @focus=${(): void => this.onValueFocus(row.rowId)}
-                  @blur=${(): void => this.onValueBlur(row.rowId)}
+                  @focus=${canMaskInPlace ? nothing : (): void => this.onValueFocus(row.rowId)}
+                  @blur=${canMaskInPlace
+                    ? nothing
+                    : (e: Event): void => this.onValueBlur(row.rowId, e)}
                   @input=${(e: Event): void => this.onValueInput(row.rowId, e)}
                 ></textarea>
               `}
@@ -1055,13 +1203,15 @@ export class ScionChatSecretRequest extends LitElement {
             type="button"
             class="toggle-visibility"
             data-toggle-visibility=${row.key}
-            aria-pressed=${revealed ? 'true' : 'false'}
-            aria-label=${revealed ? `Hide value for ${row.key}` : `Show value for ${row.key}`}
-            title=${revealed ? 'Hide value' : 'Show value'}
+            aria-pressed=${isPlaintextVisible ? 'true' : 'false'}
+            aria-label=${isPlaintextVisible
+              ? `Hide value for ${row.key}`
+              : `Show value for ${row.key}`}
+            title=${isPlaintextVisible ? 'Hide value' : 'Show value'}
             ?disabled=${disabled}
-            @click=${(): void => this.toggleReveal(row.rowId)}
+            @click=${(): void => this.toggleReveal(row.rowId, isPlaintextVisible)}
           >
-            <sl-icon name=${revealed ? 'eye-slash' : 'eye'} aria-hidden="true"></sl-icon>
+            <sl-icon name=${isPlaintextVisible ? 'eye-slash' : 'eye'} aria-hidden="true"></sl-icon>
           </button>
         </div>
       `;

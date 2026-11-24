@@ -176,8 +176,8 @@ describe('native chat secret-request wiring', () => {
     expect(card.shadowRoot?.querySelector('.status-alert.blocked')?.textContent).toContain(
       'agent.attach'
     );
-    const textarea = card.shadowRoot?.querySelector('textarea') as HTMLTextAreaElement;
-    expect(textarea.disabled).toBe(true);
+    const input = card.shadowRoot?.querySelector('input') as HTMLInputElement;
+    expect(input.disabled).toBe(true);
     // No body block rendered when intro is empty
     expect(msg.shadowRoot?.querySelector('.plain-text')).toBeNull();
   });
@@ -255,12 +255,11 @@ describe('native chat secret-request wiring', () => {
     );
     await card.updateComplete;
 
-    const textarea = card.shadowRoot?.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
-    textarea.dispatchEvent(new Event('focus'));
-    textarea.value = 'ghp_native_secret';
-    textarea.dispatchEvent(new Event('input'));
+    const input = card.shadowRoot?.querySelector(
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
+    input.value = 'ghp_native_secret';
+    input.dispatchEvent(new Event('input'));
     await card.updateComplete;
 
     (card.shadowRoot?.querySelector('.submit-btn') as HTMLElement).click();
@@ -358,5 +357,70 @@ describe('native chat secret-request wiring', () => {
     await vi.waitFor(() => {
       expect(navigateToMock).toHaveBeenCalledWith('/secret-requests/v2-other-conv');
     });
+  });
+
+  it('aborts in-flight card fetch on disconnect and refetches on reconnect', async () => {
+    const signals: AbortSignal[] = [];
+    let callCount = 0;
+    const fetchMock = vi.fn().mockImplementation((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/v1/secret-requests/msg-sr-1') {
+        callCount++;
+        if (init?.signal) signals.push(init.signal);
+        if (callCount === 1) {
+          // Keep first request pending until aborted
+          return new Promise<Response>(() => {});
+        }
+        return Promise.resolve(jsonResponse(makeCard()));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const msg = document.createElement('scion-chat-message') as ScionChatMessage;
+    msg.messageId = 'msg-sr-1';
+    msg.messageType = 'secret-request';
+    msg.body = FALLBACK_MARKDOWN;
+    document.body.appendChild(msg);
+    await msg.updateComplete;
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+
+    // Disconnect aborts the in-flight request and clears loaded id
+    msg.remove();
+    expect(signals[0].aborted).toBe(true);
+
+    // Reconnect triggers a fresh GET and renders the card
+    document.body.appendChild(msg);
+    await vi.waitFor(() => {
+      expect(msg.shadowRoot?.querySelector('scion-chat-secret-request')).not.toBeNull();
+    });
+    expect(callCount).toBe(2);
+  });
+
+  it('renders the Markdown fallback alongside the error and Retry button when card GET fails', async () => {
+    const fetchMock = vi.fn().mockImplementation((input: string | URL) => {
+      if (String(input) === '/api/v1/secret-requests/msg-sr-1') {
+        return Promise.resolve(
+          jsonResponse({ error: { code: 'internal_error', message: 'temporary failure' } }, 500)
+        );
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const msg = document.createElement('scion-chat-message') as ScionChatMessage;
+    msg.messageId = 'msg-sr-1';
+    msg.messageType = 'secret-request';
+    msg.body = FALLBACK_MARKDOWN;
+    msg.fromAgent = true;
+    document.body.appendChild(msg);
+
+    await vi.waitFor(() => {
+      expect(msg.shadowRoot?.querySelector('.secret-request-status.error')).not.toBeNull();
+      expect(msg.shadowRoot?.textContent).toContain('https://hub.example/secret-requests/msg-sr-1');
+    });
+    expect(msg.shadowRoot?.querySelector('.secret-request-status.error sl-button')).not.toBeNull();
   });
 });

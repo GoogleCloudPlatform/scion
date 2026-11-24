@@ -183,19 +183,22 @@ describe('scion-chat-secret-request', () => {
       'Stored as a secret readable only by agent builder-1 in project my-project.'
     );
 
-    // Pending row: key label, version, description, textarea + show/hide toggle
+    // Pending row: key label, version, description, password input + show/hide toggle
     const pendingRow = shadow.querySelector('[data-row-id="r-pending"]')!;
     expect(pendingRow.querySelector('.key-label')?.textContent).toBe('KEY_PENDING');
     expect(pendingRow.querySelector('.version')?.textContent).toBe('v1');
     expect(pendingRow.querySelector('.description')?.textContent).toBe(
       'A GitHub PAT with repo scope'
     );
-    const textarea = pendingRow.querySelector('textarea') as HTMLTextAreaElement;
-    expect(textarea).not.toBeNull();
+    const input = pendingRow.querySelector('input') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.type).toBe('password');
+    expect(input.autocomplete).toBe('new-password');
     const toggleBtn = pendingRow.querySelector('.toggle-visibility') as HTMLButtonElement;
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
     toggleBtn.click();
     await el.updateComplete;
+    expect(input.type).toBe('text');
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
     // Submitting row
@@ -292,12 +295,8 @@ describe('scion-chat-secret-request', () => {
       ],
     });
 
-    const inputA = el.shadowRoot!.querySelector(
-      'textarea[data-key="KEY_A"]'
-    ) as HTMLTextAreaElement;
-    const inputC = el.shadowRoot!.querySelector(
-      'textarea[data-key="KEY_C"]'
-    ) as HTMLTextAreaElement;
+    const inputA = el.shadowRoot!.querySelector('input[data-key="KEY_A"]') as HTMLInputElement;
+    const inputC = el.shadowRoot!.querySelector('input[data-key="KEY_C"]') as HTMLInputElement;
     inputA.value = 'secret-val-a';
     inputA.dispatchEvent(new Event('input'));
     inputC.value = 'secret-val-c';
@@ -331,13 +330,14 @@ describe('scion-chat-secret-request', () => {
 
     // Rows updated and form values cleared with messageId unchanged
     expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+    expect(el.shadowRoot!.querySelector('input')).toBeNull();
     expect(el.shadowRoot!.querySelector('textarea')).toBeNull();
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
   });
 
-  it('clears rendered textarea values after submit with messageId unchanged', async () => {
+  it('clears rendered input values after submit with messageId unchanged', async () => {
     // Return empty rows array on 200 so the same messageId keeps its pending
-    // textarea mounted; this directly asserts handleSubmit clears values
+    // input mounted; this directly asserts handleSubmit clears values
     // without relying on a messageId change or row transition.
     const fetchMock = vi.fn().mockResolvedValue(
       jsonResponse({
@@ -353,7 +353,7 @@ describe('scion-chat-secret-request', () => {
       rows: [makeRow({ rowId: 'r-1', messageId: 'msg-stay', key: 'KEY_A', status: 'pending' })],
     });
 
-    const input = el.shadowRoot!.querySelector('textarea[data-key="KEY_A"]') as HTMLTextAreaElement;
+    const input = el.shadowRoot!.querySelector('input[data-key="KEY_A"]') as HTMLInputElement;
     input.value = 'top-secret-value';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
@@ -368,9 +368,7 @@ describe('scion-chat-secret-request', () => {
     await el.updateComplete;
 
     expect(el.messageId).toBe('msg-stay');
-    const afterInput = el.shadowRoot!.querySelector(
-      'textarea[data-key="KEY_A"]'
-    ) as HTMLTextAreaElement;
+    const afterInput = el.shadowRoot!.querySelector('input[data-key="KEY_A"]') as HTMLInputElement;
     expect(afterInput.value).toBe('');
     const submitBtn = el.shadowRoot!.querySelector('.submit-btn') as HTMLElement;
     expect(submitBtn.hasAttribute('disabled')).toBe(true);
@@ -469,8 +467,8 @@ describe('scion-chat-secret-request', () => {
   it('clears form values on disconnect/navigation', async () => {
     const el = await mountCard();
     const input = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     input.value = 'ephemeral-secret';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
@@ -480,8 +478,8 @@ describe('scion-chat-secret-request', () => {
     await el.updateComplete;
 
     const afterReconnect = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     expect(afterReconnect.value).toBe('');
   });
 
@@ -669,8 +667,8 @@ describe('scion-chat-secret-request', () => {
 
       const el = await mountCard();
       const input = el.shadowRoot!.querySelector(
-        'textarea[data-key="GITHUB_TOKEN"]'
-      ) as HTMLTextAreaElement;
+        'input[data-key="GITHUB_TOKEN"]'
+      ) as HTMLInputElement;
       input.value = 'tok-123';
       input.dispatchEvent(new Event('input'));
       await el.updateComplete;
@@ -694,12 +692,12 @@ describe('scion-chat-secret-request', () => {
       reason: 'Requires agent.attach permission on builder-1.',
     });
 
-    const textarea = el.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+    const input = el.shadowRoot!.querySelector('input') as HTMLInputElement;
     const submitBtn = el.shadowRoot!.querySelector('.submit-btn') as HTMLElement;
     const dismissBtn = el.shadowRoot!.querySelector('.dismiss-btn') as HTMLElement;
     const blocked = el.shadowRoot!.querySelector('.status-alert.blocked');
 
-    expect(textarea.disabled).toBe(true);
+    expect(input.disabled).toBe(true);
     expect(submitBtn.hasAttribute('disabled')).toBe(true);
     expect(dismissBtn.hasAttribute('disabled')).toBe(true);
     expect(blocked?.textContent).toContain('Requires agent.attach permission on builder-1.');
@@ -707,7 +705,7 @@ describe('scion-chat-secret-request', () => {
 
   it('applies live updates from chat.secret_request.updated via stateManager', async () => {
     const el = await mountCard();
-    expect(el.shadowRoot!.querySelector('textarea')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('input')).not.toBeNull();
 
     stateManager.dispatchEvent(
       new CustomEvent('message-action-updated', {
@@ -731,7 +729,7 @@ describe('scion-chat-secret-request', () => {
     );
     await el.updateComplete;
 
-    expect(el.shadowRoot!.querySelector('textarea')).toBeNull();
+    expect(el.shadowRoot!.querySelector('input')).toBeNull();
     expect(el.shadowRoot!.textContent).toContain('found in cache');
   });
 
@@ -743,66 +741,113 @@ describe('scion-chat-secret-request', () => {
     await el.updateComplete;
 
     expect(el.canRespond).toBe(false);
-    const textarea = el.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
-    expect(textarea.disabled).toBe(true);
+    const input = el.shadowRoot!.querySelector('input') as HTMLInputElement;
+    expect(input.disabled).toBe(true);
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
     expect(el.shadowRoot!.querySelector('.dismiss-btn')?.hasAttribute('disabled')).toBe(true);
     expect(el.shadowRoot!.querySelector('.status-alert.blocked')).not.toBeNull();
   });
 
-  it('keeps textarea mounted while typing on focus and removes plaintext from DOM when masked on blur', async () => {
-    const el = await mountCard();
+  it('masks file/variable rows in place with -webkit-text-security when supported (no element swap on blur)', async () => {
+    vi.stubGlobal('CSS', {
+      supports: (prop: string, val: string) => prop === '-webkit-text-security' && val === 'disc',
+      escape: (s: string) => s,
+    });
+
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'r-file', key: 'DEPLOY_KEY', secretType: 'file' })],
+    });
+    const textarea = el.shadowRoot!.querySelector(
+      'textarea[data-key="DEPLOY_KEY"]'
+    ) as HTMLTextAreaElement;
+    expect(textarea).not.toBeNull();
+    expect(textarea.classList.contains('masked')).toBe(true);
+
+    // Focus, type several keystrokes, and blur — same textarea stays mounted and masked throughout
+    textarea.dispatchEvent(new Event('focus'));
+    textarea.value = '-----BEGIN KEY-----\nsecret-line';
+    textarea.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBe(textarea);
+    expect(textarea.classList.contains('masked')).toBe(true);
+
+    textarea.dispatchEvent(new Event('blur'));
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBe(textarea);
+    expect(el.shadowRoot!.querySelector('[data-testid="secret-masked"]')).toBeNull();
+    expect(textarea.classList.contains('masked')).toBe(true);
+
+    // Show is the only path to plaintext; aria-pressed reflects actual visibility
+    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+    toggleBtn.click();
+    await el.updateComplete;
+    expect(textarea.classList.contains('masked')).toBe(false);
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
+
+    toggleBtn.click();
+    await el.updateComplete;
+    expect(textarea.classList.contains('masked')).toBe(true);
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('falls back to accessible placeholder without plaintext or line count when -webkit-text-security is unsupported', async () => {
+    vi.stubGlobal('CSS', {
+      supports: () => false,
+      escape: (s: string) => s,
+    });
+
+    const el = await mountCard({
+      rows: [makeRow({ rowId: 'r-file', key: 'DEPLOY_KEY', secretType: 'file' })],
+    });
     const initialTextarea = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
+      'textarea[data-key="DEPLOY_KEY"]'
     ) as HTMLTextAreaElement;
     expect(initialTextarea).not.toBeNull();
 
-    // Focus and type several keystrokes — textarea stays mounted throughout
+    // Focus and type several keystrokes — textarea stays mounted; aria-pressed reflects visible plaintext
     initialTextarea.dispatchEvent(new Event('focus'));
     await el.updateComplete;
     for (const chunk of ['ghp_', 'ghp_super_', 'ghp_super_secret\nline2']) {
       initialTextarea.value = chunk;
       initialTextarea.dispatchEvent(new Event('input'));
       await el.updateComplete;
-      expect(el.shadowRoot!.querySelector('textarea[data-key="GITHUB_TOKEN"]')).toBe(
-        initialTextarea
-      );
+      expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBe(initialTextarea);
     }
+    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
-    // Blur switches to read-only masked placeholder with NO plaintext in DOM
+    // Blur switches to focusable masked placeholder with NO plaintext and NO line count
     initialTextarea.dispatchEvent(new Event('blur'));
     await el.updateComplete;
 
-    expect(el.shadowRoot!.querySelector('textarea[data-key="GITHUB_TOKEN"]')).toBeNull();
-    const masked = el.shadowRoot!.querySelector('[data-testid="secret-masked"]');
+    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
+    const masked = el.shadowRoot!.querySelector(
+      '[data-testid="secret-masked"]'
+    ) as HTMLButtonElement;
     expect(masked).not.toBeNull();
-    expect(masked?.textContent?.replace(/\s+/g, ' ').trim()).toContain('2 lines');
+    expect(masked.getAttribute('aria-label')).toBe('Secret value for DEPLOY_KEY entered, hidden');
+    expect(masked.querySelector('span[aria-hidden="true"]')).not.toBeNull();
+    expect(masked.textContent).not.toContain('line');
     expect(el.shadowRoot!.textContent).not.toContain('ghp_super_secret');
     expect(el.shadowRoot!.innerHTML).not.toContain('ghp_super_secret');
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
 
-    // Toggle Show brings textarea back with value; toggle Hide removes plaintext again
-    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
-    toggleBtn.click();
+    // Focusing the placeholder re-enters edit mode directly without needing Show
+    masked.dispatchEvent(new Event('focus'));
     await el.updateComplete;
-    const revealedTextarea = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
+    const reentered = el.shadowRoot!.querySelector(
+      'textarea[data-key="DEPLOY_KEY"]'
     ) as HTMLTextAreaElement;
-    expect(revealedTextarea).not.toBeNull();
-    expect(revealedTextarea.value).toBe('ghp_super_secret\nline2');
-
-    toggleBtn.click();
-    await el.updateComplete;
-    expect(el.shadowRoot!.querySelector('textarea[data-key="GITHUB_TOKEN"]')).toBeNull();
-    expect(el.shadowRoot!.textContent).not.toContain('ghp_super_secret');
-    expect(el.shadowRoot!.innerHTML).not.toContain('ghp_super_secret');
+    expect(reentered).not.toBeNull();
+    expect(reentered.value).toBe('ghp_super_secret\nline2');
   });
 
   it('clears form values on pagehide (bfcache protection)', async () => {
     const el = await mountCard();
     const input = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
-    input.dispatchEvent(new Event('focus'));
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     input.value = 'bfcache-secret';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
@@ -812,8 +857,8 @@ describe('scion-chat-secret-request', () => {
 
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
     const after = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     expect(after.value).toBe('');
     expect(el.shadowRoot!.textContent).not.toContain('bfcache-secret');
     expect(el.shadowRoot!.innerHTML).not.toContain('bfcache-secret');
@@ -845,8 +890,8 @@ describe('scion-chat-secret-request', () => {
     expect(submitBtn.getAttribute('type')).toBe('button');
 
     const input = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     input.value = 'tok-once';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
@@ -865,8 +910,8 @@ describe('scion-chat-secret-request', () => {
 
     const el = await mountCard();
     const input = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     // 22,000 3-byte UTF-8 characters = 66,000 bytes > 65,536 (even though .length < 65,536)
     input.value = '€'.repeat(22_000);
     input.dispatchEvent(new Event('input'));
@@ -880,17 +925,7 @@ describe('scion-chat-secret-request', () => {
     expect(alert?.textContent).toContain('64 KiB');
   });
 
-  it('refetches the card on 400 with details.field === "values"', async () => {
-    const updatedRow = makeRow({
-      rowId: 'row-1',
-      status: 'withdrawn',
-      withdrawn: {
-        at: '2026-11-22T23:58:00Z',
-        reason: 'stale card',
-        by: 'agent',
-        byName: 'builder-1',
-      },
-    });
+  it('refetches the card on 400 with details.field === "values" and applies deniedReason when canRespond becomes false', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -898,7 +933,7 @@ describe('scion-chat-secret-request', () => {
           {
             error: {
               code: 'validation_error',
-              message: 'values must contain exactly the 0 pending key(s) on this card',
+              message: 'values must contain exactly the 1 pending key(s) on this card',
               details: { field: 'values' },
             },
           },
@@ -912,8 +947,8 @@ describe('scion-chat-secret-request', () => {
           agentId: 'agent-1',
           agentName: 'builder-1',
           canRespond: false,
-          reason: 'all secret requests on this card are closed',
-          rows: [updatedRow],
+          reason: 'attach permission was revoked',
+          rows: [makeRow({ rowId: 'row-1', status: 'pending' })],
         })
       );
     vi.stubGlobal('fetch', fetchMock);
@@ -925,8 +960,8 @@ describe('scion-chat-secret-request', () => {
     });
 
     const input = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     input.value = 'tok-stale';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
@@ -940,9 +975,14 @@ describe('scion-chat-secret-request', () => {
     await el.updateComplete;
 
     expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/secret-requests/msg-1');
-    expect(el.shadowRoot!.querySelector('[data-row-id="row-1"]')?.getAttribute('data-status')).toBe(
-      'withdrawn'
+    expect(el.shadowRoot!.querySelector('.status-alert.blocked')?.textContent).toContain(
+      'attach permission was revoked'
     );
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+    const inputAfter = el.shadowRoot!.querySelector(
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
+    expect(inputAfter.disabled).toBe(true);
   });
 
   it('reuses fulfill idempotencyKey on 503 and network retry, and mints a new key after edit or 409', async () => {
@@ -988,9 +1028,8 @@ describe('scion-chat-secret-request', () => {
 
     const el = await mountCard();
     const input = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
-    input.dispatchEvent(new Event('focus'));
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     input.value = 'tok-1';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
@@ -1046,11 +1085,11 @@ describe('scion-chat-secret-request', () => {
     expect(key2).not.toBe(key1);
 
     // 5. Edit value -> mints a new key3
-    const textareaAfter = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
-    textareaAfter.value = 'tok-2';
-    textareaAfter.dispatchEvent(new Event('input'));
+    const inputAfter = el.shadowRoot!.querySelector(
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
+    inputAfter.value = 'tok-2';
+    inputAfter.dispatchEvent(new Event('input'));
     await el.updateComplete;
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
@@ -1076,8 +1115,8 @@ describe('scion-chat-secret-request', () => {
 
     const el = await mountCard();
     const input = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     input.value = 'secret-denied';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
@@ -1092,11 +1131,11 @@ describe('scion-chat-secret-request', () => {
     expect(el.shadowRoot!.querySelector('.status-alert.blocked')?.textContent).toContain(
       'you need agent.attach permission'
     );
-    const textareaAfter = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
-    expect(textareaAfter.value).toBe('');
-    expect(textareaAfter.disabled).toBe(true);
+    const inputAfter = el.shadowRoot!.querySelector(
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
+    expect(inputAfter.value).toBe('');
+    expect(inputAfter.disabled).toBe(true);
   });
 
   it('applies full secretRequest view from 409 conflict details (applyConflictDetails)', async () => {
@@ -1128,8 +1167,8 @@ describe('scion-chat-secret-request', () => {
 
     const el = await mountCard();
     const input = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
+      'input[data-key="GITHUB_TOKEN"]'
+    ) as HTMLInputElement;
     input.value = 'tok-123';
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
