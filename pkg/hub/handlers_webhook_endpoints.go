@@ -830,7 +830,7 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 				writeForbidden(w, "")
 			}
 		case errors.Is(err, errInvalidBinding):
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidBinding, "boundAgentId and boundLifetime must either both be set or both be empty", nil)
+			writeError(w, http.StatusBadRequest, "invalid_binding", "boundAgentId and boundLifetime must either both be set or both be empty", nil)
 		case errors.Is(err, errWebhookEndpointBoundLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("agent has reached the maximum of %d bound webhook endpoints", store.MaxBoundWebhookEndpointsPerAgent), nil)
