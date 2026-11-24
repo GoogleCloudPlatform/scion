@@ -473,6 +473,11 @@ func evaluateActivation(cb *CandidateBinding, now time.Time) ActivationResult {
 //   - System scope applies to everything.
 //   - Project scope applies only when the binding's ScopeID matches the
 //     resource's authoritative ProjectID.
+//
+// Coupling note: principalInputs.BindingsForProject (authz_request_inputs.go)
+// re-states this project-scope matching rule to pre-filter memoized bindings
+// for non-explain decide() calls. Any change to scope matching semantics here
+// must update buildBindingScopeIndex / BindingsForProject and its parity tests.
 func scopeApplies(cb *CandidateBinding, resource ResourceContext) bool {
 	switch cb.ScopeType {
 	case ScopeTypeSystem:
@@ -493,6 +498,12 @@ func scopeApplies(cb *CandidateBinding, resource ResourceContext) bool {
 
 // buildDenyReasons constructs a human-readable list of reasons for a deny
 // decision.
+//
+// Coupling note: principalInputs.BindingsForProject (authz_request_inputs.go)
+// relies on buildDenyReasons branching only on len(rejected) == 0 (retaining a
+// single dropped project-scoped binding whenever any binding is omitted). Any
+// change that inspects rejected binding contents or counts must update
+// BindingsForProject and its parity tests.
 func buildDenyReasons(
 	granting []GrantProvenance,
 	rejected []GrantProvenance,
