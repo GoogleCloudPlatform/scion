@@ -65,7 +65,7 @@ at 60 runes:
 default agent. A conversation name is the positional argument to `create`, not
 a `--title` flag; names must start with an ASCII letter or digit, contain only
 ASCII letters, digits, spaces, underscores, and hyphens, and be at most 100
-characters (punctuation such as `:`, `#`, `.`, or parentheses returns HTTP 400).
+characters (characters such as `:`, `#`, `.`, or parentheses return HTTP 400).
 `join` is not idempotent: adding an existing participant returns HTTP 409, so
 check `participants` first when membership is uncertain.
 
