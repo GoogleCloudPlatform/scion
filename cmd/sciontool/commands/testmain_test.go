@@ -16,6 +16,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
@@ -150,10 +151,12 @@ const selfCheckHelperEnv = "SUBSTRATE_SELFCHECK_HELPER_TEST"
 //
 // Layers, all required:
 //
-//  1. Every SCION_HUB*/token/agent-identity env var, plus SCION_HOST_UID/GID
-//     and SCION_KEEPID_UID, is cleared for the entire process: removes the
-//     *input* hub.NewClient()'s own testing.Testing() guard depends on, for
-//     every test here, not just ones that remember to call testutil.ScrubHubEnv.
+//  1. Every SCION_HUB*/token/agent-identity env var, SCION_METADATA_* and
+//     SCION_NETWORK_MODE, plus SCION_HOST_UID/GID and SCION_KEEPID_UID, is
+//     cleared for the entire process: removes the *input* hub.NewClient()'s
+//     own testing.Testing() guard depends on and prevents agent-container
+//     metadata settings from leaking into tests, for every test here, not
+//     just ones that remember to call testutil.ScrubHubEnv.
 //  2. scionUserLookup and lookupUserByID default to "not found" for the
 //     whole test binary: no lookup here can resolve a real account, even
 //     when a test overrides the var back to a fake one (scoped with
@@ -188,6 +191,9 @@ func TestMain(m *testing.M) {
 	// not depend on the caller's SCION_LOG_LEVEL / SCION_DEBUG.
 	envVarsToClear := append(testutil.HubEnvKeys(),
 		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID",
+		"SCION_METADATA_MODE", "SCION_METADATA_PORT", "SCION_METADATA_BIND_ADDRESS",
+		"SCION_METADATA_SA_EMAIL", "SCION_METADATA_PROJECT_ID", "SCION_NETWORK_MODE",
+		metadata.InterceptionEnvVar, metadata.InterceptionSourceEnvVar,
 		initFirewallEnv,
 		// SCION_INITIAL_TASK arms the first-turn watchdog in RunInit, which
 		// would capture the real tmux pane 3 minutes in.
