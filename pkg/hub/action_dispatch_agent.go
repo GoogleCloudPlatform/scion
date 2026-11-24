@@ -985,7 +985,7 @@ func (s *Server) renderDispatchReuseMessage(ctx context.Context, req hubfire.Fir
 	vars := buildDispatchTemplateVars(req, da)
 	rendered, rErr := renderTemplateSlot(payload.ReuseMessage, triggertemplate.SlotMessage, vars, payload.UntrustedVars)
 	if rErr != nil {
-		refusal := (&dispatchAgentAction{srv: s}).refuseTemplateRender(req, triggertemplate.SlotMessage, rErr)
+		refusal := (&dispatchAgentAction{srv: s}).refuseTemplateRender(ctx, req, triggertemplate.SlotMessage, rErr)
 		return "", &refusal, nil
 	}
 	return rendered, nil, nil
