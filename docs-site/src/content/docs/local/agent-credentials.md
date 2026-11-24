@@ -507,7 +507,7 @@ Two diagnostic commands help troubleshoot auth and connectivity:
 
 When an agent creates sub-agents (progeny), Scion enforces strict controls over which secrets those child agents can access.
 
-By default, child agents operate under a **granular secret access** model. They do not automatically inherit all secrets from the project or their parent. Instead, they only have access to the credentials necessary to perform their specific tasks, maintaining a least-privilege security boundary across the agent ancestry chain.
+By default, child agents operate under a **granular secret access** model. They do not automatically inherit all secrets from the project or their parent. Instead, they only have access to the credentials necessary to perform their specific tasks, maintaining a least-privilege security boundary across the agent ancestry chain. **Agent-scoped secrets** (gated by `hub.agent_secrets`) are bound to a single agent and never propagate to child agents (`allowProgeny` is rejected); see [Agent-Scoped Secrets](/scion/hosted/user/secrets/#agent-scoped-secrets).
 
 ### Propagation of User-Scoped Secrets (`--allow-progeny`)
 

@@ -338,6 +338,8 @@ is the top of the chain, and it is not — see [A2](#a2-the-config-rung-sits-abo
 runtime_broker  <  hub  <  project  <  user
 ```
 
+*(Secrets add a fifth, highest scope — `agent` — above `user` when the `hub.agent_secrets` [experiment](/scion/reference/experiments/) is enabled: `runtime_broker < hub < project < user < agent`. Plain environment variables stay four-scope; see [Agent-Scoped Secrets](/scion/hosted/user/secrets/#agent-scoped-secrets).)*
+
 The order is stated in one place in the code, the `envScopePrecedence` list, and **every consumer**
 derives its order from it: the resolver (`resolveEnvFromStorage`), the storage step of the agent
 `TZ` chain (`resolveStorageTZ`), the startup shadow warning (`WarnOutrankedBrokerEnvKeys`), and the
