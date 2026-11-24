@@ -2072,3 +2072,691 @@ func TestMessagePolicySystemOne_O2UnboundRuleBeyond200InstancesL1Precheck(t *tes
 	require.NoError(t, json.Unmarshal(ownerResp.Evaluation, &ownerProj))
 	assert.Equal(t, "z-beyond-200-proj-ref", ownerProj.Instance, "execution must resolve the exact same beyond-200 instance checked by L1 pre-check")
 }
+
+// TestMessagePolicySystemOne_R1PureDisableSkipsBindingValidation verifies Fix
+// Round 2 Item 1 (rev2-hub R1): PATCH resulting in a disabled policy with
+// system_one_rule unchanged skips System One runtime binding validation
+// (ValidateCompiled and hub.system_one check), while re-enabling or modifying
+// system_one_rule remains strictly validated.
+func TestMessagePolicySystemOne_R1PureDisableSkipsBindingValidation(t *testing.T) {
+	ctx := context.Background()
+	f := newMPHFixture(t, true)
+	var providerCalls atomic.Int32
+	tlsSrv, admin := mpgEnableSystemOne(t, f.srv, f.s, f.project, "ts-r1-primary", func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"jev-1.14.0","answers":{"asks_choice":{"type":"noul","noul":0.9}},"usage":{"input_tokens":5,"output_tokens":1}}`))
+	})
+
+	// Create a second enabled hub-wide instance (NOT allowlisted on f.project).
+	createInst := func(name string) {
+		rec := doRequestAsUser(t, f.srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    name,
+			"adapter": "typesafe",
+			"model":   "jev-1.14.0",
+			"auth":    map[string]any{"kind": "api_key", "apiKey": "sk-r1-" + name},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		row, err := f.s.GetSystemOneInstanceByName(ctx, name)
+		require.NoError(t, err)
+		row.Endpoint = tlsSrv.URL
+		require.NoError(t, f.s.UpdateSystemOneInstance(ctx, row))
+	}
+	createInst("ts-r1-secondary")
+	createInst("ts-r1-bound-dis")
+	createInst("ts-r1-bound-del")
+
+	base := f.basePath()
+	boolPtr := func(v bool) *bool { return &v }
+	patchEnabled := func(polID string, enabled bool) *httptest.ResponseRecorder {
+		return mphSessionDo(t, f.srv, f.owner, http.MethodPatch, base+"/"+polID, PatchMessagePolicyRequest{
+			Enabled: boolPtr(enabled),
+		})
+	}
+	createPolicy := func(name, s1Rule string) MessagePolicyResponse {
+		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, CreateMessagePolicyRequest{
+			Name:          name,
+			Mode:          store.MessagePolicyModeShadow,
+			Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+			ViolationRule: `judgment_flags.asks_choice`,
+			SystemOneRule: s1Rule,
+			OnUncertain:   store.MessagePolicyOutcomeAdmit,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, "create %s: %s", name, rec.Body.String())
+		var resp MessagePolicyResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp
+	}
+
+	// (a) Unbound rule with 2+ enabled hub instances and only ts-r1-primary
+	// allowlisted on the project so unbound creation succeeds.
+	unboundRule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+	polUnbound := createPolicy("r1-unbound", unboundRule)
+
+	// Pure disable succeeds (200) even though hub has multiple enabled instances.
+	rec := patchEnabled(polUnbound.ID, false)
+	require.Equal(t, http.StatusOK, rec.Code, "(a) pure disable must return 200: %s", rec.Body.String())
+
+	// Make unbound binding invalid (allowlist a 2nd enabled instance -> ambiguous) -> re-enable refused (400).
+	_, _, err := f.s.AddProjectSystemOneInstance(ctx, f.project, "ts-r1-secondary")
+	require.NoError(t, err)
+	rec = patchEnabled(polUnbound.ID, true)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "(a) re-enable while ambiguous must return 400: %s", rec.Body.String())
+	// Changing system_one_rule while staying disabled is also strictly validated (400).
+	rec = mphSessionDo(t, f.srv, f.owner, http.MethodPatch, base+"/"+polUnbound.ID, PatchMessagePolicyRequest{
+		Enabled:       boolPtr(false),
+		SystemOneRule: &unboundRule,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "(a) changing system_one_rule while disabled must stay strict: %s", rec.Body.String())
+
+	// (b) Bound instance disabled: pure disable returns 200, re-enable returns 400.
+	_, _, err = f.s.AddProjectSystemOneInstance(ctx, f.project, "ts-r1-bound-dis")
+	require.NoError(t, err)
+	boundDisRule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"ts-r1-bound-dis"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+	polBoundDis := createPolicy("r1-bound-disabled", boundDisRule)
+	disRow, err := f.s.GetSystemOneInstanceByName(ctx, "ts-r1-bound-dis")
+	require.NoError(t, err)
+	disRow.Enabled = false
+	require.NoError(t, f.s.UpdateSystemOneInstance(ctx, disRow))
+
+	rec = patchEnabled(polBoundDis.ID, false)
+	require.Equal(t, http.StatusOK, rec.Code, "(b) pure disable with disabled bound instance must return 200: %s", rec.Body.String())
+	rec = patchEnabled(polBoundDis.ID, true)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "(b) re-enable with disabled bound instance must return 400: %s", rec.Body.String())
+
+	// (c) Bound instance deleted: pure disable returns 200, re-enable returns 400.
+	_, _, err = f.s.AddProjectSystemOneInstance(ctx, f.project, "ts-r1-bound-del")
+	require.NoError(t, err)
+	boundDelRule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"ts-r1-bound-del"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+	polBoundDel := createPolicy("r1-bound-deleted", boundDelRule)
+	require.Equal(t, http.StatusNoContent, doRequestAsUser(t, f.srv, admin, http.MethodDelete, systemOneAdminPath+"/ts-r1-bound-del", nil).Code)
+
+	rec = patchEnabled(polBoundDel.ID, false)
+	require.Equal(t, http.StatusOK, rec.Code, "(c) pure disable with deleted bound instance must return 200: %s", rec.Body.String())
+	rec = patchEnabled(polBoundDel.ID, true)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "(c) re-enable with deleted bound instance must return 400: %s", rec.Body.String())
+
+	// (d) hub.system_one off: pure disable returns 200, re-enable returns 400.
+	boundPrimaryRule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"ts-r1-primary"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+	polS1Off := createPolicy("r1-s1-off", boundPrimaryRule)
+
+	var offExps []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		switch e.Name {
+		case experiments.MessagePolicies, experiments.Decisions:
+			e.Default = true
+		case experiments.SystemOne:
+			e.Default = false
+		}
+		offExps = append(offExps, e)
+	}
+	offReg, err := experiments.NewRegistry(offExps, nil)
+	require.NoError(t, err)
+	f.srv.experiments = offReg
+
+	rec = patchEnabled(polS1Off.ID, false)
+	require.Equal(t, http.StatusOK, rec.Code, "(d) pure disable while hub.system_one is off must return 200: %s", rec.Body.String())
+	rec = patchEnabled(polS1Off.ID, true)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "(d) re-enable while hub.system_one is off must return 400: %s", rec.Body.String())
+	assert.Zero(t, providerCalls.Load(), "PATCH authoring checks must make 0 provider calls")
+}
+
+// TestMessagePolicySystemOne_ND1EscapedInputNameThroughH2Send verifies Fix
+// Round 2 Item 3 (ND1 + Addendum): a System One rule whose input name uses JSON
+// Unicode escapes ("conversation\u002e\u0075nmentioned_agent_slugs") still
+// triggers unmentioned-agent-slug population through the H2 send path, respects
+// selected-field byte bounds, discloses zero unreferenced inputs to the
+// provider, and fails as facts_unavailable (never an empty list) when
+// ListAgents faults.
+func TestMessagePolicySystemOne_ND1EscapedInputNameThroughH2Send(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+
+	var (
+		providerCalls atomic.Int32
+		lastReqBody   atomic.Value
+	)
+	mpgEnableSystemOne(t, f.srv, f.s, f.project.ID, "ts-nd1", func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r.Body)
+		lastReqBody.Store(buf.String())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"jev-1.14.0","answers":{"missed_peer":{"type":"noul","noul":0.95}},"usage":{"input_tokens":10,"output_tokens":1}}`))
+	})
+
+	peerAgent := &store.Agent{
+		ID:        tid("ag-nd1-peer"),
+		Slug:      "nd1-unmentioned-peer",
+		Name:      "ND1 Peer Agent",
+		ProjectID: f.project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, peerAgent))
+
+	projID := f.project.ID
+	conv := &store.Conversation{
+		ID:          tid("conv-nd1-group"),
+		ProjectID:   &projID,
+		Kind:        "group",
+		DisplayName: "nd1-secret-thread-title",
+		Surface:     "native",
+	}
+	require.NoError(t, f.s.CreateConversation(ctx, conv))
+	require.NoError(t, f.s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    f.sender.ID,
+	}))
+	require.NoError(t, f.s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    peerAgent.ID,
+	}))
+
+	// JSON-escaped input name: "conversation\u002e\u0075nmentioned_agent_slugs"
+	// Only this field is referenced; message.body and sender/recipient fields
+	// are NOT referenced and must never be disclosed to the provider.
+	escapedRule := `{"dialect":"system_one","inputs":["conversation\u002e\u0075nmentioned_agent_slugs"],"spec":{"version":1,"binding":{"instance":"ts-nd1"},"questions":[{"id":"missed_peer","type":"binary","instructions":"Are there unmentioned peers?"}]}}`
+	pol := &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "nd1-escaped-unmentioned",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToConversation}},
+		ViolationRule: `judgment_flags.missed_peer`,
+		SystemOneRule: escapedRule,
+		SystemOneRefs: []string{"ts-nd1"},
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+
+	const unrefBodyCanary = "UNREFERENCED_BODY_CANARY_9911"
+	rr := f.sendOutbound(t, OutboundMessageRequest{
+		ConversationRef: "conv:" + conv.ID,
+		Msg:             "Status update " + unrefBodyCanary,
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	require.Equal(t, int32(1), providerCalls.Load())
+	rawProviderReq, _ := lastReqBody.Load().(string)
+	assert.Contains(t, rawProviderReq, "nd1-unmentioned-peer", "escaped input name must populate conversation.unmentioned_agent_slugs")
+	assert.NotContains(t, rawProviderReq, unrefBodyCanary, "unreferenced message.body must not be disclosed to provider")
+	assert.NotContains(t, rawProviderReq, f.sender.Slug, "unreferenced sender.slug must not be disclosed to provider")
+	assert.NotContains(t, rawProviderReq, "nd1-secret-thread-title", "unreferenced conversation metadata must not be disclosed to provider")
+	assert.LessOrEqual(t, len(rawProviderReq), messagepolicy.MaxSystemOneEnvTotalBytes, "provider request must stay within selected-field byte bounds")
+
+	// When ListAgents faults, the escaped-input policy must fail with
+	// facts_unavailable (0 additional provider calls), never sending an empty list.
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *mpListAgentsFaultStore {
+		return &mpListAgentsFaultStore{Store: inner, sw: sw}
+	})
+	fault.Arm()
+
+	rrFault := f.sendOutbound(t, OutboundMessageRequest{
+		ConversationRef: "conv:" + conv.ID,
+		Msg:             "Second update under ListAgents fault.",
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rrFault.Code, rrFault.Body.String())
+	assert.Equal(t, int32(1), providerCalls.Load(), "ListAgents fault must fail closed with 0 provider calls")
+	decs := mpgWaitForDecisionCount(t, f.s, f.project.ID, 2)
+	assert.Equal(t, store.MessagePolicyClassFailed, decs[0].Class)
+	assert.Equal(t, messagepolicy.ReasonFactsUnavailable, decs[0].CELErrorReason)
+}
+
+// TestMessagePolicySystemOne_R2FaultIsolationKillsR2Join verifies Fix Round 2
+// Item 4 (rev-hub): on a single send under an armed ListAgents fault, a policy
+// needing conversation.unmentioned_agent_slugs fails with facts_unavailable
+// while a CEL-only policy and a System One policy not needing unmentioned slugs
+// both keep their own outcomes (tested in both shadow and enforce orderings).
+func TestMessagePolicySystemOne_R2FaultIsolationKillsR2Join(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+
+	var providerCalls atomic.Int32
+	mpgEnableSystemOne(t, f.srv, f.s, f.project.ID, "ts-r2iso", func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"jev-1.14.0","answers":{"flag":{"type":"noul","noul":0.95}},"usage":{"input_tokens":8,"output_tokens":1}}`))
+	})
+
+	peerAgent := &store.Agent{
+		ID:        tid("ag-r2iso-peer"),
+		Slug:      "r2iso-peer",
+		Name:      "R2Iso Peer",
+		ProjectID: f.project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, peerAgent))
+
+	projID := f.project.ID
+	conv := &store.Conversation{
+		ID:          tid("conv-r2iso-group"),
+		ProjectID:   &projID,
+		Kind:        "group",
+		DisplayName: "r2iso-thread",
+		Surface:     "native",
+	}
+	require.NoError(t, f.s.CreateConversation(ctx, conv))
+	require.NoError(t, f.s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    f.sender.ID,
+	}))
+	require.NoError(t, f.s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    peerAgent.ID,
+	}))
+
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *mpListAgentsFaultStore {
+		return &mpListAgentsFaultStore{Store: inner, sw: sw}
+	})
+	fault.Arm()
+
+	s1NeedsUnmentioned := `{"dialect":"system_one","inputs":["message.body","conversation.unmentioned_agent_slugs"],"spec":{"version":1,"binding":{"instance":"ts-r2iso"},"questions":[{"id":"flag","type":"binary","instructions":"Flag?"}]}}`
+	s1NoUnmentioned := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"ts-r2iso"},"questions":[{"id":"flag","type":"binary","instructions":"Flag?"}]}}`
+
+	polNeeds := &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "a-needs-unmentioned",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeShadow,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToConversation}},
+		ViolationRule: `judgment_flags.flag`,
+		SystemOneRule: s1NeedsUnmentioned,
+		SystemOneRefs: []string{"ts-r2iso"},
+		OnUncertain:   store.MessagePolicyOutcomeAdmit,
+		OnFailed:      store.MessagePolicyOutcomeAdmit,
+	}
+	polCEL := &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "b-cel-only",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeShadow,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToConversation}},
+		ViolationRule: `message.body.contains("CEL_TRIGGER")`,
+		OnFailed:      store.MessagePolicyOutcomeAdmit,
+	}
+	polS1Other := &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "c-s1-no-unmentioned",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeShadow,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToConversation}},
+		ViolationRule: `judgment_flags.flag`,
+		SystemOneRule: s1NoUnmentioned,
+		SystemOneRefs: []string{"ts-r2iso"},
+		OnUncertain:   store.MessagePolicyOutcomeAdmit,
+		OnFailed:      store.MessagePolicyOutcomeAdmit,
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, polNeeds))
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, polCEL))
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, polS1Other))
+
+	byName := func(decs []store.MessagePolicyDecision) map[string]store.MessagePolicyDecision {
+		m := make(map[string]store.MessagePolicyDecision, len(decs))
+		for _, d := range decs {
+			m[d.PolicyName] = d
+		}
+		return m
+	}
+
+	// 1. Shadow ordering: all 3 policies in shadow mode on one send.
+	pBefore := providerCalls.Load()
+	rrShadow := f.sendOutbound(t, OutboundMessageRequest{
+		ConversationRef: "conv:" + conv.ID,
+		Msg:             "Shadow send with CEL_TRIGGER.",
+	})
+	require.Equal(t, http.StatusOK, rrShadow.Code, rrShadow.Body.String())
+	shadowDecs := byName(mpgWaitForDecisionCount(t, f.s, f.project.ID, 3))
+	assert.Equal(t, store.MessagePolicyClassFailed, shadowDecs["a-needs-unmentioned"].Class)
+	assert.Equal(t, messagepolicy.ReasonFactsUnavailable, shadowDecs["a-needs-unmentioned"].CELErrorReason)
+	assert.Equal(t, store.MessagePolicyClassViolation, shadowDecs["b-cel-only"].Class, "CEL-only shadow policy must keep its own outcome")
+	assert.Equal(t, store.MessagePolicyClassViolation, shadowDecs["c-s1-no-unmentioned"].Class, "System One shadow policy not needing unmentioned slugs must keep its own outcome")
+	assert.Equal(t, pBefore+1, providerCalls.Load(), "only c-s1-no-unmentioned should invoke the provider")
+
+	// 2. Enforce ordering: switch all 3 policies to enforce mode on one send.
+	for _, p := range []*store.MessagePolicy{polNeeds, polCEL, polS1Other} {
+		p.Mode = store.MessagePolicyModeEnforce
+		require.NoError(t, f.s.UpdateMessagePolicy(ctx, p))
+	}
+	pBefore = providerCalls.Load()
+	rrEnforce := f.sendOutbound(t, OutboundMessageRequest{
+		ConversationRef: "conv:" + conv.ID,
+		Msg:             "Enforce send with CEL_TRIGGER.",
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rrEnforce.Code, rrEnforce.Body.String())
+	allDecs := mpgWaitForDecisionCount(t, f.s, f.project.ID, 6)
+	enforceDecs := make(map[string]store.MessagePolicyDecision, 3)
+	for _, d := range allDecs {
+		if d.Mode == store.MessagePolicyModeEnforce {
+			enforceDecs[d.PolicyName] = d
+		}
+	}
+	assert.Equal(t, store.MessagePolicyClassFailed, enforceDecs["a-needs-unmentioned"].Class)
+	assert.Equal(t, messagepolicy.ReasonFactsUnavailable, enforceDecs["a-needs-unmentioned"].CELErrorReason)
+	assert.Equal(t, store.MessagePolicyActionAdmitted, enforceDecs["a-needs-unmentioned"].Action)
+	assert.Equal(t, store.MessagePolicyClassViolation, enforceDecs["b-cel-only"].Class, "CEL-only enforce policy must keep its own outcome")
+	assert.Equal(t, store.MessagePolicyActionRejected, enforceDecs["b-cel-only"].Action)
+	assert.Equal(t, store.MessagePolicyClassViolation, enforceDecs["c-s1-no-unmentioned"].Class, "System One enforce policy not needing unmentioned slugs must keep its own outcome")
+	assert.Equal(t, store.MessagePolicyActionRejected, enforceDecs["c-s1-no-unmentioned"].Action)
+	assert.Equal(t, pBefore+1, providerCalls.Load(), "only c-s1-no-unmentioned should invoke the provider")
+}
+
+// TestMessagePolicySystemOne_TestEndpointADCBindingRefusalZeroMints verifies
+// Fix Round 2 Item 5 (rev-hub): /test binding refusals on an ADC-auth
+// (google_access_token) instance return 400 invalid_rule (category=binding)
+// with 0 ADC token mints, 0 secret reads, and 0 provider requests.
+func TestMessagePolicySystemOne_TestEndpointADCBindingRefusalZeroMints(t *testing.T) {
+	ctx := context.Background()
+	f := newMPHFixture(t, true)
+
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		switch e.Name {
+		case experiments.MessagePolicies, experiments.Decisions, experiments.SystemOne:
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	f.srv.experiments = reg
+
+	innerBackend := secret.NewLocalBackend(f.s, "test-hub-id", "test-secret-signing-key")
+	countingSecrets := &mpCountingSecretBackend{SecretBackend: innerBackend}
+	f.srv.SetSecretBackend(countingSecrets)
+
+	var adcMints atomic.Int32
+	f.srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+		adcMints.Add(1)
+		return &SystemOneADCCredentials{
+			CredentialType:      SystemOneADCTypeServiceAccount,
+			ServiceAccountEmail: "mp-adc-test@test-proj.iam.gserviceaccount.com",
+			TokenSource: oauth2.StaticTokenSource(&oauth2.Token{
+				AccessToken: "ya29.test-adc-token-canary",
+				TokenType:   "Bearer",
+				Expiry:      time.Now().Add(time.Hour),
+			}),
+		}, nil
+	})
+
+	var providerCalls atomic.Int32
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		assert.Equal(t, "Bearer ya29.test-adc-token-canary", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"answers": {"asks_choice": {"type": "noul", "noul": 0.91, "confidence": 0.91}},
+			"usage": {"total_input_tokens": 10, "total_output_tokens": 0, "total_tokens": 10}
+		}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	f.srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(hubDialectPublicResolver{}, hubDialectTargetDialer{targetAddr: tlsSrv.Listener.Addr().String()}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+
+	adminID := hubConfigTokenUser(t, f.s, "mp-adc-admin", store.SystemRoleSuperAdmin)
+	admin, err := f.s.GetUser(ctx, adminID)
+	require.NoError(t, err)
+
+	createRec := doRequestAsUser(t, f.srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gemini-adc-refusal",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"auth": map[string]any{
+			"kind":   store.SystemOneAuthKindGoogleAccessToken,
+			"scopes": []string{"https://www.googleapis.com/auth/cloud-platform"},
+		},
+		"options": map[string]string{
+			"quota_project": "test-quota-project",
+		},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	adcRule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"gemini-adc-refusal"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+	savedPol := &store.MessagePolicy{
+		ProjectID:     f.project,
+		Name:          "adc-binding-refusal-pol",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeShadow,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `judgment_flags.asks_choice`,
+		SystemOneRule: adcRule,
+		SystemOneRefs: []string{"gemini-adc-refusal"},
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, savedPol))
+
+	base := f.basePath()
+	assertBinding400 := func(rec *httptest.ResponseRecorder, label string) {
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", label, rec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, messagepolicy.ErrCodeInvalidRule, errResp.Error.Code, label)
+		assert.Equal(t, "binding", errResp.Error.Details["category"], label)
+	}
+
+	// 1. Not allowlisted (saved + inline): 400 invalid_rule (binding), 0 mints, 0 secret reads, 0 requests.
+	assertBinding400(mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+savedPol.ID+"/test", TestMessagePolicyRequest{
+		Sample: &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Saved ADC not allowlisted."},
+	}), "saved/not_allowlisted")
+	assertBinding400(mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/test", TestMessagePolicyRequest{
+		ViolationRule: `judgment_flags.asks_choice`,
+		SystemOneRule: adcRule,
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+		Sample:        &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Inline ADC not allowlisted."},
+	}), "inline/not_allowlisted")
+
+	assert.Zero(t, adcMints.Load(), "not-allowlisted ADC /test refusal must make 0 token mints")
+	assert.Zero(t, countingSecrets.getCalls.Load(), "not-allowlisted ADC /test refusal must make 0 secret reads")
+	assert.Zero(t, providerCalls.Load(), "not-allowlisted ADC /test refusal must make 0 provider requests")
+
+	// 2. Allowlist + disable instance -> 400 invalid_rule (binding), still 0 mints / 0 secret reads / 0 requests.
+	_, _, err = f.s.AddProjectSystemOneInstance(ctx, f.project, "gemini-adc-refusal")
+	require.NoError(t, err)
+	instRow, err := f.s.GetSystemOneInstanceByName(ctx, "gemini-adc-refusal")
+	require.NoError(t, err)
+	instRow.Enabled = false
+	require.NoError(t, f.s.UpdateSystemOneInstance(ctx, instRow))
+
+	assertBinding400(mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+savedPol.ID+"/test", TestMessagePolicyRequest{
+		Sample: &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Saved ADC disabled."},
+	}), "saved/disabled")
+	assert.Zero(t, adcMints.Load(), "disabled ADC /test refusal must make 0 token mints")
+	assert.Zero(t, countingSecrets.getCalls.Load(), "disabled ADC /test refusal must make 0 secret reads")
+	assert.Zero(t, providerCalls.Load(), "disabled ADC /test refusal must make 0 provider requests")
+
+	// 3. Re-enable instance -> positive control proves the ADC token-mint counter is wired and non-vacuous.
+	instRow.Enabled = true
+	require.NoError(t, f.s.UpdateSystemOneInstance(ctx, instRow))
+	okRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+savedPol.ID+"/test", TestMessagePolicyRequest{
+		Sample: &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Positive ADC control."},
+	})
+	require.Equal(t, http.StatusOK, okRec.Code, okRec.Body.String())
+	assert.Equal(t, int32(1), adcMints.Load(), "positive control must mint 1 ADC token")
+	assert.Equal(t, int32(1), providerCalls.Load(), "positive control must make 1 provider request")
+	assert.Zero(t, countingSecrets.getCalls.Load(), "ADC instance must make 0 secret reads")
+}
+
+// TestMessagePolicySystemOne_TestEndpointRateLimiting verifies Fix Round 2
+// Item 7 (consumer-design §5.3): live System One /test evaluations are
+// rate-limited at 30/min (burst 30) per verified principal (type+ID) per
+// resolved project per replica, using a dedicated keysRateLimiter instance
+// with deterministic clock control.
+func TestMessagePolicySystemOne_TestEndpointRateLimiting(t *testing.T) {
+	ctx := context.Background()
+	f := newMPHFixture(t, true)
+
+	// Install deterministic clock on the dedicated /test rate limiter.
+	now := time.Date(2026, 11, 24, 18, 0, 0, 0, time.UTC)
+	f.srv.messagePolicyTestLimiter = newKeysRateLimiterWithClock(
+		messagePolicyTestRatePerSecond,
+		messagePolicyTestBurst,
+		func() time.Time { return now },
+	)
+
+	var providerCalls atomic.Int32
+	mpgEnableSystemOne(t, f.srv, f.s, f.project, "ts-rl", func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"jev-1.14.0","answers":{"asks_choice":{"type":"noul","noul":0.92}},"usage":{"input_tokens":8,"output_tokens":1}}`))
+	})
+	_, _, err := f.s.AddProjectSystemOneInstance(ctx, f.otherProject, "ts-rl")
+	require.NoError(t, err)
+
+	// Wrap secret backend and ADC hook with counters to verify 0 I/O on 429.
+	countingSecrets := &mpCountingSecretBackend{SecretBackend: f.srv.secretBackend}
+	f.srv.SetSecretBackend(countingSecrets)
+	var adcMints atomic.Int32
+	f.srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+		adcMints.Add(1)
+		return nil, egress.ErrAuth
+	})
+
+	s1Rule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"ts-rl"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+	base := f.basePath()
+	createPol := func(projBase, name string) MessagePolicyResponse {
+		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, projBase, CreateMessagePolicyRequest{
+			Name:          name,
+			Mode:          store.MessagePolicyModeShadow,
+			Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+			ViolationRule: `judgment_flags.asks_choice`,
+			SystemOneRule: s1Rule,
+			OnUncertain:   store.MessagePolicyOutcomeAdmit,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var resp MessagePolicyResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp
+	}
+
+	pol1 := createPol(base, "rl-pol-1")
+	pol2 := createPol(base, "rl-pol-2")
+	otherBase := "/api/v1/projects/" + f.otherProject + "/message-policies"
+	polOther := createPol(otherBase, "rl-pol-other")
+
+	sampleReq := TestMessagePolicyRequest{
+		Sample: &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Option A or B?"},
+	}
+	inlineReq := TestMessagePolicyRequest{
+		ViolationRule: `judgment_flags.asks_choice`,
+		SystemOneRule: s1Rule,
+		OnUncertain:   store.MessagePolicyOutcomeAdmit,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+		Sample:        &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Inline A or B?"},
+	}
+
+	// 1. Exhaust the 30-token burst across saved pol1, saved pol2, and inline /test
+	//    (proves changing/rotating policy IDs or saved vs inline shares one bucket).
+	for i := 0; i < 10; i++ {
+		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+pol1.ID+"/test", sampleReq)
+		require.Equal(t, http.StatusOK, rec.Code, "saved pol1 #%d: %s", i, rec.Body.String())
+	}
+	for i := 0; i < 10; i++ {
+		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+pol2.ID+"/test", sampleReq)
+		require.Equal(t, http.StatusOK, rec.Code, "saved pol2 #%d: %s", i, rec.Body.String())
+	}
+	for i := 0; i < 10; i++ {
+		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/test", inlineReq)
+		require.Equal(t, http.StatusOK, rec.Code, "inline #%d: %s", i, rec.Body.String())
+	}
+	assert.Equal(t, int32(30), providerCalls.Load())
+
+	// 2. 31st live /test call -> 429 rate_limited + accurate Retry-After ("2" for 0.5/s),
+	//    0 secret reads, 0 ADC mints, 0 provider requests, 0 decision records.
+	s0 := countingSecrets.getCalls.Load()
+	m0 := adcMints.Load()
+	p0 := providerCalls.Load()
+	rec429 := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+pol1.ID+"/test", sampleReq)
+	require.Equal(t, http.StatusTooManyRequests, rec429.Code, rec429.Body.String())
+	assert.Equal(t, "2", rec429.Header().Get("Retry-After"), "at 30/min (0.5/s) an empty bucket needs 2s for 1 token")
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec429.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeRateLimited, errResp.Error.Code)
+	assert.Equal(t, s0, countingSecrets.getCalls.Load(), "429 must make 0 secret reads")
+	assert.Equal(t, m0, adcMints.Load(), "429 must make 0 ADC mints")
+	assert.Equal(t, p0, providerCalls.Load(), "429 must make 0 provider requests")
+	decList, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{ProjectID: f.project}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, decList.Items, "/test denial must record 0 decisions")
+
+	// 3. While exhausted, CEL-only and synthetic-judgment /test are unaffected (200 OK).
+	celRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/test", TestMessagePolicyRequest{
+		ViolationRule: `message.body.contains("bad")`,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+		Sample:        &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "ok"},
+	})
+	require.Equal(t, http.StatusOK, celRec.Code, "CEL-only /test must not be rate-limited: %s", celRec.Body.String())
+
+	synthRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+pol1.ID+"/test", TestMessagePolicyRequest{
+		Sample: &MessagePolicyTestSample{
+			Surface:       store.MessagePolicySurfaceAgentToUser,
+			Body:          "Synthetic check",
+			JudgmentFlags: map[string]bool{"asks_choice": true},
+		},
+	})
+	require.Equal(t, http.StatusOK, synthRec.Code, "synthetic /test must not be rate-limited: %s", synthRec.Body.String())
+	assert.Equal(t, p0, providerCalls.Load(), "CEL-only and synthetic /test must make 0 provider calls")
+
+	// 4. Distinct caller (otherAdmin), distinct project (f.otherProject), and distinct
+	//    principal type ("dev" with the same ID as f.owner) each get separate buckets.
+	otherAdmin := projectOpsUser(t, f.s, "rl-other-admin", false)
+	projectOpsGrant(t, f.s, otherAdmin, f.project, store.ProjectRoleAdmin)
+	adminRec := mphSessionDo(t, f.srv, otherAdmin, http.MethodPost, base+"/"+pol1.ID+"/test", sampleReq)
+	require.Equal(t, http.StatusOK, adminRec.Code, "distinct caller must have its own bucket: %s", adminRec.Body.String())
+
+	otherProjRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, otherBase+"/"+polOther.ID+"/test", sampleReq)
+	require.Equal(t, http.StatusOK, otherProjRec.Code, "distinct project must have its own bucket: %s", otherProjRec.Body.String())
+
+	devSameID := &DevUser{id: f.owner, email: "dev-rl@example.com", displayName: "Dev RL"}
+	rawBody, err := json.Marshal(sampleReq)
+	require.NoError(t, err)
+	devReq := httptest.NewRequest(http.MethodPost, base+"/"+pol1.ID+"/test", bytes.NewReader(rawBody))
+	devReq.Header.Set("Content-Type", "application/json")
+	devCtx := contextWithIdentity(devReq.Context(), devSameID)
+	devCtx = contextWithCredentialContext(devCtx, CredentialContext{Kind: CredentialKindDev, ID: f.owner, Type: "dev"})
+	devReq = devReq.WithContext(devCtx)
+	devRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(devRec, devReq)
+	require.Equal(t, http.StatusOK, devRec.Code, "distinct principal type (dev vs user with same ID) must have its own bucket: %s", devRec.Body.String())
+
+	// 5. Refill + verify 400 and 403 do NOT consume a token:
+	//    Advance clock by 2s (refills exactly 1 token for f.owner on f.project).
+	now = now.Add(2 * time.Second)
+
+	// 400 (invalid CEL) must not consume the refilled token.
+	bad400 := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/test", TestMessagePolicyRequest{
+		ViolationRule: `invalid(((`,
+		SystemOneRule: s1Rule,
+		OnUncertain:   store.MessagePolicyOutcomeAdmit,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+		Sample:        &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "bad"},
+	})
+	require.Equal(t, http.StatusBadRequest, bad400.Code)
+
+	// 403 as f.owner (same bucket key user:<owner.ID>:<project>, UAT lacking
+	// project:manage_message_policies) must not consume f.owner's refilled token.
+	ownerReadOnlyUAT := projectOpsMint(t, f.srv, f.owner, projectBoundary(f.project), "project:read")
+	owner403Req := httptest.NewRequest(http.MethodPost, base+"/"+pol1.ID+"/test", bytes.NewReader(rawBody))
+	owner403Req.Header.Set("Content-Type", "application/json")
+	owner403Req.Header.Set("Authorization", "Bearer "+ownerReadOnlyUAT)
+	owner403Rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(owner403Rec, owner403Req)
+	require.Equal(t, http.StatusForbidden, owner403Rec.Code, owner403Rec.Body.String())
+
+	// The 1 refilled token for f.owner must still succeed, and the next call immediately 429s.
+	refillOK := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+pol1.ID+"/test", sampleReq)
+	require.Equal(t, http.StatusOK, refillOK.Code, "refilled token must not have been consumed by 400/403: %s", refillOK.Body.String())
+	refill429 := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/"+pol1.ID+"/test", sampleReq)
+	require.Equal(t, http.StatusTooManyRequests, refill429.Code, "bucket should be empty again after consuming the 1 refilled token")
+}

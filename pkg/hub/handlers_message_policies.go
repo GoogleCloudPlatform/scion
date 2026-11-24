@@ -606,6 +606,47 @@ func (s *Server) authorizeMessagePolicyTestSystemOne(
 	return true
 }
 
+const (
+	// messagePolicyTestRatePerSecond and messagePolicyTestBurst bound live
+	// System One /test evaluations to 30/min (burst 30) per authenticated
+	// principal (type + ID) per resolved project, per Hub replica (matching
+	// chatSendHumanRatePerMinute; consumer-design §5.3).
+	messagePolicyTestRatePerSecond = 30.0 / 60.0
+	messagePolicyTestBurst         = 30.0
+)
+
+func messagePolicyTestBucketKey(ctx context.Context, projectID string) string {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return "unknown:unknown:" + projectID
+	}
+	return identity.Type() + ":" + identity.ID() + ":" + projectID
+}
+
+// allowMessagePolicyLiveTest enforces the per-caller per-project rate limit on
+// live System One /test evaluations. Called after authz, authoring validation,
+// scope matching, and credential-boundary checks so 400/403 and out-of-scope
+// requests are never charged, and before any secret lookup, token mint, or
+// provider call.
+func (s *Server) allowMessagePolicyLiveTest(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	if s.messagePolicyTestLimiter == nil {
+		return true
+	}
+	allowed, retryAfter := s.messagePolicyTestLimiter.Allow(messagePolicyTestBucketKey(r.Context(), projectID))
+	if allowed {
+		return true
+	}
+	seconds := int((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
+		fmt.Sprintf("live message policy test rate limit exceeded (%d per minute); retry in %ds",
+			int(messagePolicyTestBurst), seconds), nil)
+	return false
+}
+
 func (s *Server) resolveProjectMessagePolicy(ctx context.Context, projectID, ref string) (*store.MessagePolicy, error) {
 	if ref == "" {
 		return nil, store.ErrNotFound
@@ -1009,11 +1050,16 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 		RejectRemediation: candidate.RejectRemediation,
 	}
 	// Attach project.ID to ctx so System One authoring enforces the P2b
-	// per-project instance allowlist via ValidateCompiled, except when purely
-	// disabling an existing policy (so operators can always turn off a policy
-	// whose bound instance was removed from the allowlist).
+	// per-project instance allowlist and runtime binding checks via
+	// ValidateCompiled, except when PATCH results in a disabled policy with
+	// system_one_rule unchanged (so operators can always disable a policy
+	// whose provider binding is broken, ambiguous, deleted, or while
+	// hub.system_one is off). Re-enabling or changing system_one_rule stays
+	// strictly validated.
 	authorCtx := ctx
-	if req.SystemOneRule != nil || candidate.Enabled {
+	if req.SystemOneRule == nil && !candidate.Enabled {
+		spec.SkipSystemOneBindingValidation = true
+	} else {
 		authorCtx = systemoneruntime.WithEvalProjectID(ctx, project.ID)
 	}
 	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(authorCtx, w, project.ID, spec, true)
@@ -1375,6 +1421,9 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	hasSystemOne := strings.TrimSpace(effective.SystemOneRule) != ""
 	if hasSystemOne && !manualJudgments {
 		if !s.authorizeMessagePolicyTestSystemOne(w, r, project, effective.SystemOneRule) {
+			return
+		}
+		if !s.allowMessagePolicyLiveTest(w, r, project.ID) {
 			return
 		}
 	}

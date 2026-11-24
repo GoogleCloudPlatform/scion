@@ -698,4 +698,41 @@ func TestEvaluatePolicy_DialectDisabledRealCompilePath(t *testing.T) {
 	)
 	assert.Equal(t, messagepolicy.OutcomeReject, outcome)
 	assert.Zero(t, providerCalls.Load(), "disabled dialect must make 0 provider calls")
+
+	// SkipSystemOneBindingValidation allows syntax-valid rules while dialect is
+	// disabled (used for pure PATCH disable), while still rejecting invalid syntax.
+	mode, err := ev.ValidateAuthoring(ctx, messagepolicy.AuthoringSpec{
+		Name:                           "disabled-pure-disable",
+		Scope:                          messagepolicy.Scope{Surfaces: []string{messagepolicy.SurfaceAgentToUser}},
+		ViolationRule:                  `judgment_flags.asks_choice`,
+		SystemOneRule:                  s1Rule,
+		OnUncertain:                    messagepolicy.OutcomeReject,
+		OnFailed:                       messagepolicy.OutcomeAdmit,
+		SkipSystemOneBindingValidation: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, messagepolicy.ModeShadow, mode)
+
+	_, badSyntaxErr := ev.ValidateAuthoring(ctx, messagepolicy.AuthoringSpec{
+		Name:                           "disabled-bad-syntax",
+		Scope:                          messagepolicy.Scope{Surfaces: []string{messagepolicy.SurfaceAgentToUser}},
+		ViolationRule:                  `judgment_flags.asks_choice`,
+		SystemOneRule:                  `{"dialect":"system_one","inputs":["secret.token"],"spec":{"version":1,"questions":[{"id":"q","type":"binary","instructions":"?"}]}}`,
+		OnUncertain:                    messagepolicy.OutcomeReject,
+		OnFailed:                       messagepolicy.OutcomeAdmit,
+		SkipSystemOneBindingValidation: true,
+	})
+	require.Error(t, badSyntaxErr)
+}
+
+func TestSystemOneRuleReferencesInput_EscapedNames(t *testing.T) {
+	escaped := `{"dialect":"system_one","inputs":["conversation\u002e\u0075nmentioned_agent_slugs"],"spec":{"version":1,"questions":[{"id":"q1","type":"binary","instructions":"Check?"}]}}`
+	plain := `{"dialect":"system_one","inputs":["message.body","conversation.unmentioned_agent_slugs"],"spec":{"version":1,"questions":[{"id":"q1","type":"binary","instructions":"Check?"}]}}`
+	other := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"questions":[{"id":"q1","type":"binary","instructions":"Check?"}]}}`
+
+	assert.True(t, messagepolicy.SystemOneRuleReferencesInput(escaped, messagepolicy.FieldConversationUnmentionedAgentSlug))
+	assert.False(t, messagepolicy.SystemOneRuleReferencesInput(escaped, messagepolicy.FieldMessageBody))
+	assert.True(t, messagepolicy.SystemOneRuleReferencesInput(plain, messagepolicy.FieldConversationUnmentionedAgentSlug))
+	assert.False(t, messagepolicy.SystemOneRuleReferencesInput(other, messagepolicy.FieldConversationUnmentionedAgentSlug))
+	assert.False(t, messagepolicy.SystemOneRuleReferencesInput("", messagepolicy.FieldConversationUnmentionedAgentSlug))
 }

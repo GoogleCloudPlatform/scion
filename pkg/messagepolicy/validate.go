@@ -270,6 +270,14 @@ type AuthoringSpec struct {
 	OnFailedReasons   map[string]string
 	RejectReason      string
 	RejectRemediation string
+
+	// SkipSystemOneBindingValidation skips runtime binding validation
+	// (Dialect.Compile / ValidateCompiled and the hub.system_one experiment
+	// check), running only syntax/schema/environment compilation via
+	// s1spec.Compile. Used strictly when PATCH results in a disabled policy
+	// with system_one_rule unchanged so operators can always disable a policy
+	// whose provider binding is broken or while hub.system_one is off.
+	SkipSystemOneBindingValidation bool
 }
 
 // ValidateAuthoring validates spec against M1 authoring rules and compiles
@@ -455,8 +463,18 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 	}
 
 	if hasSystemOne {
-		if _, err := e.CompileSystemOne(ctx, spec.SystemOneRule); err != nil {
-			if compErr, ok := s1spec.AsCompileError(err); ok {
+		var s1Err error
+		if spec.SkipSystemOneBindingValidation {
+			contentEnv := SystemOneContentEnv()
+			_, s1Err = s1spec.Compile([]byte(spec.SystemOneRule), s1spec.CompileOptions{
+				Kind:        s1spec.Kind(KindJudgments),
+				Environment: &contentEnv,
+			})
+		} else {
+			_, s1Err = e.CompileSystemOne(ctx, spec.SystemOneRule)
+		}
+		if s1Err != nil {
+			if compErr, ok := s1spec.AsCompileError(s1Err); ok {
 				code := ErrCodeInvalidRule
 				if compErr.Category == s1spec.CategoryCapability {
 					code = ErrCodeNotYetSupported
@@ -467,24 +485,24 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 					Path:     compErr.Path,
 					Message:  compErr.Message,
 					Category: string(compErr.Category),
-					Cause:    err,
+					Cause:    s1Err,
 				}
 			}
 			var unsupErr *ruleengine.UnsupportedDialectError
-			if errors.As(err, &unsupErr) {
+			if errors.As(s1Err, &unsupErr) {
 				return "", &ValidationError{
 					Code:     ErrCodeUnsupportedDialect,
 					Field:    "system_one_rule",
 					Message:  unsupErr.Error(),
 					Category: unsupErr.Reason,
-					Cause:    err,
+					Cause:    s1Err,
 				}
 			}
 			return "", &ValidationError{
 				Code:    ErrCodeInvalidRule,
 				Field:   "system_one_rule",
-				Message: err.Error(),
-				Cause:   err,
+				Message: s1Err.Error(),
+				Cause:   s1Err,
 			}
 		}
 	}

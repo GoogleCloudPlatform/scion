@@ -133,7 +133,7 @@
 - [project.messagepolicy.create](#projectmessagepolicycreate) — Create a message policy on covered outbound surfaces in a project. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
 - [project.messagepolicy.update](#projectmessagepolicyupdate) — Update a project message policy, bump its revision, and invalidate its compiled rule cache entry. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
 - [project.messagepolicy.delete](#projectmessagepolicydelete) — Delete a project message policy and invalidate its compiled rule cache entry. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
-- [project.messagepolicy.test](#projectmessagepolicytest) — Dry-run an inline or stored project message policy against synthetic sample send facts without persisting or echoing message content. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+- [project.messagepolicy.test](#projectmessagepolicytest) — Evaluate an inline or stored project message policy against sample send facts without persisting decisions or echoing message content. When system_one_rule is set and no synthetic judgments are supplied, performs a live System One provider call (sending selected fields, potentially incurring provider cost, with no automatic replay or retry; requires project.secret_read for project-scoped secrets; rate-limited to 30/min per caller per project per replica, returning 429 rate_limited with Retry-After). CEL-only and synthetic-judgment tests are not rate-limited. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047, ptone/scion#8048; 404 while hub.message_policies is off)
 - [project.messagepolicy.decisions](#projectmessagepolicydecisions) — List content-free message policy evaluation decisions for a project or a single policy. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
 - [project.template.set](#projecttemplateset) — Mark or unmark a project as a template. The caller needs project.update and project.clone on the project
 - [template.project.import](#templateprojectimport) — Discover or import templates into a project
@@ -5472,7 +5472,7 @@
 
 **Domain:** project
 
-**Description:** Dry-run an inline or stored project message policy against synthetic sample send facts without persisting or echoing message content. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+**Description:** Evaluate an inline or stored project message policy against sample send facts without persisting decisions or echoing message content. When system_one_rule is set and no synthetic judgments are supplied, performs a live System One provider call (sending selected fields, potentially incurring provider cost, with no automatic replay or retry; requires project.secret_read for project-scoped secrets; rate-limited to 30/min per caller per project per replica, returning 429 rate_limited with Retry-After). CEL-only and synthetic-judgment tests are not rate-limited. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047, ptone/scion#8048; 404 while hub.message_policies is off)
 
 ### Entry Points
 
@@ -5493,7 +5493,7 @@
 
 **Effects:** `read-one`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `rate_limited`
 
 ### Tests
 

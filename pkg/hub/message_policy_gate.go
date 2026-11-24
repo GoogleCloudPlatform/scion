@@ -227,7 +227,6 @@ type messagePolicyShadowJob struct {
 	facts                  messagepolicy.Facts
 	hasFacts               bool
 	activation             messagepolicy.Activation
-	hasActivation          bool
 	factsUnavailable       bool
 	unmentionedUnavailable bool
 	droppedCount           int
@@ -236,8 +235,7 @@ type messagePolicyShadowJob struct {
 
 func policyUsesUnmentionedAgentSlugs(pol *store.MessagePolicy) bool {
 	return pol != nil &&
-		strings.TrimSpace(pol.SystemOneRule) != "" &&
-		strings.Contains(pol.SystemOneRule, messagepolicy.FieldConversationUnmentionedAgentSlug)
+		messagepolicy.SystemOneRuleReferencesInput(pol.SystemOneRule, messagepolicy.FieldConversationUnmentionedAgentSlug)
 }
 
 func anyPolicyUsesUnmentionedAgentSlugs(pols []store.MessagePolicy) bool {
@@ -737,7 +735,6 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 				facts:                  facts,
 				hasFacts:               shadowCanReuseFacts,
 				activation:             act,
-				hasActivation:          shadowCanReuseFacts,
 				factsUnavailable:       factsErr != nil,
 				unmentionedUnavailable: needUnmentionedEnforce && unmentionedErr != nil,
 				messageID:              "",
@@ -802,7 +799,6 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			facts:                  facts,
 			hasFacts:               shadowCanReuseFacts,
 			activation:             act,
-			hasActivation:          shadowCanReuseFacts,
 			factsUnavailable:       factsErr != nil,
 			unmentionedUnavailable: needUnmentionedEnforce && unmentionedErr != nil,
 			droppedCount:           droppedShadow,

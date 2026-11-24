@@ -2683,6 +2683,14 @@ type Server struct {
 	keysPrincipalLimiter *keysRateLimiter
 	keysTargetLimiter    *keysRateLimiter
 
+	// Dedicated per-replica token-bucket rate limiter for live System One
+	// message-policy /test evaluations (30/min, burst 30, keyed by verified
+	// principal type+ID and resolved project ID; consumer-design §5.3).
+	// CEL-only and synthetic-judgment /test requests do not consult it.
+	// Reuses keysRateLimiter (10 min idle TTL; 10,000-bucket LRU-half cap);
+	// in-memory and per Hub replica (N replicas allow N*30/min aggregate).
+	messagePolicyTestLimiter *keysRateLimiter
+
 	// In-memory idempotency cache for chat message sends (#1055).
 	// Keyed by senderID:idempotencyKey with a 5-minute TTL.
 	chatIdempotency *ChatIdempotencyCache
@@ -3600,6 +3608,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// per target.
 	srv.keysPrincipalLimiter = newKeysRateLimiter(agentkeys.PrincipalProjectRateLimit, agentkeys.PrincipalProjectBurst)
 	srv.keysTargetLimiter = newKeysRateLimiter(agentkeys.TargetRateLimit, agentkeys.TargetBurst)
+	srv.messagePolicyTestLimiter = newKeysRateLimiter(messagePolicyTestRatePerSecond, messagePolicyTestBurst)
 
 	ctx := context.Background()
 

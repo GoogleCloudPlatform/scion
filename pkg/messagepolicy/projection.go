@@ -324,3 +324,24 @@ func refsFromBinding(b spec.Binding) []string {
 	slices.Sort(refs)
 	return refs
 }
+
+// SystemOneRuleReferencesInput compiles rawRule against the message_policy v1
+// ContentEnvironment and reports whether field appears in the compiled
+// selected-input list. Using spec.Compile ensures JSON-escaped input names
+// (such as "conversation\u002eunmentioned_agent_slugs") are decoded and matched
+// identically to runtime execution rather than via a raw substring check.
+func SystemOneRuleReferencesInput(rawRule, field string) bool {
+	trimmed := strings.TrimSpace(rawRule)
+	if trimmed == "" || field == "" {
+		return false
+	}
+	contentEnv := SystemOneContentEnv()
+	compiled, err := spec.Compile([]byte(trimmed), spec.CompileOptions{
+		Kind:        spec.Kind(KindJudgments),
+		Environment: &contentEnv,
+	})
+	if err != nil {
+		return false
+	}
+	return slices.Contains(compiled.Inputs, field)
+}
