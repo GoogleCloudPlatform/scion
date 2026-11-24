@@ -42,6 +42,7 @@ var hubUserLevelCommands = map[string]bool{
 // command per line. (expose and unexpose act as the calling agent, with
 // its own hub identity and no agent reference.)
 var hubOnlyCommands = map[string]bool{
+	"inbox":      true,
 	"tunnel":     true,
 	"ssh":        true,
 	"ssh-config": true,
