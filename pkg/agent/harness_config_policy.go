@@ -21,10 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
@@ -549,6 +551,368 @@ func copyRegularFiles(src, dst string) error {
 // stagedSecretsRel is the agent home's staged secrets directory, relative
 // to the home.
 const stagedSecretsRel = ".scion/harness/secrets"
+
+// bundleHooksRecordFileName is the broker-side record in agentDir listing
+// hook entries copied into the agent home from the harness-config bundle.
+const bundleHooksRecordFileName = "harness-bundle-hooks.json"
+
+const (
+	homeHooksRel           = ".scion/hooks"
+	provisionHookRel       = ".scion/hooks/pre-start.d/" + harness.HarnessProvisionHookFilename
+	projectPreStartHookRel = ".scion/hooks/pre-start.d/" + harness.ProjectPreStartHookFilename
+)
+
+type bundleHooksRecord struct {
+	Paths []string `json:"paths"`
+}
+
+func probeScriptedPolicyRefusal(policy config.HarnessConfigPolicyFunc, harnessConfigName string, hcDir *config.HarnessConfigDir) bool {
+	var probe config.HarnessConfigEntry
+	if hcDir != nil {
+		probe = hcDir.Config
+	}
+	probe.Provisioner = &config.HarnessProvisionerConfig{Type: "container-script"}
+	return policy(harnessConfigName, probe) != nil
+}
+
+// listHomeHooksEntries returns the sorted slash-separated relative paths of
+// non-directory entries below homeDir/.scion/hooks, confined to homeDir via
+// os.Root without following symlinks. Controlled hook wrappers
+// (20-harness-provision and 30-project-custom) are excluded.
+func listHomeHooksEntries(homeDir string) (present bool, rels []string, err error) {
+	if homeDir == "" {
+		return false, nil, nil
+	}
+	info, err := os.Lstat(homeDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil, nil
+		}
+		return false, nil, err
+	}
+	if !info.IsDir() {
+		return false, nil, fmt.Errorf("stat %s: not a directory", homeDir)
+	}
+	root, err := os.OpenRoot(homeDir)
+	if err != nil {
+		return false, nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	scionInfo, err := root.Lstat(".scion")
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil, nil
+		}
+		return false, nil, err
+	}
+	if !scionInfo.IsDir() {
+		return false, nil, fmt.Errorf("stat %s/.scion: not a directory", homeDir)
+	}
+
+	hooksOSRel := filepath.FromSlash(homeHooksRel)
+	hooksInfo, err := root.Lstat(hooksOSRel)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil, nil
+		}
+		return false, nil, err
+	}
+	if !hooksInfo.IsDir() {
+		return true, []string{homeHooksRel}, nil
+	}
+
+	var walk func(rel string) error
+	walk = func(rel string) error {
+		entries, err := readRootDir(root, rel)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			child := filepath.Join(rel, e.Name())
+			fi, err := root.Lstat(child)
+			if err != nil {
+				return err
+			}
+			if fi.IsDir() {
+				if err := walk(child); err != nil {
+					return err
+				}
+				continue
+			}
+			slashRel := filepath.ToSlash(child)
+			if slashRel == provisionHookRel || slashRel == projectPreStartHookRel {
+				continue
+			}
+			rels = append(rels, slashRel)
+		}
+		return nil
+	}
+	if err := walk(hooksOSRel); err != nil {
+		return true, nil, err
+	}
+	slices.Sort(rels)
+	return true, rels, nil
+}
+
+// subtractTemplateHookPaths filters base to hook paths not overlaid by any
+// template in chain.
+func subtractTemplateHookPaths(base []string, chain []*config.Template) ([]string, error) {
+	if len(base) == 0 {
+		return nil, nil
+	}
+	overlaid := make(map[string]bool)
+	for _, tpl := range chain {
+		if tpl == nil || tpl.Path == "" {
+			continue
+		}
+		_, tplRels, err := listHomeHooksEntries(filepath.Join(tpl.Path, "home"))
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range tplRels {
+			overlaid[r] = true
+		}
+	}
+	var out []string
+	for _, r := range base {
+		if overlaid[r] || r == provisionHookRel || r == projectPreStartHookRel {
+			continue
+		}
+		out = append(out, r)
+	}
+	slices.Sort(out)
+	return slices.Compact(out), nil
+}
+
+func isValidRecordedHookRel(rel string) bool {
+	if !config.IsHomeRelPath(rel) {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+	if clean == provisionHookRel || clean == projectPreStartHookRel {
+		return false
+	}
+	return clean == homeHooksRel || strings.HasPrefix(clean, homeHooksRel+"/")
+}
+
+func writeBundleHooksRecord(agentDir string, rels []string) error {
+	if agentDir == "" {
+		return nil
+	}
+	rec := bundleHooksRecord{Paths: slices.Clone(rels)}
+	if rec.Paths == nil {
+		rec.Paths = []string{}
+	}
+	return writeAgentRecordFile(agentDir, bundleHooksRecordFileName, rec)
+}
+
+func readBundleHooksRecord(agentDir string) (rels []string, exists bool, err error) {
+	if agentDir == "" {
+		return nil, false, nil
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, bundleHooksRecordFileName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, true, err
+	}
+	var rec bundleHooksRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, true, err
+	}
+	for _, r := range rec.Paths {
+		if !isValidRecordedHookRel(r) {
+			return nil, true, fmt.Errorf("invalid bundle hook path %q in %s", r, bundleHooksRecordFileName)
+		}
+		rels = append(rels, filepath.ToSlash(filepath.Clean(filepath.FromSlash(r))))
+	}
+	slices.Sort(rels)
+	return slices.Compact(rels), true, nil
+}
+
+// reconcileBundleHooksOnProvision enforces the harness-config policy on hook
+// entries copied from hcDir/home/.scion/hooks before template home overlays
+// run. When container-script harnesses are disallowed, .scion/hooks is
+// cleared from agentHome via pkg/agenthome (failing closed on any error).
+func reconcileBundleHooksOnProvision(
+	ctx context.Context,
+	agentName, harnessConfigName string,
+	hcDir *config.HarnessConfigDir,
+	agentHome string,
+) (hcHookRels []string, suppressed bool, err error) {
+	var hcHome string
+	if hcDir != nil && hcDir.Path != "" {
+		hcHome = filepath.Join(hcDir.Path, "home")
+	}
+	present, rels, listErr := listHomeHooksEntries(hcHome)
+	if policy := config.HarnessConfigPolicyFromContext(ctx); policy != nil && (present || listErr != nil) {
+		if probeScriptedPolicyRefusal(policy, harnessConfigName, hcDir) {
+			if listErr != nil {
+				return nil, false, fmt.Errorf("inspect harness-config hooks: %w", listErr)
+			}
+			home, openErr := agenthome.OpenCreate(agentHome, 0o755)
+			if openErr != nil {
+				return nil, false, fmt.Errorf("open agent home to clear harness-config hooks: %w", openErr)
+			}
+			rmErr := home.RemoveAll(homeHooksRel)
+			_ = home.Close()
+			if rmErr != nil {
+				return nil, false, fmt.Errorf("clear harness-config hooks: %w", rmErr)
+			}
+			slog.Info("harness-config hook staging suppressed",
+				"agent", agentName,
+				"harness_config", harnessConfigName,
+				"reason", "container-script harnesses disallowed",
+			)
+			return nil, true, nil
+		}
+	}
+	if listErr != nil {
+		return nil, false, fmt.Errorf("inspect harness-config hooks: %w", listErr)
+	}
+	return rels, false, nil
+}
+
+// clearDisallowedBundleHooksOnStart removes any harness-config bundle hook
+// entries from agentHome when container-script harnesses are disallowed by
+// policy, leaving template-supplied hooks and 30-project-custom intact.
+func clearDisallowedBundleHooksOnStart(
+	ctx context.Context,
+	agentName, harnessConfigName string,
+	hcDir *config.HarnessConfigDir,
+	chain []*config.Template,
+	templatesUnresolvable bool,
+	agentDir, agentHome string,
+	writeHome func(func() error) error,
+) error {
+	policy := config.HarnessConfigPolicyFromContext(ctx)
+	if policy == nil {
+		return nil
+	}
+
+	recorded, hasRecord, recErr := readBundleHooksRecord(agentDir)
+	var toRemove []string
+	var listErr error
+	switch {
+	case hasRecord:
+		toRemove = slices.Clone(recorded)
+	case hcDir != nil && hcDir.Path != "":
+		_, hcRels, err := listHomeHooksEntries(filepath.Join(hcDir.Path, "home"))
+		if err != nil {
+			listErr = err
+		} else if len(hcRels) > 0 {
+			toRemove, listErr = subtractTemplateHookPaths(hcRels, chain)
+		}
+	default:
+		if !probeScriptedPolicyRefusal(policy, harnessConfigName, hcDir) {
+			return nil
+		}
+		if harnessConfigName != "" {
+			return fmt.Errorf("%w: %w", ErrHarnessConfigPolicy, &HarnessConfigNotEvaluatedError{
+				Name:  harnessConfigName,
+				Cause: errors.New("harness-config directory is not resolvable and no provision hooks record exists"),
+			})
+		}
+		if templatesUnresolvable {
+			return fmt.Errorf("%w: cannot verify agent hooks for %q: template is not resolvable and no provision hooks record exists", ErrHarnessConfigPolicy, agentName)
+		}
+		_, homeRels, err := listHomeHooksEntries(agentHome)
+		if err != nil {
+			return fmt.Errorf("inspect agent hooks: %w", err)
+		}
+		toRemove, err = subtractTemplateHookPaths(homeRels, chain)
+		if err != nil {
+			return fmt.Errorf("inspect template hooks: %w", err)
+		}
+		if len(toRemove) == 0 {
+			return nil
+		}
+		return stripAgentHomeHookPaths(agentName, harnessConfigName, agentHome, toRemove, writeHome)
+	}
+
+	slices.Sort(toRemove)
+	toRemove = slices.Compact(toRemove)
+
+	if recErr == nil && listErr == nil && len(toRemove) == 0 {
+		return nil
+	}
+	if !probeScriptedPolicyRefusal(policy, harnessConfigName, hcDir) {
+		return nil
+	}
+	if recErr != nil {
+		return fmt.Errorf("read harness-config hooks record: %w", recErr)
+	}
+	if listErr != nil {
+		return fmt.Errorf("inspect harness-config hooks: %w", listErr)
+	}
+	return stripAgentHomeHookPaths(agentName, harnessConfigName, agentHome, toRemove, writeHome)
+}
+
+func stripAgentHomeHookPaths(
+	agentName, harnessConfigName, agentHome string,
+	toRemove []string,
+	writeHome func(func() error) error,
+) error {
+	strip := func() error {
+		home, err := agenthome.Open(agentHome)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		defer func() { _ = home.Close() }()
+		for _, rel := range toRemove {
+			if err := home.RemoveAll(rel); err != nil {
+				return err
+			}
+		}
+		pruneEmptyHomeHooksDirs(home, toRemove)
+		return nil
+	}
+	var err error
+	if writeHome != nil {
+		err = writeHome(strip)
+	} else {
+		err = strip()
+	}
+	if err != nil {
+		return fmt.Errorf("clear harness-config hooks: %w", err)
+	}
+	slog.Info("harness-config hook staging suppressed",
+		"agent", agentName,
+		"harness_config", harnessConfigName,
+		"reason", "container-script harnesses disallowed",
+	)
+	return nil
+}
+
+func pruneEmptyHomeHooksDirs(home *agenthome.Home, removed []string) {
+	seen := map[string]bool{homeHooksRel: true}
+	for _, rel := range removed {
+		for d := path.Dir(rel); strings.HasPrefix(d, homeHooksRel+"/"); d = path.Dir(d) {
+			seen[d] = true
+		}
+	}
+	dirs := make([]string, 0, len(seen))
+	for d := range seen {
+		dirs = append(dirs, d)
+	}
+	slices.SortFunc(dirs, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	for _, d := range dirs {
+		entries, err := home.ReadDir(d)
+		if err == nil && len(entries) == 0 {
+			_ = home.Remove(d)
+		}
+	}
+}
 
 // stagedSecretsDir is the agent home's staged secrets directory.
 func stagedSecretsDir(agentHome string) string {

@@ -364,6 +364,9 @@ func buildHarnessTemplateEnv(envTemplate map[string]string, agentName, agentHome
 		effectiveKey, disp := envpolicy.ClassifyHarnessConfigEnvKey(k)
 		switch disp {
 		case envpolicy.HarnessConfigKeyRefuse:
+			if config.IsReservedLifecycleEnvKey(k) {
+				slog.Warn("ignoring reserved lifecycle environment variable in harness-config", "key", k)
+			}
 			continue
 		case envpolicy.HarnessConfigKeyRewrite:
 			if _, explicit := envTemplate[effectiveKey]; explicit {

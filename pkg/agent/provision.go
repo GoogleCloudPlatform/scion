@@ -2642,6 +2642,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if _, err := overlayHomeLayer(agentHomeDir, hcDir.OpenDir); err != nil {
 		return "", "", nil, fmt.Errorf("failed to copy harness-config home %q: %w", harnessConfigName, err)
 	}
+	hcHookRels, hcHooksSuppressed, err := reconcileBundleHooksOnProvision(ctx, agentName, harnessConfigName, hcDir, agentHome)
+	if err != nil {
+		return "", "", nil, err
+	}
 
 	// Step 2: Copy template home → agentHome (overlay; template files win on conflict).
 	// Defence in depth (security audit H1 / ptone/scion#8812 I1): shell
@@ -2657,6 +2661,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 			templateHomeCopied = templateHomeCopied || copied
 		}
+	}
+	bundleHookRels := hcHookRels
+	if !hcHooksSuppressed && len(hcHookRels) > 0 {
+		bundleHookRels, err = subtractTemplateHookPaths(hcHookRels, chain)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("failed to inspect template hooks: %w", err)
+		}
+	}
+	if err := writeBundleHooksRecord(agentDir, bundleHookRels); err != nil {
+		return "", "", nil, fmt.Errorf("failed to write harness-config hooks record: %w", err)
 	}
 
 	// Safety net: an agent must never come up without its base home files.
@@ -3097,11 +3111,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Write scion-services.yaml for sciontool to consume at container startup
-	if len(finalScionCfg.Services) > 0 {
-		if err := writeServicesFile(agentHome, finalScionCfg.Services); err != nil {
-			return "", "", nil, err
-		}
+	// Reconcile scion-services.yaml for sciontool to consume at container startup
+	if err := reconcileServicesFile(agentHome, finalScionCfg.Services); err != nil {
+		return "", "", nil, err
 	}
 
 	// 2f. Configure git credential helper for shared-workspace projects.
@@ -5576,4 +5588,22 @@ func writeServicesFile(agentHome string, services []api.ServiceSpec) error {
 		return fmt.Errorf("failed to write %s: %w", servicesFileName, err)
 	}
 	return nil
+}
+
+// reconcileServicesFile writes scion-services.yaml when services are
+// configured or removes any stale copy in agentHome when empty, confined to
+// the agent home.
+func reconcileServicesFile(agentHome string, services []api.ServiceSpec) error {
+	if len(services) > 0 {
+		return writeServicesFile(agentHome, services)
+	}
+	h, err := agenthome.Open(agentHome)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = h.Close() }()
+	return h.RemoveAll(".scion/" + servicesFileName)
 }
