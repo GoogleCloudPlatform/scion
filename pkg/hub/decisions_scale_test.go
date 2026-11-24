@@ -55,7 +55,7 @@ func rebindScaleSQL(d, q string) string {
 	return b.String()
 }
 
-func measureHubColdAndWarmMedian(t *testing.T, warmRuns int, fn func()) (cold, warmMedian time.Duration) {
+func measureHubColdAndWarmStats(t *testing.T, warmRuns int, fn func()) (cold, warmMedian, tailMedian, tailMax time.Duration) {
 	t.Helper()
 	t0 := time.Now()
 	fn()
@@ -66,8 +66,28 @@ func measureHubColdAndWarmMedian(t *testing.T, warmRuns int, fn func()) (cold, w
 		fn()
 		samples[i] = time.Since(t1)
 	}
-	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
-	return cold, samples[len(samples)/2]
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	warmMedian = sorted[len(sorted)/2]
+
+	// Tail calls (calls 7..N, 1-indexed including cold = warm indices 5..N-1)
+	// capture Postgres pgx prepared-statement generic-plan execution after the
+	// 5th execution on one pool.
+	tailStart := 5
+	if tailStart >= len(samples) {
+		tailStart = 0
+	}
+	tail := append([]time.Duration(nil), samples[tailStart:]...)
+	sort.Slice(tail, func(i, j int) bool { return tail[i] < tail[j] })
+	tailMedian = tail[len(tail)/2]
+	tailMax = tail[len(tail)-1]
+	return cold, warmMedian, tailMedian, tailMax
+}
+
+func measureHubColdAndWarmMedian(t *testing.T, warmRuns int, fn func()) (cold, warmMedian time.Duration) {
+	t.Helper()
+	cold, warmMedian, _, _ = measureHubColdAndWarmStats(t, warmRuns, fn)
+	return cold, warmMedian
 }
 
 func seedSettledAndOpenHistoryForQueryCount(
@@ -153,16 +173,29 @@ func seedSettledAndOpenHistoryForQueryCount(
 // issue a constant number of SQL queries with respect to project count
 // (5 vs 40) and history depth (10 vs 300) (design-scale §7 item 4).
 func TestDecisionsQueryCount_LimitZeroAndWaitingOnYouTotal(t *testing.T) {
-	measure := func(t *testing.T, numProjects, settledPerProject, openProjects int) (limitZeroQueries, bellQueries int64) {
+	measure := func(t *testing.T, numProjects, settledPerProject, openProjects int) (limitZeroCold, limitZeroWarm, bellQueries int64) {
 		t.Helper()
 		f, cs, counter := newCountingDecisionsFixture(t)
 		seedSettledAndOpenHistoryForQueryCount(t, f, cs, numProjects, settledPerProject, openProjects)
 		ctx := context.Background()
 
+		// First HTTP call on a fresh server includes 3 extra queries from the
+		// throttled auth-middleware users.last_seen update (SELECT user,
+		// UPDATE users SET last_seen, post-update SELECT). Subsequent calls
+		// within the throttle window run the 10 steady-state queries matching
+		// waitingOnYouTotal and Scale S warm measurements.
 		counter.Reset(true)
 		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
 		resp := decodeProfilePendingDecisions(t, rr)
-		limitZeroQueries = counter.Count()
+		limitZeroCold = counter.Count()
+		counter.Reset(false)
+		assert.Equal(t, openProjects, resp.Counts.WaitingOnYou)
+		assert.Empty(t, resp.Prompts)
+
+		counter.Reset(true)
+		rr = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+		resp = decodeProfilePendingDecisions(t, rr)
+		limitZeroWarm = counter.Count()
 		counter.Reset(false)
 		assert.Equal(t, openProjects, resp.Counts.WaitingOnYou)
 		assert.Empty(t, resp.Prompts)
@@ -175,33 +208,40 @@ func TestDecisionsQueryCount_LimitZeroAndWaitingOnYouTotal(t *testing.T) {
 		assert.Equal(t, openProjects, total)
 		assert.Equal(t, openProjects, projs)
 
-		t.Logf("projects=%d history=%d open=%d -> limit=0 queries=%d, waitingOnYouTotal queries=%d",
-			numProjects, settledPerProject, openProjects, limitZeroQueries, bellQueries)
-		return limitZeroQueries, bellQueries
+		t.Logf("projects=%d history=%d open=%d -> limit=0 cold=%d warm=%d, waitingOnYouTotal=%d",
+			numProjects, settledPerProject, openProjects, limitZeroCold, limitZeroWarm, bellQueries)
+		return limitZeroCold, limitZeroWarm, bellQueries
 	}
 
 	t.Run("quiet_user_constant_in_projects_and_history", func(t *testing.T) {
-		lz5p10h, bell5p10h := measure(t, 5, 10, 0)
-		lz40p10h, bell40p10h := measure(t, 40, 10, 0)
-		lz5p300h, bell5p300h := measure(t, 5, 300, 0)
+		lzC5p10h, lzW5p10h, bell5p10h := measure(t, 5, 10, 0)
+		lzC40p10h, lzW40p10h, bell40p10h := measure(t, 40, 10, 0)
+		lzC5p300h, lzW5p300h, bell5p300h := measure(t, 5, 300, 0)
 
-		assert.Equal(t, lz5p10h, lz40p10h, "limit=0 query count must be constant across 5 vs 40 projects")
-		assert.Equal(t, lz5p10h, lz5p300h, "limit=0 query count must be constant across 10 vs 300 history rows/project")
+		assert.Equal(t, lzC5p10h, lzC40p10h, "limit=0 (cold) query count must be constant across 5 vs 40 projects")
+		assert.Equal(t, lzC5p10h, lzC5p300h, "limit=0 (cold) query count must be constant across 10 vs 300 history rows/project")
+		assert.Equal(t, lzW5p10h, lzW40p10h, "limit=0 (warm) query count must be constant across 5 vs 40 projects")
+		assert.Equal(t, lzW5p10h, lzW5p300h, "limit=0 (warm) query count must be constant across 10 vs 300 history rows/project")
 		assert.Equal(t, bell5p10h, bell40p10h, "waitingOnYouTotal query count must be constant across 5 vs 40 projects")
 		assert.Equal(t, bell5p10h, bell5p300h, "waitingOnYouTotal query count must be constant across 10 vs 300 history rows/project")
-		// Fixed overhead (account check, authz bindings/groups/constraints,
-		// ProjectsWithDecisions, ListProjectSummaries, ProjectsWithUnsettledDecisions)
-		// stays strictly bounded and independent of project count and history.
-		assert.LessOrEqual(t, bell40p10h, int64(20), "quiet-user waitingOnYouTotal must stay within fixed-overhead bound")
+		// Owner exit criterion (design-scale §1): quiet-user limit=0 probe
+		// (steady-state warm) and bell waitingOnYouTotal stay <= 12 queries.
+		// The very first HTTP request on a fresh server adds 3 throttled
+		// users.last_seen update queries (<= 15).
+		assert.LessOrEqual(t, bell40p10h, int64(12), "quiet-user waitingOnYouTotal must stay <= 12 queries (design-scale §1)")
+		assert.LessOrEqual(t, lzW40p10h, int64(12), "quiet-user HTTP limit=0 (warm) must stay <= 12 queries (design-scale §1)")
+		assert.LessOrEqual(t, lzC40p10h, int64(15), "quiet-user HTTP limit=0 (cold first request with throttled last_seen) must stay <= 15 queries")
 	})
 
 	t.Run("one_open_project_constant_in_total_projects_and_history", func(t *testing.T) {
-		lz5p10h, bell5p10h := measure(t, 5, 10, 1)
-		lz40p10h, bell40p10h := measure(t, 40, 10, 1)
-		lz5p300h, bell5p300h := measure(t, 5, 300, 1)
+		lzC5p10h, lzW5p10h, bell5p10h := measure(t, 5, 10, 1)
+		lzC40p10h, lzW40p10h, bell40p10h := measure(t, 40, 10, 1)
+		lzC5p300h, lzW5p300h, bell5p300h := measure(t, 5, 300, 1)
 
-		assert.Equal(t, lz5p10h, lz40p10h, "limit=0 with 1 open project must be constant across 5 vs 40 projects")
-		assert.Equal(t, lz5p10h, lz5p300h, "limit=0 with 1 open project must be constant across 10 vs 300 history rows/project")
+		assert.Equal(t, lzC5p10h, lzC40p10h, "limit=0 (cold) with 1 open project must be constant across 5 vs 40 projects")
+		assert.Equal(t, lzC5p10h, lzC5p300h, "limit=0 (cold) with 1 open project must be constant across 10 vs 300 history rows/project")
+		assert.Equal(t, lzW5p10h, lzW40p10h, "limit=0 (warm) with 1 open project must be constant across 5 vs 40 projects")
+		assert.Equal(t, lzW5p10h, lzW5p300h, "limit=0 (warm) with 1 open project must be constant across 10 vs 300 history rows/project")
 		assert.Equal(t, bell5p10h, bell40p10h, "waitingOnYouTotal with 1 open project must be constant across 5 vs 40 projects")
 		assert.Equal(t, bell5p10h, bell5p300h, "waitingOnYouTotal with 1 open project must be constant across 10 vs 300 history rows/project")
 	})
@@ -407,10 +447,10 @@ func TestDecisionsScale(t *testing.T) {
 			require.NoError(t, err)
 			t.Logf("[%s/%s] seeded %d projects x %d rows (+ %d open) in %v", sc.name, d, sc.numProjects, sc.rowsPerProject, sc.openProjects, time.Since(seedStart))
 
-			const warmRuns = 5
+			const warmRuns = 10
 			var qLimitZero, qBell, qPending, qMadeRecent, qMadeProject, qSingleProj int64
 
-			coldLZ, medLZ := measureHubColdAndWarmMedian(t, warmRuns, func() {
+			coldLZ, medLZ, tailMedLZ, tailMaxLZ := measureHubColdAndWarmStats(t, warmRuns, func() {
 				counter.Reset(true)
 				rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
 				qLimitZero = counter.Count()
@@ -419,7 +459,7 @@ func TestDecisionsScale(t *testing.T) {
 				require.Equal(t, sc.openProjects, resp.Counts.WaitingOnYou)
 			})
 
-			coldBell, medBell := measureHubColdAndWarmMedian(t, warmRuns, func() {
+			coldBell, medBell, tailMedBell, tailMaxBell := measureHubColdAndWarmStats(t, warmRuns, func() {
 				counter.Reset(true)
 				wTot, wProjs, berr := f.srv.waitingOnYouTotal(ctx, f.bob.ID)
 				qBell = counter.Count()
@@ -461,9 +501,9 @@ func TestDecisionsScale(t *testing.T) {
 				require.Equal(t, http.StatusOK, rr.Code)
 			})
 
-			t.Logf("[%s/%s] HUB TIMINGS (cold / warm-med):", sc.name, d)
-			t.Logf("  limit=0 (HTTP)               = %v / %v (%d queries)", coldLZ, medLZ, qLimitZero)
-			t.Logf("  waitingOnYouTotal            = %v / %v (%d queries)", coldBell, medBell, qBell)
+			t.Logf("[%s/%s] HUB TIMINGS (cold / warm-med / calls7-10 med / calls7-10 max):", sc.name, d)
+			t.Logf("  limit=0 (HTTP)               = %v / %v / %v / %v (%d queries)", coldLZ, medLZ, tailMedLZ, tailMaxLZ, qLimitZero)
+			t.Logf("  waitingOnYouTotal            = %v / %v / %v / %v (%d queries)", coldBell, medBell, tailMedBell, tailMaxBell, qBell)
 			t.Logf("  tab=pending                  = %v / %v (%d queries)", coldPend, medPend, qPending)
 			t.Logf("  tab=made&sort=recent         = %v / %v (%d queries)", coldMR, medMR, qMadeRecent)
 			t.Logf("  tab=made&sort=project        = %v / %v (%d queries)", coldMP, medMP, qMadeProject)
