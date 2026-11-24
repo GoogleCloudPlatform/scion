@@ -1316,7 +1316,9 @@ func TestMessagePolicySystemOne_P2bAllowlistAndCapacityEnforcement(t *testing.T)
 	innerBackend := secret.NewLocalBackend(f.s, "test-hub-id", "test-secret-signing-key")
 	countingSecrets := &mpCountingSecretBackend{SecretBackend: innerBackend}
 	f.srv.SetSecretBackend(countingSecrets)
+	var adcMints atomic.Int32
 	f.srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+		adcMints.Add(1)
 		return nil, egress.ErrAuth
 	})
 
@@ -1497,23 +1499,26 @@ func TestMessagePolicySystemOne_P2bAllowlistAndCapacityEnforcement(t *testing.T)
 
 	t.Run("allowlist_refusal_test_endpoint_saved_and_inline", func(t *testing.T) {
 		s0 := countingSecrets.getCalls.Load()
+		m0 := adcMints.Load()
 		p0 := providerCalls.Load()
 
-		// Saved policy /test.
+		assertBinding400 := func(rec *httptest.ResponseRecorder, label string) {
+			require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", label, rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, messagepolicy.ErrCodeInvalidRule, errResp.Error.Code, label)
+			assert.Equal(t, "binding", errResp.Error.Details["category"], label)
+		}
+
+		// 1. Not allowlisted: saved policy /test and inline /test both return 400 invalid_rule (binding).
 		savedRec := mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/"+enforceCreated.ID+"/test", TestMessagePolicyRequest{
 			Sample: &MessagePolicyTestSample{
 				Surface: store.MessagePolicySurfaceAgentToUser,
 				Body:    "Saved policy test while unlisted.",
 			},
 		})
-		require.Equal(t, http.StatusOK, savedRec.Code, savedRec.Body.String())
-		var savedResp TestMessagePolicyResponse
-		require.NoError(t, json.Unmarshal(savedRec.Body.Bytes(), &savedResp))
-		assert.Equal(t, store.MessagePolicyClassFailed, savedResp.Class)
-		assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), savedResp.ReasonCode)
-		assert.Equal(t, store.MessagePolicyOutcomeReject, savedResp.Outcome)
+		assertBinding400(savedRec, "saved/not_allowlisted")
 
-		// Inline /test.
 		inlineRec := mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/test", TestMessagePolicyRequest{
 			ViolationRule: `judgment_flags.asks_choice`,
 			SystemOneRule: s1Rule,
@@ -1524,15 +1529,101 @@ func TestMessagePolicySystemOne_P2bAllowlistAndCapacityEnforcement(t *testing.T)
 				Body:    "Inline test while unlisted.",
 			},
 		})
-		require.Equal(t, http.StatusOK, inlineRec.Code, inlineRec.Body.String())
-		var inlineResp TestMessagePolicyResponse
-		require.NoError(t, json.Unmarshal(inlineRec.Body.Bytes(), &inlineResp))
-		assert.Equal(t, store.MessagePolicyClassFailed, inlineResp.Class)
-		assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), inlineResp.ReasonCode)
-		assert.Equal(t, store.MessagePolicyOutcomeReject, inlineResp.Outcome)
+		assertBinding400(inlineRec, "inline/not_allowlisted")
 
-		assert.Equal(t, s0, countingSecrets.getCalls.Load(), "/test allowlist refusal must make 0 secret reads")
-		assert.Equal(t, p0, providerCalls.Load(), "/test allowlist refusal must make 0 provider requests")
+		// 2. Disabled: re-allowlist gemini-p2b, disable it -> saved + inline /test return 400 invalid_rule (binding).
+		require.Equal(t, http.StatusOK, mphSessionDo(t, f.srv, owner, http.MethodPut, allowlistPath, nil).Code)
+		instRow, gErr := f.s.GetSystemOneInstanceByName(ctx, "gemini-p2b")
+		require.NoError(t, gErr)
+		instRow.Enabled = false
+		require.NoError(t, f.s.UpdateSystemOneInstance(ctx, instRow))
+
+		assertBinding400(mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/"+enforceCreated.ID+"/test", TestMessagePolicyRequest{
+			Sample: &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Saved test while disabled."},
+		}), "saved/disabled")
+		assertBinding400(mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/test", TestMessagePolicyRequest{
+			ViolationRule: `judgment_flags.asks_choice`,
+			SystemOneRule: s1Rule,
+			OnUncertain:   store.MessagePolicyOutcomeReject,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+			Sample:        &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Inline test while disabled."},
+		}), "inline/disabled")
+
+		// Re-enable gemini-p2b.
+		instRow.Enabled = true
+		require.NoError(t, f.s.UpdateSystemOneInstance(ctx, instRow))
+
+		// 3. Ambiguous: add a second enabled allowlisted instance -> unbound rule returns 400 invalid_rule (binding) on saved + inline /test.
+		require.Equal(t, http.StatusCreated, doRequestAsUser(t, f.srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    "gemini-p2b-extra",
+			"adapter": "gemini_decisions",
+			"model":   "gemini-2.5-flash",
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": systemoneprovider.DefaultGeminiAPIKeySecretName, "scope": systemoneprovider.SecretScopeProject},
+			},
+		}).Code)
+		_, _, aErr := f.s.AddProjectSystemOneInstance(ctx, f.project.ID, "gemini-p2b-extra")
+		require.NoError(t, aErr)
+		unboundRule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+		unboundPol := &store.MessagePolicy{
+			ProjectID:     f.project.ID,
+			Name:          "z-p2b-unbound",
+			Enabled:       false,
+			Mode:          store.MessagePolicyModeEnforce,
+			Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+			ViolationRule: `judgment_flags.asks_choice`,
+			SystemOneRule: unboundRule,
+			OnUncertain:   store.MessagePolicyOutcomeReject,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, unboundPol))
+		assertBinding400(mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/"+unboundPol.ID+"/test", TestMessagePolicyRequest{
+			Sample: &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Saved test while ambiguous."},
+		}), "saved/ambiguous")
+		assertBinding400(mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/test", TestMessagePolicyRequest{
+			ViolationRule: `judgment_flags.asks_choice`,
+			SystemOneRule: unboundRule,
+			OnUncertain:   store.MessagePolicyOutcomeReject,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+			Sample:        &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Inline test while ambiguous."},
+		}), "inline/ambiguous")
+
+		// 4. Deleted: delete gemini-p2b-extra -> saved + inline /test bound to it return 400 invalid_rule (binding).
+		delPol := &store.MessagePolicy{
+			ProjectID:     f.project.ID,
+			Name:          "z-p2b-deleted-ref",
+			Enabled:       false,
+			Mode:          store.MessagePolicyModeEnforce,
+			Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+			ViolationRule: `judgment_flags.asks_choice`,
+			SystemOneRule: `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"gemini-p2b-extra"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`,
+			SystemOneRefs: []string{"gemini-p2b-extra"},
+			OnUncertain:   store.MessagePolicyOutcomeReject,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, delPol))
+		require.Equal(t, http.StatusNoContent, doRequestAsUser(t, f.srv, admin, http.MethodDelete, systemOneAdminPath+"/gemini-p2b-extra", nil).Code)
+
+		assertBinding400(mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/"+delPol.ID+"/test", TestMessagePolicyRequest{
+			Sample: &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Saved test after instance delete."},
+		}), "saved/deleted")
+		assertBinding400(mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/test", TestMessagePolicyRequest{
+			ViolationRule: `judgment_flags.asks_choice`,
+			SystemOneRule: delPol.SystemOneRule,
+			OnUncertain:   store.MessagePolicyOutcomeReject,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+			Sample:        &MessagePolicyTestSample{Surface: store.MessagePolicySurfaceAgentToUser, Body: "Inline test after instance delete."},
+		}), "inline/deleted")
+
+		// Clean up extra policies and remove gemini-p2b again so step 4 starts from clean state.
+		require.NoError(t, f.s.DeleteMessagePolicy(ctx, unboundPol.ID))
+		require.NoError(t, f.s.DeleteMessagePolicy(ctx, delPol.ID))
+		require.Equal(t, http.StatusOK, mphSessionDo(t, f.srv, owner, http.MethodDelete, allowlistPath, nil).Code)
+
+		assert.Equal(t, s0, countingSecrets.getCalls.Load(), "all 4 /test binding 400 cases must make 0 secret reads")
+		assert.Equal(t, m0, adcMints.Load(), "all 4 /test binding 400 cases must make 0 ADC token mints")
+		assert.Equal(t, p0, providerCalls.Load(), "all 4 /test binding 400 cases must make 0 provider requests")
 	})
 
 	// 4. Re-allowlist gemini-p2b and saturate its maxInFlight=1 slot -> capacity
@@ -1834,13 +1925,19 @@ func TestMessagePolicySystemOne_O2UnboundRuleBeyond200InstancesL1Precheck(t *tes
 	innerBackend := secret.NewLocalBackend(f.s, "test-hub-id", "test-secret-signing-key")
 	countingSecrets := &mpCountingSecretBackend{SecretBackend: innerBackend}
 	f.srv.SetSecretBackend(countingSecrets)
+	var adcMints atomic.Int32
 	f.srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+		adcMints.Add(1)
 		return nil, egress.ErrAuth
 	})
 
-	var providerCalls atomic.Int32
-	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var (
+		providerCalls atomic.Int32
+		seenKeyHeader string
+	)
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		providerCalls.Add(1)
+		seenKeyHeader = r.Header.Get("x-goog-api-key")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"answers": {"asks_choice": {"type": "noul", "noul": 0.91, "confidence": 0.91}},
@@ -1856,12 +1953,23 @@ func TestMessagePolicySystemOne_O2UnboundRuleBeyond200InstancesL1Precheck(t *tes
 		),
 	)
 
+	const projAKey = "AIza-o2-beyond-200-key"
+	const projBKey = "AIza-o2-projB-conflict-8888"
 	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
-		Value:      "AIza-o2-beyond-200-key",
+		Value:      projAKey,
 		SecretType: store.SecretTypeVariable,
 		Scope:      store.ScopeProject,
 		ScopeID:    f.project,
+	})
+	require.NoError(t, err)
+	// Seed another project (f.otherProject) with a same-named secret holding a different value.
+	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
+		Value:      projBKey,
+		SecretType: store.SecretTypeVariable,
+		Scope:      store.ScopeProject,
+		ScopeID:    f.otherProject,
 	})
 	require.NoError(t, err)
 
@@ -1898,11 +2006,15 @@ func TestMessagePolicySystemOne_O2UnboundRuleBeyond200InstancesL1Precheck(t *tes
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
 	_, _, err = f.s.AddProjectSystemOneInstance(ctx, f.project, "z-beyond-200-proj-ref")
 	require.NoError(t, err)
+	_, _, err = f.s.AddProjectSystemOneInstance(ctx, f.otherProject, "z-beyond-200-proj-ref")
+	require.NoError(t, err)
 
 	hubAdminID := hubConfigTokenUser(t, f.s, "mp-o2-hubadmin", store.SystemRoleHubAdmin)
 	hubAdmin, err := f.s.GetUser(ctx, hubAdminID)
 	require.NoError(t, err)
 	uatManageOnly := projectOpsMint(t, f.srv, f.owner, projectBoundary(f.project), "project:manage_message_policies")
+	// Conflicting token project claim: owner UAT bounded to f.otherProject calling f.project's /test.
+	uatOtherProject := projectOpsMint(t, f.srv, f.owner, projectBoundary(f.otherProject), "project:manage_message_policies", "project:read")
 
 	// Unbound System One rule (no spec.binding.instance) -> resolves the single allowlisted
 	// project-ref instance beyond page 1.
@@ -1918,31 +2030,42 @@ func TestMessagePolicySystemOne_O2UnboundRuleBeyond200InstancesL1Precheck(t *tes
 	}
 	testURL := f.basePath() + "/test"
 
-	// hub-admin (lacks project.secret_read) -> 403 with 0 secret reads and 0 provider calls.
+	// hub-admin (lacks project.secret_read) -> 403 with 0 secret reads, 0 ADC mints, 0 provider calls.
 	sBefore := countingSecrets.getCalls.Load()
+	mBefore := adcMints.Load()
 	pBefore := providerCalls.Load()
 	haRec := doRequestAsUser(t, f.srv, hubAdmin, http.MethodPost, testURL, unboundReq)
 	require.Equal(t, http.StatusForbidden, haRec.Code, haRec.Body.String())
 	assert.Equal(t, sBefore, countingSecrets.getCalls.Load(), "hub-admin must make 0 secret reads")
+	assert.Equal(t, mBefore, adcMints.Load(), "hub-admin must make 0 ADC mints")
 	assert.Equal(t, pBefore, providerCalls.Load(), "hub-admin must make 0 provider calls")
 
-	// manage-only UAT (lacks project.secret_read) -> 403 with 0 secret reads and 0 provider calls.
+	// manage-only UAT (lacks project.secret_read) -> 403 with 0 I/O.
 	raw, err := json.Marshal(unboundReq)
 	require.NoError(t, err)
-	uatReq := httptest.NewRequest(http.MethodPost, testURL, bytes.NewReader(raw))
-	uatReq.Header.Set("Content-Type", "application/json")
-	uatReq.Header.Set("Authorization", "Bearer "+uatManageOnly)
-	uatRec := httptest.NewRecorder()
-	f.srv.Handler().ServeHTTP(uatRec, uatReq)
-	require.Equal(t, http.StatusForbidden, uatRec.Code, uatRec.Body.String())
-	assert.Equal(t, sBefore, countingSecrets.getCalls.Load(), "UAT must make 0 secret reads")
-	assert.Equal(t, pBefore, providerCalls.Load(), "UAT must make 0 provider calls")
+	for name, tok := range map[string]string{
+		"manage_only_uat":           uatManageOnly,
+		"conflicting_project_b_uat": uatOtherProject,
+	} {
+		uatReq := httptest.NewRequest(http.MethodPost, testURL, bytes.NewReader(raw))
+		uatReq.Header.Set("Content-Type", "application/json")
+		uatReq.Header.Set("Authorization", "Bearer "+tok)
+		uatRec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(uatRec, uatReq)
+		require.Equal(t, http.StatusForbidden, uatRec.Code, "%s: %s", name, uatRec.Body.String())
+		assert.Equal(t, sBefore, countingSecrets.getCalls.Load(), "%s must make 0 secret reads", name)
+		assert.Equal(t, mBefore, adcMints.Load(), "%s must make 0 ADC mints", name)
+		assert.Equal(t, pBefore, providerCalls.Load(), "%s must make 0 provider calls", name)
+	}
 
-	// project owner (holds project.read + project.secret_read) -> 200 OK,
-	// and execution resolves the exact same beyond-200 instance ("z-beyond-200-proj-ref").
+	// project owner (holds project.read + project.secret_read on f.project) -> 200 OK,
+	// and pre-check + execution resolve the EXACT same beyond-200 instance ("z-beyond-200-proj-ref")
+	// and the EXACT same authorized project (f.project -> projAKey, never projBKey).
 	ownerRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, testURL, unboundReq)
 	require.Equal(t, http.StatusOK, ownerRec.Code, ownerRec.Body.String())
 	assert.Equal(t, pBefore+1, providerCalls.Load())
+	assert.Equal(t, projAKey, seenKeyHeader, "execution must resolve f.project's secret, never otherProject's same-named secret")
+	assert.NotEqual(t, projBKey, seenKeyHeader)
 	var ownerResp TestMessagePolicyResponse
 	require.NoError(t, json.Unmarshal(ownerRec.Body.Bytes(), &ownerResp))
 	var ownerProj messagepolicy.EvaluationProjection

@@ -703,20 +703,8 @@ func (s *Server) validateMessagePolicyAuthoring(
 
 	mode, err := ev.ValidateAuthoring(ctx, spec)
 	if err != nil {
-		// On /test (!forbidReservedNames), allow a System One binding error
-		// (e.g. instance not on the project allowlist or disabled) to flow into
-		// live evaluation so /test reports class=failed, reason_code=no_eligible_instance
-		// with 0 provider requests and 0 secret reads after G4/L1 pre-check.
-		var vErr *messagepolicy.ValidationError
-		if !forbidReservedNames && errors.As(err, &vErr) && vErr.Field == "system_one_rule" && vErr.Category == "binding" {
-			mode = strings.TrimSpace(spec.Mode)
-			if mode == "" {
-				mode = messagepolicy.ModeShadow
-			}
-		} else {
-			writeMessagePolicyValidationError(w, err)
-			return "", nil, false
-		}
+		writeMessagePolicyValidationError(w, err)
+		return "", nil, false
 	}
 
 	if _, parseErr := uuid.Parse(spec.Name); parseErr == nil {
@@ -1225,10 +1213,11 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		RejectReason:      effective.RejectReason,
 		RejectRemediation: effective.RejectRemediation,
 	}
-	// Attach project.ID to evalCtx so unbound System One rules resolve strictly
-	// against this project's allowlist (never falsely tripping ambiguity against
-	// instances not on the project allowlist), while binding refusals flow into
-	// EvaluatePolicyTest to report class=failed, reason_code=no_eligible_instance.
+	// Attach project.ID to evalCtx so System One validation on /test enforces
+	// the exact same project allowlist and binding rules as create/update
+	// (400 invalid_rule with category=binding for not allowlisted, disabled,
+	// ambiguous, or deleted instances, and unbound resolution strictly within
+	// this project's allowlist even when >200 Hub instances exist).
 	evalCtx := systemoneruntime.WithEvalProjectID(ctx, project.ID)
 	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(evalCtx, w, project.ID, spec, false)
 	if !ok {
