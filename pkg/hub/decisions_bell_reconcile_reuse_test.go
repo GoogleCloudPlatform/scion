@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -377,6 +378,51 @@ func TestDecisionsBell_ReconcileReuse_FallbackToAsync(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "3", row.ResourceID, "async reconcile must record full user count, not token-narrowed count")
 		assert.Equal(t, formatDecisionsWaitingMessage(3, 2), row.Message)
+	})
+
+	t.Run("view_as_member_session_enqueues_async", func(t *testing.T) {
+		f := newDecisionsFixture(t)
+		setDecisionsExperiment(t, f.srv, true)
+		release := holdDecisionBellWorkers(t, f.srv)
+		ctx := context.Background()
+
+		f.agent.Ancestry = []string{f.bob.ID}
+		f.agent.MessageMode = store.MessageModeProject
+		require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+
+		choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
+		_, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+				Recipient: "chat", ThreadID: f.topicID, Channel: "web", CreatedAt: time.Now().UTC(),
+			},
+			AskerAgentID: f.agent.ID, AskerAgentName: f.agent.Name,
+			Decisions: []messages.Decision{{Key: "vam", Question: "VAM?", Choices: choices}},
+		})
+		require.NoError(t, err)
+
+		// A View-as-member session runs with clamped admin bindings, so it must
+		// fall back to async reconcile rather than writing clamped counts inline.
+		req := httptest.NewRequest(http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+		vamUser := NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, string(ClientTypeWeb)).WithViewAsMember()
+		reqCtx := contextWithIdentity(req.Context(), vamUser)
+		reqCtx = contextWithViewAsMember(reqCtx, f.bob.ID)
+		req = req.WithContext(reqCtx)
+		rr := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		queued, reconcile := decisionBellHasQueuedUser(f.srv, f.bob.ID)
+		assert.True(t, queued, "view-as-member session must enqueue async reconcile")
+		assert.True(t, reconcile)
+		_, nerr := f.store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+		assert.ErrorIs(t, nerr, store.ErrNotFound, "view-as-member session must not write bell notification inline")
+
+		release()
+		waitDecisionBellIdle(t, f.srv)
+		row, err := f.store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+		require.NoError(t, err)
+		assert.Equal(t, "1", row.ResourceID)
 	})
 }
 

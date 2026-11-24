@@ -428,7 +428,8 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 		bellTotal     int
 		bellProjects  int
 	)
-	if pq.tab == ProjectDecisionsTabPending && token == nil && !pq.filtered() {
+	_, viewAsMember := viewAsMemberUserFromContext(r.Context())
+	if pq.tab == ProjectDecisionsTabPending && token == nil && !viewAsMember && !pq.filtered() {
 		pq.onUnfilteredBellCounts = func(total, projects int) {
 			bellTotal = total
 			bellProjects = projects
