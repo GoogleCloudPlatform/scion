@@ -149,6 +149,8 @@ type AddParticipantRequest struct {
 // ConversationListResult is the response from listing conversations.
 type ConversationListResult struct {
 	Conversations []ConversationDetail `json:"conversations"`
+	Total         int                  `json:"total"`
+	Truncated     bool                 `json:"truncated"`
 	Cursor        string               `json:"cursor,omitempty"`
 }
 

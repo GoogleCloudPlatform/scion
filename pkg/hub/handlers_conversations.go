@@ -55,6 +55,8 @@ type conversationPeer struct {
 // conversationListResponse is the response for listing conversations.
 type conversationListResponse struct {
 	Conversations []conversationResponse `json:"conversations"`
+	Total         int                    `json:"total"`
+	Truncated     bool                   `json:"truncated"`
 	Cursor        string                 `json:"cursor,omitempty"`
 }
 
@@ -243,14 +245,19 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	})
 
 	// Apply limit.
-	if limit > 0 && len(filtered) > limit {
+	total := len(filtered)
+	truncated := false
+	if limit > 0 && total > limit {
 		filtered = filtered[:limit]
+		truncated = true
 	}
 
 	// Build response WITHOUT participants (available via GET /conversations/{id}).
 	// This avoids an N+1 query — one ListParticipants call per conversation.
 	result := conversationListResponse{
 		Conversations: make([]conversationResponse, 0, len(filtered)),
+		Total:         total,
+		Truncated:     truncated,
 	}
 	for _, conv := range filtered {
 		result.Conversations = append(result.Conversations, conversationResponse{

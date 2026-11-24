@@ -40,6 +40,7 @@ var (
 	convProject string
 	convJSON    bool
 	convLimit   int
+	convAll     bool
 
 	convMsgLimit  int
 	convMsgBefore string
@@ -99,7 +100,8 @@ Examples:
   scion conversation list
   scion conversation list --kind group
   scion conversation list --surface discord --json
-  scion conversation list --limit 10`,
+  scion conversation list --limit 10
+  scion conversation list --all`,
 	Args: cobra.NoArgs,
 	RunE: runConversationList,
 }
@@ -289,6 +291,7 @@ func init() {
 		cmd.Flags().StringVar(&convProject, "project", "", "Filter by project ID")
 		cmd.Flags().BoolVar(&convJSON, "json", false, "Output in JSON format")
 		cmd.Flags().IntVar(&convLimit, "limit", 50, "Maximum number of conversations to show")
+		cmd.Flags().BoolVar(&convAll, "all", false, "Return all conversations without a limit")
 	}
 
 	// Messages flags
@@ -316,7 +319,22 @@ func init() {
 	conversationCatchUpCmd.Flags().BoolVar(&convCatchUpFull, "full", false, "Show full untruncated message text and message IDs")
 }
 
+func printConversationTruncationNotice(result *hubclient.ConversationListResult) {
+	if result == nil || !result.Truncated {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Showing %d of %d conversations; use --limit or --all to see more.\n",
+		len(result.Conversations), result.Total)
+}
+
 func runConversationList(cmd *cobra.Command, args []string) error {
+	if convAll && cmd.Flags().Changed("limit") {
+		return fmt.Errorf("cannot use --all together with --limit")
+	}
+	if !convAll && convLimit <= 0 {
+		return fmt.Errorf("--limit must be a positive integer (got %d); use --all to list all conversations", convLimit)
+	}
+
 	if convJSON {
 		outputFormat = "json"
 	}
@@ -329,10 +347,15 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
+	limit := convLimit
+	if convAll {
+		limit = 0
+	}
+
 	opts := &hubclient.ListConversationsOptions{
 		Kind:    convKind,
 		Surface: convSurface,
-		Limit:   convLimit,
+		Limit:   limit,
 	}
 
 	// Review round 1 finding #2 / design §3.2 addendum: project_id keeps
@@ -357,11 +380,16 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 	}
 
 	if isJSONOutput() {
-		return outputJSON(result)
+		if err := outputJSON(result); err != nil {
+			return err
+		}
+		printConversationTruncationNotice(result)
+		return nil
 	}
 
 	if len(result.Conversations) == 0 {
 		fmt.Println("No conversations found.")
+		printConversationTruncationNotice(result)
 		return nil
 	}
 
@@ -379,7 +407,11 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			conv.ID, conv.Kind, conv.Surface, name, defaultAgent, lastActivity)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	printConversationTruncationNotice(result)
+	return nil
 }
 
 func runConversationMessages(cmd *cobra.Command, args []string) error {
