@@ -494,10 +494,13 @@ func TestPendingDispatchTTL_AtLeastCreateUnconfirmedHold(t *testing.T) {
 	require.GreaterOrEqual(t, defaultHold, 16*time.Minute)
 	assert.GreaterOrEqual(t, srv.pendingDispatchTTL(), defaultHold)
 
-	// Raising CreateUnconfirmedHold in server config raises pendingDispatchTTL
-	// dynamically at reap time.
+	// Raising CreateUnconfirmedHold (within UnconfirmedHold) in server config
+	// raises pendingDispatchTTL dynamically at reap time.
 	raisedHold := defaultHold + 5*time.Minute
-	srv.config.StartClaim = StartClaimSettings{CreateUnconfirmedHold: raisedHold}
+	srv.config.StartClaim = StartClaimSettings{
+		UnconfirmedHold:       raisedHold + time.Minute,
+		CreateUnconfirmedHold: raisedHold,
+	}
 	assert.GreaterOrEqual(t, srv.pendingDispatchTTL(), raisedHold)
 
 	// Reset to default and verify a create row aged 12m (past the old 10m
@@ -557,12 +560,9 @@ func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateI
 		return out
 	}
 
-	appliedWithReserved := copyEnv()
-	appliedWithReserved["SCION_USER_GITHUB_TOKEN"] = "scion_user_gh_hidden"
-
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseCreated)
-		a.AppliedConfig.Env = appliedWithReserved
+		a.AppliedConfig.Env = copyEnv()
 		a.AppliedConfig.InlineConfig = &api.ScionConfig{Env: copyEnv()}
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
 			InlineConfig: &api.ScionConfig{Env: copyEnv()},
@@ -571,9 +571,22 @@ func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateI
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	for _, secretVal := range []string{"ghp_secret_1", "ghp_secret_2", "ghp_secret_3", "ghp_secret_4", "scion_user_gh_hidden"} {
+	for _, secretVal := range []string{"ghp_secret_1", "ghp_secret_2", "ghp_secret_3", "ghp_secret_4"} {
 		assert.NotContains(t, rec.Body.String(), secretVal, "GET must hide all blocked GitHub token keys")
 	}
+
+	// Separately assert that GET also hides SCION_USER_GITHUB_TOKEN when present
+	// in AppliedConfig.Env (not patched, since SCION_* keys are reserved on PATCH).
+	hiddenAgent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Env = map[string]string{
+			"SCION_USER_GITHUB_TOKEN": "scion_user_gh_hidden",
+			"FOO":                     "bar",
+		}
+	})
+	recHidden := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+hiddenAgent.ID, nil)
+	require.Equal(t, http.StatusOK, recHidden.Code, recHidden.Body.String())
+	assert.NotContains(t, recHidden.Body.String(), "scion_user_gh_hidden", "GET must hide SCION_USER_GITHUB_TOKEN")
 
 	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"env": map[string]interface{}{"FOO": "bar"},
