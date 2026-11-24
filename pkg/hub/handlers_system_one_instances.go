@@ -1291,23 +1291,10 @@ func (s *Server) deleteSystemOneInstance(w http.ResponseWriter, r *http.Request,
 
 	s.SystemOneRuntime().ForgetInstance(inst.ID)
 
-	prunedProjects, pruneErr := s.store.PruneSystemOneInstanceFromAllProjects(ctx, inst.Name)
-	if pruneErr != nil {
-		s.logSystemOneAudit().Error("Failed to prune deleted System One instance from project allowlists",
-			"instance_id", inst.ID,
-			"instance_name", inst.Name,
-			"actor_id", user.ID(),
-			"error", pruneErr,
-		)
-		InternalError(w)
-		return
-	}
-
 	s.logSystemOneAudit().Info("System One instance deleted",
 		"instance_id", inst.ID,
 		"instance_name", inst.Name,
 		"secret_name", inst.Auth.SecretName,
-		"pruned_projects", prunedProjects,
 		"actor_id", user.ID(),
 	)
 

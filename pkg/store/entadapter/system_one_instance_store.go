@@ -19,12 +19,14 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
 	"time"
 
 	"entgo.io/ent/dialect"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/systemoneinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -400,31 +402,124 @@ func (s *SystemOneInstanceStore) UpdateSystemOneInstance(ctx context.Context, in
 	return nil
 }
 
-// DeleteSystemOneInstance deletes a System One instance by UUID.
+// systemOnePruneFaultHook, when non-nil in tests, injects a failure inside
+// pruneSystemOneInstanceTx to verify transactional rollback on delete+prune.
+var systemOnePruneFaultHook func(ctx context.Context, instanceName string) error
+
+// pruneSystemOneInstanceTx removes instanceName from every project's System One
+// allowlist inside tx. Projects are locked in deterministic ID order on
+// Postgres to maintain the canonical lock order (system_one_instances ->
+// projects by ID ASC) and prevent deadlocks with concurrent add/set calls.
+func pruneSystemOneInstanceTx(ctx context.Context, tx *ent.Tx, useLocks bool, instanceName string) (int, error) {
+	if systemOnePruneFaultHook != nil {
+		if err := systemOnePruneFaultHook(ctx, instanceName); err != nil {
+			return 0, err
+		}
+	}
+	q := tx.Project.Query().
+		Where(project.SystemOneAllowedInstancesNotNil()).
+		Order(ent.Asc(project.FieldID))
+	if useLocks {
+		q = q.ForUpdate()
+	}
+	projects, err := q.All(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+
+	updated := 0
+	for _, p := range projects {
+		found := false
+		filtered := make([]string, 0, len(p.SystemOneAllowedInstances))
+		for _, existing := range p.SystemOneAllowedInstances {
+			if existing == instanceName {
+				found = true
+				continue
+			}
+			filtered = append(filtered, existing)
+		}
+		if !found {
+			continue
+		}
+		sort.Strings(filtered)
+		upd := tx.Project.UpdateOneID(p.ID)
+		if len(filtered) == 0 {
+			upd.ClearSystemOneAllowedInstances()
+		} else {
+			upd.SetSystemOneAllowedInstances(filtered)
+		}
+		if _, err := upd.Save(ctx); err != nil {
+			return 0, mapError(err)
+		}
+		updated++
+	}
+	return updated, nil
+}
+
+// DeleteSystemOneInstance atomically prunes the instance name from all project
+// allowlists and deletes the System One instance by UUID in a single
+// transaction. If pruning fails, the transaction rolls back so no orphan
+// allowlist entry can survive to authorize a future recreated instance.
 func (s *SystemOneInstanceStore) DeleteSystemOneInstance(ctx context.Context, id string) error {
 	uid, err := parseGetID(id)
 	if err != nil {
 		return err
 	}
-	if err := s.client.SystemOneInstance.DeleteOneID(uid).Exec(ctx); err != nil {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return markTransient(fmt.Errorf("begin transaction: %w", err))
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.SystemOneInstance.Query().Where(systemoneinstance.IDEQ(uid))
+	if s.usesRowLocks() {
+		q = q.ForUpdate()
+	}
+	inst, err := q.Only(ctx)
+	if err != nil {
 		return mapError(err)
+	}
+	if _, err := pruneSystemOneInstanceTx(ctx, tx, s.usesRowLocks(), inst.Name); err != nil {
+		return err
+	}
+	if err := tx.SystemOneInstance.DeleteOneID(inst.ID).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return markTransient(fmt.Errorf("commit transaction: %w", err))
 	}
 	return nil
 }
 
-// DeleteSystemOneInstanceByName deletes a System One instance by its unique slug Name.
+// DeleteSystemOneInstanceByName atomically prunes the instance name from all
+// project allowlists and deletes the System One instance by its unique slug
+// Name in a single transaction.
 func (s *SystemOneInstanceStore) DeleteSystemOneInstanceByName(ctx context.Context, name string) error {
 	if name == "" {
 		return store.ErrNotFound
 	}
-	affected, err := s.client.SystemOneInstance.Delete().
-		Where(systemoneinstance.NameEQ(name)).
-		Exec(ctx)
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return markTransient(fmt.Errorf("begin transaction: %w", err))
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.SystemOneInstance.Query().Where(systemoneinstance.NameEQ(name))
+	if s.usesRowLocks() {
+		q = q.ForUpdate()
+	}
+	inst, err := q.Only(ctx)
 	if err != nil {
 		return mapError(err)
 	}
-	if affected == 0 {
-		return store.ErrNotFound
+	if _, err := pruneSystemOneInstanceTx(ctx, tx, s.usesRowLocks(), inst.Name); err != nil {
+		return err
+	}
+	if err := tx.SystemOneInstance.DeleteOneID(inst.ID).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return markTransient(fmt.Errorf("commit transaction: %w", err))
 	}
 	return nil
 }

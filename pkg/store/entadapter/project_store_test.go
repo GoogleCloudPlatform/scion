@@ -1340,12 +1340,39 @@ func TestProject_LegacyEmptyGitHubPermissionsReadAsNil(t *testing.T) {
 	})
 }
 
+func seedSystemOneInstances(t *testing.T, is *SystemOneInstanceStore, names ...string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, name := range names {
+		err := is.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+			ID:       uuid.NewString(),
+			Name:     name,
+			Adapter:  "typesafe",
+			Model:    "jev-1.14.0",
+			Endpoint: "https://api.typesafe.ai",
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "sec-" + name},
+			Enabled:  true,
+		})
+		require.NoError(t, err, "seed instance %q", name)
+	}
+}
+
 func TestProject_SystemOneAllowedInstances(t *testing.T) {
-	ps := newTestProjectStore(t)
+	client := enttest.NewClient(t)
+	ps := NewProjectStore(client)
+	is := NewSystemOneInstanceStore(client)
 	ctx := context.Background()
 
 	p := newProject(1)
 	require.NoError(t, ps.CreateProject(ctx, p))
+
+	seedSystemOneInstances(t, is, "typesafe-b", "gemini-a", "zeta-1", "alpha-1", "shared-inst", "keep-me", "other-inst")
+	maxNames := make([]string, store.MaxProjectSystemOneInstances)
+	for i := range maxNames {
+		maxNames[i] = fmt.Sprintf("inst-%03d", i)
+	}
+	seedSystemOneInstances(t, is, maxNames...)
+	seedSystemOneInstances(t, is, "inst-overflow")
 
 	// Empty by default on every new project.
 	got, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
@@ -1397,13 +1424,15 @@ func TestProject_SystemOneAllowedInstances(t *testing.T) {
 	assert.Empty(t, got)
 
 	// 64-entry cap enforced atomically inside store for both Set and Add.
-	maxNames := make([]string, store.MaxProjectSystemOneInstances)
-	for i := range maxNames {
-		maxNames[i] = fmt.Sprintf("inst-%03d", i)
-	}
 	_, got, err = ps.SetProjectSystemOneInstances(ctx, p.ID, maxNames)
 	require.NoError(t, err)
 	assert.Len(t, got, store.MaxProjectSystemOneInstances)
+
+	// Unknown instance name returns ErrSystemOneInstanceNotFound inside tx.
+	_, _, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "does-not-exist")
+	assert.ErrorIs(t, err, store.ErrSystemOneInstanceNotFound)
+	_, _, err = ps.SetProjectSystemOneInstances(ctx, p.ID, []string{"alpha-1", "does-not-exist"})
+	assert.ErrorIs(t, err, store.ErrSystemOneInstanceNotFound)
 
 	// Adding an already-present entry at the cap succeeds idempotently.
 	_, got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "inst-000")
@@ -1469,13 +1498,18 @@ func TestProject_SystemOneAllowedInstances(t *testing.T) {
 }
 
 func TestProject_SystemOneAllowedInstances_ConcurrentAddRemove(t *testing.T) {
-	ps := newTestProjectStore(t)
+	client := enttest.NewClient(t)
+	ps := NewProjectStore(client)
+	is := NewSystemOneInstanceStore(client)
 	ctx := context.Background()
 
 	p := newProject(10)
 	require.NoError(t, ps.CreateProject(ctx, p))
 
 	const workers = 16
+	for i := 0; i < workers; i++ {
+		seedSystemOneInstances(t, is, fmt.Sprintf("conc-inst-%02d", i))
+	}
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 	for i := 0; i < workers; i++ {
@@ -1529,10 +1563,14 @@ func TestProject_SystemOneAllowedInstances_ConcurrentAddRemove(t *testing.T) {
 	// Concurrent remove + add on the same project must never resurrect the removed name.
 	pMix := newProject(11)
 	require.NoError(t, ps.CreateProject(ctx, pMix))
+	seedSystemOneInstances(t, is, "keep-base", "victim-inst")
+	const addWorkers = 12
+	for i := 0; i < addWorkers; i++ {
+		seedSystemOneInstances(t, is, fmt.Sprintf("mix-add-%02d", i))
+	}
 	_, _, err = ps.SetProjectSystemOneInstances(ctx, pMix.ID, []string{"keep-base", "victim-inst"})
 	require.NoError(t, err)
 
-	const addWorkers = 12
 	mixErrs := make(chan error, addWorkers+1)
 	startMix := make(chan struct{})
 	wg.Add(1)
@@ -1577,10 +1615,14 @@ func TestProject_SystemOneAllowedInstances_ConcurrentAddRemove(t *testing.T) {
 	for i := range base60 {
 		base60[i] = fmt.Sprintf("cap-base-%02d", i)
 	}
+	seedSystemOneInstances(t, is, base60...)
+	const capRacers = 12
+	for i := 0; i < capRacers; i++ {
+		seedSystemOneInstances(t, is, fmt.Sprintf("cap-race-%02d", i))
+	}
 	_, _, err = ps.SetProjectSystemOneInstances(ctx, pCap.ID, base60)
 	require.NoError(t, err)
 
-	const capRacers = 12
 	capResults := make(chan error, capRacers)
 	startCap := make(chan struct{})
 	for i := 0; i < capRacers; i++ {
@@ -1611,4 +1653,131 @@ func TestProject_SystemOneAllowedInstances_ConcurrentAddRemove(t *testing.T) {
 	gotCap, err := ps.GetProjectSystemOneInstances(ctx, pCap.ID)
 	require.NoError(t, err)
 	assert.Len(t, gotCap, store.MaxProjectSystemOneInstances)
+}
+
+func TestProject_SystemOneAllowedInstances_AtomicDeletePruneFaultRollback(t *testing.T) {
+	client := enttest.NewClient(t)
+	ps := NewProjectStore(client)
+	is := NewSystemOneInstanceStore(client)
+	ctx := context.Background()
+
+	p := newProject(20)
+	require.NoError(t, ps.CreateProject(ctx, p))
+
+	instID := uuid.NewString()
+	require.NoError(t, is.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       instID,
+		Name:     "fault-inst",
+		Adapter:  "typesafe",
+		Model:    "jev-1.14.0",
+		Endpoint: "https://api.typesafe.ai",
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "sec-fault"},
+		Enabled:  true,
+	}))
+	_, _, err := ps.AddProjectSystemOneInstance(ctx, p.ID, "fault-inst")
+	require.NoError(t, err)
+
+	// 1. Fault-injected prune failure rolls back the entire transaction:
+	//    instance row stays in place (not orphaned), allowlist stays intact.
+	prevHook := systemOnePruneFaultHook
+	t.Cleanup(func() { systemOnePruneFaultHook = prevHook })
+	systemOnePruneFaultHook = func(_ context.Context, _ string) error {
+		return fmt.Errorf("injected prune failure")
+	}
+
+	err = is.DeleteSystemOneInstance(ctx, instID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "injected prune failure")
+
+	stillExists, err := is.GetSystemOneInstance(ctx, instID)
+	require.NoError(t, err, "instance must remain when delete+prune rolls back")
+	assert.Equal(t, "fault-inst", stillExists.Name)
+
+	gotBeforeRetry, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"fault-inst"}, gotBeforeRetry)
+
+	// 2. Clear fault and retry delete: both instance and allowlist entry are removed atomically.
+	systemOnePruneFaultHook = nil
+	require.NoError(t, is.DeleteSystemOneInstance(ctx, instID))
+
+	_, err = is.GetSystemOneInstance(ctx, instID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	gotAfterDelete, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotAfterDelete, "atomic delete must prune allowlist entry")
+
+	// 3. Recreate an instance with the same name: project allowlist MUST remain empty.
+	require.NoError(t, is.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       uuid.NewString(),
+		Name:     "fault-inst",
+		Adapter:  "typesafe",
+		Model:    "jev-1.14.0",
+		Endpoint: "https://api.typesafe.ai",
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "sec-fault-2"},
+		Enabled:  true,
+	}))
+	gotAfterRecreate, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotAfterRecreate, "recreated same-name instance must NOT be silently authorized")
+}
+
+func TestProject_SystemOneAllowedInstances_AddVsDeleteRace(t *testing.T) {
+	client := enttest.NewClient(t)
+	ps := NewProjectStore(client)
+	is := NewSystemOneInstanceStore(client)
+	ctx := context.Background()
+
+	p := newProject(21)
+	require.NoError(t, ps.CreateProject(ctx, p))
+
+	for iter := 0; iter < 10; iter++ {
+		name := fmt.Sprintf("race-del-inst-%02d", iter)
+		instID := uuid.NewString()
+		require.NoError(t, is.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+			ID:       instID,
+			Name:     name,
+			Adapter:  "typesafe",
+			Model:    "jev-1.14.0",
+			Endpoint: "https://api.typesafe.ai",
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "sec-" + name},
+			Enabled:  true,
+		}))
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var delErr error
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			delErr = is.DeleteSystemOneInstance(ctx, instID)
+		}()
+
+		const adders = 4
+		addErrs := make([]error, adders)
+		for a := 0; a < adders; a++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				<-start
+				_, _, addErrs[idx] = ps.AddProjectSystemOneInstance(ctx, p.ID, name)
+			}(a)
+		}
+		close(start)
+		wg.Wait()
+
+		require.NoError(t, delErr, "iter %d: delete must succeed", iter)
+		for _, aErr := range addErrs {
+			if aErr != nil {
+				assert.ErrorIs(t, aErr, store.ErrSystemOneInstanceNotFound, "iter %d: concurrent add after delete must fail with ErrSystemOneInstanceNotFound", iter)
+			}
+		}
+
+		// After delete commits, no orphan entry may exist in the project's allowlist.
+		got, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
+		require.NoError(t, err)
+		assert.NotContains(t, got, name, "iter %d: add-vs-delete race must never leave an orphan allowlist entry", iter)
+	}
 }

@@ -41,8 +41,11 @@ type ProjectSystemOneInstancesResponse struct {
 
 // SetProjectSystemOneInstancesRequest is the request body for
 // PUT /api/v1/projects/{id}/system-one/instances.
+// Instances is a pointer so missing "instances" (e.g. `{}`) is rejected as a
+// validation error rather than silently clearing the allowlist; pass
+// `{"instances": []}` to clear explicitly.
 type SetProjectSystemOneInstancesRequest struct {
-	Instances []string `json:"instances"`
+	Instances *[]string `json:"instances"`
 }
 
 // handleProjectSystemOneInstances routes:
@@ -88,14 +91,33 @@ func (s *Server) handleProjectSystemOneInstances(w http.ResponseWriter, r *http.
 	}
 }
 
-func projectSystemOneUserCredentialAllowed(identity Identity) bool {
+// projectSystemOneUserCredentialAllowed reports whether the request's identity
+// and credential kind may read or mutate a project's System One allowlist:
+//   - a local user or dev identity with an interactive session or dev credential;
+//   - a scoped user identity with a user access token (UAT).
+//
+// Agents, agent-delegated credentials, broker credentials (including broker
+// on-behalf-of), hub-delivery credentials, federated credentials, and visitors
+// are refused with 403 (aligned with messagePolicyManageCredentialAllowed).
+func projectSystemOneUserCredentialAllowed(ctx context.Context, identity Identity) bool {
 	if isNilIdentity(identity) {
 		return false
 	}
-	switch identity.Type() {
-	case "user", "dev", "federated_user":
+	if _, federated := identity.(FederatedIdentity); federated {
+		return false
+	}
+	kind := requestCredentialKind(ctx, identity)
+	if IsScopedUserIdentity(identity) {
+		if identity.Type() != "user" {
+			return false
+		}
 		_, ok := identity.(UserIdentity)
-		return ok
+		return ok && kind == CredentialKindUAT
+	}
+	switch identity.Type() {
+	case "user", "dev":
+		_, ok := identity.(UserIdentity)
+		return ok && allowedMutationCredentials[kind]
 	default:
 		return false
 	}
@@ -105,7 +127,7 @@ func projectSystemOneUserCredentialAllowed(identity Identity) bool {
 // project's System One instance allowlist: an active project owner, an active
 // project admin, or an unscoped Hub/platform admin.
 func (s *Server) projectSystemOneOwnerOrAdminRule(ctx context.Context, identity Identity, projectID string) bool {
-	if !projectSystemOneUserCredentialAllowed(identity) {
+	if !projectSystemOneUserCredentialAllowed(ctx, identity) {
 		return false
 	}
 	userIdent, ok := identity.(UserIdentity)
@@ -129,7 +151,7 @@ func (s *Server) authorizeProjectSystemOneRead(w http.ResponseWriter, r *http.Re
 		return false
 	}
 	res := projectResource(project)
-	if !projectSystemOneUserCredentialAllowed(identity) {
+	if !projectSystemOneUserCredentialAllowed(ctx, identity) {
 		logAuthzDenial(r, identity, res, ActionRead, "credential or principal kind cannot read project System One instance allowlist")
 		writeForbiddenStructured(w, "", res.Type, ActionRead)
 		return false
@@ -161,7 +183,7 @@ func (s *Server) authorizeProjectSystemOneManage(w http.ResponseWriter, r *http.
 		return false
 	}
 	res := projectResource(project)
-	if !projectSystemOneUserCredentialAllowed(identity) {
+	if !projectSystemOneUserCredentialAllowed(ctx, identity) {
 		logAuthzDenial(r, identity, res, ActionManageSystemOneInstances, "credential or principal kind cannot manage project System One instance allowlist")
 		writeForbiddenStructured(w, projectSystemOneManageRuleMessage, res.Type, ActionManageSystemOneInstances)
 		return false
@@ -216,34 +238,29 @@ func (s *Server) handleSetProjectSystemOneInstances(w http.ResponseWriter, r *ht
 	if !readBoundedJSONStrict(w, r, maxProjectSystemOneInstancesBodyBytes, &req) {
 		return
 	}
-	if len(req.Instances) > store.MaxProjectSystemOneInstances {
+	if req.Instances == nil {
+		ValidationError(w, "instances field is required (pass [] to clear the allowlist)", nil)
+		return
+	}
+	instances := *req.Instances
+	if len(instances) > store.MaxProjectSystemOneInstances {
 		ValidationError(w, fmt.Sprintf("instances exceeds maximum of %d entries", store.MaxProjectSystemOneInstances), nil)
 		return
 	}
-	seen := make(map[string]struct{}, len(req.Instances))
-	for _, raw := range req.Instances {
+	for _, raw := range instances {
 		name := strings.TrimSpace(raw)
 		if !store.IsValidSystemOneInstanceName(name) {
 			ValidationError(w, fmt.Sprintf("invalid instance name %q: must be a lowercase alphanumeric slug (1..63 characters)", raw), nil)
 			return
 		}
-		if _, dup := seen[name]; dup {
-			continue
-		}
-		seen[name] = struct{}{}
-		if _, getErr := s.store.GetSystemOneInstanceByName(ctx, name); getErr != nil {
-			if errors.Is(getErr, store.ErrNotFound) {
-				writeError(w, http.StatusUnprocessableEntity, "unknown_instance", fmt.Sprintf("System One instance %q does not exist", name), nil)
-				return
-			}
-			slog.Error("failed to verify System One instance existence", "project_id", project.ID, "instance", name, "error", getErr)
-			RuntimeError(w, "Failed to verify System One instance")
-			return
-		}
 	}
 
-	before, updated, err := s.store.SetProjectSystemOneInstances(ctx, project.ID, req.Instances)
+	before, updated, err := s.store.SetProjectSystemOneInstances(ctx, project.ID, instances)
 	if err != nil {
+		if errors.Is(err, store.ErrSystemOneInstanceNotFound) {
+			writeError(w, http.StatusUnprocessableEntity, "unknown_instance", err.Error(), nil)
+			return
+		}
 		if errors.Is(err, store.ErrSystemOneAllowlistLimitExceeded) {
 			ValidationError(w, fmt.Sprintf("instances exceeds maximum of %d entries", store.MaxProjectSystemOneInstances), nil)
 			return
@@ -294,18 +311,13 @@ func (s *Server) handleAddProjectSystemOneInstance(w http.ResponseWriter, r *htt
 		ValidationError(w, fmt.Sprintf("invalid instance name %q: must be a lowercase alphanumeric slug (1..63 characters)", instanceName), nil)
 		return
 	}
-	if _, getErr := s.store.GetSystemOneInstanceByName(ctx, name); getErr != nil {
-		if errors.Is(getErr, store.ErrNotFound) {
-			writeError(w, http.StatusUnprocessableEntity, "unknown_instance", fmt.Sprintf("System One instance %q does not exist", name), nil)
-			return
-		}
-		slog.Error("failed to verify System One instance existence", "project_id", project.ID, "instance", name, "error", getErr)
-		RuntimeError(w, "Failed to verify System One instance")
-		return
-	}
 
 	before, updated, err := s.store.AddProjectSystemOneInstance(ctx, project.ID, name)
 	if err != nil {
+		if errors.Is(err, store.ErrSystemOneInstanceNotFound) {
+			writeError(w, http.StatusUnprocessableEntity, "unknown_instance", fmt.Sprintf("System One instance %q does not exist", name), nil)
+			return
+		}
 		if errors.Is(err, store.ErrSystemOneAllowlistLimitExceeded) {
 			ValidationError(w, fmt.Sprintf("instances exceeds maximum of %d entries", store.MaxProjectSystemOneInstances), nil)
 			return

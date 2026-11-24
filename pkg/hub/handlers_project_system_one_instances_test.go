@@ -224,7 +224,8 @@ func TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate(t *testing.T) {
 	assert.Equal(t, http.StatusOK, doRequestAsUser(t, srv, member, http.MethodGet, basePath, nil).Code)
 	assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, member, http.MethodPut, basePath+"/inst-x", nil).Code)
 	assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, member, http.MethodDelete, basePath+"/inst-x", nil).Code)
-	assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, member, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: []string{"inst-x"}}).Code)
+	instX := []string{"inst-x"}
+	assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, member, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{Instances: &instX}).Code)
 
 	// 4. Scoped UAT: WITH project:manage_system_one_instances allowed; WITHOUT scope denied.
 	uatWithScope := projectOpsMint(t, srv, owner.ID, projectBoundary(proj.ID), "project:manage_system_one_instances")
@@ -282,19 +283,37 @@ func TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate(t *testing.T) {
 	customRoleUAT := projectOpsMint(t, srv, customRoleUser.ID, projectBoundary(proj.ID), "project:manage_system_one_instances")
 	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodPut, basePath+"/inst-x", customRoleUAT, nil).Code)
 
-	// 5. Agent JWT MUST be denied on GET, PUT, DELETE.
-	agentIdent := dcAgentIdentity(uuid.NewString(), proj.ID, AgentRoleBaseline)
-	doAsAgent := func(method, path string) *httptest.ResponseRecorder {
+	// 5. Non-user / non-interactive credentials MUST be denied (403) on GET, PUT, DELETE:
+	//    agent JWT, delegated agent, broker direct, broker on-behalf-of owner,
+	//    hub-delivery, and federated user (Hub O1).
+	doWithCred := func(ident Identity, cc CredentialContext, method, path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, nil)
-		reqCtx := contextWithIdentity(req.Context(), agentIdent)
-		reqCtx = contextWithCredentialContext(reqCtx, CredentialContext{Kind: CredentialKindAgentJWT, ID: "ajwt-s1"})
+		reqCtx := contextWithIdentity(req.Context(), ident)
+		reqCtx = contextWithCredentialContext(reqCtx, cc)
 		rec := httptest.NewRecorder()
 		srv.mux.ServeHTTP(rec, req.WithContext(reqCtx))
 		return rec
 	}
-	assert.Equal(t, http.StatusForbidden, doAsAgent(http.MethodGet, basePath).Code)
-	assert.Equal(t, http.StatusForbidden, doAsAgent(http.MethodPut, basePath+"/inst-agent").Code)
-	assert.Equal(t, http.StatusForbidden, doAsAgent(http.MethodDelete, basePath+"/inst-uat").Code)
+	ownerUserIdent := NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, owner.Role, string(ClientTypeAPI))
+	deniedCreds := []struct {
+		name  string
+		ident Identity
+		cc    CredentialContext
+	}{
+		{"agent-jwt", dcAgentIdentity(uuid.NewString(), proj.ID, AgentRoleBaseline), CredentialContext{Kind: CredentialKindAgentJWT, ID: "ajwt-s1"}},
+		{"delegated-agent", dcAgentIdentity(uuid.NewString(), proj.ID, AgentRoleBaseline), CredentialContext{Kind: CredentialKindDelegatedAgent, ID: "dcred-s1"}},
+		{"broker-direct", NewBrokerIdentity(uuid.NewString()), CredentialContext{Kind: CredentialKindBroker, ID: "brk-s1"}},
+		{"broker-obo-owner", ownerUserIdent, CredentialContext{Kind: CredentialKindBroker, ID: "brk-obo-s1"}},
+		{"hub-delivery", ownerUserIdent, CredentialContext{Kind: CredentialKindHubDelivery, ID: "hdel-s1"}},
+		{"federated-user", NewFederatedUserIdentity("https://issuer.example", "fed-sub-s1", owner.Email, "Fed Owner", "admin", nil), CredentialContext{Kind: CredentialKindFederation, ID: "fed-s1"}},
+	}
+	for _, tc := range deniedCreds {
+		t.Run("denied_cred_"+tc.name, func(t *testing.T) {
+			assert.Equal(t, http.StatusForbidden, doWithCred(tc.ident, tc.cc, http.MethodGet, basePath).Code)
+			assert.Equal(t, http.StatusForbidden, doWithCred(tc.ident, tc.cc, http.MethodPut, basePath+"/inst-agent").Code)
+			assert.Equal(t, http.StatusForbidden, doWithCred(tc.ident, tc.cc, http.MethodDelete, basePath+"/inst-uat").Code)
+		})
+	}
 }
 
 func TestProjectSystemOneInstances_UnknownInstanceAndDeletePrune(t *testing.T) {
@@ -317,11 +336,18 @@ func TestProjectSystemOneInstances_UnknownInstanceAndDeletePrune(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, addMissing.Code, addMissing.Body.String())
 	assert.Contains(t, addMissing.Body.String(), "unknown_instance")
 
+	missingInsts := []string{"does-not-exist"}
 	setMissing := doRequestAsUser(t, srv, admin, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{
-		Instances: []string{"does-not-exist"},
+		Instances: &missingInsts,
 	})
 	require.Equal(t, http.StatusUnprocessableEntity, setMissing.Code, setMissing.Body.String())
 	assert.Contains(t, setMissing.Body.String(), "unknown_instance")
+
+	// PUT {} without the "instances" key returns 400 validation_error and never
+	// silently clears the allowlist; explicit {"instances": []} clears it (Hub N2).
+	emptyBodyRec := doRequestAsUser(t, srv, admin, http.MethodPut, basePath, map[string]any{})
+	require.Equal(t, http.StatusBadRequest, emptyBodyRec.Code, emptyBodyRec.Body.String())
+	assert.Contains(t, emptyBodyRec.Body.String(), "instances field is required")
 
 	// Removing a non-existent valid slug stays idempotent (200).
 	delMissing := doRequestAsUser(t, srv, admin, http.MethodDelete, basePath+"/does-not-exist", nil)
@@ -403,6 +429,10 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		providerCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"models": [{"id": "jev-1.14.0"}]}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{
 		  "model": "jev-1.14.0",
 		  "answers": {"q1": {"type": "noul", "noul": 0.92}},
@@ -540,6 +570,20 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	assert.Zero(t, providerCalls.Load())
 	assert.Zero(t, countingSecrets.getCalls.Load())
 
+	// 4b. Models probe with --project P also respects P's allowlist (Hub O2):
+	//     unlisted -> no_eligible_instance with 0 provider hits and 0 secret reads.
+	modelsDenied := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/ts-allow/probe", ProbeSystemOneInstanceRequest{
+		Models:  true,
+		Project: proj.ID,
+	})
+	require.Equal(t, http.StatusOK, modelsDenied.Code, modelsDenied.Body.String())
+	var modelsDeniedResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(modelsDenied.Body.Bytes(), &modelsDeniedResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, modelsDeniedResp.Class)
+	assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), modelsDeniedResp.Reason)
+	assert.Zero(t, providerCalls.Load())
+	assert.Zero(t, countingSecrets.getCalls.Load())
+
 	// 5. Probe WITHOUT --project stays hub-admin-only and succeeds even with empty project allowlist.
 	probeNoProj := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/ts-allow/probe", ProbeSystemOneInstanceRequest{
 		Kind:  string(spec.KindFilter),
@@ -583,6 +627,18 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	require.NoError(t, json.Unmarshal(probeWithProjOK.Body.Bytes(), &probeOKResp))
 	assert.Equal(t, systemoneruntime.ClassSuccess, probeOKResp.Class)
 	assert.Equal(t, int32(3), providerCalls.Load())
+
+	// Models probe with --project P succeeds once ts-allow is allowlisted.
+	modelsOK := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/ts-allow/probe", ProbeSystemOneInstanceRequest{
+		Models:  true,
+		Project: proj.ID,
+	})
+	require.Equal(t, http.StatusOK, modelsOK.Code, modelsOK.Body.String())
+	var modelsOKResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(modelsOK.Body.Bytes(), &modelsOKResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, modelsOKResp.Class)
+	assert.Contains(t, modelsOKResp.Models, "jev-1.14.0")
+	assert.Equal(t, int32(4), providerCalls.Load())
 
 	// 7. Remove "ts-allow" via HTTP API -> takes effect immediately on the next evaluation (0 new requests).
 	delRec := doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/projects/"+proj.ID+"/system-one/instances/ts-allow", nil)

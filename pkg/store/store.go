@@ -45,6 +45,11 @@ var (
 	// wraps ErrInvalidInput.
 	ErrSystemOneAllowlistLimitExceeded = fmt.Errorf("%w: project System One instance allowlist exceeds maximum of %d entries", ErrInvalidInput, MaxProjectSystemOneInstances)
 
+	// ErrSystemOneInstanceNotFound is returned when a project allowlist mutation
+	// references a hub System One instance name that does not exist. It wraps
+	// ErrNotFound.
+	ErrSystemOneInstanceNotFound = fmt.Errorf("%w: system one instance not found", ErrNotFound)
+
 	// ErrActiveReservationExists is returned by CreateUsageReservation when
 	// the resource already holds an active (released_at IS NULL)
 	// reservation for the same limit definition: the unique active
