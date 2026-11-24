@@ -196,10 +196,100 @@ func (r *execRevealer) canReadCreatorAgent(agent *store.Agent) bool {
 	return r.s.authzService.CheckAccess(r.ctx, r.identity, agentResource(agent), ActionRead).Allowed
 }
 
+// resolveCreatorUser formats a user creator if the caller is allowed to read it.
+func (r *execRevealer) resolveCreatorUser(user *store.User) resolvedScheduleCreator {
+	if user == nil || !r.canReadCreatorUser(user.ID) {
+		return resolvedScheduleCreator{}
+	}
+	name := user.DisplayName
+	if name == "" {
+		name = user.Email
+	}
+	if name == "" {
+		return resolvedScheduleCreator{}
+	}
+	return resolvedScheduleCreator{name: name, kind: "user"}
+}
+
+// resolveCreatorAgent formats an agent creator if active and readable by the caller.
+func (r *execRevealer) resolveCreatorAgent(agent *store.Agent) resolvedScheduleCreator {
+	if agent == nil || !agent.DeletedAt.IsZero() || !r.canReadCreatorAgent(agent) {
+		return resolvedScheduleCreator{}
+	}
+	name := agent.Slug
+	if name == "" {
+		name = agent.Name
+	}
+	if name == "" {
+		return resolvedScheduleCreator{}
+	}
+	return resolvedScheduleCreator{name: name, kind: "agent"}
+}
+
+// preloadCreators batch-resolves all unique schedule CreatedBy IDs in at most
+// two store lookups (GetUsersByIDs, then GetAgentsByIDs for remaining IDs) and
+// populates r.creators so scheduleResponse does not issue per-row queries.
+func (r *execRevealer) preloadCreators(schedules []store.Schedule) {
+	if r == nil || r.s == nil || r.s.store == nil || r.identity == nil || len(schedules) == 0 {
+		return
+	}
+	if r.creators == nil {
+		r.creators = make(map[string]resolvedScheduleCreator, len(schedules))
+	}
+	seen := make(map[string]struct{}, len(schedules))
+	ids := make([]string, 0, len(schedules))
+	for i := range schedules {
+		id := schedules[i].CreatedBy
+		if id == "" {
+			continue
+		}
+		if _, cached := r.creators[id]; cached {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return
+	}
+
+	users, err := r.s.store.GetUsersByIDs(r.ctx, ids)
+	if err != nil {
+		slog.WarnContext(r.ctx, "schedule response: batch user lookup failed", "error", err)
+	}
+
+	remaining := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if user, ok := users[id]; ok && user != nil {
+			r.creators[id] = r.resolveCreatorUser(user)
+		} else {
+			remaining = append(remaining, id)
+		}
+	}
+	if len(remaining) == 0 {
+		return
+	}
+
+	agents, err := r.s.store.GetAgentsByIDs(r.ctx, remaining)
+	if err != nil {
+		slog.WarnContext(r.ctx, "schedule response: batch agent lookup failed", "error", err)
+	}
+	for _, id := range remaining {
+		if agent, ok := agents[id]; ok && agent != nil {
+			r.creators[id] = r.resolveCreatorAgent(agent)
+		} else {
+			r.creators[id] = resolvedScheduleCreator{}
+		}
+	}
+}
+
 // resolveCreator resolves a schedule's CreatedBy UUID to a readable name and
 // principal kind ("user" or "agent") without widening caller visibility.
 func (r *execRevealer) resolveCreator(createdBy string) (string, string) {
-	if r == nil || r.s == nil || r.s.store == nil || createdBy == "" {
+	if r == nil || r.s == nil || r.s.store == nil || r.identity == nil || createdBy == "" {
 		return "", ""
 	}
 	if r.creators != nil {
@@ -209,25 +299,9 @@ func (r *execRevealer) resolveCreator(createdBy string) (string, string) {
 	}
 	var resolved resolvedScheduleCreator
 	if user, err := r.s.store.GetUser(r.ctx, createdBy); err == nil && user != nil {
-		if r.canReadCreatorUser(user.ID) {
-			name := user.DisplayName
-			if name == "" {
-				name = user.Email
-			}
-			if name != "" {
-				resolved = resolvedScheduleCreator{name: name, kind: "user"}
-			}
-		}
-	} else if agent, err := r.s.store.GetAgent(r.ctx, createdBy); err == nil && agent != nil && agent.DeletedAt.IsZero() {
-		if r.canReadCreatorAgent(agent) {
-			name := agent.Slug
-			if name == "" {
-				name = agent.Name
-			}
-			if name != "" {
-				resolved = resolvedScheduleCreator{name: name, kind: "agent"}
-			}
-		}
+		resolved = r.resolveCreatorUser(user)
+	} else if agent, err := r.s.store.GetAgent(r.ctx, createdBy); err == nil && agent != nil {
+		resolved = r.resolveCreatorAgent(agent)
 	}
 	if r.creators != nil {
 		r.creators[createdBy] = resolved
@@ -340,6 +414,7 @@ func buildScheduledEventResponse(rev *execRevealer, evt store.ScheduledEvent, ru
 
 // scheduleResponses serializes schedules for the caller of rev.
 func scheduleResponses(rev *execRevealer, schedules []store.Schedule) []ScheduleResponse {
+	rev.preloadCreators(schedules)
 	out := make([]ScheduleResponse, 0, len(schedules))
 	for i := range schedules {
 		out = append(out, scheduleResponse(rev, schedules[i]))

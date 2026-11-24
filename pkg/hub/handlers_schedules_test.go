@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1224,5 +1226,201 @@ func TestSchedule_CreatorNameResolution(t *testing.T) {
 		assert.Equal(t, "user", sessByID[aliceSchedID].CreatedByType)
 		assert.Equal(t, "ops-bot", sessByID[agentSchedID].CreatedByName)
 		assert.Equal(t, "agent", sessByID[agentSchedID].CreatedByType)
+	})
+}
+
+type scheduleCreatorLookupSpyStore struct {
+	store.Store
+	fault           *storeFaultSwitch
+	getUserCalls    atomic.Int64
+	getAgentCalls   atomic.Int64
+	getUsersByIDs   atomic.Int64
+	getAgentsByIDs  atomic.Int64
+	failUsersBatch  atomic.Bool
+	failAgentsBatch atomic.Bool
+}
+
+func (s *scheduleCreatorLookupSpyStore) reset() {
+	s.getUserCalls.Store(0)
+	s.getAgentCalls.Store(0)
+	s.getUsersByIDs.Store(0)
+	s.getAgentsByIDs.Store(0)
+	s.failUsersBatch.Store(false)
+	s.failAgentsBatch.Store(false)
+}
+
+func (s *scheduleCreatorLookupSpyStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.fault.Active() {
+		s.getUserCalls.Add(1)
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *scheduleCreatorLookupSpyStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.fault.Active() {
+		s.getAgentCalls.Add(1)
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+func (s *scheduleCreatorLookupSpyStore) GetUsersByIDs(ctx context.Context, ids []string) (map[string]*store.User, error) {
+	if s.fault.Active() {
+		s.getUsersByIDs.Add(1)
+		if s.failUsersBatch.Load() {
+			return nil, errors.New("injected batch user lookup failure")
+		}
+	}
+	return s.Store.GetUsersByIDs(ctx, ids)
+}
+
+func (s *scheduleCreatorLookupSpyStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
+	if s.fault.Active() {
+		s.getAgentsByIDs.Add(1)
+		if s.failAgentsBatch.Load() {
+			return nil, errors.New("injected batch agent lookup failure")
+		}
+	}
+	return s.Store.GetAgentsByIDs(ctx, ids)
+}
+
+func TestSchedule_CreatorNameResolutionBatchesLookups(t *testing.T) {
+	srv, s, spy, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *scheduleCreatorLookupSpyStore {
+		return &scheduleCreatorLookupSpyStore{Store: inner, fault: f}
+	})
+	srv, s, projectID := initScheduleTest(t, srv, s)
+	ctx := context.Background()
+
+	u1ID := tid("batch-creator-u1")
+	u2ID := tid("batch-creator-u2")
+	for _, u := range []*store.User{
+		{ID: u1ID, Email: "u1@example.com", DisplayName: "User One", Role: "member", Status: "active"},
+		{ID: u2ID, Email: "u2@example.com", DisplayName: "", Role: "member", Status: "active"},
+	} {
+		require.NoError(t, s.CreateUser(ctx, u))
+	}
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, u1ID))
+
+	a1ID := tid("batch-creator-a1")
+	a2ID := tid("batch-creator-a2")
+	for _, a := range []*store.Agent{
+		{ID: a1ID, Slug: "batch-bot-1", Name: "Batch Bot 1", ProjectID: projectID, Phase: "running"},
+		{ID: a2ID, Slug: "batch-bot-2", Name: "Batch Bot 2", ProjectID: projectID, Phase: "running"},
+	} {
+		require.NoError(t, s.CreateAgent(ctx, a))
+	}
+
+	missingID := tid("batch-creator-missing")
+	mkSched := func(projID, name, createdBy string) string {
+		id := tid("batch-sched-" + name)
+		require.NoError(t, s.CreateSchedule(ctx, &store.Schedule{
+			ID:        id,
+			ProjectID: projID,
+			Name:      name,
+			CronExpr:  "0 9 * * *",
+			EventType: "message",
+			Payload:   `{"agentName":"worker","message":"hi"}`,
+			Status:    store.ScheduleStatusActive,
+			CreatedBy: createdBy,
+		}))
+		return id
+	}
+
+	sU1 := mkSched(projectID, "u1", u1ID)
+	sU2 := mkSched(projectID, "u2", u2ID)
+	sA1 := mkSched(projectID, "a1", a1ID)
+	sA2 := mkSched(projectID, "a2", a2ID)
+	sMissing := mkSched(projectID, "missing", missingID)
+
+	// Separate project with only user-created schedules to verify agent batch is skipped.
+	userOnlyProjID := tid("batch-user-only-proj")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   userOnlyProjID,
+		Name: "User Only Schedules",
+		Slug: "user-only-schedules",
+	}))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, userOnlyProjID, u1ID))
+	mkSched(userOnlyProjID, "only-u1", u1ID)
+	mkSched(userOnlyProjID, "only-u2", u2ID)
+
+	viewer := NewAuthenticatedUser(u1ID, "u1@example.com", "User One", "member", "web")
+	fault.Arm()
+
+	t.Run("mixed creators resolved in one user batch and one agent batch", func(t *testing.T) {
+		spy.reset()
+		rec := doScheduleUserRequest(t, srv, viewer, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.Equal(t, int64(1), spy.getUsersByIDs.Load(), "expected one GetUsersByIDs batch call")
+		assert.Equal(t, int64(1), spy.getAgentsByIDs.Load(), "expected one GetAgentsByIDs batch call")
+		assert.Zero(t, spy.getUserCalls.Load(), "expected zero per-row GetUser calls")
+		assert.Zero(t, spy.getAgentCalls.Load(), "expected zero per-row GetAgent calls")
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+		assert.Equal(t, "User One", byID[sU1].CreatedByName)
+		assert.Equal(t, "user", byID[sU1].CreatedByType)
+		assert.Equal(t, "u2@example.com", byID[sU2].CreatedByName)
+		assert.Equal(t, "user", byID[sU2].CreatedByType)
+		assert.Equal(t, "batch-bot-1", byID[sA1].CreatedByName)
+		assert.Equal(t, "agent", byID[sA1].CreatedByType)
+		assert.Equal(t, "batch-bot-2", byID[sA2].CreatedByName)
+		assert.Equal(t, "agent", byID[sA2].CreatedByType)
+		assert.Empty(t, byID[sMissing].CreatedByName)
+		assert.Empty(t, byID[sMissing].CreatedByType)
+	})
+
+	t.Run("all user creators skips agent batch lookup", func(t *testing.T) {
+		spy.reset()
+		rec := doScheduleUserRequest(t, srv, viewer, http.MethodGet, userOnlyProjID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.Equal(t, int64(1), spy.getUsersByIDs.Load())
+		assert.Zero(t, spy.getAgentsByIDs.Load())
+		assert.Zero(t, spy.getUserCalls.Load())
+		assert.Zero(t, spy.getAgentCalls.Load())
+	})
+
+	t.Run("batch lookup error fails closed without per-row fallback", func(t *testing.T) {
+		spy.reset()
+		spy.failUsersBatch.Store(true)
+		rec := doScheduleUserRequest(t, srv, viewer, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.Equal(t, int64(1), spy.getUsersByIDs.Load())
+		assert.Equal(t, int64(1), spy.getAgentsByIDs.Load())
+		assert.Zero(t, spy.getUserCalls.Load())
+		assert.Zero(t, spy.getAgentCalls.Load())
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+		assert.Empty(t, byID[sU1].CreatedByName)
+		assert.Equal(t, "batch-bot-1", byID[sA1].CreatedByName)
+
+		spy.reset()
+		spy.failAgentsBatch.Store(true)
+		rec = doScheduleUserRequest(t, srv, viewer, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.Equal(t, int64(1), spy.getUsersByIDs.Load())
+		assert.Equal(t, int64(1), spy.getAgentsByIDs.Load())
+		assert.Zero(t, spy.getUserCalls.Load())
+		assert.Zero(t, spy.getAgentCalls.Load())
+
+		resp = ListSchedulesResponse{}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		byID = make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+		assert.Equal(t, "User One", byID[sU1].CreatedByName)
+		assert.Empty(t, byID[sA1].CreatedByName)
 	})
 }
