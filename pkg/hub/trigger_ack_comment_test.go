@@ -175,6 +175,38 @@ func TestDispatchAgentAckComment_AuthoringValidation(t *testing.T) {
 		AckComment: &DispatchAgentAckComment{Body: "hi"},
 	}))
 
+	// 6b. N1: ackComment is rejected on message and github.comment actions (not silently dropped).
+	recCommentWithAck := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-comment-with-ack",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:       store.TriggerActionGitHubComment,
+				Body:       "hello",
+				AckComment: &DispatchAgentAckComment{Body: "ack"},
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, recCommentWithAck.Code, recCommentWithAck.Body.String())
+	assert.Contains(t, recCommentWithAck.Body.String(), "action.ackComment")
+
+	recMsgWithAck := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "msg-with-ack",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:       store.TriggerActionMessage,
+				AgentID:    uuid.NewString(),
+				Message:    "hi",
+				AckComment: &DispatchAgentAckComment{Body: "ack"},
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, recMsgWithAck.Code, recMsgWithAck.Body.String())
+	assert.Contains(t, recMsgWithAck.Body.String(), "action.ackComment")
+
 	// 7. O2: UAT scoped to trigger:create + agent:create (without github_trigger:comment)
 	// is 403 Forbidden with ackComment, and 201 Created for the identical payload without it.
 	ctx := context.Background()
@@ -1104,4 +1136,308 @@ func TestG4aG4b_RepoRemovalReleasesClaimAndCancelsDeferredFire(t *testing.T) {
 	evAfter, err := f.sched.store.GetTriggerEvent(ctx, ev.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.TriggerEventStatusProcessed, evAfter.Status)
+}
+
+// TestG4aG4b_PreFireBotGuardCoversReuseDeferAndCoalesce verifies R1: the
+// dispatcher-level PreFireRefuser hook enforces the unknown-identity and
+// own-App bot guard before claiming, coalescing, deferral, or subject reuse so
+// reuse deliveries, deferred re-handles, and coalescing promotes on
+// dispatch_agent triggers are refused, while message-action triggers and
+// non-bot User senders remain unaffected.
+func TestG4aG4b_PreFireBotGuardCoversReuseDeferAndCoalesce(t *testing.T) {
+	f, _, _, proj := setupAckCommentFixture(t, "g4a-g4b-prefire-bot-guard")
+	ctx := context.Background()
+	creatorCtx := f.userAuth(t, f.sched.creator)
+
+	var createCalls atomic.Int32
+	tracker := &reuseTrackingBrokerClient{
+		headlessGatherBrokerClient: f.client,
+		storeForUpd:                f.sched.store,
+		onBeforeCreate: func(_ *RemoteCreateAgentRequest) error {
+			createCalls.Add(1)
+			return nil
+		},
+	}
+	f.sched.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.sched.store, tracker, false, slog.Default()))
+
+	// Target agent for the message-action trigger (must stay unaffected).
+	msgTarget := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "prefire-msg-target",
+		Name:            "prefire-msg-target",
+		ProjectID:       proj.ID,
+		OwnerID:         f.sched.creator.ID,
+		RuntimeBrokerID: f.sched.broker.ID,
+		Phase:           string(state.PhaseRunning),
+		ContainerStatus: "running",
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, msgTarget))
+
+	// Create 3 GitHub triggers: reuse dispatch_agent, coalescing dispatch_agent, and message.
+	recReuse := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:    "gh-prefire-reuse",
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:   &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeReuse},
+			Action: TriggerActionSpec{
+				Type:         store.TriggerActionDispatchAgent,
+				Task:         "Review PR",
+				ReuseMessage: "Wake on event",
+				GithubToken:  DispatchAgentGitHubTokenInstallation,
+			},
+		})
+	require.Equal(t, http.StatusCreated, recReuse.Code, recReuse.Body.String())
+	var reuseTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recReuse.Body.Bytes(), &reuseTrig))
+
+	recCoalesce := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:    "gh-prefire-coalesce",
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:   &TriggerMatchSpec{Types: []string{"github.pull_request.synchronize"}},
+			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeNew, CoalesceWindow: "30s"},
+			Action: TriggerActionSpec{
+				Type:        store.TriggerActionDispatchAgent,
+				Task:        "Check sync",
+				GithubToken: DispatchAgentGitHubTokenInstallation,
+			},
+		})
+	require.Equal(t, http.StatusCreated, recCoalesce.Code, recCoalesce.Body.String())
+	var coalesceTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recCoalesce.Body.Bytes(), &coalesceTrig))
+
+	recMsg := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-prefire-msg",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:    store.TriggerActionMessage,
+				AgentID: msgTarget.ID,
+				Message: "Observe bot event",
+			},
+		})
+	require.Equal(t, http.StatusCreated, recMsg.Code, recMsg.Body.String())
+	var msgTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recMsg.Body.Bytes(), &msgTrig))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(f.sched.store, f.sched.store, clock)
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Store:         f.sched.store,
+		Core:          serverTriggerCore{srv: f.sched.srv},
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	// Seed a running claimed agent for reuse delivery tests.
+	liveAgent := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "prefire-reuse-live",
+		Name:            "prefire-reuse-live",
+		ProjectID:       proj.ID,
+		OwnerID:         f.sched.creator.ID,
+		RuntimeBrokerID: f.sched.broker.ID,
+		Phase:           string(state.PhaseRunning),
+		ContainerStatus: "running",
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, liveAgent))
+	const liveSubject = "github:acme/widgets#101"
+	liveClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, liveSubject, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.Nil(t, ex)
+	require.NoError(t, claims.Bind(ctx, liveClaim, liveAgent.ID))
+
+	// Seed an in-flight (PhaseStarting) claimed agent for deferred re-handle tests.
+	deferAgent := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "prefire-reuse-defer",
+		Name:            "prefire-reuse-defer",
+		ProjectID:       proj.ID,
+		OwnerID:         f.sched.creator.ID,
+		RuntimeBrokerID: f.sched.broker.ID,
+		Phase:           string(state.PhaseStarting),
+		LaunchDeadline:  now.Add(10 * time.Minute),
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, deferAgent))
+	const deferSubject = "github:acme/widgets#102"
+	deferClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, deferSubject, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.Nil(t, ex)
+	require.NoError(t, claims.Bind(ctx, deferClaim, deferAgent.ID))
+
+	makeItem := func(evType, subject, senderType, sender string) (string, durablequeue.Item) {
+		t.Helper()
+		evID := uuid.NewString()
+		ev := &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  proj.ID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "8301",
+			Type:       evType,
+			Subject:    subject,
+			DedupKey:   "dedup-r1-" + evID,
+			OccurredAt: now,
+			ReceivedAt: now,
+			Attributes: map[string]string{
+				"repo":        "acme/widgets",
+				"repo_owner":  "acme",
+				"repo_name":   "widgets",
+				"number":      "101",
+				"sender":      sender,
+				"sender_type": senderType,
+			},
+			Status: store.TriggerEventStatusPending,
+		}
+		require.NoError(t, f.sched.store.CreateTriggerEvent(ctx, ev))
+		rawPayload, mErr := json.Marshal(trigger.EventQueuePayload{
+			Version: trigger.EventQueuePayloadVersion,
+			EventID: ev.ID,
+		})
+		require.NoError(t, mErr)
+		return ev.ID, durablequeue.Item{
+			Kind:     trigger.EventQueueKind,
+			DedupKey: ev.ID,
+			Payload:  rawPayload,
+			Attempts: 1,
+		}
+	}
+
+	origPrivKey := f.sched.srv.config.GitHubAppConfig.PrivateKey
+
+	modes := []struct {
+		name       string
+		sender     string
+		wantReason string
+		// allowSetup sets App identity so the event can initially enter deferred/coalescing.
+		allowSetup func()
+		// blockSetup sets App identity so the guard must refuse the event.
+		blockSetup func()
+	}{
+		{
+			name:       "unknown_identity",
+			sender:     "dependabot[bot]",
+			wantReason: "github app identity unknown",
+			allowSetup: func() {
+				f.sched.srv.mu.Lock()
+				f.sched.srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+				f.sched.srv.config.GitHubAppConfig.PrivateKey = origPrivKey
+				f.sched.srv.mu.Unlock()
+				f.sched.srv.githubAppIdentity.reset()
+			},
+			blockSetup: func() {
+				f.sched.srv.mu.Lock()
+				f.sched.srv.config.GitHubAppConfig.AppSlug = ""
+				f.sched.srv.config.GitHubAppConfig.PrivateKey = ""
+				f.sched.srv.mu.Unlock()
+				f.sched.srv.githubAppIdentity.reset()
+			},
+		},
+		{
+			name:       "own_app_login",
+			sender:     "scion-bot[bot]",
+			wantReason: "github own app event",
+			allowSetup: func() {
+				f.sched.srv.mu.Lock()
+				f.sched.srv.config.GitHubAppConfig.AppSlug = "other-app"
+				f.sched.srv.config.GitHubAppConfig.PrivateKey = origPrivKey
+				f.sched.srv.mu.Unlock()
+				f.sched.srv.githubAppIdentity.reset()
+			},
+			blockSetup: func() {
+				f.sched.srv.mu.Lock()
+				f.sched.srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+				f.sched.srv.config.GitHubAppConfig.PrivateKey = origPrivKey
+				f.sched.srv.mu.Unlock()
+				f.sched.srv.githubAppIdentity.reset()
+			},
+		},
+	}
+
+	for _, tc := range modes {
+		t.Run(tc.name, func(t *testing.T) {
+			// 1. Reuse delivery to live claimed agent -> refused, no wake message;
+			//    message-action trigger on same event -> still delivered.
+			tc.blockSetup()
+			msgsBefore := len(tracker.messages())
+			evReuseID, itReuse := makeItem("github.issue_comment.created", liveSubject, "Bot", tc.sender)
+			resReuse := disp.HandleItem(ctx, itReuse, nil)
+			require.True(t, resReuse.Done, "reuse HandleItem err=%v", resReuse.Err)
+
+			firesReuse, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evReuseID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			byTrig := map[string]store.TriggerFire{}
+			for _, fr := range firesReuse.Items {
+				byTrig[fr.TriggerID] = fr
+			}
+			assert.Equal(t, store.TriggerFireStatusRefused, byTrig[reuseTrig.ID].Status)
+			assert.Equal(t, tc.wantReason, byTrig[reuseTrig.ID].Error)
+			assert.Equal(t, store.TriggerFireStatusFired, byTrig[msgTrig.ID].Status)
+
+			// Only the message-action trigger sent a message; liveAgent got NO wake message.
+			newMsgs := tracker.messages()[msgsBefore:]
+			require.Len(t, newMsgs, 1)
+			assert.Equal(t, msgTarget.Slug, newMsgs[0].AgentID)
+
+			// 2. Deferred re-handle -> transitions deferred fire to refused.
+			tc.allowSetup()
+			evDeferID, itDefer := makeItem("github.issue_comment.created", deferSubject, "Bot", tc.sender)
+			resDefer1 := disp.HandleItem(ctx, itDefer, nil)
+			require.False(t, resDefer1.Done, "in-flight agent must defer fire")
+			require.False(t, resDefer1.RetryAt.IsZero())
+
+			tc.blockSetup()
+			now = resDefer1.RetryAt.Add(time.Second)
+			resDefer2 := disp.HandleItem(ctx, itDefer, nil)
+			require.True(t, resDefer2.Done, "deferred re-handle must complete, err=%v", resDefer2.Err)
+
+			firesDefer, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evDeferID, TriggerID: reuseTrig.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, firesDefer.Items, 1)
+			assert.Equal(t, store.TriggerFireStatusRefused, firesDefer.Items[0].Status)
+			assert.Equal(t, tc.wantReason, firesDefer.Items[0].Error)
+
+			// 3. Coalescing promote -> transitions coalescing fire to refused without creating an agent.
+			tc.allowSetup()
+			createsBefore := createCalls.Load()
+			evCoalID, itCoal := makeItem("github.pull_request.synchronize", "github:acme/widgets#"+tc.name, "Bot", tc.sender)
+			resCoal1 := disp.HandleItem(ctx, itCoal, nil)
+			require.False(t, resCoal1.Done, "coalesce window must hold fire")
+			require.False(t, resCoal1.RetryAt.IsZero())
+
+			tc.blockSetup()
+			now = resCoal1.RetryAt.Add(time.Second)
+			resCoal2 := disp.HandleItem(ctx, itCoal, nil)
+			require.True(t, resCoal2.Done, "coalescing promote must complete, err=%v", resCoal2.Err)
+
+			firesCoal, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evCoalID, TriggerID: coalesceTrig.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, firesCoal.Items, 1)
+			assert.Equal(t, store.TriggerFireStatusRefused, firesCoal.Items[0].Status)
+			assert.Equal(t, tc.wantReason, firesCoal.Items[0].Error)
+			assert.Equal(t, createsBefore, createCalls.Load(), "refused coalescing promote must not create agent")
+
+			// 4. Non-bot User sender -> unaffected (reuse wake message delivered normally).
+			msgsBeforeUser := len(tracker.messages())
+			evUserID, itUser := makeItem("github.issue_comment.created", liveSubject, "User", "alice")
+			resUser := disp.HandleItem(ctx, itUser, nil)
+			require.True(t, resUser.Done, "user HandleItem err=%v", resUser.Err)
+
+			firesUser, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evUserID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			byTrigUser := map[string]store.TriggerFire{}
+			for _, fr := range firesUser.Items {
+				byTrigUser[fr.TriggerID] = fr
+			}
+			assert.Equal(t, store.TriggerFireStatusFired, byTrigUser[reuseTrig.ID].Status, byTrigUser[reuseTrig.ID].Error)
+			assert.Equal(t, store.TriggerFireStatusFired, byTrigUser[msgTrig.ID].Status, byTrigUser[msgTrig.ID].Error)
+			assert.Len(t, tracker.messages()[msgsBeforeUser:], 2, "both reuse wake and message trigger must fire for User sender")
+		})
+	}
 }

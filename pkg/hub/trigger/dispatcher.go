@@ -230,6 +230,15 @@ type ReuseMessageRenderer interface {
 	RenderReuseMessage(ctx context.Context, req hubfire.FireRequest) (text string, refusal *hubfire.FireOutcome, err error)
 }
 
+// PreFireRefuser is an optional interface Core implementations may satisfy to
+// refuse a matched trigger fire before fire-row claiming, coalescing, deferral,
+// or subject reuse (for example, source-specific bot/own-App identity guards).
+// Returning refused == true records the fire as refused with the sanitized
+// reason (and optional auditReason) and skips claiming, coalescing, and reuse.
+type PreFireRefuser interface {
+	PreFireRefusal(ctx context.Context, tr *store.Trigger, ev *hubfire.FireEvent) (reason, auditReason string, refused bool)
+}
+
 // DispatcherConfig configures a trigger event Dispatcher.
 type DispatcherConfig struct {
 	Core           Core
@@ -891,6 +900,23 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					ctx, tr, ev, fireSubject,
 					store.TriggerFireStatusRefused, ErrFireStaleEvent,
 					matchedThrough, decidedDialect, ruleTraceStr, "stale_event",
+				); rErr != nil {
+					return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
+				}
+				continue
+			}
+		}
+
+		// Source-specific pre-fire refusals (e.g. GitHub own-App / unknown-identity
+		// bot guard) run after stale refusal so refusal reasons stay deterministic,
+		// and before claiming, coalescing, deferral, or subject reuse so reuse
+		// deliveries, deferred re-handles, and coalescing promotes cannot bypass them.
+		if refuser, ok := d.core.(PreFireRefuser); ok {
+			if reason, auditReason, refused := refuser.PreFireRefusal(ctx, tr, &baseEvent); refused {
+				if rErr := d.recordDirectFire(
+					ctx, tr, ev, fireSubject,
+					store.TriggerFireStatusRefused, reason,
+					matchedThrough, decidedDialect, ruleTraceStr, auditReason,
 				); rErr != nil {
 					return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
 				}

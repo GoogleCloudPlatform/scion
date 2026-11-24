@@ -124,7 +124,25 @@ var (
 	_ trigger.SourceEnricher       = serverTriggerCore{}
 	_ trigger.PostEvaluationHook   = serverTriggerCore{}
 	_ trigger.ReuseMessageRenderer = serverTriggerCore{}
+	_ trigger.PreFireRefuser       = serverTriggerCore{}
 )
+
+func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger, ev *hubfire.FireEvent) (string, string, bool) {
+	if c.srv == nil || tr == nil || ev == nil {
+		return "", "", false
+	}
+	if tr.ActionType != store.TriggerActionDispatchAgent && tr.ActionType != store.TriggerActionGitHubComment {
+		return "", "", false
+	}
+	if refusal := c.srv.githubBotIdentityUnknownRefusal(ctx, ev); refusal != nil {
+		auditReason := "github_app_identity_unknown"
+		if refusal.Reason == "github own app event" {
+			auditReason = "github_own_app_event"
+		}
+		return refusal.Reason, auditReason, true
+	}
+	return "", "", false
+}
 
 func (c serverTriggerCore) RenderReuseMessage(ctx context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
 	return c.srv.renderDispatchReuseMessage(ctx, req)

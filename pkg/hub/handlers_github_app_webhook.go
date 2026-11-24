@@ -831,11 +831,13 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 	}
 }
 
-// pauseGitHubTriggersForRemovedRepo pauses every active (or reason-less paused)
-// GitHub-sourced trigger in project with status_reason = source_deleted and
-// writes a mutation audit record for each paused trigger (§10.3). Triggers
-// already paused with a system reason (including source_deleted on redelivery)
-// are skipped so the operation is idempotent.
+// pauseGitHubTriggersForRemovedRepo releases the project's active GitHub
+// trigger subject claims with release_reason = association_lost, pauses every
+// active (or reason-less paused) GitHub-sourced trigger in project with
+// status_reason = source_deleted, and writes a mutation audit record for each
+// paused trigger (§10.3). Triggers already paused with a system reason
+// (including source_deleted on redelivery) are skipped so the operation is
+// idempotent.
 func (s *Server) pauseGitHubTriggersForRemovedRepo(ctx context.Context, project *store.Project, installationID int64, ownerRepo string) {
 	if project == nil || project.ID == "" {
 		return

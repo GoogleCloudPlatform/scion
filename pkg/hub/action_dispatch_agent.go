@@ -650,6 +650,9 @@ func (a *dispatchAgentAction) Preauthorize(ctx context.Context, req hubfire.Fire
 	if req.Authority.DefinitionKind != hubfire.DefinitionKindTrigger || a == nil || a.srv == nil {
 		return nil, nil
 	}
+	// Defence in depth for callers invoking fireAction directly (bypassing
+	// trigger.Dispatcher's PreFireRefuser hook).
+	// TODO(G7): re-home behind provider action / post-fire hook (app-shaped-source-seams §2.1)
 	if refusal := a.srv.githubBotIdentityUnknownRefusal(ctx, req.Event); refusal != nil {
 		return refusal, nil
 	}
@@ -1372,6 +1375,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			if agent != nil {
 				agentID = agent.ID
 			}
+			// TODO(G7): re-home behind provider action / post-fire hook (app-shaped-source-seams §2.1)
 			if da.payload.AckComment != nil && ev.SourceKind == store.TriggerSourceKindGitHub && a.srv.githubTriggersEnabled() {
 				a.srv.postDispatchAgentAckComment(ctx, req, da, agent)
 			}
