@@ -72,8 +72,9 @@ func nextClearedFields(old, req *api.ScionConfig, rawConfig map[string]json.RawM
 			delete(set, k)
 		}
 	}
-	if present["env"] && req != nil {
-		for k := range req.Env {
+	ep := envPatchFrom(rawConfig, req)
+	if ep.present {
+		for k := range ep.set {
 			delete(set, api.ClearedEnvPathPrefix+k)
 		}
 	}
@@ -93,12 +94,14 @@ func nextClearedFields(old, req *api.ScionConfig, rawConfig map[string]json.RawM
 	if present["system_prompt"] && configFieldZero("system_prompt", req) && !configFieldZero("system_prompt", old) {
 		set["system_prompt"] = true
 	}
-	if present["env"] && canViewEnv && old != nil && req != nil {
-		for k := range old.Env {
-			if _, kept := req.Env[k]; kept || autoExposeEnvKeys[k] || k == agentTZEnvKey {
+	if ep.present && canViewEnv && old != nil {
+		for k := range ep.remove {
+			if autoExposeEnvKeys[k] || k == agentTZEnvKey {
 				continue
 			}
-			set[api.ClearedEnvPathPrefix+k] = true
+			if _, existed := old.Env[k]; existed {
+				set[api.ClearedEnvPathPrefix+k] = true
+			}
 		}
 	}
 	for _, p := range droppedResourceSubPaths(old, req, present) {

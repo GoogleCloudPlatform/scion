@@ -229,9 +229,9 @@ func TestApplyAgentUpdate_DeletesEnvKeyAndThinkingLevel(t *testing.T) {
 		}
 	})
 
-	// env without FOO -> deleted. thinking_level: null -> unset.
+	// env with FOO: null -> deleted (ptone/scion#5599). thinking_level: null -> unset.
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
-		"env":            map[string]interface{}{},
+		"env":            map[string]interface{}{"FOO": nil},
 		"thinking_level": nil,
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

@@ -369,11 +369,13 @@ describe('environment in edit mode', () => {
     expect(el.missingRequiredEnv()).toEqual(['NEEDED']);
   });
 
-  it('says that saving replaces the stored environment', async () => {
+  it('says that only changed or removed variables are sent and hidden values are kept', async () => {
     const el = await mount('stopped');
-    expect(
-      field(el, 'config.env').querySelector('[data-testid="env-replace-note"]')!.textContent
-    ).toContain('replaces the agent');
+    const note = field(el, 'config.env').querySelector(
+      '[data-testid="env-merge-note"]'
+    )!.textContent!;
+    expect(note).toContain('Only added, changed, or removed variables are sent');
+    expect(note).toContain('kept');
   });
 
   it('an untouched env sends nothing', async () => {
@@ -381,7 +383,7 @@ describe('environment in edit mode', () => {
     expect(el.collectConfigPatch()).toEqual({});
   });
 
-  it('a row edit sends the whole env, without TZ or untouched auto-expose keys', async () => {
+  it('a row edit sends only changed and added keys, without unchanged rows, TZ, or untouched auto-expose keys', async () => {
     const el = await mount('stopped');
     const editor = field(el, 'config.env').querySelector('scion-env-editor')!;
     editor.dispatchEvent(
@@ -397,11 +399,75 @@ describe('environment in edit mode', () => {
       })
     );
     await el.updateComplete;
-    expect(el.collectConfigPatch()).toEqual({ env: { FOO: 'bar', NEEDED: 'x', NEW: '1' } });
+    expect(el.collectConfigPatch()).toEqual({ env: { NEEDED: 'x', NEW: '1' } });
     expect(el.missingRequiredEnv()).toEqual([]);
   });
 
-  it('the auto-expose control shows an explicit value; using it sends the keys with the stored rows', async () => {
+  it('deleting a stored row sends null for the deleted key, and deleting all rows sends null for every stored key', async () => {
+    const el = await mount('stopped');
+    const editor = field(el, 'config.env').querySelector('scion-env-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('env-change', {
+        detail: { entries: [{ key: 'NEEDED', value: '' }] },
+      })
+    );
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({ env: { FOO: null } });
+
+    editor.dispatchEvent(new CustomEvent('env-change', { detail: { entries: [] } }));
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({ env: { FOO: null, NEEDED: null } });
+  });
+
+  it('renaming a stored row sends the new key and null for the old key', async () => {
+    const el = await mount('stopped');
+    const editor = field(el, 'config.env').querySelector('scion-env-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('env-change', {
+        detail: {
+          entries: [
+            { key: 'FOO_RENAMED', value: 'bar' },
+            { key: 'NEEDED', value: '' },
+          ],
+        },
+      })
+    );
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({ env: { FOO_RENAMED: 'bar', FOO: null } });
+  });
+
+  it('emptying a stored row sends "" rather than null, and a no-op edit sends no env', async () => {
+    const el = await mount('stopped');
+    const editor = field(el, 'config.env').querySelector('scion-env-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('env-change', {
+        detail: {
+          entries: [
+            { key: 'FOO', value: '' },
+            { key: 'NEEDED', value: '' },
+          ],
+        },
+      })
+    );
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({ env: { FOO: '' } });
+
+    editor.dispatchEvent(
+      new CustomEvent('env-change', {
+        detail: {
+          entries: [
+            { key: 'FOO', value: 'bar' },
+            { key: 'NEEDED', value: '' },
+            { key: 'TZ', value: 'Asia/Tokyo' },
+          ],
+        },
+      })
+    );
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({});
+  });
+
+  it('the auto-expose control shows an explicit value; using it sends only the auto-expose keys', async () => {
     const el = await mount('stopped', {
       editValues: { ...EDIT_VALUES, explicitEnv: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
     });
@@ -416,8 +482,6 @@ describe('environment in edit mode', () => {
     await el.updateComplete;
     expect(el.collectConfigPatch()).toEqual({
       env: {
-        FOO: 'bar',
-        NEEDED: '',
         SCION_AUTO_EXPOSE_PORTS: 'true',
         SCION_AUTO_EXPOSE_MODE: 'denylist',
         SCION_AUTO_EXPOSE_PORTS_LIST: '22,8080',
@@ -528,8 +592,6 @@ describe('auto-expose source and inheritance in edit mode', () => {
     await el.updateComplete;
     expect(el.collectConfigPatch()).toEqual({
       env: {
-        FOO: 'bar',
-        NEEDED: '',
         SCION_AUTO_EXPOSE_PORTS: 'true',
         SCION_AUTO_EXPOSE_MODE: 'denylist',
         SCION_AUTO_EXPOSE_PORTS_LIST: '22',

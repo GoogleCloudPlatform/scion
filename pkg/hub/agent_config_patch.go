@@ -87,6 +87,183 @@ func (p configPatch) subset(keep func(agentEditField) bool) configPatch {
 	return out
 }
 
+// envPatch is the key-level env edit decoded from a PATCH's raw "env" JSON
+// object: set holds keys with a string value (added or updated), remove holds
+// keys explicitly set to JSON null (removed), and keys absent from the object
+// are untouched. A missing or top-level-null "env" has present == false and
+// edits nothing.
+type envPatch struct {
+	present bool
+	set     map[string]string
+	remove  map[string]bool
+}
+
+// hasEdits reports whether ep sets or removes any env key (ignoring TZ,
+// which config.env never owns and strips).
+func (ep envPatch) hasEdits() bool {
+	for k := range ep.set {
+		if k != agentTZEnvKey {
+			return true
+		}
+	}
+	for k := range ep.remove {
+		if k != agentTZEnvKey {
+			return true
+		}
+	}
+	return false
+}
+
+// rawEnvJSON returns the raw JSON value of the "env" key in rawConfig,
+// matching encoding/json's case-insensitive fallback when exact "env" is
+// absent.
+func rawEnvJSON(rawConfig map[string]json.RawMessage) (json.RawMessage, bool) {
+	if raw, ok := rawConfig["env"]; ok {
+		return raw, true
+	}
+	var bestKey string
+	var bestVal json.RawMessage
+	for k, v := range rawConfig {
+		if strings.EqualFold(k, "env") && (bestKey == "" || k < bestKey) {
+			bestKey = k
+			bestVal = v
+		}
+	}
+	if bestKey != "" {
+		return bestVal, true
+	}
+	return nil, false
+}
+
+// parseEnvPatch decodes the raw "env" object from rawConfig into an envPatch.
+// Absent or top-level-null "env" yields present == false (no-op).
+func parseEnvPatch(rawConfig map[string]json.RawMessage) envPatch {
+	raw, ok := rawEnvJSON(rawConfig)
+	if !ok {
+		return envPatch{}
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return envPatch{}
+	}
+	var m map[string]*string
+	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+		return envPatch{}
+	}
+	ep := envPatch{
+		present: true,
+		set:     make(map[string]string),
+		remove:  make(map[string]bool),
+	}
+	for k, v := range m {
+		if v == nil {
+			ep.remove[k] = true
+		} else {
+			ep.set[k] = *v
+		}
+	}
+	return ep
+}
+
+// envPatchFrom parses rawConfig when non-nil, or falls back to cfg.Env when
+// called without raw JSON.
+func envPatchFrom(rawConfig map[string]json.RawMessage, cfg *api.ScionConfig) envPatch {
+	if rawConfig != nil {
+		return parseEnvPatch(rawConfig)
+	}
+	if cfg == nil || cfg.Env == nil {
+		return envPatch{}
+	}
+	return envPatch{
+		present: true,
+		set:     maps.Clone(cfg.Env),
+		remove:  map[string]bool{},
+	}
+}
+
+// applyEnvPatch returns base with ep's set keys written and remove keys
+// deleted. Absent keys are kept unchanged. base is not modified.
+func applyEnvPatch(base map[string]string, ep envPatch) map[string]string {
+	out := maps.Clone(base)
+	if !ep.present {
+		return out
+	}
+	if out == nil && len(ep.set) > 0 {
+		out = make(map[string]string, len(ep.set))
+	}
+	for k, v := range ep.set {
+		out[k] = v
+	}
+	for k := range ep.remove {
+		delete(out, k)
+	}
+	return out
+}
+
+// mergeEnvPatches overlays one envPatch onto another (for combining consecutive
+// held config.env edits): overlay's sets override earlier sets/removals, and
+// overlay's removals override earlier sets.
+func mergeEnvPatches(base, overlay envPatch) envPatch {
+	if !base.present {
+		return overlay
+	}
+	if !overlay.present {
+		return base
+	}
+	out := envPatch{
+		present: true,
+		set:     maps.Clone(base.set),
+		remove:  maps.Clone(base.remove),
+	}
+	if out.set == nil {
+		out.set = make(map[string]string)
+	}
+	if out.remove == nil {
+		out.remove = make(map[string]bool)
+	}
+	for k, v := range overlay.set {
+		out.set[k] = v
+		delete(out.remove, k)
+	}
+	for k := range overlay.remove {
+		delete(out.set, k)
+		out.remove[k] = true
+	}
+	return out
+}
+
+// marshalEnvPatch encodes ep as a JSON object preserving explicit null
+// removals, or JSON null when ep.present is false.
+func marshalEnvPatch(ep envPatch) (json.RawMessage, error) {
+	if !ep.present {
+		return json.RawMessage("null"), nil
+	}
+	m := make(map[string]*string, len(ep.set)+len(ep.remove))
+	for k, v := range ep.set {
+		val := v
+		m[k] = &val
+	}
+	for k := range ep.remove {
+		m[k] = nil
+	}
+	return json.Marshal(m)
+}
+
+// withMergedEnv returns a shallow copy of cfg whose Env is base.Env merged
+// with ep. Neither cfg nor base is modified.
+func withMergedEnv(cfg, base *api.ScionConfig, ep envPatch) *api.ScionConfig {
+	if cfg == nil {
+		return nil
+	}
+	var baseEnv map[string]string
+	if base != nil {
+		baseEnv = base.Env
+	}
+	cp := *cfg
+	cp.Env = applyEnvPatch(baseEnv, ep)
+	return &cp
+}
+
 // validateAgentConfigPatch runs the agent PATCH's config validation, which
 // writes nothing: the harness capability check, the reserved env keys, on
 // a hosted hub the member config check (hostedConfigRefusal, so the live
@@ -95,10 +272,7 @@ func (p configPatch) subset(keep func(agentEditField) bool) configPatch {
 // error response and returns false. A held edit is validated by the same
 // call when it is saved; the harness is fixed after create, so the check
 // still holds when the edit is applied.
-//
-// nilEnvClears says a nil cfg.Env clears the env, as a held edit that names
-// env with a null value does; on the live path a nil env leaves it as it is.
-func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig, nilEnvClears bool) bool {
+func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig, rawConfig map[string]json.RawMessage) bool {
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
 	if issues := validateConfigAgainstHarnessCapabilities(cfg, harnessCaps); len(issues) > 0 {
 		ValidationError(w, "Config contains unsupported fields for harness "+resolvedHarness, map[string]interface{}{
@@ -113,21 +287,18 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 	// keys carry the hub's own GCP identity decision to the broker. The only
 	// exception is the exact names in patchableReservedEnvKeys, the
 	// user-facing auto-expose keys (patchReservedEnvKey). A key stored with
-	// the agent may be sent back byte-identical (the configure page sends
-	// the whole env), except the native Cloud Run marker, which is always
-	// refused when sent (dropping it is allowed). The stored env compared is
-	// the one this request read, and the write is a compare-and-set on that
-	// same state version, so a concurrent change of it makes the write fail
-	// instead.
+	// the agent may be sent back byte-identical, except the native Cloud Run
+	// marker, which is always refused when set (removing it with null is
+	// allowed). Keys absent from the patch are preserved untouched. The
+	// stored env compared is the one this request read, and the write is a
+	// compare-and-set on that same state version, so a concurrent change of
+	// it makes the write fail instead.
 	var stored map[string]string
 	if agent != nil && agent.AppliedConfig != nil {
 		stored = agent.AppliedConfig.Env
 	}
-	requested := cfg.Env
-	if requested == nil && nilEnvClears {
-		requested = map[string]string{}
-	}
-	if key := reservedEnvEditKey(stored, requested); key != "" {
+	ep := envPatchFrom(rawConfig, cfg)
+	if key := reservedEnvEditKey(stored, ep); key != "" {
 		ValidationError(w, "config.env may not add, change or remove a key reserved for scion's own control-plane environment variables", map[string]interface{}{
 			"field": "env",
 			"value": key,
@@ -137,11 +308,11 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 	// On a hosted hub the config a member stores may not name host
 	// resources (hostedguard), as at create; a stored edit would otherwise
 	// be refused only at the agent's next dispatch. Env entries sent back
-	// unchanged from the stored env are not checked: the configure page
-	// sends the whole env, which can hold keys the hub wrote itself (a
-	// trigger-created agent's SCION_TRIGGER_* keys, persisted resolved env).
+	// unchanged from the stored env are not checked: a caller may echo keys
+	// the hub wrote itself (a trigger-created agent's SCION_TRIGGER_* keys,
+	// persisted resolved env). Explicit null removals are not checked.
 	if !s.workstation {
-		if err := hostedConfigRefusal(withChangedEnvOnly(cfg, stored), hostedRuntimeKind(ctx, s.store, agent)); err != nil {
+		if err := hostedConfigRefusal(withChangedEnvOnly(cfg, stored, ep), hostedRuntimeKind(ctx, s.store, agent)); err != nil {
 			writeRuntimeTargetRefusal(w, err)
 			return false
 		}
@@ -155,17 +326,26 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 	return s.validateUnlimitedCounts(ctx, w, agent, cfg)
 }
 
-// withChangedEnvOnly returns cfg with its env narrowed to the entries that
-// add or change a value against stored, the agent's stored env, for the
-// hosted member config check of an edit. Other fields are kept. cfg is not
-// modified.
-func withChangedEnvOnly(cfg *api.ScionConfig, stored map[string]string) *api.ScionConfig {
-	if cfg == nil || len(cfg.Env) == 0 {
+// withChangedEnvOnly returns cfg with its env narrowed to the entries in ep.set
+// that add or change a value against stored, the agent's stored env, for the
+// hosted member config check of an edit. Explicit null removals (ep.remove)
+// are excluded so removing a key is never refused. Other fields are kept. cfg
+// is not modified.
+func withChangedEnvOnly(cfg *api.ScionConfig, stored map[string]string, ep envPatch) *api.ScionConfig {
+	if cfg == nil {
 		return cfg
 	}
+	if !ep.present || len(ep.set) == 0 {
+		if len(cfg.Env) == 0 {
+			return cfg
+		}
+		cp := *cfg
+		cp.Env = nil
+		return &cp
+	}
 	cp := *cfg
-	cp.Env = make(map[string]string, len(cfg.Env))
-	for k, v := range cfg.Env {
+	cp.Env = make(map[string]string, len(ep.set))
+	for k, v := range ep.set {
 		if sv, ok := stored[k]; ok && sv == v {
 			continue
 		}
@@ -174,24 +354,24 @@ func withChangedEnvOnly(cfg *api.ScionConfig, stored map[string]string) *api.Sci
 	return &cp
 }
 
-// withoutHostedEnvEchoes returns cfg without the env entries a hosted hub
+// withoutHostedEnvEchoes returns ep without the set entries a hosted hub
 // keeps out of the agent's inline config on an edit: an entry sent back
 // unchanged from storedEnv (the agent's env before the edit) that the inline
 // config did not hold and that the member config check would refuse. Such an
 // entry was written by the hub (a trigger-created agent's SCION_TRIGGER_*
 // keys, persisted resolved env); it still reaches the broker through the
 // agent's env, and kept in the inline config it would be refused at the
-// agent's next dispatch (hostedConfigPrecheck). cfg is not modified.
-func withoutHostedEnvEchoes(cfg *api.ScionConfig, storedEnv map[string]string, oldInline *api.ScionConfig) *api.ScionConfig {
-	if cfg == nil || len(cfg.Env) == 0 {
-		return cfg
+// agent's next dispatch (hostedConfigPrecheck). ep is not modified.
+func withoutHostedEnvEchoes(ep envPatch, storedEnv map[string]string, oldInline *api.ScionConfig) envPatch {
+	if !ep.present || len(ep.set) == 0 {
+		return ep
 	}
 	var inlineEnv map[string]string
 	if oldInline != nil {
 		inlineEnv = oldInline.Env
 	}
 	var drop []string
-	for k, v := range cfg.Env {
+	for k, v := range ep.set {
 		if sv, ok := storedEnv[k]; !ok || sv != v {
 			continue
 		}
@@ -204,14 +384,17 @@ func withoutHostedEnvEchoes(cfg *api.ScionConfig, storedEnv map[string]string, o
 		drop = append(drop, k)
 	}
 	if len(drop) == 0 {
-		return cfg
+		return ep
 	}
-	cp := *cfg
-	cp.Env = maps.Clone(cfg.Env)
+	out := envPatch{
+		present: ep.present,
+		set:     maps.Clone(ep.set),
+		remove:  maps.Clone(ep.remove),
+	}
 	for _, k := range drop {
-		delete(cp.Env, k)
+		delete(out.set, k)
 	}
-	return &cp
+	return out
 }
 
 // patchableReservedEnvKeys are the reserved env keys (by exact name, never
@@ -230,17 +413,16 @@ func patchReservedEnvKey(k string) bool {
 }
 
 // reservedEnvEditKey returns, in sorted order, the first reserved env key
-// (patchReservedEnvKey) that requested, a patch's whole new env,
-// would add, change or remove against stored, or "". The native Cloud Run
-// marker counts whenever requested names it, and its removal does not. A
-// nil requested leaves the env as it is and edits nothing. Only key names
+// (patchReservedEnvKey) that ep would add, change or remove against stored,
+// or "". The native Cloud Run marker counts whenever ep sets it, and its
+// explicit null removal does not. An absent ep edits nothing. Only key names
 // are returned, never values.
-func reservedEnvEditKey(stored, requested map[string]string) string {
-	if requested == nil {
+func reservedEnvEditKey(stored map[string]string, ep envPatch) string {
+	if !ep.present {
 		return ""
 	}
 	var keys []string
-	for k, v := range requested {
+	for k, v := range ep.set {
 		if !patchReservedEnvKey(k) {
 			continue
 		}
@@ -248,10 +430,10 @@ func reservedEnvEditKey(stored, requested map[string]string) string {
 			keys = append(keys, k)
 		}
 	}
-	for k := range stored {
-		// Removing the marker is allowed: it is refused whenever sent, so
+	for k := range ep.remove {
+		// Removing the marker is allowed: it is refused whenever set, so
 		// dropping it is the only edit that leaves an env holding it.
-		if _, ok := requested[k]; !ok && k != envNativeCloudRun && patchReservedEnvKey(k) {
+		if k != envNativeCloudRun && patchReservedEnvKey(k) {
 			keys = append(keys, k)
 		}
 	}
@@ -324,6 +506,25 @@ func stripConfigEnvTZ(cfg *api.ScionConfig) bool {
 	return v != ""
 }
 
+// stripEnvPatchTZ removes TZ from both ep and cfg's env. It reports whether
+// a non-empty TZ value was dropped.
+func stripEnvPatchTZ(ep *envPatch, cfg *api.ScionConfig) bool {
+	warned := false
+	if ep != nil {
+		if v, ok := ep.set[agentTZEnvKey]; ok {
+			delete(ep.set, agentTZEnvKey)
+			if v != "" {
+				warned = true
+			}
+		}
+		delete(ep.remove, agentTZEnvKey)
+	}
+	if stripConfigEnvTZ(cfg) {
+		warned = true
+	}
+	return warned
+}
+
 // applyAgentConfigPatch writes an agent PATCH's config object into the
 // agent's applied config, in memory: the caller persists the agent. It is
 // the single apply path of config edits, for a live PATCH and for a held
@@ -341,6 +542,7 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
 	}
 	cfg := p.cfg
+	ep := envPatchFrom(p.raw, cfg)
 	var modelSize string
 	if cfg.Model != "" {
 		// Resolved here, ahead of both recordExplicitEdits and the live
@@ -369,17 +571,16 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 	// The TZ strip runs here, between the `old` snapshot above and the
 	// recordExplicitEdits call below -- never after it. See
 	// recordExplicitEdits' doc comment for why.
-	if stripConfigEnvTZ(cfg) {
+	if stripEnvPatchTZ(&ep, cfg) {
 		res.warnings = append(res.warnings, configEnvTZIgnoredWarning)
 	}
 	// canAttachEnv is the same attach-equivalent-access gate the GET
 	// response's Env redaction uses (ResponseView). A caller who fails
-	// it never saw the live Env to begin with, so their request's env
-	// map cannot be trusted to list every key that still exists live --
-	// see recordExplicitEdits' env-removal gate. It also gates the env
-	// removals below (removedConfigEntries, nextClearedFields).
+	// it never saw the live Env to begin with -- see recordExplicitEdits'
+	// env-removal gate. It also gates the env removals below
+	// (removedConfigEntries, nextClearedFields).
 	if agent.AppliedConfig.CreateInputs != nil {
-		recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, p.present,
+		recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, p.present, ep,
 			dispatchImageRegistry(s.GetDispatcher(), agent), canAttachEnv)
 	}
 
@@ -401,44 +602,46 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 	if cfg.AuthSelectedType != "" {
 		agent.AppliedConfig.HarnessAuth = cfg.AuthSelectedType
 	}
-	if cfg.Env != nil {
-		// AppliedConfig.Env is a copy, so the auto-expose resolution
-		// below never leaks a derived value into InlineConfig.Env.
-		agent.AppliedConfig.Env = maps.Clone(cfg.Env)
+	if ep.present {
+		// Merge env by key (ptone/scion#5599): keys in ep.set are written,
+		// keys in ep.remove (explicit null) are deleted, and keys absent
+		// from the request are preserved unchanged. AppliedConfig.Env is a
+		// fresh copy, so the auto-expose resolution below never leaks a
+		// derived value into InlineConfig.Env.
+		agent.AppliedConfig.Env = applyEnvPatch(old.Env, ep)
 		project, err := s.store.GetProject(ctx, agent.ProjectID)
 		if err != nil {
 			slog.WarnContext(ctx, "applyAgentUpdate: project lookup failed; auto-expose project tier not re-derived",
 				"agent", agent.ID, "project", agent.ProjectID, "error", err)
 			project = nil
 		}
-		applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
+		applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, ep)
 	}
 	dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher(), agent))
 	// Start from the live InlineConfig and overlay only the keys the
-	// request names (ptone/scion#3901). The configure page does not
-	// render volumes, skills, MCP servers, services, command args or
-	// kubernetes, and sends telemetry and env only when touched, so a
-	// wholesale replace would wipe them on every Save and Start.
+	// request names (ptone/scion#3901). For env, merge by key against
+	// old.InlineConfig.Env (ptone/scion#5599) so absent keys are preserved.
 	// The harness cannot change here: harness and harness_config are
 	// fixed keys, refused when they would change. So the harness check of
 	// validateAgentConfigPatch covers every key the request sends, and
 	// kept keys are left as they were.
-	inlineCfg := cfg
+	inlineEP := ep
 	if !s.workstation {
-		inlineCfg = withoutHostedEnvEchoes(cfg, old.Env, old.InlineConfig)
+		inlineEP = withoutHostedEnvEchoes(ep, old.Env, old.InlineConfig)
 	}
-	merged := mergePresentInlineFields(old.InlineConfig, inlineCfg, p.present)
+	effectiveCfg := withMergedEnv(cfg, old.InlineConfig, inlineEP)
+	merged := mergePresentInlineFields(old.InlineConfig, effectiveCfg, p.present)
 	agent.AppliedConfig.InlineConfig = merged
 	// provision, cleared and removed are computed once and drive both
 	// the reincarnation warnings and the disposition, so a key warned
 	// as taking effect at the next reincarnation is the key reported
 	// held for it.
-	provision, cleared := reincarnateOnlyConfigEdits(p.raw, cfg, old.InlineConfig)
-	removed := removedConfigEntries(old.InlineConfig, cfg, p.present, canAttachEnv)
+	provision, cleared := reincarnateOnlyConfigEdits(p.raw, effectiveCfg, old.InlineConfig)
+	removed := removedConfigEntries(old.InlineConfig, effectiveCfg, p.present, canAttachEnv)
 	// The broker's start-time merge keeps a previous value the inline
 	// config leaves empty; the cleared paths it sends with each start
 	// let the broker remove them (ptone/scion#3906).
-	merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, p.raw, cleared, canAttachEnv)
+	merged.ClearedFields = nextClearedFields(old.InlineConfig, effectiveCfg, p.raw, cleared, canAttachEnv)
 	// The provision-rendered keys changed since creation, which a
 	// broker with changedFields re-renders at start; for such a broker
 	// they take effect at the next start, not at the next
@@ -448,8 +651,8 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 	// as a resources.<sub-field> clear (ptone/scion#5676); it counts as a
 	// clear of config.resources, which a broker with
 	// clearedResourceSubfields applies at the next start.
-	resDropped := droppedResourceSubPaths(old.InlineConfig, cfg, p.present)
-	cleared = withDroppedResourcesSubField(cleared, old.InlineConfig, cfg, p.present)
+	resDropped := droppedResourceSubPaths(old.InlineConfig, effectiveCfg, p.present)
+	cleared = withDroppedResourcesSubField(cleared, old.InlineConfig, effectiveCfg, p.present)
 	// A broker with clearedFields applies the clears recorded above at
 	// the next start (ptone/scion#4890), so only the rest are held.
 	// What is reported applied follows what was recorded above. With
@@ -461,12 +664,12 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 			return res, err
 		}
 	}
-	provision = sup.heldProvisionEdits(provision, old.InlineConfig, cfg, merged.ClearedFields)
-	cleared = sup.heldClearEdits(cleared, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present), resDropped)
+	provision = sup.heldProvisionEdits(provision, old.InlineConfig, effectiveCfg, merged.ClearedFields)
+	cleared = sup.heldClearEdits(cleared, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, effectiveCfg, p.present), resDropped)
 	removed = sup.heldRemovals(removed, merged.ClearedFields)
 	res.warnings = append(res.warnings, sup.reincarnateOnlyEditWarnings(provision, cleared)...)
 	res.warnings = append(res.warnings, removedEntriesWarnings(removed)...)
-	res.applied, res.heldForReincarnate = configEditDisposition(p.raw, cfg, old.InlineConfig, provision, cleared, removed)
+	res.applied, res.heldForReincarnate = configEditDisposition(p.raw, effectiveCfg, old.InlineConfig, provision, cleared, removed)
 	return res, nil
 }
 

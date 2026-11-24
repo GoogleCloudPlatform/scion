@@ -67,7 +67,7 @@ func TestAgentConfigPatch_ClearsReachTheStart(t *testing.T) {
 	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{
 			"max_turns": nil, "thinking_level": nil, "system_prompt": "", "resources": nil,
-			"env": map[string]string{"BAR": "2"},
+			"env": map[string]interface{}{"FOO": nil, "BAR": "2"},
 		},
 	})
 	require.Equal(t, http.StatusOK, code, body)

@@ -180,7 +180,7 @@ func TestValidateAgentConfigPatch_HostedRefusesMemberEnvAndHub(t *testing.T) {
 			srv, _ := testServer(t)
 			agent := &store.Agent{ID: tid("agent-patch-env"), ProjectID: tid("project-patch-env"), AppliedConfig: &store.AgentAppliedConfig{}}
 			rec := httptest.NewRecorder()
-			assert.False(t, srv.validateAgentConfigPatch(ctx, rec, agent, tc.cfg, false))
+			assert.False(t, srv.validateAgentConfigPatch(ctx, rec, agent, tc.cfg, nil))
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			code, msg := decodeHostedRefusal(t, rec)
 			assert.Equal(t, hostedguard.ErrorCode, code)
@@ -189,7 +189,7 @@ func TestValidateAgentConfigPatch_HostedRefusesMemberEnvAndHub(t *testing.T) {
 
 			srv.workstation = true
 			rec = httptest.NewRecorder()
-			assert.True(t, srv.validateAgentConfigPatch(ctx, rec, agent, tc.cfg, false), rec.Body.String())
+			assert.True(t, srv.validateAgentConfigPatch(ctx, rec, agent, tc.cfg, nil), rec.Body.String())
 		})
 	}
 }
@@ -345,7 +345,7 @@ func TestValidateAgentConfigPatch_HostedMemberEnvScope(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			ok := srv.validateAgentConfigPatch(ctx, rec, agent, &api.ScionConfig{Env: tc.env}, false)
+			ok := srv.validateAgentConfigPatch(ctx, rec, agent, &api.ScionConfig{Env: tc.env}, nil)
 			assert.Equal(t, tc.allowed, ok, rec.Body.String())
 		})
 	}
