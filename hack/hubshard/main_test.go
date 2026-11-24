@@ -350,8 +350,13 @@ func TestParityCatchesCrossShardUse(t *testing.T) {
 		if s.assign[n] != other {
 			continue
 		}
-		s.an.uses[n] = map[string]bool{"f_test.go": true}
-		err := s.parity(io.Discard)
+		src := append(append([]byte(nil), s.genFiles[n].src...), "\nvar _ = helperF\n"...)
+		g, err := parseFile(n, src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.genFiles[n] = g
+		err = s.parity(io.Discard)
 		if err == nil || !strings.Contains(err.Error(), n+" uses f_test.go") {
 			t.Fatalf("want a cross-shard use problem, got %v", err)
 		}

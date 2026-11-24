@@ -305,7 +305,7 @@ func (s *sharding) parity(w io.Writer) error {
 			}
 		}
 	}
-	problems = append(problems, breakage(s.an, s.genFiles, s.assign, s.n)...)
+	problems = append(problems, breakage(analyze(s.genFiles), s.genFiles, s.assign, s.n)...)
 	problems = append(problems, importBreakage(s.genFiles, s.genImports, s.pkg)...)
 	var b bytes.Buffer
 	for _, warn := range sideEffectWarnings(s.genFiles, s.pkg) {

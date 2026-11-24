@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -141,14 +142,183 @@ func TestOther(t *testing.T) {}
 	}
 }
 
+func TestSplitRetainsOutsideReferencedTypeAndMethods(t *testing.T) {
+	// A type declared in a non-helper common file and referenced only by
+	// another file (never by kept functions in the same file) must stay in
+	// the common piece together with its methods, while unrelated tests move
+	// to the split file.
+	tree := map[string]string{
+		"main_test.go": header + `import "testing"
+
+func TestMain(m *testing.M) {
+	var v sharedType
+	_ = v.Value()
+	m.Run()
+}
+`,
+		"types_test.go": header + `import "testing"
+
+type sharedType struct{}
+
+func (sharedType) Value() int { return 42 }
+
+func TestTypesPrivate(t *testing.T) {}
+`,
+		"caller_test.go": header + `import "testing"
+
+func TestCaller(t *testing.T) {
+	var p *sharedType = &sharedType{}
+	if p.Value() != 42 {
+		t.Fatal("unexpected")
+	}
+}
+`,
+	}
+
+	root, dir := writeFiles(t, tree)
+	args := baseArgs(root, dir, "-n", "2")
+	files, _ := overlayFiles(t, args)
+
+	commonSrc, ok := files["types_test.go"]
+	if !ok {
+		t.Fatalf("expected trimmed types_test.go in overlay; got %v", sortedKeys(files))
+	}
+	splitName := splitPrefix + "types_test.go"
+	splitSrc, ok := files[splitName]
+	if !ok {
+		t.Fatalf("expected %s in overlay; got %v", splitName, sortedKeys(files))
+	}
+
+	for _, want := range []string{"type sharedType struct{}", "func (sharedType) Value() int"} {
+		if !strings.Contains(commonSrc, want) {
+			t.Errorf("common piece missing %q:\n%s", want, commonSrc)
+		}
+		if strings.Contains(splitSrc, want) {
+			t.Errorf("split piece should not contain %q:\n%s", want, splitSrc)
+		}
+	}
+	if !strings.Contains(splitSrc, "func TestTypesPrivate(") {
+		t.Errorf("split piece missing TestTypesPrivate:\n%s", splitSrc)
+	}
+
+	var out bytes.Buffer
+	if err := run(append(args, "-parity"), &out); err != nil {
+		t.Fatalf("-parity failed:\n%s\nerr: %v", out.String(), err)
+	}
+}
+
+func TestParityRejectsBadSplit(t *testing.T) {
+	// -parity must inspect the post-split overlay graph (genFiles), so a
+	// broken split that moves an outside-referenced type or unlinks a method
+	// from its kept local type fails parity instead of silently passing.
+	tree := map[string]string{
+		"main_test.go": header + `import "testing"
+
+func TestMain(m *testing.M) {
+	var v sharedType
+	_ = v.Value()
+	m.Run()
+}
+`,
+		"types_test.go": header + `import "testing"
+
+type sharedType struct{}
+
+func (sharedType) Value() int { return 42 }
+
+func TestTypesPrivate(t *testing.T) {}
+`,
+		"other_test.go": header + `import "testing"
+
+func TestOther(t *testing.T) {}
+`,
+	}
+
+	cases := []struct {
+		name      string
+		commonSrc string
+		splitSrc  string
+		wantErr   string
+	}{
+		{
+			name:      "outside-referenced type moved to split",
+			commonSrc: header,
+			splitSrc: header + `import "testing"
+
+type sharedType struct{}
+
+func (sharedType) Value() int { return 42 }
+
+func TestTypesPrivate(t *testing.T) {}
+`,
+			wantErr: "main_test.go uses " + splitPrefix + "types_test.go",
+		},
+		{
+			name: "method unlinked from kept local type",
+			commonSrc: header + `type sharedType struct{}
+`,
+			splitSrc: header + `import "testing"
+
+func (sharedType) Value() int { return 42 }
+
+func TestTypesPrivate(t *testing.T) {}
+`,
+			wantErr: "types_test.go uses " + splitPrefix + "types_test.go",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, dir := writeFiles(t, tree)
+			files, err := loadFiles(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			an := analyze(files)
+			splitName := splitPrefix + "types_test.go"
+			commonInfo, err := parseFile(filepath.Join(dir, "types_test.go"), []byte(tc.commonSrc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			splitInfo, err := parseFile(filepath.Join(dir, splitName), []byte(tc.splitSrc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			splits := map[string]*splitResult{
+				"types_test.go": {
+					origName:   "types_test.go",
+					splitName:  splitName,
+					commonSrc:  []byte(tc.commonSrc),
+					commonInfo: commonInfo,
+					splitInfo:  splitInfo,
+				},
+			}
+			assign := assignShards(an, files, splits, 2)
+			s, err := newSharding(dir, files, an, splits, assign, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = s.parity(&out)
+			if err == nil {
+				t.Fatalf("parity succeeded for bad split %q, want error containing %q\n%s", tc.name, tc.wantErr, out.String())
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("parity error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestStoreEmbedWeightBalancing(t *testing.T) {
-	// Two files with store.Store embeds (tiny line count) plus several
-	// ordinary files: the two embed-heavy files must land in different shards.
+	// One large plain file (1,000 lines) and two tiny files with store.Store
+	// embeds: line-count-only placement would put plain1 on shard 1 and both
+	// tiny embed files on shard 2, whereas storeEmbedLineWeight separates the
+	// two embed-heavy files onto different shards.
 	tree := map[string]string{
 		"embed1_test.go": header + "import \"example.com/store\"\ntype e1 struct { store.Store }\n",
 		"embed2_test.go": header + "import \"example.com/store\"\ntype e2 struct { store.Store }\n",
-		"plain1_test.go": header + strings.Repeat("// line\n", 500) + "func TestP1() {}\n",
-		"plain2_test.go": header + strings.Repeat("// line\n", 500) + "func TestP2() {}\n",
+		"plain1_test.go": header + strings.Repeat("// line\n", 1000) + "func TestP1() {}\n",
 	}
 	root, dir := writeFiles(t, tree)
 	files, _ := overlayFiles(t, baseArgs(root, dir, "-n", "2"))

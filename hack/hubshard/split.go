@@ -72,16 +72,11 @@ type splitResult struct {
 // splitCommonFiles partitions non-helper common files into a trimmed common
 // piece and a sharded piece. Returns a map keyed by original file name.
 func splitCommonFiles(dir string, files map[string]*fileInfo, an *analysis) (map[string]*splitResult, error) {
-	// Precompute the set of unresolved identifiers and selector names
-	// referenced by each file, and how many files reference each symbol.
+	// Precompute how many files reference each unresolved identifier.
 	identUsers := map[string]int{}
-	selUsers := map[string]int{}
 	for _, f := range files {
 		for id := range f.idents {
 			identUsers[id]++
-		}
-		for sel := range f.selectors {
-			selUsers[sel]++
 		}
 	}
 
@@ -91,7 +86,7 @@ func splitCommonFiles(dir string, files map[string]*fileInfo, an *analysis) (map
 			continue
 		}
 		f := files[name]
-		sp, err := splitOneCommonFile(dir, f, identUsers, selUsers)
+		sp, err := splitOneCommonFile(dir, f, identUsers)
 		if err != nil {
 			return nil, fmt.Errorf("split %s: %w", name, err)
 		}
@@ -102,8 +97,8 @@ func splitCommonFiles(dir string, files map[string]*fileInfo, an *analysis) (map
 	return out, nil
 }
 
-func splitOneCommonFile(dir string, f *fileInfo, identUsers, selUsers map[string]int) (*splitResult, error) {
-	// Skip files with //go:embed or cgo, which have special comment semantics.
+func splitOneCommonFile(dir string, f *fileInfo, identUsers map[string]int) (*splitResult, error) {
+	// Skip files with //go:embed, which have special comment semantics.
 	if bytes.Contains(f.src, []byte("//go:embed")) {
 		return nil, nil
 	}
@@ -120,6 +115,7 @@ func splitOneCommonFile(dir string, f *fileInfo, identUsers, selUsers map[string
 		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.IMPORT {
 			for _, sp := range gd.Specs {
 				is := sp.(*ast.ImportSpec)
+				// Skip cgo files, whose preamble comments are bound to import "C".
 				if p, err := strconv.Unquote(is.Path.Value); err == nil && p == "C" {
 					return nil, nil
 				}
@@ -143,13 +139,6 @@ func splitOneCommonFile(dir string, f *fileInfo, identUsers, selUsers map[string
 	usedOutside := func(sym string) bool {
 		n := identUsers[sym]
 		if f.idents[sym] {
-			n--
-		}
-		return n > 0
-	}
-	selOutside := func(sym string) bool {
-		n := selUsers[sym]
-		if f.selectors[sym] {
 			n--
 		}
 		return n > 0
@@ -207,8 +196,6 @@ func splitOneCommonFile(dir string, f *fileInfo, identUsers, selUsers map[string
 		declRecv[i] = recv
 		if _, localType := declOf[recv]; localType {
 			methodsOf[recv] = append(methodsOf[recv], i)
-		} else if recv == "" || selOutside(fd.Name.Name) || usedOutside(recv) {
-			keep[i] = true
 		} else {
 			// Method on a type declared outside this file (e.g. a pkg/hub
 			// type): keep in common so any shard calling it sees the method.
