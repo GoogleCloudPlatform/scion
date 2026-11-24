@@ -454,6 +454,131 @@ func TestContainer(t *testing.T) {
 		}
 	})
 
+	// AC 5 (hardened init-firewall.sh): run the real harnesses/claude/init-firewall.sh
+	// in a reduced-capability netns-setup sidecar on an IPv6-enabled Docker network,
+	// asserting IPv6 DROP policies + REJECT, gateway /32 (no /24), no tcp/22, and
+	// metadata redirect preservation.
+	t.Run("hardened init-firewall.sh in sidecar on IPv6 network", func(t *testing.T) {
+		fwBaseImage := "scion-netcap-fw-base:local"
+		fwImage := "scion-netcap-fw-test:local"
+		fwArgs := []string{
+			"build", "-q", "-t", fwBaseImage,
+			"--build-arg", "PACKAGES=iptables ipset iproute2 jq aggregate sudo procps curl",
+		}
+		if base := os.Getenv("SCION_NETCAP_TEST_BASE"); base != "" {
+			fwArgs = append(fwArgs, "--build-arg", "BASE="+base)
+		}
+		mustDocker(t, append(fwArgs, filepath.Join("testdata", "container"))...)
+
+		scriptBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "harnesses", "claude", "init-firewall.sh"))
+		if err != nil {
+			t.Fatalf("read harnesses/claude/init-firewall.sh: %v", err)
+		}
+		fwCtx := t.TempDir()
+		if err := os.WriteFile(filepath.Join(fwCtx, "init-firewall.sh"), scriptBytes, 0o755); err != nil {
+			t.Fatalf("write temp init-firewall.sh: %v", err)
+		}
+		fwDockerfile := fmt.Sprintf("FROM %s\nCOPY init-firewall.sh /usr/local/sbin/init-firewall.sh\nRUN chmod 0755 /usr/local/sbin/init-firewall.sh\n", fwBaseImage)
+		if err := os.WriteFile(filepath.Join(fwCtx, "Dockerfile"), []byte(fwDockerfile), 0o644); err != nil {
+			t.Fatalf("write temp Dockerfile: %v", err)
+		}
+		mustDocker(t, "build", "-q", "-t", fwImage, fwCtx)
+
+		netName := fmt.Sprintf("scion-netcap-v6-%d", time.Now().UnixNano())
+		if out, err := docker(t, "network", "create", "--ipv6", "--subnet", "fd00:db8:8994::/64", netName); err != nil {
+			t.Skipf("unable to create IPv6 docker network (skipping IPv6 live test): %v\n%s", err, out)
+		}
+		t.Cleanup(func() { _, _ = docker(t, "network", "rm", netName) })
+
+		name := fmt.Sprintf("scion-netcap-fw-%d", time.Now().UnixNano())
+		mustDocker(t, "create", "--name", name,
+			"--network", netName,
+			"-e", interceptionRequired,
+			"-e", interceptionSourceRuntime,
+			"-e", "SCION_INIT_FIREWALL=true",
+			"-e", "SCION_METADATA_MODE=block",
+			"-e", "SCION_METADATA_PORT="+metadataPort,
+			"-e", "SCION_HOST_UID=1000",
+			"-e", "SCION_HOST_GID=1000",
+			"-e", "SCION_TELEMETRY_ENABLED=false",
+			"--entrypoint", "/usr/local/bin/sciontool",
+			fwImage, "init", "--", "/usr/local/bin/netcap-harness.sh")
+		t.Cleanup(func() {
+			if t.Failed() {
+				logs, _ := docker(t, "logs", name)
+				t.Logf("container logs:\n%s", logs)
+			}
+			_, _ = docker(t, "rm", "-f", name)
+		})
+		mustDocker(t, "cp", sciontool, name+":/usr/local/bin/sciontool")
+		mustDocker(t, "start", name)
+
+		sidecarName := name + "-netns-setup"
+		mustDocker(t, "create", "--name", sidecarName,
+			"--network", "container:"+name,
+			"--cap-drop", "ALL",
+			"--cap-add", "NET_ADMIN",
+			"--cap-add", "NET_RAW",
+			"--security-opt", "no-new-privileges",
+			"--user", "0",
+			"--entrypoint", "/usr/local/bin/sciontool",
+			"-e", "SCION_METADATA_MODE=block",
+			"-e", "SCION_METADATA_PORT="+metadataPort,
+			"-e", "SCION_INIT_FIREWALL=true",
+			"--label", "scion.netns-setup="+name,
+			fwImage, "netns-setup")
+		defer func() { _, _ = docker(t, "rm", "-f", sidecarName) }()
+		mustDocker(t, "cp", sciontool, sidecarName+":/usr/local/bin/sciontool")
+		mustDocker(t, "start", "-a", sidecarName)
+
+		waitProbe(t, name)
+
+		ip6Rules := mustDocker(t, "run", "--rm",
+			"--network", "container:"+name,
+			"--cap-add", "NET_ADMIN",
+			"--user", "0",
+			fwImage, "ip6tables", "-S")
+		for _, want := range []string{
+			"-P INPUT DROP",
+			"-P FORWARD DROP",
+			"-P OUTPUT DROP",
+			"-A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited",
+		} {
+			if !strings.Contains(ip6Rules, want) {
+				t.Errorf("ip6tables -S missing %q:\n%s", want, ip6Rules)
+			}
+		}
+
+		ip4Rules := mustDocker(t, "run", "--rm",
+			"--network", "container:"+name,
+			"--cap-add", "NET_ADMIN",
+			"--user", "0",
+			fwImage, "iptables", "-S")
+		if strings.Contains(ip4Rules, "/24") {
+			t.Errorf("iptables -S unexpectedly contains /24 rule:\n%s", ip4Rules)
+		}
+		if strings.Contains(ip4Rules, "--dport 22") {
+			t.Errorf("iptables -S unexpectedly contains --dport 22 rule:\n%s", ip4Rules)
+		}
+		if !strings.Contains(ip4Rules, "/32 -j ACCEPT") {
+			t.Errorf("iptables -S missing gateway /32 ACCEPT rule:\n%s", ip4Rules)
+		}
+
+		if !redirectPresent(t, name) {
+			t.Error("metadata REDIRECT rule is missing after hardened init-firewall.sh ran in sidecar")
+		}
+		httpCode := mustDocker(t, "exec", "--user", "scion", name,
+			"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+			"-H", "Metadata-Flavor: Google", "http://169.254.169.254/")
+		if httpCode != "200" {
+			t.Errorf("curl http://169.254.169.254/ returned HTTP %s, want 200", httpCode)
+		}
+		if out, err := docker(t, "exec", "--user", "scion", name,
+			"curl", "-6", "--connect-timeout", "5", "https://example.com"); err == nil {
+			t.Errorf("expected curl -6 https://example.com to fail under IPv6 DROP, succeeded: %s", out)
+		}
+	})
+
 	// AC 3: missing runtime source marker refuses before writing credentials.
 	t.Run("missing source marker refused before credentials", func(t *testing.T) {
 		name := fmt.Sprintf("scion-netcap-nosrc-%d", time.Now().UnixNano())
