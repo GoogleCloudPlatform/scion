@@ -655,6 +655,8 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		{api.LaunchCodeImagePullFailed, api.LaunchStepImagePull, "", "the agent image could not be pulled"},
 		{api.LaunchCodeInvalidImage, api.LaunchStepContainerCreate, "InvalidImageName", "the agent image reference is not valid (InvalidImageName)"},
 		{api.LaunchCodeInvalidImage, api.LaunchStepImagePull, "", "the agent image reference is not valid"},
+		{api.LaunchCodeRuntimeUnavailable, api.LaunchStepLaunching, "", "the container runtime is not running or could not be reached; start the container runtime and retry"},
+		{api.LaunchCodeRuntimeUnavailable, api.LaunchStepImagePull, "", "the container runtime is not running or could not be reached; start the container runtime and retry"},
 		{api.LaunchCodeImageLacksNetnsSetup, api.LaunchStepContainerStart, "", "the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough"},
 		{api.LaunchCodeImageLacksNetnsSetup, api.LaunchStepLaunching, "", "the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough"},
 		{api.LaunchCodeContainerConfig, api.LaunchStepContainerCreate, "CreateContainerConfigError", "the agent container could not be configured (CreateContainerConfigError)"},

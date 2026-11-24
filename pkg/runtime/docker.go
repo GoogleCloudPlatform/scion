@@ -120,9 +120,11 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			return "", ctx.Err()
 		}
 		runErr := fmt.Errorf("container run failed: %w (output: %s)", err, out)
-		if code := classifyDockerRunImageError(out, err); code != "" {
-			hooks.progress(api.LaunchStepImagePull)
-			return "", newLaunchFailure(code, api.LaunchStepImagePull, "", runErr)
+		if code, step := classifyDockerRunError(out, err); code != "" {
+			if step == api.LaunchStepImagePull {
+				hooks.progress(api.LaunchStepImagePull)
+			}
+			return "", newLaunchFailure(code, step, "", runErr)
 		}
 		return "", runErr
 	}
@@ -424,7 +426,13 @@ func (r *DockerRuntime) ImageExists(ctx context.Context, image string) (bool, er
 		if isImageNotFoundOutput(out) {
 			return false, nil
 		}
+		if ctx.Err() == nil && isDockerDaemonConnectError(out) {
+			return false, newLaunchFailure(api.LaunchCodeRuntimeUnavailable, api.LaunchStepLaunching, "", err)
+		}
 		return false, err
+	}
+	if ctx.Err() == nil && isRuntimeBinaryNotFound(err) {
+		return false, newLaunchFailure(api.LaunchCodeRuntimeUnavailable, api.LaunchStepLaunching, "", err)
 	}
 	return false, err
 }
@@ -460,73 +468,6 @@ func (r *DockerRuntime) PullImage(ctx context.Context, image string) error {
 		return pullErr
 	}
 	return nil
-}
-
-// isDockerDaemonConnectError reports whether Docker CLI output indicates a
-// failure to reach or authenticate to the Docker daemon socket/API itself,
-// rather than an image or registry error returned by a reachable daemon.
-func isDockerDaemonConnectError(output string) bool {
-	lower := strings.ToLower(output)
-	return strings.Contains(lower, "cannot connect to the docker daemon") ||
-		strings.Contains(lower, "is the docker daemon running") ||
-		strings.Contains(lower, "permission denied while trying to connect to the docker") ||
-		strings.Contains(lower, "error during connect:")
-}
-
-// isInvalidImageReference reports whether image is empty or contains
-// whitespace, which can never be a valid container image reference.
-func isInvalidImageReference(image string) bool {
-	return strings.TrimSpace(image) == "" || strings.ContainsAny(image, " \t\r\n")
-}
-
-// isInvalidImageOutput reports whether Docker CLI/daemon output indicates a
-// malformed image reference.
-func isInvalidImageOutput(output string) bool {
-	lower := strings.ToLower(output)
-	return strings.Contains(lower, "invalid reference format") ||
-		strings.Contains(lower, "repository name must be lowercase") ||
-		strings.Contains(lower, "invalid tag format") ||
-		strings.Contains(lower, "invalid digest format") ||
-		strings.Contains(lower, "repository name must have at least one component") ||
-		strings.Contains(lower, "repository name must not be more than") ||
-		strings.Contains(lower, "repository name must be canonical") ||
-		strings.Contains(lower, "not a valid repository/tag") ||
-		strings.Contains(lower, "unable to parse reference") ||
-		strings.Contains(lower, "failed to parse image reference")
-}
-
-// isDockerRunImagePullOutput reports whether `docker run` output indicates
-// that an implicit image pull failed (as opposed to a mount, flag, or
-// container start error).
-func isDockerRunImagePullOutput(output string) bool {
-	lower := strings.ToLower(output)
-	return strings.Contains(lower, "unable to find image ") ||
-		strings.Contains(lower, "manifest unknown") ||
-		strings.Contains(lower, "pull access denied") ||
-		strings.Contains(lower, "no matching manifest for ")
-}
-
-func classifyDockerPullError(image, out string, err error) string {
-	if err == nil || !isExitError(err) || isDockerDaemonConnectError(out) {
-		return ""
-	}
-	if isInvalidImageReference(image) || isInvalidImageOutput(out) {
-		return api.LaunchCodeInvalidImage
-	}
-	return api.LaunchCodeImagePullFailed
-}
-
-func classifyDockerRunImageError(out string, err error) string {
-	if err == nil || !isExitError(err) || isDockerDaemonConnectError(out) {
-		return ""
-	}
-	if isInvalidImageOutput(out) {
-		return api.LaunchCodeInvalidImage
-	}
-	if isDockerRunImagePullOutput(out) {
-		return api.LaunchCodeImagePullFailed
-	}
-	return ""
 }
 
 func (r *DockerRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {

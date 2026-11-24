@@ -240,3 +240,155 @@ func TestStart_DockerImagePullReportsStepAndTypedLaunchFailure(t *testing.T) {
 		assert.Empty(t, progress)
 	})
 }
+
+// TestStart_LocalRuntimes_ImagePullAndRuntimeUnavailable covers
+// ptone/scion#8951: Podman and Apple Container report LaunchStepImagePull and
+// typed image_pull_failed / invalid_image failures matching Docker, and all
+// three local runtimes surface runtime_unavailable without emitting a spurious
+// image_pull step when the local container daemon is stopped.
+func TestStart_LocalRuntimes_ImagePullAndRuntimeUnavailable(t *testing.T) {
+	t.Run("podman and apple container pull failures", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			makeRT      func(cmd string) runtime.Runtime
+			notFoundMsg string
+			pullSubcmd  string
+			pullStderr  string
+			image       string
+			wantCode    string
+		}{
+			{
+				name:        "podman missing tag",
+				makeRT:      func(cmd string) runtime.Runtime { return &runtime.PodmanRuntime{Command: cmd} },
+				notFoundMsg: "Error: image not known",
+				pullSubcmd:  "pull",
+				pullStderr:  "Error: initializing source docker://example.com/scion/agent:missing: manifest unknown",
+				image:       "example.com/scion/agent:missing",
+				wantCode:    api.LaunchCodeImagePullFailed,
+			},
+			{
+				name:        "podman invalid image",
+				makeRT:      func(cmd string) runtime.Runtime { return &runtime.PodmanRuntime{Command: cmd} },
+				notFoundMsg: "Error: image not known",
+				pullSubcmd:  "pull",
+				pullStderr:  "Error: invalid reference format",
+				image:       "INVALID::IMAGE",
+				wantCode:    api.LaunchCodeInvalidImage,
+			},
+			{
+				name:        "apple container missing tag",
+				makeRT:      func(cmd string) runtime.Runtime { return &runtime.AppleContainerRuntime{Command: cmd} },
+				notFoundMsg: "Error: image not found",
+				pullSubcmd:  "image",
+				pullStderr:  "Error: failed to fetch manifest: manifest unknown",
+				image:       "example.com/scion/agent:missing",
+				wantCode:    api.LaunchCodeImagePullFailed,
+			},
+			{
+				name:        "apple container invalid image",
+				makeRT:      func(cmd string) runtime.Runtime { return &runtime.AppleContainerRuntime{Command: cmd} },
+				notFoundMsg: "Error: image not found",
+				pullSubcmd:  "image",
+				pullStderr:  "Error: invalid image reference: INVALID::IMAGE",
+				image:       "INVALID::IMAGE",
+				wantCode:    api.LaunchCodeInvalidImage,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newSharedDirStorageRunFixture(t)
+				f.writeGlobalSettings(t, "")
+
+				mockRT := filepath.Join(t.TempDir(), "mock-rt")
+				script := "#!/bin/sh\n" +
+					"case \"$1:$2\" in\n" +
+					"  ps:*|list:*) echo '[]'; exit 0 ;;\n" +
+					"  image:inspect)\n" +
+					"    echo '" + tc.notFoundMsg + "' >&2\n" +
+					"    exit 1 ;;\n" +
+					"  pull:*|image:pull)\n" +
+					"    echo '" + tc.pullStderr + "' >&2\n" +
+					"    exit 1 ;;\n" +
+					"  *) exit 1 ;;\n" +
+					"esac\n"
+				require.NoError(t, os.WriteFile(mockRT, []byte(script), 0o755))
+
+				var progress []string
+				_, err := NewManager(tc.makeRT(mockRT)).Start(context.Background(), api.StartOptions{
+					Name:        "test-agent",
+					ProjectPath: f.projectScionDir,
+					NoAuth:      true,
+					Image:       tc.image,
+					Progress: func(step, message string) {
+						progress = append(progress, step+": "+message)
+					},
+				})
+				require.Error(t, err)
+
+				var lf *runtime.LaunchFailure
+				require.ErrorAs(t, err, &lf, "expected *runtime.LaunchFailure, got %v", err)
+				assert.Equal(t, tc.wantCode, lf.Code)
+				assert.Equal(t, api.LaunchStepImagePull, lf.Step)
+				assert.Empty(t, lf.Reason)
+				assert.Equal(t, []string{api.LaunchStepImagePull + ": pulling the image"}, progress)
+			})
+		}
+	})
+
+	t.Run("stopped local runtime short-circuits with runtime_unavailable", func(t *testing.T) {
+		cases := []struct {
+			name         string
+			makeRT       func(cmd string) runtime.Runtime
+			daemonStderr string
+		}{
+			{
+				name:         "docker",
+				makeRT:       func(cmd string) runtime.Runtime { return &runtime.DockerRuntime{Command: cmd} },
+				daemonStderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+			},
+			{
+				name:         "podman",
+				makeRT:       func(cmd string) runtime.Runtime { return &runtime.PodmanRuntime{Command: cmd} },
+				daemonStderr: "Cannot connect to Podman. Is the podman machine running?",
+			},
+			{
+				name:         "apple container",
+				makeRT:       func(cmd string) runtime.Runtime { return &runtime.AppleContainerRuntime{Command: cmd} },
+				daemonStderr: "Error: container system is not running. Run container system start.",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newSharedDirStorageRunFixture(t)
+				f.writeGlobalSettings(t, "")
+
+				mockRT := filepath.Join(t.TempDir(), "mock-rt")
+				script := "#!/bin/sh\n" +
+					"echo '" + tc.daemonStderr + "' >&2\n" +
+					"exit 1\n"
+				require.NoError(t, os.WriteFile(mockRT, []byte(script), 0o755))
+
+				var progress []string
+				_, err := NewManager(tc.makeRT(mockRT)).Start(context.Background(), api.StartOptions{
+					Name:        "test-agent",
+					ProjectPath: f.projectScionDir,
+					NoAuth:      true,
+					Image:       "example.com/scion/agent:v1",
+					Progress: func(step, message string) {
+						progress = append(progress, step+": "+message)
+					},
+				})
+				require.Error(t, err)
+
+				var lf *runtime.LaunchFailure
+				require.ErrorAs(t, err, &lf, "expected *runtime.LaunchFailure, got %v", err)
+				assert.Equal(t, api.LaunchCodeRuntimeUnavailable, lf.Code)
+				assert.Equal(t, api.LaunchStepLaunching, lf.Step)
+				assert.Empty(t, lf.Reason)
+				assert.Empty(t, progress, "stopped runtime must not report image_pull progress")
+			})
+		}
+	})
+}

@@ -540,10 +540,11 @@ func TestDockerRuntime_PullImage_ClassifiesLaunchFailures(t *testing.T) {
 			wantTyped: true,
 		},
 		{
-			name:      "daemon unreachable stays untyped",
+			name:      "daemon unreachable",
 			image:     "example.com/scion/agent:v1",
 			stderr:    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
-			wantTyped: false,
+			wantCode:  api.LaunchCodeRuntimeUnavailable,
+			wantTyped: true,
 		},
 	}
 
@@ -617,15 +618,21 @@ func TestDockerRuntime_PullImage_ClassifiesLaunchFailures(t *testing.T) {
 		}
 	})
 
-	t.Run("missing binary stays untyped", func(t *testing.T) {
+	t.Run("missing binary classifies as runtime_unavailable", func(t *testing.T) {
 		rt := &DockerRuntime{Command: filepath.Join(t.TempDir(), "no-such-docker")}
 		err := rt.PullImage(context.Background(), "example.com/scion/agent:v1")
 		if err == nil {
 			t.Fatal("expected error for missing binary")
 		}
 		var lf *LaunchFailure
-		if errors.As(err, &lf) {
-			t.Fatalf("expected untyped error for missing binary, got %+v", lf)
+		if !errors.As(err, &lf) {
+			t.Fatalf("expected *LaunchFailure for missing binary, got %T: %v", err, err)
+		}
+		if lf.Code != api.LaunchCodeRuntimeUnavailable {
+			t.Errorf("LaunchFailure.Code = %q, want %q", lf.Code, api.LaunchCodeRuntimeUnavailable)
+		}
+		if lf.Step != api.LaunchStepImagePull {
+			t.Errorf("LaunchFailure.Step = %q, want %q", lf.Step, api.LaunchStepImagePull)
 		}
 	})
 }
@@ -653,6 +660,14 @@ func TestDockerRuntime_Run_ClassifiesImageFailuresAndReportsPullStep(t *testing.
 			stderr:    "docker: invalid reference format.",
 			wantCode:  api.LaunchCodeInvalidImage,
 			wantStep:  api.LaunchStepImagePull,
+			wantTyped: true,
+		},
+		{
+			name:      "daemon unreachable during run",
+			image:     "example.com/scion/agent:v1",
+			stderr:    "docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+			wantCode:  api.LaunchCodeRuntimeUnavailable,
+			wantStep:  api.LaunchStepLaunching,
 			wantTyped: true,
 		},
 		{
@@ -709,9 +724,13 @@ func TestDockerRuntime_Run_ClassifiesImageFailuresAndReportsPullStep(t *testing.
 			if lf.Step != tc.wantStep {
 				t.Errorf("LaunchFailure.Step = %q, want %q", lf.Step, tc.wantStep)
 			}
-			wantProgress := api.LaunchStepImagePull + ": pulling the image"
-			if len(steps) != 1 || steps[0] != wantProgress {
-				t.Errorf("progress steps = %v, want [%q]", steps, wantProgress)
+			if tc.wantStep == api.LaunchStepImagePull {
+				wantProgress := api.LaunchStepImagePull + ": pulling the image"
+				if len(steps) != 1 || steps[0] != wantProgress {
+					t.Errorf("progress steps = %v, want [%q]", steps, wantProgress)
+				}
+			} else if len(steps) != 0 {
+				t.Errorf("expected no image_pull progress step for step %q, got %v", tc.wantStep, steps)
 			}
 		})
 	}

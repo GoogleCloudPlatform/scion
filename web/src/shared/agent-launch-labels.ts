@@ -75,6 +75,8 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
   storage_migration_required: "the agent's storage settings must be migrated first",
   image_pull_failed: 'the agent image could not be pulled',
   invalid_image: 'the agent image reference is not valid',
+  runtime_unavailable:
+    'the container runtime is not running or could not be reached; start the container runtime and retry',
   image_lacks_netns_setup:
     'the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough',
   container_config: 'the agent container could not be configured',
