@@ -62,6 +62,8 @@ type Decision struct {
 	Status decision.Status `json:"status,omitempty"`
 	// Settled holds the value of the "settled" field.
 	Settled bool `json:"settled,omitempty"`
+	// FacetIndexed holds the value of the "facet_indexed" field.
+	FacetIndexed bool `json:"facet_indexed,omitempty"`
 	// ReplacedByID holds the value of the "replaced_by_id" field.
 	ReplacedByID *uuid.UUID `json:"replaced_by_id,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
@@ -88,7 +90,7 @@ func (*Decision) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case decision.FieldChoices:
 			values[i] = new([]byte)
-		case decision.FieldAllowOther, decision.FieldSettled:
+		case decision.FieldAllowOther, decision.FieldSettled, decision.FieldFacetIndexed:
 			values[i] = new(sql.NullBool)
 		case decision.FieldPosition, decision.FieldVersion, decision.FieldIntroLength:
 			values[i] = new(sql.NullInt64)
@@ -253,6 +255,12 @@ func (_m *Decision) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Settled = value.Bool
 			}
+		case decision.FieldFacetIndexed:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field facet_indexed", values[i])
+			} else if value.Valid {
+				_m.FacetIndexed = value.Bool
+			}
 		case decision.FieldReplacedByID:
 			if value, ok := values[i].(*sql.NullScanner); !ok {
 				return fmt.Errorf("unexpected type %T for field replaced_by_id", values[i])
@@ -411,6 +419,9 @@ func (_m *Decision) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("settled=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Settled))
+	builder.WriteString(", ")
+	builder.WriteString("facet_indexed=")
+	builder.WriteString(fmt.Sprintf("%v", _m.FacetIndexed))
 	builder.WriteString(", ")
 	if v := _m.ReplacedByID; v != nil {
 		builder.WriteString("replaced_by_id=")

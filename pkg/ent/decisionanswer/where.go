@@ -160,6 +160,11 @@ func MatchedDefault(v bool) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldEQ(FieldMatchedDefault, v))
 }
 
+// FacetIndexed applies equality check predicate on the "facet_indexed" field. It's identical to FacetIndexedEQ.
+func FacetIndexed(v bool) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldFacetIndexed, v))
+}
+
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldEQ(FieldCreatedAt, v))
@@ -1423,6 +1428,16 @@ func MatchedDefaultEQ(v bool) predicate.DecisionAnswer {
 // MatchedDefaultNEQ applies the NEQ predicate on the "matched_default" field.
 func MatchedDefaultNEQ(v bool) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldNEQ(FieldMatchedDefault, v))
+}
+
+// FacetIndexedEQ applies the EQ predicate on the "facet_indexed" field.
+func FacetIndexedEQ(v bool) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldFacetIndexed, v))
+}
+
+// FacetIndexedNEQ applies the NEQ predicate on the "facet_indexed" field.
+func FacetIndexedNEQ(v bool) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNEQ(FieldFacetIndexed, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

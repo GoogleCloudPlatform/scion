@@ -145,6 +145,11 @@ func Settled(v bool) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldSettled, v))
 }
 
+// FacetIndexed applies equality check predicate on the "facet_indexed" field. It's identical to FacetIndexedEQ.
+func FacetIndexed(v bool) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldFacetIndexed, v))
+}
+
 // ReplacedByID applies equality check predicate on the "replaced_by_id" field. It's identical to ReplacedByIDEQ.
 func ReplacedByID(v uuid.UUID) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldReplacedByID, v))
@@ -1163,6 +1168,16 @@ func SettledEQ(v bool) predicate.Decision {
 // SettledNEQ applies the NEQ predicate on the "settled" field.
 func SettledNEQ(v bool) predicate.Decision {
 	return predicate.Decision(sql.FieldNEQ(FieldSettled, v))
+}
+
+// FacetIndexedEQ applies the EQ predicate on the "facet_indexed" field.
+func FacetIndexedEQ(v bool) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldFacetIndexed, v))
+}
+
+// FacetIndexedNEQ applies the NEQ predicate on the "facet_indexed" field.
+func FacetIndexedNEQ(v bool) predicate.Decision {
+	return predicate.Decision(sql.FieldNEQ(FieldFacetIndexed, v))
 }
 
 // ReplacedByIDEQ applies the EQ predicate on the "replaced_by_id" field.

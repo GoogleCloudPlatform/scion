@@ -108,6 +108,9 @@ type Decision func(*sql.Selector)
 // DecisionAnswer is the predicate function for decisionanswer builders.
 type DecisionAnswer func(*sql.Selector)
 
+// DecisionFacetEntry is the predicate function for decisionfacetentry builders.
+type DecisionFacetEntry func(*sql.Selector)
+
 // DecisionKeyCounter is the predicate function for decisionkeycounter builders.
 type DecisionKeyCounter func(*sql.Selector)
 

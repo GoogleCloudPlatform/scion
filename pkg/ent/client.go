@@ -50,6 +50,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
@@ -204,6 +205,8 @@ type Client struct {
 	Decision *DecisionClient
 	// DecisionAnswer is the client for interacting with the DecisionAnswer builders.
 	DecisionAnswer *DecisionAnswerClient
+	// DecisionFacetEntry is the client for interacting with the DecisionFacetEntry builders.
+	DecisionFacetEntry *DecisionFacetEntryClient
 	// DecisionKeyCounter is the client for interacting with the DecisionKeyCounter builders.
 	DecisionKeyCounter *DecisionKeyCounterClient
 	// DelegationAdoption is the client for interacting with the DelegationAdoption builders.
@@ -407,6 +410,7 @@ func (c *Client) init() {
 	c.ConversationParticipant = NewConversationParticipantClient(c.config)
 	c.Decision = NewDecisionClient(c.config)
 	c.DecisionAnswer = NewDecisionAnswerClient(c.config)
+	c.DecisionFacetEntry = NewDecisionFacetEntryClient(c.config)
 	c.DecisionKeyCounter = NewDecisionKeyCounterClient(c.config)
 	c.DelegationAdoption = NewDelegationAdoptionClient(c.config)
 	c.DelegationEdge = NewDelegationEdgeClient(c.config)
@@ -612,6 +616,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		ConversationParticipant:       NewConversationParticipantClient(cfg),
 		Decision:                      NewDecisionClient(cfg),
 		DecisionAnswer:                NewDecisionAnswerClient(cfg),
+		DecisionFacetEntry:            NewDecisionFacetEntryClient(cfg),
 		DecisionKeyCounter:            NewDecisionKeyCounterClient(cfg),
 		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
 		DelegationEdge:                NewDelegationEdgeClient(cfg),
@@ -744,6 +749,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		ConversationParticipant:       NewConversationParticipantClient(cfg),
 		Decision:                      NewDecisionClient(cfg),
 		DecisionAnswer:                NewDecisionAnswerClient(cfg),
+		DecisionFacetEntry:            NewDecisionFacetEntryClient(cfg),
 		DecisionKeyCounter:            NewDecisionKeyCounterClient(cfg),
 		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
 		DelegationEdge:                NewDelegationEdgeClient(cfg),
@@ -861,28 +867,29 @@ func (c *Client) Use(hooks ...Hook) {
 		c.BrokerReportedRun, c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory,
 		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun,
 		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
-		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionKeyCounter,
-		c.DelegationAdoption, c.DelegationEdge, c.DurableQueueItem,
-		c.EntitlementBinding, c.EnvVar, c.ExecRunOutput, c.ExternalIdentity,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubEncryptionMigration,
-		c.HubEncryptionPolicy, c.HubInstance, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
-		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
-		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
-		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
-		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
-		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
-		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
-		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.Trigger,
-		c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
-		c.UserExecContainer, c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionFacetEntry,
+		c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
+		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExecRunOutput,
+		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubEncryptionMigration, c.HubEncryptionPolicy, c.HubInstance, c.HubSetting,
+		c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState,
+		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.MembershipLossCheck,
+		c.Message, c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision,
+		c.MutationAudit, c.NonceCache, c.Notification, c.NotificationSubscription,
+		c.PendingSecret, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.ProjectVisitorExclusion,
+		c.ProjectVisitorRule, c.RelayInstance, c.RoleBinding, c.RoleDefinition,
+		c.RuntimeBroker, c.RuntimeOrphan, c.Schedule, c.ScheduledEvent,
+		c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret, c.SecretRequest,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
+		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
+		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
+		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -901,28 +908,29 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.BrokerReportedRun, c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory,
 		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun,
 		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
-		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionKeyCounter,
-		c.DelegationAdoption, c.DelegationEdge, c.DurableQueueItem,
-		c.EntitlementBinding, c.EnvVar, c.ExecRunOutput, c.ExternalIdentity,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubEncryptionMigration,
-		c.HubEncryptionPolicy, c.HubInstance, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
-		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
-		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
-		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
-		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
-		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
-		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
-		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.Trigger,
-		c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
-		c.UserExecContainer, c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionFacetEntry,
+		c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
+		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExecRunOutput,
+		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubEncryptionMigration, c.HubEncryptionPolicy, c.HubInstance, c.HubSetting,
+		c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState,
+		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.MembershipLossCheck,
+		c.Message, c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision,
+		c.MutationAudit, c.NonceCache, c.Notification, c.NotificationSubscription,
+		c.PendingSecret, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.ProjectVisitorExclusion,
+		c.ProjectVisitorRule, c.RelayInstance, c.RoleBinding, c.RoleDefinition,
+		c.RuntimeBroker, c.RuntimeOrphan, c.Schedule, c.ScheduledEvent,
+		c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret, c.SecretRequest,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
+		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
+		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
+		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -999,6 +1007,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Decision.mutate(ctx, m)
 	case *DecisionAnswerMutation:
 		return c.DecisionAnswer.mutate(ctx, m)
+	case *DecisionFacetEntryMutation:
+		return c.DecisionFacetEntry.mutate(ctx, m)
 	case *DecisionKeyCounterMutation:
 		return c.DecisionKeyCounter.mutate(ctx, m)
 	case *DelegationAdoptionMutation:
@@ -5889,6 +5899,139 @@ func (c *DecisionAnswerClient) mutate(ctx context.Context, m *DecisionAnswerMuta
 		return (&DecisionAnswerDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown DecisionAnswer mutation op: %q", m.Op())
+	}
+}
+
+// DecisionFacetEntryClient is a client for the DecisionFacetEntry schema.
+type DecisionFacetEntryClient struct {
+	config
+}
+
+// NewDecisionFacetEntryClient returns a client for the DecisionFacetEntry from the given config.
+func NewDecisionFacetEntryClient(c config) *DecisionFacetEntryClient {
+	return &DecisionFacetEntryClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `decisionfacetentry.Hooks(f(g(h())))`.
+func (c *DecisionFacetEntryClient) Use(hooks ...Hook) {
+	c.hooks.DecisionFacetEntry = append(c.hooks.DecisionFacetEntry, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `decisionfacetentry.Intercept(f(g(h())))`.
+func (c *DecisionFacetEntryClient) Intercept(interceptors ...Interceptor) {
+	c.inters.DecisionFacetEntry = append(c.inters.DecisionFacetEntry, interceptors...)
+}
+
+// Create returns a builder for creating a DecisionFacetEntry entity.
+func (c *DecisionFacetEntryClient) Create() *DecisionFacetEntryCreate {
+	mutation := newDecisionFacetEntryMutation(c.config, OpCreate)
+	return &DecisionFacetEntryCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of DecisionFacetEntry entities.
+func (c *DecisionFacetEntryClient) CreateBulk(builders ...*DecisionFacetEntryCreate) *DecisionFacetEntryCreateBulk {
+	return &DecisionFacetEntryCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *DecisionFacetEntryClient) MapCreateBulk(slice any, setFunc func(*DecisionFacetEntryCreate, int)) *DecisionFacetEntryCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &DecisionFacetEntryCreateBulk{err: fmt.Errorf("calling to DecisionFacetEntryClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*DecisionFacetEntryCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &DecisionFacetEntryCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for DecisionFacetEntry.
+func (c *DecisionFacetEntryClient) Update() *DecisionFacetEntryUpdate {
+	mutation := newDecisionFacetEntryMutation(c.config, OpUpdate)
+	return &DecisionFacetEntryUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *DecisionFacetEntryClient) UpdateOne(_m *DecisionFacetEntry) *DecisionFacetEntryUpdateOne {
+	mutation := newDecisionFacetEntryMutation(c.config, OpUpdateOne, withDecisionFacetEntry(_m))
+	return &DecisionFacetEntryUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *DecisionFacetEntryClient) UpdateOneID(id uuid.UUID) *DecisionFacetEntryUpdateOne {
+	mutation := newDecisionFacetEntryMutation(c.config, OpUpdateOne, withDecisionFacetEntryID(id))
+	return &DecisionFacetEntryUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for DecisionFacetEntry.
+func (c *DecisionFacetEntryClient) Delete() *DecisionFacetEntryDelete {
+	mutation := newDecisionFacetEntryMutation(c.config, OpDelete)
+	return &DecisionFacetEntryDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *DecisionFacetEntryClient) DeleteOne(_m *DecisionFacetEntry) *DecisionFacetEntryDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *DecisionFacetEntryClient) DeleteOneID(id uuid.UUID) *DecisionFacetEntryDeleteOne {
+	builder := c.Delete().Where(decisionfacetentry.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &DecisionFacetEntryDeleteOne{builder}
+}
+
+// Query returns a query builder for DecisionFacetEntry.
+func (c *DecisionFacetEntryClient) Query() *DecisionFacetEntryQuery {
+	return &DecisionFacetEntryQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeDecisionFacetEntry},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a DecisionFacetEntry entity by its id.
+func (c *DecisionFacetEntryClient) Get(ctx context.Context, id uuid.UUID) (*DecisionFacetEntry, error) {
+	return c.Query().Where(decisionfacetentry.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *DecisionFacetEntryClient) GetX(ctx context.Context, id uuid.UUID) *DecisionFacetEntry {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *DecisionFacetEntryClient) Hooks() []Hook {
+	return c.hooks.DecisionFacetEntry
+}
+
+// Interceptors returns the client interceptors.
+func (c *DecisionFacetEntryClient) Interceptors() []Interceptor {
+	return c.inters.DecisionFacetEntry
+}
+
+func (c *DecisionFacetEntryClient) mutate(ctx context.Context, m *DecisionFacetEntryMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&DecisionFacetEntryCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&DecisionFacetEntryUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&DecisionFacetEntryUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&DecisionFacetEntryDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown DecisionFacetEntry mutation op: %q", m.Op())
 	}
 }
 
@@ -17002,25 +17145,26 @@ type (
 		BrokerReportedRun, BrokerSecret, BrokerSetting, BrokerTargetInventory,
 		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch,
 		ConduitSession, Conversation, ConversationParticipant, Decision,
-		DecisionAnswer, DecisionKeyCounter, DelegationAdoption, DelegationEdge,
-		DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity,
-		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy,
-		HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
-		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
-		MessageAddressee, MessagePolicy, MessagePolicyDecision, MutationAudit,
-		NonceCache, Notification, NotificationSubscription, PendingSecret,
-		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
-		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
-		ScheduledEvent, ScheduledExecPollCursor, ScheduledExecRun, Secret,
-		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
-		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim, UsageReservation,
-		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
-		UserTerminalWorkspace, WebhookEndpoint []ent.Hook
+		DecisionAnswer, DecisionFacetEntry, DecisionKeyCounter, DelegationAdoption,
+		DelegationEdge, DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput,
+		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
+		Group, GroupMembership, HarnessConfig, HubEncryptionMigration,
+		HubEncryptionPolicy, HubInstance, HubSetting, IntegrationConfig,
+		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
+		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
+		MessagePolicy, MessagePolicyDecision, MutationAudit, NonceCache, Notification,
+		NotificationSubscription, PendingSecret, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
+		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
+		RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule, ScheduledEvent,
+		ScheduledExecPollCursor, ScheduledExecRun, Secret, SecretRequest, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
+		SystemOneInstance, Template, TestIdentityDelegation, TestIdentityLoginCode,
+		TestInfraMarker, ThreadGroup, ThreadGroupMember, Trigger, TriggerEvent,
+		TriggerFire, TriggerSubjectClaim, UsageReservation, User, UserAccessToken,
+		UserDeletion, UserDeletionAgent, UserExecContainer, UserTerminalWorkspace,
+		WebhookEndpoint []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -17031,24 +17175,25 @@ type (
 		BrokerReportedRun, BrokerSecret, BrokerSetting, BrokerTargetInventory,
 		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch,
 		ConduitSession, Conversation, ConversationParticipant, Decision,
-		DecisionAnswer, DecisionKeyCounter, DelegationAdoption, DelegationEdge,
-		DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity,
-		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy,
-		HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
-		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
-		MessageAddressee, MessagePolicy, MessagePolicyDecision, MutationAudit,
-		NonceCache, Notification, NotificationSubscription, PendingSecret,
-		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
-		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
-		ScheduledEvent, ScheduledExecPollCursor, ScheduledExecRun, Secret,
-		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
-		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim, UsageReservation,
-		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
-		UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
+		DecisionAnswer, DecisionFacetEntry, DecisionKeyCounter, DelegationAdoption,
+		DelegationEdge, DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput,
+		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
+		Group, GroupMembership, HarnessConfig, HubEncryptionMigration,
+		HubEncryptionPolicy, HubInstance, HubSetting, IntegrationConfig,
+		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
+		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
+		MessagePolicy, MessagePolicyDecision, MutationAudit, NonceCache, Notification,
+		NotificationSubscription, PendingSecret, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
+		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
+		RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule, ScheduledEvent,
+		ScheduledExecPollCursor, ScheduledExecRun, Secret, SecretRequest, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
+		SystemOneInstance, Template, TestIdentityDelegation, TestIdentityLoginCode,
+		TestInfraMarker, ThreadGroup, ThreadGroupMember, Trigger, TriggerEvent,
+		TriggerFire, TriggerSubjectClaim, UsageReservation, User, UserAccessToken,
+		UserDeletion, UserDeletionAgent, UserExecContainer, UserTerminalWorkspace,
+		WebhookEndpoint []ent.Interceptor
 	}
 )

@@ -57,6 +57,20 @@ func (_u *DecisionUpdate) SetNillableSettled(v *bool) *DecisionUpdate {
 	return _u
 }
 
+// SetFacetIndexed sets the "facet_indexed" field.
+func (_u *DecisionUpdate) SetFacetIndexed(v bool) *DecisionUpdate {
+	_u.mutation.SetFacetIndexed(v)
+	return _u
+}
+
+// SetNillableFacetIndexed sets the "facet_indexed" field if the given value is not nil.
+func (_u *DecisionUpdate) SetNillableFacetIndexed(v *bool) *DecisionUpdate {
+	if v != nil {
+		_u.SetFacetIndexed(*v)
+	}
+	return _u
+}
+
 // SetReplacedByID sets the "replaced_by_id" field.
 func (_u *DecisionUpdate) SetReplacedByID(v uuid.UUID) *DecisionUpdate {
 	_u.mutation.SetReplacedByID(v)
@@ -255,6 +269,9 @@ func (_u *DecisionUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.Settled(); ok {
 		_spec.SetField(decision.FieldSettled, field.TypeBool, value)
 	}
+	if value, ok := _u.mutation.FacetIndexed(); ok {
+		_spec.SetField(decision.FieldFacetIndexed, field.TypeBool, value)
+	}
 	if value, ok := _u.mutation.ReplacedByID(); ok {
 		_spec.SetField(decision.FieldReplacedByID, field.TypeUUID, value)
 	}
@@ -335,6 +352,20 @@ func (_u *DecisionUpdateOne) SetSettled(v bool) *DecisionUpdateOne {
 func (_u *DecisionUpdateOne) SetNillableSettled(v *bool) *DecisionUpdateOne {
 	if v != nil {
 		_u.SetSettled(*v)
+	}
+	return _u
+}
+
+// SetFacetIndexed sets the "facet_indexed" field.
+func (_u *DecisionUpdateOne) SetFacetIndexed(v bool) *DecisionUpdateOne {
+	_u.mutation.SetFacetIndexed(v)
+	return _u
+}
+
+// SetNillableFacetIndexed sets the "facet_indexed" field if the given value is not nil.
+func (_u *DecisionUpdateOne) SetNillableFacetIndexed(v *bool) *DecisionUpdateOne {
+	if v != nil {
+		_u.SetFacetIndexed(*v)
 	}
 	return _u
 }
@@ -566,6 +597,9 @@ func (_u *DecisionUpdateOne) sqlSave(ctx context.Context) (_node *Decision, err 
 	}
 	if value, ok := _u.mutation.Settled(); ok {
 		_spec.SetField(decision.FieldSettled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.FacetIndexed(); ok {
+		_spec.SetField(decision.FieldFacetIndexed, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.ReplacedByID(); ok {
 		_spec.SetField(decision.FieldReplacedByID, field.TypeUUID, value)

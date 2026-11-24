@@ -231,6 +231,20 @@ func (_c *DecisionCreate) SetNillableSettled(v *bool) *DecisionCreate {
 	return _c
 }
 
+// SetFacetIndexed sets the "facet_indexed" field.
+func (_c *DecisionCreate) SetFacetIndexed(v bool) *DecisionCreate {
+	_c.mutation.SetFacetIndexed(v)
+	return _c
+}
+
+// SetNillableFacetIndexed sets the "facet_indexed" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableFacetIndexed(v *bool) *DecisionCreate {
+	if v != nil {
+		_c.SetFacetIndexed(*v)
+	}
+	return _c
+}
+
 // SetReplacedByID sets the "replaced_by_id" field.
 func (_c *DecisionCreate) SetReplacedByID(v uuid.UUID) *DecisionCreate {
 	_c.mutation.SetReplacedByID(v)
@@ -394,6 +408,10 @@ func (_c *DecisionCreate) defaults() {
 		v := decision.DefaultSettled
 		_c.mutation.SetSettled(v)
 	}
+	if _, ok := _c.mutation.FacetIndexed(); !ok {
+		v := decision.DefaultFacetIndexed
+		_c.mutation.SetFacetIndexed(v)
+	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := decision.DefaultCreatedAt()
 		_c.mutation.SetCreatedAt(v)
@@ -505,6 +523,9 @@ func (_c *DecisionCreate) check() error {
 	}
 	if _, ok := _c.mutation.Settled(); !ok {
 		return &ValidationError{Name: "settled", err: errors.New(`ent: missing required field "Decision.settled"`)}
+	}
+	if _, ok := _c.mutation.FacetIndexed(); !ok {
+		return &ValidationError{Name: "facet_indexed", err: errors.New(`ent: missing required field "Decision.facet_indexed"`)}
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "Decision.created_at"`)}
@@ -629,6 +650,10 @@ func (_c *DecisionCreate) createSpec() (*Decision, *sqlgraph.CreateSpec) {
 		_spec.SetField(decision.FieldSettled, field.TypeBool, value)
 		_node.Settled = value
 	}
+	if value, ok := _c.mutation.FacetIndexed(); ok {
+		_spec.SetField(decision.FieldFacetIndexed, field.TypeBool, value)
+		_node.FacetIndexed = value
+	}
 	if value, ok := _c.mutation.ReplacedByID(); ok {
 		_spec.SetField(decision.FieldReplacedByID, field.TypeUUID, value)
 		_node.ReplacedByID = &value
@@ -730,6 +755,18 @@ func (u *DecisionUpsert) SetSettled(v bool) *DecisionUpsert {
 // UpdateSettled sets the "settled" field to the value that was provided on create.
 func (u *DecisionUpsert) UpdateSettled() *DecisionUpsert {
 	u.SetExcluded(decision.FieldSettled)
+	return u
+}
+
+// SetFacetIndexed sets the "facet_indexed" field.
+func (u *DecisionUpsert) SetFacetIndexed(v bool) *DecisionUpsert {
+	u.Set(decision.FieldFacetIndexed, v)
+	return u
+}
+
+// UpdateFacetIndexed sets the "facet_indexed" field to the value that was provided on create.
+func (u *DecisionUpsert) UpdateFacetIndexed() *DecisionUpsert {
+	u.SetExcluded(decision.FieldFacetIndexed)
 	return u
 }
 
@@ -974,6 +1011,20 @@ func (u *DecisionUpsertOne) SetSettled(v bool) *DecisionUpsertOne {
 func (u *DecisionUpsertOne) UpdateSettled() *DecisionUpsertOne {
 	return u.Update(func(s *DecisionUpsert) {
 		s.UpdateSettled()
+	})
+}
+
+// SetFacetIndexed sets the "facet_indexed" field.
+func (u *DecisionUpsertOne) SetFacetIndexed(v bool) *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetFacetIndexed(v)
+	})
+}
+
+// UpdateFacetIndexed sets the "facet_indexed" field to the value that was provided on create.
+func (u *DecisionUpsertOne) UpdateFacetIndexed() *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateFacetIndexed()
 	})
 }
 
@@ -1403,6 +1454,20 @@ func (u *DecisionUpsertBulk) SetSettled(v bool) *DecisionUpsertBulk {
 func (u *DecisionUpsertBulk) UpdateSettled() *DecisionUpsertBulk {
 	return u.Update(func(s *DecisionUpsert) {
 		s.UpdateSettled()
+	})
+}
+
+// SetFacetIndexed sets the "facet_indexed" field.
+func (u *DecisionUpsertBulk) SetFacetIndexed(v bool) *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetFacetIndexed(v)
+	})
+}
+
+// UpdateFacetIndexed sets the "facet_indexed" field to the value that was provided on create.
+func (u *DecisionUpsertBulk) UpdateFacetIndexed() *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateFacetIndexed()
 	})
 }
 

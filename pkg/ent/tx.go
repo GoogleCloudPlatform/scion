@@ -80,6 +80,8 @@ type Tx struct {
 	Decision *DecisionClient
 	// DecisionAnswer is the client for interacting with the DecisionAnswer builders.
 	DecisionAnswer *DecisionAnswerClient
+	// DecisionFacetEntry is the client for interacting with the DecisionFacetEntry builders.
+	DecisionFacetEntry *DecisionFacetEntryClient
 	// DecisionKeyCounter is the client for interacting with the DecisionKeyCounter builders.
 	DecisionKeyCounter *DecisionKeyCounterClient
 	// DelegationAdoption is the client for interacting with the DelegationAdoption builders.
@@ -403,6 +405,7 @@ func (tx *Tx) init() {
 	tx.ConversationParticipant = NewConversationParticipantClient(tx.config)
 	tx.Decision = NewDecisionClient(tx.config)
 	tx.DecisionAnswer = NewDecisionAnswerClient(tx.config)
+	tx.DecisionFacetEntry = NewDecisionFacetEntryClient(tx.config)
 	tx.DecisionKeyCounter = NewDecisionKeyCounterClient(tx.config)
 	tx.DelegationAdoption = NewDelegationAdoptionClient(tx.config)
 	tx.DelegationEdge = NewDelegationEdgeClient(tx.config)
