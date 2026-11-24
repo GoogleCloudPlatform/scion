@@ -85,7 +85,7 @@ const shardTag = "hubshard"
 // defaultShards is the -n default. The CI matrix (.github/workflows/ci.yml,
 // job hub-shard-plan), the make targets and the nightly loops take the
 // shard list from -shards, so this is the one place the count lives.
-const defaultShards = 6
+const defaultShards = 10
 
 // defaultMaxGroupDiv is the -maxgroupdiv default.
 const defaultMaxGroupDiv = 16

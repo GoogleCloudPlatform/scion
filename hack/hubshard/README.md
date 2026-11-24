@@ -28,7 +28,7 @@ go test -overlay /tmp/ov/overlay.json -tags hubshard,hubshard_3 ./pkg/hub
 
 CI never compiles the whole `pkg/hub` test package: the `pkg/hub shard K/N`
 jobs run the shards in parallel, and the `pkg/hub SQLite Tests` check
-passes only when all of them do (N = 6 today, from `-shards`).
+passes only when all of them do (N = 10 today, from `-shards`).
 
 ## Commands
 
@@ -64,9 +64,13 @@ tool the way `go run ./hack/hubshard` would, from a binary it builds into
 a temporary directory; the other make targets and CI call it. Both scripts
 build and run the tool with `GOGC=25` unless `GOGC` is set, and honour an
 optional `HUB_SHARD_DEADLINE` (a Unix time: every step runs under
-`timeout` until 60 seconds before it). `HUB_SHARD_RUN_GOGC` sets the
-`GOGC` of `shard.sh`'s test runs. Other tags combine as usual: `shard.sh`
-passes `no_sqlite` or `integration` next to the shard tags.
+`timeout` until 60 seconds before it). `shard.sh` also defaults
+`GOMEMLIMIT=10GiB` (overridable via `GOMEMLIMIT` or `HUB_SHARD_MEMLIMIT`)
+for compiles and vets, and `-gcflags=-c=2` (`HUB_SHARD_COMPILE_C`, set to
+`0` to disable) for compiles to cap peak memory on 16 GB CI runners.
+`HUB_SHARD_RUN_GOGC` sets the `GOGC` of `shard.sh`'s test runs. Other tags
+combine as usual: `shard.sh` passes `no_sqlite` or `integration` next to
+the shard tags.
 
 `make test-hub-shard` runs the shard binary with `-test.v` and rebuilds
 its stdout as without `-test.v` (the `=== RUN`, `--- PASS`, `--- SKIP`
@@ -99,7 +103,7 @@ the recorded output of a real one ([`testdata/skip-summary`](testdata/skip-summa
 ok  	pkg/hub shard 2 (tags: hubshard,hubshard_2)	412s
 ```
 
-Tool flags: `-n N` (shard count, default 6), `-shards` (print 1..N; the
+Tool flags: `-n N` (shard count, default 10), `-shards` (print 1..N; the
 CI matrix and `make test-hub-shards` loop over it),
 `-overlay DIR`, `-parity`, `-list K` (the tests shard K's binary compiles,
 under `-tags`), `-skip K` (the `go test -skip` pattern for shard K, see

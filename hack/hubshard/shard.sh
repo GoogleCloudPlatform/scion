@@ -58,18 +58,27 @@
 #       or if a named test prints no PASS line.
 #
 # Environment:
-#   HUB_SHARD_TIMEOUT  the test binary's -test.timeout for "test" (default 30m)
-#   HUB_SHARD_P        go build -p for the compiles (default 1: one package
-#                      at a time keeps the peak at the pkg/hub compile)
-#   GOGC               for the compiles, the hubshard build and calls and
-#                      the -test.list check (default 25, as HUB_TEST_GOGC
-#                      in the Makefile). The "test" runs inherit GOGC (Go's
-#                      default unless set); the short "postgres" runs use
-#                      the compile GOGC.
-#   HUB_SHARD_RUN_GOGC optional GOGC for the test runs ("test" and
-#                      "postgres"), overriding the above
-#   HUB_SHARD_DEADLINE optional Unix time in seconds: every step runs under
-#                      timeout(1) until 60 seconds before it (see lib.sh)
+#   HUB_SHARD_TIMEOUT   the test binary's -test.timeout for "test" (default 30m)
+#   HUB_SHARD_P         go build -p for the compiles (default 1: one package
+#                       at a time keeps the peak at the pkg/hub compile)
+#   HUB_SHARD_COMPILE_C cmd/compile -c concurrency for pkg/hub (default 2:
+#                       limits peak compiler backend memory on 4+ vCPU runners;
+#                       set to 0 or empty to leave unset)
+#   GOGC                for the compiles, the hubshard build and calls and
+#                       the -test.list check (default 25, as HUB_TEST_GOGC
+#                       in the Makefile). The "test" runs inherit GOGC (Go's
+#                       default unless set); the short "postgres" runs use
+#                       the compile GOGC.
+#   GOMEMLIMIT          soft memory limit for the compiles and vets (default
+#                       10GiB, leaving headroom on 16 GB CI runners for the OS
+#                       and Postgres tmpfs). Overridden by HUB_SHARD_MEMLIMIT.
+#                       The test runs inherit the caller's GOMEMLIMIT.
+#   HUB_SHARD_MEMLIMIT  optional GOMEMLIMIT for compiles and vets only,
+#                       overriding GOMEMLIMIT
+#   HUB_SHARD_RUN_GOGC  optional GOGC for the test runs ("test" and
+#                       "postgres"), overriding the above
+#   HUB_SHARD_DEADLINE  optional Unix time in seconds: every step runs under
+#                       timeout(1) until 60 seconds before it (see lib.sh)
 
 set -euo pipefail
 
@@ -100,7 +109,9 @@ esac
 
 timeout=${HUB_SHARD_TIMEOUT:-30m}
 par=${HUB_SHARD_P:-1}
+compile_c=${HUB_SHARD_COMPILE_C:-2}
 build_gogc=${GOGC:-25}
+build_memlimit=${HUB_SHARD_MEMLIMIT:-${GOMEMLIMIT:-10GiB}}
 # run_gogc is empty when the test runs inherit the caller's GOGC.
 run_gogc=${HUB_SHARD_RUN_GOGC:-}
 
@@ -143,10 +154,13 @@ parse_flags() {
 }
 
 compile() {
-	local k=$1 extra=$2 out=$3
+	local k=$1 extra=$2 out=$3 gcflags=
+	if [ -n "$compile_c" ] && [ "$compile_c" != 0 ]; then
+		gcflags="-gcflags=-c=$compile_c"
+	fi
 	echo "== compile pkg/hub shard $k (tags: $(with_tags "$k" "$extra"))"
 	mkdir -p "$out"
-	step env GOGC="$build_gogc" go test -c -p "$par" ${race:+"$race"} -overlay "$overlay" \
+	step env GOGC="$build_gogc" GOMEMLIMIT="$build_memlimit" go test -c -p "$par" ${gcflags:+"$gcflags"} ${race:+"$race"} -overlay "$overlay" \
 		-tags "$(with_tags "$k" "$extra")" -o "$out/" ./pkg/hub
 }
 
@@ -212,7 +226,7 @@ vet)
 	[ $# -eq 0 ] || usage
 	for extra in no_sqlite integration,tzcontract; do
 		echo "== go vet pkg/hub shard $shard (tags: $(with_tags "$shard" "$extra"))"
-		step env GOGC="$build_gogc" go vet -p "$par" -overlay "$overlay" -tags "$(with_tags "$shard" "$extra")" ./pkg/hub
+		step env GOGC="$build_gogc" GOMEMLIMIT="$build_memlimit" go vet -p "$par" -overlay "$overlay" -tags "$(with_tags "$shard" "$extra")" ./pkg/hub
 	done
 	;;
 

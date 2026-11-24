@@ -471,7 +471,7 @@ func TestShards(t *testing.T) {
 		args []string
 		want string
 	}{
-		{nil, "1\n2\n3\n4\n5\n6\n"},
+		{nil, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n"},
 		{[]string{"-n", "2"}, "1\n2\n"},
 	} {
 		var b bytes.Buffer
