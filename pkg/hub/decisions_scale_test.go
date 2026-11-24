@@ -108,24 +108,24 @@ func seedSettledAndOpenHistoryForQueryCount(
 // issue a constant number of SQL queries with respect to project count
 // (5 vs 40) and history depth (10 vs 300) (design-scale §7 item 4).
 func TestDecisionsQueryCount_LimitZeroAndWaitingOnYouTotal(t *testing.T) {
-	measure := func(t *testing.T, numProjects, settledPerProject, openProjects int) (limitZeroQueries, bellQueries int) {
+	measure := func(t *testing.T, numProjects, settledPerProject, openProjects int) (limitZeroQueries, bellQueries int64) {
 		t.Helper()
 		f, cs, counter := newCountingDecisionsFixture(t)
 		seedSettledAndOpenHistoryForQueryCount(t, f, cs, numProjects, settledPerProject, openProjects)
 		ctx := context.Background()
 
-		// Warm any one-time caches unrelated to per-project/history scaling? No —
-		// measure cold-per-request, same as production requests.
-		counter.Reset()
+		counter.Reset(true)
 		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
 		resp := decodeProfilePendingDecisions(t, rr)
 		limitZeroQueries = counter.Count()
+		counter.Reset(false)
 		assert.Equal(t, openProjects, resp.Counts.WaitingOnYou)
 		assert.Empty(t, resp.Prompts)
 
-		counter.Reset()
+		counter.Reset(true)
 		total, projs, err := f.srv.waitingOnYouTotal(ctx, f.bob.ID)
 		bellQueries = counter.Count()
+		counter.Reset(false)
 		require.NoError(t, err)
 		assert.Equal(t, openProjects, total)
 		assert.Equal(t, openProjects, projs)
@@ -144,7 +144,7 @@ func TestDecisionsQueryCount_LimitZeroAndWaitingOnYouTotal(t *testing.T) {
 		assert.Equal(t, lz5p10h, lz5p300h, "limit=0 query count must be constant across 10 vs 300 history rows/project")
 		assert.Equal(t, bell5p10h, bell40p10h, "waitingOnYouTotal query count must be constant across 5 vs 40 projects")
 		assert.Equal(t, bell5p10h, bell5p300h, "waitingOnYouTotal query count must be constant across 10 vs 300 history rows/project")
-		assert.LessOrEqual(t, bell40p10h, 12, "quiet-user waitingOnYouTotal must meet design §1 <= 12 queries target")
+		assert.LessOrEqual(t, bell40p10h, int64(12), "quiet-user waitingOnYouTotal must meet design §1 <= 12 queries target")
 	})
 
 	t.Run("one_open_project_constant_in_total_projects_and_history", func(t *testing.T) {
@@ -198,25 +198,17 @@ func TestDecisionsScale(t *testing.T) {
 			}
 
 			seedStart := time.Now()
-			tx, err := cs.DB().BeginTx(ctx, nil)
-			require.NoError(t, err)
-			stmtDec, err := tx.PrepareContext(ctx,
-				`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, created_at, decided_at, withdrawn_at, dismissed_at)
-				 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, 'agent', 1, ?, ?, false, 0, ?, ?, ?, ?, ?, ?)`)
-			require.NoError(t, err)
-			stmtAns, err := tx.PrepareContext(ctx,
-				`INSERT INTO decision_answers (id, decision_row_id, project_id, asker_agent_id, key, version, question_text, choice_id, choice_label, answered_by_user_id, answered_by_name, answered_by_email, provenance, outcome, surface, response_message_id, matched_default, created_at)
-				 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'Bob', 'bob@test.com', 'direct', ?, 'decisions_page', ?, false, ?)`)
-			require.NoError(t, err)
-
-			type openSeed struct {
+			type projSeed struct {
 				projID string
 				tpID   string
 				botID  string
 				pIdx   int
 			}
-			var openSeeds []openSeed
+			projSeeds := make([]projSeed, sc.numProjects)
+			var openSeeds []projSeed
 
+			// Create projects, role bindings, and topics BEFORE opening the bulk
+			// SQL transaction so SQLite's MaxOpenConns(1) pool never deadlocks.
 			for p := 0; p < sc.numProjects; p++ {
 				projID := detUUID(0x01, p, 0)
 				require.NoError(t, f.store.CreateProject(ctx, &store.Project{
@@ -229,9 +221,26 @@ func TestDecisionsScale(t *testing.T) {
 				require.NoError(t, err)
 				tpID := createTestDecisionTopic(t, f.wcs, projID, "general", f.bob.ID)
 				botID := detUUID(0x10, p, 0)
+				ps := projSeed{projID: projID, tpID: tpID, botID: botID, pIdx: p}
+				projSeeds[p] = ps
 				if p < sc.openProjects {
-					openSeeds = append(openSeeds, openSeed{projID: projID, tpID: tpID, botID: botID, pIdx: p})
+					openSeeds = append(openSeeds, ps)
 				}
+			}
+
+			tx, err := cs.DB().BeginTx(ctx, nil)
+			require.NoError(t, err)
+			stmtDec, err := tx.PrepareContext(ctx,
+				`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, created_at, decided_at, withdrawn_at, dismissed_at)
+				 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, 'agent', 1, ?, ?, false, 0, ?, ?, ?, ?, ?, ?)`)
+			require.NoError(t, err)
+			stmtAns, err := tx.PrepareContext(ctx,
+				`INSERT INTO decision_answers (id, decision_row_id, project_id, asker_agent_id, key, version, question_text, choice_id, choice_label, answered_by_user_id, answered_by_name, answered_by_email, provenance, outcome, surface, response_message_id, matched_default, created_at)
+				 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'Bob', 'bob@test.com', 'direct', ?, 'decisions_page', ?, false, ?)`)
+			require.NoError(t, err)
+
+			for p, ps := range projSeeds {
+				projID, tpID, botID := ps.projID, ps.tpID, ps.botID
 
 				for j := 0; j < sc.rowsPerProject; j++ {
 					decID := detUUID(0x20, p, j)
@@ -276,19 +285,21 @@ func TestDecisionsScale(t *testing.T) {
 			require.NoError(t, err)
 			t.Logf("[%s] seeded %d projects x %d rows (+ %d open) in %v", sc.name, sc.numProjects, sc.rowsPerProject, sc.openProjects, time.Since(seedStart))
 
-			counter.Reset()
+			counter.Reset(true)
 			t0 := time.Now()
 			rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
 			dLimitZero := time.Since(t0)
 			qLimitZero := counter.Count()
+			counter.Reset(false)
 			resp := decodeProfilePendingDecisions(t, rr)
 			require.Equal(t, sc.openProjects, resp.Counts.WaitingOnYou)
 
-			counter.Reset()
+			counter.Reset(true)
 			t0 = time.Now()
 			wTot, wProjs, err := f.srv.waitingOnYouTotal(ctx, f.bob.ID)
 			dBell := time.Since(t0)
 			qBell := counter.Count()
+			counter.Reset(false)
 			require.NoError(t, err)
 			require.Equal(t, sc.openProjects, wTot)
 			require.Equal(t, sc.openProjects, wProjs)
@@ -296,5 +307,138 @@ func TestDecisionsScale(t *testing.T) {
 			t.Logf("[%s] HUB TIMINGS: limit=0=%v (%d queries), waitingOnYouTotal=%v (%d queries)",
 				sc.name, dLimitZero, qLimitZero, dBell, qBell)
 		})
+	}
+}
+
+// TestDecisionsScale_BellTopicEventEndToEnd measures design-scale §1 row:
+// "One topic event end-to-end (expansion + 500 recomputes, 2 workers)" at scale S
+// (200 projects / 200k decisions, 500 members on the event's project).
+// Skipped unless SCION_DECISIONS_SCALE=1.
+func TestDecisionsScale_BellTopicEventEndToEnd(t *testing.T) {
+	if os.Getenv("SCION_DECISIONS_SCALE") != "1" {
+		t.Skip("set SCION_DECISIONS_SCALE=1 to run end-to-end bell topic event scale test")
+	}
+	f, cs, counter := newCountingDecisionsFixture(t)
+	ctx := context.Background()
+	setFastDecisionBell(t, f.srv, time.Millisecond)
+
+	memberRole, err := f.store.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
+	require.NoError(t, err)
+
+	const (
+		numProjects    = 200
+		rowsPerProject = 1000
+		numMembers     = 500
+	)
+	base := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	choicesJSON := `[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}]`
+	detUUID := func(tag byte, a, b int) string {
+		var u uuid.UUID
+		u[0] = tag
+		binary.BigEndian.PutUint32(u[4:8], uint32(a+1))
+		binary.BigEndian.PutUint32(u[8:12], uint32(b+1))
+		u[6] = (u[6] & 0x0f) | 0x40
+		u[8] = (u[8] & 0x3f) | 0x80
+		return u.String()
+	}
+
+	seedStart := time.Now()
+	// 1. Create 200 projects + 1 topic each.
+	projIDs := make([]string, numProjects)
+	topicIDs := make([]string, numProjects)
+	for p := 0; p < numProjects; p++ {
+		pid := detUUID(0x01, p, 0)
+		projIDs[p] = pid
+		require.NoError(t, f.store.CreateProject(ctx, &store.Project{
+			ID: pid, Name: fmt.Sprintf("e2e-p-%03d", p), Slug: fmt.Sprintf("e2e-p-%03d", p), Created: base,
+		}))
+		topicIDs[p] = createTestDecisionTopic(t, f.wcs, pid, "general", f.bob.ID)
+	}
+
+	// 2. Create 500 active member users and bind them to project 0 (and a
+	// rolling window of 20 other projects each so every user has realistic
+	// multi-project membership).
+	memberIDs := make([]string, numMembers)
+	for m := 0; m < numMembers; m++ {
+		uid := detUUID(0x70, m, 0)
+		memberIDs[m] = uid
+		require.NoError(t, f.store.CreateUser(ctx, &store.User{
+			ID: uid, Email: fmt.Sprintf("member-%03d@test.com", m), DisplayName: fmt.Sprintf("Member %03d", m),
+			Role: store.UserRoleMember, Status: "active", Created: base,
+		}))
+		_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: memberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: uid,
+			ScopeType: store.RoleScopeProject, ScopeID: projIDs[0], CreatedBy: "test",
+		})
+		require.NoError(t, err)
+	}
+
+	// 3. Seed 200k settled decisions across the 200 projects in one transaction.
+	tx, err := cs.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	stmtDec, err := tx.PrepareContext(ctx,
+		`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, created_at, decided_at)
+		 VALUES (?, ?, ?, ?, 0, ?, 'bot', ?, ?, 'agent', 1, 'Deploy?', ?, false, 0, 'decided', true, ?, ?)`)
+	require.NoError(t, err)
+	stmtAns, err := tx.PrepareContext(ctx,
+		`INSERT INTO decision_answers (id, decision_row_id, project_id, asker_agent_id, key, version, question_text, choice_id, choice_label, answered_by_user_id, answered_by_name, answered_by_email, provenance, outcome, surface, response_message_id, matched_default, created_at)
+		 VALUES (?, ?, ?, ?, ?, 1, 'Deploy?', 'yes', 'Yes', ?, 'Bob', 'bob@test.com', 'direct', 'answer', 'decisions_page', ?, false, ?)`)
+	require.NoError(t, err)
+	for p := 0; p < numProjects; p++ {
+		pid, tpID, botID := projIDs[p], topicIDs[p], detUUID(0x10, p, 0)
+		for j := 0; j < rowsPerProject; j++ {
+			decID := detUUID(0x20, p, j)
+			msgID := detUUID(0x40, p, j)
+			key := fmt.Sprintf("e2e-%03d-%06d", p, j)
+			ts := base.Add(time.Duration(p*100000+j) * time.Second)
+			_, err = stmtDec.ExecContext(ctx, decID, pid, tpID, msgID, botID, key, key, choicesJSON, ts, ts)
+			require.NoError(t, err)
+			_, err = stmtAns.ExecContext(ctx, detUUID(0x30, p, j), decID, pid, botID, key, f.bob.ID, detUUID(0x50, p, j), ts)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, stmtDec.Close())
+	require.NoError(t, stmtAns.Close())
+	require.NoError(t, tx.Commit())
+
+	// 4. Post 1 open decision in project 0's topic, then ANALYZE.
+	bot0 := detUUID(0x10, 0, 0)
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+		Message: &store.Message{
+			ID: api.NewUUID(), ProjectID: projIDs[0], Sender: "agent:bot", SenderID: bot0,
+			Recipient: "chat", ThreadID: topicIDs[0], Channel: "web", CreatedAt: base.Add(48 * time.Hour),
+		},
+		AskerAgentID: bot0, AskerAgentName: "bot",
+		Decisions: []messages.Decision{{Key: "e2e-open-1", Question: "Ship release?", Choices: []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}}},
+	})
+	require.NoError(t, err)
+	_, err = cs.DB().ExecContext(ctx, "ANALYZE")
+	require.NoError(t, err)
+	t.Logf("[E2E 200p/200k + 500 members] seeded in %v", time.Since(seedStart))
+
+	// 5. Measure one topic event end-to-end: expansion + 500 recomputes on 2 workers.
+	counter.Reset(true)
+	t0 := time.Now()
+	f.srv.enqueueDecisionBellTopic(projIDs[0], topicIDs[0])
+	waitDecisionBellIdle(t, f.srv)
+	elapsed := time.Since(t0)
+	totalQueries := counter.Count()
+	counter.Reset(false)
+
+	t.Logf("[E2E 200p/200k + 500 members] topic event (expansion + 500 recomputes, 2 workers): elapsed=%v, total_queries=%d",
+		elapsed, totalQueries)
+
+	// Spot-check first and last members received their waiting-on-you bell notification.
+	for _, uid := range []string{memberIDs[0], memberIDs[numMembers-1]} {
+		notifs, nerr := f.store.GetNotifications(ctx, store.SubscriberTypeUser, uid, true)
+		require.NoError(t, nerr)
+		found := false
+		for _, n := range notifs {
+			if n.Kind == store.NotificationKindDecisionsWaiting && n.ResourceID == "1" {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "user %s must have decisions_waiting notification with count 1", uid)
 	}
 }

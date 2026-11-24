@@ -19,80 +19,69 @@ package hub
 import (
 	"context"
 	"database/sql"
-	"sync"
+	"fmt"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"entgo.io/ent/dialect"
+	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
-// countingDialectDriver wraps an ent dialect.Driver and counts every SQL
-// statement (Query and Exec, both top-level and inside transactions) issued
-// through it. Reusable across Decisions scaling query-count regression tests
-// (design-scale §7 item 4).
-type countingDialectDriver struct {
+// bellQueryCountingDriver wraps an ent dialect.Driver and counts SQL
+// Query/Exec statements (both top-level and inside transactions) while active.
+// Shared across Decisions scaling query-count regression tests (design-scale §7).
+type bellQueryCountingDriver struct {
 	dialect.Driver
-	mu      sync.Mutex
-	queries []string
+	active atomic.Bool
+	count  atomic.Int64
 }
 
-func newCountingDialectDriver(drv dialect.Driver) *countingDialectDriver {
-	return &countingDialectDriver{Driver: drv}
+func newBellQueryCountingDriver(drv dialect.Driver) *bellQueryCountingDriver {
+	return &bellQueryCountingDriver{Driver: drv}
 }
 
-// Unwrap lets entc.SQLDriver reach the underlying *sql.Driver for raw DB access.
-func (d *countingDialectDriver) Unwrap() dialect.Driver {
+// Unwrap lets entc.SQLDriver reach the underlying *entsql.Driver for raw DB access.
+func (d *bellQueryCountingDriver) Unwrap() dialect.Driver {
 	return d.Driver
 }
 
-func (d *countingDialectDriver) record(q string) {
-	d.mu.Lock()
-	d.queries = append(d.queries, q)
-	d.mu.Unlock()
+func (d *bellQueryCountingDriver) Reset(active bool) {
+	d.count.Store(0)
+	d.active.Store(active)
 }
 
-func (d *countingDialectDriver) Reset() {
-	d.mu.Lock()
-	d.queries = nil
-	d.mu.Unlock()
+func (d *bellQueryCountingDriver) Count() int64 {
+	return d.count.Load()
 }
 
-func (d *countingDialectDriver) Count() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return len(d.queries)
-}
-
-func (d *countingDialectDriver) Statements() []string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	out := make([]string, len(d.queries))
-	copy(out, d.queries)
-	return out
-}
-
-func (d *countingDialectDriver) Exec(ctx context.Context, query string, args, v any) error {
-	d.record(query)
-	return d.Driver.Exec(ctx, query, args, v)
-}
-
-func (d *countingDialectDriver) Query(ctx context.Context, query string, args, v any) error {
-	d.record(query)
+func (d *bellQueryCountingDriver) Query(ctx context.Context, query string, args, v any) error {
+	if d.active.Load() {
+		d.count.Add(1)
+	}
 	return d.Driver.Query(ctx, query, args, v)
 }
 
-func (d *countingDialectDriver) Tx(ctx context.Context) (dialect.Tx, error) {
+func (d *bellQueryCountingDriver) Exec(ctx context.Context, query string, args, v any) error {
+	if d.active.Load() {
+		d.count.Add(1)
+	}
+	return d.Driver.Exec(ctx, query, args, v)
+}
+
+func (d *bellQueryCountingDriver) Tx(ctx context.Context) (dialect.Tx, error) {
 	tx, err := d.Driver.Tx(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &countingDialectTx{Tx: tx, parent: d}, nil
+	return &bellQueryCountingTx{Tx: tx, parent: d}, nil
 }
 
-func (d *countingDialectDriver) BeginTx(ctx context.Context, opts *sql.TxOptions) (dialect.Tx, error) {
+func (d *bellQueryCountingDriver) BeginTx(ctx context.Context, opts *sql.TxOptions) (dialect.Tx, error) {
 	if starter, ok := d.Driver.(interface {
 		BeginTx(context.Context, *sql.TxOptions) (dialect.Tx, error)
 	}); ok {
@@ -100,33 +89,44 @@ func (d *countingDialectDriver) BeginTx(ctx context.Context, opts *sql.TxOptions
 		if err != nil {
 			return nil, err
 		}
-		return &countingDialectTx{Tx: tx, parent: d}, nil
+		return &bellQueryCountingTx{Tx: tx, parent: d}, nil
 	}
 	return d.Tx(ctx)
 }
 
-type countingDialectTx struct {
+type bellQueryCountingTx struct {
 	dialect.Tx
-	parent *countingDialectDriver
+	parent *bellQueryCountingDriver
 }
 
-func (t *countingDialectTx) Exec(ctx context.Context, query string, args, v any) error {
-	t.parent.record(query)
-	return t.Tx.Exec(ctx, query, args, v)
-}
-
-func (t *countingDialectTx) Query(ctx context.Context, query string, args, v any) error {
-	t.parent.record(query)
+func (t *bellQueryCountingTx) Query(ctx context.Context, query string, args, v any) error {
+	if t.parent.active.Load() {
+		t.parent.count.Add(1)
+	}
 	return t.Tx.Query(ctx, query, args, v)
 }
 
-// newCountingDecisionsFixture builds a decisionsFixture backed by a
-// countingDialectDriver so tests can assert exact or constant SQL query counts
-// for profile, limit=0, bell recompute, and topic expansion paths.
-func newCountingDecisionsFixture(t *testing.T) (*decisionsFixture, *entadapter.CompositeStore, *countingDialectDriver) {
+func (t *bellQueryCountingTx) Exec(ctx context.Context, query string, args, v any) error {
+	if t.parent.active.Load() {
+		t.parent.count.Add(1)
+	}
+	return t.Tx.Exec(ctx, query, args, v)
+}
+
+var countingFixtureSeq atomic.Int64
+
+// newCountingDecisionsFixture builds a decisionsFixture backed by the shared
+// bellQueryCountingDriver so tests can assert exact or constant SQL query
+// counts for profile, limit=0, bell recompute, and topic expansion paths.
+// Each call gets a fresh isolated SQLite file so multiple fixtures may be
+// created inside the same subtest.
+func newCountingDecisionsFixture(t *testing.T) (*decisionsFixture, *entadapter.CompositeStore, *bellQueryCountingDriver) {
 	t.Helper()
-	base := enttest.NewClient(t)
-	counter := newCountingDialectDriver(base.Driver())
+	dbPath := filepath.Join(t.TempDir(), fmt.Sprintf("counting-%d.db", countingFixtureSeq.Add(1)))
+	base, err := entc.OpenSQLite(dbPath, entc.PoolConfig{MaxOpenConns: 1})
+	require.NoError(t, err)
+	require.NoError(t, entc.AutoMigrate(context.Background(), base))
+	counter := newBellQueryCountingDriver(base.Driver())
 	cs := entadapter.NewCompositeStore(ent.NewClient(ent.Driver(counter)))
 	srv, s := testServerOnMigratedStore(t, cs)
 	alice, bob, project := setupDemoPolicyOn(t, srv, s)

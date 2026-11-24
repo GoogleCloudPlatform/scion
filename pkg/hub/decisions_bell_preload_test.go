@@ -23,7 +23,6 @@ import (
 	"os"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,64 +40,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
-
-// bellQueryCountingDriver wraps a dialect.Driver and counts SQL Query/Exec
-// statements while enabled.
-type bellQueryCountingDriver struct {
-	dialect.Driver
-	active atomic.Bool
-	count  atomic.Int64
-}
-
-func (d *bellQueryCountingDriver) Reset(active bool) {
-	d.count.Store(0)
-	d.active.Store(active)
-}
-
-func (d *bellQueryCountingDriver) Count() int64 {
-	return d.count.Load()
-}
-
-func (d *bellQueryCountingDriver) Query(ctx context.Context, query string, args, v any) error {
-	if d.active.Load() {
-		d.count.Add(1)
-	}
-	return d.Driver.Query(ctx, query, args, v)
-}
-
-func (d *bellQueryCountingDriver) Exec(ctx context.Context, query string, args, v any) error {
-	if d.active.Load() {
-		d.count.Add(1)
-	}
-	return d.Driver.Exec(ctx, query, args, v)
-}
-
-func (d *bellQueryCountingDriver) Tx(ctx context.Context) (dialect.Tx, error) {
-	tx, err := d.Driver.Tx(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &bellQueryCountingTx{Tx: tx, parent: d}, nil
-}
-
-type bellQueryCountingTx struct {
-	dialect.Tx
-	parent *bellQueryCountingDriver
-}
-
-func (t *bellQueryCountingTx) Query(ctx context.Context, query string, args, v any) error {
-	if t.parent.active.Load() {
-		t.parent.count.Add(1)
-	}
-	return t.Tx.Query(ctx, query, args, v)
-}
-
-func (t *bellQueryCountingTx) Exec(ctx context.Context, query string, args, v any) error {
-	if t.parent.active.Load() {
-		t.parent.count.Add(1)
-	}
-	return t.Tx.Exec(ctx, query, args, v)
-}
 
 // bellPreloadSpyStore records store method invocations while active, and
 // forwards DB()/Dialect() from the underlying store so webChatStore attaches
