@@ -133,6 +133,103 @@ export interface ArtifactResponse {
    * woken, or remains suspended.
    */
   reviewDelivery?: ReviewDeliveryInfo;
+  /**
+   * On a GET of the artifact or one of its versions while
+   * hub.artifacts_review_requests is enabled (ptone/scion#9296): viewer-specific
+   * review request state. Omitted while the experiment is off.
+   */
+  reviewState?: ReviewStateInfo;
+}
+
+/** Viewer-specific review state on ArtifactResponse (pkg/artifacts/api.go). */
+export interface ReviewStateInfo {
+  requestedOfMe: ReviewRequestInfo | null;
+}
+
+/** A reviewer or requester principal in review-request responses. */
+export interface ReviewRequestPrincipal {
+  kind?: string;
+  ref: string;
+  displayName?: string;
+}
+
+/** One artifact review request (pkg/artifacts/api.go). */
+export interface ReviewRequestInfo {
+  id: string;
+  reviewer: ReviewRequestPrincipal;
+  requester: ReviewRequestPrincipal;
+  requestedSeq: number;
+  note?: string;
+  access: string;
+  state: string;
+  responseNote?: string;
+  resolvedSeq?: number;
+  createdAt: string;
+  remindedAt?: string;
+  resolvedAt?: string;
+}
+
+/** Per-reviewer outcome returned by POST /api/v1/artifacts/{id}/review-requests. */
+export type ReviewRequestOutcome = 'created' | 'reminded' | 'unchanged' | 'refused';
+
+/** Body of POST /api/v1/artifacts/{id}/review-requests. */
+export interface CreateReviewRequestsBody {
+  reviewers: string[];
+  note?: string;
+}
+
+/** One per-reviewer result inside CreateReviewRequestsResponse. */
+export interface ReviewRequestResult {
+  reviewer: string;
+  outcome: ReviewRequestOutcome;
+  code?: string;
+  access?: string;
+  request?: ReviewRequestInfo;
+  notified: boolean;
+  notifySkipped?: string;
+}
+
+/** Response of POST /api/v1/artifacts/{id}/review-requests. */
+export interface CreateReviewRequestsResponse {
+  requests: ReviewRequestResult[];
+}
+
+/** Body of POST /api/v1/artifacts/{id}/review-request/dismiss. */
+export interface DismissReviewRequestBody {
+  note?: string;
+}
+
+/** Response of POST /api/v1/artifacts/{id}/review-request/dismiss. */
+export interface DismissReviewRequestResponse {
+  request: ReviewRequestInfo;
+  authorNotified: boolean;
+}
+
+/** Maximum reviewers accepted in one POST /review-requests call. */
+export const MAX_REVIEW_REQUEST_REVIEWERS = 10;
+
+/** Maximum Unicode runes accepted in a review-request or dismiss note. */
+export const MAX_REVIEW_REQUEST_NOTE_RUNES = 1000;
+
+/** Counts Unicode code points (runes), matching Go's utf8.RuneCountInString. */
+export function countRunes(s: string): number {
+  return [...s].length;
+}
+
+/** Human-readable explanation for a per-reviewer refusal code. */
+export function reviewRequestRefusalText(code?: string): string {
+  switch (code) {
+    case 'reviewer_cannot_review':
+      return 'Cannot review this artifact';
+    case 'reviewer_unavailable':
+      return 'Reviewer unavailable';
+    case 'request_closed':
+      return 'Request already closed';
+    case 'agent_cannot_request_review':
+      return 'Only users can request reviews';
+    default:
+      return code ? `Refused (${code})` : 'Refused';
+  }
 }
 
 export type ReviewDeliveryStatus =
@@ -1257,6 +1354,8 @@ export function publishErrorMessage(err: unknown): string {
 export interface ArtifactListItem extends Artifact {
   /** The current version is a review awaiting the owner. */
   reviewPending: boolean;
+  /** The caller has an open review request on this artifact (when gate is on). */
+  reviewRequested?: boolean;
   /** Why the caller sees the artifact. */
   access?: ArtifactAccess;
   /** In a list narrowed to a project: homed elsewhere and shared with it. */
@@ -1658,6 +1757,43 @@ export async function deleteGrant(id: string, grantId: string): Promise<void> {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+}
+
+/** Requests review of an artifact from one or more user principals (ptone/scion#9306). */
+export async function createReviewRequests(
+  id: string,
+  body: CreateReviewRequestsBody
+): Promise<CreateReviewRequestsResponse> {
+  const payload: CreateReviewRequestsBody = { reviewers: body.reviewers };
+  if (body.note !== undefined && body.note !== '') {
+    payload.note = body.note;
+  }
+  const res = await okJSON<CreateReviewRequestsResponse>(
+    await apiFetch(`${artifactPath(id)}/review-requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  );
+  return { requests: res.requests ?? [] };
+}
+
+/** Dismisses the caller's open review request on an artifact (ptone/scion#9306). */
+export async function dismissReviewRequest(
+  id: string,
+  note?: string
+): Promise<DismissReviewRequestResponse> {
+  const payload: DismissReviewRequestBody = {};
+  if (note !== undefined && note !== '') {
+    payload.note = note;
+  }
+  return okJSON<DismissReviewRequestResponse>(
+    await apiFetch(`${artifactPath(id)}/review-request/dismiss`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  );
 }
 
 /**

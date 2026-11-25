@@ -244,6 +244,15 @@ export const ARTIFACTS_OPEN_REVIEW_CHECK_FLAG = 'hub.artifacts_open_review_check
 export const ARTIFACTS_REVIEW_DRAFTS_FLAG = 'hub.artifacts_review_drafts';
 
 /**
+ * Artifact review requests (ptone/scion#9296, ptone/scion#9306): enables the
+ * Request review dialog, reviewer banner and dismiss dialog on artifact detail,
+ * the "Review requested" badge, and the Requested of me list filter. Presentation
+ * only: the hub checks the experiment on every review-request route and list field.
+ * Default OFF.
+ */
+export const ARTIFACTS_REVIEW_REQUESTS_FLAG = 'hub.artifacts_review_requests';
+
+/**
  * Force user delete (ptone/scion#2143): the admin users page offers to
  * force-delete a user who has agents and shows a deletion in
  * progress. Presentation only: the hub checks the experiment on the force

@@ -27,6 +27,9 @@ import { render } from 'lit';
 import { PUSH_STORAGE_KEYS } from '../../client/push-preference.js';
 import type { Notification } from '../../shared/types.js';
 import {
+  ARTIFACT_REVIEW_DISMISSED_STATUS,
+  ARTIFACT_REVIEW_REQUEST_KIND,
+  ARTIFACT_REVIEW_REQUESTED_STATUS,
   ARTIFACT_REVIEW_SUBMITTED_STATUS,
   ARTIFACT_REVIEW_SUMMARY_KIND,
   notificationFromEvent,
@@ -248,5 +251,39 @@ describe('notification tray: review summary', () => {
     const typed = notificationFromEvent({ ...payload, excerpt: 7, resourceId: {} }, 'me');
     expect(typed?.excerpt).toBeUndefined();
     expect(typed?.resourceId).toBeUndefined();
+  });
+
+  it('maps ARTIFACT_REVIEW_DISMISSED to "Review request dismissed" with safe excerpt and artifact link', () => {
+    const n = summary({
+      id: 'notif-dismissed',
+      kind: ARTIFACT_REVIEW_REQUEST_KIND,
+      status: ARTIFACT_REVIEW_DISMISSED_STATUS,
+      message: 'Bob dismissed your review request on "Launch Plan"',
+      excerpt: 'Out of scope this week',
+    });
+
+    expect(ARTIFACT_REVIEW_REQUEST_KIND).toBe('artifact_review_request');
+    expect(ARTIFACT_REVIEW_DISMISSED_STATUS).toBe('ARTIFACT_REVIEW_DISMISSED');
+    expect(ARTIFACT_REVIEW_REQUESTED_STATUS).toBe('ARTIFACT_REVIEW_REQUESTED');
+
+    const host = renderRow(n);
+    expect(host.querySelector('.notif-title')?.textContent?.trim()).toBe(
+      'Review request dismissed'
+    );
+    expect(host.querySelector('.notif-message')?.textContent?.trim()).toBe(
+      'Bob dismissed your review request on "Launch Plan"'
+    );
+    expect(host.querySelector('.notif-excerpt')?.textContent).toBe('“Out of scope this week”');
+    expect(host.querySelector('a')?.getAttribute('href')).toBe(
+      `/projects/${PROJECT_ID}/artifacts/${ARTIFACT_ID}`
+    );
+
+    const tray: any = document.createElement('scion-notification-tray');
+    tray.dispatchBrowserNotification(n);
+    expect(popups).toHaveLength(1);
+    expect(popups[0].title).toBe('Review request dismissed');
+    expect(popups[0].options.body).toBe(
+      'Bob dismissed your review request on "Launch Plan"\n“Out of scope this week”'
+    );
   });
 });

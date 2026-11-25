@@ -59,6 +59,7 @@ import {
   ARTIFACT_REVIEW_EDITOR_FLAG,
   ARTIFACTS_OPEN_REVIEW_CHECK_FLAG,
   ARTIFACTS_REVIEW_DRAFTS_FLAG,
+  ARTIFACTS_REVIEW_REQUESTS_FLAG,
   isFeatureEnabled,
 } from '../../utils/feature-flags.js';
 import { formatInstant, formatRelative } from '../../utils/time.js';
@@ -73,8 +74,10 @@ import { showToast } from '../../utils/toast.js';
 import { copyToClipboard, copyWithToast, showCopyFailedToast } from '../../utils/clipboard.js';
 import {
   ARTIFACTS_FLAG,
+  countRunes,
   DraftConflictError,
   MAX_INLINE_TEXT_BYTES,
+  MAX_REVIEW_REQUEST_NOTE_RUNES,
   artifactArchiveUrl,
   artifactDownloadUrl,
   artifactFileUrl,
@@ -83,6 +86,7 @@ import {
   baseName,
   deleteReviewDraft,
   discardReasonText,
+  dismissReviewRequest,
   downloadTextFile,
   formatBytes,
   getReviewDraft,
@@ -114,6 +118,7 @@ import type {
   ReviewDeliveryInfo,
   ReviewDraft,
   ReviewOpenEntry,
+  ReviewRequestInfo,
   ViewResponse,
 } from '../../client/artifacts.js';
 import type { WakeOffer } from '../../client/wake-offer.js';
@@ -139,6 +144,7 @@ import '../shared/artifact-publish-dialog.js';
 import '../shared/artifact-move-dialog.js';
 import '../shared/artifact-transfer-dialog.js';
 import '../shared/artifact-share-dialog.js';
+import '../shared/artifact-request-review-dialog.js';
 import { capabilitiesFrom, showManageAccess } from '../shared/artifact-access-sections.js';
 import type { AccessCapabilities } from '../shared/artifact-access-sections.js';
 import '../shared/artifact-delete-dialog.js';
@@ -632,6 +638,13 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private accessOpen = false;
   /** The Delete artifact confirmation is open. */
   @state() private deleteOpen = false;
+  /** The Request review dialog is open. */
+  @state() private requestReviewOpen = false;
+  /** The Dismiss review request dialog state. */
+  @state() private dismissRequestOpen = false;
+  @state() private dismissRequestNote = '';
+  @state() private dismissRequestBusy = false;
+  @state() private dismissRequestError: string | null = null;
   /** The file currently open in the shared file viewer from the Files tab. */
   @state() private previewFile: ArtifactPreviewTarget | null = null;
   private previewOpenGen = 0;
@@ -869,6 +882,42 @@ export class ScionPageArtifactDetail extends LitElement {
       }
       .review-banner::part(base) {
         align-items: center;
+      }
+      .reviewer-request-banner {
+        margin-bottom: 0.75rem;
+      }
+      .reviewer-request-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+      }
+      .reviewer-request-text {
+        flex: 1;
+        min-width: 12rem;
+      }
+      .reviewer-request-note {
+        margin-top: 0.25rem;
+        font-size: 0.8125rem;
+        color: var(--scion-text-secondary);
+      }
+      .reviewer-request-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+      .dismiss-note-meta {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 0.35rem;
+        font-size: 0.75rem;
+        color: var(--scion-text-muted);
+      }
+      .dismiss-note-over {
+        color: var(--scion-status-danger);
+        font-weight: 500;
       }
       .review-toolbar {
         display: flex;
@@ -1922,6 +1971,63 @@ export class ScionPageArtifactDetail extends LitElement {
     return isFeatureEnabled(ARTIFACTS_REVIEW_DRAFTS_FLAG);
   }
 
+  /** Artifact review requests are on (experiment hub.artifacts_review_requests). */
+  private get reviewRequestsEnabled(): boolean {
+    return isFeatureEnabled(ARTIFACTS_REVIEW_REQUESTS_FLAG);
+  }
+
+  /** Open review request addressed to the signed-in viewer, when the gate is on. */
+  private get requestedOfMe(): ReviewRequestInfo | null {
+    if (!this.reviewRequestsEnabled) return null;
+    return this.data?.reviewState?.requestedOfMe ?? null;
+  }
+
+  /** Whether the viewer may open the Request review dialog on this artifact. */
+  private get canRequestReview(): boolean {
+    return (
+      this.reviewRequestsEnabled && this.canPublish && (this.data?.artifact.currentSeq ?? 0) > 0
+    );
+  }
+
+  private openDismissRequestDialog = (): void => {
+    this.dismissRequestNote = '';
+    this.dismissRequestError = null;
+    this.dismissRequestBusy = false;
+    this.dismissRequestOpen = true;
+  };
+
+  private closeDismissRequestDialog(): void {
+    if (this.dismissRequestBusy) return;
+    this.dismissRequestOpen = false;
+    this.dismissRequestError = null;
+  }
+
+  private async confirmDismissRequest(): Promise<void> {
+    if (!this.artifactId || this.dismissRequestBusy) return;
+    if (countRunes(this.dismissRequestNote) > MAX_REVIEW_REQUEST_NOTE_RUNES) return;
+    this.dismissRequestBusy = true;
+    this.dismissRequestError = null;
+    try {
+      await dismissReviewRequest(this.artifactId, this.dismissRequestNote.trim() || undefined);
+      this.dismissRequestOpen = false;
+      this.dismissRequestNote = '';
+      if (this.data) {
+        this.data = {
+          ...this.data,
+          reviewState: {
+            ...(this.data.reviewState ?? { requestedOfMe: null }),
+            requestedOfMe: null,
+          },
+        };
+      }
+    } catch (err) {
+      this.dismissRequestError =
+        err instanceof Error ? err.message : 'Could not dismiss review request';
+    } finally {
+      this.dismissRequestBusy = false;
+    }
+  }
+
   private disposeDraftController(): void {
     this.draftController?.dispose();
     this.draftController = null;
@@ -1945,6 +2051,10 @@ export class ScionPageArtifactDetail extends LitElement {
     this.draftDiscardConflict = false;
     this.staleDraft = null;
     this.staleReviewError = false;
+    this.requestReviewOpen = false;
+    this.dismissRequestOpen = false;
+    this.dismissRequestNote = '';
+    this.dismissRequestError = null;
   };
 
   private onLeaveGuard(): boolean {
@@ -2935,7 +3045,7 @@ export class ScionPageArtifactDetail extends LitElement {
           ? this.reviewGraphical
             ? this.renderGraphicalReview()
             : this.renderReview()
-          : html`${this.renderReviewNotice()}${this.renderReviewBanner()}${this.renderTabs()}`}
+          : html`${this.renderReviewNotice()}${this.renderReviewerRequestBanner()}${this.renderReviewBanner()}${this.renderTabs()}`}
       <scion-artifact-publish-dialog
         .artifactId=${this.artifactId}
         ?open=${this.publishOpen}
@@ -3031,7 +3141,17 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-transfer-dialog>`
         : nothing}
-      ${this.renderDraftDialogs()}
+      ${this.canRequestReview
+        ? html`<scion-artifact-request-review-dialog
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            ?open=${this.requestReviewOpen}
+            @artifact-request-review-closed=${(): void => {
+              this.requestReviewOpen = false;
+            }}
+          ></scion-artifact-request-review-dialog>`
+        : nothing}
+      ${this.renderDraftDialogs()} ${this.renderDismissRequestDialog()}
       <scion-chat-file-preview
         .target=${this.previewFile}
         .currentUserId=${this.pageData?.user?.id ?? ''}
@@ -3169,6 +3289,7 @@ export class ScionPageArtifactDetail extends LitElement {
       (!!v ||
         this.canEdit ||
         this.canReview ||
+        this.canRequestReview ||
         accessActions ||
         this.canTransfer ||
         this.canRetire);
@@ -3181,6 +3302,11 @@ export class ScionPageArtifactDetail extends LitElement {
         ${this.currentIsReview
           ? html`<sl-badge variant="warning" pill>
               <sl-icon name="chat-dots"></sl-icon>&nbsp;Review pending
+            </sl-badge>`
+          : nothing}
+        ${this.requestedOfMe
+          ? html`<sl-badge class="review-requested-badge" variant="primary" pill>
+              <sl-icon name="person-check"></sl-icon>&nbsp;Review requested
             </sl-badge>`
           : nothing}
         ${a.ownerDeleted ? ownerDeletedBadge(a.ownerKind) : nothing}
@@ -3267,6 +3393,19 @@ export class ScionPageArtifactDetail extends LitElement {
                         <sl-icon slot="prefix" name="chat-text"></sl-icon>
                         Review
                       </sl-button>`
+                  : nothing}
+                ${this.canRequestReview
+                  ? html`<sl-button
+                      size="small"
+                      class="request-review-btn"
+                      ?disabled=${this.refreshing}
+                      @click=${(): void => {
+                        this.requestReviewOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="person-check"></sl-icon>
+                      Request review
+                    </sl-button>`
                   : nothing}
                 ${this.manageAccess && showManageAccess(this.accessCaps)
                   ? html`<sl-button
@@ -3912,6 +4051,110 @@ export class ScionPageArtifactDetail extends LitElement {
       <sl-radio-button value="clean">Clean</sl-radio-button>
       <sl-radio-button value="accept">Accepted</sl-radio-button>
     </sl-radio-group>`;
+  }
+
+  /** Banner shown when the signed-in viewer has an open review request (ptone/scion#9306). */
+  private renderReviewerRequestBanner(): TemplateResult | typeof nothing {
+    const req = this.requestedOfMe;
+    if (!req) return nothing;
+    const requester =
+      req.requester.displayName || this.label(req.requester.kind || 'user', req.requester.ref);
+    return html`<sl-alert class="reviewer-request-banner" variant="primary" open>
+      <sl-icon slot="icon" name="person-check"></sl-icon>
+      <div class="reviewer-request-row">
+        <div class="reviewer-request-text">
+          <strong>${requester}</strong> asked you to review this (v${req.requestedSeq}).
+          ${req.note ? html`<div class="reviewer-request-note">“${req.note}”</div>` : nothing}
+        </div>
+        <div class="reviewer-request-actions">
+          ${this.canReview
+            ? html`<sl-button
+                size="small"
+                variant="primary"
+                class="banner-start-review-btn"
+                ?disabled=${this.refreshing || this.reviewLoadingDraft}
+                @click=${this.startReview}
+              >
+                Start review
+              </sl-button>`
+            : nothing}
+          <sl-button
+            size="small"
+            class="banner-dismiss-request-btn"
+            @click=${this.openDismissRequestDialog}
+          >
+            Dismiss…
+          </sl-button>
+        </div>
+      </div>
+    </sl-alert>`;
+  }
+
+  /** Dialog for dismissing the viewer's open review request with an optional note. */
+  private renderDismissRequestDialog(): TemplateResult | typeof nothing {
+    if (!this.dismissRequestOpen) return nothing;
+    const runes = countRunes(this.dismissRequestNote);
+    const tooLong = runes > MAX_REVIEW_REQUEST_NOTE_RUNES;
+    return html`<sl-dialog
+      class="dismiss-request-dialog"
+      label="Dismiss review request"
+      open
+      @sl-request-close=${(e: Event): void => {
+        if (e.target !== e.currentTarget) return;
+        if (this.dismissRequestBusy) e.preventDefault();
+        else this.closeDismissRequestDialog();
+      }}
+      @sl-after-hide=${(e: Event): void => {
+        if (e.target === e.currentTarget && this.dismissRequestOpen) {
+          this.closeDismissRequestDialog();
+        }
+      }}
+    >
+      ${this.dismissRequestError
+        ? html`<sl-alert variant="danger" open role="alert">
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${this.dismissRequestError}
+          </sl-alert>`
+        : nothing}
+      <sl-textarea
+        class="dismiss-request-note"
+        size="small"
+        rows="3"
+        label="Note (optional)"
+        placeholder="Add an optional note…"
+        .value=${this.dismissRequestNote}
+        ?disabled=${this.dismissRequestBusy}
+        @sl-input=${(e: Event): void => {
+          this.dismissRequestNote = (e.target as HTMLTextAreaElement).value;
+        }}
+      ></sl-textarea>
+      <div class="dismiss-note-meta">
+        <span>The author will see your note.</span>
+        <span class=${tooLong ? 'dismiss-note-over' : ''}>
+          ${runes} / ${MAX_REVIEW_REQUEST_NOTE_RUNES}
+        </span>
+      </div>
+      <sl-button
+        slot="footer"
+        size="small"
+        class="dismiss-request-cancel"
+        ?disabled=${this.dismissRequestBusy}
+        @click=${(): void => this.closeDismissRequestDialog()}
+      >
+        Cancel
+      </sl-button>
+      <sl-button
+        slot="footer"
+        size="small"
+        variant="primary"
+        class="dismiss-request-confirm"
+        ?disabled=${tooLong}
+        ?loading=${this.dismissRequestBusy}
+        @click=${(): void => void this.confirmDismissRequest()}
+      >
+        Dismiss
+      </sl-button>
+    </sl-dialog>`;
   }
 
   /** Says who reviewed and what, while the current version is a review. */
