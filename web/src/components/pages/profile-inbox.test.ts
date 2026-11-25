@@ -1937,7 +1937,10 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
         'application/json'
       );
 
-      // Resolve ack -> store refreshes and bell tray drops the notification.
+      // Resolve ack -> triggers a forced summary refresh (with no SSE hint) and bell tray drops the notification.
+      const summaryCallsBeforeAck = fetchMock.mock.calls.filter((c) =>
+        urlOf(c[0]).includes('/api/v1/users/me/inbox/summary')
+      ).length;
       dismissed = true;
       resolveAck!(
         new Response(JSON.stringify({ status: 'ok' }), {
@@ -1949,6 +1952,10 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
       await page.updateComplete;
       await tray.updateComplete;
 
+      const summaryCallsAfterAck = fetchMock.mock.calls.filter((c) =>
+        urlOf(c[0]).includes('/api/v1/users/me/inbox/summary')
+      ).length;
+      expect(summaryCallsAfterAck).toBeGreaterThan(summaryCallsBeforeAck);
       expect(ackedEvents).toEqual(['notif-99']);
       expect(tray.shadowRoot?.querySelector('.badge')).toBeNull();
       expect(showToast).toHaveBeenLastCalledWith('Dismissed review request', 'neutral');
@@ -2067,19 +2074,25 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     expect(page.shadowRoot?.querySelector('[data-review-row="notif-1"]')).toBeNull();
     expect(page.shadowRoot?.querySelector('[data-review-row="notif-2"]')).toBeNull();
 
-    // Row 1 fails with 500 -> rolls back row 1 with danger toast; row 2 succeeds and stays removed.
-    resolveAck1!(
-      new Response(JSON.stringify({ error: { message: 'Ack failed' } }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      })
-    );
-    await flush();
-    await page.updateComplete;
+    // Row 1 fails with 500 -> rolls back row 1 with danger toast and requests a non-forced refresh.
+    const refreshSpy = vi.spyOn(inboxSummaryStore, 'requestRefresh');
+    try {
+      resolveAck1!(
+        new Response(JSON.stringify({ error: { message: 'Ack failed' } }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await flush();
+      await page.updateComplete;
 
-    expect(showToast).toHaveBeenCalledWith('Ack failed', 'danger');
-    expect(page.shadowRoot?.querySelector('[data-review-row="notif-1"]')).not.toBeNull();
-    expect(page.shadowRoot?.querySelector('[data-review-row="notif-2"]')).toBeNull();
+      expect(showToast).toHaveBeenCalledWith('Ack failed', 'danger');
+      expect(refreshSpy).toHaveBeenCalledWith();
+      expect(page.shadowRoot?.querySelector('[data-review-row="notif-1"]')).not.toBeNull();
+      expect(page.shadowRoot?.querySelector('[data-review-row="notif-2"]')).toBeNull();
+    } finally {
+      refreshSpy.mockRestore();
+    }
 
     serverItems = [rev1];
     resolveAck2!(
@@ -2182,17 +2195,23 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     expect(dismissSignal?.aborted).toBe(false);
     expect(inboxSummaryStore.summary?.categories.reviews.count).toBe(0);
 
-    // Disconnect mid-flight -> aborts signal; settling with AbortError rolls back store without toast.
-    page.remove();
-    expect(dismissSignal?.aborted).toBe(true);
+    // Disconnect mid-flight -> aborts signal; settling with AbortError rolls back store, requests a non-forced refresh, and skips toast.
+    const refreshSpy = vi.spyOn(inboxSummaryStore, 'requestRefresh');
+    try {
+      page.remove();
+      expect(dismissSignal?.aborted).toBe(true);
 
-    const abortErr = new Error('aborted');
-    abortErr.name = 'AbortError';
-    rejectAck!(abortErr);
-    await flush();
+      const abortErr = new Error('aborted');
+      abortErr.name = 'AbortError';
+      rejectAck!(abortErr);
+      await flush();
 
-    expect(inboxSummaryStore.summary?.categories.reviews.count).toBe(1);
-    expect(showToast).not.toHaveBeenCalled();
+      expect(inboxSummaryStore.summary?.categories.reviews.count).toBe(1);
+      expect(refreshSpy).toHaveBeenCalledWith();
+      expect(showToast).not.toHaveBeenCalled();
+    } finally {
+      refreshSpy.mockRestore();
+    }
   });
 
   it('shows overflow hint in Reviews group when breakdown count exceeds previews and hides Reviews card when disabled', async () => {
@@ -2268,7 +2287,9 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     expect(
       reviewsCard?.querySelector('[data-reviews-group-count="to_address"]')?.textContent?.trim()
     ).toBe('2');
-    expect(reviewsCard?.querySelector('[data-reviews-group-overflow="to_address"]')).not.toBeNull();
+    expect(
+      reviewsCard?.querySelector('[data-reviews-group-overflow="to_address"]')?.textContent?.trim()
+    ).toBe('2 more · View all');
     expect(
       reviewsCard?.querySelector('[data-reviews-group="requested"] [data-review-row="notif-only"]')
     ).not.toBeNull();

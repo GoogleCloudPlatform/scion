@@ -302,4 +302,55 @@ describe('notification tray: Inbox link and empty state', () => {
     await tray.updateComplete;
     expect(tray.shadowRoot!.querySelector('.bell-btn .badge')).toBeNull();
   });
+
+  it('keeps an acked notification absent when an in-flight tray fetch resolves with the stale row', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    notificationsResponse = [makeNotification('n-1'), makeNotification('n-2')];
+    const tray = await mountTray(false);
+    expect(tray.shadowRoot!.querySelector('.bell-btn .badge')?.textContent?.trim()).toBe('2');
+
+    // Start an in-flight tray fetch whose response still includes n-1.
+    let resolveStaleFetch: ((res: Response) => void) | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/api/v1/notifications')) {
+        return new Promise<Response>((resolve) => {
+          resolveStaleFetch = resolve;
+        });
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(summaryResponse), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    });
+
+    // Opening the tray starts a fresh notifications fetch.
+    tray.shadowRoot!.querySelector<HTMLButtonElement>('.bell-btn')!.click();
+    await tray.updateComplete;
+    expect(resolveStaleFetch).not.toBeNull();
+
+    // While the fetch is in flight, Inbox acks n-1.
+    window.dispatchEvent(new CustomEvent(NOTIFICATION_ACKED_EVENT, { detail: { id: 'n-1' } }));
+    await tray.updateComplete;
+    expect(tray.shadowRoot!.querySelector('.bell-btn .badge')?.textContent?.trim()).toBe('1');
+
+    // Stale fetch resolves still containing n-1 -> n-1 must stay absent.
+    resolveStaleFetch!(
+      new Response(JSON.stringify([makeNotification('n-1'), makeNotification('n-2')]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    await flush();
+    await tray.updateComplete;
+
+    expect(tray.shadowRoot!.querySelector('.bell-btn .badge')?.textContent?.trim()).toBe('1');
+    const items = Array.from(tray.shadowRoot!.querySelectorAll('.notif-item'));
+    expect(items).toHaveLength(1);
+    expect(items[0]?.textContent).toContain('Agent finished n-2');
+    expect(items[0]?.textContent).not.toContain('Agent finished n-1');
+  });
 });

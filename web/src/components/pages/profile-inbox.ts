@@ -935,6 +935,7 @@ export class ScionPageProfileInbox extends LitElement {
       });
       if (!res.ok) {
         rollback?.();
+        inboxSummaryStore.requestRefresh();
         let msg = `Could not dismiss review request (${res.status})`;
         try {
           const data = (await res.json()) as { error?: { message?: string } };
@@ -954,6 +955,7 @@ export class ScionPageProfileInbox extends LitElement {
       }
     } catch (err) {
       rollback?.();
+      inboxSummaryStore.requestRefresh();
       if (!isAbortError(err) && this.isConnected) {
         showToast('Could not dismiss review request', 'danger');
       }
@@ -1400,22 +1402,10 @@ export class ScionPageProfileInbox extends LitElement {
         return html`
           <div class="review-groups" data-reviews-groups>
             ${showToAddress
-              ? this.renderReviewGroup(
-                  'to_address',
-                  'To address',
-                  toAddressCount,
-                  toAddressItems,
-                  'View all to see items to address'
-                )
+              ? this.renderReviewGroup('to_address', 'To address', toAddressCount, toAddressItems)
               : nothing}
             ${showRequested
-              ? this.renderReviewGroup(
-                  'requested',
-                  'Requested',
-                  requestedCount,
-                  requestedItems,
-                  'View all to see review requests'
-                )
+              ? this.renderReviewGroup('requested', 'Requested', requestedCount, requestedItems)
               : nothing}
           </div>
         `;
@@ -1427,8 +1417,7 @@ export class ScionPageProfileInbox extends LitElement {
     kind: 'to_address' | 'requested',
     heading: string,
     count: number,
-    items: InboxReviewPreview[],
-    overflowHint: string
+    items: InboxReviewPreview[]
   ): TemplateResult {
     return html`
       <div class="review-group" data-reviews-group=${kind}>
@@ -1442,7 +1431,9 @@ export class ScionPageProfileInbox extends LitElement {
                 ${items.map((item) => this.renderReviewRow(item))}
               </ul>
             `
-          : html`<p class="card-empty" data-reviews-group-overflow=${kind}>${overflowHint}</p>`}
+          : html`<p class="card-empty" data-reviews-group-overflow=${kind}>
+              ${count} more · View all
+            </p>`}
       </div>
     `;
   }
