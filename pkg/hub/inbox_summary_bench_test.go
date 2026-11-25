@@ -18,9 +18,12 @@ package hub
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -30,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -39,17 +43,48 @@ import (
 // latency on a workstation SQLite hub with 50 member projects and all five
 // categories populated (design §4.5 target: p95 < 150 ms on SQLite).
 func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
-	srv, s := testServer(b)
-	artStore, _ := enableArtifactsForTest(b, srv)
-	setExperimentOverrides(b, srv, map[string]bool{
-		experiments.InboxDashboard: true,
-		experiments.Decisions:      true,
-		experiments.Artifacts:      true,
-	})
-	wcs := srv.webChatStore
-	require.NotNil(b, wcs)
-
 	ctx := context.Background()
+	s, err := newTestStore(b, ":memory:")
+	require.NoError(b, err)
+	b.Cleanup(func() { _ = s.Close() })
+	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
+
+	srv, err := New(testServerConfig(), s)
+	require.NoError(b, err)
+	b.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	srv.SetHubID("bench-hub-id")
+
+	// Enable web.inbox_dashboard, web.decisions, and hub.artifacts.
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		if e.Name == experiments.InboxDashboard || e.Name == experiments.Decisions || e.Name == experiments.Artifacts {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(b, err)
+	srv.experiments = reg
+
+	// Configure native WebChatStore on the same SQLite DB.
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(b, ok, "store does not expose DB()")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
+	require.NoError(b, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	// Configure artifacts store and local storage.
+	artDB, err := sql.Open("sqlite", "file:"+filepath.Join(b.TempDir(), "artifacts.db")+"?_pragma=busy_timeout(5000)")
+	require.NoError(b, err)
+	b.Cleanup(func() { _ = artDB.Close() })
+	artStore := artifacts.NewStore(artDB, "sqlite")
+	require.NoError(b, artStore.Init(ctx))
+	srv.SetArtifactStore(artStore)
+
+	blobs, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "hub", LocalPath: b.TempDir()})
+	require.NoError(b, err)
+	srv.SetStorage(blobs)
+
 	now := time.Now().UTC().Truncate(time.Second)
 
 	me := &store.User{
@@ -71,6 +106,9 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 	require.NoError(b, s.CreateUser(ctx, me))
 	require.NoError(b, s.CreateUser(ctx, peer))
 
+	memberRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(b, err)
+
 	const numProjects = 50
 	projects := make([]*store.Project, numProjects)
 	for i := 0; i < numProjects; i++ {
@@ -83,15 +121,15 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 			Updated: now.Add(-time.Duration(numProjects-i) * time.Minute),
 		}
 		require.NoError(b, s.CreateProject(ctx, p))
-		require.NoError(b, s.CreateRoleBinding(ctx, &store.RoleBinding{
-			ID:            api.NewUUID(),
-			PrincipalType: store.PrincipalTypeUser,
-			PrincipalID:   me.ID,
-			RoleID:        store.ProjectRoleMember,
-			ScopeType:     store.ScopeTypeProject,
-			ScopeID:       p.ID,
-			Created:       now,
-		}))
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: memberRole.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      me.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          p.ID,
+			CreatedBy:        "bench",
+		})
+		require.NoError(b, err)
 		projects[i] = p
 
 		// Create a general topic in every project so chat unread walks all 50 projects.
@@ -142,7 +180,7 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 			}
 			require.NoError(b, s.CreateAgent(ctx, ag))
 
-			decs, err := messages.NormalizeDecisions("decisions", []messages.DecisionInput{{
+			decs, nErr := messages.NormalizeDecisions("decisions", []messages.DecisionInput{{
 				ID:       fmt.Sprintf("D%d", i+1),
 				Question: fmt.Sprintf("Proceed with step %d?", i+1),
 				Choices: []messages.ChoiceInput{
@@ -150,7 +188,7 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 					{ID: "no", Label: "No"},
 				},
 			}})
-			require.NoError(b, err)
+			require.NoError(b, nErr)
 			_, err = s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 				Message: &store.Message{
 					ID:        api.NewUUID(),
@@ -172,7 +210,7 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 
 		// Populate pending user-scope secrets (approvals) in 3 projects.
 		if i < 3 {
-			_, err := s.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
+			_, err = s.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
 				ID:          api.NewUUID(),
 				Key:         fmt.Sprintf("BENCH_SECRET_%d", i),
 				SecretType:  store.SecretTypeEnvironment,
@@ -191,7 +229,7 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 			require.NoError(b, err)
 		}
 
-		// Populate artifact reviews (toAddress + requested) in 4 projects.
+		// Populate artifact reviews (2 toAddress + 2 requested) in 4 projects.
 		if i < 4 {
 			artID := uuid.NewString()
 			ownerRef := me.ID
@@ -240,14 +278,13 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 	// Seed 1 unread user DM.
 	dmKey, err := messages.DMConversationKey("user", me.ID, "user", peer.ID)
 	require.NoError(b, err)
-	dmConvID := api.NewUUID()
-	require.NoError(b, s.CreateConversation(ctx, &store.Conversation{
-		ID:        dmConvID,
-		Channel:   "native",
-		ThreadKey: dmKey,
-		Kind:      "direct",
-		CreatedAt: now,
-	}))
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Surface:     "native",
+		ExternalRef: dmKey,
+		Kind:        "direct",
+		DriftState:  "active",
+	})
+	require.NoError(b, err)
 	dmMsgID := api.NewUUID()
 	require.NoError(b, wcs.UpsertDM(ctx, WebChatDM{
 		ConversationKey: dmKey,
@@ -261,7 +298,7 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 		ID:             dmMsgID,
 		ProjectID:      projects[0].ID,
 		ThreadID:       dmKey,
-		ConversationID: dmConvID,
+		ConversationID: dmConv.ID,
 		Channel:        "web",
 		Sender:         "user:" + peer.ID,
 		SenderID:       peer.ID,
@@ -272,21 +309,30 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 		CreatedAt:      now,
 	}))
 
-	authUser := NewAuthenticatedUser(me.ID, me.Email, me.DisplayName, me.Role, string(ClientTypeWeb))
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		me.ID, me.Email, me.DisplayName, me.Role, ClientTypeWeb,
+	)
+	require.NoError(b, err)
 	handler := srv.Handler()
 
-	// Sanity-check one warm-up request before timing.
+	// Sanity-check one warm-up request and verify all five categories are ok and populated.
 	warmReq := httptest.NewRequest(http.MethodGet, userMeInboxSummaryPath, nil)
-	warmReq = warmReq.WithContext(contextWithIdentity(warmReq.Context(), authUser))
+	warmReq.Header.Set("Authorization", "Bearer "+token)
 	warmRec := httptest.NewRecorder()
 	handler.ServeHTTP(warmRec, warmReq)
 	require.Equal(b, http.StatusOK, warmRec.Code, warmRec.Body.String())
+	var warmResp InboxSummaryResponse
+	require.NoError(b, json.Unmarshal(warmRec.Body.Bytes(), &warmResp))
+	for _, key := range []string{InboxCategoryDecisions, InboxCategoryWaiting, InboxCategoryApprovals, InboxCategoryReviews, InboxCategoryChat} {
+		require.Equal(b, InboxStateOK, warmResp.Categories[key].State, "category %s must be ok", key)
+		require.Greater(b, warmResp.Categories[key].Count, 0, "category %s must be populated", key)
+	}
 
 	durations := make([]time.Duration, 0, b.N)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		req := httptest.NewRequest(http.MethodGet, userMeInboxSummaryPath, nil)
-		req = req.WithContext(contextWithIdentity(req.Context(), authUser))
+		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		start := time.Now()
 		handler.ServeHTTP(rec, req)

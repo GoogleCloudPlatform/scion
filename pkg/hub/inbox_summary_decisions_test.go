@@ -526,9 +526,62 @@ func TestUserMeInboxSummary_DecisionsCappedMatchesTruncatedProjects(t *testing.T
 	}
 	require.NoError(t, f.s.CreateProject(ctx, projC))
 	bindProjectMember(t, f.s, projC.ID, f.member)
+	topicC := api.NewUUID()
+	require.NoError(t, f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:             topicC,
+		ProjectID:      projC.ID,
+		Name:           "general",
+		IsGeneral:      true,
+		CreatedBy:      f.member,
+		CreatedAt:      time.Now().UTC(),
+		LastActivityAt: time.Now().UTC(),
+	}))
+	agentC := &store.Agent{
+		ID:          api.NewUUID(),
+		Slug:        "inbox-agent-c",
+		Name:        "Inbox Agent C",
+		ProjectID:   projC.ID,
+		OwnerID:     f.member,
+		Ancestry:    []string{f.member},
+		MessageMode: store.MessageModeProject,
+		Phase:       "running",
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, agentC))
+
+	for _, ag := range []*store.Agent{f.agentA, f.agentB} {
+		ag.OwnerID = f.member
+		ag.Ancestry = []string{f.member}
+		ag.MessageMode = store.MessageModeProject
+		require.NoError(t, f.s.UpdateAgent(ctx, ag))
+	}
 
 	memberUser, err := f.s.GetUser(ctx, f.member)
 	require.NoError(t, err)
+
+	// Seed one settled (withdrawn) decision in each of the 3 projects so
+	// ProjectsWithDecisions returns all 3 projects while
+	// filterProjectsWithUnsettledDecisions leaves zero open projects.
+	seedSettled := func(projID, chatKey string, ag *store.Agent, key string) {
+		decs, nErr := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+key+`","question":"Settled?","choices":["yes","no"]}]`))
+		require.NoError(t, nErr)
+		res, cErr := f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: api.NewUUID(), ProjectID: projID, Sender: "agent:" + ag.Slug, SenderID: ag.ID,
+				Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+			},
+			Intro: "Settled", AskerAgentID: ag.ID, AskerAgentName: ag.Slug, Decisions: decs,
+		})
+		require.NoError(t, cErr)
+		_, wErr := f.s.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+			AskerAgentID: ag.ID,
+			Keys:         []string{res.Decisions[0].Key},
+			Reason:       "no longer needed",
+		})
+		require.NoError(t, wErr)
+	}
+	seedSettled(f.projA, f.topicA, f.agentA, "S1")
+	seedSettled(f.projB, f.topicB, f.agentB, "S2")
+	seedSettled(projC.ID, topicC, agentC, "S3")
 
 	// 1. Cap at 2 with 3 readable member projects and ZERO unsettled decisions.
 	//    filterProjectsWithUnsettledDecisions returns empty; capped must STILL be true.
@@ -550,26 +603,35 @@ func TestUserMeInboxSummary_DecisionsCappedMatchesTruncatedProjects(t *testing.T
 	assert.False(t, uncappedDec.Capped)
 	assert.False(t, uncappedResp.TotalCapped)
 
-	// 3. Seed an open decision in f.projA and cap back at 2 -> capped must be true.
-	f.agentA.OwnerID = f.member
-	f.agentA.Ancestry = []string{f.member}
-	f.agentA.MessageMode = store.MessageModeProject
-	require.NoError(t, f.s.UpdateAgent(ctx, f.agentA))
-	decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"C1","question":"Cap check?","choices":["yes","no"]}]`))
-	require.NoError(t, err)
-	_, err = f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
-		Message: &store.Message{
-			ID: api.NewUUID(), ProjectID: f.projA, Sender: "agent:" + f.agentA.Slug, SenderID: f.agentA.ID,
-			Recipient: "chat", ThreadID: f.topicA, Channel: "web", CreatedAt: time.Now().UTC(),
-		},
-		Intro: "Cap check", AskerAgentID: f.agentA.ID, AskerAgentName: f.agentA.Slug, Decisions: decs,
-	})
-	require.NoError(t, err)
+	// 3. Seed an open decision in every project and cap back at 2 -> capped must be true
+	//    on the non-empty open-projects path too.
+	for idx, target := range []struct {
+		projID  string
+		chatKey string
+		ag      *store.Agent
+		key     string
+	}{
+		{f.projA, f.topicA, f.agentA, "O1"},
+		{f.projB, f.topicB, f.agentB, "O2"},
+		{projC.ID, topicC, agentC, "O3"},
+	} {
+		decs, nErr := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+target.key+`","question":"Cap check?","choices":["yes","no"]}]`))
+		require.NoError(t, nErr)
+		_, cErr := f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: api.NewUUID(), ProjectID: target.projID, Sender: "agent:" + target.ag.Slug, SenderID: target.ag.ID,
+				Recipient: "chat", ThreadID: target.chatKey, Channel: "web", CreatedAt: time.Now().UTC().Add(time.Duration(idx) * time.Second),
+			},
+			Intro: "Cap check", AskerAgentID: target.ag.ID, AskerAgentName: target.ag.Slug, Decisions: decs,
+		})
+		require.NoError(t, cErr)
+	}
 
 	f.srv.maxProfileDecisionProjectsForTest = 2
 	openResp := decodeInboxSummary(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, userMeInboxSummaryPath, nil))
 	openDec := openResp.Categories[InboxCategoryDecisions]
 	assert.Equal(t, InboxStateOK, openDec.State)
+	assert.Equal(t, 2, openDec.Count)
 	assert.True(t, openDec.Capped, "capped must be true when readable projects exceed cap with open decisions")
 	assert.True(t, openResp.TotalCapped)
 }
@@ -581,9 +643,11 @@ func TestInboxDecisionPromptHref_UsesSharedChatPathHelpers(t *testing.T) {
 	msgID := "msg:1/2"
 
 	set := &decisionScopeSet{
-		conversationAvailable: map[string]bool{
-			dmKey:     true,
-			threadKey: true,
+		projectReadableScope: &projectReadableScope{
+			conversationAvailable: map[string]bool{
+				dmKey:     true,
+				threadKey: true,
+			},
 		},
 	}
 
