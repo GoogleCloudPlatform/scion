@@ -581,23 +581,32 @@ func TestGitHubTriggerCommandMatrix_E2E(t *testing.T) {
 		"cmd-validate", "validate", "")
 	assert.Equal(t, store.TriggerSubjectModeNew, trValidate.Subject.Mode)
 
-	// 3. /fix: on=pull_request, mode=reuse, ack_comment=yes on dispatch / none on reuse, branch=head_ref
+	// 3. /fix: on=pull_request, mode=reuse, ack_comment=yes on dispatch / none on reuse, branch=head_ref.
+	// The github.command preset cannot express subject.mode=reuse today, so the test sets it on the create request.
 	trFix := applyPreset(githubtrigger.PresetCommand,
 		map[string]any{"command": "fix", "on": "pull_request"},
 		"cmd-fix", "fix", store.TriggerSubjectModeReuse)
 	assert.Equal(t, store.TriggerSubjectModeReuse, trFix.Subject.Mode)
 
-	// 4. /plan: on=any (issue or PR), mode=reuse, ack_comment=yes, branch=none
+	// 4. /plan: on=any (issue or PR), mode=reuse, ack_comment=yes, branch=none.
+	// The github.command preset cannot express subject.mode=reuse today, so the test sets it on the create request.
 	trPlan := applyPreset(githubtrigger.PresetCommand,
 		map[string]any{"command": "plan", "on": "any", "include_body": true},
 		"cmd-plan", "plan", store.TriggerSubjectModeReuse)
 	assert.Equal(t, store.TriggerSubjectModeReuse, trPlan.Subject.Mode)
 
-	// 5. /implement: on=any, mode=new, ack_comment=yes, branch=none (include_forks=true to verify fork PR dispatches without branch)
+	// 5. /implement: on=any, mode=new, ack_comment=yes, branch=none (include_forks=true; on=any never sets branch).
 	trImplement := applyPreset(githubtrigger.PresetCommand,
 		map[string]any{"command": "implement", "on": "any", "include_body": true, "include_forks": true},
 		"cmd-implement", "implement", "")
 	assert.Equal(t, store.TriggerSubjectModeNew, trImplement.Subject.Mode)
+
+	// 5b. PR-scoped fork-enabled command rule (on=pull_request, include_forks=true) to exercise
+	// non-vacuous branch omission and `gh pr checkout` task guidance on fork PRs.
+	trForkReview := applyPreset(githubtrigger.PresetCommand,
+		map[string]any{"command": "review-fork", "on": "pull_request", "include_forks": true},
+		"cmd-review-fork", "fork-review", "")
+	assert.Equal(t, store.TriggerSubjectModeNew, trForkReview.Subject.Mode)
 
 	// 6. Preset PR-updated rule (§7.2) to exercise synchronize coalescing within the same project.
 	trPRUpdated := applyPreset(githubtrigger.PresetPRUpdated,
@@ -646,6 +655,9 @@ func TestGitHubTriggerCommandMatrix_E2E(t *testing.T) {
 		handled := 0
 		for {
 			now := clock()
+			// handleGitHubWebhook enqueues durable_queue_items using wall time for
+			// next_attempt_at, so snap simNow past wall time when needed to claim
+			// newly enqueued deliveries.
 			if wall := time.Now().UTC(); wall.After(now) {
 				clockMu.Lock()
 				simNow = wall.Add(time.Second).Truncate(time.Second)
@@ -914,8 +926,9 @@ func TestGitHubTriggerCommandMatrix_E2E(t *testing.T) {
 	assert.Empty(t, firesNone.Items, "NONE-association commenter must record no fires under presets")
 
 	// -------------------------------------------------------------------------
-	// 7. Fork PR -> fork-guarded /review does not fire; fork-enabled /implement
-	//    dispatches with no branch passed
+	// 7. Fork PR -> fork-guarded /review does not fire; PR-scoped fork-enabled
+	//    /review-fork dispatches with no branch and `gh pr checkout 55` guidance
+	//    (and /implement on=any also dispatches with no branch)
 	// -------------------------------------------------------------------------
 	evForkReview := postAndDrain(t, "issue_comment", syntheticIssueCommentPayload(
 		t, instID, 55, true, 1010, "alice", "User", "OWNER", "@scion-bot /review", eventTS,
@@ -931,12 +944,27 @@ func TestGitHubTriggerCommandMatrix_E2E(t *testing.T) {
 	calls = dispatchCalls()
 	require.Len(t, calls, 7, "fork-enabled /implement must dispatch on fork PR")
 	assert.Equal(t, "implement", calls[6].Config.Template)
-	assert.Empty(t, calls[6].Config.Branch, "fork PR dispatch must pass no branch")
+	assert.Empty(t, calls[6].Config.Branch, "/implement (on=any) must pass no branch")
 	firesForkImpl, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evForkImpl}, store.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, firesForkImpl.Items, 1)
 	assert.Equal(t, trImplement.ID, firesForkImpl.Items[0].TriggerID)
 	assert.Equal(t, store.TriggerFireStatusFired, firesForkImpl.Items[0].Status)
+
+	advanceClock(2 * time.Second)
+	evForkPRScoped := postAndDrain(t, "issue_comment", syntheticIssueCommentPayload(
+		t, instID, 55, true, 1014, "alice", "User", "OWNER", "@scion-bot /review-fork", eventTS,
+	))
+	calls = dispatchCalls()
+	require.Len(t, calls, 8, "PR-scoped fork-enabled /review-fork must dispatch on fork PR")
+	assert.Equal(t, "fork-review", calls[7].Config.Template)
+	assert.Empty(t, calls[7].Config.Branch, "PR-scoped fork-enabled rule must omit branch on fork PR")
+	assert.Contains(t, calls[7].Config.Task, "gh pr checkout 55", "PR-scoped fork-enabled rule task must instruct gh pr checkout 55")
+	firesForkPRScoped, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evForkPRScoped}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, firesForkPRScoped.Items, 1)
+	assert.Equal(t, trForkReview.ID, firesForkPRScoped.Items[0].TriggerID)
+	assert.Equal(t, store.TriggerFireStatusFired, firesForkPRScoped.Items[0].Status)
 
 	// -------------------------------------------------------------------------
 	// 8. Carried §8.3 item A: unmatched-command reply when CEL did not match
@@ -947,7 +975,7 @@ func TestGitHubTriggerCommandMatrix_E2E(t *testing.T) {
 	evCELNoMatch := postAndDrain(t, "issue_comment", syntheticIssueCommentPayload(
 		t, instID, 103, false, 1012, "alice", "User", "OWNER", "@scion-bot /review", eventTS,
 	))
-	assert.Len(t, dispatchCalls(), 7, "CEL-unmatched /review on an issue must not dispatch")
+	assert.Len(t, dispatchCalls(), 8, "CEL-unmatched /review on an issue must not dispatch")
 	firesCELNoMatch, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evCELNoMatch}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, firesCELNoMatch.Items)
@@ -964,7 +992,7 @@ func TestGitHubTriggerCommandMatrix_E2E(t *testing.T) {
 	evSkippedOnly := postAndDrain(t, "issue_comment", syntheticIssueCommentPayload(
 		t, instID, 77, true, 1013, "alice", "User", "OWNER", "@scion-bot /review", eventTS,
 	))
-	assert.Len(t, dispatchCalls(), 7, "skipped /review must not dispatch")
+	assert.Len(t, dispatchCalls(), 8, "skipped /review must not dispatch")
 	firesSkippedOnly, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evSkippedOnly}, store.ListOptions{})
 	require.NoError(t, err)
 	require.NotEmpty(t, firesSkippedOnly.Items, "enrichment failure on PR #77 must record a skipped fire")
