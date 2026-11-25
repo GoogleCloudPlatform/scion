@@ -336,7 +336,7 @@ describe('answerDecision', () => {
     expect(JSON.parse(init?.body as string)).toEqual({ choice_id: 'y', idempotency_key: 'key-1' });
   });
 
-  it('includes surface when surface is decisions_page and omits it on native', async () => {
+  it('includes surface when surface is decisions_page or inbox and omits it on native', async () => {
     apiFetch.mockResolvedValue(res(200, { decision: decided(), responseMessageId: 'resp' }));
     await answerDecision('r1', 'y', 'key-page', 'decisions_page');
     expect(JSON.parse(apiFetch.mock.calls[0]![1]?.body as string)).toEqual({
@@ -345,8 +345,15 @@ describe('answerDecision', () => {
       surface: 'decisions_page',
     });
 
-    await answerDecision('r1', 'y', 'key-native', 'native');
+    await answerDecision('r1', 'y', 'key-inbox', 'inbox');
     expect(JSON.parse(apiFetch.mock.calls[1]![1]?.body as string)).toEqual({
+      choice_id: 'y',
+      idempotency_key: 'key-inbox',
+      surface: 'inbox',
+    });
+
+    await answerDecision('r1', 'y', 'key-native', 'native');
+    expect(JSON.parse(apiFetch.mock.calls[2]![1]?.body as string)).toEqual({
       choice_id: 'y',
       idempotency_key: 'key-native',
     });

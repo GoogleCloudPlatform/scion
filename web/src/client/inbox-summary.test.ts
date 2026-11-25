@@ -399,4 +399,102 @@ describe('InboxSummaryStore', () => {
     await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it('optimistically removes a decision and refetches', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const decisionPreview = {
+      id: 'msg-1',
+      projectId: 'p1',
+      projectName: 'Proj',
+      createdAt: '2026-11-23T17:00:00Z',
+      href: '/chat/space/p1/thread/t1#msg-msg-1',
+      promptMessageId: 'msg-1',
+      conversationLabel: '#deploy',
+      askerAgentName: 'deploy-bot',
+      question: 'Ship to prod?',
+      decisionCount: 1,
+      answerMode: 'single',
+      canAnswer: true,
+      inline: {
+        decisionRowId: 'row-1',
+        choices: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+        allowsOther: false,
+      },
+    };
+    const withDecision = makeSummary(0);
+    withDecision.total = 1;
+    withDecision.categories.decisions = {
+      state: 'ok',
+      count: 1,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/profile/decisions?tab=pending',
+      previews: [decisionPreview],
+    };
+    const withoutDecision = makeSummary(0);
+    withoutDecision.categories.decisions = {
+      state: 'ok',
+      count: 0,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/profile/decisions?tab=pending',
+      previews: [],
+    };
+
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(withDecision), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(withoutDecision), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+    const unmount = store.mountPage('user-1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(store.total).toBe(1);
+    expect(store.summary?.categories.decisions.previews).toHaveLength(1);
+
+    const nextCount = store.optimisticRemoveDecision('msg-1');
+    expect(nextCount).toBe(0);
+    expect(store.total).toBe(0);
+    expect(store.summary?.categories.decisions.count).toBe(0);
+    expect(store.summary?.categories.decisions.previews).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it('refetches on chat-message-received and chat-read-state-updated events', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(makeSummary(1)), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    store.ensureStarted('user-1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    stateManager.dispatchEvent(new CustomEvent('chat-read-state-updated', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });

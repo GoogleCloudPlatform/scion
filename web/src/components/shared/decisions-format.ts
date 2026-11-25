@@ -344,6 +344,8 @@ export function surfaceDisplay(surface: string): { icon: string; label: string }
   switch (surface) {
     case 'decisions_page':
       return { icon: 'window', label: 'Decisions page' };
+    case 'inbox':
+      return { icon: 'inbox', label: 'Inbox' };
     case 'native':
     case 'web':
       return { icon: 'chat-dots', label: 'Chat' };
