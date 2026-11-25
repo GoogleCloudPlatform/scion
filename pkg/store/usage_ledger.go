@@ -265,6 +265,43 @@ type RunAttributionConfig struct {
 	HubID string
 }
 
+// UsageMeterHealthUpdate describes a meter_health update applied atomically
+// inside IngestUsageBatch (for event batches and/or empty heartbeats).
+type UsageMeterHealthUpdate struct {
+	AgentID              string
+	RunID                string
+	ProducerEpoch        string
+	LastReceiptAt        time.Time
+	ProducerSeq          int64
+	LastContiguousSeq    *int64
+	ReceivedSeqs         []int64
+	MissingRanges        []SeqRange
+	LastSourceActivityAt *time.Time
+	SupportedSignals     []string
+	SchemaDriftDetected  bool
+	FinalState           string
+}
+
+// UsageIngestBatchInput holds validated, attribution-stamped usage events and
+// an optional meter_health update to persist atomically in one transaction.
+type UsageIngestBatchInput struct {
+	// AgentID is the authenticated agent's ID (used for the Postgres advisory
+	// lock hashtext('usage_rollup:' || agent_id)).
+	AgentID string
+	// Events are validated, attribution-stamped usage events ready for
+	// idempotent insert into usage_events.
+	Events []*UsageEvent
+	// MeterHealth, when non-nil, is applied in the same transaction.
+	MeterHealth *UsageMeterHealthUpdate
+}
+
+// UsageIngestBatchResult reports the counts of newly inserted vs duplicate
+// events persisted by IngestUsageBatch.
+type UsageIngestBatchResult struct {
+	Accepted   int
+	Duplicates int
+}
+
 // UsageLedgerStore defines persistence operations for the Tokenomics Track 1
 // operational usage ledger tables introduced in P1.1.
 type UsageLedgerStore interface {
@@ -310,4 +347,16 @@ type UsageLedgerStore interface {
 
 	// GetMeterHealth returns all meter_health rows for (agentID, runID).
 	GetMeterHealth(ctx context.Context, agentID, runID string) ([]*MeterHealth, error)
+
+	// EnsureRunAttributionForAgent ensures a run_attribution row exists for
+	// the agent's current run_id (lazy attribution fallback for the narrow
+	// OFF->ON race), built from the Hub's agents row, never from event payload.
+	EnsureRunAttributionForAgent(ctx context.Context, agentID, runID, hubID string) (*RunAttribution, error)
+
+	// IngestUsageBatch atomically inserts events into usage_events
+	// (ON CONFLICT (hub_id, event_id) DO NOTHING RETURNING), increments
+	// usage_rollups_daily and usage_scope_counters_daily ONLY for newly
+	// inserted rows (in canonical key-sorted order to prevent deadlocks),
+	// and updates meter_health (events and/or heartbeats).
+	IngestUsageBatch(ctx context.Context, in *UsageIngestBatchInput) (*UsageIngestBatchResult, error)
 }

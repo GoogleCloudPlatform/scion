@@ -613,11 +613,42 @@ func (s *UsageLedgerStore) backfillActiveRunAttributionsPaged(ctx context.Contex
 }
 
 // UpsertMeterHealth implements store.UsageLedgerStore.UpsertMeterHealth.
-// Enforces monotonic sequence and final_state progression per §4.3.
+// Enforces monotonic sequence, shrinking-only missing_ranges, first-insert
+// race safety, and one-way final_state progression per §4.3.
 func (s *UsageLedgerStore) UpsertMeterHealth(ctx context.Context, mh *store.MeterHealth) error {
 	if mh == nil || mh.AgentID == "" || mh.RunID == "" || mh.ProducerEpoch == "" {
 		return fmt.Errorf("%w: agent_id, run_id, and producer_epoch are required", store.ErrInvalidInput)
 	}
+	run := func(client *ent.Client) error {
+		return s.upsertMeterHealthTx(ctx, client, mh, 0, nil)
+	}
+	if s.inTx {
+		return run(s.client)
+	}
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := run(tx.Client()); err != nil {
+		return err
+	}
+	return mapError(tx.Commit())
+}
+
+// upsertMeterHealthTx performs a race-safe monotonic upsert of meter_health
+// inside the caller's transaction. When anomalousDelta > 0, it is added to
+// existing.AnomalousCount instead of taking max(existing, mh.AnomalousCount).
+// When receivedSeqs is non-empty, sequence continuity (last_contiguous_seq,
+// max_seq_seen, missing_ranges) is updated from those exact received sequence
+// numbers as well as mh's fields.
+func (s *UsageLedgerStore) upsertMeterHealthTx(
+	ctx context.Context,
+	client *ent.Client,
+	mh *store.MeterHealth,
+	anomalousDelta int64,
+	receivedSeqs []int64,
+) error {
 	lastReceipt := mh.LastReceiptAt
 	if lastReceipt.IsZero() {
 		lastReceipt = time.Now()
@@ -634,7 +665,7 @@ func (s *UsageLedgerStore) UpsertMeterHealth(ctx context.Context, mh *store.Mete
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
-	run := func(client *ent.Client) error {
+	queryExisting := func() (*ent.MeterHealth, error) {
 		q := client.MeterHealth.Query().Where(
 			meterhealth.AgentIDEQ(mh.AgentID),
 			meterhealth.RunIDEQ(mh.RunID),
@@ -643,111 +674,115 @@ func (s *UsageLedgerStore) UpsertMeterHealth(ctx context.Context, mh *store.Mete
 		if s.usesRowLocks() {
 			q = q.ForUpdate()
 		}
-		existing, err := q.Only(ctx)
+		row, err := q.Only(ctx)
 		if err != nil && !ent.IsNotFound(err) {
-			return mapError(err)
+			return nil, mapError(err)
 		}
-		if existing == nil {
-			b := client.MeterHealth.Create().
-				SetID(uuid.New()).
-				SetAgentID(mh.AgentID).
-				SetRunID(mh.RunID).
-				SetProducerEpoch(mh.ProducerEpoch).
-				SetLastReceiptAt(lastReceipt).
-				SetLastContiguousSeq(mh.LastContiguousSeq).
-				SetMaxSeqSeen(mh.MaxSeqSeen).
-				SetNillableLastSourceActivityAt(lastSourceActivity).
-				SetAnomalousCount(mh.AnomalousCount).
-				SetSchemaDriftDetected(mh.SchemaDriftDetected).
-				SetFinalState(finalState).
-				SetUpdatedAt(now)
-			if len(mh.MissingRanges) > 0 {
-				b = b.SetMissingRanges(mh.MissingRanges)
-			}
-			if len(mh.SupportedSignals) > 0 {
-				b = b.SetSupportedSignals(mh.SupportedSignals)
-			}
-			if err := client.MeterHealth.CreateBulk(b).
-				OnConflictColumns(meterhealth.FieldAgentID, meterhealth.FieldRunID, meterhealth.FieldProducerEpoch).
-				DoNothing().
-				Exec(ctx); err != nil {
-				return mapError(err)
-			}
-			return nil
-		}
-
-		nextReceipt := existing.LastReceiptAt.UTC()
-		if lastReceipt.After(nextReceipt) {
-			nextReceipt = lastReceipt
-		}
-		nextContig := existing.LastContiguousSeq
-		if mh.LastContiguousSeq > nextContig {
-			nextContig = mh.LastContiguousSeq
-		}
-		nextMax := existing.MaxSeqSeen
-		if mh.MaxSeqSeen > nextMax {
-			nextMax = mh.MaxSeqSeen
-		}
-		nextAnomalous := existing.AnomalousCount
-		if mh.AnomalousCount > nextAnomalous {
-			nextAnomalous = mh.AnomalousCount
-		}
-		nextDrift := existing.SchemaDriftDetected || mh.SchemaDriftDetected
-		nextFinal := existing.FinalState
-		if nextFinal == store.MeterHealthFinalStateOpen &&
-			(finalState == store.MeterHealthFinalStateFinal || finalState == store.MeterHealthFinalStateIncomplete) {
-			nextFinal = finalState
-		}
-
-		u := client.MeterHealth.UpdateOneID(existing.ID).
-			SetLastReceiptAt(nextReceipt).
-			SetLastContiguousSeq(nextContig).
-			SetMaxSeqSeen(nextMax).
-			SetAnomalousCount(nextAnomalous).
-			SetSchemaDriftDetected(nextDrift).
-			SetFinalState(nextFinal).
-			SetUpdatedAt(now)
-
-		if lastSourceActivity != nil {
-			if existing.LastSourceActivityAt == nil || lastSourceActivity.After(existing.LastSourceActivityAt.UTC()) {
-				u = u.SetLastSourceActivityAt(*lastSourceActivity)
-			}
-		}
-		if len(mh.SupportedSignals) > 0 {
-			u = u.SetSupportedSignals(mh.SupportedSignals)
-		}
-		if mh.MissingRanges != nil {
-			// Prune any ranges at or below nextContig so missing_ranges stay
-			// consistent with the monotonic contiguous sequence.
-			pruned := make([]store.SeqRange, 0, len(mh.MissingRanges))
-			for _, r := range mh.MissingRanges {
-				if r.End <= nextContig {
-					continue
-				}
-				if r.Start <= nextContig {
-					r.Start = nextContig + 1
-				}
-				pruned = append(pruned, r)
-			}
-			u = u.SetMissingRanges(pruned)
-		}
-
-		_, err = u.Save(ctx)
-		return mapError(err)
+		return row, nil
 	}
 
-	if s.inTx {
-		return run(s.client)
-	}
-	tx, err := s.client.Tx(ctx)
+	existing, err := queryExisting()
 	if err != nil {
-		return mapError(err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := run(tx.Client()); err != nil {
 		return err
 	}
-	return mapError(tx.Commit())
+
+	if existing == nil {
+		initContig, initMax, initMissing := advanceSeqState(
+			0, 0, nil,
+			mh.LastContiguousSeq, mh.MaxSeqSeen, mh.MissingRanges, receivedSeqs,
+		)
+		initAnom := mh.AnomalousCount
+		if anomalousDelta > 0 {
+			initAnom = anomalousDelta
+		}
+		newID := uuid.New()
+		b := client.MeterHealth.Create().
+			SetID(newID).
+			SetAgentID(mh.AgentID).
+			SetRunID(mh.RunID).
+			SetProducerEpoch(mh.ProducerEpoch).
+			SetLastReceiptAt(lastReceipt).
+			SetLastContiguousSeq(initContig).
+			SetMaxSeqSeen(initMax).
+			SetNillableLastSourceActivityAt(lastSourceActivity).
+			SetAnomalousCount(initAnom).
+			SetSchemaDriftDetected(mh.SchemaDriftDetected).
+			SetFinalState(finalState).
+			SetUpdatedAt(now)
+		if len(initMissing) > 0 {
+			b = b.SetMissingRanges(initMissing)
+		}
+		if len(mh.SupportedSignals) > 0 {
+			b = b.SetSupportedSignals(mh.SupportedSignals)
+		}
+		if err := client.MeterHealth.CreateBulk(b).
+			OnConflictColumns(meterhealth.FieldAgentID, meterhealth.FieldRunID, meterhealth.FieldProducerEpoch).
+			DoNothing().
+			Exec(ctx); err != nil {
+			return mapError(err)
+		}
+
+		// Check whether our insert won the first-insert race. If another
+		// concurrent writer inserted first, row.ID != newID and we fall
+		// through to the read-modify-write merge path so no sequence advance
+		// or anomaly count is silently lost (P1.1 review O6).
+		row, err := queryExisting()
+		if err != nil {
+			return err
+		}
+		if row == nil || row.ID == newID {
+			return nil
+		}
+		existing = row
+	}
+
+	nextReceipt := existing.LastReceiptAt.UTC()
+	if lastReceipt.After(nextReceipt) {
+		nextReceipt = lastReceipt
+	}
+	nextContig, nextMax, nextMissing := advanceSeqState(
+		existing.LastContiguousSeq, existing.MaxSeqSeen, existing.MissingRanges,
+		mh.LastContiguousSeq, mh.MaxSeqSeen, mh.MissingRanges, receivedSeqs,
+	)
+
+	nextAnomalous := existing.AnomalousCount
+	if anomalousDelta > 0 {
+		nextAnomalous += anomalousDelta
+	} else if mh.AnomalousCount > nextAnomalous {
+		nextAnomalous = mh.AnomalousCount
+	}
+	nextDrift := existing.SchemaDriftDetected || mh.SchemaDriftDetected
+	nextFinal := existing.FinalState
+	if nextFinal == store.MeterHealthFinalStateOpen &&
+		(finalState == store.MeterHealthFinalStateFinal || finalState == store.MeterHealthFinalStateIncomplete) {
+		nextFinal = finalState
+	}
+
+	u := client.MeterHealth.UpdateOneID(existing.ID).
+		SetLastReceiptAt(nextReceipt).
+		SetLastContiguousSeq(nextContig).
+		SetMaxSeqSeen(nextMax).
+		SetAnomalousCount(nextAnomalous).
+		SetSchemaDriftDetected(nextDrift).
+		SetFinalState(nextFinal).
+		SetUpdatedAt(now)
+
+	if lastSourceActivity != nil {
+		if existing.LastSourceActivityAt == nil || lastSourceActivity.After(existing.LastSourceActivityAt.UTC()) {
+			u = u.SetLastSourceActivityAt(*lastSourceActivity)
+		}
+	}
+	if len(mh.SupportedSignals) > 0 {
+		u = u.SetSupportedSignals(mh.SupportedSignals)
+	}
+	if nextMissing != nil {
+		u = u.SetMissingRanges(nextMissing)
+	} else if len(existing.MissingRanges) > 0 {
+		u = u.SetMissingRanges([]store.SeqRange{})
+	}
+
+	_, err = u.Save(ctx)
+	return mapError(err)
 }
 
 // GetMeterHealth implements store.UsageLedgerStore.GetMeterHealth.
