@@ -43,15 +43,22 @@ func (e *UsageIngestHTTPError) Error() string {
 	return fmt.Sprintf("hub usage ingest returned HTTP %d: %s", e.StatusCode, e.Body)
 }
 
+// IsPayloadTooLarge reports whether the Hub rejected the batch with HTTP 413.
+// Callers should bisect multi-event batches rather than dead-lettering them.
+func (e *UsageIngestHTTPError) IsPayloadTooLarge() bool {
+	return e != nil && e.StatusCode == http.StatusRequestEntityTooLarge
+}
+
 // IsPermanent reports whether retrying the exact same batch payload is futile.
 // 401/403 (token may refresh), 404 (transient route/deploy), 408 (timeout),
-// 429 (rate limit), and 5xx are treated as transient.
+// 413 (handled via batch bisection), 429 (rate limit), and 5xx are not
+// blindly dead-lettered at the batch level.
 func (e *UsageIngestHTTPError) IsPermanent() bool {
 	if e == nil {
 		return false
 	}
 	switch e.StatusCode {
-	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
 		return true
 	default:
 		return false

@@ -25,6 +25,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
+// ErrPayloadTooLarge marks an HTTP 413 Payload Too Large rejection from the
+// Hub usage ingest endpoint. HubUsageSink bisects multi-event batches on this
+// error and only dead-letters a single event that exceeds the limit on its own.
+var ErrPayloadTooLarge = errors.New("hub usage ingest: payload too large")
+
 // UsageIngestPostFunc sends a usage ingest request (batch or empty heartbeat)
 // to the Hub's POST /api/v1/agents/{id}/usage/events endpoint.
 type UsageIngestPostFunc func(ctx context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error)
@@ -35,7 +40,7 @@ type HubUsageSinkConfig struct {
 	// Post delivers one UsageIngestRequest to the Hub. Required.
 	Post UsageIngestPostFunc
 	// RunID is the Hub-minted run identifier for heartbeats and fallback event
-	// attribution.
+	// attribution when an outbox event omits run_id.
 	RunID string
 	// HubID is the Hub identifier returned by the capabilities probe (optional).
 	HubID string
@@ -90,10 +95,16 @@ type HubUsageSink struct {
 }
 
 // NewHubUsageSink creates a Hub usage sink for outbox. Returns nil if outbox
-// or cfg.Post is nil.
+// or cfg.Post is nil. When cfg.RunID is set, it ensures the outbox's producer
+// epoch is rotated if the run changed since the last process.
 func NewHubUsageSink(outbox *AnalyticsOutbox, cfg HubUsageSinkConfig) *HubUsageSink {
 	if outbox == nil || cfg.Post == nil {
 		return nil
+	}
+	if cfg.RunID != "" {
+		if err := outbox.EnsureRunEpoch(cfg.RunID); err != nil {
+			log.Debug("Hub usage sink: ensure run epoch failed: %v", err)
+		}
 	}
 	return &HubUsageSink{
 		cfg:    cfg,
@@ -175,6 +186,13 @@ func (s *HubUsageSink) EffectiveMaxBatchBytes() int {
 }
 
 // SendBatch implements AnalyticsBatchSendFunc for the Hub usage ingest endpoint.
+//
+// Events are grouped by contiguous (run_id, producer_epoch) so WAL replays from
+// an earlier run preserve their original run_id and epoch (using cfg.RunID only
+// as a fallback when an event omits run_id). Re-encoded request bodies that
+// exceed maxBatchBytes or receive HTTP 413 (ErrPayloadTooLarge) are bisected so
+// good events are never dead-lettered; only a single event that exceeds the
+// limit on its own is dead-lettered.
 func (s *HubUsageSink) SendBatch(ctx context.Context, lines [][]byte) (BatchSendOutcome, error) {
 	if s == nil || s.cfg.Post == nil {
 		return BatchSendOutcome{}, errors.New("hub usage sink not configured")
@@ -182,8 +200,6 @@ func (s *HubUsageSink) SendBatch(ctx context.Context, lines [][]byte) (BatchSend
 	events := make([]telemetrycontract.UsageEvent, 0, len(lines))
 	origIndex := make([]int, 0, len(lines))
 	var rejected []int
-	var maxBatchSeq int64
-	var batchEpoch string
 
 	for i, line := range lines {
 		var ev telemetrycontract.UsageEvent
@@ -191,12 +207,6 @@ func (s *HubUsageSink) SendBatch(ctx context.Context, lines [][]byte) (BatchSend
 			log.Warn("Hub usage sink: dead-lettering undecodable outbox line: %v", err)
 			rejected = append(rejected, i)
 			continue
-		}
-		if batchEpoch == "" && ev.ProducerEpoch != "" {
-			batchEpoch = ev.ProducerEpoch
-		}
-		if ev.ProducerSeq > maxBatchSeq {
-			maxBatchSeq = ev.ProducerSeq
 		}
 		if ts, err := telemetrycontract.ParseTS(ev.ObservedTS); err == nil {
 			s.NoteActivity(ts)
@@ -213,36 +223,109 @@ func (s *HubUsageSink) SendBatch(ctx context.Context, lines [][]byte) (BatchSend
 		return BatchSendOutcome{RejectedIndices: rejected}, nil
 	}
 
-	epoch, seq := s.ledgerMeta()
-	if epoch == "" {
-		epoch = batchEpoch
+	ledgerEpoch, ledgerSeq := s.ledgerMeta()
+
+	// Partition into contiguous groups sharing (run_id, producer_epoch) so each
+	// Hub ingest request has a single consistent meter_health (run, epoch) key
+	// and preserves per-event run_id across restarts.
+	start := 0
+	for start < len(events) {
+		groupRunID := events[start].RunID
+		groupEpoch := events[start].ProducerEpoch
+		end := start + 1
+		for end < len(events) && events[end].RunID == groupRunID && events[end].ProducerEpoch == groupEpoch {
+			end++
+		}
+		if err := s.sendGroup(ctx, events[start:end], origIndex[start:end], ledgerEpoch, ledgerSeq, &rejected); err != nil {
+			return BatchSendOutcome{}, err
+		}
+		start = end
 	}
-	if maxBatchSeq > seq {
-		seq = maxBatchSeq
+
+	return BatchSendOutcome{RejectedIndices: rejected}, nil
+}
+
+func (s *HubUsageSink) sendGroup(
+	ctx context.Context,
+	events []telemetrycontract.UsageEvent,
+	origIndices []int,
+	ledgerEpoch string,
+	ledgerSeq int64,
+	rejected *[]int,
+) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	runID := events[0].RunID
+	if runID == "" {
+		runID = s.cfg.RunID
+	}
+	epoch := events[0].ProducerEpoch
+	if epoch == "" {
+		epoch = ledgerEpoch
+	}
+	var maxSeq int64
+	for _, ev := range events {
+		if ev.ProducerSeq > maxSeq {
+			maxSeq = ev.ProducerSeq
+		}
+	}
+	seq := maxSeq
+	if epoch != "" && epoch == ledgerEpoch && ledgerSeq > seq {
+		seq = ledgerSeq
 	}
 
 	req := telemetrycontract.UsageIngestRequest{
 		Events:               events,
-		RunID:                s.cfg.RunID,
+		RunID:                runID,
 		ProducerEpoch:        epoch,
 		ProducerSeq:          seq,
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
 	}
 
+	// Proactive re-encoded size check (O2): encoding/json HTML-escaping or
+	// field normalization can expand the wire body past maxBatchBytes. Bisect
+	// multi-event batches before posting so good events are never rejected with
+	// a batch-level 413.
+	if len(events) > 1 {
+		if encoded, err := json.Marshal(req); err == nil && len(encoded) > s.cfg.maxBatchBytes() {
+			mid := len(events) / 2
+			if err := s.sendGroup(ctx, events[:mid], origIndices[:mid], ledgerEpoch, ledgerSeq, rejected); err != nil {
+				return err
+			}
+			return s.sendGroup(ctx, events[mid:], origIndices[mid:], ledgerEpoch, ledgerSeq, rejected)
+		}
+	}
+
 	resp, err := s.cfg.Post(ctx, req)
 	if err != nil {
-		return BatchSendOutcome{}, err
+		if errors.Is(err, ErrPayloadTooLarge) {
+			if len(events) > 1 {
+				mid := len(events) / 2
+				if err := s.sendGroup(ctx, events[:mid], origIndices[:mid], ledgerEpoch, ledgerSeq, rejected); err != nil {
+					return err
+				}
+				return s.sendGroup(ctx, events[mid:], origIndices[mid:], ledgerEpoch, ledgerSeq, rejected)
+			}
+			// Single event exceeded the Hub's payload limit on its own: dead-letter only this event.
+			log.Warn("Hub usage sink: single event %s exceeded payload limit (413); dead-lettering", events[0].EventID)
+			*rejected = append(*rejected, origIndices[0])
+			return nil
+		}
+		return err
 	}
+
 	if resp != nil {
 		for _, rej := range resp.Rejected {
-			if rej.Index >= 0 && rej.Index < len(origIndex) {
-				rejected = append(rejected, origIndex[rej.Index])
+			if rej.Index >= 0 && rej.Index < len(origIndices) {
+				*rejected = append(*rejected, origIndices[rej.Index])
 				log.Warn("Hub usage sink: event %s rejected (%s: %s); dead-lettering", rej.EventID, rej.Code, rej.Reason)
 			}
 		}
 	}
-	return BatchSendOutcome{RejectedIndices: rejected}, nil
+	return nil
 }
 
 // SendHeartbeat sends an empty UsageIngestRequest carrying meter-health fields
@@ -251,6 +334,9 @@ func (s *HubUsageSink) SendBatch(ctx context.Context, lines [][]byte) (BatchSend
 func (s *HubUsageSink) SendHeartbeat(ctx context.Context, finalState string) error {
 	if s == nil || s.cfg.Post == nil {
 		return nil
+	}
+	if s.cfg.RunID != "" {
+		_ = s.outbox.EnsureRunEpoch(s.cfg.RunID)
 	}
 	epoch, seq := s.ledgerMeta()
 	if epoch == "" {

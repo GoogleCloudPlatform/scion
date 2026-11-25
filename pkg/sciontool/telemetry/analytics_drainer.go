@@ -110,20 +110,26 @@ type AnalyticsDrainer struct {
 	send    AnalyticsSendFunc
 	resolve HubIDResolver
 
-	// hubSink, when non-nil, switches the drainer from per-line Cloud Logging
-	// sends to batched Hub usage ingest plus periodic empty heartbeats.
+	// hubSink, when non-nil, drains finalized usage batches and periodic empty
+	// meter-health heartbeats to the Scion Hub. When both send (GCP) and
+	// hubSink are set (dual-run fan-out), they track independent cursors
+	// ("cursor" and hubCursorName) and independent backoffs so a failure in
+	// one sink never blocks or dead-letters the other.
 	hubSink           *HubUsageSink
 	batchSend         AnalyticsBatchSendFunc
+	hubCursorName     string
 	heartbeatInterval time.Duration
 	lastHubContact    time.Time
 
 	interval time.Duration
 	now      func() time.Time
 
-	mu         sync.Mutex
-	backoff    time.Duration
-	retryAfter time.Time
-	lastExpiry time.Time
+	mu            sync.Mutex
+	backoff       time.Duration
+	retryAfter    time.Time
+	hubBackoff    time.Duration
+	hubRetryAfter time.Time
+	lastExpiry    time.Time
 
 	// resolveBackoff/resolveAfter pace hub ID resolution while unresolved
 	// (drainer goroutine only).
@@ -188,8 +194,52 @@ func newHubAnalyticsDrainerWithSend(outbox *AnalyticsOutbox, sink *HubUsageSink,
 		outbox:            outbox,
 		hubSink:           sink,
 		batchSend:         bounded,
+		hubCursorName:     "cursor",
 		resolve:           resolve,
 		interval:          sink.cfg.drainInterval(),
+		heartbeatInterval: sink.cfg.heartbeatInterval(),
+		now:               time.Now,
+	}
+}
+
+// NewDualAnalyticsDrainer builds a drainer that fans out every finalized event
+// to BOTH the GCP Cloud Logging sink (gcpSend, primary "cursor") and the Hub
+// usage sink (sink, independent "cursor.hub") with isolated retry backoffs so
+// neither sink can block or dead-letter the other.
+func NewDualAnalyticsDrainer(outbox *AnalyticsOutbox, gcpSend AnalyticsSendFunc, sink *HubUsageSink, resolve HubIDResolver) *AnalyticsDrainer {
+	if sink == nil {
+		return NewAnalyticsDrainer(outbox, gcpSend, resolve)
+	}
+	if gcpSend == nil {
+		return NewHubAnalyticsDrainer(outbox, sink, resolve)
+	}
+	return newDualAnalyticsDrainerWithSend(outbox, gcpSend, sink, sink.SendBatch, resolve)
+}
+
+func newDualAnalyticsDrainerWithSend(outbox *AnalyticsOutbox, gcpSend AnalyticsSendFunc, sink *HubUsageSink, hubBatchSend AnalyticsBatchSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
+	outbox.EnableSecondaryCursor(HubAnalyticsCursorName)
+	boundedGCP := func(ctx context.Context, line []byte) error {
+		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+		defer cancel()
+		return gcpSend(sctx, line)
+	}
+	boundedHub := func(ctx context.Context, lines [][]byte) (BatchSendOutcome, error) {
+		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+		defer cancel()
+		return hubBatchSend(sctx, lines)
+	}
+	interval := analyticsDrainInterval
+	if di := sink.cfg.drainInterval(); di > 0 && di < interval {
+		interval = di
+	}
+	return &AnalyticsDrainer{
+		outbox:            outbox,
+		send:              boundedGCP,
+		hubSink:           sink,
+		batchSend:         boundedHub,
+		hubCursorName:     HubAnalyticsCursorName,
+		resolve:           resolve,
+		interval:          interval,
 		heartbeatInterval: sink.cfg.heartbeatInterval(),
 		now:               time.Now,
 	}
@@ -261,6 +311,7 @@ func (d *AnalyticsDrainer) Stop(ctx context.Context) {
 	}
 	d.mu.Lock()
 	d.retryAfter = time.Time{} // the final attempt ignores backoff
+	d.hubRetryAfter = time.Time{}
 	d.mu.Unlock()
 	d.runOnce(ctx, true)
 }
@@ -360,71 +411,100 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	}
 
 	sent := 0
-	var drainErr error
-	d.mu.Lock()
-	waiting := d.now().Before(d.retryAfter)
-	d.mu.Unlock()
-	if !waiting {
-		var n int
-		if d.hubSink != nil {
-			n, drainErr = d.outbox.DrainBatch(ctx, d.hubSink.cfg.maxBatchEvents(), d.hubSink.EffectiveMaxBatchBytes(), d.batchSend)
-		} else {
-			n, drainErr = d.outbox.Drain(ctx, d.send)
-		}
-		sent = n
+	if d.send != nil {
 		d.mu.Lock()
-		if drainErr != nil && ctx.Err() == nil {
-			if d.backoff == 0 {
-				d.backoff = analyticsBackoffMin
-			} else if d.backoff *= 2; d.backoff > analyticsBackoffMax {
-				d.backoff = analyticsBackoffMax
-			}
-			d.retryAfter = d.now().Add(d.backoff)
-			log.Debug("Analytics drainer: send failed, retrying in %s: %v", d.backoff, drainErr)
-		} else if drainErr == nil {
-			d.backoff, d.retryAfter = 0, time.Time{}
-			if d.hubSink != nil && sent > 0 {
-				d.lastHubContact = d.now()
-			}
-		}
+		waiting := d.now().Before(d.retryAfter)
 		d.mu.Unlock()
+		if !waiting {
+			n, err := d.outbox.Drain(ctx, d.send)
+			sent += n
+			d.mu.Lock()
+			if err != nil && ctx.Err() == nil {
+				if d.backoff == 0 {
+					d.backoff = analyticsBackoffMin
+				} else if d.backoff *= 2; d.backoff > analyticsBackoffMax {
+					d.backoff = analyticsBackoffMax
+				}
+				d.retryAfter = d.now().Add(d.backoff)
+				log.Debug("Analytics drainer: send failed, retrying in %s: %v", d.backoff, err)
+			} else if err == nil {
+				d.backoff, d.retryAfter = 0, time.Time{}
+			}
+			d.mu.Unlock()
+		}
 	}
 
-	if d.hubSink != nil && ctx.Err() == nil {
-		if final {
-			finalState := telemetrycontract.MeterFinalStateFinal
-			if drainErr != nil {
-				finalState = telemetrycontract.MeterFinalStateIncomplete
-			} else if ledger, lerr := d.outbox.LedgerSnapshot(); lerr != nil || ledger.PendingBytes > 0 {
-				finalState = telemetrycontract.MeterFinalStateIncomplete
+	if d.hubSink != nil {
+		var hubDrainErr error
+		hubSent := 0
+		d.mu.Lock()
+		hubWaiting := d.now().Before(d.hubRetryAfter)
+		d.mu.Unlock()
+		if !hubWaiting {
+			hubCursor := d.hubCursorName
+			if hubCursor == "" {
+				hubCursor = "cursor"
 			}
-			hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
-			if herr := d.hubSink.SendHeartbeat(hctx, finalState); herr != nil {
-				log.Debug("Analytics drainer: final heartbeat failed: %v", herr)
-			}
-			cancel()
-		} else if !waiting && drainErr == nil && d.heartbeatInterval > 0 {
+			hubSent, hubDrainErr = d.outbox.DrainBatchCursor(ctx, hubCursor, d.hubSink.cfg.maxBatchEvents(), d.hubSink.EffectiveMaxBatchBytes(), d.batchSend)
+			sent += hubSent
 			d.mu.Lock()
-			due := d.lastHubContact.IsZero() || d.now().Sub(d.lastHubContact) >= d.heartbeatInterval
-			d.mu.Unlock()
-			if due {
-				hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
-				herr := d.hubSink.SendHeartbeat(hctx, "")
-				cancel()
-				d.mu.Lock()
-				if herr != nil && ctx.Err() == nil {
-					if d.backoff == 0 {
-						d.backoff = analyticsBackoffMin
-					} else if d.backoff *= 2; d.backoff > analyticsBackoffMax {
-						d.backoff = analyticsBackoffMax
-					}
-					d.retryAfter = d.now().Add(d.backoff)
-					log.Debug("Analytics drainer: heartbeat failed, retrying in %s: %v", d.backoff, herr)
-				} else if herr == nil {
-					d.backoff, d.retryAfter = 0, time.Time{}
+			if hubDrainErr != nil && ctx.Err() == nil {
+				if d.hubBackoff == 0 {
+					d.hubBackoff = analyticsBackoffMin
+				} else if d.hubBackoff *= 2; d.hubBackoff > analyticsBackoffMax {
+					d.hubBackoff = analyticsBackoffMax
+				}
+				d.hubRetryAfter = d.now().Add(d.hubBackoff)
+				log.Debug("Analytics drainer: hub send failed, retrying in %s: %v", d.hubBackoff, hubDrainErr)
+			} else if hubDrainErr == nil {
+				d.hubBackoff, d.hubRetryAfter = 0, time.Time{}
+				if hubSent > 0 {
 					d.lastHubContact = d.now()
 				}
+			}
+			d.mu.Unlock()
+		}
+
+		if ctx.Err() == nil {
+			if final {
+				hubCursor := d.hubCursorName
+				if hubCursor == "" {
+					hubCursor = "cursor"
+				}
+				finalState := telemetrycontract.MeterFinalStateFinal
+				if hubDrainErr != nil {
+					finalState = telemetrycontract.MeterFinalStateIncomplete
+				} else if pending, perr := d.outbox.pendingBytesForCursor(hubCursor); perr != nil || pending > 0 {
+					finalState = telemetrycontract.MeterFinalStateIncomplete
+				}
+				hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+				if herr := d.hubSink.SendHeartbeat(hctx, finalState); herr != nil {
+					log.Debug("Analytics drainer: final heartbeat failed: %v", herr)
+				}
+				cancel()
+			} else if !hubWaiting && hubDrainErr == nil && d.heartbeatInterval > 0 {
+				d.mu.Lock()
+				due := d.lastHubContact.IsZero() || d.now().Sub(d.lastHubContact) >= d.heartbeatInterval
 				d.mu.Unlock()
+				if due {
+					hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+					herr := d.hubSink.SendHeartbeat(hctx, "")
+					cancel()
+					d.mu.Lock()
+					if herr != nil && ctx.Err() == nil {
+						if d.hubBackoff == 0 {
+							d.hubBackoff = analyticsBackoffMin
+						} else if d.hubBackoff *= 2; d.hubBackoff > analyticsBackoffMax {
+							d.hubBackoff = analyticsBackoffMax
+						}
+						d.hubRetryAfter = d.now().Add(d.hubBackoff)
+						log.Debug("Analytics drainer: heartbeat failed, retrying in %s: %v", d.hubBackoff, herr)
+					} else if herr == nil {
+						d.hubBackoff, d.hubRetryAfter = 0, time.Time{}
+						d.lastHubContact = d.now()
+					}
+					d.mu.Unlock()
+				}
 			}
 		}
 	}
@@ -437,13 +517,17 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	return sent
 }
 
-// Backoff reports the current retry backoff (zero when healthy).
+// Backoff reports the current retry backoff (zero when healthy). When both
+// GCP and Hub sinks are active, it returns the larger active backoff.
 func (d *AnalyticsDrainer) Backoff() time.Duration {
 	if d == nil {
 		return 0
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.hubBackoff > d.backoff {
+		return d.hubBackoff
+	}
 	return d.backoff
 }
 
@@ -558,16 +642,31 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 		resolver = NewHealthzHubIDResolver(analyticsHubEndpoint(), nil)
 	}
 	a.native = NewUsageAnalytics(outbox, telemetrycontract.UsageSourceNative)
-	if a.hubSinkCfg != nil {
+	switch {
+	case a.hubSinkCfg != nil && gcp != nil:
+		// Dual-run fan-out (design §6 B2 / §9.3): keep container-direct Cloud
+		// Logging active alongside the Hub sink using independent cursors.
 		cfg := *a.hubSinkCfg
 		if cfg.SupportedSignals == nil && a.supportedSignals != nil {
 			cfg.SupportedSignals = a.supportedSignals
 		}
 		sink := NewHubUsageSink(outbox, cfg)
+		a.native.runID = cfg.RunID
+		a.native.onRecord = sink.NoteActivity
+		a.send = newCountingSend(gcp.SendAnalytics)
+		hubSend := newCountingBatchSend(sink.SendBatch)
+		a.drainer = newDualAnalyticsDrainerWithSend(outbox, a.send.Send, sink, hubSend.SendBatch, resolver)
+	case a.hubSinkCfg != nil:
+		cfg := *a.hubSinkCfg
+		if cfg.SupportedSignals == nil && a.supportedSignals != nil {
+			cfg.SupportedSignals = a.supportedSignals
+		}
+		sink := NewHubUsageSink(outbox, cfg)
+		a.native.runID = cfg.RunID
 		a.native.onRecord = sink.NoteActivity
 		a.send = newCountingBatchSend(sink.SendBatch)
 		a.drainer = newHubAnalyticsDrainerWithSend(outbox, sink, a.send.SendBatch, resolver)
-	} else {
+	default:
 		a.send = newCountingSend(gcp.SendAnalytics)
 		a.drainer = NewAnalyticsDrainer(outbox, a.send.Send, resolver)
 	}

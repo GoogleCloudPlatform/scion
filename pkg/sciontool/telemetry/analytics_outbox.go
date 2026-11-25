@@ -95,6 +95,10 @@ const analyticsTmpSweepAge = time.Hour
 // .scion directory.
 const AnalyticsOutboxDirName = "analytics-outbox"
 
+// HubAnalyticsCursorName is the independent cursor file used by the Hub usage
+// sink when running alongside the GCP Cloud Logging drain (dual-run fan-out).
+const HubAnalyticsCursorName = "cursor.hub"
+
 // AnalyticsOutboxDirFor returns the outbox directory for the AGENT home
 // (<home>/.scion/analytics-outbox), or "" if home is empty. Both producers
 // must pass the agent home: sciontool init (which runs as root with
@@ -239,6 +243,34 @@ type AnalyticsOutbox struct {
 	// crashAt, when set, makes appendUsage stop right after the named step
 	// ("intent" or "line") without cleaning up, simulating a crash (tests).
 	crashAt string
+
+	// secondaryCursors names additional independent cursor files (e.g.
+	// HubAnalyticsCursorName in dual-run mode). A ready file is only deleted
+	// once every active cursor ("cursor" plus secondaryCursors) has moved past
+	// it. Configured before draining starts.
+	secondaryCursors []string
+}
+
+// EnableSecondaryCursor registers an independent cursor file (such as
+// HubAnalyticsCursorName) so ready files are retained until both the primary
+// "cursor" and the named secondary cursor have advanced past them.
+func (o *AnalyticsOutbox) EnableSecondaryCursor(name string) {
+	if o == nil || name == "" || name == "cursor" {
+		return
+	}
+	for _, existing := range o.secondaryCursors {
+		if existing == name {
+			return
+		}
+	}
+	o.secondaryCursors = append(o.secondaryCursors, name)
+}
+
+func (o *AnalyticsOutbox) activeCursors() []string {
+	out := make([]string, 0, 1+len(o.secondaryCursors))
+	out = append(out, "cursor")
+	out = append(out, o.secondaryCursors...)
+	return out
 }
 
 // readyFile is what Drain reads a ready file through.
@@ -500,6 +532,10 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 	if err := o.recoverIntentLocked(); err != nil {
 		// This observation is refused (held, or recovery failed): consume
 		// a seq for it (after any intent's), so the loss is a visible gap.
+		o.consumeSeqDuringHold()
+		return 0, err
+	}
+	if err := o.ensureRunEpochLocked(ev.RunID); err != nil {
 		o.consumeSeqDuringHold()
 		return 0, err
 	}
@@ -945,14 +981,64 @@ func (o *AnalyticsOutbox) reindexLastStagingLine() error {
 	return o.writeIndex(name, entry)
 }
 
+// EnsureRunEpoch rotates the outbox's producer_epoch and resets producer_seq
+// to 0 whenever runID differs from the outbox's recorded run_id, so each new
+// agent run starts its sequence numbering at 1 without creating a [1..N] gap
+// for a previous run's sequences. Already-staged/ready events from earlier
+// runs keep their original producer_epoch, producer_seq, and run_id bytes.
+func (o *AnalyticsOutbox) EnsureRunEpoch(runID string) error {
+	if o == nil || strings.TrimSpace(runID) == "" {
+		return nil
+	}
+	unlock, err := o.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := o.recoverIntentLocked(); err != nil {
+		return err
+	}
+	return o.ensureRunEpochLocked(runID)
+}
+
+func (o *AnalyticsOutbox) ensureRunEpochLocked(runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil
+	}
+	currentRunID, err := o.readTrimmed("run_id")
+	if err != nil {
+		return err
+	}
+	if currentRunID == runID {
+		return nil
+	}
+	seq, err := o.readInt("seq")
+	if err != nil {
+		return err
+	}
+	// Rotate epoch and reset seq when moving from another run, or when
+	// adopting a persisted legacy outbox that already allocated sequences
+	// without a run_id marker.
+	if currentRunID != "" || seq > 0 {
+		if err := o.writeFileAtomic("epoch", []byte(telemetrycontract.NewEventID())); err != nil {
+			return err
+		}
+		if err := o.writeFileAtomic("seq", []byte("0")); err != nil {
+			return err
+		}
+	}
+	return o.writeFileAtomic("run_id", []byte(runID))
+}
+
 // usageSemanticFingerprint hashes the event's source-determined content:
 // everything except observation and ledger fields (event_id, observed_ts,
-// producer_build, harness_version, hub_id, producer_epoch/seq,
+// producer_build, harness_version, hub_id, run_id, producer_epoch/seq,
 // source_occurrence, identity_ambiguous). A retransmission matches; a
 // conflicting payload (or a changed normalization) does not.
 func usageSemanticFingerprint(ev *telemetrycontract.UsageEvent) (string, error) {
 	c := *ev
-	c.EventID, c.ObservedTS, c.ProducerBuild, c.HarnessVersion, c.HubID = "", "", "", "", ""
+	c.EventID, c.ObservedTS, c.ProducerBuild, c.HarnessVersion, c.HubID, c.RunID = "", "", "", "", "", ""
 	c.ProducerEpoch, c.ProducerSeq, c.SourceOccurrence, c.IdentityAmbiguous = "", 0, 0, false
 	b, err := json.Marshal(&c)
 	if err != nil {
@@ -1433,17 +1519,22 @@ func (o *AnalyticsOutbox) nextReadyNumber() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	cursorFile, cursorOffset, err := o.readCursor()
-	if err != nil {
-		return 0, err
-	}
-	// Never hand out a number the cursor still points into (a stale cursor
-	// at offset > 0 after an interrupted quarantine or delete), nor one a
-	// ready or quarantine file already uses: Drain would seek a new file
-	// to the old offset, or a quarantine rename could overwrite.
-	next := cursorFile
-	if cursorOffset > 0 {
-		next = cursorFile + 1
+	// Never hand out a number any active cursor still points into (a stale
+	// cursor at offset > 0 after an interrupted quarantine or delete), nor one
+	// a ready or quarantine file already uses.
+	var next int64
+	for _, cname := range o.activeCursors() {
+		cursorFile, cursorOffset, err := o.readCursorNamed(cname)
+		if err != nil {
+			return 0, err
+		}
+		candidate := cursorFile
+		if cursorOffset > 0 {
+			candidate = cursorFile + 1
+		}
+		if candidate > next {
+			next = candidate
+		}
 	}
 	if len(files) > 0 && files[len(files)-1] >= next {
 		next = files[len(files)-1] + 1
@@ -1565,25 +1656,54 @@ func (o *AnalyticsOutbox) keptBytes() (int64, error) {
 }
 
 func (o *AnalyticsOutbox) readCursor() (file, offset int64, err error) {
-	s, err := o.readTrimmed("cursor")
+	return o.readCursorNamed("cursor")
+}
+
+func (o *AnalyticsOutbox) writeCursor(file, offset int64) error {
+	return o.writeCursorNamed("cursor", file, offset)
+}
+
+func (o *AnalyticsOutbox) readCursorNamed(name string) (file, offset int64, err error) {
+	if name == "" {
+		name = "cursor"
+	}
+	s, err := o.readTrimmed(name)
 	if err != nil || s == "" {
 		return 0, 0, err
 	}
 	a, b, ok := strings.Cut(s, " ")
 	if !ok {
-		return 0, 0, fmt.Errorf("analytics outbox: malformed cursor %q", s)
+		return 0, 0, fmt.Errorf("analytics outbox: malformed %s %q", name, s)
 	}
 	if file, err = strconv.ParseInt(a, 10, 64); err == nil {
 		offset, err = strconv.ParseInt(b, 10, 64)
 	}
 	if err != nil {
-		return 0, 0, fmt.Errorf("analytics outbox: malformed cursor %q", s)
+		return 0, 0, fmt.Errorf("analytics outbox: malformed %s %q", name, s)
 	}
 	return file, offset, nil
 }
 
-func (o *AnalyticsOutbox) writeCursor(file, offset int64) error {
-	return o.writeFileAtomic("cursor", []byte(fmt.Sprintf("%d %d", file, offset)))
+func (o *AnalyticsOutbox) writeCursorNamed(name string, file, offset int64) error {
+	if name == "" {
+		name = "cursor"
+	}
+	return o.writeFileAtomic(name, []byte(fmt.Sprintf("%d %d", file, offset)))
+}
+
+// allCursorsPast reports whether every active cursor has moved strictly past
+// ready file n, meaning ready-n.jsonl is safe to remove.
+func (o *AnalyticsOutbox) allCursorsPast(n int64) (bool, error) {
+	for _, cname := range o.activeCursors() {
+		cf, _, err := o.readCursorNamed(cname)
+		if err != nil {
+			return false, err
+		}
+		if cf <= n {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // AnalyticsSendFunc delivers one final event line. A nil error means the
@@ -1608,15 +1728,26 @@ type BatchSendOutcome struct {
 // on the next drain.
 type AnalyticsBatchSendFunc func(ctx context.Context, lines [][]byte) (BatchSendOutcome, error)
 
-// DrainBatch sends ready lines in order from the cursor in batches bounded by
-// maxEvents and maxBytes (JSON array payload bytes excluding outer envelope),
-// committing the cursor after each acknowledged batch and deleting a ready file
-// once fully sent. It stops at the first transient send error without advancing
-// the cursor, so the next drain replays the exact same bytes and event IDs.
-// Called only from the pipeline's drainer goroutine.
+// DrainBatch sends ready lines in order from the primary cursor in batches
+// bounded by maxEvents and maxBytes. See DrainBatchCursor for independent
+// cursor support.
 func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes int, send AnalyticsBatchSendFunc) (int, error) {
+	return o.DrainBatchCursor(ctx, "cursor", maxEvents, maxBytes, send)
+}
+
+// DrainBatchCursor sends ready lines in order from cursorName in batches
+// bounded by maxEvents and maxBytes (JSON array payload bytes excluding outer
+// envelope), committing cursorName after each acknowledged batch and deleting
+// a ready file once every active cursor has moved past it. It stops at the
+// first transient send error without advancing cursorName, so the next drain
+// replays the exact same bytes and event IDs. Called only from the pipeline's
+// drainer goroutine.
+func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName string, maxEvents, maxBytes int, send AnalyticsBatchSendFunc) (int, error) {
 	if o == nil {
 		return 0, errNilOutbox
+	}
+	if cursorName == "" {
+		cursorName = "cursor"
 	}
 	if maxEvents <= 0 {
 		maxEvents = telemetrycontract.UsageIngestMaxBatchEvents
@@ -1628,15 +1759,17 @@ func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes in
 	if err != nil {
 		return 0, err
 	}
-	curFile, curOffset, err := o.readCursor()
+	curFile, curOffset, err := o.readCursorNamed(cursorName)
 	if err != nil {
 		return 0, err
 	}
 	sent := 0
 	for _, n := range files {
 		if n < curFile {
-			// Fully sent before a crash interrupted the delete.
-			_ = os.Remove(o.path(readyName(n)))
+			// Fully sent for this cursor; remove only once all cursors are past n.
+			if past, perr := o.allCursorsPast(n); perr == nil && past {
+				_ = os.Remove(o.path(readyName(n)))
+			}
 			continue
 		}
 		offset := int64(0)
@@ -1690,7 +1823,7 @@ func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes in
 					}
 				}
 			}
-			if werr := o.writeCursor(n, batchEndOffset); werr != nil {
+			if werr := o.writeCursorNamed(cursorName, n, batchEndOffset); werr != nil {
 				return werr
 			}
 			batch = batch[:0]
@@ -1711,7 +1844,7 @@ func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes in
 					offset += int64(len(line))
 					batchEndOffset = offset
 					if len(batch) == 0 {
-						if err := o.writeCursor(n, offset); err != nil {
+						if err := o.writeCursorNamed(cursorName, n, offset); err != nil {
 							_ = f.Close()
 							return sent, err
 						}
@@ -1754,30 +1887,36 @@ func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes in
 		}
 		_ = f.Close()
 		if truncated {
-			o.quarantined.Add(1)
-			target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
-			if _, err := os.Stat(target); err == nil {
-				target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
+			if err := o.writeCursorNamed(cursorName, n+1, 0); err != nil {
+				return sent, err
 			}
-			if err := os.Rename(o.path(readyName(n)), target); err != nil {
-				return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
+			if past, perr := o.allCursorsPast(n); perr == nil && past {
+				o.quarantined.Add(1)
+				target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
+				if _, err := os.Stat(target); err == nil {
+					target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
+				}
+				if err := os.Rename(o.path(readyName(n)), target); err != nil {
+					return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
+				}
+				if err := syncDir(o.dir); err != nil {
+					return sent, err
+				}
+			}
+			continue
+		}
+		if err := o.writeCursorNamed(cursorName, n+1, 0); err != nil {
+			return sent, err
+		}
+		if past, perr := o.allCursorsPast(n); perr != nil {
+			return sent, perr
+		} else if past {
+			if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return sent, fmt.Errorf("analytics outbox: %w", err)
 			}
 			if err := syncDir(o.dir); err != nil {
 				return sent, err
 			}
-			if err := o.writeCursor(n+1, 0); err != nil {
-				return sent, err
-			}
-			continue
-		}
-		if err := o.writeCursor(n+1, 0); err != nil {
-			return sent, err
-		}
-		if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return sent, fmt.Errorf("analytics outbox: %w", err)
-		}
-		if err := syncDir(o.dir); err != nil {
-			return sent, err
 		}
 	}
 	return sent, nil
@@ -1802,8 +1941,11 @@ func (o *AnalyticsOutbox) Drain(ctx context.Context, send AnalyticsSendFunc) (in
 	sent := 0
 	for _, n := range files {
 		if n < curFile {
-			// Fully sent before a crash interrupted the delete.
-			_ = os.Remove(o.path(readyName(n)))
+			// Fully sent before a crash interrupted the delete; remove only
+			// once all active cursors have moved past n.
+			if past, perr := o.allCursorsPast(n); perr == nil && past {
+				_ = os.Remove(o.path(readyName(n)))
+			}
 			continue
 		}
 		offset := int64(0)
@@ -1870,31 +2012,37 @@ func (o *AnalyticsOutbox) Drain(ctx context.Context, send AnalyticsSendFunc) (in
 			// corruption: keep the file byte-for-byte as quarantine-N for
 			// explicit recovery (never sent, never counted delivered), and
 			// move on so later events are not blocked behind it.
-			o.quarantined.Add(1)
-			target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
-			if _, err := os.Stat(target); err == nil {
-				// Never overwrite kept bytes.
-				target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
-			}
-			if err := os.Rename(o.path(readyName(n)), target); err != nil {
-				return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
-			}
-			if err := syncDir(o.dir); err != nil {
-				return sent, err
-			}
 			if err := o.writeCursor(n+1, 0); err != nil {
 				return sent, err
+			}
+			if past, perr := o.allCursorsPast(n); perr == nil && past {
+				o.quarantined.Add(1)
+				target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
+				if _, err := os.Stat(target); err == nil {
+					// Never overwrite kept bytes.
+					target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
+				}
+				if err := os.Rename(o.path(readyName(n)), target); err != nil {
+					return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
+				}
+				if err := syncDir(o.dir); err != nil {
+					return sent, err
+				}
 			}
 			continue
 		}
 		if err := o.writeCursor(n+1, 0); err != nil {
 			return sent, err
 		}
-		if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return sent, fmt.Errorf("analytics outbox: %w", err)
-		}
-		if err := syncDir(o.dir); err != nil {
-			return sent, err
+		if past, perr := o.allCursorsPast(n); perr != nil {
+			return sent, perr
+		} else if past {
+			if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return sent, fmt.Errorf("analytics outbox: %w", err)
+			}
+			if err := syncDir(o.dir); err != nil {
+				return sent, err
+			}
 		}
 	}
 	return sent, nil
@@ -2197,9 +2345,70 @@ func (o *AnalyticsOutbox) pendingBytes() (int64, time.Time, error) {
 	if err != nil {
 		return 0, time.Time{}, err
 	}
-	curFile, curOffset, err := o.readCursor()
+	type cursorPos struct{ file, offset int64 }
+	cursors := make([]cursorPos, 0, len(o.activeCursors()))
+	for _, cname := range o.activeCursors() {
+		cf, co, err := o.readCursorNamed(cname)
+		if err != nil {
+			return 0, time.Time{}, err
+		}
+		cursors = append(cursors, cursorPos{cf, co})
+	}
+	for _, n := range files {
+		// Use the slowest active cursor for this ready file so PendingBytes
+		// stays non-zero until every active sink has delivered it.
+		var minFile int64
+		var minOffset int64
+		for i, c := range cursors {
+			if i == 0 || c.file < minFile || (c.file == minFile && c.offset < minOffset) {
+				minFile, minOffset = c.file, c.offset
+			}
+		}
+		if n < minFile {
+			continue
+		}
+		info, err := os.Stat(o.path(readyName(n)))
+		if err != nil {
+			continue
+		}
+		size := info.Size()
+		if n == minFile {
+			size -= minOffset
+		}
+		if size > 0 {
+			total += size
+			note(info)
+		}
+	}
+	return total, oldest, nil
+}
+
+// pendingBytesForCursor reports undelivered bytes (staging, finalizing, and
+// ready files past cursorName) for a single consumer cursor.
+func (o *AnalyticsOutbox) pendingBytesForCursor(cursorName string) (int64, error) {
+	if o == nil {
+		return 0, errNilOutbox
+	}
+	var total int64
+	if info, err := os.Stat(o.path("staging.jsonl")); err == nil && info.Size() > 0 {
+		total += info.Size()
+	}
+	finalizing, err := o.finalizingFiles()
 	if err != nil {
-		return 0, time.Time{}, err
+		return 0, err
+	}
+	for _, name := range finalizing {
+		if info, err := os.Stat(o.path(name)); err == nil {
+			total += info.Size()
+		}
+	}
+	files, err := o.readyFiles()
+	if err != nil {
+		return 0, err
+	}
+	curFile, curOffset, err := o.readCursorNamed(cursorName)
+	if err != nil {
+		return 0, err
 	}
 	for _, n := range files {
 		if n < curFile {
@@ -2215,10 +2424,9 @@ func (o *AnalyticsOutbox) pendingBytes() (int64, time.Time, error) {
 		}
 		if size > 0 {
 			total += size
-			note(info)
 		}
 	}
-	return total, oldest, nil
+	return total, nil
 }
 
 func (o *AnalyticsOutbox) readTrimmed(name string) (string, error) {

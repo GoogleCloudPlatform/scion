@@ -18,12 +18,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -62,6 +64,9 @@ func httptestPostFunc(srvURL, agentID, token string) UsageIngestPostFunc {
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			err := fmt.Errorf("hub HTTP %d: %s", resp.StatusCode, string(respBody))
+			if resp.StatusCode == http.StatusRequestEntityTooLarge {
+				return nil, fmt.Errorf("%w: %v", ErrPayloadTooLarge, err)
+			}
 			if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity {
 				return nil, PermanentSendError(err)
 			}
@@ -784,4 +789,587 @@ func TestHubUsageSink_PermanentHTTPErrorDeadLetters(t *testing.T) {
 	if ledger.DeadLettersTotal != 1 {
 		t.Errorf("DeadLettersTotal = %d, want 1", ledger.DeadLettersTotal)
 	}
+}
+
+// R1 (scenario d): rotating producer epoch on run change ensures a new run on
+// a persisted agent home starts its sequence at 1 (no [1..N] gap from the
+// previous run's sequences).
+func TestHubUsageSink_RunChangeRotatesEpochAndResetsSeq(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "outbox")
+	o1, err := OpenAnalyticsOutbox(dir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(1): %v", err)
+	}
+
+	var runAEpoch string
+	for i := 1; i <= 3; i++ {
+		ev := draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:runA-%d", i), int64(i))
+		ev.RunID = "run-A"
+		mustAppend(t, o1, ev, AppendWritten)
+		if runAEpoch == "" {
+			runAEpoch = ev.ProducerEpoch
+		}
+		if ev.ProducerSeq != int64(i) {
+			t.Fatalf("run-A event %d seq = %d, want %d", i, ev.ProducerSeq, i)
+		}
+	}
+
+	// Reopen persisted outbox under a new run (run-B).
+	var mu sync.Mutex
+	var reqs []telemetrycontract.UsageIngestRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req telemetrycontract.UsageIngestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		reqs = append(reqs, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+	}))
+	defer srv.Close()
+
+	o2, err := OpenAnalyticsOutbox(dir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(2): %v", err)
+	}
+	sink2 := NewHubUsageSink(o2, HubUsageSinkConfig{
+		Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+		RunID: "run-B",
+	})
+
+	ledger2, err := o2.LedgerSnapshot()
+	if err != nil {
+		t.Fatalf("LedgerSnapshot(2): %v", err)
+	}
+	if ledger2.Epoch == runAEpoch {
+		t.Fatalf("epoch did not rotate on run change: still %q", ledger2.Epoch)
+	}
+	if ledger2.LastSeq != 0 {
+		t.Fatalf("seq did not reset on run change: got %d, want 0", ledger2.LastSeq)
+	}
+
+	for i := 1; i <= 2; i++ {
+		ev := draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:runB-%d", i), int64(i))
+		ev.RunID = "run-B"
+		mustAppend(t, o2, ev, AppendWritten)
+		if ev.ProducerEpoch != ledger2.Epoch {
+			t.Errorf("run-B event %d epoch = %q, want %q", i, ev.ProducerEpoch, ledger2.Epoch)
+		}
+		if ev.ProducerSeq != int64(i) {
+			t.Errorf("run-B event %d seq = %d, want %d (must start at 1)", i, ev.ProducerSeq, i)
+		}
+	}
+
+	d2 := NewHubAnalyticsDrainer(o2, sink2, trustedHub("hub-1"))
+	if sent := d2.RunOnce(context.Background()); sent != 5 {
+		t.Fatalf("sent = %d, want 5", sent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawRunB bool
+	for _, req := range reqs {
+		if req.RunID == "run-B" && len(req.Events) > 0 {
+			sawRunB = true
+			if req.ProducerEpoch != ledger2.Epoch {
+				t.Errorf("run-B request epoch = %q, want %q", req.ProducerEpoch, ledger2.Epoch)
+			}
+			if req.Events[0].ProducerSeq != 1 || req.Events[1].ProducerSeq != 2 {
+				t.Errorf("run-B event seqs = [%d, %d], want [1, 2]", req.Events[0].ProducerSeq, req.Events[1].ProducerSeq)
+			}
+		}
+	}
+	if !sawRunB {
+		t.Fatalf("did not see run-B batch in requests: %+v", reqs)
+	}
+}
+
+// R2: events appended under run A carry run_id=run-A; when replayed from the
+// WAL by a restarted process configured for run B, the Hub request carries
+// run-A for those events and run-B for new events.
+func TestHubUsageSink_CrossRunWALReplayPreservesOriginalRunID(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
+
+	dir := filepath.Join(t.TempDir(), "outbox")
+	o1, err := OpenAnalyticsOutbox(dir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(1): %v", err)
+	}
+
+	// Process 1 runs under SCION_LAUNCH_ID=run-A and crashes before draining.
+	t.Setenv("SCION_LAUNCH_ID", "run-A")
+	ua1 := NewUsageAnalytics(o1, telemetrycontract.UsageSourceNative)
+	for i := 1; i <= 2; i++ {
+		if _, err := ua1.Record(UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   fmt.Sprintf("cmp1:cross-A-%d", i),
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(int64(i * 10)),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
+		}); err != nil {
+			t.Fatalf("Record(run-A, %d): %v", i, err)
+		}
+	}
+
+	var mu sync.Mutex
+	var reqs []telemetrycontract.UsageIngestRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req telemetrycontract.UsageIngestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		reqs = append(reqs, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+	}))
+	defer srv.Close()
+
+	// Process 2 restarts under run-B, appends one run-B event, and drains.
+	t.Setenv("SCION_LAUNCH_ID", "run-B")
+	o2, err := OpenAnalyticsOutbox(dir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(2): %v", err)
+	}
+	sink2 := NewHubUsageSink(o2, HubUsageSinkConfig{
+		Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+		RunID: "run-B",
+	})
+	ua2 := NewUsageAnalytics(o2, telemetrycontract.UsageSourceNative)
+	if _, err := ua2.Record(UsageObservation{
+		SourceKind:      "claude.api_request",
+		Identity:        telemetrycontract.SourceIdentityComposite,
+		SourceEventID:   "cmp1:cross-B-1",
+		Status:          telemetrycontract.StatusSuccess,
+		Calls:           1,
+		Input:           int64Ptr(99),
+		InputDerivation: telemetrycontract.InputDerivationReported,
+		TokenStatus:     telemetrycontract.TokenStatusPartial,
+	}); err != nil {
+		t.Fatalf("Record(run-B): %v", err)
+	}
+
+	d2 := NewHubAnalyticsDrainer(o2, sink2, trustedHub("hub-1"))
+	if sent := d2.RunOnce(context.Background()); sent != 3 {
+		t.Fatalf("sent = %d, want 3", sent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var runACount, runBCount int
+	for _, req := range reqs {
+		if len(req.Events) == 0 {
+			continue
+		}
+		switch req.RunID {
+		case "run-A":
+			for _, ev := range req.Events {
+				if ev.RunID != "run-A" {
+					t.Errorf("run-A batch carried event with RunID=%q", ev.RunID)
+				}
+				runACount++
+			}
+		case "run-B":
+			for _, ev := range req.Events {
+				if ev.RunID != "run-B" {
+					t.Errorf("run-B batch carried event with RunID=%q", ev.RunID)
+				}
+				runBCount++
+			}
+		default:
+			t.Errorf("unexpected req.RunID = %q", req.RunID)
+		}
+	}
+	if runACount != 2 || runBCount != 1 {
+		t.Errorf("got runACount=%d runBCount=%d, want 2 and 1", runACount, runBCount)
+	}
+}
+
+// R4: dual-run fan-out with independent cursors. When both GCP Cloud Logging
+// and Hub sink are active, both receive every event, and failure/rejection in
+// one sink never blocks or dead-letters the other.
+func TestDualAnalyticsDrainer_FanOutAndIsolation(t *testing.T) {
+	t.Run("both sinks receive every event", func(t *testing.T) {
+		var mu sync.Mutex
+		var hubIDs []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			for _, ev := range req.Events {
+				hubIDs = append(hubIDs, ev.EventID)
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		var wantIDs []string
+		for i := 1; i <= 3; i++ {
+			ev := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:dual-%d", i), int64(i)), AppendWritten)
+			wantIDs = append(wantIDs, ev.EventID)
+		}
+
+		gcp := &capture{}
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-dual",
+		})
+		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+
+		d.RunOnce(context.Background())
+
+		if len(gcp.lines) != 3 {
+			t.Fatalf("gcp received %d lines, want 3", len(gcp.lines))
+		}
+		mu.Lock()
+		gotHub := append([]string(nil), hubIDs...)
+		mu.Unlock()
+		if len(gotHub) != 3 {
+			t.Fatalf("hub received %d events, want 3", len(gotHub))
+		}
+		for i, want := range wantIDs {
+			if got := decodeUsage(t, gcp.lines[i]).EventID; got != want {
+				t.Errorf("gcp[%d] = %q, want %q", i, got, want)
+			}
+			if gotHub[i] != want {
+				t.Errorf("hub[%d] = %q, want %q", i, gotHub[i], want)
+			}
+		}
+		if o.Stats().PendingBytes != 0 {
+			t.Errorf("PendingBytes = %d after both sinks drained, want 0", o.Stats().PendingBytes)
+		}
+	})
+
+	t.Run("GCP failure does not block Hub and ready file stays until GCP recovers", func(t *testing.T) {
+		var mu sync.Mutex
+		var hubIDs []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			for _, ev := range req.Events {
+				hubIDs = append(hubIDs, ev.EventID)
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:gcp-fail-1", 1), AppendWritten)
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:gcp-fail-2", 2), AppendWritten)
+
+		gcp := &capture{fail: errors.New("cloud logging down")}
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-dual-2",
+		})
+		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+		clock := time.Date(2026, 11, 25, 19, 0, 0, 0, time.UTC)
+		d.now = func() time.Time { return clock }
+
+		// First tick: GCP fails, Hub still delivers both events.
+		d.RunOnce(context.Background())
+		mu.Lock()
+		gotHub := len(hubIDs)
+		mu.Unlock()
+		if gotHub != 2 {
+			t.Fatalf("hub delivered %d events while GCP failed, want 2", gotHub)
+		}
+		if len(gcp.lines) != 0 {
+			t.Fatalf("gcp delivered %d events while down, want 0", len(gcp.lines))
+		}
+		if o.Stats().PendingBytes == 0 {
+			t.Fatal("PendingBytes must remain non-zero while GCP cursor is behind")
+		}
+
+		// Recover GCP and advance clock past GCP backoff: GCP delivers both events without re-sending to Hub.
+		gcp.fail = nil
+		clock = clock.Add(5 * time.Second)
+		d.RunOnce(context.Background())
+		if len(gcp.lines) != 2 {
+			t.Fatalf("gcp delivered %d events after recovery, want 2", len(gcp.lines))
+		}
+		mu.Lock()
+		gotHubAfter := len(hubIDs)
+		mu.Unlock()
+		if gotHubAfter != 2 {
+			t.Errorf("hub received %d events total, want 2 (no duplicate delivery)", gotHubAfter)
+		}
+		if o.Stats().PendingBytes != 0 {
+			t.Errorf("PendingBytes = %d after both cursors caught up, want 0", o.Stats().PendingBytes)
+		}
+	})
+
+	t.Run("Hub failure and rejection do not block or dead-letter GCP", func(t *testing.T) {
+		var hubFail atomic.Bool
+		hubFail.Store(true)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if hubFail.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			// Reject index 0 permanently on Hub.
+			var rej []telemetrycontract.UsageIngestRejection
+			if len(req.Events) > 0 {
+				rej = append(rej, telemetrycontract.UsageIngestRejection{
+					Index:   0,
+					EventID: req.Events[0].EventID,
+					Code:    telemetrycontract.UsageRejectInvalidEvent,
+					Reason:  "hub rejected",
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{
+				Accepted: len(req.Events) - len(rej),
+				Rejected: rej,
+			})
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:hub-fail-1", 1), AppendWritten)
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:hub-fail-2", 2), AppendWritten)
+
+		gcp := &capture{}
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-dual-3",
+		})
+		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+		clock := time.Date(2026, 11, 25, 19, 10, 0, 0, time.UTC)
+		d.now = func() time.Time { return clock }
+
+		// First tick: Hub is 503, GCP still receives both events cleanly.
+		d.RunOnce(context.Background())
+		if len(gcp.lines) != 2 {
+			t.Fatalf("gcp delivered %d events while Hub was down, want 2", len(gcp.lines))
+		}
+		if o.Stats().PendingBytes == 0 {
+			t.Fatal("PendingBytes must remain non-zero while Hub cursor is behind")
+		}
+
+		// Hub recovers and rejects event 0: Hub advances past it, ready file cleaned up, GCP already got both.
+		hubFail.Store(false)
+		clock = clock.Add(5 * time.Second)
+		d.RunOnce(context.Background())
+		if len(gcp.lines) != 2 {
+			t.Errorf("gcp lines = %d, want 2", len(gcp.lines))
+		}
+		if o.Stats().PendingBytes != 0 {
+			t.Errorf("PendingBytes = %d after both cursors finished, want 0", o.Stats().PendingBytes)
+		}
+	})
+}
+
+// O2: HTTP 413 Payload Too Large must bisect multi-event batches instead of
+// dead-lettering good events; only a single event that exceeds the limit on
+// its own may be dead-lettered. Re-encoded JSON expansion is also proactively
+// bisected.
+func TestHubUsageSink_413BisectsBatchAndOnlyDeadLettersSingleOversizeEvent(t *testing.T) {
+	t.Run("reactive 413 bisects multi-event batch without dead-lettering", func(t *testing.T) {
+		var mu sync.Mutex
+		var deliveredIDs []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if len(req.Events) > 1 {
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				_, _ = w.Write([]byte("batch too large"))
+				return
+			}
+			mu.Lock()
+			for _, ev := range req.Events {
+				deliveredIDs = append(deliveredIDs, ev.EventID)
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		var wantIDs []string
+		for i := 1; i <= 4; i++ {
+			ev := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:413-%d", i), int64(i)), AppendWritten)
+			wantIDs = append(wantIDs, ev.EventID)
+		}
+
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:           httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID:          "run-413",
+			MaxBatchEvents: 500,
+			MaxBatchBytes:  telemetrycontract.UsageIngestMaxBatchBytes,
+		})
+		d := NewHubAnalyticsDrainer(o, sink, trustedHub("hub-1"))
+
+		if sent := d.RunOnce(context.Background()); sent != 4 {
+			t.Fatalf("sent = %d, want 4", sent)
+		}
+		ledger, err := o.LedgerSnapshot()
+		if err != nil {
+			t.Fatalf("LedgerSnapshot: %v", err)
+		}
+		if ledger.DeadLettersTotal != 0 {
+			t.Errorf("DeadLettersTotal = %d, want 0 (no good event may be dead-lettered on 413)", ledger.DeadLettersTotal)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(deliveredIDs) != 4 {
+			t.Fatalf("delivered = %d, want 4", len(deliveredIDs))
+		}
+		for i, want := range wantIDs {
+			if deliveredIDs[i] != want {
+				t.Errorf("delivered[%d] = %q, want %q", i, deliveredIDs[i], want)
+			}
+		}
+	})
+
+	t.Run("single oversize event dead-lettered while good siblings succeed", func(t *testing.T) {
+		const serverLimit = 1200
+		var mu sync.Mutex
+		var deliveredIDs []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if len(raw) > serverLimit {
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				_, _ = w.Write([]byte("too large"))
+				return
+			}
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.Unmarshal(raw, &req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			for _, ev := range req.Events {
+				deliveredIDs = append(deliveredIDs, ev.EventID)
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		good0 := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:413-good-0", 1), AppendWritten)
+		huge := draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:413-huge-1", 2)
+		huge.SessionID = strings.Repeat("x", 1500) // exceeds serverLimit even on its own
+		mustAppend(t, o, huge, AppendWritten)
+		good2 := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:413-good-2", 3), AppendWritten)
+
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:           httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID:          "run-413-single",
+			MaxBatchEvents: 500,
+			MaxBatchBytes:  telemetrycontract.UsageIngestMaxBatchBytes,
+		})
+		d := NewHubAnalyticsDrainer(o, sink, trustedHub("hub-1"))
+
+		if sent := d.RunOnce(context.Background()); sent != 2 {
+			t.Fatalf("sent = %d, want 2 good events", sent)
+		}
+		ledger, err := o.LedgerSnapshot()
+		if err != nil {
+			t.Fatalf("LedgerSnapshot: %v", err)
+		}
+		if ledger.DeadLettersTotal != 1 {
+			t.Errorf("DeadLettersTotal = %d, want 1 (only the single oversize event)", ledger.DeadLettersTotal)
+		}
+		if ledger.PendingBytes != 0 {
+			t.Errorf("PendingBytes = %d, want 0", ledger.PendingBytes)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(deliveredIDs) != 2 || deliveredIDs[0] != good0.EventID || deliveredIDs[1] != good2.EventID {
+			t.Errorf("deliveredIDs = %v, want [%q, %q]", deliveredIDs, good0.EventID, good2.EventID)
+		}
+	})
+
+	t.Run("proactive re-encoded JSON expansion bisects before POST", func(t *testing.T) {
+		const maxBytes = 1500
+		var mu sync.Mutex
+		var maxSeenBody int
+		var delivered int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.Unmarshal(raw, &req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			if len(raw) > maxSeenBody {
+				maxSeenBody = len(raw)
+			}
+			delivered += len(req.Events)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		for i := 1; i <= 2; i++ {
+			ev := draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:esc-%d", i), int64(i))
+			// '<' expands from 1 byte to 6 bytes (\u003c) under encoding/json HTML escaping.
+			ev.SessionID = strings.Repeat("<", 80)
+			mustAppend(t, o, ev, AppendWritten)
+		}
+
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:           httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID:          "run-esc",
+			MaxBatchEvents: 500,
+			MaxBatchBytes:  maxBytes,
+		})
+		d := NewHubAnalyticsDrainer(o, sink, trustedHub("hub-1"))
+
+		if sent := d.RunOnce(context.Background()); sent != 2 {
+			t.Fatalf("sent = %d, want 2", sent)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if delivered != 2 {
+			t.Fatalf("delivered = %d, want 2", delivered)
+		}
+		if maxSeenBody > maxBytes {
+			t.Errorf("max HTTP body size = %d > maxBytes %d (proactive re-encoded bisect failed)", maxSeenBody, maxBytes)
+		}
+	})
 }

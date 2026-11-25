@@ -140,13 +140,14 @@ func TestClient_PostUsageEvents(t *testing.T) {
 		for _, tc := range []struct {
 			code          int
 			wantPermanent bool
+			wantTooLarge  bool
 		}{
-			{http.StatusBadRequest, true},
-			{http.StatusRequestEntityTooLarge, true},
-			{http.StatusUnprocessableEntity, true},
-			{http.StatusUnauthorized, false},
-			{http.StatusTooManyRequests, false},
-			{http.StatusServiceUnavailable, false},
+			{http.StatusBadRequest, true, false},
+			{http.StatusRequestEntityTooLarge, false, true},
+			{http.StatusUnprocessableEntity, true, false},
+			{http.StatusUnauthorized, false, false},
+			{http.StatusTooManyRequests, false, false},
+			{http.StatusServiceUnavailable, false, false},
 		} {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.code)
@@ -161,6 +162,9 @@ func TestClient_PostUsageEvents(t *testing.T) {
 			}
 			if httpErr.IsPermanent() != tc.wantPermanent {
 				t.Errorf("code %d: IsPermanent() = %v, want %v", tc.code, httpErr.IsPermanent(), tc.wantPermanent)
+			}
+			if httpErr.IsPayloadTooLarge() != tc.wantTooLarge {
+				t.Errorf("code %d: IsPayloadTooLarge() = %v, want %v", tc.code, httpErr.IsPayloadTooLarge(), tc.wantTooLarge)
 			}
 		}
 	})

@@ -17,6 +17,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -86,8 +87,13 @@ func probeAndConfigureUsageIngest(ctx context.Context, pipeline *telemetry.Pipel
 			resp, postErr := client.PostUsageEvents(postCtx, req)
 			if postErr != nil {
 				var httpErr *hub.UsageIngestHTTPError
-				if errors.As(postErr, &httpErr) && httpErr.IsPermanent() {
-					return nil, telemetry.PermanentSendError(postErr)
+				if errors.As(postErr, &httpErr) {
+					if httpErr.IsPayloadTooLarge() {
+						return nil, fmt.Errorf("%w: %v", telemetry.ErrPayloadTooLarge, postErr)
+					}
+					if httpErr.IsPermanent() {
+						return nil, telemetry.PermanentSendError(postErr)
+					}
 				}
 				return nil, postErr
 			}

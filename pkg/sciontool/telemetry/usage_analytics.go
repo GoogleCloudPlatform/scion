@@ -74,6 +74,7 @@ type UsageAnalytics struct {
 	open      func() (*AnalyticsOutbox, error)
 	failDir   string
 	failOwner *OutboxOwner
+	runID     string
 	onRecord  func(time.Time)
 
 	droppedNoIdentity, invalid atomic.Int64
@@ -261,6 +262,11 @@ func (a *UsageAnalytics) build(obs UsageObservation) (*telemetrycontract.UsageEv
 	env.ProducerBuild = version.Short()
 	env.HarnessVersion = obs.HarnessVersion
 
+	runID := strings.TrimSpace(a.runID)
+	if runID == "" {
+		runID = strings.TrimSpace(os.Getenv("SCION_LAUNCH_ID"))
+	}
+
 	model, modelSource := resolveModelWithSource(obs.Model)
 	ev := &telemetrycontract.UsageEvent{
 		Envelope:            env,
@@ -269,6 +275,7 @@ func (a *UsageAnalytics) build(obs UsageObservation) (*telemetrycontract.UsageEv
 		SourceSchemaVersion: UsageRuleSchemaVersion,
 		SourceEventID:       obs.SourceEventID,
 		SourceIdentity:      obs.Identity,
+		RunID:               runID,
 		Harness:             os.Getenv("SCION_HARNESS"),
 		Model:               model,
 		ModelSource:         modelSource,
