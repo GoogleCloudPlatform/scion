@@ -16,7 +16,12 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
-import type { AutoUpdateStatus, UpdateStatus } from './admin-maintenance-update-card.js';
+import { setPreferredTimeZone } from '../../utils/time.js';
+import type {
+  AutoUpdateStatus,
+  UpdateStatus,
+  ViewRunDetail,
+} from './admin-maintenance-update-card.js';
 
 type Json = Record<string, unknown>;
 
@@ -115,6 +120,7 @@ let el: Card | null = null;
 afterEach(() => {
   el?.remove();
   el = null;
+  setPreferredTimeZone('');
   vi.unstubAllGlobals();
 });
 
@@ -387,5 +393,230 @@ describe('scion-admin-maintenance-update-card auto-update checkbox', () => {
     const alert = card.shadowRoot!.querySelector('sl-alert.auto-update-error');
     expect(alert).not.toBeNull();
     expect(alert!.textContent).toContain('modified concurrently');
+  });
+
+  it('clears the error alert on dismiss and on subsequent status change to pinned/git', async () => {
+    const { card } = await mount(makeStatus(), () =>
+      Promise.resolve(json({ error: { message: 'Temporary server error' } }, 500))
+    );
+
+    const cb = card.shadowRoot!.querySelector<Checkbox>('sl-checkbox.auto-update-checkbox')!;
+    cb.checked = true;
+    cb.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await settle(card);
+
+    const alert = card.shadowRoot!.querySelector('sl-alert.auto-update-error');
+    expect(alert).not.toBeNull();
+    expect(alert!.hasAttribute('closable')).toBe(true);
+
+    // Dismissing the closable alert clears it.
+    alert!.dispatchEvent(new Event('sl-after-hide', { bubbles: true }));
+    await settle(card);
+    expect(card.shadowRoot!.querySelector('sl-alert.auto-update-error')).toBeNull();
+
+    // Trigger another error, then change status to pinned => alert clears automatically.
+    cb.checked = true;
+    cb.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await settle(card);
+    expect(card.shadowRoot!.querySelector('sl-alert.auto-update-error')).not.toBeNull();
+
+    card.status = makeStatus({
+      pin: 'nightly-20261022',
+      autoUpdate: autoUpdate({ inactiveReason: 'pinned' }),
+    });
+    await settle(card);
+    expect(card.shadowRoot!.querySelector('sl-alert.auto-update-error')).toBeNull();
+  });
+
+  it('sends PUT on hour change, disables in flight, updates value, and emits auto-update-changed', async () => {
+    let resolvePut!: (res: Response) => void;
+    const putPromise = new Promise<Response>((r) => {
+      resolvePut = r;
+    });
+    const { card, fetchMock } = await mount(
+      makeStatus({
+        autoUpdate: autoUpdate({
+          enabled: true,
+          source: 'setting',
+          active: true,
+          windowStartHourUtc: 4,
+          nextRunAt: '2026-11-25T04:17:00Z',
+        }),
+      }),
+      () => putPromise
+    );
+    const changedSpy = vi.fn();
+    card.addEventListener('auto-update-changed', changedSpy);
+
+    const hourSelect = card.shadowRoot!.querySelector<Select>('sl-select.auto-update-hour-select')!;
+    expect(hourSelect).not.toBeNull();
+    expect(hourSelect.value).toBe('4');
+    expect(hourSelect.querySelectorAll('sl-option').length).toBe(24);
+
+    hourSelect.value = '14';
+    hourSelect.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await card.updateComplete;
+
+    // Both controls are disabled while saving.
+    expect(hourSelect.hasAttribute('disabled')).toBe(true);
+    expect(
+      card.shadowRoot!.querySelector('sl-checkbox.auto-update-checkbox')!.hasAttribute('disabled')
+    ).toBe(true);
+
+    const putCall = fetchMock.mock.calls.find(
+      (c) =>
+        String(c[0]).includes('/api/v1/admin/maintenance/auto-update') &&
+        (c[1] as RequestInit | undefined)?.method === 'PUT'
+    );
+    expect(putCall).toBeDefined();
+    expect(JSON.parse(typeof putCall![1]?.body === 'string' ? putCall![1].body : '')).toEqual({
+      enabled: true,
+      windowStartHourUtc: 14,
+    });
+
+    const updated = autoUpdate({
+      enabled: true,
+      source: 'setting',
+      active: true,
+      windowStartHourUtc: 14,
+      nextRunAt: '2026-11-25T14:17:00Z',
+    });
+    resolvePut(json(updated));
+    await settle(card);
+
+    expect(hourSelect.hasAttribute('disabled')).toBe(false);
+    expect(hourSelect.value).toBe('14');
+    expect(changedSpy).toHaveBeenCalledTimes(1);
+    expect((changedSpy.mock.calls[0][0] as CustomEvent<AutoUpdateStatus>).detail).toEqual(updated);
+  });
+
+  it('reverts hour picker and shows alert on PUT error', async () => {
+    const { card } = await mount(
+      makeStatus({
+        autoUpdate: autoUpdate({
+          enabled: true,
+          source: 'setting',
+          active: true,
+          windowStartHourUtc: 4,
+        }),
+      }),
+      () => Promise.resolve(json({ error: { message: 'Invalid hour' } }, 400))
+    );
+
+    const hourSelect = card.shadowRoot!.querySelector<Select>('sl-select.auto-update-hour-select')!;
+    hourSelect.value = '9';
+    hourSelect.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await settle(card);
+
+    expect(hourSelect.hasAttribute('disabled')).toBe(false);
+    expect(hourSelect.value).toBe('4');
+    expect(card.shadowRoot!.querySelector('sl-alert.auto-update-error')?.textContent).toContain(
+      'Invalid hour'
+    );
+  });
+
+  it('renders next-run in local tz with UTC tooltip, last outcome with view-run, suppressed note, and Pin row suffix', async () => {
+    setPreferredTimeZone('America/New_York');
+    const { card } = await mount(
+      makeStatus({
+        autoUpdate: autoUpdate({
+          enabled: true,
+          source: 'setting',
+          active: true,
+          windowStartHourUtc: 4,
+          nextRunAt: '2099-11-25T04:17:00Z',
+          lastCheckAt: '2026-11-24T04:17:00Z',
+          lastRunId: 'run-auto-99',
+          lastTarget: 'nightly-20261124',
+          lastOutcome: 'verified',
+          suppressedTag: 'nightly-20261125',
+        }),
+      })
+    );
+
+    // Pin row mentions daily automatic updates when active.
+    expect(card.shadowRoot!.querySelector('.pin-state')?.textContent).toContain(
+      'updates automatically daily'
+    );
+
+    // Next check is formatted in the display timezone (EST = UTC-5 -> Nov 24, 23:17) with UTC tooltip.
+    const nextEl = card.shadowRoot!.querySelector('.auto-update-next');
+    expect(nextEl).not.toBeNull();
+    expect(nextEl!.textContent).toContain('Next check: Nov 24, 23:17 (America/New_York)');
+    expect(nextEl!.getAttribute('title')).toBe('Nov 25, 2099, 04:17 UTC');
+
+    // Last outcome renders target, label, and View run link.
+    const lastEl = card.shadowRoot!.querySelector('.auto-update-last');
+    expect(lastEl).not.toBeNull();
+    expect(lastEl!.textContent).toContain('Last automatic update:');
+    expect(lastEl!.textContent).toContain('nightly-20261124');
+    expect(lastEl!.textContent).toContain('verified');
+
+    const viewRunSpy = vi.fn();
+    card.addEventListener('view-run', viewRunSpy);
+    const link = card.shadowRoot!.querySelector<HTMLAnchorElement>('a.auto-update-last-run');
+    expect(link).not.toBeNull();
+    link!.click();
+    expect(viewRunSpy).toHaveBeenCalledTimes(1);
+    expect((viewRunSpy.mock.calls[0][0] as CustomEvent<ViewRunDetail>).detail).toEqual({
+      runId: 'run-auto-99',
+      operationKey: 'update-binary',
+    });
+
+    // Suppressed note renders exact wording.
+    const suppressed = card.shadowRoot!.querySelector('.auto-update-suppressed');
+    expect(suppressed).not.toBeNull();
+    expect(suppressed!.textContent).toContain(
+      'Skipped nightly-20261125 after a failed update; waiting for a newer release.'
+    );
+  });
+
+  it('renders "within the next few minutes" when nextRunAt is at or before now', async () => {
+    const pastIso = '2020-01-01T04:17:00Z';
+    const { card } = await mount(
+      makeStatus({
+        autoUpdate: autoUpdate({
+          enabled: true,
+          source: 'setting',
+          active: true,
+          windowStartHourUtc: 4,
+          nextRunAt: pastIso,
+        }),
+      })
+    );
+
+    const nextEl = card.shadowRoot!.querySelector('.auto-update-next');
+    expect(nextEl).not.toBeNull();
+    expect(nextEl!.textContent?.trim()).toBe('Next check: within the next few minutes');
+    expect(nextEl!.getAttribute('title')).toBe('Jan 1, 2020, 04:17 UTC');
+  });
+
+  it('uses "Last automatic check:" and omits View run link and target when lastOutcome is a skip outcome', async () => {
+    const { card } = await mount(
+      makeStatus({
+        autoUpdate: autoUpdate({
+          enabled: true,
+          source: 'setting',
+          active: false,
+          inactiveReason: 'pinned',
+          nextRunAt: null,
+          lastRunId: 'stale-run-id',
+          lastTarget: 'nightly-20261120',
+          lastOutcome: 'skipped:in_flight',
+        }),
+      })
+    );
+
+    expect(card.shadowRoot!.querySelector('.pin-state')?.textContent).not.toContain(
+      'updates automatically daily'
+    );
+    expect(card.shadowRoot!.querySelector('.auto-update-next')).toBeNull();
+    const lastEl = card.shadowRoot!.querySelector('.auto-update-last');
+    expect(lastEl).not.toBeNull();
+    expect(lastEl!.textContent).toContain('Last automatic check:');
+    expect(lastEl!.textContent).not.toContain('Last automatic update:');
+    expect(lastEl!.textContent).toContain('skipped (update already in progress)');
+    expect(lastEl!.textContent).not.toContain('nightly-20261120');
+    expect(card.shadowRoot!.querySelector('a.auto-update-last-run')).toBeNull();
   });
 });

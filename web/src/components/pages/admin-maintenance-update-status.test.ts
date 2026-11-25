@@ -25,6 +25,7 @@ vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
 vi.mock('../../client/hub-restart.js', () => ({ waitForHubRestart: vi.fn() }));
 
 import { showToast } from '../../utils/toast.js';
+import { setPreferredTimeZone } from '../../utils/time.js';
 import { waitForHubRestart } from '../../client/hub-restart.js';
 
 type Json = Record<string, unknown>;
@@ -2313,5 +2314,145 @@ describe('expectedRestartVersion', () => {
     expect(expectedRestartVersion({ ...base, to: 'nightly-20261101' })).toBe('nightly-20261101');
     expect(expectedRestartVersion({ ...base, to: 'git-0123abcd4567', mode: 'git' })).toBeNull();
     expect(expectedRestartVersion({ ...base, to: '' })).toBeNull();
+  });
+});
+
+describe('update-available banner auto-update schedule', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+  });
+
+  const NOTIFIED: Json = {
+    update_available: true,
+    update: {
+      version: 'nightly-20261023',
+      channel: 'nightly',
+      detected_at: '2026-10-23T00:00:00Z',
+    },
+  };
+
+  it('appends "Will install automatically at <nextRunAt>" when auto-update is active and omits it when inactive', async () => {
+    setPreferredTimeZone('America/New_York');
+    el = await mount({
+      status: updateStatus({
+        autoUpdate: {
+          enabled: true,
+          source: 'setting',
+          locked: false,
+          lockedReason: '',
+          active: true,
+          inactiveReason: '',
+          windowStartHourUtc: 4,
+          nextRunAt: '2099-11-25T04:17:00Z',
+        },
+      }),
+      updateAvailable: NOTIFIED,
+    });
+    const banner = root(el).querySelector('.update-available-banner:not(.unit-drift-banner)');
+    expect(banner).not.toBeNull();
+    const autoSpan = banner!.querySelector('.banner-auto-update');
+    expect(autoSpan).not.toBeNull();
+    expect(autoSpan!.textContent).toContain(
+      'Will install automatically at Nov 24, 23:17 (America/New_York)'
+    );
+    expect(autoSpan!.getAttribute('title')).toBe('Nov 25, 2099, 04:17 UTC');
+
+    // When the card emits auto-update-changed with active:false, the banner drops the schedule note.
+    const card = root(el).querySelector('scion-admin-maintenance-update-card')!;
+    card.dispatchEvent(
+      new CustomEvent('auto-update-changed', {
+        detail: {
+          enabled: false,
+          source: 'setting',
+          locked: false,
+          lockedReason: '',
+          active: false,
+          inactiveReason: '',
+          windowStartHourUtc: 4,
+          nextRunAt: null,
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
+    expect(
+      root(el).querySelector('.update-available-banner:not(.unit-drift-banner) .banner-auto-update')
+    ).toBeNull();
+  });
+
+  it('omits the banner auto-install note when suppressedTag equals update.version', async () => {
+    el = await mount({
+      status: updateStatus({
+        autoUpdate: {
+          enabled: true,
+          source: 'setting',
+          locked: false,
+          lockedReason: '',
+          active: true,
+          inactiveReason: '',
+          windowStartHourUtc: 4,
+          nextRunAt: '2099-11-25T04:17:00Z',
+          suppressedTag: 'nightly-20261023',
+        },
+      }),
+      updateAvailable: NOTIFIED,
+    });
+    const banner = root(el).querySelector('.update-available-banner:not(.unit-drift-banner)');
+    expect(banner).not.toBeNull();
+    expect(banner!.querySelector('.banner-auto-update')).toBeNull();
+  });
+
+  it('shows the banner auto-install note when suppressedTag is a different, older tag', async () => {
+    setPreferredTimeZone('America/New_York');
+    el = await mount({
+      status: updateStatus({
+        autoUpdate: {
+          enabled: true,
+          source: 'setting',
+          locked: false,
+          lockedReason: '',
+          active: true,
+          inactiveReason: '',
+          windowStartHourUtc: 4,
+          nextRunAt: '2099-11-25T04:17:00Z',
+          suppressedTag: 'nightly-20261021',
+        },
+      }),
+      updateAvailable: NOTIFIED,
+    });
+    const autoSpan = root(el).querySelector(
+      '.update-available-banner:not(.unit-drift-banner) .banner-auto-update'
+    );
+    expect(autoSpan).not.toBeNull();
+    expect(autoSpan!.textContent).toContain(
+      'Will install automatically at Nov 24, 23:17 (America/New_York)'
+    );
+  });
+
+  it('renders "within the next few minutes" in the banner when nextRunAt is at or before now', async () => {
+    el = await mount({
+      status: updateStatus({
+        autoUpdate: {
+          enabled: true,
+          source: 'setting',
+          locked: false,
+          lockedReason: '',
+          active: true,
+          inactiveReason: '',
+          windowStartHourUtc: 4,
+          nextRunAt: '2020-01-01T04:17:00Z',
+        },
+      }),
+      updateAvailable: NOTIFIED,
+    });
+    const autoSpan = root(el).querySelector(
+      '.update-available-banner:not(.unit-drift-banner) .banner-auto-update'
+    );
+    expect(autoSpan).not.toBeNull();
+    expect(autoSpan!.textContent?.trim()).toBe(
+      'Will install automatically within the next few minutes'
+    );
+    expect(autoSpan!.getAttribute('title')).toBe('Jan 1, 2020, 04:17 UTC');
   });
 });

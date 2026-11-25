@@ -153,64 +153,171 @@ func TestEffectiveAutoUpdate(t *testing.T) {
 func TestBuildAutoUpdateStatus_Eligibility(t *testing.T) {
 	enabledSetting := &AutoUpdateSetting{Enabled: true, WindowStartUTC: 4}
 	notifyMC := MaintenanceConfig{UpdatePolicy: "notify"}
+	now := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
 
-	t.Run("eligible and enabled is active", func(t *testing.T) {
-		got := buildAutoUpdateStatus(notifyMC, enabledSetting, UpdateModeRelease, "nightly", maintenance.PinLatest, true, false)
+	t.Run("eligible and enabled is active with nextRunAt", func(t *testing.T) {
+		got := buildAutoUpdateStatus(notifyMC, enabledSetting, AutoUpdateState{}, UpdateModeRelease, "nightly", maintenance.PinLatest, true, false, "", now)
 		assert.True(t, got.Enabled)
 		assert.True(t, got.Active)
 		assert.Empty(t, got.InactiveReason)
+		require.NotNil(t, got.NextRunAt)
+		assert.Equal(t, "2026-11-24T04:00:00Z", *got.NextRunAt)
 	})
 
-	t.Run("eligible and disabled is inactive with empty reason", func(t *testing.T) {
-		got := buildAutoUpdateStatus(notifyMC, nil, UpdateModeRelease, "nightly", maintenance.PinLatest, true, false)
+	t.Run("eligible and disabled is inactive with empty reason and nil nextRunAt", func(t *testing.T) {
+		got := buildAutoUpdateStatus(notifyMC, nil, AutoUpdateState{}, UpdateModeRelease, "nightly", maintenance.PinLatest, true, false, "", now)
 		assert.False(t, got.Enabled)
 		assert.False(t, got.Active)
 		assert.Empty(t, got.InactiveReason)
+		assert.Nil(t, got.NextRunAt)
 	})
 
 	t.Run("config locked", func(t *testing.T) {
 		lockedMC := MaintenanceConfig{UpdatePolicy: "disabled", UpdatePolicyExplicit: true}
-		got := buildAutoUpdateStatus(lockedMC, enabledSetting, UpdateModeRelease, "nightly", maintenance.PinLatest, true, false)
+		got := buildAutoUpdateStatus(lockedMC, enabledSetting, AutoUpdateState{}, UpdateModeRelease, "nightly", maintenance.PinLatest, true, false, "", now)
 		assert.False(t, got.Enabled)
 		assert.True(t, got.Locked)
 		assert.False(t, got.Active)
 		assert.Equal(t, AutoUpdateInactiveConfigLocked, got.InactiveReason)
+		assert.Nil(t, got.NextRunAt)
 	})
 
 	t.Run("git mode", func(t *testing.T) {
-		got := buildAutoUpdateStatus(notifyMC, enabledSetting, UpdateModeGit, "", maintenance.PinLatest, true, false)
+		got := buildAutoUpdateStatus(notifyMC, enabledSetting, AutoUpdateState{}, UpdateModeGit, "", maintenance.PinLatest, true, false, "", now)
 		assert.True(t, got.Enabled)
 		assert.False(t, got.Active)
 		assert.Equal(t, AutoUpdateInactiveGitMode, got.InactiveReason)
+		assert.Nil(t, got.NextRunAt)
 	})
 
 	t.Run("pinned", func(t *testing.T) {
-		got := buildAutoUpdateStatus(notifyMC, enabledSetting, UpdateModeRelease, "nightly", "nightly-20261124", true, false)
+		got := buildAutoUpdateStatus(notifyMC, enabledSetting, AutoUpdateState{}, UpdateModeRelease, "nightly", "nightly-20261124", true, false, "", now)
 		assert.True(t, got.Enabled)
 		assert.False(t, got.Active)
 		assert.Equal(t, AutoUpdateInactivePinned, got.InactiveReason)
+		assert.Nil(t, got.NextRunAt)
 	})
 
 	t.Run("installer unsupported", func(t *testing.T) {
-		got := buildAutoUpdateStatus(notifyMC, enabledSetting, UpdateModeRelease, "nightly", maintenance.PinLatest, false, false)
+		got := buildAutoUpdateStatus(notifyMC, enabledSetting, AutoUpdateState{}, UpdateModeRelease, "nightly", maintenance.PinLatest, false, false, "", now)
 		assert.True(t, got.Enabled)
 		assert.False(t, got.Active)
 		assert.Equal(t, AutoUpdateInactiveInstallerUnsupported, got.InactiveReason)
+		assert.Nil(t, got.NextRunAt)
 	})
 
 	t.Run("no channel", func(t *testing.T) {
-		got := buildAutoUpdateStatus(notifyMC, enabledSetting, UpdateModeRelease, "", maintenance.PinLatest, true, false)
+		got := buildAutoUpdateStatus(notifyMC, enabledSetting, AutoUpdateState{}, UpdateModeRelease, "", maintenance.PinLatest, true, false, "", now)
 		assert.True(t, got.Enabled)
 		assert.False(t, got.Active)
 		assert.Equal(t, AutoUpdateInactiveNoChannel, got.InactiveReason)
+		assert.Nil(t, got.NextRunAt)
 	})
 
 	t.Run("maintenance mode", func(t *testing.T) {
-		got := buildAutoUpdateStatus(notifyMC, enabledSetting, UpdateModeRelease, "nightly", maintenance.PinLatest, true, true)
+		got := buildAutoUpdateStatus(notifyMC, enabledSetting, AutoUpdateState{}, UpdateModeRelease, "nightly", maintenance.PinLatest, true, true, "", now)
 		assert.True(t, got.Enabled)
 		assert.False(t, got.Active)
 		assert.Equal(t, AutoUpdateInactiveMaintenanceMode, got.InactiveReason)
+		assert.Nil(t, got.NextRunAt)
 	})
+
+	t.Run("propagates state fields and per-hub offset into nextRunAt", func(t *testing.T) {
+		hubID := "hub-alpha-123"
+		offset := autoUpdateWindowOffset(hubID)
+		state := AutoUpdateState{
+			LastCheckAt:    "2026-11-23T04:17:00Z",
+			LastAttemptDay: "2026-11-24",
+			LastRunID:      "run-42",
+			LastTarget:     "nightly-20261124",
+			LastOutcome:    AutoUpdateOutcomeFailed,
+			SuppressedTag:  "nightly-20261124",
+		}
+		got := buildAutoUpdateStatus(notifyMC, enabledSetting, state, UpdateModeRelease, "nightly", maintenance.PinLatest, true, false, hubID, now)
+		assert.True(t, got.Active)
+		require.NotNil(t, got.NextRunAt)
+		// LastAttemptDay is already 2026-11-24, so nextRunAt advances to 2026-11-25.
+		wantNext := time.Date(2026, 11, 25, 4, 0, 0, 0, time.UTC).Add(offset).Format(time.RFC3339)
+		assert.Equal(t, wantNext, *got.NextRunAt)
+		assert.Equal(t, state.LastCheckAt, got.LastCheckAt)
+		assert.Equal(t, state.LastRunID, got.LastRunID)
+		assert.Equal(t, state.LastTarget, got.LastTarget)
+		assert.Equal(t, state.LastOutcome, got.LastOutcome)
+		assert.Equal(t, state.SuppressedTag, got.SuppressedTag)
+	})
+}
+
+func TestNextAutoUpdateRunAt(t *testing.T) {
+	offset := 17 * time.Minute
+
+	cases := []struct {
+		name           string
+		now            time.Time
+		startHourUTC   int
+		offset         time.Duration
+		lastAttemptDay string
+		want           time.Time
+	}{
+		{
+			name:         "before today window",
+			now:          time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC),
+			startHourUTC: 4,
+			offset:       offset,
+			want:         time.Date(2026, 11, 24, 4, 17, 0, 0, time.UTC),
+		},
+		{
+			name:         "inside unattempted window returns now truncated to seconds",
+			now:          time.Date(2026, 11, 24, 4, 25, 30, 500, time.UTC),
+			startHourUTC: 4,
+			offset:       offset,
+			want:         time.Date(2026, 11, 24, 4, 25, 30, 0, time.UTC),
+		},
+		{
+			name:           "inside already-attempted window advances to tomorrow",
+			now:            time.Date(2026, 11, 24, 4, 25, 0, 0, time.UTC),
+			startHourUTC:   4,
+			offset:         offset,
+			lastAttemptDay: "2026-11-24",
+			want:           time.Date(2026, 11, 25, 4, 17, 0, 0, time.UTC),
+		},
+		{
+			name:         "after today window ended advances to tomorrow",
+			now:          time.Date(2026, 11, 24, 6, 0, 0, 0, time.UTC),
+			startHourUTC: 4,
+			offset:       offset,
+			want:         time.Date(2026, 11, 25, 4, 17, 0, 0, time.UTC),
+		},
+		{
+			name:         "midnight-crossing window unattempted after 00:00",
+			now:          time.Date(2026, 11, 25, 0, 30, 0, 0, time.UTC),
+			startHourUTC: 23,
+			offset:       15 * time.Minute,
+			want:         time.Date(2026, 11, 25, 0, 30, 0, 0, time.UTC),
+		},
+		{
+			name:           "midnight-crossing window already attempted advances to same-day 23:15",
+			now:            time.Date(2026, 11, 25, 0, 30, 0, 0, time.UTC),
+			startHourUTC:   23,
+			offset:         15 * time.Minute,
+			lastAttemptDay: "2026-11-24",
+			want:           time.Date(2026, 11, 25, 23, 15, 0, 0, time.UTC),
+		},
+		{
+			name:           "window moved later on same day after attempt already ran",
+			now:            time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC),
+			startHourUTC:   10,
+			offset:         offset,
+			lastAttemptDay: "2026-11-24",
+			want:           time.Date(2026, 11, 25, 10, 17, 0, 0, time.UTC),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nextAutoUpdateRunAt(tc.now, tc.startHourUTC, tc.offset, tc.lastAttemptDay)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func autoUpdateTestServer(t *testing.T, mc MaintenanceConfig) (*Server, store.Store, *store.User, *store.User) {
@@ -441,6 +548,68 @@ func TestHandleAdminMaintenanceAutoUpdate_RoundTripAndStates(t *testing.T) {
 	assert.True(t, st.AutoUpdate.Enabled)
 	assert.True(t, st.AutoUpdate.Active)
 	assert.Empty(t, st.AutoUpdate.InactiveReason)
+	require.NotNil(t, st.AutoUpdate.NextRunAt)
+	_, err = time.Parse(time.RFC3339, *st.AutoUpdate.NextRunAt)
+	assert.NoError(t, err)
+}
+
+func TestHandleAdminMaintenanceUpdateStatus_AutoUpdateStateAndNextRunAt(t *testing.T) {
+	ctx := context.Background()
+	mc := MaintenanceConfig{
+		DeploymentTier: "binary",
+		ReleaseChannel: "nightly",
+		UpdatePolicy:   "notify",
+		Installer:      newTestInstaller(maintenance.StrategySymlink),
+	}
+	srv, _, admin, _ := autoUpdateTestServer(t, mc)
+	srv.config.HubID = "hub-status-test-01"
+
+	require.NoError(t, srv.writeAutoUpdateState(ctx, AutoUpdateState{
+		LastCheckAt:    "2026-11-24T04:17:00Z",
+		LastAttemptDay: "2026-11-24",
+		LastRunID:      "run-abc",
+		LastTarget:     "nightly-20261124",
+		LastOutcome:    AutoUpdateOutcomeRolledBack,
+		SuppressedTag:  "nightly-20261124",
+	}))
+
+	// Inactive (default off): nextRunAt must serialize as explicit JSON null,
+	// while persisted state fields are still surfaced.
+	rec := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/admin/maintenance/update-status", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	auRaw, ok := raw["autoUpdate"].(map[string]any)
+	require.True(t, ok)
+	val, hasKey := auRaw["nextRunAt"]
+	assert.True(t, hasKey, "nextRunAt key must be present")
+	assert.Nil(t, val, "nextRunAt must be JSON null when inactive")
+	assert.Equal(t, "2026-11-24T04:17:00Z", auRaw["lastCheckAt"])
+	assert.Equal(t, "run-abc", auRaw["lastRunId"])
+	assert.Equal(t, "nightly-20261124", auRaw["lastTarget"])
+	assert.Equal(t, AutoUpdateOutcomeRolledBack, auRaw["lastOutcome"])
+	assert.Equal(t, "nightly-20261124", auRaw["suppressedTag"])
+
+	// Enable via PUT with a window hour 6h ahead (guaranteed outside the current 2h window):
+	// response includes non-null RFC3339 nextRunAt and preserves state fields.
+	windowHour := (time.Now().UTC().Hour() + 6) % 24
+	rec = doRequestAsUser(t, srv, admin, http.MethodPut, autoUpdateAdminPath, map[string]any{
+		"enabled":            true,
+		"windowStartHourUtc": windowHour,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var putResp updateStatusAutoUpdate
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &putResp))
+	assert.True(t, putResp.Active)
+	require.NotNil(t, putResp.NextRunAt)
+	parsedNext, err := time.Parse(time.RFC3339, *putResp.NextRunAt)
+	require.NoError(t, err)
+	assert.Equal(t, windowHour, parsedNext.UTC().Hour())
+	assert.Equal(t, int(autoUpdateWindowOffset(srv.config.HubID)/time.Minute), parsedNext.UTC().Minute())
+	assert.Equal(t, "run-abc", putResp.LastRunID)
+	assert.Equal(t, "nightly-20261124", putResp.LastTarget)
+	assert.Equal(t, AutoUpdateOutcomeRolledBack, putResp.LastOutcome)
+	assert.Equal(t, "nightly-20261124", putResp.SuppressedTag)
 }
 
 func TestHandleAdminMaintenanceAutoUpdate_AuditEvents(t *testing.T) {

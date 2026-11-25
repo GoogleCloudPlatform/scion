@@ -400,6 +400,37 @@ export function formatInstantWithZone(iso: string, style: InstantStyle = 'dateti
   return formatted ? `${formatted} (${zoneLabel()})` : '';
 }
 
+const UTC_MONTHS_SHORT = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+/**
+ * Formats an ISO instant as a compact UTC timestamp for tooltips
+ * (e.g. `"Nov 25, 2026, 04:17 UTC"`). Returns `''` on empty or unparsable input.
+ */
+export function formatUtcInstant(iso: string | undefined | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const mon = UTC_MONTHS_SHORT[d.getUTCMonth()];
+  const day = d.getUTCDate();
+  const year = d.getUTCFullYear();
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${mon} ${day}, ${year}, ${hh}:${mm} UTC`;
+}
+
 // ---------------------------------------------------------------------------
 // Relative-time formatting
 // ---------------------------------------------------------------------------
