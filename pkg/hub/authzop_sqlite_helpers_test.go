@@ -1313,6 +1313,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/workspace/files":                   {"id": f.project},
 		"/api/v1/projects/{id}/workspace/files/{path}":            {"id": f.project, "path": "li-files.txt"},
 		"/api/v1/projects/{id}/workspace/pull":                    {"id": f.project},
+		"/api/v1/projects/{id}/github":                            {"id": f.project},
 		"/api/v1/projects/{id}/github-installation":               {"id": f.project},
 		"/api/v1/projects/{id}/github-status":                     {"id": f.project},
 		"/api/v1/projects/{id}/github-permissions":                {"id": f.project},

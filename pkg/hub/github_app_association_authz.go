@@ -422,6 +422,24 @@ func hasUsableStoredGitHubPermissions(stored *store.GitHubTokenPermissions) bool
 	return false
 }
 
+// effectiveGitHubTokenPermissions computes the effective GitHub App
+// installation token permissions for project under grant and the App's
+// granted permissions. Both token minting (mintGitHubAppTokenInternal) and
+// the project GitHub read model (GET /api/v1/projects/{id}/github) call this
+// single helper so reported effective permissions never drift from minted
+// tokens.
+func effectiveGitHubTokenPermissions(
+	project *store.Project,
+	grant githubAssociationGrant,
+	appPerms map[string]string,
+) (perms githubapp.TokenPermissions, usedDefaults bool, ok bool) {
+	var stored *store.GitHubTokenPermissions
+	if project != nil {
+		stored = project.GitHubPermissions
+	}
+	return githubTokenPermissionsForGrant(stored, grant, appPerms)
+}
+
 // githubTokenPermissionsForGrant returns the permission set to request for
 // a token minted under grant, from the project's stored permissions or (when
 // nothing usable is stored) DefaultTokenPermissions intersected with the App's

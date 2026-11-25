@@ -2889,8 +2889,9 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.github.read",
 		Domain:      "project",
-		Description: "Read a project's GitHub status, GitHub permissions and git identity",
+		Description: "Read a project's GitHub integration overview, status, permissions and git identity",
 		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-status", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-permissions", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/git-identity", Method: "GET"},
