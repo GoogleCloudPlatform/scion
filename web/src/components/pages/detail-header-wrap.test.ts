@@ -21,8 +21,8 @@
  * follow it onto the next line, the icon keeps its size and the actions
  * drop below the title on a narrow screen. These tests check each page
  * hands its parts to the right slots and keeps no copy of the header CSS.
- * Pages with a back link hand it to the header's back slot as a shared
- * scion-back-link (ptone/scion#4177) and keep no back-link CSS of their own.
+ * Pages hand their navigation trail to the header's back slot as a shared
+ * scion-breadcrumb (ptone/scion#8281) and keep no back-link CSS of their own.
  * The agent page is covered in agent-detail-layout.test.ts.
  */
 
@@ -54,10 +54,8 @@ interface PageCase {
   badges: string[];
   /** Classes of the meta slot's elements, in order. */
   meta: string[];
-  /** Legacy back links in the back slot, as [href, label], in order. */
-  back?: Array<[string, string]>;
   /** Breadcrumb trail in the back slot, as [label, href|undefined] tuples. */
-  crumbs?: CrumbTuple[];
+  crumbs: CrumbTuple[];
   /** State overrides under which no header action renders. */
   noActions?: Record<string, unknown>;
 }
@@ -512,19 +510,11 @@ describe.each(cases)('%s detail header', (_label, c) => {
     ).toBe(true);
   });
 
-  it('hands its navigation to the back slot as shared breadcrumb or back links', () => {
+  it('hands its navigation to the back slot as a shared breadcrumb', () => {
     const header = renderHeader(c);
     const back = Array.from(header.children).filter((n) => n.getAttribute('slot') === 'back');
-    if (c.crumbs) {
-      expect(back.map((n) => n.tagName.toLowerCase())).toEqual(['scion-breadcrumb']);
-      expect(crumbTuples(header)).toEqual(c.crumbs);
-    } else {
-      const expected = c.back ?? [];
-      expect(back.map((n) => n.tagName.toLowerCase())).toEqual(
-        expected.map(() => 'scion-back-link')
-      );
-      expect(back.map((n) => [n.getAttribute('href'), n.textContent?.trim()])).toEqual(expected);
-    }
+    expect(back.map((n) => n.tagName.toLowerCase())).toEqual(['scion-breadcrumb']);
+    expect(crumbTuples(header)).toEqual(c.crumbs);
     // The page renders no back anchor of its own.
     expect(header.querySelector('a.back-link, a > sl-icon[name="arrow-left"]')).toBeNull();
   });
@@ -617,14 +607,25 @@ describe('project-scoped template and harness config breadcrumbs', () => {
 /**
  * Non-detail-header pages migrated to scion-breadcrumb keep no copy of
  * back-link or ad-hoc breadcrumb CSS.
+ *
+ * Documented exemptions (ptone/scion#8281 design §12 criterion 7):
+ * - `components/terminal/terminal-pane.ts`: compact mode keeps icon-only
+ *   `.back-link.compact` toolbar buttons (design §4.7).
+ * - `components/pages/secret-request.ts`: `/secret-requests/:id`
+ *   (ptone/scion#8747) landed after the #8281 design survey; migration to
+ *   `scion-breadcrumb` is tracked in ptone/scion#9152.
  */
 describe.each([
+  ['agent-detail', './agent-detail.js', 'scion-page-agent-detail'],
+  ['broker-area-detail', './broker-area-detail.js', 'scion-page-broker-area-detail'],
   ['project-settings', './project-settings.js', 'scion-page-project-settings'],
   ['project-schedules', './project-schedules.js', 'scion-page-project-schedules'],
   ['project-decisions', './project-decisions.js', 'scion-page-project-decisions'],
+  ['project-metrics', './metrics-dashboard.js', 'scion-page-project-metrics'],
   ['project-create', './project-create.js', 'scion-page-project-create'],
   ['agent-create', './agent-create.js', 'scion-page-agent-create'],
   ['agent-edit', './agent-edit.js', 'scion-page-agent-edit'],
+  ['agent-graph', './agent-graph.js', 'scion-page-agent-graph'],
   ['skill-create', './skill-create.js', 'scion-page-skill-create'],
   [
     'admin-access-boundary-editor',

@@ -157,33 +157,16 @@ describe('scion-detail-header back slot (ptone/scion#8281)', () => {
     expect(crumb.shadowRoot!.querySelector('[aria-current="page"]')!.textContent?.trim()).toBe(
       LONG_NAME
     );
-  });
-
-  it('lays multiple legacy back links out in one wrapping row', async () => {
-    const el = await mount();
-    for (const [href, label] of [
-      ['/projects/p/settings', 'Project Settings'],
-      ['/projects/p/settings?tab=templates', 'Templates'],
-    ]) {
-      const link = document.createElement('scion-back-link');
-      link.slot = 'back';
-      link.href = href;
-      link.textContent = label;
-      el.prepend(link);
-    }
-    await el.updateComplete;
-    expect(slot(el, 'back').assignedElements()).toHaveLength(2);
-    const row = rules.get('.back') ?? '';
-    expect(row).toMatch(/display:\s*flex/);
-    expect(row).toMatch(/flex-wrap:\s*wrap/);
-    expect(row).toMatch(/column-gap:\s*1rem/);
+    const rowRules = rules.get('.back') ?? '';
+    expect(rowRules).toMatch(/display:\s*flex/);
+    expect(rowRules).toMatch(/flex-wrap:\s*wrap/);
+    expect(rowRules).toMatch(/min-width:\s*0/);
   });
 
   it('renders no back content when none is set', async () => {
     const el = await mount();
     expect(slot(el, 'back').assignedElements()).toHaveLength(0);
     expect(el.querySelector('scion-breadcrumb')).toBeNull();
-    expect(el.querySelector('scion-back-link')).toBeNull();
     expect(el.shadowRoot!.querySelector('a')).toBeNull();
     // The empty row adds no space of its own.
     expect(rules.get('.back') ?? '').not.toMatch(/margin|padding|height/);

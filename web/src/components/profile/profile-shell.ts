@@ -29,7 +29,8 @@ import './profile-nav.js';
 import '../shared/header.js';
 import type { User } from '../../shared/types.js';
 import { performLogout } from '../../utils/auth.js';
-import { setDocumentTitle } from '../../client/page-title.js';
+import { setDocumentTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
+import type { PageTitleDetail } from '../../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from '../shared/app-frame.js';
 import {
   TestHubBannerController,
@@ -69,6 +70,7 @@ export class ScionProfileShell extends LitElement {
 
   /** The test-hub banner's status (shared/test-hub-banner.ts). */
   private _testHubBanner = new TestHubBannerController(this);
+  private _pageTitleHandler = this.handlePageTitle.bind(this);
 
   static override styles = css`
     ${testHubBannerStyles}
@@ -182,6 +184,7 @@ export class ScionProfileShell extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     enterAppFrame();
+    this.addEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
     try {
       this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
     } catch {
@@ -192,6 +195,14 @@ export class ScionProfileShell extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     exitAppFrame();
+    this.removeEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
+  }
+
+  private handlePageTitle(event: CustomEvent<PageTitleDetail>): void {
+    const segments = event.detail?.segments;
+    if (segments && segments.length > 0) {
+      setDocumentTitle(...segments);
+    }
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -258,6 +269,9 @@ export class ScionProfileShell extends LitElement {
 
   private getPageTitle(): string {
     const pathname = this.currentPath.split(/[?#]/, 1)[0] || '';
+    if (/^\/profile\/templates\/[^/]+$/.test(pathname)) {
+      return 'Template';
+    }
     return PROFILE_TITLES[pathname] || 'Profile';
   }
 

@@ -942,7 +942,7 @@ export class ScionProfileNav extends LitElement {
           `
         : ''}
 
-      <nav class="nav-container">
+      <nav class="nav-container" aria-label="Profile">
         ${this.inboxEnabled
           ? html`
               <div class="nav-section nav-section-inbox" data-inbox-nav-section>
