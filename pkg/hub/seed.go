@@ -169,7 +169,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    10, // R10: webhook_endpoint.{send,update} (ptone/scion#8061); R9: project.read_message_policies (ptone/scion#8047); R8: trigger.{create,list,read}, webhook_endpoint.{create,list,read} (ptone/scion#8028); R7: github_trigger.comment (ptone/scion#8090); R6: project.chat_post (ptone/scion#5518); R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    10, // R10: webhook_endpoint.send (ptone/scion#8061); R9: project.read_message_policies (ptone/scion#8047); R8: trigger.{create,list,read}, webhook_endpoint.{create,list,read} (ptone/scion#8028); R7: github_trigger.comment (ptone/scion#8090); R6: project.chat_post (ptone/scion#5518); R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 		{

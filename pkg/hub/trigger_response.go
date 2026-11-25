@@ -91,7 +91,7 @@ type WebhookEndpointCreatedResponse struct {
 type WebhookEndpointRotatedResponse struct {
 	WebhookEndpointResponse
 	Secret             string    `json:"secret"`
-	GraceWindowExpires time.Time `json:"graceWindowExpires"`
+	GraceWindowExpires time.Time `json:"graceWindowExpires,omitzero"`
 }
 
 // ListWebhookEndpointsResponse is the paginated response of GET /webhook-endpoints.

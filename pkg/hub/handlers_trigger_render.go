@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/gitref"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
@@ -129,16 +130,19 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	sourceName := ""
 	signatureMode := ""
+	var ep *store.WebhookEndpoint
 	if ev.SourceKind == store.TriggerSourceKindWebhook && ev.SourceID != "" {
-		if ep, epErr := s.store.GetWebhookEndpoint(ctx, ev.SourceID); epErr == nil && ep != nil && ep.ProjectID == projectID {
-			sourceName = ep.Name
-			signatureMode = ep.SignatureMode
+		if loaded, epErr := s.store.GetWebhookEndpoint(ctx, ev.SourceID); epErr == nil && loaded != nil && loaded.ProjectID == projectID {
+			ep = loaded
+			sourceName = loaded.Name
 		}
 	}
 	if sourceName == "" && ev.Attributes != nil {
 		sourceName = ev.Attributes["endpoint_name"]
 	}
-	if signatureMode == "" && ev.Attributes != nil {
+	if ev.SourceKind == store.TriggerSourceKindWebhook {
+		signatureMode = trigger.WebhookEventVerificationMode(ev.Attributes, ep)
+	} else if ev.Attributes != nil {
 		signatureMode = ev.Attributes["signature_mode"]
 	}
 

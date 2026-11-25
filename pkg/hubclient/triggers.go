@@ -208,7 +208,7 @@ type WebhookEndpointCreated struct {
 type WebhookEndpointRotated struct {
 	WebhookEndpoint
 	Secret             string    `json:"secret"`
-	GraceWindowExpires time.Time `json:"graceWindowExpires"`
+	GraceWindowExpires time.Time `json:"graceWindowExpires,omitzero"`
 }
 
 // ListWebhookEndpointsOptions configures webhook endpoint listing.

@@ -484,21 +484,23 @@ func (s *TriggerStore) RotateWebhookEndpointSecret(ctx context.Context, projectI
 	if err != nil {
 		return nil, err
 	}
-	if nextVersion < 2 {
+	if nextVersion < 1 {
 		return nil, store.ErrInvalidInput
 	}
 	ts := rotatedAt.UTC().Truncate(time.Microsecond)
-	n, err := s.client.WebhookEndpoint.Update().
+	u := s.client.WebhookEndpoint.Update().
 		Where(
 			webhookendpoint.IDEQ(uid),
 			webhookendpoint.ProjectIDEQ(pid),
 			webhookendpoint.SecretVersionEQ(nextVersion-1),
 		).
 		SetSecretVersion(nextVersion).
-		SetSecretRotatedAt(ts).
 		AddConfigVersion(1).
-		SetUpdated(ts).
-		Save(ctx)
+		SetUpdated(ts)
+	if nextVersion >= 2 {
+		u = u.SetSecretRotatedAt(ts)
+	}
+	n, err := u.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}

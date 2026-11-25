@@ -32,29 +32,36 @@ import (
 )
 
 var (
-	triggerWebhookName               string
-	triggerWebhookDescription        string
-	triggerWebhookAuth               string
-	triggerWebhookAllowProjectAgents bool
-	triggerWebhookReplayWindow       int
-	triggerWebhookRate               int
-	triggerWebhookBurst              int
-	triggerWebhookMaxBody            string
-	triggerWebhookAgent              string
-	triggerWebhookToSelf             bool
-	triggerWebhookBind               string
-	triggerWebhookPersistent         bool
-	triggerWebhookMessage            string
-	triggerWebhookInterrupt          bool
-	triggerWebhookWake               bool
-	triggerWebhookListStatus         string
-	triggerWebhookListBound          string
-	triggerWebhookUpdateDescription  string
-	triggerWebhookUpdateStatus       string
-	triggerWebhookUpdateBind         string
-	triggerWebhookUpdateUnbind       bool
-	triggerWebhookUpdatePersistent   bool
-	triggerWebhookUpdateAgentLife    bool
+	triggerWebhookName                     string
+	triggerWebhookDescription              string
+	triggerWebhookAuth                     string
+	triggerWebhookAllowProjectAgents       bool
+	triggerWebhookReplayWindow             int
+	triggerWebhookRate                     int
+	triggerWebhookBurst                    int
+	triggerWebhookMaxBody                  string
+	triggerWebhookAgent                    string
+	triggerWebhookToSelf                   bool
+	triggerWebhookBind                     string
+	triggerWebhookPersistent               bool
+	triggerWebhookMessage                  string
+	triggerWebhookInterrupt                bool
+	triggerWebhookWake                     bool
+	triggerWebhookListStatus               string
+	triggerWebhookListBound                string
+	triggerWebhookUpdateDescription        string
+	triggerWebhookUpdateStatus             string
+	triggerWebhookUpdateBind               string
+	triggerWebhookUpdateUnbind             bool
+	triggerWebhookUpdatePersistent         bool
+	triggerWebhookUpdateAgentLife          bool
+	triggerWebhookUpdateAuth               string
+	triggerWebhookUpdateAllowProjectAgents bool
+	triggerWebhookUpdateSignatureMode      string
+	triggerWebhookUpdateRate               int
+	triggerWebhookUpdateBurst              int
+	triggerWebhookUpdateMaxBody            string
+	triggerWebhookUpdateReplayWindow       int
 )
 
 const defaultToSelfWebhookMessage = "Webhook event received."
@@ -623,7 +630,7 @@ func runTriggerWebhookDelete(cmd *cobra.Command, args []string) error {
 	})
 }
 
-func runTriggerWebhookUpdate(cmd *cobra.Command, args []string) error {
+func buildUpdateWebhookEndpointRequest(cmd *cobra.Command) (*hubclient.UpdateWebhookEndpointRequest, error) {
 	req := &hubclient.UpdateWebhookEndpointRequest{}
 	changed := false
 
@@ -635,16 +642,63 @@ func runTriggerWebhookUpdate(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("status") {
 		st := strings.TrimSpace(triggerWebhookUpdateStatus)
 		if st != "active" && st != "disabled" {
-			return newUsageError("--status must be 'active' or 'disabled'")
+			return nil, newUsageError("--status must be 'active' or 'disabled'")
 		}
 		req.Status = &st
 		changed = true
 	}
+	if cmd.Flags().Changed("auth") {
+		authMode := strings.TrimSpace(triggerWebhookUpdateAuth)
+		if authMode != "hmac" && authMode != "hub_token" {
+			return nil, newUsageError("--auth must be hmac or hub_token, got %q", authMode)
+		}
+		req.AuthMode = &authMode
+		changed = true
+	}
+	if cmd.Flags().Changed("allow-project-agents") {
+		v := triggerWebhookUpdateAllowProjectAgents
+		req.AllowProjectAgents = &v
+		changed = true
+	}
+	if cmd.Flags().Changed("signature-mode") {
+		sigMode := strings.TrimSpace(triggerWebhookUpdateSignatureMode)
+		if sigMode == "" {
+			return nil, newUsageError("--signature-mode cannot be empty")
+		}
+		req.SignatureMode = &sigMode
+		changed = true
+	}
+	if cmd.Flags().Changed("rate") || cmd.Flags().Changed("burst") {
+		if triggerWebhookUpdateRate < 0 || triggerWebhookUpdateBurst < 0 {
+			return nil, newUsageError("--rate and --burst must be non-negative")
+		}
+		req.RateLimit = &hubclient.WebhookEndpointRateLimitSpec{
+			PerSecond: triggerWebhookUpdateRate,
+			Burst:     triggerWebhookUpdateBurst,
+		}
+		changed = true
+	}
+	if cmd.Flags().Changed("max-body") {
+		maxBodyBytes, err := parseTriggerByteSize(triggerWebhookUpdateMaxBody)
+		if err != nil {
+			return nil, newUsageError("invalid --max-body: %v", err)
+		}
+		req.MaxBodyBytes = &maxBodyBytes
+		changed = true
+	}
+	if cmd.Flags().Changed("replay-window") {
+		if triggerWebhookUpdateReplayWindow < 0 {
+			return nil, newUsageError("--replay-window must be non-negative")
+		}
+		win := triggerWebhookUpdateReplayWindow
+		req.ReplayWindowSeconds = &win
+		changed = true
+	}
 	if triggerWebhookUpdateUnbind && strings.TrimSpace(triggerWebhookUpdateBind) != "" {
-		return newUsageError("--bind and --unbind cannot be used together")
+		return nil, newUsageError("--bind and --unbind cannot be used together")
 	}
 	if triggerWebhookUpdatePersistent && triggerWebhookUpdateAgentLife {
-		return newUsageError("--persistent and --agent-lifetime cannot be used together")
+		return nil, newUsageError("--persistent and --agent-lifetime cannot be used together")
 	}
 	if triggerWebhookUpdateUnbind {
 		empty := ""
@@ -655,7 +709,7 @@ func runTriggerWebhookUpdate(cmd *cobra.Command, args []string) error {
 		if cmd.Flags().Changed("bind") {
 			b := strings.TrimSpace(triggerWebhookUpdateBind)
 			if b != "" && !triggerWebhookUpdatePersistent && !triggerWebhookUpdateAgentLife {
-				return newUsageError("--bind requires --persistent or --agent-lifetime (specify the binding lifetime, e.g. --bind %s --persistent)", b)
+				return nil, newUsageError("--bind requires --persistent or --agent-lifetime (specify the binding lifetime, e.g. --bind %s --persistent)", b)
 			}
 			req.BoundAgentID = &b
 			changed = true
@@ -671,7 +725,15 @@ func runTriggerWebhookUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if !changed {
-		return newUsageError("specify at least one field to update (--description, --status, --bind, --unbind, --persistent, --agent-lifetime)")
+		return nil, newUsageError("specify at least one field to update (--description, --status, --auth, --allow-project-agents, --signature-mode, --rate, --burst, --max-body, --replay-window, --bind, --unbind, --persistent, --agent-lifetime)")
+	}
+	return req, nil
+}
+
+func runTriggerWebhookUpdate(cmd *cobra.Command, args []string) error {
+	req, err := buildUpdateWebhookEndpointRequest(cmd)
+	if err != nil {
+		return err
 	}
 
 	hubCtx, projectID, ctx, cancel, err := triggerHubContextFn()
@@ -767,6 +829,22 @@ func runTriggerWebhookRotateSecret(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func bindTriggerWebhookUpdateFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&triggerWebhookUpdateDescription, "description", "", "Updated endpoint description")
+	cmd.Flags().StringVar(&triggerWebhookUpdateStatus, "status", "", "Updated endpoint status (active or disabled)")
+	cmd.Flags().StringVar(&triggerWebhookUpdateAuth, "auth", "", "Updated authentication mode (hmac or hub_token)")
+	cmd.Flags().BoolVar(&triggerWebhookUpdateAllowProjectAgents, "allow-project-agents", false, "Allow any agent in the same project to send to this hub_token endpoint (use --allow-project-agents=false to disable)")
+	cmd.Flags().StringVar(&triggerWebhookUpdateSignatureMode, "signature-mode", "", "Updated signature mode (e.g. scion_v1)")
+	cmd.Flags().IntVar(&triggerWebhookUpdateRate, "rate", 0, "Updated per-endpoint ingress rate limit in requests/sec (0 = hub default 10)")
+	cmd.Flags().IntVar(&triggerWebhookUpdateBurst, "burst", 0, "Updated per-endpoint ingress burst limit (0 = hub default 60)")
+	cmd.Flags().StringVar(&triggerWebhookUpdateMaxBody, "max-body", "", "Updated per-endpoint max body size in bytes or KiB (e.g. 16384 or 16KiB; max 64KiB)")
+	cmd.Flags().IntVar(&triggerWebhookUpdateReplayWindow, "replay-window", 0, "Updated timestamp replay tolerance in seconds (30-900; 0 = default 300)")
+	cmd.Flags().StringVar(&triggerWebhookUpdateBind, "bind", "", "Bind the endpoint to an agent name or ID (users only)")
+	cmd.Flags().BoolVar(&triggerWebhookUpdateUnbind, "unbind", false, "Clear the endpoint's agent binding (users only)")
+	cmd.Flags().BoolVar(&triggerWebhookUpdatePersistent, "persistent", false, "Set bound lifetime to persistent (users only)")
+	cmd.Flags().BoolVar(&triggerWebhookUpdateAgentLife, "agent-lifetime", false, "Set bound lifetime to agent (users only)")
+}
+
 func init() {
 	triggerWebhookCmd.AddCommand(triggerWebhookCreateCmd)
 	triggerWebhookCmd.AddCommand(triggerWebhookGetCmd)
@@ -796,10 +874,5 @@ func init() {
 	triggerWebhookListCmd.Flags().StringVar(&triggerWebhookListStatus, "status", "", "Filter by status (active or disabled)")
 	triggerWebhookListCmd.Flags().StringVar(&triggerWebhookListBound, "bound", "", "Filter by bound agent ID or name")
 
-	triggerWebhookUpdateCmd.Flags().StringVar(&triggerWebhookUpdateDescription, "description", "", "Updated endpoint description")
-	triggerWebhookUpdateCmd.Flags().StringVar(&triggerWebhookUpdateStatus, "status", "", "Updated endpoint status (active or disabled)")
-	triggerWebhookUpdateCmd.Flags().StringVar(&triggerWebhookUpdateBind, "bind", "", "Bind the endpoint to an agent name or ID (users only)")
-	triggerWebhookUpdateCmd.Flags().BoolVar(&triggerWebhookUpdateUnbind, "unbind", false, "Clear the endpoint's agent binding (users only)")
-	triggerWebhookUpdateCmd.Flags().BoolVar(&triggerWebhookUpdatePersistent, "persistent", false, "Set bound lifetime to persistent (users only)")
-	triggerWebhookUpdateCmd.Flags().BoolVar(&triggerWebhookUpdateAgentLife, "agent-lifetime", false, "Set bound lifetime to agent (users only)")
+	bindTriggerWebhookUpdateFlags(triggerWebhookUpdateCmd)
 }

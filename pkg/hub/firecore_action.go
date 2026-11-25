@@ -45,7 +45,7 @@ func (s *Server) checkTriggerFireReplaySafety(
 		loaded, err := s.store.GetWebhookEndpoint(ctx, ev.SourceID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
-				return nil, &FireRefusal{Reason: "source not replay protected"}, nil
+				return nil, &FireRefusal{Reason: trigger.FireReplayReasonSourceNotProtected}, nil
 			}
 			return nil, nil, fmt.Errorf("trigger fire replay safety: load webhook endpoint: %w", err)
 		}

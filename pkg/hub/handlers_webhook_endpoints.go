@@ -1167,11 +1167,14 @@ func (s *Server) rotateWebhookEndpointSecret(w http.ResponseWriter, r *http.Requ
 
 	s.invalidateWebhookEndpointCache(ep.ID)
 
-	writeJSON(w, http.StatusOK, WebhookEndpointRotatedResponse{
+	resp := WebhookEndpointRotatedResponse{
 		WebhookEndpointResponse: s.buildWebhookEndpointResponse(ctx, *rotated),
 		Secret:                  rawSecret,
-		GraceWindowExpires:      rotatedAt.Add(store.WebhookSecretRotationGraceWindow),
-	})
+	}
+	if rotated.SecretVersion >= 2 {
+		resp.GraceWindowExpires = rotatedAt.Add(store.WebhookSecretRotationGraceWindow)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) deleteWebhookEndpoint(w http.ResponseWriter, r *http.Request, projectID, endpointID string) {

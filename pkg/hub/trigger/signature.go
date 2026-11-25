@@ -226,23 +226,56 @@ func SourceReplayProtected(sourceKind string, ep *store.WebhookEndpoint) bool {
 	}
 }
 
+// Closed-set refusal reasons returned by FireReplaySafe.
+const (
+	FireReplayReasonSourceNotProtected = "source not replay protected"
+	FireReplayReasonMissingDeliveryID  = "missing delivery id"
+)
+
+// WebhookEventVerificationMode derives the ingress verification mode for a
+// webhook event (Stage 2 §7.1, §7.3, §5.8). It prefers a recognized hub-written
+// event.attributes["signature_mode"] recorded at ingress ("scion_v1",
+// "hub_token", "body_only", "github_v1", "stripe_v1") so a subsequent endpoint
+// auth_mode flip cannot rewrite how an already-ingested event was verified,
+// while unrecognized/spoofed attribute values fall back to ep.
+func WebhookEventVerificationMode(attrs map[string]string, ep *store.WebhookEndpoint) string {
+	if attrs != nil {
+		switch recorded := strings.TrimSpace(attrs["signature_mode"]); recorded {
+		case store.WebhookAuthModeHubToken,
+			store.WebhookSignatureModeScionV1,
+			store.WebhookSignatureModeBodyOnly,
+			"github_v1",
+			"stripe_v1":
+			return recorded
+		}
+	}
+	if ep == nil {
+		return ""
+	}
+	if ep.AuthMode == store.WebhookAuthModeHubToken {
+		return store.WebhookAuthModeHubToken
+	}
+	return strings.TrimSpace(ep.SignatureMode)
+}
+
 // FireReplaySafe checks whether a trigger fire event satisfies both source-level
 // replay protection (SourceReplayProtected) and per-delivery deduplication
 // required by agent-creating or command-executing actions (Stage 2 §7.3,
 // P1c-1 security M1).
 //
 // Returns "" when safe to fire, or a closed-set fire refusal reason:
-//   - "source not replay protected" when SourceReplayProtected is false
-//   - "missing delivery id" when a non-hub_token webhook delivery omitted
-//     X-Scion-Delivery (leaving it replayable within replay_window_seconds)
+//   - FireReplayReasonSourceNotProtected when SourceReplayProtected is false
+//   - FireReplayReasonMissingDeliveryID when a webhook delivery not verified
+//     as hub_token at ingress omitted X-Scion-Delivery (leaving it replayable
+//     within replay_window_seconds)
 func FireReplaySafe(sourceKind string, ep *store.WebhookEndpoint, attrs map[string]string) string {
 	if !SourceReplayProtected(sourceKind, ep) {
-		return "source not replay protected"
+		return FireReplayReasonSourceNotProtected
 	}
 	if sourceKind == store.TriggerSourceKindWebhook &&
-		ep != nil && ep.AuthMode != store.WebhookAuthModeHubToken &&
+		WebhookEventVerificationMode(attrs, ep) != store.WebhookAuthModeHubToken &&
 		strings.TrimSpace(attrs["delivery"]) == "" {
-		return "missing delivery id"
+		return FireReplayReasonMissingDeliveryID
 	}
 	return ""
 }

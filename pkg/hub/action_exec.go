@@ -195,21 +195,13 @@ func (a *execAction) Preauthorize(ctx context.Context, req hubfire.FireRequest) 
 			a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New("missing trigger event"))
 			return &FireRefusal{Reason: execReasonRefused}, nil
 		}
-		var ep *store.WebhookEndpoint
-		if req.Event.SourceKind == store.TriggerSourceKindWebhook {
-			loaded, epErr := a.srv.store.GetWebhookEndpoint(ctx, req.Event.SourceID)
-			if epErr != nil {
-				if errors.Is(epErr, store.ErrNotFound) || errors.Is(epErr, store.ErrInvalidInput) {
-					a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New(execReasonSourceNotReplayProtected))
-					return &FireRefusal{Reason: execReasonSourceNotReplayProtected}, nil
-				}
-				return nil, fmt.Errorf("exec trigger fire: load webhook endpoint: %w", epErr)
-			}
-			ep = loaded
+		_, replayRefusal, replayErr := a.srv.checkTriggerFireReplaySafety(ctx, req.Event)
+		if replayErr != nil {
+			return nil, fmt.Errorf("exec trigger fire: %w", replayErr)
 		}
-		if reason := trigger.FireReplaySafe(req.Event.SourceKind, ep, req.Event.Attributes); reason != "" {
+		if replayRefusal != nil {
 			execReason := execReasonSourceNotReplayProtected
-			if reason == "missing delivery id" {
+			if replayRefusal.Reason == trigger.FireReplayReasonMissingDeliveryID {
 				execReason = execReasonMissingDeliveryID
 			}
 			a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New(execReason))

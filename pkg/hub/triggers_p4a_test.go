@@ -1377,3 +1377,312 @@ func TestAuthorizeDispatchAgentFire_IdentityRules(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "may not create agents")
 }
+
+// TestTriggerFire_O1VerificationModeUsesRecordedEventAttr covers review-2 O1:
+// fire-time M1 exemption, dispatch framing trailer, reuse-message trailer, and
+// trigger render preview all derive verification mode from the hub-written
+// event.attributes["signature_mode"] recorded at ingress, NOT the endpoint's
+// later flipped auth_mode.
+func TestTriggerFire_O1VerificationModeUsesRecordedEventAttr(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "o1-recorded-mode")
+	userCtx := f.userAuth(t, f.sched.creator)
+	ownerUser := hubMemberUser(t, f.sched.store, "o1-owner")
+	grantFixtureRole(t, f.sched.bypassAgentsFixture, ownerUser.ID, store.ProjectRoleOwner)
+	ownerCtx := f.userAuth(t, ownerUser)
+
+	// Direction 1: HMAC-ingested event WITHOUT X-Scion-Delivery, then endpoint
+	// flipped to hub_token before fire -> STILL refused "missing delivery id".
+	hmacEp := f.createEndpoint(t, userCtx, "o1-hmac-ep")
+	recTr := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:   "o1-dispatch",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: hmacEp.ID},
+			Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+			Action: TriggerActionSpec{
+				Type:          store.TriggerActionDispatchAgent,
+				AgentName:     "o1-worker",
+				Template:      "default",
+				Task:          "Work on ${event.id}: ${event.payload.hello}",
+				ReuseMessage:  "Reuse ${event.id}: ${event.payload.hello}",
+				UntrustedVars: []string{"event.payload.hello"},
+			},
+		})
+	require.Equal(t, http.StatusCreated, recTr.Code, recTr.Body.String())
+	var trResp TriggerResponse
+	require.NoError(t, json.Unmarshal(recTr.Body.Bytes(), &trResp))
+
+	// Post HMAC-signed webhook with empty delivery id (queued, not yet drained).
+	recIngest := f.postSignedWebhook(t, hmacEp, "", "", "o1-subj", []byte(`{"k":"v"}`))
+	require.Equal(t, http.StatusAccepted, recIngest.Code, recIngest.Body.String())
+
+	// Flip endpoint to hub_token BEFORE draining the queued event.
+	recFlipHT := f.doJSON(t, ownerCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/webhook-endpoints/%s", f.sched.proj.ID, hmacEp.ID),
+		map[string]any{"auth": store.WebhookAuthModeHubToken})
+	require.Equal(t, http.StatusOK, recFlipHT.Code, recFlipHT.Body.String())
+
+	f.drainOneTriggerEvent(t)
+	fires1, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		ProjectID: f.sched.proj.ID,
+		TriggerID: trResp.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires1.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusRefused, fires1.Items[0].Status)
+	assert.Equal(t, trigger.FireReplayReasonMissingDeliveryID, fires1.Items[0].Error)
+
+	// Direction 2: hub_token-ingested event, then endpoint flipped back to hmac
+	// before fire/render -> fire trailer, reuse-message trailer, and render
+	// preview STILL show hub token (not scion_v1).
+	ownerJWT := mintTestUserSessionJWT(t, f.sched.srv, f.sched.creator)
+	htReq := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+hmacEp.ID, bytes.NewReader([]byte(`{"hello":"world"}`)))
+	htReq.RemoteAddr = "198.51.100.77:9000"
+	htReq.Header.Set("Content-Type", "application/json")
+	htReq.Header.Set("Authorization", "Bearer "+ownerJWT)
+	htRec := httptest.NewRecorder()
+	f.sched.srv.Handler().ServeHTTP(htRec, htReq)
+	require.Equal(t, http.StatusAccepted, htRec.Code, htRec.Body.String())
+
+	var htIngestResp struct {
+		EventID string `json:"eventId"`
+	}
+	require.NoError(t, json.Unmarshal(htRec.Body.Bytes(), &htIngestResp))
+	require.NotEmpty(t, htIngestResp.EventID)
+
+	// Flip endpoint back to hmac BEFORE draining/rendering.
+	recFlipHMAC := f.doJSON(t, ownerCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/webhook-endpoints/%s", f.sched.proj.ID, hmacEp.ID),
+		map[string]any{"auth": store.WebhookAuthModeHMAC})
+	require.Equal(t, http.StatusOK, recFlipHMAC.Code, recFlipHMAC.Body.String())
+
+	// 2a. Render preview must report "hub token" (not "scion_v1").
+	renderRec := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s/render?eventId=%s", f.sched.proj.ID, trResp.ID, htIngestResp.EventID),
+		nil)
+	require.Equal(t, http.StatusOK, renderRec.Code, renderRec.Body.String())
+	var renderResp TriggerRenderResponse
+	require.NoError(t, json.Unmarshal(renderRec.Body.Bytes(), &renderResp))
+	require.NotNil(t, renderResp.Slots.Task)
+	assert.Contains(t, renderResp.Slots.Task.Rendered, "(hub token;")
+	assert.NotContains(t, renderResp.Slots.Task.Rendered, "(scion_v1;")
+
+	// 2b. Draining the hub_token-ingested event (without delivery id) succeeds
+	// and the dispatched agent's task trailer reports "hub token".
+	f.drainOneTriggerEvent(t)
+	fires2, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		ProjectID: f.sched.proj.ID,
+		TriggerID: trResp.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires2.Items, 2)
+	var firedRow *store.TriggerFire
+	for i := range fires2.Items {
+		if fires2.Items[i].EventID == htIngestResp.EventID {
+			firedRow = &fires2.Items[i]
+			break
+		}
+	}
+	require.NotNil(t, firedRow)
+	assert.Equal(t, store.TriggerFireStatusFired, firedRow.Status, firedRow.Error)
+	ag, err := f.sched.store.GetAgent(ctx, firedRow.TargetAgentID)
+	require.NoError(t, err)
+	assert.Contains(t, ag.AppliedConfig.Task, "(hub token;")
+	assert.NotContains(t, ag.AppliedConfig.Task, "(scion_v1;")
+
+	// 2c. Reuse-message rendering also derives hub_token from the event attribute.
+	storedTr, err := f.sched.store.GetTrigger(ctx, trResp.ID)
+	require.NoError(t, err)
+	storedEv, err := f.sched.store.GetTriggerEvent(ctx, htIngestResp.EventID)
+	require.NoError(t, err)
+	reuseRendered, reuseRefusal, reuseErr := f.sched.srv.renderDispatchReuseMessage(ctx, hubfire.FireRequest{
+		ProjectID:  f.sched.proj.ID,
+		ActionType: store.TriggerActionDispatchAgent,
+		Payload:    storedTr.ActionPayload,
+		Authority:  hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindTrigger, DefinitionID: storedTr.ID},
+		Event: &hubfire.FireEvent{
+			ID:         storedEv.ID,
+			ProjectID:  f.sched.proj.ID,
+			SourceKind: storedEv.SourceKind,
+			SourceID:   storedEv.SourceID,
+			Type:       storedEv.Type,
+			Subject:    storedEv.Subject,
+			OccurredAt: storedEv.OccurredAt,
+			ReceivedAt: storedEv.ReceivedAt,
+			Attributes: storedEv.Attributes,
+			Payload:    []byte(storedEv.Payload),
+			Trigger:    &hubfire.FireTriggerRef{ID: storedTr.ID, Name: storedTr.Name},
+		},
+	})
+	require.NoError(t, reuseErr)
+	require.Nil(t, reuseRefusal)
+	assert.Contains(t, reuseRendered, "Reuse "+storedEv.ID+": world")
+}
+
+// TestWebhookEndpoint_O2HubTokenRotateThenSwitchToHMAC covers review-2 O2:
+// rotate-secret on a version-0 (hub_token) endpoint mints v1 with no grace
+// window, returns it once, and allows PATCH auth=hmac followed by a signed POST.
+func TestWebhookEndpoint_O2HubTokenRotateThenSwitchToHMAC(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+
+	// 1. Create a hub_token endpoint -> secretVersion 0, no secret returned.
+	createRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name:     "o2-ht-ep",
+		AuthMode: store.WebhookAuthModeHubToken,
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	assert.Empty(t, created.Secret)
+	assert.Equal(t, 0, created.SecretVersion)
+
+	// 2. Rotate secret on v0 endpoint -> mints v1 with NO grace window.
+	rotRec := f.doWebhookEndpoint(t, f.ownerAuth, created.ID+"/rotate-secret", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, rotRec.Code, rotRec.Body.String())
+	var rotated WebhookEndpointRotatedResponse
+	require.NoError(t, json.Unmarshal(rotRec.Body.Bytes(), &rotated))
+	assert.Equal(t, 1, rotated.SecretVersion)
+	assert.NotEmpty(t, rotated.Secret)
+	assert.True(t, rotated.GraceWindowExpires.IsZero(), "v0->v1 mint must have no grace window")
+	assert.Nil(t, rotated.SecretRotatedAt)
+	assert.NotContains(t, rotRec.Body.String(), `"graceWindowExpires"`)
+
+	// 3. PATCH auth=hmac now succeeds.
+	patchRec := f.doWebhookEndpoint(t, f.ownerAuth, created.ID, http.MethodPatch, map[string]any{
+		"auth": store.WebhookAuthModeHMAC,
+	})
+	require.Equal(t, http.StatusOK, patchRec.Code, patchRec.Body.String())
+	var patched WebhookEndpointResponse
+	require.NoError(t, json.Unmarshal(patchRec.Body.Bytes(), &patched))
+	assert.Equal(t, store.WebhookAuthModeHMAC, patched.AuthMode)
+
+	// 4. Signed POST using the minted v1 secret is accepted (202).
+	body := []byte(`{"o2":"ok"}`)
+	ts := time.Now().Unix()
+	deliv := api.NewUUID()
+	sig := trigger.SignScionV1(rotated.Secret, ts, deliv, "", "", body)
+	postReq := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+created.ID, bytes.NewReader(body))
+	postReq.RemoteAddr = "198.51.100.88:9000"
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("X-Scion-Delivery", deliv)
+	postReq.Header.Set("X-Scion-Signature", sig)
+	postRec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(postRec, postReq)
+	assert.Equal(t, http.StatusAccepted, postRec.Code, postRec.Body.String())
+
+	// 5. Rotating again (v1->v2) sets the 24h grace window.
+	rot2Rec := f.doWebhookEndpoint(t, f.ownerAuth, created.ID+"/rotate-secret", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, rot2Rec.Code, rot2Rec.Body.String())
+	var rotated2 WebhookEndpointRotatedResponse
+	require.NoError(t, json.Unmarshal(rot2Rec.Body.Bytes(), &rotated2))
+	assert.Equal(t, 2, rotated2.SecretVersion)
+	assert.False(t, rotated2.GraceWindowExpires.IsZero(), "v1->v2 rotation must include 24h grace window")
+	assert.NotNil(t, rotated2.SecretRotatedAt)
+}
+
+// TestWebhookEndpointCache_O4CrossReplicaInvalidationOnAgentDelete covers
+// review-2 O4: deleting a bound agent on replica 1 publishes cross-replica
+// invalidations from webhook_endpoint_cascade.go so replica 2 evicts both the
+// deleted agent-lifetime endpoint and the unbound persistent endpoint.
+func TestWebhookEndpointCache_O4CrossReplicaInvalidationOnAgentDelete(t *testing.T) {
+	ctx := context.Background()
+	f := setupTriggersTestFixture(t)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+
+	f.srv.SetEventPublisher(pub)
+	replica2, err := New(DefaultServerConfig(), f.store)
+	require.NoError(t, err)
+	replica2.SetEventPublisher(pub)
+	replica2.experiments = f.srv.experiments
+	subCtx, cancelSub := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancelSub()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = replica2.Shutdown(shutCtx)
+	})
+	replica2.startWebhookEndpointInvalidationSubscriber(subCtx)
+
+	boundAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "o4-bound-agent",
+		Name:      "o4-bound-agent",
+		ProjectID: f.projectID,
+		Phase:     "running",
+		OwnerID:   f.owner.ID,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, boundAgent))
+
+	// Create an agent-lifetime bound endpoint and a persistent bound endpoint.
+	createBound := func(name, lifetime string) WebhookEndpointCreatedResponse {
+		rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name:          name,
+			AuthMode:      store.WebhookAuthModeHubToken,
+			BoundAgentID:  boundAgent.ID,
+			BoundLifetime: lifetime,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var ep WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ep))
+		return ep
+	}
+	epAgentLife := createBound("o4-agent-life-ep", store.WebhookBoundLifetimeAgent)
+	epPersistent := createBound("o4-persistent-ep", store.WebhookBoundLifetimePersistent)
+
+	ownerJWT := mintTestUserSessionJWT(t, replica2, f.owner)
+	sendToReplica2 := func(epID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+epID, bytes.NewReader([]byte(`{"ping":1}`)))
+		req.RemoteAddr = "198.51.100.66:9000"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+ownerJWT)
+		rec := httptest.NewRecorder()
+		replica2.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Warm replica 2's positive cache for both endpoints.
+	require.Equal(t, http.StatusAccepted, sendToReplica2(epAgentLife.ID).Code)
+	require.Equal(t, http.StatusAccepted, sendToReplica2(epPersistent.ID).Code)
+
+	// Observe invalidation events published on the shared publisher.
+	invalCh, unsub := pub.Subscribe("trigger.webhook_endpoint.changed")
+	defer unsub()
+
+	// Delete the bound agent on replica 1 (soft-delete + cascade).
+	require.NoError(t, f.store.DeleteAgent(ctx, boundAgent.ID))
+	f.srv.releaseTriggerBindingsForAgent(ctx, boundAgent)
+
+	// Both the agent-lifetime delete and the persistent unbind must publish
+	// cross-replica invalidations.
+	seen := map[string]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case ev := <-invalCh:
+			var payload struct {
+				EndpointID string `json:"endpointId"`
+			}
+			if json.Unmarshal(ev.Data, &payload) == nil && payload.EndpointID != "" {
+				seen[payload.EndpointID] = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for cross-replica invalidation events; saw %v", seen)
+		}
+	}
+	assert.True(t, seen[epAgentLife.ID], "expected invalidation for deleted agent-lifetime endpoint")
+	assert.True(t, seen[epPersistent.ID], "expected invalidation for unbound persistent endpoint")
+
+	// Replica 2 must promptly evict the deleted agent-lifetime endpoint (404).
+	require.Eventually(t, func() bool {
+		return sendToReplica2(epAgentLife.ID).Code == http.StatusNotFound
+	}, 2*time.Second, 20*time.Millisecond, "replica 2 must evict agent-lifetime endpoint on agent delete cascade")
+
+	// Persistent endpoint is unbound in store and remains active on replica 2.
+	got, gErr := f.store.GetWebhookEndpoint(ctx, epPersistent.ID)
+	require.NoError(t, gErr)
+	assert.Empty(t, got.BoundAgentID)
+	assert.Empty(t, got.BoundLifetime)
+	assert.Equal(t, http.StatusAccepted, sendToReplica2(epPersistent.ID).Code)
+}

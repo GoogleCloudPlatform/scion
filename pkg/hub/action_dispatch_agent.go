@@ -801,10 +801,9 @@ func (a *dispatchAgentAction) Authorize(
 			}
 			if ep != nil {
 				sourceName = ep.Name
-				signatureMode = ep.SignatureMode
-				if ep.AuthMode == store.WebhookAuthModeHubToken {
-					signatureMode = store.WebhookAuthModeHubToken
-				}
+			}
+			if req.Event.SourceKind == store.TriggerSourceKindWebhook {
+				signatureMode = trigger.WebhookEventVerificationMode(req.Event.Attributes, ep)
 			}
 			// Stage 3 §4.4 defense-in-depth: refuse stale events from replay-protected sources.
 			if req.Event.Attributes["stale"] == "true" {
@@ -1015,11 +1014,15 @@ func (s *Server) renderDispatchReuseMessage(ctx context.Context, req hubfire.Fir
 	if proj, pErr := s.store.GetProject(ctx, req.ProjectID); pErr == nil && proj != nil {
 		projectName = proj.Name
 	}
-	if req.Event.SourceKind == store.TriggerSourceKindWebhook && req.Event.SourceID != "" {
-		if ep, epErr := s.store.GetWebhookEndpoint(ctx, req.Event.SourceID); epErr == nil && ep != nil {
-			sourceName = ep.Name
-			signatureMode = ep.SignatureMode
+	if req.Event.SourceKind == store.TriggerSourceKindWebhook {
+		var ep *store.WebhookEndpoint
+		if req.Event.SourceID != "" {
+			if loaded, epErr := s.store.GetWebhookEndpoint(ctx, req.Event.SourceID); epErr == nil && loaded != nil {
+				ep = loaded
+				sourceName = loaded.Name
+			}
 		}
+		signatureMode = trigger.WebhookEventVerificationMode(req.Event.Attributes, ep)
 	}
 	da := &dispatchAgentAuthorized{
 		payload:       payload,

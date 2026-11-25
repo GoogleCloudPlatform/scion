@@ -189,9 +189,7 @@ func (s *Server) deleteAgentLifetimeWebhookEndpoint(ctx context.Context, agent *
 			"agent_id", agent.ID, "project_id", ep.ProjectID, "endpoint_id", ep.ID, "error", err)
 		return false
 	}
-	if s.webhookIngress != nil {
-		s.webhookIngress.InvalidateEndpoint(ep.ID)
-	}
+	s.invalidateWebhookEndpointCache(ep.ID)
 	return true
 }
 
@@ -230,8 +228,8 @@ func (s *Server) unbindPersistentWebhookEndpoint(ctx context.Context, agent *sto
 			"agent_id", agent.ID, "project_id", ep.ProjectID, "endpoint_id", ep.ID, "error", err)
 		return false
 	}
-	if unbound && s.webhookIngress != nil {
-		s.webhookIngress.InvalidateEndpoint(ep.ID)
+	if unbound {
+		s.invalidateWebhookEndpointCache(ep.ID)
 	}
 	return unbound
 }

@@ -151,7 +151,21 @@ func TestFireReplaySafe(t *testing.T) {
 			sourceKind: store.TriggerSourceKindWebhook,
 			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHMAC, SignatureMode: store.WebhookSignatureModeScionV1},
 			attrs:      map[string]string{},
-			want:       "missing delivery id",
+			want:       FireReplayReasonMissingDeliveryID,
+		},
+		{
+			name:       "hmac_ingested_missing_delivery_then_ep_flipped_to_hub_token_still_refused",
+			sourceKind: store.TriggerSourceKindWebhook,
+			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHubToken, SignatureMode: store.WebhookSignatureModeScionV1},
+			attrs:      map[string]string{"signature_mode": store.WebhookSignatureModeScionV1},
+			want:       FireReplayReasonMissingDeliveryID,
+		},
+		{
+			name:       "hub_token_ingested_without_delivery_then_ep_flipped_to_hmac_ok",
+			sourceKind: store.TriggerSourceKindWebhook,
+			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHMAC, SignatureMode: store.WebhookSignatureModeScionV1},
+			attrs:      map[string]string{"signature_mode": store.WebhookAuthModeHubToken},
+			want:       "",
 		},
 		{
 			name:       "hub_token_without_delivery_ok",
@@ -165,7 +179,7 @@ func TestFireReplaySafe(t *testing.T) {
 			sourceKind: store.TriggerSourceKindWebhook,
 			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHMAC, SignatureMode: store.WebhookSignatureModeBodyOnly},
 			attrs:      map[string]string{"delivery": "deliv-2"},
-			want:       "source not replay protected",
+			want:       FireReplayReasonSourceNotProtected,
 		},
 		{
 			name:       "github_source_ok",
@@ -181,5 +195,29 @@ func TestFireReplaySafe(t *testing.T) {
 				t.Errorf("FireReplaySafe() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWebhookEventVerificationMode(t *testing.T) {
+	epHMAC := &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHMAC, SignatureMode: store.WebhookSignatureModeScionV1}
+	epHT := &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHubToken, SignatureMode: store.WebhookSignatureModeScionV1}
+
+	if got := WebhookEventVerificationMode(map[string]string{"signature_mode": "scion_v1"}, epHT); got != "scion_v1" {
+		t.Fatalf("recorded attr should win over flipped hub_token endpoint: got %q", got)
+	}
+	if got := WebhookEventVerificationMode(map[string]string{"signature_mode": "hub_token"}, epHMAC); got != "hub_token" {
+		t.Fatalf("recorded attr should win over flipped hmac endpoint: got %q", got)
+	}
+	if got := WebhookEventVerificationMode(nil, epHT); got != "hub_token" {
+		t.Fatalf("fallback to hub_token endpoint: got %q", got)
+	}
+	if got := WebhookEventVerificationMode(map[string]string{}, epHMAC); got != "scion_v1" {
+		t.Fatalf("fallback to hmac endpoint signature_mode: got %q", got)
+	}
+	if got := WebhookEventVerificationMode(map[string]string{"signature_mode": "spoofed_mode"}, epHMAC); got != "scion_v1" {
+		t.Fatalf("unrecognized/spoofed attr must fall back to endpoint: got %q", got)
+	}
+	if got := WebhookEventVerificationMode(nil, nil); got != "" {
+		t.Fatalf("nil attrs and nil endpoint: got %q", got)
 	}
 }
