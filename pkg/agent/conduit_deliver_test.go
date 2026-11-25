@@ -763,25 +763,28 @@ func TestConduitDelivery_InterruptWaitsBehindFlush(t *testing.T) {
 		if isFirst {
 			close(entered)
 			<-release
+			// Record completion while the delivery lock is still held so
+			// scheduler preemption after unlock cannot reorder the slice.
+			mu.Lock()
+			order = append(order, "flush")
+			mu.Unlock()
+			return
 		}
+		mu.Lock()
+		order = append(order, "interrupt")
+		mu.Unlock()
 	}
 	m.SetConduitDeliverer(d)
 	flushDone := make(chan struct{})
 	go func() {
 		defer close(flushDone)
 		_ = m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "buffered", messageIDs: []string{"m-1"}, readyWanted: true})
-		mu.Lock()
-		order = append(order, "flush")
-		mu.Unlock()
 	}()
 	<-entered
 	intDone := make(chan struct{})
 	go func() {
 		defer close(intDone)
 		_ = m.Message(WithDeliveryMessageID(context.Background(), "m-2"), "test-agent", "", "stop", true)
-		mu.Lock()
-		order = append(order, "interrupt")
-		mu.Unlock()
 	}()
 	time.Sleep(100 * time.Millisecond)
 	if d.calls() != 1 {
@@ -790,7 +793,7 @@ func TestConduitDelivery_InterruptWaitsBehindFlush(t *testing.T) {
 	close(release)
 	<-flushDone
 	<-intDone
-	if d.calls() != 2 || order[0] != "flush" || d.reqs[1].Op != agentcontrol.OpInterruptPaste {
+	if d.calls() != 2 || !slices.Equal(order, []string{"flush", "interrupt"}) || d.reqs[0].Op != agentcontrol.OpPaste || d.reqs[1].Op != agentcontrol.OpInterruptPaste {
 		t.Fatalf("calls %d order %v", d.calls(), order)
 	}
 }
