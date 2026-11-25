@@ -1686,3 +1686,130 @@ func TestWebhookEndpointCache_O4CrossReplicaInvalidationOnAgentDelete(t *testing
 	assert.Empty(t, got.BoundLifetime)
 	assert.Equal(t, http.StatusAccepted, sendToReplica2(epPersistent.ID).Code)
 }
+
+// TestWebhookIngress_HubTokenAgentTokenScopeEnforced covers security-pass M1:
+// hub_token ingress ActionSend requires ScopeAgentNotify (project:agent:notify)
+// on the agent token. Readonly-role and status-only tokens (including the
+// SignAgentToken default) are denied (403) on owned, bound, and
+// allowProjectAgents endpoints, while baseline-role and full-role tokens are
+// accepted (202).
+func TestWebhookIngress_HubTokenAgentTokenScopeEnforced(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	ag := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "sec-m1-agent",
+		Name:      "sec-m1-agent",
+		ProjectID: f.projectID,
+		Phase:     "running",
+		OwnerID:   f.owner.ID,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, ag))
+
+	endpoints := []struct {
+		name string
+		ep   *store.WebhookEndpoint
+	}{
+		{
+			name: "owned_endpoint",
+			ep: &store.WebhookEndpoint{
+				ID:                  api.NewUUID(),
+				ProjectID:           f.projectID,
+				Name:                "m1-owned-ep",
+				OwnerPrincipalKind:  store.DelegationPrincipalAgent,
+				OwnerPrincipalID:    ag.ID,
+				OwnerCredentialKind: "api",
+				AuthMode:            store.WebhookAuthModeHubToken,
+				MaxBodyBytes:        store.DefaultWebhookMaxBodyBytes,
+				ReplayWindowSeconds: store.DefaultWebhookReplayWindowSeconds,
+				ConfigVersion:       1,
+				SecretVersion:       0,
+				SignatureMode:       store.WebhookSignatureModeScionV1,
+				Status:              store.WebhookEndpointStatusActive,
+				CreatedBy:           ag.ID,
+			},
+		},
+		{
+			name: "bound_endpoint",
+			ep: &store.WebhookEndpoint{
+				ID:                  api.NewUUID(),
+				ProjectID:           f.projectID,
+				Name:                "m1-bound-ep",
+				OwnerPrincipalKind:  store.DelegationPrincipalUser,
+				OwnerPrincipalID:    f.owner.ID,
+				OwnerCredentialKind: "api",
+				BoundAgentID:        ag.ID,
+				BoundLifetime:       store.WebhookBoundLifetimePersistent,
+				AuthMode:            store.WebhookAuthModeHubToken,
+				MaxBodyBytes:        store.DefaultWebhookMaxBodyBytes,
+				ReplayWindowSeconds: store.DefaultWebhookReplayWindowSeconds,
+				ConfigVersion:       1,
+				SecretVersion:       0,
+				SignatureMode:       store.WebhookSignatureModeScionV1,
+				Status:              store.WebhookEndpointStatusActive,
+				CreatedBy:           f.owner.ID,
+			},
+		},
+		{
+			name: "allow_project_agents_endpoint",
+			ep: &store.WebhookEndpoint{
+				ID:                  api.NewUUID(),
+				ProjectID:           f.projectID,
+				Name:                "m1-proj-agents-ep",
+				OwnerPrincipalKind:  store.DelegationPrincipalUser,
+				OwnerPrincipalID:    f.owner.ID,
+				OwnerCredentialKind: "api",
+				AllowProjectAgents:  true,
+				AuthMode:            store.WebhookAuthModeHubToken,
+				MaxBodyBytes:        store.DefaultWebhookMaxBodyBytes,
+				ReplayWindowSeconds: store.DefaultWebhookReplayWindowSeconds,
+				ConfigVersion:       1,
+				SecretVersion:       0,
+				SignatureMode:       store.WebhookSignatureModeScionV1,
+				Status:              store.WebhookEndpointStatusActive,
+				CreatedBy:           f.owner.ID,
+			},
+		},
+	}
+	for _, e := range endpoints {
+		require.NoError(t, f.store.CreateWebhookEndpoint(ctx, e.ep))
+	}
+
+	mint := func(scopes []AgentTokenScope) string {
+		tok, cred, mErr := f.srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+			AgentID:   ag.ID,
+			ProjectID: ag.ProjectID,
+			Scopes:    scopes,
+		}, "")
+		require.NoError(t, mErr)
+		require.NoError(t, f.store.CreateAgentCredential(ctx, cred))
+		return tok
+	}
+
+	tokenCases := []struct {
+		name       string
+		tok        string
+		wantStatus int
+	}{
+		{"readonly_role", mint(ScopesForRole(AgentRoleReadOnly)), http.StatusForbidden},
+		{"default_status_only", mint(nil), http.StatusForbidden},
+		{"explicit_status_only", mint([]AgentTokenScope{ScopeAgentStatusUpdate}), http.StatusForbidden},
+		{"baseline_role", mint(ScopesForRole(AgentRoleBaseline)), http.StatusAccepted},
+		{"full_role", mint(ScopesForRole(AgentRoleFull)), http.StatusAccepted},
+	}
+
+	for _, e := range endpoints {
+		for _, tc := range tokenCases {
+			t.Run(e.name+"/"+tc.name, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+e.ep.ID, bytes.NewReader([]byte(`{"m1":"check"}`)))
+				req.RemoteAddr = "198.51.100.91:4000"
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-Scion-Agent-Token", tc.tok)
+				rec := httptest.NewRecorder()
+				f.srv.Handler().ServeHTTP(rec, req)
+				assert.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			})
+		}
+	}
+}

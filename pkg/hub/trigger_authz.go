@@ -188,8 +188,10 @@ type webhookEndpointAccess struct {
 //     projectID (they become the endpoint owner).
 //   - ActionSend (hub_token ingress): requires same project
 //     (agent.ProjectID() == projectID — other projects' agents are ALWAYS
-//     refused even when allowProjectAgents is true), AND either endpoint
-//     ownership, bound-agent match (ep.BoundAgentID == agent.ID()), or
+//     refused even when allowProjectAgents is true), ScopeAgentNotify
+//     (project:agent:notify; present in baseline/full role ceilings, absent
+//     from readonly/status-only tokens), AND either endpoint ownership,
+//     bound-agent match (ep.BoundAgentID == agent.ID()), or
 //     ep.AllowProjectAgents == true.
 //   - Owner agent (ep.OwnerPrincipalKind == "agent" && ep.OwnerPrincipalID == agent.ID()):
 //     admitted on ActionRead, ActionUpdate (non-binding fields), ActionDelete.
@@ -217,6 +219,9 @@ func (s *Server) webhookEndpointAccessDecision(ctx context.Context, projectID st
 			agentIdent, ok := identity.(AgentIdentity)
 			if !ok || agentIdent.ProjectID() != projectID {
 				return webhookEndpointAccess{reason: "agent does not belong to endpoint project"}
+			}
+			if !agentIdent.HasScope(ScopeAgentNotify) {
+				return webhookEndpointAccess{reason: "missing required scope: " + string(ScopeAgentNotify)}
 			}
 			isOwner := ep.OwnerPrincipalKind == store.DelegationPrincipalAgent && ep.OwnerPrincipalID != "" && ep.OwnerPrincipalID == identity.ID()
 			isBound := ep.BoundAgentID != "" && ep.BoundAgentID == identity.ID()
