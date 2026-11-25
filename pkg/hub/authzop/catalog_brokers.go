@@ -324,6 +324,32 @@ var brokerOperations = []OperationSpec{
 		Bearer: NonUser(),
 	},
 	{
+		ID:          "broker.agent.usage.ingest",
+		Domain:      "broker",
+		Description: "Ingest harvested Track 1 usage events and meter health updates for an agent owned by the calling broker (behind tokenomics.usage_ledger)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/brokers/{id}/agents/{agentId}/usage/events", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalBroker},
+		Credentials:      []CredentialKind{CredentialBrokerToken},
+		ResourceResolver: "broker-self",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"},
+			{Package: "pkg/hub", Function: "TestUsageIngest_BrokerHarvestRoute"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "The broker authenticates with its own HMAC credential and must own the target agent; no user permission applies",
+			Scope:  "broker self access",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: NonUser(),
+	},
+	{
 		ID:          "broker.attachment.redeem",
 		Domain:      "broker",
 		Description: "Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home",

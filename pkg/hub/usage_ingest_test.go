@@ -26,12 +26,18 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
@@ -217,7 +223,9 @@ func TestUsageIngest_EndToEndIdempotentAntiSpoofingAndAnomalous(t *testing.T) {
 		LastSourceActivityAt: telemetrycontract.FormatTS(now),
 		SupportedSignals:     []string{"calls", "input", "output"},
 	}
+	beforePost := time.Now().UTC().Truncate(time.Microsecond)
 	rec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, reqBody)
+	afterPost := time.Now().UTC().Truncate(time.Microsecond)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	var resp telemetrycontract.UsageIngestResponse
@@ -229,6 +237,38 @@ func TestUsageIngest_EndToEndIdempotentAntiSpoofingAndAnomalous(t *testing.T) {
 	assert.Equal(t, telemetrycontract.UsageRejectAgentMismatch, resp.Rejected[0].Code)
 	require.NotNil(t, resp.Enforcement)
 	assert.Equal(t, telemetrycontract.UsageEnforcementActionNone, resp.Enforcement.Action)
+
+	// R3: Verify stored usage_events row and usage_rollups_daily directly in DB:
+	// - project_id and harness were stamped from run_attribution (forged payload ignored),
+	// - future event_ts (+2h) was clamped to received_at within [beforePost, afterPost],
+	// - rollup exists for real proj.ID and NO rollup exists for forged-project-id.
+	cs, ok := s.(*entadapter.CompositeStore)
+	require.True(t, ok, "test store must be CompositeStore")
+	entClient := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.SQLite, cs.DB())))
+
+	storedEv, err := entClient.UsageEvent.Query().
+		Where(usageevent.HubIDEQ("hub-e2e"), usageevent.EventIDEQ("evt-e2e-1")).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, proj.ID, storedEv.ProjectID, "stored usage_events.project_id must come from run_attribution, not payload")
+	assert.Equal(t, "claude", storedEv.Harness, "stored usage_events.harness must come from run_attribution, not payload")
+	assert.Equal(t, storedEv.ReceivedAt.UTC(), storedEv.EventTs.UTC(), "future event_ts must be clamped to received_at")
+	assert.False(t, storedEv.EventTs.UTC().Before(beforePost), "clamped event_ts %v before request start %v", storedEv.EventTs, beforePost)
+	assert.False(t, storedEv.EventTs.UTC().After(afterPost), "clamped event_ts %v after request end %v", storedEv.EventTs, afterPost)
+
+	realRollups, err := entClient.UsageRollupDaily.Query().
+		Where(usagerollupdaily.ProjectIDEQ(proj.ID), usagerollupdaily.AgentIDEQ(ag.ID)).
+		All(ctx)
+	require.NoError(t, err)
+	require.Len(t, realRollups, 1)
+	assert.Equal(t, "claude", realRollups[0].Harness)
+	assert.Equal(t, int64(3), realRollups[0].Events)
+
+	forgedCount, err := entClient.UsageRollupDaily.Query().
+		Where(usagerollupdaily.ProjectIDEQ("forged-project-id")).
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, forgedCount, "no rollup row may exist for forged-project-id")
 
 	// 2. Duplicate replay of same batch -> duplicates=3, accepted=0.
 	recDup := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, reqBody)
