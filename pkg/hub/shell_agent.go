@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -352,6 +353,24 @@ func shellPatchHasNonMetadataKeys(body []byte) bool {
 	}
 	for k := range top {
 		if !shellPatchMetadataKeys[strings.ToLower(k)] {
+			return true
+		}
+	}
+	return false
+}
+
+// reincarnateRequestHasNonGovernanceFields reports whether req sets any field
+// other than DryRun. Uses reflection over ReincarnateAgentRequest so any
+// future field added to the request struct fails closed to owner-human
+// ActionAttach on a shell execution container (ptone/scion#8812 §3.4 S7).
+func reincarnateRequestHasNonGovernanceFields(req ReincarnateAgentRequest) bool {
+	v := reflect.ValueOf(req)
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		if t.Field(i).Name == "DryRun" {
+			continue
+		}
+		if !v.Field(i).IsZero() {
 			return true
 		}
 	}

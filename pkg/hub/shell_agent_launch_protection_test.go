@@ -438,6 +438,63 @@ func TestShellAgentExisting_L4_BrokerlessPlacementRequiresAttach(t *testing.T) {
 	assert.NotEqual(t, http.StatusForbidden, recOwner.Code, "owner placing brokerless shell agent should pass L4 gate: %s", recOwner.Body.String())
 }
 
+// TestShellAgentReincarnate_S7_EveryRequestFieldReflection walks every field
+// of ReincarnateAgentRequest by reflection and asserts that only DryRun is
+// allowed for a project admin without attach on a shell execution container;
+// HarnessConfig is refused outright (400), and every other non-zero field
+// (including any future field added to the struct) gets 403 Forbidden.
+func TestShellAgentReincarnate_S7_EveryRequestFieldReflection(t *testing.T) {
+	srv, s := testServer(t)
+	project, broker := seedShellTestProjectAndBroker(t, s)
+
+	owner := seedShellTestUser(t, s, "reinc-refl-owner@test.com", "Reinc Refl Owner")
+	admin := seedShellTestUser(t, s, "reinc-refl-admin@test.com", "Reinc Refl Admin")
+	bindProjectRole(t, s, project.ID, owner.ID, "project-member")
+	bindProjectRole(t, s, project.ID, admin.ID, "project-admin")
+
+	shellAgent := seedShellTestAgent(t, s, project.ID, broker.ID, "reinc-refl-shell", owner.ID, config.ShellHarnessConfigName, state.PhaseStopped, []string{owner.ID})
+
+	typ := reflect.TypeOf(ReincarnateAgentRequest{})
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		t.Run(f.Name, func(t *testing.T) {
+			var req ReincarnateAgentRequest
+			rv := reflect.ValueOf(&req).Elem().Field(i)
+			switch rv.Kind() {
+			case reflect.String:
+				rv.SetString("non-zero")
+			case reflect.Bool:
+				rv.SetBool(true)
+			case reflect.Pointer:
+				elem := reflect.New(rv.Type().Elem())
+				if elem.Elem().Kind() == reflect.Int {
+					elem.Elem().SetInt(10)
+				}
+				rv.Set(elem)
+			case reflect.Map:
+				m := reflect.MakeMap(rv.Type())
+				m.SetMapIndex(reflect.ValueOf("k"), reflect.ValueOf("v"))
+				rv.Set(m)
+			default:
+				t.Fatalf("unhandled ReincarnateAgentRequest field %s kind %s — add populate case", f.Name, rv.Kind())
+			}
+
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/reincarnate", req)
+			switch f.Name {
+			case "DryRun":
+				assert.NotEqual(t, http.StatusForbidden, rec.Code, "DryRun alone must stay on agent.lifecycle (S10): %s", rec.Body.String())
+			case "HarnessConfig":
+				assert.Equal(t, http.StatusBadRequest, rec.Code, "HarnessConfig switch must be refused outright (400): %s", rec.Body.String())
+			default:
+				assert.Equal(t, http.StatusForbidden, rec.Code, "non-zero ReincarnateAgentRequest.%s from admin without attach must get 403: %s", f.Name, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestShellAgentPendingConfig_S7(t *testing.T) {
 	srv, s := testServer(t)
 	setExperimentOverrides(t, srv, map[string]bool{experiments.AgentEditHeld: true})
