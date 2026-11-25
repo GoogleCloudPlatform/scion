@@ -1,0 +1,1011 @@
+//go:build !no_sqlite
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"fmt"
+	"math/rand"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"entgo.io/ent/dialect"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+)
+
+func newAuthzPrefilterTestServer(t *testing.T) (*Server, *entadapter.CompositeStore, string) {
+	t.Helper()
+	ctx := context.Background()
+	if dsn := os.Getenv("SCION_TEST_POSTGRES_DSN"); dsn != "" {
+		schemaName := "authz_prefilter_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		adminClient, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 2})
+		require.NoError(t, err)
+		adminCS := entadapter.NewCompositeStore(adminClient)
+		_, err = adminCS.DB().ExecContext(ctx, "CREATE SCHEMA "+schemaName)
+		require.NoError(t, err)
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		scopedDSN := dsn + sep + "search_path=" + schemaName
+		base, err := entc.OpenPostgres(scopedDSN, entc.PoolConfig{MaxOpenConns: 4})
+		if err != nil {
+			_, _ = adminCS.DB().ExecContext(ctx, "DROP SCHEMA IF EXISTS "+schemaName+" CASCADE")
+			_ = adminCS.Close()
+			require.NoError(t, err)
+		}
+		require.NoError(t, entc.AutoMigrate(ctx, base))
+		cs := entadapter.NewCompositeStore(base)
+		t.Cleanup(func() {
+			_ = cs.Close()
+			_, _ = adminCS.DB().ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schemaName+" CASCADE")
+			_ = adminCS.Close()
+		})
+		srv, _ := testServerOnMigratedStore(t, cs)
+		alice, _, _ := setupDemoPolicyOn(t, srv, srv.store)
+		return srv, cs, alice.ID
+	}
+	rawStore, _, err := newTestStoreWithClient(t)
+	require.NoError(t, err)
+	srv, _ := testServerOnMigratedStore(t, rawStore)
+	alice, _, _ := setupDemoPolicyOn(t, srv, srv.store)
+	return srv, rawStore, alice.ID
+}
+
+// TestEvaluate_PrecomputedSortedPermsByteIdentical verifies that precomputing
+// sortedPerms on RolePermissions produces byte-identical KernelDecision and
+// KernelProvenance compared to a RolePermissions without precomputed keys.
+func TestEvaluate_PrecomputedSortedPermsByteIdentical(t *testing.T) {
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	perms := []string{"project.update", "project.read", "project.chat_post", "agent.list", "agent.read"}
+
+	precomputed := NewRolePermissions("r-member", "project-member", ScopeTypeProject, perms)
+	permMap := make(map[string]struct{}, len(perms))
+	for _, p := range perms {
+		permMap[p] = struct{}{}
+	}
+	unprecomputed := &RolePermissions{
+		RoleID:            "r-member",
+		RoleName:          "project-member",
+		ScopeType:         ScopeTypeProject,
+		Permissions:       permMap,
+		ConfersMembership: true,
+	}
+
+	candidates := []CandidateBinding{
+		{
+			BindingID:        "b-match",
+			RoleDefinitionID: "r-member",
+			PrincipalType:    "user",
+			PrincipalID:      "u1",
+			ScopeType:        ScopeTypeProject,
+			ScopeID:          "p1",
+		},
+		{
+			BindingID:        "b-other-proj",
+			RoleDefinitionID: "r-member",
+			PrincipalType:    "user",
+			PrincipalID:      "u1",
+			ScopeType:        ScopeTypeProject,
+			ScopeID:          "p2",
+		},
+	}
+
+	reqPre := KernelRequest{
+		Permission:        "project.read",
+		PrincipalClosure:  map[string]struct{}{"user:u1": {}},
+		MembershipPaths:   map[string][]string{"user:u1": {"u1"}},
+		Resource:          ResourceContext{ResourceType: "project", ResourceID: "p1", ProjectID: "p1"},
+		CandidateBindings: candidates,
+		RoleDefinitions:   map[string]*RolePermissions{"r-member": precomputed},
+		Now:               now,
+	}
+	reqUnpre := reqPre
+	reqUnpre.RoleDefinitions = map[string]*RolePermissions{"r-member": unprecomputed}
+
+	gotPre := Evaluate(reqPre)
+	gotUnpre := Evaluate(reqUnpre)
+	assert.Equal(t, gotUnpre, gotPre, "precomputed sortedPerms must produce byte-identical KernelDecision and KernelProvenance")
+	assert.True(t, gotPre.Allowed)
+	assert.Len(t, gotPre.Provenance.GrantingBindings, 1)
+	assert.Len(t, gotPre.Provenance.RejectedCandidates, 1)
+	assert.Equal(t, []string{"agent.list", "agent.read", "project.chat_post", "project.read", "project.update"},
+		gotPre.Provenance.GrantingBindings[0].Permissions)
+}
+
+// TestAuthzScopePrefilter_ParityMatrix verifies that non-explain decide() with
+// authzInputMemo's BindingsForProject scope pre-filter produces per-project
+// decisions identical to unmemoized full-binding decide() across every identity
+// kind, binding shape, access constraint shape, test identity, account status,
+// UAT scope/boundary, and View-as-member session (ptone/scion#9157).
+func TestAuthzScopePrefilter_ParityMatrix(t *testing.T) {
+	ctx := context.Background()
+	srv, rawStore, issuerID := newAuthzPrefilterTestServer(t)
+	s := srv.store
+	d := rawStore.Dialect()
+	var err error
+
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	projMemberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	projViewerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+	projAdminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	newProj := func(slug string) *store.Project {
+		p := &store.Project{
+			ID:      api.NewUUID(),
+			Name:    "Proj " + slug,
+			Slug:    slug,
+			Created: time.Now().UTC(),
+		}
+		require.NoError(t, s.CreateProject(ctx, p))
+		return p
+	}
+	pMember := newProj("p-member")
+	pViewer := newProj("p-viewer")
+	pAdmin := newProj("p-admin")
+	pDirectGroup := newProj("p-direct-group")
+	pNestedGroup := newProj("p-nested-group")
+	pExpired := newProj("p-expired")
+	pFuture := newProj("p-future")
+	pConstrainedReadOnly := newProj("p-constrained-ro")
+	pGroupConstrainedRO := newProj("p-group-constrained-ro")
+	pGroupConstrainedDeny := newProj("p-group-constrained-deny")
+	pNoGrant := newProj("p-no-grant")
+
+	allProjects := []*store.Project{
+		pMember, pViewer, pAdmin, pDirectGroup, pNestedGroup,
+		pExpired, pFuture, pConstrainedReadOnly, pGroupConstrainedRO,
+		pGroupConstrainedDeny, pNoGrant,
+	}
+	allResources := make([]Resource, len(allProjects))
+	for i, p := range allProjects {
+		allResources[i] = projectResource(p)
+	}
+
+	directGrp := &store.Group{ID: api.NewUUID(), Name: "direct-grp", Slug: "direct-grp", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, directGrp))
+	childGrp := &store.Group{ID: api.NewUUID(), Name: "child-grp", Slug: "child-grp", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, childGrp))
+	parentGrp := &store.Group{ID: api.NewUUID(), Name: "parent-grp", Slug: "parent-grp", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, parentGrp))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: parentGrp.ID, MemberType: store.GroupMemberTypeGroup, MemberID: childGrp.ID, Role: store.GroupMemberRoleMember,
+	}))
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: projMemberRD.ID, PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: directGrp.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: pDirectGroup.ID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: projMemberRD.ID, PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: parentGrp.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: pNestedGroup.ID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	past := now.Add(-1 * time.Hour)
+	future := now.Add(2 * time.Hour)
+
+	createUser := func(email, status, kind string, expiresAt *time.Time) *store.User {
+		u := &store.User{
+			ID:          api.NewUUID(),
+			Email:       email,
+			DisplayName: email,
+			Role:        store.UserRoleMember,
+			Status:      status,
+			Kind:        kind,
+			ExpiresAt:   expiresAt,
+			Created:     now,
+		}
+		switch kind {
+		case store.UserKindTestFixture:
+			u.Email = fmt.Sprintf("fixture-%s@%s", api.NewUUID()[:6], store.TestFixtureEmailDomain)
+			u.IssuedBy = &issuerID
+			require.NoError(t, rawStore.CreateTestFixtureUser(ctx, u))
+		case store.UserKindTestHubAdmin, store.UserKindTestSuperAdmin:
+			domain := store.TestHubAdminEmailDomain
+			rdID := hubAdminRD.ID
+			if kind == store.UserKindTestSuperAdmin {
+				domain = store.TestSuperAdminEmailDomain
+				rdID = superAdminRD.ID
+			}
+			u.Email = fmt.Sprintf("tadmin-%s@%s", api.NewUUID()[:6], domain)
+			u.Role = store.TestAdminRole(kind)
+			issuanceID := api.NewUUID()
+			purpose := "authz scope prefilter parity matrix"
+			u.IssuedBy = &issuerID
+			u.IssuanceID = &issuanceID
+			u.Purpose = &purpose
+			createExp := future
+			u.ExpiresAt = &createExp
+			_, cerr := rawStore.CreateTestAdminUser(ctx, u, rdID)
+			require.NoError(t, cerr)
+			if expiresAt != nil && expiresAt.Before(now) {
+				q := "UPDATE users SET expires_at = ? WHERE id = ?"
+				if d == dialect.Postgres {
+					q = "UPDATE users SET expires_at = $1 WHERE id = $2"
+				}
+				_, uerr := rawStore.DB().ExecContext(ctx, q, *expiresAt, u.ID)
+				require.NoError(t, uerr)
+				u.ExpiresAt = expiresAt
+			}
+		default:
+			require.NoError(t, rawStore.CreateUser(ctx, u))
+		}
+		return u
+	}
+
+	bindMixedProjects := func(uid string) {
+		for _, spec := range []struct {
+			projID string
+			rdID   string
+			nb     *time.Time
+			exp    *time.Time
+		}{
+			{pMember.ID, projMemberRD.ID, nil, nil},
+			{pViewer.ID, projViewerRD.ID, nil, nil},
+			{pAdmin.ID, projAdminRD.ID, nil, nil},
+			{pExpired.ID, projMemberRD.ID, nil, &past},
+			{pFuture.ID, projMemberRD.ID, &future, nil},
+			{pConstrainedReadOnly.ID, projMemberRD.ID, nil, nil},
+			{pGroupConstrainedRO.ID, projMemberRD.ID, nil, nil},
+			{pGroupConstrainedDeny.ID, projMemberRD.ID, nil, nil},
+		} {
+			_, berr := s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: spec.rdID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: uid,
+				ScopeType: store.RoleScopeProject, ScopeID: spec.projID,
+				NotBefore: spec.nb, ExpiresAt: spec.exp, CreatedBy: "test",
+			})
+			require.NoError(t, berr)
+		}
+		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+			GroupID: directGrp.ID, MemberType: store.GroupMemberTypeUser, MemberID: uid, Role: store.GroupMemberRoleMember,
+		}))
+		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+			GroupID: childGrp.ID, MemberType: store.GroupMemberTypeUser, MemberID: uid, Role: store.GroupMemberRoleMember,
+		}))
+	}
+
+	strPtr := func(v string) *string { return &v }
+
+	// 1. Regular human user with mixed direct + group + nested group + constraints.
+	human := createUser("human@test.local", store.UserStatusActive, store.UserKindHuman, nil)
+	bindMixedProjects(human.ID)
+
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		ID:                   api.NewUUID(),
+		Name:                 "user-ro-constraint",
+		SubjectKind:          "principal",
+		SubjectPrincipalType: strPtr("user"),
+		SubjectPrincipalID:   strPtr(human.ID),
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              pConstrainedReadOnly.ID,
+		MaximumPermissions:   []string{"project.read"},
+		CreatedBy:            "test",
+	})
+	require.NoError(t, err)
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		ID:                 api.NewUUID(),
+		Name:               "group-ro-constraint",
+		SubjectKind:        "group_closure",
+		SubjectGroupID:     strPtr(directGrp.ID),
+		ScopeType:          store.RoleScopeProject,
+		ScopeID:            pGroupConstrainedRO.ID,
+		MaximumPermissions: []string{"project.read"},
+		CreatedBy:          "test",
+	})
+	require.NoError(t, err)
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		ID:                 api.NewUUID(),
+		Name:               "nested-group-deny-constraint",
+		SubjectKind:        "group_closure",
+		SubjectGroupID:     strPtr(parentGrp.ID),
+		ScopeType:          store.RoleScopeProject,
+		ScopeID:            pGroupConstrainedDeny.ID,
+		MaximumPermissions: []string{"agent.list"},
+		CreatedBy:          "test",
+	})
+	require.NoError(t, err)
+
+	// 2. System hub-admin (also tested with View-as-member).
+	sysAdmin := createUser("sysadmin@test.local", store.UserStatusActive, store.UserKindHuman, nil)
+	sysAdmin.Role = store.UserRoleAdmin
+	require.NoError(t, s.UpdateUser(ctx, sysAdmin))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: sysAdmin.ID,
+		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: projMemberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: sysAdmin.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: pMember.ID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+
+	// 3. System-constrained user.
+	sysConstrained := createUser("sysconstrained@test.local", store.UserStatusActive, store.UserKindHuman, nil)
+	bindMixedProjects(sysConstrained.ID)
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		ID:                   api.NewUUID(),
+		Name:                 "sys-ro-constraint",
+		SubjectKind:          "principal",
+		SubjectPrincipalType: strPtr("user"),
+		SubjectPrincipalID:   strPtr(sysConstrained.ID),
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"project.read"},
+		CreatedBy:            "test",
+	})
+	require.NoError(t, err)
+
+	// 4. Test identities: test_fixture, test_hub_admin (live/expired), test_super_admin.
+	// CreateTestAdminUser already creates the system role binding for test_hub_admin
+	// and test_super_admin.
+	testFixture := createUser("fixture@test.local", store.UserStatusActive, store.UserKindTestFixture, &future)
+	bindMixedProjects(testFixture.ID)
+	_, err = rawStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: testFixture.ID,
+		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+
+	testHubAdminLive := createUser("tha-live@test.local", store.UserStatusActive, store.UserKindTestHubAdmin, &future)
+	testHubAdminExpired := createUser("tha-exp@test.local", store.UserStatusActive, store.UserKindTestHubAdmin, &past)
+	testSuperAdmin := createUser("tsa@test.local", store.UserStatusActive, store.UserKindTestSuperAdmin, &future)
+
+	// 5. Suspended, invited, and unknown-Kind users.
+	suspended := createUser("suspended@test.local", store.UserStatusSuspended, store.UserKindHuman, nil)
+	bindMixedProjects(suspended.ID)
+
+	invited := createUser("invited@test.local", store.UserStatusInvited, store.UserKindHuman, nil)
+	bindMixedProjects(invited.ID)
+
+	unknownKind := createUser("unknown-kind@test.local", store.UserStatusActive, store.UserKindHuman, nil)
+	bindMixedProjects(unknownKind.ID)
+	qUnknown := `UPDATE users SET kind = 'future_unknown_kind' WHERE id = ?`
+	if d == dialect.Postgres {
+		qUnknown = `UPDATE users SET kind = 'future_unknown_kind' WHERE id = $1`
+	}
+	_, err = rawStore.DB().ExecContext(ctx, qUnknown, unknownKind.ID)
+	require.NoError(t, err)
+
+	// 6. Scoped UAT identities for human.
+	humanIdent := NewAuthenticatedUser(human.ID, human.Email, human.DisplayName, human.Role, string(ClientTypeWeb))
+	uatHubReadWrite := NewScopedUserIdentityWithBoundaryAndDecoration(humanIdent, hubBoundary(), []string{"project:read", "inbox:write"}, "tok-hub-rw", bearerCeiling(t, "project:read", "inbox:write"), nil)
+	uatHubReadOnly := NewScopedUserIdentityWithBoundaryAndDecoration(humanIdent, hubBoundary(), []string{"project:read"}, "tok-hub-ro", bearerCeiling(t, "project:read"), nil)
+	uatHubNoRead := NewScopedUserIdentityWithBoundaryAndDecoration(humanIdent, hubBoundary(), []string{"inbox:read"}, "tok-hub-noread", bearerCeiling(t, "inbox:read"), nil)
+	uatProjMember := NewScopedUserIdentityWithBoundaryAndDecoration(humanIdent, projectBoundary(pMember.ID), []string{"project:read", "inbox:write"}, "tok-proj-member", bearerCeiling(t, "project:read", "inbox:write"), nil)
+
+	// Parity checker: compares memoized (BindingsForProject pre-filtered)
+	// evaluation against maskAllAuthzMemo (unfiltered full-binding evaluation)
+	// across all 11 projects for CheckAccess, ComputeCapabilitiesForActions,
+	// and chatUserAccess.
+	checkParity := func(t *testing.T, evalCtx context.Context, ident UserIdentity, tokenScope bool) {
+		t.Helper()
+		memoCtx := withAuthzInputMemo(evalCtx)
+		unfilteredCtx := maskAllAuthzMemo(evalCtx)
+
+		gotCaps := srv.authzService.ComputeCapabilitiesForActions(memoCtx, ident, allResources, []Action{ActionRead, ActionChatPost})
+		wantCaps := srv.authzService.ComputeCapabilitiesForActions(unfilteredCtx, ident, allResources, []Action{ActionRead, ActionChatPost})
+		for i, p := range allProjects {
+			assert.Equal(t, wantCaps[i].Actions, gotCaps[i].Actions,
+				"project %s (%s) capabilities mismatch", p.Slug, p.ID)
+
+			// Also verify the whole non-explain Decision (including Provenance.Grants,
+			// Provenance.DenyReasons, DeniedBy, MatchedPolicy, BindingID, RoleName,
+			// MatchedGrant, Scope, Reason, DenyCause).
+			for _, act := range []Action{ActionRead, ActionChatPost} {
+				var gotD, wantD Decision
+				if IsScopedUserIdentity(ident) {
+					gotD = srv.authzService.DecideFromContext(contextWithIdentity(memoCtx, ident), allResources[i], act)
+					wantD = srv.authzService.DecideFromContext(contextWithIdentity(unfilteredCtx, ident), allResources[i], act)
+				} else {
+					gotD = srv.authzService.CheckAccess(memoCtx, ident, allResources[i], act)
+					wantD = srv.authzService.CheckAccess(unfilteredCtx, ident, allResources[i], act)
+				}
+				assert.Equal(t, wantD, gotD, "project %s action %s full Decision mismatch", p.Slug, act)
+			}
+
+			gotChat := srv.chatUserAccess(memoCtx, ident, p,
+				[]string{ChatActionRead}, chatThreadWriteActions, nil, tokenScope, false)
+			wantChat := srv.chatUserAccess(unfilteredCtx, ident, p,
+				[]string{ChatActionRead}, chatThreadWriteActions, nil, tokenScope, false)
+			assert.Equal(t, wantChat.Actions, gotChat.Actions,
+				"project %s (%s) ChatAccess.Actions mismatch (tokenScope=%v)", p.Slug, p.ID, tokenScope)
+			assert.Equal(t, wantChat.Reason, gotChat.Reason,
+				"project %s (%s) ChatAccess.Reason mismatch (tokenScope=%v)", p.Slug, p.ID, tokenScope)
+		}
+	}
+
+	userIdent := func(u *store.User) UserIdentity {
+		return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
+	}
+
+	t.Run("human_mixed_direct_group_nested_constraints", func(t *testing.T) {
+		checkParity(t, ctx, humanIdent, false)
+		memoCtx := withAuthzInputMemo(ctx)
+		caps := srv.authzService.ComputeCapabilitiesForActions(memoCtx, humanIdent, allResources, []Action{ActionRead, ActionChatPost})
+		assert.Equal(t, []string{"read", "chat_post"}, caps[0].Actions, "pMember")
+		assert.Equal(t, []string{"read"}, caps[1].Actions, "pViewer")
+		assert.Equal(t, []string{"read", "chat_post"}, caps[2].Actions, "pAdmin")
+		assert.Equal(t, []string{"read", "chat_post"}, caps[3].Actions, "pDirectGroup")
+		assert.Equal(t, []string{"read", "chat_post"}, caps[4].Actions, "pNestedGroup")
+		assert.Empty(t, caps[5].Actions, "pExpired")
+		assert.Empty(t, caps[6].Actions, "pFuture")
+		assert.Equal(t, []string{"read"}, caps[7].Actions, "pConstrainedReadOnly")
+		assert.Equal(t, []string{"read"}, caps[8].Actions, "pGroupConstrainedRO")
+		assert.Empty(t, caps[9].Actions, "pGroupConstrainedDeny")
+		assert.Empty(t, caps[10].Actions, "pNoGrant")
+	})
+
+	t.Run("explain_preserves_all_inactive_grants", func(t *testing.T) {
+		memoCtx := withAuthzInputMemo(ctx)
+		unfilteredCtx := maskAllAuthzMemo(ctx)
+		req := AuthzRequest{
+			Principal: principalContextForIdentity(humanIdent),
+			Resource:  allResources[0],
+			Action:    ActionRead,
+			Explain:   true,
+		}
+		got := srv.authzService.Decide(memoCtx, req)
+		want := srv.authzService.Decide(unfilteredCtx, req)
+		assert.Equal(t, want.Allowed, got.Allowed)
+		require.NotNil(t, got.Provenance)
+		require.NotNil(t, want.Provenance)
+		assert.Len(t, got.Provenance.InactiveGrants, len(want.Provenance.InactiveGrants),
+			"Explain=true must keep all InactiveGrants unfiltered")
+	})
+
+	t.Run("system_hub_admin", func(t *testing.T) {
+		checkParity(t, ctx, userIdent(sysAdmin), false)
+	})
+
+	t.Run("view_as_member_session", func(t *testing.T) {
+		vamCtx := contextWithViewAsMember(ctx, sysAdmin.ID)
+		vamIdent := NewAuthenticatedUser(sysAdmin.ID, sysAdmin.Email, sysAdmin.DisplayName, store.UserRoleAdmin, string(ClientTypeWeb)).WithViewAsMember()
+		checkParity(t, vamCtx, vamIdent, false)
+		memoCtx := withAuthzInputMemo(vamCtx)
+		caps := srv.authzService.ComputeCapabilitiesForActions(memoCtx, vamIdent, allResources, []Action{ActionRead, ActionChatPost})
+		assert.Equal(t, []string{"read", "chat_post"}, caps[0].Actions, "view-as-member retains direct pMember")
+		assert.Empty(t, caps[10].Actions, "view-as-member loses system-admin access to pNoGrant")
+	})
+
+	t.Run("system_scoped_access_constraint", func(t *testing.T) {
+		checkParity(t, ctx, userIdent(sysConstrained), false)
+	})
+
+	t.Run("test_fixture", func(t *testing.T) {
+		checkParity(t, ctx, userIdent(testFixture), false)
+	})
+
+	t.Run("test_hub_admin_enabled_disabled_expired", func(t *testing.T) {
+		clamp, ok := srv.authzService.store.(*testFixtureGrantClamp)
+		require.True(t, ok, "expected testFixtureGrantClamp wrapping authz store")
+
+		origAdminTier := clamp.cache.adminTier
+		t.Cleanup(func() { clamp.cache.adminTier = origAdminTier })
+
+		clamp.cache.adminTier = func(string) bool { return true }
+		checkParity(t, ctx, userIdent(testHubAdminLive), false)
+		checkParity(t, ctx, userIdent(testHubAdminExpired), false)
+		checkParity(t, ctx, userIdent(testSuperAdmin), false)
+
+		clamp.cache.adminTier = func(string) bool { return false }
+		checkParity(t, ctx, userIdent(testHubAdminLive), false)
+		checkParity(t, ctx, userIdent(testSuperAdmin), false)
+	})
+
+	t.Run("suspended_invited_unknown_kind", func(t *testing.T) {
+		checkParity(t, ctx, userIdent(suspended), false)
+		checkParity(t, ctx, userIdent(invited), false)
+		checkParity(t, ctx, userIdent(unknownKind), false)
+
+		for _, u := range []*store.User{suspended, invited, unknownKind} {
+			caps := srv.authzService.ComputeCapabilitiesForActions(withAuthzInputMemo(ctx), userIdent(u), allResources, []Action{ActionRead, ActionChatPost})
+			for i, p := range allProjects {
+				assert.Empty(t, caps[i].Actions, "%s must be denied on %s", u.Email, p.Slug)
+			}
+		}
+	})
+
+	t.Run("uat_scoped_tokens", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			tok        *ScopedUserIdentity
+			tokenScope bool
+		}{
+			{"hub_rw_tokenScope_false", uatHubReadWrite, false},
+			{"hub_rw_tokenScope_true", uatHubReadWrite, true},
+			{"hub_ro_tokenScope_true", uatHubReadOnly, true},
+			{"hub_noread_tokenScope_false", uatHubNoRead, false},
+			{"proj_member_tokenScope_true", uatProjMember, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				checkParity(t, ctx, tc.tok, tc.tokenScope)
+			})
+		}
+	})
+
+	// R2(a): project binding created BEFORE a granting system binding must
+	// still be selected first (preserving BindingID, RoleName, MatchedGrant,
+	// Scope, and Reason).
+	t.Run("project_before_system_binding_order", func(t *testing.T) {
+		u := createUser("proj-before-sys@test.local", store.UserStatusActive, store.UserKindHuman, nil)
+		// Create project-admin on pMember BEFORE hub-admin at system scope.
+		projBind, berr := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: projAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+			ScopeType: store.RoleScopeProject, ScopeID: pMember.ID, CreatedBy: "test",
+		})
+		require.NoError(t, berr)
+		_, berr = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: hubAdminRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+			ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+		})
+		require.NoError(t, berr)
+
+		ident := userIdent(u)
+		checkParity(t, ctx, ident, false)
+
+		got := srv.authzService.CheckAccess(withAuthzInputMemo(ctx), ident, projectResource(pMember), ActionRead)
+		want := srv.authzService.CheckAccess(maskAllAuthzMemo(ctx), ident, projectResource(pMember), ActionRead)
+		assert.True(t, got.Allowed)
+		assert.Equal(t, want.BindingID, got.BindingID)
+		assert.Equal(t, want.RoleName, got.RoleName)
+		assert.Equal(t, want.MatchedGrant, got.MatchedGrant)
+		assert.Equal(t, want.Scope, got.Scope)
+		assert.Equal(t, want.Reason, got.Reason)
+		if want.BindingID == projBind.ID {
+			assert.Equal(t, store.ProjectRoleAdmin, got.RoleName)
+			assert.Equal(t, ScopeTypeProject, got.Scope)
+		}
+	})
+
+	// R2(b): skill, template, and harness_config targets (project- and
+	// user-scoped) for a user with hub-member + bindings on other projects must
+	// match unfiltered deny reasons ("no active binding grants permission ...",
+	// never "no candidate bindings") after applyHubWideScopeFilters strips the
+	// hub-member system binding.
+	t.Run("hub_wide_catalog_scope_filter_deny_reason", func(t *testing.T) {
+		hubMemberRD, rerr := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+		require.NoError(t, rerr)
+		u := createUser("catalog-member@test.local", store.UserStatusActive, store.UserKindHuman, nil)
+		_, berr := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: hubMemberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+			ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+		})
+		require.NoError(t, berr)
+		_, berr = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: projMemberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+			ScopeType: store.RoleScopeProject, ScopeID: pMember.ID, CreatedBy: "test",
+		})
+		require.NoError(t, berr)
+
+		ident := userIdent(u)
+		memoCtx := withAuthzInputMemo(ctx)
+		unfilteredCtx := maskAllAuthzMemo(ctx)
+		otherOwnerID := api.NewUUID()
+
+		targets := []Resource{
+			{Type: "skill", ID: api.NewUUID(), ScopeKind: "project", ParentType: "project", ParentID: pNoGrant.ID},
+			{Type: "skill", ID: api.NewUUID(), ScopeKind: "user", OwnerID: otherOwnerID},
+			{Type: "template", ID: api.NewUUID(), ScopeKind: "project", ParentType: "project", ParentID: pNoGrant.ID},
+			{Type: "template", ID: api.NewUUID(), ScopeKind: "user", OwnerID: otherOwnerID},
+			{Type: "harness_config", ID: api.NewUUID(), ScopeKind: "project", ParentType: "project", ParentID: pNoGrant.ID},
+			{Type: "harness_config", ID: api.NewUUID(), ScopeKind: "user", OwnerID: otherOwnerID},
+		}
+		for _, res := range targets {
+			got := srv.authzService.CheckAccess(memoCtx, ident, res, ActionRead)
+			want := srv.authzService.CheckAccess(unfilteredCtx, ident, res, ActionRead)
+			assert.False(t, want.Allowed, "expected deny for %s (%s)", res.Type, res.ScopeKind)
+			assert.Equal(t, want.Allowed, got.Allowed, "%s (%s) Allowed mismatch", res.Type, res.ScopeKind)
+			assert.Equal(t, want.Reason, got.Reason, "%s (%s) Reason mismatch", res.Type, res.ScopeKind)
+			assert.Equal(t, want.BindingID, got.BindingID, "%s (%s) BindingID mismatch", res.Type, res.ScopeKind)
+			assert.Equal(t, want.RoleName, got.RoleName, "%s (%s) RoleName mismatch", res.Type, res.ScopeKind)
+			assert.Equal(t, want.Scope, got.Scope, "%s (%s) Scope mismatch", res.Type, res.ScopeKind)
+			assert.NotEqual(t, "no candidate bindings", got.Reason,
+				"%s (%s) must not collapse rejected candidates into 'no candidate bindings'", res.Type, res.ScopeKind)
+		}
+	})
+
+	// O2: child resource with ParentType="project" (agent in a project) and
+	// parentless non-catalog resource (user) must match full non-explain
+	// Decision identically across member, hub-admin, and view-as-member callers.
+	t.Run("child_project_resource_and_parentless_user_resource", func(t *testing.T) {
+		agentInMemberProj := Resource{
+			Type:       "agent",
+			ID:         api.NewUUID(),
+			ParentType: "project",
+			ParentID:   pMember.ID,
+		}
+		agentInNoGrantProj := Resource{
+			Type:       "agent",
+			ID:         api.NewUUID(),
+			ParentType: "project",
+			ParentID:   pNoGrant.ID,
+		}
+		parentlessUser := Resource{
+			Type: "user",
+			ID:   api.NewUUID(),
+		}
+
+		vamCtx := contextWithViewAsMember(ctx, sysAdmin.ID)
+		vamIdent := NewAuthenticatedUser(sysAdmin.ID, sysAdmin.Email, sysAdmin.DisplayName, store.UserRoleAdmin, string(ClientTypeWeb)).WithViewAsMember()
+
+		callers := []struct {
+			name    string
+			evalCtx context.Context
+			ident   UserIdentity
+		}{
+			{"human", ctx, humanIdent},
+			{"sys_admin", ctx, userIdent(sysAdmin)},
+			{"view_as_member", vamCtx, vamIdent},
+		}
+		targets := []struct {
+			name string
+			res  Resource
+			act  Action
+		}{
+			{"agent_in_member_project", agentInMemberProj, ActionRead},
+			{"agent_in_no_grant_project", agentInNoGrantProj, ActionRead},
+			{"parentless_user", parentlessUser, ActionRead},
+		}
+		for _, c := range callers {
+			memoCtx := withAuthzInputMemo(c.evalCtx)
+			unfilteredCtx := maskAllAuthzMemo(c.evalCtx)
+			for _, tgt := range targets {
+				got := srv.authzService.CheckAccess(memoCtx, c.ident, tgt.res, tgt.act)
+				want := srv.authzService.CheckAccess(unfilteredCtx, c.ident, tgt.res, tgt.act)
+				assert.Equal(t, want, got, "%s on %s full Decision mismatch", c.name, tgt.name)
+			}
+		}
+
+		// Sanity-check expected allow/deny outcomes.
+		assert.True(t, srv.authzService.CheckAccess(withAuthzInputMemo(ctx), humanIdent, agentInMemberProj, ActionRead).Allowed)
+		assert.False(t, srv.authzService.CheckAccess(withAuthzInputMemo(ctx), humanIdent, agentInNoGrantProj, ActionRead).Allowed)
+		assert.False(t, srv.authzService.CheckAccess(withAuthzInputMemo(ctx), humanIdent, parentlessUser, ActionRead).Allowed)
+		assert.True(t, srv.authzService.CheckAccess(withAuthzInputMemo(ctx), userIdent(sysAdmin), parentlessUser, ActionRead).Allowed)
+		assert.False(t, srv.authzService.CheckAccess(withAuthzInputMemo(vamCtx), vamIdent, parentlessUser, ActionRead).Allowed)
+	})
+}
+
+// TestAuthzScopePrefilter_RegressionGuard fails if per-project authorization
+// work regresses back to O(P * B) binding evaluation inside decide() (mutant
+// m7) or per-evaluation sortedKeys allocation (mutant m5) (ptone/scion#9157).
+func TestAuthzScopePrefilter_RegressionGuard(t *testing.T) {
+	// 1. BindingsForProject returns O(1) capacity-capped bindings per project,
+	// and decide() via ComputeCapabilitiesForActions keeps per-project
+	// allocations constant across 5 vs 100 projects (catches mutant m7).
+	t.Run("decide_and_bindings_constant_in_project_count", func(t *testing.T) {
+		measure := func(numProjects int) (filteredLen, filteredCap int, allocsPerProject float64, storeCalls map[string]int64) {
+			ctx := context.Background()
+			srv, rawStore, _, spy := newBellCountingSQLiteServer(t)
+			_, bob, _ := setupDemoPolicyOn(t, srv, srv.store)
+
+			memberRole, err := rawStore.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+			require.NoError(t, err)
+
+			resources := make([]Resource, numProjects)
+			var targetProjID string
+			for i := 0; i < numProjects; i++ {
+				p := &store.Project{
+					ID:      api.NewUUID(),
+					Name:    fmt.Sprintf("reg-p-%03d", i),
+					Slug:    fmt.Sprintf("reg-p-%03d", i),
+					Created: time.Now().UTC(),
+				}
+				require.NoError(t, rawStore.CreateProject(ctx, p))
+				_, err = rawStore.CreateRoleBinding(ctx, &store.RoleBinding{
+					RoleDefinitionID: memberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: bob.ID,
+					ScopeType: store.RoleScopeProject, ScopeID: p.ID, CreatedBy: "test",
+				})
+				require.NoError(t, err)
+				resources[i] = projectResource(p)
+				if i == 0 {
+					targetProjID = p.ID
+				}
+			}
+
+			bobIdent := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, string(ClientTypeWeb))
+			memoCtx := withAuthzInputMemo(ctx)
+
+			spy.Reset(true)
+			caps := srv.authzService.ComputeCapabilitiesForActions(memoCtx, bobIdent, resources, []Action{ActionRead})
+			require.Len(t, caps, numProjects)
+			for i := range resources {
+				require.True(t, capabilityAllows(caps[i], ActionRead))
+			}
+
+			h := srv.authzService.inputsFor(memoCtx, bobIdent)
+			_, err = h.Principals()
+			require.NoError(t, err)
+			filtered, err := h.BindingsForProject(targetProjID)
+			require.NoError(t, err)
+			_, err = h.RoleDefs()
+			require.NoError(t, err)
+
+			snap := spy.Snapshot()
+			spy.Reset(false)
+
+			// Measure steady-state decide() allocations per project with the
+			// memo warm: O(1) with BindingsForProject, O(P) if decide() reverts
+			// to authzIn.Bindings().
+			totalAllocs := testing.AllocsPerRun(5, func() {
+				_ = srv.authzService.ComputeCapabilitiesForActions(memoCtx, bobIdent, resources, []Action{ActionRead})
+			})
+			return len(filtered), cap(filtered), totalAllocs / float64(numProjects), snap
+		}
+
+		len5, cap5, alloc5, store5 := measure(5)
+		len100, cap100, alloc100, store100 := measure(100)
+
+		assert.Equal(t, len5, cap5, "BindingsForProject slice must be capacity-capped (N1)")
+		assert.Equal(t, len100, cap100, "BindingsForProject slice must be capacity-capped (N1)")
+		assert.Equal(t, len5, len100, "BindingsForProject slice length must be constant across 5 vs 100 projects")
+		assert.LessOrEqual(t, len100, 6, "BindingsForProject must only return system + matching project + 1 dropped sentinel (got %d for 100 projects)", len100)
+		assert.LessOrEqual(t, alloc100, alloc5*1.5+10,
+			"decide() allocations per project must stay O(1) across 5 (%.1f/proj) vs 100 (%.1f/proj) projects", alloc5, alloc100)
+		assert.Equal(t, store5["GetEffectiveGroups"], store100["GetEffectiveGroups"])
+		assert.Equal(t, store5["ListRoleBindingsForPrincipals"], store100["ListRoleBindingsForPrincipals"])
+		assert.Equal(t, store5["GetRoleDefinitionsByIDs"], store100["GetRoleDefinitionsByIDs"])
+		assert.LessOrEqual(t, store100["ListRoleBindingsForPrincipals"], int64(1))
+	})
+
+	// 2. evaluateBinding must not allocate/sort role.Permissions per evaluation
+	// when the role was built with NewRolePermissions (catches mutant m5).
+	t.Run("evaluateBinding_no_per_eval_sortedKeys_alloc", func(t *testing.T) {
+		perms := make([]string, 30)
+		permMap := make(map[string]struct{}, 30)
+		for i := range perms {
+			p := fmt.Sprintf("perm.%02d", i)
+			perms[i] = p
+			permMap[p] = struct{}{}
+		}
+		rolePre := NewRolePermissions("r1", "member", ScopeTypeProject, perms)
+		roleUnpre := &RolePermissions{
+			RoleID:            "r1",
+			RoleName:          "member",
+			ScopeType:         ScopeTypeProject,
+			Permissions:       permMap,
+			ConfersMembership: true,
+		}
+		baseReq := KernelRequest{
+			Permission:       "perm.00",
+			PrincipalClosure: map[string]struct{}{"user:u1": {}},
+			MembershipPaths:  map[string][]string{"user:u1": {"u1"}},
+			Resource:         ResourceContext{ResourceType: "project", ResourceID: "p1", ProjectID: "p1"},
+			Now:              time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC),
+		}
+		reqPre := baseReq
+		reqPre.RoleDefinitions = map[string]*RolePermissions{"r1": rolePre}
+		reqUnpre := baseReq
+		reqUnpre.RoleDefinitions = map[string]*RolePermissions{"r1": roleUnpre}
+
+		cb := &CandidateBinding{
+			BindingID:        "b1",
+			RoleDefinitionID: "r1",
+			PrincipalType:    "user",
+			PrincipalID:      "u1",
+			ScopeType:        ScopeTypeProject,
+			ScopeID:          "p1",
+		}
+		allocsPre := testing.AllocsPerRun(100, func() {
+			_ = evaluateBinding(reqPre, cb)
+		})
+		allocsUnpre := testing.AllocsPerRun(100, func() {
+			_ = evaluateBinding(reqUnpre, cb)
+		})
+		assert.Less(t, allocsPre, allocsUnpre,
+			"precomputed sortedPerms must allocate strictly fewer objects (%.1f) than unprecomputed sortedKeys (%.1f)", allocsPre, allocsUnpre)
+		assert.LessOrEqual(t, allocsPre, 1.0,
+			"evaluateBinding with precomputed sortedPerms must allocate at most 1 object (compositeKey); got %.1f", allocsPre)
+	})
+}
+
+// TestBindingScopeIndex_RandomKernelParity is a deterministic pure-kernel
+// property test verifying that buildBindingScopeIndex(bs).buildForProject(pid)
+// produces the exact same non-explain Decision as the unfiltered binding list
+// through toCandidateBindings -> applyHubWideScopeFilters -> Evaluate ->
+// kernelDecisionToDecision across 4,000 randomized binding/resource/restriction
+// combinations (security audit Low).
+func TestBindingScopeIndex_RandomKernelParity(t *testing.T) {
+	rng := rand.New(rand.NewSource(9157))
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+
+	projectIDs := []string{"p1", "p2", "p3", "", "P1", " p1"}
+	scopeTypes := []string{ScopeTypeProject, ScopeTypeProject, ScopeTypeProject, ScopeTypeSystem, "unknown_scope", "hub", ""}
+	principalTypes := []string{"user", "group", "agent"}
+	principalIDs := []string{"u1", "g1", "gX"}
+	roles := map[string]*RolePermissions{
+		"r-proj-a": NewRolePermissions("r-proj-a", "proj-a", ScopeTypeProject, []string{"project.read", "agent.read"}),
+		"r-proj-b": NewRolePermissions("r-proj-b", "proj-b", ScopeTypeProject, []string{"agent.create"}),
+		"r-sys":    NewRolePermissions("r-sys", "hub-member", ScopeTypeSystem, []string{"skill.read", "template.read", "harness_config.read", "project.read", "user.read"}),
+		"r-empty":  NewRolePermissions("r-empty", "empty", ScopeTypeProject, nil),
+	}
+	roleIDs := []string{"r-proj-a", "r-proj-b", "r-sys", "r-empty", "r-missing"}
+	perms := []string{"project.read", "agent.read", "agent.create", "skill.read", "template.read", "harness_config.read", "user.read"}
+	resourceTypes := []string{"project", "agent", "skill", "template", "harness_config", "user", "broker"}
+	scopeKinds := []string{"global", "project", "user", ""}
+	closure := map[string]struct{}{"user:u1": {}, "group:g1": {}}
+	membershipPaths := map[string][]string{"user:u1": {"u1"}, "group:g1": {"u1", "g1"}}
+
+	// normalizeNonExplain mirrors decide() Step 11 (Explain=false) so we
+	// compare the full non-explain Decision surface including Provenance.Grants
+	// and Provenance.DenyReasons.
+	normalizeNonExplain := func(d Decision) Decision {
+		if d.Provenance != nil {
+			d.Provenance = &DecisionProvenance{
+				Permission:      d.Provenance.Permission,
+				Grants:          d.Provenance.Grants,
+				DenyReasons:     d.Provenance.DenyReasons,
+				Restrictions:    []RestrictionProvenance{},
+				InactiveGrants:  []GrantDetail{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return d
+	}
+
+	const cases = 4000
+	for iter := 0; iter < cases; iter++ {
+		n := rng.Intn(9)
+		bs := make([]*store.RoleBinding, n)
+		for i := range bs {
+			b := &store.RoleBinding{
+				ID:               fmt.Sprintf("b%d", i),
+				RoleDefinitionID: roleIDs[rng.Intn(len(roleIDs))],
+				PrincipalType:    principalTypes[rng.Intn(len(principalTypes))],
+				PrincipalID:      principalIDs[rng.Intn(len(principalIDs))],
+				ScopeType:        scopeTypes[rng.Intn(len(scopeTypes))],
+				ScopeID:          projectIDs[rng.Intn(len(projectIDs))],
+			}
+			switch rng.Intn(8) {
+			case 0:
+				b.ExpiresAt = &past
+			case 1:
+				b.NotBefore = &future
+			}
+			bs[i] = b
+		}
+
+		res := Resource{Type: resourceTypes[rng.Intn(len(resourceTypes))], ID: "x"}
+		switch rng.Intn(3) {
+		case 0:
+			if res.Type == "project" {
+				res.ID = projectIDs[rng.Intn(len(projectIDs))]
+			}
+		case 1:
+			// Child-of-project resource (e.g. agent/skill/template in a project).
+			res.ParentType = "project"
+			res.ParentID = projectIDs[rng.Intn(len(projectIDs))]
+		case 2:
+			// Parentless resource (empty ProjectID).
+		}
+		if res.Type == "skill" || res.Type == "template" || res.Type == "harness_config" {
+			res.ScopeKind = scopeKinds[rng.Intn(len(scopeKinds))]
+		}
+
+		pid := projectIDForResource(res)
+		filtered := buildBindingScopeIndex(bs).buildForProject(pid)
+		require.Equal(t, len(filtered), cap(filtered), "iter %d: filtered slice must be clipped", iter)
+
+		perm := perms[rng.Intn(len(perms))]
+		var restr []Restriction
+		if rng.Intn(4) == 0 {
+			deniedPerm := perms[rng.Intn(len(perms))]
+			restr = append(restr, Restriction{
+				Kind: "credential_scope",
+				Check: func(p string) bool {
+					return p != deniedPerm
+				},
+			})
+		}
+
+		eval := func(input []*store.RoleBinding) Decision {
+			candidates := applyHubWideScopeFilters(
+				toCandidateBindings(input),
+				roles,
+				ProjectTargetClass{ResourceType: res.Type, ScopeKind: res.ScopeKind},
+			)
+			kd := Evaluate(KernelRequest{
+				Permission:        perm,
+				PrincipalClosure:  closure,
+				MembershipPaths:   membershipPaths,
+				Resource:          ResourceContext{ResourceType: res.Type, ResourceID: res.ID, ProjectID: pid},
+				CandidateBindings: candidates,
+				RoleDefinitions:   roles,
+				Restrictions:      restr,
+				Now:               now,
+			})
+			return normalizeNonExplain(kernelDecisionToDecision(kd, perm))
+		}
+
+		want := eval(bs)
+		got := eval(filtered)
+		require.Equal(t, want, got, "iter %d mismatch pid=%q perm=%q res=%+v", iter, pid, perm, res)
+	}
+}
+
+// TestBindingsForProject_SliceIsolationAndRace verifies concurrent
+// BindingsForProject calls are race-free and returned slices are clipped so
+// caller appends cannot mutate cached memo backing arrays.
+func TestBindingsForProject_SliceIsolationAndRace(t *testing.T) {
+	bs := []*store.RoleBinding{
+		{ID: "s", ScopeType: ScopeTypeSystem},
+		{ID: "a", ScopeType: ScopeTypeProject, ScopeID: "p1"},
+		{ID: "b", ScopeType: ScopeTypeProject, ScopeID: "p2"},
+	}
+	m := &authzInputMemo{principals: map[principalKey]*memoEntry{}}
+	e := &memoEntry{bindings: bs, bindingsOK: true}
+	mk := func() *principalInputs {
+		return &principalInputs{
+			ctx:              context.Background(),
+			memo:             m,
+			principalsLoaded: true,
+			bindingsLoaded:   true,
+			bindingsVal:      bs,
+			bindingsEntry:    e,
+		}
+	}
+
+	var wg sync.WaitGroup
+	targets := []string{"p1", "p2", "", "p9"}
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			out, err := mk().BindingsForProject(targets[i%len(targets)])
+			assert.NoError(t, err)
+			assert.Equal(t, len(out), cap(out), "returned slice must be clipped")
+			_ = append(out, &store.RoleBinding{ID: "evil", ScopeType: ScopeTypeSystem})
+		}(i)
+	}
+	wg.Wait()
+
+	out, err := mk().BindingsForProject("p1")
+	require.NoError(t, err)
+	assert.Equal(t, len(out), cap(out))
+	for _, b := range out {
+		assert.NotEqual(t, "evil", b.ID, "caller append must not leak into cached memo slice")
+	}
+
+	// Done ctx must return unfiltered slice cleanly without panicking.
+	doneCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h := mk()
+	h.ctx = doneCtx
+	outDone, err := h.BindingsForProject("p1")
+	require.NoError(t, err)
+	assert.Len(t, outDone, len(bs))
+}

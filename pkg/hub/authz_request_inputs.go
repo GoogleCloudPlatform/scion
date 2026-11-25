@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -76,8 +77,130 @@ type memoEntry struct {
 	bindings   []*store.RoleBinding
 	bindingsOK bool
 
+	// scopeIdx lazily partitions bindings by ScopeID for non-explain
+	// evaluations (see BindingsForProject). Built at most once after
+	// bindingsOK is set; read-only once populated.
+	scopeIdx *bindingScopeIndex
+
 	roleDefs   map[string]*RolePermissions
 	roleDefsOK bool
+}
+
+// indexedBinding pairs a role binding with its original index in
+// memoEntry.bindings so BindingsForProject can merge non-project and matching
+// project bindings in their exact original relative order.
+type indexedBinding struct {
+	origIdx int
+	binding *store.RoleBinding
+}
+
+// bindingScopeIndex partitions a principal's unfiltered bindings by project
+// ScopeID so non-explain decide() calls hand the kernel only bindings that
+// could pass scopeApplies for the target resource's project, while preserving
+// exact original relative order and rejected-set non-emptiness.
+type bindingScopeIndex struct {
+	total int
+	// nonProject holds every nil binding and every binding whose ScopeType !=
+	// ScopeTypeProject (system-scoped plus any unknown scope type, so
+	// behaviour matches the unfiltered list), in original order.
+	nonProject []indexedBinding
+	// byProject maps ScopeID -> project-scoped bindings for that project,
+	// in original order.
+	byProject map[string][]indexedBinding
+	// firstEmptyScopeProj holds the first project-scoped binding with empty
+	// ScopeID, if any (always rejected by scopeApplies).
+	firstEmptyScopeProj *store.RoleBinding
+	// sampleProj holds the first binding from up to two distinct non-empty
+	// project ScopeIDs so that whenever any project binding is dropped for a
+	// target projectID, one dropped binding can be picked in O(1).
+	sampleProj [2]*store.RoleBinding
+	// merged caches the capacity-capped per-project slice (protected by
+	// authzInputMemo.mu).
+	merged map[string][]*store.RoleBinding
+}
+
+func buildBindingScopeIndex(bindings []*store.RoleBinding) *bindingScopeIndex {
+	idx := &bindingScopeIndex{
+		total:     len(bindings),
+		byProject: make(map[string][]indexedBinding),
+		merged:    make(map[string][]*store.RoleBinding),
+	}
+	for i, b := range bindings {
+		if b != nil && b.ScopeType == ScopeTypeProject {
+			if b.ScopeID == "" {
+				if idx.firstEmptyScopeProj == nil {
+					idx.firstEmptyScopeProj = b
+				}
+				continue
+			}
+			idx.byProject[b.ScopeID] = append(idx.byProject[b.ScopeID], indexedBinding{origIdx: i, binding: b})
+			if idx.sampleProj[0] == nil {
+				idx.sampleProj[0] = b
+			} else if idx.sampleProj[1] == nil && idx.sampleProj[0].ScopeID != b.ScopeID {
+				idx.sampleProj[1] = b
+			}
+			continue
+		}
+		idx.nonProject = append(idx.nonProject, indexedBinding{origIdx: i, binding: b})
+	}
+	return idx
+}
+
+func (idx *bindingScopeIndex) droppedSentinelFor(projectID string) *store.RoleBinding {
+	if idx.firstEmptyScopeProj != nil {
+		return idx.firstEmptyScopeProj
+	}
+	if idx.sampleProj[0] != nil && idx.sampleProj[0].ScopeID != projectID {
+		return idx.sampleProj[0]
+	}
+	if idx.sampleProj[1] != nil && idx.sampleProj[1].ScopeID != projectID {
+		return idx.sampleProj[1]
+	}
+	return nil
+}
+
+func (idx *bindingScopeIndex) buildForProject(projectID string) []*store.RoleBinding {
+	var proj []indexedBinding
+	if projectID != "" {
+		proj = idx.byProject[projectID]
+	}
+	kept := len(idx.nonProject) + len(proj)
+	var sentinel *store.RoleBinding
+	if kept < idx.total {
+		// At least one project-scoped binding was dropped; keep one dropped
+		// binding (always rejected by scopeApplies and never stripped by
+		// applyHubWideScopeFilters) so the kernel's rejected set is non-empty
+		// whenever the unfiltered one is.
+		sentinel = idx.droppedSentinelFor(projectID)
+	}
+	outCap := kept
+	if sentinel != nil {
+		outCap++
+	}
+	out := make([]*store.RoleBinding, 0, outCap)
+	// Two-pointer merge preserves the exact original relative order of
+	// nonProject and matching project bindings so kernelDecisionToDecision
+	// selects the same first granting binding as an unfiltered evaluation.
+	ni, pi := 0, 0
+	for ni < len(idx.nonProject) && pi < len(proj) {
+		if idx.nonProject[ni].origIdx < proj[pi].origIdx {
+			out = append(out, idx.nonProject[ni].binding)
+			ni++
+		} else {
+			out = append(out, proj[pi].binding)
+			pi++
+		}
+	}
+	for ; ni < len(idx.nonProject); ni++ {
+		out = append(out, idx.nonProject[ni].binding)
+	}
+	for ; pi < len(proj); pi++ {
+		out = append(out, proj[pi].binding)
+	}
+	if sentinel != nil {
+		out = append(out, sentinel)
+	}
+	return slices.Clip(out)
 }
 
 // authzInputMemo memoizes principal-bound authorization inputs for one
@@ -234,14 +357,18 @@ func (m *authzInputMemo) entryFor(key principalKey) *memoEntry {
 
 // principalInputs is a per-decision handle over one principal's UNFILTERED
 // authorization inputs, returned by AuthzService.inputsFor. It serves no
-// query shape other than the one authorizationPrincipals / decide steps
+// store query shape other than the one authorizationPrincipals / decide steps
 // 2-4 use: the full closure, its bindings with (nil, nil) scope filters, and
-// role definitions for exactly those bindings. Callers that filter by scope
-// or query a different ref set — authz_candelegate.go, authz_boundary.go's
-// project-scoped grant resolvers, hasActiveSystemRole, getEffectivePermissions
-// — must NOT use it; they keep their own direct loads, which this design
-// does not touch. ProjectMembershipEvidence uses it (via inputsForPrincipal)
-// because it issues exactly this unfiltered closure-plus-bindings query.
+// role definitions for exactly those bindings. Non-explain decide() calls may
+// read an in-memory scope-filtered view of those already-loaded unfiltered
+// bindings via BindingsForProject (which lazily indexes entry.bindings by
+// project ScopeID without issuing any scope-filtered store query). Callers
+// that filter by scope at the store or query a different ref set —
+// authz_candelegate.go, authz_boundary.go's project-scoped grant resolvers,
+// hasActiveSystemRole, getEffectivePermissions — must NOT use it; they keep
+// their own direct loads, which this design does not touch.
+// ProjectMembershipEvidence uses it (via inputsForPrincipal) because it issues
+// exactly this unfiltered closure-plus-bindings query.
 //
 // A handle is used for exactly one decision (or one ResolveListScopes call)
 // and must not be reused across decisions or shared between goroutines.
@@ -428,6 +555,46 @@ func (h *principalInputs) Bindings() ([]*store.RoleBinding, error) {
 	return bindings, nil
 }
 
+// BindingsForProject returns the subset of h.Bindings() that could pass
+// scopeApplies for a target resource with authoritative projectID, in the
+// exact relative order of h.Bindings(). Only project-scoped bindings for other
+// projects (or with empty ScopeID) are omitted; whenever at least one binding
+// is omitted, one omitted project-scoped binding is retained so the kernel's
+// rejected set remains non-empty even if applyHubWideScopeFilters removes
+// system-scoped candidates.
+//
+// Intended for non-explain decide() calls where InactiveGrants are stripped.
+// Returned slices are capacity-capped so callers cannot mutate shared memo
+// backing arrays. When no memo is active, returns the full bindings slice
+// directly without indexing overhead.
+func (h *principalInputs) BindingsForProject(projectID string) ([]*store.RoleBinding, error) {
+	bindings, err := h.Bindings()
+	if err != nil || len(bindings) == 0 {
+		return bindings, err
+	}
+	if h.memo == nil || h.bindingsEntry == nil || h.ctx.Err() != nil {
+		return bindings, nil
+	}
+
+	entry := h.bindingsEntry
+	memo := h.memo
+
+	memo.mu.Lock()
+	idx := entry.scopeIdx
+	if idx == nil {
+		idx = buildBindingScopeIndex(entry.bindings)
+		entry.scopeIdx = idx
+	}
+	if cached, ok := idx.merged[projectID]; ok {
+		memo.mu.Unlock()
+		return cached, nil
+	}
+	out := idx.buildForProject(projectID)
+	idx.merged[projectID] = out
+	memo.mu.Unlock()
+	return out, nil
+}
+
 // RoleDefs loads the role definitions for exactly the bindings this handle's
 // Bindings() produced (step 4), keyed by the definition IDs those bindings
 // reference. Calling it before Bindings is a programming error and fails
@@ -444,9 +611,8 @@ func (h *principalInputs) RoleDefs() (map[string]*RolePermissions, error) {
 		return nil, h.bindingsErr
 	}
 
-	roleDefIDs := collectRoleDefinitionIDs(h.bindingsVal)
-
 	if h.memo == nil || h.bindingsEntry == nil || h.ctx.Err() != nil {
+		roleDefIDs := collectRoleDefinitionIDs(h.bindingsVal)
 		return h.a.loadRoleDefinitions(h.ctx, roleDefIDs)
 	}
 
@@ -461,6 +627,7 @@ func (h *principalInputs) RoleDefs() (map[string]*RolePermissions, error) {
 	}
 	memo.mu.Unlock()
 
+	roleDefIDs := collectRoleDefinitionIDs(h.bindingsVal)
 	defs, err := h.a.loadRoleDefinitions(h.ctx, roleDefIDs)
 	if err != nil {
 		return nil, err

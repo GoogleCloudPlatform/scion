@@ -861,7 +861,15 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// ── Step 3: Load active role bindings (batched) ───────────────────
-	bindings, err := authzIn.Bindings()
+	// For non-explain evaluations with a request-local memo, pre-filter to
+	// bindings whose scope could apply to the target resource's project.
+	// Explain keeps the full list so InactiveGrants lists every binding.
+	var bindings []*store.RoleBinding
+	if request.Explain {
+		bindings, err = authzIn.Bindings()
+	} else {
+		bindings, err = authzIn.BindingsForProject(projectIDForResource(request.Resource))
+	}
 	if err != nil {
 		logAuthzCheckFault(ctx, a.logger, "role_bindings", "failed to load role bindings", err,
 			"principal_id", principal.ID)

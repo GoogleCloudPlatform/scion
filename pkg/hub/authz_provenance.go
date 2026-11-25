@@ -76,6 +76,7 @@ type GrantDetail struct {
 	MembershipPath []string `json:"membershipPath,omitempty"`
 
 	// Permissions lists the permissions this binding's role grants.
+	// Permissions is shared; copy before mutating.
 	Permissions []string `json:"permissions,omitempty"`
 
 	// InactiveReason explains why this grant did not contribute,
