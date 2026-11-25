@@ -915,6 +915,12 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		}
 	}
 	extra, warnings := s.finalizeExtras(w, r.WithContext(work), b, v, files)
+	priorWasReview := false
+	if v.Kind == VersionKindPublish && a.OwnerKind == PrincipalKindUser && a.CurrentSeq > 0 && s.inboxHintsActive(work) {
+		if prior, perr := b.store.GetVersion(work, a.ID, a.CurrentSeq); perr == nil && prior.Kind == VersionKindReview {
+			priorWasReview = true
+		}
+	}
 	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra, base)
 	if errors.Is(err, ErrStaleBase) {
 		// A version was published between the review check and now.
@@ -960,6 +966,8 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	var delivery *ReviewDeliveryInfo
 	if ready.Kind == VersionKindReview {
 		delivery = s.notifyReviewWithDelivery(ctx, w, updated, ready, access, freq.Wake)
+	} else if priorWasReview && updated.CurrentSeq == seq && updated.OwnerKind == PrincipalKindUser {
+		s.notifyInboxChanged(ctx, updated.OwnerRef)
 	}
 	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings, ReviewDelivery: delivery})
 }

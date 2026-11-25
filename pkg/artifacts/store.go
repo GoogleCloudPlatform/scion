@@ -305,6 +305,11 @@ type Store interface {
 	// and scope, or ErrNotFound.
 	GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ownerKind, ownerRef, key string) (*Artifact, error)
 
+	// GetArtifacts returns the live (non-deleted) artifacts whose IDs are in
+	// ids, keyed by artifact ID. Missing and deleted IDs are absent from the
+	// map. At most MaxGrantsForIDs ids may be given.
+	GetArtifacts(ctx context.Context, ids []string) (map[string]*Artifact, error)
+
 	// MarkReceived records, in one transaction, that the bytes of file path
 	// of the pending version versionID have arrived, with their media type,
 	// and that the files named in siblings (path -> media type), which have

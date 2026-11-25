@@ -124,12 +124,16 @@ var grantNoticeLevel = map[string]string{
 	artifacts.GrantAdmin:  "Can manage",
 }
 
+// reviewRequestMessagePhrase is the fixed phrase used in review-request grant
+// notifications (shared with reviewRequestedByFromMessage in inbox_reviews.go).
+const reviewRequestMessagePhrase = " asked you to review an artifact"
+
 // grantNoticeMessage is the fixed message of a grant notice: the label, the
 // level and the artifact's reference, and nothing else (K14/K19).
 func grantNoticeMessage(label, permission, artifactID string) string {
 	ref := artifacts.FormatRef(artifactID, 0)
 	if permission == artifacts.GrantReview {
-		return label + " asked you to review an artifact (" + grantNoticeLevel[permission] + "): " + ref
+		return label + reviewRequestMessagePhrase + " (" + grantNoticeLevel[permission] + "): " + ref
 	}
 	return label + " shared an artifact with you (" + grantNoticeLevel[permission] + "): " + ref
 }

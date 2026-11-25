@@ -275,3 +275,17 @@ type Stewardship interface {
 	// Any lookup failure answers "".
 	StewardClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string, orphaned bool) string
 }
+
+// InboxNotifier is an optional extension of Host. The service calls it after a
+// committed mutation that can change a user's pending-reviews inbox (a publish
+// that clears a pending review, an artifact delete, or a user grant
+// revocation). A host without it sends no hints.
+type InboxNotifier interface {
+	// InboxHintsActive reports whether inbox invalidation hints are currently
+	// enabled on the host, so the service can skip extra reads (such as
+	// checking the prior version kind on publish) when hints are inactive.
+	InboxHintsActive(ctx context.Context) bool
+	// InboxChanged tells the host that userID's artifact-reviews inbox may
+	// have changed. Best effort, called after commit.
+	InboxChanged(ctx context.Context, userID string)
+}

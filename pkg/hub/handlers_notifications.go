@@ -500,6 +500,7 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 					return
 				}
 			}
+			s.publishInboxHint(r.Context(), caller.ID, InboxHint{Category: InboxCategoryNotifications})
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 			return
 		}
@@ -507,6 +508,7 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		s.publishInboxHint(r.Context(), caller.ID, InboxHint{Category: InboxCategoryNotifications})
 		slog.Info("All notifications acknowledged", "subscriberType", caller.Type, "subscriberID", caller.ID)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
@@ -541,6 +543,9 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 		if err := s.store.AcknowledgeNotification(r.Context(), id); err != nil {
 			writeErrorFromErr(w, err, "Notification")
 			return
+		}
+		if !caller.isAgent() {
+			s.publishInboxHint(r.Context(), caller.ID, InboxHint{Category: InboxCategoryNotifications})
 		}
 		slog.Info("Notification acknowledged", "notificationID", id, "subscriberType", caller.Type, "subscriberID", caller.ID)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

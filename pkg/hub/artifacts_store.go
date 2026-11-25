@@ -186,10 +186,12 @@ func (s *Server) artifactsHandler() http.Handler {
 }
 
 // artifactRefResolver returns the artifact service for resolving message
-// references (resolveArtifactRefs, its only caller). Like artifactsHandler
-// it is built over this server's artifacts.Host; resolveArtifactRefs
-// admits only request-authenticated contexts, so the host still sees only
-// identities derived from request credentials.
+// references (resolveArtifactRefs, artifactRecipientWarning) and the inbox
+// summary reviews category (inboxReviewsCategory). Like artifactsHandler it is
+// built over this server's artifacts.Host; every caller is pinned by
+// TestArtifactRefResolverReachableOnlyFromRequestContexts to check
+// requestCredentialBindsIdentity(ctx), so the host still sees only identities
+// derived from request credentials.
 func (s *Server) artifactRefResolver() *artifacts.Service {
 	svc := artifacts.NewService(newArtifactHost(s))
 	svc.SetBackendProvider(s.artifactBackend)

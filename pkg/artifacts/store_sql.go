@@ -734,7 +734,12 @@ func (s *sqlStore) GetArtifact(ctx context.Context, id string) (*Artifact, error
 }
 
 // getArtifact returns the live artifact matching where.
-func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (*Artifact, error) {
+// artifactColumns is the artifact column list scanArtifact reads.
+const artifactColumns = `id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at,
+		orphaned_at, message_project_id, sponsor_ref
+		`
+
+func scanArtifact(r rowScanner) (Artifact, error) {
 	var (
 		a                    Artifact
 		key                  sql.NullString
@@ -745,17 +750,11 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 		messageProject       sql.NullString
 		sponsor              sql.NullString
 	)
-	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT
-		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at,
-		orphaned_at, message_project_id, sponsor_ref
-		FROM artifact WHERE `+where+` AND deleted_at IS NULL`), args...).Scan(
+	err := r.Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
 		&expires, &created, &updated, &deletedTime, &orphaned, &messageProject, &sponsor)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
 	if err != nil {
-		return nil, fmt.Errorf("artifacts: get artifact: %w", err)
+		return Artifact{}, err
 	}
 	a.Key = key.String
 	a.CurrentSeq = int(seq.Int64)
@@ -766,7 +765,52 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 	a.OrphanedAt = orphaned.ptr()
 	a.MessageProjectID = nullStringPtr(messageProject)
 	a.SponsorRef = sponsor.String
+	return a, nil
+}
+
+func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (*Artifact, error) {
+	a, err := scanArtifact(s.db.QueryRowContext(ctx, s.rebind(`SELECT `+artifactColumns+`
+		FROM artifact WHERE `+where+` AND deleted_at IS NULL`), args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: get artifact: %w", err)
+	}
 	return &a, nil
+}
+
+// GetArtifacts implements Store.
+func (s *sqlStore) GetArtifacts(ctx context.Context, ids []string) (map[string]*Artifact, error) {
+	if len(ids) == 0 {
+		return map[string]*Artifact{}, nil
+	}
+	if len(ids) > MaxGrantsForIDs {
+		return nil, fmt.Errorf("artifacts: GetArtifacts accepts at most %d ids", MaxGrantsForIDs)
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT `+artifactColumns+`
+		FROM artifact WHERE id IN (`+strings.TrimSuffix(strings.Repeat("?, ", len(args)), ", ")+`) AND deleted_at IS NULL`), args...)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: get artifacts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]*Artifact, len(ids))
+	for rows.Next() {
+		a, err := scanArtifact(rows)
+		if err != nil {
+			return nil, fmt.Errorf("artifacts: scan artifact: %w", err)
+		}
+		aCopy := a
+		out[aCopy.ID] = &aCopy
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("artifacts: get artifacts: %w", err)
+	}
+	return out, nil
 }
 
 // versionColumns is the artifact_version column list scanVersion reads.

@@ -408,13 +408,14 @@ func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 	wantResolver := map[stripSiteKey]bool{
 		{"message_artifacts.go", "resolveArtifactRefs"}:      true,
 		{"message_artifacts.go", "artifactRecipientWarning"}: true,
+		{"inbox_reviews.go", "inboxReviewsCategory"}:         true,
 	}
 	if len(got["artifactRefResolver"]) == 0 {
 		t.Fatal("found no artifactRefResolver call sites: scanner broken")
 	}
 	for key := range got["artifactRefResolver"] {
 		if !wantResolver[key] {
-			t.Errorf("artifactRefResolver called from %s:%s; only resolveArtifactRefs may build the in-process artifact service", key.file, key.function)
+			t.Errorf("artifactRefResolver called from %s:%s; only allow-listed request-bound callers (resolveArtifactRefs, artifactRecipientWarning, inboxReviewsCategory) may build the in-process artifact service", key.file, key.function)
 		}
 	}
 
