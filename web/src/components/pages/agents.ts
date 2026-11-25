@@ -733,7 +733,7 @@ export class ScionPageAgents extends LitElement {
         storedMode &&
         (storedMode === 'can_message' ||
           storedMode === 'cannot_message' ||
-          storedMode in MESSAGE_MODE_DISPLAY)
+          Object.hasOwn(MESSAGE_MODE_DISPLAY, storedMode))
       ) {
         this.modeFilter = storedMode;
       } else if (storedMode) {

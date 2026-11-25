@@ -319,6 +319,14 @@ func TestTreeMode_MatrixAndSymmetry(t *testing.T) {
 		if !allowed {
 			t.Fatalf("super-admin→tree should be allowed: %s", reason)
 		}
+
+		// Isolated project-owner piercing of tree: target's Ancestry[0] is member,
+		// not owner, so only project-owner piercing (not ancestry allow) admits owner.
+		memberTree := msgAuthzAgent(t, s, "tree-member-owned", projectID, store.MessageModeTree, []string{member.ID})
+		allowed, reason, _ = srv.authorizeAgentMessage(ctx, ownerIdent, memberTree, false)
+		if !allowed || reason != "project owner piercing" {
+			t.Fatalf("project owner→member-owned tree: got allowed=%v reason=%q, want allowed=true reason='project owner piercing'", allowed, reason)
+		}
 	})
 
 	t.Run("symmetry property over all modes and pairs", func(t *testing.T) {

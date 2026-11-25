@@ -838,6 +838,38 @@ func TestEvaluateAgentMessage_CrossProject_PolicyAnyDoesNotOpenRestricted(t *tes
 	}
 }
 
+// TestEvaluateAgentMessage_CrossProject_SameTreeDenied pins S4: even when two
+// agents share the same creation tree (Ancestry[0] and owner-created root),
+// tree mode never admits a cross-project send in either direction.
+func TestEvaluateAgentMessage_CrossProject_SameTreeDenied(t *testing.T) {
+	f := crossProjectSetup(t)
+	ctx := context.Background()
+
+	enableCrossProjectMessaging(t, f.srv)
+	_, err := f.store.UpdateProjectMessagingPolicy(ctx, f.projectA, store.CrossProjectInboundAny, 1)
+	require_NoError(t, err)
+	_, err = f.store.UpdateProjectMessagingPolicy(ctx, f.projectB, store.CrossProjectInboundAny, 1)
+	require_NoError(t, err)
+
+	// Foo in projectA (hub) -> Bar in projectB (tree), sharing the same tree root Foo.
+	foo := msgAuthzAgent(t, f.store, "cp-same-tree-foo", f.projectA, store.MessageModeHub, []string{f.ownerA.ID})
+	bar := msgAuthzAgent(t, f.store, "cp-same-tree-bar", f.projectB, store.MessageModeTree, []string{f.ownerA.ID, foo.ID})
+
+	fooIdent := msgAuthzAgentIdentity(foo.ID, f.projectA, foo.Ancestry)
+	dec1 := f.srv.EvaluateAgentMessage(ctx, fooIdent, bar)
+	if dec1.Allowed || dec1.Code != MessageDenialCrossProjectTargetMode {
+		t.Fatalf("hub(A)->tree(B) same tree: got allowed=%v code=%q, want allowed=false code=%q",
+			dec1.Allowed, dec1.Code, MessageDenialCrossProjectTargetMode)
+	}
+
+	barIdent := msgAuthzAgentIdentity(bar.ID, f.projectB, bar.Ancestry)
+	dec2 := f.srv.EvaluateAgentMessage(ctx, barIdent, foo)
+	if dec2.Allowed || dec2.Code != MessageDenialCrossProjectSenderMode {
+		t.Fatalf("tree(B)->hub(A) same tree: got allowed=%v code=%q, want allowed=false code=%q",
+			dec2.Allowed, dec2.Code, MessageDenialCrossProjectSenderMode)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Test: Cross-project message provenance fields
 // ---------------------------------------------------------------------------

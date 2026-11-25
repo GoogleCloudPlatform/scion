@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -328,12 +329,6 @@ var validMessageModesOrder = []string{
 	"none", "owner", "direct", "tree", "project", "hub",
 }
 
-// validMessageModes are the agent message modes a scion-agent config may name
-// in message_mode.
-var validMessageModes = map[string]struct{}{
-	"none": {}, "owner": {}, "direct": {}, "tree": {}, "project": {}, "hub": {},
-}
-
 // retiredMessageModeHints maps retired message mode names to their replacements
 // for actionable error messages. Retired names are never accepted as aliases.
 var retiredMessageModeHints = map[string]string{
@@ -361,7 +356,7 @@ func ValidateMessageMode(mode string) error {
 	if mode == "" {
 		return nil
 	}
-	if _, ok := validMessageModes[mode]; !ok {
+	if !slices.Contains(validMessageModesOrder, mode) {
 		if repl, retired := RetiredMessageModeHint(mode); retired {
 			return fmt.Errorf("invalid message_mode %q (%q was renamed to %q): must be one of %s",
 				mode, mode, repl, strings.Join(validMessageModesOrder, ", "))

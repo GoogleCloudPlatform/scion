@@ -130,7 +130,7 @@ func TestCapabilities_Authenticated(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.True(t, resp.HubEnabled, "cross-project should be enabled")
 	require.Contains(t, resp.CrossProjectConversationKinds, "direct")
-	require.Len(t, resp.SupportedModes, 5)
+	require.Equal(t, store.MessageModes(), resp.SupportedModes)
 }
 
 func TestCapabilities_Unauthenticated(t *testing.T) {

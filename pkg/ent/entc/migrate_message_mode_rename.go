@@ -16,6 +16,7 @@ package entc
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 
@@ -29,9 +30,12 @@ import (
 //   - "lineage" -> "owner"
 //   - "branch"  -> "direct"
 //
-// Raw SQL is used because Ent's generated MessageModeValidator rejects retired
-// enum values in typed predicates. Soft-deleted rows are intentionally included
-// (no deleted_at filter) so a restored agent cannot return with a retired mode.
+// Statements are executed through client.Driver().Tx so wrapped ent drivers
+// (such as lockProbeDriver, recordingDriver, and dialect.DebugDriver) work
+// without requiring Unwrap(). Raw SQL is used because Ent's generated
+// MessageModeValidator rejects retired enum values in typed predicates.
+// Soft-deleted rows are intentionally included (no deleted_at filter) so a
+// restored agent cannot return with a retired mode.
 func MigrateMessageModeRename(ctx context.Context, client *ent.Client) error {
 	driver := client.Driver()
 	switch driver.Dialect() {
@@ -40,12 +44,7 @@ func MigrateMessageModeRename(ctx context.Context, client *ent.Client) error {
 		return fmt.Errorf("migrate agent message modes: unsupported dialect %q", driver.Dialect())
 	}
 
-	sqlDrv, ok := SQLDriver(driver)
-	if !ok {
-		return fmt.Errorf("migrate agent message modes: underlying SQL driver unavailable")
-	}
-
-	tx, err := sqlDrv.DB().BeginTx(ctx, nil)
+	tx, err := driver.Tx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin agent message mode migration: %w", err)
 	}
@@ -56,23 +55,28 @@ func MigrateMessageModeRename(ctx context.Context, client *ent.Client) error {
 		}
 	}()
 
-	resOwner, err := tx.ExecContext(ctx, `UPDATE agents SET message_mode = 'owner' WHERE message_mode = 'lineage'`)
-	if err != nil {
+	var resOwner sql.Result
+	if err := tx.Exec(ctx, `UPDATE agents SET message_mode = 'owner' WHERE message_mode = 'lineage'`, []any{}, &resOwner); err != nil {
 		return fmt.Errorf("migrate agent message_mode lineage->owner: %w", err)
 	}
-	ownerRows, _ := resOwner.RowsAffected()
 
-	resDirect, err := tx.ExecContext(ctx, `UPDATE agents SET message_mode = 'direct' WHERE message_mode = 'branch'`)
-	if err != nil {
+	var resDirect sql.Result
+	if err := tx.Exec(ctx, `UPDATE agents SET message_mode = 'direct' WHERE message_mode = 'branch'`, []any{}, &resDirect); err != nil {
 		return fmt.Errorf("migrate agent message_mode branch->direct: %w", err)
 	}
-	directRows, _ := resDirect.RowsAffected()
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit agent message mode migration: %w", err)
 	}
 	committed = true
 
+	var ownerRows, directRows int64
+	if resOwner != nil {
+		ownerRows, _ = resOwner.RowsAffected()
+	}
+	if resDirect != nil {
+		directRows, _ = resDirect.RowsAffected()
+	}
 	if ownerRows > 0 || directRows > 0 {
 		slog.InfoContext(ctx, "migrated retired agent message_mode values",
 			"lineage_to_owner", ownerRows,

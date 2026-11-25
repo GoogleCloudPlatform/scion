@@ -627,10 +627,10 @@ func TestAgentDelegatedMessage_OnlyTheRouteTarget(t *testing.T) {
 	}{
 		{"same project, hub", f.agentA.ProjectID, store.MessageModeHub, true, ""},
 		{"same project, project", f.agentA.ProjectID, store.MessageModeProject, true, ""},
-		{"same project, empty", f.agentA.ProjectID, "", false, ""},
-		{"same project, lineage", f.agentA.ProjectID, store.MessageModeOwner, false, ""},
+		{"same project, empty", f.agentA.ProjectID, "", false, MessageDenialCode(ReasonModeIncompatible)},
+		{"same project, owner", f.agentA.ProjectID, store.MessageModeOwner, false, MessageDenialCode(ReasonModeIncompatible)},
 		{"same project, none", f.agentA.ProjectID, store.MessageModeNone, false, ""},
-		{"other project, lineage", b.ProjectID, store.MessageModeOwner, false, MessageDenialCrossProjectTargetMode},
+		{"other project, owner", b.ProjectID, store.MessageModeOwner, false, MessageDenialCrossProjectTargetMode},
 		{"other project, hub", b.ProjectID, store.MessageModeHub, true, ""},
 	} {
 		moded := *b

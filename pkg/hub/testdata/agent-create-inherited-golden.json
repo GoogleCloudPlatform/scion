@@ -7,7 +7,7 @@
         "template": {
           "agentConfig": {
             "model": "template-model",
-            "message_mode": "lineage",
+            "message_mode": "owner",
             "telemetry": {
               "enabled": false
             },
@@ -27,7 +27,7 @@
       "dispatched": {
         "config.model": "template-model",
         "harnessConfig": "template-hc",
-        "messageMode": "lineage"
+        "messageMode": "owner"
       }
     },
     {
