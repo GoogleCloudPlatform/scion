@@ -56,7 +56,7 @@ func (r *recordingVariableDeleter) DropPending(_ context.Context, ref string) er
 
 func TestMigrateRetireVariableSecretType_AllScopeClassesAndIdempotent(t *testing.T) {
 	ctx := context.Background()
-	client, err := OpenSQLite(":memory:", PoolConfig{})
+	client, err := OpenSQLite(":memory:", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
 	require.NoError(t, AutoMigrate(ctx, client))
@@ -215,7 +215,7 @@ func TestMigrateRetireVariableSecretType_AllScopeClassesAndIdempotent(t *testing
 
 func TestMigrateRetireVariableSecretTypeLeftovers_NilDeleter(t *testing.T) {
 	ctx := context.Background()
-	client, err := OpenSQLite(":memory:", PoolConfig{})
+	client, err := OpenSQLite(":memory:", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
 	require.NoError(t, AutoMigrate(ctx, client))
@@ -240,7 +240,7 @@ func TestMigrateRetireVariableSecretTypeLeftovers_NilDeleter(t *testing.T) {
 
 func TestMigrateRetireVariableSecretTypeLeftovers_SkipsConcurrentlyReplacedRow(t *testing.T) {
 	ctx := context.Background()
-	client, err := OpenSQLite(":memory:", PoolConfig{})
+	client, err := OpenSQLite(":memory:", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
 	require.NoError(t, AutoMigrate(ctx, client))
@@ -283,7 +283,7 @@ func TestMigrateRetireVariableSecretTypeLeftovers_SkipsConcurrentlyReplacedRow(t
 
 func TestSecretRequest_LegacyVariableNormalizesToOnDemandInEnt(t *testing.T) {
 	ctx := context.Background()
-	client, err := OpenSQLite(":memory:", PoolConfig{})
+	client, err := OpenSQLite(":memory:", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
 	require.NoError(t, AutoMigrate(ctx, client))
@@ -351,7 +351,7 @@ func (t *execRecordingTx) Exec(ctx context.Context, query string, args, v any) e
 // schema, which breaks enttest's Postgres schema-snapshot recorder.
 func TestMigrateRetireVariableSecretType_NoParameterizedExecOnEmptySchema(t *testing.T) {
 	ctx := context.Background()
-	baseClient, err := OpenSQLite(":memory:", PoolConfig{})
+	baseClient, err := OpenSQLite(":memory:", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	defer func() { _ = baseClient.Close() }()
 
