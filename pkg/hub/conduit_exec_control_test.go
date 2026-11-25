@@ -558,6 +558,7 @@ func TestExecControlRoutes_NotReachableThroughDeliver(t *testing.T) {
 func TestExecControlCallers(t *testing.T) {
 	allowedCallers := map[string]bool{
 		"action_exec.go":          true,
+		"command_run_exec.go":     true,
 		"conduit_exec_control.go": true,
 		"scheduled_exec_fire.go":  true,
 	}

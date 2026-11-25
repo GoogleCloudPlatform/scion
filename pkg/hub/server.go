@@ -2528,6 +2528,12 @@ type Server struct {
 	// running without recording an outcome, so the sweeper records the real
 	// one after a restart.
 	execRuns scheduledExecRunTracker
+	// commandRuns tracks human-approved command runs in flight on this replica
+	// (ptone/scion#9278): bounded slots and shutdown gate.
+	commandRuns commandRunTracker
+	// commandRunLauncher optionally overrides the post-commit approval handoff
+	// in tests; nil uses s.EnqueueCommandRun.
+	commandRunLauncher CommandRunLauncher
 	// scheduledExecLimiterOnce creates scheduledExecAuthoringLimiter, the
 	// per-principal exec authoring rate limiter.
 	scheduledExecLimiterOnce      sync.Once
@@ -7575,6 +7581,7 @@ func (s *Server) registerSchedulerHandlers() {
 	// The scheduled-event purge inside it always runs.
 	s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	s.scheduler.RegisterRecurringSingleton("scheduled-exec-run-sweep", 1, store.LockScheduledExecRunSweep, s.scheduledExecRunSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("command-run-sweep", 1, store.LockCommandRunSweep, s.commandRunSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-heartbeat-timeout", 5, store.LockBrokerHeartbeatTimeout, s.brokerHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
@@ -8171,6 +8178,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		s.stopTriggerDrainer(ctx)
 		s.stopScheduledDetachedFires(ctx)
 		s.stopScheduledExecRuns(ctx)
+		s.stopCommandRuns(ctx)
 		if notificationDispatcher != nil {
 			notificationDispatcher.Stop()
 		}

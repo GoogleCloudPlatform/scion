@@ -179,6 +179,7 @@ func (s *Server) haltDispatchProducers() {
 	}
 	s.scheduledDetachedFires.closeAdmission()
 	s.execRuns.work.closeAdmission()
+	s.commandRuns.work.closeAdmission()
 	s.haltScheduledSendSweeper()
 	s.haltAutoSuspendWorker()
 }
