@@ -48,6 +48,13 @@ func backdateDecisionForRace(t *testing.T, cs *CompositeStore, decID string, cre
 		_, err = db.ExecContext(ctx, "UPDATE decision_answers SET created_at = $1 WHERE decision_row_id = $2", ansTime.UTC(), uid)
 		require.NoError(t, err)
 	}
+	// Rebuild facet_entries from the backdated timestamps so facet_entries.latest_at
+	// matches the backdated rows before the race begins.
+	_, err = cs.client.DecisionFacetEntry.Delete().Exec(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cs.client.Decision.Update().SetFacetIndexed(false).Exec(ctx))
+	require.NoError(t, cs.client.DecisionAnswer.Update().SetFacetIndexed(false).Exec(ctx))
+	drainDecisionIndex(t, ctx, cs, 100)
 }
 
 // TestDecisionRetentionRace_PurgeVsAnswer: an answer holds the decision row lock

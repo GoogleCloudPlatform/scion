@@ -626,7 +626,13 @@ func TestDecisionRetentionStore_CandidateScanPlan(t *testing.T) {
 		if st.pg {
 			_, err := st.db.ExecContext(ctx, "ANALYZE decisions")
 			require.NoError(t, err)
-			rows, err := st.db.QueryContext(ctx, "EXPLAIN "+q, args...)
+			// Disable seqscan inside a local tx so Postgres proves the query
+			// satisfies the partial index predicate even on a small test table.
+			ptx, err := st.db.BeginTx(ctx, nil)
+			require.NoError(t, err)
+			_, err = ptx.ExecContext(ctx, "SET LOCAL enable_seqscan = off")
+			require.NoError(t, err)
+			rows, err := ptx.QueryContext(ctx, "EXPLAIN "+q, args...)
 			require.NoError(t, err)
 			var lines []string
 			for rows.Next() {
@@ -635,6 +641,7 @@ func TestDecisionRetentionStore_CandidateScanPlan(t *testing.T) {
 				lines = append(lines, line)
 			}
 			require.NoError(t, rows.Close())
+			_ = ptx.Rollback()
 			plan := strings.Join(lines, "\n")
 			t.Logf("Postgres plan (after=%v):\n%s", !after.IsStart(), plan)
 			assert.Contains(t, plan, "decision_settled_created_at_id", "Postgres plan must use partial index")
