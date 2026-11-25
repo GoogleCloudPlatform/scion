@@ -410,7 +410,7 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 		// A limit=0 probe returns only open-prompt counts and truncation state
 		// (no facets or answer lists), so projects without unsettled decisions
 		// contribute nothing and can skip per-project scope resolution (and
-		// when candidate count <= maxProfileDecisionProjects, truncation is
+		// when candidate count <= profileDecisionProjectLimit(), truncation is
 		// guaranteed false so unsettled filtering runs before project-summary
 		// and per-project ActionRead capability checks).
 		selected, truncated, err = s.selectProfileDecisionProjects(searchCtx, user, token, pq.projectID, true)
@@ -489,7 +489,7 @@ func (s *Server) profileDecisionScopes(
 //
 // When unsettledOnly is true (limit=0 probe and waitingOnYouTotal), only
 // projects holding at least one settled=false decision are returned. When
-// len(candidateIDs) <= maxProfileDecisionProjects, truncated is guaranteed
+// len(candidateIDs) <= profileDecisionProjectLimit(), truncated is guaranteed
 // false and every readable candidate fits in the cap, so unsettled filtering
 // runs before ListProjectSummaries and per-project ActionRead checks without
 // changing selection or authorization semantics.
@@ -522,8 +522,9 @@ func (s *Server) selectProfileDecisionProjects(
 		return nil, false, nil
 	}
 
+	limit := s.profileDecisionProjectLimit()
 	preFilteredUnsettled := false
-	if unsettledOnly && len(candidateIDs) <= maxProfileDecisionProjects {
+	if unsettledOnly && len(candidateIDs) <= limit {
 		unsettled, err := s.store.ProjectsWithUnsettledDecisions(ctx, candidateIDs)
 		if err != nil {
 			return nil, false, err
@@ -595,7 +596,6 @@ func (s *Server) selectProfileDecisionProjects(
 		return nil, false, nil
 	}
 
-	limit := s.profileDecisionProjectLimit()
 	truncated := len(readable) > limit
 	selected := readable
 	if truncated {
