@@ -319,6 +319,7 @@ func TestUserMeInboxSummary_ReviewsDisabledAndError(t *testing.T) {
 	resp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, InboxStateDisabled, resp.Categories[InboxCategoryReviews].State)
 	assert.Equal(t, 0, resp.Categories[InboxCategoryReviews].Count)
+	assert.False(t, resp.Categories[InboxCategoryReviews].CountsTowardTotal)
 
 	// Error isolation when hub.artifacts is on but artifact store is not configured.
 	setExperimentOverrides(t, srv, map[string]bool{
@@ -327,6 +328,7 @@ func TestUserMeInboxSummary_ReviewsDisabledAndError(t *testing.T) {
 	})
 	respErr := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, InboxStateError, respErr.Categories[InboxCategoryReviews].State)
+	assert.False(t, respErr.Categories[InboxCategoryReviews].CountsTowardTotal)
 	assert.Equal(t, InboxErrorInternal, respErr.Categories[InboxCategoryReviews].ErrorCode)
 	assert.Equal(t, InboxStateOK, respErr.Categories[InboxCategoryApprovals].State)
 
@@ -338,6 +340,7 @@ func TestUserMeInboxSummary_ReviewsDisabledAndError(t *testing.T) {
 	fault.Arm()
 	respNotifErr := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, InboxStateError, respNotifErr.Categories[InboxCategoryReviews].State)
+	assert.False(t, respNotifErr.Categories[InboxCategoryReviews].CountsTowardTotal)
 	assert.Equal(t, InboxErrorInternal, respNotifErr.Categories[InboxCategoryReviews].ErrorCode)
 	assert.Equal(t, InboxStateOK, respNotifErr.Categories[InboxCategoryApprovals].State)
 }
@@ -498,6 +501,7 @@ func TestUserMeInboxSummary_ReviewsRefusesUnboundIdentity(t *testing.T) {
 	cat := srv.inboxReviewsCategory(unboundCtx, inboxViewer{userID: owner.ID, user: userIdent}, 3, InboxChatFilterAll)
 	assert.Equal(t, InboxStateUnavailable, cat.State)
 	assert.Equal(t, 0, cat.Count)
+	assert.False(t, cat.CountsTowardTotal)
 	assert.Empty(t, cat.Previews)
 }
 

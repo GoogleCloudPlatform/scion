@@ -978,10 +978,16 @@ func starExcerpt(content string) string {
 	return strings.TrimRight(string(runes[:chatStarExcerptMax-1]), " ") + "…"
 }
 
+// chatThreadWebPath returns the relative web chat route for a project thread
+// identified by projectID and conversation key.
+func chatThreadWebPath(projectID, key string) string {
+	return "/chat/space/" + url.PathEscape(projectID) + "/thread/" + url.PathEscape(key)
+}
+
 // starPermalink is the relative, same-origin link to a thread message
 // (the web chat's thread route plus #msg-<id>).
 func starPermalink(projectID, key, messageID string) string {
-	return "/chat/space/" + url.PathEscape(projectID) + "/thread/" + url.PathEscape(key) + "#msg-" + url.PathEscape(messageID)
+	return chatThreadWebPath(projectID, key) + "#msg-" + url.PathEscape(messageID)
 }
 
 // chatDMWebPath returns the relative web chat route for a DM conversation key,

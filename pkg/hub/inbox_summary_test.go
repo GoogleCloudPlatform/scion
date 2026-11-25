@@ -139,6 +139,7 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 	require.Len(t, uatHubResp.Categories, 5)
 	assert.Equal(t, InboxStateUnavailable, uatHubResp.Categories[InboxCategoryApprovals].State)
 	assert.Equal(t, 0, uatHubResp.Categories[InboxCategoryApprovals].Count)
+	assert.False(t, uatHubResp.Categories[InboxCategoryApprovals].CountsTowardTotal, "unavailable category must not count toward total")
 	assert.Empty(t, uatHubResp.Categories[InboxCategoryApprovals].Previews)
 
 	// 7. Project-bounded UAT with inbox:read -> 200, approvals unavailable.
@@ -188,6 +189,7 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 		cat := sessResp.Categories[disabledKey]
 		assert.Equal(t, InboxStateDisabled, cat.State, "category %s", disabledKey)
 		assert.Equal(t, 0, cat.Count, "category %s", disabledKey)
+		assert.False(t, cat.CountsTowardTotal, "disabled category %s must not count toward total", disabledKey)
 		assert.Empty(t, cat.Previews, "category %s", disabledKey)
 	}
 
@@ -317,7 +319,7 @@ func TestUserMeInboxSummary_SourceErrorIsolation(t *testing.T) {
 				return InboxCategory{
 					State:             InboxStateError,
 					Count:             0,
-					CountsTowardTotal: true,
+					CountsTowardTotal: false,
 					Href:              "/agents",
 					ErrorCode:         inboxCategoryErrorCode(ctx, context.DeadlineExceeded),
 					Previews:          []any{},
@@ -330,7 +332,7 @@ func TestUserMeInboxSummary_SourceErrorIsolation(t *testing.T) {
 				return InboxCategory{
 					State:             InboxStateError,
 					Count:             0,
-					CountsTowardTotal: true,
+					CountsTowardTotal: false,
 					Href:              "/artifacts?review_pending=1&owner=me",
 					ErrorCode:         inboxCategoryErrorCode(ctx, errors.New("boom")),
 					Previews:          []any{},
@@ -345,10 +347,15 @@ func TestUserMeInboxSummary_SourceErrorIsolation(t *testing.T) {
 	resp := decodeInboxSummary(t, rec)
 	assert.Equal(t, 2, resp.Total)
 	assert.Equal(t, InboxStateOK, resp.Categories[InboxCategoryApprovals].State)
+	assert.True(t, resp.Categories[InboxCategoryApprovals].CountsTowardTotal)
 	assert.Equal(t, InboxStateError, resp.Categories[InboxCategoryWaiting].State)
+	assert.False(t, resp.Categories[InboxCategoryWaiting].CountsTowardTotal)
 	assert.Equal(t, InboxErrorTimeout, resp.Categories[InboxCategoryWaiting].ErrorCode)
 	assert.Equal(t, InboxStateError, resp.Categories[InboxCategoryReviews].State)
+	assert.False(t, resp.Categories[InboxCategoryReviews].CountsTowardTotal)
 	assert.Equal(t, InboxErrorInternal, resp.Categories[InboxCategoryReviews].ErrorCode)
+	assert.False(t, resp.Categories[InboxCategoryChat].CountsTowardTotal)
+	assert.False(t, resp.Categories[InboxCategoryDecisions].CountsTowardTotal)
 }
 
 type inboxCountingStore struct {
@@ -855,14 +862,17 @@ func TestUserMeInboxSummary_WaitingCappedAndErrors(t *testing.T) {
 	stub.err = errors.New("db unavailable")
 	errResp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, InboxStateError, errResp.Categories[InboxCategoryWaiting].State)
+	assert.False(t, errResp.Categories[InboxCategoryWaiting].CountsTowardTotal)
 	assert.Equal(t, InboxErrorInternal, errResp.Categories[InboxCategoryWaiting].ErrorCode)
 	assert.Equal(t, 0, errResp.Categories[InboxCategoryWaiting].Count)
 	assert.Equal(t, InboxStateOK, errResp.Categories[InboxCategoryApprovals].State)
+	assert.True(t, errResp.Categories[InboxCategoryApprovals].CountsTowardTotal)
 
 	// Timeout error -> waiting state="error" (timeout).
 	stub.err = context.DeadlineExceeded
 	timeoutResp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, InboxStateError, timeoutResp.Categories[InboxCategoryWaiting].State)
+	assert.False(t, timeoutResp.Categories[InboxCategoryWaiting].CountsTowardTotal)
 	assert.Equal(t, InboxErrorTimeout, timeoutResp.Categories[InboxCategoryWaiting].ErrorCode)
 }
 
@@ -1050,4 +1060,68 @@ func TestUserMeInboxSummary_WaitingOrderingByActivitySince(t *testing.T) {
 	}
 	assert.Equal(t, wantOrder, gotPreviewIDs)
 	assert.Equal(t, []time.Time{t1, t2, t3, t4, t5}, gotSince)
+}
+
+// TestUserMeInboxSummary_WaitingWindowKeepsOldestWhenCapped pins that when an
+// owner has more waiting agents than the store window limit, ListAgents orders
+// ascending by oldest-waiting (updated ASC) so the longest-waiting agents are
+// kept in previews and agentIds rather than dropped by a created DESC window.
+func TestUserMeInboxSummary_WaitingWindowKeepsOldestWhenCapped(t *testing.T) {
+	f := newChatFixture(t)
+	setInboxDashboardExperiment(t, f.srv, true)
+	f.srv.inboxWaitingLimitForTest = 3
+	ctx := context.Background()
+
+	memberUser, err := f.s.GetUser(ctx, f.member)
+	require.NoError(t, err)
+
+	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	seed := func(slug string, lastActivity time.Time) *store.Agent {
+		a := &store.Agent{
+			ID:                api.NewUUID(),
+			Slug:              slug,
+			Name:              slug,
+			ProjectID:         f.projA,
+			OwnerID:           f.member,
+			Phase:             string(state.PhaseRunning),
+			Activity:          string(state.ActivityWaitingForInput),
+			Message:           "waiting " + slug,
+			LastActivityEvent: lastActivity,
+		}
+		require.NoError(t, f.s.CreateAgent(ctx, a))
+		return a
+	}
+
+	// Create 5 waiting agents in newest-to-oldest creation order, with explicit
+	// LastActivityEvent timestamps spanning oldest (t+0m) to newest (t+40m).
+	// A created DESC window would drop the oldest-waiting agents; ascending
+	// updated order must keep the 3 longest-waiting (w1, w2, w3).
+	w1 := seed("wait-oldest-1", base.Add(0*time.Minute))
+	time.Sleep(2 * time.Millisecond)
+	w2 := seed("wait-oldest-2", base.Add(10*time.Minute))
+	time.Sleep(2 * time.Millisecond)
+	w3 := seed("wait-oldest-3", base.Add(20*time.Minute))
+	time.Sleep(2 * time.Millisecond)
+	_ = seed("wait-newer-4", base.Add(30*time.Minute))
+	time.Sleep(2 * time.Millisecond)
+	_ = seed("wait-newest-5", base.Add(40*time.Minute))
+
+	resp := decodeInboxSummary(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, userMeInboxSummaryPath+"?previews=3", nil))
+	waiting := resp.Categories[InboxCategoryWaiting]
+	assert.Equal(t, InboxStateOK, waiting.State)
+	assert.Equal(t, 3, waiting.Count)
+	assert.True(t, waiting.Capped)
+	assert.True(t, resp.TotalCapped)
+	assert.Equal(t, []string{w1.ID, w2.ID, w3.ID}, waiting.AgentIDs)
+
+	require.Len(t, waiting.Previews, 3)
+	gotIDs := make([]string, 3)
+	for i, raw := range waiting.Previews {
+		b, mErr := json.Marshal(raw)
+		require.NoError(t, mErr)
+		var p InboxWaitingAgentPreview
+		require.NoError(t, json.Unmarshal(b, &p))
+		gotIDs[i] = p.AgentID
+	}
+	assert.Equal(t, []string{w1.ID, w2.ID, w3.ID}, gotIDs)
 }

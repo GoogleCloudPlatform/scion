@@ -129,6 +129,7 @@ func TestUserMeInboxSummary_DecisionsFlagOffAndParity(t *testing.T) {
 	assert.Equal(t, InboxStateDisabled, offDec.State)
 	assert.Equal(t, 0, offDec.Count)
 	assert.False(t, offDec.Capped)
+	assert.False(t, offDec.CountsTowardTotal)
 	assert.Equal(t, "/profile/decisions?tab=pending", offDec.Href)
 	assert.Empty(t, offDec.Previews)
 	assert.Equal(t, 0, offResp.Total)
@@ -503,4 +504,116 @@ func TestWaitingOnYouSummary_PropagatesContextCancellation(t *testing.T) {
 	viewer := NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, string(ClientTypeWeb))
 	_, err := f.srv.waitingOnYouSummary(withAuthzInputMemo(ctx), viewer, nil, 3)
 	require.ErrorIs(t, err, context.Canceled, "context cancellation during classifyProjectOpenPrompts must propagate instead of returning partial counts")
+}
+
+// TestUserMeInboxSummary_DecisionsCappedMatchesTruncatedProjects pins
+// decisions.capped == truncatedProjects, including the early-return path where
+// filterProjectsWithUnsettledDecisions leaves zero open projects.
+func TestUserMeInboxSummary_DecisionsCappedMatchesTruncatedProjects(t *testing.T) {
+	f := newChatFixture(t)
+	setInboxAndDecisionsExperiments(t, f.srv, true, true)
+	ctx := context.Background()
+
+	// Give f.member read membership on 3 projects: f.projA, f.projB, and projC.
+	bindProjectMember(t, f.s, f.projB, f.member)
+	projC := &store.Project{
+		ID:      api.NewUUID(),
+		Slug:    "inbox-cap-proj-c",
+		Name:    "Inbox Cap Project C",
+		OwnerID: f.owner,
+		Created: time.Now().UTC(),
+		Updated: time.Now().UTC(),
+	}
+	require.NoError(t, f.s.CreateProject(ctx, projC))
+	bindProjectMember(t, f.s, projC.ID, f.member)
+
+	memberUser, err := f.s.GetUser(ctx, f.member)
+	require.NoError(t, err)
+
+	// 1. Cap at 2 with 3 readable member projects and ZERO unsettled decisions.
+	//    filterProjectsWithUnsettledDecisions returns empty; capped must STILL be true.
+	f.srv.maxProfileDecisionProjectsForTest = 2
+	zeroResp := decodeInboxSummary(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, userMeInboxSummaryPath, nil))
+	zeroDec := zeroResp.Categories[InboxCategoryDecisions]
+	assert.Equal(t, InboxStateOK, zeroDec.State)
+	assert.Equal(t, 0, zeroDec.Count)
+	assert.True(t, zeroDec.Capped, "capped must mirror truncatedProjects even when zero projects have unsettled decisions")
+	assert.True(t, zeroDec.CountsTowardTotal)
+	assert.True(t, zeroResp.TotalCapped)
+
+	// 2. Cap at 3 (not exceeded) -> capped must be false.
+	f.srv.maxProfileDecisionProjectsForTest = 3
+	uncappedResp := decodeInboxSummary(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, userMeInboxSummaryPath, nil))
+	uncappedDec := uncappedResp.Categories[InboxCategoryDecisions]
+	assert.Equal(t, InboxStateOK, uncappedDec.State)
+	assert.Equal(t, 0, uncappedDec.Count)
+	assert.False(t, uncappedDec.Capped)
+	assert.False(t, uncappedResp.TotalCapped)
+
+	// 3. Seed an open decision in f.projA and cap back at 2 -> capped must be true.
+	f.agentA.OwnerID = f.member
+	f.agentA.Ancestry = []string{f.member}
+	f.agentA.MessageMode = store.MessageModeProject
+	require.NoError(t, f.s.UpdateAgent(ctx, f.agentA))
+	decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"C1","question":"Cap check?","choices":["yes","no"]}]`))
+	require.NoError(t, err)
+	_, err = f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+		Message: &store.Message{
+			ID: api.NewUUID(), ProjectID: f.projA, Sender: "agent:" + f.agentA.Slug, SenderID: f.agentA.ID,
+			Recipient: "chat", ThreadID: f.topicA, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+		Intro: "Cap check", AskerAgentID: f.agentA.ID, AskerAgentName: f.agentA.Slug, Decisions: decs,
+	})
+	require.NoError(t, err)
+
+	f.srv.maxProfileDecisionProjectsForTest = 2
+	openResp := decodeInboxSummary(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, userMeInboxSummaryPath, nil))
+	openDec := openResp.Categories[InboxCategoryDecisions]
+	assert.Equal(t, InboxStateOK, openDec.State)
+	assert.True(t, openDec.Capped, "capped must be true when readable projects exceed cap with open decisions")
+	assert.True(t, openResp.TotalCapped)
+}
+
+func TestInboxDecisionPromptHref_UsesSharedChatPathHelpers(t *testing.T) {
+	dmKey := "dm:agent:a/1:user:u:2"
+	projID := "proj/with space"
+	threadKey := "topic:with/slash"
+	msgID := "msg:1/2"
+
+	set := &decisionScopeSet{
+		conversationAvailable: map[string]bool{
+			dmKey:     true,
+			threadKey: true,
+		},
+	}
+
+	assert.Equal(t, starDMPermalink(dmKey, msgID), inboxDecisionPromptHref(set, classifiedOpenPrompt{
+		raw:         &store.ProjectDecisionPrompt{ChatKey: dmKey, MessageID: msgID},
+		promptAvail: true,
+	}))
+	assert.Equal(t, chatDMWebPath(dmKey), inboxDecisionPromptHref(set, classifiedOpenPrompt{
+		raw:         &store.ProjectDecisionPrompt{ChatKey: dmKey, MessageID: msgID},
+		promptAvail: false,
+	}))
+	assert.Equal(t, "/chat/dm/dm%3Aagent%3Aa%2F1%3Auser%3Au%3A2", chatDMWebPath(dmKey))
+
+	assert.Equal(t, starPermalink(projID, threadKey, msgID), inboxDecisionPromptHref(set, classifiedOpenPrompt{
+		raw:         &store.ProjectDecisionPrompt{ProjectID: projID, ChatKey: threadKey, MessageID: msgID},
+		promptAvail: true,
+	}))
+	assert.Equal(t, chatThreadWebPath(projID, threadKey), inboxDecisionPromptHref(set, classifiedOpenPrompt{
+		raw:         &store.ProjectDecisionPrompt{ProjectID: projID, ChatKey: threadKey, MessageID: msgID},
+		promptAvail: false,
+	}))
+	assert.Equal(t, "/chat/space/proj%2Fwith%20space/thread/topic:with%2Fslash", chatThreadWebPath(projID, threadKey))
+
+	// Fallback when conversation is unavailable or projectID is missing on a thread.
+	assert.Equal(t, "/profile/decisions?tab=pending", inboxDecisionPromptHref(set, classifiedOpenPrompt{
+		raw:         &store.ProjectDecisionPrompt{ChatKey: "missing-key", MessageID: msgID},
+		promptAvail: true,
+	}))
+	assert.Equal(t, "/profile/decisions?tab=pending", inboxDecisionPromptHref(set, classifiedOpenPrompt{
+		raw:         &store.ProjectDecisionPrompt{ChatKey: threadKey, MessageID: msgID},
+		promptAvail: true,
+	}))
 }

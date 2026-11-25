@@ -71,7 +71,7 @@ func inboxReviewsErrorCategory(ctx context.Context, err error) InboxCategory {
 		State:             InboxStateError,
 		Count:             0,
 		Capped:            false,
-		CountsTowardTotal: true,
+		CountsTowardTotal: false,
 		Href:              inboxReviewsHref,
 		ErrorCode:         code,
 		Previews:          []any{},
@@ -84,7 +84,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 			State:             InboxStateDisabled,
 			Count:             0,
 			Capped:            false,
-			CountsTowardTotal: true,
+			CountsTowardTotal: false,
 			Href:              inboxReviewsHref,
 			Previews:          []any{},
 		}
@@ -95,7 +95,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 			State:             InboxStateUnavailable,
 			Count:             0,
 			Capped:            false,
-			CountsTowardTotal: true,
+			CountsTowardTotal: false,
 			Href:              inboxReviewsHref,
 			Previews:          []any{},
 		}

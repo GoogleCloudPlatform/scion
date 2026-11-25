@@ -446,6 +446,7 @@ func TestUserMeInboxSummary_ChatDisabledAndErrorStates(t *testing.T) {
 	resp := h.decodeSummary(doRequestAsUser(t, srv, me, http.MethodGet, "/api/v1/users/me/inbox/summary", nil))
 	assert.Equal(t, InboxStateDisabled, resp.Categories[InboxCategoryChat].State)
 	assert.Equal(t, 0, resp.Categories[InboxCategoryChat].Count)
+	assert.False(t, resp.Categories[InboxCategoryChat].CountsTowardTotal)
 	assert.Empty(t, resp.Categories[InboxCategoryChat].Previews)
 	assert.Equal(t, 0, resp.Total)
 	srv.config.NativeChatEnabled = nil
@@ -455,6 +456,7 @@ func TestUserMeInboxSummary_ChatDisabledAndErrorStates(t *testing.T) {
 	resp = h.decodeSummary(doRequestAsUser(t, srv, me, http.MethodGet, "/api/v1/users/me/inbox/summary", nil))
 	assert.Equal(t, InboxStateDisabled, resp.Categories[InboxCategoryChat].State)
 	assert.Equal(t, 0, resp.Categories[InboxCategoryChat].Count)
+	assert.False(t, resp.Categories[InboxCategoryChat].CountsTowardTotal)
 	assert.Equal(t, 0, resp.Total)
 
 	// 3. UnreadMentionKeys internal error -> state:"error", errorCode:"internal", HTTP 200.
@@ -462,6 +464,7 @@ func TestUserMeInboxSummary_ChatDisabledAndErrorStates(t *testing.T) {
 	srv.SetWebChatStore(faultWCS)
 	resp = h.decodeSummary(doRequestAsUser(t, srv, me, http.MethodGet, "/api/v1/users/me/inbox/summary", nil))
 	assert.Equal(t, InboxStateError, resp.Categories[InboxCategoryChat].State)
+	assert.False(t, resp.Categories[InboxCategoryChat].CountsTowardTotal)
 	assert.Equal(t, InboxErrorInternal, resp.Categories[InboxCategoryChat].ErrorCode)
 	assert.Equal(t, 0, resp.Categories[InboxCategoryChat].Count)
 	assert.Equal(t, InboxStateOK, resp.Categories[InboxCategoryApprovals].State)
@@ -470,6 +473,7 @@ func TestUserMeInboxSummary_ChatDisabledAndErrorStates(t *testing.T) {
 	faultWCS.mentionErr = context.DeadlineExceeded
 	resp = h.decodeSummary(doRequestAsUser(t, srv, me, http.MethodGet, "/api/v1/users/me/inbox/summary", nil))
 	assert.Equal(t, InboxStateError, resp.Categories[InboxCategoryChat].State)
+	assert.False(t, resp.Categories[InboxCategoryChat].CountsTowardTotal)
 	assert.Equal(t, InboxErrorTimeout, resp.Categories[InboxCategoryChat].ErrorCode)
 }
 
