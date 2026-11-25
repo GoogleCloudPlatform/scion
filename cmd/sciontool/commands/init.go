@@ -791,6 +791,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		pipeline.SetHubIDResolver(newAnalyticsHubIDResolver(hub.NewClient))
 		var telemetryCancel context.CancelFunc
 		telemetryCtx, telemetryCancel = context.WithCancel(context.Background())
+		probeAndConfigureUsageIngest(telemetryCtx, pipeline, hub.NewClient)
 		if err := pipeline.Start(telemetryCtx); err != nil {
 			log.Error("Failed to start telemetry: %v", err)
 			telemetryCancel()

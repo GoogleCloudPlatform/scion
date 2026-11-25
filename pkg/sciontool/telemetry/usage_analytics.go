@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -73,6 +74,7 @@ type UsageAnalytics struct {
 	open      func() (*AnalyticsOutbox, error)
 	failDir   string
 	failOwner *OutboxOwner
+	onRecord  func(time.Time)
 
 	droppedNoIdentity, invalid atomic.Int64
 }
@@ -161,11 +163,18 @@ func (a *UsageAnalytics) ensureOpen() error {
 }
 
 // AnalyticsEnabledForHooks reports whether a hook process should write
-// analytics events: only when the pipeline's GCP exporter (and so the
+// analytics events: when the Hub usage ingest sink is active
+// (SCION_USAGE_HUB_INGEST=1) or when the pipeline's GCP exporter (and so the
 // drainer) is configured. Otherwise analytics is disabled
 // (AnalyticsDisabledNoGCPExporter) and nothing is written.
 func AnalyticsEnabledForHooks(cfg *Config) bool {
-	return cfg != nil && cfg.Enabled && cfg.IsCloudConfigured() && cfg.IsGCP()
+	if cfg == nil || !cfg.Enabled {
+		return false
+	}
+	if util.ParseBoolEnv(EnvUsageHubIngest, false) {
+		return true
+	}
+	return cfg.IsCloudConfigured() && cfg.IsGCP()
 }
 
 // errNoAgentIdentity is returned when SCION_AGENT_ID is unset: the event
@@ -176,6 +185,13 @@ var errNoAgentIdentity = errors.New("analytics: SCION_AGENT_ID is unset; usage e
 func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 	if a == nil {
 		return 0, nil
+	}
+	if a.onRecord != nil {
+		t := obs.EventTime
+		if t.IsZero() {
+			t = a.now()
+		}
+		a.onRecord(t)
 	}
 	ev, err := a.build(obs)
 	if err != nil {

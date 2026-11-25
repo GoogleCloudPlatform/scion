@@ -1591,6 +1591,198 @@ func (o *AnalyticsOutbox) writeCursor(file, offset int64) error {
 // never will (the line is dead-lettered); any other error is retried.
 type AnalyticsSendFunc func(ctx context.Context, line []byte) error
 
+// BatchSendOutcome describes the destination's per-line disposition of one
+// batch of ready outbox lines.
+type BatchSendOutcome struct {
+	// RejectedIndices lists 0-based indices into the batch slice that the
+	// destination permanently rejected; each is dead-lettered and not retried.
+	RejectedIndices []int
+}
+
+// AnalyticsBatchSendFunc delivers an ordered batch of final event lines.
+// A nil error means the batch was acknowledged: lines not listed in
+// outcome.RejectedIndices are counted delivered and rejected lines are
+// dead-lettered. A non-nil error means the batch was not acknowledged: if
+// IsPermanentSendError(err) is true, every line in the batch is dead-lettered;
+// otherwise the cursor does not advance and the exact same bytes are retried
+// on the next drain.
+type AnalyticsBatchSendFunc func(ctx context.Context, lines [][]byte) (BatchSendOutcome, error)
+
+// DrainBatch sends ready lines in order from the cursor in batches bounded by
+// maxEvents and maxBytes (JSON array payload bytes excluding outer envelope),
+// committing the cursor after each acknowledged batch and deleting a ready file
+// once fully sent. It stops at the first transient send error without advancing
+// the cursor, so the next drain replays the exact same bytes and event IDs.
+// Called only from the pipeline's drainer goroutine.
+func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes int, send AnalyticsBatchSendFunc) (int, error) {
+	if o == nil {
+		return 0, errNilOutbox
+	}
+	if maxEvents <= 0 {
+		maxEvents = telemetrycontract.UsageIngestMaxBatchEvents
+	}
+	if maxBytes <= 0 {
+		maxBytes = telemetrycontract.UsageIngestMaxBatchBytes
+	}
+	files, err := o.readyFiles()
+	if err != nil {
+		return 0, err
+	}
+	curFile, curOffset, err := o.readCursor()
+	if err != nil {
+		return 0, err
+	}
+	sent := 0
+	for _, n := range files {
+		if n < curFile {
+			// Fully sent before a crash interrupted the delete.
+			_ = os.Remove(o.path(readyName(n)))
+			continue
+		}
+		offset := int64(0)
+		if n == curFile {
+			offset = curOffset
+		}
+		f, err := o.openFile(o.path(readyName(n)))
+		if err != nil {
+			return sent, fmt.Errorf("analytics outbox: %w", err)
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			_ = f.Close()
+			return sent, fmt.Errorf("analytics outbox: %w", err)
+		}
+		r := bufio.NewReaderSize(f, 64<<10)
+		var batch [][]byte
+		batchBytes := 0
+		batchEndOffset := offset
+
+		flushBatch := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			outcome, serr := send(ctx, batch)
+			if serr != nil {
+				o.sendFailures.Add(1)
+				if !IsPermanentSendError(serr) {
+					return serr
+				}
+				for _, line := range batch {
+					if derr := o.deadLetter(line); derr != nil {
+						return derr
+					}
+				}
+			} else {
+				rejected := make(map[int]struct{}, len(outcome.RejectedIndices))
+				for _, idx := range outcome.RejectedIndices {
+					if idx >= 0 && idx < len(batch) {
+						rejected[idx] = struct{}{}
+					}
+				}
+				for i, line := range batch {
+					if _, isRej := rejected[i]; isRej {
+						o.sendFailures.Add(1)
+						if derr := o.deadLetter(line); derr != nil {
+							return derr
+						}
+					} else {
+						sent++
+						o.delivered.Add(1)
+					}
+				}
+			}
+			if werr := o.writeCursor(n, batchEndOffset); werr != nil {
+				return werr
+			}
+			batch = batch[:0]
+			batchBytes = 0
+			return nil
+		}
+
+		truncated := false
+		for {
+			if err := ctx.Err(); err != nil {
+				_ = f.Close()
+				return sent, err
+			}
+			line, readErr := r.ReadBytes('\n')
+			if readErr == nil {
+				body := line[:len(line)-1]
+				if len(body) == 0 {
+					offset += int64(len(line))
+					batchEndOffset = offset
+					if len(batch) == 0 {
+						if err := o.writeCursor(n, offset); err != nil {
+							_ = f.Close()
+							return sent, err
+						}
+					}
+					continue
+				}
+				entryBytes := len(body)
+				if len(batch) > 0 {
+					entryBytes++ // JSON comma separator
+				}
+				if len(batch) > 0 && (len(batch) >= maxEvents || batchBytes+entryBytes > maxBytes) {
+					if err := flushBatch(); err != nil {
+						_ = f.Close()
+						return sent, err
+					}
+					entryBytes = len(body)
+				}
+				batch = append(batch, body)
+				batchBytes += entryBytes
+				offset += int64(len(line))
+				batchEndOffset = offset
+				if len(batch) >= maxEvents {
+					if err := flushBatch(); err != nil {
+						_ = f.Close()
+						return sent, err
+					}
+				}
+				continue
+			}
+			if !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return sent, fmt.Errorf("analytics outbox: reading %s: %w", readyName(n), readErr)
+			}
+			truncated = len(line) > 0
+			break
+		}
+		if err := flushBatch(); err != nil {
+			_ = f.Close()
+			return sent, err
+		}
+		_ = f.Close()
+		if truncated {
+			o.quarantined.Add(1)
+			target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
+			if _, err := os.Stat(target); err == nil {
+				target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
+			}
+			if err := os.Rename(o.path(readyName(n)), target); err != nil {
+				return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
+			}
+			if err := syncDir(o.dir); err != nil {
+				return sent, err
+			}
+			if err := o.writeCursor(n+1, 0); err != nil {
+				return sent, err
+			}
+			continue
+		}
+		if err := o.writeCursor(n+1, 0); err != nil {
+			return sent, err
+		}
+		if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return sent, fmt.Errorf("analytics outbox: %w", err)
+		}
+		if err := syncDir(o.dir); err != nil {
+			return sent, err
+		}
+	}
+	return sent, nil
+}
+
 // Drain sends ready lines in order from the cursor, committing the cursor
 // after each accepted line and deleting a ready file once fully sent. It
 // stops at the first send error and returns it; the same bytes are sent

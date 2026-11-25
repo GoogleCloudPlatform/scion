@@ -110,6 +110,13 @@ type AnalyticsDrainer struct {
 	send    AnalyticsSendFunc
 	resolve HubIDResolver
 
+	// hubSink, when non-nil, switches the drainer from per-line Cloud Logging
+	// sends to batched Hub usage ingest plus periodic empty heartbeats.
+	hubSink           *HubUsageSink
+	batchSend         AnalyticsBatchSendFunc
+	heartbeatInterval time.Duration
+	lastHubContact    time.Time
+
 	interval time.Duration
 	now      func() time.Time
 
@@ -159,6 +166,32 @@ func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolv
 		resolve:  resolve,
 		interval: analyticsDrainInterval,
 		now:      time.Now,
+	}
+}
+
+// NewHubAnalyticsDrainer builds a drainer that ships finalized usage batches
+// and periodic empty meter-health heartbeats to the Scion Hub via sink.
+func NewHubAnalyticsDrainer(outbox *AnalyticsOutbox, sink *HubUsageSink, resolve HubIDResolver) *AnalyticsDrainer {
+	if sink == nil {
+		return nil
+	}
+	return newHubAnalyticsDrainerWithSend(outbox, sink, sink.SendBatch, resolve)
+}
+
+func newHubAnalyticsDrainerWithSend(outbox *AnalyticsOutbox, sink *HubUsageSink, batchSend AnalyticsBatchSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
+	bounded := func(ctx context.Context, lines [][]byte) (BatchSendOutcome, error) {
+		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+		defer cancel()
+		return batchSend(sctx, lines)
+	}
+	return &AnalyticsDrainer{
+		outbox:            outbox,
+		hubSink:           sink,
+		batchSend:         bounded,
+		resolve:           resolve,
+		interval:          sink.cfg.drainInterval(),
+		heartbeatInterval: sink.cfg.heartbeatInterval(),
+		now:               time.Now,
 	}
 }
 
@@ -327,25 +360,73 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	}
 
 	sent := 0
+	var drainErr error
 	d.mu.Lock()
 	waiting := d.now().Before(d.retryAfter)
 	d.mu.Unlock()
 	if !waiting {
-		n, err := d.outbox.Drain(ctx, d.send)
+		var n int
+		if d.hubSink != nil {
+			n, drainErr = d.outbox.DrainBatch(ctx, d.hubSink.cfg.maxBatchEvents(), d.hubSink.EffectiveMaxBatchBytes(), d.batchSend)
+		} else {
+			n, drainErr = d.outbox.Drain(ctx, d.send)
+		}
 		sent = n
 		d.mu.Lock()
-		if err != nil && ctx.Err() == nil {
+		if drainErr != nil && ctx.Err() == nil {
 			if d.backoff == 0 {
 				d.backoff = analyticsBackoffMin
 			} else if d.backoff *= 2; d.backoff > analyticsBackoffMax {
 				d.backoff = analyticsBackoffMax
 			}
 			d.retryAfter = d.now().Add(d.backoff)
-			log.Debug("Analytics drainer: send failed, retrying in %s: %v", d.backoff, err)
-		} else if err == nil {
+			log.Debug("Analytics drainer: send failed, retrying in %s: %v", d.backoff, drainErr)
+		} else if drainErr == nil {
 			d.backoff, d.retryAfter = 0, time.Time{}
+			if d.hubSink != nil && sent > 0 {
+				d.lastHubContact = d.now()
+			}
 		}
 		d.mu.Unlock()
+	}
+
+	if d.hubSink != nil && ctx.Err() == nil {
+		if final {
+			finalState := telemetrycontract.MeterFinalStateFinal
+			if drainErr != nil {
+				finalState = telemetrycontract.MeterFinalStateIncomplete
+			} else if ledger, lerr := d.outbox.LedgerSnapshot(); lerr != nil || ledger.PendingBytes > 0 {
+				finalState = telemetrycontract.MeterFinalStateIncomplete
+			}
+			hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+			if herr := d.hubSink.SendHeartbeat(hctx, finalState); herr != nil {
+				log.Debug("Analytics drainer: final heartbeat failed: %v", herr)
+			}
+			cancel()
+		} else if !waiting && drainErr == nil && d.heartbeatInterval > 0 {
+			d.mu.Lock()
+			due := d.lastHubContact.IsZero() || d.now().Sub(d.lastHubContact) >= d.heartbeatInterval
+			d.mu.Unlock()
+			if due {
+				hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+				herr := d.hubSink.SendHeartbeat(hctx, "")
+				cancel()
+				d.mu.Lock()
+				if herr != nil && ctx.Err() == nil {
+					if d.backoff == 0 {
+						d.backoff = analyticsBackoffMin
+					} else if d.backoff *= 2; d.backoff > analyticsBackoffMax {
+						d.backoff = analyticsBackoffMax
+					}
+					d.retryAfter = d.now().Add(d.backoff)
+					log.Debug("Analytics drainer: heartbeat failed, retrying in %s: %v", d.backoff, herr)
+				} else if herr == nil {
+					d.backoff, d.retryAfter = 0, time.Time{}
+					d.lastHubContact = d.now()
+				}
+				d.mu.Unlock()
+			}
+		}
 	}
 
 	if !final && ctx.Err() == nil && d.now().Sub(d.lastExpiry) >= analyticsIndexExpiryEvery {
@@ -390,9 +471,22 @@ type analyticsState struct {
 	// outboxDir and owner locate the outbox under the AGENT home and name
 	// its owner (Pipeline.SetAnalyticsOutbox); resolver overrides the hub
 	// ID resolver (tests).
-	outboxDir string
-	owner     *OutboxOwner
-	resolver  HubIDResolver
+	outboxDir        string
+	owner            *OutboxOwner
+	resolver         HubIDResolver
+	hubSinkCfg       *HubUsageSinkConfig
+	supportedSignals func() []string
+}
+
+// SetHubUsageSink configures the pipeline's analytics outbox to drain usage
+// batches and meter-health heartbeats to the Scion Hub. When set, the outbox
+// is enabled even without a GCP exporter. Must be called before Start.
+func (p *Pipeline) SetHubUsageSink(cfg HubUsageSinkConfig) {
+	if p == nil || cfg.Post == nil {
+		return
+	}
+	c := cfg
+	p.analytics.hubSinkCfg = &c
 }
 
 // SetAnalyticsOutbox points the pipeline's analytics outbox at the agent
@@ -427,13 +521,14 @@ func (p *Pipeline) AnalyticsOutboxDir() string {
 	return p.analytics.native.Dir() // nil-safe; the evidence dir when failed
 }
 
-// start enables analytics when the GCP exporter is active. Any failure
-// leaves analytics disabled with a reason; it never fails the pipeline.
+// start enables analytics when either the Hub usage sink or the GCP exporter
+// is active. Any failure leaves analytics disabled with a reason; it never
+// fails the pipeline.
 func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 	if a.drainer != nil {
 		return
 	}
-	if gcp == nil {
+	if a.hubSinkCfg == nil && gcp == nil {
 		a.disabledReason = AnalyticsDisabledNoGCPExporter
 		return
 	}
@@ -455,12 +550,27 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 		return
 	}
 	resolver := a.resolver
+	if resolver == nil && a.hubSinkCfg != nil && a.hubSinkCfg.HubID != "" {
+		hubID := a.hubSinkCfg.HubID
+		resolver = func(context.Context) (string, error) { return hubID, nil }
+	}
 	if resolver == nil {
 		resolver = NewHealthzHubIDResolver(analyticsHubEndpoint(), nil)
 	}
 	a.native = NewUsageAnalytics(outbox, telemetrycontract.UsageSourceNative)
-	a.send = newCountingSend(gcp.SendAnalytics)
-	a.drainer = NewAnalyticsDrainer(outbox, a.send.Send, resolver)
+	if a.hubSinkCfg != nil {
+		cfg := *a.hubSinkCfg
+		if cfg.SupportedSignals == nil && a.supportedSignals != nil {
+			cfg.SupportedSignals = a.supportedSignals
+		}
+		sink := NewHubUsageSink(outbox, cfg)
+		a.native.onRecord = sink.NoteActivity
+		a.send = newCountingBatchSend(sink.SendBatch)
+		a.drainer = newHubAnalyticsDrainerWithSend(outbox, sink, a.send.SendBatch, resolver)
+	} else {
+		a.send = newCountingSend(gcp.SendAnalytics)
+		a.drainer = NewAnalyticsDrainer(outbox, a.send.Send, resolver)
+	}
 	a.drainer.Start(ctx)
 	a.disabledReason = ""
 }
