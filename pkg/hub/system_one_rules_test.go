@@ -437,11 +437,11 @@ func TestSystemOneRules_DialectForwardsProjectIDForProjectScopedNamedSecret(t *t
 	require.NoError(t, s.CreateProject(ctx, proj))
 	projID := proj.ID
 
-	// Store a project-scoped GEMINI_API_KEY variable secret in the Hub secret backend.
+	// Store a project-scoped GEMINI_API_KEY environment secret in the Hub secret backend.
 	_, _, err = srv.secretBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
 		Value:      projAPIKey,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Scope:      store.ScopeProject,
 		ScopeID:    projID,
 	})
