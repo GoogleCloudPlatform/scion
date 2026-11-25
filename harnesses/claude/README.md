@@ -65,8 +65,12 @@ agents in `WAITING_FOR_INPUT`.
 - **Opting out:** Because container/runtime environment variables take
   precedence over the provisioner's env overlay, operators or templates can opt
   out by explicitly setting `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS`
-  to `"0"` or `""` in `profiles.<profile>.harness_overrides.claude.env`,
-  `harness_configs.claude.env`, or a template's `env:` block.
+  to `"0"` in `profiles.<profile>.harness_overrides.claude.env`,
+  `harness_configs.claude.env`, or a template's `env:` block. Do not use an
+  empty string (`""`): Scion treats an empty value in those layers as a
+  host-env passthrough / required variable rather than an explicit override (so
+  it is omitted under a broker—leaving the default `"1"` active—or fails local
+  startup).
 - **`SHELL=/bin/zsh` and Layer 2 shell-expansion caveat:** `Dockerfile` sets
   `ENV SHELL=/bin/zsh`, so Claude Code's `Bash` tool executes under `zsh` by
   default. `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` specifically
