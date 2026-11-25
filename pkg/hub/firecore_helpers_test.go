@@ -22,6 +22,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+func firstTriggerAction(tr store.Trigger) store.TriggerAction {
+	actions, err := triggerActions(tr)
+	if err != nil || len(actions) == 0 {
+		return store.TriggerAction{Type: tr.ActionType, Payload: tr.ActionPayload}
+	}
+	return actions[0]
+}
+
 // fireScheduledActionForTest runs a scheduled event through the native fire
 // core (Server.fireActionWithRawError) using the registered FireAction (or the
 // default built-in action for actionType on bare test servers that did not call

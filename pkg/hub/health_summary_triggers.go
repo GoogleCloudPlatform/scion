@@ -275,14 +275,6 @@ func healthTriggerActionType(tr store.Trigger) string {
 	return strings.Join(types, ",")
 }
 
-func firstTriggerAction(tr store.Trigger) store.TriggerAction {
-	actions, err := triggerActions(tr)
-	if err != nil || len(actions) == 0 {
-		return store.TriggerAction{Type: tr.ActionType, Payload: tr.ActionPayload}
-	}
-	return actions[0]
-}
-
 func (s *Server) healthSummaryScanTriggers(
 	r *http.Request,
 	allowed map[string]bool,

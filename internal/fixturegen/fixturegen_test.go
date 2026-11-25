@@ -263,7 +263,7 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, "cel", trFire.DecidedDialect)
 	assert.Contains(t, trFire.RuleTrace, `"class":"matched"`)
 
-	trClaim, err := composite.GetActiveTriggerSubjectClaim(ctx, triggerID, "webhook:"+webhookEndpointID)
+	trClaim, err := composite.GetActiveTriggerSubjectClaim(ctx, triggerID, 0, "webhook:"+webhookEndpointID)
 	require.NoError(t, err, "trigger_subject_claims fixture row must be readable via TriggerStore")
 	assert.Equal(t, triggerSubjectClaimID, trClaim.ID)
 	assert.Equal(t, store.TriggerSubjectClaimStateActive, trClaim.State)
