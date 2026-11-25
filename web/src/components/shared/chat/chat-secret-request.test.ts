@@ -24,6 +24,30 @@ import { stateManager } from '../../../client/state.js';
 import type { SecretRequestView } from '../../../client/secret-requests.js';
 import './chat-secret-request.js';
 import type { ScionChatSecretRequest } from './chat-secret-request.js';
+import type { ScionSecretValueField } from '../secret-value-field.js';
+
+function q<T extends Element = Element>(
+  root: ParentNode | null | undefined,
+  selector: string
+): T | null {
+  if (!root) return null;
+  const direct = root.querySelector<T>(selector);
+  if (direct) return direct;
+  const fields = root.querySelectorAll<ScionSecretValueField>('scion-secret-value-field');
+  for (const f of fields) {
+    const found = f.shadowRoot?.querySelector<T>(selector);
+    if (found) return found;
+  }
+  return null;
+}
+
+async function settle(el: ScionChatSecretRequest): Promise<void> {
+  await el.updateComplete;
+  const fields = el.shadowRoot?.querySelectorAll<ScionSecretValueField>('scion-secret-value-field');
+  if (fields) {
+    await Promise.all([...fields].map((f) => f.updateComplete));
+  }
+}
 
 function makeRow(overrides: Partial<SecretRequestView> = {}): SecretRequestView {
   return {
@@ -65,7 +89,7 @@ async function mountCard(
   el.rows = [makeRow()];
   Object.assign(el, props);
   document.body.appendChild(el);
-  await el.updateComplete;
+  await settle(el);
   return el;
 }
 
@@ -190,15 +214,15 @@ describe('scion-chat-secret-request', () => {
     expect(pendingRow.querySelector('.description')?.textContent).toBe(
       'A GitHub PAT with repo scope'
     );
-    const input = pendingRow.querySelector('input') as HTMLInputElement;
+    const input = q(pendingRow, 'input') as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.type).toBe('password');
     expect(input.autocomplete).toBe('off');
-    const toggleBtn = pendingRow.querySelector('.toggle-visibility') as HTMLButtonElement;
+    const toggleBtn = q(pendingRow, '.toggle-visibility') as HTMLButtonElement;
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
     toggleBtn.click();
-    await el.updateComplete;
-    expect(pendingRow.querySelector('textarea')).not.toBeNull();
+    await settle(el);
+    expect(q(pendingRow, 'textarea')).not.toBeNull();
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
     // Submitting row
@@ -295,13 +319,13 @@ describe('scion-chat-secret-request', () => {
       ],
     });
 
-    const inputA = el.shadowRoot!.querySelector('input[data-key="KEY_A"]') as HTMLInputElement;
-    const inputC = el.shadowRoot!.querySelector('input[data-key="KEY_C"]') as HTMLInputElement;
+    const inputA = q(el.shadowRoot!, 'input[data-key="KEY_A"]') as HTMLInputElement;
+    const inputC = q(el.shadowRoot!, 'input[data-key="KEY_C"]') as HTMLInputElement;
     inputA.value = 'secret-val-a';
     inputA.dispatchEvent(new Event('input'));
     inputC.value = 'secret-val-c';
     inputC.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     // Values must never touch localStorage or sessionStorage
     expect(localStorage.length).toBe(0);
@@ -330,8 +354,8 @@ describe('scion-chat-secret-request', () => {
 
     // Rows updated and form values cleared with messageId unchanged
     expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
-    expect(el.shadowRoot!.querySelector('input')).toBeNull();
-    expect(el.shadowRoot!.querySelector('textarea')).toBeNull();
+    expect(q(el.shadowRoot!, 'input')).toBeNull();
+    expect(q(el.shadowRoot!, 'textarea')).toBeNull();
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
   });
 
@@ -353,10 +377,10 @@ describe('scion-chat-secret-request', () => {
       rows: [makeRow({ rowId: 'r-1', messageId: 'msg-stay', key: 'KEY_A', status: 'pending' })],
     });
 
-    const input = el.shadowRoot!.querySelector('input[data-key="KEY_A"]') as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="KEY_A"]') as HTMLInputElement;
     input.value = 'top-secret-value';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     let fulfilledFired = false;
     el.addEventListener('secret-request-fulfilled', () => {
@@ -365,10 +389,10 @@ describe('scion-chat-secret-request', () => {
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
     await vi.waitFor(() => expect(fulfilledFired).toBe(true));
-    await el.updateComplete;
+    await settle(el);
 
     expect(el.messageId).toBe('msg-stay');
-    const afterInput = el.shadowRoot!.querySelector('input[data-key="KEY_A"]') as HTMLInputElement;
+    const afterInput = q(el.shadowRoot!, 'input[data-key="KEY_A"]') as HTMLInputElement;
     expect(afterInput.value).toBe('');
     const submitBtn = el.shadowRoot!.querySelector('.submit-btn') as HTMLElement;
     expect(submitBtn.hasAttribute('disabled')).toBe(true);
@@ -420,7 +444,7 @@ describe('scion-chat-secret-request', () => {
     const runDismiss = async (opts: { uncheckR2?: boolean; reason: string }): Promise<string> => {
       const priorCalls = fetchMock.mock.calls.length;
       (el.shadowRoot!.querySelector('.dismiss-btn') as HTMLElement).click();
-      await el.updateComplete;
+      await settle(el);
 
       if (opts.uncheckR2) {
         const cb2 = el.shadowRoot!.querySelector(
@@ -428,7 +452,7 @@ describe('scion-chat-secret-request', () => {
         ) as HTMLElement & { checked: boolean };
         cb2.checked = false;
         cb2.dispatchEvent(new CustomEvent('sl-change', { bubbles: true }));
-        await el.updateComplete;
+        await settle(el);
       }
 
       const reasonInput = el.shadowRoot!.querySelector('.dismiss-reason-input') as HTMLElement & {
@@ -436,7 +460,7 @@ describe('scion-chat-secret-request', () => {
       };
       reasonInput.value = opts.reason;
       reasonInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
-      await el.updateComplete;
+      await settle(el);
 
       (el.shadowRoot!.querySelector('.dismiss-confirm-btn') as HTMLElement).click();
       await vi.waitFor(() => {
@@ -444,7 +468,7 @@ describe('scion-chat-secret-request', () => {
         const dialog = el.shadowRoot!.querySelector('sl-dialog.dismiss-dialog');
         expect(dialog?.hasAttribute('open')).toBe(false);
       });
-      await el.updateComplete;
+      await settle(el);
 
       const [, init] = fetchMock.mock.calls[priorCalls] as [string, RequestInit];
       const sent = JSON.parse(init.body as string) as { idempotencyKey: string };
@@ -466,20 +490,16 @@ describe('scion-chat-secret-request', () => {
 
   it('clears form values on disconnect/navigation', async () => {
     const el = await mountCard();
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'ephemeral-secret';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     el.remove();
     document.body.appendChild(el);
-    await el.updateComplete;
+    await settle(el);
 
-    const afterReconnect = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const afterReconnect = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     expect(afterReconnect.value).toBe('');
   });
 
@@ -530,18 +550,18 @@ describe('scion-chat-secret-request', () => {
     });
 
     (el.shadowRoot!.querySelector('.dismiss-btn') as HTMLElement).click();
-    await el.updateComplete;
+    await settle(el);
 
     const reasonInput = el.shadowRoot!.querySelector('.dismiss-reason-input') as HTMLElement & {
       value: string;
     };
     reasonInput.value = 'not needed';
     reasonInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
-    await el.updateComplete;
+    await settle(el);
 
     (el.shadowRoot!.querySelector('.dismiss-confirm-btn') as HTMLElement).click();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    await el.updateComplete;
+    await settle(el);
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/v1/secret-requests/msg-1/dismiss');
@@ -585,7 +605,7 @@ describe('scion-chat-secret-request', () => {
     });
 
     (el.shadowRoot!.querySelector('.dismiss-btn') as HTMLElement).click();
-    await el.updateComplete;
+    await settle(el);
 
     // Uncheck r-2 so only r-1 is dismissed
     const cb2 = el.shadowRoot!.querySelector(
@@ -595,18 +615,18 @@ describe('scion-chat-secret-request', () => {
     };
     cb2.checked = false;
     cb2.dispatchEvent(new CustomEvent('sl-change', { bubbles: true }));
-    await el.updateComplete;
+    await settle(el);
 
     const reasonInput = el.shadowRoot!.querySelector('.dismiss-reason-input') as HTMLElement & {
       value: string;
     };
     reasonInput.value = 'skip A';
     reasonInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
-    await el.updateComplete;
+    await settle(el);
 
     (el.shadowRoot!.querySelector('.dismiss-confirm-btn') as HTMLElement).click();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    await el.updateComplete;
+    await settle(el);
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     const sent = JSON.parse(init.body as string) as Record<string, unknown>;
@@ -666,18 +686,16 @@ describe('scion-chat-secret-request', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const el = await mountCard();
-      const input = el.shadowRoot!.querySelector(
-        'input[data-key="GITHUB_TOKEN"]'
-      ) as HTMLInputElement;
+      const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
       input.value = 'tok-123';
       input.dispatchEvent(new Event('input'));
-      await el.updateComplete;
+      await settle(el);
 
       (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
       await vi.waitFor(() => {
         expect(el.shadowRoot!.querySelector('.status-alert.error')).not.toBeNull();
       });
-      await el.updateComplete;
+      await settle(el);
 
       const alert = el.shadowRoot!.querySelector('.status-alert.error');
       expect(alert?.textContent).toContain(expectedText);
@@ -692,7 +710,7 @@ describe('scion-chat-secret-request', () => {
       reason: 'Requires agent.attach permission on builder-1.',
     });
 
-    const input = el.shadowRoot!.querySelector('input') as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input') as HTMLInputElement;
     const submitBtn = el.shadowRoot!.querySelector('.submit-btn') as HTMLElement;
     const dismissBtn = el.shadowRoot!.querySelector('.dismiss-btn') as HTMLElement;
     const blocked = el.shadowRoot!.querySelector('.status-alert.blocked');
@@ -705,7 +723,7 @@ describe('scion-chat-secret-request', () => {
 
   it('applies live updates from chat.secret_request.updated via stateManager', async () => {
     const el = await mountCard();
-    expect(el.shadowRoot!.querySelector('input')).not.toBeNull();
+    expect(q(el.shadowRoot!, 'input')).not.toBeNull();
 
     stateManager.dispatchEvent(
       new CustomEvent('message-action-updated', {
@@ -727,9 +745,9 @@ describe('scion-chat-secret-request', () => {
         },
       })
     );
-    await el.updateComplete;
+    await settle(el);
 
-    expect(el.shadowRoot!.querySelector('input')).toBeNull();
+    expect(q(el.shadowRoot!, 'input')).toBeNull();
     expect(el.shadowRoot!.textContent).toContain('found in cache');
   });
 
@@ -738,10 +756,10 @@ describe('scion-chat-secret-request', () => {
     el.messageId = 'msg-1';
     el.rows = [makeRow()];
     document.body.appendChild(el);
-    await el.updateComplete;
+    await settle(el);
 
     expect(el.canRespond).toBe(false);
-    const input = el.shadowRoot!.querySelector('input') as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input') as HTMLInputElement;
     expect(input.disabled).toBe(true);
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
     expect(el.shadowRoot!.querySelector('.dismiss-btn')?.hasAttribute('disabled')).toBe(true);
@@ -776,11 +794,11 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'DEPLOY_KEY', secretType: 'file' })],
     });
-    const input = el.shadowRoot!.querySelector('input[data-key="DEPLOY_KEY"]') as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="DEPLOY_KEY"]') as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.type).toBe('password');
     expect(input.autocomplete).toBe('off');
-    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
+    expect(q(el.shadowRoot!, 'textarea[data-key="DEPLOY_KEY"]')).toBeNull();
 
     // Dispatch paste event with multi-line clipboard data
     const pasteEvent = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
@@ -790,11 +808,11 @@ describe('scion-chat-secret-request', () => {
       },
     });
     input.dispatchEvent(pasteEvent);
-    await el.updateComplete;
+    await settle(el);
 
     expect(pasteEvent.defaultPrevented).toBe(true);
-    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
-    const maskedStatus = el.shadowRoot!.querySelector('[data-testid="file-value-masked"]');
+    expect(q(el.shadowRoot!, 'textarea[data-key="DEPLOY_KEY"]')).toBeNull();
+    const maskedStatus = q(el.shadowRoot!, '[data-testid="file-value-masked"]');
     expect(maskedStatus).not.toBeNull();
     expect(maskedStatus?.getAttribute('aria-label')).toBe(
       'Secret value for DEPLOY_KEY entered, hidden'
@@ -805,22 +823,20 @@ describe('scion-chat-secret-request', () => {
     expect(el.shadowRoot!.innerHTML).not.toContain('line-two-secret');
 
     // Show reveals textarea with verbatim multi-line value; Hide returns to password input without losing it
-    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    const toggleBtn = q(el.shadowRoot!, '.toggle-visibility') as HTMLButtonElement;
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
     toggleBtn.click();
-    await el.updateComplete;
+    await settle(el);
 
-    const textarea = el.shadowRoot!.querySelector(
-      'textarea[data-key="DEPLOY_KEY"]'
-    ) as HTMLTextAreaElement;
+    const textarea = q(el.shadowRoot!, 'textarea[data-key="DEPLOY_KEY"]') as HTMLTextAreaElement;
     expect(textarea).not.toBeNull();
     expect(textarea.value).toBe(multilineSecret);
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
     toggleBtn.click();
-    await el.updateComplete;
-    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
-    expect(el.shadowRoot!.querySelector('input[data-key="DEPLOY_KEY"]')).not.toBeNull();
+    await settle(el);
+    expect(q(el.shadowRoot!, 'textarea[data-key="DEPLOY_KEY"]')).toBeNull();
+    expect(q(el.shadowRoot!, 'input[data-key="DEPLOY_KEY"]')).not.toBeNull();
     expect(el.shadowRoot!.textContent).not.toContain('line-two-secret');
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
 
@@ -838,7 +854,8 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'DEPLOY_KEY', secretType: 'file' })],
     });
-    const fileInput = el.shadowRoot!.querySelector(
+    const fileInput = q(
+      el.shadowRoot!,
       'input[type="file"][data-file-input="DEPLOY_KEY"]'
     ) as HTMLInputElement;
     expect(fileInput).not.toBeNull();
@@ -852,7 +869,7 @@ describe('scion-chat-secret-request', () => {
       });
       fileInput.dispatchEvent(new Event('change'));
       await new Promise((r) => setTimeout(r, 10));
-      await el.updateComplete;
+      await settle(el);
     };
 
     // 1. Reject > 64 KiB before reading
@@ -882,10 +899,8 @@ describe('scion-chat-secret-request', () => {
     await triggerFile(validFile);
     expect(el.shadowRoot!.querySelector('.status-alert.error')).toBeNull();
     expect(fileInput.value).toBe('');
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
-    const pwdInput = el.shadowRoot!.querySelector(
-      'input[data-key="DEPLOY_KEY"]'
-    ) as HTMLInputElement;
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).not.toBeNull();
+    const pwdInput = q(el.shadowRoot!, 'input[data-key="DEPLOY_KEY"]') as HTMLInputElement;
     expect(pwdInput.value).toBe('');
     expect(el.shadowRoot!.textContent).not.toContain('abc123');
     expect(el.shadowRoot!.innerHTML).not.toContain('abc123');
@@ -895,41 +910,37 @@ describe('scion-chat-secret-request', () => {
 
     // pagehide clears loaded file value too
     window.dispatchEvent(new Event('pagehide'));
-    await el.updateComplete;
+    await settle(el);
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).toBeNull();
 
     // 5. Loading a file while Show is active automatically hides the value
-    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    const toggleBtn = q(el.shadowRoot!, '.toggle-visibility') as HTMLButtonElement;
     toggleBtn.click();
-    await el.updateComplete;
-    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).not.toBeNull();
+    await settle(el);
+    expect(q(el.shadowRoot!, 'textarea[data-key="DEPLOY_KEY"]')).not.toBeNull();
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
     await triggerFile(new File(['reloaded-secret\nline2'], 'cert2.pem', { type: 'text/plain' }));
-    expect(el.shadowRoot!.querySelector('textarea[data-key="DEPLOY_KEY"]')).toBeNull();
-    expect(el.shadowRoot!.querySelector('input[data-key="DEPLOY_KEY"]')).not.toBeNull();
+    expect(q(el.shadowRoot!, 'textarea[data-key="DEPLOY_KEY"]')).toBeNull();
+    expect(q(el.shadowRoot!, 'input[data-key="DEPLOY_KEY"]')).not.toBeNull();
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).not.toBeNull();
     expect(el.shadowRoot!.textContent).not.toContain('reloaded-secret');
   });
 
   it('clears form values on pagehide (bfcache protection)', async () => {
     const el = await mountCard();
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'bfcache-secret';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     window.dispatchEvent(new Event('pagehide'));
-    await el.updateComplete;
+    await settle(el);
 
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    const after = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const after = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     expect(after.value).toBe('');
     expect(el.shadowRoot!.textContent).not.toContain('bfcache-secret');
     expect(el.shadowRoot!.innerHTML).not.toContain('bfcache-secret');
@@ -960,12 +971,10 @@ describe('scion-chat-secret-request', () => {
     const submitBtn = el.shadowRoot!.querySelector('.submit-btn') as HTMLElement;
     expect(submitBtn.getAttribute('type')).toBe('button');
 
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'tok-once';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     submitBtn.click();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
@@ -980,16 +989,14 @@ describe('scion-chat-secret-request', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const el = await mountCard();
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     // 22,000 3-byte UTF-8 characters = 66,000 bytes > 65,536 (even though .length < 65,536)
     input.value = '€'.repeat(22_000);
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
-    await el.updateComplete;
+    await settle(el);
 
     expect(fetchMock).not.toHaveBeenCalled();
     const alert = el.shadowRoot!.querySelector('.status-alert.error');
@@ -1030,12 +1037,10 @@ describe('scion-chat-secret-request', () => {
       refreshedEventFired = true;
     });
 
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'tok-stale';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
 
@@ -1043,16 +1048,14 @@ describe('scion-chat-secret-request', () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(refreshedEventFired).toBe(true);
     });
-    await el.updateComplete;
+    await settle(el);
 
     expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/secret-requests/msg-1');
     expect(el.shadowRoot!.querySelector('.status-alert.blocked')?.textContent).toContain(
       'attach permission was revoked'
     );
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    const inputAfter = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const inputAfter = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     expect(inputAfter.disabled).toBe(true);
   });
 
@@ -1098,12 +1101,10 @@ describe('scion-chat-secret-request', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const el = await mountCard();
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'tok-1';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     const getSentKey = (callIdx: number): string => {
       const [, init] = fetchMock.mock.calls[callIdx] as [string, RequestInit];
@@ -1118,7 +1119,7 @@ describe('scion-chat-secret-request', () => {
         'backend down'
       );
     });
-    await el.updateComplete;
+    await settle(el);
     const key1 = getSentKey(0);
 
     // 2. Retry same value -> network error -> reuses key1
@@ -1129,7 +1130,7 @@ describe('scion-chat-secret-request', () => {
         'Could not reach the server'
       );
     });
-    await el.updateComplete;
+    await settle(el);
     expect(getSentKey(1)).toBe(key1);
 
     // 3. Retry after network error -> 409 submitting -> still reuses key1, then clears it
@@ -1140,7 +1141,7 @@ describe('scion-chat-secret-request', () => {
         'Another submission is currently in progress'
       );
     });
-    await el.updateComplete;
+    await settle(el);
     expect(getSentKey(2)).toBe(key1);
 
     // 4. Retry after 409 (without editing) -> mints a new key2 (and fails with 503)
@@ -1151,24 +1152,22 @@ describe('scion-chat-secret-request', () => {
         'retry after edit'
       );
     });
-    await el.updateComplete;
+    await settle(el);
     const key2 = getSentKey(3);
     expect(key2).not.toBe(key1);
 
     // 5. Edit value -> mints a new key3
-    const inputAfter = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const inputAfter = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     inputAfter.value = 'tok-2';
     inputAfter.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
     await vi.waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(5);
       expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
     });
-    await el.updateComplete;
+    await settle(el);
     const key3 = getSentKey(4);
     expect(key3).not.toBe(key2);
   });
@@ -1185,26 +1184,22 @@ describe('scion-chat-secret-request', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const el = await mountCard();
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'secret-denied';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
     await vi.waitFor(() => {
       expect(el.shadowRoot!.querySelector('.status-alert.blocked')).not.toBeNull();
     });
-    await el.updateComplete;
+    await settle(el);
 
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
     expect(el.shadowRoot!.querySelector('.status-alert.blocked')?.textContent).toContain(
       'you need agent.attach permission'
     );
-    const inputAfter = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const inputAfter = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     expect(inputAfter.value).toBe('');
     expect(inputAfter.disabled).toBe(true);
   });
@@ -1237,18 +1232,16 @@ describe('scion-chat-secret-request', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const el = await mountCard();
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'tok-123';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
     await vi.waitFor(() => {
       expect(el.shadowRoot!.textContent).toContain('agent deleted');
     });
-    await el.updateComplete;
+    await settle(el);
 
     expect(el.shadowRoot!.textContent).toContain('the hub');
     expect(el.shadowRoot!.querySelector('[data-row-id="row-1"]')?.getAttribute('data-status')).toBe(
@@ -1260,36 +1253,32 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-var', key: 'API_CONFIG', secretType: 'variable' })],
     });
-    const input = el.shadowRoot!.querySelector('input[data-key="API_CONFIG"]') as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="API_CONFIG"]') as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.type).toBe('password');
     expect(input.autocomplete).toBe('off');
-    expect(el.shadowRoot!.querySelector('textarea[data-key="API_CONFIG"]')).toBeNull();
+    expect(q(el.shadowRoot!, 'textarea[data-key="API_CONFIG"]')).toBeNull();
 
     input.value = '{"token":"secret"}';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     // Show switches to textarea with value preserved in memory
-    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    const toggleBtn = q(el.shadowRoot!, '.toggle-visibility') as HTMLButtonElement;
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
     toggleBtn.click();
-    await el.updateComplete;
+    await settle(el);
 
-    expect(el.shadowRoot!.querySelector('input[data-key="API_CONFIG"]')).toBeNull();
-    const ta = el.shadowRoot!.querySelector(
-      'textarea[data-key="API_CONFIG"]'
-    ) as HTMLTextAreaElement;
+    expect(q(el.shadowRoot!, 'input[data-key="API_CONFIG"]')).toBeNull();
+    const ta = q(el.shadowRoot!, 'textarea[data-key="API_CONFIG"]') as HTMLTextAreaElement;
     expect(ta).not.toBeNull();
     expect(ta.value).toBe('{"token":"secret"}');
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
     // Hide switches back to native password input
     toggleBtn.click();
-    await el.updateComplete;
-    const maskedAgain = el.shadowRoot!.querySelector(
-      'input[data-key="API_CONFIG"]'
-    ) as HTMLInputElement;
+    await settle(el);
+    const maskedAgain = q(el.shadowRoot!, 'input[data-key="API_CONFIG"]') as HTMLInputElement;
     expect(maskedAgain).not.toBeNull();
     expect(maskedAgain.type).toBe('password');
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
@@ -1306,12 +1295,10 @@ describe('scion-chat-secret-request', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const el = await mountCard({ surface: 'native' });
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'tok-inflight';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
 
     const submitBtn = el.shadowRoot!.querySelector('.submit-btn') as HTMLElement;
     // Two synchronous clicks before updateComplete must send only one POST
@@ -1377,9 +1364,7 @@ describe('scion-chat-secret-request', () => {
       });
 
       const pasteInto = (text: string): void => {
-        const input = el.shadowRoot!.querySelector(
-          'input[data-key="MULTI_KEY"]'
-        ) as HTMLInputElement;
+        const input = q(el.shadowRoot!, 'input[data-key="MULTI_KEY"]') as HTMLInputElement;
         const pasteEvent = new Event('paste', {
           bubbles: true,
           cancelable: true,
@@ -1393,18 +1378,16 @@ describe('scion-chat-secret-request', () => {
 
       // 1. Masked paste "A\nB" -> submits "A\nB"
       pasteInto('A\nB');
-      await el.updateComplete;
-      expect(
-        (el.shadowRoot!.querySelector('input[data-key="MULTI_KEY"]') as HTMLInputElement).value
-      ).toBe('');
-      expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+      await settle(el);
+      expect((q(el.shadowRoot!, 'input[data-key="MULTI_KEY"]') as HTMLInputElement).value).toBe('');
+      expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).not.toBeNull();
       let fulfilledCount = 0;
       el.addEventListener('secret-request-fulfilled', () => {
         fulfilledCount++;
       });
       (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
       await vi.waitFor(() => expect(fulfilledCount).toBe(1));
-      await el.updateComplete;
+      await settle(el);
       expect(
         JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string).values
       ).toEqual({
@@ -1413,10 +1396,10 @@ describe('scion-chat-secret-request', () => {
 
       // 2. Masked paste "A\r\nB" -> submits "A\r\nB" unchanged
       pasteInto('A\r\nB');
-      await el.updateComplete;
+      await settle(el);
       (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
       await vi.waitFor(() => expect(fulfilledCount).toBe(2));
-      await el.updateComplete;
+      await settle(el);
       expect(
         JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string).values
       ).toEqual({
@@ -1424,26 +1407,22 @@ describe('scion-chat-secret-request', () => {
       });
 
       // 3. Reveal -> enter "A\nB" in textarea -> Hide -> password input is empty; typing "X" replaces (never "ABX")
-      const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+      const toggleBtn = q(el.shadowRoot!, '.toggle-visibility') as HTMLButtonElement;
       toggleBtn.click();
-      await el.updateComplete;
-      const ta = el.shadowRoot!.querySelector(
-        'textarea[data-key="MULTI_KEY"]'
-      ) as HTMLTextAreaElement;
+      await settle(el);
+      const ta = q(el.shadowRoot!, 'textarea[data-key="MULTI_KEY"]') as HTMLTextAreaElement;
       expect(ta).not.toBeNull();
       ta.value = 'A\nB';
       ta.dispatchEvent(new Event('input'));
-      await el.updateComplete;
+      await settle(el);
 
       toggleBtn.click();
-      await el.updateComplete;
-      const hiddenInput = el.shadowRoot!.querySelector(
-        'input[data-key="MULTI_KEY"]'
-      ) as HTMLInputElement;
+      await settle(el);
+      const hiddenInput = q(el.shadowRoot!, 'input[data-key="MULTI_KEY"]') as HTMLInputElement;
       expect(hiddenInput.value).toBe('');
       hiddenInput.value = 'X';
       hiddenInput.dispatchEvent(new Event('input'));
-      await el.updateComplete;
+      await settle(el);
 
       (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
       await vi.waitFor(() => expect(fulfilledCount).toBe(3));
@@ -1457,33 +1436,29 @@ describe('scion-chat-secret-request', () => {
 
   it('clears form values when messageId changes', async () => {
     const el = await mountCard({ messageId: 'msg-a' });
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'secret-for-a';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(1);
 
     el.messageId = 'msg-b';
     el.rows = [makeRow({ rowId: 'row-1', messageId: 'msg-b' })];
-    await el.updateComplete;
+    await settle(el);
 
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    expect(
-      (el.shadowRoot!.querySelector('input[data-key="GITHUB_TOKEN"]') as HTMLInputElement).value
-    ).toBe('');
+    expect((q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement).value).toBe(
+      ''
+    );
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
   });
 
   it('prunes in-memory form values when a live update resolves a pending row', async () => {
     const el = await mountCard();
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="GITHUB_TOKEN"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement;
     input.value = 'typed-before-fulfilled';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(1);
 
     stateManager.dispatchEvent(
@@ -1506,7 +1481,7 @@ describe('scion-chat-secret-request', () => {
         },
       })
     );
-    await el.updateComplete;
+    await settle(el);
 
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
   });
@@ -1515,7 +1490,8 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'DEPLOY_KEY', secretType: 'file' })],
     });
-    const fileInput = el.shadowRoot!.querySelector(
+    const fileInput = q(
+      el.shadowRoot!,
       'input[type="file"][data-file-input="DEPLOY_KEY"]'
     ) as HTMLInputElement;
 
@@ -1535,10 +1511,10 @@ describe('scion-chat-secret-request', () => {
     el.clearFormValues();
     resolveBuf!(new TextEncoder().encode('delayed-secret').buffer);
     await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await settle(el);
 
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).toBeNull();
   });
 
   it('hides the blocked alert on closed cards and refetches canRespond when a submitting claim rolls back to pending', async () => {
@@ -1601,10 +1577,9 @@ describe('scion-chat-secret-request', () => {
       );
       expect(rolling.canRespond).toBe(true);
     });
-    await rolling.updateComplete;
+    await settle(rolling);
     expect(
-      (rolling.shadowRoot!.querySelector('input[data-key="GITHUB_TOKEN"]') as HTMLInputElement)
-        .disabled
+      (q(rolling.shadowRoot!, 'input[data-key="GITHUB_TOKEN"]') as HTMLInputElement).disabled
     ).toBe(false);
   });
 
@@ -1612,12 +1587,12 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-1', key: 'TOKEN', secretType: 'environment' })],
     });
-    const input = el.shadowRoot!.querySelector('input[data-key="TOKEN"]') as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="TOKEN"]') as HTMLInputElement;
 
     // 1. Single-line paste on non-captured row does NOT preventDefault (native browser compose)
     input.value = 'abc';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
     const singlePaste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
     Object.defineProperty(singlePaste, 'clipboardData', {
       value: { getData: (t: string) => (t === 'text/plain' ? 'def' : '') },
@@ -1632,7 +1607,7 @@ describe('scion-chat-secret-request', () => {
       value: { getData: (t: string) => (t === 'text/plain' ? 'X\nY' : '') },
     });
     input.dispatchEvent(multiPaste);
-    await el.updateComplete;
+    await settle(el);
     expect(multiPaste.defaultPrevented).toBe(true);
     expect((el as unknown as { formValues: Map<string, string> }).formValues.get('r-1')).toBe(
       'aX\nYbc'
@@ -1646,7 +1621,7 @@ describe('scion-chat-secret-request', () => {
       data: 'Y1\r\nY2',
     });
     input.dispatchEvent(bi);
-    await el.updateComplete;
+    await settle(el);
     expect(bi.defaultPrevented).toBe(true);
     expect((el as unknown as { formValues: Map<string, string> }).formValues.get('r-1')).toBe(
       'Y1\r\nY2'
@@ -1658,7 +1633,7 @@ describe('scion-chat-secret-request', () => {
       value: { getData: (t: string) => (t === 'text/plain' ? 'D1\nD2\nD3' : '') },
     });
     input.dispatchEvent(dropEv);
-    await el.updateComplete;
+    await settle(el);
     expect(dropEv.defaultPrevented).toBe(true);
     expect((el as unknown as { formValues: Map<string, string> }).formValues.get('r-1')).toBe(
       'D1\nD2\nD3'
@@ -1669,14 +1644,14 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-1', key: 'TOKEN', secretType: 'file' })],
     });
-    const input = el.shadowRoot!.querySelector('input[data-key="TOKEN"]') as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="TOKEN"]') as HTMLInputElement;
     const paste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
     Object.defineProperty(paste, 'clipboardData', {
       value: { getData: (t: string) => (t === 'text/plain' ? 'line1\nline2' : '') },
     });
     input.dispatchEvent(paste);
-    await el.updateComplete;
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    await settle(el);
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).not.toBeNull();
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(false);
 
     // Clear via deleteContentBackward beforeinput
@@ -1686,23 +1661,23 @@ describe('scion-chat-secret-request', () => {
       inputType: 'deleteContentBackward',
     });
     input.dispatchEvent(delEv);
-    await el.updateComplete;
+    await settle(el);
 
     expect(delEv.defaultPrevented).toBe(true);
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).toBeNull();
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
 
     // Re-paste and clear via Backspace keydown (for browsers that don't fire beforeinput on empty input)
     input.dispatchEvent(paste);
-    await el.updateComplete;
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    await settle(el);
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).not.toBeNull();
     const kd = new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true });
     input.dispatchEvent(kd);
-    await el.updateComplete;
+    await settle(el);
     expect(kd.defaultPrevented).toBe(true);
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).toBeNull();
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
   });
 
@@ -1732,7 +1707,8 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'BOM_KEY', secretType: 'file' })],
     });
-    const fileInput = el.shadowRoot!.querySelector(
+    const fileInput = q(
+      el.shadowRoot!,
       'input[type="file"][data-file-input="BOM_KEY"]'
     ) as HTMLInputElement;
     // EF BB BF + "abc\n"
@@ -1741,7 +1717,7 @@ describe('scion-chat-secret-request', () => {
     Object.defineProperty(fileInput, 'files', { value: [bomFile], configurable: true });
     fileInput.dispatchEvent(new Event('change'));
     await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await settle(el);
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
     await vi.waitFor(() => {
@@ -1754,15 +1730,14 @@ describe('scion-chat-secret-request', () => {
 
   it('moves focus to the revealed textarea when Show is clicked', async () => {
     const el = await mountCard();
-    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    const toggleBtn = q(el.shadowRoot!, '.toggle-visibility') as HTMLButtonElement;
     toggleBtn.click();
-    await el.updateComplete;
+    await settle(el);
 
-    const ta = el.shadowRoot!.querySelector(
-      'textarea[data-key="GITHUB_TOKEN"]'
-    ) as HTMLTextAreaElement;
+    const ta = q(el.shadowRoot!, 'textarea[data-key="GITHUB_TOKEN"]') as HTMLTextAreaElement;
     expect(ta).not.toBeNull();
-    expect(el.shadowRoot!.activeElement).toBe(ta);
+    const field = el.shadowRoot!.querySelector<ScionSecretValueField>('scion-secret-value-field')!;
+    expect(field.shadowRoot!.activeElement).toBe(ta);
   });
 
   it('preserves CRLF line endings when editing a revealed all-CRLF value', async () => {
@@ -1791,29 +1766,29 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'row-1', key: 'CRLF_KEY', secretType: 'file' })],
     });
-    const input = el.shadowRoot!.querySelector('input[data-key="CRLF_KEY"]') as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="CRLF_KEY"]') as HTMLInputElement;
     const pasteEv = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
     Object.defineProperty(pasteEv, 'clipboardData', {
       value: { getData: () => 'AAA-l1\r\nBBB-l2\r\nCCC-l3' },
     });
     input.dispatchEvent(pasteEv);
-    await el.updateComplete;
+    await settle(el);
 
-    const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+    const toggleBtn = q(el.shadowRoot!, '.toggle-visibility') as HTMLButtonElement;
     toggleBtn.click();
-    await el.updateComplete;
+    await settle(el);
 
-    const ta = el.shadowRoot!.querySelector('textarea[data-key="CRLF_KEY"]') as HTMLTextAreaElement;
+    const ta = q(el.shadowRoot!, 'textarea[data-key="CRLF_KEY"]') as HTMLTextAreaElement;
     expect(ta.readOnly).toBe(false);
-    expect(el.shadowRoot!.querySelector('[data-testid="mixed-line-endings-note"]')).toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="mixed-line-endings-note"]')).toBeNull();
 
     // Simulate browser HTML textarea LF-normalized edit
     ta.value = 'AAA-l1\nBBB-l2\nCCC-l3X';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await el.updateComplete;
+    await settle(el);
 
     toggleBtn.click();
-    await el.updateComplete;
+    await settle(el);
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
     await vi.waitFor(() => {
@@ -1854,34 +1829,32 @@ describe('scion-chat-secret-request', () => {
       const el = await mountCard({
         rows: [makeRow({ rowId: 'row-1', key: 'MIXED_KEY', secretType: 'environment' })],
       });
-      const input = el.shadowRoot!.querySelector('input[data-key="MIXED_KEY"]') as HTMLInputElement;
+      const input = q(el.shadowRoot!, 'input[data-key="MIXED_KEY"]') as HTMLInputElement;
       const pasteEv = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
       Object.defineProperty(pasteEv, 'clipboardData', {
         value: { getData: () => rawValue },
       });
       input.dispatchEvent(pasteEv);
-      await el.updateComplete;
+      await settle(el);
 
-      const toggleBtn = el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement;
+      const toggleBtn = q(el.shadowRoot!, '.toggle-visibility') as HTMLButtonElement;
       toggleBtn.click();
-      await el.updateComplete;
+      await settle(el);
 
-      const ta = el.shadowRoot!.querySelector(
-        'textarea[data-key="MIXED_KEY"]'
-      ) as HTMLTextAreaElement;
+      const ta = q(el.shadowRoot!, 'textarea[data-key="MIXED_KEY"]') as HTMLTextAreaElement;
       expect(ta.readOnly).toBe(true);
-      const note = el.shadowRoot!.querySelector('[data-testid="mixed-line-endings-note"]');
+      const note = q(el.shadowRoot!, '[data-testid="mixed-line-endings-note"]');
       expect(note?.textContent?.trim()).toBe(
-        'This value has mixed line endings; paste or load to replace it'
+        'This value has mixed line endings; Hide, then paste or load to replace it.'
       );
 
       // Even if a synthetic input event fires, the stored value is not altered
       ta.value = 'corrupted';
       ta.dispatchEvent(new Event('input', { bubbles: true }));
-      await el.updateComplete;
+      await settle(el);
 
       toggleBtn.click();
-      await el.updateComplete;
+      await settle(el);
 
       (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
       await vi.waitFor(() => {
@@ -1923,17 +1896,15 @@ describe('scion-chat-secret-request', () => {
     const el1 = await mountCard({
       rows: [makeRow({ rowId: 'row-1', key: 'REV_PASTE', secretType: 'variable' })],
     });
-    (el1.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement).click();
-    await el1.updateComplete;
-    const ta1 = el1.shadowRoot!.querySelector(
-      'textarea[data-key="REV_PASTE"]'
-    ) as HTMLTextAreaElement;
+    (q(el1.shadowRoot!, '.toggle-visibility') as HTMLButtonElement).click();
+    await settle(el1);
+    const ta1 = q(el1.shadowRoot!, 'textarea[data-key="REV_PASTE"]') as HTMLTextAreaElement;
     const paste1 = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
     Object.defineProperty(paste1, 'clipboardData', {
       value: { getData: () => 'A\r\nB\r\nC' },
     });
     ta1.dispatchEvent(paste1);
-    await el1.updateComplete;
+    await settle(el1);
     expect(paste1.defaultPrevented).toBe(true);
     expect(ta1.readOnly).toBe(false);
     (el1.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
@@ -1952,25 +1923,23 @@ describe('scion-chat-secret-request', () => {
     const el2 = await mountCard({
       rows: [makeRow({ rowId: 'row-1', key: 'REV_PASTE', secretType: 'variable' })],
     });
-    const input2 = el2.shadowRoot!.querySelector('input[data-key="REV_PASTE"]') as HTMLInputElement;
+    const input2 = q(el2.shadowRoot!, 'input[data-key="REV_PASTE"]') as HTMLInputElement;
     const lfPaste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
     Object.defineProperty(lfPaste, 'clipboardData', { value: { getData: () => 'L1\nL2' } });
     input2.dispatchEvent(lfPaste);
-    await el2.updateComplete;
+    await settle(el2);
 
-    (el2.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement).click();
-    await el2.updateComplete;
-    const ta2 = el2.shadowRoot!.querySelector(
-      'textarea[data-key="REV_PASTE"]'
-    ) as HTMLTextAreaElement;
+    (q(el2.shadowRoot!, '.toggle-visibility') as HTMLButtonElement).click();
+    await settle(el2);
+    const ta2 = q(el2.shadowRoot!, 'textarea[data-key="REV_PASTE"]') as HTMLTextAreaElement;
     ta2.setSelectionRange(ta2.value.length, ta2.value.length);
     const crlfAppend = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
     Object.defineProperty(crlfAppend, 'clipboardData', { value: { getData: () => '\r\nX' } });
     ta2.dispatchEvent(crlfAppend);
-    await el2.updateComplete;
+    await settle(el2);
     expect(crlfAppend.defaultPrevented).toBe(true);
     expect(ta2.readOnly).toBe(true);
-    expect(el2.shadowRoot!.querySelector('[data-testid="mixed-line-endings-note"]')).not.toBeNull();
+    expect(q(el2.shadowRoot!, '[data-testid="mixed-line-endings-note"]')).not.toBeNull();
 
     (el2.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
     await vi.waitFor(() => {
@@ -2011,7 +1980,7 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'row-1', key: 'LF_IN_CRLF', secretType: 'file' })],
     });
-    const input = el.shadowRoot!.querySelector('input[data-key="LF_IN_CRLF"]') as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="LF_IN_CRLF"]') as HTMLInputElement;
 
     // Undo/redo blocked on masked input (both beforeinput and keydown)
     const maskedUndoBi = new InputEvent('beforeinput', {
@@ -2037,13 +2006,11 @@ describe('scion-chat-secret-request', () => {
       value: { getData: () => 'AAA\r\nBBB' },
     });
     input.dispatchEvent(crlfPaste);
-    await el.updateComplete;
+    await settle(el);
 
-    (el.shadowRoot!.querySelector('.toggle-visibility') as HTMLButtonElement).click();
-    await el.updateComplete;
-    const ta = el.shadowRoot!.querySelector(
-      'textarea[data-key="LF_IN_CRLF"]'
-    ) as HTMLTextAreaElement;
+    (q(el.shadowRoot!, '.toggle-visibility') as HTMLButtonElement).click();
+    await settle(el);
+    const ta = q(el.shadowRoot!, 'textarea[data-key="LF_IN_CRLF"]') as HTMLTextAreaElement;
 
     const revRedoBi = new InputEvent('beforeinput', {
       inputType: 'historyRedo',
@@ -2066,11 +2033,11 @@ describe('scion-chat-secret-request', () => {
     const lfPaste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
     Object.defineProperty(lfPaste, 'clipboardData', { value: { getData: () => '\nL1\nL2' } });
     ta.dispatchEvent(lfPaste);
-    await el.updateComplete;
+    await settle(el);
 
     expect(lfPaste.defaultPrevented).toBe(true);
     expect(ta.readOnly).toBe(true);
-    expect(el.shadowRoot!.querySelector('[data-testid="mixed-line-endings-note"]')).not.toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="mixed-line-endings-note"]')).not.toBeNull();
 
     (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
     await vi.waitFor(() => {
@@ -2088,7 +2055,8 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'CERT_PEM', secretType: 'file' })],
     });
-    const fileInput = el.shadowRoot!.querySelector(
+    const fileInput = q(
+      el.shadowRoot!,
       'input[type="file"][data-file-input="CERT_PEM"]'
     ) as HTMLInputElement;
 
@@ -2097,9 +2065,9 @@ describe('scion-chat-secret-request', () => {
     Object.defineProperty(fileInput, 'files', { value: [validFile], configurable: true });
     fileInput.dispatchEvent(new Event('change'));
     await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await settle(el);
 
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).not.toBeNull();
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(false);
 
     // 2. Select invalid file B (non-UTF-8 binary) -> previous value must be cleared
@@ -2109,10 +2077,10 @@ describe('scion-chat-secret-request', () => {
     Object.defineProperty(fileInput, 'files', { value: [invalidFile], configurable: true });
     fileInput.dispatchEvent(new Event('change'));
     await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await settle(el);
 
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).toBeNull();
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
     expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
       'not valid UTF-8'
@@ -2123,17 +2091,16 @@ describe('scion-chat-secret-request', () => {
     const el = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'UNREADABLE_FILE', secretType: 'file' })],
     });
-    const fileInput = el.shadowRoot!.querySelector(
+    const fileInput = q(
+      el.shadowRoot!,
       'input[type="file"][data-file-input="UNREADABLE_FILE"]'
     ) as HTMLInputElement;
 
     // Seed an existing value first to confirm it is also cleared on read failure
-    const input = el.shadowRoot!.querySelector(
-      'input[data-key="UNREADABLE_FILE"]'
-    ) as HTMLInputElement;
+    const input = q(el.shadowRoot!, 'input[data-key="UNREADABLE_FILE"]') as HTMLInputElement;
     input.value = 'old-val';
     input.dispatchEvent(new Event('input'));
-    await el.updateComplete;
+    await settle(el);
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(false);
 
     // Select a File whose arrayBuffer() rejects
@@ -2143,10 +2110,10 @@ describe('scion-chat-secret-request', () => {
     Object.defineProperty(fileInput, 'files', { value: [badFile], configurable: true });
     fileInput.dispatchEvent(new Event('change'));
     await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
+    await settle(el);
 
     expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    expect(el.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(q(el.shadowRoot!, '[data-testid="file-value-masked"]')).toBeNull();
     expect(el.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
     expect(el.shadowRoot!.querySelector('.status-alert.error')?.textContent?.trim()).toBe(
       'Could not read the file for UNREADABLE_FILE.'
@@ -2159,7 +2126,8 @@ describe('scion-chat-secret-request', () => {
     const el1 = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'RACE_FILE', secretType: 'file' })],
     });
-    const fileInput1 = el1.shadowRoot!.querySelector(
+    const fileInput1 = q(
+      el1.shadowRoot!,
       'input[type="file"][data-file-input="RACE_FILE"]'
     ) as HTMLInputElement;
 
@@ -2171,13 +2139,13 @@ describe('scion-chat-secret-request', () => {
       });
     Object.defineProperty(fileInput1, 'files', { value: [fileA1], configurable: true });
     fileInput1.dispatchEvent(new Event('change'));
-    await el1.updateComplete;
+    await settle(el1);
 
     // Pick oversize file B while A is still pending
     const oversizeB = new File([new Uint8Array(65 * 1024)], 'b.pem', { type: 'text/plain' });
     Object.defineProperty(fileInput1, 'files', { value: [oversizeB], configurable: true });
     fileInput1.dispatchEvent(new Event('change'));
-    await el1.updateComplete;
+    await settle(el1);
     expect(el1.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
       'exceeds the 64 KiB limit'
     );
@@ -2185,10 +2153,10 @@ describe('scion-chat-secret-request', () => {
     // Now resolve A — must be ignored
     resolveA1(new TextEncoder().encode('stale-file-a').buffer);
     await new Promise((r) => setTimeout(r, 10));
-    await el1.updateComplete;
+    await settle(el1);
 
     expect((el1 as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
-    expect(el1.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(q(el1.shadowRoot!, '[data-testid="file-value-masked"]')).toBeNull();
     expect(el1.shadowRoot!.querySelector('.submit-btn')?.hasAttribute('disabled')).toBe(true);
     expect(el1.shadowRoot!.querySelector('.status-alert.error')?.textContent).toContain(
       'exceeds the 64 KiB limit'
@@ -2199,7 +2167,8 @@ describe('scion-chat-secret-request', () => {
     const el2 = await mountCard({
       rows: [makeRow({ rowId: 'r-file', key: 'RACE_FILE', secretType: 'file' })],
     });
-    const fileInput2 = el2.shadowRoot!.querySelector(
+    const fileInput2 = q(
+      el2.shadowRoot!,
       'input[type="file"][data-file-input="RACE_FILE"]'
     ) as HTMLInputElement;
 
@@ -2211,21 +2180,97 @@ describe('scion-chat-secret-request', () => {
       });
     Object.defineProperty(fileInput2, 'files', { value: [fileA2], configurable: true });
     fileInput2.dispatchEvent(new Event('change'));
-    await el2.updateComplete;
+    await settle(el2);
 
-    const input2 = el2.shadowRoot!.querySelector('input[data-key="RACE_FILE"]') as HTMLInputElement;
+    const input2 = q(el2.shadowRoot!, 'input[data-key="RACE_FILE"]') as HTMLInputElement;
     input2.value = 'typed-secret';
     input2.dispatchEvent(new Event('input'));
-    await el2.updateComplete;
+    await settle(el2);
 
     resolveA2(new TextEncoder().encode('stale-file-a').buffer);
     await new Promise((r) => setTimeout(r, 10));
-    await el2.updateComplete;
+    await settle(el2);
 
     expect((el2 as unknown as { formValues: Map<string, string> }).formValues.get('r-file')).toBe(
       'typed-secret'
     );
-    expect(el2.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).toBeNull();
+    expect(q(el2.shadowRoot!, '[data-testid="file-value-masked"]')).toBeNull();
     el2.remove();
+  });
+
+  it('keeps each field value bound to its own rowId when pending rows reorder', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        rows: [
+          makeRow({
+            rowId: 'r-2',
+            key: 'KEY_B',
+            position: 0,
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-24T00:05:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+          makeRow({
+            rowId: 'r-1',
+            key: 'KEY_A',
+            position: 1,
+            status: 'fulfilled',
+            fulfilled: {
+              at: '2026-11-24T00:05:00Z',
+              byUserId: 'user-1',
+              byName: 'Me',
+              surface: 'native',
+            },
+          }),
+        ],
+        responseMessageId: 'resp-reorder',
+        replayed: false,
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard({
+      rows: [
+        makeRow({ rowId: 'r-1', key: 'KEY_A', position: 0 }),
+        makeRow({ rowId: 'r-2', key: 'KEY_B', position: 1 }),
+      ],
+    });
+
+    const inputA = q(el.shadowRoot!, 'input[data-key="KEY_A"]') as HTMLInputElement;
+    const inputB = q(el.shadowRoot!, 'input[data-key="KEY_B"]') as HTMLInputElement;
+    inputA.value = 'secret-a';
+    inputA.dispatchEvent(new Event('input'));
+    inputB.value = 'secret-b';
+    inputB.dispatchEvent(new Event('input'));
+    await settle(el);
+
+    // Reorder rows so r-2 comes before r-1
+    el.rows = [
+      makeRow({ rowId: 'r-2', key: 'KEY_B', position: 0 }),
+      makeRow({ rowId: 'r-1', key: 'KEY_A', position: 1 }),
+    ];
+    await settle(el);
+
+    const rowEls = [...el.shadowRoot!.querySelectorAll<HTMLElement>('.row')];
+    expect(rowEls.map((r) => r.getAttribute('data-row-id'))).toEqual(['r-2', 'r-1']);
+
+    const fieldB = rowEls[0].querySelector<ScionSecretValueField>('scion-secret-value-field')!;
+    const fieldA = rowEls[1].querySelector<ScionSecretValueField>('scion-secret-value-field')!;
+    expect(fieldB.value).toBe('secret-b');
+    expect(fieldA.value).toBe('secret-a');
+    expect((q(rowEls[0], 'input[data-key="KEY_B"]') as HTMLInputElement).value).toBe('secret-b');
+    expect((q(rowEls[1], 'input[data-key="KEY_A"]') as HTMLInputElement).value).toBe('secret-a');
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as { values: Record<string, string> };
+    expect(sent.values).toEqual({ KEY_A: 'secret-a', KEY_B: 'secret-b' });
   });
 });

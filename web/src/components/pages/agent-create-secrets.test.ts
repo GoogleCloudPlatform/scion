@@ -20,6 +20,7 @@ import { createInternals } from './__fixtures__/agent-create-internals.js';
 import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { AGENT_SECRETS_FLAG, setFeatureFlag } from '../../utils/feature-flags.js';
 import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
+import type { ScionSecretValueField } from '../shared/secret-value-field.js';
 
 interface CreatePrivate extends HTMLElement {
   loading: boolean;
@@ -100,6 +101,34 @@ async function mountCreate(experimentOn: boolean): Promise<{
 
 type Valued = HTMLElement & { value: string; type?: string };
 
+function getValueField(rowEl: HTMLElement): ScionSecretValueField {
+  return rowEl.querySelector<ScionSecretValueField>(
+    'scion-secret-value-field[data-field="value"]'
+  )!;
+}
+
+async function enterSecretValue(
+  form: ScionAgentConfigForm,
+  rowEl: HTMLElement,
+  value: string
+): Promise<void> {
+  const field = getValueField(rowEl);
+  await field.updateComplete;
+  const input = field.shadowRoot!.querySelector<HTMLInputElement>('input.secret-input')!;
+  if (value.includes('\n') || value.includes('\r')) {
+    const pasteEv = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(pasteEv, 'clipboardData', {
+      value: { getData: (t: string) => (t === 'text/plain' ? value : '') },
+    });
+    input.dispatchEvent(pasteEv);
+  } else {
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  await field.updateComplete;
+  await form.updateComplete;
+}
+
 async function addAndFillRow(
   form: ScionAgentConfigForm,
   opts: {
@@ -129,10 +158,7 @@ async function addAndFillRow(
     await form.updateComplete;
   }
 
-  const valInput = rowEl.querySelector<Valued>('[data-field="value"]')!;
-  valInput.value = opts.value;
-  valInput.dispatchEvent(new Event('sl-input'));
-  await form.updateComplete;
+  await enterSecretValue(form, rowEl, opts.value);
 
   if (opts.target !== undefined) {
     const targetInput = rowEl.querySelector<Valued>('[data-field="target"]')!;
@@ -193,78 +219,112 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
     expect(editForm.shadowRoot!.querySelector('[data-testid="create-secrets-editor"]')).toBeNull();
   });
 
-  it('masks values with show/hide toggle and never exposes masked file plaintext in DOM', async () => {
+  it('uses native password masking for every row type, adds Load from file on file rows, and reveals textarea only on Show', async () => {
     const { form } = await mountCreate(true);
     const rowEl = await addAndFillRow(form, { key: 'API_KEY', value: 's3cr3t' });
 
-    const valInput = rowEl.querySelector<Valued>('[data-field="value"]')!;
-    expect(valInput.tagName.toLowerCase()).toBe('sl-input');
-    expect(valInput.getAttribute('type')).toBe('password');
+    const field = getValueField(rowEl);
+    await field.updateComplete;
+    const pwdInput = field.shadowRoot!.querySelector<HTMLInputElement>('input.secret-input')!;
+    expect(pwdInput).not.toBeNull();
+    expect(pwdInput.type).toBe('password');
+    expect(pwdInput.autocomplete).toBe('off');
+    expect(field.shadowRoot!.querySelector('textarea')).toBeNull();
+    expect(field.shadowRoot!.querySelector('input[type="file"]')).toBeNull();
 
-    // Switch to file type while still masked -> plaintext must not appear in DOM
+    // Switch to file type while still masked -> stays native password input + shows Load from file
     const typeSelect = rowEl.querySelector<Valued>('[data-field="type"]')!;
     typeSelect.value = 'file';
     typeSelect.dispatchEvent(new Event('sl-change'));
     await form.updateComplete;
+    await field.updateComplete;
 
-    expect(rowEl.querySelector('[data-testid="secret-file-masked"]')).not.toBeNull();
-    expect(rowEl.querySelector('sl-textarea')).toBeNull();
-    expect(rowEl.textContent).not.toContain('s3cr3t');
-    expect(rowEl.innerHTML).not.toContain('s3cr3t');
+    expect(field.shadowRoot!.querySelector('input.secret-input')?.getAttribute('type')).toBe(
+      'password'
+    );
+    expect(field.shadowRoot!.querySelector('input[type="file"]')).not.toBeNull();
+    expect(field.shadowRoot!.querySelector('textarea')).toBeNull();
+    expect(field.shadowRoot!.textContent).not.toContain('s3cr3t');
 
-    // Toggle show -> renders sl-textarea with value for viewing/editing
-    rowEl.querySelector<HTMLElement>('[data-action="toggle-reveal"]')!.click();
-    await form.updateComplete;
-    const textarea = rowEl.querySelector<Valued>('[data-field="value"]')!;
-    expect(textarea.tagName.toLowerCase()).toBe('sl-textarea');
+    // Toggle Show -> renders textarea with value and accurate aria-pressed
+    const toggleBtn = field.shadowRoot!.querySelector<HTMLButtonElement>('.toggle-visibility')!;
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+    toggleBtn.click();
+    await field.updateComplete;
+    const textarea = field.shadowRoot!.querySelector<HTMLTextAreaElement>(
+      'textarea.secret-textarea'
+    )!;
+    expect(textarea).not.toBeNull();
     expect(textarea.value).toBe('s3cr3t');
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
 
-    // Toggle hide again -> removes textarea and plaintext from DOM
-    rowEl.querySelector<HTMLElement>('[data-action="toggle-reveal"]')!.click();
-    await form.updateComplete;
-    expect(rowEl.querySelector('[data-testid="secret-file-masked"]')).not.toBeNull();
-    expect(rowEl.querySelector('sl-textarea')).toBeNull();
-    expect(rowEl.textContent).not.toContain('s3cr3t');
-    expect(rowEl.innerHTML).not.toContain('s3cr3t');
+    // Toggle Hide -> returns to native password input without losing value
+    toggleBtn.click();
+    await field.updateComplete;
+    expect(field.shadowRoot!.querySelector('textarea')).toBeNull();
+    expect(field.shadowRoot!.querySelector('input.secret-input')?.getAttribute('type')).toBe(
+      'password'
+    );
+    expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+    expect(form.collectSecrets()[0].value).toBe('s3cr3t');
   });
 
-  it('keeps file textarea mounted across multiple keystrokes while focused, then masks on blur', async () => {
+  it('captures multi-line file values via paste and file picker without blur-swap or plaintext DOM leak', async () => {
     const { form } = await mountCreate(true);
-    form.shadowRoot!.querySelector<HTMLElement>('[data-testid="add-secret-row"]')!.click();
+    const rowEl = await addAndFillRow(form, {
+      key: 'DEPLOY_KEY',
+      value: '-----BEGIN KEY-----\npem-body\n-----END KEY-----',
+      type: 'file',
+      target: '~/.ssh/id_ed25519',
+    });
+
+    const field = getValueField(rowEl);
+    await field.updateComplete;
+    expect(field.shadowRoot!.querySelector('textarea')).toBeNull();
+    expect(field.shadowRoot!.querySelector('[data-testid="file-value-masked"]')).not.toBeNull();
+    expect(field.shadowRoot!.textContent).not.toContain('pem-body');
+    expect(field.shadowRoot!.innerHTML).not.toContain('pem-body');
+    expect(form.collectSecrets()[0].value).toBe('-----BEGIN KEY-----\npem-body\n-----END KEY-----');
+
+    // Load from file replaces value verbatim while staying masked
+    const fileInput = field.shadowRoot!.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const loadedPem = '-----BEGIN CERT-----\r\nfrom-file\r\n-----END CERT-----\r\n';
+    const file = new File([loadedPem], 'cert.pem', { type: 'text/plain' });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fileInput.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 10));
+    await field.updateComplete;
     await form.updateComplete;
 
-    const rowEl = form.shadowRoot!.querySelector<HTMLElement>('[data-testid="secret-row"]')!;
-    const keyInput = rowEl.querySelector<Valued>('[data-field="key"]')!;
-    keyInput.value = 'DEPLOY_KEY';
-    keyInput.dispatchEvent(new Event('sl-input'));
-    const typeSelect = rowEl.querySelector<Valued>('[data-field="type"]')!;
-    typeSelect.value = 'file';
-    typeSelect.dispatchEvent(new Event('sl-change'));
+    expect(fileInput.value).toBe('');
+    expect(field.shadowRoot!.querySelector('textarea')).toBeNull();
+    expect(field.shadowRoot!.textContent).not.toContain('from-file');
+    expect(form.collectSecrets()[0].value).toBe(loadedPem);
+  });
+
+  it('keeps remaining row values isolated when an earlier row is removed', async () => {
+    const { form } = await mountCreate(true);
+    await addAndFillRow(form, { key: 'FIRST_KEY', value: 'first-secret' });
+    await addAndFillRow(form, { key: 'SECOND_KEY', value: 'second-secret' });
+
+    const firstRow = form.shadowRoot!.querySelectorAll<HTMLElement>(
+      '[data-testid="secret-row"]'
+    )[0];
+    firstRow.querySelector<HTMLElement>('[data-action="remove"]')!.click();
     await form.updateComplete;
 
-    const textarea = rowEl.querySelector<Valued>('sl-textarea[data-field="value"]')!;
-    expect(textarea).not.toBeNull();
-
-    textarea.dispatchEvent(new Event('sl-focus'));
-    await form.updateComplete;
-
-    for (const partial of ['p', 'pe', 'pem-body']) {
-      textarea.value = partial;
-      textarea.dispatchEvent(new Event('sl-input'));
-      await form.updateComplete;
-      // Same textarea instance remains mounted while focused
-      expect(rowEl.querySelector('sl-textarea[data-field="value"]')).toBe(textarea);
-      expect(rowEl.querySelector('[data-testid="secret-file-masked"]')).toBeNull();
-    }
-    expect(form.collectSecrets()[0].value).toBe('pem-body');
-
-    // On blur, textarea is replaced by the masked placeholder with no plaintext in DOM
-    textarea.dispatchEvent(new Event('sl-blur'));
-    await form.updateComplete;
-    expect(rowEl.querySelector('sl-textarea')).toBeNull();
-    expect(rowEl.querySelector('[data-testid="secret-file-masked"]')).not.toBeNull();
-    expect(rowEl.textContent).not.toContain('pem-body');
-    expect(rowEl.innerHTML).not.toContain('pem-body');
+    expect(form.collectSecrets()).toEqual([
+      {
+        key: 'SECOND_KEY',
+        value: 'second-secret',
+        type: 'environment',
+        injectionMode: 'as_needed',
+      },
+    ]);
+    const remainingRow = form.shadowRoot!.querySelector<HTMLElement>('[data-testid="secret-row"]')!;
+    const remainingField = getValueField(remainingRow);
+    await remainingField.updateComplete;
+    expect(remainingField.value).toBe('second-secret');
   });
 
   it('omits secrets from POST body when none are entered', async () => {
@@ -275,12 +335,19 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
     expect(postBodies[0]).not.toHaveProperty('secrets');
   });
 
-  it('omits secrets from POST body when hub.agent_secrets turns off after rows were entered', async () => {
+  it('omits secrets from POST body when hub.agent_secrets turns off and stays cleared if turned back on', async () => {
     const { page, form } = await mountCreate(true);
     await addAndFillRow(form, { key: 'LATE_FLAG_OFF', value: 'should-not-send' });
     expect(form.collectSecrets()).toHaveLength(1);
 
     setFeatureFlag(AGENT_SECRETS_FLAG, false);
+    await form.updateComplete;
+    await page.updateComplete;
+
+    expect(form.collectSecrets()).toEqual([]);
+
+    // Re-enabling the flag must not resurrect cleared secrets invisibly
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
     await form.updateComplete;
     await page.updateComplete;
 
@@ -338,9 +405,16 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
     expect(form.collectSecrets()).toEqual([]);
   });
 
-  it('clears secret values on navigation / disconnect', async () => {
+  it('clears secret values on navigation / disconnect and pagehide', async () => {
     const { page, form } = await mountCreate(true);
     await addAndFillRow(form, { key: 'TEMP_TOKEN', value: 'ephemeral-value' });
+    expect(form.collectSecrets()).toHaveLength(1);
+
+    window.dispatchEvent(new Event('pagehide'));
+    await form.updateComplete;
+    expect(form.collectSecrets()).toEqual([]);
+
+    await addAndFillRow(form, { key: 'TEMP_TOKEN_2', value: 'ephemeral-value-2' });
     expect(form.collectSecrets()).toHaveLength(1);
 
     page.remove();
@@ -378,12 +452,12 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
     (mounted.form as unknown as { secretRows: unknown[] }).secretRows = Array.from(
       { length: 51 },
       (_, i) => ({
+        id: `bulk-row-${i}`,
         key: `K_${i}`,
         value: `v_${i}`,
         type: 'environment',
         target: '',
         injectionMode: 'as_needed',
-        revealed: false,
       })
     );
     await mounted.page.handleSubmit(new Event('submit'));
