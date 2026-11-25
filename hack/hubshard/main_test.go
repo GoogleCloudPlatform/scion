@@ -469,6 +469,39 @@ func TestListSkipLocate(t *testing.T) {
 	if _, err := runOut("-tags", "no_sqlite", "-locate", "TestB"); err == nil {
 		t.Error("-locate TestB under no_sqlite should fail")
 	}
+
+	// -match supports regexes, subtest filters, alternation, and build tags.
+	got, err = runOut("-match", "^TestA$/subtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("TestA %d\n", as["a_test.go"]); got != want {
+		t.Errorf("-match ^TestA$/subtest = %q, want %q", got, want)
+	}
+	got, err = runOut("-match", "TestA/sub1|TestCommon/sub2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("TestA %d\nTestCommon 1\n", as["a_test.go"]); got != want {
+		t.Errorf("-match alternation = %q, want %q", got, want)
+	}
+	got, err = runOut("-tags", "no_sqlite", "-match", "TestB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("-match TestB under no_sqlite = %q, want empty", got)
+	}
+	got, err = runOut("-match", "TestNoSuch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("-match TestNoSuch = %q, want empty", got)
+	}
+	if _, err := runOut("-match", "[invalid"); err == nil {
+		t.Error("-match with invalid regex should fail")
+	}
 }
 
 func TestShards(t *testing.T) {

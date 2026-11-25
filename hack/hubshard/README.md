@@ -34,7 +34,7 @@ passes only when all of them do (N = 10 today, from `-shards`).
 
 ```sh
 make test-hub-shard SHARD=2            # compile shard 2, check its test list, run it
-make test-hub-shard SHARD=2 NOSQLITE=1 # the same with -tags no_sqlite (RACE=1 adds -race)
+make test-hub-shard SHARD=2 NOSQLITE=1 # the same with -tags no_sqlite (RACE=1 adds -race; RUN=pat adds -run pat)
 make build-hub-shard SHARD=2           # compile only (binary discarded)
 make vet-hub-shard SHARD=2             # go vet the shard with both vet tag sets
 make test-hub-postgres SHARD=2         # the shard's Postgres tests (needs the Postgres env vars)
@@ -103,8 +103,9 @@ Tool flags: `-n N` (shard count, default 10), `-shards` (print 1..N; the
 CI matrix and `make test-hub-shards` loop over it),
 `-overlay DIR`, `-parity`, `-list K` (the tests shard K's binary compiles,
 under `-tags`), `-skip K` (the `go test -skip` pattern for shard K, see
-below), `-locate NAME...` (the shard that runs each named test), `-untag`
-(strip clauses an older generator committed), `-v`, `-dumpgraph FILE`.
+below), `-locate NAME...` (the shard that runs each named test),
+`-match PATTERN` (every test matching a `go test -run` regex and its shard),
+`-untag` (strip clauses an older generator committed), `-v`, `-dumpgraph FILE`.
 
 ## Exactly once
 
