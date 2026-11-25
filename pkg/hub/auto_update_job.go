@@ -92,12 +92,9 @@ func autoUpdateWindowOffset(hubID string) time.Duration {
 	return time.Duration(h.Sum32()%autoUpdateMaxHubOffsetMinutes) * time.Minute
 }
 
-// autoUpdateWindowFor reports whether now falls inside the daily auto-update
-// window [startHourUTC:00 + offset, startHourUTC:00 + 2h) in UTC, and if so
-// returns the window's start date ("YYYY-MM-DD") as attemptDay. Checking both
-// today's and yesterday's window start handles windows that cross midnight
-// (startHourUTC == 23) without permitting a second attempt after 00:00 UTC.
-func autoUpdateWindowFor(now time.Time, startHourUTC int, offset time.Duration) (inWindow bool, attemptDay string) {
+// normalizeAutoUpdateWindow clamps startHourUTC to [0, 23] (falling back to
+// DefaultAutoUpdateWindowStartHourUTC) and offset to [0, autoUpdateWindowDuration).
+func normalizeAutoUpdateWindow(startHourUTC int, offset time.Duration) (int, time.Duration) {
 	if startHourUTC < 0 || startHourUTC > 23 {
 		startHourUTC = DefaultAutoUpdateWindowStartHourUTC
 	}
@@ -106,6 +103,16 @@ func autoUpdateWindowFor(now time.Time, startHourUTC int, offset time.Duration) 
 	} else if offset >= autoUpdateWindowDuration {
 		offset = autoUpdateWindowDuration - time.Minute
 	}
+	return startHourUTC, offset
+}
+
+// autoUpdateWindowFor reports whether now falls inside the daily auto-update
+// window [startHourUTC:00 + offset, startHourUTC:00 + 2h) in UTC, and if so
+// returns the window's start date ("YYYY-MM-DD") as attemptDay. Checking both
+// today's and yesterday's window start handles windows that cross midnight
+// (startHourUTC == 23) without permitting a second attempt after 00:00 UTC.
+func autoUpdateWindowFor(now time.Time, startHourUTC int, offset time.Duration) (inWindow bool, attemptDay string) {
+	startHourUTC, offset = normalizeAutoUpdateWindow(startHourUTC, offset)
 	utc := now.UTC()
 	y, m, d := utc.Date()
 	todayStart := time.Date(y, m, d, startHourUTC, 0, 0, 0, time.UTC)
@@ -117,6 +124,46 @@ func autoUpdateWindowFor(now time.Time, startHourUTC int, offset time.Duration) 
 		}
 	}
 	return false, ""
+}
+
+// nextAutoUpdateRunAt returns the next UTC instant at which the daily
+// auto-update job will evaluate an update check, using the same window and
+// per-hub offset rules as autoUpdateWindowFor. When now already lies inside an
+// unattempted window, it returns now truncated to seconds (imminent next tick).
+func nextAutoUpdateRunAt(now time.Time, startHourUTC int, offset time.Duration, lastAttemptDay string) time.Time {
+	startHourUTC, offset = normalizeAutoUpdateWindow(startHourUTC, offset)
+	utc := now.UTC()
+	y, m, d := utc.Date()
+	todayStart := time.Date(y, m, d, startHourUTC, 0, 0, 0, time.UTC)
+	for _, windowStart := range []time.Time{
+		todayStart.AddDate(0, 0, -1),
+		todayStart,
+		todayStart.AddDate(0, 0, 1),
+	} {
+		day := windowStart.UTC().Format("2006-01-02")
+		if day == lastAttemptDay {
+			continue
+		}
+		effectiveStart := windowStart.Add(offset)
+		windowEnd := windowStart.Add(autoUpdateWindowDuration)
+		if !utc.Before(windowEnd) {
+			continue
+		}
+		if utc.Before(effectiveStart) {
+			return effectiveStart
+		}
+		return utc.Truncate(time.Second)
+	}
+	return todayStart.AddDate(0, 0, 1).Add(offset)
+}
+
+// setAutoUpdateNonRunOutcome records a non-run outcome (no_update or
+// skipped:*) and clears LastRunID/LastTarget so the UI never pairs a skip
+// outcome with an unrelated earlier run.
+func setAutoUpdateNonRunOutcome(state *AutoUpdateState, outcome string) {
+	state.LastRunID = ""
+	state.LastTarget = ""
+	state.LastOutcome = outcome
 }
 
 // readAutoUpdateState reads system.auto_update_state. Missing or unreadable
@@ -313,7 +360,7 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 	if s.maintenance != nil && s.maintenance.IsEnabled() {
 		log.Info("Auto-update skipped: hub maintenance mode is enabled")
 		state.LastCheckAt = now.UTC().Format(time.RFC3339)
-		state.LastOutcome = AutoUpdateOutcomeSkippedMaintenanceMode
+		setAutoUpdateNonRunOutcome(&state, AutoUpdateOutcomeSkippedMaintenanceMode)
 		if err := s.writeAutoUpdateState(ctx, state); err != nil {
 			log.Error("Failed to persist maintenance-mode skip state", "error", err)
 		}
@@ -341,7 +388,7 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 	})
 	if err != nil {
 		log.Error("Scheduled auto-update catalog check failed; will retry next day", "channel", channel, "error", err)
-		state.LastOutcome = AutoUpdateOutcomeSkippedCheckFailed
+		setAutoUpdateNonRunOutcome(&state, AutoUpdateOutcomeSkippedCheckFailed)
 		if werr := s.writeAutoUpdateState(ctx, state); werr != nil {
 			log.Error("Failed to persist check_failed outcome", "error", werr)
 		}
@@ -353,7 +400,7 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 		log.Debug("Auto-update check found no newer release",
 			"current", result.CurrentVersion, "latest", result.LatestVersion,
 			"channel", result.Channel, "class", result.Class)
-		state.LastOutcome = AutoUpdateOutcomeNoUpdate
+		setAutoUpdateNonRunOutcome(&state, AutoUpdateOutcomeNoUpdate)
 		if werr := s.writeAutoUpdateState(ctx, state); werr != nil {
 			log.Error("Failed to persist no_update outcome", "error", werr)
 		}
@@ -362,7 +409,7 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 	if state.SuppressedTag != "" && result.LatestVersion == state.SuppressedTag {
 		log.Info("Auto-update skipped: latest release is suppressed after a previous failure",
 			"tag", result.LatestVersion, "channel", channel)
-		state.LastOutcome = AutoUpdateOutcomeSkippedSuppressed
+		setAutoUpdateNonRunOutcome(&state, AutoUpdateOutcomeSkippedSuppressed)
 		if werr := s.writeAutoUpdateState(ctx, state); werr != nil {
 			log.Error("Failed to persist suppressed outcome", "error", werr)
 		}
@@ -374,7 +421,7 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 	executor, err := deps.updateExecutor()
 	if err != nil {
 		log.Error("Failed to resolve update-binary executor for auto-update", "error", err)
-		state.LastOutcome = AutoUpdateOutcomeSkippedError
+		setAutoUpdateNonRunOutcome(&state, AutoUpdateOutcomeSkippedError)
 		if werr := s.writeAutoUpdateState(ctx, state); werr != nil {
 			log.Error("Failed to persist executor error outcome", "error", werr)
 		}
@@ -387,7 +434,7 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 		state.LastTarget = result.LatestVersion
 		state.LastOutcome = AutoUpdateOutcomeStarted
 	} else {
-		state.LastOutcome = outcome
+		setAutoUpdateNonRunOutcome(&state, outcome)
 	}
 	if werr := s.writeAutoUpdateState(ctx, state); werr != nil {
 		log.Error("Failed to persist auto-update apply outcome", "run_id", runID, "outcome", state.LastOutcome, "error", werr)

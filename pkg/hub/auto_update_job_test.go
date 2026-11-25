@@ -729,6 +729,43 @@ func TestRunReleaseAutoUpdate_InFlightDowngradeAndSelectedChannel(t *testing.T) 
 		require.NoError(t, err)
 		waitForRunTerminal(t, s, state.LastRunID)
 	})
+
+	t.Run("skip outcome clears previous LastRunID and LastTarget", func(t *testing.T) {
+		srv, s := newAutoUpdateJobTestServer(t, MaintenanceConfig{
+			DeploymentTier: "binary", ReleaseChannel: "nightly", UpdatePolicy: "auto",
+			Installer: newTestInstaller(maintenance.StrategySymlink),
+		})
+		// Seed a prior day's verified run.
+		require.NoError(t, srv.writeAutoUpdateState(ctx, AutoUpdateState{
+			LastCheckAt:    "2026-11-23T04:15:00Z",
+			LastAttemptDay: "2026-11-23",
+			LastRunID:      "prior-run-123",
+			LastTarget:     "nightly-20261123",
+			LastOutcome:    AutoUpdateOutcomeVerified,
+		}))
+		// Seed an in-flight manual update so autoApplyUpdate skips with skipped:in_flight.
+		require.NoError(t, s.CreateMaintenanceRun(ctx, &store.MaintenanceOperationRun{
+			ID:           api.NewUUID(),
+			OperationKey: "update-binary",
+			Status:       store.MaintenanceStatusRunning,
+			StartedAt:    time.Now(),
+			StartedBy:    "admin@example.com",
+		}))
+
+		p := &autoUpdateJobProbe{
+			now:         inWindow,
+			running:     "nightly-20261123",
+			checkResult: releaseCheckResult(true),
+			executor:    newParamRecordingExecutor(),
+		}
+		srv.runReleaseAutoUpdate(ctx, p.deps())
+
+		state, err := srv.readAutoUpdateState(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, AutoUpdateOutcomeSkippedInFlight, state.LastOutcome)
+		assert.Empty(t, state.LastRunID, "skip outcome must not retain an unrelated prior LastRunID")
+		assert.Empty(t, state.LastTarget, "skip outcome must not retain an unrelated prior LastTarget")
+	})
 }
 
 func TestRegisterSchedulerHandlers_ReleaseAutoUpdateAlwaysRegistered(t *testing.T) {

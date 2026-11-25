@@ -68,13 +68,19 @@ type AutoUpdateSetting struct {
 // GET /api/v1/admin/maintenance/update-status and
 // PUT /api/v1/admin/maintenance/auto-update.
 type updateStatusAutoUpdate struct {
-	Enabled            bool   `json:"enabled"`
-	Source             string `json:"source"`
-	Locked             bool   `json:"locked"`
-	LockedReason       string `json:"lockedReason"`
-	Active             bool   `json:"active"`
-	InactiveReason     string `json:"inactiveReason"`
-	WindowStartHourUTC int    `json:"windowStartHourUtc"`
+	Enabled            bool    `json:"enabled"`
+	Source             string  `json:"source"`
+	Locked             bool    `json:"locked"`
+	LockedReason       string  `json:"lockedReason"`
+	Active             bool    `json:"active"`
+	InactiveReason     string  `json:"inactiveReason"`
+	WindowStartHourUTC int     `json:"windowStartHourUtc"`
+	NextRunAt          *string `json:"nextRunAt"`
+	LastCheckAt        string  `json:"lastCheckAt"`
+	LastRunID          string  `json:"lastRunId"`
+	LastTarget         string  `json:"lastTarget"`
+	LastOutcome        string  `json:"lastOutcome"`
+	SuppressedTag      string  `json:"suppressedTag"`
 }
 
 // effectiveAutoUpdateResult is the precedence-resolved auto-update intent
@@ -135,12 +141,15 @@ func effectiveAutoUpdate(mc MaintenanceConfig, setting *AutoUpdateSetting) effec
 }
 
 // buildAutoUpdateStatus combines the precedence-resolved auto-update intent
-// with the hub's runtime eligibility state.
+// with the hub's runtime eligibility state and persisted job bookkeeping.
 func buildAutoUpdateStatus(
 	mc MaintenanceConfig,
 	setting *AutoUpdateSetting,
+	state AutoUpdateState,
 	mode, channel, pin string,
 	installerSupported, maintenanceMode bool,
+	hubID string,
+	now time.Time,
 ) updateStatusAutoUpdate {
 	eff := effectiveAutoUpdate(mc, setting)
 
@@ -160,14 +169,32 @@ func buildAutoUpdateStatus(
 		inactiveReason = AutoUpdateInactiveMaintenanceMode
 	}
 
+	active := eff.Enabled && inactiveReason == ""
+	var nextRunAt *string
+	if active {
+		next := nextAutoUpdateRunAt(
+			now,
+			eff.WindowStartHourUTC,
+			autoUpdateWindowOffset(hubID),
+			state.LastAttemptDay,
+		).UTC().Format(time.RFC3339)
+		nextRunAt = &next
+	}
+
 	return updateStatusAutoUpdate{
 		Enabled:            eff.Enabled,
 		Source:             eff.Source,
 		Locked:             eff.Locked,
 		LockedReason:       eff.LockedReason,
-		Active:             eff.Enabled && inactiveReason == "",
+		Active:             active,
 		InactiveReason:     inactiveReason,
 		WindowStartHourUTC: eff.WindowStartHourUTC,
+		NextRunAt:          nextRunAt,
+		LastCheckAt:        state.LastCheckAt,
+		LastRunID:          state.LastRunID,
+		LastTarget:         state.LastTarget,
+		LastOutcome:        state.LastOutcome,
+		SuppressedTag:      state.SuppressedTag,
 	}
 }
 
@@ -285,16 +312,25 @@ func (s *Server) handleAdminMaintenanceAutoUpdate(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read update status", nil)
 		return
 	}
+	state, err := s.readAutoUpdateState(ctx)
+	if err != nil {
+		s.maintenanceLog.Error("Failed to read auto_update_state after auto_update write", "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read update status", nil)
+		return
+	}
 	cur := currentRunningBuild()
 	channel, _ := effectiveReleaseChannel(mc, cur.Version, sel)
 	resp := buildAutoUpdateStatus(
 		mc,
 		&next,
+		state,
 		effectiveUpdateMode(mc, sel),
 		channel,
 		effectivePin(sel),
 		s.updateInstaller().Status().Supported,
 		s.maintenance != nil && s.maintenance.IsEnabled(),
+		s.config.HubID,
+		time.Now(),
 	)
 	writeJSON(w, http.StatusOK, resp)
 }

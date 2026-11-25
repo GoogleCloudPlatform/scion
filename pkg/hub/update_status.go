@@ -586,6 +586,10 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 	if err != nil {
 		return nil, err
 	}
+	autoUpdateState, err := s.readAutoUpdateState(ctx)
+	if err != nil {
+		return nil, err
+	}
 	channel, source := effectiveReleaseChannel(mc, cur.Version, sel)
 	isGit := !update.IsReleaseTag(cur.Version)
 	displayVersion := cur.Version
@@ -626,11 +630,14 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 		AutoUpdate: buildAutoUpdateStatus(
 			mc,
 			autoUpdateSetting,
+			autoUpdateState,
 			modeEff,
 			channel,
 			pinEff,
 			instStatus.Supported,
 			s.maintenance != nil && s.maintenance.IsEnabled(),
+			s.config.HubID,
+			time.Now(),
 		),
 		Downgrade: updateStatusDowngrade{
 			Floor:              downgradeFloor,
