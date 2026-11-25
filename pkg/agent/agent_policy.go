@@ -209,6 +209,18 @@ func quotePolicyValue(v string) string {
 // so the API server does not default the request to the filled limit.
 var k8sDefaultRequestFor = map[string]string{"cpu": "250m", "memory": "512Mi"}
 
+// fillMissingLimitRuntimes are the runtimes where omitting a resource limit
+// leaves the container unlimited, so max_resources fills missing limits with
+// the configured maximum. Runtimes with bounded platform defaults or
+// request-as-limit fallback (Cloud Run, Apple container) are not filled so
+// request-only agents are not silently upsized and Cloud Run CPU/memory
+// bands are not violated.
+var fillMissingLimitRuntimes = map[string]bool{
+	"docker":     true,
+	"podman":     true,
+	"kubernetes": true,
+}
+
 // applyAgentPolicyResources checks the agent's CPU and memory requests and
 // limits (the common resource spec and the Kubernetes resources map, which
 // overrides it on Kubernetes) against max_resources, and returns the spec to
@@ -303,8 +315,11 @@ func applyAgentPolicyResources(p *config.V1AgentPolicy, agentName, runtimeName s
 		if runtimeName != "kubernetes" {
 			hasK8sLimit, hasK8sRequest = false, false
 		}
-		// No limit is not "unlimited": the maximum becomes the limit.
-		if *r.limit == "" && (!hasK8sLimit || k8sLimit == "") {
+		// No limit is not "unlimited" on runtimes where omission means
+		// unbounded (Docker, Podman, Kubernetes): the maximum becomes the
+		// limit. Runtimes with bounded defaults or request-as-limit fallback
+		// (Cloud Run, Apple container) keep missing limits unset.
+		if fillMissingLimitRuntimes[runtimeName] && *r.limit == "" && (!hasK8sLimit || k8sLimit == "") {
 			*r.limit = r.max
 			if runtimeName == "kubernetes" && *r.request == "" && (!hasK8sRequest || k8sRequest == "") {
 				req := k8sDefaultRequestFor[r.name]
