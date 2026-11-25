@@ -3949,6 +3949,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	// A stored broker_policy.admin_managed_only=true while its experiment is
 	// off (ptone/scion#7829).
 	hubSrv.WarnBrokerPolicyExperimentMismatch()
+	// Stored access constraints remain enforced while hub.access_constraints is
+	// off (ptone/scion#9080).
+	hubSrv.WarnStoredAccessConstraintsExperimentOff(ctx)
 
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",

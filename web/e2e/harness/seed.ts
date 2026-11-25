@@ -259,6 +259,18 @@ export async function createAccessBoundary(
     groupId: string;
   }
 ): Promise<{ id: string }> {
+  // Ensure hub.access_constraints is enabled so admin constraint routes are active.
+  const expState = await apiJSON<{ revision: number }>(
+    baseURL,
+    accessToken,
+    'GET',
+    '/api/v1/admin/experiments'
+  );
+  await apiJSON<unknown>(baseURL, accessToken, 'PUT', '/api/v1/admin/experiments', {
+    expected_revision: expState.revision,
+    overrides: { 'hub.access_constraints': true },
+  });
+
   // Step 1: Create a preview
   const preview = await apiJSON<{ previewToken: string; id: string }>(
     baseURL,

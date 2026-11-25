@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -490,6 +491,7 @@ func TestHubUATControlPlane_ProjectTokenNeverReachesHubRoutes(t *testing.T) {
 func TestHubUATControlPlane_GovernanceSessionOnlyOperationsRefuseHubToken(t *testing.T) {
 	f := newMSFixture(t, "xp-gov")
 	srv, s := f.srv, f.s
+	setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: true})
 	ctx := context.Background()
 	admin := mustGetUser(t, s, hubConfigTokenUser(t, s, "xp-gov-admin", store.SystemRoleSuperAdmin))
 

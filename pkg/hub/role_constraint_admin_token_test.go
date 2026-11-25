@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -772,6 +773,7 @@ func rcaDeleteConstraint(t *testing.T, srv *Server, key string, c *store.AccessC
 // nothing changes.
 func TestConstraintAdminToken_RequiresConstraintAdminSelector(t *testing.T) {
 	srv, s := testServer(t)
+	setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: true})
 	ctx := context.Background()
 	sa := mtSuperAdmin(t, s, "sa")
 	subject := rcaUser(t, s, "ca-subject")
@@ -842,6 +844,7 @@ func TestConstraintAdminToken_RequiresConstraintAdminSelector(t *testing.T) {
 // update that widens or removes the time window is admitted.
 func TestConstraintRelaxToken_SessionOnly(t *testing.T) {
 	srv, s := testServer(t)
+	setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: true})
 	ctx := context.Background()
 	sa := mtSuperAdmin(t, s, "sa")
 	subject := rcaUser(t, s, "cr-subject")
@@ -935,6 +938,7 @@ func TestConstraintRelaxToken_SessionOnly(t *testing.T) {
 // the authority.
 func TestConstraintWindowToken_NeedsRelaxationAuthority(t *testing.T) {
 	srv, s := testServer(t)
+	setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: true})
 	ctx := context.Background()
 	sa := mtSuperAdmin(t, s, "sa")
 	subject := rcaUser(t, s, "cw-subject")
@@ -1013,6 +1017,7 @@ func rcaRequireWindow(t *testing.T, c *store.AccessConstraint, notBefore, expire
 // holder's full authority.
 func TestConstraintCommit_AppliesTokenSelectors(t *testing.T) {
 	srv, s := testServer(t)
+	setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: true})
 	ctx := context.Background()
 	sa := mtSuperAdmin(t, s, "sa")
 	subject := rcaUser(t, s, "cc-subject")

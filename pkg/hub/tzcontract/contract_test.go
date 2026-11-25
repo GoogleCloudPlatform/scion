@@ -354,6 +354,11 @@ func runTokyoContract(t *testing.T, b backend) {
 	step(t, "access constraint window +02:00", func(t *testing.T) {
 		acProject := createProject(t, h, "tzcontract-ac")
 		grantConstraintAdmin(t, h, acProject)
+		expState := h.mustJSON("GET", "/api/v1/admin/experiments", nil, 200)
+		h.mustJSON("PUT", "/api/v1/admin/experiments", map[string]any{
+			"expected_revision": expState["revision"],
+			"overrides":         map[string]any{"hub.access_constraints": true},
+		}, 200)
 		notBefore := time.Now().Add(24 * time.Hour).Truncate(time.Second).In(offsetZone)
 		expiresAt := time.Now().Add(72 * time.Hour).Truncate(time.Second).In(offsetZone)
 		draft := map[string]any{

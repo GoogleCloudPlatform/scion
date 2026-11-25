@@ -51,6 +51,7 @@ import {
   parseWallClock,
 } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { accessConstraintsEnabled } from '../../utils/feature-flags.js';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -619,6 +620,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
    * ignored and the notice simply does not appear.
    */
   private async loadBoundaryCount(): Promise<void> {
+    if (!accessConstraintsEnabled()) return;
     try {
       const res = await apiFetch('/api/v1/admin/access-constraints?status=active&pageSize=0');
       if (res.ok) {
@@ -1063,7 +1065,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
   }
 
   private renderBoundaryNotice() {
-    if (this.activeBoundaryCount <= 0) return nothing;
+    if (!accessConstraintsEnabled() || this.activeBoundaryCount <= 0) return nothing;
 
     return html`
       <div

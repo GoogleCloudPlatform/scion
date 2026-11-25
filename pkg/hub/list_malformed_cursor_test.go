@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -132,6 +133,11 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 	for epName, ep := range endpoints {
 		for cName, cursor := range cursors {
 			t.Run(epName+"/"+cName, func(t *testing.T) {
+				if epName == "access constraints" {
+					prevOps := srv.GetOperationalSettings()
+					setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: true})
+					defer srv.SetOperationalSettings(prevOps)
+				}
 				param := ep.param
 				if param == "" {
 					param = "cursor"

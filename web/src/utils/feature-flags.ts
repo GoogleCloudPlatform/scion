@@ -467,3 +467,18 @@ export const TRIGGERS_FLAG = 'hub.triggers';
 export function triggersEnabled(): boolean {
   return isFeatureEnabled(TRIGGERS_FLAG);
 }
+
+/**
+ * Access constraints management UI (hub.access_constraints, ptone/scion#9080):
+ * gates the Access Constraints admin nav item, /admin/access-boundaries* pages,
+ * and cross-links/notices. Presentation only: the hub enforces the experiment
+ * on /api/v1/admin/access-constraints* and /api/v1/admin/access-constraint-previews*
+ * (404 while off) while any stored constraints remain unconditionally enforced.
+ * Default OFF.
+ */
+export const ACCESS_CONSTRAINTS_FLAG = 'hub.access_constraints';
+
+/** Whether Access Constraints UI surfaces are enabled in this session. */
+export function accessConstraintsEnabled(): boolean {
+  return isFeatureEnabled(ACCESS_CONSTRAINTS_FLAG);
+}

@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -298,6 +299,7 @@ func TestRoleRoutesToken_WriteMethodsNeedWriteSelectors(t *testing.T) {
 func TestConstraintReadToken_DoesNotAdmitConstraintAdmin(t *testing.T) {
 	m := newBearerMatrixFixture(t)
 	srv := m.srv
+	setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: true})
 	ac := m.ids.accessConstraint
 
 	reads := m.mint(t, hubBoundary(), []string{"access_constraint:read"})
@@ -339,6 +341,7 @@ func TestConstraintReadToken_DoesNotAdmitConstraintAdmin(t *testing.T) {
 // nothing.
 func TestConstraintWriteRoutesToken_WriteMethodsNeedAdminSelector(t *testing.T) {
 	m := newBearerMatrixFixture(t)
+	setExperimentOverrides(t, m.srv, map[string]bool{experiments.AccessConstraints: true})
 	ctx := context.Background()
 	_, selectors := m.everySelectorHubToken(t)
 	require.Contains(t, selectors, "access_constraint:read")
@@ -373,6 +376,7 @@ func TestConstraintWriteRoutesToken_WriteMethodsNeedAdminSelector(t *testing.T) 
 // and that hub_audit:read cannot be minted on a project boundary.
 func TestConstraintAuditToken_RequiresHubAuditReadOnHubBoundary(t *testing.T) {
 	m := newBearerMatrixFixture(t)
+	setExperimentOverrides(t, m.srv, map[string]bool{experiments.AccessConstraints: true})
 	ctx := context.Background()
 	subjectType := "user"
 	subjectID := m.ids.userDel
@@ -858,6 +862,7 @@ func TestSelfReadCredential_VisitorIdentityOnly(t *testing.T) {
 // targets are hub-level records.
 func TestGovernanceReadsToken_ProjectBoundaryRefused(t *testing.T) {
 	m := newBearerMatrixFixture(t)
+	setExperimentOverrides(t, m.srv, map[string]bool{experiments.AccessConstraints: true})
 	adminUser := NewAuthenticatedUser(m.adminID, m.adminID+"@test.com", m.adminID, "admin", "api")
 	selectors := []string{"role:read", "role_binding:read", "access_constraint:read"}
 	credential := NewScopedUserIdentityWithBoundaryAndDecoration(adminUser, projectBoundary(m.ids.project),

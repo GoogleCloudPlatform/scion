@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -79,6 +80,10 @@ func b7TestServer(t *testing.T) (*Server, store.Store) {
 	if srv.previewService == nil {
 		srv.initBoundaryServices()
 	}
+
+	// Enable the hub.access_constraints experiment so handler tests exercise
+	// the management routes by default.
+	setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: true})
 
 	return srv, s
 }

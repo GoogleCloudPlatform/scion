@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -2129,4 +2130,27 @@ func (s *Server) initBoundaryServices() {
 	eventBus.Subscribe("conduit-stream-authz", nil, func(InvalidationEvent) {
 		s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	}, true)
+}
+
+// WarnStoredAccessConstraintsExperimentOff logs a startup warning when one or
+// more access constraints are stored in the database while the
+// hub.access_constraints experiment is off. Stored constraints remain
+// unconditionally enforced regardless of the flag, so admins need to know to
+// enable the experiment to view or manage them.
+func (s *Server) WarnStoredAccessConstraintsExperimentOff(ctx context.Context) {
+	if s == nil || s.store == nil || s.experimentEnabled(experiments.AccessConstraints) {
+		return
+	}
+	count, err := s.store.CountAccessConstraints(ctx)
+	if err != nil {
+		slog.Warn("failed to check stored access constraints at startup while experiment is off",
+			"experiment", experiments.AccessConstraints,
+			"error", err)
+		return
+	}
+	if count > 0 {
+		slog.Warn("stored access constraints are actively enforced while experiment hub.access_constraints is off — enable hub.access_constraints to view or manage them",
+			"count", count,
+			"experiment", experiments.AccessConstraints)
+	}
 }
