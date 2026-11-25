@@ -1042,4 +1042,94 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(projWin.display.map((a) => a.id)).toContain('p-new-prov');
     projEl.remove();
   });
+
+  it('shows a feedback notice when clearing a chip removes unrepresentable text (phase:running -test and is:mine "phase:running")', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  id: 'a-1',
+                  name: 'a-1',
+                  slug: 'a-1',
+                  projectId: 'proj-1',
+                  template: 'developer',
+                  phase: 'running',
+                },
+              ],
+              complete: true,
+            }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          )
+        )
+      )
+    );
+
+    // 1. phase:running -test -> click All phase chip -> clears to '' with notice.
+    window.history.replaceState(null, '', '/agents?q=' + encodeURIComponent('phase:running -test'));
+    const el1 = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(el1);
+    await new Promise((r) => setTimeout(r, 20));
+    await el1.updateComplete;
+
+    const allPhaseBtn = Array.from(el1.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
+      (b) => b.textContent?.trim() === 'All'
+    ) as HTMLButtonElement;
+    allPhaseBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    await el1.updateComplete;
+
+    const box1 = el1.shadowRoot?.querySelector('scion-filter-box') as HTMLElement & {
+      value: string;
+      notice: string;
+      updateComplete: Promise<boolean>;
+    };
+    await box1.updateComplete;
+    expect(box1.value).toBe('');
+    expect(box1.shadowRoot?.querySelector('.feedback')?.textContent?.trim()).toContain(
+      'Cleared remaining text'
+    );
+    el1.remove();
+
+    // 2. is:mine "phase:running" -> click All scope chip -> clears to '' with notice.
+    window.history.replaceState(
+      null,
+      '',
+      '/agents?q=' + encodeURIComponent('is:mine "phase:running"')
+    );
+    const el2 = document.createElement('scion-page-agents') as ScionPageAgents;
+    el2.pageData = {
+      path: '/agents',
+      title: 'Agents',
+      user: { id: 'u-1', email: 'u@example.com', name: 'U', role: 'member' },
+    };
+    document.body.appendChild(el2);
+    await new Promise((r) => setTimeout(r, 20));
+    await el2.updateComplete;
+
+    const scopeAllBtn = el2.shadowRoot?.querySelector(
+      '.header-actions .scope-toggle button'
+    ) as HTMLButtonElement;
+    scopeAllBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    await el2.updateComplete;
+
+    const box2 = el2.shadowRoot?.querySelector('scion-filter-box') as HTMLElement & {
+      value: string;
+      notice: string;
+      updateComplete: Promise<boolean>;
+    };
+    await box2.updateComplete;
+    expect(box2.value).toBe('');
+    expect(box2.shadowRoot?.querySelector('.feedback')?.textContent?.trim()).toContain(
+      'Cleared remaining text'
+    );
+    el2.remove();
+  });
 });

@@ -130,7 +130,7 @@ import {
   parse as parseFilterQuery,
   phasePredicateForQuery,
   serverSubset,
-  setSingleKeyInQuery,
+  setSingleKeyInQueryWithNotice,
   validate as validateFilterQuery,
   type AgentFilterContext,
   type Query as FilterQuery,
@@ -393,6 +393,9 @@ export class ScionPageProjectDetail extends LitElement {
   /** Unified filter query text. */
   @state()
   private filterQueryText = '';
+
+  @state()
+  private filterNotice = '';
 
   private filterQuery: FilterQuery | null = null;
   private committedFilterQuery: FilterQuery | null = null;
@@ -2619,6 +2622,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private handleFilterInput(e: CustomEvent<FilterInputDetail>): void {
+    this.filterNotice = '';
     this.filterQueryText = e.detail.value;
     this.filterQuery = e.detail.query;
     const fq = e.detail.query;
@@ -2630,6 +2634,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private handleFilterCommit(e: CustomEvent<FilterCommitDetail>): void {
+    this.filterNotice = '';
     // Do not overwrite `this.filterQueryText` or the URL when a deferred commit
     // fires after the user has moved on to a newer (e.g. in-progress invalid) edit.
     const isCurrentText = e.detail.value === this.filterQueryText;
@@ -2666,12 +2671,14 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private setPhaseChipInQuery(phase: AgentPhase | ''): void {
-    const next = setSingleKeyInQuery(
+    const edit = setSingleKeyInQueryWithNotice(
       this.filterQueryText,
       'phase',
       phase,
       PROJECT_AGENTS_FILTER_SCHEMA
     );
+    const next = edit.value;
+    this.filterNotice = edit.notice ?? '';
     if (next === this.filterQueryText) return;
     this.filterQueryText = next;
     this.syncQueryToUrl(next);
@@ -2769,6 +2776,7 @@ export class ScionPageProjectDetail extends LitElement {
         <scion-filter-box
           view="project_agents"
           .value=${this.filterQueryText}
+          .notice=${this.filterNotice}
           .valueSuggestions=${this.agentValueSuggestions}
           placeholder="Filter agents… (try phase:running,error -label:tmp)"
           @filter-input=${this.handleFilterInput}

@@ -37,7 +37,11 @@ export {
   getActiveSingleKeyValue,
   hasIsFlagInQuery,
   setSingleKeyInQuery,
+  setSingleKeyInQueryWithNotice,
   toggleIsFlagInQuery,
+  toggleIsFlagInQueryWithNotice,
+  UNREPRESENTABLE_CLEAR_NOTICE,
+  type QueryEditResult,
 } from './query-edit.js';
 export {
   agentToFilterRow,

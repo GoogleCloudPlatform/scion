@@ -65,6 +65,13 @@ export class ScionFilterBox extends LitElement {
   @property({ type: String })
   externalWarning = '';
 
+  /**
+   * Optional feedback notice from the host (for example when clearing a chip
+   * also removed text/exclusions that cannot be represented in pure-text mode).
+   */
+  @property({ type: String })
+  notice = '';
+
   @state()
   private suggestions: Suggestion[] = [];
 
@@ -694,7 +701,7 @@ export class ScionFilterBox extends LitElement {
       <div
         class="feedback ${shownError
           ? 'error'
-          : this.warning || this.externalWarning
+          : this.warning || this.externalWarning || this.notice
             ? 'warning'
             : ''}"
         aria-live="polite"
@@ -707,7 +714,7 @@ export class ScionFilterBox extends LitElement {
             ? this.warning.message
             : this.externalWarning
               ? this.externalWarning
-              : nothing}
+              : this.notice || nothing}
       </div>
     `;
   }

@@ -32,7 +32,10 @@ import {
   parse,
   serverSubset,
   setSingleKeyInQuery,
+  setSingleKeyInQueryWithNotice,
   toggleIsFlagInQuery,
+  toggleIsFlagInQueryWithNotice,
+  UNREPRESENTABLE_CLEAR_NOTICE,
   validate,
   type FilterRow,
   type Query,
@@ -312,25 +315,39 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     );
     expect(setSingleKeyInQuery('foo', 'phase', 'running', agentsSchema)).toBe('phase:running foo');
 
-    // Clearing the last chip unquotes clean pure text, and keeps remaining text
-    // instead of silently dropping exclusions or terms that cannot be shown in
-    // pure-text mode (P2 N3).
-    expect(setSingleKeyInQuery('phase:running -test', 'phase', '', agentsSchema)).toBe('-test');
-    expect(setSingleKeyInQuery('is:mine "phase:running"', 'is', '', agentsSchema)).toBe(
-      '"phase:running"'
+    // Clearing the last chip unquotes clean pure text, and never reinterprets
+    // exclusions or key-like quoted text as literal substrings: when the
+    // remainder cannot be represented in pure-text mode with the same meaning,
+    // it clears to '' and returns a short feedback notice.
+    expect(setSingleKeyInQueryWithNotice('phase:running -test', 'phase', '', agentsSchema)).toEqual(
+      { value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE }
     );
-    expect(setSingleKeyInQuery('is:mine "a b"', 'is', '', agentsSchema)).toBe('a b');
-    expect(setSingleKeyInQuery('phase:running foo', 'phase', '', agentsSchema)).toBe('foo');
+    expect(
+      setSingleKeyInQueryWithNotice('is:mine "phase:running"', 'is', '', agentsSchema)
+    ).toEqual({ value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE });
+    expect(setSingleKeyInQueryWithNotice('is:mine "a b"', 'is', '', agentsSchema)).toEqual({
+      value: 'a b',
+    });
+    expect(setSingleKeyInQueryWithNotice('phase:running foo', 'phase', '', agentsSchema)).toEqual({
+      value: 'foo',
+    });
 
-    // Artifacts toggleIsFlagInQuery promotes pure text with quoting and preserves text on clear.
+    // Artifacts toggleIsFlagInQuery promotes pure text with quoting and preserves meaning on clear.
     const artifactsSchema = getViewSchema('artifacts')!;
     expect(toggleIsFlagInQuery('-draft', 'review', [], artifactsSchema)).toBe('is:review "-draft"');
     expect(toggleIsFlagInQuery('a OR b', 'review', [], artifactsSchema)).toBe('is:review "a OR b"');
     expect(toggleIsFlagInQuery('"hello"', 'review', [], artifactsSchema)).toBe(
       'is:review "\\"hello\\""'
     );
-    expect(toggleIsFlagInQuery('is:review -draft', 'review', [], artifactsSchema)).toBe('-draft');
-    expect(toggleIsFlagInQuery('is:mine "a b"', 'mine', ['shared'], artifactsSchema)).toBe('a b');
+    expect(
+      toggleIsFlagInQueryWithNotice('is:review -draft', 'review', [], artifactsSchema)
+    ).toEqual({ value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE });
+    expect(
+      toggleIsFlagInQueryWithNotice('is:mine "is:review"', 'mine', ['shared'], artifactsSchema)
+    ).toEqual({ value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE });
+    expect(
+      toggleIsFlagInQueryWithNotice('is:mine "a b"', 'mine', ['shared'], artifactsSchema)
+    ).toEqual({ value: 'a b' });
 
     // Distinct referent cap: 20 distinct refs pass (duplicates fold), 21 fail with code 'limit'.
     const atCap =

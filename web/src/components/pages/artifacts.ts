@@ -62,6 +62,7 @@ import {
   parse as parseFilterQuery,
   serverSubset,
   toggleIsFlagInQuery,
+  toggleIsFlagInQueryWithNotice,
   validate as validateFilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
@@ -116,6 +117,7 @@ export class ScionPageArtifacts extends LitElement {
   @state() private items: ArtifactListItem[] = [];
   @state() private nextCursor = '';
   @state() private filterQueryText = '';
+  @state() private filterNotice = '';
   /** The row whose Move dialog is open. */
   @state() private moving: ArtifactListItem | null = null;
   /** Display names by "kind:id" (owners) or "project:id"; '' while unknown. */
@@ -445,10 +447,12 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private onFilterInput = (e: CustomEvent<FilterInputDetail>): void => {
+    this.filterNotice = '';
     this.filterQueryText = e.detail.value;
   };
 
   private onFilterCommit = (e: CustomEvent<FilterCommitDetail>): void => {
+    this.filterNotice = '';
     this.filterQueryText = e.detail.value;
     this.syncQueryToUrl(e.detail.value);
     if (e.detail.serverQ === this.committedServerQ) return;
@@ -458,12 +462,14 @@ export class ScionPageArtifacts extends LitElement {
 
   private onFlagChipClick(flag: 'review' | 'mine' | 'shared'): void {
     const exclusive = flag === 'mine' ? ['shared'] : flag === 'shared' ? ['mine'] : [];
-    const next = toggleIsFlagInQuery(
+    const edit = toggleIsFlagInQueryWithNotice(
       this.filterQueryText,
       flag,
       exclusive,
       ARTIFACTS_FILTER_SCHEMA
     );
+    const next = edit.value;
+    this.filterNotice = edit.notice ?? '';
     if (next === this.filterQueryText) return;
     this.filterQueryText = next;
     this.syncQueryToUrl(next);
@@ -565,6 +571,7 @@ export class ScionPageArtifacts extends LitElement {
         <scion-filter-box
           view="artifacts"
           .value=${this.filterQueryText}
+          .notice=${this.filterNotice}
           .valueSuggestions=${this.suggestValues}
           placeholder="Filter artifacts… (try is:review project:my-project)"
           @filter-input=${this.onFilterInput}

@@ -43,52 +43,63 @@ export function getActiveSingleKeyValue(
   return only.values[0].toLowerCase();
 }
 
+export interface QueryEditResult {
+  value: string;
+  /**
+   * Short feedback notice when clearing the last chip removed remaining text
+   * or exclusions that cannot be represented in pure-text mode without
+   * changing their meaning.
+   */
+  notice?: string;
+}
+
+export const UNREPRESENTABLE_CLEAR_NOTICE =
+  'Cleared remaining text that cannot be represented without a key filter.';
+
 /**
- * Edit `input` to set or clear a single-valued key (e.g. `phase` or `is`).
- * - When `value` is empty, removes all `key:` / `-key:` terms from `input`.
- * - When `value` is non-empty, replaces any existing `key:` / `-key:` terms
- *   with `key:value` (or prepends it if none existed), preserving all other
- *   terms and free text. When promoting pure-text input to structured mode,
- *   the text remainder is quoted if needed so its literal meaning is preserved.
+ * Edit `input` to set or clear a single-valued key (e.g. `phase` or `is`),
+ * returning both the resulting query text and an optional notice when clearing
+ * the last chip removes text/exclusions that would change meaning in pure-text
+ * mode (e.g. `phase:running -test` or `is:mine "phase:running"`).
  */
-export function setSingleKeyInQuery(
+export function setSingleKeyInQueryWithNotice(
   input: string,
   key: string,
   value: string,
   schema: ViewSchema
-): string {
-  const known = (k: string) => schema.keys.some((sk) => sk.name.toLowerCase() === k);
+): QueryEditResult {
+  const known = (k: string): boolean => schema.keys.some((sk) => sk.name.toLowerCase() === k);
   const target = key.toLowerCase();
   const trimmed = trimASCIISpace(input);
 
   if (!trimmed) {
-    return value ? `${target}:${value}` : '';
+    return { value: value ? `${target}:${value}` : '' };
   }
 
   const res = parse(input, known);
   if (res.error || !res.query) {
     // Currently invalid input: prepend the key term if setting.
-    if (!value) return trimmed;
-    return `${target}:${value} ${trimmed}`;
+    if (!value) return { value: trimmed };
+    return { value: `${target}:${value} ${trimmed}` };
   }
   if (res.query.mode !== 'structured') {
     // Promoting pure text to structured mode: quote the remainder when needed
     // so leading '-', 'OR'/'AND', quotes, spaces, or parens keep their literal meaning.
-    if (!value) return trimmed;
-    return `${target}:${value} ${formatText(res.query.text)}`;
+    if (!value) return { value: trimmed };
+    return { value: `${target}:${value} ${formatText(res.query.text)}` };
   }
 
   const keyTerms = res.query.terms.filter((t) => t.key.toLowerCase() === target);
   if (keyTerms.length === 0) {
-    return value ? `${target}:${value} ${trimmed}` : trimmed;
+    return { value: value ? `${target}:${value} ${trimmed}` : trimmed };
   }
 
   // When clearing the last remaining key terms, render via
   // renderQueryPreservingMeaning so clean pure text (e.g. `is:mine "a b"` ->
-  // `a b`) is unquoted cleanly. If remaining text/exclusions cannot be
-  // represented in pure-text mode without a key (e.g. `phase:running -test`),
-  // fall through to splicing out the cleared key terms so the user's text is
-  // kept rather than silently dropped.
+  // `a b`) is unquoted cleanly while never reinterpreting exclusions or
+  // key-like quoted text as literal substrings. If the remainder cannot be
+  // represented in pure-text mode with the same meaning, clear to '' and
+  // surface a feedback notice instead of silently dropping or reinterpreting.
   if (!value) {
     const remainingTerms = res.query.terms.filter((t) => t.key.toLowerCase() !== target);
     if (remainingTerms.length === 0) {
@@ -103,8 +114,9 @@ export function setSingleKeyInQuery(
         Boolean(res.query.text) ||
         Boolean(res.query.excludeText && res.query.excludeText.length > 0);
       if (rendered || !hasRemainingText) {
-        return rendered;
+        return { value: rendered };
       }
+      return { value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE };
     }
   }
 
@@ -129,7 +141,19 @@ export function setSingleKeyInQuery(
       }
     }
   }
-  return trimASCIISpace(out);
+  return { value: trimASCIISpace(out) };
+}
+
+/**
+ * Edit `input` to set or clear a single-valued key (e.g. `phase` or `is`).
+ */
+export function setSingleKeyInQuery(
+  input: string,
+  key: string,
+  value: string,
+  schema: ViewSchema
+): string {
+  return setSingleKeyInQueryWithNotice(input, key, value, schema).value;
 }
 
 /**
@@ -153,34 +177,33 @@ export function hasIsFlagInQuery(input: string, flag: string, schema: ViewSchema
 }
 
 /**
- * Toggles an `is:<flag>` term in `input` while preserving the meaning of all
- * other terms and free text. When promoting pure-text input to structured mode,
- * quotes the text remainder when needed so leading `-`, `OR`/`AND`, quotes,
- * spaces, or parens keep their literal meaning. When turning `flag` on, removes
- * any mutually exclusive `is:<ex>` terms and any `-is:<flag>` negation first.
+ * Toggles an `is:<flag>` term in `input`, returning both the resulting query
+ * text and an optional notice when clearing the last chip removes remaining
+ * text/exclusions that cannot be represented in pure-text mode without
+ * changing their meaning.
  */
-export function toggleIsFlagInQuery(
+export function toggleIsFlagInQueryWithNotice(
   input: string,
   flag: string,
   exclusiveFlags: readonly string[],
   schema: ViewSchema
-): string {
-  const known = (k: string) => schema.keys.some((sk) => sk.name.toLowerCase() === k);
+): QueryEditResult {
+  const known = (k: string): boolean => schema.keys.some((sk) => sk.name.toLowerCase() === k);
   const target = flag.toLowerCase();
   const active = hasIsFlagInQuery(input, target, schema);
   const trimmed = trimASCIISpace(input);
 
   if (!trimmed) {
-    return active ? '' : `is:${target}`;
+    return { value: active ? '' : `is:${target}` };
   }
 
   const res = parse(input, known);
   if (res.error || !res.query) {
-    return active ? trimmed : `is:${target} ${trimmed}`;
+    return { value: active ? trimmed : `is:${target} ${trimmed}` };
   }
   if (res.query.mode !== 'structured') {
-    if (active) return trimmed;
-    return `is:${target} ${formatText(res.query.text)}`;
+    if (active) return { value: trimmed };
+    return { value: `is:${target} ${formatText(res.query.text)}` };
   }
 
   const dropSet = new Set<string>(
@@ -211,8 +234,9 @@ export function toggleIsFlagInQuery(
         Boolean(res.query.text) ||
         Boolean(res.query.excludeText && res.query.excludeText.length > 0);
       if (rendered || !hasRemainingText) {
-        return rendered;
+        return { value: rendered };
       }
+      return { value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE };
     }
   }
 
@@ -224,6 +248,19 @@ export function toggleIsFlagInQuery(
     out = before && after ? `${before} ${after}` : before + after;
   }
   out = trimASCIISpace(out);
-  if (active) return out;
-  return out ? `is:${target} ${out}` : `is:${target}`;
+  if (active) return { value: out };
+  return { value: out ? `is:${target} ${out}` : `is:${target}` };
+}
+
+/**
+ * Toggles an `is:<flag>` term in `input` while preserving the meaning of all
+ * other terms and free text.
+ */
+export function toggleIsFlagInQuery(
+  input: string,
+  flag: string,
+  exclusiveFlags: readonly string[],
+  schema: ViewSchema
+): string {
+  return toggleIsFlagInQueryWithNotice(input, flag, exclusiveFlags, schema).value;
 }

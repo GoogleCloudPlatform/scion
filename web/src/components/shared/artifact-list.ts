@@ -44,7 +44,7 @@ import {
   knownKeysFor,
   parse as parseFilterQuery,
   serverSubset,
-  setSingleKeyInQuery,
+  setSingleKeyInQueryWithNotice,
   validate as validateFilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
@@ -76,6 +76,7 @@ export class ScionArtifactList extends LitElement {
   @state() private loadingMore = false;
   @state() private error: string | null = null;
   @state() private filterQueryText = '';
+  @state() private filterNotice = '';
   private committedServerQ = '';
   @state() private publishOpen = false;
   /** The caller may publish here: canCreate on the list (ptone/scion#4584). */
@@ -332,10 +333,12 @@ export class ScionArtifactList extends LitElement {
       this.abort?.abort();
       this.loadingMore = false;
     }
+    this.filterNotice = '';
     this.filterQueryText = e.detail.value;
   };
 
   private onFilterCommit = (e: CustomEvent<FilterCommitDetail>): void => {
+    this.filterNotice = '';
     this.filterQueryText = e.detail.value;
     this.syncQueryToUrl(e.detail.value);
     if (e.detail.serverQ === this.committedServerQ) return;
@@ -347,12 +350,14 @@ export class ScionArtifactList extends LitElement {
   private onSharedChipClick = (): void => {
     const active =
       getActiveSingleKeyValue(this.filterQueryText, 'is', PROJECT_ARTIFACTS_SCHEMA) === 'shared';
-    const next = setSingleKeyInQuery(
+    const edit = setSingleKeyInQueryWithNotice(
       this.filterQueryText,
       'is',
       active ? '' : 'shared',
       PROJECT_ARTIFACTS_SCHEMA
     );
+    const next = edit.value;
+    this.filterNotice = edit.notice ?? '';
     if (next === this.filterQueryText) return;
     this.filterQueryText = next;
     this.syncQueryToUrl(next);
@@ -541,6 +546,7 @@ export class ScionArtifactList extends LitElement {
         <scion-filter-box
           view="artifacts-project"
           .value=${this.filterQueryText}
+          .notice=${this.filterNotice}
           placeholder="Filter artifacts… (try is:shared)"
           @filter-input=${this.onFilterInput}
           @filter-commit=${this.onFilterCommit}
