@@ -185,6 +185,7 @@ export function buildFixture() {
           'hub.code_span_mentions': false,
           'hub.command_requests': false,
           'hub.custom_default_user_role': false,
+          'hub.decision_retention': false,
           'hub.effective_permissions': false,
           'hub.exec_containers': false,
           'hub.exec_schedules': false,

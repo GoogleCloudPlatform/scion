@@ -86,6 +86,7 @@
       "broker_policy.admin_managed_only"
     ],
     "chat_retention": [],
+    "decision_retention": [],
     "endpoints": [
       "server.hub.public_url",
       "server.hub.hub_name",

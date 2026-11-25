@@ -269,6 +269,14 @@ const ChatStarredMessages = "web.chat_starred_messages"
 // window.
 const ChatRetention = "hub.chat_retention"
 
+// DecisionRetention gates opt-in retention purge for settled decisions
+// (ptone/scion#8984): the decision_retention operational-settings section and
+// its admin API (404 while off), the decision-retention sweeper, which purges
+// nothing while it is off, and the admin panel and Made retention notice in
+// the web UI. Turning it on deletes nothing until an admin also enables the
+// sweep and sets a retention window (minimum 30 days).
+const DecisionRetention = "hub.decision_retention"
+
 // ConversationWatch gates the long-poll conversation watch endpoint
 // (GET /api/v1/conversations/{id}/watch; ptone/scion#8136). While off, the
 // route answers 404; sequence allocation and backfill remain active.
@@ -1139,6 +1147,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#6596",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        DecisionRetention,
+		Title:       "Decision retention",
+		Description: "Lets a hub admin bound how long settled decisions and their answers are kept: a background sweep hard-deletes settled decision prompts whose last activity is older than the configured window (minimum 30 days) and keeps facet summaries consistent. Gates the decision_retention settings section and its admin API (404 while off) and the decision-retention sweep (LayerServer), plus the admin panel and Made notice (LayerWeb). Turning it on deletes nothing until an admin also enables retention and sets a window.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8984",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-05-25",
 	},
 	{
 		Name:        AgentEdit,

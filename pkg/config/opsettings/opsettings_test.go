@@ -78,6 +78,7 @@ func TestSectionHasKoanfPaths(t *testing.T) {
 
 		"agent_delegation_policy": true,
 		"chat_retention":          true,
+		"decision_retention":      true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {

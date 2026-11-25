@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionretentionrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
@@ -1645,6 +1646,16 @@ func init() {
 	decisionkeycounterDescNext := decisionkeycounterFields[1].Descriptor()
 	// decisionkeycounter.NextValidator is a validator for the "next" field. It is called by the builders before save.
 	decisionkeycounter.NextValidator = decisionkeycounterDescNext.Validators[0].(func(int64) error)
+	decisionretentionrunFields := schema.DecisionRetentionRun{}.Fields()
+	_ = decisionretentionrunFields
+	// decisionretentionrunDescDryRun is the schema descriptor for dry_run field.
+	decisionretentionrunDescDryRun := decisionretentionrunFields[2].Descriptor()
+	// decisionretentionrun.DefaultDryRun holds the default value on creation for the dry_run field.
+	decisionretentionrun.DefaultDryRun = decisionretentionrunDescDryRun.Default.(bool)
+	// decisionretentionrunDescID is the schema descriptor for id field.
+	decisionretentionrunDescID := decisionretentionrunFields[0].Descriptor()
+	// decisionretentionrun.DefaultID holds the default value on creation for the id field.
+	decisionretentionrun.DefaultID = decisionretentionrunDescID.Default.(func() uuid.UUID)
 	delegationadoptionFields := schema.DelegationAdoption{}.Fields()
 	_ = delegationadoptionFields
 	// delegationadoptionDescCohortID is the schema descriptor for cohort_id field.

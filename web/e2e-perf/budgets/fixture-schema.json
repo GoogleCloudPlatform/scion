@@ -49,6 +49,7 @@
         "experiments.hub.code_span_mentions:boolean",
         "experiments.hub.command_requests:boolean",
         "experiments.hub.custom_default_user_role:boolean",
+        "experiments.hub.decision_retention:boolean",
         "experiments.hub.effective_permissions:boolean",
         "experiments.hub.exec_containers:boolean",
         "experiments.hub.exec_schedules:boolean",

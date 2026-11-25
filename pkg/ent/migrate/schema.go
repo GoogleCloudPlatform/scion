@@ -1498,6 +1498,14 @@ var (
 				},
 			},
 			{
+				Name:    "decision_settled_created_at_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionsColumns[24], DecisionsColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "settled = true",
+				},
+			},
+			{
 				Name:    "decision_message_id_position",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionsColumns[4], DecisionsColumns[5]},
@@ -1630,6 +1638,32 @@ var (
 		Name:       "decision_key_counters",
 		Columns:    DecisionKeyCountersColumns,
 		PrimaryKey: []*schema.Column{DecisionKeyCountersColumns[0]},
+	}
+	// DecisionRetentionRunsColumns holds the columns for the "decision_retention_runs" table.
+	DecisionRetentionRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"sweep", "manual", "preview"}},
+		{Name: "dry_run", Type: field.TypeBool, Default: false},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"running", "ok", "partial", "failed"}, Default: "running"},
+		{Name: "actor", Type: field.TypeString, Nullable: true},
+		{Name: "policy", Type: field.TypeJSON, Nullable: true},
+		{Name: "counts", Type: field.TypeJSON, Nullable: true},
+		{Name: "error", Type: field.TypeString, Nullable: true},
+	}
+	// DecisionRetentionRunsTable holds the schema information for the "decision_retention_runs" table.
+	DecisionRetentionRunsTable = &schema.Table{
+		Name:       "decision_retention_runs",
+		Columns:    DecisionRetentionRunsColumns,
+		PrimaryKey: []*schema.Column{DecisionRetentionRunsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "decisionretentionrun_started_at",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionRetentionRunsColumns[3]},
+			},
+		},
 	}
 	// DelegationAdoptionsColumns holds the columns for the "delegation_adoptions" table.
 	DelegationAdoptionsColumns = []*schema.Column{
@@ -5087,6 +5121,7 @@ var (
 		DecisionAnswersTable,
 		DecisionFacetEntriesTable,
 		DecisionKeyCountersTable,
+		DecisionRetentionRunsTable,
 		DelegationAdoptionsTable,
 		DelegationEdgesTable,
 		DurableQueueItemsTable,
@@ -5272,6 +5307,9 @@ func init() {
 	}
 	DecisionKeyCountersTable.Annotation = &entsql.Annotation{
 		Table: "decision_key_counters",
+	}
+	DecisionRetentionRunsTable.Annotation = &entsql.Annotation{
+		Table: "decision_retention_runs",
 	}
 	DurableQueueItemsTable.Annotation = &entsql.Annotation{
 		Table: "durable_queue_items",

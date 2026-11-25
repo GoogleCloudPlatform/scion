@@ -190,6 +190,12 @@ func (Decision) Indexes() []ent.Index {
 		// covers queries filtering on project_id WHERE facet_indexed = false.
 		index.Fields("project_id").
 			Annotations(entsql.IndexWhere("facet_indexed = false")),
+		// Partial index for settled-decision retention candidate scans
+		// (design-8984 §3.3): covers queries filtering on
+		// settled = true AND created_at < cutoff ORDER BY created_at, id.
+		index.Fields("created_at", "id").
+			StorageKey("decision_settled_created_at_id").
+			Annotations(entsql.IndexWhere("settled = true")),
 		// History pages load a page's decisions by message.
 		index.Fields("message_id", "position"),
 		index.Fields("conversation_id"),
