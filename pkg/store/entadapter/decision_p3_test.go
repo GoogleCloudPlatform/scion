@@ -108,7 +108,7 @@ func legacyListDecisionAnswers(
 	if err != nil {
 		return nil, "", err
 	}
-	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
+	vf, err := validateDecisionAnswerFilter(filter)
 	if err != nil {
 		return nil, "", err
 	}
@@ -129,7 +129,7 @@ func legacyListDecisionAnswers(
 			legacyDecisionAnswerInChatKeys(keys),
 			legacyNotSupersededInterpretedAnswer(),
 		)
-	q = applyDecisionAnswerFilter(q, filter, agentUUID, provPred)
+	q = applyDecisionAnswerFilter(q, filter, vf)
 	if cursor != "" {
 		q = q.Where(legacyDecisionAnswerCursorPredicate(cur))
 	}
@@ -169,7 +169,7 @@ func legacyListDecisionAnswersPerProject(
 	if err != nil {
 		return nil, err
 	}
-	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
+	vf, err := validateDecisionAnswerFilter(filter)
 	if err != nil {
 		return nil, err
 	}
@@ -184,27 +184,14 @@ func legacyListDecisionAnswersPerProject(
 		if len(projKeys) == 0 {
 			continue
 		}
-		projFilter := filter
-		if filter.Query != "" && len(cleanedQueryKeys) > 0 {
-			projKeySet := make(map[string]bool, len(projKeys))
-			for _, k := range projKeys {
-				projKeySet[k] = true
-			}
-			var qKeys []string
-			for _, qk := range cleanedQueryKeys {
-				if projKeySet[qk] {
-					qKeys = append(qKeys, qk)
-				}
-			}
-			projFilter.QueryChatKeys = qKeys
-		}
+		projFilter := scopeDecisionAnswerFilterToProject(filter, cleanedQueryKeys, projKeys)
 		q := cs.client.DecisionAnswer.Query().
 			Where(
 				decisionanswer.ProjectIDEQ(pUUID),
 				legacyDecisionAnswerInChatKeys(projKeys),
 				legacyNotSupersededInterpretedAnswer(),
 			)
-		q = applyDecisionAnswerFilter(q, projFilter, agentUUID, provPred)
+		q = applyDecisionAnswerFilter(q, projFilter, vf)
 		rows, err := q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
 			Limit(perProject).
 			All(ctx)

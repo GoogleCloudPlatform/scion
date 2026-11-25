@@ -35,7 +35,6 @@ import (
 )
 
 const (
-	maxProjectDecisionFacetItems     = 500
 	projectDecisionAgentsChunkSize   = 500
 	facetProbeChunkSize              = 500
 	maxDecisionAnswerUnionArms       = 100
@@ -351,7 +350,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 	if limit < 0 || limit > store.MaxDecisionListLimit {
 		return nil, "", fmt.Errorf("%w: limit must be between 0 and %d", store.ErrInvalidInput, store.MaxDecisionListLimit)
 	}
-	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
+	vf, err := validateDecisionAnswerFilter(filter)
 	if err != nil {
 		return nil, "", err
 	}
@@ -377,7 +376,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 				decisionAnswerInChatKeysBounded(keys),
 				notSupersededInterpretedAnswer(),
 			)
-		q = applyDecisionAnswerFilter(q, filter, agentUUID, provPred)
+		q = applyDecisionAnswerFilter(q, filter, vf)
 		if cursor != "" {
 			q = q.Where(decisionAnswerCursorPredicate(cur))
 		}
@@ -392,7 +391,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 		// handler) use ListDecisionAnswersForProjects so each arm filters only
 		// its own project's readable chat keys. Keep this multi-project branch
 		// bounded per arm for direct store callers passing a shared key slice.
-		preds := decisionAnswerFilterPredicates(filter, agentUUID, provPred)
+		preds := decisionAnswerFilterPredicates(filter, vf)
 		if cursor != "" {
 			preds = append(preds, decisionAnswerCursorPredicate(cur))
 		}
@@ -449,7 +448,7 @@ func (c *CompositeStore) ListDecisionAnswersForProjects(
 	if limit < 0 || limit > store.MaxDecisionListLimit {
 		return nil, "", fmt.Errorf("%w: limit must be between 0 and %d", store.ErrInvalidInput, store.MaxDecisionListLimit)
 	}
-	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
+	vf, err := validateDecisionAnswerFilter(filter)
 	if err != nil {
 		return nil, "", err
 	}
@@ -465,6 +464,7 @@ func (c *CompositeStore) ListDecisionAnswersForProjects(
 	}
 
 	cleanedQueryKeys := cleanChatKeys(filter.QueryChatKeys)
+	hasPerProjectExcludeKeys := hasExcludeQueryChatKeys(filter.ExcludeQueries)
 	arms := make([]decisionAnswerUnionArm, 0, len(projectUUIDs))
 	for _, pUUID := range projectUUIDs {
 		pid := pUUID.String()
@@ -472,21 +472,8 @@ func (c *CompositeStore) ListDecisionAnswersForProjects(
 		if len(projKeys) == 0 {
 			continue
 		}
-		projFilter := filter
-		if filter.Query != "" && len(cleanedQueryKeys) > 0 {
-			projKeySet := make(map[string]bool, len(projKeys))
-			for _, k := range projKeys {
-				projKeySet[k] = true
-			}
-			var qKeys []string
-			for _, qk := range cleanedQueryKeys {
-				if projKeySet[qk] {
-					qKeys = append(qKeys, qk)
-				}
-			}
-			projFilter.QueryChatKeys = qKeys
-		}
-		preds := decisionAnswerFilterPredicates(projFilter, agentUUID, provPred)
+		projFilter := scopeDecisionAnswerFilterToProject(filter, cleanedQueryKeys, projKeys)
+		preds := decisionAnswerFilterPredicates(projFilter, vf)
 		if cursor != "" {
 			preds = append(preds, decisionAnswerCursorPredicate(cur))
 		}
@@ -501,7 +488,7 @@ func (c *CompositeStore) ListDecisionAnswersForProjects(
 		return nil, "", nil
 	}
 
-	uniformPreds := filter.Query == "" || len(cleanedQueryKeys) == 0
+	uniformPreds := (filter.Query == "" || len(cleanedQueryKeys) == 0) && !hasPerProjectExcludeKeys
 	rows, err := c.listDecisionAnswersUnion(ctx, arms, limit+1, uniformPreds)
 	if err != nil {
 		return nil, "", err
@@ -703,7 +690,7 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 	if perProject < 0 || perProject > store.MaxDecisionListLimit {
 		return nil, fmt.Errorf("%w: perProject must be between 0 and %d", store.ErrInvalidInput, store.MaxDecisionListLimit)
 	}
-	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
+	vf, err := validateDecisionAnswerFilter(filter)
 	if err != nil {
 		return nil, err
 	}
@@ -712,6 +699,7 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 	}
 
 	cleanedQueryKeys := cleanChatKeys(filter.QueryChatKeys)
+	hasPerProjectExcludeKeys := hasExcludeQueryChatKeys(filter.ExcludeQueries)
 	arms := make([]decisionAnswerUnionArm, 0, len(projectUUIDs))
 	for _, pUUID := range projectUUIDs {
 		pid := pUUID.String()
@@ -719,24 +707,11 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 		if len(projKeys) == 0 {
 			continue
 		}
-		projFilter := filter
-		if filter.Query != "" && len(cleanedQueryKeys) > 0 {
-			projKeySet := make(map[string]bool, len(projKeys))
-			for _, k := range projKeys {
-				projKeySet[k] = true
-			}
-			var qKeys []string
-			for _, qk := range cleanedQueryKeys {
-				if projKeySet[qk] {
-					qKeys = append(qKeys, qk)
-				}
-			}
-			projFilter.QueryChatKeys = qKeys
-		}
+		projFilter := scopeDecisionAnswerFilterToProject(filter, cleanedQueryKeys, projKeys)
 		arms = append(arms, decisionAnswerUnionArm{
 			projectUUID: pUUID,
 			chatKeys:    projKeys,
-			preds:       decisionAnswerFilterPredicates(projFilter, agentUUID, provPred),
+			preds:       decisionAnswerFilterPredicates(projFilter, vf),
 			limit:       perProject,
 		})
 	}
@@ -744,7 +719,7 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 		return nil, nil
 	}
 
-	uniformPreds := filter.Query == "" || len(cleanedQueryKeys) == 0
+	uniformPreds := (filter.Query == "" || len(cleanedQueryKeys) == 0) && !hasPerProjectExcludeKeys
 	allRows, err := c.listDecisionAnswersUnion(ctx, arms, 0, uniformPreds)
 	if err != nil {
 		return nil, err
@@ -1068,42 +1043,184 @@ func (c *CompositeStore) listDecisionAnswersUnion(
 	return allRows, nil
 }
 
-func validateDecisionAnswerFilter(filter store.ProjectDecisionAnswerFilter) (uuid.UUID, predicate.DecisionAnswer, error) {
-	var agentUUID uuid.UUID
+type validatedDecisionAnswerFilter struct {
+	agentUUID         uuid.UUID
+	agentUUIDs        []uuid.UUID
+	excludeAgentUUIDs []uuid.UUID
+	provPred          predicate.DecisionAnswer
+	provOrPred        predicate.DecisionAnswer
+	excludeProvPreds  []predicate.DecisionAnswer
+}
+
+func validateDecisionAnswerFilter(filter store.ProjectDecisionAnswerFilter) (validatedDecisionAnswerFilter, error) {
+	var out validatedDecisionAnswerFilter
 	var err error
 	if filter.AgentID != "" {
-		agentUUID, err = parseUUID(filter.AgentID)
+		out.agentUUID, err = parseUUID(filter.AgentID)
 		if err != nil {
-			return uuid.Nil, nil, err
+			return out, err
 		}
 	}
-	provPred, err := answerProvenancePredicate(filter.Provenance)
+	if len(filter.AgentIDs) > 0 {
+		out.agentUUIDs = make([]uuid.UUID, 0, len(filter.AgentIDs))
+		for _, id := range filter.AgentIDs {
+			u, err := parseUUID(id)
+			if err != nil {
+				return out, err
+			}
+			out.agentUUIDs = append(out.agentUUIDs, u)
+		}
+	}
+	if len(filter.ExcludeAgentIDs) > 0 {
+		out.excludeAgentUUIDs = make([]uuid.UUID, 0, len(filter.ExcludeAgentIDs))
+		for _, id := range filter.ExcludeAgentIDs {
+			u, err := parseUUID(id)
+			if err != nil {
+				return out, err
+			}
+			out.excludeAgentUUIDs = append(out.excludeAgentUUIDs, u)
+		}
+	}
+	out.provPred, err = answerProvenancePredicate(filter.Provenance)
 	if err != nil {
-		return uuid.Nil, nil, err
+		return out, err
+	}
+	if len(filter.Provenances) > 0 {
+		orPreds := make([]predicate.DecisionAnswer, 0, len(filter.Provenances))
+		for _, p := range filter.Provenances {
+			if p == "" {
+				return out, fmt.Errorf("%w: invalid provenance filter %q", store.ErrInvalidInput, p)
+			}
+			pred, err := answerProvenancePredicate(p)
+			if err != nil {
+				return out, err
+			}
+			orPreds = append(orPreds, pred)
+		}
+		if len(orPreds) == 1 {
+			out.provOrPred = orPreds[0]
+		} else if len(orPreds) > 1 {
+			out.provOrPred = decisionanswer.Or(orPreds...)
+		}
+	}
+	if len(filter.ExcludeProvenances) > 0 {
+		out.excludeProvPreds = make([]predicate.DecisionAnswer, 0, len(filter.ExcludeProvenances))
+		for _, p := range filter.ExcludeProvenances {
+			if p == "" {
+				return out, fmt.Errorf("%w: invalid provenance filter %q", store.ErrInvalidInput, p)
+			}
+			pred, err := answerProvenancePredicate(p)
+			if err != nil {
+				return out, err
+			}
+			out.excludeProvPreds = append(out.excludeProvPreds, pred)
+		}
 	}
 	if filter.From != nil && filter.To != nil && filter.From.After(*filter.To) {
-		return uuid.Nil, nil, fmt.Errorf("%w: from must not be after to", store.ErrInvalidInput)
+		return out, fmt.Errorf("%w: from must not be after to", store.ErrInvalidInput)
 	}
-	return agentUUID, provPred, nil
+	return out, nil
+}
+
+func hasExcludeQueryChatKeys(excludes []store.ProjectDecisionExcludeQuery) bool {
+	for _, ex := range excludes {
+		if ex.Text != "" && len(cleanChatKeys(ex.ChatKeys)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeDecisionAnswerFilterToProject(
+	filter store.ProjectDecisionAnswerFilter,
+	cleanedQueryKeys []string,
+	projKeys []string,
+) store.ProjectDecisionAnswerFilter {
+	projFilter := filter
+	var projKeySet map[string]bool
+	ensureSet := func() map[string]bool {
+		if projKeySet == nil {
+			projKeySet = make(map[string]bool, len(projKeys))
+			for _, k := range projKeys {
+				projKeySet[k] = true
+			}
+		}
+		return projKeySet
+	}
+	if filter.Query != "" && len(cleanedQueryKeys) > 0 {
+		set := ensureSet()
+		var qKeys []string
+		for _, qk := range cleanedQueryKeys {
+			if set[qk] {
+				qKeys = append(qKeys, qk)
+			}
+		}
+		projFilter.QueryChatKeys = qKeys
+	}
+	if len(filter.ExcludeQueries) > 0 {
+		scoped := make([]store.ProjectDecisionExcludeQuery, len(filter.ExcludeQueries))
+		for i, ex := range filter.ExcludeQueries {
+			cleaned := cleanChatKeys(ex.ChatKeys)
+			if ex.Text != "" && len(cleaned) > 0 {
+				set := ensureSet()
+				var qKeys []string
+				for _, qk := range cleaned {
+					if set[qk] {
+						qKeys = append(qKeys, qk)
+					}
+				}
+				scoped[i] = store.ProjectDecisionExcludeQuery{Text: ex.Text, ChatKeys: qKeys}
+			} else {
+				scoped[i] = ex
+			}
+		}
+		projFilter.ExcludeQueries = scoped
+	}
+	return projFilter
 }
 
 func decisionAnswerFilterPredicates(
 	filter store.ProjectDecisionAnswerFilter,
-	agentUUID uuid.UUID,
-	provPred predicate.DecisionAnswer,
+	vf validatedDecisionAnswerFilter,
 ) []predicate.DecisionAnswer {
 	var preds []predicate.DecisionAnswer
 	if filter.Query != "" {
 		preds = append(preds, decisionAnswerMatchesQuery(filter.Query, cleanChatKeys(filter.QueryChatKeys)))
 	}
+	for _, ex := range filter.ExcludeQueries {
+		if ex.Text != "" {
+			preds = append(preds, decisionanswer.Not(decisionAnswerMatchesQuery(ex.Text, cleanChatKeys(ex.ChatKeys))))
+		}
+	}
 	if filter.AgentID != "" {
-		preds = append(preds, decisionanswer.AskerAgentID(agentUUID))
+		preds = append(preds, decisionanswer.AskerAgentID(vf.agentUUID))
+	}
+	if len(vf.agentUUIDs) > 0 {
+		preds = append(preds, decisionanswer.AskerAgentIDIn(vf.agentUUIDs...))
+	}
+	if len(vf.excludeAgentUUIDs) > 0 {
+		preds = append(preds, decisionanswer.AskerAgentIDNotIn(vf.excludeAgentUUIDs...))
 	}
 	if filter.UserID != "" {
 		preds = append(preds, decisionanswer.AnsweredByUserID(filter.UserID))
 	}
-	if provPred != nil {
-		preds = append(preds, provPred)
+	if len(filter.UserIDs) > 0 {
+		preds = append(preds, decisionanswer.AnsweredByUserIDIn(filter.UserIDs...))
+	}
+	if len(filter.ExcludeUserIDs) > 0 {
+		preds = append(preds, decisionanswer.Or(
+			decisionanswer.AnsweredByUserIDIsNil(),
+			decisionanswer.AnsweredByUserIDNotIn(filter.ExcludeUserIDs...),
+		))
+	}
+	if vf.provPred != nil {
+		preds = append(preds, vf.provPred)
+	}
+	if vf.provOrPred != nil {
+		preds = append(preds, vf.provOrPred)
+	}
+	for _, ep := range vf.excludeProvPreds {
+		preds = append(preds, decisionanswer.Not(ep))
 	}
 	if filter.From != nil {
 		preds = append(preds, decisionanswer.CreatedAtGTE(filter.From.UTC()))
@@ -1117,10 +1234,9 @@ func decisionAnswerFilterPredicates(
 func applyDecisionAnswerFilter(
 	q *ent.DecisionAnswerQuery,
 	filter store.ProjectDecisionAnswerFilter,
-	agentUUID uuid.UUID,
-	provPred predicate.DecisionAnswer,
+	vf validatedDecisionAnswerFilter,
 ) *ent.DecisionAnswerQuery {
-	if preds := decisionAnswerFilterPredicates(filter, agentUUID, provPred); len(preds) > 0 {
+	if preds := decisionAnswerFilterPredicates(filter, vf); len(preds) > 0 {
 		q = q.Where(preds...)
 	}
 	return q
@@ -1315,24 +1431,15 @@ func (c *CompositeStore) ListDecisionFacets(
 	}
 	sortProjectDecisionActors(agents)
 
-	// Cap answerers at maxProjectDecisionFacetItems ordered by user ID ASC
-	// before display-name sorting, matching listDecisionFacetsLegacy.
-	answererIDs := make([]string, 0, len(byAnswerer))
-	for id := range byAnswerer {
-		answererIDs = append(answererIDs, id)
-	}
-	sort.Strings(answererIDs)
-	if len(answererIDs) > maxProjectDecisionFacetItems {
-		answererIDs = answererIDs[:maxProjectDecisionFacetItems]
-	}
-	answerers := make([]store.ProjectDecisionActor, 0, len(answererIDs))
-	for _, id := range answererIDs {
-		a := byAnswerer[id]
+	// Return all answerers sorted by display name; the hub caps the facet
+	// after sorting (design-8985 §3.3).
+	answerers := make([]store.ProjectDecisionActor, 0, len(byAnswerer))
+	for id, a := range byAnswerer {
 		name := a.name
 		if name == "" {
 			name = a.email
 		}
-		answerers = append(answerers, store.ProjectDecisionActor{ID: id, Name: name})
+		answerers = append(answerers, store.ProjectDecisionActor{ID: id, Name: name, Email: a.email})
 	}
 	sortProjectDecisionActors(answerers)
 
@@ -1386,7 +1493,6 @@ func (c *CompositeStore) listDecisionFacetsLegacy(
 			notSupersededInterpretedAnswer(),
 		).
 		Order(ent.Asc(decisionanswer.FieldAnsweredByUserID)).
-		Limit(maxProjectDecisionFacetItems).
 		GroupBy(decisionanswer.FieldAnsweredByUserID).
 		Aggregate(
 			ent.As(ent.Max(decisionanswer.FieldAnsweredByName), "name"),
@@ -1405,7 +1511,7 @@ func (c *CompositeStore) listDecisionFacetsLegacy(
 		if name == "" {
 			name = r.Email
 		}
-		answerers = append(answerers, store.ProjectDecisionActor{ID: r.AnsweredByUserID, Name: name})
+		answerers = append(answerers, store.ProjectDecisionActor{ID: r.AnsweredByUserID, Name: name, Email: r.Email})
 	}
 	sortProjectDecisionActors(answerers)
 
@@ -1592,8 +1698,8 @@ func decisionAnswerMatchesQuery(q string, labelKeys []string) predicate.Decision
 	return decisionanswer.Or(
 		decisionanswer.QuestionTextContainsFold(q),
 		decisionanswer.ChoiceLabelContainsFold(q),
-		decisionanswer.OtherTextContainsFold(q),
-		decisionanswer.DismissReasonContainsFold(q),
+		decisionanswer.And(decisionanswer.OtherTextNotNil(), decisionanswer.OtherTextContainsFold(q)),
+		decisionanswer.And(decisionanswer.DismissReasonNotNil(), decisionanswer.DismissReasonContainsFold(q)),
 		decisionanswer.KeyContainsFold(q),
 		func(s *entsql.Selector) {
 			t := entsql.Table(decision.Table)
