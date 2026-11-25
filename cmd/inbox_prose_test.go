@@ -36,7 +36,7 @@ type inboxProseFixture struct {
 }
 
 func TestFormatInboxProse_SharedFixture(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "testdata", "inbox_prose.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "pkg", "hubclient", "testdata", "inbox_prose.json"))
 	require.NoError(t, err)
 
 	var fixture inboxProseFixture

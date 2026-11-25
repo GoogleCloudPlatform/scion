@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
@@ -489,6 +490,12 @@ type eventBuilder struct {
 	// receive waiting inbox hints for an agent in projectID owned by ownerID
 	// (owner plus project members, ptone/scion#9300).
 	inboxWaitingRecipients atomic.Pointer[func(ctx context.Context, projectID, ownerID string) []string]
+	// waitingMu guards waitingAgents, which tracks agent IDs whose last
+	// published status had activity == waiting_for_input so PublishAgentStatus
+	// only resolves project members and emits waiting hints on transitions into
+	// or out of waiting_for_input.
+	waitingMu     sync.Mutex
+	waitingAgents map[string]struct{}
 }
 
 // inboxHintEnabledSetter is implemented by event publishers backed by
@@ -537,6 +544,36 @@ func (p *eventBuilder) resolveInboxWaitingRecipients(ctx context.Context, projec
 		return nil
 	}
 	return []string{ownerID}
+}
+
+// trackAgentWaiting records whether agentID is currently waiting_for_input and
+// reports whether its previously published status was waiting_for_input.
+func (p *eventBuilder) trackAgentWaiting(agentID string, isWaiting bool) bool {
+	if agentID == "" {
+		return false
+	}
+	p.waitingMu.Lock()
+	defer p.waitingMu.Unlock()
+	_, wasWaiting := p.waitingAgents[agentID]
+	if isWaiting {
+		if p.waitingAgents == nil {
+			p.waitingAgents = make(map[string]struct{})
+		}
+		p.waitingAgents[agentID] = struct{}{}
+	} else if wasWaiting {
+		delete(p.waitingAgents, agentID)
+	}
+	return wasWaiting
+}
+
+// clearAgentWaiting drops any tracked waiting state for a deleted agent.
+func (p *eventBuilder) clearAgentWaiting(agentID string) {
+	if agentID == "" {
+		return
+	}
+	p.waitingMu.Lock()
+	delete(p.waitingAgents, agentID)
+	p.waitingMu.Unlock()
 }
 
 // SetPublishMetrics wires the scion.hub.events.published counter
@@ -780,7 +817,9 @@ func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agen
 	if agent.ProjectID != "" {
 		sink("project."+agent.ProjectID+".agent.status", evt)
 	}
-	if p.shouldEmitInboxHint() {
+	isWaiting := agent.Activity == string(state.ActivityWaitingForInput)
+	wasWaiting := p.trackAgentWaiting(agent.ID, isWaiting)
+	if p.shouldEmitInboxHint() && (isWaiting || wasWaiting) {
 		hint := InboxHint{
 			Category: InboxCategoryWaiting,
 			AgentID:  agent.ID,
@@ -842,6 +881,7 @@ func (p *eventBuilder) publishAgentCreated(evt AgentCreatedEvent) {
 // PublishAgentDeleted publishes an agent deleted event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
 func (p *eventBuilder) PublishAgentDeleted(_ context.Context, agentID, projectID string) {
+	p.clearAgentWaiting(agentID)
 	evt := AgentDeletedEvent{
 		AgentID:   agentID,
 		ProjectID: projectID,

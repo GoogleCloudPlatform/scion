@@ -308,6 +308,114 @@ func TestUserMeInboxSummary_PendingSecretsOrderingAndPrivacy(t *testing.T) {
 	assert.Empty(t, pendingZero.Previews)
 }
 
+type inboxPendingSecretFallbackStore struct {
+	store.Store
+	rows []*store.PendingSecret
+}
+
+func (s *inboxPendingSecretFallbackStore) ListPendingSecretsByOwner(_ context.Context, _ string, _ time.Time) ([]*store.PendingSecret, error) {
+	return s.rows, nil
+}
+
+func TestUserMeInboxSummary_PendingSecretsBreakdownDistinctCounts(t *testing.T) {
+	f := newPendingFixture(t, "inbox-pending-breakdown")
+	setInboxDashboardExperiment(t, f.Server, true)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	proj1 := f.ProjectID
+	proj2 := api.NewUUID()
+	projExpired := api.NewUUID()
+	projOther := api.NewUUID()
+	agent1 := f.AgentID
+	agent2 := api.NewUUID()
+	agent3 := api.NewUUID()
+
+	seed := func(ownerID, key, agentID, agentSlug, projectID, projectName string, expiresAt time.Time) {
+		writeTime := expiresAt.Add(-store.PendingSecretTTL)
+		_, err := f.Store.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
+			ID:            api.NewUUID(),
+			Key:           key,
+			SecretType:    store.SecretTypeEnvironment,
+			Scope:         store.ScopeUser,
+			ScopeID:       ownerID,
+			AllowProgeny:  true,
+			InjectionMode: store.InjectionModeAsNeeded,
+			ValueRef:      "ref-" + key,
+			ValueLen:      12,
+			AgentID:       agentID,
+			AgentSlug:     agentSlug,
+			ProjectID:     projectID,
+			ProjectName:   projectName,
+			Created:       writeTime,
+			Updated:       writeTime,
+			ExpiresAt:     expiresAt,
+		}, writeTime)
+		require.NoError(t, err)
+	}
+
+	// 2 live secrets from agent1 in proj1 (same agent & project -> counts once each).
+	seed(f.UserID, "BD_A1_1", agent1, "agent-1", proj1, "Proj 1", now.Add(1*time.Hour))
+	seed(f.UserID, "BD_A1_2", agent1, "agent-1", proj1, "Proj 1", now.Add(2*time.Hour))
+	// 1 live secret from agent2 in proj1 (2nd distinct agent, same project).
+	seed(f.UserID, "BD_A2_1", agent2, "agent-2", proj1, "Proj 1", now.Add(3*time.Hour))
+	// 1 live secret from agent3 in proj2 (3rd distinct agent, 2nd project).
+	seed(f.UserID, "BD_A3_1", agent3, "agent-3", proj2, "Proj 2", now.Add(4*time.Hour))
+	// Expired secret from a distinct agent/project (must be excluded).
+	seed(f.UserID, "BD_EXPIRED", api.NewUUID(), "agent-exp", projExpired, "Proj Exp", now.Add(-10*time.Minute))
+	// Live secret for another user from a distinct agent/project (must be excluded).
+	seed(tid("other-owner-bd"), "BD_OTHER", api.NewUUID(), "agent-other", projOther, "Proj Other", now.Add(30*time.Minute))
+
+	for _, path := range []string{userMeInboxSummaryPath, userMeInboxSummaryPath + "?previews=0"} {
+		rec := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodGet, path, nil)
+		resp := decodeInboxSummary(t, rec)
+		pending := resp.Categories[InboxCategoryPendingSecrets]
+		assert.Equal(t, InboxStateOK, pending.State, path)
+		assert.Equal(t, 4, pending.Count, path)
+		assert.Equal(t, map[string]int{
+			InboxBreakdownAgents:   3,
+			InboxBreakdownProjects: 2,
+		}, pending.Breakdown, path)
+	}
+
+	// Verify the AgentSlug fallback when a row carries an empty AgentID (Ent
+	// rejects empty agent_id on write, so inject via a store wrapper).
+	t.Run("AgentSlugFallback", func(t *testing.T) {
+		installStoreFault(t, f.Server, func(inner store.Store, _ *storeFaultSwitch) *inboxPendingSecretFallbackStore {
+			return &inboxPendingSecretFallbackStore{
+				Store: inner,
+				rows: []*store.PendingSecret{
+					{
+						ID: api.NewUUID(), Key: "FB_1", Scope: store.ScopeUser, ScopeID: f.UserID,
+						AgentID: agent1, AgentSlug: "agent-1", ProjectID: proj1, ProjectName: "Proj 1",
+						ExpiresAt: now.Add(1 * time.Hour),
+					},
+					{
+						ID: api.NewUUID(), Key: "FB_2", Scope: store.ScopeUser, ScopeID: f.UserID,
+						AgentID: "", AgentSlug: "slug-fallback-agent", ProjectID: proj2, ProjectName: "Proj 2",
+						ExpiresAt: now.Add(2 * time.Hour),
+					},
+					{
+						ID: api.NewUUID(), Key: "FB_3", Scope: store.ScopeUser, ScopeID: f.UserID,
+						AgentID: "", AgentSlug: "slug-fallback-agent", ProjectID: proj2, ProjectName: "Proj 2",
+						ExpiresAt: now.Add(3 * time.Hour),
+					},
+				},
+			}
+		})
+
+		rec := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodGet, userMeInboxSummaryPath, nil)
+		resp := decodeInboxSummary(t, rec)
+		pending := resp.Categories[InboxCategoryPendingSecrets]
+		assert.Equal(t, InboxStateOK, pending.State)
+		assert.Equal(t, 3, pending.Count)
+		assert.Equal(t, map[string]int{
+			InboxBreakdownAgents:   2,
+			InboxBreakdownProjects: 2,
+		}, pending.Breakdown)
+	})
+}
+
 func TestUserMeInboxSummary_SourceErrorIsolation(t *testing.T) {
 	f := newChatFixture(t)
 	setInboxDashboardExperiment(t, f.srv, true)
@@ -967,8 +1075,21 @@ func TestUserMeInboxSummary_WaitingCappedAndErrors(t *testing.T) {
 	assert.Equal(t, InboxErrorTimeout, timeoutResp.Categories[InboxCategoryWaiting].ErrorCode)
 }
 
+type inboxMemberLookupCountingStore struct {
+	store.Store
+	listMembers atomic.Int32
+}
+
+func (s *inboxMemberLookupCountingStore) ListProjectMembers(ctx context.Context, projectID string) ([]*store.ProjectMembership, error) {
+	s.listMembers.Add(1)
+	return s.Store.ListProjectMembers(ctx, projectID)
+}
+
 func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 	srv, rawStore := testServer(t)
+	memberCounter, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *inboxMemberLookupCountingStore {
+		return &inboxMemberLookupCountingStore{Store: inner}
+	})
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 	srv.SetEventPublisher(pub)
@@ -1027,30 +1148,51 @@ func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 		Activity:  string(state.ActivityWaitingForInput),
 	}
 
-	// Flag OFF: PublishAgentStatus emits no inbox hint.
+	// Flag OFF: PublishAgentStatus emits no inbox hint and does not query members.
+	memberCounter.listMembers.Store(0)
 	pub.PublishAgentStatus(ctx, agent)
 	drainNoEvent(ownerCh, "flag off enter waiting owner")
 	drainNoEvent(teammateCh, "flag off enter waiting teammate")
+	assert.Equal(t, int32(0), memberCounter.listMembers.Load(), "flag off must not look up project members")
 
 	// Flag ON: entering and leaving waiting_for_input emit hints to owner and project members,
 	// but never to non-members (ptone/scion#9300).
 	setInboxDashboardExperiment(t, srv, true)
 
+	memberCounter.listMembers.Store(0)
 	pub.PublishAgentStatus(ctx, agent)
 	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityWaitingForInput))
 	expectWaitingHint(teammateCh, teammateID, agent.ID, string(state.ActivityWaitingForInput))
 	drainNoEvent(otherCh, "non-member on enter")
+	assert.Equal(t, int32(1), memberCounter.listMembers.Load(), "entering waiting_for_input should resolve project members once")
 
+	memberCounter.listMembers.Store(0)
 	agent.Activity = string(state.ActivityThinking)
 	pub.PublishAgentStatus(ctx, agent)
 	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityThinking))
 	expectWaitingHint(teammateCh, teammateID, agent.ID, string(state.ActivityThinking))
 	drainNoEvent(otherCh, "non-member on leave")
+	assert.Equal(t, int32(1), memberCounter.listMembers.Load(), "leaving waiting_for_input should resolve project members once")
 
-	// PublishAgentDeleted sends no inbox hint (§5.2).
+	// Non-waiting -> non-waiting transitions must NOT query project members or emit inbox hints.
+	memberCounter.listMembers.Store(0)
+	agent.Activity = string(state.ActivityExecuting)
+	pub.PublishAgentStatus(ctx, agent)
+	drainNoEvent(ownerCh, "non-waiting transition owner")
+	drainNoEvent(teammateCh, "non-waiting transition teammate")
+	assert.Equal(t, int32(0), memberCounter.listMembers.Load(), "non-waiting -> non-waiting must not query project members")
+
+	// PublishAgentDeleted sends no inbox hint (§5.2) and clears tracked waiting state.
+	agent.Activity = string(state.ActivityWaitingForInput)
+	pub.PublishAgentStatus(ctx, agent)
+	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityWaitingForInput))
+	expectWaitingHint(teammateCh, teammateID, agent.ID, string(state.ActivityWaitingForInput))
+
+	memberCounter.listMembers.Store(0)
 	pub.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
 	drainNoEvent(ownerCh, "agent deleted owner")
 	drainNoEvent(teammateCh, "agent deleted teammate")
+	assert.Equal(t, int32(0), memberCounter.listMembers.Load(), "delete must not query project members")
 }
 
 func TestUserMeInboxSummary_WaitingOrderingByActivitySince(t *testing.T) {

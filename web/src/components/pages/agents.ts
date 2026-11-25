@@ -247,7 +247,7 @@ export class ScionPageAgents extends LitElement {
   @state()
   private phaseFilter: AgentPhase | '' = '';
 
-  /** Activity filter hydrated from `?q=activity:<val>` or `?activity=<val>` when dialect is off. */
+  /** Activity filter hydrated from `?q=activity:<val>` when dialect is off. */
   @state()
   private activityFilter = '';
 

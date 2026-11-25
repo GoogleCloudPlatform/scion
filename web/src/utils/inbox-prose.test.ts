@@ -31,7 +31,7 @@ interface ProseCase {
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(THIS_DIR, '..', '..', '..');
-const FIXTURE_PATH = resolve(REPO_ROOT, 'testdata/inbox_prose.json');
+const FIXTURE_PATH = resolve(REPO_ROOT, 'pkg/hubclient/testdata/inbox_prose.json');
 
 const fixture = JSON.parse(readFileSync(FIXTURE_PATH, 'utf-8')) as { cases: ProseCase[] };
 

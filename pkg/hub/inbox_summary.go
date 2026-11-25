@@ -631,6 +631,9 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 		}
 	}
 
+	// Capped is computed on the pre-read-filter window, so if unreadable rows
+	// are dropped by readableAgentRows below it remains a conservative lower-
+	// bound signal ("N+ agents waiting").
 	capped := len(res.Items) >= limit
 
 	var candidates []store.Agent
