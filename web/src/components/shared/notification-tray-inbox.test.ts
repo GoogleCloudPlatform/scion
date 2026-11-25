@@ -29,9 +29,10 @@ vi.mock('../../client/inbox-summary-loader.js', async (importOriginal) => {
   };
 });
 
-import type { ScionNotificationTray } from './notification-tray.js';
+import { NOTIFICATION_ACKED_EVENT, type ScionNotificationTray } from './notification-tray.js';
 import { ensureInboxSummaryStarted } from '../../client/inbox-summary-loader.js';
 import { inboxSummaryStore, type InboxSummaryResponse } from '../../client/inbox-summary.js';
+import { stateManager } from '../../client/state.js';
 import {
   INBOX_DASHBOARD_FLAG,
   resetServerFlagStateForTests,
@@ -278,5 +279,27 @@ describe('notification tray: Inbox link and empty state', () => {
 
     expect(paths).toEqual(['/profile/inbox']);
     expect(tray.shadowRoot!.querySelector('.panel')).toBeNull();
+  });
+
+  it('syncs bell tray on NOTIFICATION_ACKED_EVENT and inbox-changed notifications hint', async () => {
+    notificationsResponse = [makeNotification('n-1'), makeNotification('n-2')];
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const tray = await mountTray(false);
+
+    expect(tray.shadowRoot!.querySelector('.bell-btn .badge')?.textContent?.trim()).toBe('2');
+
+    // Same-tab ack event drops n-1 immediately.
+    window.dispatchEvent(new CustomEvent(NOTIFICATION_ACKED_EVENT, { detail: { id: 'n-1' } }));
+    await tray.updateComplete;
+    expect(tray.shadowRoot!.querySelector('.bell-btn .badge')?.textContent?.trim()).toBe('1');
+
+    // Cross-tab SSE inbox-changed { category: 'notifications' } refetches and drops n-2.
+    notificationsResponse = [];
+    stateManager.dispatchEvent(
+      new CustomEvent('inbox-changed', { detail: { category: 'notifications' } })
+    );
+    await flush();
+    await tray.updateComplete;
+    expect(tray.shadowRoot!.querySelector('.bell-btn .badge')).toBeNull();
   });
 });

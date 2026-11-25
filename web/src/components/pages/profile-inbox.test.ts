@@ -22,9 +22,15 @@ vi.mock('../../utils/toast.js', () => ({
 
 import './profile-inbox.js';
 import '../profile/profile-nav.js';
+import '../shared/notification-tray.js';
 import type { ScionPageProfileInbox } from './profile-inbox.js';
 import type { ScionProfileNav } from '../profile/profile-nav.js';
+import {
+  NOTIFICATION_ACKED_EVENT,
+  type ScionNotificationTray,
+} from '../shared/notification-tray.js';
 import { inboxSummaryStore, type InboxSummaryResponse } from '../../client/inbox-summary.js';
+import { stateManager } from '../../client/state.js';
 import { PENDING_SECRETS_CHANGED_EVENT } from '../../client/pending-secrets.js';
 import {
   PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
@@ -396,7 +402,7 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     expect(dialog!.hasAttribute('open')).toBe(false);
   });
 
-  it('renders Decisions, Approvals, and Chat cards in fixed order and hides waiting/reviews until 6b', async () => {
+  it('renders all five cards in fixed order: Decisions, Agents waiting, Approvals, Reviews, Chat', async () => {
     setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
     const summary = makeSummaryResponse(
       {
@@ -437,7 +443,21 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
           capped: false,
           countsTowardTotal: true,
           href: '/agents',
-          previews: [],
+          agentIds: ['agent-1'],
+          previews: [
+            {
+              id: 'agent-1',
+              projectId: 'p-1',
+              projectName: 'Web',
+              createdAt: '2026-11-23T17:00:00Z',
+              href: '/agents/agent-1',
+              agentId: 'agent-1',
+              agentName: 'Frontend Dev',
+              agentSlug: 'fe-dev',
+              question: 'Need staging creds?',
+              since: '2026-11-23T17:46:00Z',
+            },
+          ],
         },
         reviews: {
           state: 'ok',
@@ -445,7 +465,20 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
           capped: false,
           countsTowardTotal: true,
           href: '/artifacts?review_pending=1&owner=me',
-          previews: [],
+          breakdown: { toAddress: 1, requested: 0 },
+          previews: [
+            {
+              id: 'art-1',
+              kind: 'to_address',
+              projectId: 'p-1',
+              projectName: 'Web',
+              createdAt: '2026-11-23T17:30:00Z',
+              href: '/projects/p-1/artifacts/art-1',
+              artifactId: 'art-1',
+              title: 'RFC: Inbox Cards',
+              scopeRef: 'p-1',
+            },
+          ],
         },
         chat: {
           state: 'error',
@@ -481,7 +514,7 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     const cards = Array.from(page.shadowRoot?.querySelectorAll('[data-inbox-card]') ?? []).map(
       (el) => el.getAttribute('data-inbox-card')
     );
-    expect(cards).toEqual(['decisions', 'approvals', 'chat']);
+    expect(cards).toEqual(['decisions', 'waiting', 'approvals', 'reviews', 'chat']);
 
     // Capped decisions card shows "2+" and "View all" links to /profile/decisions?tab=pending.
     const decCard = page.shadowRoot?.querySelector('[data-inbox-card="decisions"]');
@@ -1621,5 +1654,630 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     await page.updateComplete;
 
     expect(chatCard?.querySelector('[data-card-error]')).toBeNull();
+  });
+
+  it('renders Agents waiting card with agentName/agentSlug, question, since, href, no inline action, and updates on waiting SSE hints', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const waitingItem = {
+      id: 'agent-42',
+      projectId: 'proj-web',
+      projectName: 'Web',
+      createdAt: '2026-11-23T17:00:00Z',
+      href: '/agents/agent-42',
+      agentId: 'agent-42',
+      agentName: 'Frontend Dev',
+      agentSlug: 'fe-dev',
+      question: 'Need staging credentials before running migration?',
+      since: new Date(Date.now() - 14 * 60_000).toISOString(),
+    };
+
+    let currentWaiting = [waitingItem];
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify(
+            makeSummaryResponse(
+              {
+                state: 'disabled',
+                count: 0,
+                capped: false,
+                countsTowardTotal: true,
+                href: '/profile/secrets',
+                previews: [],
+              },
+              {
+                waiting: {
+                  state: 'ok',
+                  count: currentWaiting.length,
+                  capped: false,
+                  countsTowardTotal: true,
+                  href: '/agents',
+                  agentIds: currentWaiting.map((w) => w.agentId),
+                  previews: currentWaiting,
+                },
+              }
+            )
+          ),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
+    );
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const waitingCard = page.shadowRoot?.querySelector('[data-inbox-card="waiting"]');
+    expect(waitingCard).not.toBeNull();
+    expect(waitingCard?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('1');
+    expect(waitingCard?.querySelector('[data-card-view-all]')?.getAttribute('href')).toBe(
+      '/agents'
+    );
+
+    const row = waitingCard?.querySelector('[data-waiting-row="agent-42"]');
+    expect(row).not.toBeNull();
+    const link = row?.querySelector('[data-waiting-link]');
+    expect(link?.getAttribute('href')).toBe('/agents/agent-42');
+    expect(link?.textContent?.trim()).toBe('Frontend Dev');
+    expect(row?.querySelector('[data-waiting-slug]')?.textContent?.trim()).toBe('fe-dev');
+    expect(row?.querySelector('[data-waiting-question]')?.textContent?.trim()).toBe(
+      'Need staging credentials before running migration?'
+    );
+    expect(row?.querySelector('[data-waiting-since]')?.textContent?.trim()).toBeTruthy();
+    // No inline action buttons on the waiting card.
+    expect(row?.querySelector('sl-button')).toBeNull();
+
+    // Resolving the waiting agent via SSE hint clears the row and shows compact empty state.
+    currentWaiting = [];
+    stateManager.dispatchEvent(
+      new CustomEvent('inbox-changed', {
+        detail: { category: 'waiting', agentId: 'agent-42', activity: 'thinking' },
+      })
+    );
+    await new Promise((r) => setTimeout(r, 850));
+    await page.updateComplete;
+
+    expect(waitingCard?.querySelector('[data-waiting-row="agent-42"]')).toBeNull();
+    expect(waitingCard?.querySelector('[data-card-empty]')?.textContent?.trim()).toBe(
+      'Nothing waiting'
+    );
+  });
+
+  it('renders Reviews card with separate to_address and requested groups, hides when disabled, and dismisses requested rows optimistically with bell sync', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const toAddressItem = {
+      id: 'art-1',
+      kind: 'to_address' as const,
+      projectId: 'proj-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:30:00Z',
+      href: '/projects/proj-1/artifacts/art-1',
+      artifactId: 'art-1',
+      title: 'API Spec v2',
+      scopeRef: 'proj-1',
+    };
+    const requestedItem = {
+      id: 'notif-99',
+      kind: 'requested' as const,
+      projectId: 'proj-2',
+      projectName: 'Web',
+      createdAt: '2026-11-23T17:45:00Z',
+      href: '/projects/proj-2/artifacts/art-2',
+      artifactId: 'art-2',
+      title: 'Launch Checklist',
+      scopeRef: 'proj-2',
+      requestedBy: 'alice',
+      notificationId: 'notif-99',
+    };
+
+    let dismissed = false;
+    let resolveAck: ((res: Response) => void) | null = null;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        const previews = dismissed ? [toAddressItem] : [requestedItem, toAddressItem];
+        const breakdown = dismissed
+          ? { toAddress: 1, requested: 0 }
+          : { toAddress: 1, requested: 1 };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              makeSummaryResponse(
+                {
+                  state: 'disabled',
+                  count: 0,
+                  capped: false,
+                  countsTowardTotal: true,
+                  href: '/profile/secrets',
+                  previews: [],
+                },
+                {
+                  reviews: {
+                    state: 'ok',
+                    count: previews.length,
+                    capped: false,
+                    countsTowardTotal: true,
+                    href: '/artifacts?review_pending=1&owner=me',
+                    breakdown,
+                    previews,
+                  },
+                }
+              )
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (url.endsWith('/api/v1/notifications/notif-99/ack') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          resolveAck = resolve;
+        });
+      }
+      if (url.includes('/api/v1/notifications?acknowledged=false')) {
+        const list = dismissed
+          ? []
+          : [
+              {
+                id: 'notif-99',
+                subscriptionId: 'sub-1',
+                agentId: '00000000-0000-0000-0000-000000000000',
+                projectId: 'proj-2',
+                subscriberType: 'user',
+                subscriberId: 'user-1',
+                status: 'ARTIFACT_REVIEW_REQUESTED',
+                message: 'alice requested your review on Launch Checklist',
+                acknowledged: false,
+                createdAt: '2026-11-23T17:45:00Z',
+              },
+            ];
+        return Promise.resolve(
+          new Response(JSON.stringify(list), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const tray = document.createElement('scion-notification-tray') as ScionNotificationTray;
+    tray.user = { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' };
+    document.body.appendChild(tray);
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+    await tray.updateComplete;
+
+    const reviewsCard = page.shadowRoot?.querySelector('[data-inbox-card="reviews"]');
+    expect(reviewsCard).not.toBeNull();
+    expect(reviewsCard?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('2');
+    expect(reviewsCard?.querySelector('[data-card-view-all]')?.getAttribute('href')).toBe(
+      '/artifacts?review_pending=1&owner=me'
+    );
+
+    // Two visually separate groups with breakdown counts.
+    const toAddressGroup = reviewsCard?.querySelector('[data-reviews-group="to_address"]');
+    const requestedGroup = reviewsCard?.querySelector('[data-reviews-group="requested"]');
+    expect(toAddressGroup).not.toBeNull();
+    expect(requestedGroup).not.toBeNull();
+    expect(
+      toAddressGroup?.querySelector('[data-reviews-group-count="to_address"]')?.textContent?.trim()
+    ).toBe('1');
+    expect(
+      requestedGroup?.querySelector('[data-reviews-group-count="requested"]')?.textContent?.trim()
+    ).toBe('1');
+
+    // to_address row shows title, scopeRef, href, and NO dismiss button.
+    const toAddressRow = toAddressGroup?.querySelector('[data-review-row="art-1"]');
+    expect(toAddressRow?.querySelector('[data-review-link]')?.getAttribute('href')).toBe(
+      '/projects/proj-1/artifacts/art-1'
+    );
+    expect(toAddressRow?.querySelector('[data-review-link]')?.textContent?.trim()).toBe(
+      'API Spec v2'
+    );
+    expect(toAddressRow?.querySelector('[data-review-scope]')?.textContent?.trim()).toBe('proj-1');
+    expect(toAddressRow?.querySelector('[data-review-dismiss-btn]')).toBeNull();
+
+    // requested row shows title, scopeRef, requestedBy, href, and Dismiss button with row context.
+    const requestedRow = requestedGroup?.querySelector('[data-review-row="notif-99"]');
+    expect(requestedRow?.querySelector('[data-review-link]')?.getAttribute('href')).toBe(
+      '/projects/proj-2/artifacts/art-2'
+    );
+    expect(requestedRow?.querySelector('[data-review-scope]')?.textContent?.trim()).toBe('proj-2');
+    expect(requestedRow?.querySelector('[data-review-requested-by]')?.textContent?.trim()).toBe(
+      'requested by alice'
+    );
+    const dismissBtn = requestedRow?.querySelector<HTMLElement>(
+      '[data-review-dismiss-btn="notif-99"]'
+    );
+    expect(dismissBtn).not.toBeNull();
+    expect(dismissBtn?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'Dismiss review request for Launch Checklist'
+    );
+
+    const ackedEvents: string[] = [];
+    const onAcked = (e: Event): void => {
+      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
+      if (id) ackedEvents.push(id);
+    };
+    window.addEventListener(NOTIFICATION_ACKED_EVENT, onAcked);
+
+    try {
+      // Click Dismiss -> row is removed optimistically BEFORE POST resolves.
+      dismissBtn!.click();
+      await page.updateComplete;
+
+      expect(reviewsCard?.querySelector('[data-review-row="notif-99"]')).toBeNull();
+      expect(reviewsCard?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('1');
+
+      // POST /api/v1/notifications/notif-99/ack sent with Content-Type: application/json.
+      const ackCall = fetchMock.mock.calls.find((c) =>
+        urlOf(c[0]).endsWith('/api/v1/notifications/notif-99/ack')
+      );
+      expect(ackCall).toBeTruthy();
+      const ackInit = ackCall?.[1] as RequestInit | undefined;
+      expect(ackInit?.method).toBe('POST');
+      expect((ackInit?.headers as Record<string, string>)?.['Content-Type']).toBe(
+        'application/json'
+      );
+
+      // Resolve ack -> store refreshes and bell tray drops the notification.
+      dismissed = true;
+      resolveAck!(
+        new Response(JSON.stringify({ status: 'ok' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await flush();
+      await page.updateComplete;
+      await tray.updateComplete;
+
+      expect(ackedEvents).toEqual(['notif-99']);
+      expect(tray.shadowRoot?.querySelector('.badge')).toBeNull();
+      expect(showToast).toHaveBeenLastCalledWith('Dismissed review request', 'neutral');
+    } finally {
+      window.removeEventListener(NOTIFICATION_ACKED_EVENT, onAcked);
+    }
+  });
+
+  it('guards review Dismiss against double-submit, rolls back on error with toast, and tracks concurrent rows independently', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const rev1 = {
+      id: 'notif-1',
+      kind: 'requested' as const,
+      projectId: 'proj-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:45:00Z',
+      href: '/projects/proj-1/artifacts/art-1',
+      artifactId: 'art-1',
+      title: 'Doc One',
+      scopeRef: 'proj-1',
+      requestedBy: 'alice',
+      notificationId: 'notif-1',
+    };
+    const rev2 = {
+      id: 'notif-2',
+      kind: 'requested' as const,
+      projectId: 'proj-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:40:00Z',
+      href: '/projects/proj-1/artifacts/art-2',
+      artifactId: 'art-2',
+      title: 'Doc Two',
+      scopeRef: 'proj-1',
+      requestedBy: 'bob',
+      notificationId: 'notif-2',
+    };
+
+    let ack1Calls = 0;
+    let ack2Calls = 0;
+    let resolveAck1: ((res: Response) => void) | null = null;
+    let resolveAck2: ((res: Response) => void) | null = null;
+    let serverItems = [rev1, rev2];
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              makeSummaryResponse(
+                {
+                  state: 'disabled',
+                  count: 0,
+                  capped: false,
+                  countsTowardTotal: true,
+                  href: '/profile/secrets',
+                  previews: [],
+                },
+                {
+                  reviews: {
+                    state: 'ok',
+                    count: serverItems.length,
+                    capped: false,
+                    countsTowardTotal: true,
+                    href: '/artifacts?review_pending=1&owner=me',
+                    breakdown: { toAddress: 0, requested: serverItems.length },
+                    previews: serverItems,
+                  },
+                }
+              )
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (url.endsWith('/api/v1/notifications/notif-1/ack') && init?.method === 'POST') {
+        ack1Calls += 1;
+        return new Promise<Response>((resolve) => {
+          resolveAck1 = resolve;
+        });
+      }
+      if (url.endsWith('/api/v1/notifications/notif-2/ack') && init?.method === 'POST') {
+        ack2Calls += 1;
+        return new Promise<Response>((resolve) => {
+          resolveAck2 = resolve;
+        });
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const btn1 = page.shadowRoot?.querySelector<HTMLElement>('[data-review-dismiss-btn="notif-1"]');
+    const btn2 = page.shadowRoot?.querySelector<HTMLElement>('[data-review-dismiss-btn="notif-2"]');
+    expect(btn1).not.toBeNull();
+    expect(btn2).not.toBeNull();
+
+    // Double-submit guard on row 1: two synchronous clicks send only 1 POST.
+    // Concurrent row 2 dismiss is NOT blocked by row 1's busy state.
+    btn1!.click();
+    btn1!.click();
+    btn2!.click();
+    await page.updateComplete;
+
+    expect(ack1Calls).toBe(1);
+    expect(ack2Calls).toBe(1);
+    expect(page.shadowRoot?.querySelector('[data-review-row="notif-1"]')).toBeNull();
+    expect(page.shadowRoot?.querySelector('[data-review-row="notif-2"]')).toBeNull();
+
+    // Row 1 fails with 500 -> rolls back row 1 with danger toast; row 2 succeeds and stays removed.
+    resolveAck1!(
+      new Response(JSON.stringify({ error: { message: 'Ack failed' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    await flush();
+    await page.updateComplete;
+
+    expect(showToast).toHaveBeenCalledWith('Ack failed', 'danger');
+    expect(page.shadowRoot?.querySelector('[data-review-row="notif-1"]')).not.toBeNull();
+    expect(page.shadowRoot?.querySelector('[data-review-row="notif-2"]')).toBeNull();
+
+    serverItems = [rev1];
+    resolveAck2!(
+      new Response(JSON.stringify({ status: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    await flush();
+    await page.updateComplete;
+
+    expect(page.shadowRoot?.querySelector('[data-review-row="notif-1"]')).not.toBeNull();
+    expect(page.shadowRoot?.querySelector('[data-review-row="notif-2"]')).toBeNull();
+    expect(
+      page.shadowRoot
+        ?.querySelector('[data-inbox-card="reviews"] [data-card-count]')
+        ?.textContent?.trim()
+    ).toBe('1');
+  });
+
+  it('aborts in-flight review Dismiss fetch on disconnect, rolls back store state, and skips toast', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const rev = {
+      id: 'notif-abort',
+      kind: 'requested' as const,
+      projectId: 'proj-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:45:00Z',
+      href: '/projects/proj-1/artifacts/art-1',
+      artifactId: 'art-1',
+      title: 'Abort Doc',
+      scopeRef: 'proj-1',
+      requestedBy: 'alice',
+      notificationId: 'notif-abort',
+    };
+
+    let dismissSignal: AbortSignal | undefined;
+    let rejectAck: ((err: unknown) => void) | null = null;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              makeSummaryResponse(
+                {
+                  state: 'disabled',
+                  count: 0,
+                  capped: false,
+                  countsTowardTotal: true,
+                  href: '/profile/secrets',
+                  previews: [],
+                },
+                {
+                  reviews: {
+                    state: 'ok',
+                    count: 1,
+                    capped: false,
+                    countsTowardTotal: true,
+                    href: '/artifacts?review_pending=1&owner=me',
+                    breakdown: { toAddress: 0, requested: 1 },
+                    previews: [rev],
+                  },
+                }
+              )
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (url.endsWith('/api/v1/notifications/notif-abort/ack') && init?.method === 'POST') {
+        dismissSignal = init?.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          rejectAck = reject;
+        });
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const dismissBtn = page.shadowRoot?.querySelector<HTMLElement>(
+      '[data-review-dismiss-btn="notif-abort"]'
+    );
+    expect(dismissBtn).not.toBeNull();
+    dismissBtn!.click();
+    await page.updateComplete;
+
+    expect(dismissSignal).toBeDefined();
+    expect(dismissSignal?.aborted).toBe(false);
+    expect(inboxSummaryStore.summary?.categories.reviews.count).toBe(0);
+
+    // Disconnect mid-flight -> aborts signal; settling with AbortError rolls back store without toast.
+    page.remove();
+    expect(dismissSignal?.aborted).toBe(true);
+
+    const abortErr = new Error('aborted');
+    abortErr.name = 'AbortError';
+    rejectAck!(abortErr);
+    await flush();
+
+    expect(inboxSummaryStore.summary?.categories.reviews.count).toBe(1);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('shows overflow hint in Reviews group when breakdown count exceeds previews and hides Reviews card when disabled', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const requestedOnly = {
+      id: 'notif-only',
+      kind: 'requested' as const,
+      projectId: 'proj-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:45:00Z',
+      href: '/projects/proj-1/artifacts/art-1',
+      artifactId: 'art-1',
+      title: 'Review Me',
+      scopeRef: 'proj-1',
+      requestedBy: 'alice',
+      notificationId: 'notif-only',
+    };
+
+    let reviewsDisabled = false;
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify(
+            makeSummaryResponse(
+              {
+                state: 'ok',
+                count: 0,
+                capped: false,
+                countsTowardTotal: true,
+                href: '/profile/secrets',
+                previews: [],
+              },
+              {
+                reviews: reviewsDisabled
+                  ? {
+                      state: 'disabled',
+                      count: 0,
+                      capped: false,
+                      countsTowardTotal: true,
+                      href: '/artifacts?review_pending=1&owner=me',
+                      previews: [],
+                    }
+                  : {
+                      state: 'ok',
+                      count: 3,
+                      capped: false,
+                      countsTowardTotal: true,
+                      href: '/artifacts?review_pending=1&owner=me',
+                      breakdown: { toAddress: 2, requested: 1 },
+                      previews: [requestedOnly],
+                    },
+              }
+            )
+          ),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
+    );
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const reviewsCard = page.shadowRoot?.querySelector('[data-inbox-card="reviews"]');
+    expect(reviewsCard).not.toBeNull();
+    expect(
+      reviewsCard?.querySelector('[data-reviews-group-count="to_address"]')?.textContent?.trim()
+    ).toBe('2');
+    expect(reviewsCard?.querySelector('[data-reviews-group-overflow="to_address"]')).not.toBeNull();
+    expect(
+      reviewsCard?.querySelector('[data-reviews-group="requested"] [data-review-row="notif-only"]')
+    ).not.toBeNull();
+
+    // When hub.artifacts is off, reviews is state:"disabled" -> card is hidden.
+    reviewsDisabled = true;
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await page.updateComplete;
+    expect(page.shadowRoot?.querySelector('[data-inbox-card="reviews"]')).toBeNull();
   });
 });

@@ -79,6 +79,9 @@ export const SECRET_PENDING_STATUS = 'SECRET_PENDING';
 /** The path where the user decides on pending secrets. */
 const PROFILE_SECRETS_PATH = '/profile/secrets';
 
+/** Dispatched on `window` when another surface (e.g. Inbox) acks a notification. */
+export const NOTIFICATION_ACKED_EVENT = 'scion:notification-acked';
+
 /** The Profile > Secrets path for a pending secret row, or null for any other row. */
 export function pendingSecretLink(n: Notification): string | null {
   return n.kind === SECRET_PENDING_KIND || n.status === SECRET_PENDING_STATUS
@@ -278,6 +281,8 @@ export class ScionNotificationTray extends LitElement {
   private boundOnPushPreference = (): void => this.syncPushState();
   private boundOnFeatureFlagsChanged = (): void => this.onFeatureFlagsChanged();
   private boundOnInboxSummaryChanged = (): void => this.syncInboxState();
+  private boundOnInboxChanged = (e: Event): void => this.onInboxChanged(e);
+  private boundOnNotificationAcked = (e: Event): void => this.onNotificationAcked(e);
 
   /** IDs already seen — used to detect genuinely new notifications. */
   private seenIds = new Set<string>();
@@ -343,6 +348,7 @@ export class ScionNotificationTray extends LitElement {
     window.addEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     window.addEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.boundOnInboxSummaryChanged);
+    window.addEventListener(NOTIFICATION_ACKED_EVENT, this.boundOnNotificationAcked);
     this.syncUser();
     this.syncInboxState();
   }
@@ -356,6 +362,7 @@ export class ScionNotificationTray extends LitElement {
     window.removeEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     window.removeEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.boundOnInboxSummaryChanged);
+    window.removeEventListener(NOTIFICATION_ACKED_EVENT, this.boundOnNotificationAcked);
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
@@ -578,16 +585,36 @@ export class ScionNotificationTray extends LitElement {
 
   private listenForNotifications(): void {
     stateManager.addEventListener('notification-created', this.boundOnNotification);
+    stateManager.addEventListener('inbox-changed', this.boundOnInboxChanged);
     stateManager.addEventListener('disconnected', this.boundOnSseDisconnected);
     stateManager.addEventListener('connected', this.boundOnSseConnected);
   }
 
   private stopListeningForNotifications(): void {
     stateManager.removeEventListener('notification-created', this.boundOnNotification);
+    stateManager.removeEventListener('inbox-changed', this.boundOnInboxChanged);
     stateManager.removeEventListener('disconnected', this.boundOnSseDisconnected);
     stateManager.removeEventListener('connected', this.boundOnSseConnected);
     this.sseUnhealthy = false;
     this.eventFetch.cancel();
+  }
+
+  private onInboxChanged(e: Event): void {
+    const detail = (e as CustomEvent<{ category?: string }> | undefined)?.detail;
+    if (detail?.category === 'notifications') {
+      this.eventFetch.schedule(e.timeStamp > 0 ? e.timeStamp : undefined);
+    }
+  }
+
+  private onNotificationAcked(e: Event): void {
+    const id = (e as CustomEvent<{ id?: string }> | undefined)?.detail?.id;
+    if (!id) return;
+    this.upsertedAtSeq.delete(id);
+    this.ackedAtSeq.set(id, this.fetchSeq);
+    this.seenIds.delete(id);
+    if (this.notifications.some((x) => x.id === id)) {
+      this.notifications = this.notifications.filter((x) => x.id !== id);
+    }
   }
 
   private onSseDisconnected(): void {
