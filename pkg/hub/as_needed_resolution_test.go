@@ -961,9 +961,9 @@ func TestResolveSecrets_FileTypePassesThroughAsNeeded(t *testing.T) {
 		}
 	}
 
-	// Variable-type secret with as_needed should also pass through.
-	if _, ok := byName["VAR_SECRET"]; !ok {
-		t.Error("expected VAR_SECRET (variable-type, as_needed) to pass through resolveSecrets")
+	// on_demand secret must be excluded by resolveSecrets (never delivered).
+	if _, ok := byName["VAR_SECRET"]; ok {
+		t.Error("VAR_SECRET (on_demand) should be excluded by resolveSecrets")
 	}
 
 	// Environment-type secret with as_needed should be filtered out
