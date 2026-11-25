@@ -111,6 +111,15 @@ function formatRelativeAge(iso: string): string {
   return formatRelative(iso, { style: 'narrow' });
 }
 
+function isAbortError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'name' in err &&
+    (err as { name?: unknown }).name === 'AbortError'
+  );
+}
+
 interface InboxCardOptions<T> {
   key: InboxCategoryKey;
   icon: string;
@@ -147,7 +156,7 @@ export class ScionPageProfileInbox extends LitElement {
   private busyIds = new Set<string>();
 
   @state()
-  private busyChoiceKey: string | null = null;
+  private busyChoiceKeys = new Set<string>();
 
   @state()
   private confirmApproval: InboxApprovalPreview | null = null;
@@ -649,6 +658,13 @@ export class ScionPageProfileInbox extends LitElement {
     this.busyIds = next;
   }
 
+  private setBusyChoice(key: string, busy: boolean): void {
+    const next = new Set(this.busyChoiceKeys);
+    if (busy) next.add(key);
+    else next.delete(key);
+    this.busyChoiceKeys = next;
+  }
+
   private handleRefreshClick(): void {
     inboxSummaryStore.requestRefresh({ immediate: true, force: true });
     if (this.chatFilter !== 'all' || this.chatExpanded) {
@@ -723,7 +739,7 @@ export class ScionPageProfileInbox extends LitElement {
       }
     } catch (err) {
       if (seq !== this.chatFetchSeq || !this.isConnected) return;
-      if (err instanceof DOMException && err.name === 'AbortError') return;
+      if (isAbortError(err)) return;
       this.chatError = true;
     } finally {
       if (seq === this.chatFetchSeq) {
@@ -746,7 +762,7 @@ export class ScionPageProfileInbox extends LitElement {
     if (!inline || this.busyIds.has(item.id)) return;
     const choiceKey = `${item.id}:${choiceId}`;
     this.setBusy(item.id, true);
-    this.busyChoiceKey = choiceKey;
+    this.setBusyChoice(choiceKey, true);
     try {
       const result = await answerDecision(
         inline.decisionRowId,
@@ -779,9 +795,7 @@ export class ScionPageProfileInbox extends LitElement {
       showToast(result.message, 'danger');
     } finally {
       this.setBusy(item.id, false);
-      if (this.busyChoiceKey === choiceKey) {
-        this.busyChoiceKey = null;
-      }
+      this.setBusyChoice(choiceKey, false);
     }
   }
 
@@ -951,7 +965,7 @@ export class ScionPageProfileInbox extends LitElement {
                     <sl-button
                       size="small"
                       variant="default"
-                      ?loading=${this.busyChoiceKey === key}
+                      ?loading=${this.busyChoiceKeys.has(key)}
                       ?disabled=${busy}
                       data-decision-choice-btn=${choice.id}
                       @click=${(): void =>

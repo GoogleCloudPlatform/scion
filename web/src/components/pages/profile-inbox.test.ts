@@ -1407,4 +1407,219 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     ).length;
     expect(summaryCallsAfter).toBeGreaterThan(summaryCallsBefore);
   });
+
+  it('tracks inline decision loading spinners independently across concurrent rows', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const makeDecision = (
+      id: string,
+      rowId: string,
+      question: string
+    ): InboxSummaryResponse['categories']['decisions']['previews'][number] => ({
+      id,
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:00:00Z',
+      href: `/chat/space/p-1/thread/t-1#msg-${id}`,
+      promptMessageId: id,
+      conversationLabel: '#release',
+      askerAgentName: 'release-bot',
+      question,
+      decisionCount: 1,
+      answerMode: 'single',
+      canAnswer: true,
+      inline: {
+        decisionRowId: rowId,
+        choices: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+        allowsOther: false,
+      },
+    });
+
+    const d1 = makeDecision('msg-1', 'row-1', 'Ship A?');
+    const d2 = makeDecision('msg-2', 'row-2', 'Ship B?');
+    let remaining = [d1, d2];
+
+    let resolveRow1: ((r: Response) => void) | null = null;
+    let resolveRow2: ((r: Response) => void) | null = null;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              makeSummaryResponse(
+                {
+                  state: 'disabled',
+                  count: 0,
+                  capped: false,
+                  countsTowardTotal: true,
+                  href: '/profile/secrets',
+                  previews: [],
+                },
+                {
+                  decisions: {
+                    state: 'ok',
+                    count: remaining.length,
+                    capped: false,
+                    countsTowardTotal: true,
+                    href: '/profile/decisions?tab=pending',
+                    previews: remaining,
+                  },
+                }
+              )
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (url.endsWith('/api/v1/decisions/row-1/answer') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          resolveRow1 = resolve;
+        });
+      }
+      if (url.endsWith('/api/v1/decisions/row-2/answer') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          resolveRow2 = resolve;
+        });
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const btn1 = page.shadowRoot?.querySelector<HTMLElement>(
+      '[data-decision-row="msg-1"] [data-decision-choice-btn="yes"]'
+    );
+    const btn2 = page.shadowRoot?.querySelector<HTMLElement>(
+      '[data-decision-row="msg-2"] [data-decision-choice-btn="no"]'
+    );
+    expect(btn1).not.toBeNull();
+    expect(btn2).not.toBeNull();
+
+    // Answer both rows concurrently -> both choice buttons show loading.
+    btn1!.click();
+    btn2!.click();
+    await page.updateComplete;
+
+    expect(btn1!.hasAttribute('loading')).toBe(true);
+    expect(btn2!.hasAttribute('loading')).toBe(true);
+
+    // Resolve row 1 -> row 1 completes, while row 2 keeps its loading spinner.
+    remaining = [d2];
+    resolveRow1!(
+      new Response(
+        JSON.stringify({
+          decision: { rowId: 'row-1', status: 'decided' },
+          responseMessageId: 'r1',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await flush();
+    await page.updateComplete;
+
+    expect(page.shadowRoot?.querySelector('[data-decision-row="msg-1"]')).toBeNull();
+    const btn2StillLoading = page.shadowRoot?.querySelector<HTMLElement>(
+      '[data-decision-row="msg-2"] [data-decision-choice-btn="no"]'
+    );
+    expect(btn2StillLoading?.hasAttribute('loading')).toBe(true);
+
+    // Resolve row 2 -> clears cleanly.
+    remaining = [];
+    resolveRow2!(
+      new Response(
+        JSON.stringify({
+          decision: { rowId: 'row-2', status: 'decided' },
+          responseMessageId: 'r2',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await flush();
+    await page.updateComplete;
+
+    expect(page.shadowRoot?.querySelector('[data-decision-row="msg-2"]')).toBeNull();
+  });
+
+  it('ignores AbortError rejections without relying on global DOMException', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const baseSummary = makeSummaryResponse(
+      {
+        state: 'disabled',
+        count: 0,
+        capped: false,
+        countsTowardTotal: true,
+        href: '/profile/secrets',
+        previews: [],
+      },
+      {
+        chat: {
+          state: 'ok',
+          count: 1,
+          capped: false,
+          countsTowardTotal: true,
+          href: '/chat',
+          breakdown: { dms: 1, mentions: 0, unreadConversations: 1 },
+          previews: [
+            {
+              id: 'dm:u1:a1',
+              kind: 'dm',
+              projectId: 'p-1',
+              projectName: 'Core',
+              createdAt: '2026-11-23T17:50:00Z',
+              href: '/chat/dm/dm%3Au1%3Aa1',
+              conversationKey: 'dm:u1:a1',
+              label: 'deploy-bot',
+              lastMessageAt: '2026-11-23T17:50:00Z',
+            },
+          ],
+        },
+      }
+    );
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.includes('chat=dms')) {
+        const abortErr = new Error('aborted');
+        abortErr.name = 'AbortError';
+        return Promise.reject(abortErr);
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(baseSummary), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const chatCard = page.shadowRoot?.querySelector('[data-inbox-card="chat"]');
+    chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="dms"]')?.click();
+    await flush();
+    await page.updateComplete;
+
+    expect(chatCard?.querySelector('[data-card-error]')).toBeNull();
+  });
 });
