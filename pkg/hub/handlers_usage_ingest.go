@@ -68,8 +68,12 @@ func (s *Server) handleAgentUsageCapabilities(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, telemetrycontract.UsageCapabilitiesResponse{
-		UsageIngestEnabled:   true,
-		SuppressDirectOTel:   true,
+		UsageIngestEnabled: true,
+		// Keep container-direct OTel export active until Hub OTel re-emission
+		// lands in P2; advertising true before then would cause a P2-aware
+		// sciontool to suppress gen_ai.api.calls / scion.usage.tokens while
+		// this Hub does not yet re-emit them.
+		SuppressDirectOTel:   false,
 		MaxBatchEvents:       telemetrycontract.UsageIngestMaxBatchEvents,
 		MaxBatchBytes:        telemetrycontract.UsageIngestMaxBatchBytes,
 		HeartbeatIntervalSec: telemetrycontract.DefaultUsageHeartbeatIntervalSec,
