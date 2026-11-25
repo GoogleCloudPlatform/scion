@@ -4105,8 +4105,8 @@ func init() {
 	usageevent.DefaultBrokerID = usageeventDescBrokerID.Default.(string)
 	// usageeventDescHarness is the schema descriptor for harness field.
 	usageeventDescHarness := usageeventFields[8].Descriptor()
-	// usageevent.HarnessValidator is a validator for the "harness" field. It is called by the builders before save.
-	usageevent.HarnessValidator = usageeventDescHarness.Validators[0].(func(string) error)
+	// usageevent.DefaultHarness holds the default value on creation for the harness field.
+	usageevent.DefaultHarness = usageeventDescHarness.Default.(string)
 	// usageeventDescModel is the schema descriptor for model field.
 	usageeventDescModel := usageeventFields[9].Descriptor()
 	// usageevent.ModelValidator is a validator for the "model" field. It is called by the builders before save.
@@ -4201,8 +4201,8 @@ func init() {
 	usagerollupdaily.AgentIDValidator = usagerollupdailyDescAgentID.Validators[0].(func(string) error)
 	// usagerollupdailyDescHarness is the schema descriptor for harness field.
 	usagerollupdailyDescHarness := usagerollupdailyFields[5].Descriptor()
-	// usagerollupdaily.HarnessValidator is a validator for the "harness" field. It is called by the builders before save.
-	usagerollupdaily.HarnessValidator = usagerollupdailyDescHarness.Validators[0].(func(string) error)
+	// usagerollupdaily.DefaultHarness holds the default value on creation for the harness field.
+	usagerollupdaily.DefaultHarness = usagerollupdailyDescHarness.Default.(string)
 	// usagerollupdailyDescModel is the schema descriptor for model field.
 	usagerollupdailyDescModel := usagerollupdailyFields[6].Descriptor()
 	// usagerollupdaily.ModelValidator is a validator for the "model" field. It is called by the builders before save.

@@ -63,7 +63,8 @@ func (UsageEvent) Fields() []ent.Field {
 			Default("").
 			Immutable(),
 		field.String("harness").
-			NotEmpty().
+			Optional().
+			Default("").
 			Immutable(),
 		field.String("model").
 			NotEmpty().

@@ -163,8 +163,8 @@ var (
 	AgentIDValidator func(string) error
 	// DefaultBrokerID holds the default value on creation for the "broker_id" field.
 	DefaultBrokerID string
-	// HarnessValidator is a validator for the "harness" field. It is called by the builders before save.
-	HarnessValidator func(string) error
+	// DefaultHarness holds the default value on creation for the "harness" field.
+	DefaultHarness string
 	// ModelValidator is a validator for the "model" field. It is called by the builders before save.
 	ModelValidator func(string) error
 	// ModelSourceValidator is a validator for the "model_source" field. It is called by the builders before save.

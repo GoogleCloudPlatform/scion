@@ -445,6 +445,16 @@ func HarnessHasSuffix(v string) predicate.UsageRollupDaily {
 	return predicate.UsageRollupDaily(sql.FieldHasSuffix(FieldHarness, v))
 }
 
+// HarnessIsNil applies the IsNil predicate on the "harness" field.
+func HarnessIsNil() predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldIsNull(FieldHarness))
+}
+
+// HarnessNotNil applies the NotNil predicate on the "harness" field.
+func HarnessNotNil() predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNotNull(FieldHarness))
+}
+
 // HarnessEqualFold applies the EqualFold predicate on the "harness" field.
 func HarnessEqualFold(v string) predicate.UsageRollupDaily {
 	return predicate.UsageRollupDaily(sql.FieldEqualFold(FieldHarness, v))

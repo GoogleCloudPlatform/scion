@@ -49,7 +49,8 @@ func (UsageRollupDaily) Fields() []ent.Field {
 			NotEmpty().
 			Immutable(),
 		field.String("harness").
-			NotEmpty().
+			Optional().
+			Default("").
 			Immutable(),
 		field.String("model").
 			NotEmpty().

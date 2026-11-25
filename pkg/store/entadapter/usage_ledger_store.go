@@ -112,24 +112,29 @@ func (s *UsageLedgerStore) EnsureRunAttribution(ctx context.Context, attr *store
 	return insertRunAttributionOnConflictDoNothing(ctx, s.client, attr)
 }
 
-func insertRunAttributionOnConflictDoNothing(ctx context.Context, client *ent.Client, attr *store.RunAttribution) (bool, error) {
+func buildInsertRunAttributionQuery(dialectName string, attr *store.RunAttribution) (string, []any, error) {
 	createdAt := attr.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
 	createdAt = createdAt.UTC().Truncate(time.Microsecond)
 
-	var labelsJSON any
+	var labelsVal any
 	if len(attr.LabelsAtLaunch) > 0 {
 		raw, err := json.Marshal(attr.LabelsAtLaunch)
 		if err != nil {
-			return false, fmt.Errorf("marshal labels_at_launch: %w", err)
+			return "", nil, fmt.Errorf("marshal labels_at_launch: %w", err)
 		}
-		labelsJSON = string(raw)
+		if dialectName == dialect.Postgres {
+			labelsVal = entsql.ExprFunc(func(b *entsql.Builder) {
+				b.Arg(string(raw)).WriteString("::jsonb")
+			})
+		} else {
+			labelsVal = string(raw)
+		}
 	}
 
-	drv := client.Driver()
-	query, args := entsql.Dialect(drv.Dialect()).
+	query, args := entsql.Dialect(dialectName).
 		Insert(runattribution.Table).
 		Columns(
 			runattribution.FieldID,
@@ -178,7 +183,7 @@ func insertRunAttributionOnConflictDoNothing(ctx context.Context, client *ent.Cl
 			attr.HarnessConfigDigest,
 			attr.TemplateDigest,
 			attr.HarnessBuild,
-			labelsJSON,
+			labelsVal,
 			attr.MeteringWriterMode,
 			attr.UsageLiveSource,
 			attr.CapturePolicy,
@@ -192,7 +197,15 @@ func insertRunAttributionOnConflictDoNothing(ctx context.Context, client *ent.Cl
 			entsql.DoNothing(),
 		).
 		Query()
+	return query, args, nil
+}
 
+func insertRunAttributionOnConflictDoNothing(ctx context.Context, client *ent.Client, attr *store.RunAttribution) (bool, error) {
+	drv := client.Driver()
+	query, args, err := buildInsertRunAttributionQuery(drv.Dialect(), attr)
+	if err != nil {
+		return false, err
+	}
 	var res sql.Result
 	if err := drv.Exec(ctx, query, args, &res); err != nil {
 		return false, mapError(err)
@@ -380,7 +393,9 @@ func resolveBillingUserIDTx(ctx context.Context, client *ent.Client, ownerID, cr
 
 // buildRunAttributionFromAgentRow constructs the immutable run_attribution
 // snapshot for runID from an Ent Agent row inside the caller's transaction.
-func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, row *ent.Agent, runID, priorRunID, hubID string) (*store.RunAttribution, error) {
+// overrideLaunchID, when non-empty (e.g. from SettleLaunchedRun's fence),
+// takes precedence over the row's launch_id match.
+func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, row *ent.Agent, runID, priorRunID, hubID, overrideLaunchID string) (*store.RunAttribution, error) {
 	var ownerIDStr, createdByStr string
 	var ownerIDPtr, createdByPtr *string
 	if row.OwnerID != nil {
@@ -413,8 +428,8 @@ func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, ro
 	}
 	harness := store.ResolveRunAttributionHarness(appliedCfg, effectiveCfg)
 
-	var launchID string
-	if row.LaunchRunID == runID && row.LaunchID != "" {
+	launchID := overrideLaunchID
+	if launchID == "" && row.LaunchRunID == runID && row.LaunchID != "" {
 		launchID = row.LaunchID
 	}
 
@@ -455,7 +470,7 @@ func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, ro
 
 // ensureRunAttributionForAgentTx reads the agent row in client's transaction
 // and inserts an immutable run_attribution row for runID via ON CONFLICT DO NOTHING.
-func ensureRunAttributionForAgentTx(ctx context.Context, client *ent.Client, uid uuid.UUID, runID, priorRunID, hubID string, beforeInsert func(ctx context.Context, runID string) error) error {
+func ensureRunAttributionForAgentTx(ctx context.Context, client *ent.Client, uid uuid.UUID, runID, priorRunID, hubID, overrideLaunchID string, beforeInsert func(ctx context.Context, runID string) error) error {
 	if runID == "" {
 		return nil
 	}
@@ -466,7 +481,7 @@ func ensureRunAttributionForAgentTx(ctx context.Context, client *ent.Client, uid
 	if err != nil {
 		return mapError(err)
 	}
-	attr, err := buildRunAttributionFromAgentRow(ctx, client, row, runID, priorRunID, hubID)
+	attr, err := buildRunAttributionFromAgentRow(ctx, client, row, runID, priorRunID, hubID, overrideLaunchID)
 	if err != nil {
 		return err
 	}
@@ -572,7 +587,7 @@ func (s *UsageLedgerStore) backfillActiveRunAttributionsPaged(ctx context.Contex
 			if err := ctx.Err(); err != nil {
 				return inserted, err
 			}
-			attr, err := buildRunAttributionFromAgentRow(ctx, s.client, row, row.RunID, "", hubID)
+			attr, err := buildRunAttributionFromAgentRow(ctx, s.client, row, row.RunID, "", hubID, "")
 			if err != nil {
 				slog.Warn("run_attribution backfill: failed to build attribution for agent",
 					"agent_id", row.ID.String(), "run_id", row.RunID, "error", err)

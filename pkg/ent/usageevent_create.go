@@ -89,6 +89,14 @@ func (_c *UsageEventCreate) SetHarness(v string) *UsageEventCreate {
 	return _c
 }
 
+// SetNillableHarness sets the "harness" field if the given value is not nil.
+func (_c *UsageEventCreate) SetNillableHarness(v *string) *UsageEventCreate {
+	if v != nil {
+		_c.SetHarness(*v)
+	}
+	return _c
+}
+
 // SetModel sets the "model" field.
 func (_c *UsageEventCreate) SetModel(v string) *UsageEventCreate {
 	_c.mutation.SetModel(v)
@@ -467,6 +475,10 @@ func (_c *UsageEventCreate) defaults() {
 		v := usageevent.DefaultBrokerID
 		_c.mutation.SetBrokerID(v)
 	}
+	if _, ok := _c.mutation.Harness(); !ok {
+		v := usageevent.DefaultHarness
+		_c.mutation.SetHarness(v)
+	}
 	if _, ok := _c.mutation.SourceKind(); !ok {
 		v := usageevent.DefaultSourceKind
 		_c.mutation.SetSourceKind(v)
@@ -541,14 +553,6 @@ func (_c *UsageEventCreate) check() error {
 	if v, ok := _c.mutation.AgentID(); ok {
 		if err := usageevent.AgentIDValidator(v); err != nil {
 			return &ValidationError{Name: "agent_id", err: fmt.Errorf(`ent: validator failed for field "UsageEvent.agent_id": %w`, err)}
-		}
-	}
-	if _, ok := _c.mutation.Harness(); !ok {
-		return &ValidationError{Name: "harness", err: errors.New(`ent: missing required field "UsageEvent.harness"`)}
-	}
-	if v, ok := _c.mutation.Harness(); ok {
-		if err := usageevent.HarnessValidator(v); err != nil {
-			return &ValidationError{Name: "harness", err: fmt.Errorf(`ent: validator failed for field "UsageEvent.harness": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.Model(); !ok {

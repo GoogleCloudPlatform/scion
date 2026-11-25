@@ -98,8 +98,8 @@ var (
 	DefaultBillingUserID string
 	// AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
 	AgentIDValidator func(string) error
-	// HarnessValidator is a validator for the "harness" field. It is called by the builders before save.
-	HarnessValidator func(string) error
+	// DefaultHarness holds the default value on creation for the "harness" field.
+	DefaultHarness string
 	// ModelValidator is a validator for the "model" field. It is called by the builders before save.
 	ModelValidator func(string) error
 	// UsageSourceValidator is a validator for the "usage_source" field. It is called by the builders before save.

@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -174,6 +176,38 @@ func TestUsageLedgerSchemas_MigrationAndNullability(t *testing.T) {
 		SetLastEventTs(now).
 		Save(ctx)
 	require.Error(t, err, "duplicate usage_rollups_daily key must be rejected")
+
+	// Empty harness ("") is allowed on usage_events and usage_rollups_daily (unknown harness).
+	_, err = client.UsageEvent.Create().
+		SetHubID("hub-test").
+		SetEventID("evt-unknown-harness").
+		SetRunID(runID).
+		SetProjectID(projectID).
+		SetAgentID(agentID).
+		SetHarness("").
+		SetModel("unknown").
+		SetModelSource("unknown").
+		SetUsageSource(store.UsageSourceHooks).
+		SetStatus("success").
+		SetCalls(1).
+		SetTokenStatus("not_reported").
+		SetEventTs(now).
+		SetReceivedAt(now).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.UsageRollupDaily.Create().
+		SetBucketStart(dayUTC).
+		SetProjectID(projectID).
+		SetBillingUserID("").
+		SetAgentID(agentID).
+		SetHarness("").
+		SetModel("unknown").
+		SetUsageSource(store.UsageSourceHooks).
+		SetFirstEventTs(now).
+		SetLastEventTs(now).
+		Save(ctx)
+	require.NoError(t, err)
 
 	// 4. usage_scope_counters_daily
 	_, err = client.UsageScopeCounterDaily.Create().
@@ -750,6 +784,130 @@ func TestBackfillActiveRunAttributions_Paging(t *testing.T) {
 	n, err = cs.backfillActiveRunAttributionsPaged(ctx, "hub-paged", 2)
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
+}
+
+func TestRunAttribution_SettleLaunchedRunPreservesLaunchID(t *testing.T) {
+	ctx := context.Background()
+	cs := NewCompositeStore(enttest.NewClient(t))
+	t.Cleanup(func() { _ = cs.Close() })
+	cs.SetRunAttributionConfig(&store.RunAttributionConfig{HubID: "hub-settle"})
+
+	projectID := createTestProject(t, cs, "attr-settle")
+	ag := makeAgent(projectID, "worker-settle")
+	ag.RuntimeBrokerID = "broker-settle-1"
+	ag.AppliedConfig = &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "my-claude"}
+	ag.Phase = string(state.PhaseCreated)
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+
+	// Mint initial run and begin launch.
+	_, err := cs.SetAgentRunID(ctx, ag.ID, "run-minted-for-launch", nil)
+	require.NoError(t, err)
+	launchID, err := cs.BeginLaunchWithOptions(ctx, ag.ID, store.LaunchKindCreate, time.Minute, store.BeginLaunchOptions{
+		RunID: "run-minted-for-launch",
+	})
+	require.NoError(t, err)
+
+	loaded, err := cs.GetAgent(ctx, ag.ID)
+	require.NoError(t, err)
+	require.NotNil(t, loaded.RunIDUpdatedAt)
+
+	// Settle launch to a different, not-yet-attributed run ID: must preserve launch_id from fence.
+	swapped, err := cs.SettleLaunchedRun(ctx, ag.ID, store.LaunchSettleFence{
+		LaunchID:       launchID,
+		FromRunID:      "run-minted-for-launch",
+		ToRunID:        "run-adopted-on-settle",
+		BrokerID:       "broker-settle-1",
+		Generation:     loaded.Generation,
+		UnchangedSince: loaded.RunIDUpdatedAt.Add(time.Second),
+	})
+	require.NoError(t, err)
+	require.True(t, swapped)
+
+	attr, err := cs.GetRunAttribution(ctx, "run-adopted-on-settle")
+	require.NoError(t, err)
+	assert.Equal(t, launchID, attr.LaunchID, "settled run must inherit launch_id from settle fence")
+	assert.Equal(t, "run-minted-for-launch", attr.PriorRunID)
+	assert.Equal(t, "claude", attr.Harness)
+}
+
+func TestRunAttribution_SameRunIDMintClearsPriorRunID(t *testing.T) {
+	ctx := context.Background()
+	cs := NewCompositeStore(enttest.NewClient(t))
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "attr-same-mint")
+	ag := makeAgent(projectID, "worker-same-mint")
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+
+	// Mint run-same while hook is OFF, then turn hook ON and re-mint run-same.
+	_, err := cs.SetAgentRunID(ctx, ag.ID, "run-same", nil)
+	require.NoError(t, err)
+
+	cs.SetRunAttributionConfig(&store.RunAttributionConfig{HubID: "hub-same"})
+	_, err = cs.SetAgentRunID(ctx, ag.ID, "run-same", nil)
+	require.NoError(t, err)
+
+	attr, err := cs.GetRunAttribution(ctx, "run-same")
+	require.NoError(t, err)
+	assert.Empty(t, attr.PriorRunID, "same-run mint must not set prior_run_id to itself")
+}
+
+func TestRunAttribution_LabelsRoundTripAsJSONObject(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "attr-json-labels")
+	agentID := uuid.NewString()
+	runID := "run-labels-" + uuid.NewString()
+	wantLabels := map[string]string{
+		"issue": "ptone/scion#9233",
+		"area":  "tokenomics",
+	}
+
+	// Verify Postgres query emits an explicit ::jsonb cast for labels_at_launch.
+	pgQuery, _, err := buildInsertRunAttributionQuery(dialect.Postgres, &store.RunAttribution{
+		RunID:          runID,
+		ProjectID:      projectID,
+		AgentID:        agentID,
+		LabelsAtLaunch: wantLabels,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, pgQuery, "::jsonb")
+
+	// Insert via EnsureRunAttribution and verify labels round-trip as a JSON object
+	// (not a JSON string) on both SQLite and Postgres (via CI test-store-postgres-entadapter).
+	created, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:          runID,
+		Generation:     1,
+		HubID:          "hub-json",
+		ProjectID:      projectID,
+		AgentID:        agentID,
+		LabelsAtLaunch: wantLabels,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	got, err := cs.GetRunAttribution(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, wantLabels, got.LabelsAtLaunch)
+
+	// Confirm the stored SQL JSON type is an object, not a string.
+	drv := client.Driver()
+	var rows entsql.Rows
+	var typeQuery string
+	if drv.Dialect() == dialect.Postgres {
+		typeQuery = "SELECT jsonb_typeof(labels_at_launch) FROM run_attribution WHERE run_id = $1"
+	} else {
+		typeQuery = "SELECT json_type(labels_at_launch) FROM run_attribution WHERE run_id = ?"
+	}
+	require.NoError(t, drv.Query(ctx, typeQuery, []any{runID}, &rows))
+	defer func() { _ = rows.Close() }()
+	require.True(t, rows.Next())
+	var jsonType string
+	require.NoError(t, rows.Scan(&jsonType))
+	assert.Equal(t, "object", jsonType)
 }
 
 func TestBackfillActiveRunAttributions_Idempotent(t *testing.T) {

@@ -4135,6 +4135,10 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		return upd.Save(ctx)
 	}
 	runAttrCfg := s.runAttribution.load()
+	priorRunID := row.RunID
+	if runID == row.RunID {
+		priorRunID = ""
+	}
 	var n int
 	switch obs := s.lifecycle.load(); {
 	case obs != nil:
@@ -4152,7 +4156,7 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 					return n, mapError(err)
 				}
 				if runAttrCfg != nil {
-					if err := ensureRunAttributionForAgentTx(ctx, c, uid, runID, row.RunID, runAttrCfg.HubID, s.beforeRunAttributionInsert); err != nil {
+					if err := ensureRunAttributionForAgentTx(ctx, c, uid, runID, priorRunID, runAttrCfg.HubID, "", s.beforeRunAttributionInsert); err != nil {
 						return 0, err
 					}
 				}
@@ -4181,12 +4185,12 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		}
 	case cred == nil:
 		// runAttrCfg != nil: commit the run_id swap and run_attribution row atomically.
-		n, err = s.swapWithRunAttribution(ctx, swap, uid, runID, row.RunID, runAttrCfg.HubID)
+		n, err = s.swapWithRunAttribution(ctx, swap, uid, runID, priorRunID, runAttrCfg.HubID, "")
 		if err != nil {
 			return "", false, err
 		}
 	default:
-		n, err = s.swapWithCredential(ctx, swap, uid, runID, row.RunID, cred, runAttrCfg)
+		n, err = s.swapWithCredential(ctx, swap, uid, runID, priorRunID, cred, runAttrCfg)
 		if err != nil {
 			return "", false, err
 		}
@@ -4203,13 +4207,13 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 
 // swapWithRunAttribution runs swap and, when it updated the row, inserts the
 // immutable run_attribution row for runID in the same transaction.
-func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.AgentClient) (int, error), uid uuid.UUID, runID, priorRunID, hubID string) (int, error) {
+func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.AgentClient) (int, error), uid uuid.UUID, runID, priorRunID, hubID, overrideLaunchID string) (int, error) {
 	if s.inTx {
 		n, err := swap(s.client.Agent)
 		if err != nil || n == 0 {
 			return n, mapError(err)
 		}
-		if err := ensureRunAttributionForAgentTx(ctx, s.client, uid, runID, priorRunID, hubID, s.beforeRunAttributionInsert); err != nil {
+		if err := ensureRunAttributionForAgentTx(ctx, s.client, uid, runID, priorRunID, hubID, overrideLaunchID, s.beforeRunAttributionInsert); err != nil {
 			return 0, err
 		}
 		return n, nil
@@ -4227,7 +4231,7 @@ func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.
 		_ = tx.Rollback()
 		return 0, nil
 	}
-	if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, hubID, s.beforeRunAttributionInsert); err != nil {
+	if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, hubID, overrideLaunchID, s.beforeRunAttributionInsert); err != nil {
 		_ = tx.Rollback()
 		return 0, err
 	}
@@ -4257,7 +4261,7 @@ func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.Agen
 		return 0, nil
 	}
 	if runAttrCfg != nil {
-		if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, runAttrCfg.HubID, s.beforeRunAttributionInsert); err != nil {
+		if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, runAttrCfg.HubID, "", s.beforeRunAttributionInsert); err != nil {
 			_ = tx.Rollback()
 			return 0, err
 		}
@@ -4336,14 +4340,14 @@ func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, pub
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
 // The swap also clears previous_run_ids: the run has settled.
 func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
-	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true,
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true, "",
 		store.AgentWriteHints{Kind: store.WriteKindRunAdopt, AdoptionSource: store.AdoptionSourceCAS})
 }
 
 // RevertAgentRunID implements store.AgentStore.RevertAgentRunID: the same
 // swap, leaving previous_run_ids as they are.
 func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID, previousRunID string) (bool, error) {
-	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false,
+	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false, "",
 		store.AgentWriteHints{Kind: store.WriteKindRunRevert})
 }
 
@@ -4354,7 +4358,7 @@ func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID,
 // (store.RunAdoptionSourceFrom): cas for the launch-report settle,
 // heartbeat_adopt for the heartbeat adoption.
 func (s *AgentStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error) {
-	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true,
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true, "",
 		store.AgentWriteHints{Kind: store.WriteKindRunAdopt, AdoptionSource: store.RunAdoptionSourceFrom(ctx)},
 		runIDWritable(time.Now()),
 		agent.RunIDUpdatedAtNotNil(),
@@ -4370,7 +4374,7 @@ func (s *AgentStore) SettleLaunchedRun(ctx context.Context, agentID string, f st
 	if f.LaunchID == "" || f.FromRunID == "" || f.ToRunID == "" || f.BrokerID == "" {
 		return false, nil
 	}
-	return s.swapAgentRunID(ctx, agentID, f.FromRunID, f.ToRunID, true,
+	return s.swapAgentRunID(ctx, agentID, f.FromRunID, f.ToRunID, true, f.LaunchID,
 		store.AgentWriteHints{Kind: store.WriteKindRunAdopt, AdoptionSource: store.AdoptionSourceCAS},
 		runIDWritable(time.Now()),
 		agent.RunIDUpdatedAtNotNil(),
@@ -4384,7 +4388,7 @@ func (s *AgentStore) SettleLaunchedRun(ctx context.Context, agentID string, f st
 // swapAgentRunID swaps run_id from expectedRunID to newRunID, under any
 // extra predicates, and reports whether it did. A swap that changes the
 // value also sets run_id_updated_at; a same-value swap (a settle) leaves it.
-func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool, hints store.AgentWriteHints, extra ...predicate.Agent) (bool, error) {
+func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool, launchID string, hints store.AgentWriteHints, extra ...predicate.Agent) (bool, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return false, err
@@ -4435,13 +4439,13 @@ func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID,
 				if err != nil || n == 0 || !needAttribution {
 					return n, err
 				}
-				if err := ensureRunAttributionForAgentTx(ctx, c, uid, newRunID, priorRunID, runAttrCfg.HubID, s.beforeRunAttributionInsert); err != nil {
+				if err := ensureRunAttributionForAgentTx(ctx, c, uid, newRunID, priorRunID, runAttrCfg.HubID, launchID, s.beforeRunAttributionInsert); err != nil {
 					return 0, err
 				}
 				return n, nil
 			})
 	case needAttribution:
-		n, err = s.swapWithRunAttribution(ctx, write, uid, newRunID, priorRunID, runAttrCfg.HubID)
+		n, err = s.swapWithRunAttribution(ctx, write, uid, newRunID, priorRunID, runAttrCfg.HubID, launchID)
 	default:
 		n, err = write(s.client.Agent)
 	}
