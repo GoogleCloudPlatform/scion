@@ -116,6 +116,18 @@ type ProjectService interface {
 	// UpdateGitHubTriggerSettings updates the project's GitHub trigger source
 	// settings (PUT /api/v1/projects/{id}/trigger-sources/github).
 	UpdateGitHubTriggerSettings(ctx context.Context, projectID string, req *UpdateProjectGitHubTriggerSettingsRequest) (*ProjectGitHubTriggerSettings, error)
+
+	// GetGitHub retrieves the project's GitHub App integration read model
+	// (GET /api/v1/projects/{id}/github).
+	GetGitHub(ctx context.Context, projectID string) (*ProjectGitHub, error)
+
+	// BindGitHubInstallation binds a GitHub App installation to a project
+	// (PUT /api/v1/projects/{id}/github-installation).
+	BindGitHubInstallation(ctx context.Context, projectID string, installationID int64) (*BindGitHubInstallationResponse, error)
+
+	// UnbindGitHubInstallation removes the GitHub App installation association
+	// from a project (DELETE /api/v1/projects/{id}/github-installation).
+	UnbindGitHubInstallation(ctx context.Context, projectID string) error
 }
 
 // projectService is the implementation of ProjectService.

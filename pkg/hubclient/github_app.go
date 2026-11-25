@@ -26,6 +26,7 @@ import (
 
 const (
 	githubAppConfigPath          = "/api/v1/github-app"
+	githubAppInstallationsPath   = "/api/v1/github-app/installations"
 	githubAppRepoRoutingBasePath = "/api/v1/github-app/repo-routing"
 )
 
@@ -35,6 +36,10 @@ type GitHubAppService interface {
 	// GetConfig retrieves the Hub's administrative GitHub App configuration and
 	// trigger readiness summary (GET /api/v1/github-app).
 	GetConfig(ctx context.Context) (*GitHubAppConfig, error)
+
+	// ListInstallations lists GitHub App installations known to the Hub
+	// (GET /api/v1/github-app/installations).
+	ListInstallations(ctx context.Context, opts *ListGitHubInstallationsOptions) ([]GitHubInstallation, error)
 
 	// ListRepoRouting lists primary-project trigger routing entries across
 	// repositories with candidate projects (optional installation filter).
@@ -106,6 +111,50 @@ type SetGitHubRepoPrimaryRequest struct {
 
 func githubAppRepoRoutingItemPath(owner, repo string) string {
 	return githubAppRepoRoutingBasePath + "/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+}
+
+// ListGitHubInstallationsOptions filters GET /api/v1/github-app/installations.
+type ListGitHubInstallationsOptions struct {
+	AccountLogin string
+	Status       string
+}
+
+// GitHubInstallation represents a GitHub App installation record returned by
+// GET /api/v1/github-app/installations.
+type GitHubInstallation struct {
+	InstallationID int64    `json:"installation_id"`
+	AccountLogin   string   `json:"account_login"`
+	AccountType    string   `json:"account_type"`
+	AppID          int64    `json:"app_id"`
+	Repositories   []string `json:"repositories,omitempty"`
+	Status         string   `json:"status"`
+}
+
+func (s *githubAppService) ListInstallations(ctx context.Context, opts *ListGitHubInstallationsOptions) ([]GitHubInstallation, error) {
+	query := url.Values{}
+	if opts != nil {
+		if opts.AccountLogin != "" {
+			query.Set("account_login", opts.AccountLogin)
+		}
+		if opts.Status != "" {
+			query.Set("status", opts.Status)
+		}
+	}
+	resp, err := s.c.getWithQuery(ctx, githubAppInstallationsPath, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Installations []GitHubInstallation `json:"installations"`
+	}
+	decoded, err := apiclient.DecodeRequired[struct {
+		Installations []GitHubInstallation `json:"installations"`
+	}](resp)
+	if err != nil {
+		return nil, err
+	}
+	wrapper.Installations = decoded.Installations
+	return wrapper.Installations, nil
 }
 
 func (s *githubAppService) GetConfig(ctx context.Context) (*GitHubAppConfig, error) {
