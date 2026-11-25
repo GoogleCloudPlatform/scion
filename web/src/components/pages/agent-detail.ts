@@ -101,6 +101,7 @@ import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
 import '../shared/agent-schedules-tab.js';
 import type { ScionAgentSchedulesTab } from '../shared/agent-schedules-tab.js';
+import '../shared/agent-usage-panel.js';
 import '../shared/agent-suspend-screen.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
@@ -110,6 +111,7 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   idleSuspendEnabled,
   isFeatureEnabled,
+  TOKENOMICS_USAGE_LEDGER_FLAG,
 } from '../../utils/feature-flags.js';
 import '../shared/secret-list.js';
 import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
@@ -325,6 +327,10 @@ export class ScionPageAgentDetail extends LitElement {
   /** Whether the agent-scoped secrets experiment is enabled. */
   private get agentSecretsEnabled(): boolean {
     return isFeatureEnabled(AGENT_SECRETS_FLAG);
+  }
+
+  private get usageLedgerEnabled(): boolean {
+    return isFeatureEnabled(TOKENOMICS_USAGE_LEDGER_FLAG);
   }
 
   /** Whether an agent uses the built-in shell execution container harness. */
@@ -1831,6 +1837,9 @@ export class ScionPageAgentDetail extends LitElement {
 
       <sl-tab-group @sl-tab-show=${this.handleTabShow}>
         <sl-tab slot="nav" panel="status">Status</sl-tab>
+        ${this.usageLedgerEnabled
+          ? html`<sl-tab slot="nav" panel="usage" data-testid="agent-usage-tab">Usage</sl-tab>`
+          : nothing}
         <sl-tab slot="nav" panel="metrics">Metrics</sl-tab>
         <sl-tab slot="nav" panel="logs">Logs</sl-tab>
         ${!isShell ? html`<sl-tab slot="nav" panel="messages">Messages</sl-tab>` : nothing}
@@ -1843,6 +1852,11 @@ export class ScionPageAgentDetail extends LitElement {
           : nothing}
 
         <sl-tab-panel name="status">${this.renderStatusTab()}</sl-tab-panel>
+        ${this.usageLedgerEnabled
+          ? html`<sl-tab-panel name="usage" data-testid="agent-usage-panel">
+              <scion-agent-usage-panel agentId=${this.agent.id}></scion-agent-usage-panel>
+            </sl-tab-panel>`
+          : nothing}
         <sl-tab-panel name="metrics">${this.renderMetricsTab()}</sl-tab-panel>
         <sl-tab-panel name="logs">
           <scion-agent-log-viewer
