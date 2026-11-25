@@ -67,6 +67,14 @@ scion runtime-broker register
 
 This command checks that the local broker server is running, then exchanges credentials with the Hub, linking your machine's broker to your Hub user account. Each Hub connection is saved to `~/.scion/hub-credentials/<name>.json`, one file per connection (`--name`, derived from the Hub endpoint by default; registration does not write `hub_connections` into settings files, and `scion config set` refuses `hub_connections` keys as not writable). List the connections with `scion runtime-broker hubs`.
 
+#### Re-registering a broker that is online
+
+Re-registering a broker replaces its credentials, which disconnects the running broker. The Hub therefore refuses to re-register a broker that is currently online (connected to the Hub, or reported online with a heartbeat in the last few minutes) unless the request sets `force`. It answers `409` with code `broker_online`, and `error.details` names the broker (`brokerId`, `brokerName`, `status`).
+
+On a terminal, `scion runtime-broker register` asks before it takes over the online broker (default No). Without a terminal it fails, even with `--yes`, and tells you to re-run with `--force` to take over the broker's identity, or with `--broker-name` to register a separate broker under another name. `--force` skips the question.
+
+Re-minting a join token that keeps the broker's settings (`scion hub brokers join-token create`) does not need `force`: the running broker stays connected until the new token is redeemed.
+
 ### 3. Provide Compute for a Project
 
 Even after registration, your broker will not accept arbitrary agents. It only executes agents for specific **Projects** (projects) that you explicitly authorize it to serve.
