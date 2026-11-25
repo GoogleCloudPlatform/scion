@@ -193,7 +193,10 @@ type PublishArtifactRequest struct {
 
 // ListArtifactsOptions filters and pages List.
 type ListArtifactsOptions struct {
-	// Query keeps artifacts whose title or key contains it.
+	// Query is a unified filter query (see docs reference/filter-queries.md:
+	// `is:`, `project:`, `-` negation, or plain title/key text). Subject to the
+	// dialect limits (512 bytes raw, 200 runes text, 20 distinct project values);
+	// invalid queries return 400 invalid_filter_query.
 	Query string
 	// ReviewPending keeps artifacts whose current version is a review.
 	ReviewPending bool
