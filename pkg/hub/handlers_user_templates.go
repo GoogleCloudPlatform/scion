@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -240,7 +241,7 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.CreateTemplate(ctx, template); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A template with this name already exists in your user scope. Choose a different name.", nil)
 			return
 		}

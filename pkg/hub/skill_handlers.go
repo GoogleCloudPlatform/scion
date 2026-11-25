@@ -753,7 +753,7 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.CreateSkill(ctx, skill); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A skill with this slug already exists in the target scope", nil)
 			return
 		}
@@ -1150,7 +1150,7 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 		}
 
 		if err := s.store.CreateSkillVersion(ctx, sv); err != nil {
-			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			if errors.Is(err, store.ErrAlreadyExists) {
 				writeError(w, http.StatusConflict, "conflict",
 					fmt.Sprintf("version %s already exists for this skill", req.Version), nil)
 				return
@@ -1293,7 +1293,7 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 		sv.PublisherID = identity.ID()
 	}
 	if err := s.store.CreateSkillVersion(ctx, sv); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict",
 				fmt.Sprintf("version %s already exists for this skill", version), nil)
 			return
