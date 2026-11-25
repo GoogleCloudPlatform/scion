@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -229,9 +230,13 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 		if hubAgentID := deleteHubAgentIDFrom(ctx); validHomeAgentID(hubAgentID, agentName) {
 			_, homeParent, homeLeaf, ok, hErr := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
 			if hErr != nil {
-				return dirs, fmt.Errorf("%w: resolve NFS home share: %v", ErrMoveMarkerMismatch, hErr)
-			}
-			if ok {
+				// Home-share availability/resolution errors must not be
+				// misclassified as ErrMoveMarkerMismatch (409), which would
+				// block workspace rollback and prevent removeK8sNFSAgentHome
+				// from auditing the OutcomeFailed TreeAgentHome deletion (V2).
+				slog.Warn("move marker check: could not resolve NFS home share; skipping home marker check so workspace rollback proceeds",
+					"project_id", projectID, "agent", agentName, "error", hErr)
+			} else if ok {
 				if homeParent != wsExportAgentDir {
 					if _, lstatErr := os.Lstat(homeLeaf); lstatErr == nil {
 						// Home leaf exists on a distinct home share: require moveID on

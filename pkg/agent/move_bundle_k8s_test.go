@@ -442,32 +442,103 @@ func TestProvision_K8sNFSMoveBundle_DistinctHomeShareUnmarkedLeafSurvivesRollbac
 }
 
 func TestRollback_K8sNFSHomeResolutionFailureAuditsOutcomeFailed(t *testing.T) {
-	_, hostBase, projectPath := setupK8sNFSFixture(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("SCION_CONFIG_DIR", filepath.Join(tmp, ".scion"))
+
+	mountRoot := filepath.Join(tmp, "nfs-mounts")
+	wsHostBase := filepath.Join(mountRoot, "ws-share")
+	require.NoError(t, os.MkdirAll(wsHostBase, 0o755))
+
+	globalDir := filepath.Join(tmp, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	// Workspace storage is mounted and healthy on ws-share, while
+	// home_storage=nfs + a broken/divergent shared_dir_storage makes
+	// homeShareLayout fail during rollback.
+	settingsYAML := `schema_version: "1"
+active_profile: gke
+runtimes:
+  kubernetes:
+    type: kubernetes
+profiles:
+  gke:
+    runtime: kubernetes
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: ` + mountRoot + `
+      subpath_root: projects
+      shares:
+        - id: ws-share
+          server: 10.0.0.10
+          export: /ws-export
+          pv_name: pv-ws
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: ` + mountRoot + `
+      subpath_root: homes
+      shares:
+        - id: home-share
+          server: 10.0.0.11
+          export: /home-export
+          pv_name: pv-home
+  home_storage:
+    backend: nfs
+    leaf: pod
+    allow_incomplete_phases: true
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsYAML), 0o644))
+	projectPath := filepath.Join(globalDir, "projects", "demo", ".scion")
+	require.NoError(t, os.MkdirAll(projectPath, 0o755))
+	require.NoError(t, config.InitGlobal(getTestHarnesses()))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsYAML), 0o644))
+
+	realWSBase, err := filepath.EvalSymlinks(wsHostBase)
+	require.NoError(t, err)
 	slug := "k8s-unmounted"
 	rid := "rid-k8s-unmounted-1"
 
-	// Remove the NFS mount root to simulate an unmounted share during rollback.
-	require.NoError(t, os.RemoveAll(hostBase))
+	// Create a marked workspace export agent dir + workspace (just like Provision does).
+	exportAgentDir := filepath.Join(realWSBase, "projects", k8sTestProjectUUID, "agents", slug)
+	exportWS := filepath.Join(exportAgentDir, "workspace")
+	require.NoError(t, os.MkdirAll(exportWS, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(exportAgentDir, MoveMarkerFile), []byte(rid+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(exportWS, "work.txt"), []byte("data"), 0o644))
 
 	mgr := NewManager(&runtime.MockRuntime{
 		NameFunc: func() string { return "kubernetes" },
 	}).(*AgentManager)
 
-	rbCtx := WithDeleteMoveReincarnationID(WithDeleteHubAgentID(context.Background(), k8sTestAgentUUID), rid)
-	ds, rmErr := mgr.RemoveNFSAgentFiles(rbCtx, projectPath, k8sTestProjectUUID, slug)
-	require.Error(t, rmErr, "rollback must report an error when NFS home mount root is unavailable")
+	// Drive CheckMoveMarkers followed by RemoveNFSAgentFiles, exactly as the
+	// broker delete handler sequences rollback deletes (V2).
+	checkCtx := WithDeleteHubAgentID(context.Background(), k8sTestAgentUUID)
+	_, chkErr := mgr.CheckMoveMarkers(checkCtx, projectPath, k8sTestProjectUUID, k8sTestProjectUUID, slug, slug, rid)
+	require.NoError(t, chkErr, "home-share resolution failure must not become ErrMoveMarkerMismatch (409)")
 
-	var homeDel *projectfs.Deletion
+	rbCtx := WithDeleteMoveReincarnationID(checkCtx, rid)
+	ds, rmErr := mgr.RemoveNFSAgentFiles(rbCtx, projectPath, k8sTestProjectUUID, slug)
+	require.Error(t, rmErr, "rollback must report an error when NFS home share cannot be resolved")
+
+	var wsDel, homeDel *projectfs.Deletion
 	for i := range ds {
-		if ds[i].Tree == projectfs.TreeAgentHome {
+		switch ds[i].Tree {
+		case projectfs.TreeAgentWorkspace:
+			if ds[i].Path == exportWS {
+				wsDel = &ds[i]
+			}
+		case projectfs.TreeAgentHome:
 			homeDel = &ds[i]
-			break
 		}
 	}
+	require.NotNil(t, wsDel, "workspace deletion must be audited")
+	assert.Equal(t, projectfs.OutcomeDeleted, wsDel.Outcome, "marked workspace must still be removed during home-share outage")
+	assert.NoDirExists(t, exportWS, "marked workspace dir must be removed")
+
 	require.NotNil(t, homeDel, "RemoveNFSAgentFiles must audit an OutcomeFailed TreeAgentHome deletion (C3)")
 	assert.Equal(t, projectfs.OutcomeFailed, homeDel.Outcome)
 	require.Error(t, homeDel.Err)
-	assert.Contains(t, homeDel.Err.Error(), "unavailable")
 }
 
 func TestRollback_K8sNFSHomePrefersRecordedSubPathRoot(t *testing.T) {

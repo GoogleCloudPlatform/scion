@@ -248,7 +248,7 @@ func EstimateWithOptions(ctx context.Context, root *os.Root, ex Excluder, lim Li
 				if err != nil {
 					return fmt.Errorf("stat %s: %w", rel, err)
 				}
-				if err := access.checkReadable(info, true); err != nil {
+				if err := access.checkReadable(root, rel, info, true); err != nil {
 					return fmt.Errorf("read %s: %w", rel, err)
 				}
 			}
@@ -264,7 +264,7 @@ func EstimateWithOptions(ctx context.Context, root *os.Root, ex Excluder, lim Li
 				return &ErrLimitExceeded{Field: "bytes", Got: res.Bytes + info.Size(), Max: lim.MaxBytes}
 			}
 			if opts.CheckReadable {
-				if err := access.checkReadable(info, false); err != nil {
+				if err := access.checkReadable(root, rel, info, false); err != nil {
 					return fmt.Errorf("read %s: %w", rel, err)
 				}
 			}

@@ -16,10 +16,15 @@
 
 package bundle
 
-import "io/fs"
+import (
+	"io/fs"
+	"os"
+)
 
 type statAccessChecker struct{}
 
 func newStatAccessChecker() statAccessChecker { return statAccessChecker{} }
 
-func (statAccessChecker) checkReadable(_ fs.FileInfo, _ bool) error { return nil }
+func (*statAccessChecker) checkReadable(_ *os.Root, _ string, _ fs.FileInfo, _ bool) error {
+	return nil
+}
