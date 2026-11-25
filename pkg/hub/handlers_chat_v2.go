@@ -475,6 +475,8 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		s.handleConversationPin(w, r, key)
 	case "promote":
 		s.handleConversationPromote(w, r, key)
+	case "decisions":
+		s.handleConversationDecisions(w, r, key)
 	default:
 		http.NotFound(w, r)
 	}

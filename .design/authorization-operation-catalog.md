@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 440
+**Operations:** 442
 
 ## Table of Contents
 
@@ -235,6 +235,8 @@
 - [chat.decisionprompt.dismiss](#chatdecisionpromptdismiss) — Dismiss open decisions of a decision prompt without answering, once the version is at least 5 minutes old, with an optional plain-text reason (up to 500 characters) and surface (native, decisions_page or inbox). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key; a UAT also needs inbox:write and the prompt's project inside its boundary), surviving chat retention purge of the prompt message. Agents get 403 users_only, visitors and non-session/non-UAT credentials get 403, and a user a live asking agent takes no messages from gets 403 MESSAGE_DENIED. A missing or unreadable prompt is 404; a too-recent version is 409 too_recent with details.availableAt; an already-settled prompt is 409 dismiss_changed (with details.availableAt when a listed row is too recent). Records one outcome=dismiss ($dismissed) answer row per dismissed decision with a shared batch id and one decision-response message in one transaction, delivers it to a live asking agent, and reports deliveryStatus: delivered, held (for the agent's next session), gone (stored without failure, not sent), unreachable (a suspended or stopped asker: stored failed, not sent), failed, or none when nothing new was dismissed; and publishes decision.updated per row. 404 while web.decisions is off
 - [chat.projectdecisions.list](#chatprojectdecisionslist) — List pending decision prompts or the append-only recorded answer log for a project, with live waitingOnYou and waitingOnOthers counts and filter facets. Needs project:read on the project, then scopes every prompt, log entry, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off
 - [chat.userdecisions.list](#chatuserdecisionslist) — List pending decision prompts or recorded decision answers across every project the caller is a member of and can read, with live waitingOnYou and waitingOnOthers counts, sort=project|recent, optional project narrowing, and filter facets (capped at 200 readable member projects with truncatedProjects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty results), then scopes every prompt, log entry, group, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Non-member projects and project-visitor bindings are excluded even for hub admins. Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off
+- [chat.conversation.decisions.topic](#chatconversationdecisionstopic) — List open decision prompts in one chat thread with per-viewer prompt counts (oldest first, capped at 100). Needs project:read on the thread's project (a caller without it gets the missing-thread 404); a token also needs inbox:read for the project. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off
+- [chat.conversation.decisions.dm](#chatconversationdecisionsdm) — List open decision prompts in one of the caller's DMs with per-viewer prompt counts (oldest first, capped at 100; user-to-user DMs return an empty list). Needs DM participation and a readable peer; a token also needs inbox:read under the DM rule. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
@@ -8987,6 +8989,70 @@
 
 - `pkg/hub:TestUserMeDecisions_TokenAndCallerAuthz`
 - `pkg/hub:TestUserMeDecisions_DMPrivacyAndMembershipScope`
+
+---
+
+## chat.conversation.decisions.topic
+
+**Domain:** chat
+
+**Description:** List open decision prompts in one chat thread with per-viewer prompt counts (oldest first, capped at 100). Needs project:read on the thread's project (a caller without it gets the missing-thread 404); a token also needs inbox:read for the project. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/decisions` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`; pinned by `TestConversationDecisions_Authz`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** chat-thread-access
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestConversationDecisions_Authz`
+
+---
+
+## chat.conversation.decisions.dm
+
+**Domain:** chat
+
+**Description:** List open decision prompts in one of the caller's DMs with per-viewer prompt counts (oldest first, capped at 100; user-to-user DMs return an empty list). Needs DM participation and a readable peer; a token also needs inbox:read under the DM rule. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/decisions` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`; pinned by `TestConversationDecisions_Authz`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestConversationDecisions_Authz`
 
 ---
 
