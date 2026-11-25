@@ -64,9 +64,14 @@ export class ScionChatOpenDecisions extends LitElement {
   @state() private hiddenBy404 = false;
   @state() private counts: ConversationDecisionCounts = { waitingOnYou: 0, waitingOnOthers: 0 };
   @state() private prompts: ConversationOpenPromptItem[] = [];
+  @state() private truncated = false;
   @state() private loading = false;
   @state() private error = '';
   @state() private othersExpanded = false;
+  @state() private liveAnnouncement = '';
+
+  private prevTotal = 0;
+  private prevLoadedOnce = false;
 
   private readonly panelId = `open-decisions-panel-${++panelSeq}`;
   private readonly headingId = `${this.panelId}-heading`;
@@ -308,6 +313,58 @@ export class ScionChatOpenDecisions extends LitElement {
       color: var(--scion-text-secondary, #475569);
     }
 
+    .entry-reason {
+      font-size: var(--chat-fs-xs, 0.75rem);
+      color: var(--scion-text-muted, #64748b);
+      display: flex;
+      gap: 0.25rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-top: 0.1rem;
+    }
+
+    .entry.gone {
+      cursor: default;
+    }
+
+    .entry.gone .entry-question {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .entry.gone a,
+    .panel-footer a {
+      color: var(--scion-primary, #3b82f6);
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .entry.gone a:hover,
+    .panel-footer a:hover {
+      text-decoration: underline;
+    }
+
+    .panel-footer {
+      flex: none;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      padding: 0.45rem 0.75rem;
+      font-size: var(--chat-fs-xs, 0.75rem);
+      color: var(--scion-text-muted, #64748b);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
     .status {
       display: flex;
       flex-wrap: wrap;
@@ -337,6 +394,9 @@ export class ScionChatOpenDecisions extends LitElement {
     if (changed.has('conversationKey') && changed.get('conversationKey') !== undefined) {
       this.closePanel(false);
       this.othersExpanded = false;
+      this.liveAnnouncement = '';
+      this.prevTotal = 0;
+      this.prevLoadedOnce = false;
       this.controller.setConversation(this.conversationKey);
     }
     if (changed.has('hiddenBy404')) {
@@ -345,8 +405,17 @@ export class ScionChatOpenDecisions extends LitElement {
   }
 
   private applySnapshot(snap: ConversationOpenDecisionsSnapshot): void {
+    const nextTotal = snap.counts.waitingOnYou + snap.counts.waitingOnOthers;
+    if (snap.loadedOnce) {
+      if (this.prevLoadedOnce && !this.open && nextTotal > this.prevTotal) {
+        this.liveAnnouncement = 'New decision waiting';
+      }
+      this.prevTotal = nextTotal;
+      this.prevLoadedOnce = true;
+    }
     this.counts = snap.counts;
     this.prompts = snap.prompts;
+    this.truncated = snap.truncated;
     this.loading = snap.loading;
     this.error = snap.error;
     this.hiddenBy404 = snap.hiddenBy404;
@@ -390,6 +459,7 @@ export class ScionChatOpenDecisions extends LitElement {
       return;
     }
     this.open = true;
+    this.liveAnnouncement = '';
     document.addEventListener('pointerdown', this.handleOutsidePointer, true);
     window.addEventListener('resize', this.handleResize);
     window.addEventListener('popstate', this.handlePopState);
@@ -485,9 +555,48 @@ export class ScionChatOpenDecisions extends LitElement {
     return nothing;
   }
 
+  private get decisionsPageUrl(): string {
+    const conv = encodeURIComponent(this.conversationKey);
+    if (this.projectSlug) {
+      return `/projects/${encodeURIComponent(this.projectSlug)}/decisions?conversation=${conv}`;
+    }
+    return `/profile/decisions?conversation=${conv}`;
+  }
+
+  private reasonIcon(reason: string): string {
+    const lower = reason.toLowerCase();
+    if (lower.includes('read-only')) return 'eye';
+    if (lower.includes('confirm')) return 'person';
+    return 'slash-circle';
+  }
+
   private renderEntry(item: ConversationOpenPromptItem): TemplateResult {
     const age = formatRelative(item.createdAt, { style: 'short' });
     const abs = formatInstantWithZone(item.createdAt);
+    const meta = html`<span class="entry-meta">
+      <span class="entry-asker">${item.askerAgentName}</span>
+      <span aria-hidden="true">·</span>
+      <time class="entry-age" datetime=${item.createdAt} title=${abs}>${age}</time>
+      ${this.renderChip(item)}
+    </span>`;
+    const question = html`<span class="entry-question">${item.question}</span>`;
+
+    if (!item.promptAvailable) {
+      const cls = item.waitingOnYou ? 'entry gone' : 'entry others gone';
+      return html`<li>
+        <div class=${cls} data-message-id=${item.promptMessageId}>
+          ${meta} ${question}
+          <span class="entry-reason">
+            <sl-icon name="clock-history" aria-hidden="true"></sl-icon>
+            <span>Message no longer in chat ·</span>
+            <a href=${this.decisionsPageUrl} @click=${(): void => this.closePanel(false)}
+              >Open in Decisions</a
+            >
+          </span>
+        </div>
+      </li>`;
+    }
+
     const cls = item.waitingOnYou ? 'entry' : 'entry others';
     return html`<li>
       <a
@@ -496,13 +605,13 @@ export class ScionChatOpenDecisions extends LitElement {
         data-message-id=${item.promptMessageId}
         @click=${(e: MouseEvent): void => this.openEntry(e, item)}
       >
-        <span class="entry-meta">
-          <span class="entry-asker">${item.askerAgentName}</span>
-          <span aria-hidden="true">·</span>
-          <time class="entry-age" datetime=${item.createdAt} title=${abs}>${age}</time>
-          ${this.renderChip(item)}
-        </span>
-        <span class="entry-question">${item.question}</span>
+        ${meta} ${question}
+        ${!item.waitingOnYou && item.disabledReason
+          ? html`<span class="entry-reason">
+              <sl-icon name=${this.reasonIcon(item.disabledReason)} aria-hidden="true"></sl-icon>
+              <span>${item.disabledReason}</span>
+            </span>`
+          : nothing}
       </a>
     </li>`;
   }
@@ -616,8 +725,17 @@ export class ScionChatOpenDecisions extends LitElement {
                 ${total > 0 ? html`<span class="sort-label">Oldest first</span>` : nothing}
               </div>
               <div class="scroll">${this.renderBody()}</div>
+              ${this.truncated
+                ? html`<div class="panel-footer">
+                    <span>Showing the oldest ${this.prompts.length} of ${total}</span>
+                    <a href=${this.decisionsPageUrl} @click=${(): void => this.closePanel(false)}
+                      >Open all in Decisions</a
+                    >
+                  </div>`
+                : nothing}
             </div>`
           : nothing}
+        <span class="sr-only" aria-live="polite" role="status">${this.liveAnnouncement}</span>
       </div>
     `;
   }

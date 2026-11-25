@@ -3939,6 +3939,14 @@ describe('conversation header More menu', () => {
     };
     try {
       expect(page.fullHeaderActionCount(conv)).toBe(9);
+      (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
+        'web.chat_starred_messages': false,
+        'web.decisions': true,
+      };
+      // Agent DM counts +1 when web.decisions is on.
+      expect(page.fullHeaderActionCount(conv)).toBe(10);
+      // User-to-user DM never renders open decisions (+0).
+      expect(page.fullHeaderActionCount({ ...conv, peerKind: 'user' })).toBe(6);
     } finally {
       delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
     }

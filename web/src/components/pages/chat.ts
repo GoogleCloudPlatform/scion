@@ -7431,6 +7431,7 @@ export class ScionPageChat extends LitElement {
           ? this.resolveDefaultAgentId(conv.defaultAgent)
           : '';
     let count = 3; // export, search, members
+    if (this.headerShowsOpenDecisions(conv)) count += 1; // open decisions
     if (this.headerShowsStars(conv)) count += 1; // starred messages
     if (agentId) count += this.getAgentProjectId(agentId) ? 2 : 1; // terminal, graph
     if (!this.isMobileLayout) count += 1; // density
