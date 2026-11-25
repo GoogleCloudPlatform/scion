@@ -7883,6 +7883,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Start the lifecycle outbox drainer, only when it has work.
 	s.startLifecycleEvents(ctx)
 
+	// Reconcile Tokenomics usage ledger attribution hook and one-shot active-run backfill.
+	s.reconcileUsageLedger(ctx)
+
 	// Start the trigger.event queue drainer when hub.triggers is enabled.
 	s.startTriggerDrainer(ctx)
 }
