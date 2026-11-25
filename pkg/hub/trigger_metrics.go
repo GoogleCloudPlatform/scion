@@ -86,6 +86,7 @@ func triggerFireStatuses() []string {
 		store.TriggerFireStatusSkipped,
 		store.TriggerFireStatusFailed,
 		store.TriggerFireStatusRefused,
+		store.TriggerFireStatusExpired,
 		triggerMetricLabelOther,
 	}
 }
@@ -112,7 +113,7 @@ func triggerReaperOutcomes() []string {
 
 func normalizeQueueKindLabel(kind string) string {
 	switch kind {
-	case trigger.EventQueueKind:
+	case trigger.EventQueueKind, trigger.FireRetryQueueKind:
 		return kind
 	default:
 		return triggerMetricLabelOther
@@ -175,7 +176,8 @@ func normalizeTriggerFireStatusLabel(status string) string {
 	case store.TriggerFireStatusFired,
 		store.TriggerFireStatusSkipped,
 		store.TriggerFireStatusFailed,
-		store.TriggerFireStatusRefused:
+		store.TriggerFireStatusRefused,
+		store.TriggerFireStatusExpired:
 		return status
 	default:
 		return triggerMetricLabelOther

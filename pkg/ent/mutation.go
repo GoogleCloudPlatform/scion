@@ -124169,6 +124169,9 @@ type TriggerFireMutation struct {
 	decided_dialect               *string
 	rule_trace                    *string
 	target_agent_id               *uuid.UUID
+	wait_until                    *time.Time
+	attempts                      *int
+	addattempts                   *int
 	executor_kind                 *string
 	executor_id                   *string
 	lease_until                   *time.Time
@@ -125184,6 +125187,111 @@ func (m *TriggerFireMutation) ResetTargetAgentID() {
 	delete(m.clearedFields, triggerfire.FieldTargetAgentID)
 }
 
+// SetWaitUntil sets the "wait_until" field.
+func (m *TriggerFireMutation) SetWaitUntil(t time.Time) {
+	m.wait_until = &t
+}
+
+// WaitUntil returns the value of the "wait_until" field in the mutation.
+func (m *TriggerFireMutation) WaitUntil() (r time.Time, exists bool) {
+	v := m.wait_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWaitUntil returns the old "wait_until" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldWaitUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWaitUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWaitUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWaitUntil: %w", err)
+	}
+	return oldValue.WaitUntil, nil
+}
+
+// ClearWaitUntil clears the value of the "wait_until" field.
+func (m *TriggerFireMutation) ClearWaitUntil() {
+	m.wait_until = nil
+	m.clearedFields[triggerfire.FieldWaitUntil] = struct{}{}
+}
+
+// WaitUntilCleared returns if the "wait_until" field was cleared in this mutation.
+func (m *TriggerFireMutation) WaitUntilCleared() bool {
+	_, ok := m.clearedFields[triggerfire.FieldWaitUntil]
+	return ok
+}
+
+// ResetWaitUntil resets all changes to the "wait_until" field.
+func (m *TriggerFireMutation) ResetWaitUntil() {
+	m.wait_until = nil
+	delete(m.clearedFields, triggerfire.FieldWaitUntil)
+}
+
+// SetAttempts sets the "attempts" field.
+func (m *TriggerFireMutation) SetAttempts(i int) {
+	m.attempts = &i
+	m.addattempts = nil
+}
+
+// Attempts returns the value of the "attempts" field in the mutation.
+func (m *TriggerFireMutation) Attempts() (r int, exists bool) {
+	v := m.attempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttempts returns the old "attempts" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldAttempts(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttempts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttempts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttempts: %w", err)
+	}
+	return oldValue.Attempts, nil
+}
+
+// AddAttempts adds i to the "attempts" field.
+func (m *TriggerFireMutation) AddAttempts(i int) {
+	if m.addattempts != nil {
+		*m.addattempts += i
+	} else {
+		m.addattempts = &i
+	}
+}
+
+// AddedAttempts returns the value that was added to the "attempts" field in this mutation.
+func (m *TriggerFireMutation) AddedAttempts() (r int, exists bool) {
+	v := m.addattempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAttempts resets all changes to the "attempts" field.
+func (m *TriggerFireMutation) ResetAttempts() {
+	m.attempts = nil
+	m.addattempts = nil
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (m *TriggerFireMutation) SetExecutorKind(s string) {
 	m.executor_kind = &s
@@ -125584,7 +125692,7 @@ func (m *TriggerFireMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerFireMutation) Fields() []string {
-	fields := make([]string, 0, 27)
+	fields := make([]string, 0, 29)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, triggerfire.FieldInitiatorPrincipalKind)
 	}
@@ -125641,6 +125749,12 @@ func (m *TriggerFireMutation) Fields() []string {
 	}
 	if m.target_agent_id != nil {
 		fields = append(fields, triggerfire.FieldTargetAgentID)
+	}
+	if m.wait_until != nil {
+		fields = append(fields, triggerfire.FieldWaitUntil)
+	}
+	if m.attempts != nil {
+		fields = append(fields, triggerfire.FieldAttempts)
 	}
 	if m.executor_kind != nil {
 		fields = append(fields, triggerfire.FieldExecutorKind)
@@ -125712,6 +125826,10 @@ func (m *TriggerFireMutation) Field(name string) (ent.Value, bool) {
 		return m.RuleTrace()
 	case triggerfire.FieldTargetAgentID:
 		return m.TargetAgentID()
+	case triggerfire.FieldWaitUntil:
+		return m.WaitUntil()
+	case triggerfire.FieldAttempts:
+		return m.Attempts()
 	case triggerfire.FieldExecutorKind:
 		return m.ExecutorKind()
 	case triggerfire.FieldExecutorID:
@@ -125775,6 +125893,10 @@ func (m *TriggerFireMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldRuleTrace(ctx)
 	case triggerfire.FieldTargetAgentID:
 		return m.OldTargetAgentID(ctx)
+	case triggerfire.FieldWaitUntil:
+		return m.OldWaitUntil(ctx)
+	case triggerfire.FieldAttempts:
+		return m.OldAttempts(ctx)
 	case triggerfire.FieldExecutorKind:
 		return m.OldExecutorKind(ctx)
 	case triggerfire.FieldExecutorID:
@@ -125933,6 +126055,20 @@ func (m *TriggerFireMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetTargetAgentID(v)
 		return nil
+	case triggerfire.FieldWaitUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWaitUntil(v)
+		return nil
+	case triggerfire.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttempts(v)
+		return nil
 	case triggerfire.FieldExecutorKind:
 		v, ok := value.(string)
 		if !ok {
@@ -126003,6 +126139,9 @@ func (m *TriggerFireMutation) AddedFields() []string {
 	if m.addauthorization_revision != nil {
 		fields = append(fields, triggerfire.FieldAuthorizationRevision)
 	}
+	if m.addattempts != nil {
+		fields = append(fields, triggerfire.FieldAttempts)
+	}
 	return fields
 }
 
@@ -126015,6 +126154,8 @@ func (m *TriggerFireMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedAttributionVersion()
 	case triggerfire.FieldAuthorizationRevision:
 		return m.AddedAuthorizationRevision()
+	case triggerfire.FieldAttempts:
+		return m.AddedAttempts()
 	}
 	return nil, false
 }
@@ -126037,6 +126178,13 @@ func (m *TriggerFireMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddAuthorizationRevision(v)
+		return nil
+	case triggerfire.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAttempts(v)
 		return nil
 	}
 	return fmt.Errorf("unknown TriggerFire numeric field %s", name)
@@ -126084,6 +126232,9 @@ func (m *TriggerFireMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(triggerfire.FieldTargetAgentID) {
 		fields = append(fields, triggerfire.FieldTargetAgentID)
+	}
+	if m.FieldCleared(triggerfire.FieldWaitUntil) {
+		fields = append(fields, triggerfire.FieldWaitUntil)
 	}
 	if m.FieldCleared(triggerfire.FieldNotBefore) {
 		fields = append(fields, triggerfire.FieldNotBefore)
@@ -126146,6 +126297,9 @@ func (m *TriggerFireMutation) ClearField(name string) error {
 		return nil
 	case triggerfire.FieldTargetAgentID:
 		m.ClearTargetAgentID()
+		return nil
+	case triggerfire.FieldWaitUntil:
+		m.ClearWaitUntil()
 		return nil
 	case triggerfire.FieldNotBefore:
 		m.ClearNotBefore()
@@ -126220,6 +126374,12 @@ func (m *TriggerFireMutation) ResetField(name string) error {
 		return nil
 	case triggerfire.FieldTargetAgentID:
 		m.ResetTargetAgentID()
+		return nil
+	case triggerfire.FieldWaitUntil:
+		m.ResetWaitUntil()
+		return nil
+	case triggerfire.FieldAttempts:
+		m.ResetAttempts()
 		return nil
 	case triggerfire.FieldExecutorKind:
 		m.ResetExecutorKind()

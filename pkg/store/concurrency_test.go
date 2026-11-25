@@ -137,6 +137,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockScheduledExecOverlap,
 		LockTriggerQuota,
 		LockTriggerSubjectOverlap,
+		LockTriggerOfflineQueue,
 		testLockClassID,
 	}
 	for _, k := range classIDs {
@@ -239,6 +240,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockScheduledExecOverlap", LockScheduledExecOverlap},
 		{"LockTriggerQuota", LockTriggerQuota},
 		{"LockTriggerSubjectOverlap", LockTriggerSubjectOverlap},
+		{"LockTriggerOfflineQueue", LockTriggerOfflineQueue},
 	}
 
 	// --- Check 1: value uniqueness ---

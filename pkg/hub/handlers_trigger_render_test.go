@@ -202,7 +202,7 @@ func TestTriggerRender(t *testing.T) {
 		assert.NotContains(t, logBuf.String(), secretSentinel)
 	})
 
-	t.Run("allowed for agent holding trigger with readable event (message action delivered literally until P2b)", func(t *testing.T) {
+	t.Run("allowed for agent holding trigger with readable event (message action renders message slot)", func(t *testing.T) {
 		rec := f.doTrigger(t, f.agentAAuth, renderPath(msgTrig.ID, agentEvent.ID), http.MethodPost, nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -210,9 +210,11 @@ func TestTriggerRender(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		assert.Empty(t, resp.Errors)
 		require.NotNil(t, resp.Slots.Message)
-		assert.Equal(t, "Event ${event.id} on ${trigger.name}", resp.Slots.Message.Rendered)
-		assert.Empty(t, resp.Slots.Message.Used)
-		assert.Equal(t, "not_supported_until_P2b", resp.Slots.Message.Templating)
+		assert.Equal(t, "Event "+agentEvent.ID+" on "+msgTrig.Name, resp.Slots.Message.Rendered)
+		assert.Equal(t, []TriggerRenderUsedVar{
+			{Path: "event.id", Class: string(triggertemplate.ClassTrusted)},
+			{Path: "trigger.name", Class: string(triggertemplate.ClassTrusted)},
+		}, resp.Slots.Message.Used)
 	})
 
 	t.Run("refused for cross-project event (project-B event via project-A trigger -> 404)", func(t *testing.T) {

@@ -233,9 +233,11 @@ func MultiFireAuditSink(sinks ...FireAuditSink) FireAuditSink {
 func sanitizeAuditFireStatus(status string) string {
 	switch status {
 	case store.TriggerFireStatusFired,
+		store.TriggerFireStatusWaiting,
 		store.TriggerFireStatusSkipped,
 		store.TriggerFireStatusRefused,
-		store.TriggerFireStatusFailed:
+		store.TriggerFireStatusFailed,
+		store.TriggerFireStatusExpired:
 		return status
 	default:
 		return "unknown"

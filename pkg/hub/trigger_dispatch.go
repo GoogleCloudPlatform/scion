@@ -29,6 +29,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
@@ -36,17 +37,20 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// triggerRuntime holds the hub's shared trigger.event durablequeue handle and
-// background drainer lifecycle state. The zero value is ready to use.
+// triggerRuntime holds the hub's shared trigger.event and trigger.fire_retry
+// durablequeue handles, agent-status nudge subscriber, and background drainer
+// lifecycle state. The zero value is ready to use.
 type triggerRuntime struct {
 	mu                   sync.Mutex
 	queue                *durablequeue.StoreQueue
 	ruleMetrics          *trigger.OTelRuleEvalMetrics
 	templateRefusalAudit trigger.TemplateRefusalAuditSink
 	drainer              *durablequeue.Drainer
+	retryDrainer         *durablequeue.Drainer
 	cancel               context.CancelFunc
 	done                 chan struct{}
 	started              bool
@@ -125,6 +129,7 @@ var (
 	_ trigger.PostEvaluationHook   = serverTriggerCore{}
 	_ trigger.ReuseMessageRenderer = serverTriggerCore{}
 	_ trigger.PreFireRefuser       = serverTriggerCore{}
+	_ trigger.RetryTargetChecker   = serverTriggerCore{}
 )
 
 func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger, ev *hubfire.FireEvent) (string, string, bool) {
@@ -142,6 +147,32 @@ func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger
 
 func (c serverTriggerCore) RenderReuseMessage(ctx context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
 	return c.srv.renderDispatchReuseMessage(ctx, req)
+}
+
+// CheckRetryTarget implements trigger.RetryTargetChecker by checking the target
+// agent's live existence and deliverability state from the store.
+func (c serverTriggerCore) CheckRetryTarget(ctx context.Context, agentID string) (trigger.RetryTargetState, error) {
+	if c.srv == nil || c.srv.store == nil || agentID == "" {
+		return trigger.RetryTargetOffline, nil
+	}
+	agent, err := c.srv.store.GetAgent(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return trigger.RetryTargetDeleted, nil
+		}
+		return trigger.RetryTargetOffline, err
+	}
+	if agent == nil || !agent.DeletedAt.IsZero() {
+		return trigger.RetryTargetDeleted, nil
+	}
+	if c.srv.validateAgentDeliverable(agent) == nil {
+		return trigger.RetryTargetDeliverable, nil
+	}
+	_, skip := classifyOfflineTargetPhase(agent)
+	if skip {
+		return trigger.RetryTargetTerminal, nil
+	}
+	return trigger.RetryTargetOffline, nil
 }
 
 func (c serverTriggerCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
@@ -443,7 +474,7 @@ func (s *Server) reconcileTriggerDrainerLocked(ctx context.Context, dqStore stor
 	if !s.experimentEnabled(experiments.Triggers) {
 		if rt.cancel != nil {
 			rt.cancel()
-			rt.drainer, rt.cancel, rt.done = nil, nil, nil
+			rt.drainer, rt.retryDrainer, rt.cancel, rt.done = nil, nil, nil, nil
 		}
 		return
 	}
@@ -457,28 +488,117 @@ func (s *Server) reconcileTriggerDrainerLocked(ctx context.Context, dqStore stor
 	q := s.triggerQueueLocked(dqStore)
 	d, err := s.triggerDrainer(dqStore, q)
 	if err != nil {
-		slog.Warn("hub.triggers: drainer not started", "error", err)
+		slog.Warn("hub.triggers: event drainer not started", "error", err)
+		return
+	}
+	rd, err := s.triggerRetryDrainer(dqStore, q)
+	if err != nil {
+		slog.Warn("hub.triggers: fire retry drainer not started", "error", err)
 		return
 	}
 	dctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	rt.drainer, rt.cancel, rt.done = d, cancel, done
+	rt.drainer, rt.retryDrainer, rt.cancel, rt.done = d, rd, cancel, done
 	go func() {
 		defer close(done)
-		d.Run(dctx)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			d.Run(dctx)
+		}()
+		go func() {
+			defer wg.Done()
+			rd.Run(dctx)
+		}()
+		if s.events != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s.runTriggerAgentStatusNudger(dctx, q)
+			}()
+		}
+		wg.Wait()
 		cancel()
 		rt.mu.Lock()
 		if rt.drainer == d {
-			rt.drainer, rt.cancel, rt.done = nil, nil, nil
+			rt.drainer, rt.retryDrainer, rt.cancel, rt.done = nil, nil, nil, nil
 		}
 		rt.mu.Unlock()
 	}()
 }
 
-// triggerDrainer constructs the trigger.event durablequeue.Drainer wired to
-// Server's fire core (catalog entry points triggerDrainer:message,
-// triggerDrainer:dispatch_agent, and triggerDrainer:github.comment for trigger.fire).
-func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durablequeue.StoreQueue) (*durablequeue.Drainer, error) {
+// runTriggerAgentStatusNudger subscribes to agent status transitions and nudges
+// waiting offline-queued message fires when their target agent transitions into
+// running (Stage 2 §6.2 item 4). Repeated status/activity updates while an
+// agent is already running are ignored so steady-state agent traffic does not
+// issue unnecessary waiting-fire lookups.
+func (s *Server) runTriggerAgentStatusNudger(ctx context.Context, q *durablequeue.StoreQueue) {
+	if s == nil || s.events == nil || q == nil || s.store == nil {
+		return
+	}
+	const maxTrackedAgentPhases = 10_000
+	lastPhase := make(map[string]string)
+
+	ch, unsubscribe := s.events.Subscribe("project.*.agent.status")
+	defer unsubscribe()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			if !strings.HasSuffix(evt.Subject, ".agent.status") {
+				continue
+			}
+			var statusEvt AgentStatusEvent
+			if err := json.Unmarshal(evt.Data, &statusEvt); err != nil {
+				continue
+			}
+			if statusEvt.AgentID == "" || statusEvt.Phase == "" {
+				continue
+			}
+			prev := lastPhase[statusEvt.AgentID]
+			if len(lastPhase) >= maxTrackedAgentPhases {
+				clear(lastPhase)
+			}
+			lastPhase[statusEvt.AgentID] = statusEvt.Phase
+			if statusEvt.Phase != string(state.PhaseRunning) || prev == string(state.PhaseRunning) {
+				continue
+			}
+			if !s.experimentEnabled(experiments.Triggers) {
+				continue
+			}
+			s.nudgeWaitingFiresForAgent(ctx, q, statusEvt.AgentID)
+		}
+	}
+}
+
+func (s *Server) nudgeWaitingFiresForAgent(ctx context.Context, q *durablequeue.StoreQueue, agentID string) {
+	nudgeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	fireIDs, err := s.store.ListWaitingFiresForTarget(nudgeCtx, agentID, trigger.MaxWaitingFiresPerTarget)
+	if err != nil {
+		slog.WarnContext(nudgeCtx, "hub.triggers: failed to list waiting fires for running agent",
+			"agent_id", agentID, "error", err)
+		return
+	}
+	if len(fireIDs) == 0 {
+		return
+	}
+	keys := make([]string, len(fireIDs))
+	for i, id := range fireIDs {
+		keys[i] = trigger.FireRetryDedupPrefix + id
+	}
+	if _, err := q.Nudge(nudgeCtx, trigger.FireRetryQueueKind, keys); err != nil {
+		slog.WarnContext(nudgeCtx, "hub.triggers: failed to nudge waiting fires for running agent",
+			"agent_id", agentID, "count", len(keys), "error", err)
+	}
+}
+
+func (s *Server) newTriggerDispatcher(queue *durablequeue.StoreQueue) (*trigger.Dispatcher, error) {
 	core := serverTriggerCore{srv: s}
 	logger := logging.Subsystem("hub.trigger-drainer")
 	if s.triggers.ruleMetrics == nil {
@@ -490,8 +610,19 @@ func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durableq
 		}
 	}
 	metrics := serverTriggerMetrics{srv: s}
-	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+	var q durablequeue.Queue
+	if queue != nil {
+		q = queue
+	}
+	txRunner := func(ctx context.Context, fn func(ctx context.Context, tx store.Tx, ts store.TriggerStore) error) error {
+		return s.store.WithTx(ctx, func(tx store.Store) error {
+			return fn(ctx, tx, tx)
+		})
+	}
+	return trigger.NewDispatcher(trigger.DispatcherConfig{
 		Store:         s.store,
+		Queue:         q,
+		TxRunner:      txRunner,
 		Core:          core,
 		SubjectClaims: trigger.NewSubjectClaims(s.store, s.store, nil),
 		Rules:         s.TriggerRules(),
@@ -499,6 +630,13 @@ func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durableq
 		Metrics:       metrics,
 		Logger:        logger,
 	})
+}
+
+// triggerDrainer constructs the trigger.event durablequeue.Drainer wired to
+// Server's fire core (catalog entry points triggerDrainer:message,
+// triggerDrainer:dispatch_agent, and triggerDrainer:github.comment for trigger.fire).
+func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durablequeue.StoreQueue) (*durablequeue.Drainer, error) {
+	disp, err := s.newTriggerDispatcher(queue)
 	if err != nil {
 		return nil, err
 	}
@@ -506,17 +644,32 @@ func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durableq
 		QueueStore: dqStore,
 		Queue:      queue,
 		Owner:      s.HubID(),
-		Metrics:    metrics,
+		Metrics:    serverTriggerMetrics{srv: s},
 	})
 }
 
-// stopTriggerDrainer cancels the running trigger.event drainer and waits for
-// its bounded shutdown drain (or ctx cancellation).
+// triggerRetryDrainer constructs the trigger.fire_retry durablequeue.Drainer
+// wired to Server's fire core (catalog entry point triggerRetryDrainer:message).
+func (s *Server) triggerRetryDrainer(dqStore store.DurableQueueStore, queue *durablequeue.StoreQueue) (*durablequeue.Drainer, error) {
+	disp, err := s.newTriggerDispatcher(queue)
+	if err != nil {
+		return nil, err
+	}
+	return disp.NewFireRetryDrainer(trigger.DrainerOptions{
+		QueueStore: dqStore,
+		Queue:      queue,
+		Owner:      s.HubID(),
+		Metrics:    serverTriggerMetrics{srv: s},
+	})
+}
+
+// stopTriggerDrainer cancels the running trigger.event and trigger.fire_retry
+// drainers and agent-status nudger and waits for their bounded shutdown drain.
 func (s *Server) stopTriggerDrainer(ctx context.Context) {
 	rt := &s.triggers
 	rt.mu.Lock()
 	cancel, done := rt.cancel, rt.done
-	rt.drainer, rt.cancel, rt.done = nil, nil, nil
+	rt.drainer, rt.retryDrainer, rt.cancel, rt.done = nil, nil, nil, nil
 	rt.started = false
 	rt.mu.Unlock()
 	if cancel == nil {
@@ -779,13 +932,154 @@ func DispatchedEventUsesPhaseANoRow(req hubfire.FireRequest) bool {
 	return req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger
 }
 
+// renderDispatchedMessageTemplate compiles and renders MessageEventPayload.Message
+// through triggertemplate.SlotMessage for event-triggered message fires
+// (Stage 2 §5.7). On any render or plain_with_untrusted error, it emits a
+// content-free hub.audit record carrying slot and path (never values) and
+// returns a FireStatusRefused outcome.
+//
+// Named without the word "Trigger" so action_message.go can invoke it while
+// satisfying TestFireCoreContainment.
+func renderDispatchedMessageTemplate(
+	ctx context.Context,
+	s *Server,
+	req hubfire.FireRequest,
+	payload MessageEventPayload,
+) (string, []string, *hubfire.FireOutcome) {
+	ev := req.Event
+	if ev == nil {
+		return payload.Message, nil, nil
+	}
+
+	tmpl, err := triggertemplate.Parse(payload.Message, triggertemplate.SlotMessage)
+	if err != nil {
+		out := refuseMessageTemplateRender(ctx, s, req, err)
+		return "", nil, &out
+	}
+	if payload.Plain && len(tmpl.Untrusted()) > 0 {
+		s.triggerTemplateRefusalAudit().RecordTemplateRefusal(ctx, trigger.TemplateRefusalAuditRecord{
+			ProjectID: req.ProjectID,
+			TriggerID: req.Authority.DefinitionID,
+			EventID:   ev.ID,
+			FireID:    req.Authority.FireID,
+			Slot:      triggertemplate.SlotMessage,
+			Path:      tmpl.Untrusted()[0],
+			Reason:    "plain_with_untrusted",
+		})
+		out := hubfire.FireOutcome{
+			Status: hubfire.FireStatusRefused,
+			Error:  "plain_with_untrusted",
+		}
+		return "", nil, &out
+	}
+
+	// Fast path: literal message with no placeholders or escaped $${.
+	if len(tmpl.Placeholders()) == 0 && !strings.Contains(payload.Message, "$${") {
+		return payload.Message, nil, nil
+	}
+
+	var projectName, sourceName, signatureMode string
+	if s != nil && s.store != nil {
+		if proj, pErr := s.store.GetProject(ctx, req.ProjectID); pErr == nil && proj != nil {
+			projectName = proj.Name
+		}
+		if ev.SourceKind == store.TriggerSourceKindWebhook && ev.SourceID != "" {
+			if ep, epErr := s.store.GetWebhookEndpoint(ctx, ev.SourceID); epErr == nil && ep != nil && ep.ProjectID == req.ProjectID {
+				sourceName = ep.Name
+				signatureMode = ep.SignatureMode
+			}
+		}
+	}
+	if sourceName == "" && ev.Attributes != nil {
+		sourceName = ev.Attributes["endpoint_name"]
+	}
+	if signatureMode == "" && ev.Attributes != nil {
+		signatureMode = ev.Attributes["signature_mode"]
+	}
+
+	vars := buildDispatchTemplateVars(req, &dispatchAgentAuthorized{
+		projectName:   projectName,
+		sourceName:    sourceName,
+		signatureMode: signatureMode,
+	})
+	rendered, report, err := tmpl.Render(vars, payload.UntrustedVars)
+	if err != nil {
+		out := refuseMessageTemplateRender(ctx, s, req, err)
+		return "", nil, &out
+	}
+
+	var untrustedPaths []string
+	var seen map[string]bool
+	for _, u := range report.Used {
+		if u.Class != triggertemplate.ClassUntrusted {
+			continue
+		}
+		if seen == nil {
+			seen = make(map[string]bool)
+		}
+		if !seen[u.Path] {
+			seen[u.Path] = true
+			untrustedPaths = append(untrustedPaths, u.Path)
+		}
+	}
+	return rendered, untrustedPaths, nil
+}
+
+func refuseMessageTemplateRender(ctx context.Context, s *Server, req hubfire.FireRequest, err error) hubfire.FireOutcome {
+	slot := triggertemplate.SlotMessage
+	path := ""
+	reason := string(triggertemplate.KindValueRejected)
+
+	var re *triggertemplate.RenderError
+	var ue *triggertemplate.UntrustedVarError
+	var pe *triggertemplate.ParseError
+	switch {
+	case errors.As(err, &re):
+		if re.Slot != "" {
+			slot = re.Slot
+		}
+		path = re.Path
+		if re.Kind != "" {
+			reason = string(re.Kind)
+		}
+	case errors.As(err, &ue):
+		if ue.Slot != "" {
+			slot = ue.Slot
+		}
+		path = ue.Path
+	case errors.As(err, &pe):
+		if pe.Slot != "" {
+			slot = pe.Slot
+		}
+	}
+
+	eventID := ""
+	if req.Event != nil {
+		eventID = req.Event.ID
+	}
+	// Never log expanded values or rendered output (§5.2, §5.7).
+	s.triggerTemplateRefusalAudit().RecordTemplateRefusal(ctx, trigger.TemplateRefusalAuditRecord{
+		ProjectID: req.ProjectID,
+		TriggerID: req.Authority.DefinitionID,
+		EventID:   eventID,
+		FireID:    req.Authority.FireID,
+		Slot:      slot,
+		Path:      path,
+		Reason:    reason,
+	})
+	return hubfire.FireOutcome{
+		Status: hubfire.FireStatusRefused,
+		Error:  reason,
+	}
+}
+
 // ApplyDispatchedEventEnvelope populates structuredMsg's §8.3 event carrier and
 // sender metadata when req.Event is present, before action_message.go persists
 // (when enabled) and calls RenderDeliveryText.
 //
 // Named without the word "Trigger" so action_message.go can invoke it while
 // satisfying TestFireCoreContainment.
-func ApplyDispatchedEventEnvelope(structuredMsg *messages.StructuredMessage, req hubfire.FireRequest) error {
+func ApplyDispatchedEventEnvelope(structuredMsg *messages.StructuredMessage, req hubfire.FireRequest, templatedVars ...string) error {
 	if structuredMsg == nil || req.Event == nil {
 		return nil
 	}
@@ -802,6 +1096,9 @@ func ApplyDispatchedEventEnvelope(structuredMsg *messages.StructuredMessage, req
 	}
 
 	body := buildDispatchedEventBody(req.Event)
+	if len(templatedVars) > 0 {
+		body.TemplatedVars = append([]string(nil), templatedVars...)
+	}
 	rawEvent, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal dispatched event body: %w", err)

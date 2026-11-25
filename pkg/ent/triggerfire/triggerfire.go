@@ -53,6 +53,10 @@ const (
 	FieldRuleTrace = "rule_trace"
 	// FieldTargetAgentID holds the string denoting the target_agent_id field in the database.
 	FieldTargetAgentID = "target_agent_id"
+	// FieldWaitUntil holds the string denoting the wait_until field in the database.
+	FieldWaitUntil = "wait_until"
+	// FieldAttempts holds the string denoting the attempts field in the database.
+	FieldAttempts = "attempts"
 	// FieldExecutorKind holds the string denoting the executor_kind field in the database.
 	FieldExecutorKind = "executor_kind"
 	// FieldExecutorID holds the string denoting the executor_id field in the database.
@@ -104,6 +108,8 @@ var Columns = []string{
 	FieldDecidedDialect,
 	FieldRuleTrace,
 	FieldTargetAgentID,
+	FieldWaitUntil,
+	FieldAttempts,
 	FieldExecutorKind,
 	FieldExecutorID,
 	FieldLeaseUntil,
@@ -137,6 +143,8 @@ var (
 	DecidedDialectValidator func(string) error
 	// RuleTraceValidator is a validator for the "rule_trace" field. It is called by the builders before save.
 	RuleTraceValidator func(string) error
+	// DefaultAttempts holds the default value on creation for the "attempts" field.
+	DefaultAttempts int
 	// DefaultExecutorKind holds the default value on creation for the "executor_kind" field.
 	DefaultExecutorKind string
 	// DefaultExecutorID holds the default value on creation for the "executor_id" field.
@@ -248,6 +256,16 @@ func ByRuleTrace(opts ...sql.OrderTermOption) OrderOption {
 // ByTargetAgentID orders the results by the target_agent_id field.
 func ByTargetAgentID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTargetAgentID, opts...).ToFunc()
+}
+
+// ByWaitUntil orders the results by the wait_until field.
+func ByWaitUntil(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWaitUntil, opts...).ToFunc()
+}
+
+// ByAttempts orders the results by the attempts field.
+func ByAttempts(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAttempts, opts...).ToFunc()
 }
 
 // ByExecutorKind orders the results by the executor_kind field.

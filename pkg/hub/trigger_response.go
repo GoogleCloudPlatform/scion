@@ -119,25 +119,27 @@ type TriggerMatchSpec struct {
 
 // TriggerActionSpec holds the action executed when a trigger matches.
 type TriggerActionSpec struct {
-	Type          string                   `json:"type"`
-	AgentID       string                   `json:"agentId,omitempty"`
-	AgentName     string                   `json:"agentName,omitempty"`
-	Message       string                   `json:"message,omitempty"`
-	Interrupt     bool                     `json:"interrupt,omitempty"`
-	Plain         bool                     `json:"plain,omitempty"`
-	Wake          bool                     `json:"wake,omitempty"`
-	NameConflict  string                   `json:"nameConflict,omitempty"`
-	Template      string                   `json:"template,omitempty"`
-	Task          string                   `json:"task,omitempty"`
-	Branch        string                   `json:"branch,omitempty"`
-	Labels        map[string]string        `json:"labels,omitempty"`
-	Ephemeral     bool                     `json:"ephemeral,omitempty"`
-	GithubToken   string                   `json:"githubToken,omitempty"`
-	AgentRole     string                   `json:"agentRole,omitempty"`
-	ReuseMessage  string                   `json:"reuseMessage,omitempty"`
-	AckComment    *DispatchAgentAckComment `json:"ackComment,omitempty"`
-	UntrustedVars []string                 `json:"untrustedVars,omitempty"`
-	NoAuth        bool                     `json:"noAuth,omitempty"`
+	Type            string                   `json:"type"`
+	AgentID         string                   `json:"agentId,omitempty"`
+	AgentName       string                   `json:"agentName,omitempty"`
+	Message         string                   `json:"message,omitempty"`
+	Interrupt       bool                     `json:"interrupt,omitempty"`
+	Plain           bool                     `json:"plain,omitempty"`
+	Wake            bool                     `json:"wake,omitempty"`
+	Offline         string                   `json:"offline,omitempty"`
+	QueueTTLSeconds int                      `json:"queueTtlSeconds,omitempty"`
+	NameConflict    string                   `json:"nameConflict,omitempty"`
+	Template        string                   `json:"template,omitempty"`
+	Task            string                   `json:"task,omitempty"`
+	Branch          string                   `json:"branch,omitempty"`
+	Labels          map[string]string        `json:"labels,omitempty"`
+	Ephemeral       bool                     `json:"ephemeral,omitempty"`
+	GithubToken     string                   `json:"githubToken,omitempty"`
+	AgentRole       string                   `json:"agentRole,omitempty"`
+	ReuseMessage    string                   `json:"reuseMessage,omitempty"`
+	AckComment      *DispatchAgentAckComment `json:"ackComment,omitempty"`
+	UntrustedVars   []string                 `json:"untrustedVars,omitempty"`
+	NoAuth          bool                     `json:"noAuth,omitempty"`
 
 	// github.comment action fields (Stage 3 §7.1).
 	Body          string `json:"body,omitempty"`
@@ -225,6 +227,8 @@ type TriggerFireResponse struct {
 	Status         string            `json:"status"`
 	ResultRef      string            `json:"resultRef,omitempty"`
 	TargetAgentID  string            `json:"targetAgentId,omitempty"`
+	WaitUntil      *time.Time        `json:"waitUntil,omitempty"`
+	Attempts       int               `json:"attempts,omitempty"`
 	Error          string            `json:"error,omitempty"`
 	MatchedThrough string            `json:"matchedThrough,omitempty"`
 	DecidedDialect string            `json:"decidedDialect,omitempty"`
@@ -418,6 +422,11 @@ func buildTriggerActionSpec(rev *execRevealer, actionType, rawPayload string) Tr
 			spec.Interrupt = p.Interrupt
 			spec.Plain = p.Plain
 			spec.Wake = p.Wake
+			spec.Offline = p.Offline
+			spec.QueueTTLSeconds = p.QueueTTLSeconds
+			if len(p.UntrustedVars) > 0 {
+				spec.UntrustedVars = append([]string(nil), p.UntrustedVars...)
+			}
 		}
 	case store.TriggerActionDispatchAgent:
 		var p DispatchAgentEventPayload
@@ -556,6 +565,8 @@ func buildTriggerFireResponseWithRun(tf store.TriggerFire, run *store.ScheduledE
 		Status:         tf.Status,
 		ResultRef:      tf.ResultRef,
 		TargetAgentID:  tf.TargetAgentID,
+		WaitUntil:      tf.WaitUntil,
+		Attempts:       tf.Attempts,
 		Error:          tf.Error,
 		MatchedThrough: tf.MatchedThrough,
 		DecidedDialect: decidedDialect,

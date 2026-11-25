@@ -54,6 +54,8 @@ var (
 	triggerInterrupt      bool
 	triggerWake           bool
 	triggerPlain          bool
+	triggerOffline        string
+	triggerQueueTTL       string
 	triggerDispatch       dispatchAgentFlagValues
 	triggerSubjectExpr    string
 	triggerOnSubject      string
@@ -525,9 +527,6 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 		if badFlag, ok := hasDispatchAgentFlagValues(&triggerDispatch); ok {
 			return nil, nil, newUsageError("%s cannot be used with --action message", badFlag)
 		}
-		if allowExplicit {
-			return nil, nil, newUsageError("--allow cannot be used with --action message")
-		}
 		agentRef := strings.TrimSpace(triggerAgent)
 		if agentRef == "" {
 			return nil, nil, newUsageError("--agent is required")
@@ -535,12 +534,41 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 		if strings.TrimSpace(triggerMessage) == "" {
 			return nil, nil, newUsageError("--message is required")
 		}
+		offline := strings.TrimSpace(triggerOffline)
+		if offline != "" && offline != "skip" && offline != "queue" {
+			return nil, nil, newUsageError("invalid --offline %q (supported: skip, queue)", triggerTerminalText(offline, false))
+		}
+		var queueTTLSeconds int
+		if rawTTL := strings.TrimSpace(triggerQueueTTL); rawTTL != "" {
+			if offline != "queue" {
+				return nil, nil, newUsageError("--queue-ttl requires --offline queue")
+			}
+			secs, tErr := parseTriggerQueueTTL(rawTTL)
+			if tErr != nil {
+				return nil, nil, tErr
+			}
+			queueTTLSeconds = secs
+		}
 		action = hubclient.TriggerActionSpec{
-			Type:      "message",
-			Message:   triggerMessage,
-			Interrupt: triggerInterrupt,
-			Wake:      triggerWake,
-			Plain:     triggerPlain,
+			Type:            "message",
+			Message:         triggerMessage,
+			Interrupt:       triggerInterrupt,
+			Wake:            triggerWake,
+			Plain:           triggerPlain,
+			Offline:         offline,
+			QueueTTLSeconds: queueTTLSeconds,
+		}
+		if allowExplicit || len(triggerDispatch.allow) > 0 {
+			action.UntrustedVars = append([]string(nil), triggerDispatch.allow...)
+		} else {
+			derived, dErr := deriveMessageUntrustedVars(action.Message)
+			if dErr != nil {
+				return nil, nil, dErr
+			}
+			if len(derived) > 0 {
+				action.UntrustedVars = derived
+				derivedUntrusted = derived
+			}
 		}
 		if uuid.Validate(agentRef) == nil {
 			action.AgentID = agentRef
@@ -550,6 +578,12 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 	case "dispatch_agent":
 		if badFlag, ok := hasMessageFlagValues(triggerAgent, triggerMessage, triggerInterrupt, triggerWake, triggerPlain); ok {
 			return nil, nil, newUsageError("%s cannot be used with --action dispatch-agent", badFlag)
+		}
+		if strings.TrimSpace(triggerOffline) != "" {
+			return nil, nil, newUsageError("--offline cannot be used with --action dispatch-agent")
+		}
+		if strings.TrimSpace(triggerQueueTTL) != "" {
+			return nil, nil, newUsageError("--queue-ttl cannot be used with --action dispatch-agent")
 		}
 		action, derivedUntrusted, err = buildDispatchAgentActionSpec(&triggerDispatch, allowExplicit)
 		if err != nil {
@@ -856,7 +890,7 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("FIRE HISTORY (%d of %d fires)\n", len(resp.Fires), resp.TotalCount)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tEVENT\tSTATUS\tMATCHED\tDIALECT\tSUBJECT\tSTARTED\tFINISHED\tERROR")
+	_, _ = fmt.Fprintln(w, "ID\tEVENT\tSTATUS\tMATCHED\tDIALECT\tSUBJECT\tSTARTED\tFINISHED\tWAIT UNTIL\tERROR")
 	for _, fire := range resp.Fires {
 		shortID := fire.ID
 		if len(shortID) > 8 {
@@ -883,11 +917,15 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 		if fire.FinishedAt != nil {
 			finished = clitime.Ago(*fire.FinishedAt)
 		}
+		waitUntil := "-"
+		if fire.WaitUntil != nil {
+			waitUntil = fire.WaitUntil.UTC().Format(time.RFC3339)
+		}
 		errMsg := fire.Error
 		if errMsg == "" {
 			errMsg = "-"
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			triggerTerminalText(shortID, false),
 			triggerTerminalText(shortEvent, false),
 			triggerTerminalText(fire.Status, false),
@@ -896,6 +934,7 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 			triggerTerminalText(subj, false),
 			started,
 			finished,
+			waitUntil,
 			triggerTerminalText(errMsg, false),
 		)
 	}
@@ -1077,6 +1116,8 @@ func init() {
 	triggerCreateCmd.Flags().BoolVar(&triggerInterrupt, "interrupt", false, "Interrupt the target agent")
 	triggerCreateCmd.Flags().BoolVar(&triggerWake, "wake", false, "Resume the target agent if suspended when the trigger fires")
 	triggerCreateCmd.Flags().BoolVar(&triggerPlain, "plain", false, "Deliver message text without sender prefix")
+	triggerCreateCmd.Flags().StringVar(&triggerOffline, "offline", "", "Offline target policy for message actions (skip or queue; default skip)")
+	triggerCreateCmd.Flags().StringVar(&triggerQueueTTL, "queue-ttl", "", "Maximum wait duration when --offline queue is set (e.g. 30m, 24h; 60s..48h, default 24h)")
 	bindDispatchAgentFlags(triggerCreateCmd.Flags(), &triggerDispatch)
 	triggerCreateCmd.Flags().StringVar(&triggerSubjectExpr, "subject", "", "Optional CEL expression deriving the concurrency subject (string, <= 1024B)")
 	triggerCreateCmd.Flags().StringVar(&triggerOnSubject, "on-subject", "", "Subject concurrency policy (new, skip, or reuse; default new)")

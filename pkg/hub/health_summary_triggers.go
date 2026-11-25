@@ -315,7 +315,9 @@ func (s *Server) healthSummaryCanReadTrigger(r *http.Request, tr *store.Trigger)
 
 func isFailingTrigger(tr store.Trigger) bool {
 	return tr.Status == store.TriggerStatusActive &&
-		(tr.LastFireStatus == store.TriggerFireStatusFailed || tr.LastFireStatus == store.TriggerFireStatusRefused)
+		(tr.LastFireStatus == store.TriggerFireStatusFailed ||
+			tr.LastFireStatus == store.TriggerFireStatusRefused ||
+			tr.LastFireStatus == store.TriggerFireStatusExpired)
 }
 
 func isSystemPausedTrigger(tr store.Trigger) bool {

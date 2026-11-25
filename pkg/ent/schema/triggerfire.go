@@ -76,6 +76,11 @@ func (TriggerFire) Fields() []ent.Field {
 		field.UUID("target_agent_id", uuid.UUID{}).
 			Optional().
 			Nillable(),
+		field.Time("wait_until").
+			Optional().
+			Nillable(),
+		field.Int("attempts").
+			Default(0),
 		field.String("executor_kind").
 			Default(""),
 		field.String("executor_id").
@@ -116,6 +121,7 @@ func (TriggerFire) Indexes() []ent.Index {
 		index.Fields("trigger_id", "subject", "status"),
 		index.Fields("status", "lease_until"),
 		index.Fields("target_agent_id", "status"),
+		index.Fields("project_id", "status"),
 		index.Fields("result_ref"),
 	}
 }

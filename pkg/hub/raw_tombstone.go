@@ -253,6 +253,12 @@ func (s *Server) validateScheduledEventPayloadJSON(w http.ResponseWriter, eventT
 	case "message":
 		var p MessageEventPayload
 		decodeErr = json.Unmarshal([]byte(payload), &p)
+		if decodeErr == nil {
+			if field := unsupportedScheduledMessageField(p); field != "" {
+				ValidationError(w, field+" is not supported for schedules", nil)
+				return false
+			}
+		}
 	case "dispatch_agent":
 		var p DispatchAgentEventPayload
 		decodeErr = json.Unmarshal([]byte(payload), &p)
@@ -326,6 +332,19 @@ func (s *Server) validateAndRejectScheduledPayload(w http.ResponseWriter, r *htt
 // unsupportedScheduledDispatchField returns the first Stage 2 trigger-only
 // field populated on a dispatch_agent payload when authored for a schedule
 // (Stage 2 design §5.1).
+func unsupportedScheduledMessageField(p MessageEventPayload) string {
+	switch {
+	case p.Offline != "":
+		return "offline"
+	case p.QueueTTLSeconds != 0:
+		return "queueTtlSeconds"
+	case p.UntrustedVars != nil:
+		return "untrustedVars"
+	default:
+		return ""
+	}
+}
+
 func unsupportedScheduledDispatchField(p DispatchAgentEventPayload) string {
 	switch {
 	case p.NameConflict != "":

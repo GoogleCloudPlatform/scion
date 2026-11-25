@@ -3908,16 +3908,20 @@ func init() {
 	triggerfireDescRuleTrace := triggerfireFields[11].Descriptor()
 	// triggerfire.RuleTraceValidator is a validator for the "rule_trace" field. It is called by the builders before save.
 	triggerfire.RuleTraceValidator = triggerfireDescRuleTrace.Validators[0].(func(string) error)
+	// triggerfireDescAttempts is the schema descriptor for attempts field.
+	triggerfireDescAttempts := triggerfireFields[14].Descriptor()
+	// triggerfire.DefaultAttempts holds the default value on creation for the attempts field.
+	triggerfire.DefaultAttempts = triggerfireDescAttempts.Default.(int)
 	// triggerfireDescExecutorKind is the schema descriptor for executor_kind field.
-	triggerfireDescExecutorKind := triggerfireFields[13].Descriptor()
+	triggerfireDescExecutorKind := triggerfireFields[15].Descriptor()
 	// triggerfire.DefaultExecutorKind holds the default value on creation for the executor_kind field.
 	triggerfire.DefaultExecutorKind = triggerfireDescExecutorKind.Default.(string)
 	// triggerfireDescExecutorID is the schema descriptor for executor_id field.
-	triggerfireDescExecutorID := triggerfireFields[14].Descriptor()
+	triggerfireDescExecutorID := triggerfireFields[16].Descriptor()
 	// triggerfire.DefaultExecutorID holds the default value on creation for the executor_id field.
 	triggerfire.DefaultExecutorID = triggerfireDescExecutorID.Default.(string)
 	// triggerfireDescCreated is the schema descriptor for created field.
-	triggerfireDescCreated := triggerfireFields[20].Descriptor()
+	triggerfireDescCreated := triggerfireFields[22].Descriptor()
 	// triggerfire.DefaultCreated holds the default value on creation for the created field.
 	triggerfire.DefaultCreated = triggerfireDescCreated.Default.(func() time.Time)
 	// triggerfireDescID is the schema descriptor for id field.
