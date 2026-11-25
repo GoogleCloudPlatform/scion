@@ -546,3 +546,130 @@ func TestMeterHealth_FirstInsertRaceAndShrinkingMissingRanges(t *testing.T) {
 	assert.Equal(t, int64(11), mhs[0].LastContiguousSeq)
 	assert.Equal(t, []store.SeqRange{{Start: 12, End: 12}}, mhs[0].MissingRanges)
 }
+
+func TestMeterHealth_EmittedVsReceivedContiguousScenarios(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "mh-emitted-vs-received")
+	agentID := uuid.NewString()
+	t0 := time.Date(2026, 11, 25, 15, 0, 0, 0, time.UTC)
+
+	// Scenario (a): batch delivers seqs 1..500 while producer_seq=1200 (backlog pending)
+	// -> contig=500, max=1200, missing=[501, 1200].
+	runA := "run-a-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runA, nil)
+	seqsA := make([]int64, 500)
+	eventsA := make([]*store.UsageEvent, 500)
+	for i := 0; i < 500; i++ {
+		seq := int64(i + 1)
+		seqsA[i] = seq
+		eventsA[i] = makeStoreUsageEvent("hub-test", fmt.Sprintf("a-evt-%04d", seq), runA, projectID, agentID, nil, seq, t0, 1, 1, 0, 0)
+		eventsA[i].ProducerEpoch = "ep-a"
+	}
+	resA, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  eventsA,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runA,
+			ProducerEpoch: "ep-a",
+			LastReceiptAt: t0,
+			ProducerSeq:   1200,
+			ReceivedSeqs:  seqsA,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 500, resA.Accepted)
+
+	mhsA, err := cs.GetMeterHealth(ctx, agentID, runA)
+	require.NoError(t, err)
+	require.Len(t, mhsA, 1)
+	assert.Equal(t, int64(500), mhsA[0].LastContiguousSeq)
+	assert.Equal(t, int64(1200), mhsA[0].MaxSeqSeen)
+	assert.Equal(t, []store.SeqRange{{Start: 501, End: 1200}}, mhsA[0].MissingRanges)
+
+	// Scenario (b) & (c):
+	// First deliver 1..3 (contig=3, max=3, missing=[]).
+	runB := "run-b-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runB, nil)
+	makeEvB := func(seq int64) *store.UsageEvent {
+		ev := makeStoreUsageEvent("hub-test", fmt.Sprintf("b-evt-%02d", seq), runB, projectID, agentID, nil, seq, t0, 1, 1, 0, 0)
+		ev.ProducerEpoch = "ep-b"
+		return ev
+	}
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{makeEvB(1), makeEvB(2), makeEvB(3)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runB,
+			ProducerEpoch: "ep-b",
+			LastReceiptAt: t0,
+			ProducerSeq:   3,
+			ReceivedSeqs:  []int64{1, 2, 3},
+		},
+	})
+	require.NoError(t, err)
+
+	// Heartbeat raises producer_seq to 10 (no events delivered yet) -> contig=3, max=10, missing=[4, 10].
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runB,
+			ProducerEpoch: "ep-b",
+			LastReceiptAt: t0.Add(time.Second),
+			ProducerSeq:   10,
+		},
+	})
+	require.NoError(t, err)
+	mhsB, err := cs.GetMeterHealth(ctx, agentID, runB)
+	require.NoError(t, err)
+	require.Len(t, mhsB, 1)
+	assert.Equal(t, int64(3), mhsB[0].LastContiguousSeq)
+	assert.Equal(t, int64(10), mhsB[0].MaxSeqSeen)
+	assert.Equal(t, []store.SeqRange{{Start: 4, End: 10}}, mhsB[0].MissingRanges)
+
+	// (b) Deliver 4..6 -> contig=6, max=10, missing=[7, 10].
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{makeEvB(4), makeEvB(5), makeEvB(6)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runB,
+			ProducerEpoch: "ep-b",
+			LastReceiptAt: t0.Add(2 * time.Second),
+			ProducerSeq:   10,
+			ReceivedSeqs:  []int64{4, 5, 6},
+		},
+	})
+	require.NoError(t, err)
+	mhsB, err = cs.GetMeterHealth(ctx, agentID, runB)
+	require.NoError(t, err)
+	assert.Equal(t, int64(6), mhsB[0].LastContiguousSeq)
+	assert.Equal(t, int64(10), mhsB[0].MaxSeqSeen)
+	assert.Equal(t, []store.SeqRange{{Start: 7, End: 10}}, mhsB[0].MissingRanges)
+
+	// (c) Deliver 7..10 -> contig=10, max=10, missing=[].
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{makeEvB(7), makeEvB(8), makeEvB(9), makeEvB(10)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runB,
+			ProducerEpoch: "ep-b",
+			LastReceiptAt: t0.Add(3 * time.Second),
+			ProducerSeq:   10,
+			ReceivedSeqs:  []int64{7, 8, 9, 10},
+		},
+	})
+	require.NoError(t, err)
+	mhsB, err = cs.GetMeterHealth(ctx, agentID, runB)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), mhsB[0].LastContiguousSeq)
+	assert.Equal(t, int64(10), mhsB[0].MaxSeqSeen)
+	assert.Empty(t, mhsB[0].MissingRanges)
+}

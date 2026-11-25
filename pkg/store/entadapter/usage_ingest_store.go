@@ -156,6 +156,16 @@ func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.C
 		uniqueEvents = append(uniqueEvents, ev)
 	}
 
+	// O3: Sort uniqueEvents by (hub_id, event_id) before inserting so
+	// concurrent overlapping batches acquire unique-index locks in a
+	// canonical order and cannot deadlock in Postgres.
+	sort.Slice(uniqueEvents, func(i, j int) bool {
+		if uniqueEvents[i].HubID != uniqueEvents[j].HubID {
+			return uniqueEvents[i].HubID < uniqueEvents[j].HubID
+		}
+		return uniqueEvents[i].EventID < uniqueEvents[j].EventID
+	})
+
 	insertedEvents := make([]*store.UsageEvent, 0, len(uniqueEvents))
 	dbDuplicates := 0
 
@@ -647,39 +657,33 @@ func advanceSeqState(
 			// In the already-observed region [1, existingMax], missing_ranges
 			// may only shrink: intersect existing with incoming.
 			cur = intersectSeqRanges(cur, incNorm)
-			// In the newly observed region (existingMax, nextMax], incoming
-			// gaps are new information.
-			if incomingMax > existingMax {
+			// When no receivedSeqs are supplied (e.g., direct UpsertMeterHealth),
+			// incoming gaps above existingMax are new information.
+			if len(receivedSeqs) == 0 && incomingMax > existingMax {
 				above := clipSeqRanges(incNorm, existingMax+1, incomingMax)
 				cur = normalizeSeqRanges(append(cur, above...))
 			}
-		} else {
+		} else if len(receivedSeqs) == 0 {
 			cur = incNorm
 		}
 	}
 
-	// If receivedSeqs jump past existingMax, any unreceived numbers in
-	// (existingMax, maxReceived) start as missing, then all receivedSeqs are
-	// subtracted.
+	// Track emitted (nextMax) separately from received (receivedSeqs):
+	// whenever max_seq_seen advances (from a batch or heartbeat), every
+	// newly emitted sequence in (existingMax, nextMax] starts as missing
+	// until actually received (R1).
+	if (len(receivedSeqs) > 0 || incomingMissing == nil) && nextMax > existingMax {
+		cur = normalizeSeqRanges(append(cur, store.SeqRange{Start: existingMax + 1, End: nextMax}))
+	}
 	if len(receivedSeqs) > 0 {
-		var maxRecv int64
-		for _, seq := range receivedSeqs {
-			if seq > maxRecv {
-				maxRecv = seq
-			}
-		}
-		if maxRecv > existingMax+1 {
-			cur = normalizeSeqRanges(append(cur, store.SeqRange{Start: existingMax + 1, End: maxRecv - 1}))
-		}
 		cur = subtractSeqsFromRanges(cur, receivedSeqs)
 	}
 
 	// Prune anything <= nextContig.
 	cur = pruneRangesAtOrBelow(cur, nextContig)
 
-	// If we have observed sequences up to nextMax, advance nextContig as far
-	// as the first remaining missing range (or all the way to nextMax if no
-	// gaps remain) whenever receivedSeqs were processed.
+	// Advance nextContig ONLY up to the first missing sequence (never past
+	// unreceived emitted sequences).
 	if len(receivedSeqs) > 0 && nextMax > nextContig {
 		if len(cur) == 0 {
 			nextContig = nextMax
