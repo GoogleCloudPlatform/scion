@@ -508,10 +508,14 @@ func TestCreateAgent_MessageModeFromSnapshot(t *testing.T) {
 		name, snapshot string
 		wantCode       int
 		wantMode       string
+		wantHint       string
 	}{
-		{name: "snapshot mode applies", snapshot: store.MessageModeLineage, wantCode: http.StatusCreated, wantMode: store.MessageModeLineage},
+		{name: "snapshot mode applies", snapshot: store.MessageModeOwner, wantCode: http.StatusCreated, wantMode: store.MessageModeOwner},
+		{name: "snapshot tree mode applies", snapshot: store.MessageModeTree, wantCode: http.StatusCreated, wantMode: store.MessageModeTree},
 		{name: "no snapshot mode: default", wantCode: http.StatusCreated, wantMode: store.MessageModeProject},
 		{name: "invalid snapshot mode refused", snapshot: "bogus", wantCode: http.StatusBadRequest},
+		{name: "retired lineage snapshot refused with hint", snapshot: "lineage", wantCode: http.StatusBadRequest, wantHint: "owner"},
+		{name: "retired branch snapshot refused with hint", snapshot: "branch", wantCode: http.StatusBadRequest, wantHint: "direct"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -526,6 +530,9 @@ func TestCreateAgent_MessageModeFromSnapshot(t *testing.T) {
 				Name: "mm-agent", ProjectID: project.ID, Template: "mm-tmpl", Task: "x",
 			})
 			require.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
+			if tc.wantHint != "" {
+				assert.Contains(t, rec.Body.String(), tc.wantHint)
+			}
 			if tc.wantCode != http.StatusCreated {
 				return
 			}
@@ -539,12 +546,15 @@ func TestCreateAgent_MessageModeFromSnapshot(t *testing.T) {
 // TestValidateMessageMode_MatchesStore pins api.ValidateMessageMode (used by
 // LoadConfig) to the hub's store message modes.
 func TestValidateMessageMode_MatchesStore(t *testing.T) {
-	for _, m := range []string{store.MessageModeNone, store.MessageModeLineage, store.MessageModeBranch, store.MessageModeProject, store.MessageModeHub} {
+	assert.Equal(t, store.MessageModes(), api.ValidMessageModes())
+	for _, m := range store.MessageModes() {
 		assert.NoError(t, api.ValidateMessageMode(m), m)
 		assert.True(t, store.IsValidMessageMode(m), m)
 	}
-	assert.Error(t, api.ValidateMessageMode("bogus"))
-	assert.False(t, store.IsValidMessageMode("bogus"))
+	for _, bad := range []string{"bogus", "lineage", "branch"} {
+		assert.Error(t, api.ValidateMessageMode(bad), bad)
+		assert.False(t, store.IsValidMessageMode(bad), bad)
+	}
 	assert.NoError(t, api.ValidateMessageMode(""))
 }
 
@@ -573,13 +583,13 @@ func tiersCommittedTemplate(t *testing.T, srv *Server, s store.Store, name strin
 func TestTemplateAgentConfig_LazyDeriveAndBackfill(t *testing.T) {
 	ctx := context.Background()
 	srv, s := newCommitTestServer(t, newCommitTestStorage(t))
-	agentYAML := "model: lazy-model\nmessage_mode: lineage\nimage: lazy-image:v1\n"
+	agentYAML := "model: lazy-model\nmessage_mode: owner\nimage: lazy-image:v1\n"
 
 	lazy := tiersCommittedTemplate(t, srv, s, "lazy-tmpl", map[string]string{"scion-agent.yaml": agentYAML})
 	jc := srv.templateJobConfigByID(ctx, lazy.ID)
 	require.NotNil(t, jc, "a missing snapshot is derived at read time")
 	assert.Equal(t, "lazy-model", jc.Model)
-	assert.Equal(t, store.MessageModeLineage, jc.MessageMode)
+	assert.Equal(t, store.MessageModeOwner, jc.MessageMode)
 	assert.Empty(t, jc.Image, "the derived job config excludes environment keys")
 	row, err := s.GetTemplate(ctx, lazy.ID)
 	require.NoError(t, err)

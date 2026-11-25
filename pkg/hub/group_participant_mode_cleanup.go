@@ -36,10 +36,10 @@ import (
 //   - the row is an agent row that is still active (left_at is NULL);
 //   - the agent is soft-deleted or missing, or its message mode is one for
 //     which groupAgentJoinAllowed refuses every adder other than an
-//     authorized human: none, lineage, branch, or a value outside the five
+//     authorized human: none, owner, direct, tree, or a value outside the six
 //     modes. groupModeKeepsParticipant is that rule.
 //
-// Rows of lineage and branch agents that a human added cannot be told apart
+// Rows of owner, direct, and tree agents that a human added cannot be told apart
 // from older rows, so they are removed too; a human whom the agent's mode
 // lets message it re-adds the agent through the participant API, which
 // applies groupAgentJoinAllowed.
@@ -57,8 +57,9 @@ type GroupParticipantModeCleanupExecutor struct {
 // Reasons a row is removed, used as count keys and in the log.
 const (
 	groupCleanupReasonNone    = store.MessageModeNone
-	groupCleanupReasonLineage = store.MessageModeLineage
-	groupCleanupReasonBranch  = store.MessageModeBranch
+	groupCleanupReasonOwner   = store.MessageModeOwner
+	groupCleanupReasonDirect  = store.MessageModeDirect
+	groupCleanupReasonTree    = store.MessageModeTree
 	groupCleanupReasonUnknown = "unknown_mode"
 	groupCleanupReasonDeleted = "agent_deleted"
 	groupCleanupReasonMissing = "agent_missing"
@@ -106,10 +107,12 @@ func groupParticipantCleanupReason(agent *store.Agent) string {
 	switch effectiveGroupMessageMode(agent.MessageMode) {
 	case store.MessageModeNone:
 		return groupCleanupReasonNone
-	case store.MessageModeLineage:
-		return groupCleanupReasonLineage
-	case store.MessageModeBranch:
-		return groupCleanupReasonBranch
+	case store.MessageModeOwner:
+		return groupCleanupReasonOwner
+	case store.MessageModeDirect:
+		return groupCleanupReasonDirect
+	case store.MessageModeTree:
+		return groupCleanupReasonTree
 	default:
 		return groupCleanupReasonUnknown
 	}

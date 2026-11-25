@@ -480,7 +480,7 @@ func (s *Server) authorizeUserToAgent(
 		}
 	}
 
-	// Ancestry check: U in target.Ancestry → ALLOW (lineage/branch/project)
+	// Ancestry check: U in target.Ancestry → ALLOW (owner/direct/tree/project/hub)
 	// Only trust ancestry when hub-attested (not federated). A full-session
 	// local user must also hold active access to the target's project
 	// (ptone/scion#2141), the check uatMessageGate applies to a UAT holder
@@ -503,7 +503,7 @@ func (s *Server) authorizeUserToAgent(
 		}
 	}
 
-	// Project owner pierces lineage/branch/project (D6).
+	// Project owner pierces owner/direct/tree/project/hub (D6).
 	// Owner only — NOT admin. Admin piercing would let admins unseal agents.
 	if !uatDeniesMessage && s.isProjectOwner(ctx, userIdent.ID(), targetAgent.ProjectID) {
 		return true, "project owner piercing"
@@ -520,8 +520,8 @@ func (s *Server) authorizeUserToAgent(
 		return false, "agent.message permission denied: " + decision.Reason
 	}
 
-	// target.mode is lineage or branch, and sender is not in ancestry and
-	// not project owner → DENY.
+	// target.mode is a narrow mode (owner, direct, tree) or unknown, and sender
+	// is not in ancestry and not project owner → DENY.
 	return false, fmt.Sprintf("user not authorized for target agent with message_mode %q", targetAgent.MessageMode)
 }
 
@@ -622,7 +622,13 @@ func (s *Server) evaluateAgentMessageModes(ctx context.Context, agentIdent Agent
 }
 
 // evaluateSameProjectModes implements the same-project mode compatibility
-// matrix from design Section 3.
+// matrix:
+//   - project/hub ↔ project/hub → ALLOW
+//   - direct ↔ direct → ALLOW iff direct parent/child, else DENY (mode_direct_no_edge)
+//   - tree ↔ {tree, project, hub} → ALLOW iff same creation tree, else DENY (mode_tree_outside)
+//   - tree ↔ direct → ALLOW iff same creation tree AND direct parent/child, else DENY
+//     (mode_tree_outside if different tree, else mode_direct_no_edge)
+//   - all other combinations (owner, direct↔project/hub, unknown) → DENY (mode_incompatible)
 func (s *Server) evaluateSameProjectModes(sender, target *store.Agent) MessageDecision {
 	sMode := sender.MessageMode
 	tMode := target.MessageMode
@@ -633,16 +639,52 @@ func (s *Server) evaluateSameProjectModes(sender, target *store.Agent) MessageDe
 		return MessageDecision{Allowed: true, Reason: "both agents in project/hub communication cell"}
 	}
 
-	// Both branch mode with parent/child relationship → ALLOW
-	if sMode == store.MessageModeBranch && tMode == store.MessageModeBranch {
+	// Both direct mode with parent/child relationship → ALLOW
+	if sMode == store.MessageModeDirect && tMode == store.MessageModeDirect {
 		if isDirectParentChild(sender, target) {
-			return MessageDecision{Allowed: true, Reason: "branch mode parent/child relationship"}
+			return MessageDecision{Allowed: true, Reason: "direct mode parent/child relationship"}
 		}
-		return MessageDecision{Reason: "branch mode agents without direct parent/child relationship"}
+		return MessageDecision{
+			Code:   MessageDenialCode(ReasonModeDirectNoEdge),
+			Reason: "direct mode agents without direct parent/child relationship",
+		}
 	}
 
-	// All other combinations (including lineage mode, mixed modes) → DENY
+	// Symmetric tree bond: at least one side is tree.
+	if sMode == store.MessageModeTree || tMode == store.MessageModeTree {
+		other := tMode
+		if tMode == store.MessageModeTree {
+			other = sMode
+		}
+		switch other {
+		case store.MessageModeTree, store.MessageModeProject, store.MessageModeHub:
+			if sameTree(sender, target) {
+				return MessageDecision{Allowed: true, Reason: "same creation tree"}
+			}
+			return MessageDecision{
+				Code:   MessageDenialCode(ReasonModeTreeOutside),
+				Reason: "tree mode agents in different creation trees",
+			}
+		case store.MessageModeDirect:
+			if !sameTree(sender, target) {
+				return MessageDecision{
+					Code:   MessageDenialCode(ReasonModeTreeOutside),
+					Reason: "tree mode agents in different creation trees",
+				}
+			}
+			if isDirectParentChild(sender, target) {
+				return MessageDecision{Allowed: true, Reason: "direct/tree mode parent/child relationship"}
+			}
+			return MessageDecision{
+				Code:   MessageDenialCode(ReasonModeDirectNoEdge),
+				Reason: "direct mode agents without direct parent/child relationship",
+			}
+		}
+	}
+
+	// All other combinations (including owner mode, direct↔project/hub, unknown) → DENY
 	return MessageDecision{
+		Code:   MessageDenialCode(ReasonModeIncompatible),
 		Reason: fmt.Sprintf("agent-to-agent messaging denied: sender mode %q, target mode %q", sMode, tMode),
 	}
 }
@@ -1025,6 +1067,32 @@ func (s *Server) EvaluateCrossProjectReadAccess(
 	return true, "cross_project_read_authorized"
 }
 
+// treeKey returns the origin owner and owner-created root agent of a's
+// creation tree. ok is false when a has no recorded ancestry (fail closed).
+// Ancestry is immutable and hub-written: [originUser, rootAgent, ..., directParent].
+// When len(Ancestry) == 1, the agent itself is the owner-created root.
+func treeKey(a *store.Agent) (owner, root string, ok bool) {
+	if a == nil || a.ID == "" || len(a.Ancestry) == 0 || a.Ancestry[0] == "" {
+		return "", "", false
+	}
+	owner = a.Ancestry[0]
+	if len(a.Ancestry) == 1 {
+		return owner, a.ID, true
+	}
+	if a.Ancestry[1] == "" {
+		return "", "", false
+	}
+	return owner, a.Ancestry[1], true
+}
+
+// sameTree reports whether two agents share the same origin owner and
+// owner-created root agent in their immutable Ancestry chains.
+func sameTree(a, b *store.Agent) bool {
+	ao, ar, aok := treeKey(a)
+	bo, br, bok := treeKey(b)
+	return aok && bok && ao == bo && ar == br
+}
+
 // isDirectParentChild reports whether two agents have a direct parent/child
 // relationship. The last element of an agent's Ancestry array is its parent
 // (which may be a user or an agent).
@@ -1043,7 +1111,7 @@ func isDirectParentChild(a, b *store.Agent) bool {
 // isProjectOwner reports whether the user has the project-owner role (and ONLY
 // the owner role, not admin) in the given project. This is stricter than
 // isProjectOwnerOrAdmin: for messaging piercing (D6), only the owner role
-// confers the ability to message lineage/branch agents.
+// confers the ability to message owner/direct/tree agents.
 func (s *Server) isProjectOwner(ctx context.Context, userID, projectID string) bool {
 	if userID == "" || projectID == "" {
 		return false

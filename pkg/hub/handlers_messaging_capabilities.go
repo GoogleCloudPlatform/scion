@@ -16,6 +16,8 @@ package hub
 
 import (
 	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // messagingCapabilitiesResponse is the response for GET /api/v1/messaging/capabilities.
@@ -49,7 +51,7 @@ func (s *Server) handleMessagingCapabilities(w http.ResponseWriter, r *http.Requ
 	resp := messagingCapabilitiesResponse{
 		HubEnabled:                    hubEnabled,
 		CrossProjectConversationKinds: []string{"direct"},
-		SupportedModes:                []string{"none", "lineage", "branch", "project", "hub"},
+		SupportedModes:                store.MessageModes(),
 	}
 
 	writeJSON(w, http.StatusOK, resp)

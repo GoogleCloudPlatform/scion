@@ -34,8 +34,8 @@ func TestAPIError_MessageDeniedReason(t *testing.T) {
 		{
 			name: "message_denied with full details",
 			err: &APIError{StatusCode: 403, Code: ErrCodeMessageDenied, Message: "Message delivery denied",
-				Details: map[string]interface{}{"reason": "mode_branch_no_edge", "senderMode": "branch", "recipientMode": "branch"}},
-			want: "message_denied: Message delivery denied [reason: mode_branch_no_edge, sender mode: branch, recipient mode: branch] (status: 403)",
+				Details: map[string]interface{}{"reason": "mode_direct_no_edge", "senderMode": "direct", "recipientMode": "direct"}},
+			want: "message_denied: Message delivery denied [reason: mode_direct_no_edge, sender mode: direct, recipient mode: direct] (status: 403)",
 		},
 		{
 			name: "message_denied with request ID and partial details",

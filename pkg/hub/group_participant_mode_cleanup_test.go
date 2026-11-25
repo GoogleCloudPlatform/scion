@@ -46,7 +46,7 @@ type groupCleanupFixture struct {
 	deleted *store.Conversation // a soft-deleted group conversation
 
 	// Agents whose rows in group are removed.
-	none, lineage, branch, softDeleted, missing string
+	none, owner, directAgent, tree, softDeleted, missing string
 	// Agents whose rows in group are kept.
 	project, hub string
 	// A user row in group (kept).
@@ -85,8 +85,9 @@ func newGroupCleanupFixture(t *testing.T) *groupCleanupFixture {
 		return id
 	}
 	f.none = agent(store.MessageModeNone, false)
-	f.lineage = agent(store.MessageModeLineage, false)
-	f.branch = agent(store.MessageModeBranch, false)
+	f.owner = agent(store.MessageModeOwner, false)
+	f.directAgent = agent(store.MessageModeDirect, false)
+	f.tree = agent(store.MessageModeTree, false)
 	f.project = agent(store.MessageModeProject, false)
 	f.hub = agent(store.MessageModeHub, false)
 	f.softDeleted = agent(store.MessageModeProject, true)
@@ -103,11 +104,11 @@ func newGroupCleanupFixture(t *testing.T) *groupCleanupFixture {
 			ConversationID: convID, PrincipalKind: kind, PrincipalID: id, Role: "member",
 		}))
 	}
-	for _, id := range []string{f.none, f.lineage, f.branch, f.project, f.hub, f.softDeleted, f.missing, f.leftNone} {
+	for _, id := range []string{f.none, f.owner, f.directAgent, f.tree, f.project, f.hub, f.softDeleted, f.missing, f.leftNone} {
 		add(f.group.ID, "agent", id)
 	}
 	add(f.group.ID, "user", f.user)
-	add(f.group2.ID, "agent", f.lineage)
+	add(f.group2.ID, "agent", f.owner)
 	add(f.group2.ID, "agent", f.hub)
 	add(f.deleted.ID, "agent", f.none)
 
@@ -152,11 +153,12 @@ func (f *groupCleanupFixture) rowState(t *testing.T, convID, kind, id string) (t
 func (f *groupCleanupFixture) removedRows() map[groupCleanupRow]string {
 	return map[groupCleanupRow]string{
 		{f.group.ID, f.none}:        groupCleanupReasonNone,
-		{f.group.ID, f.lineage}:     groupCleanupReasonLineage,
-		{f.group.ID, f.branch}:      groupCleanupReasonBranch,
+		{f.group.ID, f.owner}:       groupCleanupReasonOwner,
+		{f.group.ID, f.directAgent}: groupCleanupReasonDirect,
+		{f.group.ID, f.tree}:        groupCleanupReasonTree,
 		{f.group.ID, f.softDeleted}: groupCleanupReasonDeleted,
 		{f.group.ID, f.missing}:     groupCleanupReasonMissing,
-		{f.group2.ID, f.lineage}:    groupCleanupReasonLineage,
+		{f.group2.ID, f.owner}:      groupCleanupReasonOwner,
 	}
 }
 
@@ -257,12 +259,13 @@ func TestGroupParticipantModeCleanup_ReportOnlyByDefault(t *testing.T) {
 			assert.Equal(t, 0, res.AlreadyLeft)
 			assert.Equal(t, map[string]int{
 				groupCleanupReasonNone:    1,
-				groupCleanupReasonLineage: 2,
-				groupCleanupReasonBranch:  1,
+				groupCleanupReasonOwner:   2,
+				groupCleanupReasonDirect:  1,
+				groupCleanupReasonTree:    1,
 				groupCleanupReasonDeleted: 1,
 				groupCleanupReasonMissing: 1,
 			}, res.ByReason)
-			assert.Contains(t, log, "Would remove 6 row(s) (agent_deleted=1, agent_missing=1, branch=1, lineage=2, none=1).")
+			assert.Contains(t, log, "Would remove 7 row(s) (agent_deleted=1, agent_missing=1, direct=1, none=1, owner=2, tree=1).")
 			assertGroupCleanupUntouched(t, f)
 		})
 	}
@@ -283,7 +286,7 @@ func TestGroupParticipantModeCleanup_ApplyRemovesOnlyMatchingRows(t *testing.T) 
 	assert.Equal(t, 0, res.AlreadyLeft)
 	assert.Equal(t, 2, res.ConversationsScanned, "group and group2; the direct and the soft-deleted conversations are not scanned")
 	assert.Equal(t, 3, res.Kept)
-	assert.Contains(t, log, "Removed 6 row(s) (agent_deleted=1, agent_missing=1, branch=1, lineage=2, none=1).")
+	assert.Contains(t, log, "Removed 7 row(s) (agent_deleted=1, agent_missing=1, direct=1, none=1, owner=2, tree=1).")
 
 	for row := range f.removedRows() {
 		leftAt, active := f.rowState(t, row.conv, "agent", row.agent)
@@ -418,9 +421,9 @@ func TestGroupParticipantModeCleanup_ReAddAfterCleanup(t *testing.T) {
 	f := newGroupCleanupFixture(t)
 	f.run(t, map[string]string{"apply": "true"})
 	require.NoError(t, f.s.AddParticipant(context.Background(), &store.ConversationParticipant{
-		ConversationID: f.group.ID, PrincipalKind: "agent", PrincipalID: f.lineage, Role: "member",
+		ConversationID: f.group.ID, PrincipalKind: "agent", PrincipalID: f.owner, Role: "member",
 	}))
-	_, active := f.rowState(t, f.group.ID, "agent", f.lineage)
+	_, active := f.rowState(t, f.group.ID, "agent", f.owner)
 	assert.True(t, active)
 }
 

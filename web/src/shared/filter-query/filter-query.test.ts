@@ -231,9 +231,9 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     const projectSchema = getViewSchema('project_agents') as ViewSchema;
     const known = knownKeysFor(projectSchema);
 
-    const okRes = parse('mode:lineage', known);
+    const okRes = parse('mode:owner', known);
     expect(okRes.error).toBeUndefined();
-    expect(validate(okRes.query as Query, projectSchema, 'mode:lineage').error).toBeUndefined();
+    expect(validate(okRes.query as Query, projectSchema, 'mode:owner').error).toBeUndefined();
 
     for (const bad of ['mode:can_message', 'mode:cannot_message']) {
       const res = parse(bad, known);

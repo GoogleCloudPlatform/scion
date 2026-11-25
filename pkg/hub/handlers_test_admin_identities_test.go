@@ -1605,7 +1605,7 @@ func TestTestAdmin_OwnerPiercingFailsClosedOnRoleReadFault(t *testing.T) {
 	ms := newContainmentMockStore()
 	ms.users[ownerID] = &store.User{ID: ownerID, Email: "owner@example.com", Status: store.UserStatusActive, Role: "member"}
 	// Lineage mode: project-owner piercing is the owner's only allow.
-	target := &store.Agent{ID: "ta-pierce-target", Name: "t", Slug: "t", ProjectID: projectID, MessageMode: store.MessageModeLineage}
+	target := &store.Agent{ID: "ta-pierce-target", Name: "t", Slug: "t", ProjectID: projectID, MessageMode: store.MessageModeOwner}
 	ms.agents[target.ID] = target
 	ms.roleDefinitions["owner-role"] = &store.RoleDefinition{ID: "owner-role", Name: store.ProjectRoleOwner, ScopeType: store.RoleScopeProject, System: true}
 	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{

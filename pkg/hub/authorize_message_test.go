@@ -138,7 +138,7 @@ func TestAuthorizeAgentMessage_LineageMode(t *testing.T) {
 	srv, s, owner, member, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	lineageAgent := msgAuthzAgent(t, s, "lineage-agent", projectID, store.MessageModeLineage,
+	lineageAgent := msgAuthzAgent(t, s, "lineage-agent", projectID, store.MessageModeOwner,
 		[]string{owner.ID})
 
 	t.Run("ancestry user converses (ALLOW)", func(t *testing.T) {
@@ -180,7 +180,7 @@ func TestAuthorizeAgentMessage_LineageMode(t *testing.T) {
 	})
 
 	t.Run("lineage agent CANNOT message ANY agent including children (D4)", func(t *testing.T) {
-		child := msgAuthzAgent(t, s, "lineage-child", projectID, store.MessageModeLineage,
+		child := msgAuthzAgent(t, s, "lineage-child", projectID, store.MessageModeOwner,
 			[]string{owner.ID, lineageAgent.ID})
 
 		senderIdent := msgAuthzAgentIdentity(lineageAgent.ID, projectID, lineageAgent.Ancestry)
@@ -208,11 +208,11 @@ func TestAuthorizeAgentMessage_BranchMode(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	parent := msgAuthzAgent(t, s, "branch-parent", projectID, store.MessageModeBranch,
+	parent := msgAuthzAgent(t, s, "branch-parent", projectID, store.MessageModeDirect,
 		[]string{owner.ID})
-	child := msgAuthzAgent(t, s, "branch-child", projectID, store.MessageModeBranch,
+	child := msgAuthzAgent(t, s, "branch-child", projectID, store.MessageModeDirect,
 		[]string{owner.ID, parent.ID})
-	sibling := msgAuthzAgent(t, s, "branch-sibling", projectID, store.MessageModeBranch,
+	sibling := msgAuthzAgent(t, s, "branch-sibling", projectID, store.MessageModeDirect,
 		[]string{owner.ID, parent.ID})
 
 	t.Run("parent/child allowed when both branch mode", func(t *testing.T) {
@@ -266,9 +266,9 @@ func TestAuthorizeAgentMessage_RelayPinning(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	lineageAgent := msgAuthzAgent(t, s, "relay-lineage", projectID, store.MessageModeLineage,
+	lineageAgent := msgAuthzAgent(t, s, "relay-lineage", projectID, store.MessageModeOwner,
 		[]string{owner.ID})
-	branchAgent := msgAuthzAgent(t, s, "relay-branch", projectID, store.MessageModeBranch,
+	branchAgent := msgAuthzAgent(t, s, "relay-branch", projectID, store.MessageModeDirect,
 		[]string{owner.ID})
 
 	// Owner's project-mode agent
@@ -459,12 +459,12 @@ func TestAuthorizeAgentMessage_MixedBranchModes(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	branchParent := msgAuthzAgent(t, s, "mixed-branch-parent", projectID, store.MessageModeBranch,
+	branchParent := msgAuthzAgent(t, s, "mixed-branch-parent", projectID, store.MessageModeDirect,
 		[]string{owner.ID})
 	// Branch child of a project-mode parent: cannot message parent in either direction
 	projectParent := msgAuthzAgent(t, s, "mixed-project-parent", projectID, store.MessageModeProject,
 		[]string{owner.ID})
-	branchChildOfProject := msgAuthzAgent(t, s, "branch-child-of-project", projectID, store.MessageModeBranch,
+	branchChildOfProject := msgAuthzAgent(t, s, "branch-child-of-project", projectID, store.MessageModeDirect,
 		[]string{owner.ID, projectParent.ID})
 
 	t.Run("branch child of project parent denied both directions", func(t *testing.T) {
@@ -482,14 +482,14 @@ func TestAuthorizeAgentMessage_MixedBranchModes(t *testing.T) {
 	})
 
 	t.Run("branch child can still message own branch-mode children", func(t *testing.T) {
-		grandchild := msgAuthzAgent(t, s, "branch-grandchild", projectID, store.MessageModeBranch,
+		grandchild := msgAuthzAgent(t, s, "branch-grandchild", projectID, store.MessageModeDirect,
 			[]string{owner.ID, branchParent.ID, "intermediate-id"})
 		// This won't actually pass because grandchild's parent is "intermediate-id",
 		// not branchParent. Let's make a proper structure.
 		_ = grandchild // unused in this sub-case
 
 		// Proper parent-child:
-		branchChild := msgAuthzAgent(t, s, "mixed-branch-child", projectID, store.MessageModeBranch,
+		branchChild := msgAuthzAgent(t, s, "mixed-branch-child", projectID, store.MessageModeDirect,
 			[]string{owner.ID, branchParent.ID})
 
 		parentIdent := msgAuthzAgentIdentity(branchParent.ID, projectID, branchParent.Ancestry)
@@ -508,7 +508,7 @@ func TestAuthorizeAgentMessage_UATWithoutMessageScope(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	lineageAgent := msgAuthzAgent(t, s, "uat-lineage-target", projectID, store.MessageModeLineage,
+	lineageAgent := msgAuthzAgent(t, s, "uat-lineage-target", projectID, store.MessageModeOwner,
 		[]string{owner.ID})
 	projectAgent := msgAuthzAgent(t, s, "uat-project-target", projectID, store.MessageModeProject,
 		[]string{owner.ID})
@@ -609,9 +609,9 @@ func TestAuthorizeAgentMessage_IngressParity(t *testing.T) {
 	// Create agents with different message modes.
 	projectAgent := msgAuthzAgent(t, s, "parity-project", projectID, store.MessageModeProject,
 		[]string{owner.ID})
-	lineageAgent := msgAuthzAgent(t, s, "parity-lineage", projectID, store.MessageModeLineage,
+	lineageAgent := msgAuthzAgent(t, s, "parity-lineage", projectID, store.MessageModeOwner,
 		[]string{owner.ID})
-	branchAgent := msgAuthzAgent(t, s, "parity-branch", projectID, store.MessageModeBranch,
+	branchAgent := msgAuthzAgent(t, s, "parity-branch", projectID, store.MessageModeDirect,
 		[]string{owner.ID})
 	noneAgent := msgAuthzAgent(t, s, "parity-none", projectID, store.MessageModeNone,
 		[]string{owner.ID})
@@ -687,7 +687,7 @@ func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
 		[]string{owner.ID})
 	projectAgent := msgAuthzAgent(t, s, "proj-agent", projectID, store.MessageModeProject,
 		[]string{owner.ID})
-	branchAgent := msgAuthzAgent(t, s, "branch-agent-hub", projectID, store.MessageModeBranch,
+	branchAgent := msgAuthzAgent(t, s, "branch-agent-hub", projectID, store.MessageModeDirect,
 		[]string{owner.ID})
 
 	t.Run("hub->hub same project allowed", func(t *testing.T) {

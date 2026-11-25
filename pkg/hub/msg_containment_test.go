@@ -198,12 +198,12 @@ func TestC1_ScheduledMessageBranchDenied(t *testing.T) {
 
 	ms.agents[creatorAgentID] = &store.Agent{
 		ID: creatorAgentID, Name: "creator", Slug: "creator",
-		ProjectID: projectID, MessageMode: store.MessageModeBranch,
+		ProjectID: projectID, MessageMode: store.MessageModeDirect,
 		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
 	}
 	ms.agents[targetAgentID] = &store.Agent{
 		ID: targetAgentID, Name: "target", Slug: "target",
-		ProjectID: projectID, MessageMode: store.MessageModeBranch,
+		ProjectID: projectID, MessageMode: store.MessageModeDirect,
 		// No ancestry relationship with creator
 	}
 

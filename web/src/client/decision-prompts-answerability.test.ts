@@ -36,8 +36,7 @@ const {
   READ_ONLY_ANSWER_REASON,
 } = await import('./decision-prompts.js');
 
-const LINEAGE =
-  'release-bot is in lineage mode and only accepts messages from users in its ancestry. You are not in its lineage.';
+const LINEAGE = 'release-bot only accepts messages from its owner.';
 
 function res(status: number, body: unknown): Response {
   return {
@@ -66,7 +65,7 @@ describe('fetchAskerAnswerability', () => {
       res(200, {
         id: 'a1',
         name: 'release-bot',
-        _messageability: { canMessage: false, reason: 'mode_lineage_no_ancestry' },
+        _messageability: { canMessage: false, reason: 'mode_owner_only' },
       })
     );
     expect(await fetchAskerAnswerability('a1', 'release-bot')).toEqual({
@@ -129,7 +128,7 @@ describe('answerDecision on 403', () => {
         error: {
           code: 'message_denied',
           message: 'Message delivery denied',
-          details: { reason: 'mode_lineage_no_ancestry', senderMode: 'user' },
+          details: { reason: 'mode_owner_only', senderMode: 'user' },
         },
       })
     );
@@ -138,7 +137,7 @@ describe('answerDecision on 403', () => {
       ok: false,
       status: 403,
       code: 'message_denied',
-      reason: 'mode_lineage_no_ancestry',
+      reason: 'mode_owner_only',
     });
   });
 });

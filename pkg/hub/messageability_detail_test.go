@@ -166,7 +166,7 @@ func newMDFixture(t *testing.T, n int) *mdFixture {
 	// Mostly project mode (reachable), with lineage and none agents mixed
 	// in so some decisions deny on mode before any standing check.
 	modes := []string{store.MessageModeProject, store.MessageModeProject, store.MessageModeProject,
-		store.MessageModeLineage, store.MessageModeNone}
+		store.MessageModeOwner, store.MessageModeNone}
 	for i := 0; i < n; i++ {
 		a := mk(fmt.Sprintf("md-alice-%d", i), f.alice, modes[i%len(modes)], i)
 		if i == 0 {

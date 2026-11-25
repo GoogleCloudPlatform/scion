@@ -46,46 +46,52 @@ func TestEvaluateAgentMessage_SameProject_AllModePairs(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	modes := []string{
-		store.MessageModeNone,
-		store.MessageModeLineage,
-		store.MessageModeBranch,
-		store.MessageModeProject,
-		store.MessageModeHub,
-	}
+	modes := store.MessageModes()
 
-	// Expected results for same-project mode matrix (design §3).
+	// Expected results for same-project mode matrix (unrelated agents in separate trees).
 	// Format: expected[senderMode][targetMode] = allowed
 	type modePair struct{ sender, target string }
 	allowed := map[modePair]bool{
 		// none sender: all denied
 		{store.MessageModeNone, store.MessageModeNone}:    false,
-		{store.MessageModeNone, store.MessageModeLineage}: false,
-		{store.MessageModeNone, store.MessageModeBranch}:  false,
+		{store.MessageModeNone, store.MessageModeOwner}:   false,
+		{store.MessageModeNone, store.MessageModeDirect}:  false,
+		{store.MessageModeNone, store.MessageModeTree}:    false,
 		{store.MessageModeNone, store.MessageModeProject}: false,
 		{store.MessageModeNone, store.MessageModeHub}:     false,
-		// lineage sender: all denied (lineage has no agent-to-agent edges)
-		{store.MessageModeLineage, store.MessageModeNone}:    false,
-		{store.MessageModeLineage, store.MessageModeLineage}: false,
-		{store.MessageModeLineage, store.MessageModeBranch}:  false,
-		{store.MessageModeLineage, store.MessageModeProject}: false,
-		{store.MessageModeLineage, store.MessageModeHub}:     false,
-		// branch sender: only parent/child branch pairs allowed (tested separately)
-		{store.MessageModeBranch, store.MessageModeNone}:    false,
-		{store.MessageModeBranch, store.MessageModeLineage}: false,
-		{store.MessageModeBranch, store.MessageModeBranch}:  false, // non-parent/child
-		{store.MessageModeBranch, store.MessageModeProject}: false,
-		{store.MessageModeBranch, store.MessageModeHub}:     false,
+		// owner sender: all denied (owner has no agent-to-agent edges)
+		{store.MessageModeOwner, store.MessageModeNone}:    false,
+		{store.MessageModeOwner, store.MessageModeOwner}:   false,
+		{store.MessageModeOwner, store.MessageModeDirect}:  false,
+		{store.MessageModeOwner, store.MessageModeTree}:    false,
+		{store.MessageModeOwner, store.MessageModeProject}: false,
+		{store.MessageModeOwner, store.MessageModeHub}:     false,
+		// direct sender: only parent/child direct/tree pairs allowed (tested separately)
+		{store.MessageModeDirect, store.MessageModeNone}:    false,
+		{store.MessageModeDirect, store.MessageModeOwner}:   false,
+		{store.MessageModeDirect, store.MessageModeDirect}:  false, // non-parent/child
+		{store.MessageModeDirect, store.MessageModeTree}:    false, // distinct trees
+		{store.MessageModeDirect, store.MessageModeProject}: false,
+		{store.MessageModeDirect, store.MessageModeHub}:     false,
+		// tree sender: distinct trees all denied
+		{store.MessageModeTree, store.MessageModeNone}:    false,
+		{store.MessageModeTree, store.MessageModeOwner}:   false,
+		{store.MessageModeTree, store.MessageModeDirect}:  false,
+		{store.MessageModeTree, store.MessageModeTree}:    false,
+		{store.MessageModeTree, store.MessageModeProject}: false,
+		{store.MessageModeTree, store.MessageModeHub}:     false,
 		// project sender: project and hub targets allowed
 		{store.MessageModeProject, store.MessageModeNone}:    false,
-		{store.MessageModeProject, store.MessageModeLineage}: false,
-		{store.MessageModeProject, store.MessageModeBranch}:  false,
+		{store.MessageModeProject, store.MessageModeOwner}:   false,
+		{store.MessageModeProject, store.MessageModeDirect}:  false,
+		{store.MessageModeProject, store.MessageModeTree}:    false, // distinct trees
 		{store.MessageModeProject, store.MessageModeProject}: true,
 		{store.MessageModeProject, store.MessageModeHub}:     true,
 		// hub sender: project and hub targets allowed (same project)
 		{store.MessageModeHub, store.MessageModeNone}:    false,
-		{store.MessageModeHub, store.MessageModeLineage}: false,
-		{store.MessageModeHub, store.MessageModeBranch}:  false,
+		{store.MessageModeHub, store.MessageModeOwner}:   false,
+		{store.MessageModeHub, store.MessageModeDirect}:  false,
+		{store.MessageModeHub, store.MessageModeTree}:    false, // distinct trees
 		{store.MessageModeHub, store.MessageModeProject}: true,
 		{store.MessageModeHub, store.MessageModeHub}:     true,
 	}
@@ -367,7 +373,7 @@ func TestEvaluateAgentMessage_CrossProject_TargetModeRestricted(t *testing.T) {
 		// Generic early-exit denial (no typed code), NOT cross_project_target_mode.
 	})
 
-	for _, tMode := range []string{store.MessageModeLineage, store.MessageModeBranch} {
+	for _, tMode := range []string{store.MessageModeOwner, store.MessageModeDirect, store.MessageModeTree} {
 		t.Run("target_"+tMode, func(t *testing.T) {
 			sender := msgAuthzAgent(t, f.store, "cp-tmode-s-"+tMode, f.projectA, store.MessageModeHub,
 				[]string{f.ownerA.ID})
@@ -819,7 +825,7 @@ func TestEvaluateAgentMessage_CrossProject_PolicyAnyDoesNotOpenRestricted(t *tes
 		[]string{f.ownerA.ID})
 
 	// Even with policy "any", restricted target modes are denied.
-	for _, mode := range []string{store.MessageModeNone, store.MessageModeLineage, store.MessageModeBranch} {
+	for _, mode := range []string{store.MessageModeNone, store.MessageModeOwner, store.MessageModeDirect, store.MessageModeTree} {
 		t.Run("target_"+mode, func(t *testing.T) {
 			target := msgAuthzAgent(t, f.store, "cp-any-restr-"+mode, f.projectB, mode,
 				[]string{f.ownerB.ID})
@@ -829,6 +835,38 @@ func TestEvaluateAgentMessage_CrossProject_PolicyAnyDoesNotOpenRestricted(t *tes
 				t.Fatalf("policy 'any' should NOT open %s-mode receiver for cross-project", mode)
 			}
 		})
+	}
+}
+
+// TestEvaluateAgentMessage_CrossProject_SameTreeDenied pins S4: even when two
+// agents share the same creation tree (Ancestry[0] and owner-created root),
+// tree mode never admits a cross-project send in either direction.
+func TestEvaluateAgentMessage_CrossProject_SameTreeDenied(t *testing.T) {
+	f := crossProjectSetup(t)
+	ctx := context.Background()
+
+	enableCrossProjectMessaging(t, f.srv)
+	_, err := f.store.UpdateProjectMessagingPolicy(ctx, f.projectA, store.CrossProjectInboundAny, 1)
+	require_NoError(t, err)
+	_, err = f.store.UpdateProjectMessagingPolicy(ctx, f.projectB, store.CrossProjectInboundAny, 1)
+	require_NoError(t, err)
+
+	// Foo in projectA (hub) -> Bar in projectB (tree), sharing the same tree root Foo.
+	foo := msgAuthzAgent(t, f.store, "cp-same-tree-foo", f.projectA, store.MessageModeHub, []string{f.ownerA.ID})
+	bar := msgAuthzAgent(t, f.store, "cp-same-tree-bar", f.projectB, store.MessageModeTree, []string{f.ownerA.ID, foo.ID})
+
+	fooIdent := msgAuthzAgentIdentity(foo.ID, f.projectA, foo.Ancestry)
+	dec1 := f.srv.EvaluateAgentMessage(ctx, fooIdent, bar)
+	if dec1.Allowed || dec1.Code != MessageDenialCrossProjectTargetMode {
+		t.Fatalf("hub(A)->tree(B) same tree: got allowed=%v code=%q, want allowed=false code=%q",
+			dec1.Allowed, dec1.Code, MessageDenialCrossProjectTargetMode)
+	}
+
+	barIdent := msgAuthzAgentIdentity(bar.ID, f.projectB, bar.Ancestry)
+	dec2 := f.srv.EvaluateAgentMessage(ctx, barIdent, foo)
+	if dec2.Allowed || dec2.Code != MessageDenialCrossProjectSenderMode {
+		t.Fatalf("tree(B)->hub(A) same tree: got allowed=%v code=%q, want allowed=false code=%q",
+			dec2.Allowed, dec2.Code, MessageDenialCrossProjectSenderMode)
 	}
 }
 

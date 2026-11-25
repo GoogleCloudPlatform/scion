@@ -60,7 +60,7 @@ type WhoamiResult struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Ancestry    []string          `json:"ancestry,omitempty"`
 	TaskSummary string            `json:"taskSummary,omitempty"`
-	MessageMode string            `json:"messageMode,omitempty"` // effective message mode (none, lineage, branch, project, hub)
+	MessageMode string            `json:"messageMode,omitempty"` // effective message mode (none, owner, direct, tree, project, hub)
 
 	// Scopes are the scopes of the agent's current hub token, read from
 	// the token itself (only with --full). They show whether, for example,

@@ -533,7 +533,7 @@ func TestRelationshipProjectAccess_Message(t *testing.T) {
 		return allowed, reason
 	}
 
-	for _, mode := range []string{store.MessageModeLineage, store.MessageModeProject} {
+	for _, mode := range []string{store.MessageModeOwner, store.MessageModeProject} {
 		mode := mode
 
 		t.Run("BindingRemovedDenied_"+mode, func(t *testing.T) {
@@ -574,7 +574,7 @@ func TestRelationshipProjectAccess_Message(t *testing.T) {
 		f := newRPAFixture(t, "msgmember")
 		memberID := tid("rpa-msgmember-member")
 		uatpMember(t, f.store, f.projectID, memberID)
-		agent := f.messageAgent(t, "member", store.MessageModeLineage, memberID, f.ownerID)
+		agent := f.messageAgent(t, "member", store.MessageModeOwner, memberID, f.ownerID)
 
 		allowed, reason := send(f, memberID, agent)
 		assert.True(t, allowed, "member ancestor: %s", reason)
@@ -585,7 +585,7 @@ func TestRelationshipProjectAccess_Message(t *testing.T) {
 		f := newRPAFixture(t, "msgsysauth")
 		userID := tid("rpa-msgsysauth-user")
 		createTestUserWithRole(t, f.store, userID, userID+"@test.com", "member", store.SystemRoleSuperAdmin)
-		agent := f.messageAgent(t, "sysauth", store.MessageModeLineage, userID, f.ownerID)
+		agent := f.messageAgent(t, "sysauth", store.MessageModeOwner, userID, f.ownerID)
 
 		// The session identity's role is "member", so the super-admin
 		// identity shortcut does not apply; the store system binding is the
@@ -599,7 +599,7 @@ func TestRelationshipProjectAccess_Message(t *testing.T) {
 		f := newRPAFixture(t, "msgfault")
 		memberID := tid("rpa-msgfault-member")
 		uatpMember(t, f.store, f.projectID, memberID)
-		agent := f.messageAgent(t, "fault", store.MessageModeLineage, memberID, f.ownerID)
+		agent := f.messageAgent(t, "fault", store.MessageModeOwner, memberID, f.ownerID)
 
 		allowed, reason := send(f, memberID, agent)
 		require.True(t, allowed, "precondition: allowed without a fault: %s", reason)
@@ -611,7 +611,7 @@ func TestRelationshipProjectAccess_Message(t *testing.T) {
 		assert.Contains(t, reason, "project access check failed (fail-closed)")
 		// The public code is the lineage-mode refusal any unauthorized
 		// sender gets.
-		assert.Equal(t, ReasonModeLineageNoAncestry, mapReasonToCode(reason))
+		assert.Equal(t, ReasonModeOwnerOnly, mapReasonToCode(reason))
 		assert.Equal(t, ReasonMissingPermission, mapReasonToCode(messageAncestorFaultReason(store.MessageModeProject)))
 	})
 }
@@ -621,7 +621,7 @@ func TestRelationshipProjectAccess_Message(t *testing.T) {
 // unrelated non-member gets from the message handler: same status and same
 // body, for a lineage-mode and a project-mode agent.
 func TestRelationshipProjectAccess_MessageRefusalIdentical(t *testing.T) {
-	for _, mode := range []string{store.MessageModeLineage, store.MessageModeProject} {
+	for _, mode := range []string{store.MessageModeOwner, store.MessageModeProject} {
 		mode := mode
 		t.Run(mode, func(t *testing.T) {
 			f := newRPAFixture(t, "msgsame"+mode)
@@ -697,7 +697,7 @@ func TestRelationshipProjectAccess_DecideRefusalIdentical(t *testing.T) {
 // refusal an unrelated non-member gets from the message handler, for a
 // lineage-mode and a project-mode agent.
 func TestRelationshipProjectAccess_MessageFaultRefusalIdentical(t *testing.T) {
-	for _, mode := range []string{store.MessageModeLineage, store.MessageModeProject} {
+	for _, mode := range []string{store.MessageModeOwner, store.MessageModeProject} {
 		mode := mode
 		t.Run(mode, func(t *testing.T) {
 			f := newRPAFixture(t, "msgfaultsame"+mode)
@@ -737,7 +737,7 @@ func TestRelationshipProjectAccess_MessageFaultRefusalIdentical(t *testing.T) {
 func TestRelationshipProjectAccess_MessageAncestorKinds(t *testing.T) {
 	f := newRPAFixture(t, "msgkinds")
 	ctx := context.Background()
-	agent := f.messageAgent(t, "kinds", store.MessageModeLineage, f.ownerID)
+	agent := f.messageAgent(t, "kinds", store.MessageModeOwner, f.ownerID)
 	res := agentResource(agent)
 
 	scoped := rpaIdentity(rpaUAT, f.ownerID, f.projectID)
@@ -768,7 +768,7 @@ func TestRelationshipProjectAccess_MessageDevPrincipal(t *testing.T) {
 		f.hubUser(t, dev.ID())
 	}
 	f.clearBindings(t, dev.ID())
-	agent := f.messageAgent(t, "dev", store.MessageModeLineage, dev.ID(), f.ownerID)
+	agent := f.messageAgent(t, "dev", store.MessageModeOwner, dev.ID(), f.ownerID)
 
 	allowed, reason := f.srv.authorizeUserToAgent(ctx, dev, agent)
 	assert.False(t, allowed, "dev ancestor without access: %s", reason)
@@ -786,7 +786,7 @@ func TestRelationshipProjectAccess_MessageDevPrincipal(t *testing.T) {
 // former-member ancestor, two distinct lookup fault classes, an unrelated
 // non-member and (scheduled) a target agent that does not exist.
 func TestRelationshipProjectAccess_RefusalSurfaces(t *testing.T) {
-	for _, mode := range []string{store.MessageModeLineage, store.MessageModeProject} {
+	for _, mode := range []string{store.MessageModeOwner, store.MessageModeProject} {
 		mode := mode
 		t.Run(mode, func(t *testing.T) {
 			f := newRPAFixture(t, "surfaces"+mode)
@@ -864,7 +864,7 @@ func (s *rpaAgentFaultStore) GetAgent(ctx context.Context, id string) (*store.Ag
 func TestRelationshipProjectAccess_ScheduledTargetLookupFault(t *testing.T) {
 	f := newRPAFixture(t, "schedfault")
 	ctx := context.Background()
-	agent := f.messageAgent(t, "schedfault", store.MessageModeLineage, f.ownerID)
+	agent := f.messageAgent(t, "schedfault", store.MessageModeOwner, f.ownerID)
 
 	orig := f.srv.store
 	f.srv.store = &rpaAgentFaultStore{Store: orig, failID: agent.ID}

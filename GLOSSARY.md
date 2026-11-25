@@ -341,13 +341,31 @@ _See also_: Hub
 
 ## Messaging
 
-**Branch mode** (message mode):
-A message mode that permits messaging from ancestry users (like lineage) plus the agent's direct parent and child agents. Project owners can pierce branch mode.
-_Avoid_: tree mode, family mode
+**Creation tree**:
+The set of same-project agents rooted at a single **Owner-created root** — the owner-created root agent itself plus all of its direct and transitive descendants, identified in O(1) via their immutable `Ancestry` snapshot (`Ancestry[1]`, or the agent's own ID when `len(Ancestry) == 1`). Two agents created directly by the same user are roots of separate creation trees.
+_See also_: Owner-created root, Tree mode
 
-**Lineage mode** (message mode):
-A message mode that restricts messaging to users in the agent's ancestry chain — the creating user and their ancestors. No agent-to-agent messaging is permitted for lineage-mode agents. Project owners can pierce lineage mode.
-_Avoid_: ancestry mode, parent-only mode
+**Direct mode** (message mode; UI label: **Direct plus owner**):
+A message mode (`direct`) that permits messaging from the agent's origin owner plus its direct parent and direct child agents (when the counterpart is in `direct` or `tree` mode). Siblings, grandparents, and grandchildren are denied. Project owners can pierce direct mode.
+_Avoid_: branch mode (retired), parent-child mode
+_See also_: Message Mode, Tree mode, Owner (messaging)
+
+**Owner (messaging)**:
+The **origin user** recorded at `Ancestry[0]` when an agent is created. Written once by the Hub and immutable. Distinct from the mutable `agents.owner_id` column and from the **project-owner** role.
+_See also_: Ancestry chain, Owner mode, Owner-created root
+
+**Owner-created root**:
+The top-level agent created directly by a human user at the root of a creation tree: `Ancestry[1]` for any descendant agent, or the agent itself when created directly by a user (`len(Ancestry) == 1`).
+_See also_: Creation tree, Tree mode
+
+**Owner mode** (message mode):
+A message mode (`owner`) that restricts messaging to the agent's origin owner (`Ancestry[0]`). No agent-to-agent messaging is permitted in either direction. Project owners can pierce owner mode.
+_Avoid_: lineage mode (retired), ancestry mode, parent-only mode
+_See also_: Message Mode, Owner (messaging)
+
+**Tree mode** (message mode; UI label: **Tree plus owner**):
+A message mode (`tree`) that permits messaging from the agent's origin owner plus same-project agents in the same **creation tree** that are in `tree`, `project`, or `hub` mode, or in `direct` mode when they are a direct parent or child. Symmetric so replies work in both directions. Project owners can pierce tree mode.
+_See also_: Creation tree, Owner-created root, Message Mode
 
 **Message Group**:
 A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project.
@@ -355,9 +373,9 @@ _Avoid_: group, set, group chat, room, thread
 _See also_: Group (different concept — hub users, not recipients), Thread Group (different concept — a project's threads, not recipients)
 
 **Message Mode**:
-A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: **none**, **lineage**, **branch**, **project** (the built-in default unless the operator sets `server.hub.default_message_mode`), or **hub**. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
+A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of six values: **none**, **owner**, **direct**, **tree**, **project** (the built-in default unless the operator sets `server.hub.default_message_mode`), or **hub**. Set by the agent's owner, a project owner, a super-admin, or a same-project full-role agent via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
 _Avoid_: messaging mode, communication mode, access mode
-_See also_: Ancestry chain, Piercing, Hub mode
+_See also_: Ancestry chain, Piercing, Owner mode, Direct mode, Tree mode, Hub mode
 
 **Hub mode** (message mode):
 A message mode that behaves like Project mode within the agent's own project and additionally permits the agent to send direct messages across project boundaries (when cross-project messaging is enabled at the Hub and receiving-project level). A project-mode agent can receive a cross-project DM but cannot reply until granted Hub mode. Hub mode is subject to a non-escalation grant guard: an agent can only grant it to another agent if the granting agent is itself in Hub mode and has the `full` authorization role.
@@ -387,11 +405,11 @@ _Avoid_: alert, event (for the notification), watch (for the subscription), trig
 _See also_: Activity (notifications fire on activity values), Trigger (distinct concept, same word)
 
 **Piercing** (message authorization):
-The ability of a privileged user to bypass an agent's message mode restrictions. Super-admins pierce all modes including none. Project owners pierce lineage and branch modes. Piercing applies only to user identities — it is never inherited by an owner's agents.
+The ability of a privileged user to bypass an agent's message mode restrictions. Super-admins pierce all modes including none. Project owners pierce owner, direct, and tree modes. Piercing applies only to user identities — it is never inherited by an owner's agents.
 _Avoid_: override, bypass (too generic)
 
 **Project mode** (message mode):
-The built-in default message mode (unless the operator sets `server.hub.default_message_mode`). Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in project or branch mode can message it. The most permissive mode.
+The built-in default message mode (unless the operator sets `server.hub.default_message_mode`). Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in `project` or `hub` mode (or in `tree` mode within the same creation tree) can message it.
 _Avoid_: open mode, public mode
 
 **Thread Group**:

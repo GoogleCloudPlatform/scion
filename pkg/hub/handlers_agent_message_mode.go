@@ -21,9 +21,24 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// retiredMessageModeHintSuffix returns a parenthetical rename hint when mode
+// is a retired message mode name, or "" otherwise.
+func retiredMessageModeHintSuffix(mode string, templateContext bool) string {
+	repl, ok := api.RetiredMessageModeHint(mode)
+	if !ok {
+		return ""
+	}
+	if templateContext {
+		return fmt.Sprintf(" (%q was renamed to %q; update message_mode in the template's scion-agent.yaml)", mode, repl)
+	}
+	return fmt.Sprintf(" (%q was renamed to %q)", mode, repl)
+}
 
 // ---------------------------------------------------------------------------
 // set_message_mode endpoint types (D7, D10)
@@ -31,7 +46,7 @@ import (
 
 // SetMessageModeRequest is the request body for the set_message_mode action.
 type SetMessageModeRequest struct {
-	Mode    string `json:"mode"`              // Required: "none", "lineage", "branch", "project", "hub"
+	Mode    string `json:"mode"`              // Required: "none", "owner", "direct", "tree", "project", "hub"
 	Cascade bool   `json:"cascade,omitempty"` // Optional: apply to all descendants
 }
 
@@ -104,7 +119,10 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 
 	// 2. Validate mode value.
 	if !store.IsValidMessageMode(req.Mode) {
-		ValidationError(w, "invalid message mode: must be one of none, lineage, branch, project, hub", nil)
+		msg := fmt.Sprintf("invalid message mode: must be one of %s%s",
+			strings.Join(store.MessageModes(), ", "),
+			retiredMessageModeHintSuffix(req.Mode, false))
+		ValidationError(w, msg, nil)
 		return
 	}
 

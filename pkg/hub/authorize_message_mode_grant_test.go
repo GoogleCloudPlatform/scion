@@ -87,7 +87,7 @@ func TestAuthorizeMessageModeGrant_NonHubMode(t *testing.T) {
 	ctx := context.Background()
 
 	// Any mode that is not hub should be allowed without further checks.
-	for _, mode := range []string{"none", "lineage", "branch", "project"} {
+	for _, mode := range []string{"none", "owner", "direct", "tree", "project"} {
 		decision := srv.AuthorizeMessageModeGrant(ctx, nil, projectID, mode)
 		if !decision.Allowed {
 			t.Errorf("non-hub mode %q should be allowed, got denied: %s", mode, decision.Reason)
@@ -206,7 +206,7 @@ func TestIsNewHubGrant(t *testing.T) {
 		// Project → hub IS a new grant.
 		{store.MessageModeProject, store.MessageModeHub, true},
 		// Branch → hub IS a new grant.
-		{store.MessageModeBranch, store.MessageModeHub, true},
+		{store.MessageModeDirect, store.MessageModeHub, true},
 		// None → hub IS a new grant.
 		{store.MessageModeNone, store.MessageModeHub, true},
 		// Any → project is NOT a new hub grant.

@@ -2928,8 +2928,8 @@ type AgentSelf struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Ancestry    []string          `json:"ancestry,omitempty"`
 	TaskSummary string            `json:"taskSummary,omitempty"`
-	// MessageMode is the agent's effective message mode (none, lineage,
-	// branch, project, hub) as stored on the Hub.
+	// MessageMode is the agent's effective message mode (none, owner,
+	// direct, tree, project, hub) as stored on the Hub.
 	MessageMode string `json:"messageMode,omitempty"`
 	// CreatedBy is the ID of the principal (user or agent) that created
 	// this agent.

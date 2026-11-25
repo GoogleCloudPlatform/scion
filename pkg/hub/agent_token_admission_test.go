@@ -464,11 +464,11 @@ func TestSetMessageModeToken_ProjectAdminDenialStillApplies(t *testing.T) {
 	path := f.agentPath(f.agent, "/set_message_mode")
 
 	// The owner: refused without the selector, admitted with it.
-	rec := doRequestWithUAT(t, f.srv, f.mint(t, f.ownerID, projectBoundary(f.project), "agent:read"), http.MethodPost, path, map[string]any{"mode": "lineage"})
+	rec := doRequestWithUAT(t, f.srv, f.mint(t, f.ownerID, projectBoundary(f.project), "agent:read"), http.MethodPost, path, map[string]any{"mode": "owner"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	rec = doRequestWithUAT(t, f.srv, f.mint(t, f.ownerID, projectBoundary(f.other), "agent:set_message_mode"), http.MethodPost, path, map[string]any{"mode": "lineage"})
+	rec = doRequestWithUAT(t, f.srv, f.mint(t, f.ownerID, projectBoundary(f.other), "agent:set_message_mode"), http.MethodPost, path, map[string]any{"mode": "owner"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "token for another project: %s", rec.Body.String())
-	rec = doRequestWithUAT(t, f.srv, f.mint(t, f.ownerID, projectBoundary(f.project), "agent:set_message_mode"), http.MethodPost, path, map[string]any{"mode": "lineage"})
+	rec = doRequestWithUAT(t, f.srv, f.mint(t, f.ownerID, projectBoundary(f.project), "agent:set_message_mode"), http.MethodPost, path, map[string]any{"mode": "owner"})
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	// A project admin of the agent's project who owns another project can
@@ -484,7 +484,7 @@ func TestSetMessageModeToken_ProjectAdminDenialStillApplies(t *testing.T) {
 
 	got, err := f.store.GetAgent(ctx, f.agent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, store.MessageModeLineage, got.MessageMode, "the refused request leaves the mode")
+	assert.Equal(t, store.MessageModeOwner, got.MessageMode, "the refused request leaves the mode")
 }
 
 // TestSetMessageModeToken_ProjectBoundaryTokensCannotGrantHubMode pins that

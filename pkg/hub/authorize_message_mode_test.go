@@ -64,16 +64,11 @@ func TestCharacterization_ModeMatrix_AllPairs(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	modes := []string{
-		store.MessageModeNone,
-		store.MessageModeLineage,
-		store.MessageModeBranch,
-		store.MessageModeProject,
-	}
+	modes := store.MessageModes()
 
 	// Create TWO agents per mode (sender and target). All share the same
-	// project and have owner as their ancestry root — no parent/child
-	// relationship between them (except where we test branch specifically).
+	// project and have owner as their ancestry root — distinct trees and no
+	// parent/child relationship between them.
 	senderAgents := make(map[string]*store.Agent)
 	targetAgents := make(map[string]*store.Agent)
 	for _, mode := range modes {
@@ -81,35 +76,60 @@ func TestCharacterization_ModeMatrix_AllPairs(t *testing.T) {
 		targetAgents[mode] = msgAuthzAgent(t, s, "matrix-target-"+mode, projectID, mode, []string{owner.ID})
 	}
 
-	// Define expected outcomes for all 16 pairs.
+	// Define expected outcomes and denial codes for all 36 unrelated pairs.
 	type pair struct {
 		sender, target string
 		allowed        bool
+		wantCode       string
 	}
 	tests := []pair{
-		// none sender → all targets: DENY
-		{"none", "none", false},
-		{"none", "lineage", false},
-		{"none", "branch", false},
-		{"none", "project", false},
+		// none sender → all targets: DENY (mode_none_sender)
+		{"none", "none", false, ReasonModeNoneSender},
+		{"none", "owner", false, ReasonModeNoneSender},
+		{"none", "direct", false, ReasonModeNoneSender},
+		{"none", "tree", false, ReasonModeNoneSender},
+		{"none", "project", false, ReasonModeNoneSender},
+		{"none", "hub", false, ReasonModeNoneSender},
 
-		// lineage sender → all targets: DENY (D4: zero agent edges)
-		{"lineage", "none", false},
-		{"lineage", "lineage", false},
-		{"lineage", "branch", false},
-		{"lineage", "project", false},
+		// owner sender → all targets: DENY
+		{"owner", "none", false, ReasonModeNone},
+		{"owner", "owner", false, ReasonModeIncompatible},
+		{"owner", "direct", false, ReasonModeIncompatible},
+		{"owner", "tree", false, ReasonModeIncompatible},
+		{"owner", "project", false, ReasonModeIncompatible},
+		{"owner", "hub", false, ReasonModeIncompatible},
 
-		// branch sender → all targets: DENY (no parent/child here)
-		{"branch", "none", false},
-		{"branch", "lineage", false},
-		{"branch", "branch", false}, // same mode but no parent/child
-		{"branch", "project", false},
+		// direct sender → all targets: DENY (no parent/child, distinct trees)
+		{"direct", "none", false, ReasonModeNone},
+		{"direct", "owner", false, ReasonModeIncompatible},
+		{"direct", "direct", false, ReasonModeDirectNoEdge},
+		{"direct", "tree", false, ReasonModeTreeOutside},
+		{"direct", "project", false, ReasonModeIncompatible},
+		{"direct", "hub", false, ReasonModeIncompatible},
 
-		// project sender → targets: only project→project ALLOW
-		{"project", "none", false},
-		{"project", "lineage", false},
-		{"project", "branch", false},
-		{"project", "project", true},
+		// tree sender → all targets: DENY (distinct trees)
+		{"tree", "none", false, ReasonModeNone},
+		{"tree", "owner", false, ReasonModeIncompatible},
+		{"tree", "direct", false, ReasonModeTreeOutside},
+		{"tree", "tree", false, ReasonModeTreeOutside},
+		{"tree", "project", false, ReasonModeTreeOutside},
+		{"tree", "hub", false, ReasonModeTreeOutside},
+
+		// project sender → targets: only project/hub ALLOW (distinct trees)
+		{"project", "none", false, ReasonModeNone},
+		{"project", "owner", false, ReasonModeIncompatible},
+		{"project", "direct", false, ReasonModeIncompatible},
+		{"project", "tree", false, ReasonModeTreeOutside},
+		{"project", "project", true, ""},
+		{"project", "hub", true, ""},
+
+		// hub sender → targets: only project/hub ALLOW (distinct trees)
+		{"hub", "none", false, ReasonModeNone},
+		{"hub", "owner", false, ReasonModeIncompatible},
+		{"hub", "direct", false, ReasonModeIncompatible},
+		{"hub", "tree", false, ReasonModeTreeOutside},
+		{"hub", "project", true, ""},
+		{"hub", "hub", true, ""},
 	}
 
 	for _, tt := range tests {
@@ -124,23 +144,28 @@ func TestCharacterization_ModeMatrix_AllPairs(t *testing.T) {
 				t.Fatalf("expected allowed=%v for %s, got allowed=%v (reason: %s)",
 					tt.allowed, name, allowed, reason)
 			}
+			if !tt.allowed {
+				if got := mapReasonToCode(reason); got != tt.wantCode {
+					t.Fatalf("expected code %q for %s, got %q (reason: %s)", tt.wantCode, name, got, reason)
+				}
+			}
 		})
 	}
 }
 
-// TestCharacterization_BranchParentChild verifies that branch-to-branch
+// TestCharacterization_DirectParentChild verifies that direct-to-direct
 // messaging is allowed ONLY for direct parent/child relationships.
-func TestCharacterization_BranchParentChild(t *testing.T) {
+func TestCharacterization_DirectParentChild(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	parent := msgAuthzAgent(t, s, "char-branch-parent", projectID, store.MessageModeBranch,
+	parent := msgAuthzAgent(t, s, "char-direct-parent", projectID, store.MessageModeDirect,
 		[]string{owner.ID})
-	child := msgAuthzAgent(t, s, "char-branch-child", projectID, store.MessageModeBranch,
+	child := msgAuthzAgent(t, s, "char-direct-child", projectID, store.MessageModeDirect,
 		[]string{owner.ID, parent.ID})
-	grandchild := msgAuthzAgent(t, s, "char-branch-grandchild", projectID, store.MessageModeBranch,
+	grandchild := msgAuthzAgent(t, s, "char-direct-grandchild", projectID, store.MessageModeDirect,
 		[]string{owner.ID, parent.ID, child.ID})
-	sibling := msgAuthzAgent(t, s, "char-branch-sibling", projectID, store.MessageModeBranch,
+	sibling := msgAuthzAgent(t, s, "char-direct-sibling", projectID, store.MessageModeDirect,
 		[]string{owner.ID, parent.ID})
 
 	tests := []struct {
@@ -167,8 +192,176 @@ func TestCharacterization_BranchParentChild(t *testing.T) {
 				t.Fatalf("expected allowed=%v, got allowed=%v (reason: %s)",
 					tt.allowed, allowed, reason)
 			}
+			if !tt.allowed {
+				if got := mapReasonToCode(reason); got != ReasonModeDirectNoEdge {
+					t.Fatalf("expected code %q, got %q (reason: %s)", ReasonModeDirectNoEdge, got, reason)
+				}
+			}
 		})
 	}
+}
+
+// TestTreeMode_MatrixAndSymmetry covers tree membership, symmetric tree bond,
+// deleted intermediates, empty ancestry, separate trees under the same owner,
+// and the full symmetry property allow(S→T) == allow(T→S).
+func TestTreeMode_MatrixAndSymmetry(t *testing.T) {
+	srv, s, owner, member, projectID := msgAuthzSetup(t)
+	ctx := context.Background()
+
+	// Tree 1: U -> Foo -> Bar -> Baz; Foo -> Bar2
+	foo := msgAuthzAgent(t, s, "tree-foo", projectID, store.MessageModeTree, []string{owner.ID})
+	bar := msgAuthzAgent(t, s, "tree-bar", projectID, store.MessageModeTree, []string{owner.ID, foo.ID})
+	baz := msgAuthzAgent(t, s, "tree-baz", projectID, store.MessageModeTree, []string{owner.ID, foo.ID, bar.ID})
+	bar2 := msgAuthzAgent(t, s, "tree-bar2", projectID, store.MessageModeTree, []string{owner.ID, foo.ID})
+
+	// Tree 2 (same owner, different root): U -> Foo2 -> Qux
+	foo2 := msgAuthzAgent(t, s, "tree-foo2", projectID, store.MessageModeTree, []string{owner.ID})
+	qux := msgAuthzAgent(t, s, "tree-qux", projectID, store.MessageModeTree, []string{owner.ID, foo2.ID})
+
+	// Legacy / empty ancestry agent
+	emptyAnc := msgAuthzAgent(t, s, "tree-empty", projectID, store.MessageModeTree, nil)
+
+	check := func(t *testing.T, sAgent, tAgent *store.Agent, want bool, wantCode string) {
+		t.Helper()
+		sIdent := msgAuthzAgentIdentity(sAgent.ID, projectID, sAgent.Ancestry)
+		got, reason, _ := srv.authorizeAgentMessage(ctx, sIdent, tAgent, false)
+		if got != want {
+			t.Fatalf("%s(%s)→%s(%s): got allowed=%v, want %v (reason: %s)",
+				sAgent.Name, sAgent.MessageMode, tAgent.Name, tAgent.MessageMode, got, want, reason)
+		}
+		if !want && wantCode != "" {
+			if code := mapReasonToCode(reason); code != wantCode {
+				t.Fatalf("%s→%s: got code %q, want %q (reason: %s)", sAgent.Name, tAgent.Name, code, wantCode, reason)
+			}
+		}
+	}
+
+	t.Run("same tree descendants and cousins allowed", func(t *testing.T) {
+		check(t, foo, baz, true, "")
+		check(t, baz, foo, true, "")
+		check(t, bar, baz, true, "")
+		check(t, baz, bar, true, "")
+		check(t, baz, bar2, true, "")
+		check(t, bar2, baz, true, "")
+	})
+
+	t.Run("separate trees under same owner and empty ancestry denied", func(t *testing.T) {
+		check(t, foo, foo2, false, ReasonModeTreeOutside)
+		check(t, foo2, foo, false, ReasonModeTreeOutside)
+		check(t, baz, qux, false, ReasonModeTreeOutside)
+		check(t, qux, baz, false, ReasonModeTreeOutside)
+		check(t, emptyAnc, foo, false, ReasonModeTreeOutside)
+		check(t, foo, emptyAnc, false, ReasonModeTreeOutside)
+	})
+
+	t.Run("symmetric tree bond with project, hub, direct, owner", func(t *testing.T) {
+		// project root Foo ↔ tree Baz: allowed both directions
+		foo.MessageMode = store.MessageModeProject
+		require_NoError(t, s.UpdateAgent(ctx, foo))
+		check(t, foo, baz, true, "")
+		check(t, baz, foo, true, "")
+
+		// project agent outside tree (Foo2) ↔ tree Baz: denied (mode_tree_outside)
+		foo2.MessageMode = store.MessageModeProject
+		require_NoError(t, s.UpdateAgent(ctx, foo2))
+		check(t, foo2, baz, false, ReasonModeTreeOutside)
+		check(t, baz, foo2, false, ReasonModeTreeOutside)
+
+		// hub root Foo ↔ tree Baz: allowed both directions
+		foo.MessageMode = store.MessageModeHub
+		require_NoError(t, s.UpdateAgent(ctx, foo))
+		check(t, foo, baz, true, "")
+		check(t, baz, foo, true, "")
+
+		// direct Bar ↔ tree Baz (parent/child): allowed; direct Bar ↔ tree Bar2 (siblings): denied (mode_direct_no_edge)
+		bar.MessageMode = store.MessageModeDirect
+		require_NoError(t, s.UpdateAgent(ctx, bar))
+		check(t, bar, baz, true, "")
+		check(t, baz, bar, true, "")
+		check(t, bar, bar2, false, ReasonModeDirectNoEdge)
+		check(t, bar2, bar, false, ReasonModeDirectNoEdge)
+		// direct Bar ↔ tree Qux (different tree): denied (mode_tree_outside)
+		check(t, bar, qux, false, ReasonModeTreeOutside)
+		check(t, qux, bar, false, ReasonModeTreeOutside)
+
+		// owner Foo ↔ tree Baz: denied both directions (mode_incompatible)
+		foo.MessageMode = store.MessageModeOwner
+		require_NoError(t, s.UpdateAgent(ctx, foo))
+		check(t, foo, baz, false, ReasonModeIncompatible)
+		check(t, baz, foo, false, ReasonModeIncompatible)
+
+		// Restore modes for subsequent subtests
+		foo.MessageMode = store.MessageModeTree
+		bar.MessageMode = store.MessageModeTree
+		foo2.MessageMode = store.MessageModeTree
+		require_NoError(t, s.UpdateAgent(ctx, foo))
+		require_NoError(t, s.UpdateAgent(ctx, bar))
+		require_NoError(t, s.UpdateAgent(ctx, foo2))
+	})
+
+	t.Run("user path for tree mode", func(t *testing.T) {
+		ownerIdent := msgAuthzUserIdentity(owner.ID)
+		memberIdent := msgAuthzUserIdentity(member.ID)
+		adminIdent := msgAuthzAdminIdentity()
+
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, ownerIdent, baz, false)
+		if !allowed {
+			t.Fatalf("owner→tree should be allowed: %s", reason)
+		}
+		allowed, reason, _ = srv.authorizeAgentMessage(ctx, memberIdent, baz, false)
+		if allowed {
+			t.Fatalf("non-owner member→tree should be denied")
+		}
+		if code := mapReasonToCode(reason); code != ReasonModeOwnerOnly {
+			t.Fatalf("member→tree: got code %q, want %q (reason: %s)", code, ReasonModeOwnerOnly, reason)
+		}
+		allowed, reason, _ = srv.authorizeAgentMessage(ctx, adminIdent, baz, false)
+		if !allowed {
+			t.Fatalf("super-admin→tree should be allowed: %s", reason)
+		}
+
+		// Isolated project-owner piercing of tree: target's Ancestry[0] is member,
+		// not owner, so only project-owner piercing (not ancestry allow) admits owner.
+		memberTree := msgAuthzAgent(t, s, "tree-member-owned", projectID, store.MessageModeTree, []string{member.ID})
+		allowed, reason, _ = srv.authorizeAgentMessage(ctx, ownerIdent, memberTree, false)
+		if !allowed || reason != "project owner piercing" {
+			t.Fatalf("project owner→member-owned tree: got allowed=%v reason=%q, want allowed=true reason='project owner piercing'", allowed, reason)
+		}
+	})
+
+	t.Run("symmetry property over all modes and pairs", func(t *testing.T) {
+		agents := []*store.Agent{foo, bar, baz, bar2, foo2, qux, emptyAnc}
+		for _, mA := range store.MessageModes() {
+			for _, mB := range store.MessageModes() {
+				for i := 0; i < len(agents); i++ {
+					for j := i + 1; j < len(agents); j++ {
+						a := *agents[i]
+						b := *agents[j]
+						a.MessageMode = mA
+						b.MessageMode = mB
+						dAB := srv.evaluateSameProjectModes(&a, &b)
+						dBA := srv.evaluateSameProjectModes(&b, &a)
+						if dAB.Allowed != dBA.Allowed {
+							t.Fatalf("asymmetry: %s(%s)→%s(%s)=%v vs reverse=%v",
+								a.Name, mA, b.Name, mB, dAB.Allowed, dBA.Allowed)
+						}
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("soft-deleted intermediate keeps descendants connected, sender denied by standing", func(t *testing.T) {
+		bar.DeletedAt = time.Now().UTC()
+		require_NoError(t, s.UpdateAgent(ctx, bar))
+
+		// Baz ↔ Bar2 still allowed via immutable Ancestry
+		check(t, baz, bar2, true, "")
+		check(t, bar2, baz, true, "")
+
+		// Soft-deleted Bar cannot send (standing check fails)
+		check(t, bar, baz, false, "")
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -182,12 +375,7 @@ func TestCharacterization_SelfMessage(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	modes := []string{
-		store.MessageModeNone,
-		store.MessageModeLineage,
-		store.MessageModeBranch,
-		store.MessageModeProject,
-	}
+	modes := store.MessageModes()
 
 	for _, mode := range modes {
 		t.Run("self-message-"+mode, func(t *testing.T) {
@@ -216,12 +404,7 @@ func TestCharacterization_SystemPlaneBypass(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	modes := []string{
-		store.MessageModeNone,
-		store.MessageModeLineage,
-		store.MessageModeBranch,
-		store.MessageModeProject,
-	}
+	modes := store.MessageModes()
 
 	for _, mode := range modes {
 		t.Run("system-plane-"+mode, func(t *testing.T) {
@@ -254,8 +437,9 @@ func TestCharacterization_HumanPiercing(t *testing.T) {
 	ctx := context.Background()
 
 	noneAgent := msgAuthzAgent(t, s, "hp-none", projectID, store.MessageModeNone, []string{owner.ID})
-	lineageAgent := msgAuthzAgent(t, s, "hp-lineage", projectID, store.MessageModeLineage, []string{owner.ID})
-	branchAgent := msgAuthzAgent(t, s, "hp-branch", projectID, store.MessageModeBranch, []string{owner.ID})
+	ownerAgent := msgAuthzAgent(t, s, "hp-owner", projectID, store.MessageModeOwner, []string{owner.ID})
+	directAgent := msgAuthzAgent(t, s, "hp-direct", projectID, store.MessageModeDirect, []string{owner.ID})
+	treeAgent := msgAuthzAgent(t, s, "hp-tree", projectID, store.MessageModeTree, []string{owner.ID})
 	projectAgent := msgAuthzAgent(t, s, "hp-project", projectID, store.MessageModeProject, []string{owner.ID})
 
 	ownerIdent := msgAuthzUserIdentity(owner.ID)
@@ -270,20 +454,23 @@ func TestCharacterization_HumanPiercing(t *testing.T) {
 	}{
 		// Super-admin pierces everything, including none
 		{"admin→none", adminIdent, noneAgent, true},
-		{"admin→lineage", adminIdent, lineageAgent, true},
-		{"admin→branch", adminIdent, branchAgent, true},
+		{"admin→owner", adminIdent, ownerAgent, true},
+		{"admin→direct", adminIdent, directAgent, true},
+		{"admin→tree", adminIdent, treeAgent, true},
 		{"admin→project", adminIdent, projectAgent, true},
 
 		// Ancestry user (owner is in ancestry)
 		{"ancestry-owner→none", ownerIdent, noneAgent, false},      // none blocks even ancestry
-		{"ancestry-owner→lineage", ownerIdent, lineageAgent, true}, // ancestry pierces lineage
-		{"ancestry-owner→branch", ownerIdent, branchAgent, true},   // ancestry pierces branch
+		{"ancestry-owner→owner", ownerIdent, ownerAgent, true},     // ancestry pierces owner
+		{"ancestry-owner→direct", ownerIdent, directAgent, true},   // ancestry pierces direct
+		{"ancestry-owner→tree", ownerIdent, treeAgent, true},       // ancestry pierces tree
 		{"ancestry-owner→project", ownerIdent, projectAgent, true}, // ancestry for project
 
-		// Non-lineage project member
+		// Non-owner project member
 		{"member→none", memberIdent, noneAgent, false},
-		{"member→lineage", memberIdent, lineageAgent, false},
-		{"member→branch", memberIdent, branchAgent, false},
+		{"member→owner", memberIdent, ownerAgent, false},
+		{"member→direct", memberIdent, directAgent, false},
+		{"member→tree", memberIdent, treeAgent, false},
 		{"member→project", memberIdent, projectAgent, false}, // no agent.message permission
 	}
 
@@ -305,24 +492,32 @@ func TestCharacterization_AgentNeverPiercesMode(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
-	lineageTarget := msgAuthzAgent(t, s, "pierce-lineage", projectID, store.MessageModeLineage, []string{owner.ID})
-	branchTarget := msgAuthzAgent(t, s, "pierce-branch", projectID, store.MessageModeBranch, []string{owner.ID})
+	ownerTarget := msgAuthzAgent(t, s, "pierce-owner", projectID, store.MessageModeOwner, []string{owner.ID})
+	directTarget := msgAuthzAgent(t, s, "pierce-direct", projectID, store.MessageModeDirect, []string{owner.ID})
+	treeTarget := msgAuthzAgent(t, s, "pierce-tree", projectID, store.MessageModeTree, []string{owner.ID})
 
 	// Owner's project-mode agent — should NOT inherit owner's piercing ability
 	ownerAgent := msgAuthzAgent(t, s, "owner-agent-pierce", projectID, store.MessageModeProject, []string{owner.ID})
 	agentIdent := msgAuthzAgentIdentity(ownerAgent.ID, projectID, ownerAgent.Ancestry)
 
-	t.Run("owner agent cannot pierce lineage", func(t *testing.T) {
-		allowed, _, _ := srv.authorizeAgentMessage(ctx, agentIdent, lineageTarget, false)
+	t.Run("owner agent cannot pierce owner", func(t *testing.T) {
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, agentIdent, ownerTarget, false)
 		if allowed {
-			t.Fatal("owner's agent should NOT pierce lineage mode")
+			t.Fatal("owner's agent should NOT pierce owner mode")
 		}
 	})
 
-	t.Run("owner agent cannot pierce branch", func(t *testing.T) {
-		allowed, _, _ := srv.authorizeAgentMessage(ctx, agentIdent, branchTarget, false)
+	t.Run("owner agent cannot pierce direct", func(t *testing.T) {
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, agentIdent, directTarget, false)
 		if allowed {
-			t.Fatal("owner's agent should NOT pierce branch mode")
+			t.Fatal("owner's agent should NOT pierce direct mode")
+		}
+	})
+
+	t.Run("owner agent cannot pierce separate tree", func(t *testing.T) {
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, agentIdent, treeTarget, false)
+		if allowed {
+			t.Fatal("owner's agent should NOT pierce separate tree mode agent")
 		}
 	})
 }
@@ -380,8 +575,9 @@ func TestCharacterization_ProjectConfinement(t *testing.T) {
 
 	modes := []string{
 		store.MessageModeNone,
-		store.MessageModeLineage,
-		store.MessageModeBranch,
+		store.MessageModeOwner,
+		store.MessageModeDirect,
+		store.MessageModeTree,
 		store.MessageModeProject,
 	}
 

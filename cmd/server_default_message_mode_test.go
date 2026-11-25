@@ -24,10 +24,10 @@ import (
 
 func TestBuildHubServerConfig_CopiesDefaultMessageMode(t *testing.T) {
 	cfg := &config.GlobalConfig{}
-	cfg.Hub.DefaultMessageMode = "lineage"
+	cfg.Hub.DefaultMessageMode = "owner"
 
 	hubCfg := buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil)
-	assert.Equal(t, "lineage", hubCfg.DefaultMessageMode)
+	assert.Equal(t, "owner", hubCfg.DefaultMessageMode)
 
 	emptyCfg := buildHubServerConfig(&config.GlobalConfig{}, "https://hub.example.com", "", nil, false, "", nil)
 	assert.Empty(t, emptyCfg.DefaultMessageMode)
@@ -47,6 +47,30 @@ func TestValidateServerPreflight_DefaultMessageMode(t *testing.T) {
 		assert.Contains(t, err.Error(), "server.hub.default_message_mode")
 	})
 
+	t.Run("hub enabled, refuses retired lineage mode with hint", func(t *testing.T) {
+		resetServerFlags()
+		enableHub = true
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.DefaultMessageMode = "lineage"
+
+		err := validateServerPreflight(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "server.hub.default_message_mode")
+		assert.Contains(t, err.Error(), "owner")
+	})
+
+	t.Run("hub enabled, refuses retired branch mode with hint", func(t *testing.T) {
+		resetServerFlags()
+		enableHub = true
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.DefaultMessageMode = "branch"
+
+		err := validateServerPreflight(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "server.hub.default_message_mode")
+		assert.Contains(t, err.Error(), "direct")
+	})
+
 	t.Run("hub enabled, refuses unknown mode", func(t *testing.T) {
 		resetServerFlags()
 		enableHub = true
@@ -58,7 +82,7 @@ func TestValidateServerPreflight_DefaultMessageMode(t *testing.T) {
 		assert.Contains(t, err.Error(), "server.hub.default_message_mode")
 	})
 
-	for _, ok := range []string{"", "none", "lineage", "branch", "project"} {
+	for _, ok := range []string{"", "none", "owner", "direct", "tree", "project"} {
 		t.Run("hub enabled, accepts "+ok, func(t *testing.T) {
 			resetServerFlags()
 			enableHub = true

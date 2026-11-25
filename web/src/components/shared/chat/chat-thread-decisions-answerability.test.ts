@@ -58,8 +58,7 @@ type Card = HTMLElement & {
 };
 
 const KEY = 'topic-choices';
-const LINEAGE =
-  'release-bot is in lineage mode and only accepts messages from users in its ancestry. You are not in its lineage.';
+const LINEAGE = 'release-bot only accepts messages from its owner.';
 
 function json(body: unknown, status = 200): Response {
   return {
@@ -204,7 +203,7 @@ describe('asker answerability', () => {
       json({
         id: 'a1',
         name: 'release-bot',
-        _messageability: { canMessage: false, reason: 'mode_lineage_no_ancestry' },
+        _messageability: { canMessage: false, reason: 'mode_owner_only' },
       });
     const thread = await open();
     for (const id of ['p1', 'p2']) {
@@ -245,7 +244,7 @@ describe('asker answerability', () => {
             error: {
               code: 'message_denied',
               message: 'Message delivery denied',
-              details: { reason: 'mode_lineage_no_ancestry' },
+              details: { reason: 'mode_owner_only' },
             },
           },
           403
@@ -319,7 +318,7 @@ describe('asker read that fails', () => {
       json({
         id: 'a1',
         name: 'release-bot',
-        _messageability: { canMessage: false, reason: 'mode_lineage_no_ancestry' },
+        _messageability: { canMessage: false, reason: 'mode_owner_only' },
       });
     liveMessage('m-live-1', 50);
     await vi.waitFor(() => expect(agentReads()).toBe(2));
@@ -356,7 +355,7 @@ describe('a 403 over the asker read', () => {
               error: {
                 code: 'message_denied',
                 message: 'Message delivery denied',
-                details: { reason: 'mode_lineage_no_ancestry' },
+                details: { reason: 'mode_owner_only' },
               },
             },
             403

@@ -649,7 +649,7 @@ describe('AgentStore delta probe', () => {
             slug: `a${i}`,
             project: 'Main',
             labels: { team: 'red' },
-            messageMode: 'lineage',
+            messageMode: 'owner',
             ancestry: ['root'],
             createdBy: 'u1',
             _messageability: { canMessage: true, canReachViewer: true },

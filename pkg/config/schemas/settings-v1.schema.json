@@ -1978,7 +1978,7 @@
         },
         "default_message_mode": {
           "type": "string",
-          "enum": ["none", "lineage", "branch", "project"],
+          "enum": ["none", "owner", "direct", "tree", "project"],
           "description": "Message mode of a new agent when neither the create request, its template nor its parent agent sets one. Unset means 'project'. 'hub' is not accepted. Read at startup.",
           "x-env-var": "SCION_SERVER_HUB_DEFAULTMESSAGEMODE",
           "x-since": "1"

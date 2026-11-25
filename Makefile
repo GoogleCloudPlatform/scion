@@ -572,7 +572,7 @@ test-store-postgres-tail: test-store-postgres-env-check
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestMigrateBeta_SQLiteToPostgres|TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres|TestMigrateSkillCoreScope_Postgres)$$' \
+		-run '^(TestMigrateBeta_SQLiteToPostgres|TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres|TestMigrateSkillCoreScope_Postgres|TestMigrateMessageModeRename_Postgres)$$' \
 		./pkg/ent/entc/ > /tmp/test-launch-store-postgres-entc.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres-entc.log; \
@@ -591,6 +591,10 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi; \
 	if ! grep -qE '^--- PASS: TestMigrateSkillCoreScope_Postgres ' /tmp/test-launch-store-postgres-entc.log; then \
 		echo "ERROR: the core-to-global skill scope Postgres migration test did not run." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestMigrateMessageModeRename_Postgres ' /tmp/test-launch-store-postgres-entc.log; then \
+		echo "ERROR: the message_mode rename Postgres migration test did not run." >&2; \
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \

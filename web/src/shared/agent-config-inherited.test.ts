@@ -133,7 +133,7 @@ describe('resolveInheritedPlaceholders labels and gaps', () => {
   it('reads template job keys from agentConfig only, never the row config', () => {
     const p = resolveInheritedPlaceholders({
       template: {
-        config: { model: 'row-model', messageMode: 'branch', image: 'row:1' },
+        config: { model: 'row-model', messageMode: 'direct', image: 'row:1' },
       } as unknown as InheritedSources['template'],
     });
     expect(p).toEqual({});

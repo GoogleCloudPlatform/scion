@@ -910,7 +910,7 @@ for (const theme of ['light', 'dark'] as const) {
       const c = card(page, 'prompt-set');
       const reason = c.locator('.reason[data-reason="denied"]');
       await expect(reason).toContainText(
-        `You can't answer ${ASKER_NAME}: ${ASKER_NAME} is in lineage mode and only accepts messages from users in its ancestry. You are not in its lineage.`
+        `You can't answer ${ASKER_NAME}: ${ASKER_NAME} only accepts messages from its owner.`
       );
       await expect(reason.locator('sl-icon[name="lock"]')).toHaveCount(1);
       const group = c.locator('.card.set');

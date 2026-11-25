@@ -125,8 +125,8 @@ type ConversationDetail struct {
 // returns it on the single-conversation GET.
 type ConversationParticipantDetail struct {
 	store.ConversationParticipant
-	// MessageMode is the participant agent's message mode (none, lineage,
-	// branch, project, hub). The hub sets it only for agents in the
+	// MessageMode is the participant agent's message mode (none, owner,
+	// direct, tree, project, hub). The hub sets it only for agents in the
 	// conversation's project (for a conversation without a project, a DM or
 	// legacy group, the calling agent's project); it is
 	// empty for users and for agents outside that project (ptone/scion#4411).

@@ -154,15 +154,7 @@ func agentLogLevelEnvValue() string {
 }
 
 func validateMessageMode(mode string) error {
-	if mode == "" {
-		return nil
-	}
-	switch mode {
-	case "none", "lineage", "branch", "project", "hub":
-		return nil
-	default:
-		return fmt.Errorf("invalid message mode %q: must be one of none, lineage, branch, project, hub", mode)
-	}
+	return api.ValidateMessageMode(mode)
 }
 
 func validateAgentRole(role string) error {

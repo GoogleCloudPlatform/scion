@@ -460,7 +460,7 @@ Chat access in a project space and its threads follows explicit capability rules
   - Renaming a thread (`rename`), changing its default agent (`set_default_agent`), deleting a thread (`delete`), or adding a participant to a project conversation (`add_participant`).
   - Editing your own message in a project thread (`edit_own`).
 - **Setting a project space's emoji** (`set_emoji`): requires `project.update` on the project (and for a user access token, `inbox:write` for the project).
-- **Agents in project threads**: an agent caller is never granted thread post or mutation authority through `project.read`; agent posts in threads are governed by the agent's message mode (`project` and `hub` modes allow; `lineage` and `branch` allow only an existing participant; `none` denies).
+- **Agents in project threads**: an agent caller is never granted thread post or mutation authority through `project.read`; agent posts in threads are governed by the agent's message mode (`project` and `hub` modes allow; `owner`, `direct`, and `tree` allow only an existing participant; `none` denies).
 - **Direct messages (DMs)**: do not use `project.chat_post`.
 
 When an action gated by `project.chat_post` is denied, the API responds with `403` and error code `chat_post_denied` (`details.resource_type` set to `project`, `details.denied_action` set to `chat_post`, `details.reason` set to `read_only` when the account lacks `project.chat_post` or `token_scope` when a user access token lacks `inbox:write`, plus `details.chat_action` naming the attempted action on thread, space, or message mutations; messages: "You can read this thread but not post in it", "You can read this thread but not change it", or "You can read this project's chat but not create threads or groups in it").

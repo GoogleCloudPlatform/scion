@@ -229,7 +229,7 @@ func TestWhoamiFull(t *testing.T) {
 		"annotations": map[string]string{"note": "test annotation"},
 		"ancestry":    []string{"user-root", "parent-agent"},
 		"taskSummary": "Implementing feature X",
-		"messageMode": "branch",
+		"messageMode": "direct",
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
@@ -289,7 +289,7 @@ func TestWhoamiFull(t *testing.T) {
 	assert.Equal(t, map[string]string{"note": "test annotation"}, result.Annotations)
 	assert.Equal(t, []string{"user-root", "parent-agent"}, result.Ancestry)
 	assert.Equal(t, "Implementing feature X", result.TaskSummary)
-	assert.Equal(t, "branch", result.MessageMode)
+	assert.Equal(t, "direct", result.MessageMode)
 
 	// The enabled experiments, read live from the hub (ptone/scion#4573).
 	require.NotNil(t, result.Experiments)
@@ -405,7 +405,7 @@ func TestWhoamiFullPlainTextMessageMode(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":          "agent-mm-id",
 			"phase":       "running",
-			"messageMode": "lineage",
+			"messageMode": "owner",
 		})
 	}))
 	defer srv.Close()
@@ -437,7 +437,7 @@ func TestWhoamiFullPlainTextMessageMode(t *testing.T) {
 	// The hub also answers the experiments query here, so the output ends
 	// with "Experiments: (none)" and every value is aligned past that label.
 	assert.Contains(t, out, "Phase:       running")
-	assert.Contains(t, out, "Msg Mode:    lineage")
+	assert.Contains(t, out, "Msg Mode:    owner")
 }
 
 // TestPrintFullPlainTextAlignment: every value starts in the same column,

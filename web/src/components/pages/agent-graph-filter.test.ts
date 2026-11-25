@@ -73,7 +73,7 @@ describe('agent-graph-filter pure helpers', () => {
     harnessVendor: 'anthropic',
     template: 'coordinator',
     labels: { team: 'core' },
-    messageMode: 'branch',
+    messageMode: 'direct',
     _messageability: { canMessage: true, canReachViewer: true },
   });
   const mid = mkAgent({
@@ -85,7 +85,7 @@ describe('agent-graph-filter pure helpers', () => {
     harnessVendor: 'google',
     ancestry: ['user:u1', 'root'],
     labels: { team: 'ui', env: 'staging' },
-    messageMode: 'lineage',
+    messageMode: 'owner',
     _messageability: { canMessage: false, canReachViewer: false },
   });
   const leaf = mkAgent({

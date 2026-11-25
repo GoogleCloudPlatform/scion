@@ -160,7 +160,7 @@ var (
 		{Name: "created_by", Type: field.TypeUUID, Nullable: true},
 		{Name: "owner_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
-		{Name: "message_mode", Type: field.TypeEnum, Enums: []string{"none", "lineage", "branch", "project", "hub"}, Default: "project"},
+		{Name: "message_mode", Type: field.TypeEnum, Enums: []string{"none", "owner", "direct", "tree", "project", "hub"}, Default: "project"},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "phase", Type: field.TypeString, Nullable: true},

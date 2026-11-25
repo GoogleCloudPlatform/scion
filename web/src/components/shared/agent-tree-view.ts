@@ -80,35 +80,63 @@ import {
 } from '../../client/readiness-marks.js';
 
 /**
+ * Report whether a same-project parent/child edge is messageable under the
+ * Hub's same-project mode matrix. Because parent and child are always direct
+ * neighbours in the same creation tree:
+ * - none or owner on either side -> false
+ * - project/hub ↔ project/hub -> true
+ * - direct ↔ direct -> true
+ * - tree ↔ {tree, direct, project, hub} -> true
+ */
+export function modesCompatibleForParentChild(
+  parentMode: MessageMode | undefined,
+  childMode: MessageMode | undefined
+): boolean {
+  const pm: MessageMode = parentMode || 'project';
+  const cm: MessageMode = childMode || 'project';
+  if (pm === 'none' || cm === 'none' || pm === 'owner' || cm === 'owner') {
+    return false;
+  }
+  if ((pm === 'project' || pm === 'hub') && (cm === 'project' || cm === 'hub')) {
+    return true;
+  }
+  if (pm === 'direct' && cm === 'direct') {
+    return true;
+  }
+  if (pm === 'tree' || cm === 'tree') {
+    const other = cm === 'tree' ? pm : cm;
+    return other === 'tree' || other === 'direct' || other === 'project' || other === 'hub';
+  }
+  return false;
+}
+
+/**
  * Determine edge visual style based on parent/child message mode compatibility.
  */
 function getEdgeStyle(
   parentMode: MessageMode | undefined,
   childMode: MessageMode | undefined
 ): { stroke: string; dashArray: string; markerClass: string } {
-  const pm = parentMode || 'project';
-  const cm = childMode || 'project';
+  const pm: MessageMode = parentMode || 'project';
+  const cm: MessageMode = childMode || 'project';
 
   // Either endpoint sealed
   if (pm === 'none' || cm === 'none') {
     return { stroke: 'var(--sl-color-danger-400)', dashArray: '3,3', markerClass: 'sealed' };
   }
-  // Both branch mode (messageable edge)
-  if (pm === 'branch' && cm === 'branch') {
+  if (!modesCompatibleForParentChild(pm, cm)) {
+    // Mode mismatch (non-messageable)
+    return { stroke: 'var(--sl-color-neutral-400)', dashArray: '5,5', markerClass: '' };
+  }
+  // Direct↔direct or tree↔{tree, direct, project, hub} (messageable scoped edge)
+  if (pm === 'direct' || cm === 'direct' || pm === 'tree' || cm === 'tree') {
     return { stroke: 'var(--sl-color-primary-600)', dashArray: '', markerClass: 'lit' };
   }
   // Hub/project compatibility: hub joins the project communication cell.
-  // hub↔hub, hub↔project, and project↔project are all messageable within the same project.
-  const projectOrHub = new Set<MessageMode>(['project', 'hub']);
-  if (projectOrHub.has(pm) && projectOrHub.has(cm)) {
-    // Use hub color when either endpoint is hub mode
-    if (pm === 'hub' || cm === 'hub') {
-      return { stroke: 'var(--sl-color-success-600)', dashArray: '', markerClass: 'lit' };
-    }
-    return { stroke: 'var(--sl-color-neutral-400)', dashArray: '', markerClass: '' };
+  if (pm === 'hub' || cm === 'hub') {
+    return { stroke: 'var(--sl-color-success-600)', dashArray: '', markerClass: 'lit' };
   }
-  // Mode mismatch (non-messageable)
-  return { stroke: 'var(--sl-color-neutral-400)', dashArray: '5,5', markerClass: '' };
+  return { stroke: 'var(--sl-color-neutral-400)', dashArray: '', markerClass: '' };
 }
 
 const VARIANT_COLOR: Record<StatusVariant, string> = {

@@ -59,7 +59,7 @@ export function makeAgent(i: number, overrides: Partial<Agent> = {}): Agent {
     phase: 'running',
     created: `2026-01-01T00:00:00.${s}Z`,
     updated: `2026-01-02T00:00:00.${s}Z`,
-    messageMode: i % 2 === 0 ? 'project' : 'branch',
+    messageMode: i % 2 === 0 ? 'project' : 'direct',
     labels: { env: 'prod' },
     _capabilities: { actions: ['read', 'update', 'delete', 'stop_all'] },
     ...overrides,

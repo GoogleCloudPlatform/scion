@@ -297,7 +297,7 @@ func TestChatThreadAccess_AgentBranchUsesMessageMode(t *testing.T) {
 		return a
 	}
 	conv := f.group(t, f.projA)
-	lineageIn := agent(store.MessageModeLineage, f.projA)
+	lineageIn := agent(store.MessageModeOwner, f.projA)
 	addConvParticipant(t, f.s, conv.ID, "agent", lineageIn.ID)
 	cases := []struct {
 		name     string
@@ -308,7 +308,7 @@ func TestChatThreadAccess_AgentBranchUsesMessageMode(t *testing.T) {
 		{"hub mode, other project", agent(store.MessageModeHub, f.projB), true},
 		{"none mode", agent(store.MessageModeNone, f.projA), false},
 		{"lineage mode, participant", lineageIn, true},
-		{"lineage mode, not a participant", agent(store.MessageModeLineage, f.projA), false},
+		{"lineage mode, not a participant", agent(store.MessageModeOwner, f.projA), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

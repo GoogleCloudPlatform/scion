@@ -808,7 +808,10 @@ func AutoMigrate(ctx context.Context, client *ent.Client, opts ...AutoMigrateOpt
 	if err := MigrateSkillCoreScope(ctx, client); err != nil {
 		return err
 	}
-	return MigrateRetireVariableSecretType(ctx, client)
+	if err := MigrateRetireVariableSecretType(ctx, client); err != nil {
+		return err
+	}
+	return MigrateMessageModeRename(ctx, client)
 }
 
 // AutoMigrateOption configures AutoMigrate.

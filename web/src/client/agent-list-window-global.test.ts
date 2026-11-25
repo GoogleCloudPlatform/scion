@@ -151,7 +151,7 @@ function referenceDisplay(
 
 describe('AgentListWindow — mode filter', () => {
   it('a mode filter makes every view state complete-needing', () => {
-    const { win } = setup({ modeFilter: 'branch' });
+    const { win } = setup({ modeFilter: 'direct' });
     expect(win.isSortedEligible('')).toBe(false);
     expect(win.planRequest('page-load', '')).toBe('drain');
     win.setViewState({ modeFilter: '' });

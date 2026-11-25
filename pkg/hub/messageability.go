@@ -39,12 +39,13 @@ type AgentMessageabilityDetail struct {
 
 // Reason codes for messaging authorization denials.
 const (
-	ReasonModeNone              = "mode_none"
-	ReasonModeNoneSender        = "mode_none_sender"
-	ReasonModeLineageNoAncestry = "mode_lineage_no_ancestry"
-	ReasonModeBranchNoEdge      = "mode_branch_no_edge"
-	ReasonModeLineageAgentAgent = "mode_lineage_agent_to_agent"
-	ReasonMissingPermission     = "missing_permission"
+	ReasonModeNone          = "mode_none"
+	ReasonModeNoneSender    = "mode_none_sender"
+	ReasonModeOwnerOnly     = "mode_owner_only"
+	ReasonModeDirectNoEdge  = "mode_direct_no_edge"
+	ReasonModeTreeOutside   = "mode_tree_outside"
+	ReasonModeIncompatible  = "mode_incompatible"
+	ReasonMissingPermission = "missing_permission"
 )
 
 // mapReasonToCode converts the plain-text reason strings returned by
@@ -56,12 +57,14 @@ func mapReasonToCode(reason string) string {
 	case reason == "sender agent message_mode is none":
 		return ReasonModeNoneSender
 	case strings.HasPrefix(reason, "user not authorized for target agent with message_mode"):
-		return ReasonModeLineageNoAncestry
-	case reason == "branch mode agents without direct parent/child relationship":
-		return ReasonModeBranchNoEdge
+		return ReasonModeOwnerOnly
+	case reason == "direct mode agents without direct parent/child relationship":
+		return ReasonModeDirectNoEdge
+	case reason == "tree mode agents in different creation trees":
+		return ReasonModeTreeOutside
 	case strings.HasPrefix(reason, "agent-to-agent messaging denied: sender mode"):
-		// Covers mixed modes and lineage-mode agent-to-agent denials (D4).
-		return ReasonModeLineageAgentAgent
+		// Covers incompatible mode pairs, including owner-mode agent-to-agent denials.
+		return ReasonModeIncompatible
 	case strings.HasPrefix(reason, "agent.message permission denied"):
 		return ReasonMissingPermission
 	// Phase 5: Cross-project denial codes mapped to API-safe values.
@@ -166,8 +169,8 @@ func computeCanReachViewer(viewerIdentity Identity, targetAgent *store.Agent) bo
 		// For agent viewers, the full check requires the viewer agent's mode — this
 		// is a simplified approximation (see design doc Section 3.2).
 		return true
-	case store.MessageModeLineage, store.MessageModeBranch:
-		// Lineage and branch modes allow messaging users in the agent's ancestry.
+	case store.MessageModeOwner, store.MessageModeDirect, store.MessageModeTree:
+		// Narrow modes (owner, direct, tree) allow messaging users in the agent's ancestry.
 		viewerID := viewerIdentity.ID()
 		for _, ancestorID := range targetAgent.Ancestry {
 			if ancestorID == viewerID {
@@ -275,7 +278,7 @@ func countReachableUsers(targetAgent *store.Agent) int {
 	switch mode {
 	case store.MessageModeNone:
 		return 0
-	case store.MessageModeLineage, store.MessageModeBranch:
+	case store.MessageModeOwner, store.MessageModeDirect, store.MessageModeTree:
 		// Ancestry chain contains the user(s) who can be reached.
 		// The first element is always the root user.
 		if len(targetAgent.Ancestry) > 0 {

@@ -1149,7 +1149,7 @@ func modeTestParticipants() []hubclient.ConversationParticipantDetail {
 		}
 	}
 	return []hubclient.ConversationParticipantDetail{
-		mk("agent", "agent-branch", "branch"),
+		mk("agent", "agent-direct", "direct"),
 		mk("agent", "agent-project", "project"),
 		mk("agent", "agent-foreign", ""),
 		mk("user", "user-1", ""),
@@ -1179,17 +1179,17 @@ func TestWriteConversationGetParticipants_MessageMode(t *testing.T) {
 	assert.Contains(t, out, "MSG MODE")
 	got := modeColumnByID(t, out, 1)
 	assert.Equal(t, map[string]string{
-		"agent-branch":  "branch",
+		"agent-direct":  "direct",
 		"agent-project": "project", // IDs are printed in full
 		"agent-foreign": "-",
 		"user-1":        "-",
 	}, got)
-	assert.Contains(t, out, conversationModeHint, "a branch agent should trigger the mode hint")
+	assert.Contains(t, out, conversationModeHint, "a direct agent should trigger the mode hint")
 }
 
 func TestWriteConversationGetParticipants_NoHintForOpenModes(t *testing.T) {
 	var buf bytes.Buffer
-	ps := modeTestParticipants()[1:] // drop the branch agent
+	ps := modeTestParticipants()[1:] // drop the direct agent
 	writeConversationGetParticipants(&buf, ps)
 	assert.NotContains(t, buf.String(), conversationModeHint)
 
@@ -1207,7 +1207,7 @@ func TestWriteConversationParticipantsTable_MessageMode(t *testing.T) {
 	assert.Contains(t, strings.SplitN(out, "\n", 2)[0], "MSG MODE")
 	got := modeColumnByID(t, out, 1)
 	assert.Equal(t, map[string]string{
-		"agent-branch":  "branch",
+		"agent-direct":  "direct",
 		"agent-project": "project",
 		"agent-foreign": "-",
 		"user-1":        "-",
@@ -1223,16 +1223,16 @@ func TestConversationParticipantDetail_JSON(t *testing.T) {
 	var raw []map[string]interface{}
 	require.NoError(t, json.Unmarshal(b, &raw))
 	require.Len(t, raw, 4)
-	assert.Equal(t, "branch", raw[0]["messageMode"])
-	assert.Equal(t, "agent-branch", raw[0]["principalId"], "embedded participant fields stay flat")
+	assert.Equal(t, "direct", raw[0]["messageMode"])
+	assert.Equal(t, "agent-direct", raw[0]["principalId"], "embedded participant fields stay flat")
 	assert.NotContains(t, raw[2], "messageMode")
 	assert.NotContains(t, raw[3], "messageMode")
 
 	// And the hub's wire shape decodes into it.
 	var back hubclient.ConversationDetail
-	require.NoError(t, json.Unmarshal([]byte(`{"id":"c1","participants":[{"principalKind":"agent","principalId":"a1","messageMode":"lineage"}]}`), &back))
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"c1","participants":[{"principalKind":"agent","principalId":"a1","messageMode":"owner"}]}`), &back))
 	require.Len(t, back.Participants, 1)
-	assert.Equal(t, "lineage", back.Participants[0].MessageMode)
+	assert.Equal(t, "owner", back.Participants[0].MessageMode)
 	assert.Equal(t, "a1", back.Participants[0].PrincipalID)
 }
 

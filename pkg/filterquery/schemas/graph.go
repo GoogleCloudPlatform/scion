@@ -56,8 +56,9 @@ func graphModeEnum() []string {
 	return []string{
 		"hub",
 		"project",
-		"branch",
-		"lineage",
+		"tree",
+		"direct",
+		"owner",
 		"none",
 		"can_message",
 		"cannot_message",

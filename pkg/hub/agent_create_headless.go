@@ -605,7 +605,7 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}
 	if templateMessageMode != "" {
 		if !store.IsValidMessageMode(templateMessageMode) {
-			return nil, fmt.Errorf("invalid template message mode: %s", templateMessageMode)
+			return nil, fmt.Errorf("invalid template message mode: %s%s", templateMessageMode, retiredMessageModeHintSuffix(templateMessageMode, true))
 		}
 		agent.MessageMode = templateMessageMode
 	} else if parentMessageMode != "" {

@@ -296,7 +296,7 @@ failed start.
     - `--broker <string>`: Preferred runtime broker ID or name.
     - `--label <key=value>`: Label for the agent (repeatable).
     - `--role <string>`: Agent role for Hub API access (`none`, `readonly`, `baseline`, `full`).
-    - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
+    - `--message-mode <mode>`: Set the agent's initial message mode (`none`, `owner`, `direct`, `tree`, `project`, or `hub`). See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--service-account <string>`: GCP service account to assign: its id, email or display name. An email matches the project's own account before a hub-wide one; a display name that matches more than one account returns `identity_ambiguous` with the candidates' ids, and you retry with an id.
     - `--upload-template`, `--no-upload`, `--template-scope <scope>`: Template upload behavior.
 
@@ -543,7 +543,7 @@ Sets the message mode for an agent, controlling which users and agents can send 
 
 - **Arguments:**
     - `<agent-name>`: The target agent.
-    - `<mode>`: One of `project` (default), `branch`, `lineage`, `none`, or `hub`.
+    - `<mode>`: One of `none`, `owner`, `direct`, `tree`, `project` (default), or `hub`.
 
 See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes) for details on each mode. The `hub` mode enables [cross-project messaging](/scion/hosted/user/messaging/#cross-project-messaging).
 
@@ -2254,7 +2254,7 @@ The command populates a structured JSON schema divided into two latency tiers:
 - `annotations`: System key-value pairs attached to the agent.
 - `ancestry`: A lineage array representing the agent's parent/child spawn relationships.
 - `taskSummary`: A brief summary of active task execution.
-- `messageMode`: The agent's effective [message mode](/scion/hosted/user/messaging/#message-authorization--modes) (`none`, `lineage`, `branch`, `project` or `hub`), shown as `Msg Mode:` in plain text.
+- `messageMode`: The agent's effective [message mode](/scion/hosted/user/messaging/#message-authorization--modes) (`none`, `owner`, `direct`, `tree`, `project` or `hub`), shown as `Msg Mode:` in plain text.
 - `experiments`: The hub experiments that are on now, read live from `GET /api/v1/experiments` (shown as `Experiments:` in plain text, `(none)` when none is on). It includes server-checked experiments that also have a web layer, such as `hub.artifacts`, so an agent can tell whether artifacts are available. The key is absent when the Hub could not be asked. The agent environment variable `SCION_HUB_EXPERIMENTS` lists only the experiments dispatched to agents, fixed when the agent starts, so it is not the full list.
 
 ##### Token scopes (requires `--full`; read locally, no Hub connectivity needed)

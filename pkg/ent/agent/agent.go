@@ -524,8 +524,9 @@ const DefaultMessageMode = MessageModeProject
 // MessageMode values.
 const (
 	MessageModeNone    MessageMode = "none"
-	MessageModeLineage MessageMode = "lineage"
-	MessageModeBranch  MessageMode = "branch"
+	MessageModeOwner   MessageMode = "owner"
+	MessageModeDirect  MessageMode = "direct"
+	MessageModeTree    MessageMode = "tree"
 	MessageModeProject MessageMode = "project"
 	MessageModeHub     MessageMode = "hub"
 )
@@ -537,7 +538,7 @@ func (mm MessageMode) String() string {
 // MessageModeValidator is a validator for the "message_mode" field enum values. It is called by the builders before save.
 func MessageModeValidator(mm MessageMode) error {
 	switch mm {
-	case MessageModeNone, MessageModeLineage, MessageModeBranch, MessageModeProject, MessageModeHub:
+	case MessageModeNone, MessageModeOwner, MessageModeDirect, MessageModeTree, MessageModeProject, MessageModeHub:
 		return nil
 	default:
 		return fmt.Errorf("agent: invalid enum value for message_mode field: %q", mm)

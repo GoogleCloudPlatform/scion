@@ -987,12 +987,12 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       };
       stubFake(fake);
       const el = await mount();
-      internals(el).setModeFilter('branch');
+      internals(el).setModeFilter('direct');
       await settle(el);
       expect(fake.requests.length).toBe(1 + 3);
       expect(internals(el).agentWindow.state).toBe('held');
       expect(internals(el).agentWindow.total).toBe(600);
-      expect(internals(el).agentWindow.items.every((a) => a.messageMode === 'branch')).toBe(true);
+      expect(internals(el).agentWindow.items.every((a) => a.messageMode === 'direct')).toBe(true);
       internals(el).setModeFilter('');
       await settle(el);
       expect(fake.requests.length).toBe(4);

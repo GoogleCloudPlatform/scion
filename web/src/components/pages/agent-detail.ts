@@ -2960,7 +2960,7 @@ export class ScionPageAgentDetail extends LitElement {
                   }}
                 >
                   <sl-icon slot="prefix" name="diagram-3"></sl-icon>
-                  Apply to entire branch
+                  Apply to all descendants
                 </sl-button>
               </div>
             `
@@ -3017,12 +3017,15 @@ export class ScionPageAgentDetail extends LitElement {
         // Medium severity: unsealing
         const modeLabel = getMessageModeDisplay(newMode).label.toLowerCase();
         message = `Unseal ${agent.name}? It will be able to send and receive messages in ${modeLabel} mode. This takes effect immediately.`;
-      } else if (newMode === 'lineage') {
-        // Medium severity: restricting to lineage
-        message = `Change ${agent.name} to lineage mode? It will only be able to message users in its ancestry chain. All agent-to-agent messaging will be denied.`;
-      } else if (newMode === 'branch') {
-        // Medium severity: restricting to branch
-        message = `Change ${agent.name} to branch mode? It will only be able to message its direct parent and children (if they are also in branch mode) and lineage users.`;
+      } else if (newMode === 'owner') {
+        // Medium severity: restricting to owner
+        message = `Change ${agent.name} to Owner mode? It will only be able to message its owner. All agent-to-agent messaging will be denied.`;
+      } else if (newMode === 'direct') {
+        // Medium severity: restricting to direct plus owner
+        message = `Change ${agent.name} to Direct plus owner mode? It will only be able to message its direct parent and children (in Direct or Tree mode) and its owner.`;
+      } else if (newMode === 'tree') {
+        // Medium severity: restricting to tree plus owner
+        message = `Change ${agent.name} to Tree plus owner mode? It will only be able to message same-project agents in its own creation tree and its owner.`;
       } else {
         message = `Change ${agent.name} to ${getMessageModeDisplay(newMode).label.toLowerCase()} mode?`;
       }
