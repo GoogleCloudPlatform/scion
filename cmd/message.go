@@ -247,11 +247,10 @@ Examples:
 			return newUsageError("--body-file and positional message arguments are mutually exclusive")
 		}
 
-		// Decision prompts (--decisions, --decisions-file, --update, plus legacy
-		// --choices* aliases) and secret requests (--secret-request,
-		// --secret-description, --secret-request-file, --update): checked and read
-		// before the body, so -file - owns stdin. The JSON is parsed only for early
-		// errors; the hub is the authority.
+		// Decision prompts (--decisions, --decisions-file, --update) and secret
+		// requests (--secret-request, --secret-description, --secret-request-file,
+		// --update): checked and read before the body, so -file - owns stdin. The
+		// JSON is parsed only for early errors; the hub is the authority.
 		msgDecisionsPayload = nil
 		msgSecretRequestsPayload = nil
 		agentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
@@ -1987,12 +1986,6 @@ func init() {
 	messageCmd.Flags().StringVar(&msgSecretDescription, "secret-description", "", "With a single --secret-request: description explaining what the secret is for")
 	messageCmd.Flags().StringVar(&msgSecretRequestFile, "secret-request-file", "", "Read secret request entries (JSON array of {key, description, type, target}) from a file ('-' reads stdin, which then excludes --body-file -)")
 	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions/--decisions-file or --secret-request/--secret-request-file: replace items whose keys already exist (a new version each); without it, reusing an id or pending key is refused. To revise an unanswered set on one card, resend all still-pending keys of that set. To retire without a replacement, use 'scion decisions withdraw' or 'scion secret request withdraw'")
-
-	// legacy choices fallback: remove in ptone/scion#8249
-	messageCmd.Flags().StringVar(&msgLegacyChoices, "choices", "", "Deprecated alias of --decisions")
-	messageCmd.Flags().StringVar(&msgLegacyChoicesFile, "choices-file", "", "Deprecated alias of --decisions-file")
-	_ = messageCmd.Flags().MarkDeprecated("choices", "use --decisions")
-	_ = messageCmd.Flags().MarkDeprecated("choices-file", "use --decisions-file")
 
 	// Removed flags — kept (hidden) only so their use gets actionable
 	// guidance instead of an unknown-flag error. See Args and RunE.

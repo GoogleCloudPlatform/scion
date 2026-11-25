@@ -494,7 +494,7 @@ func placeholderFlagProblems(lines []string, source string) []string {
 // TestDocSyntax_PlatformSkillDecisions checks every fenced scion line of the
 // scion-messaging skill and its Decisions reference (ptone/scion#7830,
 // ptone/scion#8225), placeholder lines included, against the cobra tree,
-// rejects hidden/deprecated aliases (--choices, --choices-file), and verifies
+// rejects removed legacy aliases (--choices, --choices-file), and verifies
 // that no example passes decisions as inline JSON: the reference teaches
 // --decisions-file.
 func TestDocSyntax_PlatformSkillDecisions(t *testing.T) {
@@ -526,13 +526,13 @@ func TestDocSyntax_PlatformSkillDecisions(t *testing.T) {
 		assert.Empty(t, placeholderFlagProblems([]string{"scion decisions record <key> <choice-id> --from <message-id>"}, "test"))
 	})
 
-	t.Run("catches_deprecated_choices_aliases", func(t *testing.T) {
+	t.Run("catches_removed_choices_aliases", func(t *testing.T) {
 		assert.NotEmpty(t, findCommandProblems([]string{`scion message @alice@example.com "hi" --choices '[]'`}, "test"))
 		assert.NotEmpty(t, findCommandProblems([]string{`scion message @alice@example.com "hi" --choices-file /tmp/d.json`}, "test"))
 		assert.Empty(t, findCommandProblems([]string{`scion message @alice@example.com "hi" --decisions-file /tmp/d.json`}, "test"))
-		assert.NotEmpty(t, agentHelpProblems([]string{`scion message "conv:<id>" --choices-file <file>`}, "test"))
-		assert.NotEmpty(t, agentHelpProblems([]string{`scion message "conv:<id>" --choices <json>`}, "test"))
-		assert.Empty(t, agentHelpProblems([]string{`scion message "conv:<id>" --decisions-file <file>`}, "test"))
+		assert.NotEmpty(t, placeholderFlagProblems([]string{`scion message "conv:<id>" --choices-file <file>`}, "test"))
+		assert.NotEmpty(t, placeholderFlagProblems([]string{`scion message "conv:<id>" --choices <json>`}, "test"))
+		assert.Empty(t, placeholderFlagProblems([]string{`scion message "conv:<id>" --decisions-file <file>`}, "test"))
 	})
 }
 

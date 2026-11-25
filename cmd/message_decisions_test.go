@@ -104,14 +104,6 @@ func TestValidateDecisionFlags(t *testing.T) {
 		{name: "no decisions", setup: func() {}},
 		{name: "decisions to a user", setup: func() { msgDecisions = "[]" }},
 		{name: "both decision flags", setup: func() { msgDecisions = "[]"; msgDecisionsFile = "q.json" }, wantErr: "mutually exclusive", wantUsage: true},
-		{name: "decisions and legacy choices", setup: func() {
-			require.NoError(t, messageCmd.Flags().Set("decisions", "[]"))
-			require.NoError(t, messageCmd.Flags().Set("choices", "[]"))
-		}, wantErr: "--decisions and --choices are mutually exclusive", wantUsage: true},
-		{name: "decisions-file and legacy choices-file", setup: func() {
-			require.NoError(t, messageCmd.Flags().Set("decisions-file", "a.json"))
-			require.NoError(t, messageCmd.Flags().Set("choices-file", "b.json"))
-		}, wantErr: "--decisions-file and --choices-file are mutually exclusive", wantUsage: true},
 		{name: "update without decisions", setup: func() { msgDecisionsUpdate = true }, wantErr: "--update is valid only with --decisions, --decisions-file, --secret-request, or --secret-request-file", wantUsage: true},
 		{name: "two readers of stdin", setup: func() { msgDecisionsFile = "-"; msgBodyFile = "-" }, wantErr: "both read stdin", wantUsage: true},
 		{name: "agent recipient", setup: func() { msgDecisions = "[]" }, agent: true, wantErr: "not to an agent", wantUsage: false},
@@ -312,7 +304,7 @@ func TestSendOutboundDecisions_HumanModeNoAskUser(t *testing.T) {
 }
 
 // The command refuses an agent recipient before anything is sent, and a
-// body is optional with --decisions or its deprecated --choices alias.
+// body is optional with --decisions.
 func TestMessageCommand_DecisionsArgs(t *testing.T) {
 	decisionsState(t, "asker")
 	require.NoError(t, messageCmd.Flags().Set("decisions", twoTestDecisions))
@@ -336,29 +328,18 @@ func TestMessageCommand_UpdateHelpDocumentsFullSet(t *testing.T) {
 	assert.Contains(t, messageCmd.Long, "withdraw")
 }
 
-// TestMessageCommand_ChoicesAliasesDeprecatedAndHidden covers the S3 CLI
-// rename (ptone/scion#8225): --decisions and --decisions-file are visible,
-// while --choices and --choices-file remain working, hidden, deprecated
-// aliases whose deprecation notice goes to stderr.
-func TestMessageCommand_ChoicesAliasesDeprecatedAndHidden(t *testing.T) {
-	for _, tc := range []struct {
-		alias       string
-		replacement string
-	}{
-		{"choices", "use --decisions"},
-		{"choices-file", "use --decisions-file"},
-	} {
-		f := messageCmd.Flags().Lookup(tc.alias)
-		require.NotNil(t, f, "--%s flag must exist", tc.alias)
-		assert.True(t, f.Hidden, "--%s must be hidden", tc.alias)
-		assert.Equal(t, tc.replacement, f.Deprecated, "--%s deprecation message", tc.alias)
-		assert.NotContains(t, messageCmd.Flags().FlagUsages(), "--"+tc.alias)
+// TestMessageCommand_DecisionsFlagsAndRemovedChoicesAliases verifies that
+// --decisions and --decisions-file are registered and visible, while the
+// legacy --choices and --choices-file aliases have been removed (ptone/scion#8249).
+func TestMessageCommand_DecisionsFlagsAndRemovedChoicesAliases(t *testing.T) {
+	for _, removed := range []string{"choices", "choices-file"} {
+		assert.Nil(t, messageCmd.Flags().Lookup(removed), "--%s legacy alias must be removed", removed)
+		assert.NotContains(t, messageCmd.Flags().FlagUsages(), "--"+removed)
 	}
 	assert.Contains(t, messageCmd.Flags().FlagUsages(), "--decisions ")
 	assert.Contains(t, messageCmd.Flags().FlagUsages(), "--decisions-file ")
 
-	// End-to-end execution through rootCmd: --decisions-file, --choices-file
-	// (printing deprecation to stderr), and --format json (ptone/scion#8156).
+	// End-to-end execution through rootCmd: --decisions-file and --format json (ptone/scion#8156).
 	t.Run("execute_decisions_file_and_format_json", func(t *testing.T) {
 		asked := decisionsState(t, "asker")
 		var got map[string]interface{}
@@ -395,39 +376,26 @@ func TestMessageCommand_ChoicesAliasesDeprecatedAndHidden(t *testing.T) {
 		assert.Equal(t, []string{"Decision needed: Ship the feature now? (+1 more)"}, *asked)
 	})
 
-	t.Run("execute_legacy_choices_file_warns_on_stderr_and_keeps_json_clean", func(t *testing.T) {
-		asked := decisionsState(t, "asker")
-		var got map[string]interface{}
-		hubCtx := newDecisionsHub(t, http.StatusOK, decisionsSentBody(), &got)
-
-		t.Setenv("HOME", t.TempDir())
-		t.Setenv("SCION_HUB_ENDPOINT", hubCtx.Endpoint)
-		t.Setenv("SCION_HUB_TOKEN", "test-agent-token")
-		t.Setenv("SCION_PROJECT_ID", decisionsTestProject)
-		t.Cleanup(func() {
-			rootCmd.SetArgs(nil)
-			if f := rootCmd.PersistentFlags().Lookup("format"); f != nil {
-				_ = f.Value.Set(f.DefValue)
-				f.Changed = false
-			}
-		})
-
-		path := filepath.Join(t.TempDir(), "legacy-choices.json")
-		require.NoError(t, os.WriteFile(path, []byte(twoTestDecisions), 0o600))
-
-		var execErr error
-		stdout, stderr := captureStdoutStderr(t, func() {
-			rootCmd.SetArgs([]string{"msg", "user:alice@example.com", "--choices-file", path, "--format", "json"})
-			execErr = rootCmd.Execute()
-		})
-		require.NoError(t, execErr)
-		assert.Contains(t, stderr, "Flag --choices-file has been deprecated, use --decisions-file")
-
-		var res hubclient.OutboundMessageResult
-		require.NoError(t, json.Unmarshal([]byte(stdout), &res), "stdout must stay pure JSON when --choices-file warns on stderr: %s", stdout)
-		assert.Equal(t, "msg-decisions-1", res.MessageID)
-		require.Len(t, res.Decisions, 2)
-		assert.Len(t, *asked, 1)
+	t.Run("removed_choices_flags_are_rejected_as_unknown", func(t *testing.T) {
+		for _, tc := range []struct {
+			flag string
+			val  string
+		}{
+			{"--choices", twoTestDecisions},
+			{"--choices-file", "decisions.json"},
+		} {
+			t.Run(tc.flag, func(t *testing.T) {
+				decisionsState(t, "asker")
+				t.Cleanup(func() { rootCmd.SetArgs(nil) })
+				var execErr error
+				_, _ = captureStdoutStderr(t, func() {
+					rootCmd.SetArgs([]string{"message", "user:alice@example.com", tc.flag, tc.val})
+					execErr = rootCmd.Execute()
+				})
+				require.Error(t, execErr)
+				assert.Contains(t, execErr.Error(), "unknown flag: "+tc.flag)
+			})
+		}
 	})
 }
 
