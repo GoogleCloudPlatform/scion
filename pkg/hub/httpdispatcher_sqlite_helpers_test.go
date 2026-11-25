@@ -183,11 +183,13 @@ type mockRuntimeBrokerClient struct {
 	// failFirstStartWith, and the second (and later) calls succeed.
 	startCallCount     int
 	failFirstStartWith error
+	lastPrecheckReq    *api.MoveBundlePrecheckRequest
 }
 
 var _ moveBundleBrokerClient = (*mockRuntimeBrokerClient)(nil)
 
-func (m *mockRuntimeBrokerClient) PrecheckMoveBundle(context.Context, string, string, string, string, *api.MoveBundlePrecheckRequest) (*api.MoveBundlePrecheckResponse, error) {
+func (m *mockRuntimeBrokerClient) PrecheckMoveBundle(_ context.Context, _, _, _, _ string, req *api.MoveBundlePrecheckRequest) (*api.MoveBundlePrecheckResponse, error) {
+	m.lastPrecheckReq = req
 	return &api.MoveBundlePrecheckResponse{Durable: true}, nil
 }
 
