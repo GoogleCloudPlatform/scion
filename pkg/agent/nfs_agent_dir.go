@@ -322,28 +322,37 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 // resolveK8sNFSHomeRollbackPaths resolves the home share's host base, agent
 // directory, and home-<agentID> leaf path for K8s rollback marker checks and
 // removal, preferring the SubPathRoot recorded in home-storage.json when
-// available (N4).
+// available (N4). Returns (ok=false, err=nil) when NFS home storage is not
+// configured or hubAgentID/projectID are invalid; returns a non-nil error when
+// NFS home storage is configured (or settings cannot be loaded) but the share
+// layout or mount root cannot be resolved so rollback audits the failure (C3).
 func resolveK8sNFSHomeRollbackPaths(ctx context.Context, projectID, agentName, hubAgentID string) (resolvedHostBase, exportAgentDir, homeLeafPath string, ok bool, err error) {
 	if !shareddirs.ValidProjectID(projectID) || !validHomeAgentID(hubAgentID, agentName) {
 		return "", "", "", false, nil
 	}
 	gs, err := loadHomeStorageSettings(ctx)
 	if err != nil {
-		slog.Warn("home storage nfs rollback: could not load global settings; skipping NFS home rollback check",
+		slog.Warn("home storage nfs rollback: could not load global settings",
 			"project_id", projectID, "agent", agentName, "error", err)
+		return "", "", "", false, fmt.Errorf("load global settings for NFS home rollback: %w", err)
+	}
+	if gs == nil || gs.ResolveHomeStorage().Backend != config.HomeStorageBackendNFS {
 		return "", "", "", false, nil
 	}
 	hl, err := homeShareLayout(gs, "")
 	if err != nil {
-		slog.Warn("home storage nfs rollback: could not resolve home share layout; skipping NFS home rollback check",
+		slog.Warn("home storage nfs rollback: could not resolve home share layout",
 			"project_id", projectID, "agent", agentName, "error", err)
-		return "", "", "", false, nil
+		return "", "", "", false, fmt.Errorf("resolve home share layout: %w", err)
 	}
 	info, err := os.Stat(hl.HostBase)
 	if err != nil || !info.IsDir() {
-		slog.Warn("home storage nfs rollback: home share mount root unavailable; skipping NFS home rollback check",
+		slog.Warn("home storage nfs rollback: home share mount root unavailable",
 			"project_id", projectID, "agent", agentName, "host_base", hl.HostBase, "error", err)
-		return "", "", "", false, nil
+		if err == nil {
+			err = fmt.Errorf("%s is not a directory", hl.HostBase)
+		}
+		return "", "", "", false, fmt.Errorf("home share mount root %s unavailable: %w", hl.HostBase, err)
 	}
 	resolvedHostBase, err = filepath.EvalSymlinks(hl.HostBase)
 	if err != nil {
@@ -363,14 +372,23 @@ func resolveK8sNFSHomeRollbackPaths(ctx context.Context, projectID, agentName, h
 // removeK8sNFSAgentHome removes the Kubernetes NFS home leaf (home-<agentID>)
 // and any move-bundle staging siblings from the home share's agent directory
 // during a move rollback delete (moveID != ""). Refuses to remove home-<agentID>
-// unless either the leaf itself or its parent carries MoveMarkerFile == moveID
-// (R3). Normal deletes never call this function (R4).
+// or staging entries unless either the leaf itself or its parent carries
+// MoveMarkerFile == moveID (R3, N1). Normal deletes never call this function (R4).
 func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, agentName, hubAgentID, moveID string) (d projectfs.Deletion, homeParent string, ok bool) {
 	if moveID == "" || m.Runtime == nil || !isKubernetesRuntime(m.Runtime.Name()) {
 		return d, "", false
 	}
 	resolvedHostBase, exportAgentDir, homeLeafPath, resolved, err := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
-	if err != nil || !resolved {
+	if err != nil {
+		d = projectfs.Deletion{
+			Tree:    projectfs.TreeAgentHome,
+			Path:    homeLeafPath,
+			Outcome: projectfs.OutcomeFailed,
+			Err:     fmt.Errorf("home storage nfs: %w", err),
+		}
+		return d, "", true
+	}
+	if !resolved {
 		return d, "", false
 	}
 	d = projectfs.Deletion{Tree: projectfs.TreeAgentHome, Path: homeLeafPath}
@@ -389,9 +407,6 @@ func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, age
 	if err != nil {
 		return fail(fmt.Errorf("home storage nfs: %w", err))
 	}
-	if stageErr := purgeMoveBundleStagingEntries(checkedDir); stageErr != nil {
-		return fail(fmt.Errorf("home storage nfs: purge move-bundle staging: %w", stageErr))
-	}
 	root, err := os.OpenRoot(checkedDir)
 	if err != nil {
 		return fail(fmt.Errorf("home storage nfs: open export agent dir: %w", err))
@@ -399,15 +414,23 @@ func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, age
 	defer func() { _ = root.Close() }()
 	homeBase := filepath.Base(homeLeafPath)
 	if _, err := root.Lstat(homeBase); errors.Is(err, fs.ErrNotExist) {
+		if checkMoveMarker(checkedDir, moveID) == nil {
+			if stageErr := purgeMoveBundleStagingEntries(checkedDir); stageErr != nil {
+				return fail(fmt.Errorf("home storage nfs: purge move-bundle staging: %w", stageErr))
+			}
+		}
 		d.Outcome = projectfs.OutcomeAbsent
 		return d, checkedDir, true
 	} else if err != nil {
 		return fail(fmt.Errorf("home storage nfs: stat %s: %w", homeBase, err))
 	}
-	// Marker guard (R3): never delete home-<agentID> unless either the leaf
-	// itself or its parent carries this move's reincarnation ID.
+	// Marker guard (R3): never delete home-<agentID> or staging siblings unless
+	// either the leaf itself or its parent carries this move's reincarnation ID.
 	if checkMoveMarker(homeLeafPath, moveID) != nil && checkMoveMarker(checkedDir, moveID) != nil {
 		return fail(fmt.Errorf("home storage nfs: %w: %s has no matching move marker", ErrMoveMarkerMismatch, homeLeafPath))
+	}
+	if stageErr := purgeMoveBundleStagingEntries(checkedDir); stageErr != nil {
+		return fail(fmt.Errorf("home storage nfs: purge move-bundle staging: %w", stageErr))
 	}
 	if err := root.RemoveAll(homeBase); err != nil {
 		return fail(fmt.Errorf("home storage nfs: remove %s: %w", homeBase, err))

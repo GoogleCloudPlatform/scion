@@ -29,7 +29,6 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // Write streams root into a gzip-compressed tar archive split into parts of at
@@ -186,11 +185,11 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 
 // EstimateOptions configures optional checks performed during EstimateWithOptions.
 type EstimateOptions struct {
-	// CheckReadable, when true, verifies that every non-excluded regular file
-	// encountered within limits can be opened for reading via rootopen, failing
-	// closed with fs.ErrPermission on unreadable files (e.g. pod-owned 0600
-	// files on root-squash NFS exports) without exceeding Limits or walking
-	// excluded subtrees.
+	// CheckReadable, when true, verifies via stat-based POSIX mode/owner checks
+	// (no per-file open/close RTTs) that every non-excluded directory and
+	// regular file encountered within limits is readable/traversable by the
+	// current process, failing closed with fs.ErrPermission on unreadable
+	// entries without exceeding Limits or walking excluded subtrees.
 	CheckReadable bool
 }
 
@@ -219,6 +218,11 @@ func EstimateWithOptions(ctx context.Context, root *os.Root, ex Excluder, lim Li
 		return EstimateResult{}, err
 	}
 
+	var access statAccessChecker
+	if opts.CheckReadable {
+		access = newStatAccessChecker()
+	}
+
 	var (
 		res       EstimateResult
 		pathBytes int64
@@ -239,6 +243,15 @@ func EstimateWithOptions(ctx context.Context, root *os.Root, ex Excluder, lim Li
 			pathBytes += entryPathBytesLen(rel, linkTarget)
 			return nil
 		case entryDir:
+			if opts.CheckReadable {
+				info, err := d.Info()
+				if err != nil {
+					return fmt.Errorf("stat %s: %w", rel, err)
+				}
+				if err := access.checkReadable(info, true); err != nil {
+					return fmt.Errorf("read %s: %w", rel, err)
+				}
+			}
 			res.Entries++
 			pathBytes += entryPathBytesLen(rel, "")
 			return nil
@@ -251,11 +264,9 @@ func EstimateWithOptions(ctx context.Context, root *os.Root, ex Excluder, lim Li
 				return &ErrLimitExceeded{Field: "bytes", Got: res.Bytes + info.Size(), Max: lim.MaxBytes}
 			}
 			if opts.CheckReadable {
-				f, _, openErr := rootopen.OpenRegularForRead(root, filepath.FromSlash(rel), nil)
-				if openErr != nil {
-					return fmt.Errorf("read %s: %w", rel, openErr)
+				if err := access.checkReadable(info, false); err != nil {
+					return fmt.Errorf("read %s: %w", rel, err)
 				}
-				_ = f.Close()
 			}
 			res.Entries++
 			res.Bytes += info.Size()

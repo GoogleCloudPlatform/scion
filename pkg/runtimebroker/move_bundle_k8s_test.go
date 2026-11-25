@@ -77,6 +77,8 @@ server:
     nfs:
       mount_root: %s
       subpath_root: projects
+      uid: 2000
+      gid: 3000
       shares:
         - id: share-1
           server: 10.0.0.10
@@ -318,10 +320,13 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 	rid := "rid-k8s-import-1"
 
 	// Build a valid bundle in memory (workspace + home) from a temp source.
+	// Include .tmux.conf with source content so we can verify target-rendered
+	// files win over same-named source files through import + seed-over (C1).
 	srcWS := t.TempDir()
 	srcHome := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(srcWS, "README.md"), []byte("hello from source\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(srcHome, "history.txt"), []byte("cmd1\ncmd2\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".tmux.conf"), []byte("# from-source-only\n"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".scion"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".scion", "agent-info.json"), []byte(`{"from":"source"}`), 0o644))
 
@@ -442,18 +447,21 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 	assert.Equal(t, "cmd1\ncmd2\n", string(histData))
 
 	// Post-commit chown must have run on imported workspace and home entries.
-	wantOwner := commitChown{uid: int(scionrt.K8sContainerUID), gid: 1000}
+	// Fixture configures nfs.uid=2000 and nfs.gid=3000; on Kubernetes pods
+	// always run as K8sContainerUID (1000) with fsGroup DefaultOwnerID(nfs.gid)
+	// = 3000 (R1), while home uses K8sContainerUID:homeStorageGID (1000:1000).
+	wantWSOwner := commitChown{uid: int(scionrt.K8sContainerUID), gid: 3000}
+	wantHomeOwner := commitChown{uid: int(scionrt.K8sContainerUID), gid: 1000}
 	chownMu.Lock()
-	assert.Equal(t, wantOwner, chowned[exportWS], "committed workspace dir must be chowned")
-	assert.Equal(t, wantOwner, chowned[filepath.Join(exportWS, "README.md")], "committed workspace file must be chowned")
-	assert.Equal(t, wantOwner, chowned[exportHome], "committed home dir must be chowned")
-	assert.Equal(t, wantOwner, chowned[filepath.Join(exportHome, "history.txt")], "committed home file must be chowned")
+	assert.Equal(t, wantWSOwner, chowned[exportWS], "committed workspace dir must be chowned to K8sContainerUID:DefaultOwnerID(nfs.gid)")
+	assert.Equal(t, wantWSOwner, chowned[filepath.Join(exportWS, "README.md")], "committed workspace file must be chowned to K8sContainerUID:DefaultOwnerID(nfs.gid)")
+	assert.Equal(t, wantHomeOwner, chowned[exportHome], "committed home dir must be chowned to K8sContainerUID:homeStorageGID")
+	assert.Equal(t, wantHomeOwner, chowned[filepath.Join(exportHome, "history.txt")], "committed home file must be chowned to K8sContainerUID:homeStorageGID")
 	chownMu.Unlock()
 
 	// Sentinel written by provision must survive import, and homeprep.Decide
-	// must choose ActionSeedOver so target Start transfers broker-rendered
-	// files (e.g. .scion/agent-info.json) over source files while keeping
-	// imported source files like history.txt (C1).
+	// must choose ModeSeedOver so target Start transfers broker-rendered files
+	// over source files while keeping imported source files like history.txt (C1).
 	sentinelPath := filepath.Join(exportHome, homeprep.SentinelName)
 	assert.FileExists(t, sentinelPath)
 	sentinelBytes, err := os.ReadFile(sentinelPath)
@@ -470,9 +478,10 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, homeprep.ModeSeedOver, decision.Mode, "imported K8s NFS home must trigger homeprep seed-over on target Start")
 
-	// Verify seed-over precedence: target-rendered agent-info.json from
-	// broker-local agentHome differs from source's {"from":"source"} and
-	// would overwrite it on seed-over while history.txt remains intact.
+	// Exercise seed-over precedence unconditionally: verify Provision rendered
+	// .tmux.conf in broker-local targetHome with target content distinct from
+	// source, apply seed-over transfer from targetHome onto exportHome, and
+	// assert target .tmux.conf wins while imported history.txt survives.
 	targetDirs, err := agent.ResolveMoveBundleAgentDirs(context.Background(), "kubernetes", api.StartOptions{
 		Name:         slug,
 		ProjectPath:  projectPath,
@@ -480,10 +489,46 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 		BrokerMode:   true,
 	})
 	require.NoError(t, err)
-	targetAgentInfo := filepath.Join(targetDirs.AgentDir, "home", ".scion", "agent-info.json")
-	if targetInfoBytes, readErr := os.ReadFile(targetAgentInfo); readErr == nil {
-		assert.NotEqual(t, `{"from":"source"}`, string(targetInfoBytes), "target-rendered agent-info.json must be distinct from source")
-	}
+	targetTmuxBytes, err := os.ReadFile(filepath.Join(targetDirs.HomeDir, ".tmux.conf"))
+	require.NoError(t, err, "target provision must render .tmux.conf in broker-local agent home")
+	require.NotEqual(t, "# from-source-only\n", string(targetTmuxBytes))
+
+	// Before seed-over, exportHome/.tmux.conf has the imported source content.
+	importedTmux, err := os.ReadFile(filepath.Join(exportHome, ".tmux.conf"))
+	require.NoError(t, err)
+	assert.Equal(t, "# from-source-only\n", string(importedTmux))
+
+	// Simulate Start's ModeSeedOver transfer of broker-rendered targetHome over exportHome.
+	require.NoError(t, filepath.WalkDir(targetDirs.HomeDir, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || p == targetDirs.HomeDir {
+			return walkErr
+		}
+		rel, relErr := filepath.Rel(targetDirs.HomeDir, p)
+		if relErr != nil {
+			return relErr
+		}
+		dst := filepath.Join(exportHome, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		if d.Type().IsRegular() {
+			data, rErr := os.ReadFile(p)
+			if rErr != nil {
+				return rErr
+			}
+			if mkErr := os.MkdirAll(filepath.Dir(dst), 0o755); mkErr != nil {
+				return mkErr
+			}
+			return os.WriteFile(dst, data, 0o644)
+		}
+		return nil
+	}))
+	seededTmux, err := os.ReadFile(filepath.Join(exportHome, ".tmux.conf"))
+	require.NoError(t, err)
+	assert.Equal(t, string(targetTmuxBytes), string(seededTmux), "target-rendered .tmux.conf must win over source after seed-over")
+	histAfterSeed, err := os.ReadFile(filepath.Join(exportHome, "history.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "cmd1\ncmd2\n", string(histAfterSeed), "source-only history.txt must survive seed-over")
 
 	// 3. Rollback delete (marker-guarded) removes NFS workspace, NFS home leaf,
 	//    .bundle-* staging siblings, and the now-empty export agent dir (N3).

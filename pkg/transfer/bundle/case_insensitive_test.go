@@ -18,8 +18,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -139,4 +141,48 @@ func TestWorkspaceExcluder_CaseInsensitiveExtraLiterals(t *testing.T) {
 	assert.FileExists(t, filepath.Join(dstDir, "main.go"))
 	assert.NoFileExists(t, filepath.Join(dstDir, ".ENV"))
 	assert.NoFileExists(t, filepath.Join(dstDir, ".Scion", "agent-info.json"))
+}
+
+func TestHomeExcluder_DefaultCaseSensitiveOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-only default case-sensitivity assertion")
+	}
+	ex := HomeExcluder(HomeExcluderOptions{})
+	assert.False(t, ex.Exclude(".Cache/x", false), "default excluder on linux must remain case-sensitive and keep .Cache/x")
+	assert.True(t, ex.Exclude(".cache/x", false), "default excluder on linux must still exclude .cache/x")
+}
+
+func TestEstimateWithOptions_StatReadableChecksDirAndFile(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires non-root unix permissions")
+	}
+	dir := t.TempDir()
+	ciWriteFile(t, dir, ".cache/unreadable.bin", "x", 0o000)
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, ".cache", "unreadable.bin"), 0o600) })
+	ciWriteFile(t, dir, "ok.txt", "hello", 0o644)
+
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer func() { _ = root.Close() }()
+
+	ex := HomeExcluder(HomeExcluderOptions{})
+	res, err := EstimateWithOptions(context.Background(), root, ex, DefaultHomeLimits(), EstimateOptions{CheckReadable: true})
+	require.NoError(t, err, "unreadable file under excluded .cache/ must be skipped")
+	assert.Equal(t, int64(len("hello")), res.Bytes)
+
+	// Non-excluded unreadable regular file fails with fs.ErrPermission.
+	badFile := filepath.Join(dir, "private.txt")
+	require.NoError(t, os.WriteFile(badFile, []byte("secret"), 0o000))
+	t.Cleanup(func() { _ = os.Chmod(badFile, 0o600) })
+	_, err = EstimateWithOptions(context.Background(), root, ex, DefaultHomeLimits(), EstimateOptions{CheckReadable: true})
+	assert.ErrorIs(t, err, fs.ErrPermission)
+	require.NoError(t, os.Chmod(badFile, 0o600))
+
+	// Non-excluded directory missing traverse bit (0400) fails with fs.ErrPermission.
+	badDir := filepath.Join(dir, "noexec")
+	require.NoError(t, os.MkdirAll(badDir, 0o755))
+	require.NoError(t, os.Chmod(badDir, 0o400))
+	t.Cleanup(func() { _ = os.Chmod(badDir, 0o755) })
+	_, err = EstimateWithOptions(context.Background(), root, ex, DefaultHomeLimits(), EstimateOptions{CheckReadable: true})
+	assert.ErrorIs(t, err, fs.ErrPermission)
 }

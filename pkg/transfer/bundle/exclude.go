@@ -32,6 +32,12 @@ import (
 // tool can create or open `.Docker/config.json` through a case-insensitive
 // bind mount while the host directory walk yields `.Docker/config.json`, which
 // would bypass case-sensitive exclusion matching.
+//
+// This check intentionally keys on runtime.GOOS rather than probing the target
+// mount's case sensitivity: on case-sensitive APFS volumes it deliberately
+// over-excludes case variants (such as `.Cache/` or `.Docker/`), which is the
+// fail-safe direction because every built-in prefix is a credential or cache.
+// Linux stays case-sensitive and never fails open.
 func defaultCaseInsensitiveFS() bool {
 	return runtime.GOOS == "darwin" || runtime.GOOS == "windows"
 }

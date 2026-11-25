@@ -368,14 +368,16 @@ func TestProvision_K8sNFSMoveBundle_DistinctHomeShareUnmarkedLeafSurvivesRollbac
 	slug := "k8s-distinct"
 	rid := "rid-k8s-distinct-1"
 
-	// Pre-populate an UNMARKED home-<agentID> on a distinct home subpath_root
-	// ("legacy-homes") while workspace uses "projects" (a valid config where
-	// homeParent != wsExportAgentDir).
+	// Pre-populate an UNMARKED home-<agentID> and a staging sibling on a
+	// distinct home subpath_root ("legacy-homes") while workspace uses
+	// "projects" (a valid config where homeParent != wsExportAgentDir).
 	preExistingHomeParent := filepath.Join(realHostBase, "legacy-homes", k8sTestProjectUUID, "agents", slug)
 	preExistingHome := filepath.Join(preExistingHomeParent, "home-"+k8sTestAgentUUID)
 	require.NoError(t, os.MkdirAll(preExistingHome, 0o755))
 	preciousFile := filepath.Join(preExistingHome, "precious.txt")
 	require.NoError(t, os.WriteFile(preciousFile, []byte("do not delete"), 0o600))
+	unmarkedStage := filepath.Join(preExistingHomeParent, ".home-"+k8sTestAgentUUID+".bundle-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.MkdirAll(unmarkedStage, 0o755))
 
 	// Also mark the workspace export agent dir with rid so that ONLY the
 	// unmarked distinct home leaf triggers the marker guards in CheckMoveMarkers
@@ -436,6 +438,36 @@ func TestProvision_K8sNFSMoveBundle_DistinctHomeShareUnmarkedLeafSurvivesRollbac
 	data, err := os.ReadFile(preciousFile)
 	require.NoError(t, err, "pre-existing unmarked home leaf on distinct share must survive rollback")
 	assert.Equal(t, "do not delete", string(data))
+	assert.DirExists(t, unmarkedStage, "staging sibling in unmarked home parent must survive because staging purge runs after the marker guard (N1)")
+}
+
+func TestRollback_K8sNFSHomeResolutionFailureAuditsOutcomeFailed(t *testing.T) {
+	_, hostBase, projectPath := setupK8sNFSFixture(t)
+	slug := "k8s-unmounted"
+	rid := "rid-k8s-unmounted-1"
+
+	// Remove the NFS mount root to simulate an unmounted share during rollback.
+	require.NoError(t, os.RemoveAll(hostBase))
+
+	mgr := NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+	}).(*AgentManager)
+
+	rbCtx := WithDeleteMoveReincarnationID(WithDeleteHubAgentID(context.Background(), k8sTestAgentUUID), rid)
+	ds, rmErr := mgr.RemoveNFSAgentFiles(rbCtx, projectPath, k8sTestProjectUUID, slug)
+	require.Error(t, rmErr, "rollback must report an error when NFS home mount root is unavailable")
+
+	var homeDel *projectfs.Deletion
+	for i := range ds {
+		if ds[i].Tree == projectfs.TreeAgentHome {
+			homeDel = &ds[i]
+			break
+		}
+	}
+	require.NotNil(t, homeDel, "RemoveNFSAgentFiles must audit an OutcomeFailed TreeAgentHome deletion (C3)")
+	assert.Equal(t, projectfs.OutcomeFailed, homeDel.Outcome)
+	require.Error(t, homeDel.Err)
+	assert.Contains(t, homeDel.Err.Error(), "unavailable")
 }
 
 func TestRollback_K8sNFSHomePrefersRecordedSubPathRoot(t *testing.T) {

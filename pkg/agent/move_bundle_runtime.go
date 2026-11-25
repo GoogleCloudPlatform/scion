@@ -95,6 +95,10 @@ func MoveBundleRuntimeSupported(runtimeName string) bool {
 // K8sMoveBundleConfigured reports whether this broker's global settings have
 // Kubernetes NFS workspace storage, a usable claim-backed NFS home share, and
 // the K8s NFS home prerequisites configured (N1).
+//
+// Capability advertisement is a broker-wide approximation (reading global
+// settings with context.Background() without per-project overrides); precheck
+// and provision make the authoritative per-project decision.
 func K8sMoveBundleConfigured() bool {
 	gs, _, err := config.LoadGlobalSettingsWithOverlayFor(context.Background())
 	if err != nil || gs == nil || gs.Server == nil {
@@ -298,11 +302,12 @@ func (kubernetesMoveBundleRuntime) ResolveDirs(ctx context.Context, in MoveBundl
 		return MoveBundleAgentDirs{}, err
 	}
 
-	if wsOwner.UID == 0 {
-		wsOwner.UID = int(runtime.K8sContainerUID)
-	}
-	if wsOwner.GID == 0 {
-		wsOwner.GID = homeStorageGID
+	// Match Kubernetes pod securityContext / nfsProvisionCommand
+	// (pkg/runtime/k8s_runtime.go): K8s pods always run as K8sContainerUID
+	// (1000) regardless of nfs.uid, with fsGroup DefaultOwnerID(nfs.gid).
+	wsChownOwner := shareddirs.Owner{
+		UID: int(runtime.K8sContainerUID),
+		GID: provision.DefaultOwnerID(wsOwner.GID),
 	}
 
 	return MoveBundleAgentDirs{
@@ -310,7 +315,7 @@ func (kubernetesMoveBundleRuntime) ResolveDirs(ctx context.Context, in MoveBundl
 		WorkspaceDir:   wsDir,
 		HomeDir:        homeDir,
 		ExportAgentDir: exportAgentDir,
-		WorkspaceOwner: wsOwner,
+		WorkspaceOwner: wsChownOwner,
 		HomeOwner:      shareddirs.Owner{UID: int(runtime.K8sContainerUID), GID: homeStorageGID},
 	}, nil
 }
