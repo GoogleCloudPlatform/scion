@@ -52,12 +52,11 @@ function agent(id: string, overrides: Partial<Agent> = {}): Agent {
 
 function viewState(partial: Partial<AgentListViewState> = {}): AgentListViewState {
   return {
-    phaseFilter: '',
-    label: '',
     sortField: 'updated',
     sortDir: 'desc',
     pageSize: 25,
     view: 'list',
+    serverQuery: '',
     ...partial,
   };
 }
@@ -99,7 +98,7 @@ function enter(win: AgentListWindow, setHeld: (a: Agent[]) => void, state: Windo
       win.setSmall();
       break;
     case 'paged':
-      win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), '');
+      win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }));
       break;
     case 'held':
       setHeld([agent('a'), agent('b')]);
@@ -181,9 +180,13 @@ describe('AgentListWindow states — paged view changes', () => {
     { name: 'grid, updated -> created', vs: { view: 'grid', sortField: 'created' }, plan: 'fit' },
     { name: 'sort -> name', vs: { sortField: 'name' }, plan: 'drain' },
     { name: 'sort -> status', vs: { sortField: 'status' }, plan: 'drain' },
-    { name: 'phase change', vs: { phaseFilter: 'running' }, plan: 'fit' },
+    { name: 'phase change', vs: { serverQuery: 'phase:running' }, plan: 'fit' },
     { name: 'page size change', vs: { pageSize: 50 }, plan: 'fit' },
-    { name: 'label typing only', vs: { label: 'team=r' }, plan: 'none' },
+    {
+      name: 'live preview typing only',
+      vs: { filterPredicate: (a) => a.labels?.team === 'r', previewDiffersFromCommitted: true },
+      plan: 'none',
+    },
   ];
   for (const c of cases) {
     it(`${c.name} -> ${c.plan}`, () => {
@@ -216,36 +219,41 @@ describe('AgentListWindow states — sorted eligibility', () => {
   const cases: Array<{
     name: string;
     vs: Partial<AgentListViewState>;
-    label: string;
+    serverQuery: string;
     eligible: boolean;
   }> = [
-    { name: 'list, updated, no label', vs: {}, label: '', eligible: true },
-    { name: 'grid, updated, no label', vs: { view: 'grid' }, label: '', eligible: true },
-    { name: 'list, created', vs: { sortField: 'created' }, label: '', eligible: true },
+    { name: 'list, updated, empty query', vs: {}, serverQuery: '', eligible: true },
+    { name: 'grid, updated, empty query', vs: { view: 'grid' }, serverQuery: '', eligible: true },
+    { name: 'list, created', vs: { sortField: 'created' }, serverQuery: '', eligible: true },
     {
       name: 'grid, created, asc',
       vs: { view: 'grid', sortField: 'created', sortDir: 'asc' },
-      label: '',
+      serverQuery: '',
       eligible: true,
     },
-    { name: 'k=v label', vs: {}, label: 'team=red', eligible: true },
-    { name: 'whitespace-only label', vs: {}, label: '   ', eligible: true },
-    { name: 'bare-key label', vs: {}, label: 'team', eligible: false },
-    { name: 'name sort', vs: { sortField: 'name' }, label: '', eligible: false },
-    { name: 'status sort', vs: { sortField: 'status' }, label: '', eligible: false },
-    { name: 'tree view', vs: { view: 'tree' }, label: '', eligible: false },
+    { name: 'k=v label', vs: {}, serverQuery: 'label:team=red', eligible: true },
+    { name: 'bare-key label', vs: {}, serverQuery: 'label:team', eligible: true },
+    {
+      name: 'client-only filter key',
+      vs: { hasClientOnlyFilter: true },
+      serverQuery: '',
+      eligible: false,
+    },
+    { name: 'name sort', vs: { sortField: 'name' }, serverQuery: '', eligible: false },
+    { name: 'status sort', vs: { sortField: 'status' }, serverQuery: '', eligible: false },
+    { name: 'tree view', vs: { view: 'tree' }, serverQuery: '', eligible: false },
     {
       name: 'tree view, created',
       vs: { view: 'tree', sortField: 'created' },
-      label: '',
+      serverQuery: '',
       eligible: false,
     },
   ];
   for (const c of cases) {
     it(`${c.name} -> ${c.eligible ? 'sorted-eligible' : 'complete-needing'}`, () => {
-      const { win } = setup(c.vs);
-      expect(win.isSortedEligible(c.label)).toBe(c.eligible);
-      expect(win.planRequest('page-load', c.label)).toBe(c.eligible ? 'fit' : 'drain');
+      const { win } = setup({ serverQuery: c.serverQuery, ...c.vs });
+      expect(win.isSortedEligible()).toBe(c.eligible);
+      expect(win.planRequest('page-load', c.serverQuery)).toBe(c.eligible ? 'fit' : 'drain');
     });
   }
 });
@@ -268,7 +276,7 @@ describe('AgentListWindow states — transitions', () => {
     },
     {
       name: 'setPaged',
-      apply: (win) => win.setPaged(pagedResult([agent('a')], { nextCursor: 'c' }), ''),
+      apply: (win) => win.setPaged(pagedResult([agent('a')], { nextCursor: 'c' })),
       state: 'paged',
       reason: null,
     },
@@ -347,7 +355,7 @@ describe('AgentListWindow states — transitions', () => {
   ): Promise<void> {
     if (state === 'paged') {
       fetchPage.mockResolvedValue(pagedResult([agent('b')], { nextCursor: 'c2', totalCount: 60 }));
-      win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), '');
+      win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }));
     } else {
       setHeld([agent('a'), agent('b')]);
       if (state === 'small') win.setSmall();
@@ -514,7 +522,7 @@ describe('AgentListWindow states — capped', () => {
     win.adoptDrain({ complete: false, capped: true, error: null, requests: 4 });
     win.setViewState({ sortField: 'updated' });
     expect(win.planRequest('view-change', '')).toBe('fit');
-    win.setPaged(pagedResult([agent('a')], { nextCursor: 'c', totalCount: 3000 }), '');
+    win.setPaged(pagedResult([agent('a')], { nextCursor: 'c', totalCount: 3000 }));
     expect(win.state).toBe('paged');
     expect(win.incompleteReason).toBeNull();
     expect(win.total).toBe(3000);
@@ -540,7 +548,7 @@ describe('AgentListWindow states — capped', () => {
     setHeld([agent('a')]);
     win.adoptDrain({ complete: false, capped: true, error: null, requests: 4 });
     setHeld([agent('a'), agent('b')]);
-    win.setViewState({ phaseFilter: 'running' });
+    win.setViewState({ serverQuery: 'phase:running', filterPredicate: (a) => a.phase === 'running' });
     win.markResync();
     expect(win.state).toBe('capped');
     expect(win.total).toEqual({ loaded: 2, capped: true });
@@ -684,7 +692,7 @@ describe('AgentListWindow states — created sort while paged', () => {
       getHeldAgents: () => held,
     });
     held = [];
-    win.setPaged(pagedResult(rows, { totalCount: 2 }), '');
+    win.setPaged(pagedResult(rows, { totalCount: 2 }));
     // A fresh activity on the older agent would move it first under the
     // updated sort; under the created sort it stays where it is.
     live.set('mid', { ...rows[1], updated: '2026-02-01T00:00:00Z' });
@@ -718,8 +726,7 @@ describe('AgentListWindow states — created sort while paged', () => {
             ['c', 'running'],
           ],
         },
-      }),
-      ''
+      })
     );
     win.applyChanges({
       upserted: [],
@@ -766,8 +773,7 @@ describe('AgentListWindow states — off-page activity from an unknown delta', (
             ['d', 'running'],
           ],
         },
-      }),
-      ''
+      })
     );
     return { win, fetchPage };
   }
@@ -867,8 +873,7 @@ describe('AgentListWindow states — optimistic local update', () => {
     win.setPaged(
       pagedResult([agent('a', { updated: '2026-01-02T00:00:00Z' }), agent('b')], {
         totalCount: 2,
-      }),
-      ''
+      })
     );
     win.applyLocalUpdate([
       agent('a', { phase: 'stopping', updated: '2026-01-02T00:00:00Z' }),
@@ -894,8 +899,7 @@ describe('AgentListWindow states — optimistic local update', () => {
           agent('c', { updated: '2026-01-01T00:00:00Z' }),
         ],
         { totalCount: 3 }
-      ),
-      ''
+      )
     );
     const onChange = vi.fn();
     win.addEventListener('change', onChange);
@@ -940,8 +944,7 @@ describe('AgentListWindow states — live changes during a paged request', () =>
     const store = new Map([[created.id, created]]);
     const { win } = setupWithStore(store);
     win.setPaged(
-      pagedResult([agent('a'), agent('b')], { totalCount: 2, liveChanged: ['new'] }),
-      ''
+      pagedResult([agent('a'), agent('b')], { totalCount: 2, liveChanged: ['new'] })
     );
     expect(win.memberIndex.has('new')).toBe(true);
     expect(win.stats.total).toBe(3);
@@ -952,7 +955,7 @@ describe('AgentListWindow states — live changes during a paged request', () =>
     const foreign = agent('other', { projectId: 'p-2' });
     const store = new Map([[foreign.id, foreign]]);
     const { win } = setupWithStore(store);
-    win.setPaged(pagedResult([agent('a')], { totalCount: 1, liveChanged: ['other'] }), '');
+    win.setPaged(pagedResult([agent('a')], { totalCount: 1, liveChanged: ['other'] }));
     expect(win.memberIndex.has('other')).toBe(false);
     expect(win.updatesAvailable).toBe(false);
   });
@@ -964,7 +967,7 @@ describe('AgentListWindow states — live changes during a paged request', () =>
       Promise.resolve(pagedResult([agent('a')], { totalCount: 1, liveChanged: ['new'] }))
     );
     const { win } = setupWithStore(store, fetchPage);
-    win.setPaged(pagedResult([agent('a')], { totalCount: 1 }), '');
+    win.setPaged(pagedResult([agent('a')], { totalCount: 1 }));
     await win.refresh();
     expect(fetchPage).toHaveBeenCalledTimes(1);
     expect(win.memberIndex.has('new')).toBe(true);
@@ -989,7 +992,7 @@ function setupHeldFetch(vs: Partial<AgentListViewState> = {}) {
     getProjectId: () => 'p-1',
     getHeldAgents: () => held,
   });
-  win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), '');
+  win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }));
   const setHeld = (agents: Agent[]): void => {
     held = agents;
   };
@@ -1018,7 +1021,7 @@ describe('AgentListWindow — page fetch abort', () => {
     },
     {
       name: 'setPaged',
-      stop: (win) => win.setPaged(pagedResult([agent('p')], { totalCount: 1 }), ''),
+      stop: (win) => win.setPaged(pagedResult([agent('p')], { totalCount: 1 })),
       state: 'paged',
     },
   ];
@@ -1068,21 +1071,21 @@ describe('AgentListWindow — sorted request tickets', () => {
     expect(win.supersededRequest('')).toBeNull();
   });
 
-  const CHANGES: Array<{ name: string; change: Partial<AgentListViewState>; label?: string }> = [
+  const CHANGES: Array<{ name: string; change: Partial<AgentListViewState>; query?: string }> = [
     { name: 'sort', change: { sortField: 'created' } },
     { name: 'dir', change: { sortDir: 'asc' } },
-    { name: 'phase', change: { phaseFilter: 'stopped' } },
+    { name: 'phase', change: { serverQuery: 'phase:stopped' } },
     { name: 'page size', change: { pageSize: 50 } },
-    { name: 'label', change: {}, label: 'env=prod' },
+    { name: 'serverQuery', change: {}, query: 'label:env=prod' },
     { name: 'eligibility (tree view)', change: { view: 'tree' } },
     { name: 'eligibility (name sort)', change: { sortField: 'name' } },
   ];
-  for (const { name, change, label } of CHANGES) {
+  for (const { name, change, query } of CHANGES) {
     it(`a ${name} change supersedes the ticket's trigger`, () => {
       const { win } = setup();
       win.beginSortedRequest('label-commit', '');
       win.setViewState(change);
-      expect(win.supersededRequest(label ?? '')).toBe('label-commit');
+      expect(win.supersededRequest(query ?? '')).toBe('label-commit');
     });
   }
 
@@ -1111,10 +1114,10 @@ describe('AgentListWindow — sorted request tickets', () => {
     const { win } = setup();
     const ticket = win.beginSortedRequest('page-load', '');
     win.setViewState({ sortDir: 'asc' });
-    win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), '', ticket.key);
+    win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), ticket.key);
     expect(win.planRequest('view-change', '')).toBe('fit');
     // The same page recorded under the current view state needs nothing.
-    win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), '');
+    win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }));
     expect(win.planRequest('view-change', '')).toBe('none');
   });
 });

@@ -32,11 +32,11 @@ import {
   type MockInstance,
 } from 'vitest';
 import type { LitElement } from 'lit';
-import type { Agent, PageData } from '../../shared/types.js';
+import type { Agent, AgentPhase, PageData } from '../../shared/types.js';
 import type { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import type { ScionQuickPalette } from '../shared/palette/quick-palette.js';
 import { stateManager } from '../../client/state.js';
-import type { AgentListViewState, AgentListWindow } from '../../client/agent-list-window.js';
+import type { AgentListWindow } from '../../client/agent-list-window.js';
 import { getViewSchema, knownKeysFor, parse } from '../../shared/filter-query/index.js';
 
 const GRAPH_KEYS = knownKeysFor(getViewSchema('graph')!);
@@ -173,7 +173,7 @@ async function setState(el: GraphPage, state: Record<string, unknown>): Promise<
   Object.assign(el, rest);
   const win = (el as GraphPage & { agentWindow?: AgentListWindow }).agentWindow;
   if (win && phaseFilter !== undefined) {
-    const phase = phaseFilter as AgentListViewState['phaseFilter'];
+    const phase = phaseFilter as AgentPhase | '';
     (el as GraphPage & { filterQueryText?: string }).filterQueryText = phase
       ? `phase:${phase}`
       : '';

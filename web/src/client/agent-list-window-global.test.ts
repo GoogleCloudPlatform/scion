@@ -44,12 +44,11 @@ function agent(id: string, overrides: Partial<Agent> = {}): Agent {
 
 function viewState(partial: Partial<AgentListViewState> = {}): AgentListViewState {
   return {
-    phaseFilter: '',
-    label: '',
     sortField: 'updated',
     sortDir: 'desc',
     pageSize: 25,
     view: 'list',
+    serverQuery: '',
     ...partial,
   };
 }
@@ -149,28 +148,28 @@ function referenceDisplay(
   return sorted;
 }
 
-describe('AgentListWindow — mode filter', () => {
-  it('a mode filter makes every view state complete-needing', () => {
-    const { win } = setup({ modeFilter: 'direct' });
-    expect(win.isSortedEligible('')).toBe(false);
+describe('AgentListWindow — client-only filter', () => {
+  it('a client-only filter makes every view state complete-needing', () => {
+    const { win } = setup({ hasClientOnlyFilter: true });
+    expect(win.isSortedEligible()).toBe(false);
     expect(win.planRequest('page-load', '')).toBe('drain');
-    win.setViewState({ modeFilter: '' });
-    expect(win.isSortedEligible('')).toBe(true);
+    win.setViewState({ hasClientOnlyFilter: false });
+    expect(win.isSortedEligible()).toBe(true);
     expect(win.planRequest('page-load', '')).toBe('fit');
   });
 
-  it('while paged, setting a mode filter plans a drain; clearing it in capped returns to a fit request', () => {
+  it('while paged, setting a client-only filter plans a drain; clearing it in capped returns to a fit request', () => {
     const { win, setHeld } = setup();
-    win.setPaged({ agents: [agent('a')], totalCount: 60, nextCursor: 'c1' }, '');
-    win.setViewState({ modeFilter: 'can_message' });
+    win.setPaged({ agents: [agent('a')], totalCount: 60, nextCursor: 'c1' });
+    win.setViewState({ hasClientOnlyFilter: true });
     expect(win.planRequest('view-change', '')).toBe('drain');
     setHeld([agent('a')]);
     win.adoptDrain({ complete: false, capped: true, error: null, requests: 4 });
-    win.setViewState({ modeFilter: '' });
+    win.setViewState({ hasClientOnlyFilter: false });
     expect(win.planRequest('view-change', '')).toBe('fit');
   });
 
-  it('the small-state display equals the reference for every sort, phase, bare-key label and mode filter', () => {
+  it('the small-state display equals the reference for every sort and filterPredicate', () => {
     const phases: AgentPhase[] = ['running', 'stopped', 'error', 'suspended'];
     const modes = ['project', 'branch', 'lineage', 'none', undefined];
     const held = Array.from({ length: 40 }, (_, i) =>
@@ -194,7 +193,27 @@ describe('AgentListWindow — mode filter', () => {
         for (const phase of ['', 'running', 'stopped'] as Array<AgentPhase | ''>) {
           for (const mode of ['', 'branch', 'project', 'can_message', 'cannot_message']) {
             for (const label of ['', 'env', 'env=prod']) {
-              win.setViewState({ sortField, sortDir, phaseFilter: phase, modeFilter: mode, label });
+              const pred = (a: Agent): boolean => {
+                if (phase && a.phase !== phase) return false;
+                if (mode === 'can_message' && a._messageability?.canMessage !== true) return false;
+                if (mode === 'cannot_message' && a._messageability?.canMessage !== false)
+                  return false;
+                if (
+                  mode &&
+                  mode !== 'can_message' &&
+                  mode !== 'cannot_message' &&
+                  (a.messageMode || 'project') !== mode
+                ) {
+                  return false;
+                }
+                if (label) {
+                  const [k, v] = label.split('=');
+                  if (!a.labels) return false;
+                  if (v ? a.labels[k] !== v : !(k in a.labels)) return false;
+                }
+                return true;
+              };
+              win.setViewState({ sortField, sortDir, filterPredicate: pred });
               const expected = referenceDisplay(held, { phase, mode, label, sortField, sortDir });
               expect(win.display.map((a) => a.id)).toEqual(expected.map((a) => a.id));
             }
@@ -206,27 +225,30 @@ describe('AgentListWindow — mode filter', () => {
 });
 
 describe('AgentListWindow — add rule override', () => {
-  it('replaces the project match: a create joins only when the rule passes, and the committed k=v label still applies', () => {
+  it('replaces the project match: a create joins only when the rule and committedFilterPredicate pass', () => {
     let scopeAll = true;
-    const { win, agents } = setup({}, { isAddable: () => scopeAll });
-    win.setPaged(
+    const { win, agents } = setup(
       {
-        agents: [agent('a', { updated: '2026-01-05T00:00:00Z' })],
-        totalCount: 1,
-        stats: { total: 1, running: 1, agents: [['a', 'running']] },
+        serverQuery: 'label:env=prod',
+        committedFilterPredicate: (a) => a.labels?.env === 'prod',
       },
-      'env=prod'
+      { isAddable: () => scopeAll }
     );
+    win.setPaged({
+      agents: [agent('a', { updated: '2026-01-05T00:00:00Z' })],
+      totalCount: 1,
+      stats: { total: 1, running: 1, agents: [['a', 'running']] },
+    });
     agents.set('n1', agent('n1', { projectId: 'other', labels: { env: 'prod' } }));
     agents.set('n2', agent('n2', { labels: { env: 'dev' } }));
     win.applyChanges(flushOf(['n1', 'n2']));
     expect(win.memberIndex.has('n1')).toBe(true); // any project
-    expect(win.memberIndex.has('n2')).toBe(false); // outside the committed label
+    expect(win.memberIndex.has('n2')).toBe(false); // outside the committed query
     expect(win.updatesAvailable).toBe(true);
 
     scopeAll = false;
     const { win: win2, agents: agents2 } = setup({}, { isAddable: () => scopeAll });
-    win2.setPaged({ agents: [], totalCount: 0, stats: { total: 0, running: 0, agents: [] } }, '');
+    win2.setPaged({ agents: [], totalCount: 0, stats: { total: 0, running: 0, agents: [] } });
     agents2.set('n3', agent('n3'));
     win2.applyChanges(flushOf(['n3']));
     expect(win2.memberIndex.has('n3')).toBe(false);
@@ -240,7 +262,7 @@ describe('AgentListWindow — add rule override', () => {
     win.markMembershipChanged();
     expect(win.updatesAvailable).toBe(false);
     expect(win.stale).toBe(false);
-    win.setPaged({ agents: [agent('a')], totalCount: 60, nextCursor: 'c1' }, '');
+    win.setPaged({ agents: [agent('a')], totalCount: 60, nextCursor: 'c1' });
     win.markMembershipChanged();
     expect(win.updatesAvailable).toBe(true);
   });
@@ -265,7 +287,7 @@ describe('AgentListWindow — count-only member index', () => {
           }),
       }
     );
-    ctx.win.setPaged({ agents: page, totalCount: 2001, nextCursor: 'c1', stats }, '');
+    ctx.win.setPaged({ agents: page, totalCount: 2001, nextCursor: 'c1', stats });
     return {
       ...ctx,
       setStats: (s: PagedPageResult['stats']) => {

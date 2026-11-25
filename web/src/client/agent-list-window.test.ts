@@ -47,12 +47,11 @@ function agent(id: string, overrides: Partial<Agent> = {}): Agent {
 
 function makeViewState(partial: Partial<AgentListViewState> = {}): AgentListViewState {
   return {
-    phaseFilter: '',
-    label: '',
     sortField: 'updated',
     sortDir: 'desc',
     pageSize: 2,
     view: 'list',
+    serverQuery: '',
     ...partial,
   };
 }
@@ -96,10 +95,10 @@ describe('AgentListWindow — small state', () => {
     // updated desc: a, b, c
     expect(win.items.map((a) => a.id)).toEqual(['a', 'b', 'c']);
 
-    win.setViewState({ phaseFilter: 'running' });
+    win.setViewState({ filterPredicate: (a) => a.phase === 'running' });
     expect(win.items.map((a) => a.id)).toEqual(['a', 'c']);
 
-    win.setViewState({ phaseFilter: '', sortField: 'name', sortDir: 'asc' });
+    win.setViewState({ filterPredicate: null, sortField: 'name', sortDir: 'asc' });
     expect(win.items.map((a) => a.id)).toEqual(['b', 'c', 'a']); // Alpha, Bravo, Charlie
   });
 
@@ -140,7 +139,7 @@ describe('AgentListWindow — small state', () => {
       )
     );
     const { win, setHeld } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }));
     await win.next();
     expect(win.state).toBe('paged');
     expect(win.pageIndex).toBe(1);
@@ -191,8 +190,8 @@ describe('AgentListWindow — small state', () => {
     const fetchPage = vi.fn();
     const { win, setHeld } = createWindow({ viewState: makeViewState(), fetchPage });
     setHeld([agent('a', { labels: { env: 'prod' } }), agent('b')]);
-    win.setViewState({ label: 'env=prod' });
-    win.setViewState({ phaseFilter: 'running' });
+    win.setViewState({ filterPredicate: (a) => a.labels?.env === 'prod' });
+    win.setViewState({ filterPredicate: (a) => a.phase === 'running' });
     win.setViewState({ sortField: 'name', sortDir: 'asc' });
     expect(fetchPage).not.toHaveBeenCalled();
   });
@@ -223,7 +222,7 @@ describe('AgentListWindow — paged state', () => {
       return Promise.reject(new Error('unexpected cursor'));
     });
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }));
     expect(win.state).toBe('paged');
     expect(win.items.map((a) => a.id)).toEqual(['a', 'b']);
     expect(win.hasNext).toBe(true);
@@ -260,7 +259,7 @@ describe('AgentListWindow — paged state', () => {
       return Promise.resolve(pagedResult(page0, { totalCount: 2 })); // step-back refetch of page 0
     });
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }));
     await win.next();
     expect(win.pageIndex).toBe(0);
     expect(win.items.map((a) => a.id)).toEqual(['a', 'b']);
@@ -291,8 +290,7 @@ describe('AgentListWindow — paged state', () => {
             ['c', 'running'],
           ],
         },
-      }),
-      ''
+      })
     );
     expect(win.updatesAvailable).toBe(false);
 
@@ -335,8 +333,7 @@ describe('AgentListWindow — paged state', () => {
             ['c', 'running'],
           ],
         },
-      }),
-      ''
+      })
     );
 
     known.set('c', agent('c', { phase: 'stopped', updated: '2026-01-01T00:00:00Z' }));
@@ -354,7 +351,11 @@ describe('AgentListWindow — paged state', () => {
       ['c', agent('c', { phase: 'stopped', updated: '2026-01-01T00:00:00Z' })],
     ]);
     const { win } = createWindow({
-      viewState: makeViewState({ phaseFilter: 'running' }),
+      viewState: makeViewState({
+        serverQuery: 'phase:running',
+        committedFilterPredicate: (a) => a.phase === 'running',
+        committedPhasePredicate: (p) => p === 'running',
+      }),
       getAgent: (id) => known.get(id),
     });
     win.setPaged(
@@ -368,8 +369,7 @@ describe('AgentListWindow — paged state', () => {
             ['c', 'stopped'],
           ],
         },
-      }),
-      ''
+      })
     );
     expect(win.updatesAvailable).toBe(false);
 
@@ -391,11 +391,14 @@ describe('AgentListWindow — paged state', () => {
       ['z', matching],
     ]);
     const { win } = createWindow({
-      viewState: makeViewState(),
+      viewState: makeViewState({
+        serverQuery: 'label:env=prod',
+        committedFilterPredicate: (a) => a.labels?.env === 'prod',
+      }),
       getAgent: (id) => known.get(id),
       getProjectId: () => 'p-1',
     });
-    win.setPaged(pagedResult(page0, { totalCount: 1 }), 'env=prod');
+    win.setPaged(pagedResult(page0, { totalCount: 1 }));
 
     win.applyChanges({ upserted: ['x'], deleted: [], unknown: new Map(), generation: 1 });
     expect(win.memberIndex.has('x')).toBe(false); // wrong label: never added
@@ -423,7 +426,7 @@ describe('AgentListWindow — paged state', () => {
       viewState: makeViewState({ sortDir: 'desc' }),
       getAgent: (id) => known.get(id),
     });
-    win.setPaged(pagedResult(page0, { totalCount: 2 }), '');
+    win.setPaged(pagedResult(page0, { totalCount: 2 }));
 
     // 'b' becomes the most-recently-updated: should move to the top.
     const bUpdated = agent('b', { updated: '2026-01-05T00:00:00Z' });
@@ -440,10 +443,14 @@ describe('AgentListWindow — paged state', () => {
       ['b', page0[1]],
     ]);
     const { win } = createWindow({
-      viewState: makeViewState({ phaseFilter: 'running' }),
+      viewState: makeViewState({
+        serverQuery: 'phase:running',
+        committedFilterPredicate: (a) => a.phase === 'running',
+        committedPhasePredicate: (p) => p === 'running',
+      }),
       getAgent: (id) => known.get(id),
     });
-    win.setPaged(pagedResult(page0, { totalCount: 2 }), '');
+    win.setPaged(pagedResult(page0, { totalCount: 2 }));
 
     known.set('b', agent('b', { phase: 'stopped' }));
     win.applyChanges({ upserted: ['b'], deleted: [], unknown: new Map(), generation: 1 });
@@ -455,7 +462,7 @@ describe('AgentListWindow — paged state', () => {
   it('an on-page delete removes the row and raises the chip', () => {
     const page0 = [agent('a'), agent('b')];
     const { win } = createWindow({ viewState: makeViewState() });
-    win.setPaged(pagedResult(page0, { totalCount: 2 }), '');
+    win.setPaged(pagedResult(page0, { totalCount: 2 }));
     win.applyChanges({ upserted: [], deleted: ['a'], unknown: new Map(), generation: 1 });
     expect(win.items.map((a) => a.id)).toEqual(['b']);
     expect(win.updatesAvailable).toBe(true);
@@ -464,7 +471,7 @@ describe('AgentListWindow — paged state', () => {
   it('a delete for an ID that is neither on-page nor in the member index is a safe no-op', () => {
     const page0 = [agent('a')];
     const { win } = createWindow({ viewState: makeViewState() });
-    win.setPaged(pagedResult(page0, { totalCount: 1 }), '');
+    win.setPaged(pagedResult(page0, { totalCount: 1 }));
     win.applyChanges({ upserted: [], deleted: ['never-seen'], unknown: new Map(), generation: 1 });
     expect(win.updatesAvailable).toBe(false);
     expect(win.items.map((a) => a.id)).toEqual(['a']);
@@ -484,8 +491,7 @@ describe('AgentListWindow — paged state', () => {
             ['c', 'running'],
           ],
         },
-      }),
-      ''
+      })
     );
 
     // No active phase filter: a phase-only change is counts-only.
@@ -499,7 +505,11 @@ describe('AgentListWindow — paged state', () => {
     expect(win.updatesAvailable).toBe(false);
 
     const { win: filtered } = createWindow({
-      viewState: makeViewState({ phaseFilter: 'running' }),
+      viewState: makeViewState({
+        serverQuery: 'phase:running',
+        committedFilterPredicate: (a) => a.phase === 'running',
+        committedPhasePredicate: (p) => p === 'running',
+      }),
     });
     filtered.setPaged(
       pagedResult(page0, {
@@ -512,8 +522,7 @@ describe('AgentListWindow — paged state', () => {
             ['c', 'stopped'],
           ],
         },
-      }),
-      ''
+      })
     );
     filtered.applyChanges({
       upserted: [],
@@ -524,7 +533,7 @@ describe('AgentListWindow — paged state', () => {
     expect(filtered.updatesAvailable).toBe(true); // newly passes the active filter
 
     const { win: freshWin } = createWindow({ viewState: makeViewState() });
-    freshWin.setPaged(pagedResult(page0, { totalCount: 1 }), '');
+    freshWin.setPaged(pagedResult(page0, { totalCount: 1 }));
     freshWin.applyChanges({
       upserted: [],
       deleted: [],
@@ -537,7 +546,7 @@ describe('AgentListWindow — paged state', () => {
   it('markResync raises the chip and issues no request (reconnect)', () => {
     const fetchPage = vi.fn();
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(pagedResult([agent('a')], { totalCount: 1 }), '');
+    win.setPaged(pagedResult([agent('a')], { totalCount: 1 }));
     win.markResync();
     expect(win.updatesAvailable).toBe(true);
     expect(fetchPage).not.toHaveBeenCalled();
@@ -547,7 +556,7 @@ describe('AgentListWindow — paged state', () => {
     const page0 = [agent('a')];
     const fetchPage = vi.fn(() => Promise.resolve(pagedResult(page0, { totalCount: 1 })));
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(await fetchPage(), '');
+    win.setPaged(await fetchPage());
     win.markResync();
     expect(win.updatesAvailable).toBe(true);
     await win.refresh();
@@ -558,9 +567,9 @@ describe('AgentListWindow — paged state', () => {
   it("a sort/phase/page-size change never calls fetchPage by itself — project-detail.ts's syncAgentsForViewState owns that decision", () => {
     const fetchPage = vi.fn();
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(pagedResult([agent('a')], { totalCount: 1 }), '');
+    win.setPaged(pagedResult([agent('a')], { totalCount: 1 }));
     win.setViewState({ sortField: 'name' });
-    win.setViewState({ phaseFilter: 'running' });
+    win.setViewState({ serverQuery: 'phase:running' });
     win.setViewState({ pageSize: 50 });
     expect(fetchPage).not.toHaveBeenCalled();
   });
@@ -602,14 +611,17 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
       )
     );
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }));
     await win.next();
     expect(win.pageIndex).toBe(1);
     expect(win.hasPrev).toBe(true);
     expect(win.items.map((a) => a.id)).toEqual(['c', 'd']);
 
     const callsBefore = fetchPage.mock.calls.length;
-    win.setViewState({ label: 'env' }); // sl-input: local preview only
+    win.setViewState({
+      filterPredicate: (a) => Boolean(a.labels && 'env' in a.labels),
+      previewDiffersFromCommitted: true,
+    }); // uncommitted preview only
     expect(win.pageIndex).toBe(1); // unchanged — no re-adoption, no reset
     expect(win.hasPrev).toBe(true); // unchanged
     // The live preview filter IS applied to the
@@ -631,7 +643,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
         viewState: makeViewState({ pageSize: 3 }),
         getAgent: (id) => known.get(id),
       });
-      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }), '');
+      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }));
       known.set('b', agent('b', { updated: '2026-01-02T00:00:00Z', phase: 'stopped' }));
       win.applyChanges({ upserted: ['b'], deleted: [], unknown: new Map(), generation: 1 });
       expect(win.updatesAvailable).toBe(false);
@@ -648,7 +660,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
         viewState: makeViewState({ pageSize: 3, sortDir: 'asc' }),
         getAgent: (id) => known.get(id),
       });
-      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }), '');
+      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }));
       known.set('a', agent('a', { updated: '2026-01-03T00:00:00Z' }));
       win.applyChanges({ upserted: ['a'], deleted: [], unknown: new Map(), generation: 1 });
       expect(win.updatesAvailable).toBe(false);
@@ -666,7 +678,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
         viewState: makeViewState({ pageSize: 3 }),
         getAgent: (id) => known.get(id),
       });
-      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }), '');
+      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }));
       known.set('c', agent('c', { updated: '2026-01-09T00:00:00Z' }));
       win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
       expect(win.updatesAvailable).toBe(false);
@@ -688,7 +700,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
         fetchPage,
         getAgent: (id) => known.get(id),
       });
-      win.setPaged(pagedResult(page0, { totalCount: 3, nextCursor: 'c1' }), '');
+      win.setPaged(pagedResult(page0, { totalCount: 3, nextCursor: 'c1' }));
       await win.next();
       known.set('c', agent('c', { updated: '2026-01-05T00:00:00Z' })); // now above page1's old first ('b')
       win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
@@ -706,7 +718,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
         viewState: makeViewState({ pageSize: 3 }),
         getAgent: (id) => known.get(id),
       });
-      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }), '');
+      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }));
       known.set('a', agent('a', { updated: '2025-01-01T00:00:00Z' })); // now older than everything
       win.applyChanges({ upserted: ['a'], deleted: [], unknown: new Map(), generation: 1 });
       expect(win.updatesAvailable).toBe(true);
@@ -718,10 +730,13 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
     const nonMember = agent('x', { labels: { env: 'dev' }, updated: '2026-02-01T00:00:00Z' });
     const known = new Map([...page0, nonMember].map((a) => [a.id, a]));
     const { win } = createWindow({
-      viewState: makeViewState(),
+      viewState: makeViewState({
+        serverQuery: 'label:env=prod',
+        committedFilterPredicate: (a) => a.labels?.env === 'prod',
+      }),
       getAgent: (id) => known.get(id),
     });
-    win.setPaged(pagedResult(page0, { totalCount: 1 }), 'env=prod');
+    win.setPaged(pagedResult(page0, { totalCount: 1 }));
 
     win.applyChanges({ upserted: ['x'], deleted: [], unknown: new Map(), generation: 1 });
 
@@ -742,7 +757,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
       fetchPage,
       getAgent: (id) => known.get(id),
     });
-    win.setPaged(pagedResult(page0, { totalCount: 3, nextCursor: 'c1' }), '');
+    win.setPaged(pagedResult(page0, { totalCount: 3, nextCursor: 'c1' }));
     await win.next();
     expect(win.pageIndex).toBe(1);
 
@@ -760,7 +775,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
       viewState: makeViewState({ pageSize: 1 }),
       getAgent: (id) => (id === 'n' ? agent('n', { updated: '2026-02-01T00:00:00Z' }) : undefined),
     });
-    win.setPaged(pagedResult(page0, { totalCount: 1 }), '');
+    win.setPaged(pagedResult(page0, { totalCount: 1 }));
     win.applyChanges({ upserted: ['n'], deleted: [], unknown: new Map(), generation: 1 });
     expect(win.updatesAvailable).toBe(true);
   });
@@ -776,7 +791,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
       )
     );
     const { win } = createWindow({ viewState: makeViewState({ pageSize: 3 }), fetchPage });
-    win.setPaged(await fetchPage({ cursor: undefined, limit: 3, wantStats: true }), '');
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 3, wantStats: true }));
     expect(win.rangeStart).toBe(0);
     await win.next();
     expect(win.rangeStart).toBe(3); // rows before page 1: exactly page0's 3 rows
@@ -798,7 +813,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
     const d2 = win.display;
     expect(d1).toBe(d2); // same reference: not recomputed
 
-    win.setViewState({ phaseFilter: 'running' });
+    win.setViewState({ filterPredicate: (a) => a.phase === 'running' });
     const d3 = win.display;
     expect(d3).not.toBe(d1); // view state changed: recomputed
     const d4 = win.display;
@@ -835,7 +850,7 @@ describe('AgentListWindow — cursor invalidation after a failed view-change', (
       )
     );
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }));
     expect(win.hasNext).toBe(true);
     expect(win.hasPrev).toBe(false);
 
@@ -856,7 +871,7 @@ describe('AgentListWindow — cursor invalidation after a failed view-change', (
 
     // The next successful setPaged (e.g. retrying the view-change) restores
     // navigation.
-    win.setPaged(pagedResult(page1, { totalCount: 4 }), '');
+    win.setPaged(pagedResult(page1, { totalCount: 4 }));
     expect(win.hasNext).toBe(false); // page1 happens to be the last page here
     expect(win.hasPrev).toBe(false); // setPaged always re-adopts at page 0
   });
@@ -896,7 +911,7 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
       )
     );
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }));
     await win.next();
     expect(win.pageIndex).toBe(1);
     expect(win.hasPrev).toBe(true); // on page 1, Prev is normally available
@@ -939,7 +954,7 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
       }
     );
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }));
     await win.next();
     expect(win.pageIndex).toBe(1);
 
@@ -1014,7 +1029,7 @@ describe('AgentListWindow — cursor invalidation vs. a concurrent window fetch'
       return Promise.resolve(pagedResult(page1, { nextCursor: 'c1', totalCount: 4 }));
     });
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
-    win.setPaged(pagedResult(page0, { nextCursor: 'c1', totalCount: 4 }), '');
+    win.setPaged(pagedResult(page0, { nextCursor: 'c1', totalCount: 4 }));
     await win.next();
     expect(win.pageIndex).toBe(1);
 
@@ -1050,7 +1065,11 @@ describe('AgentListWindow — stopping phase filter', () => {
   it('small state: stopping agents only, and phase changes move them in and out', () => {
     let agents = [agent('a', { phase: 'stopping' }), agent('b'), agent('c', { phase: 'stopped' })];
     const { win } = createWindow({
-      viewState: makeViewState({ phaseFilter: 'stopping', pageSize: 10 }),
+      viewState: makeViewState({
+        serverQuery: 'phase:stopping',
+        filterPredicate: (a) => a.phase === 'stopping',
+        pageSize: 10,
+      }),
       getHeldAgents: () => agents,
     });
     win.setSmall();
@@ -1062,7 +1081,11 @@ describe('AgentListWindow — stopping phase filter', () => {
   it('paged state: an off-page member entering stopping shows the updates chip', () => {
     const live = new Map<string, Agent>();
     const { win } = createWindow({
-      viewState: makeViewState({ phaseFilter: 'stopping' }),
+      viewState: makeViewState({
+        serverQuery: 'phase:stopping',
+        committedFilterPredicate: (a) => a.phase === 'stopping',
+        committedPhasePredicate: (p) => p === 'stopping',
+      }),
       getAgent: (id) => live.get(id),
     });
     win.setPaged(
@@ -1077,8 +1100,7 @@ describe('AgentListWindow — stopping phase filter', () => {
             ['z', 'running'],
           ],
         },
-      },
-      ''
+      }
     );
     expect(win.items.map((a) => a.id)).toEqual(['a']);
     live.set('z', agent('z', { phase: 'stopping' }));
@@ -1094,7 +1116,6 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
       a.phase === 'error' && a.labels?.['team'] === 'ui';
     const { win } = createWindow({
       viewState: makeViewState({
-        phaseFilter: '',
         serverQuery: 'label:team=ui phase:error',
         filterPredicate: matchesErrorUi,
         committedFilterPredicate: matchesErrorUi,
@@ -1114,8 +1135,7 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
             ['a2', 'error'],
           ],
         },
-      },
-      ''
+      }
     );
 
     // Brand-new agent outside the committed query arrives via SSE.
@@ -1137,7 +1157,6 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
     const matchesRunning = (a: Agent): boolean => a.phase === 'running';
     const { win } = createWindow({
       viewState: makeViewState({
-        phaseFilter: '',
         serverQuery: 'phase:running',
         filterPredicate: matchesRunning,
         committedFilterPredicate: matchesRunning,
@@ -1157,8 +1176,7 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
             ['off-1', 'running'],
           ],
         },
-      },
-      ''
+      }
     );
 
     // Existing off-page member stops running -> leaves the committed query population.
@@ -1175,7 +1193,6 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
     const matchesRunning = (a: Agent): boolean => a.phase === 'running';
     const { win } = createWindow({
       viewState: makeViewState({
-        phaseFilter: '',
         serverQuery: 'phase:running',
         filterPredicate: matchesRunning,
         committedFilterPredicate: matchesRunning,
@@ -1195,8 +1212,7 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
             ['off-1', 'running'],
           ],
         },
-      },
-      ''
+      }
     );
 
     live.set('a1', agent('a1', { phase: 'stopped' }));
@@ -1213,7 +1229,6 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
       a.phase === 'running' && a.labels?.['team'] === 'ui';
     const { win } = createWindow({
       viewState: makeViewState({
-        phaseFilter: '',
         serverQuery: 'label:team=ui phase:running',
         filterPredicate: matchesRunningUi,
         committedFilterPredicate: matchesRunningUi,
@@ -1233,8 +1248,7 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
             ['off-1', 'running'],
           ],
         },
-      },
-      ''
+      }
     );
 
     // Phase-only delta keeping phase=running must NOT falsely evict even though delta lacks labels.

@@ -479,12 +479,11 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private agentWindow = new AgentListWindow({
     viewState: {
-      phaseFilter: '',
-      label: '',
       sortField: this.sortField,
       sortDir: this.sortDir,
       pageSize: this.pagerPageSize,
       view: listViewOf(this.viewMode),
+      serverQuery: '',
     },
     getProjectId: () => this.projectId,
     isAddable: (agent: Agent): boolean => {
@@ -1388,14 +1387,13 @@ export class ScionPageProjectDetail extends LitElement {
     const committedPred =
       cfq === fq ? initialPred : cfq ? (a: Agent) => matchAgentQuery(cfq, a, ctx) : null;
     this.agentWindow.setViewState({
-      phaseFilter: '',
-      label: '',
       sortField: this.sortField,
       sortDir: this.sortDir,
       pageSize: this.pagerPageSize,
       view: listViewOf(this.viewMode),
       hasClientOnlyFilter: this.committedHasClientOnly,
       filterPredicate: initialPred,
+      previewDiffersFromCommitted: false,
       committedFilterPredicate: committedPred,
       committedPhasePredicate: phasePredicateForQuery(cfq),
       serverQuery: this.committedServerQ,
@@ -1960,6 +1958,7 @@ export class ScionPageProjectDetail extends LitElement {
       const cfq = this.committedFilterQuery;
       const ctx = this.filterContext;
       this.agentWindow.setViewState({
+        previewDiffersFromCommitted: this.filterQuery !== cfq,
         committedFilterPredicate: cfq ? (a: Agent) => matchAgentQuery(cfq, a, ctx) : null,
         committedPhasePredicate: phasePredicateForQuery(cfq),
         serverQuery: this.committedServerQ,
@@ -2107,7 +2106,7 @@ export class ScionPageProjectDetail extends LitElement {
       // Paged: `this.agents` stays empty; stats and Stop-all read the
       // member index through `agentStats` instead.
       this.agents = [];
-      this.agentWindow.setPaged(this.seedPage(epoch, data), serverQ, ticket.key);
+      this.agentWindow.setPaged(this.seedPage(epoch, data), ticket.key);
     }
     return true;
   }
@@ -2620,6 +2619,7 @@ export class ScionPageProjectDetail extends LitElement {
     const ctx = this.filterContext;
     this.agentWindow.setViewState({
       filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
+      previewDiffersFromCommitted: true,
     });
   }
 
@@ -2646,6 +2646,7 @@ export class ScionPageProjectDetail extends LitElement {
     const pred = (a: Agent) => matchAgentQuery(fq, a, ctx);
     this.agentWindow.setViewState({
       filterPredicate: pred,
+      previewDiffersFromCommitted: !isCurrentText,
       committedFilterPredicate: pred,
       committedPhasePredicate: phasePredicateForQuery(fq),
       serverQuery: nextQ,
@@ -2688,6 +2689,7 @@ export class ScionPageProjectDetail extends LitElement {
         const pred = (a: Agent) => matchAgentQuery(fq, a, ctx);
         this.agentWindow.setViewState({
           filterPredicate: pred,
+          previewDiffersFromCommitted: false,
           committedFilterPredicate: pred,
           committedPhasePredicate: phasePredicateForQuery(fq),
           serverQuery: nextQ,
@@ -3724,7 +3726,7 @@ export class ScionPageProjectDetail extends LitElement {
     // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
     const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     const win = this.agentWindow;
-    if (win.state === 'paged' && !win.isSortedEligible(this.committedServerQ)) {
+    if (win.state === 'paged' && !win.isSortedEligible()) {
       return this.agentsLoading
         ? html`<div class="empty-filter-state">Loading agents…</div>`
         : html`<div class="empty-filter-state">

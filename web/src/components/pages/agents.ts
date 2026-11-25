@@ -746,15 +746,13 @@ export class ScionPageAgents extends LitElement {
     const cfq = this.committedFilterQuery;
     const ctx = this.filterContext;
     return {
-      phaseFilter: '',
-      label: '',
       sortField: this.sortField,
       sortDir: this.sortDir,
       pageSize: this.pagerPageSize,
       view: listViewOf(this.viewMode),
-      modeFilter: '',
       hasClientOnlyFilter: this.committedHasClientOnly,
       filterPredicate: fq ? (a: Agent) => matchAgentQuery(fq, a, ctx) : null,
+      previewDiffersFromCommitted: false,
       committedFilterPredicate: cfq ? (a: Agent) => matchAgentQuery(cfq, a, ctx) : null,
       committedPhasePredicate: phasePredicateForQuery(cfq),
       serverQuery: this.committedServerQ,
@@ -797,6 +795,7 @@ export class ScionPageAgents extends LitElement {
     const ctx = this.filterContext;
     this.agentWindow.setViewState({
       filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
+      previewDiffersFromCommitted: true,
     });
   }
 
@@ -817,9 +816,11 @@ export class ScionPageAgents extends LitElement {
     this.committedFilterQuery = fq;
     this.committedHasClientOnly = nextHasClientOnly;
     const ctx = this.filterContext;
+    const pred = (a: Agent): boolean => matchAgentQuery(fq, a, ctx);
     this.agentWindow.setViewState({
-      filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
-      committedFilterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
+      filterPredicate: pred,
+      previewDiffersFromCommitted: !isCurrentText,
+      committedFilterPredicate: pred,
       committedPhasePredicate: phasePredicateForQuery(fq),
       serverQuery: nextQ,
       hasClientOnlyFilter: nextHasClientOnly,
@@ -850,9 +851,11 @@ export class ScionPageAgents extends LitElement {
         this.committedServerQ = nextQ;
         this.committedHasClientOnly = nextHasClientOnly;
         const ctx = this.filterContext;
+        const pred = (a: Agent): boolean => matchAgentQuery(fq, a, ctx);
         this.agentWindow.setViewState({
-          filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
-          committedFilterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
+          filterPredicate: pred,
+          previewDiffersFromCommitted: false,
+          committedFilterPredicate: pred,
           committedPhasePredicate: phasePredicateForQuery(fq),
           serverQuery: nextQ,
           hasClientOnlyFilter: nextHasClientOnly,
@@ -946,7 +949,7 @@ export class ScionPageAgents extends LitElement {
    */
   private onAgentViewStateChanged(): void {
     this.viewEpoch++;
-    const superseded = this.agentWindow.supersededRequest('');
+    const superseded = this.agentWindow.supersededRequest(this.committedServerQ);
     if (superseded) {
       this.cancelAgentsLoad();
       if (superseded === 'page-load' || superseded === 'label-commit') {
@@ -1003,7 +1006,7 @@ export class ScionPageAgents extends LitElement {
    * longer fits it, plans again for the current view state.
    */
   private async loadAgentsForView(trigger: AgentListTrigger): Promise<void> {
-    const plan = this.agentWindow.planRequest(trigger, '');
+    const plan = this.agentWindow.planRequest(trigger, this.committedServerQ);
     if (plan === 'none') return;
     if (plan === 'page') {
       await this.agentWindow.refresh();
@@ -1026,7 +1029,7 @@ export class ScionPageAgents extends LitElement {
     if (
       adopted &&
       viewEpoch !== this.viewEpoch &&
-      this.agentWindow.planRequest('view-change', '') !== 'none'
+      this.agentWindow.planRequest('view-change', this.committedServerQ) !== 'none'
     ) {
       // A view change, so a failure keeps the adopted rows, as a
       // background view-change refresh does, and never becomes the page
@@ -1046,8 +1049,8 @@ export class ScionPageAgents extends LitElement {
    */
   private async loadFitAgents(trigger: AgentListTrigger): Promise<boolean> {
     const { gen, signal } = this.beginAgentsLoad();
-    const ticket = this.agentWindow.beginSortedRequest(trigger, '');
     const serverQ = this.committedServerQ;
+    const ticket = this.agentWindow.beginSortedRequest(trigger, serverQ);
     const params = new URLSearchParams();
     params.set('sort', this.serverSortField);
     params.set('dir', this.sortDir);
@@ -1107,7 +1110,7 @@ export class ScionPageAgents extends LitElement {
         // Paged: `this.agents` stays empty; stats and Stop-all read the
         // member index through the window.
         this.agents = [];
-        this.agentWindow.setPaged(this.seedPage(epoch, data), '', ticket.key);
+        this.agentWindow.setPaged(this.seedPage(epoch, data), ticket.key);
       }
       return true;
     } finally {
@@ -1679,7 +1682,7 @@ export class ScionPageAgents extends LitElement {
         : this.renderEmptyState()}`;
     }
 
-    if (win.state === 'paged' && !win.isSortedEligible('')) {
+    if (win.state === 'paged' && !win.isSortedEligible()) {
       // The drain this view state needs is in flight, or failed; the server
       // page is not shown in the wrong order meanwhile.
       return this.agentsLoading

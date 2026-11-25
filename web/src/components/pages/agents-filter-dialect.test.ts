@@ -837,8 +837,8 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     const globalWin = (agentsEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
     const liveDirect1 = makeModeAgent('live-direct-1', 'proj-1', 'direct');
     const liveOwner1 = makeModeAgent('live-owner-1', 'proj-1', 'owner');
-    expect(globalWin.passesCommittedLabel(liveDirect1)).toBe(true);
-    expect(globalWin.passesCommittedLabel(liveOwner1)).toBe(false);
+    expect(globalWin.passesCommittedQuery(liveDirect1)).toBe(true);
+    expect(globalWin.passesCommittedQuery(liveOwner1)).toBe(false);
 
     dispatchSseCreate(liveDirect1);
     dispatchSseCreate(liveOwner1);
@@ -894,8 +894,8 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     const projWin = (projEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
     const liveDirect2 = makeModeAgent('live-proj-direct-1', 'proj-123', 'direct');
     const liveOwner2 = makeModeAgent('live-proj-owner-1', 'proj-123', 'owner');
-    expect(projWin.passesCommittedLabel(liveDirect2)).toBe(true);
-    expect(projWin.passesCommittedLabel(liveOwner2)).toBe(false);
+    expect(projWin.passesCommittedQuery(liveDirect2)).toBe(true);
+    expect(projWin.passesCommittedQuery(liveOwner2)).toBe(false);
 
     dispatchSseCreate(liveDirect2);
     dispatchSseCreate(liveOwner2);
