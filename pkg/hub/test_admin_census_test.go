@@ -316,6 +316,7 @@ var testAdminAdminEmailsCensus = map[string]string{
 	"operational_settings.go:buildSnapshotFromKoanf":      "config: settings plumbing",
 	"server.go:AdminEmails":                               "config: accessor; ReconcileSuperAdminBindings skips test identities",
 	"server.go:New":                                       "config: passed to ReconcileSuperAdminBindings, which skips test identities",
+	"server.go:ReconcileStartupAdminBindings":             "config: passed to reconcileSuperAdminBindings, which skips test identities",
 	"web.go:adminEmails":                                  "sign-in: web sign-in; test identities never sign in",
 
 	// The authorized_domains save check (ptone/scion#6000) reads admin_emails

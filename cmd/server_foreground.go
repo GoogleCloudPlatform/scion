@@ -3378,6 +3378,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		return nil, errors.New("hub server initialization failed: no store configured")
 	}
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
+	if _, ok := s.(store.HubSettingStore); ok {
+		hubCfg.DeferAdminReconciliation = true
+	}
 	hubCfg.HubEndpoints = &endpoints
 	hubCfg.MaintenanceConfig.Installer = detectUpdateInstaller(ctx, hubCfg.MaintenanceConfig)
 	hubCfg.HubIDSource = resolveHubIDSource(hubCfg.HubIDPinned, hubCfg.HubID)
@@ -3874,6 +3877,18 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	hub.ApplyMaintenanceFromSnapshot(hubSrv, snap)
 
 	hubSrv.SetOperationalSettings(ops)
+
+	// Reconcile super-admin bindings and latch demotionSafe now that the
+	// effective operational settings (including DB rows and SCION_SEED_*
+	// values) have been applied, before any HTTP listener binds.
+	hubSrv.ReconcileStartupAdminBindings(ctx)
+	if len(hubSrv.AdminEmails()) == 0 &&
+		strings.TrimSpace(os.Getenv("SCION_SERVER_HUB_ADMINEMAILS")) == "" &&
+		strings.TrimSpace(os.Getenv("SCION_SEED_SERVER_HUB_ADMINEMAILS")) != "" {
+		slog.Warn("Effective runtime admin_emails list is empty despite SCION_SEED_SERVER_HUB_ADMINEMAILS being set — seed values may be superseded (e.g. by a managed access row in the database) or sanitize to empty; admin reconciliation is disabled",
+			"seed_env_var", "SCION_SEED_SERVER_HUB_ADMINEMAILS",
+			"server_env_var", "SCION_SERVER_HUB_ADMINEMAILS")
+	}
 
 	// One-time image_registry warnings (ptone/scion#3916): a maintenance
 	// registry that no longer applies to agent images, and settings-file
