@@ -3264,6 +3264,10 @@ type Server struct {
 	// (lifecycle_events.go).
 	lifecycleEvents lifecycleEventsRuntime
 
+	// usageLedger tracks tokenomics.usage_ledger backfill state and
+	// background goroutine lifecycle (usage_ledger.go).
+	usageLedger usageLedgerRuntime
+
 	// triggers holds the shared trigger.event durablequeue handle and
 	// background drainer state (trigger_dispatch.go).
 	triggers triggerRuntime
@@ -7883,7 +7887,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Start the lifecycle outbox drainer, only when it has work.
 	s.startLifecycleEvents(ctx)
 
-	// Reconcile Tokenomics usage ledger attribution hook and one-shot active-run backfill.
+	// Reconcile Tokenomics usage ledger attribution hook and idempotent active-run backfill.
 	s.reconcileUsageLedger(ctx)
 
 	// Start the trigger.event queue drainer when hub.triggers is enabled.
@@ -8085,6 +8089,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Stop the lifecycle drainer after its bounded final pass, while
 		// the store is still open.
 		s.stopLifecycleEvents(ctx)
+		s.stopUsageLedger()
 
 		// Stop the DB pool-stats sampler. Safe to call more than once: it
 		// wraps either a context.CancelFunc or a no-op from

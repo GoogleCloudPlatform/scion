@@ -2298,7 +2298,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// hub.lifecycle_events, hub.triggers, and tokenomics.usage_ledger are read on every apply.
 	s.reconcileLifecycleEvents(context.Background())
 	s.reconcileTriggerDrainer(context.Background())
-	s.reconcileUsageLedger(context.Background())
+	s.reconcileUsageLedgerAsync(context.Background())
 
 	return map[string]interface{}{
 		"applied":          applied,

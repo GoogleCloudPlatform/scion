@@ -16,12 +16,16 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
 
 	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -31,6 +35,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// defaultRunAttributionBackfillPageSize bounds each paged batch in
+// BackfillActiveRunAttributions so large fleets do not load all agents into
+// memory at once.
+const defaultRunAttributionBackfillPageSize = 200
 
 // runAttributionConfigSlot holds the active *store.RunAttributionConfig
 // atomically so the Hub can toggle tokenomics.usage_ledger at runtime without
@@ -94,73 +103,105 @@ func (s *UsageLedgerStore) usesRowLocks() bool {
 }
 
 // EnsureRunAttribution implements store.UsageLedgerStore.EnsureRunAttribution.
+// Returns created=true iff the INSERT ... ON CONFLICT (run_id) DO NOTHING
+// statement actually inserted a new row (based on RowsAffected).
 func (s *UsageLedgerStore) EnsureRunAttribution(ctx context.Context, attr *store.RunAttribution) (bool, error) {
 	if attr == nil || attr.RunID == "" || attr.ProjectID == "" || attr.AgentID == "" {
 		return false, fmt.Errorf("%w: run_id, project_id, and agent_id are required", store.ErrInvalidInput)
 	}
-	existed, err := s.client.RunAttribution.Query().
-		Where(runattribution.IDEQ(attr.RunID)).
-		Exist(ctx)
-	if err != nil {
-		return false, mapError(err)
-	}
-	if existed {
-		return false, nil
-	}
-	if err := insertRunAttributionOnConflictDoNothing(ctx, s.client, attr); err != nil {
-		return false, err
-	}
-	return true, nil
+	return insertRunAttributionOnConflictDoNothing(ctx, s.client, attr)
 }
 
-func insertRunAttributionOnConflictDoNothing(ctx context.Context, client *ent.Client, attr *store.RunAttribution) error {
+func insertRunAttributionOnConflictDoNothing(ctx context.Context, client *ent.Client, attr *store.RunAttribution) (bool, error) {
 	createdAt := attr.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
 	createdAt = createdAt.UTC().Truncate(time.Microsecond)
 
-	b := client.RunAttribution.Create().
-		SetID(attr.RunID).
-		SetLaunchID(attr.LaunchID).
-		SetGeneration(attr.Generation).
-		SetPriorRunID(attr.PriorRunID).
-		SetHubID(attr.HubID).
-		SetProjectID(attr.ProjectID).
-		SetAgentID(attr.AgentID).
-		SetAgentSlug(attr.AgentSlug).
-		SetBrokerID(attr.BrokerID).
-		SetNillableBillingUserID(attr.BillingUserID).
-		SetNillableOwnerID(attr.OwnerID).
-		SetNillableCreatedBy(attr.CreatedBy).
-		SetHarness(attr.Harness).
-		SetHarnessConfig(attr.HarnessConfig).
-		SetTemplate(attr.Template).
-		SetNillableHarnessConfigDigest(attr.HarnessConfigDigest).
-		SetNillableTemplateDigest(attr.TemplateDigest).
-		SetNillableHarnessBuild(attr.HarnessBuild).
-		SetMeteringWriterMode(attr.MeteringWriterMode).
-		SetUsageLiveSource(attr.UsageLiveSource).
-		SetCapturePolicy(attr.CapturePolicy).
-		SetNoticeVersion(attr.NoticeVersion).
-		SetBackfillExisting(attr.BackfillExisting).
-		SetLegalHold(attr.LegalHold).
-		SetCreatedAt(createdAt)
+	var labelsJSON any
 	if len(attr.LabelsAtLaunch) > 0 {
-		labels := make(map[string]string, len(attr.LabelsAtLaunch))
-		for k, v := range attr.LabelsAtLaunch {
-			labels[k] = v
+		raw, err := json.Marshal(attr.LabelsAtLaunch)
+		if err != nil {
+			return false, fmt.Errorf("marshal labels_at_launch: %w", err)
 		}
-		b = b.SetLabelsAtLaunch(labels)
+		labelsJSON = string(raw)
 	}
 
-	if err := client.RunAttribution.CreateBulk(b).
-		OnConflictColumns(runattribution.FieldID).
-		DoNothing().
-		Exec(ctx); err != nil {
-		return mapError(err)
+	drv := client.Driver()
+	query, args := entsql.Dialect(drv.Dialect()).
+		Insert(runattribution.Table).
+		Columns(
+			runattribution.FieldID,
+			runattribution.FieldLaunchID,
+			runattribution.FieldGeneration,
+			runattribution.FieldPriorRunID,
+			runattribution.FieldHubID,
+			runattribution.FieldProjectID,
+			runattribution.FieldAgentID,
+			runattribution.FieldAgentSlug,
+			runattribution.FieldBrokerID,
+			runattribution.FieldBillingUserID,
+			runattribution.FieldOwnerID,
+			runattribution.FieldCreatedBy,
+			runattribution.FieldHarness,
+			runattribution.FieldHarnessConfig,
+			runattribution.FieldTemplate,
+			runattribution.FieldHarnessConfigDigest,
+			runattribution.FieldTemplateDigest,
+			runattribution.FieldHarnessBuild,
+			runattribution.FieldLabelsAtLaunch,
+			runattribution.FieldMeteringWriterMode,
+			runattribution.FieldUsageLiveSource,
+			runattribution.FieldCapturePolicy,
+			runattribution.FieldNoticeVersion,
+			runattribution.FieldBackfillExisting,
+			runattribution.FieldLegalHold,
+			runattribution.FieldCreatedAt,
+		).
+		Values(
+			attr.RunID,
+			attr.LaunchID,
+			attr.Generation,
+			attr.PriorRunID,
+			attr.HubID,
+			attr.ProjectID,
+			attr.AgentID,
+			attr.AgentSlug,
+			attr.BrokerID,
+			attr.BillingUserID,
+			attr.OwnerID,
+			attr.CreatedBy,
+			attr.Harness,
+			attr.HarnessConfig,
+			attr.Template,
+			attr.HarnessConfigDigest,
+			attr.TemplateDigest,
+			attr.HarnessBuild,
+			labelsJSON,
+			attr.MeteringWriterMode,
+			attr.UsageLiveSource,
+			attr.CapturePolicy,
+			attr.NoticeVersion,
+			attr.BackfillExisting,
+			attr.LegalHold,
+			createdAt,
+		).
+		OnConflict(
+			entsql.ConflictColumns(runattribution.FieldID),
+			entsql.DoNothing(),
+		).
+		Query()
+
+	var res sql.Result
+	if err := drv.Exec(ctx, query, args, &res); err != nil {
+		return false, mapError(err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
 }
 
 // GetRunAttribution implements store.UsageLedgerStore.GetRunAttribution.
@@ -357,27 +398,20 @@ func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, ro
 	}
 
 	harnessConfig := row.HarnessConfig
-	var harness string
+	var appliedCfg *store.AgentAppliedConfig
 	if row.AppliedConfig != "" {
 		if cfg, parseErr := parseAppliedConfig(row.AppliedConfig); parseErr == nil && cfg != nil {
+			appliedCfg = cfg
 			if harnessConfig == "" {
 				harnessConfig = cfg.HarnessConfig
 			}
-			if cfg.Env != nil {
-				if h := cfg.Env["SCION_HARNESS"]; h != "" {
-					harness = h
-				}
-			}
 		}
 	}
-	if harness == "" && row.EffectiveConfig != nil && *row.EffectiveConfig != "" {
-		if eff := parseEffectiveConfig(row.ID.String(), row.EffectiveConfig); eff != nil && eff.Harness != "" {
-			harness = eff.Harness
-		}
+	var effectiveCfg *store.AgentEffectiveConfig
+	if row.EffectiveConfig != nil && *row.EffectiveConfig != "" {
+		effectiveCfg = parseEffectiveConfig(row.ID.String(), row.EffectiveConfig)
 	}
-	if harness == "" {
-		harness = harnessConfig
-	}
+	harness := store.ResolveRunAttributionHarness(appliedCfg, effectiveCfg)
 
 	var launchID string
 	if row.LaunchRunID == runID && row.LaunchID != "" {
@@ -421,12 +455,13 @@ func buildRunAttributionFromAgentRow(ctx context.Context, client *ent.Client, ro
 
 // ensureRunAttributionForAgentTx reads the agent row in client's transaction
 // and inserts an immutable run_attribution row for runID via ON CONFLICT DO NOTHING.
-func ensureRunAttributionForAgentTx(ctx context.Context, client *ent.Client, uid uuid.UUID, runID, priorRunID, hubID string) error {
+func ensureRunAttributionForAgentTx(ctx context.Context, client *ent.Client, uid uuid.UUID, runID, priorRunID, hubID string, beforeInsert func(ctx context.Context, runID string) error) error {
 	if runID == "" {
 		return nil
 	}
 	row, err := client.Agent.Query().
 		Where(agent.IDEQ(uid)).
+		Select(runAttributionAgentColumns...).
 		Only(ctx)
 	if err != nil {
 		return mapError(err)
@@ -435,7 +470,34 @@ func ensureRunAttributionForAgentTx(ctx context.Context, client *ent.Client, uid
 	if err != nil {
 		return err
 	}
-	return insertRunAttributionOnConflictDoNothing(ctx, client, attr)
+	if beforeInsert != nil {
+		if err := beforeInsert(ctx, runID); err != nil {
+			return err
+		}
+	}
+	_, err = insertRunAttributionOnConflictDoNothing(ctx, client, attr)
+	return err
+}
+
+// runAttributionAgentColumns is the narrow column projection needed to build a
+// run_attribution snapshot from an agents row.
+var runAttributionAgentColumns = []string{
+	agent.FieldID,
+	agent.FieldProjectID,
+	agent.FieldSlug,
+	agent.FieldRunID,
+	agent.FieldLaunchID,
+	agent.FieldLaunchRunID,
+	agent.FieldGeneration,
+	agent.FieldRuntimeBrokerID,
+	agent.FieldOwnerID,
+	agent.FieldCreatedBy,
+	agent.FieldAncestry,
+	agent.FieldHarnessConfig,
+	agent.FieldTemplate,
+	agent.FieldLabels,
+	agent.FieldAppliedConfig,
+	agent.FieldEffectiveConfig,
 }
 
 // fillRunAttributionLaunchIDTx fills launch_id once on run_attribution when
@@ -451,40 +513,88 @@ func fillRunAttributionLaunchIDTx(ctx context.Context, client *ent.Client, runID
 	return mapError(err)
 }
 
-// BackfillActiveRunAttributions implements store.UsageLedgerStore.BackfillActiveRunAttributions.
-// Queries all non-deleted agents with a non-empty run_id and inserts missing
-// run_attribution rows via INSERT ... ON CONFLICT (run_id) DO NOTHING.
-// Completely idempotent and safe to run concurrently across multiple replicas
-// at startup and on every OFF -> ON transition of tokenomics.usage_ledger.
-func (s *UsageLedgerStore) BackfillActiveRunAttributions(ctx context.Context, hubID string) (int, error) {
-	rows, err := s.client.Agent.Query().
-		Where(agent.DeletedAtIsNil(), agent.RunIDNEQ("")).
-		All(ctx)
-	if err != nil {
-		return 0, mapError(err)
-	}
+// runAttributionNotExists filters agents to those whose current run_id does
+// not yet have a row in run_attribution (dialect-uniform SQLite & Postgres).
+func runAttributionNotExists(sel *entsql.Selector) {
+	ra := entsql.Table(runattribution.Table)
+	sub := entsql.Dialect(sel.Dialect()).
+		Select(ra.C(runattribution.FieldID)).
+		From(ra).
+		Where(entsql.ColumnsEQ(ra.C(runattribution.FieldID), sel.C(agent.FieldRunID)))
+	sel.Where(entsql.NotExists(sub))
+}
 
+// BackfillActiveRunAttributions implements store.UsageLedgerStore.BackfillActiveRunAttributions.
+// Pages through non-deleted agents with a non-empty run_id that have no
+// run_attribution row yet (NOT EXISTS filter, narrow column projection),
+// inserting missing rows via INSERT ... ON CONFLICT (run_id) DO NOTHING.
+// Continues past per-agent errors (logging each and returning an aggregated
+// error at the end so the caller retries on the next reconcile).
+func (s *UsageLedgerStore) BackfillActiveRunAttributions(ctx context.Context, hubID string) (int, error) {
+	return s.backfillActiveRunAttributionsPaged(ctx, hubID, defaultRunAttributionBackfillPageSize)
+}
+
+func (s *UsageLedgerStore) backfillActiveRunAttributionsPaged(ctx context.Context, hubID string, pageSize int) (int, error) {
+	if pageSize <= 0 {
+		pageSize = defaultRunAttributionBackfillPageSize
+	}
 	inserted := 0
-	for _, row := range rows {
-		existed, err := s.client.RunAttribution.Query().
-			Where(runattribution.IDEQ(row.RunID)).
-			Exist(ctx)
+	var lastID uuid.UUID
+	hasCursor := false
+	var rowErrs []error
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return inserted, err
+		}
+		q := s.client.Agent.Query().
+			Where(
+				agent.DeletedAtIsNil(),
+				agent.RunIDNEQ(""),
+				runAttributionNotExists,
+			).
+			Select(runAttributionAgentColumns...).
+			Order(ent.Asc(agent.FieldID)).
+			Limit(pageSize)
+		if hasCursor {
+			q = q.Where(agent.IDGT(lastID))
+		}
+		rows, err := q.All(ctx)
 		if err != nil {
 			return inserted, mapError(err)
 		}
-		if existed {
-			continue
+		if len(rows) == 0 {
+			break
 		}
-		attr, err := buildRunAttributionFromAgentRow(ctx, s.client, row, row.RunID, "", hubID)
-		if err != nil {
-			return inserted, err
+		for _, row := range rows {
+			lastID = row.ID
+			hasCursor = true
+			if err := ctx.Err(); err != nil {
+				return inserted, err
+			}
+			attr, err := buildRunAttributionFromAgentRow(ctx, s.client, row, row.RunID, "", hubID)
+			if err != nil {
+				slog.Warn("run_attribution backfill: failed to build attribution for agent",
+					"agent_id", row.ID.String(), "run_id", row.RunID, "error", err)
+				rowErrs = append(rowErrs, fmt.Errorf("agent %s run %s: %w", row.ID, row.RunID, err))
+				continue
+			}
+			created, err := insertRunAttributionOnConflictDoNothing(ctx, s.client, attr)
+			if err != nil {
+				slog.Warn("run_attribution backfill: failed to insert attribution for agent",
+					"agent_id", row.ID.String(), "run_id", row.RunID, "error", err)
+				rowErrs = append(rowErrs, fmt.Errorf("agent %s run %s: %w", row.ID, row.RunID, err))
+				continue
+			}
+			if created {
+				inserted++
+			}
 		}
-		if err := insertRunAttributionOnConflictDoNothing(ctx, s.client, attr); err != nil {
-			return inserted, err
+		if len(rows) < pageSize {
+			break
 		}
-		inserted++
 	}
-	return inserted, nil
+	return inserted, errors.Join(rowErrs...)
 }
 
 // UpsertMeterHealth implements store.UsageLedgerStore.UpsertMeterHealth.

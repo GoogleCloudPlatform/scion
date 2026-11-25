@@ -18,7 +18,10 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -128,4 +131,73 @@ func TestUsageLedger_ExperimentGatingAndBackfill(t *testing.T) {
 	assert.Equal(t, "hub-tokenomics-test", reEnabled.HubID)
 	require.NotNil(t, reEnabled.BillingUserID)
 	assert.Equal(t, user.ID, *reEnabled.BillingUserID)
+}
+
+func TestUsageLedger_BackfillRetryAfterErrorAndAsync(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-retry-test")
+
+	uls, ok := s.(usageLedgerHookStore)
+	require.True(t, ok)
+
+	user := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "retry-user@example.com",
+		DisplayName: "Retry User",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	proj := &store.Project{
+		ID:   uuid.NewString(),
+		Name: "retry-proj",
+		Slug: "retry-proj-" + uuid.NewString()[:8],
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{
+		ID:            uuid.NewString(),
+		Slug:          "retry-agent",
+		Name:          "retry-agent",
+		ProjectID:     proj.ID,
+		OwnerID:       user.ID,
+		CreatedBy:     user.ID,
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "my-claude-fast"},
+		Template:      "default",
+		Phase:         "created",
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-needs-retry", nil)
+	require.NoError(t, err)
+
+	// Inject a transient error on the first backfill call.
+	var calls atomic.Int32
+	srv.usageLedger.backfillFn = func(bctx context.Context, hubID string) (int, error) {
+		if calls.Add(1) == 1 {
+			return 0, errors.New("transient db error")
+		}
+		return uls.BackfillActiveRunAttributions(bctx, hubID)
+	}
+
+	setUsageLedgerExperimentForTest(t, srv, true)
+
+	// First reconcile: writer installs, backfill fails, backfillSucceeded remains false.
+	srv.reconcileUsageLedger(ctx)
+	assert.True(t, uls.RunAttributionConfigInstalled())
+	assert.Equal(t, int32(1), calls.Load())
+	_, err = s.GetRunAttribution(ctx, "run-needs-retry")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Second reconcile (no restart, no OFF->ON toggle): async retry succeeds off the caller path.
+	srv.reconcileUsageLedgerAsync(ctx)
+	require.Eventually(t, func() bool {
+		attr, getErr := s.GetRunAttribution(ctx, "run-needs-retry")
+		return getErr == nil && attr.Harness == "claude" && attr.HarnessConfig == "my-claude-fast"
+	}, 5*time.Second, 10*time.Millisecond)
+	srv.stopUsageLedger()
+	assert.Equal(t, int32(2), calls.Load())
+
+	// Third reconcile: backfillSucceeded is now true, so backfillFn is not called again.
+	srv.reconcileUsageLedger(ctx)
+	assert.Equal(t, int32(2), calls.Load())
 }

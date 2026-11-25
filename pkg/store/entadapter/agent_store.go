@@ -71,6 +71,11 @@ type AgentStore struct {
 	// read and its swap, to simulate a concurrent writer.
 	afterRunIDRead func(agentID string)
 
+	// beforeRunAttributionInsert, when set (tests only), runs inside the
+	// run-ID transaction right before inserting run_attribution so tests can
+	// inject a failure and verify the run_id swap and credential roll back.
+	beforeRunAttributionInsert func(ctx context.Context, runID string) error
+
 	// lifecycle is the agent-write observer slot, shared with the
 	// transactional copies of this store; entTx is the ambient transaction
 	// when there is one (lifecycle_outbox_store.go).
@@ -4147,7 +4152,7 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 					return n, mapError(err)
 				}
 				if runAttrCfg != nil {
-					if err := ensureRunAttributionForAgentTx(ctx, c, uid, runID, row.RunID, runAttrCfg.HubID); err != nil {
+					if err := ensureRunAttributionForAgentTx(ctx, c, uid, runID, row.RunID, runAttrCfg.HubID, s.beforeRunAttributionInsert); err != nil {
 						return 0, err
 					}
 				}
@@ -4204,7 +4209,7 @@ func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.
 		if err != nil || n == 0 {
 			return n, mapError(err)
 		}
-		if err := ensureRunAttributionForAgentTx(ctx, s.client, uid, runID, priorRunID, hubID); err != nil {
+		if err := ensureRunAttributionForAgentTx(ctx, s.client, uid, runID, priorRunID, hubID, s.beforeRunAttributionInsert); err != nil {
 			return 0, err
 		}
 		return n, nil
@@ -4222,7 +4227,7 @@ func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.
 		_ = tx.Rollback()
 		return 0, nil
 	}
-	if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, hubID); err != nil {
+	if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, hubID, s.beforeRunAttributionInsert); err != nil {
 		_ = tx.Rollback()
 		return 0, err
 	}
@@ -4252,7 +4257,7 @@ func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.Agen
 		return 0, nil
 	}
 	if runAttrCfg != nil {
-		if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, runAttrCfg.HubID); err != nil {
+		if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, runAttrCfg.HubID, s.beforeRunAttributionInsert); err != nil {
 			_ = tx.Rollback()
 			return 0, err
 		}
@@ -4413,7 +4418,14 @@ func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID,
 		return n, mapError(err)
 	}
 	runAttrCfg := s.runAttribution.load()
-	needAttribution := runAttrCfg != nil && newRunID != ""
+	// Same-value settles (newRunID == expectedRunID) keep the current run and
+	// need no attribution write; reverts pass prior_run_id = "" so a restored
+	// run never records the failed/reverted run as its prior.
+	needAttribution := runAttrCfg != nil && newRunID != "" && newRunID != expectedRunID
+	priorRunID := expectedRunID
+	if hints.Kind == store.WriteKindRunRevert {
+		priorRunID = ""
+	}
 	var n int
 	switch obs := s.lifecycle.load(); {
 	case obs != nil:
@@ -4423,13 +4435,13 @@ func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID,
 				if err != nil || n == 0 || !needAttribution {
 					return n, err
 				}
-				if err := ensureRunAttributionForAgentTx(ctx, c, uid, newRunID, expectedRunID, runAttrCfg.HubID); err != nil {
+				if err := ensureRunAttributionForAgentTx(ctx, c, uid, newRunID, priorRunID, runAttrCfg.HubID, s.beforeRunAttributionInsert); err != nil {
 					return 0, err
 				}
 				return n, nil
 			})
 	case needAttribution:
-		n, err = s.swapWithRunAttribution(ctx, write, uid, newRunID, expectedRunID, runAttrCfg.HubID)
+		n, err = s.swapWithRunAttribution(ctx, write, uid, newRunID, priorRunID, runAttrCfg.HubID)
 	default:
 		n, err = write(s.client.Agent)
 	}

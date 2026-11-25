@@ -17,8 +17,69 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
+
+// CanonicalHarnessName normalizes a known harness name to its canonical
+// identifier, or returns "" when name is not one of the built-in harness names.
+func CanonicalHarnessName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude":
+		return "claude"
+	case "gemini", "gemini-cli":
+		return "gemini-cli"
+	case "opencode":
+		return "opencode"
+	case "codex":
+		return "codex"
+	case "generic":
+		return "generic"
+	case "shell":
+		return "shell"
+	default:
+		return ""
+	}
+}
+
+// ResolveRunAttributionHarness resolves the canonical harness type stored on
+// run_attribution from the agent's own stored config records without fabricating
+// a harness from the harness-config name:
+//  1. AppliedConfig.Harness (stamped by the Hub at create),
+//  2. AppliedConfig.InlineConfig.Harness,
+//  3. EffectiveConfig.Harness (broker-reported).
+//
+// Each non-empty candidate is canonicalized via CanonicalHarnessName (keeping
+// the trimmed value when it is a custom/non-builtin harness type). Returns ""
+// when none of the three is set.
+func ResolveRunAttributionHarness(ac *AgentAppliedConfig, ec *AgentEffectiveConfig) string {
+	canonicalOrTrim := func(raw string) string {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			return ""
+		}
+		if c := CanonicalHarnessName(trimmed); c != "" {
+			return c
+		}
+		return trimmed
+	}
+	if ac != nil {
+		if h := canonicalOrTrim(ac.Harness); h != "" {
+			return h
+		}
+		if ac.InlineConfig != nil {
+			if h := canonicalOrTrim(ac.InlineConfig.Harness); h != "" {
+				return h
+			}
+		}
+	}
+	if ec != nil {
+		if h := canonicalOrTrim(ec.Harness); h != "" {
+			return h
+		}
+	}
+	return ""
+}
 
 // Usage ledger scope kinds for usage_scope_counters_daily.
 const (
@@ -232,10 +293,11 @@ type UsageLedgerStore interface {
 	//  4. nil (NULL) for principal-less agents.
 	ResolveBillingUserID(ctx context.Context, ownerID, createdBy string, ancestry []string) (*string, error)
 
-	// BackfillActiveRunAttributions runs the one-shot idempotent backfill of
-	// run_attribution rows for non-deleted agents that have a non-empty run_id,
-	// guarded by a hub_settings completion marker. Returns the number of newly
-	// inserted rows.
+	// BackfillActiveRunAttributions runs the idempotent active-run backfill of
+	// run_attribution rows for non-deleted agents that have a non-empty run_id
+	// and no run_attribution row yet. Invoked at Hub startup when
+	// tokenomics.usage_ledger is enabled and on every OFF -> ON transition.
+	// Returns the number of newly inserted rows.
 	BackfillActiveRunAttributions(ctx context.Context, hubID string) (int, error)
 
 	// UpsertMeterHealth upserts a meter_health row keyed by

@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -391,8 +393,8 @@ func TestRunAttribution_AtomicOnMintSwapAdoptRevertAndLaunch(t *testing.T) {
 	ag.CreatedBy = userA
 	ag.Template = "dev-template"
 	ag.AppliedConfig = &store.AgentAppliedConfig{
-		HarnessConfig: "claude",
-		Env:           map[string]string{"SCION_HARNESS": "claude"},
+		Harness:       "claude",
+		HarnessConfig: "my-claude-fast",
 	}
 	ag.RuntimeBrokerID = "broker-1"
 	ag.Labels = map[string]string{"issue": "ptone/scion#9233"}
@@ -429,7 +431,8 @@ func TestRunAttribution_AtomicOnMintSwapAdoptRevertAndLaunch(t *testing.T) {
 	assert.Equal(t, "run-off-1", attr1.PriorRunID)
 	require.NotNil(t, attr1.BillingUserID)
 	assert.Equal(t, userA, *attr1.BillingUserID)
-	assert.Equal(t, "claude", attr1.HarnessConfig)
+	assert.Equal(t, "claude", attr1.Harness)
+	assert.Equal(t, "my-claude-fast", attr1.HarnessConfig)
 	assert.Equal(t, "dev-template", attr1.Template)
 	assert.Equal(t, map[string]string{"issue": "ptone/scion#9233"}, attr1.LabelsAtLaunch)
 	assert.Empty(t, attr1.LaunchID)
@@ -486,16 +489,267 @@ func TestRunAttribution_AtomicOnMintSwapAdoptRevertAndLaunch(t *testing.T) {
 	require.NotNil(t, attrAdopted.BillingUserID)
 	assert.Equal(t, userB, *attrAdopted.BillingUserID)
 
-	// 6. Revert (run-3 minted, then reverted to run-off-1): run-off-1 untouched, exactly one row per run.
+	// 6. Revert (run-3 minted, then reverted to a pre-experiment run without a row):
+	//    the newly inserted row for the restored run must have prior_run_id == "" (O5).
 	_, err = cs.SetAgentRunID(ctx, ag.ID, "run-3", nil)
 	require.NoError(t, err)
-	reverted, err := cs.RevertAgentRunID(ctx, ag.ID, "run-3", "run-off-1")
+	reverted, err := cs.RevertAgentRunID(ctx, ag.ID, "run-3", "run-reverted-target")
 	require.NoError(t, err)
 	require.True(t, reverted)
+	revertedAttr, err := cs.GetRunAttribution(ctx, "run-reverted-target")
+	require.NoError(t, err)
+	assert.Empty(t, revertedAttr.PriorRunID, "reverted run must not record the reverted run as its prior_run_id")
+
+	// 7. Same-value settle skips attribution work cleanly.
+	settled, err := cs.CompareAndSwapAgentRunID(ctx, ag.ID, "run-reverted-target", "run-reverted-target")
+	require.NoError(t, err)
+	require.True(t, settled)
 
 	allAttrs, err := cs.ListRunAttributionsByAgent(ctx, ag.ID, 10)
 	require.NoError(t, err)
-	assert.Len(t, allAttrs, 4, "expected exactly 1 row each for run-1, run-2, run-off-1, run-3")
+	assert.Len(t, allAttrs, 5, "expected exactly 1 row each for run-1, run-2, run-off-1, run-3, run-reverted-target")
+}
+
+func TestRunAttribution_HarnessResolution(t *testing.T) {
+	ctx := context.Background()
+	cs := NewCompositeStore(enttest.NewClient(t))
+	t.Cleanup(func() { _ = cs.Close() })
+	cs.SetRunAttributionConfig(&store.RunAttributionConfig{HubID: "hub-harness"})
+
+	projectID := createTestProject(t, cs, "attr-harness")
+
+	cases := []struct {
+		name              string
+		appliedConfig     *store.AgentAppliedConfig
+		effectiveHarness  string
+		wantHarness       string
+		wantHarnessConfig string
+	}{
+		{
+			name: "custom config name with stamped AppliedConfig.Harness",
+			appliedConfig: &store.AgentAppliedConfig{
+				Harness:       "claude",
+				HarnessConfig: "my-claude-fast",
+			},
+			wantHarness:       "claude",
+			wantHarnessConfig: "my-claude-fast",
+		},
+		{
+			name: "inline config harness canonicalized",
+			appliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: "custom-gemini-cfg",
+				InlineConfig:  &api.ScionConfig{Harness: "gemini"},
+			},
+			wantHarness:       "gemini-cli",
+			wantHarnessConfig: "custom-gemini-cfg",
+		},
+		{
+			name: "effective config harness fallback",
+			appliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: "custom-codex-cfg",
+			},
+			effectiveHarness:  "codex",
+			wantHarness:       "codex",
+			wantHarnessConfig: "custom-codex-cfg",
+		},
+		{
+			name: "pre-stamp agent with no harness stores empty string (never config name or env)",
+			appliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: "my-claude-fast",
+				Env:           map[string]string{"SCION_HARNESS": "claude"},
+			},
+			wantHarness:       "",
+			wantHarnessConfig: "my-claude-fast",
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ag := makeAgent(projectID, "harness-worker-"+uuid.NewString()[:8])
+			ag.AppliedConfig = tc.appliedConfig
+			require.NoError(t, cs.CreateAgent(ctx, ag))
+			if tc.effectiveHarness != "" {
+				// Populate effective_config via direct Ent update for this test case.
+				agUID, err := parseUUID(ag.ID)
+				require.NoError(t, err)
+				_, err = cs.client.Agent.UpdateOneID(agUID).
+					SetEffectiveConfig(`{"runId":"prev","harness":"` + tc.effectiveHarness + `"}`).
+					Save(ctx)
+				require.NoError(t, err)
+			}
+			runID := "run-harness-" + uuid.NewString()
+			_, err := cs.SetAgentRunID(ctx, ag.ID, runID, nil)
+			require.NoError(t, err)
+
+			attr, err := cs.GetRunAttribution(ctx, runID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantHarness, attr.Harness, "case %d", i)
+			assert.Equal(t, tc.wantHarnessConfig, attr.HarnessConfig, "case %d", i)
+		})
+	}
+}
+
+type stubAgentWriteObserver struct {
+	calls int
+}
+
+func (s *stubAgentWriteObserver) ObserveAgentWrite(_ context.Context, _ store.LifecycleTx, _ store.AgentWrite) error {
+	s.calls++
+	return nil
+}
+
+func TestRunAttribution_AtomicWithLifecycleObserver(t *testing.T) {
+	ctx := context.Background()
+	cs := NewCompositeStore(enttest.NewClient(t))
+	t.Cleanup(func() { _ = cs.Close() })
+
+	obs := &stubAgentWriteObserver{}
+	cs.SetAgentWriteObserver(obs)
+	cs.SetRunAttributionConfig(&store.RunAttributionConfig{HubID: "hub-obs"})
+
+	projectID := createTestProject(t, cs, "attr-observer")
+	userA := createTestUser(t, cs, "obs-owner@example.com")
+
+	ag := makeAgent(projectID, "worker-obs")
+	ag.OwnerID = userA
+	ag.AppliedConfig = &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "my-claude"}
+	ag.Phase = string(state.PhaseCreated)
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+
+	// Mint with credential under observer.
+	cred := &store.AgentCredential{
+		AgentID:      ag.ID,
+		ProjectID:    projectID,
+		TokenJTIHash: "hash-obs-1",
+		IssuedAt:     time.Now().UTC(),
+		ExpiresAt:    time.Now().UTC().Add(time.Hour),
+	}
+	_, err := cs.SetAgentRunID(ctx, ag.ID, "obs-run-1", cred)
+	require.NoError(t, err)
+
+	attr1, err := cs.GetRunAttribution(ctx, "obs-run-1")
+	require.NoError(t, err)
+	assert.Equal(t, "claude", attr1.Harness)
+	assert.Equal(t, "my-claude", attr1.HarnessConfig)
+	assert.GreaterOrEqual(t, obs.calls, 1)
+
+	// Swap/adopt to a different run under observer.
+	swapped, err := cs.CompareAndSwapAgentRunID(ctx, ag.ID, "obs-run-1", "obs-run-2")
+	require.NoError(t, err)
+	require.True(t, swapped)
+	attr2, err := cs.GetRunAttribution(ctx, "obs-run-2")
+	require.NoError(t, err)
+	assert.Equal(t, "obs-run-1", attr2.PriorRunID)
+
+	// Revert under observer.
+	reverted, err := cs.RevertAgentRunID(ctx, ag.ID, "obs-run-2", "obs-run-reverted")
+	require.NoError(t, err)
+	require.True(t, reverted)
+	attrRev, err := cs.GetRunAttribution(ctx, "obs-run-reverted")
+	require.NoError(t, err)
+	assert.Empty(t, attrRev.PriorRunID)
+}
+
+func TestRunAttribution_RollbackOnAttributionFailure(t *testing.T) {
+	injectedErr := errors.New("injected attribution insert failure")
+
+	for _, withObserver := range []bool{false, true} {
+		name := "without_observer"
+		if withObserver {
+			name = "with_observer"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cs := NewCompositeStore(enttest.NewClient(t))
+			t.Cleanup(func() { _ = cs.Close() })
+
+			if withObserver {
+				cs.SetAgentWriteObserver(&stubAgentWriteObserver{})
+			}
+			cs.SetRunAttributionConfig(&store.RunAttributionConfig{HubID: "hub-rb"})
+
+			projectID := createTestProject(t, cs, "attr-rollback")
+			ag := makeAgent(projectID, "worker-rb")
+			ag.AppliedConfig = &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "claude"}
+			require.NoError(t, cs.CreateAgent(ctx, ag))
+
+			// Seed initial run-0 successfully.
+			_, err := cs.SetAgentRunID(ctx, ag.ID, "run-0", nil)
+			require.NoError(t, err)
+
+			// Inject failure during run_attribution insert.
+			cs.beforeRunAttributionInsert = func(_ context.Context, _ string) error {
+				return injectedErr
+			}
+
+			// 1. SetAgentRunID with credential must roll back both run_id and credential.
+			cred := &store.AgentCredential{
+				AgentID:      ag.ID,
+				ProjectID:    projectID,
+				TokenJTIHash: "hash-rb-fail",
+				IssuedAt:     time.Now().UTC(),
+				ExpiresAt:    time.Now().UTC().Add(time.Hour),
+			}
+			_, err = cs.SetAgentRunID(ctx, ag.ID, "run-fail-mint", cred)
+			require.ErrorIs(t, err, injectedErr)
+
+			loaded, err := cs.GetAgent(ctx, ag.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "run-0", loaded.RunID, "agent run_id must roll back on attribution failure")
+
+			hasCred, err := cs.HasAgentCredentialForRun(ctx, ag.ID, "run-fail-mint")
+			require.NoError(t, err)
+			assert.False(t, hasCred, "agent credential must roll back on attribution failure")
+
+			_, err = cs.GetRunAttribution(ctx, "run-fail-mint")
+			assert.ErrorIs(t, err, store.ErrNotFound)
+
+			// 2. CompareAndSwapAgentRunID must also roll back run_id on attribution failure.
+			swapped, err := cs.CompareAndSwapAgentRunID(ctx, ag.ID, "run-0", "run-fail-swap")
+			require.ErrorIs(t, err, injectedErr)
+			assert.False(t, swapped)
+
+			loaded, err = cs.GetAgent(ctx, ag.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "run-0", loaded.RunID, "swap must roll back run_id on attribution failure")
+
+			_, err = cs.GetRunAttribution(ctx, "run-fail-swap")
+			assert.ErrorIs(t, err, store.ErrNotFound)
+		})
+	}
+}
+
+func TestBackfillActiveRunAttributions_Paging(t *testing.T) {
+	ctx := context.Background()
+	cs := NewCompositeStore(enttest.NewClient(t))
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "attr-paging")
+	runIDs := make([]string, 5)
+	for i := range runIDs {
+		ag := makeAgent(projectID, "paged-"+uuid.NewString()[:8])
+		ag.AppliedConfig = &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "claude"}
+		require.NoError(t, cs.CreateAgent(ctx, ag))
+		runIDs[i] = "paged-run-" + uuid.NewString()
+		_, err := cs.SetAgentRunID(ctx, ag.ID, runIDs[i], nil)
+		require.NoError(t, err)
+	}
+
+	// Page size 2 forces 3 pages (2 + 2 + 1).
+	n, err := cs.backfillActiveRunAttributionsPaged(ctx, "hub-paged", 2)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
+
+	for _, rid := range runIDs {
+		attr, err := cs.GetRunAttribution(ctx, rid)
+		require.NoError(t, err)
+		assert.Equal(t, "claude", attr.Harness)
+	}
+
+	// Second pass finds 0 via NOT EXISTS filter.
+	n, err = cs.backfillActiveRunAttributionsPaged(ctx, "hub-paged", 2)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
 }
 
 func TestBackfillActiveRunAttributions_Idempotent(t *testing.T) {
