@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -42,8 +43,9 @@ var (
 	triggerEventListLimit   int
 	triggerEventListCursor  string
 
-	triggerEventPayloadOnly bool
-	triggerEventPayloadOut  string
+	triggerEventPayloadOnly  bool
+	triggerEventPayloadOut   string
+	triggerEventPayloadForce bool
 )
 
 var triggerEventCmd = &cobra.Command{
@@ -261,16 +263,17 @@ func runTriggerEventGet(cmd *cobra.Command, args []string) error {
 		defer func() { _ = rc.Close() }()
 
 		if outPath != "" {
-			f, cErr := os.Create(outPath)
-			if cErr != nil {
-				return fmt.Errorf("failed to create output file %q: %w", outPath, cErr)
+			dir, name := filepath.Dir(outPath), filepath.Base(outPath)
+			out, oErr := openOutDir(dir)
+			if oErr != nil {
+				return fmt.Errorf("failed to open output directory %q: %w", dir, oErr)
 			}
-			if _, copyErr := io.Copy(f, rc); copyErr != nil {
-				_ = f.Close()
-				return fmt.Errorf("failed to write payload to %q: %w", outPath, copyErr)
-			}
-			if closeErr := f.Close(); closeErr != nil {
-				return fmt.Errorf("failed to close output file %q: %w", outPath, closeErr)
+			defer func() { _ = out.Close() }()
+			if wErr := out.WriteFile(name, triggerEventPayloadForce, func(w io.Writer) error {
+				_, copyErr := io.Copy(w, rc)
+				return copyErr
+			}); wErr != nil {
+				return fmt.Errorf("failed to write payload to %q: %w", outPath, wErr)
 			}
 			return nil
 		}
@@ -437,5 +440,6 @@ func init() {
 	triggerEventListCmd.Flags().StringVar(&triggerEventListCursor, "cursor", "", "Pagination cursor from a previous event list response")
 
 	triggerEventGetCmd.Flags().BoolVar(&triggerEventPayloadOnly, "payload", false, "Stream only the raw JSON payload (supports overflow payloads)")
-	triggerEventGetCmd.Flags().StringVar(&triggerEventPayloadOut, "out", "", "Write --payload stream to a file instead of stdout")
+	triggerEventGetCmd.Flags().StringVar(&triggerEventPayloadOut, "out", "", "Write --payload stream to a file instead of stdout (refuses to overwrite without --force)")
+	triggerEventGetCmd.Flags().BoolVar(&triggerEventPayloadForce, "force", false, "Overwrite an existing --out file")
 }

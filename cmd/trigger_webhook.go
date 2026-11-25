@@ -91,8 +91,10 @@ One-call endpoint + default trigger:
 
 Data visibility & payload limits:
   - Note: anyone with read access to this project's triggers can read bodies sent here.
-  - Requests must be application/json with a body of at most 64 KiB (HTTP 413 above
-    64 KiB; ensure any reverse proxy in front of the Hub also permits 64 KiB bodies).
+  - Requests must be application/json with a body of at most 64 KiB by default,
+    configurable up to 1 MiB via --max-body (HTTP 413 above the endpoint limit;
+    ensure any reverse proxy in front of the Hub permits bodies up to your
+    configured --max-body).
   - Running this command in agent mode prints the one-time secret into the agent's
     transcript; agent-owned endpoints are isolated so the secret only reaches
     triggers on that agent's own endpoint.

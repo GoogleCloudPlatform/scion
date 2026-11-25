@@ -903,7 +903,8 @@ func TestTriggerCLI_NilListResponseGuard(t *testing.T) {
 func TestTriggerWebhookCreateHelp_SenderContractAndLimits(t *testing.T) {
 	helpText := triggerWebhookCreateCmd.Long
 	assert.Contains(t, helpText, "anyone with read access to this project's triggers can read bodies sent here")
-	assert.Contains(t, helpText, "at most 64 KiB (HTTP 413 above")
+	assert.Contains(t, helpText, "at most 64 KiB by default")
+	assert.Contains(t, helpText, "up to 1 MiB via --max-body")
 	assert.Contains(t, helpText, `openssl dgst -sha256 -hmac "$SECRET"`)
 	assert.Contains(t, helpText, `printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl`)
 	assert.NotContains(t, helpText, `SIGNED="$(`, "help example must pipe directly into openssl so command substitution never strips trailing newlines from BODY")
@@ -3126,10 +3127,12 @@ func TestTriggerEventCLI_OverflowPayloadStreamAndOutFile(t *testing.T) {
 	origFormat := outputFormat
 	origEvPayload := triggerEventPayloadOnly
 	origEvOut := triggerEventPayloadOut
+	origEvForce := triggerEventPayloadForce
 	t.Cleanup(func() {
 		outputFormat = origFormat
 		triggerEventPayloadOnly = origEvPayload
 		triggerEventPayloadOut = origEvOut
+		triggerEventPayloadForce = origEvForce
 	})
 
 	evID := "99999999-9999-4999-8999-999999999999"
@@ -3183,15 +3186,54 @@ func TestTriggerEventCLI_OverflowPayloadStreamAndOutFile(t *testing.T) {
 	outFile := filepath.Join(t.TempDir(), "payload.json")
 	triggerEventPayloadOnly = true
 	triggerEventPayloadOut = outFile
+	triggerEventPayloadForce = false
 	require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
 	diskBytes, err := os.ReadFile(outFile)
 	require.NoError(t, err)
 	assert.Equal(t, largePayload, string(diskBytes))
 
+	// 3b. O4: writing to an existing --out file without --force fails and preserves the original file.
+	require.NoError(t, os.WriteFile(outFile, []byte("original-content"), 0o644))
+	triggerEventPayloadForce = false
+	err = runTriggerEventGet(triggerEventGetCmd, []string{evID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--force")
+	preserved, err := os.ReadFile(outFile)
+	require.NoError(t, err)
+	assert.Equal(t, "original-content", string(preserved))
+
+	// 3c. O4: with --force, replaces atomically.
+	triggerEventPayloadForce = true
+	require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	replaced, err := os.ReadFile(outFile)
+	require.NoError(t, err)
+	assert.Equal(t, largePayload, string(replaced))
+
 	// 4. --payload to stdout streams exact valid JSON.
 	triggerEventPayloadOut = ""
+	triggerEventPayloadForce = false
 	stdoutPayload := captureStdout(t, func() {
 		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
 	})
 	assert.JSONEq(t, largePayload, stdoutPayload)
+
+	// 5. O4: mid-stream read error leaves no partial file at --out.
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+evID && r.URL.Query().Get("payload") == "1" {
+			// Declare a larger Content-Length than written so the HTTP client returns io.ErrUnexpectedEOF mid-stream.
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "10000")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"partial":`))
+			return
+		}
+		http.NotFound(w, r)
+	}, hubsync.CredentialKindOAuth)
+	partialFile := filepath.Join(t.TempDir(), "partial.json")
+	triggerEventPayloadOnly = true
+	triggerEventPayloadOut = partialFile
+	triggerEventPayloadForce = false
+	require.Error(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	_, statErr := os.Stat(partialFile)
+	assert.True(t, os.IsNotExist(statErr), "partial file must not exist after mid-stream error")
 }
