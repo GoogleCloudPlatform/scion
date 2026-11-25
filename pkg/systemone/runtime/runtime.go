@@ -850,22 +850,29 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		reason := provider.FailCapacity
 		switch stopCause {
 		case admissionStopCanceled:
-			if ctx.Err() != nil {
-				reason = classifyContextCause(ctx.Err(), latchCause(context.Cause(attemptCtx)))
+			cause := latchCause(context.Cause(attemptCtx))
+			if ctx.Err() != nil || errors.Is(cause, errRuntimeDeadline) {
+				reason = classifyContextCause(ctx.Err(), cause)
 			}
 		case admissionStopAttemptDeadline:
 			// The wait was bounded by attemptCtx's deadline (dl <= now+admissionWait).
-			// If the caller's deadline was the limiting bound (callerDL <= ownDeadline),
-			// preserve caller-deadline classification deterministically even if waitCtx
-			// expired before parent ctx.Err() became visible.
+			// Preserve the limiting deadline's classification deterministically even if
+			// waitCtx expired before attemptCtx.Err()/ctx.Err() became visible:
+			//   - caller deadline <= ownDeadline -> FailCanceled (or FailTimeout if
+			//     errRuntimeDeadline was already latched)
+			//   - ownDeadline < caller deadline (or no caller deadline) -> FailTimeout
+			cause := latchCause(context.Cause(attemptCtx))
 			if ctx.Err() != nil {
-				reason = classifyContextCause(ctx.Err(), latchCause(context.Cause(attemptCtx)))
+				reason = classifyContextCause(ctx.Err(), cause)
 			} else if callerDL, ok := ctx.Deadline(); ok && !ownDeadline.Before(callerDL) {
-				reason = classifyContextCause(context.DeadlineExceeded, latchCause(context.Cause(attemptCtx)))
+				reason = classifyContextCause(context.DeadlineExceeded, cause)
+			} else {
+				reason = classifyContextCause(nil, errRuntimeDeadline)
 			}
 		case admissionStopCapacity:
-			if ctx.Err() != nil {
-				reason = classifyContextCause(ctx.Err(), latchCause(context.Cause(attemptCtx)))
+			cause := latchCause(context.Cause(attemptCtx))
+			if ctx.Err() != nil || errors.Is(cause, errRuntimeDeadline) {
+				reason = classifyContextCause(ctx.Err(), cause)
 			}
 		}
 		eval.Attempts = []Attempt{{

@@ -316,7 +316,9 @@ func (c *admissionController) forgetInstance(id string) {
 //
 // Equal-bound precedence: when attemptCtx's deadline equals now+admissionWait
 // (dl <= now+admissionWait), the attempt/caller deadline takes precedence over
-// admissionWait, consistent with the existing caller-cancellation contract.
+// admissionWait — caller deadline yields FailCanceled and runtime deadline
+// (errRuntimeDeadline) yields FailTimeout, consistent with the existing
+// caller-cancellation and runtime-deadline contracts.
 func (c *admissionController) acquire(
 	attemptCtx context.Context,
 	projectID string,
