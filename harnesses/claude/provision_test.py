@@ -340,10 +340,26 @@ class ModelResolutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp)
             auth = scion_harness.ResolvedAuth(method="api-key", env_key="ANTHROPIC_API_KEY")
-            env = provision._build_env_overlay(ctx, auth)
+            with env_vars(CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=None):
+                env = provision._build_env_overlay(ctx, auth)
 
         self.assertEqual(env.get("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"), "1")
         self.assertEqual(env.get("DISABLE_AUTOUPDATER"), "1")
+        self.assertEqual(
+            env.get("CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"), "1"
+        )
+
+    def test_build_env_overlay_preserves_skip_permissions_override(self) -> None:
+        """An operator/template override (e.g. '0' or '') must not be overwritten."""
+        for override in ("0", ""):
+            with self.subTest(override=override):
+                with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+                    ctx = make_ctx(tmp)
+                    auth = scion_harness.ResolvedAuth(method="api-key", env_key="ANTHROPIC_API_KEY")
+                    with env_vars(CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=override):
+                        env = provision._build_env_overlay(ctx, auth)
+
+                self.assertNotIn("CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS", env)
 
 
 # Mirrors harnesses/claude/config.yaml's `thinking:` block exactly. The Go
@@ -496,6 +512,21 @@ class ProvisionEffortWiringTest(unittest.TestCase):
         env = self._env_json(None)
         self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL", env)
         self.assertIn("ANTHROPIC_MODEL", env)  # sanity: the overlay was written
+
+    def test_skip_permissions_default_and_override_reach_env_json(self) -> None:
+        with env_vars(CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=None):
+            env = self._env_json(None)
+        self.assertEqual(
+            env.get("CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"), "1"
+        )
+
+        for override in ("0", ""):
+            with self.subTest(override=override):
+                with env_vars(CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=override):
+                    env = self._env_json(None)
+                self.assertNotIn(
+                    "CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS", env
+                )
 
 
 def _select_with_candidates(home: str, candidates: dict[str, Any]):

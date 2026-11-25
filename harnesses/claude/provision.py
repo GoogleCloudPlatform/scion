@@ -106,6 +106,12 @@ OPUS_5_5_FALLBACK_MODEL = "claude-opus-4-8"
 EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
 EFFORT_ENV_VALUES = frozenset({"low", "medium", "high", "xhigh", "max", "auto"})
 
+# Suppresses Claude Code's Layer 2 critical-path rm/rmdir confirmation prompts
+# under --dangerously-skip-permissions so unattended agents do not stall in
+# WAITING_FOR_INPUT (ptone/scion#9088). Claude Code ignores this variable in
+# settings.json, so it must be injected into the supervised process env.
+SKIP_PERMISSIONS_ENV = "CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
+
 AUTH = scion_harness.AuthSpec(
     harness="claude",
     methods=[
@@ -422,6 +428,10 @@ def _build_env_overlay(ctx: scion_harness.ProvisionContext, auth: scion_harness.
     env["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"] = "1"
     # Prevent non-root container process from failing background npm self-updates.
     env["DISABLE_AUTOUPDATER"] = "1"
+    # Suppress Layer 2 critical-path rm/rmdir prompts in unattended containers
+    # unless an operator or template explicitly set the variable (even to "0" or "").
+    if SKIP_PERMISSIONS_ENV not in os.environ:
+        env.setdefault(SKIP_PERMISSIONS_ENV, "1")
 
     return env
 
