@@ -596,6 +596,7 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 		"/api/v1/agent/decisions/":       "reads and records agent decisions; issues no credentials, tokens, or secrets",
 		"/api/v1/agent/secret-requests":  "lists and withdraws the calling agent's secret request metadata; never reads, writes, or returns secret values",
 		"/api/v1/agent/secret-requests/": "lists and withdraws the calling agent's secret request metadata; never reads, writes, or returns secret values",
+		"/api/v1/agent/command-requests": "lists the calling agent's own command request metadata and run status; never executes commands or issues credentials",
 	}
 
 	// Explicit pre-authentication public credential routes (ExemptionPublicEndpoint).

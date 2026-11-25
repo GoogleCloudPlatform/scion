@@ -202,6 +202,7 @@ var compressBypassedUntagged = map[string]string{
 	"POST /api/v1/secret-requests/{messageId}/dismiss": "secret path substring",
 	"exemption /api/v1/agent/secret-requests":          "agent prefix",
 	"exemption /api/v1/agent/secret-requests/":         "agent prefix",
+	"exemption /api/v1/agent/command-requests":         "agent prefix",
 }
 
 // compressRequestBypassed mirrors the MountHubAPI decision: the request

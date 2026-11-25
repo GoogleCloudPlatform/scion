@@ -232,6 +232,12 @@ var agentAllowed = map[string]bool{
 	"secret.request.list":     true,
 	"secret.request.withdraw": true,
 
+	// Command-request self-service list for agents (ptone/scion#9278 §4.5).
+	// command.request.approve is human-only and intentionally omitted.
+	"command":              true,
+	"command.request":      true,
+	"command.request.list": true,
+
 	// Decision self-service as the calling agent (ptone/scion#7797,
 	// decision Q1; withdraw ptone/scion#8190). Hub routes enforce
 	// AgentIdentity and web.decisions.

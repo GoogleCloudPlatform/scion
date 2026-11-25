@@ -72,9 +72,11 @@ func ValidateLegacyMessage(msg *messages.StructuredMessage) error {
 	// Body must not be empty unless attachments are present (legacy rule).
 	// Attachment-only messages (e.g. image uploads from chat v2) have an empty
 	// Msg field but carry content via StructuredMessage.Attachments. A decision
-	// prompt may leave out its intro: its stored body is the markdown fallback
-	// rendered from its decisions.
-	if msg.Msg == "" && len(msg.Attachments) == 0 && msg.Type != messages.TypeDecisionPrompt {
+	// prompt or command request may leave out its intro: its stored body is the
+	// markdown fallback rendered from its structured payload.
+	if msg.Msg == "" && len(msg.Attachments) == 0 &&
+		msg.Type != messages.TypeDecisionPrompt &&
+		msg.Type != messages.TypeCommandRequest {
 		return fmt.Errorf("msg field is required")
 	}
 

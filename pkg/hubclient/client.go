@@ -186,6 +186,9 @@ type Client interface {
 	// member projects (GET /api/v1/users/me/decisions).
 	MyDecisions() MyDecisionService
 
+	// CommandRequests returns the human-approved command request operations interface.
+	CommandRequests() CommandRequestService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 
@@ -232,6 +235,7 @@ type client struct {
 	agentDelegations      *agentDelegationService
 	decisions             *decisionService
 	myDecisions           *myDecisionService
+	commandRequests       *commandRequestService
 
 	// pluginName, when set (WithPluginName), is sent as
 	// X-Scion-Plugin-Name on the broker attachment requests.
@@ -301,6 +305,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.agentDelegations = &agentDelegationService{c: c}
 	c.decisions = &decisionService{c: c}
 	c.myDecisions = &myDecisionService{c: c}
+	c.commandRequests = &commandRequestService{c: c}
 
 	return c, nil
 }
@@ -502,6 +507,11 @@ func (c *client) Decisions() DecisionService {
 // MyDecisions returns the calling user's cross-project Decisions roll-up service.
 func (c *client) MyDecisions() MyDecisionService {
 	return c.myDecisions
+}
+
+// CommandRequests returns the command request operations interface.
+func (c *client) CommandRequests() CommandRequestService {
+	return c.commandRequests
 }
 
 // get performs an HTTP GET request.

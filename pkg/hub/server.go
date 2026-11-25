@@ -2307,6 +2307,10 @@ type Server struct {
 	// uses the defaults (chat_member_fanout.go).
 	chatMemberFanout chatMemberFanoutLimits
 
+	// commandRunLauncher receives newly approved command runs post-commit
+	// (command_requests_handlers.go).
+	commandRunLauncher CommandRunLauncher
+
 	// decisionBell coalesces and reconciles per-user Decisions bell
 	// notifications (decisions_bell.go).
 	decisionBell decisionBellState
@@ -8693,6 +8697,9 @@ func (s *Server) registerRoutes() {
 	// Secret request responder endpoints (hub.agent_secrets; 404 while off).
 	s.mux.HandleFunc("/api/v1/secret-requests/", s.guarded("/api/v1/secret-requests/", s.handleSecretRequestRoutes))
 
+	// Command request responder endpoints (hub.command_requests; 404 while off).
+	s.mux.HandleFunc("/api/v1/command-requests/", s.guarded("/api/v1/command-requests/", s.handleCommandRequestRoutes))
+
 	// Attachment delivery capability redemption by brokers (ptone/scion#4596).
 	s.mux.HandleFunc("/api/v1/attachment-deliveries/", s.guarded("/api/v1/attachment-deliveries/", s.handleAttachmentDelivery))
 
@@ -8716,6 +8723,9 @@ func (s *Server) registerRoutes() {
 	// Agent self-service secret-request list and withdraw (agent token auth; 404 when hub.agent_secrets is off)
 	s.mux.HandleFunc("/api/v1/agent/secret-requests", s.guarded("/api/v1/agent/secret-requests", s.handleAgentSecretRequestRoutes))
 	s.mux.HandleFunc("/api/v1/agent/secret-requests/", s.guarded("/api/v1/agent/secret-requests/", s.handleAgentSecretRequestRoutes))
+
+	// Agent self-service command-request list (agent token auth; 404 when hub.command_requests is off)
+	s.mux.HandleFunc("/api/v1/agent/command-requests", s.guarded("/api/v1/agent/command-requests", s.handleAgentCommandRequestRoutes))
 
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))

@@ -779,6 +779,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "agent.read", Resource: "agent", Action: "read",
 	},
+	"/api/v1/command-requests/": {
+		Pattern: "/api/v1/command-requests/", RouteID: "commandrequests.byId",
+		Classification: RoutePolicy,
+		Permission:     "agent.read", Resource: "agent", Action: "read",
+	},
 	"/api/v1/chat/search": {
 		Pattern: "/api/v1/chat/search", RouteID: "chat.search",
 		Classification: RoutePolicy,
@@ -1640,6 +1645,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification:      RouteAgentToken,
 		AgentStanding:       AgentStandingExempt,
 		AgentStandingReason: "lists and withdraws the calling agent's secret request metadata; never reads, writes, or returns secret values",
+	},
+	"/api/v1/agent/command-requests": {
+		Pattern: "/api/v1/agent/command-requests", RouteID: "agent.commandRequests",
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingExempt,
+		AgentStandingReason: "lists the calling agent's own command request metadata and run status; never executes commands or issues credentials",
 	},
 
 	// -------------------------------------------------------------------------
