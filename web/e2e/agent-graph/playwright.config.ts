@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from '@playwright/test';
 
 import { chromiumLaunchOptions } from '../../playwright-chromium.js';
@@ -43,7 +44,7 @@ export default defineConfig({
   },
   webServer: {
     command: 'npm run dev -- --host 127.0.0.1 --port 4553',
-    cwd: new URL('../../', import.meta.url).pathname,
+    cwd: fileURLToPath(new URL('../../', import.meta.url)),
     url: 'http://127.0.0.1:4553/',
     reuseExistingServer: false,
     timeout: CI ? 120_000 : 60_000,

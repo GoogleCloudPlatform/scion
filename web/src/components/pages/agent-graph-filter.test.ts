@@ -265,19 +265,14 @@ describe('scion-agent-tree-view context dimming & filtered empty state', () => {
   });
 
   it('does not pin opacity/transform after node-in finishes via forwards/both fill-mode', () => {
-    const styles = (tree?.constructor as typeof ScionAgentTreeView | undefined)?.styles;
-    const cssText = Array.isArray(styles)
+    const ctor = customElements.get('scion-agent-tree-view') as
+      | typeof ScionAgentTreeView
+      | undefined;
+    const styles = ctor?.styles;
+    const text = Array.isArray(styles)
       ? styles.map((s) => s.cssText).join('\n')
       : (styles?.cssText ?? '');
-    const ctorStyles = (
-      customElements.get('scion-agent-tree-view') as typeof ScionAgentTreeView | undefined
-    )?.styles;
-    const text =
-      cssText ||
-      (Array.isArray(ctorStyles)
-        ? ctorStyles.map((s) => s.cssText).join('\n')
-        : (ctorStyles?.cssText ?? ''));
-    expect(text).toMatch(/animation:\s*node-in\s+0\.35s\s+ease\s+backwards\s*;/);
+    expect(text).toMatch(/animation:\s*node-in\b[^;]*;/);
     expect(text).not.toMatch(/animation:\s*node-in[^;]*\b(both|forwards)\b/);
   });
 

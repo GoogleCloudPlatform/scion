@@ -167,14 +167,19 @@ test('dims non-matching context ancestors after node-in settles and brightens on
     .poll(async () => childNode.evaluate((el) => Number.parseFloat(getComputedStyle(el).opacity)))
     .toBeCloseTo(1, 2);
 
-  // Hovering the context ancestor brightens it to opacity 1 and applies the hover transform.
+  // Hovering the context ancestor brightens it to opacity 1 and applies the hover scale(1.02) transform.
   await parentNode.hover();
   await expect
     .poll(async () => parentNode.evaluate((el) => Number.parseFloat(getComputedStyle(el).opacity)))
     .toBeCloseTo(1, 2);
   await expect
-    .poll(async () => parentNode.evaluate((el) => getComputedStyle(el).transform))
-    .not.toBe('none');
+    .poll(async () =>
+      parentNode.evaluate((el) => {
+        const m = /^matrix\(([^,]+),/.exec(getComputedStyle(el).transform);
+        return m ? Number.parseFloat(m[1]) : 0;
+      })
+    )
+    .toBeCloseTo(1.02, 2);
 });
 
 test('dims unrelated nodes (.node.dim) when hovering a lineage branch', async ({ page }) => {
