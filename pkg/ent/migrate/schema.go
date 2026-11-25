@@ -293,6 +293,11 @@ var (
 				Columns: []*schema.Column{AgentsColumns[101], AgentsColumns[7]},
 			},
 			{
+				Name:    "agent_owner_id_phase_activity",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[8], AgentsColumns[13], AgentsColumns[14]},
+			},
+			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
 				Columns: []*schema.Column{AgentsColumns[65]},
