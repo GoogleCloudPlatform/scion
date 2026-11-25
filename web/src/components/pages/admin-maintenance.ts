@@ -33,13 +33,12 @@ import { waitForHubRestart } from '../../client/hub-restart.js';
 import { withTimeout } from '../../client/with-timeout.js';
 import { stateManager } from '../../client/state.js';
 import { canReissueAllScopes } from '../../lib/admin-permissions.js';
-import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatInstantWithZone, formatRelative, formatUtcInstant } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
 import {
   LAST_UPDATE_LABELS,
-  formatUtcInstant,
   isNextRunImminent,
   isOlderClass,
   renderInstallerUnsupported,

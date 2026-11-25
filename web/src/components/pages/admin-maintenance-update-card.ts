@@ -35,7 +35,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
-import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatInstantWithZone, formatRelative, formatUtcInstant } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 /** Result of the last update, from the system.last_update hub setting. */
@@ -213,34 +213,6 @@ export const LAST_UPDATE_LABELS: Record<string, string> = {
   failed: 'failed',
   rolled_back: 'rolled back',
 };
-
-const UTC_MONTHS_SHORT = [
-  'Jan',
-  'Feb',
-  'Mar',
-  'Apr',
-  'May',
-  'Jun',
-  'Jul',
-  'Aug',
-  'Sep',
-  'Oct',
-  'Nov',
-  'Dec',
-] as const;
-
-/** Formats an ISO instant as a compact UTC timestamp for tooltips (e.g. "Nov 25, 2026, 04:17 UTC"). */
-export function formatUtcInstant(iso: string | undefined | null): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const mon = UTC_MONTHS_SHORT[d.getUTCMonth()];
-  const day = d.getUTCDate();
-  const year = d.getUTCFullYear();
-  const hh = String(d.getUTCHours()).padStart(2, '0');
-  const mm = String(d.getUTCMinutes()).padStart(2, '0');
-  return `${mon} ${day}, ${year}, ${hh}:${mm} UTC`;
-}
 
 /** Daily UTC window hours 0..23 for the auto-update hour picker. */
 const AUTO_UPDATE_HOURS = Array.from({ length: 24 }, (_, h) => h);

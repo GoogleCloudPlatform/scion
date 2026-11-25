@@ -54,6 +54,7 @@ import {
   DISPLAY_TIMEZONE_CHANGED_EVENT,
   formatInstant,
   formatInstantWithZone,
+  formatUtcInstant,
   formatRelative,
   formatRelativeTime,
   parseWallClock,
@@ -767,5 +768,29 @@ describe('parseWallClock / toWallClockInput', () => {
       expect(iso).toBe('2026-06-15T06:15:00.000Z');
       expect(toWallClockInput(iso, 'Asia/Kathmandu')).toBe('2026-06-15T12:00');
     });
+  });
+});
+
+describe('formatUtcInstant', () => {
+  it('formats valid ISO instants in UTC with zero-padded 24-hour time', () => {
+    expect(formatUtcInstant('2026-11-25T04:17:00Z')).toBe('Nov 25, 2026, 04:17 UTC');
+    expect(formatUtcInstant('2026-01-01T00:05:30Z')).toBe('Jan 1, 2026, 00:05 UTC');
+    expect(formatUtcInstant('2026-12-31T23:59:00Z')).toBe('Dec 31, 2026, 23:59 UTC');
+  });
+
+  it('normalizes offset timestamps to UTC regardless of preferred display zone', () => {
+    setPreferredTimeZone('America/New_York');
+    try {
+      expect(formatUtcInstant('2026-11-24T23:17:00-05:00')).toBe('Nov 25, 2026, 04:17 UTC');
+    } finally {
+      setPreferredTimeZone('');
+    }
+  });
+
+  it('returns empty string for missing or unparsable input', () => {
+    expect(formatUtcInstant('')).toBe('');
+    expect(formatUtcInstant(null)).toBe('');
+    expect(formatUtcInstant(undefined)).toBe('');
+    expect(formatUtcInstant('not-a-date')).toBe('');
   });
 });
