@@ -298,31 +298,20 @@ func applyNoAuthGitToken(env map[string]string, classifications *map[string]api.
 // noAuthCreateGitToken reads the GITHUB_TOKEN record of scope (project or
 // the owner's user scope) by name for create, returning its value, or ""
 // when there is none, it is non-deliverable, or it cannot be read (logged at
-// debug, without the value). shadowed is true when a non-deliverable,
-// non-internal row (e.g. on_demand) occupies GITHUB_TOKEN at this scope so
-// callers do not fall back to a lower-precedence scope.
-func (d *HTTPAgentDispatcher) noAuthCreateGitToken(ctx context.Context, agent *store.Agent, scope, scopeID string) (value string, shadowed bool) {
+// debug, without the value).
+func (d *HTTPAgentDispatcher) noAuthCreateGitToken(ctx context.Context, agent *store.Agent, scope, scopeID string) string {
 	ghSecret, err := d.secretBackend.Get(ctx, noAuthGitTokenKey, scope, scopeID)
 	if err != nil {
 		if d.debug {
 			d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN", "agent_id", agent.ID, "scope", scope, "error", err)
 		}
-		return "", false
+		return ""
 	}
-	if ghSecret == nil {
-		return "", false
-	}
-	if !secret.DeliverableType(ghSecret.SecretType) {
-		if ghSecret.SecretType == store.SecretTypeInternal {
-			return "", false
-		}
-		return "", true
-	}
-	if ghSecret.Value == "" {
-		return "", false
+	if ghSecret == nil || !secret.DeliverableType(ghSecret.SecretType) || ghSecret.Value == "" {
+		return ""
 	}
 	if d.debug {
 		d.log.Debug("NoAuth: resolved GITHUB_TOKEN for git operations", "agent_id", agent.ID, "scope", scope)
 	}
-	return ghSecret.Value, false
+	return ghSecret.Value
 }

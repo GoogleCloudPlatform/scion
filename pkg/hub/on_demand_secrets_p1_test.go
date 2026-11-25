@@ -496,53 +496,64 @@ func TestOnDemandSecret_NoAuthCreateExcludesOnDemandGitHubToken(t *testing.T) {
 	}
 	sb := f.srv.GetSecretBackend()
 
-	noAuthAgent := &store.Agent{
-		ID:            api.NewUUID(),
-		Slug:          "noauth-od-agent",
-		Name:          "noauth-od-agent",
-		ProjectID:     f.proj.ID,
-		OwnerID:       f.creator.ID,
-		CreatedBy:     f.creator.ID,
-		Ancestry:      []string{f.creator.ID},
-		Phase:         "created",
-		AppliedConfig: &store.AgentAppliedConfig{NoAuth: true},
-	}
-	require.NoError(t, f.store.CreateAgent(ctx, noAuthAgent))
+	// Use sessionParent so owner/user-scope secrets are authorized on both
+	// create (ownerCloneTokenAllowed) and start (selectDeliverySecretsWith).
+	parent, _ := f.sessionParent(t, "noauth-od-agent")
+	noAuthAgent := *parent
+	noAuthAgent.AppliedConfig = &store.AgentAppliedConfig{NoAuth: true}
 
 	d := NewHTTPAgentDispatcher(f.store, false, nil)
 	d.SetSecretBackend(sb)
 	d.SetAuthzService(f.srv.authzService)
 
-	// Seed a user-scope environment GITHUB_TOKEN as well, so the test proves
-	// project on_demand GITHUB_TOKEN does NOT fall back to user scope.
-	_, _, err := sb.Set(ctx, &secret.SetSecretInput{
-		Name: noAuthGitTokenKey, Value: "user-env-gh-token", SecretType: store.SecretTypeEnvironment,
-		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: f.creator.ID,
-	})
-	require.NoError(t, err)
+	startGitToken := func(t *testing.T) string {
+		t.Helper()
+		sel := newDeliverySelector(f.srv.authzService, &noAuthAgent, PurposeDispatch)
+		candidates, _, _, err := d.selectDeliverySecretsWith(ctx, sel, &noAuthAgent, nil)
+		require.NoError(t, err)
+		return pickNoAuthGitTokenFrom(candidates).value
+	}
 
-	// 1. Project on_demand GITHUB_TOKEN: must be absent from ResolvedEnv and
-	// must not fall back to the user-scope token.
-	_, _, err = sb.Set(ctx, &secret.SetSecretInput{
+	// 1. Project on_demand GITHUB_TOKEN with NO user token: both create and
+	// start deliver nothing.
+	_, _, err := sb.Set(ctx, &secret.SetSecretInput{
 		Name: noAuthGitTokenKey, Value: "proj-od-gh-token", SecretType: store.SecretTypeOnDemand,
 		Target: noAuthGitTokenKey, InjectionMode: store.InjectionModeAsNeeded,
 		Scope: store.ScopeProject, ScopeID: f.proj.ID,
 	})
 	require.NoError(t, err)
 
-	req, err := d.buildCreateRequestFor(ctx, noAuthAgent, "test", failOnSecretResolutionError)
+	reqNoUser, err := d.buildCreateRequestFor(ctx, &noAuthAgent, "test", failOnSecretResolutionError)
 	require.NoError(t, err)
-	assert.NotContains(t, req.ResolvedEnv, noAuthGitTokenKey,
-		"project on_demand GITHUB_TOKEN must not be injected or fall back to user scope on no-auth create")
+	assert.NotContains(t, reqNoUser.ResolvedEnv, noAuthGitTokenKey,
+		"create must not inject project on_demand GITHUB_TOKEN when no user token exists")
+	assert.Empty(t, startGitToken(t),
+		"start must not deliver project on_demand GITHUB_TOKEN when no user token exists")
 
-	// 2. Control: project environment GITHUB_TOKEN is injected on no-auth create.
+	// 2. Project on_demand GITHUB_TOKEN plus an allowed owner/user environment
+	// GITHUB_TOKEN: user scope outranks project scope, so both create and start
+	// deliver the user token.
+	_, _, err = sb.Set(ctx, &secret.SetSecretInput{
+		Name: noAuthGitTokenKey, Value: "user-env-gh-token", SecretType: store.SecretTypeEnvironment,
+		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: f.creator.ID,
+	})
+	require.NoError(t, err)
+
+	reqWithUser, err := d.buildCreateRequestFor(ctx, &noAuthAgent, "test", failOnSecretResolutionError)
+	require.NoError(t, err)
+	assert.Equal(t, "user-env-gh-token", reqWithUser.ResolvedEnv[noAuthGitTokenKey],
+		"create must deliver allowed user environment GITHUB_TOKEN when project GITHUB_TOKEN is on_demand")
+	assert.Equal(t, "user-env-gh-token", startGitToken(t),
+		"start must deliver allowed user environment GITHUB_TOKEN when project GITHUB_TOKEN is on_demand")
+
+	// 3. Control: project environment GITHUB_TOKEN is injected on no-auth create.
 	_, _, err = sb.Set(ctx, &secret.SetSecretInput{
 		Name: noAuthGitTokenKey, Value: "proj-env-gh-token", SecretType: store.SecretTypeEnvironment,
 		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: f.proj.ID,
 	})
 	require.NoError(t, err)
 
-	reqCtrl, err := d.buildCreateRequestFor(ctx, noAuthAgent, "test", failOnSecretResolutionError)
+	reqCtrl, err := d.buildCreateRequestFor(ctx, &noAuthAgent, "test", failOnSecretResolutionError)
 	require.NoError(t, err)
 	assert.Equal(t, "proj-env-gh-token", reqCtrl.ResolvedEnv[noAuthGitTokenKey],
 		"project environment GITHUB_TOKEN control must be injected on no-auth create")
