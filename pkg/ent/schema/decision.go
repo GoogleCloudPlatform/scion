@@ -137,6 +137,12 @@ func (Decision) Fields() []ent.Field {
 		// predicate.
 		field.Bool("settled").
 			Default(false),
+		// facet_indexed is true once this row's contribution is recorded in
+		// decision_facet_entries (or skipped because chat_key is NULL).
+		// Defaults to false so rows written by an older binary trigger fallback
+		// reads until the background indexer processes them.
+		field.Bool("facet_indexed").
+			Default(false),
 		// replaced_by_id is the row of the version that replaced this one.
 		field.UUID("replaced_by_id", uuid.UUID{}).
 			Optional().
@@ -180,6 +186,10 @@ func (Decision) Indexes() []ent.Index {
 		// covers queries filtering on (project_id, chat_key) WHERE settled = false.
 		index.Fields("project_id", "chat_key").
 			Annotations(entsql.IndexWhere("settled = false")),
+		// Partial index for facet-indexer work and fallback probes:
+		// covers queries filtering on project_id WHERE facet_indexed = false.
+		index.Fields("project_id").
+			Annotations(entsql.IndexWhere("facet_indexed = false")),
 		// History pages load a page's decisions by message.
 		index.Fields("message_id", "position"),
 		index.Fields("conversation_id"),

@@ -992,6 +992,12 @@ type DecisionStore interface {
 	// agents table are gone), with their newest stored asker_agent_name.
 	ListProjectDecisionAgents(ctx context.Context, projectID string) ([]ProjectDecisionActor, error)
 
+	// ListProjectDecisionAgentsForProjects returns, keyed by project ID, the
+	// distinct asking agents recorded on decisions in each projectID (including
+	// hard-deleted agents), with their newest stored asker_agent_name. Projects
+	// with no decisions are omitted. Empty projectIDs returns (nil, nil).
+	ListProjectDecisionAgentsForProjects(ctx context.Context, projectIDs []string) (map[string][]ProjectDecisionActor, error)
+
 	// ListOpenPrompts returns every decision prompt in projectIDs whose
 	// chat_key is in chatKeys and that still has at least one non-settled
 	// decision row (status == pending, or status == decided with no direct
@@ -1034,8 +1040,9 @@ type DecisionStore interface {
 	ProjectsWithUnsettledDecisions(ctx context.Context, projectIDs []string) (map[string]bool, error)
 
 	// HasPendingDecisionIndexWork reports whether any background decision
-	// indexing work is pending (e.g. settled-eligible rows still marked
-	// settled=false).
+	// indexing work is pending (settled-eligible rows still marked
+	// settled=false, or decisions/decision_answers still marked
+	// facet_indexed=false).
 	HasPendingDecisionIndexWork(ctx context.Context) (bool, error)
 
 	// SweepSettledDecisionsPage marks up to limit settled-eligible decisions
@@ -1046,6 +1053,26 @@ type DecisionStore interface {
 	// afterID = nextCursor while nextCursor != "" (even on short pages, since
 	// Postgres FOR UPDATE SKIP LOCKED may return fewer than limit rows).
 	SweepSettledDecisionsPage(ctx context.Context, afterID string, limit int) (updated int, nextCursor string, err error)
+
+	// IndexDecisionFacetsDecisionsPage indexes up to limit decisions with
+	// id > afterID (when afterID is non-empty) whose facet_indexed marker is
+	// false into decision_facet_entries and flips facet_indexed=true in one
+	// transaction. Returns the number of rows indexed and the highest decision
+	// ID scanned on this page (empty when no matching rows remain).
+	IndexDecisionFacetsDecisionsPage(ctx context.Context, afterID string, limit int) (int, string, error)
+
+	// IndexDecisionFacetsAnswersPage indexes up to limit decision_answers with
+	// id > afterID (when afterID is non-empty) whose facet_indexed marker is
+	// false into decision_facet_entries (handling superseded agent_interpreted
+	// siblings under the decision row lock) and flips facet_indexed=true in
+	// one transaction. Returns the number of rows indexed and the highest
+	// answer ID scanned on this page (empty when no matching rows remain).
+	IndexDecisionFacetsAnswersPage(ctx context.Context, afterID string, limit int) (int, string, error)
+
+	// ReconcileDecisionFacets deletes stale decision_facet_entries rows left
+	// behind by older-binary user or project deletions. Returns the number of
+	// summary rows deleted.
+	ReconcileDecisionFacets(ctx context.Context) (int, error)
 
 	// ListDecisionAnswersPerProject lists up to perProject newest non-superseded
 	// Made-tab decision_answers entries per project in projectIDs whose

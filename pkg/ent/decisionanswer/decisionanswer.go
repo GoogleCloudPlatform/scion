@@ -63,6 +63,8 @@ const (
 	FieldBatchID = "batch_id"
 	// FieldMatchedDefault holds the string denoting the matched_default field in the database.
 	FieldMatchedDefault = "matched_default"
+	// FieldFacetIndexed holds the string denoting the facet_indexed field in the database.
+	FieldFacetIndexed = "facet_indexed"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// Table holds the table name of the decisionanswer in the database.
@@ -96,6 +98,7 @@ var Columns = []string{
 	FieldIdempotencyKey,
 	FieldBatchID,
 	FieldMatchedDefault,
+	FieldFacetIndexed,
 	FieldCreatedAt,
 }
 
@@ -124,6 +127,8 @@ var (
 	IdempotencyKeyValidator func(string) error
 	// DefaultMatchedDefault holds the default value on creation for the "matched_default" field.
 	DefaultMatchedDefault bool
+	// DefaultFacetIndexed holds the default value on creation for the "facet_indexed" field.
+	DefaultFacetIndexed bool
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -337,6 +342,11 @@ func ByBatchID(opts ...sql.OrderTermOption) OrderOption {
 // ByMatchedDefault orders the results by the matched_default field.
 func ByMatchedDefault(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldMatchedDefault, opts...).ToFunc()
+}
+
+// ByFacetIndexed orders the results by the facet_indexed field.
+func ByFacetIndexed(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFacetIndexed, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

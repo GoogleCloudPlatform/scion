@@ -28,11 +28,13 @@ import (
 )
 
 // DecisionAnswer is one answer to a decision version: the decision log
-// (choices, ptone/scion#7514). Rows are append-only and kept forever. The
-// question, key, version and label are snapshots, so a row reads the same
-// after its decision is replaced or its prompt message is purged, and the
-// answerer's name and email are snapshots kept after the user is deleted
-// (answered_by_user_id is then cleared).
+// (choices, ptone/scion#7514). Rows are append-only apart from
+// answered_by_user_id (cleared when the user is deleted) and facet_indexed
+// (set to true once the row's contribution is recorded in
+// decision_facet_entries), and are kept forever. The question, key, version
+// and label are snapshots, so a row reads the same after its decision is
+// replaced or its prompt message is purged, and the answerer's name and email
+// are snapshots kept after the user is deleted.
 type DecisionAnswer struct {
 	ent.Schema
 }
@@ -147,6 +149,12 @@ func (DecisionAnswer) Fields() []ent.Field {
 		field.Bool("matched_default").
 			Default(false).
 			Immutable(),
+		// facet_indexed is true once this row's contribution is recorded in
+		// decision_facet_entries (or skipped because it contributes zero).
+		// Defaults to false so rows written by an older binary trigger fallback
+		// reads until the background indexer processes them.
+		field.Bool("facet_indexed").
+			Default(false),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),
@@ -175,6 +183,10 @@ func (DecisionAnswer) Indexes() []ent.Index {
 		index.Fields("answered_by_user_id"),
 		// The answers of one set submit.
 		index.Fields("batch_id"),
+		// Partial index for facet-indexer work and fallback probes:
+		// covers queries filtering on project_id WHERE facet_indexed = false.
+		index.Fields("project_id").
+			Annotations(entsql.IndexWhere("facet_indexed = false")),
 	}
 }
 

@@ -66,6 +66,8 @@ type DecisionAnswer struct {
 	BatchID *uuid.UUID `json:"batch_id,omitempty"`
 	// MatchedDefault holds the value of the "matched_default" field.
 	MatchedDefault bool `json:"matched_default,omitempty"`
+	// FacetIndexed holds the value of the "facet_indexed" field.
+	FacetIndexed bool `json:"facet_indexed,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt    time.Time `json:"created_at,omitempty"`
 	selectValues sql.SelectValues
@@ -78,7 +80,7 @@ func (*DecisionAnswer) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case decisionanswer.FieldInterpretedByAgentID, decisionanswer.FieldSourceMessageID, decisionanswer.FieldBatchID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case decisionanswer.FieldMatchedDefault:
+		case decisionanswer.FieldMatchedDefault, decisionanswer.FieldFacetIndexed:
 			values[i] = new(sql.NullBool)
 		case decisionanswer.FieldVersion:
 			values[i] = new(sql.NullInt64)
@@ -262,6 +264,12 @@ func (_m *DecisionAnswer) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.MatchedDefault = value.Bool
 			}
+		case decisionanswer.FieldFacetIndexed:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field facet_indexed", values[i])
+			} else if value.Valid {
+				_m.FacetIndexed = value.Bool
+			}
 		case decisionanswer.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created_at", values[i])
@@ -393,6 +401,9 @@ func (_m *DecisionAnswer) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("matched_default=")
 	builder.WriteString(fmt.Sprintf("%v", _m.MatchedDefault))
+	builder.WriteString(", ")
+	builder.WriteString("facet_indexed=")
+	builder.WriteString(fmt.Sprintf("%v", _m.FacetIndexed))
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

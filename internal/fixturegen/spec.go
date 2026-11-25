@@ -462,6 +462,18 @@ func Spec() []TableFixture {
 		{Table: "decision_key_counters", Rows: []row{
 			{"agent_id": agentID, "next": 2},
 		}},
+		{Table: "decision_facet_entries", Rows: []row{
+			{
+				"id": "df000000-0000-0000-0000-000000000001", "project_id": projectID,
+				"chat_key": "topic-fixture", "kind": "asker", "actor_id": agentID,
+				"name": "worker", "email": "", "latest_at": baseTime, "ref_count": 5,
+			},
+			{
+				"id": "df000000-0000-0000-0000-000000000002", "project_id": projectID,
+				"chat_key": "topic-fixture", "kind": "answerer", "actor_id": userID,
+				"name": "Alice", "email": "alice@example.com", "latest_at": baseTime.Add(6 * time.Minute), "ref_count": 3,
+			},
+		}},
 		// ---- Agent-to-human secret requests ----
 		{Table: "secret_requests", Rows: []row{
 			{

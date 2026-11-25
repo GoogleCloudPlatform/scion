@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
@@ -1269,8 +1270,12 @@ func init() {
 	decisionDescSettled := decisionFields[21].Descriptor()
 	// decision.DefaultSettled holds the default value on creation for the settled field.
 	decision.DefaultSettled = decisionDescSettled.Default.(bool)
+	// decisionDescFacetIndexed is the schema descriptor for facet_indexed field.
+	decisionDescFacetIndexed := decisionFields[22].Descriptor()
+	// decision.DefaultFacetIndexed holds the default value on creation for the facet_indexed field.
+	decision.DefaultFacetIndexed = decisionDescFacetIndexed.Default.(bool)
 	// decisionDescCreatedAt is the schema descriptor for created_at field.
-	decisionDescCreatedAt := decisionFields[23].Descriptor()
+	decisionDescCreatedAt := decisionFields[24].Descriptor()
 	// decision.DefaultCreatedAt holds the default value on creation for the created_at field.
 	decision.DefaultCreatedAt = decisionDescCreatedAt.Default.(func() time.Time)
 	// decisionDescID is the schema descriptor for id field.
@@ -1349,14 +1354,60 @@ func init() {
 	decisionanswerDescMatchedDefault := decisionanswerFields[24].Descriptor()
 	// decisionanswer.DefaultMatchedDefault holds the default value on creation for the matched_default field.
 	decisionanswer.DefaultMatchedDefault = decisionanswerDescMatchedDefault.Default.(bool)
+	// decisionanswerDescFacetIndexed is the schema descriptor for facet_indexed field.
+	decisionanswerDescFacetIndexed := decisionanswerFields[25].Descriptor()
+	// decisionanswer.DefaultFacetIndexed holds the default value on creation for the facet_indexed field.
+	decisionanswer.DefaultFacetIndexed = decisionanswerDescFacetIndexed.Default.(bool)
 	// decisionanswerDescCreatedAt is the schema descriptor for created_at field.
-	decisionanswerDescCreatedAt := decisionanswerFields[25].Descriptor()
+	decisionanswerDescCreatedAt := decisionanswerFields[26].Descriptor()
 	// decisionanswer.DefaultCreatedAt holds the default value on creation for the created_at field.
 	decisionanswer.DefaultCreatedAt = decisionanswerDescCreatedAt.Default.(func() time.Time)
 	// decisionanswerDescID is the schema descriptor for id field.
 	decisionanswerDescID := decisionanswerFields[0].Descriptor()
 	// decisionanswer.DefaultID holds the default value on creation for the id field.
 	decisionanswer.DefaultID = decisionanswerDescID.Default.(func() uuid.UUID)
+	decisionfacetentryFields := schema.DecisionFacetEntry{}.Fields()
+	_ = decisionfacetentryFields
+	// decisionfacetentryDescChatKey is the schema descriptor for chat_key field.
+	decisionfacetentryDescChatKey := decisionfacetentryFields[2].Descriptor()
+	// decisionfacetentry.ChatKeyValidator is a validator for the "chat_key" field. It is called by the builders before save.
+	decisionfacetentry.ChatKeyValidator = func() func(string) error {
+		validators := decisionfacetentryDescChatKey.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(chat_key string) error {
+			for _, fn := range fns {
+				if err := fn(chat_key); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// decisionfacetentryDescActorID is the schema descriptor for actor_id field.
+	decisionfacetentryDescActorID := decisionfacetentryFields[4].Descriptor()
+	// decisionfacetentry.ActorIDValidator is a validator for the "actor_id" field. It is called by the builders before save.
+	decisionfacetentry.ActorIDValidator = decisionfacetentryDescActorID.Validators[0].(func(string) error)
+	// decisionfacetentryDescName is the schema descriptor for name field.
+	decisionfacetentryDescName := decisionfacetentryFields[5].Descriptor()
+	// decisionfacetentry.DefaultName holds the default value on creation for the name field.
+	decisionfacetentry.DefaultName = decisionfacetentryDescName.Default.(string)
+	// decisionfacetentryDescEmail is the schema descriptor for email field.
+	decisionfacetentryDescEmail := decisionfacetentryFields[6].Descriptor()
+	// decisionfacetentry.DefaultEmail holds the default value on creation for the email field.
+	decisionfacetentry.DefaultEmail = decisionfacetentryDescEmail.Default.(string)
+	// decisionfacetentryDescRefCount is the schema descriptor for ref_count field.
+	decisionfacetentryDescRefCount := decisionfacetentryFields[8].Descriptor()
+	// decisionfacetentry.DefaultRefCount holds the default value on creation for the ref_count field.
+	decisionfacetentry.DefaultRefCount = decisionfacetentryDescRefCount.Default.(int)
+	// decisionfacetentry.RefCountValidator is a validator for the "ref_count" field. It is called by the builders before save.
+	decisionfacetentry.RefCountValidator = decisionfacetentryDescRefCount.Validators[0].(func(int) error)
+	// decisionfacetentryDescID is the schema descriptor for id field.
+	decisionfacetentryDescID := decisionfacetentryFields[0].Descriptor()
+	// decisionfacetentry.DefaultID holds the default value on creation for the id field.
+	decisionfacetentry.DefaultID = decisionfacetentryDescID.Default.(func() uuid.UUID)
 	decisionkeycounterFields := schema.DecisionKeyCounter{}.Fields()
 	_ = decisionkeycounterFields
 	// decisionkeycounterDescNext is the schema descriptor for next field.

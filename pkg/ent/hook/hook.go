@@ -417,6 +417,18 @@ func (f DecisionAnswerFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Val
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DecisionAnswerMutation", m)
 }
 
+// The DecisionFacetEntryFunc type is an adapter to allow the use of ordinary
+// function as DecisionFacetEntry mutator.
+type DecisionFacetEntryFunc func(context.Context, *ent.DecisionFacetEntryMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DecisionFacetEntryFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.DecisionFacetEntryMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DecisionFacetEntryMutation", m)
+}
+
 // The DecisionKeyCounterFunc type is an adapter to allow the use of ordinary
 // function as DecisionKeyCounter mutator.
 type DecisionKeyCounterFunc func(context.Context, *ent.DecisionKeyCounterMutation) (ent.Value, error)

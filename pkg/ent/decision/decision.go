@@ -57,6 +57,8 @@ const (
 	FieldStatus = "status"
 	// FieldSettled holds the string denoting the settled field in the database.
 	FieldSettled = "settled"
+	// FieldFacetIndexed holds the string denoting the facet_indexed field in the database.
+	FieldFacetIndexed = "facet_indexed"
 	// FieldReplacedByID holds the string denoting the replaced_by_id field in the database.
 	FieldReplacedByID = "replaced_by_id"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
@@ -99,6 +101,7 @@ var Columns = []string{
 	FieldIntroLength,
 	FieldStatus,
 	FieldSettled,
+	FieldFacetIndexed,
 	FieldReplacedByID,
 	FieldCreatedAt,
 	FieldDecidedAt,
@@ -143,6 +146,8 @@ var (
 	IntroLengthValidator func(int) error
 	// DefaultSettled holds the default value on creation for the "settled" field.
 	DefaultSettled bool
+	// DefaultFacetIndexed holds the default value on creation for the "facet_indexed" field.
+	DefaultFacetIndexed bool
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -307,6 +312,11 @@ func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 // BySettled orders the results by the settled field.
 func BySettled(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSettled, opts...).ToFunc()
+}
+
+// ByFacetIndexed orders the results by the facet_indexed field.
+func ByFacetIndexed(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFacetIndexed, opts...).ToFunc()
 }
 
 // ByReplacedByID orders the results by the replaced_by_id field.

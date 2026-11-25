@@ -1318,6 +1318,7 @@ var (
 		{Name: "intro_length", Type: field.TypeInt, Default: 0},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "decided", "replaced", "withdrawn", "dismissed"}, Default: "pending"},
 		{Name: "settled", Type: field.TypeBool, Default: false},
+		{Name: "facet_indexed", Type: field.TypeBool, Default: false},
 		{Name: "replaced_by_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "decided_at", Type: field.TypeTime, Nullable: true},
@@ -1361,6 +1362,14 @@ var (
 				},
 			},
 			{
+				Name:    "decision_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionsColumns[1]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "facet_indexed = false",
+				},
+			},
+			{
 				Name:    "decision_message_id_position",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionsColumns[4], DecisionsColumns[5]},
@@ -1399,6 +1408,7 @@ var (
 		{Name: "idempotency_key", Type: field.TypeString, Nullable: true, Size: 128},
 		{Name: "batch_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "matched_default", Type: field.TypeBool, Default: false},
+		{Name: "facet_indexed", Type: field.TypeBool, Default: false},
 		{Name: "created_at", Type: field.TypeTime},
 	}
 	// DecisionAnswersTable holds the schema information for the "decision_answers" table.
@@ -1420,12 +1430,12 @@ var (
 			{
 				Name:    "decisionanswer_project_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[25]},
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[26]},
 			},
 			{
 				Name:    "decisionanswer_project_id_asker_agent_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[3], DecisionAnswersColumns[25]},
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[3], DecisionAnswersColumns[26]},
 			},
 			{
 				Name:    "decisionanswer_response_message_id",
@@ -1441,6 +1451,44 @@ var (
 				Name:    "decisionanswer_batch_id",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionAnswersColumns[23]},
+			},
+			{
+				Name:    "decisionanswer_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAnswersColumns[2]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "facet_indexed = false",
+				},
+			},
+		},
+	}
+	// DecisionFacetEntriesColumns holds the columns for the "decision_facet_entries" table.
+	DecisionFacetEntriesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "chat_key", Type: field.TypeString, Size: 256},
+		{Name: "kind", Type: field.TypeEnum, Enums: []string{"asker", "answerer"}},
+		{Name: "actor_id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString, Default: ""},
+		{Name: "email", Type: field.TypeString, Default: ""},
+		{Name: "latest_at", Type: field.TypeTime},
+		{Name: "ref_count", Type: field.TypeInt, Default: 0},
+	}
+	// DecisionFacetEntriesTable holds the schema information for the "decision_facet_entries" table.
+	DecisionFacetEntriesTable = &schema.Table{
+		Name:       "decision_facet_entries",
+		Columns:    DecisionFacetEntriesColumns,
+		PrimaryKey: []*schema.Column{DecisionFacetEntriesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "decisionfacetentry_project_id_chat_key_kind_actor_id",
+				Unique:  true,
+				Columns: []*schema.Column{DecisionFacetEntriesColumns[1], DecisionFacetEntriesColumns[2], DecisionFacetEntriesColumns[3], DecisionFacetEntriesColumns[4]},
+			},
+			{
+				Name:    "decisionfacetentry_project_id_kind_actor_id",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionFacetEntriesColumns[1], DecisionFacetEntriesColumns[3], DecisionFacetEntriesColumns[4]},
 			},
 		},
 	}
@@ -4627,6 +4675,7 @@ var (
 		ConversationParticipantsTable,
 		DecisionsTable,
 		DecisionAnswersTable,
+		DecisionFacetEntriesTable,
 		DecisionKeyCountersTable,
 		DelegationAdoptionsTable,
 		DelegationEdgesTable,
@@ -4796,6 +4845,9 @@ func init() {
 	}
 	DecisionAnswersTable.Annotation = &entsql.Annotation{
 		Table: "decision_answers",
+	}
+	DecisionFacetEntriesTable.Annotation = &entsql.Annotation{
+		Table: "decision_facet_entries",
 	}
 	DecisionKeyCountersTable.Annotation = &entsql.Annotation{
 		Table: "decision_key_counters",

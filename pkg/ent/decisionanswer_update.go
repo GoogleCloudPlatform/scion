@@ -47,6 +47,20 @@ func (_u *DecisionAnswerUpdate) ClearAnsweredByUserID() *DecisionAnswerUpdate {
 	return _u
 }
 
+// SetFacetIndexed sets the "facet_indexed" field.
+func (_u *DecisionAnswerUpdate) SetFacetIndexed(v bool) *DecisionAnswerUpdate {
+	_u.mutation.SetFacetIndexed(v)
+	return _u
+}
+
+// SetNillableFacetIndexed sets the "facet_indexed" field if the given value is not nil.
+func (_u *DecisionAnswerUpdate) SetNillableFacetIndexed(v *bool) *DecisionAnswerUpdate {
+	if v != nil {
+		_u.SetFacetIndexed(*v)
+	}
+	return _u
+}
+
 // Mutation returns the DecisionAnswerMutation object of the builder.
 func (_u *DecisionAnswerUpdate) Mutation() *DecisionAnswerMutation {
 	return _u.mutation
@@ -118,6 +132,9 @@ func (_u *DecisionAnswerUpdate) sqlSave(ctx context.Context) (_node int, err err
 	if _u.mutation.BatchIDCleared() {
 		_spec.ClearField(decisionanswer.FieldBatchID, field.TypeUUID)
 	}
+	if value, ok := _u.mutation.FacetIndexed(); ok {
+		_spec.SetField(decisionanswer.FieldFacetIndexed, field.TypeBool, value)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{decisionanswer.Label}
@@ -155,6 +172,20 @@ func (_u *DecisionAnswerUpdateOne) SetNillableAnsweredByUserID(v *string) *Decis
 // ClearAnsweredByUserID clears the value of the "answered_by_user_id" field.
 func (_u *DecisionAnswerUpdateOne) ClearAnsweredByUserID() *DecisionAnswerUpdateOne {
 	_u.mutation.ClearAnsweredByUserID()
+	return _u
+}
+
+// SetFacetIndexed sets the "facet_indexed" field.
+func (_u *DecisionAnswerUpdateOne) SetFacetIndexed(v bool) *DecisionAnswerUpdateOne {
+	_u.mutation.SetFacetIndexed(v)
+	return _u
+}
+
+// SetNillableFacetIndexed sets the "facet_indexed" field if the given value is not nil.
+func (_u *DecisionAnswerUpdateOne) SetNillableFacetIndexed(v *bool) *DecisionAnswerUpdateOne {
+	if v != nil {
+		_u.SetFacetIndexed(*v)
+	}
 	return _u
 }
 
@@ -258,6 +289,9 @@ func (_u *DecisionAnswerUpdateOne) sqlSave(ctx context.Context) (_node *Decision
 	}
 	if _u.mutation.BatchIDCleared() {
 		_spec.ClearField(decisionanswer.FieldBatchID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.FacetIndexed(); ok {
+		_spec.SetField(decisionanswer.FieldFacetIndexed, field.TypeBool, value)
 	}
 	_node = &DecisionAnswer{config: _u.config}
 	_spec.Assign = _node.assignValues

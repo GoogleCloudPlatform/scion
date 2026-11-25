@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -138,7 +139,7 @@ func openScaleCompositeStore(tb testing.TB) *CompositeStore {
 	return cs
 }
 
-func measureColdAndWarmMedian(tb testing.TB, warmRuns int, fn func() error) (cold, warmMedian time.Duration) {
+func measureColdAndWarmStats(tb testing.TB, warmRuns int, fn func() error) (cold, warmMedian, tailMedian, tailMax time.Duration) {
 	tb.Helper()
 	t0 := time.Now()
 	require.NoError(tb, fn())
@@ -150,8 +151,22 @@ func measureColdAndWarmMedian(tb testing.TB, warmRuns int, fn func() error) (col
 		require.NoError(tb, fn())
 		samples[i] = time.Since(t1)
 	}
-	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
-	return cold, samples[len(samples)/2]
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	warmMedian = sorted[len(sorted)/2]
+
+	// Tail calls (calls 7..N, 1-indexed including cold = warm indices 5..N-1)
+	// capture Postgres pgx prepared-statement generic-plan execution after the
+	// 5th execution on one pool.
+	tailStart := 5
+	if tailStart >= len(samples) {
+		tailStart = 0
+	}
+	tail := append([]time.Duration(nil), samples[tailStart:]...)
+	sort.Slice(tail, func(i, j int) bool { return tail[i] < tail[j] })
+	tailMedian = tail[len(tail)/2]
+	tailMax = tail[len(tail)-1]
+	return cold, warmMedian, tailMedian, tailMax
 }
 
 func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled bool) *decisionScaleFixture {
@@ -216,6 +231,7 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 		for a := 0; a < sc.agentsPerProject; a++ {
 			agentIDs[a] = detUUID(0x10, p, a)
 		}
+		var projFacetDeltas []facetEntryDelta
 
 		for offset := 0; offset < sc.rowsPerProject; offset += batchSize {
 			end := offset + batchSize
@@ -262,7 +278,19 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 					SetVersion(1).
 					SetQuestion(fmt.Sprintf("Deploy service %d in project %d?", j, p)).
 					SetChoices(choices).
+					SetFacetIndexed(markSettled).
 					SetCreatedAt(ts)
+				if markSettled {
+					projFacetDeltas = append(projFacetDeltas, facetEntryDelta{
+						ProjectID: pUUID,
+						ChatKey:   chatKey,
+						Kind:      decisionfacetentry.KindAsker,
+						ActorID:   agentID.String(),
+						Name:      agentName,
+						LatestAt:  ts,
+						Delta:     1,
+					})
+				}
 
 				switch {
 				case isInterpOpen:
@@ -286,7 +314,14 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 						SetSourceMessageID(detUUID(0x60, p, j)).
 						SetSurface(decisionanswer.SurfaceNative).
 						SetResponseMessageID(respMsgID).
+						SetFacetIndexed(markSettled).
 						SetCreatedAt(ts))
+					if markSettled {
+						projFacetDeltas = append(projFacetDeltas, facetEntryDelta{
+							ProjectID: pUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer,
+							ActorID: uid, Name: "User 0", LatestAt: ts, Delta: 1,
+						})
+					}
 				case isOpen:
 					dc.SetStatus(decision.StatusPending).SetSettled(false)
 				case isWithdrawn:
@@ -294,6 +329,7 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 				case isDismissed:
 					dc.SetStatus(decision.StatusDismissed).SetDismissedAt(ts).SetSettled(markSettled)
 					uid := users[j%len(users)]
+					uName := fmt.Sprintf("User %d", j%len(users))
 					ansCreates = append(ansCreates, tx.DecisionAnswer.Create().
 						SetID(ansID).
 						SetDecisionRowID(decID).
@@ -305,15 +341,23 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 						SetChoiceID("$dismissed").
 						SetChoiceLabel("Dismissed").
 						SetAnsweredByUserID(uid).
-						SetAnsweredByName(fmt.Sprintf("User %d", j%len(users))).
+						SetAnsweredByName(uName).
 						SetProvenance(decisionanswer.ProvenanceDirect).
 						SetOutcome(decisionanswer.OutcomeDismiss).
 						SetSurface(decisionanswer.SurfaceDecisionsPage).
 						SetResponseMessageID(respMsgID).
+						SetFacetIndexed(markSettled).
 						SetCreatedAt(ts))
+					if markSettled {
+						projFacetDeltas = append(projFacetDeltas, facetEntryDelta{
+							ProjectID: pUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer,
+							ActorID: uid, Name: uName, LatestAt: ts, Delta: 1,
+						})
+					}
 				default:
 					dc.SetStatus(decision.StatusDecided).SetDecidedAt(ts).SetSettled(markSettled)
 					uid := users[j%len(users)]
+					uName := fmt.Sprintf("User %d", j%len(users))
 					ansCreates = append(ansCreates, tx.DecisionAnswer.Create().
 						SetID(ansID).
 						SetDecisionRowID(decID).
@@ -325,12 +369,19 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 						SetChoiceID("yes").
 						SetChoiceLabel("Yes").
 						SetAnsweredByUserID(uid).
-						SetAnsweredByName(fmt.Sprintf("User %d", j%len(users))).
+						SetAnsweredByName(uName).
 						SetProvenance(decisionanswer.ProvenanceDirect).
 						SetOutcome(decisionanswer.OutcomeAnswer).
 						SetSurface(decisionanswer.SurfaceDecisionsPage).
 						SetResponseMessageID(respMsgID).
+						SetFacetIndexed(markSettled).
 						SetCreatedAt(ts))
+					if markSettled {
+						projFacetDeltas = append(projFacetDeltas, facetEntryDelta{
+							ProjectID: pUUID, ChatKey: chatKey, Kind: decisionfacetentry.KindAnswerer,
+							ActorID: uid, Name: uName, LatestAt: ts, Delta: 1,
+						})
+					}
 				}
 				decCreates = append(decCreates, dc)
 			}
@@ -341,6 +392,9 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 				totalAnswers += len(ansCreates)
 			}
 		}
+		if markSettled && len(projFacetDeltas) > 0 {
+			require.NoError(tb, applyDecisionFacetDeltas(ctx, tx.Client(), projFacetDeltas))
+		}
 		require.NoError(tb, tx.Commit())
 	}
 
@@ -349,7 +403,7 @@ func seedDecisionScaleFixture(tb testing.TB, sc decisionScaleSpec, markSettled b
 	if markSettled || cs.Dialect() == dialect.Postgres {
 		analyzeSQL := "ANALYZE"
 		if cs.Dialect() == dialect.Postgres {
-			analyzeSQL = "ANALYZE decisions, decision_answers"
+			analyzeSQL = "ANALYZE decisions, decision_answers, decision_facet_entries"
 		}
 		_, err := cs.DB().ExecContext(ctx, analyzeSQL)
 		require.NoError(tb, err)
@@ -381,6 +435,35 @@ func BenchmarkDecisionsProfileScale(b *testing.B) {
 			ctx := context.Background()
 			b.Logf("[%s/%s] seeded %d decisions + %d answers in %v",
 				sc.name, f.cs.Dialect(), f.totalDecisions, f.totalAnswers, f.seedDuration)
+
+			b.Run("ListDecisionFacets", func(b *testing.B) {
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					ag, ans, ck, err := f.cs.ListDecisionFacets(ctx, f.projectIDs, f.allKeys)
+					require.NoError(b, err)
+					require.NotEmpty(b, ag)
+					require.NotEmpty(b, ans)
+					require.NotEmpty(b, ck)
+				}
+			})
+
+			b.Run("ListProjectDecisionAgentsForProjects", func(b *testing.B) {
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					got, err := f.cs.ListProjectDecisionAgentsForProjects(ctx, f.projectIDs)
+					require.NoError(b, err)
+					require.Len(b, got, sc.numProjects)
+				}
+			})
+
+			b.Run("ProjectsWithDecisions", func(b *testing.B) {
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					got, err := f.cs.ProjectsWithDecisions(ctx, f.projectIDs)
+					require.NoError(b, err)
+					require.Len(b, got, sc.numProjects)
+				}
+			})
 
 			b.Run("ListOpenPrompts", func(b *testing.B) {
 				b.ResetTimer()
@@ -433,14 +516,15 @@ var decisionScaleSmokeSpec = decisionScaleSpec{
 
 // TestDecisionsScaleStore verifies store-level scale query correctness on a
 // tiny fixture by default, or runs the full R/S(/X) timing table (cold first
-// call + warm median of 5 calls) when SCION_DECISIONS_SCALE=1 (and optionally
-// SCION_DECISIONS_SCALE_X=1 for 1M).
+// call + 10 warm calls on one pool, reporting warm median plus calls 7-10
+// median/max to exercise Postgres pgx generic-plan caching) when
+// SCION_DECISIONS_SCALE=1 (and optionally SCION_DECISIONS_SCALE_X=1 for 1M).
 func TestDecisionsScaleStore(t *testing.T) {
 	specs := []decisionScaleSpec{decisionScaleSmokeSpec}
 	warmRuns := 1
 	if os.Getenv("SCION_DECISIONS_SCALE") == "1" {
 		specs = decisionScaleSpecs
-		warmRuns = 5
+		warmRuns = 10
 	}
 	ctx := context.Background()
 	for _, sc := range specs {
@@ -452,7 +536,16 @@ func TestDecisionsScaleStore(t *testing.T) {
 			t.Logf("[%s/%s] seeded %d decisions + %d answers across %d projects in %v",
 				sc.name, f.cs.Dialect(), f.totalDecisions, f.totalAnswers, sc.numProjects, f.seedDuration)
 
-			coldPWD, medPWD := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldProbe, medProbe, tailMedProbe, tailMaxProbe := measureColdAndWarmStats(t, warmRuns, func() error {
+				unindexed, err := f.cs.hasUnindexedDecisionFacets(ctx, f.projectUUIDs)
+				if err != nil {
+					return err
+				}
+				require.False(t, unindexed)
+				return nil
+			})
+
+			coldPWD, medPWD, tailMedPWD, tailMaxPWD := measureColdAndWarmStats(t, warmRuns, func() error {
 				pwds, err := f.cs.ProjectsWithDecisions(ctx, f.projectIDs)
 				if err != nil {
 					return err
@@ -461,7 +554,39 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldUnsettled, medUnsettled := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldFacets, medFacets, tailMedFacets, tailMaxFacets := measureColdAndWarmStats(t, warmRuns, func() error {
+				ag, ans, ck, err := f.cs.ListDecisionFacets(ctx, f.projectIDs, f.allKeys)
+				if err != nil {
+					return err
+				}
+				require.NotEmpty(t, ag)
+				require.NotEmpty(t, ans)
+				require.NotEmpty(t, ck)
+				return nil
+			})
+
+			singleKeys := f.keysByProject[f.projectIDs[0]]
+			coldFacetsSingle, medFacetsSingle, tailMedFacetsSingle, tailMaxFacetsSingle := measureColdAndWarmStats(t, warmRuns, func() error {
+				ag, ans, ck, err := f.cs.ListDecisionFacets(ctx, f.projectIDs[:1], singleKeys)
+				if err != nil {
+					return err
+				}
+				require.NotEmpty(t, ag)
+				require.NotEmpty(t, ans)
+				require.NotEmpty(t, ck)
+				return nil
+			})
+
+			coldAgentsBatch, medAgentsBatch, tailMedAgentsBatch, tailMaxAgentsBatch := measureColdAndWarmStats(t, warmRuns, func() error {
+				got, err := f.cs.ListProjectDecisionAgentsForProjects(ctx, f.projectIDs)
+				if err != nil {
+					return err
+				}
+				require.Len(t, got, sc.numProjects)
+				return nil
+			})
+
+			coldUnsettled, medUnsettled, tailMedUnsettled, tailMaxUnsettled := measureColdAndWarmStats(t, warmRuns, func() error {
 				unsettled, err := f.cs.ProjectsWithUnsettledDecisions(ctx, f.projectIDs)
 				if err != nil {
 					return err
@@ -470,7 +595,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldOpen, medOpen := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldOpen, medOpen, tailMedOpen, tailMaxOpen := measureColdAndWarmStats(t, warmRuns, func() error {
 				openPrompts, err := f.cs.ListOpenPrompts(ctx, f.projectIDs, f.allKeys)
 				if err != nil {
 					return err
@@ -486,7 +611,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				Save(ctx)
 			require.NoError(t, err)
 
-			coldQuietUnsettled, medQuietUnsettled := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldQuietUnsettled, medQuietUnsettled, tailMedQuietUnsettled, tailMaxQuietUnsettled := measureColdAndWarmStats(t, warmRuns, func() error {
 				quietUnsettled, err := f.cs.ProjectsWithUnsettledDecisions(ctx, f.projectIDs)
 				if err != nil {
 					return err
@@ -495,7 +620,7 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			coldQuietOpen, medQuietOpen := measureColdAndWarmMedian(t, warmRuns, func() error {
+			coldQuietOpen, medQuietOpen, tailMedQuietOpen, tailMaxQuietOpen := measureColdAndWarmStats(t, warmRuns, func() error {
 				quietOpen, err := f.cs.ListOpenPrompts(ctx, f.projectIDs, f.allKeys)
 				if err != nil {
 					return err
@@ -504,20 +629,25 @@ func TestDecisionsScaleStore(t *testing.T) {
 				return nil
 			})
 
-			t.Logf("[%s/%s] STORE TIMINGS (cold / warm median of %d):", sc.name, f.cs.Dialect(), warmRuns)
-			t.Logf("  ProjectsWithDecisions(%d)                  = cold %v / warm-med %v", sc.numProjects, coldPWD, medPWD)
-			t.Logf("  ProjectsWithUnsettledDecisions(%d open)    = cold %v / warm-med %v", sc.numProjects, coldUnsettled, medUnsettled)
-			t.Logf("  ListOpenPrompts(%d open)                   = cold %v / warm-med %v", sc.numProjects*sc.openPerProject, coldOpen, medOpen)
-			t.Logf("  ProjectsWithUnsettledDecisions(quiet)      = cold %v / warm-med %v", coldQuietUnsettled, medQuietUnsettled)
-			t.Logf("  ListOpenPrompts(quiet)                     = cold %v / warm-med %v", coldQuietOpen, medQuietOpen)
+			t.Logf("[%s/%s] STORE TIMINGS (cold / warm-med / calls7-10 med / calls7-10 max, warmRuns=%d):", sc.name, f.cs.Dialect(), warmRuns)
+			t.Logf("  hasUnindexedDecisionFacets(%d)             = %v / %v / %v / %v", sc.numProjects, coldProbe, medProbe, tailMedProbe, tailMaxProbe)
+			t.Logf("  ProjectsWithDecisions(%d)                  = %v / %v / %v / %v", sc.numProjects, coldPWD, medPWD, tailMedPWD, tailMaxPWD)
+			t.Logf("  ListDecisionFacets(%d projects)            = %v / %v / %v / %v", sc.numProjects, coldFacets, medFacets, tailMedFacets, tailMaxFacets)
+			t.Logf("  ListDecisionFacets(single project)         = %v / %v / %v / %v", coldFacetsSingle, medFacetsSingle, tailMedFacetsSingle, tailMaxFacetsSingle)
+			t.Logf("  ListProjectDecisionAgentsForProjects(%d)   = %v / %v / %v / %v", sc.numProjects, coldAgentsBatch, medAgentsBatch, tailMedAgentsBatch, tailMaxAgentsBatch)
+			t.Logf("  ProjectsWithUnsettledDecisions(%d open)    = %v / %v / %v / %v", sc.numProjects, coldUnsettled, medUnsettled, tailMedUnsettled, tailMaxUnsettled)
+			t.Logf("  ListOpenPrompts(%d open)                   = %v / %v / %v / %v", sc.numProjects*sc.openPerProject, coldOpen, medOpen, tailMedOpen, tailMaxOpen)
+			t.Logf("  ProjectsWithUnsettledDecisions(quiet)      = %v / %v / %v / %v", coldQuietUnsettled, medQuietUnsettled, tailMedQuietUnsettled, tailMaxQuietUnsettled)
+			t.Logf("  ListOpenPrompts(quiet)                     = %v / %v / %v / %v", coldQuietOpen, medQuietOpen, tailMedQuietOpen, tailMaxQuietOpen)
 		})
 	}
 }
 
-// TestDecisionsScaleBackfill verifies keyset-cursor settled-hint backfill
-// correctness on a small fixture by default, or measures a full Scale S (200p /
-// 200k decisions) backfill on SQLite (file-backed, MaxOpenConns=1, no ANALYZE)
-// and PostgreSQL when SCION_DECISIONS_SCALE=1.
+// TestDecisionsScaleBackfill verifies keyset-cursor settled-hint, facet
+// backfill, and reconciler correctness on a small fixture by default, or
+// measures a full Scale S (200p / 200k decisions) backfill on SQLite
+// (file-backed, MaxOpenConns=1, no ANALYZE) and PostgreSQL when
+// SCION_DECISIONS_SCALE=1.
 func TestDecisionsScaleBackfill(t *testing.T) {
 	ctx := context.Background()
 	sc := decisionScaleSmokeSpec
@@ -529,54 +659,77 @@ func TestDecisionsScaleBackfill(t *testing.T) {
 		minPages = 10
 	}
 	f := seedDecisionScaleFixture(t, sc, false)
-	t.Logf("[%s/%s] seeded %d decisions (all settled=false) in %v",
+	t.Logf("[%s/%s] seeded %d decisions (all settled=false, facet_indexed=false) in %v",
 		sc.name, f.cs.Dialect(), f.totalDecisions, f.seedDuration)
-
-	var pageDurs []time.Duration
-	totalSwept := 0
-	cursor := ""
-	totalStart := time.Now()
-	for {
-		pStart := time.Now()
-		n, nextCursor, err := f.cs.SweepSettledDecisionsPage(ctx, cursor, pageSize)
-		pDur := time.Since(pStart)
-		require.NoError(t, err)
-		if nextCursor == "" {
-			break
-		}
-		pageDurs = append(pageDurs, pDur)
-		totalSwept += n
-		cursor = nextCursor
-	}
-	totalDur := time.Since(totalStart)
-
-	pending, err := f.cs.HasPendingDecisionIndexWork(ctx)
-	require.NoError(t, err)
-	require.False(t, pending, "no pending settled work after full backfill")
-
-	expectedSettled := f.totalDecisions - sc.numProjects*sc.openPerProject
-	require.Equal(t, expectedSettled, totalSwept)
-	require.GreaterOrEqual(t, len(pageDurs), minPages)
 
 	median := func(ds []time.Duration) time.Duration {
 		cp := append([]time.Duration(nil), ds...)
 		sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
 		return cp[len(cp)/2]
 	}
-	window := 5
-	if len(pageDurs) < window {
-		window = len(pageDurs)
-	}
-	firstMed := median(pageDurs[:window])
-	lastMed := median(pageDurs[len(pageDurs)-window:])
-	worst := pageDurs[0]
-	for _, d := range pageDurs[1:] {
-		if d > worst {
-			worst = d
+
+	runPagedStep := func(stepName string, fn func(cursor string) (int, string, error)) (int, int) {
+		var pageDurs []time.Duration
+		totalUpdated := 0
+		cursor := ""
+		totalStart := time.Now()
+		for {
+			pStart := time.Now()
+			n, nextCursor, err := fn(cursor)
+			pDur := time.Since(pStart)
+			require.NoError(t, err, "backfill step %s", stepName)
+			if nextCursor == "" {
+				break
+			}
+			pageDurs = append(pageDurs, pDur)
+			totalUpdated += n
+			cursor = nextCursor
 		}
+		totalDur := time.Since(totalStart)
+		require.GreaterOrEqual(t, len(pageDurs), minPages, "backfill step %s page count", stepName)
+
+		window := 5
+		if len(pageDurs) < window {
+			window = len(pageDurs)
+		}
+		firstMed := median(pageDurs[:window])
+		lastMed := median(pageDurs[len(pageDurs)-window:])
+		worst := pageDurs[0]
+		for _, d := range pageDurs[1:] {
+			if d > worst {
+				worst = d
+			}
+		}
+		t.Logf("[%s/%s] BACKFILL %s (%d rows, %d pages of %d):",
+			sc.name, f.cs.Dialect(), stepName, totalUpdated, len(pageDurs), pageSize)
+		t.Logf("  total=%v  first-%d med=%v  last-%d med=%v  worst-page=%v",
+			totalDur, window, firstMed, window, lastMed, worst)
+		return totalUpdated, len(pageDurs)
 	}
-	t.Logf("[%s/%s] BACKFILL TIMINGS (%d rows, %d pages of %d):",
-		sc.name, f.cs.Dialect(), totalSwept, len(pageDurs), pageSize)
-	t.Logf("  total=%v  first-%d med=%v  last-%d med=%v  worst-page=%v",
-		totalDur, window, firstMed, window, lastMed, worst)
+
+	totalSwept, _ := runPagedStep("settled", func(cursor string) (int, string, error) {
+		return f.cs.SweepSettledDecisionsPage(ctx, cursor, pageSize)
+	})
+	totalFacetDecs, _ := runPagedStep("facet_decisions", func(cursor string) (int, string, error) {
+		return f.cs.IndexDecisionFacetsDecisionsPage(ctx, cursor, pageSize)
+	})
+	totalFacetAns, _ := runPagedStep("facet_answers", func(cursor string) (int, string, error) {
+		return f.cs.IndexDecisionFacetsAnswersPage(ctx, cursor, pageSize)
+	})
+
+	recStart := time.Now()
+	reconciled, err := f.cs.ReconcileDecisionFacets(ctx)
+	recDur := time.Since(recStart)
+	require.NoError(t, err)
+	t.Logf("[%s/%s] BACKFILL reconcile (%d deleted): total=%v",
+		sc.name, f.cs.Dialect(), reconciled, recDur)
+
+	pending, err := f.cs.HasPendingDecisionIndexWork(ctx)
+	require.NoError(t, err)
+	require.False(t, pending, "no pending decision index work after full backfill")
+
+	expectedSettled := f.totalDecisions - sc.numProjects*sc.openPerProject
+	require.Equal(t, expectedSettled, totalSwept)
+	require.Equal(t, f.totalDecisions, totalFacetDecs)
+	require.Greater(t, totalFacetAns, 0)
 }

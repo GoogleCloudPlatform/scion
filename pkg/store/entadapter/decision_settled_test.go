@@ -1001,9 +1001,11 @@ func TestDecisionIndex_PostgresConcurrentSweepAndRepost(t *testing.T) {
 		cursor = nextCursor
 	}
 
-	pending, err := cs.HasPendingDecisionIndexWork(ctx)
+	pendingSettled, err := cs.client.Decision.Query().
+		Where(decisionSettledFalse(), settledDecisionPredicate()).
+		Count(ctx)
 	require.NoError(t, err)
-	assert.False(t, pending, "no pending settled work after concurrent sweep + repost")
+	assert.Zero(t, pendingSettled, "no pending settled work after concurrent sweep + repost")
 
 	settledHint, err := cs.client.Decision.Query().Where(decision.Settled(true)).Count(ctx)
 	require.NoError(t, err)

@@ -272,6 +272,20 @@ func (_c *DecisionAnswerCreate) SetNillableMatchedDefault(v *bool) *DecisionAnsw
 	return _c
 }
 
+// SetFacetIndexed sets the "facet_indexed" field.
+func (_c *DecisionAnswerCreate) SetFacetIndexed(v bool) *DecisionAnswerCreate {
+	_c.mutation.SetFacetIndexed(v)
+	return _c
+}
+
+// SetNillableFacetIndexed sets the "facet_indexed" field if the given value is not nil.
+func (_c *DecisionAnswerCreate) SetNillableFacetIndexed(v *bool) *DecisionAnswerCreate {
+	if v != nil {
+		_c.SetFacetIndexed(*v)
+	}
+	return _c
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (_c *DecisionAnswerCreate) SetCreatedAt(v time.Time) *DecisionAnswerCreate {
 	_c.mutation.SetCreatedAt(v)
@@ -350,6 +364,10 @@ func (_c *DecisionAnswerCreate) defaults() {
 	if _, ok := _c.mutation.MatchedDefault(); !ok {
 		v := decisionanswer.DefaultMatchedDefault
 		_c.mutation.SetMatchedDefault(v)
+	}
+	if _, ok := _c.mutation.FacetIndexed(); !ok {
+		v := decisionanswer.DefaultFacetIndexed
+		_c.mutation.SetFacetIndexed(v)
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := decisionanswer.DefaultCreatedAt()
@@ -442,6 +460,9 @@ func (_c *DecisionAnswerCreate) check() error {
 	}
 	if _, ok := _c.mutation.MatchedDefault(); !ok {
 		return &ValidationError{Name: "matched_default", err: errors.New(`ent: missing required field "DecisionAnswer.matched_default"`)}
+	}
+	if _, ok := _c.mutation.FacetIndexed(); !ok {
+		return &ValidationError{Name: "facet_indexed", err: errors.New(`ent: missing required field "DecisionAnswer.facet_indexed"`)}
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "DecisionAnswer.created_at"`)}
@@ -578,6 +599,10 @@ func (_c *DecisionAnswerCreate) createSpec() (*DecisionAnswer, *sqlgraph.CreateS
 		_spec.SetField(decisionanswer.FieldMatchedDefault, field.TypeBool, value)
 		_node.MatchedDefault = value
 	}
+	if value, ok := _c.mutation.FacetIndexed(); ok {
+		_spec.SetField(decisionanswer.FieldFacetIndexed, field.TypeBool, value)
+		_node.FacetIndexed = value
+	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(decisionanswer.FieldCreatedAt, field.TypeTime, value)
 		_node.CreatedAt = value
@@ -649,6 +674,18 @@ func (u *DecisionAnswerUpsert) UpdateAnsweredByUserID() *DecisionAnswerUpsert {
 // ClearAnsweredByUserID clears the value of the "answered_by_user_id" field.
 func (u *DecisionAnswerUpsert) ClearAnsweredByUserID() *DecisionAnswerUpsert {
 	u.SetNull(decisionanswer.FieldAnsweredByUserID)
+	return u
+}
+
+// SetFacetIndexed sets the "facet_indexed" field.
+func (u *DecisionAnswerUpsert) SetFacetIndexed(v bool) *DecisionAnswerUpsert {
+	u.Set(decisionanswer.FieldFacetIndexed, v)
+	return u
+}
+
+// UpdateFacetIndexed sets the "facet_indexed" field to the value that was provided on create.
+func (u *DecisionAnswerUpsert) UpdateFacetIndexed() *DecisionAnswerUpsert {
+	u.SetExcluded(decisionanswer.FieldFacetIndexed)
 	return u
 }
 
@@ -790,6 +827,20 @@ func (u *DecisionAnswerUpsertOne) UpdateAnsweredByUserID() *DecisionAnswerUpsert
 func (u *DecisionAnswerUpsertOne) ClearAnsweredByUserID() *DecisionAnswerUpsertOne {
 	return u.Update(func(s *DecisionAnswerUpsert) {
 		s.ClearAnsweredByUserID()
+	})
+}
+
+// SetFacetIndexed sets the "facet_indexed" field.
+func (u *DecisionAnswerUpsertOne) SetFacetIndexed(v bool) *DecisionAnswerUpsertOne {
+	return u.Update(func(s *DecisionAnswerUpsert) {
+		s.SetFacetIndexed(v)
+	})
+}
+
+// UpdateFacetIndexed sets the "facet_indexed" field to the value that was provided on create.
+func (u *DecisionAnswerUpsertOne) UpdateFacetIndexed() *DecisionAnswerUpsertOne {
+	return u.Update(func(s *DecisionAnswerUpsert) {
+		s.UpdateFacetIndexed()
 	})
 }
 
@@ -1098,6 +1149,20 @@ func (u *DecisionAnswerUpsertBulk) UpdateAnsweredByUserID() *DecisionAnswerUpser
 func (u *DecisionAnswerUpsertBulk) ClearAnsweredByUserID() *DecisionAnswerUpsertBulk {
 	return u.Update(func(s *DecisionAnswerUpsert) {
 		s.ClearAnsweredByUserID()
+	})
+}
+
+// SetFacetIndexed sets the "facet_indexed" field.
+func (u *DecisionAnswerUpsertBulk) SetFacetIndexed(v bool) *DecisionAnswerUpsertBulk {
+	return u.Update(func(s *DecisionAnswerUpsert) {
+		s.SetFacetIndexed(v)
+	})
+}
+
+// UpdateFacetIndexed sets the "facet_indexed" field to the value that was provided on create.
+func (u *DecisionAnswerUpsertBulk) UpdateFacetIndexed() *DecisionAnswerUpsertBulk {
+	return u.Update(func(s *DecisionAnswerUpsert) {
+		s.UpdateFacetIndexed()
 	})
 }
 
