@@ -49,6 +49,13 @@ func (e *UsageIngestHTTPError) IsPayloadTooLarge() bool {
 	return e != nil && e.StatusCode == http.StatusRequestEntityTooLarge
 }
 
+// IsNotFound reports whether the Hub rejected the request with HTTP 404,
+// indicating the usage ingest capability was revoked (e.g. experiment disabled
+// mid-run or Hub rolled back).
+func (e *UsageIngestHTTPError) IsNotFound() bool {
+	return e != nil && e.StatusCode == http.StatusNotFound
+}
+
 // IsPermanent reports whether retrying the exact same batch payload is futile.
 // 401/403 (token may refresh), 404 (transient route/deploy), 408 (timeout),
 // 413 (handled via batch bisection), 429 (rate limit), and 5xx are not

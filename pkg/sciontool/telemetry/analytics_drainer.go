@@ -129,6 +129,7 @@ type AnalyticsDrainer struct {
 	retryAfter    time.Time
 	hubBackoff    time.Duration
 	hubRetryAfter time.Time
+	hubRevoked    bool
 	lastExpiry    time.Time
 
 	// resolveBackoff/resolveAfter pace hub ID resolution while unresolved
@@ -185,6 +186,7 @@ func NewHubAnalyticsDrainer(outbox *AnalyticsOutbox, sink *HubUsageSink, resolve
 }
 
 func newHubAnalyticsDrainerWithSend(outbox *AnalyticsOutbox, sink *HubUsageSink, batchSend AnalyticsBatchSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
+	outbox.SetPrimaryCursor(HubAnalyticsCursorName)
 	bounded := func(ctx context.Context, lines [][]byte) (BatchSendOutcome, error) {
 		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
 		defer cancel()
@@ -194,7 +196,7 @@ func newHubAnalyticsDrainerWithSend(outbox *AnalyticsOutbox, sink *HubUsageSink,
 		outbox:            outbox,
 		hubSink:           sink,
 		batchSend:         bounded,
-		hubCursorName:     "cursor",
+		hubCursorName:     HubAnalyticsCursorName,
 		resolve:           resolve,
 		interval:          sink.cfg.drainInterval(),
 		heartbeatInterval: sink.cfg.heartbeatInterval(),
@@ -435,75 +437,93 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	}
 
 	if d.hubSink != nil {
-		var hubDrainErr error
-		hubSent := 0
 		d.mu.Lock()
+		revoked := d.hubRevoked
 		hubWaiting := d.now().Before(d.hubRetryAfter)
 		d.mu.Unlock()
-		if !hubWaiting {
+		if !revoked {
+			var hubDrainErr error
+			hubSent := 0
 			hubCursor := d.hubCursorName
 			if hubCursor == "" {
-				hubCursor = "cursor"
+				hubCursor = HubAnalyticsCursorName
 			}
-			hubSent, hubDrainErr = d.outbox.DrainBatchCursor(ctx, hubCursor, d.hubSink.cfg.maxBatchEvents(), d.hubSink.EffectiveMaxBatchBytes(), d.batchSend)
-			sent += hubSent
-			d.mu.Lock()
-			if hubDrainErr != nil && ctx.Err() == nil {
-				if d.hubBackoff == 0 {
-					d.hubBackoff = analyticsBackoffMin
-				} else if d.hubBackoff *= 2; d.hubBackoff > analyticsBackoffMax {
-					d.hubBackoff = analyticsBackoffMax
-				}
-				d.hubRetryAfter = d.now().Add(d.hubBackoff)
-				log.Debug("Analytics drainer: hub send failed, retrying in %s: %v", d.hubBackoff, hubDrainErr)
-			} else if hubDrainErr == nil {
-				d.hubBackoff, d.hubRetryAfter = 0, time.Time{}
-				if hubSent > 0 {
-					d.lastHubContact = d.now()
-				}
-			}
-			d.mu.Unlock()
-		}
-
-		if ctx.Err() == nil {
-			if final {
-				hubCursor := d.hubCursorName
-				if hubCursor == "" {
-					hubCursor = "cursor"
-				}
-				finalState := telemetrycontract.MeterFinalStateFinal
-				if hubDrainErr != nil {
-					finalState = telemetrycontract.MeterFinalStateIncomplete
-				} else if pending, perr := d.outbox.pendingBytesForCursor(hubCursor); perr != nil || pending > 0 {
-					finalState = telemetrycontract.MeterFinalStateIncomplete
-				}
-				hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
-				if herr := d.hubSink.SendHeartbeat(hctx, finalState); herr != nil {
-					log.Debug("Analytics drainer: final heartbeat failed: %v", herr)
-				}
-				cancel()
-			} else if !hubWaiting && hubDrainErr == nil && d.heartbeatInterval > 0 {
+			revokeHub := func() {
+				log.Warn("Analytics drainer: Hub usage ingest returned 404 (capability revoked); disabling Hub sink")
 				d.mu.Lock()
-				due := d.lastHubContact.IsZero() || d.now().Sub(d.lastHubContact) >= d.heartbeatInterval
+				d.hubRevoked = true
+				d.hubBackoff, d.hubRetryAfter = 0, time.Time{}
 				d.mu.Unlock()
-				if due {
-					hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
-					herr := d.hubSink.SendHeartbeat(hctx, "")
-					cancel()
+				if d.send != nil {
+					d.outbox.DisableSecondaryCursor(hubCursor)
+				}
+			}
+			if !hubWaiting {
+				hubSent, hubDrainErr = d.outbox.DrainBatchCursor(ctx, hubCursor, d.hubSink.cfg.maxBatchEvents(), d.hubSink.EffectiveMaxBatchBytes(), d.batchSend)
+				sent += hubSent
+				if errors.Is(hubDrainErr, ErrUsageIngestRevoked) {
+					revokeHub()
+					revoked = true
+				} else {
 					d.mu.Lock()
-					if herr != nil && ctx.Err() == nil {
+					if hubDrainErr != nil && ctx.Err() == nil {
 						if d.hubBackoff == 0 {
 							d.hubBackoff = analyticsBackoffMin
 						} else if d.hubBackoff *= 2; d.hubBackoff > analyticsBackoffMax {
 							d.hubBackoff = analyticsBackoffMax
 						}
 						d.hubRetryAfter = d.now().Add(d.hubBackoff)
-						log.Debug("Analytics drainer: heartbeat failed, retrying in %s: %v", d.hubBackoff, herr)
-					} else if herr == nil {
+						log.Debug("Analytics drainer: hub send failed, retrying in %s: %v", d.hubBackoff, hubDrainErr)
+					} else if hubDrainErr == nil {
 						d.hubBackoff, d.hubRetryAfter = 0, time.Time{}
-						d.lastHubContact = d.now()
+						if hubSent > 0 {
+							d.lastHubContact = d.now()
+						}
 					}
 					d.mu.Unlock()
+				}
+			}
+
+			if !revoked && ctx.Err() == nil {
+				if final {
+					finalState := telemetrycontract.MeterFinalStateFinal
+					if hubDrainErr != nil {
+						finalState = telemetrycontract.MeterFinalStateIncomplete
+					} else if pending, perr := d.outbox.pendingBytesForCursor(hubCursor); perr != nil || pending > 0 {
+						finalState = telemetrycontract.MeterFinalStateIncomplete
+					}
+					hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+					if herr := d.hubSink.SendHeartbeat(hctx, finalState); herr != nil {
+						log.Debug("Analytics drainer: final heartbeat failed: %v", herr)
+					}
+					cancel()
+				} else if !hubWaiting && hubDrainErr == nil && d.heartbeatInterval > 0 {
+					d.mu.Lock()
+					due := d.lastHubContact.IsZero() || d.now().Sub(d.lastHubContact) >= d.heartbeatInterval
+					d.mu.Unlock()
+					if due {
+						hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
+						herr := d.hubSink.SendHeartbeat(hctx, "")
+						cancel()
+						if errors.Is(herr, ErrUsageIngestRevoked) {
+							revokeHub()
+						} else {
+							d.mu.Lock()
+							if herr != nil && ctx.Err() == nil {
+								if d.hubBackoff == 0 {
+									d.hubBackoff = analyticsBackoffMin
+								} else if d.hubBackoff *= 2; d.hubBackoff > analyticsBackoffMax {
+									d.hubBackoff = analyticsBackoffMax
+								}
+								d.hubRetryAfter = d.now().Add(d.hubBackoff)
+								log.Debug("Analytics drainer: heartbeat failed, retrying in %s: %v", d.hubBackoff, herr)
+							} else if herr == nil {
+								d.hubBackoff, d.hubRetryAfter = 0, time.Time{}
+								d.lastHubContact = d.now()
+							}
+							d.mu.Unlock()
+						}
+					}
 				}
 			}
 		}
@@ -515,6 +535,17 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 		}
 	}
 	return sent
+}
+
+// HubRevoked reports whether the Hub usage sink was disabled mid-run after
+// receiving HTTP 404 (capability revoked).
+func (d *AnalyticsDrainer) HubRevoked() bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.hubRevoked
 }
 
 // Backoff reports the current retry backoff (zero when healthy). When both

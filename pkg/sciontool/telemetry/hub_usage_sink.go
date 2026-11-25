@@ -30,6 +30,12 @@ import (
 // error and only dead-letters a single event that exceeds the limit on its own.
 var ErrPayloadTooLarge = errors.New("hub usage ingest: payload too large")
 
+// ErrUsageIngestRevoked marks an HTTP 404 Not Found from the Hub usage ingest
+// endpoint, indicating the capability was revoked mid-run (e.g. experiment
+// turned off or Hub rolled back). The drainer stops the Hub sink rather than
+// retrying forever.
+var ErrUsageIngestRevoked = errors.New("hub usage ingest: capability revoked (404)")
+
 // UsageIngestPostFunc sends a usage ingest request (batch or empty heartbeat)
 // to the Hub's POST /api/v1/agents/{id}/usage/events endpoint.
 type UsageIngestPostFunc func(ctx context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error)
@@ -281,6 +287,7 @@ func (s *HubUsageSink) sendGroup(
 		RunID:                runID,
 		ProducerEpoch:        epoch,
 		ProducerSeq:          seq,
+		MissingRanges:        s.outbox.SkippedRangesForEpoch(epoch),
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
 	}
@@ -347,6 +354,7 @@ func (s *HubUsageSink) SendHeartbeat(ctx context.Context, finalState string) err
 		RunID:                s.cfg.RunID,
 		ProducerEpoch:        epoch,
 		ProducerSeq:          seq,
+		MissingRanges:        s.outbox.SkippedRangesForEpoch(epoch),
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
 		FinalState:           finalState,

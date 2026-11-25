@@ -67,6 +67,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -244,31 +245,151 @@ type AnalyticsOutbox struct {
 	// ("intent" or "line") without cleaning up, simulating a crash (tests).
 	crashAt string
 
-	// secondaryCursors names additional independent cursor files (e.g.
-	// HubAnalyticsCursorName in dual-run mode). A ready file is only deleted
-	// once every active cursor ("cursor" plus secondaryCursors) has moved past
-	// it. Configured before draining starts.
+	// cursorMu guards primaryCursor and secondaryCursors. By default
+	// primaryCursor is "cursor" (GCP-only). Hub-only mode sets primaryCursor
+	// to HubAnalyticsCursorName ("cursor.hub"). Dual-run mode keeps "cursor"
+	// as primary and registers HubAnalyticsCursorName in secondaryCursors so
+	// ready files are retained until both cursors advance past them (or the
+	// secondary cursor is reclaimed/disabled to protect the primary path).
+	cursorMu         sync.Mutex
+	primaryCursor    string
 	secondaryCursors []string
+}
+
+// SetPrimaryCursor switches the primary cursor file (e.g. to
+// HubAnalyticsCursorName in Hub-only mode). When upgrading an existing
+// legacy outbox that has "cursor" on disk but no cursor.hub yet, it seeds
+// cursor.hub from "cursor" (clamped to the oldest remaining ready file so
+// undelivered ready files are never skipped).
+func (o *AnalyticsOutbox) SetPrimaryCursor(name string) {
+	if o == nil || name == "" {
+		return
+	}
+	o.cursorMu.Lock()
+	o.primaryCursor = name
+	o.cursorMu.Unlock()
+	if name == "cursor" {
+		return
+	}
+	if _, err := os.Stat(o.path(name)); errors.Is(err, os.ErrNotExist) {
+		if unlock, lerr := o.lock(); lerr == nil {
+			defer unlock()
+			if _, serr := os.Stat(o.path(name)); errors.Is(serr, os.ErrNotExist) {
+				if cf, co, rerr := o.readCursorNamed("cursor"); rerr == nil && (cf > 0 || co > 0) {
+					if files, ferr := o.readyFiles(); ferr == nil && len(files) > 0 && files[0] < cf {
+						// Ready files older than "cursor" still exist (e.g. from a
+						// prior dual-run where the primary cursor moved ahead while
+						// the Hub cursor had not yet ACKed): start at the oldest
+						// remaining ready file so nothing is skipped.
+						cf, co = files[0], 0
+					}
+					_ = o.writeCursorNamed(name, cf, co)
+				}
+			}
+		}
+	}
 }
 
 // EnableSecondaryCursor registers an independent cursor file (such as
 // HubAnalyticsCursorName) so ready files are retained until both the primary
-// "cursor" and the named secondary cursor have advanced past them.
+// cursor and the named secondary cursor have advanced past them.
 func (o *AnalyticsOutbox) EnableSecondaryCursor(name string) {
-	if o == nil || name == "" || name == "cursor" {
+	if o == nil || name == "" {
 		return
 	}
+	o.cursorMu.Lock()
+	prim := o.primaryCursor
+	if prim == "" {
+		prim = "cursor"
+	}
+	if name == prim {
+		o.cursorMu.Unlock()
+		return
+	}
+	exists := false
 	for _, existing := range o.secondaryCursors {
 		if existing == name {
-			return
+			exists = true
+			break
 		}
 	}
-	o.secondaryCursors = append(o.secondaryCursors, name)
+	if !exists {
+		o.secondaryCursors = append(o.secondaryCursors, name)
+	}
+	o.cursorMu.Unlock()
+
+	// Ensure the secondary cursor file exists on disk so a restart into
+	// Hub-only mode knows dual-run already initialized it.
+	if _, err := os.Stat(o.path(name)); errors.Is(err, os.ErrNotExist) {
+		if unlock, lerr := o.lock(); lerr == nil {
+			defer unlock()
+			if _, serr := os.Stat(o.path(name)); errors.Is(serr, os.ErrNotExist) {
+				_ = o.writeCursorNamed(name, 0, 0)
+			}
+		}
+	}
+}
+
+// DisableSecondaryCursor unregisters a secondary cursor (e.g. when the Hub
+// usage capability is revoked mid-run with 404) and deletes any ready files
+// that the primary cursor has already advanced past.
+func (o *AnalyticsOutbox) DisableSecondaryCursor(name string) {
+	if o == nil || name == "" {
+		return
+	}
+	o.cursorMu.Lock()
+	filtered := o.secondaryCursors[:0]
+	for _, existing := range o.secondaryCursors {
+		if existing != name {
+			filtered = append(filtered, existing)
+		}
+	}
+	o.secondaryCursors = filtered
+	o.cursorMu.Unlock()
+
+	// Clean up ready files already passed by all remaining active cursors.
+	if files, err := o.readyFiles(); err == nil {
+		removed := false
+		for _, n := range files {
+			if past, perr := o.allCursorsPast(n); perr == nil && past {
+				if os.Remove(o.path(readyName(n))) == nil {
+					removed = true
+				}
+			}
+		}
+		if removed {
+			_ = syncDir(o.dir)
+		}
+	}
+}
+
+func (o *AnalyticsOutbox) getPrimaryCursor() string {
+	o.cursorMu.Lock()
+	defer o.cursorMu.Unlock()
+	if o.primaryCursor == "" {
+		return "cursor"
+	}
+	return o.primaryCursor
+}
+
+func (o *AnalyticsOutbox) getSecondaryCursors() []string {
+	o.cursorMu.Lock()
+	defer o.cursorMu.Unlock()
+	if len(o.secondaryCursors) == 0 {
+		return nil
+	}
+	return append([]string(nil), o.secondaryCursors...)
 }
 
 func (o *AnalyticsOutbox) activeCursors() []string {
+	o.cursorMu.Lock()
+	defer o.cursorMu.Unlock()
+	prim := o.primaryCursor
+	if prim == "" {
+		prim = "cursor"
+	}
 	out := make([]string, 0, 1+len(o.secondaryCursors))
-	out = append(out, "cursor")
+	out = append(out, prim)
 	out = append(out, o.secondaryCursors...)
 	return out
 }
@@ -632,6 +753,19 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 	retained, err := o.retainedBytes()
 	if err != nil {
 		return 0, err
+	}
+	if retained+int64(len(line))+1 > o.maxPending {
+		// In dual-run mode, a lagging secondary cursor (cursor.hub) must never
+		// starve the primary (GCP) path. Reclaim ready files already delivered
+		// by the primary cursor, advancing the secondary cursor and recording
+		// the skipped sequence range so meter_health reflects the gap.
+		if len(o.getSecondaryCursors()) > 0 {
+			if reclaimed, rerr := o.reclaimSecondaryLagLocked(int64(len(line)) + 1); rerr == nil && reclaimed {
+				if r2, rerr2 := o.retainedBytes(); rerr2 == nil {
+					retained = r2
+				}
+			}
+		}
 	}
 	if retained+int64(len(line))+1 > o.maxPending {
 		committed = true
@@ -1691,6 +1825,153 @@ func (o *AnalyticsOutbox) writeCursorNamed(name string, file, offset int64) erro
 	return o.writeFileAtomic(name, []byte(fmt.Sprintf("%d %d", file, offset)))
 }
 
+// advanceCursorNamed updates cursor name to (file, offset) only if it moves
+// forward relative to the currently persisted position, preventing a concurrent
+// drain pass from rewinding a cursor advanced by reclaimSecondaryLagLocked.
+func (o *AnalyticsOutbox) advanceCursorNamed(name string, file, offset int64) error {
+	curFile, curOffset, err := o.readCursorNamed(name)
+	if err == nil && (curFile > file || (curFile == file && curOffset > offset)) {
+		return nil
+	}
+	return o.writeCursorNamed(name, file, offset)
+}
+
+type skippedRangesStore struct {
+	Epoch  string                            `json:"epoch"`
+	Ranges []telemetrycontract.UsageSeqRange `json:"ranges"`
+}
+
+// SkippedRangesForEpoch returns sequence ranges skipped by the secondary Hub
+// cursor due to dual-run lag reclamation for epoch, or nil if none.
+func (o *AnalyticsOutbox) SkippedRangesForEpoch(epoch string) []telemetrycontract.UsageSeqRange {
+	if o == nil || epoch == "" {
+		return nil
+	}
+	b, err := os.ReadFile(o.path("hub_skipped_ranges.json"))
+	if err != nil {
+		return nil
+	}
+	var st skippedRangesStore
+	if json.Unmarshal(b, &st) != nil || st.Epoch != epoch || len(st.Ranges) == 0 {
+		return nil
+	}
+	return append([]telemetrycontract.UsageSeqRange(nil), st.Ranges...)
+}
+
+func (o *AnalyticsOutbox) recordSkippedRangeLocked(epoch string, start, end int64) {
+	if epoch == "" || start <= 0 || end < start {
+		return
+	}
+	var st skippedRangesStore
+	if b, err := os.ReadFile(o.path("hub_skipped_ranges.json")); err == nil {
+		_ = json.Unmarshal(b, &st)
+	}
+	if st.Epoch != epoch {
+		st = skippedRangesStore{Epoch: epoch}
+	}
+	// Coalesce contiguous or overlapping ranges.
+	if n := len(st.Ranges); n > 0 && start <= st.Ranges[n-1].End+1 {
+		if end > st.Ranges[n-1].End {
+			st.Ranges[n-1].End = end
+		}
+	} else {
+		st.Ranges = append(st.Ranges, telemetrycontract.UsageSeqRange{Start: start, End: end})
+	}
+	if b, err := json.Marshal(st); err == nil {
+		_ = o.writeFileAtomic("hub_skipped_ranges.json", b)
+	}
+}
+
+// scanReadySeqRange reads ready-n.jsonl starting at startOffset and returns
+// the inclusive [minSeq, maxSeq] for events belonging to targetEpoch.
+func (o *AnalyticsOutbox) scanReadySeqRange(n, startOffset int64, targetEpoch string) (minSeq, maxSeq int64) {
+	f, err := os.Open(o.path(readyName(n)))
+	if err != nil {
+		return 0, 0
+	}
+	defer func() { _ = f.Close() }()
+	if startOffset > 0 {
+		if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
+			return 0, 0
+		}
+	}
+	r := bufio.NewReaderSize(f, 64<<10)
+	for {
+		line, readErr := r.ReadBytes('\n')
+		body := bytes.TrimSuffix(line, []byte("\n"))
+		if len(body) > 0 {
+			var head struct {
+				ProducerEpoch string `json:"producer_epoch"`
+				ProducerSeq   int64  `json:"producer_seq"`
+			}
+			if json.Unmarshal(body, &head) == nil && head.ProducerEpoch == targetEpoch && head.ProducerSeq > 0 {
+				if minSeq == 0 || head.ProducerSeq < minSeq {
+					minSeq = head.ProducerSeq
+				}
+				if head.ProducerSeq > maxSeq {
+					maxSeq = head.ProducerSeq
+				}
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	return minSeq, maxSeq
+}
+
+// reclaimSecondaryLagLocked advances lagging secondary cursors past the oldest
+// ready files already delivered by the primary cursor and deletes those files
+// until retainedBytes()+neededBytes <= maxPending (or no such files remain).
+// Caller holds the outbox lock.
+func (o *AnalyticsOutbox) reclaimSecondaryLagLocked(neededBytes int64) (bool, error) {
+	sec := o.getSecondaryCursors()
+	if len(sec) == 0 {
+		return false, nil
+	}
+	primFile, _, err := o.readCursorNamed(o.getPrimaryCursor())
+	if err != nil {
+		return false, err
+	}
+	files, err := o.readyFiles()
+	if err != nil {
+		return false, err
+	}
+	curEpoch, _ := o.readTrimmed("epoch")
+	reclaimed := false
+	for _, n := range files {
+		if n >= primFile {
+			break
+		}
+		for _, sc := range sec {
+			scFile, scOffset, rerr := o.readCursorNamed(sc)
+			if rerr != nil || scFile > n {
+				continue
+			}
+			var scanOff int64
+			if scFile == n {
+				scanOff = scOffset
+			}
+			if minS, maxS := o.scanReadySeqRange(n, scanOff, curEpoch); minS > 0 {
+				o.recordSkippedRangeLocked(curEpoch, minS, maxS)
+			}
+			if werr := o.writeCursorNamed(sc, n+1, 0); werr != nil {
+				return reclaimed, werr
+			}
+		}
+		if err := os.Remove(o.path(readyName(n))); err == nil || errors.Is(err, os.ErrNotExist) {
+			reclaimed = true
+		}
+		if ret, rerr := o.retainedBytes(); rerr == nil && ret+neededBytes <= o.maxPending {
+			break
+		}
+	}
+	if reclaimed {
+		_ = o.fsyncDir(o.dir)
+	}
+	return reclaimed, nil
+}
+
 // allCursorsPast reports whether every active cursor has moved strictly past
 // ready file n, meaning ready-n.jsonl is safe to remove.
 func (o *AnalyticsOutbox) allCursorsPast(n int64) (bool, error) {
@@ -1778,6 +2059,12 @@ func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName strin
 		}
 		f, err := o.openFile(o.path(readyName(n)))
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// File was reclaimed by dual-run lag protection while draining.
+				if cf, _, rerr := o.readCursorNamed(cursorName); rerr == nil && cf > n {
+					continue
+				}
+			}
 			return sent, fmt.Errorf("analytics outbox: %w", err)
 		}
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
@@ -1823,7 +2110,7 @@ func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName strin
 					}
 				}
 			}
-			if werr := o.writeCursorNamed(cursorName, n, batchEndOffset); werr != nil {
+			if werr := o.advanceCursorNamed(cursorName, n, batchEndOffset); werr != nil {
 				return werr
 			}
 			batch = batch[:0]
@@ -1905,7 +2192,7 @@ func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName strin
 			}
 			continue
 		}
-		if err := o.writeCursorNamed(cursorName, n+1, 0); err != nil {
+		if err := o.advanceCursorNamed(cursorName, n+1, 0); err != nil {
 			return sent, err
 		}
 		if past, perr := o.allCursorsPast(n); perr != nil {

@@ -141,13 +141,15 @@ func TestClient_PostUsageEvents(t *testing.T) {
 			code          int
 			wantPermanent bool
 			wantTooLarge  bool
+			wantNotFound  bool
 		}{
-			{http.StatusBadRequest, true, false},
-			{http.StatusRequestEntityTooLarge, false, true},
-			{http.StatusUnprocessableEntity, true, false},
-			{http.StatusUnauthorized, false, false},
-			{http.StatusTooManyRequests, false, false},
-			{http.StatusServiceUnavailable, false, false},
+			{http.StatusBadRequest, true, false, false},
+			{http.StatusRequestEntityTooLarge, false, true, false},
+			{http.StatusNotFound, false, false, true},
+			{http.StatusUnprocessableEntity, true, false, false},
+			{http.StatusUnauthorized, false, false, false},
+			{http.StatusTooManyRequests, false, false, false},
+			{http.StatusServiceUnavailable, false, false, false},
 		} {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.code)
@@ -165,6 +167,9 @@ func TestClient_PostUsageEvents(t *testing.T) {
 			}
 			if httpErr.IsPayloadTooLarge() != tc.wantTooLarge {
 				t.Errorf("code %d: IsPayloadTooLarge() = %v, want %v", tc.code, httpErr.IsPayloadTooLarge(), tc.wantTooLarge)
+			}
+			if httpErr.IsNotFound() != tc.wantNotFound {
+				t.Errorf("code %d: IsNotFound() = %v, want %v", tc.code, httpErr.IsNotFound(), tc.wantNotFound)
 			}
 		}
 	})

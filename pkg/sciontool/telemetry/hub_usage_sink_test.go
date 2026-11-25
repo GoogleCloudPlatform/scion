@@ -64,6 +64,9 @@ func httptestPostFunc(srvURL, agentID, token string) UsageIngestPostFunc {
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			err := fmt.Errorf("hub HTTP %d: %s", resp.StatusCode, string(respBody))
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("%w: %v", ErrUsageIngestRevoked, err)
+			}
 			if resp.StatusCode == http.StatusRequestEntityTooLarge {
 				return nil, fmt.Errorf("%w: %v", ErrPayloadTooLarge, err)
 			}
@@ -1370,6 +1373,235 @@ func TestHubUsageSink_413BisectsBatchAndOnlyDeadLettersSingleOversizeEvent(t *te
 		}
 		if maxSeenBody > maxBytes {
 			t.Errorf("max HTTP body size = %d > maxBytes %d (proactive re-encoded bisect failed)", maxSeenBody, maxBytes)
+		}
+	})
+}
+
+// R1(a) & R1(b): in dual-run mode at a small outbox cap, a persistently failing
+// Hub sink (404 capability revoked OR 500 outage) must never cause the healthy
+// GCP Cloud Logging export to overflow or drop events.
+func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
+	t.Run("404 capability revoked stops Hub cursor and GCP receives 200/200", func(t *testing.T) {
+		var hubCalls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hubCalls.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		o.maxPending = 16 << 10 // 16 KiB cap (reviewer's exact probe)
+		gcp := &capture{}
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-404",
+		})
+		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+
+		for i := 1; i <= 200; i++ {
+			mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:rev-%d", i), int64(i)), AppendWritten)
+			d.RunOnce(context.Background())
+		}
+
+		if !d.HubRevoked() {
+			t.Fatal("expected HubRevoked() = true after HTTP 404")
+		}
+		if got := hubCalls.Load(); got != 1 {
+			t.Errorf("hubCalls = %d, want 1 (must stop after first 404, not retry forever)", got)
+		}
+		if len(gcp.lines) != 200 {
+			t.Errorf("gcp received %d/200 events, want 200/200", len(gcp.lines))
+		}
+		stats := o.Stats()
+		if stats.Overflow != 0 || stats.PersistedOverflow != 0 {
+			t.Errorf("overflow = %d (persisted %d), want 0", stats.Overflow, stats.PersistedOverflow)
+		}
+		if stats.PendingBytes != 0 {
+			t.Errorf("PendingBytes = %d, want 0 after Hub cursor unregistered", stats.PendingBytes)
+		}
+	})
+
+	t.Run("Hub-only 404 stops draining rather than retrying forever", func(t *testing.T) {
+		var hubCalls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hubCalls.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:hubonly-404", 1), AppendWritten)
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-hubonly-404",
+		})
+		d := NewHubAnalyticsDrainer(o, sink, trustedHub("hub-1"))
+		clock := time.Date(2026, 11, 25, 20, 0, 0, 0, time.UTC)
+		d.now = func() time.Time { return clock }
+
+		d.RunOnce(context.Background())
+		clock = clock.Add(10 * time.Minute)
+		d.RunOnce(context.Background())
+		clock = clock.Add(10 * time.Minute)
+		d.RunOnce(context.Background())
+
+		if !d.HubRevoked() {
+			t.Fatal("expected HubRevoked() = true after 404 in Hub-only mode")
+		}
+		if got := hubCalls.Load(); got != 1 {
+			t.Errorf("hubCalls = %d, want 1 (must not retry forever)", got)
+		}
+	})
+
+	t.Run("persistent 500 Hub reclaims Hub lag and GCP receives 200/200 with recorded gap", func(t *testing.T) {
+		var hubDown atomic.Bool
+		hubDown.Store(true)
+		var mu sync.Mutex
+		var recoveredReqs []telemetrycontract.UsageIngestRequest
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if hubDown.Load() {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte("down"))
+				return
+			}
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			recoveredReqs = append(recoveredReqs, req)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		o.maxPending = 16 << 10 // 16 KiB cap (reviewer's exact probe)
+		gcp := &capture{}
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-500",
+		})
+		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+		clock := time.Date(2026, 11, 25, 20, 0, 0, 0, time.UTC)
+		d.now = func() time.Time { return clock }
+
+		for i := 1; i <= 200; i++ {
+			mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:500-%d", i), int64(i)), AppendWritten)
+			d.RunOnce(context.Background())
+		}
+
+		if len(gcp.lines) != 200 {
+			t.Fatalf("gcp received %d/200 events while Hub returned 500, want 200/200", len(gcp.lines))
+		}
+		stats := o.Stats()
+		if stats.Overflow != 0 || stats.PersistedOverflow != 0 {
+			t.Errorf("overflow = %d (persisted %d), want 0", stats.Overflow, stats.PersistedOverflow)
+		}
+
+		// When Hub recovers, it receives the recorded missing_ranges for the reclaimed gap.
+		hubDown.Store(false)
+		clock = clock.Add(10 * time.Minute)
+		d.RunOnce(context.Background())
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(recoveredReqs) == 0 {
+			t.Fatal("expected Hub request after recovery")
+		}
+		sawGap := false
+		for _, req := range recoveredReqs {
+			if len(req.MissingRanges) > 0 && req.MissingRanges[0].Start == 1 {
+				sawGap = true
+				break
+			}
+		}
+		if !sawGap {
+			t.Errorf("expected MissingRanges starting at 1 after Hub lag reclamation, got %+v", recoveredReqs)
+		}
+	})
+}
+
+// O4: Hub sink always uses cursor.hub in both dual-run and Hub-only modes.
+func TestHubUsageSink_AlwaysUsesCursorHub(t *testing.T) {
+	t.Run("dual-run to Hub-only restart resumes from cursor.hub without skipping", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "outbox")
+		var hubDown atomic.Bool
+		hubDown.Store(true)
+		var mu sync.Mutex
+		var hubIDs []string
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if hubDown.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			for _, ev := range req.Events {
+				hubIDs = append(hubIDs, ev.EventID)
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		}))
+		defer srv.Close()
+
+		// Process 1: dual-run; GCP drains all 3 events, Hub fails so cursor.hub stays behind.
+		o1, err := OpenAnalyticsOutbox(dir)
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox(1): %v", err)
+		}
+		var wantIDs []string
+		for i := 1; i <= 3; i++ {
+			ev := mustAppend(t, o1, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:o4-%d", i), int64(i)), AppendWritten)
+			wantIDs = append(wantIDs, ev.EventID)
+		}
+		gcp := &capture{}
+		sink1 := NewHubUsageSink(o1, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-o4",
+		})
+		d1 := NewDualAnalyticsDrainer(o1, gcp.send, sink1, trustedHub("hub-1"))
+		d1.RunOnce(context.Background())
+		if len(gcp.lines) != 3 {
+			t.Fatalf("gcp received %d, want 3", len(gcp.lines))
+		}
+
+		// Process 2: restarts in Hub-only mode (GCP config removed); Hub recovers.
+		hubDown.Store(false)
+		o2, err := OpenAnalyticsOutbox(dir)
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox(2): %v", err)
+		}
+		sink2 := NewHubUsageSink(o2, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-o4",
+		})
+		d2 := NewHubAnalyticsDrainer(o2, sink2, trustedHub("hub-1"))
+		if sent := d2.RunOnce(context.Background()); sent != 3 {
+			t.Fatalf("Hub-only restart sent %d, want 3 (must resume from cursor.hub, not GCP cursor)", sent)
+		}
+		if _, err := os.Stat(filepath.Join(dir, HubAnalyticsCursorName)); err != nil {
+			t.Errorf("expected %s file to exist: %v", HubAnalyticsCursorName, err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(hubIDs) != 3 {
+			t.Fatalf("hubIDs = %v, want 3 events", hubIDs)
+		}
+		for i, want := range wantIDs {
+			if hubIDs[i] != want {
+				t.Errorf("hubIDs[%d] = %q, want %q", i, hubIDs[i], want)
+			}
 		}
 	})
 }
