@@ -88,6 +88,8 @@ var requestPathSites = []requestPathSite{
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.EscapedPath", 1, "comparison: matches the constraint-audit routes on both path forms"},
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.Path", 4, "comparison: matches the constraint-audit routes on both path forms"},
 	{"auth.go", "isConstraintAuditAuthFailureRoute", "URL.RawPath", 1, "comparison: matches the constraint-audit routes on both path forms"},
+	{"auth.go", "isWebhookIngressRequest", "URL.EscapedPath", 1, "comparison: matches the webhook ingress route on both path forms; no path segment is logged"},
+	{"auth.go", "isWebhookIngressRequest", "URL.Path", 1, "comparison: matches the webhook ingress route on both path forms; no path segment is logged"},
 	{"cloud_handler.go", "mapToCloudHTTPRequest", "URL(bare)", 1, "not the served request: rebuilds a request from an already redacted log URL"},
 	{"decisions_agent.go", "Server.handleAgentDecisionRoutes", "URL.Path", 1, "routing: extracts the decision key or interpreted sub-route"},
 	{"decisions_batch.go", "Server.handleDecisionPromptRoutes", "URL.Path", 1, "routing: extracts the prompt message id and sub-route"},
