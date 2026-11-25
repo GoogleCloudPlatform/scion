@@ -224,4 +224,45 @@ describe('sidebar Inbox item', () => {
     await el.updateComplete;
     expect(overviewLinks(el)).toEqual(['/', '/profile/inbox']);
   });
+
+  it('shows count badge, Inbox (N)/(N+) tooltip, and accessible link label when collapsed, and hides at 0', async () => {
+    summaryResponse = makeSummary(7, false);
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const el = document.createElement('scion-nav') as ScionNav;
+    el.collapsed = true;
+    el.user = { id: 'u-1', email: 'u@example.com', name: 'User', role: 'member' };
+    document.body.appendChild(el);
+    await flush();
+    await el.updateComplete;
+
+    const inboxLink = el.shadowRoot!.querySelector('a[href="/profile/inbox"]')!;
+    const tooltip = inboxLink.closest('sl-tooltip')!;
+    const badge = inboxLink.querySelector('[data-nav-badge]')!;
+
+    expect(tooltip.getAttribute('content')).toBe('Inbox (7)');
+    expect(tooltip.hasAttribute('disabled')).toBe(false);
+    expect(inboxLink.getAttribute('aria-label')).toBe('Inbox (7 waiting)');
+    expect(badge.textContent?.trim()).toBe('7');
+    expect(badge.getAttribute('aria-hidden')).toBe('true');
+
+    // Capped count renders Inbox (25+) in tooltip and aria-label.
+    summaryResponse = makeSummary(25, true);
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await el.updateComplete;
+
+    expect(tooltip.getAttribute('content')).toBe('Inbox (25+)');
+    expect(inboxLink.getAttribute('aria-label')).toBe('Inbox (25+ waiting)');
+    expect(inboxLink.querySelector('[data-nav-badge]')?.textContent?.trim()).toBe('25+');
+
+    // At 0, badge is omitted, tooltip reverts to "Inbox", and aria-label is omitted.
+    summaryResponse = makeSummary(0, false);
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await el.updateComplete;
+
+    expect(tooltip.getAttribute('content')).toBe('Inbox');
+    expect(inboxLink.getAttribute('aria-label')).toBeNull();
+    expect(inboxLink.querySelector('[data-nav-badge]')).toBeNull();
+  });
 });

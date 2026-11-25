@@ -19,6 +19,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   INBOX_DEBOUNCE_MS,
   INBOX_MAX_WAIT_MS,
+  INBOX_POLL_HEALTHY_MS,
+  INBOX_POLL_UNHEALTHY_MS,
   INBOX_SHARE_KEY,
   INBOX_SUMMARY_CHANGED_EVENT,
   InboxSummaryStore,
@@ -724,5 +726,178 @@ describe('InboxSummaryStore', () => {
     expect(store.summary?.categories.reviews.breakdown).toEqual({ toAddress: 1, requested: 2 });
     expect(store.total).toBe(3);
     unmount();
+  });
+
+  describe('safety poll leader deduplication (§5.3)', () => {
+    function installSerializedWebLocks(): void {
+      let tail = Promise.resolve();
+      const request = vi.fn(
+        (
+          _name: string,
+          _optionsOrCb: unknown,
+          maybeCb?: (lock: { name: string }) => Promise<unknown>
+        ) => {
+          const cb =
+            typeof _optionsOrCb === 'function'
+              ? (_optionsOrCb as (lock: { name: string }) => Promise<unknown>)
+              : maybeCb!;
+          const next = tail.then(() => cb({ name: _name }));
+          tail = next.then(
+            () => undefined,
+            () => undefined
+          );
+          return next;
+        }
+      );
+      vi.stubGlobal('navigator', { locks: { request } });
+    }
+
+    it('makes only one fetch per safety-poll interval across two tabs and converges both', async () => {
+      installSerializedWebLocks();
+      setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+      vi.spyOn(stateManager, 'isConnected', 'get').mockReturnValue(true);
+
+      let fetchSeq = 0;
+      fetchMock.mockImplementation(() => {
+        fetchSeq += 1;
+        return Promise.resolve(
+          new Response(JSON.stringify(makeSummary(fetchSeq)), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      });
+
+      const storeB = new InboxSummaryStore();
+      try {
+        // Start both tabs at t=0.
+        store.ensureStarted('user-1');
+        storeB.ensureStarted('user-1');
+        await vi.advanceTimersByTimeAsync(10);
+        const callsAfterInit = fetchMock.mock.calls.length;
+
+        // Advance one full healthy safety-poll interval (5 min).
+        // Both tabs' poll timers fire, but only the first lock holder fetches;
+        // the second adopts the fresh shared payload from localStorage.
+        await vi.advanceTimersByTimeAsync(INBOX_POLL_HEALTHY_MS);
+
+        expect(fetchMock.mock.calls.length - callsAfterInit).toBe(1);
+        expect(store.total).toBe(fetchSeq);
+        expect(storeB.total).toBe(fetchSeq);
+      } finally {
+        storeB.resetForTests();
+      }
+    });
+
+    it('fetches on safety poll when the shared payload is stale for the active interval', async () => {
+      installSerializedWebLocks();
+      setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+      vi.spyOn(stateManager, 'isConnected', 'get').mockReturnValue(false);
+
+      let count = 1;
+      fetchMock.mockImplementation(() => {
+        count += 1;
+        return Promise.resolve(
+          new Response(JSON.stringify(makeSummary(count)), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      });
+
+      store.ensureStarted('user-1');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Write a stale payload (older than INBOX_POLL_UNHEALTHY_MS) to localStorage.
+      localStorage.setItem(
+        INBOX_SHARE_KEY,
+        JSON.stringify({
+          userId: 'user-1',
+          previews: 0,
+          fetchedAt: Date.now() - INBOX_POLL_UNHEALTHY_MS - 1000,
+          summary: makeSummary(99),
+        })
+      );
+
+      // Next unhealthy safety poll (30s) sees the stale payload and must fetch.
+      await vi.advanceTimersByTimeAsync(INBOX_POLL_UNHEALTHY_MS);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(store.total).toBe(3);
+    });
+
+    it('fetches on safety poll when fresh shared payload has fewer previews than needed', async () => {
+      installSerializedWebLocks();
+      setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+      vi.spyOn(stateManager, 'isConnected', 'get').mockReturnValue(false);
+
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(makeSummary(4)), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      );
+
+      const unmount = store.mountPage('user-1');
+      try {
+        await vi.advanceTimersByTimeAsync(10);
+        const callsAfterMount = fetchMock.mock.calls.length;
+
+        // Another badge-only tab writes a fresh previews=0 payload right before our poll.
+        await vi.advanceTimersByTimeAsync(INBOX_POLL_UNHEALTHY_MS - 1000);
+        localStorage.setItem(
+          INBOX_SHARE_KEY,
+          JSON.stringify({
+            userId: 'user-1',
+            previews: 0,
+            fetchedAt: Date.now(),
+            summary: makeSummary(4),
+          })
+        );
+
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(fetchMock.mock.calls.length).toBe(callsAfterMount + 1);
+      } finally {
+        unmount();
+      }
+    });
+
+    it('continues fetching on subsequent safety polls after an event-triggered fetch', async () => {
+      installSerializedWebLocks();
+      setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+      vi.spyOn(stateManager, 'isConnected', 'get').mockReturnValue(true);
+
+      let seq = 0;
+      fetchMock.mockImplementation(() => {
+        seq += 1;
+        return Promise.resolve(
+          new Response(JSON.stringify(makeSummary(seq)), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      });
+
+      store.ensureStarted('user-1');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Trigger an event-driven fetch (sets pendingEventAt on the store).
+      stateManager.dispatchEvent(
+        new CustomEvent('inbox-changed', { detail: { category: 'approvals' } })
+      );
+      await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+      const callsAfterEvent = fetchMock.mock.calls.length;
+      expect(callsAfterEvent).toBe(2);
+
+      // With no further events for > 3 poll intervals, the first poll may skip
+      // (event fetch was < 1 interval ago), and subsequent safety polls must
+      // keep fetching rather than adopting the tab's own prior payload forever.
+      await vi.advanceTimersByTimeAsync(3 * INBOX_POLL_HEALTHY_MS + 1000);
+      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(callsAfterEvent + 2);
+      expect(store.total).toBe(seq);
+    });
   });
 });

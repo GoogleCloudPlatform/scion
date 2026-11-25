@@ -731,18 +731,21 @@ export class InboxSummaryStore {
     }
   }
 
+  private pollIntervalMs(): number {
+    return stateManager.isConnected ? INBOX_POLL_HEALTHY_MS : INBOX_POLL_UNHEALTHY_MS;
+  }
+
   private schedulePoll(): void {
     if (this.pollTimer !== null) {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
     if (!this.started) return;
-    const healthy = stateManager.isConnected;
-    const delay = healthy ? INBOX_POLL_HEALTHY_MS : INBOX_POLL_UNHEALTHY_MS;
+    const delay = this.pollIntervalMs();
     this.pollTimer = setTimeout(() => {
       this.pollTimer = null;
       if (!this.started) return;
-      void this.fetchNow();
+      void this.fetchNow(false, true);
       this.schedulePoll();
     }, delay);
   }
@@ -790,15 +793,20 @@ export class InboxSummaryStore {
     }
   }
 
-  private async fetchNow(force = false): Promise<void> {
+  private async fetchNow(force = false, isPoll = false): Promise<void> {
     if (!this.started || !isInboxDashboardEnabled()) return;
     if (this.inFlight) {
-      this.pendingRefetch = true;
+      if (!isPoll) {
+        this.pendingRefetch = true;
+      }
       return;
     }
 
     this.inFlight = true;
-    const triggeredAt = this.pendingEventAt;
+    const triggeredAt = isPoll ? 0 : this.pendingEventAt;
+    if (!isPoll) {
+      this.pendingEventAt = 0;
+    }
     const previews = this.desiredPreviews();
     const isFirstLoad = this._summary === null;
     if (isFirstLoad) {
@@ -812,13 +820,20 @@ export class InboxSummaryStore {
         const uid = this.userId || stateManager.getCurrentUserId() || '';
         if (uid) this.userId = uid;
 
-        // If another tab just fetched a fresh summary with enough previews after
-        // our triggering event, adopt it instead of issuing a duplicate request.
-        if (!force && uid && triggeredAt > 0) {
+        // If another tab already fetched a fresh summary with enough previews,
+        // adopt it instead of issuing a duplicate request:
+        // - event-triggered refreshes adopt payloads fetched at/after the event;
+        // - safety polls adopt payloads younger than the active poll interval.
+        if (!force && uid && (triggeredAt > 0 || isPoll)) {
           const shared = readSharedPayload(uid);
-          if (shared && shared.fetchedAt >= triggeredAt && shared.previews >= previews) {
-            this.applySummary(shared.summary, shared.previews);
-            return;
+          if (shared && shared.previews >= previews) {
+            const eventFresh = triggeredAt > 0 && shared.fetchedAt >= triggeredAt;
+            const age = Date.now() - shared.fetchedAt;
+            const pollFresh = isPoll && age >= 0 && age < this.pollIntervalMs();
+            if (eventFresh || pollFresh) {
+              this.applySummary(shared.summary, shared.previews);
+              return;
+            }
           }
         }
 

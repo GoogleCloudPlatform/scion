@@ -14,24 +14,25 @@
 
 # Web Playwright e2e suites (ptone/scion#2580). Advisory: not a required
 # check. PRs and main pushes run only when web/ (or this file) changes,
-# or one of the few Go paths the page-policy, chat-decisions and port-proxy
-# suites exercise (listed under on:, below); the nightly run covers
+# or one of the few Go paths the page-policy, chat-decisions, inbox and
+# port-proxy suites exercise (listed under on:, below); the nightly run covers
 # everything else, such as browser drift.
 #
 # One matrix job per suite config under web/e2e/*/playwright.config.ts,
 # all in full Chromium. Every suite except test-identity-session,
-# page-policy, chat-decisions and port-proxy (below) serves the web sources
-# itself (Vite dev server or an esbuild bundle) with a mocked hub. Only
+# page-policy, chat-decisions, inbox and port-proxy (below) serves the web
+# sources itself (Vite dev server or an esbuild bundle) with a mocked hub. Only
 # terminal-workspace also needs a production build: some of its tests
 # check the Shoelace icon files in web/dist, so that job runs npm run build
 # first.
 #
-# test-identity-session, page-policy and chat-decisions run against the real Go
-# hub binary (a throwaway hub started by their global setup;
+# test-identity-session, page-policy, chat-decisions and inbox run against the
+# real Go hub binary (a throwaway hub started by their global setup;
 # test-identity-session's is a member-level test hub, ptone/scion#4240;
 # page-policy checks the page script policy the hub sends, ptone/scion#5912;
 # chat-decisions checks interactive chat decisions end to end with a
-# containerless test agent, ptone/scion#7776). They and port-proxy are
+# containerless test agent, ptone/scion#7776; inbox checks live Inbox Dashboard
+# updates over SSE across tabs, ptone/scion#8962). They and port-proxy are
 # the only jobs that set up Go (go.mod version, with setup-go's built-in
 # cache; ci.yml uses per-job caches instead, see
 # .github/actions/setup-go-cache) and build the binary (make build) and
@@ -66,17 +67,17 @@
 # Runtime and cost: about 23 minutes of test time per full run (most of it
 # terminal-workspace, chat-palette, terminal-entrypoints and
 # terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
-# 50-60 runner-minutes across the 15 mocked-hub jobs; retries of failing
+# 50-60 runner-minutes across the 16 mocked-hub jobs; retries of failing
 # tests add to that. The terminal-workspace job also runs a Vite production
 # build first, which adds about 1 minute (that job takes about 4 minutes in
-# total). The four real-hub jobs, test-identity-session, page-policy,
-# chat-decisions and port-proxy, each add setup-go, a Go build (make build; a
-# few minutes on a cold Go cache, less with the setup-go cache) and a Vite
-# production build before a short suite; port-proxy also builds the helper
+# total). The five real-hub jobs, test-identity-session, page-policy,
+# chat-decisions, inbox and port-proxy, each add setup-go, a Go build (make
+# build; a few minutes on a cold Go cache, less with the setup-go cache) and a
+# Vite production build before a short suite; port-proxy also builds the helper
 # and runs a second suite (the page view journeys, ptone/scion#5569) on a
 # second hub, which adds a few minutes; its job timeout is 35 minutes, the
 # others' 20.
-# iap-driver is the 20th job.
+# iap-driver is the 22nd job (22 jobs in total).
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)
@@ -109,6 +110,10 @@ on:
       - 'pkg/hub/decisions_*.go'
       - 'pkg/hub/agenttoken.go'
       - 'pkg/hub/agent_token_verify.go'
+      # inbox suite (ptone/scion#8962): see the header.
+      - 'pkg/hub/inbox_*.go'
+      - 'pkg/hub/handlers_pending_secrets.go'
+      - 'pkg/hub/pending_secret_*.go'
   push:
     branches: [ main ]
     paths:
@@ -137,6 +142,10 @@ on:
       - 'pkg/hub/decisions_*.go'
       - 'pkg/hub/agenttoken.go'
       - 'pkg/hub/agent_token_verify.go'
+      # inbox suite (ptone/scion#8962): see the header.
+      - 'pkg/hub/inbox_*.go'
+      - 'pkg/hub/handlers_pending_secrets.go'
+      - 'pkg/hub/pending_secret_*.go'
   # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
   schedule:
     - cron: '41 5 * * *'
@@ -183,6 +192,7 @@ jobs:
           - test-identity-session
           - page-policy
           - chat-decisions
+          - inbox
           - port-proxy
           - iap-driver
     steps:
@@ -202,17 +212,17 @@ jobs:
         working-directory: ./web
         run: npm ci
 
-      # test-identity-session, page-policy, chat-decisions and port-proxy: the
+      # test-identity-session, page-policy, chat-decisions, inbox and port-proxy: the
       # suites start the real hub binary.
       - name: Setup Go (real hub suites)
-        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-decisions' || matrix.suite == 'port-proxy'
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-decisions' || matrix.suite == 'inbox' || matrix.suite == 'port-proxy'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Build hub binary and web assets (test-identity-session, page-policy, chat-decisions)
-        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-decisions'
+      - name: Build hub binary and web assets (test-identity-session, page-policy, chat-decisions, inbox)
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-decisions' || matrix.suite == 'inbox'
         run: |
           make build
           npm --prefix web run build
@@ -280,9 +290,9 @@ jobs:
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
-          # Read only by test-identity-session, page-policy, chat-decisions and
-          # port-proxy: the binaries and web assets were built in the steps
-          # above.
+          # Read only by test-identity-session, page-policy, chat-decisions,
+          # inbox and port-proxy: the binaries and web assets were built in the
+          # steps above.
           E2E_PREBUILT: '1'
         run: |
           CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"

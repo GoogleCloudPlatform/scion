@@ -374,6 +374,7 @@ export class ScionNav extends LitElement {
     }
 
     .nav-link {
+      position: relative;
       display: flex;
       align-items: center;
       gap: 0.75rem;
@@ -443,7 +444,14 @@ export class ScionNav extends LitElement {
     }
 
     :host([collapsed]) .nav-badge {
-      display: none;
+      position: absolute;
+      top: 0.125rem;
+      right: 0.25rem;
+      margin-left: 0;
+      min-width: 1rem;
+      padding: 0 0.25rem;
+      font-size: 0.625rem;
+      line-height: 1rem;
     }
 
     /* Collapse toggle */
@@ -581,11 +589,12 @@ export class ScionNav extends LitElement {
 
   private renderNavItem(item: NavItem): TemplateResult {
     const badge = item.badge?.() ?? null;
+    const tooltipContent = badge ? `${item.label} (${badge})` : item.label;
     return html`
       <li class="nav-item">
         <sl-tooltip
           style="display: block;"
-          content="${item.label}"
+          content="${tooltipContent}"
           placement="right"
           ?disabled=${!this.collapsed}
           hoist
@@ -593,18 +602,13 @@ export class ScionNav extends LitElement {
           <a
             href="${item.path}"
             class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
+            aria-label=${badge ? `${item.label} (${badge} waiting)` : nothing}
             @click=${(e: Event) => this.handleNavClick(e, item.path)}
           >
             <sl-icon name="${item.icon}"></sl-icon>
             <span class="nav-link-text">${item.label}</span>
             ${badge
-              ? html`<span
-                  class="nav-badge"
-                  data-nav-badge
-                  title=${`${badge} items waiting in ${item.label}`}
-                  aria-label=${`${badge} items waiting in ${item.label}`}
-                  >${badge}</span
-                >`
+              ? html`<span class="nav-badge" data-nav-badge aria-hidden="true">${badge}</span>`
               : nothing}
           </a>
         </sl-tooltip>
