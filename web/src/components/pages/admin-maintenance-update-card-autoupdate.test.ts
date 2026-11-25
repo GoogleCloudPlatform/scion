@@ -524,7 +524,7 @@ describe('scion-admin-maintenance-update-card auto-update checkbox', () => {
           source: 'setting',
           active: true,
           windowStartHourUtc: 4,
-          nextRunAt: '2026-11-25T04:17:00Z',
+          nextRunAt: '2099-11-25T04:17:00Z',
           lastCheckAt: '2026-11-24T04:17:00Z',
           lastRunId: 'run-auto-99',
           lastTarget: 'nightly-20261124',
@@ -543,11 +543,12 @@ describe('scion-admin-maintenance-update-card auto-update checkbox', () => {
     const nextEl = card.shadowRoot!.querySelector('.auto-update-next');
     expect(nextEl).not.toBeNull();
     expect(nextEl!.textContent).toContain('Next check: Nov 24, 23:17 (America/New_York)');
-    expect(nextEl!.getAttribute('title')).toBe('Nov 25, 2026, 04:17 UTC');
+    expect(nextEl!.getAttribute('title')).toBe('Nov 25, 2099, 04:17 UTC');
 
     // Last outcome renders target, label, and View run link.
     const lastEl = card.shadowRoot!.querySelector('.auto-update-last');
     expect(lastEl).not.toBeNull();
+    expect(lastEl!.textContent).toContain('Last automatic update:');
     expect(lastEl!.textContent).toContain('nightly-20261124');
     expect(lastEl!.textContent).toContain('verified');
 
@@ -570,7 +571,27 @@ describe('scion-admin-maintenance-update-card auto-update checkbox', () => {
     );
   });
 
-  it('omits View run link and target when lastOutcome is a skip outcome', async () => {
+  it('renders "within the next few minutes" when nextRunAt is at or before now', async () => {
+    const pastIso = '2020-01-01T04:17:00Z';
+    const { card } = await mount(
+      makeStatus({
+        autoUpdate: autoUpdate({
+          enabled: true,
+          source: 'setting',
+          active: true,
+          windowStartHourUtc: 4,
+          nextRunAt: pastIso,
+        }),
+      })
+    );
+
+    const nextEl = card.shadowRoot!.querySelector('.auto-update-next');
+    expect(nextEl).not.toBeNull();
+    expect(nextEl!.textContent?.trim()).toBe('Next check: within the next few minutes');
+    expect(nextEl!.getAttribute('title')).toBe('Jan 1, 2020, 04:17 UTC');
+  });
+
+  it('uses "Last automatic check:" and omits View run link and target when lastOutcome is a skip outcome', async () => {
     const { card } = await mount(
       makeStatus({
         autoUpdate: autoUpdate({
@@ -592,6 +613,8 @@ describe('scion-admin-maintenance-update-card auto-update checkbox', () => {
     expect(card.shadowRoot!.querySelector('.auto-update-next')).toBeNull();
     const lastEl = card.shadowRoot!.querySelector('.auto-update-last');
     expect(lastEl).not.toBeNull();
+    expect(lastEl!.textContent).toContain('Last automatic check:');
+    expect(lastEl!.textContent).not.toContain('Last automatic update:');
     expect(lastEl!.textContent).toContain('skipped (update already in progress)');
     expect(lastEl!.textContent).not.toContain('nightly-20261120');
     expect(card.shadowRoot!.querySelector('a.auto-update-last-run')).toBeNull();

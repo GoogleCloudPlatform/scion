@@ -40,6 +40,7 @@ import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
 import {
   LAST_UPDATE_LABELS,
   formatUtcInstant,
+  isNextRunImminent,
   isOlderClass,
   renderInstallerUnsupported,
   rollbackTarget,
@@ -2644,7 +2645,8 @@ export class ScionPageAdminMaintenance extends LitElement {
 
     const update = this.updateAvailable.update;
     const au = this.updateStatus?.autoUpdate;
-    const nextRunAt = au?.active && au.nextRunAt ? au.nextRunAt : null;
+    const suppressed = !!au?.suppressedTag && au.suppressedTag === update.version;
+    const nextRunAt = au?.active && au.nextRunAt && !suppressed ? au.nextRunAt : null;
 
     return html`
       <div class="update-available-banner">
@@ -2655,7 +2657,9 @@ export class ScionPageAdminMaintenance extends LitElement {
           ${nextRunAt
             ? html` &middot;
                 <span class="banner-auto-update" title=${formatUtcInstant(nextRunAt)}
-                  >${`Will install automatically at ${formatInstantWithZone(nextRunAt, 'datetime')}`}</span
+                  >${isNextRunImminent(nextRunAt)
+                    ? 'Will install automatically within the next few minutes'
+                    : `Will install automatically at ${formatInstantWithZone(nextRunAt, 'datetime')}`}</span
                 >`
             : nothing}
         </span>

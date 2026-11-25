@@ -249,6 +249,13 @@ function formatUtcHour(hour: number): string {
   return `${String(hour).padStart(2, '0')}:00`;
 }
 
+/** Whether an ISO nextRunAt instant is at or before now (inside an unattempted window). */
+export function isNextRunImminent(iso: string | undefined | null, nowMs = Date.now()): boolean {
+  if (!iso) return false;
+  const ms = new Date(iso).getTime();
+  return !Number.isNaN(ms) && ms <= nowMs;
+}
+
 const AUTO_UPDATE_RUN_OUTCOMES = new Set(['started', 'verified', 'failed', 'rolled_back']);
 
 /** Whether an auto-update outcome corresponds to an actual update-binary run. */
@@ -1419,13 +1426,15 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
               <div class="auto-update-status">
                 ${nextRunAt
                   ? html`<span class="auto-update-next" title=${formatUtcInstant(nextRunAt)}
-                      >Next check: ${formatInstantWithZone(nextRunAt, 'datetime')}</span
+                      >${isNextRunImminent(nextRunAt)
+                        ? 'Next check: within the next few minutes'
+                        : `Next check: ${formatInstantWithZone(nextRunAt, 'datetime')}`}</span
                     >`
                   : nothing}
                 ${nextRunAt && hasOutcome ? html` &middot; ` : nothing}
                 ${hasOutcome
                   ? html`<span class="auto-update-last"
-                      >Last automatic update:
+                      >${isRunOutcome ? 'Last automatic update:' : 'Last automatic check:'}
                       ${isRunOutcome && au.lastTarget
                         ? html`${au.lastTarget} &mdash; `
                         : nothing}${outcomeLabel}${isRunOutcome && au.lastRunId
