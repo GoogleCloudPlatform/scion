@@ -705,13 +705,15 @@ type AgentStore interface {
 	// SetAgentSuspendPolicy sets the agent's suspend_policy ("auto" or "never").
 	// It is the single-purpose post-create writer for the column; generic
 	// UpdateAgent must not write it. Like SetAgentSoftDeleteOpID, it neither
-	// checks nor bumps state_version. Returns ErrInvalidInput if policy is not
-	// a valid suspend policy, or ErrNotFound if the agent doesn't exist.
+	// checks nor bumps state_version. Refuses soft-deleted rows (deleted_at IS
+	// NULL predicate). Returns ErrInvalidInput if policy is not a valid suspend
+	// policy, or ErrNotFound if the agent does not exist or is soft-deleted.
 	SetAgentSuspendPolicy(ctx context.Context, agentID, policy string) error
 
-	// ListNeverSuspendAgentIDsInProject returns the IDs of all non-deleted
-	// agents in projectID whose suspend_policy is "never", across all phases.
-	ListNeverSuspendAgentIDsInProject(ctx context.Context, projectID string) ([]string, error)
+	// ListNeverSuspendAgents returns all non-deleted agents whose
+	// suspend_policy is "never", across all phases. When projectID is non-empty,
+	// results are restricted to that project; when empty, all projects are included.
+	ListNeverSuspendAgents(ctx context.Context, projectID string) ([]*Agent, error)
 
 	// CountRunningNeverSuspendAgents returns the number of non-deleted agents
 	// in the running phase with suspend_policy = "never", grouped by project

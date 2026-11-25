@@ -5499,21 +5499,31 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 
 	var suspensionInFlight bool
 	writeSuspendPolicyTx := func(tx store.Store) error {
+		cur, err := tx.GetAgent(ctx, agent.ID)
+		if err != nil {
+			return err
+		}
+		beforePolicy := cur.SuspendPolicy
+		if beforePolicy == "" {
+			beforePolicy = store.SuspendPolicyAuto
+		}
 		if err := tx.SetAgentSuspendPolicy(ctx, agent.ID, *updates.SuspendPolicy); err != nil {
 			return err
 		}
-		policyAudit := &store.MutationAuditRecord{
-			MutationType:  mutationTypeAgentSuspendPolicySet,
-			TargetType:    "agent",
-			TargetID:      agent.ID,
-			BeforeSummary: currentPolicy,
-			AfterSummary:  *updates.SuspendPolicy,
-			Timestamp:     time.Now(),
-		}
-		auditActorFromContext(ctx).ApplyActor(policyAudit)
-		applyHubActorFallback(policyAudit)
-		if err := tx.CreateMutationAudit(ctx, policyAudit); err != nil {
-			return fmt.Errorf("agent update suspend policy audit: %w", err)
+		if beforePolicy != *updates.SuspendPolicy {
+			policyAudit := &store.MutationAuditRecord{
+				MutationType:  mutationTypeAgentSuspendPolicySet,
+				TargetType:    "agent",
+				TargetID:      agent.ID,
+				BeforeSummary: beforePolicy,
+				AfterSummary:  *updates.SuspendPolicy,
+				Timestamp:     time.Now(),
+			}
+			auditActorFromContext(ctx).ApplyActor(policyAudit)
+			applyHubActorFallback(policyAudit)
+			if err := tx.CreateMutationAudit(ctx, policyAudit); err != nil {
+				return fmt.Errorf("agent update suspend policy audit: %w", err)
+			}
 		}
 		if *updates.SuspendPolicy == store.SuspendPolicyNever {
 			fresh, err := tx.GetAgent(ctx, agent.ID)
@@ -5635,8 +5645,9 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	})
 }
 
-// isAutoSuspendInFlight reports whether an idle-suspend claim or an
-// auto-suspend run-intent swap (stalled path) is already in flight on a.
+// isAutoSuspendInFlight reports whether a stop or suspend is already in flight
+// on a (either an active idle-suspend claim, or a running agent whose
+// run_intent has already been swapped to stopped).
 func isAutoSuspendInFlight(a *store.Agent) bool {
 	if a == nil {
 		return false
@@ -5885,8 +5896,8 @@ type agentUpdateResponse struct {
 	// effect.
 	Disposition AgentUpdateDisposition `json:"disposition"`
 	// SuspensionInFlight is true when a PATCH setting suspendPolicy="never"
-	// committed after an idle-suspend claim or auto-suspend intent swap was
-	// already taken; the in-flight suspend is not canceled.
+	// committed while a stop or suspend was already in flight; the in-flight
+	// operation is not canceled.
 	SuspensionInFlight bool `json:"suspensionInFlight,omitempty"`
 }
 

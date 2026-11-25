@@ -1557,29 +1557,6 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
-	// Changing suspendPolicy on an existing agent requires PATCH with quota
-	// and audit. Refuse a mismatched non-empty suspendPolicy with 409 before
-	// any existing-agent branch acts; empty or matching values pass through.
-	// Exception: the env-gather recreate branch (Branch 3: provisioning +
-	// GatherEnv) hard-deletes the existing row and creates a fresh agent from
-	// req, so it honors req.SuspendPolicy like any other create-time field.
-	isEnvGatherRecreate := req.GatherEnv && store.EffectiveRestingPhase(existingAgent) == string(state.PhaseProvisioning)
-	if req.SuspendPolicy != "" && !isEnvGatherRecreate {
-		existingPolicy := existingAgent.SuspendPolicy
-		if existingPolicy == "" {
-			existingPolicy = store.SuspendPolicyAuto
-		}
-		if req.SuspendPolicy != existingPolicy {
-			writeError(w, http.StatusConflict, ErrCodeSuspendPolicyCreateOnly,
-				"suspendPolicy cannot be changed through create/start on an existing agent; use PATCH /api/v1/agents/{id} to update it",
-				map[string]interface{}{
-					"current":   existingPolicy,
-					"requested": req.SuspendPolicy,
-				})
-			return existingAgentErrored
-		}
-	}
-
 	// Start gate (design ptone/scion#2483 §2.1): every branch below
 	// starts, resumes, restarts or recreates existingAgent, so the shared
 	// start gate runs first, after the lifecycle authz above. An agent whose
@@ -1617,6 +1594,29 @@ func (s *Server) handleExistingAgent(
 	// any of the branch's writes (section 9 step 4 of the flat contract).
 	if res, done := s.existingAgentFlatChecks(ctx, w, &existingAgent, runtimeBrokerID, req); done {
 		return res
+	}
+
+	// Changing suspendPolicy on an existing agent requires PATCH with quota
+	// and audit. Refuse a mismatched non-empty suspendPolicy with 409 before
+	// any existing-agent branch acts; empty or matching values pass through.
+	// Exception: the env-gather recreate branch (existingBranchRecreate)
+	// hard-deletes the existing row and creates a fresh agent from req, so it
+	// honors req.SuspendPolicy like any other create-time field. Evaluated on
+	// the final existingAgent after existingAgentFlatChecks.
+	if req.SuspendPolicy != "" && classifyExistingAgent(existingAgent, req) != existingBranchRecreate {
+		existingPolicy := existingAgent.SuspendPolicy
+		if existingPolicy == "" {
+			existingPolicy = store.SuspendPolicyAuto
+		}
+		if req.SuspendPolicy != existingPolicy {
+			writeError(w, http.StatusConflict, ErrCodeSuspendPolicyCreateOnly,
+				"suspendPolicy cannot be changed through create/start on an existing agent; use PATCH /api/v1/agents/{id} to update it",
+				map[string]interface{}{
+					"current":   existingPolicy,
+					"requested": req.SuspendPolicy,
+				})
+			return existingAgentErrored
+		}
 	}
 
 	// rest is the phase the branches below are chosen by: the effective

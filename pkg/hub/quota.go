@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -429,26 +430,114 @@ func countsAcrossSubjects(limitName string) bool {
 // suspend_policy="never" in the project so agents flagged while Phase 1 was
 // deployed (without reservations) are included without double-counting agents
 // that hold both a row and a reservation (ptone/scion#9183).
-func (qs *QuotaService) countActive(ctx context.Context, limitName, limitDefID, subjectID, scopeType, scopeID string) (int64, error) {
-	if limitName == store.LimitMaxNeverSuspendAgentsPerProject && scopeType == store.QuotaScopeProject {
-		reservations, err := qs.store.ListActiveReservations(ctx, limitDefID, scopeType, scopeID)
-		if err != nil {
-			return 0, err
+// neverSuspendQuotaUsage is the single source of truth for
+// max_never_suspend_agents_per_project usage, used by both quota enforcement
+// (Reserve / 429 details) and the admin usage endpoints (getUsageSummary /
+// getUsageByLimit). When projectID is non-empty, results are scoped to that
+// project; when empty, all projects are included.
+//
+// Rules:
+//   - Active reservations for live agents with suspend_policy="never" count.
+//   - Active reservations for live agents with suspend_policy="auto" count only
+//     while younger than reconcileMinReservationAge (in-flight PATCH auto->never);
+//     older ones are stale and ignored (released by reconcile).
+//   - Active reservations whose agent row is soft-deleted never count.
+//   - Active reservations whose agent row does not exist count only while
+//     younger than reconcileMinReservationAge (in-flight creates before row
+//     commit, preventing concurrent overshoot); older ones are stale orphans and
+//     ignored (released by reconcile).
+//   - Live (non-deleted) agents with suspend_policy="never" that have no active
+//     reservation (e.g. flagged while Phase 1 was deployed) are included as
+//     synthesized usage entries so enforcement and admin views agree.
+func neverSuspendQuotaUsage(ctx context.Context, st store.Store, limitDefID, projectID string, now time.Time) ([]*store.UsageReservation, error) {
+	var reservations []*store.UsageReservation
+	var err error
+	if projectID != "" {
+		reservations, err = st.ListActiveReservations(ctx, limitDefID, store.QuotaScopeProject, projectID)
+	} else {
+		reservations, err = st.ListActiveReservationsByScopeType(ctx, limitDefID, store.QuotaScopeProject)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	resIDs := make([]string, 0, len(reservations))
+	for _, r := range reservations {
+		if r != nil && r.ResourceID != "" {
+			resIDs = append(resIDs, r.ResourceID)
 		}
-		flaggedIDs, err := qs.store.ListNeverSuspendAgentIDsInProject(ctx, scopeID)
-		if err != nil {
-			return 0, err
+	}
+	agentsByID, err := st.GetAgentsByIDs(ctx, resIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]*store.UsageReservation, 0, len(reservations))
+	seen := make(map[string]struct{}, len(reservations))
+	for _, r := range reservations {
+		if r == nil || r.ResourceID == "" {
+			continue
 		}
-		seen := make(map[string]struct{}, len(reservations)+len(flaggedIDs))
-		for _, r := range reservations {
-			if r != nil && r.ResourceID != "" {
+		a, ok := agentsByID[r.ResourceID]
+		if ok {
+			if a.SuspendPolicy == store.SuspendPolicyNever || now.Sub(r.CreatedAt) < reconcileMinReservationAge {
+				out = append(out, r)
 				seen[r.ResourceID] = struct{}{}
 			}
+			continue
 		}
-		for _, id := range flaggedIDs {
-			seen[id] = struct{}{}
+		// No live row in GetAgentsByIDs: either soft-deleted, hard-deleted, or
+		// an in-flight create that has not committed its row yet.
+		if now.Sub(r.CreatedAt) >= reconcileMinReservationAge {
+			continue
 		}
-		return int64(len(seen)), nil
+		row, getErr := st.GetAgent(ctx, r.ResourceID)
+		if getErr == nil && !row.DeletedAt.IsZero() {
+			// Soft-deleted row: does not count.
+			continue
+		}
+		if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
+			return nil, getErr
+		}
+		// In-flight create (row not yet committed) or recently hard-deleted
+		// row awaiting reconcile: keep counting within the grace window so
+		// concurrent creates cannot overshoot the cap.
+		out = append(out, r)
+		seen[r.ResourceID] = struct{}{}
+	}
+
+	flagged, err := st.ListNeverSuspendAgents(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range flagged {
+		if a == nil || a.ID == "" {
+			continue
+		}
+		if _, exists := seen[a.ID]; exists {
+			continue
+		}
+		seen[a.ID] = struct{}{}
+		out = append(out, &store.UsageReservation{
+			LimitDefinitionID: limitDefID,
+			SubjectID:         projectQuotaSubject(a),
+			ScopeType:         store.QuotaScopeProject,
+			ScopeID:           a.ProjectID,
+			ResourceID:        a.ID,
+			Reserved:          1,
+			CreatedAt:         a.Created,
+		})
+	}
+	return out, nil
+}
+
+func (qs *QuotaService) countActive(ctx context.Context, limitName, limitDefID, subjectID, scopeType, scopeID string) (int64, error) {
+	if limitName == store.LimitMaxNeverSuspendAgentsPerProject && scopeType == store.QuotaScopeProject {
+		usage, err := neverSuspendQuotaUsage(ctx, qs.store, limitDefID, scopeID, time.Now())
+		if err != nil {
+			return 0, err
+		}
+		return int64(len(usage)), nil
 	}
 	if !countsAcrossSubjects(limitName) {
 		return qs.store.CountActiveReservations(ctx, limitDefID, subjectID, scopeType, scopeID)

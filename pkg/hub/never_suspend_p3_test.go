@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -659,5 +660,208 @@ func TestNeverSuspend_FilterQueryAndMetric(t *testing.T) {
 		assert.True(t, bOK)
 		assert.Equal(t, projectID, pVal.AsString())
 		assert.Equal(t, "broker-1", bVal.AsString())
+	})
+}
+
+type failReleaseNeverSuspendStore struct {
+	store.Store
+	fault         *storeFaultSwitch
+	targetLimitID string
+}
+
+func (f *failReleaseNeverSuspendStore) ReleaseUsageReservation(ctx context.Context, limitDefinitionID, resourceID string) error {
+	if f.fault.Active() && limitDefinitionID == f.targetLimitID {
+		return errors.New("injected release failure")
+	}
+	return f.Store.ReleaseUsageReservation(ctx, limitDefinitionID, resourceID)
+}
+
+type softDeleteOnReserveStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	agentID string
+	onHook  func()
+}
+
+func (f *softDeleteOnReserveStore) CreateUsageReservation(ctx context.Context, r *store.UsageReservation) (*store.UsageReservation, error) {
+	res, err := f.Store.CreateUsageReservation(ctx, r)
+	if err == nil && f.fault.Active() && r.ResourceID == f.agentID && f.onHook != nil {
+		f.fault.Disarm()
+		f.onHook()
+	}
+	return res, err
+}
+
+func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("hard-delete with failed release returns slot after one reconcile pass", func(t *testing.T) {
+		srv, s := testServer(t)
+		setNeverSuspendExperiment(t, srv, true)
+		def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxNeverSuspendAgentsPerProject)
+		require.NoError(t, err)
+		setProjectNeverSuspendCeiling(t, s, 1)
+
+		_, fault := installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *failReleaseNeverSuspendStore {
+			return &failReleaseNeverSuspendStore{Store: inner, fault: sw, targetLimitID: def.ID}
+		})
+
+		projectID := tid("ns-rec-project")
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "NS Rec Project", Slug: "ns-rec-project",
+			GitRemote: "https://github.com/example/ns-rec.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+		brokerID := tid("ns-rec-broker")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID: brokerID, Name: "NS Rec Broker", Slug: "ns-rec-broker", Status: store.BrokerStatusOnline,
+			CreatedBy: DevUserID,
+		}))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS Rec Broker",
+			Status: store.BrokerStatusOnline,
+		}))
+		srv.SetDispatcher(&createAgentDispatcher{})
+
+		// Create flagged agent 1 (1/1).
+		rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-rec-a1",
+			"projectId":     projectID,
+			"provisionOnly": true,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusCreated, rec1.Code, "body: %s", rec1.Body.String())
+		var resp1 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		require.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID))
+
+		// Hard-delete agent 1 while never-suspend release is injected to fail.
+		fault.Arm()
+		delRec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+resp1.Agent.ID, nil)
+		require.Equal(t, http.StatusNoContent, delRec.Code, "body: %s", delRec.Body.String())
+		fault.Disarm()
+
+		// Reservation was stranded by the failed release.
+		require.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID))
+
+		// One reconcile pass releases the orphaned reservation and frees the slot.
+		srv.ReconcileStaleNeverSuspendQuotaReservations(ctx)
+		assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID))
+
+		rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-rec-a2",
+			"projectId":     projectID,
+			"provisionOnly": true,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusCreated, rec2.Code, "body: %s", rec2.Body.String())
+	})
+
+	t.Run("PATCH auto->never racing soft-delete is refused and leaves no orphan reservation", func(t *testing.T) {
+		srv, s := testServer(t)
+		setNeverSuspendExperiment(t, srv, true)
+		setProjectNeverSuspendCeiling(t, s, 1)
+
+		projectID := tid("ns-race-sd-project")
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "NS Race SD Project", Slug: "ns-race-sd-project",
+			GitRemote: "https://github.com/example/ns-race-sd.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+		a := &store.Agent{
+			ID: tid("ns-race-sd-agent"), Slug: "ns-race-sd-agent", Name: "ns-race-sd-agent",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseCreated), SuspendPolicy: store.SuspendPolicyAuto,
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		hook, fault := installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *softDeleteOnReserveStore {
+			return &softDeleteOnReserveStore{Store: inner, fault: sw, agentID: a.ID}
+		})
+		hook.onHook = func() {
+			// Soft-delete the agent after PATCH reserved quota, before SetAgentSuspendPolicy runs.
+			softDeleteAgentRow(t, s, a.ID)
+		}
+		fault.Arm()
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+a.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		assert.Equal(t, http.StatusNotFound, rec.Code, "PATCH against concurrently soft-deleted row must fail; body: %s", rec.Body.String())
+
+		// Row must still be auto and reservation must have been rolled back.
+		stored, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyAuto, stored.SuspendPolicy)
+		assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, a.ID), "reservation must be rolled back on SetAgentSuspendPolicy failure")
+	})
+
+	t.Run("Phase-1-flagged row without reservation matches across admin usage views and 429 details", func(t *testing.T) {
+		srv, s := testServer(t)
+		setNeverSuspendExperiment(t, srv, true)
+		def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxNeverSuspendAgentsPerProject)
+		require.NoError(t, err)
+		setProjectNeverSuspendCeiling(t, s, 1)
+
+		projectID := tid("ns-parity-project")
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "NS Parity Project", Slug: "ns-parity-project",
+			GitRemote: "https://github.com/example/ns-parity.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+		brokerID := tid("ns-parity-broker")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID: brokerID, Name: "NS Parity Broker", Slug: "ns-parity-broker", Status: store.BrokerStatusOnline,
+			CreatedBy: DevUserID,
+		}))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS Parity Broker",
+			Status: store.BrokerStatusOnline,
+		}))
+		srv.SetDispatcher(&createAgentDispatcher{})
+
+		// Seed a P1-style flagged row directly (no usage_reservation row).
+		p1 := &store.Agent{
+			ID: tid("ns-parity-p1"), Slug: "ns-parity-p1", Name: "ns-parity-p1",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseRunning), SuspendPolicy: store.SuspendPolicyNever,
+		}
+		require.NoError(t, s.CreateAgent(ctx, p1))
+
+		// Admin usage summary must report activeCount == 1.
+		sumRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+		require.Equal(t, http.StatusOK, sumRec.Code, "body: %s", sumRec.Body.String())
+		var sumResp usageSummaryResponse
+		require.NoError(t, json.Unmarshal(sumRec.Body.Bytes(), &sumResp))
+		var foundSummary bool
+		for _, item := range sumResp.Items {
+			if item.LimitDefinition != nil && item.LimitDefinition.Name == store.LimitMaxNeverSuspendAgentsPerProject {
+				foundSummary = true
+				assert.Equal(t, 1, item.ActiveCount, "getUsageSummary must count P1-flagged row")
+			}
+		}
+		require.True(t, foundSummary)
+
+		// Admin usage detail for the limit must report totalActive == 1 and include p1.ID.
+		detRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+def.ID, nil)
+		require.Equal(t, http.StatusOK, detRec.Code, "body: %s", detRec.Body.String())
+		var detResp usageByLimitResponse
+		require.NoError(t, json.Unmarshal(detRec.Body.Bytes(), &detResp))
+		assert.Equal(t, 1, detResp.TotalActive, "getUsageByLimit must count P1-flagged row")
+		require.Len(t, detResp.Reservations, 1)
+		assert.Equal(t, p1.ID, detResp.Reservations[0].ResourceID)
+
+		// Enforcement 429 details must report the exact same count (1 of 1).
+		createRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-parity-over",
+			"projectId":     projectID,
+			"provisionOnly": true,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusTooManyRequests, createRec.Code, "body: %s", createRec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &errResp))
+		assert.Equal(t, float64(1), errResp.Error.Details["count"])
+		assert.Equal(t, float64(1), errResp.Error.Details["limit"])
 	})
 }

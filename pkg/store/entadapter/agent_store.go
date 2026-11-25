@@ -615,7 +615,7 @@ func (s *AgentStore) SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID s
 
 // SetAgentSuspendPolicy sets suspend_policy to "auto" or "never". It is the
 // single-purpose post-create writer for the column and neither checks nor
-// bumps state_version.
+// bumps state_version. Refuses soft-deleted rows (deleted_at IS NULL).
 func (s *AgentStore) SetAgentSuspendPolicy(ctx context.Context, agentID, policy string) error {
 	if !store.IsValidSuspendPolicy(policy) {
 		return fmt.Errorf("%w: invalid suspend policy %q", store.ErrInvalidInput, policy)
@@ -624,34 +624,42 @@ func (s *AgentStore) SetAgentSuspendPolicy(ctx context.Context, agentID, policy 
 	if err != nil {
 		return err
 	}
-	if err := s.client.Agent.UpdateOneID(uid).
+	n, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).
 		SetSuspendPolicy(agent.SuspendPolicy(policy)).
-		Exec(ctx); err != nil {
+		Save(ctx)
+	if err != nil {
 		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
 	}
 	return nil
 }
 
-// ListNeverSuspendAgentIDsInProject returns the IDs of all non-deleted agents
-// in projectID with suspend_policy = "never", regardless of phase.
-func (s *AgentStore) ListNeverSuspendAgentIDsInProject(ctx context.Context, projectID string) ([]string, error) {
-	projectUID, err := parseUUID(projectID)
-	if err != nil {
-		return nil, err
-	}
-	ids, err := s.client.Agent.Query().
+// ListNeverSuspendAgents returns all non-deleted agents with
+// suspend_policy = "never", regardless of phase. When projectID is non-empty,
+// only agents in that project are returned.
+func (s *AgentStore) ListNeverSuspendAgents(ctx context.Context, projectID string) ([]*store.Agent, error) {
+	q := s.client.Agent.Query().
 		Where(
-			agent.ProjectIDEQ(projectUID),
 			agent.DeletedAtIsNil(),
 			agent.SuspendPolicyEQ(agent.SuspendPolicyNever),
-		).
-		IDs(ctx)
+		)
+	if projectID != "" {
+		projectUID, err := parseUUID(projectID)
+		if err != nil {
+			return nil, err
+		}
+		q = q.Where(agent.ProjectIDEQ(projectUID))
+	}
+	rows, err := q.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	out := make([]string, len(ids))
-	for i, id := range ids {
-		out[i] = id.String()
+	out := make([]*store.Agent, len(rows))
+	for i, r := range rows {
+		out[i] = entAgentToStore(r)
 	}
 	return out, nil
 }

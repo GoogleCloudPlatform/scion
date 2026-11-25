@@ -309,6 +309,62 @@ func (s *Server) reconcileProjectQuotaOnPhaseChange(ctx context.Context, agent *
 func (s *Server) reconcileQuotaReservations(ctx context.Context) {
 	s.ReconcileStaleBrokerQuotaReservations(ctx)
 	s.ReconcileStaleProjectQuotaReservations(ctx)
+	s.ReconcileStaleNeverSuspendQuotaReservations(ctx)
+}
+
+// ReconcileStaleNeverSuspendQuotaReservations releases stale
+// max_never_suspend_agents_per_project reservations:
+//   - any active reservation whose agent row no longer exists or is
+//     soft-deleted (at any age, matching ReconcileStaleProjectQuotaReservations),
+//   - any active reservation whose live agent has suspend_policy != "never"
+//     and is at least reconcileMinReservationAge old.
+func (s *Server) ReconcileStaleNeverSuspendQuotaReservations(ctx context.Context) {
+	if s.quotaService == nil {
+		return
+	}
+	def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxNeverSuspendAgentsPerProject)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("never-suspend quota reconcile: limit lookup failed", "error", err)
+		}
+		return
+	}
+	reservations, err := s.store.ListActiveReservationsByScopeType(ctx, def.ID, store.QuotaScopeProject)
+	if err != nil {
+		s.agentLifecycleLog.Warn("never-suspend quota reconcile: listing active reservations failed", "error", err)
+		return
+	}
+	if len(reservations) == 0 {
+		return
+	}
+	ids := make([]string, len(reservations))
+	for i, res := range reservations {
+		ids[i] = res.ResourceID
+	}
+	agentsByID, err := s.store.GetAgentsByIDs(ctx, ids)
+	if err != nil {
+		s.agentLifecycleLog.Warn("never-suspend quota reconcile: loading reserved agents failed", "error", err)
+		return
+	}
+	var released int
+	for _, res := range reservations {
+		agent, ok := agentsByID[res.ResourceID]
+		if !ok {
+			if s.releaseObservedReservation(ctx, res) {
+				released++
+			}
+			continue
+		}
+		if agent.SuspendPolicy != store.SuspendPolicyNever && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
+			if s.releaseObservedReservation(ctx, res) {
+				released++
+			}
+		}
+	}
+	if released > 0 {
+		s.agentLifecycleLog.Info("never-suspend quota reconcile: released stale max_never_suspend_agents_per_project reservations",
+			"checked", len(reservations), "released", released)
+	}
 }
 
 // ReconcileStaleProjectQuotaReservations reconciles max_agents_per_project
