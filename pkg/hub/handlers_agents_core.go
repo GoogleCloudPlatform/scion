@@ -186,16 +186,20 @@ type ListAgentsResponse struct {
 	Sort string `json:"sort,omitempty"`
 	Dir  string `json:"dir,omitempty"`
 	// Complete is set only when the request supplied "fit" (sorted mode): true
-	// iff the unphased candidate set had at most fit members, in which case
-	// Agents is its whole readable subset. On the project user path it is
-	// also false when the complete response would exceed the per-request
-	// decision budget for the caller (completeBranchMaxCandidates); the
-	// response is then an ordinary paged one. A pointer
-	// so "fit not sent" (nil, omitted) is distinguishable from "fit sent,
-	// complete: false".
+	// iff the phase-independent candidate set (both legacy "phase=" and any
+	// `phase:` terms in "q=" stripped) had at most fit members, in which case
+	// Agents is that whole unphased readable subset — callers sending "fit"
+	// with a phase filter must apply phase filtering locally when Complete is
+	// true (when Complete is false, Agents is a page of rows with the full
+	// phase filter applied). On the project user path it is also false when
+	// the complete response would exceed the per-request decision budget for
+	// the caller (completeBranchMaxCandidates); the response is then an
+	// ordinary paged one. A pointer so "fit not sent" (nil, omitted) is
+	// distinguishable from "fit sent, complete: false".
 	Complete *bool `json:"complete,omitempty"`
 	// Stats is populated only when the request supplied "stats=1". It is
-	// computed over the request filter with Phase cleared, kept
+	// computed over the phase-independent request filter (legacy Phase and any
+	// `phase:` terms in Query cleared), keeping other filter terms and
 	// label/scope/projectId/broker/includeDeleted, and (project user path)
 	// read-filtered the same way the page is.
 	Stats        *ListAgentsStats `json:"stats,omitempty"`
