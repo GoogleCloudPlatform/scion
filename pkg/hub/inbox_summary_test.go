@@ -310,10 +310,10 @@ func TestUserMeInboxSummary_PendingSecretsOrderingAndPrivacy(t *testing.T) {
 
 type inboxPendingSecretFallbackStore struct {
 	store.Store
-	rows []*store.PendingSecret
+	rows []store.PendingSecret
 }
 
-func (s *inboxPendingSecretFallbackStore) ListPendingSecretsByOwner(_ context.Context, _ string, _ time.Time) ([]*store.PendingSecret, error) {
+func (s *inboxPendingSecretFallbackStore) ListPendingSecretsByOwner(_ context.Context, _, _ string) ([]store.PendingSecret, error) {
 	return s.rows, nil
 }
 
@@ -384,7 +384,7 @@ func TestUserMeInboxSummary_PendingSecretsBreakdownDistinctCounts(t *testing.T) 
 		installStoreFault(t, f.Server, func(inner store.Store, _ *storeFaultSwitch) *inboxPendingSecretFallbackStore {
 			return &inboxPendingSecretFallbackStore{
 				Store: inner,
-				rows: []*store.PendingSecret{
+				rows: []store.PendingSecret{
 					{
 						ID: api.NewUUID(), Key: "FB_1", Scope: store.ScopeUser, ScopeID: f.UserID,
 						AgentID: agent1, AgentSlug: "agent-1", ProjectID: proj1, ProjectName: "Proj 1",
