@@ -294,6 +294,10 @@ type CreateAgentRequest struct {
 	// Valid values: "none", "lineage", "branch", "project", "hub".
 	// When omitted, resolved from template, parent inheritance, or "project" default.
 	MessageMode string `json:"messageMode,omitempty"`
+	// SuspendPolicy sets the agent's automatic suspension policy ("auto" or "never").
+	// Setting this field requires the lifecycle.never_suspend experiment; when omitted,
+	// defaults to "auto".
+	SuspendPolicy string `json:"suspendPolicy,omitempty"`
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
@@ -1779,6 +1783,21 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Validate create-time suspendPolicy before any persistence or existing-agent
+	// mutation (ptone/scion#9178). Both create routes reach it here.
+	if req.SuspendPolicy != "" {
+		if !s.experimentEnabled(experiments.NeverSuspend) {
+			writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+				"experiment_disabled: "+experiments.NeverSuspend+" is off; suspendPolicy cannot be set on this hub",
+				map[string]interface{}{"experiment": experiments.NeverSuspend})
+			return
+		}
+		if !store.IsValidSuspendPolicy(req.SuspendPolicy) {
+			ValidationError(w, "invalid suspend policy: "+req.SuspendPolicy, nil)
+			return
+		}
+	}
+
 	// Normalize bounded legacy Profile == ManagedAgentsProfile ("managed-agents")
 	// into req.ManagedAgent = true (clearing req.Profile) and reject contradictory
 	// managed-agent + Runtime Broker placement combinations before any broker
@@ -2421,6 +2440,12 @@ func (s *Server) createAgentInProject(
 				"Cannot grant hub message mode: "+decision.Reason, nil)
 			return
 		}
+	}
+
+	if req.SuspendPolicy != "" {
+		agent.SuspendPolicy = req.SuspendPolicy
+	} else {
+		agent.SuspendPolicy = store.SuspendPolicyAuto
 	}
 
 	// Persistence (ptone/scion#7780): resolved and stamped here, before the

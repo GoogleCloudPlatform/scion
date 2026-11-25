@@ -40,15 +40,20 @@ func (s *AgentStore) SetRunIntent(ctx context.Context, agentID string, intent st
 
 // SwapRunIntent implements store.AgentStore.SwapRunIntent.
 func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
-	return s.swapRunIntent(ctx, agentID, intent, true)
+	return s.swapRunIntent(ctx, agentID, intent, true, false)
 }
 
 // SwapSystemRunIntent implements store.AgentStore.SwapSystemRunIntent.
 func (s *AgentStore) SwapSystemRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
-	return s.swapRunIntent(ctx, agentID, intent, false)
+	return s.swapRunIntent(ctx, agentID, intent, false, false)
 }
 
-func (s *AgentStore) swapRunIntent(ctx context.Context, agentID string, intent store.RunIntent, preemptIdleClaim bool) (store.RunIntent, time.Time, error) {
+// SwapAutoSuspendRunIntent implements store.AgentStore.SwapAutoSuspendRunIntent.
+func (s *AgentStore) SwapAutoSuspendRunIntent(ctx context.Context, agentID string, intent store.RunIntent, requireSuspendPolicyAuto bool) (store.RunIntent, time.Time, error) {
+	return s.swapRunIntent(ctx, agentID, intent, false, requireSuspendPolicyAuto)
+}
+
+func (s *AgentStore) swapRunIntent(ctx context.Context, agentID string, intent store.RunIntent, preemptIdleClaim, requireSuspendPolicyAuto bool) (store.RunIntent, time.Time, error) {
 	if !intent.Valid() {
 		return "", time.Time{}, fmt.Errorf("%w: unknown run intent %q", store.ErrInvalidInput, intent)
 	}
@@ -78,7 +83,7 @@ func (s *AgentStore) swapRunIntent(ctx context.Context, agentID string, intent s
 		q = q.ForUpdate()
 	}
 	current, err := q.Select(agent.FieldRunIntent, agent.FieldRunIntentAt,
-		agent.FieldIdleSuspendClaimUntil,
+		agent.FieldIdleSuspendClaimUntil, agent.FieldSuspendPolicy,
 		agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).Only(ctx)
 	if err != nil {
 		return "", time.Time{}, mapError(err)
@@ -105,6 +110,9 @@ func (s *AgentStore) swapRunIntent(ctx context.Context, agentID string, intent s
 	}
 	if !preemptIdleClaim && current.IdleSuspendClaimUntil != nil && claimTime(now).Before(*current.IdleSuspendClaimUntil) {
 		return "", time.Time{}, store.ErrIdleSuspendPrecondition
+	}
+	if requireSuspendPolicyAuto && current.SuspendPolicy == agent.SuspendPolicyNever {
+		return "", time.Time{}, store.ErrAgentNeverSuspend
 	}
 	at := nextRunIntentAt(now, current.RunIntentAt)
 

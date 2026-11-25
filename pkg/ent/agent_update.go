@@ -392,6 +392,20 @@ func (_u *AgentUpdate) ClearSuspendReason() *AgentUpdate {
 	return _u
 }
 
+// SetSuspendPolicy sets the "suspend_policy" field.
+func (_u *AgentUpdate) SetSuspendPolicy(v agent.SuspendPolicy) *AgentUpdate {
+	_u.mutation.SetSuspendPolicy(v)
+	return _u
+}
+
+// SetNillableSuspendPolicy sets the "suspend_policy" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableSuspendPolicy(v *agent.SuspendPolicy) *AgentUpdate {
+	if v != nil {
+		_u.SetSuspendPolicy(*v)
+	}
+	return _u
+}
+
 // SetCurrentTurns sets the "current_turns" field.
 func (_u *AgentUpdate) SetCurrentTurns(v int) *AgentUpdate {
 	_u.mutation.ResetCurrentTurns()
@@ -2119,6 +2133,11 @@ func (_u *AgentUpdate) check() error {
 			return &ValidationError{Name: "message_mode", err: fmt.Errorf(`ent: validator failed for field "Agent.message_mode": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.SuspendPolicy(); ok {
+		if err := agent.SuspendPolicyValidator(v); err != nil {
+			return &ValidationError{Name: "suspend_policy", err: fmt.Errorf(`ent: validator failed for field "Agent.suspend_policy": %w`, err)}
+		}
+	}
 	if _u.mutation.ProjectCleared() && len(_u.mutation.ProjectIDs()) > 0 {
 		return errors.New(`ent: clearing a required unique edge "Agent.project"`)
 	}
@@ -2247,6 +2266,9 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.SuspendReasonCleared() {
 		_spec.ClearField(agent.FieldSuspendReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.SuspendPolicy(); ok {
+		_spec.SetField(agent.FieldSuspendPolicy, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.CurrentTurns(); ok {
 		_spec.SetField(agent.FieldCurrentTurns, field.TypeInt, value)
@@ -3312,6 +3334,20 @@ func (_u *AgentUpdateOne) SetNillableSuspendReason(v *string) *AgentUpdateOne {
 // ClearSuspendReason clears the value of the "suspend_reason" field.
 func (_u *AgentUpdateOne) ClearSuspendReason() *AgentUpdateOne {
 	_u.mutation.ClearSuspendReason()
+	return _u
+}
+
+// SetSuspendPolicy sets the "suspend_policy" field.
+func (_u *AgentUpdateOne) SetSuspendPolicy(v agent.SuspendPolicy) *AgentUpdateOne {
+	_u.mutation.SetSuspendPolicy(v)
+	return _u
+}
+
+// SetNillableSuspendPolicy sets the "suspend_policy" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableSuspendPolicy(v *agent.SuspendPolicy) *AgentUpdateOne {
+	if v != nil {
+		_u.SetSuspendPolicy(*v)
+	}
 	return _u
 }
 
@@ -5055,6 +5091,11 @@ func (_u *AgentUpdateOne) check() error {
 			return &ValidationError{Name: "message_mode", err: fmt.Errorf(`ent: validator failed for field "Agent.message_mode": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.SuspendPolicy(); ok {
+		if err := agent.SuspendPolicyValidator(v); err != nil {
+			return &ValidationError{Name: "suspend_policy", err: fmt.Errorf(`ent: validator failed for field "Agent.suspend_policy": %w`, err)}
+		}
+	}
 	if _u.mutation.ProjectCleared() && len(_u.mutation.ProjectIDs()) > 0 {
 		return errors.New(`ent: clearing a required unique edge "Agent.project"`)
 	}
@@ -5200,6 +5241,9 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.SuspendReasonCleared() {
 		_spec.ClearField(agent.FieldSuspendReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.SuspendPolicy(); ok {
+		_spec.SetField(agent.FieldSuspendPolicy, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.CurrentTurns(); ok {
 		_spec.SetField(agent.FieldCurrentTurns, field.TypeInt, value)

@@ -70,6 +70,9 @@ type Agent struct {
 	// SuspendReason is why a suspended agent was suspended (user, idle,
 	// stalled); empty otherwise, or when none was recorded.
 	SuspendReason string `json:"suspendReason,omitempty"`
+	// SuspendPolicy controls whether the agent is exempt from automatic
+	// suspension ("auto" or "never").
+	SuspendPolicy string `json:"suspendPolicy,omitempty"`
 	// Deletion is the hub's view of an active or failed delete of this agent
 	// (design ptone/scion#2483 §2.2). It is nil when no delete is active or
 	// failed.

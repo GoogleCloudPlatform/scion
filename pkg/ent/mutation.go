@@ -4632,6 +4632,7 @@ type AgentMutation struct {
 	runtime_state              *string
 	stalled_from_activity      *string
 	suspend_reason             *string
+	suspend_policy             *agent.SuspendPolicy
 	current_turns              *int
 	addcurrent_turns           *int
 	current_model_calls        *int
@@ -5913,6 +5914,42 @@ func (m *AgentMutation) SuspendReasonCleared() bool {
 func (m *AgentMutation) ResetSuspendReason() {
 	m.suspend_reason = nil
 	delete(m.clearedFields, agent.FieldSuspendReason)
+}
+
+// SetSuspendPolicy sets the "suspend_policy" field.
+func (m *AgentMutation) SetSuspendPolicy(ap agent.SuspendPolicy) {
+	m.suspend_policy = &ap
+}
+
+// SuspendPolicy returns the value of the "suspend_policy" field in the mutation.
+func (m *AgentMutation) SuspendPolicy() (r agent.SuspendPolicy, exists bool) {
+	v := m.suspend_policy
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSuspendPolicy returns the old "suspend_policy" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldSuspendPolicy(ctx context.Context) (v agent.SuspendPolicy, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSuspendPolicy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSuspendPolicy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSuspendPolicy: %w", err)
+	}
+	return oldValue.SuspendPolicy, nil
+}
+
+// ResetSuspendPolicy resets all changes to the "suspend_policy" field.
+func (m *AgentMutation) ResetSuspendPolicy() {
+	m.suspend_policy = nil
 }
 
 // SetCurrentTurns sets the "current_turns" field.
@@ -10065,7 +10102,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 101)
+	fields := make([]string, 0, 102)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -10134,6 +10171,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.suspend_reason != nil {
 		fields = append(fields, agent.FieldSuspendReason)
+	}
+	if m.suspend_policy != nil {
+		fields = append(fields, agent.FieldSuspendPolicy)
 	}
 	if m.current_turns != nil {
 		fields = append(fields, agent.FieldCurrentTurns)
@@ -10423,6 +10463,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.StalledFromActivity()
 	case agent.FieldSuspendReason:
 		return m.SuspendReason()
+	case agent.FieldSuspendPolicy:
+		return m.SuspendPolicy()
 	case agent.FieldCurrentTurns:
 		return m.CurrentTurns()
 	case agent.FieldCurrentModelCalls:
@@ -10634,6 +10676,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldStalledFromActivity(ctx)
 	case agent.FieldSuspendReason:
 		return m.OldSuspendReason(ctx)
+	case agent.FieldSuspendPolicy:
+		return m.OldSuspendPolicy(ctx)
 	case agent.FieldCurrentTurns:
 		return m.OldCurrentTurns(ctx)
 	case agent.FieldCurrentModelCalls:
@@ -10959,6 +11003,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSuspendReason(v)
+		return nil
+	case agent.FieldSuspendPolicy:
+		v, ok := value.(agent.SuspendPolicy)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSuspendPolicy(v)
 		return nil
 	case agent.FieldCurrentTurns:
 		v, ok := value.(int)
@@ -12211,6 +12262,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldSuspendReason:
 		m.ResetSuspendReason()
+		return nil
+	case agent.FieldSuspendPolicy:
+		m.ResetSuspendPolicy()
 		return nil
 	case agent.FieldCurrentTurns:
 		m.ResetCurrentTurns()

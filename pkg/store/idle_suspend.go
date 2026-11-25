@@ -27,6 +27,11 @@ import (
 // longer eligible to record the idle suspension).
 var ErrIdleSuspendPrecondition = fmt.Errorf("agent no longer eligible for idle suspend: %w", ErrVersionConflict)
 
+// ErrAgentNeverSuspend is returned by SwapAutoSuspendRunIntent when
+// requireSuspendPolicyAuto is true and the locked agent row has
+// suspend_policy == "never".
+var ErrAgentNeverSuspend = fmt.Errorf("agent has never-suspend policy: %w", ErrVersionConflict)
+
 // IdleSuspendCursor positions a keyset page strictly after (ActivitySince, ID)
 // in ListIdleSuspendCandidates's (activity_since ASC, id ASC) ordering.
 type IdleSuspendCursor struct {
@@ -47,6 +52,9 @@ type IdleSuspendCondition struct {
 	// idle_suspend_claim_until is less than ClaimBackoff in the past (the
 	// marker an abandoned idle suspend leaves).
 	ClaimBackoff time.Duration
+	// RequireSuspendPolicyAuto, when true (lifecycle.never_suspend is on),
+	// makes ClaimIdleSuspend exempt a row whose suspend_policy is "never".
+	RequireSuspendPolicyAuto bool
 }
 
 // HasActiveIdleSuspendClaim reports whether an idle-suspend claim lease is

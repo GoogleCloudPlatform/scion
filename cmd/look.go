@@ -247,41 +247,41 @@ func lookCaptureError(agentName string, exitCode int, output string) error {
 var lookIdentityTimeout = 3 * time.Second
 
 // fetchLookIdentityHeader returns the header lines for scion look: the
-// agent's GCP identity and, with showAuthority, the cause line of an
-// orphaned or revoked agent (authorityCauseLine). It is best effort: when
-// the agent cannot be read, or there is nothing to show, it returns "".
+// agent's GCP identity, with showAuthority the cause line of an orphaned or
+// revoked agent (authorityCauseLine), and the suspend policy line when
+// suspend_policy is "never". It is best effort: when the agent cannot be read,
+// or there is nothing to show, it returns "".
 func fetchLookIdentityHeader(ctx context.Context, client hubclient.Client, agentSvc hubclient.AgentService, projectID, agentName string, showAuthority bool) string {
 	agent, err := agentSvc.Get(ctx, agentName)
 	if err != nil || agent == nil {
 		return ""
 	}
-	var authorityLine string
-	if showAuthority {
-		authorityLine = authorityCauseLine(agent.Authority)
-	}
-	id := agentGCPIdentity(*agent)
-	if id == nil {
-		return authorityLine
-	}
-	if id.ServiceAccountID != "" {
-		pid := agent.ProjectID
-		if pid == "" {
-			pid = projectID
+	var lines []string
+	if id := agentGCPIdentity(*agent); id != nil {
+		if id.ServiceAccountID != "" {
+			pid := agent.ProjectID
+			if pid == "" {
+				pid = projectID
+			}
+			id.DisplayName = serviceAccountDisplayNames(ctx, client, []string{pid})[id.ServiceAccountID]
 		}
-		id.DisplayName = serviceAccountDisplayNames(ctx, client, []string{pid})[id.ServiceAccountID]
+		profile := ""
+		if agent.AppliedConfig != nil {
+			profile = agent.AppliedConfig.Profile
+		}
+		if header := lookIdentityHeader(id, profile); header != "" {
+			lines = append(lines, header)
+		}
 	}
-	profile := ""
-	if agent.AppliedConfig != nil {
-		profile = agent.AppliedConfig.Profile
+	if showAuthority {
+		if authorityLine := authorityCauseLine(agent.Authority); authorityLine != "" {
+			lines = append(lines, authorityLine)
+		}
 	}
-	header := lookIdentityHeader(id, profile)
-	switch {
-	case authorityLine == "":
-		return header
-	case header == "":
-		return authorityLine
+	if agent.SuspendPolicy == "never" {
+		lines = append(lines, "Suspend policy: never")
 	}
-	return header + "\n" + authorityLine
+	return strings.Join(lines, "\n")
 }
 
 func init() {

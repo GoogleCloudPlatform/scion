@@ -773,6 +773,21 @@ func (s *Server) swapSystemRunIntent(ctx context.Context, agent *store.Agent, in
 	return prior, at, nil
 }
 
+// swapAutoSuspendRunIntent records the stalled auto-suspend run-intent
+// transition, yielding with store.ErrIdleSuspendPrecondition when an active
+// idle-suspend claim owns shutdown and with store.ErrAgentNeverSuspend when
+// requireSuspendPolicyAuto is true and suspend_policy == "never".
+func (s *Server) swapAutoSuspendRunIntent(ctx context.Context, agent *store.Agent, intent store.RunIntent, requireSuspendPolicyAuto bool) (store.RunIntent, time.Time, error) {
+	prior, at, err := s.store.SwapAutoSuspendRunIntent(ctx, agent.ID, intent, requireSuspendPolicyAuto)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("record auto-suspend run intent %s: %w", intent, err)
+	}
+	agent.RunIntent = intent
+	stored := at
+	agent.RunIntentAt = &stored
+	return prior, at, nil
+}
+
 // userStartIdleSettleWait bounds how long a user start/resume waits for an
 // active idle-suspend claim to commit before preempting it directly.
 var userStartIdleSettleWait = 2 * time.Second

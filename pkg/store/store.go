@@ -944,9 +944,11 @@ type AgentStore interface {
 	// Rows whose idle_suspend_claim_until is at or after backoffCutoff are not
 	// returned: an abandoned idle suspend leaves its stamp (run_intent back to
 	// running) as the backoff marker. A zero backoffCutoff disables that skip.
-	// Offline agents and rows with a NULL activity_since are never returned. A
-	// positive limit bounds the number of rows returned.
-	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *IdleSuspendCursor, limit int) ([]Agent, error)
+	// Offline agents and rows with a NULL activity_since are never returned. When
+	// excludeNeverSuspend is true (lifecycle.never_suspend is on), rows with
+	// suspend_policy = 'never' are excluded. A positive limit bounds the number of
+	// rows returned.
+	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *IdleSuspendCursor, limit int, excludeNeverSuspend bool) ([]Agent, error)
 
 	// ClaimIdleSuspend atomically checks that agentID still satisfies cond on
 	// the locked row (phase=running, matching run_id/activity/activity_since
@@ -1232,6 +1234,12 @@ type AgentStore interface {
 	// idle_suspend_claim_until, whenever an unexpired idle-suspend claim is held
 	// on the locked row.
 	SwapSystemRunIntent(ctx context.Context, agentID string, intent RunIntent) (prior RunIntent, at time.Time, err error)
+
+	// SwapAutoSuspendRunIntent is SwapSystemRunIntent for stalled auto-suspend:
+	// when requireSuspendPolicyAuto is true (lifecycle.never_suspend is on), it
+	// additionally checks under the same row lock whether suspend_policy == "never"
+	// and yields with ErrAgentNeverSuspend if so.
+	SwapAutoSuspendRunIntent(ctx context.Context, agentID string, intent RunIntent, requireSuspendPolicyAuto bool) (prior RunIntent, at time.Time, err error)
 
 	// RevertRunIntent sets run_intent to `to` only if the row still holds
 	// `from` written at exactly fromAt (the value SetRunIntent returned);

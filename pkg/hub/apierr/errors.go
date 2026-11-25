@@ -177,6 +177,7 @@ const (
 	ErrCodeRuntimeBrokerLinkPathUnsupported = "runtime_broker_link_path_unsupported" // 409
 	ErrCodeRuntimeTargetTypeUnsupported     = "runtime_target_type_unsupported"      // 422
 	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412 / 400
+	ErrCodeSuspendPolicyCreateOnly          = "suspend_policy_create_only"           // 409
 	ErrCodeGitHubNotAssociated              = "github_not_associated"                // 409
 
 	// ErrCodeHarnessConfigNotFound is returned (404) by a reincarnate

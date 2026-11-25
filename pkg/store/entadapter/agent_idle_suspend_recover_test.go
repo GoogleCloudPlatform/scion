@@ -259,7 +259,7 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 		assert.Equal(t, "abandoned", got.Message)
 
 		// The marker keeps the row out of the candidate query and ClaimIdleSuspend.
-		cands, err := s.ListIdleSuspendCandidates(ctx, time.Now().Add(time.Hour), time.Now().Add(-time.Hour), time.Now(), time.Now().Add(-3*time.Hour), nil, 0)
+		cands, err := s.ListIdleSuspendCandidates(ctx, time.Now().Add(time.Hour), time.Now().Add(-time.Hour), time.Now(), time.Now().Add(-3*time.Hour), nil, 0, false)
 		require.NoError(t, err)
 		for _, c := range cands {
 			assert.NotEqual(t, a.ID, c.ID, "backoff: not a candidate")

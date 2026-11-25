@@ -85,6 +85,7 @@ var (
 	thinkingLevelFlag     string
 	agentRoleFlag         string
 	messageModeFlag       string
+	neverSuspendFlag      bool
 	serviceAccountFlag    string
 	agentLogLevelFlag     string
 	sendEnvFlag           bool
@@ -1285,6 +1286,10 @@ func startAgentViaHubWithSecrets(cmd *cobra.Command, hubCtx *HubContext, agentNa
 
 	// Wire --service-account flag into the GCP identity assignment.
 	applyServiceAccountFlag(req, serviceAccountFlag)
+
+	if neverSuspendFlag {
+		req.SuspendPolicy = "never"
+	}
 
 	agentLogLevel := agentLogLevelEnvValue()
 

@@ -2658,6 +2658,10 @@ func (runIntentErrStore) SwapSystemRunIntent(context.Context, string, store.RunI
 	return "", time.Time{}, errors.New("injected run intent fault")
 }
 
+func (runIntentErrStore) SwapAutoSuspendRunIntent(context.Context, string, store.RunIntent, bool) (store.RunIntent, time.Time, error) {
+	return "", time.Time{}, errors.New("injected run intent fault")
+}
+
 // ClaimAgentStart fails too: a create-and-start records its run intent with
 // its start claim.
 func (runIntentErrStore) ClaimAgentStart(context.Context, string, string, store.StartClaimKind, string, time.Duration) (store.StartClaim, error) {

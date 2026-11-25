@@ -173,6 +173,7 @@ var (
 		{Name: "runtime_state", Type: field.TypeString, Nullable: true},
 		{Name: "stalled_from_activity", Type: field.TypeString, Nullable: true},
 		{Name: "suspend_reason", Type: field.TypeString, Nullable: true},
+		{Name: "suspend_policy", Type: field.TypeEnum, Enums: []string{"auto", "never"}, Default: "auto"},
 		{Name: "current_turns", Type: field.TypeInt, Default: 0},
 		{Name: "current_model_calls", Type: field.TypeInt, Default: 0},
 		{Name: "image", Type: field.TypeString, Nullable: true},
@@ -261,7 +262,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[101]},
+				Columns:    []*schema.Column{AgentsColumns[102]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -280,17 +281,17 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[101]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[102]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[101], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[102], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[101], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[102], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_owner_id_phase_activity",
@@ -300,7 +301,7 @@ var (
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[65]},
+				Columns: []*schema.Column{AgentsColumns[66]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -308,17 +309,17 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[55]},
+				Columns: []*schema.Column{AgentsColumns[56]},
 			},
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[28], AgentsColumns[84]},
+				Columns: []*schema.Column{AgentsColumns[29], AgentsColumns[85]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[89], AgentsColumns[93]},
+				Columns: []*schema.Column{AgentsColumns[90], AgentsColumns[94]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},

@@ -696,6 +696,7 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		ExitCode:            a.ExitCode,
 		ExitReason:          a.ExitReason,
 		SuspendReason:       a.SuspendReason,
+		SuspendPolicy:       a.SuspendPolicy,
 		Authority:           a.Authority,
 		ResolvedHarness:     a.ResolvedHarness,
 		HarnessCapabilities: a.HarnessCapabilities,
@@ -786,6 +787,15 @@ func suspendedPhaseLabel(phase, reason string) string {
 		strings.HasPrefix(phase, string(state.PhaseSuspended)+" · ")
 	if isSuspended && r != "" && r.IsValid() {
 		return phase + " (" + reason + ")"
+	}
+	return phase
+}
+
+// neverSuspendPhaseLabel appends the never-suspend marker to the phase column
+// when the agent has suspend_policy=never.
+func neverSuspendPhaseLabel(phase, suspendPolicy string) string {
+	if suspendPolicy == "never" {
+		return phase + " ⏻"
 	}
 	return phase
 }
@@ -961,6 +971,7 @@ func displayAgents(agents []api.AgentInfo, all bool) error {
 		phase = suspendedPhaseLabel(phase, a.SuspendReason)
 		phase = provisionedPhaseLabel(phase, a.ProvisionedOnly)
 		phase = authorityPhaseLabel(phase, a.Authority)
+		phase = neverSuspendPhaseLabel(phase, a.SuspendPolicy)
 		containerStatus := a.ContainerStatus
 		if containerStatus == "created" && a.ID == "" {
 			containerStatus = "none"

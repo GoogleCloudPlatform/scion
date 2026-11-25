@@ -263,11 +263,12 @@ func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
 
 	skip := reflectFillStoreAgentSkipFields
 	special := map[string]func(reflect.Value){
-		"ID":          func(f reflect.Value) { f.SetString(uuid.New().String()) },
-		"ProjectID":   func(f reflect.Value) { f.SetString(projectID) },
-		"OwnerID":     func(f reflect.Value) { f.SetString(uuid.New().String()) },
-		"CreatedBy":   func(f reflect.Value) { f.SetString(uuid.New().String()) },
-		"MessageMode": func(f reflect.Value) { f.SetString("project") },
+		"ID":            func(f reflect.Value) { f.SetString(uuid.New().String()) },
+		"ProjectID":     func(f reflect.Value) { f.SetString(projectID) },
+		"OwnerID":       func(f reflect.Value) { f.SetString(uuid.New().String()) },
+		"CreatedBy":     func(f reflect.Value) { f.SetString(uuid.New().String()) },
+		"MessageMode":   func(f reflect.Value) { f.SetString("project") },
+		"SuspendPolicy": func(f reflect.Value) { f.SetString(store.SuspendPolicyNever) },
 		"AppliedConfig": func(f reflect.Value) {
 			f.Set(reflect.ValueOf(&store.AgentAppliedConfig{Image: "reflect-image", Task: "reflect-task"}))
 		},
@@ -424,6 +425,7 @@ func TestListProjectAgentsSorted_MemberProjectionEquality(t *testing.T) {
 	// must actually have round-tripped non-zero, or this test's deep-equal
 	// below would be silently blind to it.
 	assertNonSkippedFieldsNonZero(t, rereadFull)
+	require.Equal(t, store.SuspendPolicyNever, rereadFull.SuspendPolicy)
 
 	// The creation-time provenance stamp is not an authorization input:
 	// the member projection deliberately does not carry it, and the full

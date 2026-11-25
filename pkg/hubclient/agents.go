@@ -288,6 +288,10 @@ type CreateAgentRequest struct {
 	// When omitted, resolved from template, parent inheritance, or "project" default.
 	MessageMode string `json:"messageMode,omitempty"`
 
+	// SuspendPolicy sets the agent's automatic suspension policy ("auto" or "never").
+	// Requires the lifecycle.never_suspend experiment on the Hub.
+	SuspendPolicy string `json:"suspendPolicy,omitempty"`
+
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	// When nil, the project default (if any) is applied by the Hub.
