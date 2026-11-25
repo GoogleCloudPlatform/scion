@@ -19,6 +19,7 @@ package entc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -39,9 +40,16 @@ type recordingVariableDeleter struct {
 	deletedSecrets []string
 	droppedPending []string
 	onDelete       func(name, scope, scopeID string)
+	deleteErr      func(name, scope, scopeID string) error
+	dropPendingErr func(ref string) error
 }
 
 func (r *recordingVariableDeleter) Delete(_ context.Context, name, scope, scopeID string) error {
+	if r.deleteErr != nil {
+		if err := r.deleteErr(name, scope, scopeID); err != nil {
+			return err
+		}
+	}
 	r.deletedSecrets = append(r.deletedSecrets, scope+"/"+scopeID+"/"+name)
 	if r.onDelete != nil {
 		r.onDelete(name, scope, scopeID)
@@ -50,6 +58,11 @@ func (r *recordingVariableDeleter) Delete(_ context.Context, name, scope, scopeI
 }
 
 func (r *recordingVariableDeleter) DropPending(_ context.Context, ref string) error {
+	if r.dropPendingErr != nil {
+		if err := r.dropPendingErr(ref); err != nil {
+			return err
+		}
+	}
 	r.droppedPending = append(r.droppedPending, ref)
 	return nil
 }
@@ -289,7 +302,7 @@ func TestSecretRequest_LegacyVariableNormalizesToOnDemandInEnt(t *testing.T) {
 	require.NoError(t, AutoMigrate(ctx, client))
 
 	reqs, err := messages.NormalizeSecretRequests("secret_requests", []messages.SecretRequestInput{
-		{Key: "LEGACY_VAR_REQ", Type: messages.SecretRequestTypeVariable},
+		{Key: "LEGACY_VAR_REQ", Type: "variable"},
 	})
 	require.NoError(t, err)
 	require.Len(t, reqs, 1)
@@ -369,4 +382,88 @@ func TestMigrateRetireVariableSecretType_NoParameterizedExecOnEmptySchema(t *tes
 	records = nil
 	require.NoError(t, MigrateRetireVariableSecretType(ctx, wrapped))
 	assert.Empty(t, records, "MigrateRetireVariableSecretType on empty schema must execute zero Exec statements")
+}
+
+func TestMigrateRetireVariableSecretTypeLeftovers_ContinuesOnBackendFailureAndJoinsErrors(t *testing.T) {
+	ctx := context.Background()
+	client, err := OpenSQLite(":memory:", PoolConfig{MaxOpenConns: 1})
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	require.NoError(t, AutoMigrate(ctx, client))
+
+	db := SQLDB(client.Driver())
+	now := time.Now().UTC()
+	for _, key := range []string{"FAIL_SEC", "OK_SEC"} {
+		_, err = db.ExecContext(ctx, `
+			INSERT INTO secrets (
+				id, key, encrypted_value, secret_ref, secret_type, target,
+				scope, scope_id, description, injection_mode, allow_progeny,
+				version, created_by, updated_by, created, updated
+			) VALUES (?, ?, 'enc', '', 'variable', ?, 'user', 'u1', '', 'as_needed', 0, 1, '', '', ?, ?)
+		`, uuid.NewString(), key, key, now, now)
+		require.NoError(t, err)
+	}
+	for _, tc := range []struct{ key, ref string }{
+		{"FAIL_PEND", "pending-ref-fail"},
+		{"OK_PEND", "pending-ref-ok"},
+	} {
+		_, err = db.ExecContext(ctx, `
+			INSERT INTO pending_secrets (
+				id, key, secret_type, target, scope, scope_id, description,
+				injection_mode, allow_progeny, value_ref, value_len,
+				agent_id, agent_slug, project_id, project_name,
+				created, updated, expires_at
+			) VALUES (?, ?, 'variable', ?, 'user', 'u1', '', 'as_needed', 0, ?, 4, 'ag1', 'ag1', 'p1', 'p1', ?, ?, ?)
+		`, uuid.NewString(), tc.key, tc.key, tc.ref, now, now, now.Add(time.Hour))
+		require.NoError(t, err)
+	}
+
+	errSecFail := errors.New("simulated secret backend permission denied")
+	errPendFail := errors.New("simulated pending backend permission denied")
+	deleter := &recordingVariableDeleter{
+		deleteErr: func(name, _, _ string) error {
+			if name == "FAIL_SEC" {
+				return errSecFail
+			}
+			return nil
+		},
+		dropPendingErr: func(ref string) error {
+			if ref == "pending-ref-fail" {
+				return errPendFail
+			}
+			return nil
+		},
+	}
+
+	err = MigrateRetireVariableSecretTypeLeftovers(ctx, client, deleter)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSecFail)
+	assert.ErrorIs(t, err, errPendFail)
+
+	// OK rows must have been deleted despite earlier failures.
+	assert.Equal(t, []string{"user/u1/OK_SEC"}, deleter.deletedSecrets)
+	assert.Equal(t, []string{"pending-ref-ok"}, deleter.droppedPending)
+
+	// Failed rows must remain in DB for retry on next boot; OK rows must be gone.
+	var secKeys []string
+	sRows, err := db.QueryContext(ctx, "SELECT key FROM secrets WHERE secret_type = 'variable'")
+	require.NoError(t, err)
+	for sRows.Next() {
+		var k string
+		require.NoError(t, sRows.Scan(&k))
+		secKeys = append(secKeys, k)
+	}
+	require.NoError(t, sRows.Close())
+	assert.Equal(t, []string{"FAIL_SEC"}, secKeys)
+
+	var pendKeys []string
+	pRows, err := db.QueryContext(ctx, "SELECT key FROM pending_secrets WHERE secret_type = 'variable'")
+	require.NoError(t, err)
+	for pRows.Next() {
+		var k string
+		require.NoError(t, pRows.Scan(&k))
+		pendKeys = append(pendKeys, k)
+	}
+	require.NoError(t, pRows.Close())
+	assert.Equal(t, []string{"FAIL_PEND"}, pendKeys)
 }

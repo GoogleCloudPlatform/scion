@@ -1094,7 +1094,7 @@ func TestEnvGather_SecretInfoRelayType(t *testing.T) {
 			SecretInfo: map[string]SecretKeyInfo{
 				"ENV_SECRET": {Description: "Environment secret", Source: "settings", Type: "environment"},
 				"FILE_CERT":  {Description: "TLS certificate", Source: "template", Type: "file"},
-				"VAR_TOKEN":  {Description: "Variable token", Source: "settings", Type: "variable"},
+				"VAR_TOKEN":  {Description: "On-demand token", Source: "settings", Type: "on_demand"},
 			},
 		},
 	}
@@ -1133,7 +1133,7 @@ func TestEnvGather_SecretInfoRelayType(t *testing.T) {
 	}{
 		{"ENV_SECRET", "environment"},
 		{"FILE_CERT", "file"},
-		{"VAR_TOKEN", "variable"},
+		{"VAR_TOKEN", "on_demand"},
 	}
 	for _, tc := range tests {
 		info, ok := resp.EnvGather.SecretInfo[tc.key]

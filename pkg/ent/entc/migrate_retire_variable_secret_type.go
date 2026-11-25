@@ -286,6 +286,7 @@ func MigrateRetireVariableSecretTypeLeftovers(ctx context.Context, client *ent.C
 		sqlPlaceholder(dial, 3),
 		sqlPlaceholder(dial, 4),
 	)
+	var errs []error
 	for _, r := range secretLeftovers {
 		// Re-check immediately before calling the name-keyed backend Delete so
 		// a concurrent API writer that replaced the row with a non-variable
@@ -300,7 +301,11 @@ func MigrateRetireVariableSecretTypeLeftovers(ctx context.Context, client *ent.C
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("retire variable secret leftovers (recheck secret row %s/%s/%s): %w", r.scope, r.scopeID, r.key, err)
+			rowErr := fmt.Errorf("retire variable secret leftovers (recheck secret row %s/%s/%s): %w", r.scope, r.scopeID, r.key, err)
+			slog.Error("failed to recheck retired variable secret row; continuing",
+				"key", r.key, "scope", r.scope, "scope_id", r.scopeID, "error", err)
+			errs = append(errs, rowErr)
+			continue
 		}
 		if currentType != retiredSecretTypeVariable {
 			continue
@@ -309,14 +314,22 @@ func MigrateRetireVariableSecretTypeLeftovers(ctx context.Context, client *ent.C
 			"key", r.key, "scope", r.scope, "scope_id", r.scopeID)
 		if deleter != nil {
 			if err := deleter.Delete(ctx, r.key, r.scope, r.scopeID); err != nil && !errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("retire variable secret leftovers (backend delete %s/%s/%s): %w", r.scope, r.scopeID, r.key, err)
+				rowErr := fmt.Errorf("retire variable secret leftovers (backend delete %s/%s/%s): %w", r.scope, r.scopeID, r.key, err)
+				slog.Error("failed to delete retired variable secret from backend; continuing",
+					"key", r.key, "scope", r.scope, "scope_id", r.scopeID, "error", err)
+				errs = append(errs, rowErr)
+				continue
 			}
 		}
 		// Ensure the DB row is removed even when deleter is nil or a custom
 		// deleter only removes the external value. No-op if deleter already
 		// deleted the row.
 		if _, err := db.ExecContext(ctx, deleteSecretSQL, r.key, r.scope, r.scopeID, retiredSecretTypeVariable); err != nil {
-			return fmt.Errorf("retire variable secret leftovers (delete secret row %s/%s/%s): %w", r.scope, r.scopeID, r.key, err)
+			rowErr := fmt.Errorf("retire variable secret leftovers (delete secret row %s/%s/%s): %w", r.scope, r.scopeID, r.key, err)
+			slog.Error("failed to delete retired variable secret row; continuing",
+				"key", r.key, "scope", r.scope, "scope_id", r.scopeID, "error", err)
+			errs = append(errs, rowErr)
+			continue
 		}
 	}
 
@@ -334,7 +347,7 @@ func MigrateRetireVariableSecretTypeLeftovers(ctx context.Context, client *ent.C
 	)
 	pRows, err := db.QueryContext(ctx, selectPending, retiredSecretTypeVariable)
 	if err != nil {
-		return fmt.Errorf("retire variable secret leftovers (query pending_secrets): %w", err)
+		return errors.Join(append(errs, fmt.Errorf("retire variable secret leftovers (query pending_secrets): %w", err))...)
 	}
 	var pendingLeftovers []leftoverPending
 	for pRows.Next() {
@@ -342,17 +355,17 @@ func MigrateRetireVariableSecretTypeLeftovers(ctx context.Context, client *ent.C
 		var valueRef sql.NullString
 		if err := pRows.Scan(&r.id, &r.key, &r.scope, &r.scopeID, &valueRef); err != nil {
 			_ = pRows.Close()
-			return fmt.Errorf("retire variable secret leftovers (scan pending_secrets): %w", err)
+			return errors.Join(append(errs, fmt.Errorf("retire variable secret leftovers (scan pending_secrets): %w", err))...)
 		}
 		r.valueRef = valueRef.String
 		pendingLeftovers = append(pendingLeftovers, r)
 	}
 	if err := pRows.Err(); err != nil {
 		_ = pRows.Close()
-		return fmt.Errorf("retire variable secret leftovers (iterate pending_secrets): %w", err)
+		return errors.Join(append(errs, fmt.Errorf("retire variable secret leftovers (iterate pending_secrets): %w", err))...)
 	}
 	if err := pRows.Close(); err != nil {
-		return fmt.Errorf("retire variable secret leftovers (close pending_secrets): %w", err)
+		return errors.Join(append(errs, fmt.Errorf("retire variable secret leftovers (close pending_secrets): %w", err))...)
 	}
 
 	deletePendingSQL := fmt.Sprintf(
@@ -365,15 +378,23 @@ func MigrateRetireVariableSecretTypeLeftovers(ctx context.Context, client *ent.C
 			"key", r.key, "scope", r.scope, "scope_id", r.scopeID)
 		if deleter != nil && r.valueRef != "" {
 			if err := deleter.DropPending(ctx, r.valueRef); err != nil {
-				return fmt.Errorf("retire variable secret leftovers (drop pending %s/%s/%s): %w", r.scope, r.scopeID, r.key, err)
+				rowErr := fmt.Errorf("retire variable secret leftovers (drop pending %s/%s/%s): %w", r.scope, r.scopeID, r.key, err)
+				slog.Error("failed to drop retired variable pending secret from backend; continuing",
+					"key", r.key, "scope", r.scope, "scope_id", r.scopeID, "error", err)
+				errs = append(errs, rowErr)
+				continue
 			}
 		}
 		if _, err := db.ExecContext(ctx, deletePendingSQL, r.id, retiredSecretTypeVariable); err != nil {
-			return fmt.Errorf("retire variable secret leftovers (delete pending row %s): %w", r.id, err)
+			rowErr := fmt.Errorf("retire variable secret leftovers (delete pending row %s): %w", r.id, err)
+			slog.Error("failed to delete retired variable pending secret row; continuing",
+				"key", r.key, "scope", r.scope, "scope_id", r.scopeID, "error", err)
+			errs = append(errs, rowErr)
+			continue
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 func sqlPlaceholder(dial string, pos int) string {

@@ -1522,7 +1522,7 @@ func TestEnvVar_NonEnvironmentSecrets_NotMerged(t *testing.T) {
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 
-	// Create a secret with type "variable" (not "environment")
+	// Create a secret with type "on_demand" (not "environment")
 	if err := s.CreateSecret(ctx, &store.Secret{
 		ID:             tid("sec-var-1"),
 		Key:            "VARIABLE_SECRET",

@@ -823,6 +823,63 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 		}
 	})
 
+	t.Run("project_or_hub_resolves_project_on_demand_and_refuses_file_and_internal", func(t *testing.T) {
+		const projID = "proj-sysone-od-or-hub"
+		ctxWithProj := systemoneruntime.WithEvalProjectID(context.Background(), projID)
+
+		srvOK := &Server{
+			hubID: hubID,
+			secretBackend: &stubSystemOneSecretBackend{
+				getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+					if scope == store.ScopeProject && scopeID == projID {
+						return &secret.SecretWithValue{
+							SecretMeta: secret.SecretMeta{
+								Name:       name,
+								SecretType: store.SecretTypeOnDemand,
+								Scope:      scope,
+								ScopeID:    scopeID,
+								Version:    1,
+							},
+							Value: "proj-or-hub-od-canary",
+						}, nil
+					}
+					return nil, store.ErrNotFound
+				},
+			},
+		}
+		srcOK := &hubSystemOneCredentialSource{srv: srvOK}
+		tok, err := srcOK.APIKeyToken(ctxWithProj, makeInst(systemoneprovider.SecretScopeProjectOrHub))
+		require.NoError(t, err)
+		assert.Equal(t, "proj-or-hub-od-canary", tok)
+
+		for _, disallowedType := range []string{store.SecretTypeFile, store.SecretTypeInternal} {
+			srvBad := &Server{
+				hubID: hubID,
+				secretBackend: &stubSystemOneSecretBackend{
+					getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+						if scope == store.ScopeProject && scopeID == projID {
+							return &secret.SecretWithValue{
+								SecretMeta: secret.SecretMeta{
+									Name:       name,
+									SecretType: disallowedType,
+									Scope:      scope,
+									ScopeID:    scopeID,
+									Version:    1,
+								},
+								Value: "must-not-leak",
+							}, nil
+						}
+						return nil, store.ErrNotFound
+					},
+				},
+			}
+			srcBad := &hubSystemOneCredentialSource{srv: srvBad}
+			_, err := srcBad.APIKeyToken(ctxWithProj, makeInst(systemoneprovider.SecretScopeProjectOrHub))
+			require.Error(t, err, "project_or_hub with project %q must be refused", disallowedType)
+			assert.ErrorIs(t, err, egress.ErrAuth)
+		}
+	})
+
 	t.Run("allowed_types_environment_on_demand_legacy_empty_succeed_and_internal_and_file_refused", func(t *testing.T) {
 		for _, secType := range []string{
 			"",

@@ -84,6 +84,71 @@ func DeliverableType(t string) bool {
 	return t == store.SecretTypeEnvironment || t == "" || t == store.SecretTypeFile
 }
 
+// ShadowedKeys records the highest scope rank at which a non-deliverable,
+// non-internal secret (such as on_demand or an unknown type) occupies a key.
+// Such a row is never fetched or delivered, and it shadows any lower-precedence
+// deliverable candidate matching by name OR (for non-file candidates) by
+// effective env target (target, or name when empty), and blocks progeny fill.
+//
+// Internal rows and hub rows excluded by HubSecretDeliverable must not be
+// recorded here; they do not shadow lower scopes.
+type ShadowedKeys map[string]int
+
+// Record marks key as shadowed at scopeRank, keeping the highest rank seen.
+func (s *ShadowedKeys) Record(key string, scopeRank int) {
+	if *s == nil {
+		*s = make(ShadowedKeys)
+	}
+	if prev, ok := (*s)[key]; !ok || scopeRank > prev {
+		(*s)[key] = scopeRank
+	}
+}
+
+// ShadowsScope reports whether scope candidate meta at scopeRank is shadowed by
+// a higher-precedence non-deliverable row matching its name or (for non-file
+// candidates) its effective env target.
+func (s ShadowedKeys) ShadowsScope(meta SecretMeta, scopeRank int) bool {
+	if len(s) == 0 {
+		return false
+	}
+	if sr, ok := s[meta.Name]; ok && sr > scopeRank {
+		return true
+	}
+	if meta.SecretType != store.SecretTypeFile {
+		eff := effectiveEnvTarget(meta)
+		if sr, ok := s[eff]; ok && sr > scopeRank {
+			return true
+		}
+	}
+	return false
+}
+
+// ShadowsProgeny reports whether progeny candidate meta is shadowed by any
+// non-deliverable scope row matching its name or (for non-file candidates) its
+// effective env target.
+func (s ShadowedKeys) ShadowsProgeny(meta SecretMeta) bool {
+	if len(s) == 0 {
+		return false
+	}
+	if _, ok := s[meta.Name]; ok {
+		return true
+	}
+	if meta.SecretType != store.SecretTypeFile {
+		eff := effectiveEnvTarget(meta)
+		if _, ok := s[eff]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func effectiveEnvTarget(meta SecretMeta) string {
+	if meta.Target != "" {
+		return meta.Target
+	}
+	return meta.Name
+}
+
 // Well-known name and in-home path of the telemetry credential file secret.
 const (
 	telemetryCredentialFileName = "scion-telemetry-gcp-credentials"

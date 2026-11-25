@@ -77,7 +77,7 @@ func TestAppliedConfigEnvCleanupStripsGitHubTokenAndKnownSecrets(t *testing.T) {
 	secretBackend := &cleanupTestSecretBackend{
 		byScope: map[string][]secret.SecretMeta{
 			"user/" + ownerID: {
-				{Name: "USER_SECRET", SecretType: "variable"},
+				{Name: "USER_SECRET", SecretType: store.SecretTypeEnvironment},
 				// Environment-type secret with a differing Target: the
 				// persisted AppliedConfig.Env key is the Target, not Name.
 				{Name: "GH_APP_TOKEN_SOURCE", SecretType: "environment", Target: "TARGETED_SECRET_VAR"},
@@ -273,7 +273,7 @@ func TestAppliedConfigEnvCleanupStripsHubScopeSecret(t *testing.T) {
 			// cleanupTestSecretBackend.HubID() returns "test-hub", the scope
 			// ID secretScopeFilters must now query under secret.ScopeHub.
 			"hub/test-hub": {
-				{Name: "HUB_SCOPED_SECRET", SecretType: "variable"},
+				{Name: "HUB_SCOPED_SECRET", SecretType: store.SecretTypeEnvironment},
 			},
 		},
 	}
@@ -391,8 +391,8 @@ func TestAppliedConfigEnvCleanupHubScopeSecretFilter(t *testing.T) {
 	secretBackend := &cleanupTestSecretBackend{
 		byScope: map[string][]secret.SecretMeta{
 			"hub/test-hub": {
-				{Name: "HUB_SECRET_INLINE", SecretType: "variable"},
-				{Name: "HUB_SECRET_APPLIED", SecretType: "variable"},
+				{Name: "HUB_SECRET_INLINE", SecretType: store.SecretTypeEnvironment},
+				{Name: "HUB_SECRET_APPLIED", SecretType: store.SecretTypeEnvironment},
 			},
 		},
 	}
@@ -470,7 +470,7 @@ func TestAppliedConfigEnvCleanupStripsPlainShadowedSecret(t *testing.T) {
 	secretBackend := &cleanupTestSecretBackend{
 		byScope: map[string][]secret.SecretMeta{
 			"user/" + ownerID: {
-				{Name: "SHADOWED_KEY", SecretType: "variable"},
+				{Name: "SHADOWED_KEY", SecretType: store.SecretTypeEnvironment},
 			},
 		},
 	}
@@ -654,7 +654,7 @@ func TestAppliedConfigEnvCleanupStripsInlineConfigEnv(t *testing.T) {
 	secretBackend := &cleanupTestSecretBackend{
 		byScope: map[string][]secret.SecretMeta{
 			"user/" + ownerID: {
-				{Name: "USER_SECRET_INLINE", SecretType: "variable"},
+				{Name: "USER_SECRET_INLINE", SecretType: store.SecretTypeEnvironment},
 			},
 		},
 	}
@@ -747,7 +747,7 @@ func TestAppliedConfigEnvCleanupCachesPerScopeLookups(t *testing.T) {
 	}
 	secretBackend := &cleanupTestSecretBackend{
 		byScope: map[string][]secret.SecretMeta{
-			"project/" + project.ID: {{Name: "SHARED_SECRET", SecretType: "variable"}},
+			"project/" + project.ID: {{Name: "SHARED_SECRET", SecretType: store.SecretTypeEnvironment}},
 		},
 		listCalls: map[string]int{},
 	}

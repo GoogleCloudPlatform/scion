@@ -781,7 +781,7 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 	for _, row := range claimRes.Claimed {
 		val := valByNorm[row.KeyNorm]
 		target := row.Target
-		if target == "" {
+		if row.SecretType == store.SecretTypeOnDemand || target == "" {
 			target = row.Key
 		}
 		setCtx, setCancel := context.WithTimeout(loopCtx, secretRequestFulfillSetTimeout)

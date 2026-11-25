@@ -587,6 +587,14 @@ func (s *Server) approvePendingSecret(w http.ResponseWriter, r *http.Request, ow
 		allowProgeny = *req.AllowProgeny
 	}
 
+	if p.SecretType != store.SecretTypeEnvironment && p.SecretType != store.SecretTypeFile && p.SecretType != "" {
+		ValidationError(w, "pending secrets only support environment and file types", map[string]interface{}{
+			"field": "type",
+			"value": p.SecretType,
+		})
+		return
+	}
+
 	// Read the held value before claiming the row, so a read failure
 	// changes nothing.
 	value, err := s.secretBackend.ReadPending(ctx, p.ValueRef)

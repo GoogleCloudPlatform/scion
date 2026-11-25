@@ -3595,8 +3595,8 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				if sv.InjectionMode != store.InjectionModeAsNeeded {
 					continue
 				}
-				// Only environment-type secrets map to env vars.
-				if sv.SecretType != store.SecretTypeEnvironment && sv.SecretType != "" {
+				// Only environment-type deliverable secrets map to env vars.
+				if !secret.DeliverableType(sv.SecretType) || (sv.SecretType != store.SecretTypeEnvironment && sv.SecretType != "") {
 					continue
 				}
 				target := sv.Target
@@ -5796,6 +5796,11 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {
+		// Allowlist defense in depth: never deliver non-deliverable types
+		// (such as on_demand or internal) even if a custom backend returned one.
+		if !secret.DeliverableType(sv.SecretType) {
+			continue
+		}
 		// Defense in depth for rows that predate the create/patch reserved-
 		// target check, or that reached the store through some other path:
 		// drop any environment-type secret whose target is reserved for
@@ -5808,9 +5813,9 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			continue
 		}
 		// Only skip as_needed environment-type secrets (handled by the
-		// two-pass env-gather flow). File-type and variable-type secrets
-		// should always be placed regardless of injection mode — the
-		// as_needed concept does not apply to them.
+		// two-pass env-gather flow). File-type secrets are always placed
+		// regardless of injection mode — the as_needed concept does not apply
+		// to them.
 		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
 			// Collect the target key name so the broker's autodetect can
 			// consider it when selecting auth type (closes #1447).

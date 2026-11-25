@@ -64,6 +64,13 @@ func (s *Server) validateAgentSecretWriteConstraints(w http.ResponseWriter, ctx 
 			return false
 		}
 	}
+	if secretType == store.SecretTypeOnDemand && target != "" && target != key {
+		ValidationError(w, "target is not supported for on_demand secrets", map[string]interface{}{
+			"field": "target",
+			"value": target,
+		})
+		return false
+	}
 	if secretType == store.SecretTypeFile {
 		if err := messages.ValidateSecretRequestFileTarget(target); err != nil {
 			ValidationError(w, err.Error(), map[string]interface{}{

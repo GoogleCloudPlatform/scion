@@ -149,18 +149,14 @@ func TestResolveSecrets(t *testing.T) {
 		t.Errorf("expected TLS_CERT target %q, got %q", "/etc/ssl/cert.pem", cert.Target)
 	}
 
-	// CONFIG should be a variable type
-	config, ok := byName["CONFIG"]
-	if !ok {
-		t.Fatal("expected CONFIG in resolved secrets")
-	}
-	if config.Type != store.SecretTypeOnDemand {
-		t.Errorf("expected CONFIG type %q, got %q", store.SecretTypeOnDemand, config.Type)
+	// CONFIG is on_demand and must NOT be delivered by resolveSecrets.
+	if _, ok := byName["CONFIG"]; ok {
+		t.Errorf("expected on_demand secret CONFIG to be excluded from resolveSecrets")
 	}
 
-	// Total count: API_KEY, DB_PASS, TLS_CERT, CONFIG = 4
-	if len(resolved) != 4 {
-		t.Errorf("expected 4 resolved secrets, got %d", len(resolved))
+	// Total count: API_KEY, DB_PASS, TLS_CERT = 3 (CONFIG excluded as on_demand)
+	if len(resolved) != 3 {
+		t.Errorf("expected 3 resolved secrets, got %d", len(resolved))
 	}
 }
 

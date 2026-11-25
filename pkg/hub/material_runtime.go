@@ -454,6 +454,7 @@ func (s *Server) fetchAuthorizedValue(ctx context.Context, item ItemResult) (*se
 	}
 	if sv.ID != item.Meta.ID ||
 		sv.Version != item.Meta.Version ||
+		sv.SecretType != item.Meta.SecretType ||
 		sv.SecretType == store.SecretTypeInternal ||
 		sv.AllowProgeny != item.Meta.AllowProgeny ||
 		sv.CreatedBy != item.Meta.CreatedBy ||
