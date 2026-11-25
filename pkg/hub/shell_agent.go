@@ -277,8 +277,10 @@ const shellHarnessSwitchRefusalMessage = "cannot switch harness to or from execu
 // later stripped by dropFixedConfigKeys). Any attempt to set harness_config,
 // harness, or default_harness_config to "shell" on a non-shell agent, or to
 // anything other than "shell" (including clearing it) on a shell agent, is
-// refused outright.
-func shellPatchHarnessSwitchError(agent *store.Agent, cfg *api.ScionConfig, present map[string]bool) string {
+// refused outright. Checks the decoded struct directly and uses
+// strings.EqualFold on rawFields so Unicode simple case-folding (e.g. U+017F)
+// matches encoding/json and cannot bypass the check.
+func shellPatchHarnessSwitchError(agent *store.Agent, cfg *api.ScionConfig, rawFields map[string]json.RawMessage) string {
 	if cfg == nil {
 		return ""
 	}
@@ -291,14 +293,20 @@ func shellPatchHarnessSwitchError(agent *store.Agent, cfg *api.ScionConfig, pres
 		}
 		return ""
 	}
-	if present["harness_config"] && cfg.HarnessConfig != config.ShellHarnessConfigName {
+	if (cfg.HarnessConfig != "" && cfg.HarnessConfig != config.ShellHarnessConfigName) ||
+		(cfg.Harness != "" && cfg.Harness != config.ShellHarnessConfigName) ||
+		(cfg.DefaultHarnessConfig != "" && cfg.DefaultHarnessConfig != config.ShellHarnessConfigName) {
 		return shellHarnessSwitchRefusalMessage
 	}
-	if present["harness"] && cfg.Harness != config.ShellHarnessConfigName {
-		return shellHarnessSwitchRefusalMessage
-	}
-	if present["default_harness_config"] && cfg.DefaultHarnessConfig != config.ShellHarnessConfigName {
-		return shellHarnessSwitchRefusalMessage
+	for k := range rawFields {
+		switch {
+		case strings.EqualFold(k, "harness_config") && cfg.HarnessConfig != config.ShellHarnessConfigName:
+			return shellHarnessSwitchRefusalMessage
+		case strings.EqualFold(k, "harness") && cfg.Harness != config.ShellHarnessConfigName:
+			return shellHarnessSwitchRefusalMessage
+		case strings.EqualFold(k, "default_harness_config") && cfg.DefaultHarnessConfig != config.ShellHarnessConfigName:
+			return shellHarnessSwitchRefusalMessage
+		}
 	}
 	return ""
 }

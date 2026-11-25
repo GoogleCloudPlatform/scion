@@ -4902,7 +4902,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// S7 (ptone/scion#8812 §3.4): refuse any harness switch to or from the
 	// reserved built-in "shell" execution container outright, before any
 	// optimistic-lock, phase, or state mutation.
-	if msg := shellPatchHarnessSwitchError(agent, updates.Config, presentConfigKeys); msg != "" {
+	if msg := shellPatchHarnessSwitchError(agent, updates.Config, rawFields); msg != "" {
 		ValidationError(w, msg, nil)
 		return
 	}

@@ -209,6 +209,23 @@ func TestShellAgentPatch_S7_EveryFieldTable(t *testing.T) {
 			assert.Equal(t, http.StatusOK, recOwner.Code, "body=%s resp=%s", raw, recOwner.Body.String())
 		}
 	})
+
+	// L1: Unicode simple case-folding (U+017F long s: "harneſs_config") decodes
+	// into ScionConfig.HarnessConfig in encoding/json; the harness-switch
+	// refusal must still reject it for the owner (400), including explicit empty.
+	t.Run("unicode case-folded harness_config switch refused for owner", func(t *testing.T) {
+		shellAgent := seedShellTestAgent(t, s, project.ID, broker.ID, "s7-shell-unicode-fold", owner.ID, config.ShellHarnessConfigName, state.PhaseCreated, []string{owner.ID})
+		for _, raw := range []string{
+			`{"config":{"harne\u017fs_config":"claude"}}`,
+			`{"config":{"harne\u017fs_config":""}}`,
+			`{"config":{"harne\u017fs":"claude"}}`,
+			`{"config":{"default_harne\u017fs_config":"claude"}}`,
+		} {
+			recOwner := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+shellAgent.ID, json.RawMessage(raw))
+			assert.Equal(t, http.StatusBadRequest, recOwner.Code, "body=%s resp=%s", raw, recOwner.Body.String())
+			assert.Contains(t, recOwner.Body.String(), shellHarnessSwitchRefusalMessage)
+		}
+	})
 }
 
 func TestShellAgentReincarnate_S7(t *testing.T) {
@@ -346,6 +363,79 @@ func TestShellAgentReincarnate_S7(t *testing.T) {
 		DryRun: true,
 	})
 	assert.NotEqual(t, http.StatusForbidden, recAdminPlain.Code, "plain reincarnate by admin should remain allowed (S10): %s", recAdminPlain.Body.String())
+
+	// 7. L2: handoff, sharedDirBackends, and allowEmptySharedDir on a shell
+	//    agent require owner-human ActionAttach (project admin gets 403).
+	for _, tc := range []struct {
+		name string
+		req  ReincarnateAgentRequest
+	}{
+		{"handoff", ReincarnateAgentRequest{Handoff: "injected handoff", DryRun: true}},
+		{"sharedDirBackends", ReincarnateAgentRequest{SharedDirBackends: map[string]string{"s": "gcs"}, DryRun: true}},
+		{"allowEmptySharedDir", ReincarnateAgentRequest{AllowEmptySharedDir: true, DryRun: true}},
+	} {
+		t.Run("admin_l2_"+tc.name, func(t *testing.T) {
+			r := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/reincarnate", tc.req)
+			assert.Equal(t, http.StatusForbidden, r.Code, r.Body.String())
+		})
+	}
+}
+
+// TestShellAgentReincarnate_L3_PinsProfile verifies that reincarnating a shell
+// execution container with an empty CreateInputs.Profile pins old.Profile
+// instead of re-deriving a changed project active profile annotation.
+func TestShellAgentReincarnate_L3_PinsProfile(t *testing.T) {
+	srv, s := testServer(t)
+	project, broker := seedShellTestProjectAndBroker(t, s)
+	project.Annotations = map[string]string{
+		projectSettingActiveProfile: "admin-chosen-profile",
+	}
+	require.NoError(t, s.UpdateProject(context.Background(), project))
+
+	owner := seedShellTestUser(t, s, "l3-owner@test.com", "L3 Owner")
+	shellAgent := seedShellTestAgent(t, s, project.ID, broker.ID, "l3-shell", owner.ID, config.ShellHarnessConfigName, state.PhaseStopped, []string{owner.ID})
+	shellAgent.AppliedConfig.Profile = "original-profile"
+	shellAgent.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+		HarnessConfig: config.ShellHarnessConfigName,
+		Profile:       "",
+	}
+
+	fresh, _, err := srv.buildPatchedAppliedConfig(context.Background(), shellAgent, project, fixedImageRegistry(""), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "original-profile", fresh.Profile, "shell reincarnate must pin old.Profile rather than adopting project active profile")
+}
+
+// TestShellAgentExisting_L4_BrokerlessPlacementRequiresAttach verifies that a
+// project admin without attach cannot choose the first broker placement for a
+// brokerless execution container via handleExistingAgent (POST /agents with
+// existing name), while the owner passes the gate.
+func TestShellAgentExisting_L4_BrokerlessPlacementRequiresAttach(t *testing.T) {
+	srv, s := testServer(t)
+	project, broker := seedShellTestProjectAndBroker(t, s)
+
+	owner := seedShellTestUser(t, s, "l4-owner@test.com", "L4 Owner")
+	admin := seedShellTestUser(t, s, "l4-admin@test.com", "L4 Admin")
+	bindProjectRole(t, s, project.ID, owner.ID, "project-member")
+	bindProjectRole(t, s, project.ID, admin.ID, "project-admin")
+
+	// Seed a brokerless execution container (RuntimeBrokerID == "").
+	shellAgent := seedShellTestAgent(t, s, project.ID, "", "l4-brokerless-shell", owner.ID, config.ShellHarnessConfigName, state.PhaseCreated, []string{owner.ID})
+
+	// Project admin (has agent.lifecycle, lacks agent.attach) trying to start/place
+	// the brokerless shell agent on a broker -> 403.
+	recAdmin := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:            shellAgent.Slug,
+		RuntimeBrokerID: broker.ID,
+	})
+	assert.Equal(t, http.StatusForbidden, recAdmin.Code, "admin placing brokerless shell agent: %s", recAdmin.Body.String())
+
+	// Owner passes the L4 broker-adoption gate (not 403; fails later only because
+	// testServer has no dispatcher configured).
+	recOwner := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:            shellAgent.Slug,
+		RuntimeBrokerID: broker.ID,
+	})
+	assert.NotEqual(t, http.StatusForbidden, recOwner.Code, "owner placing brokerless shell agent should pass L4 gate: %s", recOwner.Body.String())
 }
 
 func TestShellAgentPendingConfig_S7(t *testing.T) {
