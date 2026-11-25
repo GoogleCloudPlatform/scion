@@ -325,64 +325,78 @@ func TestOnDemandSecret_EndToEndStartExcludesAndRuntimeReadWorks(t *testing.T) {
 }
 
 func TestOnDemandSecret_StartDeliveryShadowsLowerScopesAndBlocksProgeny(t *testing.T) {
-	srv, s, owner, _, project, agentX, _ := setupAgentSecretsTestFixture(t, true)
 	ctx := context.Background()
-
-	sb := srv.GetSecretBackend()
-	mustSet := func(in *secret.SetSecretInput) {
-		t.Helper()
-		_, _, err := sb.Set(ctx, in)
-		require.NoError(t, err)
-	}
 
 	// Subtest 1: agent on_demand shadows project-scope and user-scope
 	// environment/always secrets without fetching their values, while a
 	// higher-scope deliverable row over a lower-scope on_demand row still wins.
+	// Uses newChainFixture + sessionParent so both project and user scopes are
+	// active (proved by CONTROL_ENV and CONTROL_USER being delivered).
 	t.Run("shadows_project_and_user_scopes", func(t *testing.T) {
+		f := newChainFixture(t, "od-shadow-scopes")
+		enableAgentSecretsExperimentForTest(t, f.srv, f.store)
+		if f.srv.GetSecretBackend() == nil {
+			f.srv.SetSecretBackend(secret.NewLocalBackend(f.store, "test-hub", "test-signing-key-32-bytes-long!!"))
+		}
+		parent, _ := f.sessionParent(t, "od-shadow-parent")
+		sb := f.srv.GetSecretBackend()
+		mustSet := func(in *secret.SetSecretInput) {
+			t.Helper()
+			_, _, err := sb.Set(ctx, in)
+			require.NoError(t, err)
+		}
+
 		// Case 1: agent on_demand over project environment/always.
 		mustSet(&secret.SetSecretInput{
 			Name: "SHADOW_PROJ", Value: "project-env-val", SecretType: store.SecretTypeEnvironment,
-			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: project.ID,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: f.proj.ID,
 		})
 		mustSet(&secret.SetSecretInput{
 			Name: "SHADOW_PROJ", Value: "agent-od-val", SecretType: store.SecretTypeOnDemand,
-			Target: "SHADOW_PROJ", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
+			Target: "SHADOW_PROJ", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: parent.ID, ProjectID: f.proj.ID,
 		})
 
 		// Case 2: agent on_demand over user-scope environment/always.
 		mustSet(&secret.SetSecretInput{
 			Name: "SHADOW_USER", Value: "user-env-val", SecretType: store.SecretTypeEnvironment,
-			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: owner.ID,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: f.creator.ID,
 		})
 		mustSet(&secret.SetSecretInput{
 			Name: "SHADOW_USER", Value: "agent-od-user-val", SecretType: store.SecretTypeOnDemand,
-			Target: "SHADOW_USER", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
+			Target: "SHADOW_USER", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeAgent, ScopeID: parent.ID, ProjectID: f.proj.ID,
 		})
 
 		// Control 1: lower-scope on_demand does NOT shadow a higher-scope deliverable row.
 		mustSet(&secret.SetSecretInput{
 			Name: "HIGHER_ENV_WINS", Value: "project-od-val", SecretType: store.SecretTypeOnDemand,
-			Target: "HIGHER_ENV_WINS", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeProject, ScopeID: project.ID,
+			Target: "HIGHER_ENV_WINS", InjectionMode: store.InjectionModeAsNeeded, Scope: store.ScopeProject, ScopeID: f.proj.ID,
 		})
 		mustSet(&secret.SetSecretInput{
 			Name: "HIGHER_ENV_WINS", Value: "agent-env-val", SecretType: store.SecretTypeEnvironment,
-			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeAgent, ScopeID: parent.ID, ProjectID: f.proj.ID,
 		})
 
 		// Control 2: unshadowed project environment/always secret is delivered.
 		mustSet(&secret.SetSecretInput{
 			Name: "CONTROL_ENV", Value: "control-val", SecretType: store.SecretTypeEnvironment,
-			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: project.ID,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: f.proj.ID,
+		})
+
+		// Control 3: unshadowed user-scope environment/always secret is delivered,
+		// proving user scope is active in this fixture (non-vacuous SHADOW_USER).
+		mustSet(&secret.SetSecretInput{
+			Name: "CONTROL_USER", Value: "control-user-val", SecretType: store.SecretTypeEnvironment,
+			InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: f.creator.ID,
 		})
 
 		spy := &spyFetchValuesBackend{SecretBackend: sb}
-		d := NewHTTPAgentDispatcher(s, false, nil)
+		d := NewHTTPAgentDispatcher(f.store, false, nil)
 		d.SetSecretBackend(spy)
-		d.SetAuthzService(srv.authzService)
-		d.SetAgentSecretsEnabledProvider(func() bool { return srv.experimentEnabled(experiments.AgentSecrets) })
+		d.SetAuthzService(f.srv.authzService)
+		d.SetAgentSecretsEnabledProvider(func() bool { return f.srv.experimentEnabled(experiments.AgentSecrets) })
 
-		sel := newDeliverySelector(srv.authzService, agentX, PurposeDispatch)
-		resolved, asNeeded, skipped, err := d.selectDeliverySecretsWith(ctx, sel, agentX, nil)
+		sel := newDeliverySelector(f.srv.authzService, parent, PurposeDispatch)
+		resolved, asNeeded, skipped, err := d.selectDeliverySecretsWith(ctx, sel, parent, nil)
 		require.NoError(t, err)
 		assert.Empty(t, skipped)
 		assert.Empty(t, asNeeded)
@@ -394,6 +408,9 @@ func TestOnDemandSecret_StartDeliveryShadowsLowerScopesAndBlocksProgeny(t *testi
 
 		assert.Contains(t, byName, "CONTROL_ENV")
 		assert.Equal(t, "control-val", byName["CONTROL_ENV"].Value)
+		assert.Contains(t, byName, "CONTROL_USER", "user-scope control secret must be delivered")
+		assert.Equal(t, "control-user-val", byName["CONTROL_USER"].Value)
+		assert.Equal(t, store.ScopeUser, byName["CONTROL_USER"].Source)
 		assert.Contains(t, byName, "HIGHER_ENV_WINS")
 		assert.Equal(t, "agent-env-val", byName["HIGHER_ENV_WINS"].Value)
 		assert.Equal(t, store.ScopeAgent, byName["HIGHER_ENV_WINS"].Source)
@@ -469,4 +486,64 @@ func TestOnDemandSecret_StartDeliveryShadowsLowerScopesAndBlocksProgeny(t *testi
 		assert.NotContains(t, byName, "SHADOW_PROGENY", "SHADOW_PROGENY must be blocked by agent on_demand")
 		assert.NotContains(t, spy.fetchedNames, "SHADOW_PROGENY", "SHADOW_PROGENY must not be passed to FetchValues")
 	})
+}
+
+func TestOnDemandSecret_NoAuthCreateExcludesOnDemandGitHubToken(t *testing.T) {
+	ctx := context.Background()
+	f := newChainFixture(t, "od-noauth-create")
+	if f.srv.GetSecretBackend() == nil {
+		f.srv.SetSecretBackend(secret.NewLocalBackend(f.store, "test-hub", "test-signing-key-32-bytes-long!!"))
+	}
+	sb := f.srv.GetSecretBackend()
+
+	noAuthAgent := &store.Agent{
+		ID:            api.NewUUID(),
+		Slug:          "noauth-od-agent",
+		Name:          "noauth-od-agent",
+		ProjectID:     f.proj.ID,
+		OwnerID:       f.creator.ID,
+		CreatedBy:     f.creator.ID,
+		Ancestry:      []string{f.creator.ID},
+		Phase:         "created",
+		AppliedConfig: &store.AgentAppliedConfig{NoAuth: true},
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, noAuthAgent))
+
+	d := NewHTTPAgentDispatcher(f.store, false, nil)
+	d.SetSecretBackend(sb)
+	d.SetAuthzService(f.srv.authzService)
+
+	// Seed a user-scope environment GITHUB_TOKEN as well, so the test proves
+	// project on_demand GITHUB_TOKEN does NOT fall back to user scope.
+	_, _, err := sb.Set(ctx, &secret.SetSecretInput{
+		Name: noAuthGitTokenKey, Value: "user-env-gh-token", SecretType: store.SecretTypeEnvironment,
+		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeUser, ScopeID: f.creator.ID,
+	})
+	require.NoError(t, err)
+
+	// 1. Project on_demand GITHUB_TOKEN: must be absent from ResolvedEnv and
+	// must not fall back to the user-scope token.
+	_, _, err = sb.Set(ctx, &secret.SetSecretInput{
+		Name: noAuthGitTokenKey, Value: "proj-od-gh-token", SecretType: store.SecretTypeOnDemand,
+		Target: noAuthGitTokenKey, InjectionMode: store.InjectionModeAsNeeded,
+		Scope: store.ScopeProject, ScopeID: f.proj.ID,
+	})
+	require.NoError(t, err)
+
+	req, err := d.buildCreateRequestFor(ctx, noAuthAgent, "test", failOnSecretResolutionError)
+	require.NoError(t, err)
+	assert.NotContains(t, req.ResolvedEnv, noAuthGitTokenKey,
+		"project on_demand GITHUB_TOKEN must not be injected or fall back to user scope on no-auth create")
+
+	// 2. Control: project environment GITHUB_TOKEN is injected on no-auth create.
+	_, _, err = sb.Set(ctx, &secret.SetSecretInput{
+		Name: noAuthGitTokenKey, Value: "proj-env-gh-token", SecretType: store.SecretTypeEnvironment,
+		InjectionMode: store.InjectionModeAlways, Scope: store.ScopeProject, ScopeID: f.proj.ID,
+	})
+	require.NoError(t, err)
+
+	reqCtrl, err := d.buildCreateRequestFor(ctx, noAuthAgent, "test", failOnSecretResolutionError)
+	require.NoError(t, err)
+	assert.Equal(t, "proj-env-gh-token", reqCtrl.ResolvedEnv[noAuthGitTokenKey],
+		"project environment GITHUB_TOKEN control must be injected on no-auth create")
 }

@@ -240,6 +240,10 @@ func MigrateRetireVariableSecretTypeLeftovers(ctx context.Context, client *ent.C
 		// Re-check immediately before calling the name-keyed backend Delete so
 		// a concurrent API writer that replaced the row with a non-variable
 		// secret between the initial SELECT and this delete is not wiped.
+		// Note: a tiny residual race window remains between this re-check and
+		// deleter.Delete because backend Delete is keyed by (name, scope,
+		// scopeID) rather than type; this hook runs only at startup under an
+		// advisory lock and only for keys still typed "variable".
 		var currentType string
 		err := db.QueryRowContext(ctx, recheckSecretSQL, r.key, r.scope, r.scopeID).Scan(&currentType)
 		if errors.Is(err, sql.ErrNoRows) {

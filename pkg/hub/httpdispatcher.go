@@ -1317,8 +1317,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// Defense in depth: deliverGitHubToken also strips non-installation GitHub tokens downstream.
 		if !usesInstallationGitHubToken(agent) && agent.ProjectID != "" && d.secretBackend != nil {
 			projectValue := ""
+			projectShadowed := false
 			if !isShellAgent(agent) {
-				projectValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
+				projectValue, projectShadowed = d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
 			}
 
 			// Fall back to the creating user's profile-level GITHUB_TOKEN,
@@ -1327,10 +1328,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			// would otherwise still hit the NoAuth suppression bug (#1165).
 			// The owner's row is held to the same start-time user-scope
 			// checks as Resolve (ownerCloneTokenAllowed) before its value
-			// is read; a refused row is not used.
+			// is read; a refused row is not used. When a non-deliverable
+			// project row (e.g. on_demand) shadows GITHUB_TOKEN, do not fall
+			// back to user scope.
 			userValue := ""
-			if projectValue == "" && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
-				userValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeUser, agent.OwnerID)
+			if projectValue == "" && !projectShadowed && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
+				userValue, _ = d.noAuthCreateGitToken(ctx, agent, secret.ScopeUser, agent.OwnerID)
 			}
 			tok := pickNoAuthGitToken(projectValue, userValue)
 			applyNoAuthGitToken(req.ResolvedEnv, &req.EnvClassifications, tok)

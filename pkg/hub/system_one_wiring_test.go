@@ -1217,7 +1217,7 @@ func TestSystemOneNamedSecret_EndpointPinAllowedNameBeforeLookup(t *testing.T) {
 	)
 	ctx := systemoneruntime.WithEvalProjectID(context.Background(), projID)
 
-	for _, secretType := range []string{store.SecretTypeEnvironment, store.SecretTypeEnvironment} {
+	for _, secretType := range []string{store.SecretTypeEnvironment, store.SecretTypeOnDemand} {
 		t.Run("type_"+secretType, func(t *testing.T) {
 			var backendGetCalls atomic.Int32
 			srv := &Server{
