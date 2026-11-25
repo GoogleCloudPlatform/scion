@@ -33,7 +33,18 @@ import {
   type AgentListWindow,
 } from '../../client/agent-list-window.js';
 import { AgentDrainRunner } from '../../client/agent-drain.js';
+import {
+  getViewSchema,
+  knownKeysFor,
+  matchAgentQuery,
+  parse as parseFilterQuery,
+  serverSubset,
+  setSingleKeyInQuery,
+} from '../../shared/filter-query/index.js';
 import { holdable } from './__fixtures__/global-agents-endpoint.js';
+
+const PROJECT_AGENTS_SCHEMA = getViewSchema('project_agents')!;
+const KNOWN_PROJECT_AGENT_KEYS = knownKeysFor(PROJECT_AGENTS_SCHEMA);
 
 // Phase 2 (ptone/scion#2483): the shared delete helper, spied but running
 // for real (pass-through), so tests can prove the page delegates to it; the
@@ -144,9 +155,28 @@ function createFetchHandler(opts: {
       opts.requests.push({ url: rawUrl });
       const sort = u.searchParams.get('sort');
       const label = u.searchParams.get('label') ?? '';
+      const rawQ = u.searchParams.get('q') ?? '';
+      const parsedQ = rawQ ? parseFilterQuery(rawQ, KNOWN_PROJECT_AGENT_KEYS).query : undefined;
+
+      const filterList = (rows: Agent[]): Agent[] => {
+        let out = rows;
+        if (label.includes('=')) {
+          const [k, v] = label.split('=');
+          out = out.filter((a) => a.labels?.[k] === v);
+        }
+        if (parsedQ) {
+          out = out.filter((a) => matchAgentQuery(parsedQ, a));
+        }
+        return out;
+      };
 
       if (sort) {
-        if (opts.refuseSortedForLabel !== undefined && label === opts.refuseSortedForLabel) {
+        const matchesRefusal =
+          opts.refuseSortedForLabel !== undefined &&
+          (opts.refuseSortedForLabel === ''
+            ? label === '' && rawQ === ''
+            : label === opts.refuseSortedForLabel || rawQ === `label:${opts.refuseSortedForLabel}`);
+        if (matchesRefusal) {
           return Promise.resolve(
             jsonResponse(
               {
@@ -160,11 +190,7 @@ function createFetchHandler(opts: {
             )
           );
         }
-        let list = opts.agents;
-        if (label.includes('=')) {
-          const [k, v] = label.split('=');
-          list = list.filter((a) => a.labels?.[k] === v);
-        }
+        const list = filterList(opts.agents);
         const dir = u.searchParams.get('dir') === 'asc' ? 1 : -1;
         const sorted = [...list].sort(
           (a, b) => dir * (a.updated ?? '').localeCompare(b.updated ?? '')
@@ -185,11 +211,7 @@ function createFetchHandler(opts: {
       }
 
       // Legacy mode.
-      let list = opts.agents;
-      if (label.includes('=')) {
-        const [k, v] = label.split('=');
-        list = list.filter((a) => a.labels?.[k] === v);
-      }
+      const list = filterList(opts.agents);
       return Promise.resolve(jsonResponse({ agents: list, _capabilities: opts.projectCaps }));
     }
 
@@ -283,10 +305,52 @@ async function createComponent(
   return el;
 }
 
-function labelInput(el: TestEl): (HTMLElement & { value: string }) | null {
-  const inputs = Array.from(el.shadowRoot?.querySelectorAll('sl-input') ?? []);
-  return (inputs.find((i) => i.getAttribute('placeholder') === 'Filter by label (key=value)') ??
-    null) as (HTMLElement & { value: string }) | null;
+function setPhaseFilter(el: TestEl, phase: string): void {
+  internals(el).setPhaseChipInQuery(phase);
+}
+
+function labelInput(el: TestEl): { value: string; dispatchEvent(e: Event): boolean } | null {
+  const box = el.shadowRoot?.querySelector('scion-filter-box') as
+    | (HTMLElement & { value: string })
+    | null;
+  if (!box) return null;
+  let currentLabel = '';
+  const curText = internals(el).filterQueryText;
+  const m = /(?:^|\s)label:(\S+)/.exec(curText);
+  if (m) currentLabel = m[1];
+  return {
+    get value(): string {
+      return currentLabel;
+    },
+    set value(v: string) {
+      currentLabel = v;
+    },
+    dispatchEvent(e: Event): boolean {
+      const val = e.type === 'sl-clear' ? '' : currentLabel.trim();
+      if (e.type === 'sl-clear') currentLabel = '';
+      const next = setSingleKeyInQuery(
+        internals(el).filterQueryText,
+        'label',
+        val,
+        PROJECT_AGENTS_SCHEMA
+      );
+      const parsed = parseFilterQuery(next, KNOWN_PROJECT_AGENT_KEYS);
+      const q = parsed.query ?? { mode: 'text' as const, text: '' };
+      if (e.type === 'sl-input' || e.type === 'sl-clear') {
+        internals(el).handleFilterInput(
+          new CustomEvent('filter-input', { detail: { value: next, query: q, valid: true } })
+        );
+      }
+      if (e.type === 'sl-change' || e.type === 'sl-clear') {
+        internals(el).handleFilterCommit(
+          new CustomEvent('filter-commit', {
+            detail: { value: next, query: q, serverQ: serverSubset(q, PROJECT_AGENTS_SCHEMA) },
+          })
+        );
+      }
+      return true;
+    },
+  };
 }
 
 function viewToggle(el: TestEl): HTMLElement | null {
@@ -295,12 +359,15 @@ function viewToggle(el: TestEl): HTMLElement | null {
 
 interface Internals {
   toggleSort(field: string): void;
-  setPhaseFilter(phase: string): void;
+  setPhaseChipInQuery(phase: string): void;
+  handleFilterInput(e: CustomEvent): void;
+  handleFilterCommit(e: CustomEvent): void;
+  filterQueryText: string;
+  committedServerQ: string;
   handleAgentAction(id: string, action: string): Promise<void>;
   backgroundRefresh(trigger: string): void;
   handleStopAll(): Promise<void>;
   onPagerSizeChange(size: number): void;
-  committedLabel: string;
   pagerPageSize: number;
   agents: Agent[];
   agentWindow: {
@@ -421,12 +488,21 @@ function createRealisticFetchHandler(opts: {
       const sort = u.searchParams.get('sort');
       const label = u.searchParams.get('label') ?? '';
       const phase = u.searchParams.get('phase') ?? '';
+      const rawQ = u.searchParams.get('q') ?? '';
+      const parsedQ = rawQ ? parseFilterQuery(rawQ, KNOWN_PROJECT_AGENT_KEYS).query : undefined;
       let list = opts.agents;
       if (label.includes('=')) {
         const eq = label.indexOf('=');
         const k = label.slice(0, eq);
         const v = label.slice(eq + 1);
         list = list.filter((a) => a.labels?.[k] === v);
+      }
+      if (parsedQ) {
+        const nonPhaseQ =
+          parsedQ.mode === 'structured'
+            ? { ...parsedQ, terms: parsedQ.terms.filter((t) => t.key !== 'phase') }
+            : parsedQ;
+        list = list.filter((a) => matchAgentQuery(nonPhaseQ, a));
       }
 
       if (sort) {
@@ -458,7 +534,10 @@ function createRealisticFetchHandler(opts: {
 
         // Paged (incomplete) responses are phase-filtered server-side; a
         // complete response is always the whole unphased set.
-        const phased = phase ? sorted.filter((a) => a.phase === phase) : sorted;
+        let phased = phase ? sorted.filter((a) => a.phase === phase) : sorted;
+        if (parsedQ) {
+          phased = phased.filter((a) => matchAgentQuery(parsedQ, a));
+        }
 
         // ids= (a page of the window's frozen walk order): exactly the named
         // agents that still match, with the other filters applied.
@@ -602,6 +681,7 @@ describe('project-detail — agent list window', () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     localStorage.clear();
+    window.history.replaceState(null, '', '/');
   });
 
   it('shows a provision-only agent as created (not started) in list and grid (ptone/scion#2929)', async () => {
@@ -678,8 +758,8 @@ describe('project-detail — agent list window', () => {
       internals(el).toggleSort('name');
       expect(requests.length).toBe(1);
       internals(el).toggleSort('updated'); // back to updated for the page-nav check below
-      internals(el).setPhaseFilter('running');
-      internals(el).setPhaseFilter('');
+      setPhaseFilter(el, 'running');
+      setPhaseFilter(el, '');
       expect(requests.length).toBe(1);
 
       // Page navigation: 0 requests (local slice of the held set).
@@ -790,12 +870,12 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.state).toBe('paged');
 
       n = requests.length;
-      internals(el).setPhaseFilter('running');
+      setPhaseFilter(el, 'running');
       await settle(el);
       expect(requests.length - n).toBe(1);
-      expect(requests[requests.length - 1].url).toContain('phase=running');
+      expect(requests[requests.length - 1].url).toContain('q=phase%3Arunning');
       n = requests.length;
-      internals(el).setPhaseFilter('');
+      setPhaseFilter(el, '');
       await settle(el);
       expect(requests.length - n).toBe(1);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -811,7 +891,7 @@ describe('project-detail — agent list window', () => {
       input.dispatchEvent(new Event('sl-change'));
       await settle(el);
       expect(requests.length - n).toBe(1);
-      expect(requests[requests.length - 1].url).toContain('label=env%3Dprod');
+      expect(requests[requests.length - 1].url).toContain('q=label%3Aenv%3Dprod');
       expect(internals(el).agentWindow.state).toBe('paged');
 
       n = requests.length;
@@ -928,7 +1008,7 @@ describe('project-detail — agent list window', () => {
       await settle(el);
       expect(requests.length).toBe(4);
       expect(requests[3].url).toContain('sort=updated');
-      expect(requests[3].url).toContain('label=env%3Dprod');
+      expect(requests[3].url).toContain('q=label%3Aenv%3Dprod');
     });
   });
 
@@ -948,7 +1028,7 @@ describe('project-detail — agent list window', () => {
       stubFetch((input: string | URL | Request, init?: RequestInit) => {
         const rawUrl =
           typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        if (rawUrl.includes(`/api/v1/projects/${projectId}/agents?label=`) && failNext) {
+        if (rawUrl.includes(`/api/v1/projects/${projectId}/agents?q=`) && failNext) {
           requests.push({ url: rawUrl });
           return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
         }
@@ -973,8 +1053,8 @@ describe('project-detail — agent list window', () => {
 
       const after = (el as unknown as { agents: Agent[] }).agents;
       expect(after.length).toBe(5); // previous data kept, not cleared to []
-      expect(requests.filter((r) => r.url.includes('label=')).length).toBe(1); // a 400 is not retried
-      expect(internals(el).committedLabel).toBe('');
+      expect(requests.filter((r) => r.url.includes('q=label%3A')).length).toBe(1); // a 400 is not retried
+      expect(internals(el).committedServerQ).toBe('');
       expect(internals(el).agentWindow.state).toBe('small');
     });
   });
@@ -1206,7 +1286,7 @@ describe('project-detail — agent list window', () => {
       );
       const requests: AgentsRequest[] = [];
       const el = await mountForcedPaged(projectId, agents, requests);
-      internals(el).setPhaseFilter('running');
+      setPhaseFilter(el, 'running');
       await settle(el); // the phase change's own one paged refetch
       await el.updateComplete;
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -1253,7 +1333,6 @@ describe('project-detail — agent list window', () => {
       });
 
       const el = await createComponent(projectId);
-      internals(el).committedLabel = 'env=prod'; // simulate having committed this label (bypasses UI for brevity)
       const input = labelInput(el)!;
       input.value = 'env=prod';
       input.dispatchEvent(new Event('sl-input'));
@@ -1786,7 +1865,7 @@ describe('project-detail — agent list window', () => {
       internals(el).toggleSort('updated');
       internals(el).toggleSort('updated'); // dir flip
       internals(el).toggleSort('created');
-      internals(el).setPhaseFilter('running');
+      setPhaseFilter(el, 'running');
       await settle(el);
       expect(requests.length - n).toBe(0);
       expect(internals(el).agentWindow.state).toBe('small');
@@ -1994,10 +2073,10 @@ describe('project-detail — agent list window', () => {
       ['sort by updated after created', (el) => internals(el).toggleSort('updated')],
       [
         'filter phase running',
-        (el) => internals(el).setPhaseFilter('running'),
+        (el) => setPhaseFilter(el, 'running'),
         rowsMatch((a) => a.phase === 'running'),
       ],
-      ['clear the phase filter', (el) => internals(el).setPhaseFilter(''), rowsMatch(() => true)],
+      ['clear the phase filter', (el) => setPhaseFilter(el, ''), rowsMatch(() => true)],
       [
         'next page',
         (el) => internals(el).agentWindow.next(),
@@ -2039,7 +2118,7 @@ describe('project-detail — agent list window', () => {
       ],
       [
         'filter phase running after the tree',
-        (el) => internals(el).setPhaseFilter('running'),
+        (el) => setPhaseFilter(el, 'running'),
         rowsMatch((a) => a.phase === 'running'),
       ],
       ['next page after the tree', (el) => internals(el).agentWindow.next()],
@@ -2105,7 +2184,7 @@ describe('project-detail — agent list window', () => {
         // prettier-ignore
         states: [
           'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
-          'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'small', 'paged',
+          'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
           'paged', 'paged', 'paged', 'small', 'small', 'small', 'small', 'small',
           'small', 'small', 'paged', 'paged', 'paged',
         ],
@@ -2114,24 +2193,24 @@ describe('project-detail — agent list window', () => {
         name: '1,200 agents (paged; the tree drains three pages into a held set, after which changes are free)',
         count: 1200,
         // prettier-ignore
-        costs: [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 3, 1, 1, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+        costs: [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 3],
         // prettier-ignore
         states: [
           'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
-          'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'held', 'paged',
+          'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
           'paged', 'paged', 'paged', 'held', 'held', 'held', 'held', 'held',
           'held', 'held', 'held', 'held', 'held',
         ],
       },
       {
-        name: '2,001 agents (above the 2,000 candidate ceiling, so sorted requests are refused and the set is a capped drain; a k=v label that narrows the set pages again)',
+        name: '2,001 agents (above the 2,000 candidate ceiling, so sorted requests are refused and the set is a capped drain; a label that narrows the set pages again)',
         count: 2001,
         // prettier-ignore
-        costs: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
+        costs: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
         // prettier-ignore
         states: [
           'capped', 'capped', 'capped', 'capped', 'capped', 'capped', 'capped', 'capped',
-          'capped', 'capped', 'capped', 'capped', 'paged', 'capped', 'capped', 'capped',
+          'capped', 'capped', 'capped', 'capped', 'paged', 'capped', 'paged', 'capped',
           'capped', 'capped', 'capped', 'capped', 'capped', 'capped', 'capped', 'capped',
           'capped', 'capped', 'capped', 'capped', 'capped',
         ],
@@ -2305,7 +2384,7 @@ describe('project-detail — agent list window', () => {
       });
     }
 
-    it('a bare-key label in the list view with updated sort', async () => {
+    it('a bare-key label in the list view with updated sort stays sorted-eligible (paged, no capped banner)', async () => {
       const { el, requests } = await mountCapped('p-capped-bare-key', 'list', 'updated');
       // Sorted-eligible: the first request is the fit request, and it pages.
       expect(requests[0].url).toContain('sort=updated');
@@ -2316,9 +2395,12 @@ describe('project-detail — agent list window', () => {
       input.value = 'env';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe('capped'));
+      await settle(el);
       await el.updateComplete;
-      expect(bannerText(el)).toContain('80 loaded (newest 2,000 checked), more exist');
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(bannerText(el)).toBe('');
+      expect(requests[requests.length - 1].url).toContain('sort=updated');
+      expect(requests[requests.length - 1].url).toContain('q=label%3Aenv');
     });
   });
 
@@ -2843,7 +2925,7 @@ describe('project-detail — agent list window', () => {
         if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
           // Only the unlabelled candidate set (60) is forced paged; the
           // env=prod subset (10) fits and comes back complete.
-          if (!u.searchParams.get('label')) u.searchParams.set('fit', '0');
+          if (!u.searchParams.get('q')) u.searchParams.set('fit', '0');
         }
         return createRealisticFetchHandler({
           projectId,
@@ -2880,7 +2962,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.items.length).toBe(10); // all 10 env=prod agents visible
     });
 
-    it('a bare-key label commit (legacy path, paged -> small) lands on page 0', async () => {
+    it('a name-sort transition (legacy drain path, paged -> small) lands on page 0', async () => {
       const projectId = 'p-r3a2';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = fixture60(projectId);
@@ -2894,10 +2976,8 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
       expect(internals(el).agentWindow.pageIndex).toBe(2);
 
-      const input = labelInput(el)!;
-      input.value = 'env'; // bare key: not sorted-eligible, goes through the legacy path
-      input.dispatchEvent(new Event('sl-input'));
-      input.dispatchEvent(new Event('sl-change'));
+      // Name sort is not sorted-eligible, so it goes through the legacy drain path.
+      internals(el).toggleSort('name');
       await settle(el);
       await el.updateComplete;
 
@@ -3246,7 +3326,7 @@ describe('project-detail — agent list window', () => {
         expect(internals(el).agentWindow.state).toBe('paged');
 
         holdNextPageZeroFit = true;
-        if (kind === 'phase') internals(el).setPhaseFilter('stopped');
+        if (kind === 'phase') setPhaseFilter(el, 'stopped');
         else if (kind === 'dir') internals(el).toggleSort('updated');
         else if (kind === 'label') {
           const input = labelInput(el)!;
@@ -3318,7 +3398,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.hasNext).toBe(true);
 
       failNextSorted = true;
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       await settle(el);
       await el.updateComplete;
 
@@ -3345,7 +3425,7 @@ describe('project-detail — agent list window', () => {
       // setPaged — this is a *different* phase, not a retry of 'stopped',
       // because any successful view-change restores it, not just a retry
       // of the one that failed.
-      internals(el).setPhaseFilter('running');
+      setPhaseFilter(el, 'running');
       await settle(el);
       await el.updateComplete;
       expect(internals(el).agentWindow.error).toBeNull();
@@ -3385,7 +3465,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.hasNext).toBe(true);
 
       failNextSorted = true;
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       await settle(el);
       await el.updateComplete;
 
@@ -3445,7 +3525,7 @@ describe('project-detail — agent list window', () => {
       const itemsBefore = internals(el).agentWindow.items;
 
       failNextSorted = true;
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       await settle(el);
       await el.updateComplete;
 
@@ -3471,7 +3551,7 @@ describe('project-detail — agent list window', () => {
 
       // A subsequent successful view-change still restores navigation, so
       // the invalidation above was not a permanent, leaked failure state.
-      internals(el).setPhaseFilter('running');
+      setPhaseFilter(el, 'running');
       await settle(el);
       await el.updateComplete;
       expect(internals(el).agentWindow.error).toBeNull();
@@ -3525,7 +3605,7 @@ describe('project-detail — agent list window', () => {
       fail422NextSorted = true;
       failLegacy = true; // every attempt, retries included
       const before = requests.length;
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       // The drain retries a failed page twice (250 ms, then 500 ms).
       await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false), { timeout: 3000 });
       await el.updateComplete;
@@ -3591,7 +3671,7 @@ describe('project-detail — agent list window', () => {
       fail422NextSorted = true;
       failLegacy = true; // every attempt, retries included
       const before = requests.length;
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       // The drain retries a failed page twice (250 ms, then 500 ms).
       await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false), { timeout: 3000 });
       await el.updateComplete;
@@ -3644,7 +3724,7 @@ describe('project-detail — agent list window', () => {
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
-      expect(internals(el).committedLabel).toBe('');
+      expect(internals(el).committedServerQ).toBe('');
       expect(internals(el).agentWindow.hasNext).toBe(true);
 
       // Commit a label; its request rejects with a network error. Without
@@ -3659,7 +3739,7 @@ describe('project-detail — agent list window', () => {
       await settle(el);
       await el.updateComplete;
 
-      expect(internals(el).committedLabel).toBe(''); // reverted, not left at the rejected label
+      expect(internals(el).committedServerQ).toBe(''); // reverted, not left at the rejected label
       expect(internals(el).agentWindow.state).toBe('paged'); // previous data kept
       // A label-commit failure doesn't invalidate navigation the way a
       // view-change failure does: the stored cursors are still correctly
@@ -3717,7 +3797,7 @@ describe('project-detail — agent list window', () => {
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('small'); // sorted-eligible, complete (5 is below the fit threshold)
-      expect(internals(el).committedLabel).toBe('');
+      expect(internals(el).committedServerQ).toBe('');
 
       // First, a successful commit on the sorted path, so the
       // revert below has a non-trivial value to land back on rather than
@@ -3728,11 +3808,13 @@ describe('project-detail — agent list window', () => {
       input.dispatchEvent(new Event('sl-change'));
       await settle(el);
       await el.updateComplete;
-      expect(internals(el).committedLabel).toBe('env=dev');
+      expect(internals(el).committedServerQ).toBe('label:env=dev');
       const agentsAfterFirstCommit = internals(el).agents;
 
-      // A label with no "=" is not sorted-eligible, so this commit drains;
-      // every attempt (the drain retries an unparseable body twice) fails.
+      // Switch to name sort (not sorted-eligible) so the next label commit
+      // drains; every attempt (the drain retries an unparseable body twice) fails.
+      internals(el).toggleSort('name');
+      await settle(el);
       failLegacy = true;
       const requestsBeforeFailingCommit = requests.length;
       input.value = 'badlabel';
@@ -3742,7 +3824,7 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
 
       expect(requests.length).toBe(requestsBeforeFailingCommit + 3); // one drain page, retried twice
-      expect(internals(el).committedLabel).toBe('env=dev'); // reverted to the prior commit, not left at 'badlabel'
+      expect(internals(el).committedServerQ).toBe('label:env=dev'); // reverted to the prior commit, not left at 'badlabel'
       expect(internals(el).agents).toBe(agentsAfterFirstCommit); // previous rows kept
     });
   });
@@ -3762,7 +3844,7 @@ describe('project-detail — agent list window', () => {
           failLabelOnFitPath &&
           u.pathname === `/api/v1/projects/${projectId}/agents` &&
           u.searchParams.get('sort') &&
-          u.searchParams.get('label') === 'env=prod'
+          u.searchParams.get('q') === 'label:env=prod'
         ) {
           requests.push({ url: rawUrl });
           return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
@@ -3779,7 +3861,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.state).toBe('small'); // sorted-eligible, complete (5 is below the fit threshold)
       const before = (el as unknown as { agents: Agent[] }).agents;
       expect(before.length).toBe(5);
-      expect(internals(el).committedLabel).toBe('');
+      expect(internals(el).committedServerQ).toBe('');
 
       failLabelOnFitPath = true;
       const input = labelInput(el)!;
@@ -3789,12 +3871,12 @@ describe('project-detail — agent list window', () => {
       await settle(el);
 
       // The sorted (fit) request, not the legacy path, received the 400.
-      expect(requests.some((r) => r.url.includes('sort=') && r.url.includes('label=env'))).toBe(
+      expect(requests.some((r) => r.url.includes('sort=') && r.url.includes('q=label%3Aenv'))).toBe(
         true
       );
       const after = (el as unknown as { agents: Agent[] }).agents;
       expect(after.length).toBe(5); // previous data kept
-      expect(internals(el).committedLabel).toBe(''); // reverted, not left at the rejected label
+      expect(internals(el).committedServerQ).toBe(''); // reverted, not left at the rejected label
     });
   });
 
@@ -3893,7 +3975,7 @@ describe('project-detail — agent list window', () => {
       // Filter to a phase nothing matches, then trigger a lifecycle refresh
       // (held) while that filter is active — this.agents stays non-empty
       // (the OLD data) throughout the gap.
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       await el.updateComplete;
       expect(el.shadowRoot?.textContent).toContain('No agents match the current filter');
 
@@ -3954,7 +4036,7 @@ describe('project-detail — agent list window', () => {
         h.hold();
         const el = await createComponent(projectId, { holdsFirstLoad: true });
         expect(h.sent).toHaveLength(1);
-        if (change === 'phase') internals(el).setPhaseFilter('stopped');
+        if (change === 'phase') setPhaseFilter(el, 'stopped');
         else internals(el).toggleSort('updated');
         h.release();
         await idle(el);
@@ -3962,7 +4044,7 @@ describe('project-detail — agent list window', () => {
         expect(h.sent[0].signal?.aborted).toBe(true);
         expect(h.sent).toHaveLength(2);
         const q = new URL(h.sent[1].url, 'http://x').searchParams;
-        if (change === 'phase') expect(q.get('phase')).toBe('stopped');
+        if (change === 'phase') expect(q.get('q')).toBe('phase:stopped');
         else expect(q.get('dir')).toBe('asc');
         const win = internals(el).agentWindow;
         expect(win.state).toBe('paged');
@@ -4077,7 +4159,7 @@ describe('project-detail — agent list window', () => {
         expect((win as unknown as { rangeStart: number }).rangeStart).toBe(50);
 
         if (change === 'dir') internals(el).toggleSort('updated');
-        else if (change === 'phase') internals(el).setPhaseFilter('running');
+        else if (change === 'phase') setPhaseFilter(el, 'running');
         else internals(el).onPagerSizeChange(50);
         await idle(el);
 
@@ -4233,7 +4315,7 @@ describe('project-detail — agent list window', () => {
           if (
             refuse &&
             u.pathname === `/api/v1/projects/${projectId}/agents` &&
-            u.searchParams.get('label') === 'env=prod'
+            u.searchParams.get('q') === 'label:env=prod'
           ) {
             requests.push({ url: raw });
             return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
@@ -4254,7 +4336,7 @@ describe('project-detail — agent list window', () => {
         await settle(el);
 
         expect(requests.length - n).toBe(1); // the refused request, not retried
-        expect(internals(el).committedLabel).toBe('');
+        expect(internals(el).committedServerQ).toBe('');
         const prodIds = agents
           .filter((a) => a.labels?.env === 'prod')
           .map((a) => a.id)
@@ -4652,7 +4734,7 @@ describe('project-detail — agent list window', () => {
         commitLabel(el, 'env=prod');
         await vi.waitFor(() => expect(ctl.heldCount).toBe(1));
         const q = new URL(ctl.sent[n].url, 'http://x').searchParams;
-        expect(q.get('label')).toBe('env=prod');
+        expect(q.get('q')).toBe('label:env=prod');
         expect(q.has('sort')).toBe(path.view === 'list');
 
         emitLabelledCreate(projectId, 'live-prod', 'prod');
@@ -5154,9 +5236,7 @@ describe('project-detail — agent list window', () => {
       expect(button).toBeDefined();
       button!.click();
       await el.updateComplete;
-      expect(localStorage.getItem(`scion-filter-project-agents-phase-${projectId}`)).toBe(
-        'stopping'
-      );
+      expect(new URLSearchParams(window.location.search).get('q')).toBe('phase:stopping');
       await vi.waitFor(() => expect(shown()).toEqual(['a-0']));
 
       sseUpdate('agent.a-1.status', { phase: 'stopping' });

@@ -127,11 +127,6 @@ type Service struct {
 	archiveSlots   *archiveSlots
 	archiveNow     func() time.Time
 
-	// filterQueryDialectEnabled says whether GET /api/v1/artifacts?q= parses
-	// the unified filter query dialect (SetFilterQueryDialectEnabled). When
-	// nil or returning false, q is treated as plain text exactly as before.
-	filterQueryDialectEnabled func(context.Context) bool
-
 	// nowFn overrides time.Now in tests; nil means time.Now.
 	nowFn func() time.Time
 
@@ -763,21 +758,6 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 
 func writeErrorDetails(w http.ResponseWriter, status int, code, message string, details map[string]any) {
 	writeJSON(w, status, errorResponse{Error: errorBody{Code: code, Message: message, Details: details}})
-}
-
-// SetFilterQueryDialectEnabled sets the predicate that controls whether
-// GET /api/v1/artifacts?q= parses the unified filter query dialect.
-func (s *Service) SetFilterQueryDialectEnabled(fn func(context.Context) bool) {
-	s.mu.Lock()
-	s.filterQueryDialectEnabled = fn
-	s.mu.Unlock()
-}
-
-func (s *Service) isFilterQueryDialectEnabled(ctx context.Context) bool {
-	s.mu.RLock()
-	fn := s.filterQueryDialectEnabled
-	s.mu.RUnlock()
-	return fn != nil && fn(ctx)
 }
 
 // writeNotFound answers 404. It is also the answer when the caller may not

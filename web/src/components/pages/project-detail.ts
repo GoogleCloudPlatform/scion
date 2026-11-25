@@ -121,7 +121,6 @@ import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
-  filtersQueryDialectEnabled,
   getActiveSingleKeyValue,
   getViewSchema,
   hasClientOnlyKeys,
@@ -386,37 +385,23 @@ export class ScionPageProjectDetail extends LitElement {
   private agentsExpanded = false;
 
   @state()
-  private phaseFilter: AgentPhase | '' = '';
-
-  @state()
-  private labelFilter = '';
-
-  @state()
   private sortField: AgentSortField = 'updated';
 
   @state()
   private sortDir: SortDir = 'desc';
 
-  /**
-   * The label filter as of the last commit (`sl-change`/`sl-clear`), as
-   * opposed to `labelFilter`, which also tracks every keystroke for local
-   * preview. Passed to the window's planner, which decides
-   * eligibility for the sorted request path and keys its per-label 422
-   * refusal memory, and used for the request parameters.
-   */
-  private committedLabel = '';
-
-  /** `committedLabel`'s value just before a label commit, so a failed request can restore it instead of leaving every later request re-sending a rejected label. */
-  private labelBeforeCommit = '';
-
-  /** Unified filter query text (used when `filters.query_dialect` is on). */
+  /** Unified filter query text. */
   @state()
   private filterQueryText = '';
 
   private filterQuery: FilterQuery | null = null;
   private committedFilterQuery: FilterQuery | null = null;
   private committedServerQ = '';
+  private loadedServerQ = '';
   private committedHasClientOnly = false;
+  private serverQBeforeCommit = '';
+  private filterQueryBeforeCommit: FilterQuery | null = null;
+  private hasClientOnlyBeforeCommit = false;
 
   private get filterContext(): AgentFilterContext {
     return {
@@ -494,8 +479,8 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private agentWindow = new AgentListWindow({
     viewState: {
-      phaseFilter: this.phaseFilter,
-      label: this.labelFilter,
+      phaseFilter: '',
+      label: '',
       sortField: this.sortField,
       sortDir: this.sortDir,
       pageSize: this.pagerPageSize,
@@ -504,10 +489,7 @@ export class ScionPageProjectDetail extends LitElement {
     getProjectId: () => this.projectId,
     isAddable: (agent: Agent): boolean => {
       if (agent.projectId !== this.projectId) return false;
-      if (filtersQueryDialectEnabled()) {
-        return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
-      }
-      return true;
+      return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
     },
     fetchPage: (params: PagedPageParams) => this.fetchAgentsPage(params),
     getAgent: (id: string) => stateManager.getAgent(id),
@@ -1344,40 +1326,27 @@ export class ScionPageProjectDetail extends LitElement {
     // Read persisted agents section expand/collapse preference (user-level)
     this.agentsExpanded = localStorage.getItem(AGENTS_EXPANDED_STORAGE_KEY) === 'true';
 
-    // Read persisted phase filter (or migrate once to ?q= when dialect is on)
+    // Read ?q= from URL, migrating any legacy persisted phase filter once.
     const phaseStorageKey = `scion-filter-project-agents-phase-${this.projectId}`;
-    if (filtersQueryDialectEnabled()) {
-      const urlParams = new URLSearchParams(window.location.search);
-      const urlQ = urlParams.get('q');
-      const storedPhase = localStorage.getItem(phaseStorageKey);
-      if (storedPhase !== null) {
-        localStorage.removeItem(phaseStorageKey);
-      }
-      if (urlQ !== null) {
-        this.filterQueryText = urlQ;
-      } else if (
-        storedPhase === 'running' ||
-        storedPhase === 'stopping' ||
-        storedPhase === 'stopped' ||
-        storedPhase === 'suspended' ||
-        storedPhase === 'error'
-      ) {
-        this.filterQueryText = `phase:${storedPhase}`;
-        this.syncQueryToUrl(this.filterQueryText);
-      }
-      this.applyInitialFilterQuery(this.filterQueryText);
-    } else {
-      const storedPhase = localStorage.getItem(phaseStorageKey);
-      if (
-        storedPhase === 'running' ||
-        storedPhase === 'stopping' ||
-        storedPhase === 'stopped' ||
-        storedPhase === 'suspended' ||
-        storedPhase === 'error'
-      ) {
-        this.phaseFilter = storedPhase;
-      }
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlQ = urlParams.get('q');
+    const storedPhase = localStorage.getItem(phaseStorageKey);
+    if (storedPhase !== null) {
+      localStorage.removeItem(phaseStorageKey);
     }
+    if (urlQ !== null) {
+      this.filterQueryText = urlQ;
+    } else if (
+      storedPhase === 'running' ||
+      storedPhase === 'stopping' ||
+      storedPhase === 'stopped' ||
+      storedPhase === 'suspended' ||
+      storedPhase === 'error'
+    ) {
+      this.filterQueryText = `phase:${storedPhase}`;
+      this.syncQueryToUrl(this.filterQueryText);
+    }
+    this.applyInitialFilterQuery(this.filterQueryText);
 
     // Read persisted sort
     const storedSort = localStorage.getItem(`scion-sort-project-agents-${this.projectId}`);
@@ -1412,33 +1381,25 @@ export class ScionPageProjectDetail extends LitElement {
 
     // Sync the window's view state with the persisted values read above,
     // before the initial load.
-    if (filtersQueryDialectEnabled()) {
-      const fq = this.filterQuery;
-      const cfq = this.committedFilterQuery;
-      const ctx = this.filterContext;
-      this.agentWindow.setViewState({
-        phaseFilter: '',
-        label: '',
-        sortField: this.sortField,
-        sortDir: this.sortDir,
-        pageSize: this.pagerPageSize,
-        view: listViewOf(this.viewMode),
-        hasClientOnlyFilter: this.committedHasClientOnly,
-        filterPredicate: fq ? (a: Agent) => matchAgentQuery(fq, a, ctx) : null,
-        committedFilterPredicate: cfq ? (a: Agent) => matchAgentQuery(cfq, a, ctx) : null,
-        committedPhasePredicate: phasePredicateForQuery(cfq),
-        serverQuery: this.committedServerQ,
-      });
-    } else {
-      this.agentWindow.setViewState({
-        phaseFilter: this.phaseFilter,
-        label: this.labelFilter,
-        sortField: this.sortField,
-        sortDir: this.sortDir,
-        pageSize: this.pagerPageSize,
-        view: listViewOf(this.viewMode),
-      });
-    }
+    const fq = this.filterQuery;
+    const cfq = this.committedFilterQuery;
+    const ctx = this.filterContext;
+    const initialPred = fq ? (a: Agent) => matchAgentQuery(fq, a, ctx) : null;
+    const committedPred =
+      cfq === fq ? initialPred : cfq ? (a: Agent) => matchAgentQuery(cfq, a, ctx) : null;
+    this.agentWindow.setViewState({
+      phaseFilter: '',
+      label: '',
+      sortField: this.sortField,
+      sortDir: this.sortDir,
+      pageSize: this.pagerPageSize,
+      view: listViewOf(this.viewMode),
+      hasClientOnlyFilter: this.committedHasClientOnly,
+      filterPredicate: initialPred,
+      committedFilterPredicate: committedPred,
+      committedPhasePredicate: phasePredicateForQuery(cfq),
+      serverQuery: this.committedServerQ,
+    });
 
     this.decisionsEnabled = decisionsEnabled();
 
@@ -1719,10 +1680,7 @@ export class ScionPageProjectDetail extends LitElement {
       // getting its updates until an explicit `deleted` removes it).
       shouldAdd: (agent): boolean => {
         if (agent.projectId !== this.projectId) return false;
-        if (filtersQueryDialectEnabled()) {
-          return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
-        }
-        return true;
+        return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
       },
       scopeCapabilities: this.agentScopeCapabilities,
     });
@@ -1996,7 +1954,17 @@ export class ScionPageProjectDetail extends LitElement {
       this.agentWindow.setSmall();
     }
     if (trigger === 'label-commit') {
-      this.committedLabel = this.labelBeforeCommit;
+      this.committedServerQ = this.serverQBeforeCommit;
+      this.committedFilterQuery = this.filterQueryBeforeCommit;
+      this.committedHasClientOnly = this.hasClientOnlyBeforeCommit;
+      const cfq = this.committedFilterQuery;
+      const ctx = this.filterContext;
+      this.agentWindow.setViewState({
+        committedFilterPredicate: cfq ? (a: Agent) => matchAgentQuery(cfq, a, ctx) : null,
+        committedPhasePredicate: phasePredicateForQuery(cfq),
+        serverQuery: this.committedServerQ,
+        hasClientOnlyFilter: this.committedHasClientOnly,
+      });
     }
     if (trigger === 'view-change' && this.agentWindow.state === 'paged') {
       this.agentWindow.invalidateCursors();
@@ -2012,8 +1980,8 @@ export class ScionPageProjectDetail extends LitElement {
    * again for the current view state.
    */
   private async loadAgentsForView(trigger: AgentsViewTrigger): Promise<void> {
-    const label = this.committedLabel.trim();
-    const plan = this.agentWindow.planRequest(trigger, label);
+    const serverQ = this.committedServerQ;
+    const plan = this.agentWindow.planRequest(trigger, serverQ);
     if (plan === 'none') return;
     if (plan === 'page') {
       await this.agentWindow.refresh();
@@ -2025,8 +1993,8 @@ export class ScionPageProjectDetail extends LitElement {
     try {
       adopted =
         plan === 'fit'
-          ? await this.loadFitAgents(trigger, label)
-          : await this.drainProjectAgents(trigger, label);
+          ? await this.loadFitAgents(trigger, serverQ)
+          : await this.drainProjectAgents(trigger, serverQ);
     } finally {
       this.endLoadingIndicator();
     }
@@ -2038,7 +2006,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (
       adopted &&
       viewEpoch !== this.viewEpoch &&
-      this.agentWindow.planRequest('view-change', this.committedLabel.trim()) !== 'none'
+      this.agentWindow.planRequest('view-change', this.committedServerQ) !== 'none'
     ) {
       await this.loadAgentsForView('view-change');
     }
@@ -2049,14 +2017,14 @@ export class ScionPageProjectDetail extends LitElement {
    * (small), paged, or 422 (drain). Resolves `true` when a result was
    * adopted.
    */
-  private async loadFitAgents(trigger: AgentsViewTrigger, label: string): Promise<boolean> {
+  private async loadFitAgents(trigger: AgentsViewTrigger, serverQ: string): Promise<boolean> {
     const { gen, signal } = this.beginAgentsLoad();
-    const ticket = this.agentWindow.beginSortedRequest(trigger, label);
+    const ticket = this.agentWindow.beginSortedRequest(trigger, serverQ);
     // Opened before the request is sent, so a live create or update that
     // lands while it is in flight survives the (older) response.
     const epoch = new AgentSeedEpoch();
     try {
-      return await this.loadFitAgentsInEpoch(trigger, label, gen, signal, epoch, ticket);
+      return await this.loadFitAgentsInEpoch(trigger, serverQ, gen, signal, epoch, ticket);
     } finally {
       epoch.close();
       this.agentWindow.endSortedRequest(ticket);
@@ -2065,7 +2033,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private async loadFitAgentsInEpoch(
     trigger: AgentsViewTrigger,
-    label: string,
+    serverQ: string,
     gen: number,
     signal: AbortSignal,
     epoch: AgentSeedEpoch,
@@ -2078,12 +2046,7 @@ export class ScionPageProjectDetail extends LitElement {
     params.set('fit', String(projectAgentsFitFor(this.pagerPageSize)));
     params.set('stats', '1');
     params.set('include', 'authority');
-    if (filtersQueryDialectEnabled()) {
-      if (this.committedServerQ) params.set('q', this.committedServerQ);
-    } else {
-      if (label) params.set('label', label);
-      if (this.phaseFilter) params.set('phase', this.phaseFilter);
-    }
+    if (serverQ) params.set('q', serverQ);
 
     let response: Response;
     try {
@@ -2099,12 +2062,11 @@ export class ScionPageProjectDetail extends LitElement {
     if (this.isStaleAgentsLoad(gen)) return false;
 
     if (response.status === 422) {
-      // Candidate ceiling: remember the refusal for this committed label
-      // and drain instead.
-      this.agentWindow.recordRefusal(label);
+      // Candidate ceiling: remember the refusal and drain instead.
+      this.agentWindow.recordRefusal(serverQ);
       this.agentWindow.endSortedRequest(ticket);
       epoch.close(); // the drain runs its own epoch.
-      return await this.drainProjectAgents(trigger, label, gen);
+      return await this.drainProjectAgents(trigger, serverQ, gen);
     }
 
     if (!response.ok) {
@@ -2132,9 +2094,10 @@ export class ScionPageProjectDetail extends LitElement {
     // page's own copies (`this.agents`, the window).
     if (data.complete) {
       // The complete set: the response plus live creates it predates.
+      this.loadedServerQ = serverQ;
       this.agents = epoch.seed(data.agents || [], {
         partial: false,
-        isMember: (agent) => this.isProjectMember(agent, label),
+        isMember: (agent) => this.isProjectMember(agent),
       }).agents;
       if (!this.agentScopeCapabilities) {
         this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
@@ -2144,7 +2107,7 @@ export class ScionPageProjectDetail extends LitElement {
       // Paged: `this.agents` stays empty; stats and Stop-all read the
       // member index through `agentStats` instead.
       this.agents = [];
-      this.agentWindow.setPaged(this.seedPage(epoch, data), label, ticket.key);
+      this.agentWindow.setPaged(this.seedPage(epoch, data), serverQ, ticket.key);
     }
     return true;
   }
@@ -2152,38 +2115,31 @@ export class ScionPageProjectDetail extends LitElement {
   /**
    * The complete-set drain of a complete-needing view state, a 422, or the
    * held/capped chip. Its first page is today's legacy request. It ends in
-   * small (one page), held, or capped. A first page that fails (for
-   * example a label 400) keeps the previous data. Resolves `true` when a
-   * result was adopted.
+   * small (one page), held, or capped. A first page that fails keeps the
+   * previous data. Resolves `true` when a result was adopted.
    */
   private async drainProjectAgents(
     trigger: AgentsViewTrigger,
-    label: string,
+    serverQ: string,
     carriedGen?: number
   ): Promise<boolean> {
     const gen = carriedGen ?? this.beginAgentsLoad().gen;
 
     const params = new URLSearchParams();
-    if (filtersQueryDialectEnabled()) {
-      if (this.committedServerQ) params.set('q', this.committedServerQ);
-    } else if (label.includes('=')) {
-      params.append('label', label);
-    }
+    if (serverQ) params.set('q', serverQ);
     params.set('include', 'authority');
     const qs = params.toString();
     const url = qs
       ? `/api/v1/projects/${this.projectId}/agents?${qs}`
       : `/api/v1/projects/${this.projectId}/agents`;
 
-    const useDialect = filtersQueryDialectEnabled();
-    const hasServerOnly =
-      useDialect && hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext);
+    const hasServerOnly = hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext);
     let result: SeededDrainResult | null;
     try {
       result = await this.drainRunner.run({
         url,
         view: 'full',
-        ...(!hasServerOnly ? { isMember: (agent) => this.isProjectMember(agent, label) } : {}),
+        ...(!hasServerOnly ? { isMember: (agent) => this.isProjectMember(agent) } : {}),
       });
     } catch (err) {
       if (this.isStaleAgentsLoad(gen) || this.isAbortError(err)) return false;
@@ -2199,6 +2155,7 @@ export class ScionPageProjectDetail extends LitElement {
       return false;
     }
 
+    this.loadedServerQ = serverQ;
     this.agents = result.agents;
     this.agentScopeCapabilities =
       result.capabilities ?? this.agents.find((a) => a._capabilities)?._capabilities;
@@ -2207,14 +2164,9 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /** Membership of a live-created agent during a drain: this project, and the committed filter, if any. */
-  private isProjectMember(agent: Agent, label: string): boolean {
+  private isProjectMember(agent: Agent): boolean {
     if (agent.projectId !== this.projectId) return false;
-    if (filtersQueryDialectEnabled()) {
-      return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
-    }
-    const eq = label.indexOf('=');
-    if (eq < 0) return true;
-    return agent.labels?.[label.slice(0, eq)] === label.slice(eq + 1);
+    return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
   }
 
   /** The server sort of a sorted request: `created`, or `updated` for every other sort field. */
@@ -2230,7 +2182,7 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private onAgentViewStateChanged(): void {
     this.viewEpoch++;
-    const superseded = this.agentWindow.supersededRequest(this.committedLabel);
+    const superseded = this.agentWindow.supersededRequest(this.committedServerQ);
     if (superseded) {
       this.cancelAgentsLoad();
       // Before any result, whatever was superseded is re-sent as the page
@@ -2309,7 +2261,6 @@ export class ScionPageProjectDetail extends LitElement {
 
   /** The window's own paged navigation and paged-chip fetches. */
   private async fetchAgentsPage(params: PagedPageParams): Promise<PagedPageResult> {
-    const label = this.committedLabel.trim();
     const qs = new URLSearchParams();
     qs.set('sort', this.serverSortField);
     qs.set('dir', this.sortDir);
@@ -2318,12 +2269,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (params.ids?.length) qs.set('ids', params.ids.join(','));
     if (params.wantStats) qs.set('stats', '1');
     qs.set('include', 'authority');
-    if (filtersQueryDialectEnabled()) {
-      if (this.committedServerQ) qs.set('q', this.committedServerQ);
-    } else {
-      if (label) qs.set('label', label);
-      if (this.phaseFilter) qs.set('phase', this.phaseFilter);
-    }
+    if (this.committedServerQ) qs.set('q', this.committedServerQ);
 
     const epoch = new AgentSeedEpoch();
     try {
@@ -2611,18 +2557,6 @@ export class ScionPageProjectDetail extends LitElement {
     localStorage.setItem(AGENTS_EXPANDED_STORAGE_KEY, String(this.agentsExpanded));
   }
 
-  private setPhaseFilter(phase: AgentPhase | ''): void {
-    if (this.phaseFilter === phase) return;
-    this.phaseFilter = phase;
-    if (phase) {
-      localStorage.setItem(`scion-filter-project-agents-phase-${this.projectId}`, phase);
-    } else {
-      localStorage.removeItem(`scion-filter-project-agents-phase-${this.projectId}`);
-    }
-    this.agentWindow.setViewState({ phaseFilter: phase });
-    this.onAgentViewStateChanged();
-  }
-
   private toggleSort(field: AgentSortField): void {
     if (this.sortField === field) {
       this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
@@ -2702,19 +2636,25 @@ export class ScionPageProjectDetail extends LitElement {
     const nextHasClientOnly = hasClientOnlyKeys(fq, PROJECT_AGENTS_FILTER_SCHEMA);
     const serverChanged = nextQ !== this.committedServerQ;
     const clientOnlyChanged = nextHasClientOnly !== this.committedHasClientOnly;
+    this.serverQBeforeCommit = this.committedServerQ;
+    this.filterQueryBeforeCommit = this.committedFilterQuery;
+    this.hasClientOnlyBeforeCommit = this.committedHasClientOnly;
     this.committedServerQ = nextQ;
     this.committedFilterQuery = fq;
     this.committedHasClientOnly = nextHasClientOnly;
     const ctx = this.filterContext;
+    const pred = (a: Agent) => matchAgentQuery(fq, a, ctx);
     this.agentWindow.setViewState({
-      filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
-      committedFilterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
+      filterPredicate: pred,
+      committedFilterPredicate: pred,
       committedPhasePredicate: phasePredicateForQuery(fq),
       serverQuery: nextQ,
       hasClientOnlyFilter: nextHasClientOnly,
     });
-    if (serverChanged || clientOnlyChanged) {
+    if (serverChanged) {
       this.backgroundRefresh('label-commit');
+    } else if (clientOnlyChanged) {
+      this.onAgentViewStateChanged();
     }
   }
 
@@ -2735,41 +2675,49 @@ export class ScionPageProjectDetail extends LitElement {
         const fq = parsed.query;
         const nextQ = serverSubset(fq, PROJECT_AGENTS_FILTER_SCHEMA);
         const nextHasClientOnly = hasClientOnlyKeys(fq, PROJECT_AGENTS_FILTER_SCHEMA);
+        const serverChanged = nextQ !== this.committedServerQ;
+        const clientOnlyChanged = nextHasClientOnly !== this.committedHasClientOnly;
+        this.serverQBeforeCommit = this.committedServerQ;
+        this.filterQueryBeforeCommit = this.committedFilterQuery;
+        this.hasClientOnlyBeforeCommit = this.committedHasClientOnly;
         this.filterQuery = fq;
         this.committedFilterQuery = fq;
         this.committedServerQ = nextQ;
         this.committedHasClientOnly = nextHasClientOnly;
         const ctx = this.filterContext;
+        const pred = (a: Agent) => matchAgentQuery(fq, a, ctx);
         this.agentWindow.setViewState({
-          filterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
-          committedFilterPredicate: (a: Agent) => matchAgentQuery(fq, a, ctx),
+          filterPredicate: pred,
+          committedFilterPredicate: pred,
           committedPhasePredicate: phasePredicateForQuery(fq),
           serverQuery: nextQ,
           hasClientOnlyFilter: nextHasClientOnly,
         });
-        this.backgroundRefresh('label-commit');
+        if (this.loadedServerQ === '' && !hasServerOnlyAgentTerms(fq, ctx)) {
+          if (!this.agentWindow.isLocal || !this.hasAgentsResult) {
+            this.onAgentViewStateChanged();
+          }
+        } else if (serverChanged) {
+          this.backgroundRefresh('label-commit');
+        } else if (clientOnlyChanged) {
+          this.onAgentViewStateChanged();
+        }
       }
     }
   }
 
   private get hasActiveDialectFilter(): boolean {
-    return (
-      filtersQueryDialectEnabled() &&
-      (this.filterQueryText.trim() !== '' || this.committedServerQ !== '')
-    );
+    return this.filterQueryText.trim() !== '' || this.committedServerQ !== '';
   }
 
   private renderFilterBar() {
-    const useDialect = filtersQueryDialectEnabled();
-    const activePhase = useDialect
-      ? getActiveSingleKeyValue(this.filterQueryText, 'phase', PROJECT_AGENTS_FILTER_SCHEMA)
-      : this.phaseFilter;
+    const activePhase = getActiveSingleKeyValue(
+      this.filterQueryText,
+      'phase',
+      PROJECT_AGENTS_FILTER_SCHEMA
+    );
     const onPhaseClick = (phase: AgentPhase | ''): void => {
-      if (useDialect) {
-        this.setPhaseChipInQuery(phase);
-      } else {
-        this.setPhaseFilter(phase);
-      }
+      this.setPhaseChipInQuery(phase);
     };
 
     return html`
@@ -2810,46 +2758,14 @@ export class ScionPageProjectDetail extends LitElement {
             Error
           </button>
         </div>
-        ${useDialect
-          ? html`
-              <scion-filter-box
-                view="project_agents"
-                .value=${this.filterQueryText}
-                .valueSuggestions=${this.agentValueSuggestions}
-                placeholder="Filter agents… (try phase:running,error -label:tmp)"
-                @filter-input=${this.handleFilterInput}
-                @filter-commit=${this.handleFilterCommit}
-              ></scion-filter-box>
-            `
-          : html`
-              <sl-input
-                size="small"
-                placeholder="Filter by label (key=value)"
-                clearable
-                .value=${this.labelFilter}
-                @sl-input=${(e: Event) => {
-                  this.labelFilter = (e.target as HTMLElement & { value: string }).value;
-                  // Live preview only — no request per keystroke. `setViewState` never fetches, so
-                  // this is always free regardless of window state.
-                  this.agentWindow.setViewState({ label: this.labelFilter });
-                }}
-                @sl-change=${() => {
-                  this.labelBeforeCommit = this.committedLabel;
-                  this.committedLabel = this.labelFilter;
-                  this.backgroundRefresh('label-commit');
-                }}
-                @sl-clear=${() => {
-                  this.labelBeforeCommit = this.committedLabel;
-                  this.labelFilter = '';
-                  this.committedLabel = '';
-                  this.agentWindow.setViewState({ label: '' });
-                  this.backgroundRefresh('label-commit');
-                }}
-                style="max-width: 220px;"
-              >
-                <sl-icon slot="prefix" name="tag"></sl-icon>
-              </sl-input>
-            `}
+        <scion-filter-box
+          view="project_agents"
+          .value=${this.filterQueryText}
+          .valueSuggestions=${this.agentValueSuggestions}
+          placeholder="Filter agents… (try phase:running,error -label:tmp)"
+          @filter-input=${this.handleFilterInput}
+          @filter-commit=${this.handleFilterCommit}
+        ></scion-filter-box>
         ${this.viewMode === 'grid'
           ? html`
               <sl-dropdown>
@@ -3808,7 +3724,7 @@ export class ScionPageProjectDetail extends LitElement {
     // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
     const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     const win = this.agentWindow;
-    if (win.state === 'paged' && !win.isSortedEligible(this.committedLabel)) {
+    if (win.state === 'paged' && !win.isSortedEligible(this.committedServerQ)) {
       return this.agentsLoading
         ? html`<div class="empty-filter-state">Loading agents…</div>`
         : html`<div class="empty-filter-state">
@@ -3823,9 +3739,7 @@ export class ScionPageProjectDetail extends LitElement {
       if (display.length === 0) return this.renderNoAgentRows();
       return html`<scion-agent-tree-view
         .agents=${display}
-        filterKey=${filtersQueryDialectEnabled()
-          ? this.filterQueryText
-          : `${this.phaseFilter}|${this.labelFilter}`}
+        filterKey=${this.filterQueryText}
       ></scion-agent-tree-view>`;
     }
     if (this.viewMode === 'grid') {

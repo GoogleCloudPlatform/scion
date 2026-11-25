@@ -344,6 +344,25 @@ func TestLimits(t *testing.T) {
 	if _, err := filterquery.Parse(strings.Join(terms, " "), known); err == nil || err.Code != filterquery.ErrCodeLimit {
 		t.Errorf("over MaxTerms: got %v, want limit error", err)
 	}
+
+	// Distinct referent cap: 20 distinct refs across project/broker/owner (with
+	// case-insensitive duplicates) pass; 21 distinct refs fail with ErrCodeLimit.
+	atCap := "project:p1,p2,p3,p4,p5,p6,p7,p8,p9,p10 broker:b1,b2,b3,b4,b5,b6,b7,b8,b9,b10 project:P1"
+	qAtCap, pErr := filterquery.Parse(atCap, known)
+	if pErr != nil {
+		t.Fatalf("Parse atCap: %v", pErr)
+	}
+	if vErr := schemas.Agents.Validate(qAtCap); vErr != nil {
+		t.Errorf("Validate atCap unexpected error: %v", vErr)
+	}
+	overCap := atCap + " owner:o1"
+	qOverCap, pErr := filterquery.Parse(overCap, known)
+	if pErr != nil {
+		t.Fatalf("Parse overCap: %v", pErr)
+	}
+	if vErr := schemas.Agents.Validate(qOverCap); vErr == nil || vErr.Code != filterquery.ErrCodeLimit {
+		t.Errorf("Validate overCap = %v, want ErrCodeLimit", vErr)
+	}
 }
 
 func FuzzParse(f *testing.F) {

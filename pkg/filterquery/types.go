@@ -25,10 +25,11 @@ import (
 
 // Query limits enforced by Parse and Schema.Validate.
 const (
-	MaxInputBytes   = 512
-	MaxTerms        = 32
-	MaxValuesPerKey = 20
-	MaxTextRunes    = 200
+	MaxInputBytes        = 512
+	MaxTerms             = 32
+	MaxValuesPerKey      = 20
+	MaxTextRunes         = 200
+	MaxDistinctReferents = 20
 )
 
 // Error codes returned by Parse and Schema.Validate.

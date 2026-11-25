@@ -818,7 +818,10 @@ export class AgentListWindow extends EventTarget {
    */
   get items(): Agent[] {
     if (this._state === 'paged') {
-      if (this.viewState.filterPredicate) {
+      if (
+        this.viewState.filterPredicate &&
+        this.viewState.filterPredicate !== this.viewState.committedFilterPredicate
+      ) {
         return this.pageItems.filter(this.viewState.filterPredicate);
       }
       return this.filterByLabel(this.pageItems);
@@ -1309,8 +1312,13 @@ export class AgentListWindow extends EventTarget {
           this.memberIndex.delete(id);
           return false;
         }
+        const prevPhase = this.memberIndex.getPhase(id);
+        const prevPassed =
+          !this.viewState.committedPhasePredicate ||
+          (prevPhase !== undefined && this.viewState.committedPhasePredicate(prevPhase));
         this.memberIndex.set(id, agent.phase);
-        return this.withinPageKRange(this.kOf(agent), rangeBefore);
+        const newlyPasses = Boolean(this.viewState.committedPhasePredicate) && !prevPassed;
+        return newlyPasses || this.withinPageKRange(this.kOf(agent), rangeBefore);
       }
       // An existing off-page member's phase changes unconditionally: only
       // *adding* a new member is gated by the add rule.
@@ -1353,6 +1361,11 @@ export class AgentListWindow extends EventTarget {
   ): boolean {
     if (!this.memberIndex.has(id)) return false; // neither on-page nor a member: ignored.
     if (this.viewState.committedFilterPredicate || this.viewState.committedPhasePredicate) {
+      const prevPhase = this.memberIndex.getPhase(id);
+      const prevPassed =
+        !this.viewState.committedPhasePredicate ||
+        (prevPhase !== undefined && this.viewState.committedPhasePredicate(prevPhase));
+      let newlyPasses = false;
       if (delta.phase) {
         if (
           this.viewState.committedPhasePredicate &&
@@ -1363,10 +1376,15 @@ export class AgentListWindow extends EventTarget {
           return false;
         }
         this.memberIndex.set(id, delta.phase);
+        if (this.viewState.committedPhasePredicate && !prevPassed) {
+          newlyPasses = true;
+        }
       }
-      return delta.lastActivityEvent && this.serverSort === 'updated'
-        ? this.withinPageKRange(delta.lastActivityEvent, rangeBefore)
-        : false;
+      const enteredRange =
+        delta.lastActivityEvent && this.serverSort === 'updated'
+          ? this.withinPageKRange(delta.lastActivityEvent, rangeBefore)
+          : false;
+      return newlyPasses || enteredRange;
     }
     const prevPhase = this.memberIndex.getPhase(id);
     const prevPassed = !this.viewState.phaseFilter || prevPhase === this.viewState.phaseFilter;

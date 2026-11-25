@@ -3,7 +3,7 @@ title: Filter Queries
 description: Unified key:value filter query dialect for Scion web list views.
 ---
 
-Scion list views share a Gmail/GitHub-style `key:value` filter query dialect (gated behind the `filters.query_dialect` experiment).
+Scion list views share a Gmail/GitHub-style `key:value` filter query dialect.
 
 ## Syntax
 
@@ -21,7 +21,7 @@ Scion list views share a Gmail/GitHub-style `key:value` filter query dialect (ga
 ### Reserved syntax and limits
 
 - Bare `OR`, `AND`, parentheses `( )`, and comparison prefixes (`>`, `<`, `>=`, `<=`) are reserved and return a syntax error in structured mode.
-- Queries are bounded to 512 bytes, 32 terms, 20 values per key, and 200 characters of search text.
+- Queries are bounded to 512 bytes, 32 terms, 20 values per key, 200 characters of search text, and 20 distinct reference values (`project`, `broker`, `owner`).
 - On syntax or value errors, the web UI keeps the last valid filter applied while displaying the error inline; the Hub API returns `400 invalid_filter_query` with `details.offset` and `details.length` measured in **UTF-8 bytes** into the raw `q` query string.
 
 ## Views

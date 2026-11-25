@@ -22,17 +22,19 @@ import type { FilterRow, Query, Term } from './types.js';
 export interface AgentFilterContext {
   currentUserId?: string | undefined;
   currentUserEmail?: string | undefined;
+  /** Also match the project display name (`agent.project`), used by the agent graph. */
+  includeProjectName?: boolean | undefined;
 }
 
 /**
  * Adapt an Agent row to the filterquery FilterRow interface.
- * Covers all agents and project_agents keys (phase, activity, label, project,
- * harness, broker, template, owner, mode) plus name/slug text search.
+ * Covers all agents, project_agents, and graph keys (phase, activity, label,
+ * project, harness, broker, template, owner, mode) plus name/slug text search.
  */
 export function agentToFilterRow(agent: Agent, ctx?: AgentFilterContext): FilterRow {
   return {
     values(key: string): string[] {
-      switch (key) {
+      switch (key.toLowerCase()) {
         case 'phase':
           return agent.phase ? [agent.phase] : [];
         case 'activity':
@@ -49,6 +51,7 @@ export function agentToFilterRow(agent: Agent, ctx?: AgentFilterContext): Filter
           const out: string[] = [];
           if (agent.projectId) out.push(agent.projectId);
           if (agent.projectSlug) out.push(agent.projectSlug);
+          if (ctx?.includeProjectName && agent.project) out.push(agent.project);
           return out;
         }
         case 'harness': {

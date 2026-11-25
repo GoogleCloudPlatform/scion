@@ -27,24 +27,7 @@ import (
 	"time"
 )
 
-func TestListFilterQueryDialect_OffIsUnchanged(t *testing.T) {
-	f := newFixture(t, false)
-	// Dialect disabled (default).
-	aReview := f.publish(agentA, "doc.md", []byte("1"), "title=Normal+Review").Artifact.ID
-	// Mark aReview as review pending.
-	if _, err := f.db.Exec(`UPDATE artifact_version SET kind = ? WHERE artifact_id = ?`, VersionKindReview, aReview); err != nil {
-		t.Fatal(err)
-	}
-	aLiteral := f.publish(agentA, "lit.md", []byte("2"), "title="+url.QueryEscape("Notes about is:review")).Artifact.ID
-
-	// With dialect OFF, q=is:review searches literally for "is:review" in title/key.
-	got := listIDs(f.list(&userU, listPath+"&q="+url.QueryEscape("is:review")))
-	if !slices.Equal(got, []string{aLiteral}) {
-		t.Fatalf("dialect off q=is:review = %v, want [%s]", got, aLiteral)
-	}
-}
-
-func TestListFilterQueryDialect_GlobalAndPureTextParity(t *testing.T) {
+func TestListFilterQueryDialect_GlobalAndPureText(t *testing.T) {
 	f := newFixture(t, false)
 	f.host.slugs = map[string]string{
 		"proj-one": "project-1",
@@ -65,19 +48,6 @@ func TestListFilterQueryDialect_GlobalAndPureTextParity(t *testing.T) {
 	// 4. aPrivate: owned by agentX in project-2, NOT granted to userU (unreadable!)
 	_ = f.publish(agentX, "secret.md", []byte("4"), "title="+url.QueryEscape("Secret Report")).Artifact.ID
 
-	// Pure-text parity: dialect OFF vs ON must return identical IDs.
-	for _, raw := range []string{"report", "-v1", "design", "nonexistent:key"} {
-		f.svc.SetFilterQueryDialectEnabled(func(context.Context) bool { return false })
-		offIDs := listIDs(f.list(&userU, listPath+"&q="+url.QueryEscape(raw)))
-		f.svc.SetFilterQueryDialectEnabled(func(context.Context) bool { return true })
-		onIDs := listIDs(f.list(&userU, listPath+"&q="+url.QueryEscape(raw)))
-		if !slices.Equal(offIDs, onIDs) {
-			t.Errorf("pure-text parity %q: off=%v on=%v", raw, offIDs, onIDs)
-		}
-	}
-
-	// Enable dialect for structured tests.
-	f.svc.SetFilterQueryDialectEnabled(func(context.Context) bool { return true })
 	qList := func(q string) []string {
 		t.Helper()
 		got := listIDs(f.list(&userU, listPath+"&q="+url.QueryEscape(q)))
@@ -87,6 +57,20 @@ func TestListFilterQueryDialect_GlobalAndPureTextParity(t *testing.T) {
 	want := func(ids ...string) []string {
 		slices.Sort(ids)
 		return ids
+	}
+
+	// Pure-text fallback: inputs without known keys search title/key verbatim.
+	if got := qList("report"); !slices.Equal(got, want(aMine, aShared)) {
+		t.Errorf("pure-text report = %v, want %v", got, want(aMine, aShared))
+	}
+	if got := qList("-v1"); !slices.Equal(got, want(aProj)) {
+		t.Errorf("pure-text -v1 = %v, want %v", got, want(aProj))
+	}
+	if got := qList("design"); !slices.Equal(got, want(aProj)) {
+		t.Errorf("pure-text design = %v, want %v", got, want(aProj))
+	}
+	if got := qList("nonexistent:key"); len(got) != 0 {
+		t.Errorf("pure-text nonexistent:key = %v, want empty", got)
 	}
 
 	if got := qList("is:review"); !slices.Equal(got, want(aMine)) {
@@ -143,7 +127,6 @@ func TestListFilterQueryDialect_GlobalAndPureTextParity(t *testing.T) {
 
 func TestListFilterQueryDialect_ProjectScoped(t *testing.T) {
 	f := newFixture(t, false)
-	f.svc.SetFilterQueryDialectEnabled(func(context.Context) bool { return true })
 
 	aHomed := f.publish(agentA, "homed.md", []byte("1"), "title=Homed").Artifact.ID
 	aShared := f.publish(agentX, "shared.md", []byte("2"), "title=Shared").Artifact.ID
@@ -181,7 +164,6 @@ func TestListFilterQueryDialect_ProjectScoped(t *testing.T) {
 
 func TestListFilterQueryDialect_ValidationErrorsAndCursorBinding(t *testing.T) {
 	f := newFixture(t, false)
-	f.svc.SetFilterQueryDialectEnabled(func(context.Context) bool { return true })
 	f.host.slugs = map[string]string{"proj-one": "project-1"}
 
 	// Validation error cases -> 400 invalid_filter_query with offset/length.

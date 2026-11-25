@@ -33,6 +33,13 @@ import { stateManager } from '../../client/state.js';
 import type { AgentListWindow } from '../../client/agent-list-window.js';
 import { AgentDrainRunner } from '../../client/agent-drain.js';
 import {
+  getViewSchema,
+  knownKeysFor,
+  parse as parseFilterQuery,
+  serverSubset,
+  setSingleKeyInQuery,
+} from '../../shared/filter-query/index.js';
+import {
   FakeEventSource,
   SCOPE_CAPS,
   fakeFetch,
@@ -44,17 +51,21 @@ import {
   type Fake,
 } from './__fixtures__/global-agents-endpoint.js';
 
+const AGENTS_SCHEMA = getViewSchema('agents')!;
+const KNOWN_AGENT_KEYS = knownKeysFor(AGENTS_SCHEMA);
+
 interface Internals {
   agentWindow: AgentListWindow;
   agents: Agent[];
   error: string | null;
   loading: boolean;
   agentsLoading: boolean;
-  committedLabel: string;
+  filterQueryText: string;
+  committedServerQ: string;
   toggleSort(field: string): void;
-  setPhaseFilter(phase: string): void;
-  setModeFilter(mode: string): void;
-  setScope(scope: 'all' | 'mine' | 'shared'): void;
+  setChipInQuery(key: 'phase' | 'is', value: string): void;
+  handleFilterInput(e: CustomEvent): void;
+  handleFilterCommit(e: CustomEvent): void;
   backgroundRefresh(trigger: string): void;
   handleStopAll(): Promise<void>;
   handleAgentAction(id: string, action: string, event?: MouseEvent): Promise<void>;
@@ -119,22 +130,59 @@ function text(el: TestEl): string {
   return el.shadowRoot?.textContent?.replace(/\s+/g, ' ') ?? '';
 }
 
-function labelInput(el: TestEl): HTMLElement & { value: string } {
-  const inputs = Array.from(el.shadowRoot?.querySelectorAll('sl-input') ?? []);
-  return inputs.find(
-    (i) => i.getAttribute('placeholder') === 'Filter by label (key=value)'
-  ) as HTMLElement & { value: string };
+function setPhaseFilter(el: TestEl, phase: string): void {
+  internals(el).setChipInQuery('phase', phase);
+}
+
+function setScope(el: TestEl, scope: 'all' | 'mine' | 'shared'): void {
+  internals(el).setChipInQuery('is', scope === 'all' ? '' : scope);
+}
+
+function setModeFilter(el: TestEl, mode: string): void {
+  const next = setSingleKeyInQuery(internals(el).filterQueryText, 'mode', mode, AGENTS_SCHEMA);
+  const parsed = parseFilterQuery(next, KNOWN_AGENT_KEYS);
+  const q = parsed.query ?? { mode: 'text' as const, text: '' };
+  internals(el).handleFilterInput(
+    new CustomEvent('filter-input', { detail: { value: next, query: q, valid: true } })
+  );
+  internals(el).handleFilterCommit(
+    new CustomEvent('filter-commit', {
+      detail: { value: next, query: q, serverQ: serverSubset(q, AGENTS_SCHEMA) },
+    })
+  );
 }
 
 function typeLabel(el: TestEl, value: string): void {
-  const input = labelInput(el);
-  input.value = value;
-  input.dispatchEvent(new Event('sl-input'));
+  const next = setSingleKeyInQuery(
+    internals(el).filterQueryText,
+    'label',
+    value.trim(),
+    AGENTS_SCHEMA
+  );
+  const parsed = parseFilterQuery(next, KNOWN_AGENT_KEYS);
+  const q = parsed.query ?? { mode: 'text' as const, text: '' };
+  internals(el).handleFilterInput(
+    new CustomEvent('filter-input', { detail: { value: next, query: q, valid: true } })
+  );
 }
 
 function commitLabel(el: TestEl, value: string): void {
-  typeLabel(el, value);
-  labelInput(el).dispatchEvent(new Event('sl-change'));
+  const next = setSingleKeyInQuery(
+    internals(el).filterQueryText,
+    'label',
+    value.trim(),
+    AGENTS_SCHEMA
+  );
+  const parsed = parseFilterQuery(next, KNOWN_AGENT_KEYS);
+  const q = parsed.query ?? { mode: 'text' as const, text: '' };
+  internals(el).handleFilterInput(
+    new CustomEvent('filter-input', { detail: { value: next, query: q, valid: true } })
+  );
+  internals(el).handleFilterCommit(
+    new CustomEvent('filter-commit', {
+      detail: { value: next, query: q, serverQ: serverSubset(q, AGENTS_SCHEMA) },
+    })
+  );
 }
 
 function setView(el: TestEl, view: string): void {
@@ -252,10 +300,11 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     localStorage.clear();
+    window.history.replaceState(null, '', '/agents');
   });
 
   describe('the first request', () => {
-    it('is one sorted fit request with stats; the scope is sent only when not all, the label only with =, and the phase when set', async () => {
+    it('is one sorted fit request with stats; filter terms are sent via q=', async () => {
       const fake: Fake = {
         agents: Array.from({ length: 25 }, (_, i) => makeAgent(i)),
         requests: [],
@@ -270,22 +319,26 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(q.get('limit')).toBe('25');
       expect(q.get('fit')).toBe('500');
       expect(q.get('stats')).toBe('1');
-      expect(q.get('phase')).toBe('running');
+      expect(q.get('q')).toBe('phase:running');
       expect(q.has('scope')).toBe(false);
       expect(q.has('label')).toBe(false);
 
       commitLabel(el, 'env');
       await settle(el);
-      // A bare key is a complete-needing label: a drain, sent without the label.
-      const drainQ = new URL(fake.requests.at(-1)!, 'http://x').searchParams;
-      expect(drainQ.has('sort')).toBe(false);
-      expect(drainQ.has('label')).toBe(false);
+      // Bare-key label is now pushed down via q= (sorted-eligible).
+      const bareQ = new URL(fake.requests.at(-1)!, 'http://x').searchParams;
+      expect(bareQ.get('sort')).toBe('updated');
+      expect(bareQ.get('q')).toBe('label:env phase:running');
       commitLabel(el, 'env=prod');
       await settle(el);
-      expect(new URL(fake.requests.at(-1)!, 'http://x').searchParams.get('label')).toBe('env=prod');
-      internals(el).setScope('mine');
+      expect(new URL(fake.requests.at(-1)!, 'http://x').searchParams.get('q')).toBe(
+        'label:env=prod phase:running'
+      );
+      setScope(el, 'mine');
       await settle(el);
-      expect(new URL(fake.requests.at(-1)!, 'http://x').searchParams.get('scope')).toBe('mine');
+      expect(new URL(fake.requests.at(-1)!, 'http://x').searchParams.get('q')).toBe(
+        'is:mine label:env=prod phase:running'
+      );
     });
 
     it('a complete response renders every agent with the scope capabilities; above 500 the first page is shown', async () => {
@@ -409,7 +462,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       await vi.waitFor(() => expect(h.heldCount).toBe(1));
       // Drain page 2 is held. The drain carries no sorted request, so a
       // phase filter change (local once held) has nothing to supersede.
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       await el.updateComplete;
       h.release();
       await settle(el);
@@ -511,72 +564,6 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
   });
 
   describe('a legacy fallback and drain failures', () => {
-    it('a legacy server that honours phase answers a phased first request with part of the set: the whole set is drained, not marked complete from that page', async () => {
-      const agents = Array.from({ length: 1200 }, (_, i) =>
-        makeAgent(i, { phase: i % 3 === 0 ? 'stopped' : 'running' })
-      );
-      const requests: string[] = [];
-      const full: Fake = { agents, requests };
-      const stopped: Fake = { agents: agents.filter((a) => a.phase === 'stopped'), requests };
-      const legacy = (input: string | URL | Request, init?: RequestInit) => {
-        const raw =
-          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        const u = new URL(raw, 'http://localhost');
-        const phase = u.searchParams.get('phase');
-        for (const k of ['sort', 'dir', 'fit', 'stats', 'limit', 'phase']) u.searchParams.delete(k);
-        const target = phase === 'stopped' ? stopped : full;
-        return fakeFetch(target)(u.pathname + (u.search || ''), init);
-      };
-      vi.stubGlobal('fetch', legacy);
-      localStorage.setItem('scion-filter-agents-phase', 'stopped');
-      const el = await mount();
-      // The phased first request, then three unphased legacy pages.
-      expect(requests.length).toBe(1 + 3);
-      expect(query(requests[1]).has('cursor')).toBe(false);
-      expect(query(requests[1]).has('phase')).toBe(false);
-      expect(internals(el).agents).toHaveLength(1200);
-      expect(internals(el).agentWindow.state).toBe('held');
-      expect(internals(el).agentWindow.total).toBe(400);
-    });
-
-    it('a full phased legacy first page with a nextCursor is not carried: the whole set is drained from the start without the phase', async () => {
-      // 600 of 1,800 stopped, so the phased first page is a full 500-row page.
-      const agents = Array.from({ length: 1800 }, (_, i) =>
-        makeAgent(i, { phase: i % 3 === 0 ? 'stopped' : 'running' })
-      );
-      const requests: string[] = [];
-      const full: Fake = { agents, requests };
-      const stopped: Fake = { agents: agents.filter((a) => a.phase === 'stopped'), requests };
-      const sentPhases: Array<string | null> = [];
-      // An old server: no sorted mode, `phase` honoured, `limit` ignored.
-      const legacy = (input: string | URL | Request, init?: RequestInit) => {
-        const raw =
-          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        const u = new URL(raw, 'http://localhost');
-        sentPhases.push(u.searchParams.get('phase'));
-        const phase = u.searchParams.get('phase');
-        for (const k of ['sort', 'dir', 'fit', 'stats', 'limit', 'phase']) u.searchParams.delete(k);
-        const target = phase === 'stopped' ? stopped : full;
-        return fakeFetch(target)(u.pathname + (u.search || ''), init);
-      };
-      vi.stubGlobal('fetch', legacy);
-      localStorage.setItem('scion-filter-agents-phase', 'stopped');
-      const el = await mount();
-      // The phased first request, then four unphased drain pages from the start.
-      expect(sentPhases).toEqual(['stopped', null, null, null, null]);
-      expect(requests).toHaveLength(1 + 4);
-      expect(requests.slice(1).map((r) => query(r).get('cursor'))).toEqual([
-        null,
-        '500',
-        '1000',
-        '1500',
-      ]);
-      expect(internals(el).agents).toHaveLength(1800);
-      expect(internals(el).agentWindow.state).toBe('held');
-      expect(internals(el).agentWindow.total).toBe(600);
-      expect(stateManager.isAgentSetComplete('full')).toBe(true);
-    });
-
     it('an empty readable first drain page then a failing page is an incomplete set, not the error path', async () => {
       const fake: Fake = {
         agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
@@ -646,7 +633,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         vi.stubGlobal('fetch', h.fn);
         const el = await mountUnsettled();
         await vi.waitFor(() => expect(h.sent).toHaveLength(1));
-        if (change === 'phase') internals(el).setPhaseFilter('stopped');
+        if (change === 'phase') setPhaseFilter(el, 'stopped');
         else internals(el).toggleSort('updated');
         h.release();
         await settle(el);
@@ -654,7 +641,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         expect(h.sent[0].signal?.aborted).toBe(true);
         expect(h.sent).toHaveLength(2);
         const q = query(h.sent[1].url);
-        if (change === 'phase') expect(q.get('phase')).toBe('stopped');
+        if (change === 'phase') expect(q.get('q')).toBe('phase:stopped');
         else expect(q.get('dir')).toBe('asc');
         const win = internals(el).agentWindow;
         expect(win.state).toBe('paged');
@@ -853,9 +840,10 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(fake.requests.length).toBe(2);
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
       unmount(el);
+      window.history.replaceState(null, '', '/agents');
       const el2 = await mount();
       expect(fake.requests.length).toBe(2);
-      expect(internals(el2).committedLabel).toBe('');
+      expect(internals(el2).committedServerQ).toBe('');
       expect(internals(el2).agentWindow.display.length).toBe(25);
     });
 
@@ -870,20 +858,20 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(fake.requests.length).toBe(1);
       commitLabel(el, 'env=prod');
       await settle(el);
-      internals(el).setScope('all');
+      setScope(el, 'all');
       await settle(el);
       expect(fake.requests.length).toBe(3);
-      expect(new URL(fake.requests[2], 'http://x').searchParams.get('label')).toBe('env=prod');
+      expect(new URL(fake.requests[2], 'http://x').searchParams.get('q')).toBe('label:env=prod');
       expect(stateManager.isAgentSetComplete('full')).toBe(false);
       unmount(el);
 
       // A dashboard-scope page that loads no agents (the projects list).
       stateManager.setScope({ type: 'dashboard' });
+      window.history.replaceState(null, '', '/agents');
       const el2 = await mount();
       expect(fake.requests.length).toBe(4);
       const q = new URL(fake.requests[3], 'http://x').searchParams;
-      expect(q.has('scope')).toBe(false);
-      expect(q.has('label')).toBe(false);
+      expect(q.has('q')).toBe(false);
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
       expect(internals(el2).agentWindow.display.length).toBe(25);
     });
@@ -915,18 +903,18 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(stateManager.isAgentSetComplete('full')).toBe(false);
       commitLabel(el, 'env=prod');
       await settle(el);
-      internals(el).setScope('all');
+      setScope(el, 'all');
       await settle(el);
       expect(stateManager.isAgentSetComplete('full')).toBe(false);
       commitLabel(el, '');
       await settle(el);
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
 
-      internals(el).setScope('mine');
+      setScope(el, 'mine');
       await settle(el);
       commitLabel(el, 'env=prod');
       await settle(el);
-      internals(el).setScope('all');
+      setScope(el, 'all');
       await settle(el);
       fake.agents = Array.from({ length: 1200 }, (_, i) => makeAgent(i));
       commitLabel(el, '');
@@ -987,13 +975,13 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       };
       stubFake(fake);
       const el = await mount();
-      internals(el).setModeFilter('direct');
+      setModeFilter(el, 'direct');
       await settle(el);
       expect(fake.requests.length).toBe(1 + 3);
       expect(internals(el).agentWindow.state).toBe('held');
       expect(internals(el).agentWindow.total).toBe(600);
       expect(internals(el).agentWindow.items.every((a) => a.messageMode === 'direct')).toBe(true);
-      internals(el).setModeFilter('');
+      setModeFilter(el, '');
       await settle(el);
       expect(fake.requests.length).toBe(4);
     });
@@ -1061,7 +1049,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         expect(internals(el).agentWindow.state).toBe('held');
         const before = fake.requests.length;
         armed = true;
-        internals(el).setScope(scope);
+        setScope(el, scope);
         await settle(el);
         await flushLive(el);
         const members = fake.agents.filter(scope === 'mine' ? isMine : isShared).length;
@@ -1554,7 +1542,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       h.hold();
       commitLabel(el, 'env=prod');
       await vi.waitFor(() => expect(h.heldCount).toBe(1));
-      expect(query(h.sent.at(-1)!.url).get('label')).toBe('env=prod');
+      expect(query(h.sent.at(-1)!.url).get('q')).toBe('label:env=prod');
       expect(query(h.sent.at(-1)!.url).get('fit')).toBe('500');
       handleUpdate('agent.new-prod.created', {
         ...makeAgent(6000),
@@ -1591,7 +1579,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       const el = await mount();
       const win = internals(el).agentWindow;
       expect(win.state).toBe('capped');
-      expect(fake.requests.every((r) => query(r).get('scope') === 'mine')).toBe(true);
+      expect(fake.requests.every((r) => query(r).get('q') === 'is:mine')).toBe(true);
       expect(win.stale).toBe(false);
       const n = fake.requests.length;
       handleUpdate('agent.new-3.created', { ...makeAgent(9000), id: 'new-3', agentId: 'new-3' });
@@ -1653,7 +1641,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(internals(el).agentWindow.state).toBe('capped');
       const n = fake.requests.length;
       // Every agent is running, so a stopped filter matches nothing loaded.
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       await settle(el);
       expect(fake.requests.length).toBe(n);
       expect(internals(el).agentWindow.state).toBe('capped');
@@ -1675,7 +1663,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       reconnect();
       await settle(el);
       setView(el, 'list');
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       await settle(el);
       expect(internals(el).agentWindow.state).toBe('held');
       expect(text(el)).toContain('No Matching Agents');
@@ -1756,8 +1744,8 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
   describe('empty states', () => {
     const cases: Array<[scope: string, expected: string]> = [
       ['all', 'No Agents Found'],
-      ['mine', "You haven't created any agents yet."],
-      ['shared', 'No Shared Agents'],
+      ['mine', 'No Matching Agents'],
+      ['shared', 'No Matching Agents'],
     ];
     for (const [scope, expected] of cases) {
       it(`scope ${scope} with no agents shows "${expected}"`, async () => {
@@ -1775,7 +1763,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       };
       stubFake(fake);
       const el = await mount();
-      internals(el).setPhaseFilter('stopped');
+      setPhaseFilter(el, 'stopped');
       await settle(el);
       expect(text(el)).toContain('No Matching Agents');
       unmount(el);
@@ -1798,7 +1786,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         const el = await mount();
         expect(internals(el).agentWindow.state).toBe('small');
         expect(internals(el).agentWindow.stats.total).toBeGreaterThan(0);
-        internals(el).setPhaseFilter('stopped');
+        setPhaseFilter(el, 'stopped');
         await settle(el);
         expect(text(el)).toContain('No Matching Agents');
         expect(text(el)).not.toContain('No Shared Agents');
@@ -1809,8 +1797,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         fake.agents = Array.from({ length: 3000 }, (_, i) => makeAgent(i));
         const el2 = await mount();
         expect(internals(el2).agentWindow.state).toBe('paged');
-        expect(query(fake.requests.at(-1)!).get('scope')).toBe(scope);
-        expect(query(fake.requests.at(-1)!).get('phase')).toBe('stopped');
+        expect(query(fake.requests.at(-1)!).get('q')).toBe(`is:${scope} phase:stopped`);
         expect(text(el2)).toContain('No Matching Agents');
         expect(text(el2)).not.toContain('No Shared Agents');
         expect(text(el2)).not.toContain("You haven't created any agents yet.");
@@ -1935,10 +1922,10 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       ['flip the updated sort direction', (el) => internals(el).toggleSort('updated')],
       [
         'filter phase running',
-        (el) => internals(el).setPhaseFilter('running'),
+        (el) => setPhaseFilter(el, 'running'),
         expectRows((a) => a.phase === 'running', 'asc'),
       ],
-      ['clear the phase filter', (el) => internals(el).setPhaseFilter('')],
+      ['clear the phase filter', (el) => setPhaseFilter(el, '')],
       ['next page', (el) => internals(el).agentWindow.next()],
       ['previous page', (el) => internals(el).agentWindow.prev()],
       ['type a label without committing it', (el) => typeLabel(el, 'env=pr')],
@@ -1957,15 +1944,15 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         expectRows((a) => !!a.labels && 'team' in a.labels, 'asc'),
       ],
       ['clear bare-key label team', (el) => commitLabel(el, '')],
-      ['switch scope to mine', (el) => internals(el).setScope('mine')],
-      ['switch scope back to all', (el) => internals(el).setScope('all')],
+      ['switch scope to mine', (el) => setScope(el, 'mine')],
+      ['switch scope back to all', (el) => setScope(el, 'all')],
       ['switch to tree view', (el) => setView(el, 'graph')],
       ['switch from tree back to list view', (el) => setView(el, 'list')],
-      ['filter mode branch', (el) => internals(el).setModeFilter('branch')],
-      ['clear the mode filter', (el) => internals(el).setModeFilter('')],
+      ['filter mode branch', (el) => setModeFilter(el, 'branch')],
+      ['clear the mode filter', (el) => setModeFilter(el, '')],
       ['sort by name', (el) => internals(el).toggleSort('name')],
       ['sort by updated after the name sort', (el) => internals(el).toggleSort('updated')],
-      ['filter phase running after the tree', (el) => internals(el).setPhaseFilter('running')],
+      ['filter phase running after the tree', (el) => setPhaseFilter(el, 'running')],
       ['next page after the tree', (el) => internals(el).agentWindow.next()],
       [
         'lifecycle refresh after the tree',
@@ -1988,11 +1975,12 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       { count: 500, ...small },
       {
         count: 1200,
+        // Bare-key label is now server-side (sorted-eligible: 1 fit request).
         // prettier-ignore
-        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 3, 1, 1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         // prettier-ignore
         states: ['paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
-          'paged', 'paged', 'paged', 'paged', 'held', 'paged', 'paged', 'paged', 'held', 'held',
+          'paged', 'paged', 'paged', 'paged', 'small', 'paged', 'paged', 'paged', 'held', 'held',
           'held', 'held', 'held', 'held', 'held', 'held', 'held', 'held', 'held'],
       },
     ];
@@ -2028,16 +2016,14 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         expect(named(costs)).toEqual(named(c.costs));
         expect(named(states)).toEqual(named(c.states));
 
-        // Client navigation back to /agents: the flag is held (small or a
-        // completed drain), so the reuse branch issues no request. The
-        // persisted running filter still applies.
+        // Client navigation back to /agents (clean URL): the flag is held (small
+        // or a completed drain), so the reuse branch issues no request.
         unmount(el);
+        window.history.replaceState(null, '', '/agents');
         const n = fake.requests.length;
         const el2 = await mount();
         expect(fake.requests.length - n).toBe(0);
-        expect(internals(el2).agentWindow.total).toBe(
-          fake.agents.filter((a) => a.phase === 'running').length
-        );
+        expect(internals(el2).agentWindow.total).toBe(fake.agents.length);
       }, 60_000);
     }
 

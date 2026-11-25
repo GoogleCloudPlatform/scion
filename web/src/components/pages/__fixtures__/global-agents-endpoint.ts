@@ -20,6 +20,15 @@
  */
 
 import type { Agent, Capabilities, DeletionInfo } from '../../../shared/types.js';
+import {
+  getViewSchema,
+  knownKeysFor,
+  matchAgentQuery,
+  parse as parseFilterQuery,
+} from '../../../shared/filter-query/index.js';
+
+const AGENTS_SCHEMA = getViewSchema('agents')!;
+const KNOWN_AGENT_KEYS = knownKeysFor(AGENTS_SCHEMA);
 
 /** happy-dom has no EventSource; it opens on the next tick, so a drain's wait for it resolves at once. */
 export class FakeEventSource extends EventTarget {
@@ -150,7 +159,8 @@ export function fakeFetch(fake: Fake) {
       return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
     }
     const label = u.searchParams.get('label') ?? '';
-    if (fake.badLabels?.has(label)) {
+    const rawQ = u.searchParams.get('q') ?? '';
+    if (fake.badLabels?.has(label) || (rawQ && fake.badLabels?.has(rawQ))) {
       return Promise.resolve(jsonResponse({ error: { message: 'invalid label' } }, 400));
     }
     const scope = u.searchParams.get('scope');
@@ -162,6 +172,35 @@ export function fakeFetch(fake: Fake) {
     if (label.includes('=')) {
       const [k, v] = [label.slice(0, label.indexOf('=')), label.slice(label.indexOf('=') + 1)];
       list = list.filter((a) => a.labels?.[k] === v);
+    }
+    let parsedQ: ReturnType<typeof parseFilterQuery>['query'] | null = null;
+    if (rawQ) {
+      const parsed = parseFilterQuery(rawQ, KNOWN_AGENT_KEYS);
+      if (parsed.error || !parsed.query) {
+        return Promise.resolve(
+          jsonResponse({ error: { code: 'invalid_filter_query', message: parsed.error?.message } }, 400)
+        );
+      }
+      parsedQ = parsed.query;
+      if (parsedQ.mode === 'structured') {
+        for (const t of parsedQ.terms) {
+          if (t.key === 'label' && fake.badLabels && t.values.some((v) => fake.badLabels!.has(v))) {
+            return Promise.resolve(jsonResponse({ error: { message: 'invalid label' } }, 400));
+          }
+          if (t.key === 'is') {
+            for (const v of t.values) {
+              if (v === 'mine') list = list.filter((a) => (t.negate ? !isMine(a) : isMine(a)));
+              if (v === 'shared') list = list.filter((a) => (t.negate ? !isShared(a) : isShared(a)));
+            }
+          }
+        }
+      }
+      // Apply non-phase terms before stats (phase is applied after stats in sorted mode).
+      const nonPhaseQ =
+        parsedQ.mode === 'structured'
+          ? { ...parsedQ, terms: parsedQ.terms.filter((t) => t.key !== 'phase' && t.key !== 'is') }
+          : parsedQ;
+      list = list.filter((a) => matchAgentQuery(nonPhaseQ, a));
     }
 
     const sort = u.searchParams.get('sort');
@@ -193,7 +232,10 @@ export function fakeFetch(fake: Fake) {
       ...(fake.approximate ? { totalApproximate: true } : {}),
     });
     const phase = u.searchParams.get('phase') ?? '';
-    const phased = phase ? sorted.filter((a) => a.phase === phase) : sorted;
+    let phased = phase ? sorted.filter((a) => a.phase === phase) : sorted;
+    if (parsedQ) {
+      phased = phased.filter((a) => matchAgentQuery(parsedQ!, a));
+    }
     const limit = Number(u.searchParams.get('limit') ?? '25');
     const wantStats = u.searchParams.get('stats') !== null;
     const cursor = u.searchParams.get('cursor');

@@ -196,7 +196,6 @@ func TestListBadRequests(t *testing.T) {
 		listPath + "&review_pending=maybe",
 		listPath + "&owner=bob",
 		listPath + "&q=%00",
-		listPath + "&q=" + url.QueryEscape(string(slices.Repeat([]rune("é"), maxSearchLength+1))),
 		listPath + "&scope=%00",
 		listPath + "&scope=%ff",
 		listPath + "&scope=" + strings.Repeat("p", maxScopeLength+1),
@@ -206,7 +205,10 @@ func TestListBadRequests(t *testing.T) {
 			t.Errorf("%s: %d %s, want 400 bad_request", target, rec.Code, rec.Body.String())
 		}
 	}
-	if rec := f.do(&userU, http.MethodGet, listPath+"&q="+url.QueryEscape(string(slices.Repeat([]rune("é"), maxSearchLength))), nil, nil); rec.Code != http.StatusOK {
+	if rec := f.do(&userU, http.MethodGet, listPath+"&q="+url.QueryEscape(string(slices.Repeat([]rune("é"), 201))), nil, nil); rec.Code != http.StatusBadRequest || errCode(t, rec) != "invalid_filter_query" {
+		t.Errorf("q over length limit: %d %s, want 400 invalid_filter_query", rec.Code, rec.Body.String())
+	}
+	if rec := f.do(&userU, http.MethodGet, listPath+"&q="+url.QueryEscape(string(slices.Repeat([]rune("é"), 200))), nil, nil); rec.Code != http.StatusOK {
 		t.Errorf("q at the length limit: %d, want 200", rec.Code)
 	}
 	rec := f.do(&userU, http.MethodPut, "/api/v1/artifacts", nil, nil)

@@ -633,7 +633,7 @@ func (s *Server) agentListQueryFilter(ctx context.Context, w http.ResponseWriter
 	}
 
 	var queryScope store.AgentQueryScope
-	if rawQ := query.Get("q"); rawQ != "" && s.experimentEnabled(experiments.FiltersQueryDialect) {
+	if rawQ := query.Get("q"); rawQ != "" {
 		parsed, fqErr := filterquery.Parse(rawQ, schemas.Agents.HasKey)
 		if fqErr != nil {
 			writeInvalidFilterQuery(w, fqErr)

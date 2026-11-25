@@ -769,7 +769,6 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ExecContainers:               testAdminPolicyDeny,
 	experiments.CommandRequests:              testAdminPolicyDeny,
 	experiments.SuspendScreen:                testAdminPolicyDeny,
-	experiments.FiltersQueryDialect:          testAdminPolicyDeny,
 	experiments.AgentMoveBundle:              testAdminPolicyDeny,
 	experiments.NeverSuspend:                 testAdminPolicyDeny,
 	experiments.TokenomicsUsageLedger:        testAdminPolicyDeny,

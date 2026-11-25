@@ -84,9 +84,11 @@ export function setSingleKeyInQuery(
   }
 
   // When clearing the last remaining key terms, render via
-  // renderQueryPreservingMeaning so structured text/exclusions are not
-  // silently demoted into literal pure text (e.g. `phase:running -test` ->
-  // literal `-test` or `is:mine "a b"` -> literal `"a b"`).
+  // renderQueryPreservingMeaning so clean pure text (e.g. `is:mine "a b"` ->
+  // `a b`) is unquoted cleanly. If remaining text/exclusions cannot be
+  // represented in pure-text mode without a key (e.g. `phase:running -test`),
+  // fall through to splicing out the cleared key terms so the user's text is
+  // kept rather than silently dropped.
   if (!value) {
     const remainingTerms = res.query.terms.filter((t) => t.key.toLowerCase() !== target);
     if (remainingTerms.length === 0) {
@@ -96,7 +98,13 @@ export function setSingleKeyInQuery(
         ...(res.query.text !== undefined ? { text: res.query.text } : {}),
         ...(res.query.excludeText !== undefined ? { excludeText: res.query.excludeText } : {}),
       };
-      return renderQueryPreservingMeaning(remaining, known);
+      const rendered = renderQueryPreservingMeaning(remaining, known);
+      const hasRemainingText =
+        Boolean(res.query.text) ||
+        Boolean(res.query.excludeText && res.query.excludeText.length > 0);
+      if (rendered || !hasRemainingText) {
+        return rendered;
+      }
     }
   }
 
@@ -122,4 +130,100 @@ export function setSingleKeyInQuery(
     }
   }
   return trimASCIISpace(out);
+}
+
+/**
+ * Reports whether `input` currently has a positive single-value `is:<flag>` term
+ * (and no negated `-is:<flag>` term) for the given schema.
+ */
+export function hasIsFlagInQuery(input: string, flag: string, schema: ViewSchema): boolean {
+  const known = (k: string) => schema.keys.some((sk) => sk.name.toLowerCase() === k);
+  const res = parse(input, known);
+  if (!res.query || res.query.mode !== 'structured') return false;
+  const target = flag.toLowerCase();
+  let foundPositive = false;
+  for (const t of res.query.terms) {
+    if (t.key.toLowerCase() !== 'is') continue;
+    const hasTarget = t.values.some((v) => v.toLowerCase() === target);
+    if (!hasTarget) continue;
+    if (t.negate) return false;
+    if (t.values.length === 1) foundPositive = true;
+  }
+  return foundPositive;
+}
+
+/**
+ * Toggles an `is:<flag>` term in `input` while preserving the meaning of all
+ * other terms and free text. When promoting pure-text input to structured mode,
+ * quotes the text remainder when needed so leading `-`, `OR`/`AND`, quotes,
+ * spaces, or parens keep their literal meaning. When turning `flag` on, removes
+ * any mutually exclusive `is:<ex>` terms and any `-is:<flag>` negation first.
+ */
+export function toggleIsFlagInQuery(
+  input: string,
+  flag: string,
+  exclusiveFlags: readonly string[],
+  schema: ViewSchema
+): string {
+  const known = (k: string) => schema.keys.some((sk) => sk.name.toLowerCase() === k);
+  const target = flag.toLowerCase();
+  const active = hasIsFlagInQuery(input, target, schema);
+  const trimmed = trimASCIISpace(input);
+
+  if (!trimmed) {
+    return active ? '' : `is:${target}`;
+  }
+
+  const res = parse(input, known);
+  if (res.error || !res.query) {
+    return active ? trimmed : `is:${target} ${trimmed}`;
+  }
+  if (res.query.mode !== 'structured') {
+    if (active) return trimmed;
+    return `is:${target} ${formatText(res.query.text)}`;
+  }
+
+  const dropSet = new Set<string>(
+    active ? [target] : [target, ...exclusiveFlags.map((f) => f.toLowerCase())]
+  );
+  const toRemove = res.query.terms.filter((t) => {
+    if (t.key.toLowerCase() !== 'is') return false;
+    if (t.values.length !== 1) return false;
+    const val = t.values[0].toLowerCase();
+    if (active) {
+      return !t.negate && val === target;
+    }
+    return dropSet.has(val);
+  });
+
+  if (active) {
+    const removedSet = new Set(toRemove);
+    const remainingTerms = res.query.terms.filter((t) => !removedSet.has(t));
+    if (remainingTerms.length === 0) {
+      const remaining: Query = {
+        mode: 'structured',
+        terms: [],
+        ...(res.query.text !== undefined ? { text: res.query.text } : {}),
+        ...(res.query.excludeText !== undefined ? { excludeText: res.query.excludeText } : {}),
+      };
+      const rendered = renderQueryPreservingMeaning(remaining, known);
+      const hasRemainingText =
+        Boolean(res.query.text) ||
+        Boolean(res.query.excludeText && res.query.excludeText.length > 0);
+      if (rendered || !hasRemainingText) {
+        return rendered;
+      }
+    }
+  }
+
+  let out = input;
+  const sortedDesc = [...toRemove].sort((a, b) => b.offset - a.offset);
+  for (const t of sortedDesc) {
+    const before = out.slice(0, t.offset).replace(/[ \t\n\r]+$/, '');
+    const after = out.slice(t.offset + t.length).replace(/^[ \t\n\r]+/, '');
+    out = before && after ? `${before} ${after}` : before + after;
+  }
+  out = trimASCIISpace(out);
+  if (active) return out;
+  return out ? `is:${target} ${out}` : `is:${target}`;
 }

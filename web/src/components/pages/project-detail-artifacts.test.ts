@@ -200,9 +200,16 @@ describe('project Files area with artifacts', () => {
       updateComplete: Promise<boolean>;
     };
     await list.updateComplete;
-    const input = list.shadowRoot!.querySelector('sl-input') as HTMLElement & { value: string };
-    input.value = 'report';
-    input.dispatchEvent(new CustomEvent('sl-input'));
+    const box = list.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+      value: string;
+    };
+    box.dispatchEvent(
+      new CustomEvent('filter-input', {
+        detail: { value: 'report', query: { mode: 'text', text: 'report' }, valid: true },
+        bubbles: true,
+        composed: true,
+      })
+    );
     await pickSegment(el, 'workspace');
     await pickSegment(el, 'artifacts');
     const again = el.shadowRoot!.querySelector('scion-artifact-list') as HTMLElement & {
@@ -210,7 +217,7 @@ describe('project Files area with artifacts', () => {
     };
     await again.updateComplete;
     expect(
-      (again.shadowRoot!.querySelector('sl-input') as HTMLElement & { value: string }).value
+      (again.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & { value: string }).value
     ).toBe('');
   });
 
@@ -225,7 +232,7 @@ describe('project Files area with artifacts', () => {
   it('persists artifact filter queries under aq on project-detail without touching q', async () => {
     window.history.replaceState({}, '', `/projects/${PROJECT_ID}?q=phase%3Arunning&aq=is%3Ashared`);
     try {
-      const el = await mount(true, [{ name: 'datasets' }], { 'filters.query_dialect': true });
+      const el = await mount(true, [{ name: 'datasets' }]);
       const list = el.shadowRoot!.querySelector('scion-artifact-list') as HTMLElement & {
         urlParam: string;
         updateComplete: Promise<boolean>;

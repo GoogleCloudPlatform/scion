@@ -39,7 +39,6 @@ import {
 } from '../../client/principal-names.js';
 import type { ArtifactListItem, ArtifactResponse } from '../../client/artifacts.js';
 import {
-  filtersQueryDialectEnabled,
   getActiveSingleKeyValue,
   getViewSchema,
   knownKeysFor,
@@ -53,9 +52,6 @@ import type { FilterCommitDetail, FilterInputDetail } from './filter-box/filter-
 import './filter-box/filter-box.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from './artifact-owner-deleted.js';
 import './artifact-publish-dialog.js';
-
-/** Delay before a search runs, so typing does not send a request per key. */
-const SEARCH_DELAY_MS = 300;
 
 /** Most pages one load follows past empty pages before showing what it has. */
 const MAX_EMPTY_FOLLOWS = 10;
@@ -79,9 +75,6 @@ export class ScionArtifactList extends LitElement {
   @state() private loading = true;
   @state() private loadingMore = false;
   @state() private error: string | null = null;
-  @state() private query = '';
-  /** Only artifacts homed elsewhere and shared with this project. */
-  @state() private sharedOnly = false;
   @state() private filterQueryText = '';
   private committedServerQ = '';
   @state() private publishOpen = false;
@@ -90,7 +83,6 @@ export class ScionArtifactList extends LitElement {
   /** Owner display names by "kind:id"; missing while unknown. */
   @state() private names = new Map<string, string>();
 
-  private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private abort: AbortController | null = null;
 
   static override styles = css`
@@ -103,10 +95,6 @@ export class ScionArtifactList extends LitElement {
       gap: 0.75rem;
       align-items: center;
       margin-bottom: 0.75rem;
-    }
-    .toolbar sl-input {
-      flex: 1;
-      max-width: 22rem;
     }
     .toolbar .spacer {
       flex: 1;
@@ -251,16 +239,14 @@ export class ScionArtifactList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    if (filtersQueryDialectEnabled()) {
-      const urlQ = new URLSearchParams(window.location.search).get(this.urlParam) ?? '';
-      if (urlQ) {
-        this.filterQueryText = urlQ;
-        const parsed = parseFilterQuery(urlQ, knownKeysFor(PROJECT_ARTIFACTS_SCHEMA));
-        if (!parsed.error && parsed.query) {
-          const v = validateFilterQuery(parsed.query, PROJECT_ARTIFACTS_SCHEMA, urlQ);
-          if (!v.error) {
-            this.committedServerQ = serverSubset(parsed.query, PROJECT_ARTIFACTS_SCHEMA);
-          }
+    const urlQ = new URLSearchParams(window.location.search).get(this.urlParam) ?? '';
+    if (urlQ) {
+      this.filterQueryText = urlQ;
+      const parsed = parseFilterQuery(urlQ, knownKeysFor(PROJECT_ARTIFACTS_SCHEMA));
+      if (!parsed.error && parsed.query) {
+        const v = validateFilterQuery(parsed.query, PROJECT_ARTIFACTS_SCHEMA, urlQ);
+        if (!v.error) {
+          this.committedServerQ = serverSubset(parsed.query, PROJECT_ARTIFACTS_SCHEMA);
         }
       }
     }
@@ -269,14 +255,11 @@ export class ScionArtifactList extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    if (this.searchTimer) clearTimeout(this.searchTimer);
     this.abort?.abort();
   }
 
   private async load(more = false): Promise<void> {
     if (!this.projectId) return;
-    if (this.searchTimer) clearTimeout(this.searchTimer);
-    this.searchTimer = null;
     this.abort?.abort();
     const abort = new AbortController();
     this.abort = abort;
@@ -295,18 +278,11 @@ export class ScionArtifactList extends LitElement {
       // examines a bounded number of rows per request), so keep following
       // it until there is a row to show or the walk ends.
       for (let follow = 0; follow < MAX_EMPTY_FOLLOWS; follow++) {
-        const page = filtersQueryDialectEnabled()
-          ? await listProjectArtifacts(this.projectId, {
-              q: this.committedServerQ,
-              cursor,
-              signal: abort.signal,
-            })
-          : await listProjectArtifacts(this.projectId, {
-              q: this.query.trim(),
-              cursor,
-              signal: abort.signal,
-              sharedOnly: this.sharedOnly,
-            });
+        const page = await listProjectArtifacts(this.projectId, {
+          q: this.committedServerQ,
+          cursor,
+          signal: abort.signal,
+        });
         if (abort.signal.aborted) return;
         items = [...items, ...page.artifacts];
         cursor = page.nextCursor ?? '';
@@ -327,17 +303,6 @@ export class ScionArtifactList extends LitElement {
     }
   }
 
-  private onSearch = (e: Event): void => {
-    this.query = (e.target as HTMLInputElement).value;
-    // The cursor belongs to the previous query; Load more waits for the
-    // search, and a page still loading for the old query is dropped.
-    this.cursor = '';
-    this.abort?.abort();
-    this.loadingMore = false;
-    if (this.searchTimer) clearTimeout(this.searchTimer);
-    this.searchTimer = setTimeout(() => void this.load(), SEARCH_DELAY_MS);
-  };
-
   private open(item: ArtifactListItem): void {
     navigateTo(artifactPagePath({ id: item.id, scopeRef: item.scopeRef || this.projectId }));
   }
@@ -346,12 +311,6 @@ export class ScionArtifactList extends LitElement {
     this.publishOpen = false;
     const a = e.detail.artifact;
     navigateTo(artifactPagePath({ id: a.id, scopeRef: a.scopeRef || this.projectId }));
-  };
-
-  private onSharedOnly = (e: Event): void => {
-    this.sharedOnly = (e.target as HTMLInputElement).checked;
-    this.cursor = '';
-    void this.load();
   };
 
   private syncQueryToUrl(raw: string): void {
@@ -366,6 +325,13 @@ export class ScionArtifactList extends LitElement {
   }
 
   private onFilterInput = (e: CustomEvent<FilterInputDetail>): void => {
+    if (e.detail.value !== this.filterQueryText) {
+      // The cursor belongs to the previous query; Load more waits for the
+      // search, and a page still loading for the old query is dropped.
+      this.cursor = '';
+      this.abort?.abort();
+      this.loadingMore = false;
+    }
     this.filterQueryText = e.detail.value;
   };
 
@@ -457,19 +423,8 @@ export class ScionArtifactList extends LitElement {
   }
 
   private renderEmpty(): TemplateResult {
-    if (filtersQueryDialectEnabled()) {
-      if (this.committedServerQ.trim()) {
-        return html`<div class="empty">No artifacts match "${this.committedServerQ.trim()}".</div>`;
-      }
-    } else {
-      if (this.query.trim()) {
-        return html`<div class="empty">No artifacts match "${this.query.trim()}".</div>`;
-      }
-      if (this.sharedOnly) {
-        return html`<div class="empty">
-          No artifacts from other projects are shared with this project.
-        </div>`;
-      }
+    if (this.committedServerQ.trim()) {
+      return html`<div class="empty">No artifacts match "${this.committedServerQ.trim()}".</div>`;
     }
     return html`
       <div class="empty">
@@ -579,45 +534,25 @@ export class ScionArtifactList extends LitElement {
     } else {
       body = this.renderTable();
     }
-    const useDialect = filtersQueryDialectEnabled();
     const sharedActive =
-      useDialect &&
       getActiveSingleKeyValue(this.filterQueryText, 'is', PROJECT_ARTIFACTS_SCHEMA) === 'shared';
     return html`
       <div class="toolbar">
-        ${useDialect
-          ? html`
-              <scion-filter-box
-                view="artifacts-project"
-                .value=${this.filterQueryText}
-                placeholder="Filter artifacts… (try is:shared)"
-                @filter-input=${this.onFilterInput}
-                @filter-commit=${this.onFilterCommit}
-              ></scion-filter-box>
-              <button
-                type="button"
-                class="filter-chip ${sharedActive ? 'active' : ''}"
-                aria-pressed=${sharedActive ? 'true' : 'false'}
-                @click=${this.onSharedChipClick}
-              >
-                Shared with this project
-              </button>
-            `
-          : html`
-              <sl-input
-                size="small"
-                placeholder="Search title or key"
-                clearable
-                .value=${this.query}
-                @sl-input=${this.onSearch}
-                @sl-clear=${this.onSearch}
-              >
-                <sl-icon slot="prefix" name="search"></sl-icon>
-              </sl-input>
-              <sl-checkbox size="small" ?checked=${this.sharedOnly} @sl-change=${this.onSharedOnly}
-                >Shared with this project</sl-checkbox
-              >
-            `}
+        <scion-filter-box
+          view="artifacts-project"
+          .value=${this.filterQueryText}
+          placeholder="Filter artifacts… (try is:shared)"
+          @filter-input=${this.onFilterInput}
+          @filter-commit=${this.onFilterCommit}
+        ></scion-filter-box>
+        <button
+          type="button"
+          class="filter-chip ${sharedActive ? 'active' : ''}"
+          aria-pressed=${sharedActive ? 'true' : 'false'}
+          @click=${this.onSharedChipClick}
+        >
+          Shared with this project
+        </button>
         <span class="spacer"></span>
         ${this.newButton()}
       </div>

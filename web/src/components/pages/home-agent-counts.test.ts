@@ -31,6 +31,13 @@ import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.
 import type { AgentMemberIndex } from '../../client/agent-member-index.js';
 import type { AgentListWindow } from '../../client/agent-list-window.js';
 import {
+  getViewSchema,
+  knownKeysFor,
+  parse as parseFilterQuery,
+  serverSubset,
+  setSingleKeyInQuery,
+} from '../../shared/filter-query/index.js';
+import {
   FakeEventSource,
   SCOPE_CAPS,
   fakeFetch,
@@ -52,7 +59,9 @@ interface PageInternals {
   memberIndex?: AgentMemberIndex | null;
   agents: Agent[];
   agentWindow?: AgentListWindow;
-  setScope?(scope: 'all' | 'mine' | 'shared'): void;
+  filterQueryText?: string;
+  handleFilterCommit?(e: CustomEvent): void;
+  setChipInQuery?(key: 'phase' | 'is' | 'mode', value: string): void;
 }
 
 function internals(el: TestEl): PageInternals {
@@ -115,6 +124,7 @@ const PAGE_PATHS: Record<PageTag, string> = {
 };
 
 async function mountPage(tag: PageTag, allowPending?: () => number): Promise<TestEl> {
+  window.history.replaceState(null, '', PAGE_PATHS[tag]);
   const el = document.createElement(tag) as TestEl;
   (el as unknown as { pageData: unknown }).pageData = {
     path: PAGE_PATHS[tag],
@@ -190,13 +200,24 @@ function withProjectPage(
   };
 }
 
+const AGENTS_SCHEMA = getViewSchema('agents')!;
+const KNOWN_AGENT_KEYS = knownKeysFor(AGENTS_SCHEMA);
+
 function commitLabel(el: TestEl, value: string): void {
-  const input = Array.from(el.shadowRoot?.querySelectorAll('sl-input') ?? []).find(
-    (i) => i.getAttribute('placeholder') === 'Filter by label (key=value)'
-  ) as HTMLElement & { value: string };
-  input.value = value;
-  input.dispatchEvent(new Event('sl-input'));
-  input.dispatchEvent(new Event('sl-change'));
+  const next = setSingleKeyInQuery(
+    internals(el).filterQueryText ?? '',
+    'label',
+    value,
+    AGENTS_SCHEMA
+  );
+  const parsed = parseFilterQuery(next, KNOWN_AGENT_KEYS);
+  const q = parsed.query ?? { mode: 'text' as const, text: '' };
+  internals(el).filterQueryText = next;
+  internals(el).handleFilterCommit!(
+    new CustomEvent('filter-commit', {
+      detail: { value: next, query: q, serverQ: serverSubset(q, AGENTS_SCHEMA) },
+    })
+  );
 }
 
 function handleUpdate(subject: string, data: unknown): void {
@@ -282,6 +303,7 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     localStorage.clear();
+    window.history.replaceState(null, '', '/');
   });
 
   describe('home load', () => {
@@ -936,7 +958,7 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
       const agents = await mountPage('scion-page-agents');
       commitLabel(agents, 'env=prod');
       await settle(agents);
-      internals(agents).setScope!('all');
+      internals(agents).setChipInQuery!('is', '');
       await settle(agents);
       agents.remove();
       expect(stateManager.isAgentSetComplete('full')).toBe(false);
@@ -1011,7 +1033,7 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
       await visit('scion-page-agents');
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
       const agents = await mountPage('scion-page-agents');
-      internals(agents).setScope!('mine');
+      internals(agents).setChipInQuery!('is', 'mine');
       await settle(agents);
       agents.remove();
       expect(stateManager.isAgentSetComplete('full')).toBe(true);

@@ -50,7 +50,8 @@ type TestEl = HTMLElement & { updateComplete: Promise<boolean> };
 
 interface GraphInternals {
   agents: Agent[];
-  visibleAgents: Agent[];
+  getFilteredGraph(): { agents: Agent[] };
+  valueSuggestions: (key: string, prefix: string) => string[];
   loading: boolean;
   reloading: boolean;
   error: string | null;
@@ -62,7 +63,6 @@ interface GraphInternals {
   memberScope: string | null;
   probed: boolean;
   knownLarge: boolean;
-  setProjectFilter(value: string): void;
   onReload(): void;
 }
 
@@ -180,9 +180,27 @@ async function mountPage(tag: 'scion-page-home' | 'scion-page-agents'): Promise<
   return el;
 }
 
+/** Synchronously commits a `project:<id>` (or empty) filter on the graph filter box. */
+function setProjectFilter(el: TestEl, project: string): void {
+  const value = project ? `project:${project}` : '';
+  const query = project
+    ? {
+        mode: 'structured' as const,
+        terms: [
+          { key: 'project', values: [project], negate: false, offset: 0, length: value.length },
+        ],
+      }
+    : { mode: 'text' as const, text: '' };
+  (
+    el as unknown as {
+      onFilterCommit(e: CustomEvent<{ value: string; query: typeof query; serverQ: string }>): void;
+    }
+  ).onFilterCommit(new CustomEvent('filter-commit', { detail: { value, query, serverQ: value } }));
+}
+
 /** Changes the project filter and waits for the page to settle. */
 async function pick(el: TestEl, project: string): Promise<void> {
-  g(el).setProjectFilter(project);
+  setProjectFilter(el, project);
   await el.updateComplete;
   await settle(el);
 }
@@ -359,9 +377,9 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       holdInState(fake.agents, true);
       const el = await mountGraph('?project=p-1');
       expect(fake.requests).toEqual([]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       for (const p of ['', 'p-1', 'p-2']) await pick(el, p);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-2'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-2'));
       expect(fake.requests).toEqual([]);
     });
 
@@ -383,7 +401,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
       const el = await mountGraph();
       expect(graphRequests(fake)).toEqual([ALL_PAGE()]);
-      expect(ids(g(el).visibleAgents)).toEqual(ids(fake.agents));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(ids(fake.agents));
       expect(stateManager.isAgentSetComplete('compact')).toBe(true);
       expect(stateManager.isAgentSetComplete('full')).toBe(false);
     });
@@ -393,12 +411,12 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
       const el = await mountGraph('?project=p-1');
       expect(graphRequests(fake)).toEqual([PROBE]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(stateManager.isAgentSetComplete('compact')).toBe(true);
       expect(stateManager.isAgentSetComplete('full')).toBe(false);
       expect(stateManager.getAgents()).toHaveLength(25);
       for (const p of ['', 'p-1', 'p-3']) await pick(el, p);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-3'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-3'));
       expect(fake.requests).toHaveLength(1);
     });
 
@@ -407,7 +425,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
       const el = await mountGraph('?project=p-1');
       expect(graphRequests(fake)).toEqual([PROBE, PROJECT_PAGE('p-1')]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(stateManager.isAgentSetComplete('compact')).toBe(false);
 
       // A live create in another project updates the store but not the graph.
@@ -422,7 +440,11 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       // One in the scoped project joins it.
       liveUpdate('agent.x-new.created', xNew);
       await el.updateComplete;
-      expect(g(el).visibleAgents.some((a) => a.id === 'x-new')).toBe(true);
+      expect(
+        g(el)
+          .getFilteredGraph()
+          .agents.some((a) => a.id === 'x-new')
+      ).toBe(true);
 
       const before = fake.requests.length;
       await pick(el, '');
@@ -430,7 +452,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(stateManager.isAgentSetComplete('compact')).toBe(true);
       await pick(el, 'p-1');
       expect(fake.requests).toHaveLength(before + 3);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(projectIds(fake, 'p-1')).toContain('x-new');
     });
 
@@ -440,7 +462,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       const el = await mountGraph('?project=p-1');
       expect(graphRequests(fake)).toEqual([PROBE, PROJECT_PAGE('p-1')]);
       expect(stateManager.isAgentSetComplete('compact')).toBe(false);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
     });
 
     it('a non-empty store without the flag is not reused: the graph loads (unscoped and scoped)', async () => {
@@ -449,7 +471,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       holdInState(fake.agents.slice(0, 3), false);
       const el = await mountGraph();
       expect(graphRequests(fake)).toEqual([ALL_PAGE()]);
-      expect(g(el).visibleAgents).toHaveLength(25);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(25);
       el.remove();
 
       stateManager.setScope({ type: 'brokers-list' });
@@ -457,7 +479,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       fake.requests.length = 0;
       const scoped = await mountGraph('?project=p-1');
       expect(graphRequests(fake)).toEqual([PROBE]);
-      expect(ids(g(scoped).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(scoped).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
     });
 
     it('a live delete after the load removes the agent from the graph', async () => {
@@ -503,7 +525,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
       const el = await mountGraph();
       expect(graphRequests(fake)).toEqual([ALL_PAGE(), ALL_PAGE(500), ALL_PAGE(1000)]);
-      expect(g(el).visibleAgents).toHaveLength(1201);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(1201);
       expect(stateManager.isAgentSetComplete('compact')).toBe(true);
       expect(banner(el, 'incomplete')).toBeNull();
       await vi.waitFor(() => expect(treeNode(el, fake.agents[1100].id)).not.toBeNull());
@@ -521,7 +543,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
         ALL_PAGE(1000),
         ALL_PAGE(1500),
       ]);
-      expect(g(el).visibleAgents).toHaveLength(2000);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(2000);
       expect(stateManager.isAgentSetComplete('compact')).toBe(false);
       expect(bannerText(el, 'incomplete')).toBe(CAPPED_ALL);
       await vi.waitFor(() => expect(treeNode(el, fake.agents[5].id)).not.toBeNull());
@@ -553,7 +575,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
         })
       );
       const el = await mountGraph();
-      expect(g(el).visibleAgents).toHaveLength(500);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(500);
       expect(bannerText(el, 'incomplete')).toBe('Incomplete: loaded 500');
       expect(stateManager.isAgentSetComplete('compact')).toBe(false);
     });
@@ -574,12 +596,12 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
         })
       );
       const el = await mountGraph();
-      expect(g(el).visibleAgents).toHaveLength(1201);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(1201);
       failPage2 = true;
       reconnect();
       await el.updateComplete;
       await clickBanner(el, 'stale');
-      expect(g(el).visibleAgents).toHaveLength(1201);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(1201);
       expect(bannerText(el, 'incomplete')).toBe(
         'Incomplete: loaded 1,201 · showing the previous graph'
       );
@@ -598,7 +620,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       retry.click();
       await settle(el);
       expect(g(el).error).toBeNull();
-      expect(g(el).visibleAgents).toHaveLength(25);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(25);
     });
 
     it('a create and a delete during an unscoped drain are kept', async () => {
@@ -613,7 +635,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       liveUpdate(`agent.${victim}.deleted`, { agentId: victim });
       h.release();
       await settle(el);
-      const shown = ids(g(el).visibleAgents);
+      const shown = ids(g(el).getFilteredGraph().agents);
       expect(shown).toContain('n-new');
       expect(shown).not.toContain(victim);
       expect(shown).toHaveLength(1200);
@@ -647,13 +669,13 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       h.hold(1);
       const el = await mountUnsettled('?focus=g-00003&dir=horizontal');
       await vi.waitFor(() => expect(h.heldCount).toBe(1));
-      g(el).setProjectFilter('p-1');
+      setProjectFilter(el, 'p-1');
       expect(h.sent[0].signal?.aborted).toBe(true);
       await settle(el);
       // The aborted page never reached the server; the probe and the
       // project drain follow.
       expect(graphRequests(fake)).toEqual([ALL_PAGE(), PROBE, PROJECT_PAGE('p-1')]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(g(el).focusId).toBe('g-00003');
       expect(g(el).orientation).toBe('horizontal');
       expect(
@@ -663,22 +685,16 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
   });
 
   describe('picker', () => {
-    it('a project drained after a capped unscoped set still offers every known project', async () => {
+    it('a project drained after a capped unscoped set still offers every known project in suggestions', async () => {
       const fake = newFake(2001);
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
       const el = await mountGraph();
-      const all = (g(el).projects as Array<{ id: string }>).map((p) => p.id);
+      const all = g(el).valueSuggestions('project', '');
       expect(all).toHaveLength(7);
-      const optionValues = () =>
-        [...(el.shadowRoot?.querySelectorAll('sl-select sl-option') ?? [])].map((o) =>
-          o.getAttribute('value')
-        );
-      expect(optionValues()).toEqual(all);
       await pick(el, 'p-1');
       expect(g(el).memberScope).toBe('p-1');
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
-      expect((g(el).projects as Array<{ id: string }>).map((p) => p.id)).toEqual(all);
-      expect(optionValues()).toEqual(all);
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
+      expect(g(el).valueSuggestions('project', '')).toEqual(all);
     });
 
     it('a capped unscoped drain is reused for all projects; a project choice drains that project', async () => {
@@ -688,11 +704,11 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(fake.requests).toHaveLength(4);
       await pick(el, 'p-1');
       expect(graphRequests(fake, 4)).toEqual([PROJECT_PAGE('p-1')]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(banner(el, 'incomplete')).toBeNull();
       await pick(el, '');
       expect(fake.requests).toHaveLength(5);
-      expect(g(el).visibleAgents).toHaveLength(2000);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(2000);
       expect(bannerText(el, 'incomplete')).toBe(CAPPED_ALL);
     });
 
@@ -702,7 +718,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       // A connection wait would last a minute.
       const el = await mountGraph('?project=p-1', { connectTimeoutMs: 60_000 });
       const before = fake.requests.length;
-      g(el).setProjectFilter('p-2');
+      setProjectFilter(el, 'p-2');
       await vi.waitFor(() => expect(fake.requests.length).toBe(before + 1), { timeout: 5000 });
       expect(fake.requests[before]).toBe(PROJECT_PAGE('p-2'));
       await settle(el);
@@ -948,7 +964,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(graphRequests(fake)).toEqual([PROBE, PROJECT_PAGE('p-1')]);
       expect(g(el).error).toBeNull();
       expect(stateManager.isAgentSetComplete('compact')).toBe(false);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
     });
 
     it('a probe that fails on the network falls back to the project drain, with no error', async () => {
@@ -970,7 +986,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(graphRequests(fake)).toEqual([PROBE, PROJECT_PAGE('p-1')]);
       expect(g(el).error).toBeNull();
       expect(stateManager.isAgentSetComplete('compact')).toBe(false);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
     });
 
     it('after a legacy probe answer, a picker change drains the new project with no second probe', async () => {
@@ -985,7 +1001,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
         PROJECT_PAGE('p-2'),
         PROJECT_PAGE('p-3'),
       ]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-3'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-3'));
     });
 
     it('after a probe answered with a 500, a picker change drains the new project with no second probe', async () => {
@@ -1011,7 +1027,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       await vi.waitFor(() => expect(g(el).loading).toBe(false));
       await el.updateComplete;
       expect(fake.requests).toEqual([PROBE]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(bannerText(el, 'stale')).toBe(STALE);
     });
 
@@ -1031,13 +1047,13 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       vi.useRealTimers();
       stateManager.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
       await vi.waitFor(() => expect(h.heldCount).toBe(1));
-      g(el).setProjectFilter('p-1');
+      setProjectFilter(el, 'p-1');
       await settle(el);
       // The aborted unscoped drain page never reached the server.
       expect(h.sent.map((r) => r.url)).toEqual([ALL_PAGE()]);
       expect(h.sent[0].signal?.aborted).toBe(true);
       expect(graphRequests(fake)).toEqual([PROBE]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(g(el).stale).toBe(false);
       expect(banner(el, 'stale')).toBeNull();
     });
@@ -1066,7 +1082,11 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(g(el).agents.find((a) => a.id === statusId)?.phase).toBe('stopped');
       expect(g(el).agents.some((a) => a.id === victim)).toBe(false);
       expect(stateManager.getAgent(victim)).toBeUndefined();
-      expect(g(el).visibleAgents.some((a) => a.id === 'n-p1')).toBe(true);
+      expect(
+        g(el)
+          .getFilteredGraph()
+          .agents.some((a) => a.id === 'n-p1')
+      ).toBe(true);
       expect(bannerText(el, 'stale')).toBe(STALE);
       const openEpochs = (stateManager as unknown as { seedEpochs: Map<unknown, unknown> })
         .seedEpochs.size;
@@ -1139,7 +1159,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(banner(el, 'stale')).toBeNull();
       await pick(el, '');
       expect(graphRequests(fake, 4)).toEqual([PROJECT_PAGE('p-1')]);
-      expect(g(el).visibleAgents).toHaveLength(2000);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(2000);
       expect(bannerText(el, 'incomplete')).toBe(CAPPED_ALL);
       expect(bannerText(el, 'stale')).toBe(STALE);
     });
@@ -1166,7 +1186,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       await el.updateComplete;
       await pick(el, '');
       expect(fake.requests).toHaveLength(5);
-      const shown = ids(g(el).visibleAgents);
+      const shown = ids(g(el).getFilteredGraph().agents);
       expect(shown).toContain('n-p3');
       expect(shown).not.toContain(victim);
       expect(shown).toHaveLength(2000);
@@ -1195,14 +1215,14 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       vi.stubGlobal('fetch', vi.fn(h.fn));
       const el = await mountGraph();
       h.hold(1);
-      g(el).setProjectFilter('p-1');
+      setProjectFilter(el, 'p-1');
       await vi.waitFor(() => expect(h.heldCount).toBe(1));
-      g(el).setProjectFilter('');
+      setProjectFilter(el, '');
       expect(h.sent[0].signal?.aborted).toBe(true);
       await settle(el);
       expect(fake.requests).toHaveLength(4);
       expect(h.sent).toHaveLength(1);
-      expect(g(el).visibleAgents).toHaveLength(2000);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(2000);
       expect(bannerText(el, 'incomplete')).toBe(CAPPED_ALL);
     });
 
@@ -1223,20 +1243,20 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
         let fail = false;
         vi.stubGlobal('fetch', vi.fn(failingFetch(fake, (u) => fail && fails(u))));
         const el = await mountGraph();
-        const shown = ids(g(el).visibleAgents);
+        const shown = ids(g(el).getFilteredGraph().agents);
         fail = true;
         await clickBanner(el, 'incomplete');
         fail = false;
         expect(graphRequests(fake, 4)).toEqual(retried);
         expect(g(el).error).toBeNull();
-        expect(ids(g(el).visibleAgents)).toEqual(shown);
+        expect(ids(g(el).getFilteredGraph().agents)).toEqual(shown);
         expect(ids([...g(el).cappedAll!.members.values()])).toEqual(shown);
         expect(bannerText(el, 'incomplete')).toBe(`${CAPPED_ALL} · showing the previous graph`);
         expect(treeView(el)?.markMissingAncestors).toBe(true);
         // Back to all through a project: the same set again.
         await pick(el, 'p-1');
         await pick(el, '');
-        expect(ids(g(el).visibleAgents)).toEqual(shown);
+        expect(ids(g(el).getFilteredGraph().agents)).toEqual(shown);
         expect(bannerText(el, 'incomplete')).toBe(CAPPED_ALL);
       });
     }
@@ -1274,7 +1294,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       );
       const el = await mountGraph();
       expect(fake.requests).toHaveLength(4);
-      expect(g(el).visibleAgents).toHaveLength(1333);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(1333);
       expect(bannerText(el, 'incomplete')).toBe(
         'Graph incomplete: 1,333 loaded (newest 2,000 checked), more exist · narrow with a project filter'
       );
@@ -1291,7 +1311,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       );
       const el = await mountGraph();
       expect(bannerText(el, 'incomplete')).toBe('Incomplete: loaded 500');
-      const shown = ids(g(el).visibleAgents);
+      const shown = ids(g(el).getFilteredGraph().agents);
       const before = fake.requests.length;
       // This time page 2 answers and page 3 fails: more rows arrive, but the
       // drain still failed.
@@ -1304,7 +1324,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
         ALL_PAGE(1000),
         ALL_PAGE(1000),
       ]);
-      expect(ids(g(el).visibleAgents)).toEqual(shown);
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(shown);
       expect(bannerText(el, 'incomplete')).toBe(
         'Incomplete: loaded 500 · showing the previous graph'
       );
@@ -1321,7 +1341,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       fail = true;
       await clickBanner(el, 'stale');
       expect(g(el).error).toBeNull();
-      expect(g(el).visibleAgents).toHaveLength(1201);
+      expect(g(el).getFilteredGraph().agents).toHaveLength(1201);
       expect(bannerText(el, 'incomplete')).toBe(
         'Incomplete: loaded 1,201 · showing the previous graph'
       );
@@ -1345,7 +1365,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       await pick(el, 'p-1');
       expect(fake.requests).toHaveLength(before);
       expect(banner(el, 'incomplete')).toBeNull();
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
     });
 
     it('after an error view, a failed first page for the earlier project shows the error, not a previous graph', async () => {
@@ -1356,7 +1376,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
         vi.fn(failingFetch(fake, (u) => failing.has(u.searchParams.get('projectId') ?? '')))
       );
       const el = await mountGraph('?project=p-1');
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       await pick(el, 'p-2');
       expect(g(el).error).toBe('HTTP 500');
       expect(g(el).agents).toEqual([]);
@@ -1442,12 +1462,12 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       (banner(el, 'stale')?.querySelector('sl-button') as HTMLElement).click();
       await vi.waitFor(() => expect(h.heldCount).toBe(1));
       expect(g(el).reloading).toBe(true);
-      g(el).setProjectFilter('p-2');
+      setProjectFilter(el, 'p-2');
       await el.updateComplete;
       expect(h.sent[0].signal?.aborted).toBe(true);
       expect(g(el).reloading).toBe(false);
       await settle(el);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-2'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-2'));
       const button = banner(el, 'stale')?.querySelector('sl-button');
       expect(button?.hasAttribute('disabled')).toBe(false);
       expect(button?.hasAttribute('loading')).toBe(false);
@@ -1653,7 +1673,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       await settle(el);
       expect(graphRequests(fake, 2)).toEqual([PROBE, PROJECT_PAGE('p-1')]);
       expect(banner(el, 'stale')).toBeNull();
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
     });
 
     it('a re-attached page drops a capped set it kept, and drains again', async () => {
@@ -1720,7 +1740,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       await el.updateComplete;
       await settle(el);
       expect(graphRequests(fake, before)).toEqual([PROBE, PROJECT_PAGE('p-1')]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
     });
 
     it('a re-attached page does not carry a late first connect of its earlier attachment into its probe', async () => {
@@ -1749,7 +1769,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       hp.release();
       await settle(el);
       expect(graphRequests(fake)).toEqual([PROBE]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(g(el).stale).toBe(false);
       expect(banner(el, 'stale')).toBeNull();
     });
@@ -1782,7 +1802,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       vi.useRealTimers();
       h2.release();
       await settle(el);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(g(el).stale).toBe(true);
       expect(bannerText(el, 'stale')).toBe(STALE);
     });
@@ -1919,13 +1939,17 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       h.release();
       await settle(el);
       expect(graphRequests(fake)).toEqual([PROBE]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       expect(member(el, id)?.deletion?.state).toBe('deleting');
 
       liveUpdate(`agent.${id}.deleted`, { agentId: id });
       await el.updateComplete;
       expect(member(el, id)).toBeUndefined();
-      expect(g(el).visibleAgents.some((a) => a.id === id)).toBe(false);
+      expect(
+        g(el)
+          .getFilteredGraph()
+          .agents.some((a) => a.id === id)
+      ).toBe(false);
     });
 
     it('a deletion view and full fields the store held before the fit probe survive its compact seed', async () => {
@@ -2055,7 +2079,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
       const el = await mountGraph('?project=p-1');
       expect(graphRequests(fake)).toEqual([PROBE]);
-      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(ids(g(el).getFilteredGraph().agents)).toEqual(projectIds(fake, 'p-1'));
       await expectBadges(el, failedId, deletingId, plainId);
     });
 

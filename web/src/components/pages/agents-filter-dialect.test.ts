@@ -15,8 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetServerFlagStateForTests, setFeatureFlag } from '../../utils/feature-flags.js';
-import { FILTERS_QUERY_DIALECT_FLAG } from '../../shared/filter-query/index.js';
+import { resetServerFlagStateForTests } from '../../utils/feature-flags.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentListWindow } from '../../client/agent-list-window.js';
 import type { Agent } from '../../shared/types.js';
@@ -72,18 +71,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     resetServerFlagStateForTests();
   });
 
-  it('renders legacy label input when filters.query_dialect is off', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
-    const el = document.createElement('scion-page-agents') as ScionPageAgents;
-    document.body.appendChild(el);
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
-
-    expect(el.shadowRoot?.querySelector('scion-filter-box')).toBeNull();
-    expect(el.shadowRoot?.querySelector('sl-input[placeholder*="label"]')).not.toBeNull();
-  });
-
-  it('hydrates ?q=activity%3Awaiting_for_input in both dialect-on and dialect-off modes (ptone/scion#9300)', async () => {
+  it('hydrates ?q=activity%3Awaiting_for_input in <scion-filter-box> (ptone/scion#9300)', async () => {
     const waitingAgent: Agent = {
       id: 'a-wait',
       name: 'Waiting Bot',
@@ -121,8 +109,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
       })
     );
 
-    // 1. Dialect ON: hydrates <scion-filter-box> and sends q=activity%3Awaiting_for_input.
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     window.history.replaceState(null, '', '/agents?q=activity%3Awaiting_for_input');
     const elOn = document.createElement('scion-page-agents') as ScionPageAgents;
     document.body.appendChild(elOn);
@@ -135,139 +121,9 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(elOn.shadowRoot?.textContent).toContain('Waiting Bot');
     expect(elOn.shadowRoot?.textContent).not.toContain('Thinking Bot');
     elOn.remove();
-
-    // 2. Dialect OFF: hydrates activityFilter, ignores persisted scope/phase/mode
-    // for this load, renders removable tag, and filters client-side.
-    fetchUrls = [];
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
-    localStorage.setItem('scion-scope-agents', 'mine');
-    localStorage.setItem('scion-filter-agents-phase', 'error');
-    localStorage.setItem('scion-filter-agents-mode', 'lineage');
-    window.history.replaceState(null, '', '/agents?q=activity%3Awaiting_for_input');
-    const elOff = document.createElement('scion-page-agents') as ScionPageAgents;
-    elOff.pageData = {
-      path: '/agents',
-      title: 'Agents',
-      user: { id: 'u1', email: 'u1@example.com', name: 'U1', role: 'admin' },
-    };
-    document.body.appendChild(elOff);
-    await new Promise((r) => setTimeout(r, 15));
-    await elOff.updateComplete;
-
-    const tag = elOff.shadowRoot?.querySelector('[data-activity-filter-tag]');
-    expect(tag?.textContent?.trim()).toBe('activity:waiting_for_input');
-    expect(fetchUrls.some((u) => u.includes('scope=mine') || u.includes('phase=error'))).toBe(
-      false
-    );
-    expect(elOff.shadowRoot?.textContent).toContain('Waiting Bot');
-    expect(elOff.shadowRoot?.textContent).not.toContain('Thinking Bot');
-
-    // Removing the tag clears the filter and strips ?q= from the URL.
-    tag?.dispatchEvent(new CustomEvent('sl-remove', { bubbles: true }));
-    await elOff.updateComplete;
-    expect(new URLSearchParams(window.location.search).get('q')).toBeNull();
-    expect(elOff.shadowRoot?.querySelector('[data-activity-filter-tag]')).toBeNull();
-    expect(elOff.shadowRoot?.textContent).toContain('Thinking Bot');
-    elOff.remove();
   });
 
-  it('composes Phase and key-only label filters with the dialect-off activity tag', async () => {
-    const runningWaiting: Agent = {
-      id: 'a-run-wait',
-      name: 'Running Waiting',
-      slug: 'running-waiting',
-      projectId: 'p1',
-      template: 'developer',
-      phase: 'running',
-      activity: 'waiting_for_input',
-      labels: { team: 'ui' },
-    };
-    const stoppedWaiting: Agent = {
-      id: 'a-stop-wait',
-      name: 'Stopped Waiting',
-      slug: 'stopped-waiting',
-      projectId: 'p1',
-      template: 'developer',
-      phase: 'stopped',
-      activity: 'waiting_for_input',
-      labels: { env: 'prod' },
-    };
-    const runningThinking: Agent = {
-      id: 'a-run-think',
-      name: 'Running Thinking',
-      slug: 'running-thinking',
-      projectId: 'p1',
-      template: 'developer',
-      phase: 'running',
-      activity: 'thinking',
-      labels: { team: 'ui' },
-    };
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(() =>
-        Promise.resolve(
-          new Response(
-            JSON.stringify({
-              agents: [runningWaiting, stoppedWaiting, runningThinking],
-              complete: true,
-              totalCount: 3,
-            }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } }
-          )
-        )
-      )
-    );
-
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
-    window.history.replaceState(null, '', '/agents?q=activity%3Awaiting_for_input');
-    const el = document.createElement('scion-page-agents') as ScionPageAgents;
-    document.body.appendChild(el);
-    await new Promise((r) => setTimeout(r, 15));
-    await el.updateComplete;
-
-    expect(el.shadowRoot?.textContent).toContain('Running Waiting');
-    expect(el.shadowRoot?.textContent).toContain('Stopped Waiting');
-    expect(el.shadowRoot?.textContent).not.toContain('Running Thinking');
-
-    // Choosing Phase=stopped composes with activity:waiting_for_input.
-    const phaseButtons = Array.from(
-      el.shadowRoot?.querySelectorAll('.filter-bar .scope-toggle button') ?? []
-    );
-    const stoppedBtn = phaseButtons.find((b) =>
-      b.textContent?.trim().startsWith('Stopped')
-    ) as HTMLButtonElement;
-    expect(stoppedBtn).toBeDefined();
-    stoppedBtn.click();
-    await el.updateComplete;
-
-    expect(el.shadowRoot?.textContent).toContain('Stopped Waiting');
-    expect(el.shadowRoot?.textContent).not.toContain('Running Waiting');
-    expect(el.shadowRoot?.textContent).not.toContain('Running Thinking');
-
-    // Reset Phase to All, then type a key-only label filter ("team").
-    const allBtn = phaseButtons.find((b) =>
-      b.textContent?.trim().startsWith('All')
-    ) as HTMLButtonElement;
-    expect(allBtn).toBeDefined();
-    allBtn.click();
-    await el.updateComplete;
-
-    const labelInput = el.shadowRoot?.querySelector('sl-input[placeholder*="label"]') as
-      | (HTMLElement & { value: string })
-      | null;
-    expect(labelInput).not.toBeNull();
-    labelInput!.value = 'team';
-    labelInput!.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
-    await el.updateComplete;
-
-    expect(el.shadowRoot?.textContent).toContain('Running Waiting');
-    expect(el.shadowRoot?.textContent).not.toContain('Stopped Waiting');
-    expect(el.shadowRoot?.textContent).not.toContain('Running Thinking');
-    el.remove();
-  });
-
-  it('migrates localStorage phase once to ?q= and renders <scion-filter-box> when on', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+  it('migrates localStorage phase once to ?q= and renders <scion-filter-box>', async () => {
     localStorage.setItem('scion-filter-agents-phase', 'running');
 
     const el = document.createElement('scion-page-agents') as ScionPageAgents;
@@ -285,7 +141,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   });
 
   it('edits query text when clicking phase chips and updates ?q= in URL', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     window.history.replaceState(null, '', '/agents?q=label%3Ateam%3Dui');
 
     const el = document.createElement('scion-page-agents') as ScionPageAgents;
@@ -310,7 +165,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   });
 
   it('shows "No Matching Agents" instead of "No Agents Found" when a filter query matches zero rows', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     window.history.replaceState(null, '', '/agents?q=phase%3Aerror');
 
     const el = document.createElement('scion-page-agents') as ScionPageAgents;
@@ -322,22 +176,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(heading).toBe('No Matching Agents');
   });
 
-  it('keeps legacy empty-state behaviour unchanged when filters.query_dialect is off', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
-    localStorage.setItem('scion-filter-agents-phase', 'error');
-
-    const el = document.createElement('scion-page-agents') as ScionPageAgents;
-    document.body.appendChild(el);
-    await new Promise((r) => setTimeout(r, 10));
-    await el.updateComplete;
-
-    // With experiment off and zero total agents returned, legacy renders "No Agents Found".
-    const heading = el.shadowRoot?.querySelector('.empty-state h2')?.textContent?.trim();
-    expect(heading).toBe('No Agents Found');
-  });
-
-  it('retires old mode dropdown and migrates scope/mode from localStorage when dialect is on', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+  it('retires old mode dropdown and migrates scope/mode from localStorage', async () => {
     localStorage.setItem('scion-scope-agents', 'mine');
     localStorage.setItem('scion-filter-agents-mode', 'owner');
 
@@ -363,7 +202,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   });
 
   it('edits is:mine / is:shared via scope chips and highlights no phase chip for multi-value phase', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     window.history.replaceState(null, '', '/agents?q=phase%3Arunning%2Cerror');
 
     const el = document.createElement('scion-page-agents') as ScionPageAgents;
@@ -396,7 +234,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   });
 
   it('renders <scion-filter-box view="project_agents"> on project detail when dialect is on', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     window.history.replaceState(null, '', '/projects/proj-123?q=harness%3Aclaude');
 
     vi.stubGlobal(
@@ -444,7 +281,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   });
 
   it('refuses live-add of SSE-created agents on global page (paged) under server-only owner:<email> and is:mine, while admitting owner:me and self email', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const makeAgent = (id: string, ownerId: string): Agent => ({
       id,
       name: `agent-${id}`,
@@ -540,7 +376,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   });
 
   it('refuses live-add on project detail under server-only owner:<email> during drain and paged state, while admitting owner:me', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const makeAgent = (id: string, ownerId: string): Agent => ({
       id,
       name: `proj-agent-${id}`,
@@ -611,7 +446,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   });
 
   it('does not overwrite in-progress invalid text or URL when a deferred commit fires on global and project pages', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     vi.useFakeTimers();
     try {
       // 1) Global agents page
@@ -720,7 +554,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   });
 
   it('pins all remaining live-add/membership sites (shouldAdd, loadFitAgents, drainGlobalAgents, project-detail isAddable/shouldAdd/drainProjectAgents)', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const makeAgent = (id: string, projectId: string, ownerId: string): Agent => ({
       id,
       name: `a-${id}`,
@@ -940,7 +773,6 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   });
 
   it('updates committed predicates without refetching when only a client-only mode: value changes', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const makeModeAgent = (
       id: string,
       projectId: string,

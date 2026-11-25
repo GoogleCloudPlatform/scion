@@ -42,8 +42,6 @@ const (
 	DefaultListLimit = 50
 	// MaxListLimit is the largest page size a caller may ask for.
 	MaxListLimit = 100
-	// maxSearchLength bounds ?q= in characters.
-	maxSearchLength = 200
 	// maxScopeLength bounds ?scope= in bytes.
 	maxScopeLength = 256
 )
@@ -101,10 +99,8 @@ type ArtifactListResponse struct {
 
 // listParams is a validated list request.
 type listParams struct {
-	search        string
 	rawQuery      string
 	canonicalQ    string
-	dialect       bool
 	reviewPending bool
 	ownedOnly     bool
 	scope         string
@@ -125,15 +121,11 @@ const invalidCursorMessage = "invalid cursor: restart pagination from the first 
 const impossibleScopeID = "00000000-0000-0000-0000-000000000000"
 
 // binding is the normalized query a cursor is bound to. The page size is
-// left out: changing it mid-walk is harmless. When the filter query dialect is
-// enabled, q is bound to the server-computed filterquery.Canonical(ast).
+// left out: changing it mid-walk is harmless. q is bound to the
+// server-computed filterquery.Canonical(ast).
 func (p listParams) binding() string {
 	v := url.Values{}
-	if p.dialect {
-		v.Set("q", p.canonicalQ)
-	} else {
-		v.Set("q", p.search)
-	}
+	v.Set("q", p.canonicalQ)
 	v.Set("review_pending", strconv.FormatBool(p.reviewPending))
 	v.Set("owned", strconv.FormatBool(p.ownedOnly))
 	if p.scope != "" {
@@ -145,8 +137,8 @@ func (p listParams) binding() string {
 	return v.Encode()
 }
 
-func parseListParams(q url.Values, dialect bool) (listParams, string) {
-	p := listParams{limit: DefaultListLimit, dialect: dialect}
+func parseListParams(q url.Values) (listParams, string) {
+	p := listParams{limit: DefaultListLimit}
 	switch q.Get("mine") {
 	case "1", "true":
 	default:
@@ -156,14 +148,7 @@ func parseListParams(q url.Values, dialect bool) (listParams, string) {
 	if !utf8.ValidString(rawQ) || strings.ContainsRune(rawQ, 0) {
 		return p, "q must be valid text"
 	}
-	if dialect {
-		p.rawQuery = rawQ
-	} else {
-		p.search = strings.TrimSpace(rawQ)
-		if utf8.RuneCountInString(p.search) > maxSearchLength {
-			return p, "q must be at most " + strconv.Itoa(maxSearchLength) + " characters"
-		}
-	}
+	p.rawQuery = rawQ
 	switch q.Get("review_pending") {
 	case "", "0", "false":
 	case "1", "true":
@@ -214,8 +199,7 @@ func writeInvalidFilterQuery(w http.ResponseWriter, fqErr *filterquery.Error) {
 // and a caller the host does not serve gets an empty list.
 func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	dialect := s.isFilterQueryDialectEnabled(ctx)
-	p, msg := parseListParams(r.URL.Query(), dialect)
+	p, msg := parseListParams(r.URL.Query())
 	if msg != "" {
 		writeError(w, http.StatusBadRequest, "bad_request", msg)
 		return
@@ -223,7 +207,7 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 
 	var parsedQuery filterquery.Query
 	var hasParsedQuery bool
-	if dialect && p.rawQuery != "" {
+	if p.rawQuery != "" {
 		schema := schemas.Artifacts
 		if p.scope != "" {
 			schema = schemas.ProjectArtifacts
@@ -303,7 +287,7 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 	items, next, err := s.collect(ctx, host, b, CandidateQuery{
 		PrincipalKind: kind, PrincipalRef: ref, ScopeRefs: scopes, OwnedOnly: ownedOnly,
-		Search: p.search, ReviewPending: p.reviewPending, HomeScope: p.scope, ScopeShares: scopeShares,
+		ReviewPending: p.reviewPending, HomeScope: p.scope, ScopeShares: scopeShares,
 		SharedOnly: p.sharedOnly, Query: queryTerms, After: after,
 	}, p.limit)
 	if err != nil {

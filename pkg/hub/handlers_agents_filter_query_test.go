@@ -29,48 +29,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func enableFiltersQueryDialect(t *testing.T, srv *Server) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"`+experiments.FiltersQueryDialect+`":true}}`))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	_, err := ops.Refresh(context.Background())
-	require.NoError(t, err)
-	srv.SetOperationalSettings(ops)
-}
-
-func TestListAgents_FilterQuery_ExperimentOffIgnoresQ(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	proj := &store.Project{ID: uuid.NewString(), Name: "fq-off", Slug: "fq-off"}
-	require.NoError(t, s.CreateProject(ctx, proj))
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: uuid.NewString(), Name: "a1", Slug: "a1", ProjectID: proj.ID, Phase: "running",
-	}))
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: uuid.NewString(), Name: "a2", Slug: "a2", ProjectID: proj.ID, Phase: "stopped",
-	}))
-
-	// Experiment is off by default: even invalid q is ignored and all agents are returned.
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("phase:stopped"), nil)
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	var resp ListAgentsResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Len(t, resp.Agents, 2)
-
-	recBad := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("phase:"), nil)
-	require.Equal(t, http.StatusOK, recBad.Code)
-}
-
 func TestListAgents_FilterQuery_StructuredAndErrorsAndPagination(t *testing.T) {
 	srv, s := testServer(t)
-	enableFiltersQueryDialect(t, srv)
 	ctx := context.Background()
 
 	proj := &store.Project{ID: uuid.NewString(), Name: "fq-on", Slug: "fq-on"}
@@ -152,11 +115,19 @@ func TestListAgents_FilterQuery_StructuredAndErrorsAndPagination(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recMode.Body.Bytes(), &modeResp))
 	assert.Equal(t, ErrCodeInvalidFilterQuery, modeResp.Error.Code)
 	assert.Contains(t, modeResp.Error.Message, "mode")
+
+	// Exceeding the distinct-referent cap -> 400 invalid_filter_query.
+	tooManyRefs := "project:p1,p2,p3,p4,p5,p6,p7,p8,p9,p10 broker:b1,b2,b3,b4,b5,b6,b7,b8,b9,b10 owner:o1"
+	recLimit := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape(tooManyRefs), nil)
+	require.Equal(t, http.StatusBadRequest, recLimit.Code)
+	var limitResp ErrorResponse
+	require.NoError(t, json.Unmarshal(recLimit.Body.Bytes(), &limitResp))
+	assert.Equal(t, ErrCodeInvalidFilterQuery, limitResp.Error.Code)
+	assert.Contains(t, limitResp.Error.Message, "distinct reference")
 }
 
 func TestListAgents_FilterQuery_AllServerKeysAndReferents(t *testing.T) {
 	srv, s := testServer(t)
-	enableFiltersQueryDialect(t, srv)
 	ctx := context.Background()
 
 	aliceID := uuid.NewString()
@@ -343,16 +314,6 @@ func TestListProjectAgents_FilterQuery(t *testing.T) {
 		ID: uuid.NewString(), Name: "pb-run", Slug: "pb-run", ProjectID: projB.ID,
 		Phase: "running", Activity: "working", Template: "developer",
 	}))
-
-	// Experiment off: ignores q.
-	recOff := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("phase:running"), nil)
-	require.Equal(t, http.StatusOK, recOff.Code)
-	var respOff ListAgentsResponse
-	require.NoError(t, json.Unmarshal(recOff.Body.Bytes(), &respOff))
-	assert.Len(t, respOff.Agents, 2)
-
-	// Enable experiment.
-	enableFiltersQueryDialect(t, srv)
 
 	// Filters within project A only.
 	recOn := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("phase:running harness:claude"), nil)

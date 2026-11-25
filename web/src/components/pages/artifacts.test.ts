@@ -144,6 +144,7 @@ describe('artifacts list page', () => {
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    window.history.replaceState({}, '', '/artifacts');
     delete window.__SCION_FEATURES__;
   });
 
@@ -281,42 +282,41 @@ describe('artifacts list page', () => {
     const m = mockFetch({ '': { artifacts: [item(1)] } });
     const el = await mount(true);
 
-    vi.useFakeTimers();
-    const search = el.shadowRoot!.querySelector('sl-input') as HTMLElement & { value: string };
-    search.value = 'notes';
-    search.dispatchEvent(new Event('sl-input'));
-    search.value = 'notes q3';
-    search.dispatchEvent(new Event('sl-input'));
-    await vi.advanceTimersByTimeAsync(350);
-    vi.useRealTimers();
+    const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & { value: string };
+    box.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: {
+          value: 'notes q3',
+          query: { mode: 'text', text: 'notes q3' },
+          serverQ: 'notes q3',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
     await settle(el);
     let last = listUrls(m).at(-1)!;
     expect(last.get('q')).toBe('notes q3');
-    expect(listUrls(m)).toHaveLength(2); // initial + one debounced search
+    expect(listUrls(m)).toHaveLength(2);
 
-    const select = el.shadowRoot!.querySelector('sl-select') as HTMLElement & { value: string };
-    select.value = 'review';
-    select.dispatchEvent(new Event('sl-change'));
+    const chips = Array.from(el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.filter-chip'));
+    const reviewChip = chips.find((c) => c.textContent?.includes('Review pending'))!;
+    reviewChip.click();
     await settle(el);
     last = listUrls(m).at(-1)!;
-    expect(last.get('review_pending')).toBe('1');
-    expect(last.get('q')).toBe('notes q3');
+    expect(last.get('q')).toBe('is:review "notes q3"');
 
-    const owned = el.shadowRoot!.querySelector('sl-checkbox') as HTMLElement & { checked: boolean };
-    owned.checked = true;
-    owned.dispatchEvent(new Event('sl-change'));
+    const ownedChip = chips.find((c) => c.textContent?.includes('Owned by me'))!;
+    ownedChip.click();
     await settle(el);
     last = listUrls(m).at(-1)!;
-    expect(last.get('owner')).toBe('me');
-    expect(last.get('review_pending')).toBe('1');
+    expect(last.get('q')).toBe('is:mine is:review "notes q3"');
   });
 
   it('says no match, not "no artifacts", when filters exclude everything', async () => {
     mockFetch({ '': { artifacts: [] } });
     const el = await mount(true);
-    const owned = el.shadowRoot!.querySelector('sl-checkbox') as HTMLElement & { checked: boolean };
-    owned.checked = true;
-    owned.dispatchEvent(new Event('sl-change'));
+    tickOwned(el);
     await settle(el);
     const empty = el.shadowRoot!.querySelector('.empty-state')!;
     expect(empty.textContent).toContain('No Matching Artifacts');
@@ -359,7 +359,7 @@ describe('artifacts list page', () => {
     list.respond(0, { artifacts: [item(1, { title: 'stale' })] });
     await settle(el);
     expect(rows(el).map((r) => r.querySelector('a')!.textContent)).toEqual(['fresh']);
-    expect(list.urls[1].get('owner')).toBe('me');
+    expect(list.urls[1].get('q')).toBe('is:mine');
   });
 
   it('a filter change during "Load more" does not leave the button stuck', async () => {
@@ -382,7 +382,7 @@ describe('artifacts list page', () => {
     await settle(el);
     expect(list.urls).toHaveLength(4);
     expect(list.urls[3].get('cursor')).toBe('c1.owned2');
-    expect(list.urls[3].get('owner')).toBe('me');
+    expect(list.urls[3].get('q')).toBe('is:mine');
   });
 
   it('a failed reload shows the error with Retry, no stale rows and no stale cursor', async () => {
@@ -404,7 +404,7 @@ describe('artifacts list page', () => {
     // Retry reloads with the current filters and no cursor.
     (err.querySelector('sl-button') as HTMLElement).click();
     await settle(el);
-    expect(list.urls[2].get('owner')).toBe('me');
+    expect(list.urls[2].get('q')).toBe('is:mine');
     expect(list.urls[2].get('cursor')).toBeNull();
   });
 
@@ -427,15 +427,15 @@ describe('artifacts list page', () => {
     expect(listUrls(m).at(-1)!.get('cursor')).toBe('c1.more');
   });
 
-  it('shows the loaded count, links the home project and labels the search box', async () => {
+  it('shows the loaded count, links the home project and renders the filter box', async () => {
     mockFetch({ '': { artifacts: [item(1), item(2)], nextCursor: 'c1.x' } });
     const el = await mount(true);
     expect(el.shadowRoot!.querySelector('.count')!.textContent).toBe('Showing 2');
     const projectLink = rows(el)[0].querySelectorAll('a')[1];
     expect(projectLink.getAttribute('href')).toBe('/projects/proj-1');
-    expect(el.shadowRoot!.querySelector('sl-input')!.getAttribute('aria-label')).toBe(
-      'Search artifacts'
-    );
+    const box = el.shadowRoot!.querySelector('scion-filter-box');
+    expect(box).not.toBeNull();
+    expect(box!.getAttribute('view')).toBe('artifacts');
   });
 
   it('never shows another user’s email as their name', async () => {
@@ -471,6 +471,7 @@ describe('artifacts list page lifecycle', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
+    window.history.replaceState({}, '', '/artifacts');
     delete window.__SCION_FEATURES__;
   });
 
@@ -558,9 +559,9 @@ async function mountNoSettle(): Promise<ScionPageArtifacts> {
 }
 
 function tickOwned(el: ScionPageArtifacts): void {
-  const owned = el.shadowRoot!.querySelector('sl-checkbox') as HTMLElement & { checked: boolean };
-  owned.checked = !owned.checked;
-  owned.dispatchEvent(new Event('sl-change'));
+  const chips = Array.from(el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.filter-chip'));
+  const owned = chips.find((c) => c.textContent?.includes('Owned by me'))!;
+  owned.click();
 }
 
 function loadMoreButton(el: ScionPageArtifacts): HTMLElement | null {
@@ -575,6 +576,7 @@ describe('artifacts list page sharing', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
+    window.history.replaceState({}, '', '/artifacts');
     delete window.__SCION_FEATURES__;
   });
 
@@ -596,24 +598,20 @@ describe('artifacts list page sharing', () => {
       'Shared with you',
     ]);
 
-    const [owned, shared] = Array.from(el.shadowRoot!.querySelectorAll('sl-checkbox')) as Array<
-      HTMLElement & { checked: boolean }
-    >;
+    const chips = Array.from(el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.filter-chip'));
+    const owned = chips.find((c) => c.textContent?.includes('Owned by me'))!;
+    const shared = chips.find((c) => c.textContent?.includes('Shared with me'))!;
     expect(shared.textContent).toContain('Shared with me');
-    shared.checked = true;
-    shared.dispatchEvent(new Event('sl-change'));
+    shared.click();
     await settle(el);
     let last = listUrls(m).at(-1)!;
-    expect(last.get('shared')).toBe('1');
-    expect(last.get('owner')).toBeNull();
+    expect(last.get('q')).toBe('is:shared');
 
     // The two filters exclude each other.
-    owned.checked = true;
-    owned.dispatchEvent(new Event('sl-change'));
+    owned.click();
     await settle(el);
     last = listUrls(m).at(-1)!;
-    expect(last.get('owner')).toBe('me');
-    expect(last.get('shared')).toBeNull();
+    expect(last.get('q')).toBe('is:mine');
   });
 
   it('marks rows whose project was deleted and offers Move only to who may move', async () => {
@@ -906,7 +904,7 @@ describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
   });
 });
 
-describe('artifacts list page with filters.query_dialect', () => {
+describe('artifacts list page unified filter box', () => {
   beforeAll(async () => {
     await import('./artifacts.js');
   }, 30_000);
@@ -921,7 +919,7 @@ describe('artifacts list page with filters.query_dialect', () => {
 
   async function mountWithDialect(initialSearch = ''): Promise<ScionPageArtifacts> {
     window.history.replaceState({}, '', `/artifacts${initialSearch}`);
-    window.__SCION_FEATURES__ = { 'hub.artifacts': true, 'filters.query_dialect': true };
+    window.__SCION_FEATURES__ = { 'hub.artifacts': true };
     const el = document.createElement('scion-page-artifacts') as ScionPageArtifacts;
     el.pageData = {
       path: '/artifacts',

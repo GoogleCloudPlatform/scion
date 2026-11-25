@@ -37,6 +37,9 @@ import type { GraphPaletteController } from '../shared/palette/graph-palette-con
 import type { ScionQuickPalette } from '../shared/palette/quick-palette.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentListViewState, AgentListWindow } from '../../client/agent-list-window.js';
+import { getViewSchema, knownKeysFor, parse } from '../../shared/filter-query/index.js';
+
+const GRAPH_KEYS = knownKeysFor(getViewSchema('graph')!);
 
 /** happy-dom has no EventSource; setScope opens one. */
 class FakeEventSource extends EventTarget {
@@ -138,6 +141,7 @@ afterEach(() => {
   page?.remove();
   page = null;
   document.body.replaceChildren();
+  window.history.replaceState(null, '', '/');
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -165,10 +169,29 @@ async function mount(tag: string, setup: (el: GraphPage) => void = () => {}): Pr
  * also goes there, as the page's own phase handler does.
  */
 async function setState(el: GraphPage, state: Record<string, unknown>): Promise<void> {
-  Object.assign(el, state);
+  const { phaseFilter, projectFilter, ...rest } = state;
+  Object.assign(el, rest);
   const win = (el as GraphPage & { agentWindow?: AgentListWindow }).agentWindow;
-  if (win && 'phaseFilter' in state) {
-    win.setViewState({ phaseFilter: state.phaseFilter as AgentListViewState['phaseFilter'] });
+  if (win && phaseFilter !== undefined) {
+    const phase = phaseFilter as AgentListViewState['phaseFilter'];
+    (el as GraphPage & { filterQueryText?: string }).filterQueryText = phase
+      ? `phase:${phase}`
+      : '';
+    const pred = phase ? (a: Agent): boolean => a.phase === phase : null;
+    win.setViewState({
+      filterPredicate: pred,
+      committedFilterPredicate: pred,
+    });
+  }
+  if (projectFilter !== undefined) {
+    const proj = typeof projectFilter === 'string' ? projectFilter : '';
+    const value = proj ? `project:${proj}` : '';
+    const graphEl = el as GraphPage & {
+      filterQueryText: string;
+      activeFilterQuery: unknown;
+    };
+    graphEl.filterQueryText = value;
+    graphEl.activeFilterQuery = value ? (parse(value, GRAPH_KEYS).query ?? null) : null;
   }
   el.requestUpdate();
   await el.updateComplete;
@@ -296,13 +319,13 @@ describe('/agents', () => {
 });
 
 describe('/agents/graph', () => {
-  it('offers only the agents of the project filter', async () => {
+  it('offers all loaded agents even when a filter narrows the tree', async () => {
     getAgents.mockReturnValue(AGENTS);
     const el = await mount('scion-page-agent-graph');
     await setState(el, { projectFilter: 'p2' });
 
     expect(el.graphPalette.isAvailable).toBe(true);
-    expect(await openCandidateIds(el)).toEqual(['b1']);
+    expect((await openCandidateIds(el)).sort()).toEqual(['a1', 'a2', 'a3', 'b1']);
     expect(treeAgentIds(el)).toEqual(['b1']);
     await expectPickFocusesTree(el, 'b1');
   });
@@ -319,7 +342,7 @@ describe('/agents/graph', () => {
     await setState(el, { error: null });
     expect(el.graphPalette.isAvailable).toBe(true);
 
-    await setState(el, { projectFilter: 'nonexistent' });
+    await setState(el, { agents: [] });
     expect(el.graphPalette.isAvailable).toBe(false);
   });
 });
