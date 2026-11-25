@@ -1481,6 +1481,8 @@ var compiledRetired = []string{
 	// Replaced by web.decisions (ptone/scion#8223).
 	"web.chat_choices",
 	"web.project_decisions",
+	// Graduated: unified filter query dialect is always on (ptone/scion#9034).
+	"filters.query_dialect",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way

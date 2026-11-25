@@ -191,6 +191,30 @@ describe('feature-flags: web.decisions consolidation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Removed unified filter query dialect flag (graduated, ptone/scion#9034)
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: unified filter query dialect flag removed', () => {
+  it('does not export FILTERS_QUERY_DIALECT_FLAG or filtersQueryDialectEnabled', () => {
+    // Type-level check: neither symbol is exported from feature-flags.ts.
+    type HasFlag = 'FILTERS_QUERY_DIALECT_FLAG' extends keyof typeof featureFlags ? true : false;
+    type HasHelper = 'filtersQueryDialectEnabled' extends keyof typeof featureFlags ? true : false;
+    const hasFlag: HasFlag = false;
+    const hasHelper: HasHelper = false;
+    expect(hasFlag).toBe(false);
+    expect(hasHelper).toBe(false);
+    expect((featureFlags as Record<string, unknown>).FILTERS_QUERY_DIALECT_FLAG).toBeUndefined();
+    expect((featureFlags as Record<string, unknown>).filtersQueryDialectEnabled).toBeUndefined();
+  });
+
+  // The one allowed reference to the retired name outside compiledRetired
+  // (see the experiment-removal checklist).
+  it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
+    expect(isFeatureEnabled('filters.query_dialect')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // isFeatureEnabled: resolution order
 // ---------------------------------------------------------------------------
 

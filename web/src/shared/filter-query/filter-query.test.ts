@@ -428,7 +428,6 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
 describe('schema-to-docs completeness', () => {
   it('documents every key from schemas.generated.json in its view section of reference/filter-queries.md without experimental wording', () => {
     const doc = readFileSync(DOCS_PATH, 'utf8');
-    expect(doc).not.toContain('filters.query_dialect');
     expect(doc.toLowerCase()).not.toContain('experimental');
 
     const sections = doc.split(/^### /m).slice(1);
