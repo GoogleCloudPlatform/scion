@@ -2223,4 +2223,188 @@ describe('scion-schedule-list Run now on detail card', () => {
       ff.setServerFlags({ 'hub.exec_schedules': false });
     }
   });
+
+  it('refreshes detailSchedule in loadSchedules when the detail dialog is open', async () => {
+    let runCount = 0;
+    let lastRunAt: string | undefined;
+    let lastRunStatus: string | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? 'GET';
+        if (method === 'POST' && url.endsWith('/schedules/sched-refresh/run')) {
+          runCount = 1;
+          lastRunAt = '2026-11-24T12:00:00Z';
+          lastRunStatus = 'success';
+          return Promise.resolve(
+            jsonResponse({
+              id: 'evt-refresh-1',
+              scheduleId: 'sched-refresh',
+              eventType: 'message',
+              status: 'fired',
+              manual: true,
+              fireAt: '2026-11-24T12:00:00Z',
+              firedAt: '2026-11-24T12:00:00Z',
+            })
+          );
+        }
+        return Promise.resolve(
+          jsonResponse({
+            schedules: [
+              schedule({
+                id: 'sched-refresh',
+                name: 'refresh-me',
+                runCount,
+                ...(lastRunAt ? { lastRunAt, lastRunStatus } : {}),
+              }),
+            ],
+            totalCount: 1,
+          })
+        );
+      })
+    );
+
+    const el = document.createElement('scion-schedule-list') as ListEl;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await settle(el);
+
+    rowFor(el, 'refresh-me').click();
+    await settle(el);
+
+    const dialog = (el.shadowRoot as ShadowRoot).querySelector('sl-dialog[label^="Schedule:"]')!;
+    expect(dialog.textContent).toContain('0');
+    expect(dialog.textContent).not.toContain('Last Run:');
+
+    (dialog.querySelector('sl-button.detail-run-now') as HTMLElement).click();
+    await settle(el);
+
+    const refreshedDialog = (el.shadowRoot as ShadowRoot).querySelector(
+      'sl-dialog[label^="Schedule:"]'
+    )!;
+    expect(refreshedDialog.textContent).toMatch(/Run Count:\s*1\s+total/);
+    expect(refreshedDialog.textContent).toContain('(success)');
+  });
+
+  it('resets run-now state in showDetail when switching directly to another schedule', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? 'GET';
+        if (method === 'POST' && url.endsWith('/schedules/sched-a/run')) {
+          return Promise.resolve(
+            jsonResponse({
+              id: 'evt-a-1',
+              scheduleId: 'sched-a',
+              eventType: 'message',
+              status: 'fired',
+              manual: true,
+              fireAt: '2026-11-24T12:00:00Z',
+              firedAt: '2026-11-24T12:00:00Z',
+            })
+          );
+        }
+        return Promise.resolve(
+          jsonResponse({
+            schedules: [
+              schedule({ id: 'sched-a', name: 'alpha-sched' }),
+              schedule({ id: 'sched-b', name: 'beta-sched' }),
+            ],
+            totalCount: 2,
+          })
+        );
+      })
+    );
+
+    const el = document.createElement('scion-schedule-list') as ListEl;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await settle(el);
+
+    rowFor(el, 'alpha-sched').click();
+    await settle(el);
+
+    const root = el.shadowRoot as ShadowRoot;
+    const dialog = root.querySelector('sl-dialog[label^="Schedule:"]')!;
+    (dialog.querySelector('sl-button.detail-run-now') as HTMLElement).click();
+    await settle(el);
+    expect(dialog.querySelector('.manual-run-panel')?.textContent).toContain('fired');
+
+    // Switch directly to another schedule row without calling closeDetail first.
+    rowFor(el, 'beta-sched').click();
+    await settle(el);
+
+    const nextDialog = root.querySelector('sl-dialog[label^="Schedule:"]')!;
+    expect(nextDialog.getAttribute('label')).toBe('Schedule: beta-sched');
+    expect(nextDialog.querySelector('.manual-run-panel')).toBeNull();
+  });
+
+  it('refreshes auto-opened detailSchedule without re-triggering initialScheduleId auto-open or wiping run-now state', async () => {
+    let runCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? 'GET';
+        if (method === 'POST' && url.endsWith('/schedules/sched-auto/run')) {
+          runCount = 1;
+          return Promise.resolve(
+            jsonResponse({
+              id: 'evt-auto-1',
+              scheduleId: 'sched-auto',
+              eventType: 'message',
+              status: 'fired',
+              manual: true,
+              fireAt: '2026-11-24T12:00:00Z',
+              firedAt: '2026-11-24T12:00:00Z',
+            })
+          );
+        }
+        return Promise.resolve(
+          jsonResponse({
+            schedules: [
+              schedule({
+                id: 'sched-auto',
+                name: 'auto-sched',
+                runCount,
+              }),
+            ],
+            totalCount: 1,
+          })
+        );
+      })
+    );
+
+    const el = document.createElement('scion-schedule-list') as ListEl & {
+      initialScheduleId: string;
+    };
+    el.projectId = 'proj-1';
+    el.initialScheduleId = 'sched-auto';
+    document.body.appendChild(el);
+    await settle(el);
+
+    const root = el.shadowRoot as ShadowRoot;
+    const dialog = root.querySelector('sl-dialog[label="Schedule: auto-sched"]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.hasAttribute('open')).toBe(true);
+    expect(dialog.textContent).toMatch(/Run Count:\s*0\s+total/);
+
+    (dialog.querySelector('sl-button.detail-run-now') as HTMLElement).click();
+    await settle(el);
+
+    // Detail card refreshed to runCount 1, and manual-run-panel was NOT wiped by a second showDetail call.
+    expect(dialog.textContent).toMatch(/Run Count:\s*1\s+total/);
+    expect(dialog.querySelector('.manual-run-panel')?.textContent).toContain('fired');
+
+    // Closing the dialog and reloading schedules must not re-open initialScheduleId.
+    dialog.dispatchEvent(new Event('sl-request-close', { cancelable: true }));
+    await settle(el);
+    expect(root.querySelector('sl-dialog[label="Schedule: auto-sched"]')).toBeNull();
+
+    await (el as unknown as ListInternals).loadSchedules();
+    await settle(el);
+    expect(root.querySelector('sl-dialog[label="Schedule: auto-sched"]')).toBeNull();
+  });
 });

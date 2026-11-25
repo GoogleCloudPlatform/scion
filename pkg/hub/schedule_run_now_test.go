@@ -616,6 +616,8 @@ func TestScheduleRunNow_UsesRunnerAttributionAndCeilingNotAuthor(t *testing.T) {
 	assert.NotEqual(t, origSched.AuthorityCeiling.Kind, storedEvt.AuthorityCeiling.Kind)
 
 	require.True(t, fireCalled, "wrapped message action must have fired under runner B's authority")
+	assert.Equal(t, "schedule_manual", observedReq.Executor.Kind, "manual run must execute with ExecutorKind=schedule_manual")
+	assert.Equal(t, "schedule:"+sched.ID, observedReq.Executor.ID)
 	assert.Equal(t, runnerBUser.ID(), observedReq.Authority.Attribution.InitiatorPrincipalID, "fire-time authority must be runner B")
 	assert.Equal(t, store.EffectCeilingBounded, observedReq.Authority.Ceiling.Kind, "fire-time ceiling must be runner B's")
 
@@ -756,4 +758,91 @@ func TestScheduleRunNow_AuthoringCredentialGateRefused(t *testing.T) {
 	after, err := s.GetSchedule(ctx, sched.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 0, after.RunCount, "credential-gated refusals must not fire the schedule")
+}
+
+// TestScheduleRunNow_DetachedSlotHeldUntilGoroutineFinishes verifies that for a
+// detached manual fire (such as a wake message schedule), runScheduleNow passes
+// ownership of the per-replica manual-run slot to the detached goroutine so a
+// second /run while it is in flight returns 409 Conflict, and releases the slot
+// once the detached goroutine finishes so a subsequent /run succeeds.
+func TestScheduleRunNow_DetachedSlotHeldUntilGoroutineFinishes(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	agent := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "wake-worker",
+		Name:      "Wake Worker",
+		ProjectID: projectID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name:      "detached-slot-check",
+		CronExpr:  "0 9 * * *",
+		EventType: "message",
+		AgentName: agent.Slug,
+		Message:   "wake ping",
+		Wake:      true,
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&created))
+
+	origAction, ok := srv.LookupAction("message")
+	require.True(t, ok, "message FireAction must be registered")
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv.RegisterAction(&runNowHookAction{
+		FireAction: origAction,
+		onFire: func(fctx context.Context, req hubfire.FireRequest, a FireAuthorized) (hubfire.FireOutcome, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			return origAction.Fire(fctx, req, a)
+		},
+	})
+
+	runPath := "/api/v1/projects/" + projectID + "/schedules/" + created.ID + "/run"
+
+	// First Run now detaches and returns 202 Accepted immediately.
+	firstRec := doRequest(t, srv, http.MethodPost, runPath, nil)
+	require.Equal(t, http.StatusAccepted, firstRec.Code, firstRec.Body.String())
+
+	// Wait until the detached goroutine is running (HTTP handler has returned).
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for detached manual fire to enter hook")
+	}
+
+	// While the detached goroutine is still executing, a concurrent Run now on
+	// the same replica must get 409 Conflict (slot ownership was transferred).
+	conflictRec := doRequest(t, srv, http.MethodPost, runPath, nil)
+	assert.Equal(t, http.StatusConflict, conflictRec.Code, conflictRec.Body.String())
+
+	// Unblock the detached goroutine and wait for it to finish and release the slot.
+	close(release)
+	require.Eventually(t, func() bool {
+		sc, err := s.GetSchedule(ctx, created.ID)
+		return err == nil && sc.RunCount == 1
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// Once the detached goroutine exits and releases the slot, a subsequent
+	// Run now must be accepted again (poll briefly for defer release after DB write).
+	var thirdCode int
+	require.Eventually(t, func() bool {
+		rec := doRequest(t, srv, http.MethodPost, runPath, nil)
+		thirdCode = rec.Code
+		return thirdCode == http.StatusAccepted
+	}, 5*time.Second, 20*time.Millisecond, "expected subsequent Run now to return 202 after slot release, got %d", thirdCode)
+
+	require.Eventually(t, func() bool {
+		sc, err := s.GetSchedule(ctx, created.ID)
+		return err == nil && sc.RunCount == 2
+	}, 5*time.Second, 20*time.Millisecond)
 }
