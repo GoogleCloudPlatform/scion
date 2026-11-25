@@ -197,9 +197,23 @@ export BUCKET_NAME="scion-hub-$PROJECT_ID"
 gsutil mb -l $REGION -p $PROJECT_ID gs://$BUCKET_NAME/
 ```
 
-**Recommended lifecycle backstop for move-bundle staging:** When agents move between Runtime Brokers using bundle transfer (`scion reincarnate --broker`), the Hub stages temporary workspace and `$HOME` archives under `hubs/<hub-id>/move-bundles/<reincarnation-id>/` (or `move-bundles/<reincarnation-id>/` when `server.hub.hub_id` is unset). The Hub deletes each bundle when the move finishes, and a periodic orphan sweep cleans up abandoned prefixes after 1 hour. Add a GCS bucket lifecycle rule as a 7-day backstop so orphaned staging objects can never accumulate if the Hub is down or decommissioned:
+**Recommended lifecycle backstop for move-bundle staging:** When agents move between Runtime Brokers using bundle transfer (`scion reincarnate --broker`), the Hub stages temporary workspace and `$HOME` archives under `hubs/<hub-id>/move-bundles/<reincarnation-id>/` (or `move-bundles/<reincarnation-id>/` when `server.hub.hub_id` is unset). The Hub deletes each bundle when the move finishes, and a periodic orphan sweep cleans up abandoned prefixes after 1 hour. Add a GCS bucket lifecycle rule as a 7-day backstop so orphaned staging objects can never accumulate if the Hub is down or decommissioned.
+
+:::caution[`--lifecycle-file` replaces existing bucket lifecycle rules]
+`gcloud storage buckets update --lifecycle-file` **replaces** the bucket's entire lifecycle configuration. On an existing bucket that already has lifecycle rules, inspect the current configuration first:
 
 ```bash
+gcloud storage buckets describe gs://$BUCKET_NAME --format="json(lifecycle)"
+```
+
+Merge the `move-bundles/` rule below into your existing `lifecycle.rule` array before applying it so existing rules are not overwritten.
+:::
+
+Set `HUB_ID` to the same value you will use for `server.hub.hub_id` in [§3c](#3c-configure-and-store-settingsyaml) (if multiple Hubs share one bucket, add one `hubs/<hub-id>/move-bundles/` entry per Hub, since GCS `matchesPrefix` matches literal prefixes without wildcards):
+
+```bash
+export HUB_ID="scion-hub-ha-prod"   # Must match server.hub.hub_id
+
 cat > /tmp/move-bundles-lifecycle.json <<EOF
 {
   "lifecycle": {
@@ -208,7 +222,7 @@ cat > /tmp/move-bundles-lifecycle.json <<EOF
         "action": { "type": "Delete" },
         "condition": {
           "age": 7,
-          "matchesPrefix": ["hubs/<hub-id>/move-bundles/", "move-bundles/"]
+          "matchesPrefix": ["hubs/${HUB_ID}/move-bundles/", "move-bundles/"]
         }
       }
     ]
@@ -219,8 +233,6 @@ EOF
 gcloud storage buckets update gs://$BUCKET_NAME \
   --lifecycle-file=/tmp/move-bundles-lifecycle.json
 ```
-
-Replace `<hub-id>` with your Hub's `server.hub.hub_id` (if multiple Hubs share one bucket, add one `hubs/<hub-id>/move-bundles/` entry per Hub, since GCS `matchesPrefix` matches literal prefixes without wildcards).
 
 ### 1d. GKE Autopilot Cluster
 
