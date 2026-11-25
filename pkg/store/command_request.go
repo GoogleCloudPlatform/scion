@@ -211,13 +211,17 @@ type CommandRunDispatchInput struct {
 
 // FinishCommandRunInput is the input to FinishCommandRun.
 type FinishCommandRunInput struct {
-	RunID        string
-	Status       string // must satisfy IsTerminalCommandRunStatus
-	Reason       string
-	ExitCode     *int
-	DurationMS   *int64
-	OutputBytes  *int64
-	OutputStatus string
+	RunID  string
+	Status string // must satisfy IsTerminalCommandRunStatus
+	// ExpectedStatuses, when non-empty, adds status IN (...) to the finish CAS
+	// predicate so a stale caller (e.g. sweeper acting on a queued snapshot)
+	// cannot overwrite a run that has already transitioned to dispatching.
+	ExpectedStatuses []string
+	Reason           string
+	ExitCode         *int
+	DurationMS       *int64
+	OutputBytes      *int64
+	OutputStatus     string
 	// Output, when non-empty, is inserted into exec_run_outputs with
 	// owner_kind='action_run' inside the finish-CAS transaction on a win.
 	Output     []byte
@@ -286,9 +290,9 @@ type CommandRequestStore interface {
 	TransitionCommandRunToWaking(ctx context.Context, runID string, wake string) (bool, error)
 
 	// TransitionCommandRunToDispatching atomically transitions a run from
-	// queued|waking -> dispatching (guarded by finished_at IS NULL), pinning
-	// launch_id, not_after, lease_until, and dispatched_at. Must commit before
-	// sending exec-start.
+	// queued|waking -> dispatching (guarded by finished_at IS NULL and
+	// lease_until > dispatchedAt), pinning launch_id, not_after, lease_until,
+	// and dispatched_at. Must commit before sending exec-start.
 	TransitionCommandRunToDispatching(ctx context.Context, in *CommandRunDispatchInput) (bool, error)
 
 	// TransitionCommandRunToRunning atomically transitions a run from

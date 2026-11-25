@@ -63,7 +63,9 @@ func (s *Server) enqueueCommandRun(req *store.CommandRequest, run *store.Command
 	s.mu.RUnlock()
 	if l != nil {
 		l.EnqueueCommandRun(req, run)
+		return
 	}
+	s.EnqueueCommandRun(req, run)
 }
 
 // handleCommandRequestRoutes serves the responder command-request endpoints,

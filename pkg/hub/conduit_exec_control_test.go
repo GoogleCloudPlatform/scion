@@ -578,6 +578,19 @@ func TestExecControlCallers(t *testing.T) {
 		require.NoError(t, err)
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch x := n.(type) {
+			case *ast.Ident:
+				switch x.Name {
+				case "execOwnerCommandRun":
+					if name != "command_run_exec.go" && name != "conduit_exec_control.go" {
+						t.Errorf("%s: %s refers to execOwnerCommandRun; only command_run_exec.go may use it",
+							fset.Position(x.Pos()), name)
+					}
+				case "execOwnerScheduled":
+					if name != "action_exec.go" && name != "conduit_exec_control.go" {
+						t.Errorf("%s: %s refers to execOwnerScheduled; only action_exec.go may use it",
+							fset.Position(x.Pos()), name)
+					}
+				}
 			case *ast.SelectorExpr:
 				switch x.Sel.Name {
 				case "RouteExecStart", "RouteExecStatus", "StartAgentExecRun", "AgentExecRunStatus", "callAgentExec":

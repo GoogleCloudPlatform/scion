@@ -137,11 +137,11 @@ func (s *Server) EnqueueCommandRun(req *store.CommandRequest, run *store.Command
 	acquired, full := s.commandRuns.acquire(runCopy.ID)
 	if !acquired {
 		if full {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), scheduledEventRecordTimeout)
+			_ = s.commandRuns.work.goTracked(func(ctx context.Context) {
+				recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 				defer cancel()
-				_, _ = s.finishCommandRun(ctx, reqCopy, &runCopy, store.CommandRunStatusNotStarted, "hub_busy", nil, "")
-			}()
+				_, _ = s.finishCommandRun(recordCtx, reqCopy, &runCopy, []string{store.CommandRunStatusQueued}, store.CommandRunStatusNotStarted, "hub_busy", nil, "")
+			})
 		}
 		return
 	}
@@ -194,7 +194,7 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 				return
 			}
 			slog.Warn("Command run: failed to load request row", "run_id", run.ID, "request_id", run.RequestID, "error", err)
-			_, _ = s.finishCommandRun(ctx, req, run, store.CommandRunStatusNotStarted, "request_missing", nil, "")
+			_, _ = s.finishCommandRun(ctx, req, run, []string{store.CommandRunStatusQueued, store.CommandRunStatusWaking}, store.CommandRunStatusNotStarted, "request_missing", nil, "")
 			return
 		}
 		req = loaded
@@ -203,7 +203,12 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 	finishBeforeDispatch := func(reason string) {
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancel()
-		_, _ = s.finishCommandRun(recordCtx, req, run, store.CommandRunStatusNotStarted, reason, nil, "")
+		_, _ = s.finishCommandRun(recordCtx, req, run, []string{store.CommandRunStatusQueued, store.CommandRunStatusWaking}, store.CommandRunStatusNotStarted, reason, nil, "")
+	}
+	finishAfterDispatch := func(status, reason string, res *agentcontrol.ExecResult, fallbackOutputStatus string) {
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+		defer cancel()
+		_, _ = s.finishCommandRun(recordCtx, req, run, []string{store.CommandRunStatusDispatching}, status, reason, res, fallbackOutputStatus)
 	}
 
 	// Step 1: resolve the approver's execution container.
@@ -328,23 +333,23 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 		}
 		switch {
 		case errors.Is(startErr, ErrCommandRequestsDisabled):
-			finishBeforeDispatch("disabled")
+			finishAfterDispatch(store.CommandRunStatusNotStarted, "disabled", nil, "")
 			return
 		case errors.Is(startErr, ErrCommandRunTargetNotShell),
 			errors.Is(startErr, ErrAgentExecLaunchChanged),
 			errors.Is(startErr, store.ErrNotFound):
-			finishBeforeDispatch("container_changed")
+			finishAfterDispatch(store.CommandRunStatusNotStarted, "container_changed", nil, "")
 			return
 		case errors.Is(startErr, ErrAgentExecWorkdirUnsupported),
 			errors.Is(startErr, errExecCaptureUnsupported),
 			errors.Is(startErr, ErrAgentControlNotAdvertised):
-			finishBeforeDispatch("exec_unsupported")
+			finishAfterDispatch(store.CommandRunStatusNotStarted, "exec_unsupported", nil, "")
 			return
 		case errors.Is(startErr, router.ErrNoSession):
-			finishBeforeDispatch("container_not_running")
+			finishAfterDispatch(store.CommandRunStatusNotStarted, "container_not_running", nil, "")
 			return
 		case isExecFieldError(startErr):
-			finishBeforeDispatch("invalid_request")
+			finishAfterDispatch(store.CommandRunStatusNotStarted, "invalid_request", nil, "")
 			return
 		default:
 			// Timeout, transport drop, or schema error after send: ambiguous.
@@ -359,23 +364,28 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 	// Documented exec-start answer.
 	switch res.Status {
 	case http.StatusConflict:
-		reason := res.Outcome
-		if reason == "" {
-			reason = "busy"
+		switch res.Outcome {
+		case agentcontrol.ExecOutcomeBusy, agentcontrol.ExecOutcomeOverlap:
+			finishAfterDispatch(store.CommandRunStatusNotStarted, res.Outcome, nil, "")
+		default:
+			// Conservative mapping (O4): any 409 other than busy/overlap (e.g.
+			// mismatch) means a run with this ID may already exist on the agent.
+			reason := res.Outcome
+			if reason == "" {
+				reason = "conflict"
+			}
+			finishAfterDispatch(store.CommandRunStatusUnknown, reason, nil, agentcontrol.ExecOutputLost)
 		}
-		finishBeforeDispatch(reason)
 		return
 	case http.StatusRequestTimeout:
-		finishBeforeDispatch(agentcontrol.ExecOutcomeExpiredBeforeStart)
+		finishAfterDispatch(store.CommandRunStatusNotStarted, agentcontrol.ExecOutcomeExpiredBeforeStart, nil, "")
 		return
 	case http.StatusBadRequest:
-		finishBeforeDispatch("invalid_request")
+		finishAfterDispatch(store.CommandRunStatusNotStarted, "invalid_request", nil, "")
 		return
 	case http.StatusAccepted, http.StatusOK:
 		if res.Finished() && res.Outcome == agentcontrol.ExecOutcomeStartFailed {
-			recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-			_, _ = s.finishCommandRun(recordCtx, req, run, store.CommandRunStatusNotStarted, agentcontrol.ExecOutcomeStartFailed, &res, "")
-			cancel()
+			finishAfterDispatch(store.CommandRunStatusNotStarted, agentcontrol.ExecOutcomeStartFailed, &res, "")
 			return
 		}
 		if res.State == agentcontrol.ExecStateRunning {
@@ -439,7 +449,7 @@ func (s *Server) pollCommandRunOnce(ctx context.Context, req *store.CommandReque
 	record := func(status, reason string, res *agentcontrol.ExecResult, fallbackOutputStatus string) bool {
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancel()
-		_, err := s.finishCommandRun(recordCtx, req, run, status, reason, res, fallbackOutputStatus)
+		_, err := s.finishCommandRun(recordCtx, req, run, []string{store.CommandRunStatusDispatching, store.CommandRunStatusRunning}, status, reason, res, fallbackOutputStatus)
 		return err == nil
 	}
 
@@ -524,6 +534,7 @@ func (s *Server) finishCommandRun(
 	ctx context.Context,
 	req *store.CommandRequest,
 	run *store.CommandRun,
+	expectedStatuses []string,
 	status, reason string,
 	res *agentcontrol.ExecResult,
 	fallbackOutputStatus string,
@@ -535,10 +546,11 @@ func (s *Server) finishCommandRun(
 	}
 
 	fin := store.FinishCommandRunInput{
-		RunID:      run.ID,
-		Status:     status,
-		Reason:     reason,
-		FinishedAt: now,
+		RunID:            run.ID,
+		Status:           status,
+		ExpectedStatuses: expectedStatuses,
+		Reason:           reason,
+		FinishedAt:       now,
 	}
 	if res != nil && res.Finished() && res.Outcome != agentcontrol.ExecOutcomeStartFailed {
 		code, dur, outBytes := res.ExitCode, res.DurationMS, res.OutputBytes
@@ -809,9 +821,11 @@ func (s *Server) commandRunSweepHandler() func(ctx context.Context) {
 	return s.sweepCommandRuns
 }
 
-// sweepCommandRuns resolves expired unfinished command runs (design §4.12 rows
-// (a) and (b)):
-//   - (a) queued/waking past lease -> not_started/lease_expired (nothing sent);
+// sweepCommandRuns resolves expired pending command requests (O2, §4.12) and
+// expired unfinished command runs (design §4.12 rows (a) and (b)):
+//   - pending command_requests past expires_at -> expired + audit event;
+//   - (a) queued/waking past lease -> not_started/lease_expired (nothing sent,
+//     guarded by ExpectedStatuses {queued, waking});
 //   - (b) dispatching/running past lease -> poll exec-status once, then
 //     unknown/lease_expired if still unresolved.
 //
@@ -819,6 +833,44 @@ func (s *Server) commandRunSweepHandler() func(ctx context.Context) {
 func (s *Server) sweepCommandRuns(ctx context.Context) {
 	batch := execSeamInt(&commandRunSweepBatch)
 	budget := batch * execSeamInt(&commandRunSweepMaxPage)
+
+	// Expire pending command_requests past their 24h TTL (O2, design §4.12).
+	for expiredReqs := 0; expiredReqs < budget && ctx.Err() == nil; {
+		rows, err := s.store.ExpireCommandRequests(ctx, time.Now().UTC(), batch)
+		if err != nil {
+			slog.Warn("Command run sweep: expire command requests failed", "error", err)
+			break
+		}
+		if len(rows) == 0 {
+			break
+		}
+		now := time.Now().UTC()
+		for _, row := range rows {
+			s.emitMessageActionEvent(ctx, &MessageActionEvent{
+				Kind:      msgaction.KindCommandRequest,
+				EventType: MessageActionEventExpired,
+				RowID:     row.ID,
+				MessageID: row.MessageID,
+				ProjectID: row.ProjectID,
+				AgentID:   row.AgentID,
+				AgentName: row.AgentName,
+				Key:       row.Key,
+				Version:   row.Version,
+				ActorKind: MessageActionActorHub,
+				Details: map[string]string{
+					"command_sha256":   row.CommandSHA256,
+					"approver_user_id": row.ApproverUserID,
+				},
+				Timestamp: now,
+			})
+			s.publishActionUpdated(msgaction.KindCommandRequest, row.ProjectID, row.MessageID, row.ChatKey, commandRequestView(row, nil, nil))
+		}
+		expiredReqs += len(rows)
+		if len(rows) < batch {
+			break
+		}
+	}
+
 	for processed := 0; processed < budget && ctx.Err() == nil; {
 		runs, err := s.store.ListExpiredCommandRuns(ctx, time.Now().UTC(), batch)
 		if err != nil {
@@ -842,9 +894,9 @@ func (s *Server) sweepCommandRuns(ctx context.Context) {
 			switch run.Status {
 			case store.CommandRunStatusQueued, store.CommandRunStatusWaking:
 				recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-				_, ferr := s.finishCommandRun(recordCtx, req, run, store.CommandRunStatusNotStarted, "lease_expired", nil, "")
+				won, ferr := s.finishCommandRun(recordCtx, req, run, []string{store.CommandRunStatusQueued, store.CommandRunStatusWaking}, store.CommandRunStatusNotStarted, "lease_expired", nil, "")
 				cancel()
-				if ferr == nil {
+				if ferr == nil && won {
 					progressed = true
 				}
 			case store.CommandRunStatusDispatching, store.CommandRunStatusRunning:

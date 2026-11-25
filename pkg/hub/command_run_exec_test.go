@@ -17,8 +17,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -348,6 +351,24 @@ func TestCommandRunExec_OutcomeMapping(t *testing.T) {
 		assert.Equal(t, agentcontrol.ExecOutcomeBusy, fin.Reason)
 	})
 
+	t.Run("conflict_mismatch_maps_to_unknown", func(t *testing.T) {
+		cap := &execCapture{
+			answer: func(req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+				if req.GetPath() == execRoutePath(agentcontrol.RouteExecStart) {
+					return &conduitv1.RpcResponse{Status: 409, Body: []byte(`{"outcome":"mismatch"}`)}
+				}
+				return nil
+			},
+		}
+		f := newCmdRunExecFixture(t, cap)
+		req, run := f.createApprovedRun(t, "mismatch-case", "echo hi", "", 30)
+		f.srv.EnqueueCommandRun(req, run)
+		fin := f.waitRunFinished(t, run.ID)
+		assert.Equal(t, store.CommandRunStatusUnknown, fin.Status)
+		assert.Equal(t, agentcontrol.ExecOutcomeMismatch, fin.Reason)
+		assert.Equal(t, agentcontrol.ExecOutputLost, fin.OutputStatus)
+	})
+
 	t.Run("stopped_and_suspended_containers_not_started_no_wake_in_p1", func(t *testing.T) {
 		for _, tc := range []struct {
 			phase      state.Phase
@@ -459,49 +480,13 @@ func TestCommandRunExec_AC_S4_DoubleApproveAndRestartRecovery(t *testing.T) {
 
 	t.Run("hub_restart_before_dispatch_sweeper_marks_not_started_never_sends", func(t *testing.T) {
 		f := newCmdRunExecFixture(t, nil)
-		req, run := f.createApprovedRun(t, "restart-before-dispatch", "echo never", "", 30)
-
-		// Simulate hub shutdown right before committing dispatching.
-		commandRunExecHook = func(stage, runID string) {
-			if stage == commandRunStageBeforeDispatch && runID == run.ID {
-				f.srv.commandRuns.work.closeAdmission()
-				go f.srv.stopCommandRuns(context.Background())
-				time.Sleep(50 * time.Millisecond)
-			}
-		}
-		t.Cleanup(func() { commandRunExecHook = nil })
-
-		// Shrink stop grace so shutdown cancels quickly.
-		scheduledExecSeamMu.Lock()
-		origGrace := commandRunStopGrace
-		commandRunStopGrace = 10 * time.Millisecond
-		scheduledExecSeamMu.Unlock()
-		t.Cleanup(func() {
-			scheduledExecSeamMu.Lock()
-			commandRunStopGrace = origGrace
-			scheduledExecSeamMu.Unlock()
-		})
-
-		f.srv.EnqueueCommandRun(req, run)
-		require.Eventually(t, func() bool { return !f.srv.commandRuns.owns(run.ID) }, 5*time.Second, 20*time.Millisecond)
-		assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
-
-		// Run stays queued until lease expires; sweeper resolves queued past lease -> not_started/lease_expired.
-		got, err := f.store.GetCommandRun(context.Background(), run.ID)
-		require.NoError(t, err)
-		assert.Equal(t, store.CommandRunStatusQueued, got.Status)
-		assert.Nil(t, got.FinishedAt)
-
-		// Advance lease expiry via a fresh queued run with past LeaseUntil and sweep.
-		pastReq, pastRun := f.createApprovedRun(t, "expired-queued", "echo expired", "", 30)
-		// Force LeaseUntil into the past by creating a run with past LeaseUntil directly via ApproveCommandRequest.
-		_ = pastReq
-		_ = pastRun
-		norm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
-			Key: "expired-queued-2", Script: "echo expired2", TimeoutS: 30,
-		})
-		require.NoError(t, err)
+		// Create a pending request and approve it with a short lease so the
+		// interrupted run itself expires and is resolved by sweepCommandRuns (N3).
 		now := time.Now().UTC()
+		norm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+			Key: "restart-before-dispatch", Script: "echo never", TimeoutS: 30,
+		})
+		require.NoError(t, err)
 		pr, err := f.store.CreateCommandRequestPrompt(context.Background(), &store.CommandRequestPromptInput{
 			Message: &store.Message{
 				ID: api.NewUUID(), ProjectID: f.launched.ProjectID, ConversationID: api.NewUUID(),
@@ -516,18 +501,145 @@ func TestCommandRunExec_AC_S4_DoubleApproveAndRestartRecovery(t *testing.T) {
 		app, err := f.store.ApproveCommandRequest(context.Background(), &store.ApproveCommandRequestInput{
 			RequestID: pr.Request.ID, CommandSHA256: pr.Request.CommandSHA256,
 			UserID: f.owner.ID(), UserName: f.owner.DisplayName(), UserEmail: f.owner.Email(),
-			Surface: msgaction.CommandRequestSurfaceCLI, IdempotencyKey: "idem-exp2",
+			Surface: msgaction.CommandRequestSurfaceCLI, IdempotencyKey: "idem-restart-before",
 			ExecAgentID: f.launched.ID, ExecProjectID: f.launched.ProjectID,
-			LeaseUntil: now.Add(-time.Minute), Now: now,
+			LeaseUntil: now.Add(200 * time.Millisecond), Now: now,
 		})
 		require.NoError(t, err)
+		req, run := app.Request, app.Run
 
+		// Simulate hub shutdown right before committing dispatching.
+		commandRunExecHook = func(stage, runID string) {
+			if stage == commandRunStageBeforeDispatch && runID == run.ID {
+				f.srv.commandRuns.work.closeAdmission()
+				go f.srv.stopCommandRuns(context.Background())
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		t.Cleanup(func() { commandRunExecHook = nil })
+
+		scheduledExecSeamMu.Lock()
+		origGrace := commandRunStopGrace
+		commandRunStopGrace = 10 * time.Millisecond
+		scheduledExecSeamMu.Unlock()
+		t.Cleanup(func() {
+			scheduledExecSeamMu.Lock()
+			commandRunStopGrace = origGrace
+			scheduledExecSeamMu.Unlock()
+		})
+
+		f.srv.EnqueueCommandRun(req, run)
+		require.Eventually(t, func() bool { return !f.srv.commandRuns.owns(run.ID) }, 5*time.Second, 20*time.Millisecond)
+		assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
+
+		got, err := f.store.GetCommandRun(context.Background(), run.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.CommandRunStatusQueued, got.Status)
+		assert.Nil(t, got.FinishedAt)
+
+		// Wait past the interrupted run's own lease and sweep it.
+		time.Sleep(250 * time.Millisecond)
 		f.srv.sweepCommandRuns(context.Background())
-		swept, err := f.store.GetCommandRun(context.Background(), app.Run.ID)
+		swept, err := f.store.GetCommandRun(context.Background(), run.ID)
 		require.NoError(t, err)
 		assert.Equal(t, store.CommandRunStatusNotStarted, swept.Status)
 		assert.Equal(t, "lease_expired", swept.Reason)
 		assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "sweeper must never send exec-start")
+	})
+
+	t.Run("hub_restart_after_dispatching_before_send_resolves_dispatch_failed_only_after_grace", func(t *testing.T) {
+		f := newCmdRunExecFixture(t, nil)
+		scheduledExecSeamMu.Lock()
+		origNotAfter := commandRunNotAfter
+		origAbsentGrace := scheduledExecStartAbsentGrace
+		origLeaseGrace := commandRunLeaseGrace
+		origStopGrace := commandRunStopGrace
+		commandRunNotAfter = 120 * time.Millisecond
+		scheduledExecStartAbsentGrace = 120 * time.Millisecond
+		commandRunLeaseGrace = 400 * time.Millisecond
+		commandRunStopGrace = 10 * time.Millisecond
+		scheduledExecSeamMu.Unlock()
+		t.Cleanup(func() {
+			scheduledExecSeamMu.Lock()
+			commandRunNotAfter = origNotAfter
+			scheduledExecStartAbsentGrace = origAbsentGrace
+			commandRunLeaseGrace = origLeaseGrace
+			commandRunStopGrace = origStopGrace
+			scheduledExecSeamMu.Unlock()
+		})
+
+		req, run := f.createApprovedRun(t, "restart-after-dispatch", "echo never-sent", "", 1)
+
+		// Interrupt right after dispatching is committed and BEFORE exec-start is sent.
+		commandRunExecHook = func(stage, runID string) {
+			if stage == commandRunStageDispatched && runID == run.ID {
+				f.srv.commandRuns.work.closeAdmission()
+				go f.srv.stopCommandRuns(context.Background())
+				time.Sleep(40 * time.Millisecond)
+			}
+		}
+		t.Cleanup(func() { commandRunExecHook = nil })
+
+		f.srv.EnqueueCommandRun(req, run)
+		require.Eventually(t, func() bool { return !f.srv.commandRuns.owns(run.ID) }, 5*time.Second, 20*time.Millisecond)
+		assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "stopped before exec-start")
+
+		// Row is dispatching and unfinished.
+		mid, err := f.store.GetCommandRun(context.Background(), run.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.CommandRunStatusDispatching, mid.Status)
+		assert.Nil(t, mid.FinishedAt)
+
+		// Polling 404 BEFORE not_after + grace must NOT finish as dispatch_failed yet.
+		doneEarly := f.srv.pollCommandRunOnce(context.Background(), req, mid, false)
+		assert.False(t, doneEarly, "404 before not_after+grace must not finish prematurely")
+		stillOpen, err := f.store.GetCommandRun(context.Background(), run.ID)
+		require.NoError(t, err)
+		assert.Nil(t, stillOpen.FinishedAt)
+
+		// Once not_after + grace passes, 404 while still dispatching finishes as
+		// not_started/dispatch_failed with zero exec-start calls.
+		time.Sleep(300 * time.Millisecond)
+		doneLate := f.srv.pollCommandRunOnce(context.Background(), req, stillOpen, false)
+		assert.True(t, doneLate)
+		fin, err := f.store.GetCommandRun(context.Background(), run.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.CommandRunStatusNotStarted, fin.Status)
+		assert.Equal(t, "dispatch_failed", fin.Reason)
+		assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
+	})
+
+	t.Run("sweeper_expires_pending_command_requests", func(t *testing.T) {
+		f := newCmdRunExecFixture(t, nil)
+		now := time.Now().UTC()
+		norm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+			Key: "stale-pending", Script: "echo stale", TimeoutS: 30,
+		})
+		require.NoError(t, err)
+		pr, err := f.store.CreateCommandRequestPrompt(context.Background(), &store.CommandRequestPromptInput{
+			Message: &store.Message{
+				ID: api.NewUUID(), ProjectID: f.launched.ProjectID, ConversationID: api.NewUUID(),
+				ThreadID: "dm:user:" + f.owner.ID() + ":agent:" + f.asker.ID,
+				Sender:   "agent:" + f.asker.Slug, SenderID: f.asker.ID,
+				Recipient: "user:" + f.owner.Email(), RecipientID: f.owner.ID(),
+			},
+			AgentID: f.asker.ID, AgentName: f.asker.Slug, ApproverID: f.owner.ID(),
+			Request: norm, Now: now.Add(-25 * time.Hour), TTL: msgaction.CommandRequestTTL,
+		})
+		require.NoError(t, err)
+
+		f.srv.sweepCommandRuns(context.Background())
+		got, err := f.store.GetCommandRequest(context.Background(), pr.Request.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.CommandRequestStatusExpired, got.Status)
+
+		var sawExpired bool
+		for _, ev := range f.audit.snapshot() {
+			if ev.EventType == MessageActionEventExpired && ev.RowID == pr.Request.ID {
+				sawExpired = true
+			}
+		}
+		assert.True(t, sawExpired, "sweeper must emit expired audit event for expired command request")
 	})
 
 	t.Run("sweeper_polls_expired_dispatching_run_once_then_unknown", func(t *testing.T) {
@@ -577,7 +689,7 @@ func TestCommandRunExec_FinishCASRace(t *testing.T) {
 			defer wg.Done()
 			<-start
 			runCopy := *run
-			won, err := f.srv.finishCommandRun(context.Background(), req, &runCopy, store.CommandRunStatusSucceeded, "", &agentcontrol.ExecResult{
+			won, err := f.srv.finishCommandRun(context.Background(), req, &runCopy, []string{store.CommandRunStatusQueued}, store.CommandRunStatusSucceeded, "", &agentcontrol.ExecResult{
 				State:        agentcontrol.ExecStateFinished,
 				Outcome:      agentcontrol.ExecOutcomeOK,
 				ExitCode:     0,
@@ -602,4 +714,68 @@ func TestCommandRunExec_FinishCASRace(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, finishedAudits, "only the CAS winner may emit the finish audit event")
+}
+
+// TestCommandRunExec_ApproveHandlerDefaultLauncherEndToEnd defeats C1: on a
+// default Server (no SetCommandRunLauncher), hitting the real
+// POST /api/v1/command-requests/{id}/approve handler must launch the executor,
+// send exactly one exec-start, and finish as succeeded.
+func TestCommandRunExec_ApproveHandlerDefaultLauncherEndToEnd(t *testing.T) {
+	f := newCmdRunExecFixture(t, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	norm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+		Key:      "default-launcher-e2e",
+		Script:   "echo default-launcher-ok",
+		TimeoutS: 30,
+	})
+	require.NoError(t, err)
+	pr, err := f.store.CreateCommandRequestPrompt(ctx, &store.CommandRequestPromptInput{
+		Message: &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      f.launched.ProjectID,
+			ConversationID: api.NewUUID(),
+			ThreadID:       "dm:user:" + f.owner.ID() + ":agent:" + f.asker.ID,
+			Sender:         "agent:" + f.asker.Slug,
+			SenderID:       f.asker.ID,
+			Recipient:      "user:" + f.owner.Email(),
+			RecipientID:    f.owner.ID(),
+		},
+		AgentID:    f.asker.ID,
+		AgentName:  f.asker.Slug,
+		ApproverID: f.owner.ID(),
+		Request:    norm,
+		Now:        now,
+		TTL:        msgaction.CommandRequestTTL,
+	})
+	require.NoError(t, err)
+
+	body, err := json.Marshal(messages.ApproveCommandRequestBody{
+		RowID:          pr.Request.ID,
+		CommandSHA256:  pr.Request.CommandSHA256,
+		Surface:        msgaction.CommandRequestSurfaceCLI,
+		IdempotencyKey: "c1-e2e-key",
+	})
+	require.NoError(t, err)
+
+	// Confirm no test override was installed on the server.
+	assert.Nil(t, f.srv.commandRunLauncher)
+
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/"+pr.Request.ID+"/approve", bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq = httpReq.WithContext(contextWithIdentity(httpReq.Context(), f.owner))
+	rec := httptest.NewRecorder()
+	f.srv.handleCommandRequestRoutes(rec, httpReq)
+
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	var appResp messages.ApproveCommandRequestResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &appResp))
+	require.NotEmpty(t, appResp.Run.RunID)
+
+	fin := f.waitRunFinished(t, appResp.Run.RunID)
+	assert.Equal(t, store.CommandRunStatusSucceeded, fin.Status)
+	require.NotNil(t, fin.ExitCode)
+	assert.Equal(t, 0, *fin.ExitCode)
+	assert.Equal(t, 1, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "real approve handler must trigger exactly one exec-start")
 }

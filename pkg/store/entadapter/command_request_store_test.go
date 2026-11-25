@@ -386,3 +386,103 @@ func TestCommandRequestStore_ApproveCASIdempotencyAndRunLifecycle(t *testing.T) 
 		t.Fatalf("listRes = %+v", listRes)
 	}
 }
+
+// TestCommandRequestStore_R1_DispatchLeaseAndSweeperInterleaving verifies both
+// halves of R1:
+//  1. A stale sweeper finish carrying ExpectedStatuses={queued,waking} loses
+//     once TransitionCommandRunToDispatching has committed.
+//  2. TransitionCommandRunToDispatching refuses a run whose lease_until <= now.
+func TestCommandRequestStore_R1_DispatchLeaseAndSweeperInterleaving(t *testing.T) {
+	ctx := context.Background()
+	cs, projID, agentID := newCommandRequestTestStore(t)
+	approverID := uuid.New().String()
+	execAgentID := uuid.New().String()
+	execProjID := uuid.New().String()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// Case 1: sweeper lists queued run, executor commits dispatching before
+	// sweeper finishes -> sweeper finish with ExpectedStatuses={queued,waking}
+	// must lose and leave the run dispatching.
+	c1, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projID, agentID, approverID, "r1-interleave", "echo hi", false, now))
+	if err != nil {
+		t.Fatalf("create 1: %v", err)
+	}
+	app1, err := cs.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+		RequestID:      c1.Request.ID,
+		CommandSHA256:  c1.Request.CommandSHA256,
+		UserID:         approverID,
+		Surface:        msgaction.CommandRequestSurfaceCLI,
+		IdempotencyKey: "r1-1",
+		ExecAgentID:    execAgentID,
+		ExecProjectID:  execProjID,
+		LeaseUntil:     now.Add(6 * time.Minute),
+		Now:            now,
+	})
+	if err != nil || app1.Run == nil {
+		t.Fatalf("approve 1 = (%+v, %v)", app1, err)
+	}
+	wonDispatch, err := cs.TransitionCommandRunToDispatching(ctx, &store.CommandRunDispatchInput{
+		RunID:        app1.Run.ID,
+		LaunchID:     "launch-1",
+		NotAfter:     now.Add(1 * time.Minute),
+		LeaseUntil:   now.Add(12 * time.Minute),
+		DispatchedAt: now.Add(time.Second),
+	})
+	if err != nil || !wonDispatch {
+		t.Fatalf("TransitionCommandRunToDispatching = (%v, %v), want (true, nil)", wonDispatch, err)
+	}
+	wonSweep, err := cs.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+		RunID:            app1.Run.ID,
+		Status:           store.CommandRunStatusNotStarted,
+		ExpectedStatuses: []string{store.CommandRunStatusQueued, store.CommandRunStatusWaking},
+		Reason:           "lease_expired",
+		FinishedAt:       now.Add(2 * time.Second),
+	})
+	if err != nil || wonSweep {
+		t.Fatalf("stale sweeper FinishCommandRun = (%v, %v), want (false, nil)", wonSweep, err)
+	}
+	got1, err := cs.GetCommandRun(ctx, app1.Run.ID)
+	if err != nil {
+		t.Fatalf("GetCommandRun 1: %v", err)
+	}
+	if got1.Status != store.CommandRunStatusDispatching || got1.FinishedAt != nil {
+		t.Fatalf("run 1 = (status=%q finished=%v), want (dispatching, nil)", got1.Status, got1.FinishedAt)
+	}
+
+	// Case 2: TransitionCommandRunToDispatching refused when lease_until <= dispatchedAt.
+	c2, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projID, agentID, approverID, "r1-expired-lease", "echo late", false, now))
+	if err != nil {
+		t.Fatalf("create 2: %v", err)
+	}
+	app2, err := cs.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+		RequestID:      c2.Request.ID,
+		CommandSHA256:  c2.Request.CommandSHA256,
+		UserID:         approverID,
+		Surface:        msgaction.CommandRequestSurfaceCLI,
+		IdempotencyKey: "r1-2",
+		ExecAgentID:    execAgentID,
+		ExecProjectID:  execProjID,
+		LeaseUntil:     now.Add(5 * time.Second),
+		Now:            now,
+	})
+	if err != nil || app2.Run == nil {
+		t.Fatalf("approve 2 = (%+v, %v)", app2, err)
+	}
+	wonLate, err := cs.TransitionCommandRunToDispatching(ctx, &store.CommandRunDispatchInput{
+		RunID:        app2.Run.ID,
+		LaunchID:     "launch-1",
+		NotAfter:     now.Add(2 * time.Minute),
+		LeaseUntil:   now.Add(12 * time.Minute),
+		DispatchedAt: now.Add(5 * time.Second), // == lease_until -> must be refused
+	})
+	if err != nil || wonLate {
+		t.Fatalf("expired-lease TransitionCommandRunToDispatching = (%v, %v), want (false, nil)", wonLate, err)
+	}
+	got2, err := cs.GetCommandRun(ctx, app2.Run.ID)
+	if err != nil {
+		t.Fatalf("GetCommandRun 2: %v", err)
+	}
+	if got2.Status != store.CommandRunStatusQueued || got2.LaunchID != "" || got2.DispatchedAt != nil {
+		t.Fatalf("run 2 mutated after refused dispatch: %+v", got2)
+	}
+}

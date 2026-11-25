@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrequest"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/execrunoutput"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -714,6 +715,7 @@ func (c *CompositeStore) TransitionCommandRunToDispatching(ctx context.Context, 
 			commandrun.IDEQ(uid),
 			commandrun.StatusIn(commandrun.StatusQueued, commandrun.StatusWaking),
 			commandrun.FinishedAtIsNil(),
+			commandrun.LeaseUntilGT(dispatchedAt),
 		).
 		SetStatus(commandrun.StatusDispatching).
 		SetLaunchID(in.LaunchID).
@@ -768,10 +770,25 @@ func (c *CompositeStore) FinishCommandRun(ctx context.Context, in *store.FinishC
 		finishedAt = time.Now().UTC().Truncate(time.Microsecond)
 	}
 
+	var expectedStatuses []commandrun.Status
+	if len(in.ExpectedStatuses) > 0 {
+		expectedStatuses = make([]commandrun.Status, len(in.ExpectedStatuses))
+		for i, st := range in.ExpectedStatuses {
+			expectedStatuses[i] = commandrun.Status(st)
+		}
+	}
+
 	var won bool
 	err = runInEntTx(ctx, c.client, c.inTx, func(client *ent.Client) error {
+		queryPreds := []predicate.CommandRun{
+			commandrun.IDEQ(uid),
+			commandrun.FinishedAtIsNil(),
+		}
+		if len(expectedStatuses) > 0 {
+			queryPreds = append(queryPreds, commandrun.StatusIn(expectedStatuses...))
+		}
 		runRow, err := client.CommandRun.Query().
-			Where(commandrun.IDEQ(uid), commandrun.FinishedAtIsNil()).
+			Where(queryPreds...).
 			Only(ctx)
 		if ent.IsNotFound(err) {
 			return nil
@@ -780,7 +797,7 @@ func (c *CompositeStore) FinishCommandRun(ctx context.Context, in *store.FinishC
 			return mapError(err)
 		}
 		n, err := client.CommandRun.Update().
-			Where(commandrun.IDEQ(uid), commandrun.FinishedAtIsNil()).
+			Where(queryPreds...).
 			SetStatus(commandrun.Status(in.Status)).
 			SetReason(in.Reason).
 			SetNillableExitCode(in.ExitCode).
