@@ -51,6 +51,7 @@ export {
   hasScopeTermInQuery,
   hasServerOnlyAgentTerms,
   matchAgentQuery,
+  nonPhasePredicateForQuery,
   phasePredicateForQuery,
   type AgentFilterContext,
 } from './agent-accessors.js';

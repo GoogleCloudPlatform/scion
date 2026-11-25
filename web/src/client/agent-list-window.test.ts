@@ -1112,11 +1112,14 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
     const live = new Map<string, Agent>();
     const matchesErrorUi = (a: Agent): boolean =>
       a.phase === 'error' && a.labels?.['team'] === 'ui';
+    const matchesUi = (a: Agent): boolean => a.labels?.['team'] === 'ui';
     const { win } = createWindow({
       viewState: makeViewState({
         serverQuery: 'label:team=ui phase:error',
         filterPredicate: matchesErrorUi,
         committedFilterPredicate: matchesErrorUi,
+        committedNonPhasePredicate: matchesUi,
+        committedPhasePredicate: (p) => p === 'error',
       }),
       getAgent: (id) => live.get(id),
     });
@@ -1148,41 +1151,54 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
     expect(win.updatesAvailable).toBe(false);
   });
 
-  it('removes an off-page member from stats when it transitions out of the committed query', () => {
+  it('keeps an off-page member in stats on phase transition, evicts only on non-phase failure', () => {
     const live = new Map<string, Agent>();
-    const matchesRunning = (a: Agent): boolean => a.phase === 'running';
+    const matchesRunningUi = (a: Agent): boolean =>
+      a.phase === 'running' && a.labels?.['team'] === 'ui';
+    const matchesUi = (a: Agent): boolean => a.labels?.['team'] === 'ui';
     const { win } = createWindow({
       viewState: makeViewState({
-        serverQuery: 'phase:running',
-        filterPredicate: matchesRunning,
-        committedFilterPredicate: matchesRunning,
+        serverQuery: 'label:team=ui phase:running',
+        filterPredicate: matchesRunningUi,
+        committedFilterPredicate: matchesRunningUi,
+        committedNonPhasePredicate: matchesUi,
+        committedPhasePredicate: (p) => p === 'running',
       }),
       getAgent: (id) => live.get(id),
     });
 
     win.setPaged({
-      agents: [agent('a1', { phase: 'running' })],
+      agents: [agent('a1', { phase: 'running', labels: { team: 'ui' } })],
       totalCount: 2,
       stats: {
-        total: 2,
+        total: 3,
         running: 2,
         agents: [
           ['a1', 'running'],
           ['off-1', 'running'],
+          ['off-2', 'stopped'],
         ],
       },
     });
 
-    // Existing off-page member stops running -> leaves the committed query population.
-    live.set('off-1', agent('off-1', { phase: 'stopped' }));
+    // Existing off-page member stops running -> stays in phase-independent stats population.
+    live.set('off-1', agent('off-1', { phase: 'stopped', labels: { team: 'ui' } }));
     win.applyChanges({ upserted: ['off-1'], deleted: [], unknown: new Map(), generation: 1 });
 
-    expect(win.stats.total).toBe(1);
+    expect(win.stats.total).toBe(3);
+    expect(win.stats.running).toBe(1);
+    expect(win.updatesAvailable).toBe(false);
+
+    // Existing off-page member loses label:team=ui -> evicted from stats population.
+    live.set('off-2', agent('off-2', { phase: 'stopped', labels: { team: 'backend' } }));
+    win.applyChanges({ upserted: ['off-2'], deleted: [], unknown: new Map(), generation: 2 });
+
+    expect(win.stats.total).toBe(2);
     expect(win.stats.running).toBe(1);
     expect(win.updatesAvailable).toBe(false);
   });
 
-  it('removes an on-page member from items and stats when it transitions out of the committed query', () => {
+  it('removes an on-page member from items on phase stop while keeping it in phase-independent stats', () => {
     const live = new Map<string, Agent>();
     const matchesRunning = (a: Agent): boolean => a.phase === 'running';
     const { win } = createWindow({
@@ -1190,6 +1206,8 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
         serverQuery: 'phase:running',
         filterPredicate: matchesRunning,
         committedFilterPredicate: matchesRunning,
+        committedNonPhasePredicate: null,
+        committedPhasePredicate: (p) => p === 'running',
       }),
       getAgent: (id) => live.get(id),
     });
@@ -1198,11 +1216,12 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
       agents: [agent('a1', { phase: 'running' })],
       totalCount: 2,
       stats: {
-        total: 2,
+        total: 3,
         running: 2,
         agents: [
           ['a1', 'running'],
           ['off-1', 'running'],
+          ['off-2', 'stopped'],
         ],
       },
     });
@@ -1211,19 +1230,21 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
     win.applyChanges({ upserted: ['a1'], deleted: [], unknown: new Map(), generation: 1 });
 
     expect(win.items).toHaveLength(0);
-    expect(win.stats.total).toBe(1);
+    expect(win.stats.total).toBe(3);
     expect(win.stats.running).toBe(1);
     expect(win.updatesAvailable).toBe(true);
   });
 
-  it('removes an off-page member on unknown phase-only delta when new phase violates committed query', () => {
+  it('keeps an off-page member on unknown phase-only delta and raises chip when it transitions back to matching', () => {
     const matchesRunningUi = (a: Agent): boolean =>
       a.phase === 'running' && a.labels?.['team'] === 'ui';
+    const matchesUi = (a: Agent): boolean => a.labels?.['team'] === 'ui';
     const { win } = createWindow({
       viewState: makeViewState({
         serverQuery: 'label:team=ui phase:running',
         filterPredicate: matchesRunningUi,
         committedFilterPredicate: matchesRunningUi,
+        committedNonPhasePredicate: matchesUi,
         committedPhasePredicate: (phase) => phase === 'running',
       }),
     });
@@ -1232,11 +1253,12 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
       agents: [agent('a1', { phase: 'running', labels: { team: 'ui' } })],
       totalCount: 2,
       stats: {
-        total: 2,
+        total: 3,
         running: 2,
         agents: [
           ['a1', 'running'],
           ['off-1', 'running'],
+          ['off-2', 'stopped'],
         ],
       },
     });
@@ -1248,18 +1270,94 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
       unknown: new Map([['off-1', { phase: 'running' }]]),
       generation: 1,
     });
-    expect(win.stats.total).toBe(2);
+    expect(win.stats.total).toBe(3);
     expect(win.stats.running).toBe(2);
 
-    // Phase-only delta changing phase to stopped violates phase:running -> evicted from memberIndex.
+    // Phase-only delta changing phase to stopped keeps off-1 in memberIndex (phase-independent stats).
     win.applyChanges({
       upserted: [],
       deleted: [],
       unknown: new Map([['off-1', { phase: 'stopped' }]]),
       generation: 2,
     });
-    expect(win.stats.total).toBe(1);
+    expect(win.stats.total).toBe(3);
     expect(win.stats.running).toBe(1);
     expect(win.updatesAvailable).toBe(false);
+
+    // Scenario (i): off-page member off-2 transitions stopped -> running via unknown delta ->
+    // raises the chip and updates counts.
+    win.applyChanges({
+      upserted: [],
+      deleted: [],
+      unknown: new Map([['off-2', { phase: 'running' }]]),
+      generation: 3,
+    });
+    expect(win.stats.total).toBe(3);
+    expect(win.stats.running).toBe(2);
+    expect(win.updatesAvailable).toBe(true);
+  });
+
+  it('produces identical phase-independent header counts across chip-over-unfiltered, ?q= reload, and paged states', () => {
+    const population = [
+      agent('a1', { phase: 'running' }),
+      agent('a2', { phase: 'stopped' }),
+      agent('a3', { phase: 'error' }),
+    ];
+    const matchesRunning = (a: Agent): boolean => a.phase === 'running';
+
+    // 1. Chip-click over an unfiltered small set: H holds all 3 agents, phase:running applied locally.
+    const { win: chipOverUnfiltered } = createWindow({
+      viewState: makeViewState({ serverQuery: '' }),
+      getHeldAgents: () => population,
+    });
+    chipOverUnfiltered.setSmall();
+    chipOverUnfiltered.setViewState({
+      serverQuery: 'phase:running',
+      filterPredicate: matchesRunning,
+      committedFilterPredicate: matchesRunning,
+      committedNonPhasePredicate: null,
+      committedPhasePredicate: (p) => p === 'running',
+    });
+
+    // 2. Direct ?q=phase:running reload (small): hub fit probe is unphased, so complete=true returns all 3 agents.
+    const { win: directReloadSmall } = createWindow({
+      viewState: makeViewState({
+        serverQuery: 'phase:running',
+        filterPredicate: matchesRunning,
+        committedFilterPredicate: matchesRunning,
+        committedNonPhasePredicate: null,
+        committedPhasePredicate: (p) => p === 'running',
+      }),
+      getHeldAgents: () => population,
+    });
+    directReloadSmall.setSmall();
+
+    // 3. Paged state with ?q=phase:running: page 0 has only the running row, stats has the unphased 3-agent population.
+    const { win: pagedWin } = createWindow({
+      viewState: makeViewState({
+        serverQuery: 'phase:running',
+        filterPredicate: matchesRunning,
+        committedFilterPredicate: matchesRunning,
+        committedNonPhasePredicate: null,
+        committedPhasePredicate: (p) => p === 'running',
+      }),
+    });
+    pagedWin.setPaged({
+      agents: [population[0]],
+      totalCount: 1,
+      stats: {
+        total: 3,
+        running: 1,
+        agents: population.map((a) => [a.id, a.phase]),
+      },
+    });
+
+    const expected = { total: 3, running: 1, incomplete: false };
+    expect(chipOverUnfiltered.stats).toEqual(expected);
+    expect(directReloadSmall.stats).toEqual(expected);
+    expect(pagedWin.stats).toEqual(expected);
+    expect(chipOverUnfiltered.items.map((a) => a.id)).toEqual(['a1']);
+    expect(directReloadSmall.items.map((a) => a.id)).toEqual(['a1']);
+    expect(pagedWin.items.map((a) => a.id)).toEqual(['a1']);
   });
 });

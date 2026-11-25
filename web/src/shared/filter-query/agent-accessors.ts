@@ -144,12 +144,36 @@ export function matchAgentQuery(fq: Query, agent: Agent, ctx?: AgentFilterContex
 /**
  * Conservative live-add membership check for SSE creates and drain-time adds:
  * returns false whenever `fq` contains any server-only term (`is:`, external-email
- * `owner:`) that the client cannot evaluate, and otherwise evaluates `fq` locally.
+ * `owner:`) that the client cannot evaluate, and otherwise evaluates `fq` with
+ * `phase` terms stripped (mirroring the hub's phase-independent stats and fit
+ * population).
  */
 export function canLiveAddAgent(fq: Query | null, agent: Agent, ctx?: AgentFilterContext): boolean {
   if (fq === null) return true;
   if (hasServerOnlyAgentTerms(fq, ctx)) return false;
-  return matchAgentQuery(fq, agent, ctx);
+  const nonPhase = nonPhasePredicateForQuery(fq, ctx);
+  return nonPhase ? nonPhase(agent) : true;
+}
+
+/**
+ * Build a non-phase predicate from `fq` (evaluating all terms except `phase`)
+ * for the member-index population in paged mode, mirroring the hub's
+ * phase-independent stats population (`statsFilter` with `phase` terms
+ * removed). Returns `null` when `fq` has no non-phase terms.
+ */
+export function nonPhasePredicateForQuery(
+  fq: Query | null,
+  ctx?: AgentFilterContext
+): ((agent: Agent) => boolean) | null {
+  if (!fq) return null;
+  if (fq.mode !== 'structured') {
+    return (agent: Agent): boolean => matchAgentQuery(fq, agent, ctx);
+  }
+  const nonPhaseTerms = fq.terms.filter((t) => t.key.toLowerCase() !== 'phase');
+  const hasText = Boolean(fq.text?.trim()) || Boolean(fq.excludeText && fq.excludeText.length > 0);
+  if (nonPhaseTerms.length === 0 && !hasText) return null;
+  const stripped: Query = { ...fq, terms: nonPhaseTerms };
+  return (agent: Agent): boolean => matchAgentQuery(stripped, agent, ctx);
 }
 
 /**

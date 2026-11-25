@@ -151,16 +151,22 @@ export interface AgentListViewState {
   /**
    * Snapshot predicate for the committed server query (updated only when
    * `serverQuery` commits, never on per-keystroke typing). Used in the paged
-   * state to gate off-page SSE adds and detect when existing members leave
-   * the server's filtered population.
+   * state to decide whether a row matches the current page's full committed
+   * filter (including `phase:` terms).
    */
   committedFilterPredicate?: ((agent: Agent) => boolean) | null;
   /**
+   * Non-phase projection of `committedFilterPredicate` (all terms except
+   * `phase`), mirroring the hub's phase-independent stats population. Used to
+   * gate membership in `memberIndex`: a phase transition alone never evicts a
+   * member from `memberIndex`, while a failing non-phase predicate does.
+   */
+  committedNonPhasePredicate?: ((agent: Agent) => boolean) | null;
+  /**
    * Phase-only projection of `committedFilterPredicate`, used for off-page
-   * `unknown` deltas that carry only `phase` (without labels or name) and
-   * for frozen-walk filtering over the stats population.
-   * Returns false only when the new phase violates the committed query's
-   * phase terms, so label/text terms never cause false eviction.
+   * `unknown` deltas that carry only `phase` (without labels or name), for
+   * detecting `newlyPasses` transitions, and for frozen-walk filtering over
+   * the phase-independent stats population.
    */
   committedPhasePredicate?: ((phase: string) => boolean) | null;
   /**
@@ -1072,16 +1078,34 @@ export class AgentListWindow extends EventTarget {
     this.notifyChange();
   }
 
-  /** The committed query's add rule (mirroring the server's stats population): the project match (or `isAddable`) plus `committedFilterPredicate`, if any. */
+  /**
+   * Whether an agent belongs in the phase-independent stats population
+   * (mirroring the hub's `statsFilter` with `phase:` terms removed). When
+   * `committedNonPhasePredicate` is explicitly set (including `null` for a
+   * phase-only query), it governs membership; otherwise, if no
+   * `committedPhasePredicate` is active, falls back to `committedFilterPredicate`.
+   */
+  private passesCommittedNonPhase(agent: Agent): boolean {
+    if (this.viewState.committedNonPhasePredicate !== undefined) {
+      return (
+        !this.viewState.committedNonPhasePredicate ||
+        this.viewState.committedNonPhasePredicate(agent)
+      );
+    }
+    if (this.viewState.committedPhasePredicate) {
+      return true;
+    }
+    return this.passesCommittedFilter(agent);
+  }
+
+  /** The committed query's add rule (mirroring the server's phase-independent stats population): the project match (or `isAddable`) plus `passesCommittedNonPhase`. */
   private passesCommittedQuery(agent: Agent): boolean {
     if (this.isAddable) {
       if (!this.isAddable(agent)) return false;
     } else if (agent.projectId !== this.getProjectId()) {
       return false;
     }
-    return this.viewState.committedFilterPredicate
-      ? this.viewState.committedFilterPredicate(agent)
-      : true;
+    return this.passesCommittedNonPhase(agent);
   }
 
   /** The server sort the paged state was fetched with: `created`, or `updated` for everything else. */
@@ -1181,9 +1205,15 @@ export class AgentListWindow extends EventTarget {
           this.memberIndex.set(id, agent.phase);
         } else {
           // On-page agent now fails the committed query filter: remove the row (backfill chip).
+          // Keep it in `memberIndex` with its updated phase if it still passes
+          // the non-phase stats population (e.g. a phase transition under `phase:running`).
           onPage.delete(id);
           chip = true;
-          this.memberIndex.delete(id);
+          if (this.passesCommittedNonPhase(agent)) {
+            this.memberIndex.set(id, agent.phase);
+          } else {
+            this.memberIndex.delete(id);
+          }
         }
       } else {
         chip ||= this.applyOffPageUpsert(id, agent, rangeBefore);
@@ -1260,21 +1290,18 @@ export class AgentListWindow extends EventTarget {
     const wasMember = this.memberIndex.has(id);
 
     if (wasMember) {
-      if (
-        this.viewState.committedFilterPredicate &&
-        !this.viewState.committedFilterPredicate(agent)
-      ) {
-        // Existing member stopped matching the committed server query: remove from population.
+      if (!this.passesCommittedNonPhase(agent)) {
+        // Existing member stopped matching the non-phase stats population: remove.
         this.memberIndex.delete(id);
         return false;
       }
+      const phasePred = this.viewState.committedPhasePredicate;
       const prevPhase = this.memberIndex.getPhase(id);
-      const prevPassed =
-        !this.viewState.committedPhasePredicate ||
-        (prevPhase !== undefined && this.viewState.committedPhasePredicate(prevPhase));
+      const prevPassed = !phasePred || (prevPhase !== undefined && phasePred(prevPhase));
       this.memberIndex.set(id, agent.phase);
-      const newlyPasses = Boolean(this.viewState.committedPhasePredicate) && !prevPassed;
-      return newlyPasses || this.withinPageKRange(this.kOf(agent), rangeBefore);
+      const nowPasses = !phasePred || phasePred(agent.phase);
+      const newlyPasses = Boolean(phasePred) && !prevPassed && nowPasses;
+      return newlyPasses || (nowPasses && this.withinPageKRange(this.kOf(agent), rangeBefore));
     }
 
     if (!this.passesCommittedQuery(agent)) {
@@ -1303,27 +1330,23 @@ export class AgentListWindow extends EventTarget {
     rangeBefore: { first: string; last: string } | null
   ): boolean {
     if (!this.memberIndex.has(id)) return false; // neither on-page nor a member: ignored.
+    const phasePred = this.viewState.committedPhasePredicate;
     const prevPhase = this.memberIndex.getPhase(id);
-    const prevPassed =
-      !this.viewState.committedPhasePredicate ||
-      (prevPhase !== undefined && this.viewState.committedPhasePredicate(prevPhase));
+    const prevPassed = !phasePred || (prevPhase !== undefined && phasePred(prevPhase));
+    let nowPasses = prevPassed;
     let newlyPasses = false;
     if (delta.phase) {
-      if (
-        this.viewState.committedPhasePredicate &&
-        !this.viewState.committedPhasePredicate(delta.phase)
-      ) {
-        // Existing member's phase now violates the committed query: remove from population.
-        this.memberIndex.delete(id);
-        return false;
-      }
+      // Phase transitions never evict a member from the phase-independent stats
+      // population; update its phase in place and raise the chip if it newly
+      // passes the committed phase filter.
       this.memberIndex.set(id, delta.phase);
-      if (this.viewState.committedPhasePredicate && !prevPassed) {
+      nowPasses = !phasePred || phasePred(delta.phase);
+      if (phasePred && !prevPassed && nowPasses) {
         newlyPasses = true;
       }
     }
     const enteredRange =
-      delta.lastActivityEvent && this.serverSort === 'updated'
+      nowPasses && delta.lastActivityEvent && this.serverSort === 'updated'
         ? this.withinPageKRange(delta.lastActivityEvent, rangeBefore)
         : false;
     return newlyPasses || enteredRange;
