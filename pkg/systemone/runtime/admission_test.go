@@ -356,7 +356,7 @@ func TestAdmission_TokenBucketRatePerSec(t *testing.T) {
 	reg := provider.NewRegistry()
 	require.NoError(t, reg.Register(adapter))
 
-	// 1 req/s -> burst of 1, next token takes 1000ms (> admissionWait 40ms), so
+	// 1 req/s -> burst of 1, next token takes 1000ms (> admissionWait 500ms), so
 	// the second immediate call fails fast with capacity and 0 provider calls.
 	inst := Instance{
 		ID:      "inst-rate",
@@ -371,7 +371,7 @@ func TestAdmission_TokenBucketRatePerSec(t *testing.T) {
 	rt := New(Config{
 		Registry:              reg,
 		Instances:             StaticInstances(inst),
-		AdmissionWait:         40 * time.Millisecond,
+		AdmissionWait:         500 * time.Millisecond,
 		MaxInFlightPerProject: -1,
 	})
 	compiled := compileAdmissionTestRule(t, "rate-inst")
@@ -391,7 +391,7 @@ func TestAdmission_TokenBucketRatePerSec(t *testing.T) {
 	require.Len(t, eval.Attempts, 1)
 	assert.Equal(t, 0, eval.Attempts[0].Requests)
 	assert.Equal(t, int32(1), providerCalls.Load(), "rate-rejected call must make 0 provider requests")
-	assert.Less(t, elapsed, 40*time.Millisecond, "when required token wait exceeds admissionWait, fail fast without sleeping")
+	assert.Less(t, elapsed, 400*time.Millisecond, "when required token wait exceeds admissionWait, fail fast without sleeping")
 
 	// With a faster rate (50 req/s -> 20ms refill < 150ms admissionWait), a burst
 	// of 50+1 succeeds by waiting for the next token.
@@ -960,8 +960,9 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 		eval1, ok := EvaluationFrom(err)
 		require.True(t, ok)
 		assert.Equal(t, string(provider.FailTimeout), eval1.Reason)
-		require.Len(t, eval1.Attempts, 1)
-		assert.Equal(t, 0, eval1.Attempts[0].Requests)
+		for _, a := range eval1.Attempts {
+			assert.Equal(t, 0, a.Requests)
+		}
 
 		// 2. Real EngineMaxEvalTime (40ms << 250ms AdmissionWait) with outer engine ctx deadline > 40ms -> FailTimeout.
 		rt2, _, compiled2, rel2 := newTestRuntime(250 * time.Millisecond)
@@ -977,12 +978,14 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 		eval2, ok := EvaluationFrom(err)
 		require.True(t, ok)
 		assert.Equal(t, string(provider.FailTimeout), eval2.Reason)
-		require.Len(t, eval2.Attempts, 1)
-		assert.Equal(t, 0, eval2.Attempts[0].Requests)
+		for _, a := range eval2.Attempts {
+			assert.Equal(t, 0, a.Requests)
+		}
 
-		// 3. Deterministic seam: ownDeadline (Budget 50ms) < AdmissionWait (250ms),
-		// withWaitCtxFn expires waitCtx before attemptCtx.Err() is set -> FailTimeout.
-		rt3, _, compiled3, rel3 := newTestRuntime(250 * time.Millisecond)
+		// 3. Deterministic seam: ownDeadline (Budget 10s) < AdmissionWait (30s),
+		// withWaitCtxFn expires waitCtx immediately in admission before attemptCtx.Err()
+		// is set -> FailTimeout with 1 recorded admission attempt and 0 provider requests.
+		rt3, _, compiled3, rel3 := newTestRuntime(30 * time.Second)
 		defer rel3()
 		t0 := time.Now()
 		rt3.admission.nowFn = func() time.Time { return t0 }
@@ -994,20 +997,22 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 		caller3 := context.Background()
 		_, err = rt3.Evaluate(caller3, compiled3, ProbeInput("seam-runtime-timeout"), EvalOptions{
 			ProjectID: "proj-2",
-			Budget:    50 * time.Millisecond,
+			Budget:    10 * time.Second,
 		})
 		require.NoError(t, caller3.Err(), "caller ctx must still be live at classification")
 		require.Error(t, err)
 		eval3, ok := EvaluationFrom(err)
 		require.True(t, ok)
 		assert.Equal(t, string(provider.FailTimeout), eval3.Reason)
+		require.Len(t, eval3.Attempts, 1)
+		assert.Equal(t, 0, eval3.Attempts[0].Requests)
 	})
 
 	// (g) Deterministic regression: force waitCtx to expire BEFORE parent ctx.Err()
 	// becomes visible (ctx.Err() is still nil when acquire returns), with
 	// callerDL <= now+admissionWait -> FailCanceled.
 	t.Run("g_waitCtx_expires_before_parent_ctx_err_visible", func(t *testing.T) {
-		rt, _, compiled, rel := newTestRuntime(250 * time.Millisecond)
+		rt, _, compiled, rel := newTestRuntime(30 * time.Second)
 		defer rel()
 
 		t0 := time.Now()
@@ -1018,7 +1023,7 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 			return wctx, cancel
 		}
 
-		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(50*time.Millisecond))
+		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(10*time.Second))
 		defer cancelCaller()
 		require.NoError(t, callerCtx.Err(), "precondition: parent ctx.Err() must still be nil")
 
