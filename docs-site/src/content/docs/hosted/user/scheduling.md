@@ -97,7 +97,7 @@ The user who created a schedule can pause or delete it without `scheduled_event.
 
 ### Running a Recurring Schedule Immediately ("Run now")
 
-To fire a recurring schedule once on demand without changing its cron timing (`nextRunAt`), status, or stored revision authority, open the schedule's detail card in the Web UI and click **Run now** (or call `POST /api/v1/projects/{projectId}/schedules/{id}/run`).
+To fire a recurring schedule once on demand without changing its cron timing (`nextRunAt`), status, or stored revision authority, run `scion schedule run <id>` from the CLI, open the schedule's detail card in the Web UI and click **Run now**, or call `POST /api/v1/projects/{projectId}/schedules/{id}/run`.
 
 - **Authorization**: Requires `scheduled_event.update` in the project plus live target authorization for the schedule's event type (the same checks as editing or resuming: `agent.attach` for `exec`, `agent.create` for `dispatch_agent`, or message authorization for `message`). The creator-stop exemption for `pause`/`delete` does not apply. The manual run executes under the calling principal's own live authority and ceiling.
 - **Manual run record**: The materialized event is recorded in the schedule's history with `"manual": true` (badged **Manual** in the Web UI), updates `runCount`/`errorCount`/`lastRun*`, and leaves `nextRunAt` and `status` untouched (paused schedules stay paused).

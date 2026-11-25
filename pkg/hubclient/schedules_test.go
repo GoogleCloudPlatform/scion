@@ -149,3 +149,91 @@ func TestScheduleService_ExecRoundTrip(t *testing.T) {
 		t.Errorf("unexpected history ExecSummary: %+v", hist.Events[0].ExecSummary)
 	}
 }
+
+func TestScheduleService_Run(t *testing.T) {
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+
+	t.Run("200 OK synchronous message run", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/v1/projects/proj-1/schedules/sch-1/run" {
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(ScheduledEvent{
+				ID:         "evt-1",
+				ProjectID:  "proj-1",
+				ScheduleID: "sch-1",
+				EventType:  "message",
+				Status:     "fired",
+				Manual:     true,
+				FireAt:     now,
+				FiredAt:    &now,
+			})
+		}))
+		defer server.Close()
+
+		c, err := New(server.URL)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		evt, err := c.Schedules("proj-1").Run(context.Background(), "sch-1")
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if evt.ID != "evt-1" || evt.Status != "fired" || !evt.Manual {
+			t.Errorf("unexpected event: %+v", evt)
+		}
+	})
+
+	t.Run("202 Accepted detached exec run", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/v1/projects/proj-1/schedules/sch-2/run" {
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(ScheduledEvent{
+				ID:         "evt-2",
+				ProjectID:  "proj-1",
+				ScheduleID: "sch-2",
+				EventType:  "exec",
+				Status:     "fired",
+				Manual:     true,
+				FireAt:     now,
+				FiredAt:    &now,
+			})
+		}))
+		defer server.Close()
+
+		c, err := New(server.URL)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		evt, err := c.Schedules("proj-1").Run(context.Background(), "sch-2")
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if evt.ID != "evt-2" || evt.EventType != "exec" || !evt.Manual {
+			t.Errorf("unexpected event: %+v", evt)
+		}
+	})
+
+	t.Run("403 forbidden error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"Insufficient permissions"}}`))
+		}))
+		defer server.Close()
+
+		c, err := New(server.URL)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		_, err = c.Schedules("proj-1").Run(context.Background(), "sch-3")
+		if err == nil {
+			t.Fatal("expected error for 403 response")
+		}
+	})
+}

@@ -46,6 +46,9 @@ type ScheduleService interface {
 	// Resume resumes a paused schedule.
 	Resume(ctx context.Context, id string) (*Schedule, error)
 
+	// Run triggers a recurring schedule once immediately without changing its cron timing.
+	Run(ctx context.Context, id string) (*ScheduledEvent, error)
+
 	// History returns execution history for a schedule.
 	History(ctx context.Context, id string, opts *ListScheduledEventsOptions) (*ListScheduledEventsResponse, error)
 }
@@ -212,6 +215,15 @@ func (s *scheduleService) Resume(ctx context.Context, id string) (*Schedule, err
 		return nil, err
 	}
 	return apiclient.DecodeRequired[Schedule](resp)
+}
+
+// Run triggers a recurring schedule once immediately without changing its cron timing.
+func (s *scheduleService) Run(ctx context.Context, id string) (*ScheduledEvent, error) {
+	resp, err := s.c.post(ctx, s.basePath()+"/"+url.PathEscape(id)+"/run", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ScheduledEvent](resp)
 }
 
 // History returns execution history for a schedule.

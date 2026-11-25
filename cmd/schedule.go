@@ -35,7 +35,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const defaultExecTimeoutSeconds = 60
+const (
+	defaultExecTimeoutSeconds     = 60
+	defaultScheduleRunWaitTimeout = 2 * time.Minute
+)
+
+var (
+	scheduleRunInitialPollDelay = 250 * time.Millisecond
+	scheduleRunPollInterval     = 500 * time.Millisecond
+)
 
 // Schedule command flags
 var (
@@ -169,6 +177,20 @@ var scheduleResumeCmd = &cobra.Command{
 	Short: "Resume a paused recurring schedule",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runScheduleResume,
+}
+
+// scheduleRunCmd triggers a recurring schedule once immediately.
+var scheduleRunCmd = &cobra.Command{
+	Use:   "run <id>",
+	Short: "Trigger a recurring schedule immediately",
+	Long: `Trigger a recurring schedule once immediately without changing its cron timing or status.
+
+Records a manual run in the schedule's execution history under the caller's live
+authority. For exec schedules, waits for the run to complete and prints its status
+and, when output capture is enabled and the caller has attach permission, the
+captured output.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runScheduleRun,
 }
 
 // scheduleDeleteCmd deletes a recurring schedule.
@@ -850,6 +872,10 @@ func writeExecOutput(out *hubclient.ExecOutput) error {
 	if isJSONOutput() {
 		return outputJSON(out)
 	}
+	return writeExecOutputText(out)
+}
+
+func writeExecOutputText(out *hubclient.ExecOutput) error {
 	if len(out.Output) == 0 {
 		if out.OutputStatus != "" {
 			fmt.Printf("No captured output (status: %s).\n", out.OutputStatus)
@@ -1299,6 +1325,186 @@ func runScheduleResume(cmd *cobra.Command, args []string) error {
 	})
 }
 
+func runScheduleRun(cmd *cobra.Command, args []string) error {
+	scheduleID := args[0]
+
+	hubCtx, err := requireHub(projectPath)
+	if err != nil {
+		return err
+	}
+	if !isJSONOutput() {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
+
+	projectID, err := GetProjectID(hubCtx)
+	if err != nil {
+		return wrapHubError(err)
+	}
+
+	return scheduleRunViaHub(context.Background(), hubCtx, projectID, scheduleID)
+}
+
+func isExecRunTerminal(evt *hubclient.ScheduledEvent) bool {
+	if evt == nil {
+		return true
+	}
+	if evt.ExecSummary != nil {
+		switch evt.ExecSummary.Outcome {
+		case "ok", "nonzero", "timeout", "skipped", "error", "abandoned":
+			return true
+		}
+	}
+	switch evt.Status {
+	case "failed", "skipped", "cancelled", "expired":
+		return true
+	}
+	return false
+}
+
+func scheduleRunWaitTimeout(evt *hubclient.ScheduledEvent) time.Duration {
+	timeout := defaultScheduleRunWaitTimeout
+	if evt == nil || evt.EventType != "exec" || evt.Payload == "" {
+		return timeout
+	}
+	var p execPayloadView
+	if err := json.Unmarshal([]byte(evt.Payload), &p); err == nil && p.TimeoutSeconds > 0 {
+		candidate := time.Duration(p.TimeoutSeconds)*time.Second + 30*time.Second
+		if candidate > timeout {
+			timeout = candidate
+		}
+	}
+	return timeout
+}
+
+func pollExecScheduledEvent(ctx context.Context, hubCtx *HubContext, projectID string, initial *hubclient.ScheduledEvent) (*hubclient.ScheduledEvent, bool, error) {
+	latest := initial
+	delay := scheduleRunInitialPollDelay
+	for {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return latest, true, nil
+			}
+			return latest, false, ctx.Err()
+		case <-timer.C:
+		}
+		delay = scheduleRunPollInterval
+
+		refreshed, err := hubCtx.Client.ScheduledEvents(projectID).Get(ctx, latest.ID)
+		if err != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return latest, true, nil
+			}
+			return latest, false, err
+		}
+		latest = refreshed
+		if isExecRunTerminal(latest) {
+			return latest, false, nil
+		}
+	}
+}
+
+type scheduleRunJSON struct {
+	*hubclient.ScheduledEvent
+	ExecOutput      *hubclient.ExecOutput `json:"execOutput,omitempty"`
+	ExecOutputError string                `json:"execOutputError,omitempty"`
+	TimedOut        bool                  `json:"timedOut,omitempty"`
+}
+
+func scheduleRunViaHub(ctx context.Context, hubCtx *HubContext, projectID, scheduleID string) error {
+	reqCtx, cancelReq := context.WithTimeout(ctx, defaultListTimeout)
+	defer cancelReq()
+
+	fullID, _, err := resolveScheduleID(reqCtx, hubCtx, projectID, scheduleID, "schedule")
+	if err != nil {
+		return err
+	}
+
+	evt, err := hubCtx.Client.Schedules(projectID).Run(reqCtx, fullID)
+	if err != nil {
+		return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to run schedule: %w", err))
+	}
+
+	timedOut := false
+	if evt.EventType == "exec" && !isExecRunTerminal(evt) {
+		pollCtx, cancelPoll := context.WithTimeout(ctx, scheduleRunWaitTimeout(evt))
+		defer cancelPoll()
+
+		var pollErr error
+		evt, timedOut, pollErr = pollExecScheduledEvent(pollCtx, hubCtx, projectID, evt)
+		if pollErr != nil {
+			return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to check exec schedule run status: %w", pollErr))
+		}
+	}
+
+	var (
+		execOut       *hubclient.ExecOutput
+		execOutErrMsg string
+	)
+	if evt.EventType == "exec" && isExecRunTerminal(evt) &&
+		evt.ExecSummary != nil && evt.ExecSummary.CaptureMode != "" && evt.ExecSummary.CaptureMode != "none" {
+		outCtx, cancelOut := context.WithTimeout(ctx, defaultListTimeout)
+		defer cancelOut()
+
+		out, outErr := hubCtx.Client.ScheduledEvents(projectID).GetOutput(outCtx, evt.ID)
+		if outErr != nil {
+			if apiclient.IsForbiddenError(outErr) {
+				execOutErrMsg = "unavailable (requires attach permission on the target agent)"
+			} else {
+				execOutErrMsg = outErr.Error()
+			}
+		} else {
+			execOut = out
+		}
+	}
+
+	if isJSONOutput() {
+		return outputJSON(scheduleRunJSON{
+			ScheduledEvent:  evt,
+			ExecOutput:      execOut,
+			ExecOutputError: execOutErrMsg,
+			TimedOut:        timedOut,
+		})
+	}
+
+	fmt.Printf("Schedule %s run triggered.\n", fullID)
+	fmt.Printf("  Event ID:   %s\n", evt.ID)
+	fmt.Printf("  Type:       %s\n", evt.EventType)
+	fmt.Printf("  Status:     %s\n", evt.Status)
+	if evt.FiredAt != nil {
+		fmt.Printf("  Fired At:   %s\n", clitime.Format(*evt.FiredAt, clitime.Full))
+	}
+	if evt.Error != "" {
+		fmt.Printf("  Error:      %s\n", evt.Error)
+	}
+	if evt.ExecSummary != nil {
+		printEventExecSummary(evt.ExecSummary)
+	}
+	if timedOut {
+		fmt.Printf("  Note:       timed out waiting for exec run to complete; inspect with 'scion schedule get %s'\n", evt.ID)
+	}
+	if execOutErrMsg != "" {
+		fmt.Printf("  Captured:   %s\n", execOutErrMsg)
+	} else if execOut != nil {
+		if len(execOut.Output) == 0 {
+			if execOut.OutputStatus != "" {
+				fmt.Printf("No captured output (status: %s).\n", execOut.OutputStatus)
+			} else {
+				fmt.Println("No captured output.")
+			}
+		} else {
+			fmt.Println("\nCaptured Output:")
+			if err := writeExecOutputText(execOut); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func runScheduleDelete(cmd *cobra.Command, args []string) error {
 	scheduleID := args[0]
 
@@ -1459,6 +1665,7 @@ func init() {
 	scheduleCmd.AddCommand(scheduleCreateRecurringCmd)
 	scheduleCmd.AddCommand(schedulePauseCmd)
 	scheduleCmd.AddCommand(scheduleResumeCmd)
+	scheduleCmd.AddCommand(scheduleRunCmd)
 	scheduleCmd.AddCommand(scheduleDeleteCmd)
 	scheduleCmd.AddCommand(scheduleHistoryCmd)
 
