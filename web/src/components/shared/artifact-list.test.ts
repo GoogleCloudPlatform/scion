@@ -361,7 +361,7 @@ describe('artifact list paging', () => {
     expect(el.shadowRoot!.querySelectorAll('tbody tr')).toHaveLength(1);
   });
 
-  it('drops a Load more still in flight when the search text changes', async () => {
+  it('drops a Load more still in flight when a new filter query is committed', async () => {
     const urls: string[] = [];
     let releaseMore: (() => void) | null = null;
     vi.stubGlobal(
@@ -376,6 +376,11 @@ describe('artifact list paging', () => {
               resolve(new Response(JSON.stringify({ artifacts: [item('old')], nextCursor: 'c2' })));
             void init;
           });
+        }
+        if (url.includes('q=x')) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ artifacts: [item('matched')] }), { status: 200 })
+          );
         }
         return Promise.resolve(
           new Response(JSON.stringify({ artifacts: [item('a')], nextCursor: 'c1' }), {
@@ -395,8 +400,8 @@ describe('artifact list paging', () => {
     await el.updateComplete;
     const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & { value: string };
     box.dispatchEvent(
-      new CustomEvent('filter-input', {
-        detail: { value: 'x', query: { mode: 'text', text: 'x' }, valid: true },
+      new CustomEvent('filter-commit', {
+        detail: { value: 'x', query: { mode: 'text', text: 'x' }, serverQ: 'x' },
         bubbles: true,
         composed: true,
       })
@@ -407,22 +412,94 @@ describe('artifact list paging', () => {
       await el.updateComplete;
     }
     expect(el.shadowRoot!.textContent).not.toContain('Title old');
+    expect(el.shadowRoot!.textContent).toContain('Title matched');
     expect(el.shadowRoot!.querySelector('.more sl-button')).toBeNull();
   });
 
-  it('drops Load more as soon as the search text changes', async () => {
-    const { el } = await mountList({ 'mine=1': { artifacts: [item('a')], nextCursor: 'c1' } });
+  it('keeps Load more on an invalid edit and when typing then reverting to the committed query', async () => {
+    const { el, urls } = await mountList({
+      'mine=1': { artifacts: [item('a')], nextCursor: 'c1' },
+    });
     expect(el.shadowRoot!.querySelector('.more sl-button')).not.toBeNull();
+    const callsBefore = urls.length;
     const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & { value: string };
+
+    // Incomplete/invalid edit emits filter-input (valid: false) with no commit:
+    // Load more stays visible and no request fires.
     box.dispatchEvent(
       new CustomEvent('filter-input', {
-        detail: { value: 'x', query: { mode: 'text', text: 'x' }, valid: true },
+        detail: { value: 'is:', query: { mode: 'text', text: '' }, valid: false },
         bubbles: true,
         composed: true,
       })
     );
     await el.updateComplete;
-    expect(el.shadowRoot!.querySelector('.more sl-button')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.more sl-button')).not.toBeNull();
+
+    // Reverting back to the committed query emits filter-commit with the same serverQ:
+    // Load more remains available and no reload is issued.
+    box.dispatchEvent(
+      new CustomEvent('filter-input', {
+        detail: { value: '', query: { mode: 'text', text: '' }, valid: true },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    box.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: { value: '', query: { mode: 'text', text: '' }, serverQ: '' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.more sl-button')).not.toBeNull();
+    expect(urls.length).toBe(callsBefore);
+  });
+
+  it('does not abort the initial load on a keystroke before commit', async () => {
+    let resolveInitial: ((r: Response) => void) | null = null;
+    let initialAborted = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        if (url.startsWith('/api/v1/artifacts')) {
+          init?.signal?.addEventListener('abort', () => {
+            initialAborted = true;
+          });
+          return new Promise<Response>((resolve) => {
+            resolveInitial = resolve;
+          });
+        }
+        return Promise.resolve(new Response('{}', { status: 404 }));
+      })
+    );
+    const el = document.createElement('scion-artifact-list') as ListElement;
+    el.projectId = 'p-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & { value: string };
+    box.dispatchEvent(
+      new CustomEvent('filter-input', {
+        detail: { value: 'is:', query: { mode: 'text', text: '' }, valid: false },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    expect(initialAborted).toBe(false);
+
+    resolveInitial!(
+      new Response(JSON.stringify({ artifacts: [item('a')], nextCursor: 'c1' }), { status: 200 })
+    );
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+    expect(el.shadowRoot!.textContent).toContain('Title a');
+    expect(el.shadowRoot!.querySelector('.more sl-button')).not.toBeNull();
   });
 
   it('badges artifacts shared with the project, names their project and filters to them', async () => {

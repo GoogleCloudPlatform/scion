@@ -326,13 +326,6 @@ export class ScionArtifactList extends LitElement {
   }
 
   private onFilterInput = (e: CustomEvent<FilterInputDetail>): void => {
-    if (e.detail.value !== this.filterQueryText) {
-      // The cursor belongs to the previous query; Load more waits for the
-      // search, and a page still loading for the old query is dropped.
-      this.cursor = '';
-      this.abort?.abort();
-      this.loadingMore = false;
-    }
     this.filterNotice = '';
     this.filterQueryText = e.detail.value;
   };
@@ -344,6 +337,8 @@ export class ScionArtifactList extends LitElement {
     if (e.detail.serverQ === this.committedServerQ) return;
     this.committedServerQ = e.detail.serverQ;
     this.cursor = '';
+    this.abort?.abort();
+    this.loadingMore = false;
     void this.load();
   };
 
@@ -369,6 +364,8 @@ export class ScionArtifactList extends LitElement {
         if (nextQ !== this.committedServerQ) {
           this.committedServerQ = nextQ;
           this.cursor = '';
+          this.abort?.abort();
+          this.loadingMore = false;
           void this.load();
         }
       }
