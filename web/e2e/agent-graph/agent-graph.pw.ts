@@ -101,7 +101,7 @@ async function installMockGraphHub(page: Page): Promise<void> {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ experiments: { 'filters.query_dialect': true } }),
+        body: JSON.stringify({ experiments: {} }),
       });
     }
     if (p === '/api/v1/projects') {
