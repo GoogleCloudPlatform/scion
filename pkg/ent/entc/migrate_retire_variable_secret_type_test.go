@@ -24,7 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entsecretrequest "github.com/GoogleCloudPlatform/scion/pkg/ent/secretrequest"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -307,4 +309,64 @@ func TestSecretRequest_LegacyVariableNormalizesToOnDemandInEnt(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, entsecretrequest.SecretTypeOnDemand, row.SecretType)
+}
+
+type execRecord struct {
+	query string
+	args  []any
+}
+
+type execRecordingDriver struct {
+	dialect.Driver
+	records *[]execRecord
+}
+
+func (d *execRecordingDriver) Exec(ctx context.Context, query string, args, v any) error {
+	argv, _ := args.([]any)
+	*d.records = append(*d.records, execRecord{query: query, args: argv})
+	return d.Driver.Exec(ctx, query, args, v)
+}
+
+func (d *execRecordingDriver) Tx(ctx context.Context) (dialect.Tx, error) {
+	tx, err := d.Driver.Tx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &execRecordingTx{Tx: tx, records: d.records}, nil
+}
+
+type execRecordingTx struct {
+	dialect.Tx
+	records *[]execRecord
+}
+
+func (t *execRecordingTx) Exec(ctx context.Context, query string, args, v any) error {
+	argv, _ := args.([]any)
+	*t.records = append(*t.records, execRecord{query: query, args: argv})
+	return t.Tx.Exec(ctx, query, args, v)
+}
+
+// TestMigrateRetireVariableSecretType_NoParameterizedExecOnEmptySchema guards
+// against emitting parameterized Exec statements during AutoMigrate on an empty
+// schema, which breaks enttest's Postgres schema-snapshot recorder.
+func TestMigrateRetireVariableSecretType_NoParameterizedExecOnEmptySchema(t *testing.T) {
+	ctx := context.Background()
+	baseClient, err := OpenSQLite(":memory:", PoolConfig{})
+	require.NoError(t, err)
+	defer func() { _ = baseClient.Close() }()
+
+	var records []execRecord
+	wrapped := ent.NewClient(ent.Driver(&execRecordingDriver{
+		Driver:  baseClient.Driver(),
+		records: &records,
+	}))
+
+	require.NoError(t, AutoMigrate(ctx, wrapped))
+	for _, r := range records {
+		assert.Empty(t, r.args, "AutoMigrate on empty schema must not execute parameterized statement: %q", r.query)
+	}
+
+	records = nil
+	require.NoError(t, MigrateRetireVariableSecretType(ctx, wrapped))
+	assert.Empty(t, records, "MigrateRetireVariableSecretType on empty schema must execute zero Exec statements")
 }

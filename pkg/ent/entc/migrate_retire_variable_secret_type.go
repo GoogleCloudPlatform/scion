@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -76,6 +77,27 @@ func MigrateRetireVariableSecretType(ctx context.Context, client *ent.Client) er
 	return nil
 }
 
+func tableHasVariableSecrets(ctx context.Context, tx dialect.Tx, dial, table string) (bool, error) {
+	query := fmt.Sprintf(
+		"SELECT 1 FROM %s WHERE secret_type = %s LIMIT 1",
+		table,
+		sqlPlaceholder(dial, 1),
+	)
+	var rows entsql.Rows
+	if err := tx.Query(ctx, query, []any{retiredSecretTypeVariable}, &rows); err != nil {
+		return false, fmt.Errorf("probe %s for variable rows: %w", table, err)
+	}
+	found := rows.Next()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, fmt.Errorf("probe %s for variable rows: %w", table, err)
+	}
+	if err := rows.Close(); err != nil {
+		return false, fmt.Errorf("probe %s for variable rows: %w", table, err)
+	}
+	return found, nil
+}
+
 func migrateRetireVariableSecretsTable(ctx context.Context, driver dialect.Driver, dial string) error {
 	tx, err := driver.Tx(ctx)
 	if err != nil {
@@ -87,6 +109,22 @@ func migrateRetireVariableSecretsTable(ctx context.Context, driver dialect.Drive
 			_ = tx.Rollback()
 		}
 	}()
+
+	// Skip UPDATE statements when no 'variable' rows exist. This avoids
+	// unnecessary writes on fresh/already-migrated databases and keeps
+	// AutoMigrate free of parameterized Exec calls when enttest captures its
+	// Postgres schema snapshot on an empty schema.
+	hasRows, err := tableHasVariableSecrets(ctx, tx, dial, "secrets")
+	if err != nil {
+		return fmt.Errorf("retire variable secret type (secrets): %w", err)
+	}
+	if !hasRows {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit retire variable secret type (secrets): %w", err)
+		}
+		committed = true
+		return nil
+	}
 
 	// Step 1: Hub producer keys -> internal.
 	hubKeys := config.HubProducerSecretKeys()
@@ -148,6 +186,18 @@ func migrateRetireVariableSecretRequestsTable(ctx context.Context, driver dialec
 			_ = tx.Rollback()
 		}
 	}()
+
+	hasRows, err := tableHasVariableSecrets(ctx, tx, dial, "secret_requests")
+	if err != nil {
+		return fmt.Errorf("retire variable secret type (secret_requests): %w", err)
+	}
+	if !hasRows {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit retire variable secret type (secret_requests): %w", err)
+		}
+		committed = true
+		return nil
+	}
 
 	stmt := fmt.Sprintf(
 		"UPDATE secret_requests SET secret_type = %s WHERE secret_type = %s",
