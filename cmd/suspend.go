@@ -138,25 +138,15 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 	var (
 		toSuspend []hubclient.Agent
 		results   []agentResult
-		running   int
 	)
 	for _, a := range resp.Agents {
 		if a.Phase != string(state.PhaseRunning) {
 			continue
 		}
-		running++
-		if !suspendForce && a.SuspendPolicy == "never" {
-			results = append(results, agentResult{
-				Name:   a.Name,
-				Status: "skipped",
-				Reason: "never-suspend",
-			})
-			continue
-		}
 		toSuspend = append(toSuspend, a)
 	}
 
-	if running == 0 {
+	if len(toSuspend) == 0 {
 		if isJSONOutput() {
 			return outputJSON(map[string]interface{}{
 				"status":  "success",
@@ -172,35 +162,35 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 	var mu sync.Mutex
 
 	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
-	if len(toSuspend) > 0 {
-		boundedFanOut(context.Background(), len(toSuspend), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
-			func(i int) {
-				ag := toSuspend[i]
+	// Send every running agent to the Hub so the Hub's experiment state is the
+	// single source of truth; 409 agent_never_suspend maps to skipped below.
+	boundedFanOut(context.Background(), len(toSuspend), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
+		func(i int) {
+			ag := toSuspend[i]
 
-				res := agentResult{Name: ag.Name, Status: "success"}
+			res := agentResult{Name: ag.Name, Status: "success"}
 
-				agentCtx, agentCancel := context.WithTimeout(context.Background(), 60*time.Second)
-				defer agentCancel()
+			agentCtx, agentCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer agentCancel()
 
-				if _, err := callAgentSuspend(agentCtx, agentSvc, ag.Name, suspendForce); err != nil {
-					if !suspendForce && apiclient.IsAgentNeverSuspendError(err) {
-						res.Status = "skipped"
-						res.Reason = "never-suspend"
-					} else {
-						res.Status = "error"
-						res.Error = formatSuspendError(ag.Name, err).Error()
-					}
-					mu.Lock()
-					results = append(results, res)
-					mu.Unlock()
-					return
+			if _, err := callAgentSuspend(agentCtx, agentSvc, ag.Name, suspendForce); err != nil {
+				if !suspendForce && apiclient.IsAgentNeverSuspendError(err) {
+					res.Status = "skipped"
+					res.Reason = "never-suspend"
+				} else {
+					res.Status = "error"
+					res.Error = formatSuspendError(ag.Name, err).Error()
 				}
-
 				mu.Lock()
 				results = append(results, res)
 				mu.Unlock()
-			}, func(int) {})
-	}
+				return
+			}
+
+			mu.Lock()
+			results = append(results, res)
+			mu.Unlock()
+		}, func(int) {})
 
 	if isJSONOutput() {
 		jsonResults := make([]map[string]interface{}, len(results))

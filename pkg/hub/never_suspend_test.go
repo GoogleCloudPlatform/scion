@@ -1144,11 +1144,13 @@ func TestNeverSuspend_ForcePrincipalAllowlist(t *testing.T) {
 		SuspendPolicy: store.SuspendPolicyNever,
 	}
 
+	authUser := NewAuthenticatedUser("u1", "u1@test.com", "User", "member", "session")
 	allowed := []struct {
 		name string
 		id   Identity
 	}{
-		{"AuthenticatedUser", NewAuthenticatedUser("u1", "u1@test.com", "User", "member", "session")},
+		{"AuthenticatedUser", authUser},
+		{"ScopedUserIdentity", NewScopedUserIdentity(authUser, "proj-1", []string{"agent:lifecycle"})},
 		{"DevUser", NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev"})},
 	}
 	for _, tc := range allowed {
@@ -1167,6 +1169,7 @@ func TestNeverSuspend_ForcePrincipalAllowlist(t *testing.T) {
 		id   Identity
 	}{
 		{"nil", nil},
+		{"BrokerIdentity", &brokerIdentityImpl{brokerID: "broker-1"}},
 		{"DelegatedAgentIdentity", &DelegatedAgentIdentity{agentID: tid("ns-delegated-agent")}},
 		{"FederatedServiceIdentity", NewFederatedServiceIdentity("https://issuer.example", "svc", "svc@test.com", nil)},
 		{"FederatedUserIdentity", NewFederatedUserIdentity("https://issuer.example", "sub", "fed@test.com", "Fed", "member", nil)},

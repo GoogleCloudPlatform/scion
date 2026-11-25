@@ -114,10 +114,9 @@ func TestSuspendAll_SkipsNeverSuspendAndForceIncludes(t *testing.T) {
 		{"id":"a3","name":"idle-stopped","slug":"idle-stopped","phase":"stopped","suspendPolicy":"auto"}
 	]}`
 
-	t.Run("without --force skips never-suspend and suspends auto", func(t *testing.T) {
+	t.Run("without --force maps hub 409 agent_never_suspend to skipped and suspends auto", func(t *testing.T) {
 		var mu sync.Mutex
-		var suspended []string
-		var forceSeen []bool
+		requested := map[string]bool{}
 
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -132,9 +131,13 @@ func TestSuspendAll_SkipsNeverSuspendAndForceIncludes(t *testing.T) {
 				_ = json.Unmarshal(body, &req)
 				f, _ := req["force"].(bool)
 				mu.Lock()
-				suspended = append(suspended, name)
-				forceSeen = append(forceSeen, f)
+				requested[name] = f
 				mu.Unlock()
+				if name == "lead" {
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(`{"error":{"code":"agent_never_suspend","message":"agent \"lead\" has suspend policy \"never\""}}`))
+					return
+				}
 				_, _ = w.Write([]byte(`{"id":"` + name + `","name":"` + name + `","phase":"suspended"}`))
 			default:
 				http.NotFound(w, r)
@@ -171,10 +174,65 @@ func TestSuspendAll_SkipsNeverSuspendAndForceIncludes(t *testing.T) {
 		_ = rPipe.Close()
 
 		require.NoError(t, runErr)
-		assert.Equal(t, []string{"worker"}, suspended, "only auto agent should be sent /suspend")
-		assert.Equal(t, []bool{false}, forceSeen)
+		assert.Equal(t, map[string]bool{"lead": false, "worker": false}, requested, "both running agents must be sent to Hub so Hub experiment state governs")
 		assert.Contains(t, out.String(), "Agent 'lead': skipped (never-suspend)")
 		assert.Contains(t, out.String(), "Agent 'worker' suspended via Hub.")
+	})
+
+	t.Run("without --force reports suspended when hub returns 200 for suspendPolicy=never (experiment off)", func(t *testing.T) {
+		var mu sync.Mutex
+		var suspended []string
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/agents"):
+				_, _ = w.Write([]byte(agentsJSON))
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/suspend"):
+				parts := strings.Split(strings.TrimSuffix(r.URL.Path, "/suspend"), "/")
+				name := parts[len(parts)-1]
+				mu.Lock()
+				suspended = append(suspended, name)
+				mu.Unlock()
+				_, _ = w.Write([]byte(`{"id":"` + name + `","name":"` + name + `","phase":"suspended"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+
+		origForce := suspendForce
+		origJSON := outputFormat
+		suspendForce = false
+		outputFormat = ""
+		t.Cleanup(func() {
+			suspendForce = origForce
+			outputFormat = origJSON
+		})
+
+		origStderr := os.Stderr
+		rPipe, wPipe, err := os.Pipe()
+		require.NoError(t, err)
+		os.Stderr = wPipe
+		t.Cleanup(func() { os.Stderr = origStderr })
+
+		hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "p1"}
+		runErr := suspendAllAgentsViaHub(hubCtx)
+
+		_ = wPipe.Close()
+		os.Stderr = origStderr
+		var out bytes.Buffer
+		_, _ = io.Copy(&out, rPipe)
+		_ = rPipe.Close()
+
+		require.NoError(t, runErr)
+		assert.ElementsMatch(t, []string{"lead", "worker"}, suspended)
+		assert.Contains(t, out.String(), "Agent 'lead' suspended via Hub.")
+		assert.Contains(t, out.String(), "Agent 'worker' suspended via Hub.")
+		assert.NotContains(t, out.String(), "skipped")
 	})
 
 	t.Run("with --force includes never-suspend and sends force=true", func(t *testing.T) {
