@@ -174,6 +174,9 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 		if tr.Action.ReuseMessage != "" {
 			fmt.Printf("  Reuse Msg:   %s\n", triggerTerminalText(tr.Action.ReuseMessage, true))
 		}
+		if tr.Action.AckComment != nil && tr.Action.AckComment.Body != "" {
+			fmt.Printf("  Ack Comment: %s\n", triggerTerminalText(tr.Action.AckComment.Body, true))
+		}
 		if len(tr.Action.UntrustedVars) > 0 {
 			safeVars := make([]string, len(tr.Action.UntrustedVars))
 			for i, v := range tr.Action.UntrustedVars {
@@ -183,6 +186,24 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 		}
 		if tr.Action.Task != "" {
 			fmt.Printf("  Task:        %s\n", triggerTerminalText(tr.Action.Task, true))
+		}
+	} else if tr.Action.Type == "github.comment" {
+		fmt.Printf("  Action:      github.comment\n")
+		if tr.Action.Target != "" {
+			fmt.Printf("  Target:      %s\n", triggerTerminalText(tr.Action.Target, false))
+		}
+		if tr.Action.ReplyInThread {
+			fmt.Printf("  In Thread:   true\n")
+		}
+		if len(tr.Action.UntrustedVars) > 0 {
+			safeVars := make([]string, len(tr.Action.UntrustedVars))
+			for i, v := range tr.Action.UntrustedVars {
+				safeVars[i] = triggerTerminalText(v, false)
+			}
+			fmt.Printf("  Allowed:     %s\n", strings.Join(safeVars, ", "))
+		}
+		if tr.Action.Body != "" {
+			fmt.Printf("  Comment:     %s\n", triggerTerminalText(tr.Action.Body, true))
 		}
 	} else {
 		fmt.Printf("  Agent:       %s\n", triggerTerminalText(agentLabel, false))

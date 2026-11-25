@@ -259,28 +259,40 @@ type TriggerMatchPatchSpec struct {
 	Form    *json.RawMessage        `json:"form,omitempty"`
 }
 
+// DispatchAgentAckComment configures an optional GitHub acknowledgement comment
+// posted after a dispatch_agent trigger fire succeeds (Stage 3 §7.2).
+type DispatchAgentAckComment struct {
+	Body string `json:"body"`
+}
+
 // TriggerActionSpec holds the action executed when a trigger matches.
 type TriggerActionSpec struct {
-	Type            string            `json:"type"`
-	AgentID         string            `json:"agentId,omitempty"`
-	AgentName       string            `json:"agentName,omitempty"`
-	Message         string            `json:"message,omitempty"`
-	Interrupt       bool              `json:"interrupt,omitempty"`
-	Plain           bool              `json:"plain,omitempty"`
-	Wake            bool              `json:"wake,omitempty"`
-	Offline         string            `json:"offline,omitempty"`
-	QueueTTLSeconds int               `json:"queueTtlSeconds,omitempty"`
-	NameConflict    string            `json:"nameConflict,omitempty"`
-	Template        string            `json:"template,omitempty"`
-	Task            string            `json:"task,omitempty"`
-	Branch          string            `json:"branch,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	Ephemeral       bool              `json:"ephemeral,omitempty"`
-	GithubToken     string            `json:"githubToken,omitempty"`
-	AgentRole       string            `json:"agentRole,omitempty"`
-	ReuseMessage    string            `json:"reuseMessage,omitempty"`
-	UntrustedVars   []string          `json:"untrustedVars,omitempty"`
-	NoAuth          bool              `json:"noAuth,omitempty"`
+	Type            string                   `json:"type"`
+	AgentID         string                   `json:"agentId,omitempty"`
+	AgentName       string                   `json:"agentName,omitempty"`
+	Message         string                   `json:"message,omitempty"`
+	Interrupt       bool                     `json:"interrupt,omitempty"`
+	Plain           bool                     `json:"plain,omitempty"`
+	Wake            bool                     `json:"wake,omitempty"`
+	Offline         string                   `json:"offline,omitempty"`
+	QueueTTLSeconds int                      `json:"queueTtlSeconds,omitempty"`
+	NameConflict    string                   `json:"nameConflict,omitempty"`
+	Template        string                   `json:"template,omitempty"`
+	Task            string                   `json:"task,omitempty"`
+	Branch          string                   `json:"branch,omitempty"`
+	Labels          map[string]string        `json:"labels,omitempty"`
+	Ephemeral       bool                     `json:"ephemeral,omitempty"`
+	GithubToken     string                   `json:"githubToken,omitempty"`
+	AgentRole       string                   `json:"agentRole,omitempty"`
+	ReuseMessage    string                   `json:"reuseMessage,omitempty"`
+	AckComment      *DispatchAgentAckComment `json:"ackComment,omitempty"`
+	UntrustedVars   []string                 `json:"untrustedVars,omitempty"`
+	NoAuth          bool                     `json:"noAuth,omitempty"`
+
+	// github.comment action fields (Stage 3 §7.1).
+	Body          string `json:"body,omitempty"`
+	Target        string `json:"target,omitempty"`
+	ReplyInThread bool   `json:"replyInThread,omitempty"`
 
 	// exec action fields (Stage 2 P8, ptone/scion#8241).
 	Command           []string `json:"command,omitempty"`

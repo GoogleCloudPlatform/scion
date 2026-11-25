@@ -47,6 +47,7 @@ var (
 	triggerPresetApplyDispatch      bool
 	triggerPresetApplyDispatchFlags dispatchAgentFlagValues
 	triggerPresetApplyComment       string
+	triggerPresetApplyReplyInThread bool
 	triggerPresetApplyDryRun        bool
 )
 
@@ -331,16 +332,28 @@ func parsePresetListValue(key, raw string) ([]string, error) {
 }
 
 func validateTriggerPresetApplyAction(cmd *cobra.Command, dryRun bool) (hubclient.TriggerActionSpec, []string, error) {
-	if (cmd != nil && cmd.Flags().Changed("comment")) || strings.TrimSpace(triggerPresetApplyComment) != "" {
-		return hubclient.TriggerActionSpec{}, nil, newUsageError(`action "github.comment" is not yet available; supported actions: message, dispatch-agent`)
+	actionExplicit := cmd != nil && cmd.Flags().Changed("action")
+	commentExplicit := cmd != nil && cmd.Flags().Changed("comment")
+	ackCommentExplicit := cmd != nil && cmd.Flags().Changed("ack-comment")
+	commentSet := commentExplicit || triggerPresetApplyComment != ""
+
+	if triggerPresetApplyReplyInThread && !commentSet {
+		return hubclient.TriggerActionSpec{}, nil, newUsageError("--reply-in-thread requires --comment")
 	}
+	if triggerPresetApplyDispatch && commentSet {
+		return hubclient.TriggerActionSpec{}, nil, newUsageError("--dispatch and --comment cannot be used together")
+	}
+
 	rawAction := strings.TrimSpace(triggerPresetApplyAction)
-	if rawAction == "github.comment" {
-		return hubclient.TriggerActionSpec{}, nil, newUsageError(`action "github.comment" is not yet available; supported actions: message, dispatch-agent`)
+	if commentSet {
+		if actionExplicit && rawAction != "github.comment" {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("--comment cannot be used with --action %s", triggerTerminalText(rawAction, false))
+		}
+		rawAction = "github.comment"
 	}
 	if triggerPresetApplyDispatch {
-		if rawAction != "" && rawAction != "message" && rawAction != "dispatch-agent" && rawAction != "dispatch_agent" {
-			return hubclient.TriggerActionSpec{}, nil, newUsageError(`unsupported action %q; supported actions: message, dispatch-agent`, rawAction)
+		if actionExplicit && rawAction != "dispatch-agent" && rawAction != "dispatch_agent" {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("--dispatch cannot be used with --action %s", triggerTerminalText(rawAction, false))
 		}
 		rawAction = "dispatch-agent"
 	}
@@ -361,12 +374,31 @@ func validateTriggerPresetApplyAction(cmd *cobra.Command, dryRun bool) (hubclien
 		if badFlag, ok := hasMessageFlagValues(triggerPresetApplyAgent, triggerPresetApplyMessage, triggerPresetApplyInterrupt, triggerPresetApplyWake, triggerPresetApplyPlain); ok {
 			return hubclient.TriggerActionSpec{}, nil, newUsageError("%s cannot be used with --action dispatch-agent", badFlag)
 		}
+		if ackCommentExplicit && strings.TrimSpace(triggerPresetApplyDispatchFlags.ackComment) == "" {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("--ack-comment cannot be empty")
+		}
 		allowExplicit := cmd != nil && cmd.Flags().Changed("allow")
 		return buildDispatchAgentActionSpec(&triggerPresetApplyDispatchFlags, allowExplicit)
+
+	case "github.comment":
+		if badFlag, ok := hasMessageFlagValues(triggerPresetApplyAgent, triggerPresetApplyMessage, triggerPresetApplyInterrupt, triggerPresetApplyWake, triggerPresetApplyPlain); ok {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("%s cannot be used with --action github.comment", badFlag)
+		}
+		if badFlag, ok := hasDispatchAgentFlagValues(&triggerPresetApplyDispatchFlags); ok {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("%s cannot be used with --action github.comment", badFlag)
+		}
+		if ackCommentExplicit {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("--ack-comment cannot be used with --action github.comment")
+		}
+		allowExplicit := cmd != nil && cmd.Flags().Changed("allow")
+		return buildGitHubCommentActionSpec(triggerPresetApplyComment, triggerPresetApplyReplyInThread, triggerPresetApplyDispatchFlags.allow, allowExplicit)
 
 	default:
 		if badFlag, ok := hasDispatchAgentFlagValues(&triggerPresetApplyDispatchFlags); ok {
 			return hubclient.TriggerActionSpec{}, nil, newUsageError("%s cannot be used with --action message", badFlag)
+		}
+		if ackCommentExplicit {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("--ack-comment cannot be used with --action message")
 		}
 		if cmd != nil && cmd.Flags().Changed("allow") {
 			return hubclient.TriggerActionSpec{}, nil, newUsageError("--allow cannot be used with --action message")
@@ -541,6 +573,12 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 			sourceKind = presetID[:dot]
 		}
 	}
+	if action.Type == "github.comment" && sourceKind != "github" {
+		return newUsageError("--comment requires a github preset (got source %q)", triggerTerminalText(sourceKind, false))
+	}
+	if action.AckComment != nil && sourceKind != "github" {
+		return newUsageError("--ack-comment requires a github preset (got source %q)", triggerTerminalText(sourceKind, false))
+	}
 
 	createReq, err := buildTriggerCreateRequestFromPreset(
 		triggerPresetApplyName,
@@ -660,7 +698,7 @@ func init() {
 	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyName, "name", "", "Trigger name (required unless --dry-run)")
 	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyDescription, "description", "", "Optional trigger description")
 	triggerPresetApplyCmd.Flags().StringArrayVar(&triggerPresetApplyFields, "field", nil, "Preset field in key=value form (repeatable)")
-	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyAction, "action", "message", `Action kind ("message" or "dispatch-agent")`)
+	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyAction, "action", "message", `Action kind ("message", "dispatch-agent", or "github.comment")`)
 	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyAgent, "agent", "", "Target agent name or ID (required for --action message unless --dry-run)")
 	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyMessage, "message", "", "Message delivered to the target agent (required for --action message unless --dry-run)")
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyInterrupt, "interrupt", false, "Interrupt the target agent")
@@ -668,6 +706,7 @@ func init() {
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyPlain, "plain", false, "Deliver message text without sender prefix")
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyDispatch, "dispatch", false, "Shorthand for --action dispatch-agent")
 	bindDispatchAgentFlags(triggerPresetApplyCmd.Flags(), &triggerPresetApplyDispatchFlags)
-	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyComment, "comment", "", "Post a GitHub comment (not yet available)")
+	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyComment, "comment", "", "Post a GitHub comment with this body template (shorthand for --action github.comment; requires a github preset)")
+	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyReplyInThread, "reply-in-thread", false, "Reply under the review comment thread instead of the PR/issue conversation (requires --comment)")
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyDryRun, "dry-run", false, "Compile and print the rule without creating a trigger")
 }

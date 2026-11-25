@@ -75,6 +75,7 @@ func resetTriggerPresetFlags(t *testing.T) {
 	origDispatch := triggerPresetApplyDispatch
 	origDispatchFlags := triggerPresetApplyDispatchFlags
 	origComment := triggerPresetApplyComment
+	origReplyInThread := triggerPresetApplyReplyInThread
 	origDryRun := triggerPresetApplyDryRun
 	t.Cleanup(func() {
 		outputFormat = origFormat
@@ -92,6 +93,7 @@ func resetTriggerPresetFlags(t *testing.T) {
 		triggerPresetApplyDispatch = origDispatch
 		triggerPresetApplyDispatchFlags = origDispatchFlags
 		triggerPresetApplyComment = origComment
+		triggerPresetApplyReplyInThread = origReplyInThread
 		triggerPresetApplyDryRun = origDryRun
 	})
 	outputFormat = ""
@@ -109,6 +111,7 @@ func resetTriggerPresetFlags(t *testing.T) {
 	triggerPresetApplyDispatch = false
 	triggerPresetApplyDispatchFlags = dispatchAgentFlagValues{}
 	triggerPresetApplyComment = ""
+	triggerPresetApplyReplyInThread = false
 	triggerPresetApplyDryRun = false
 }
 
@@ -252,22 +255,28 @@ func TestTriggerPresetCLI_ApplyDryRunFieldCoercionAndActionValidation(t *testing
 	assert.Contains(t, dryOut, "Compiled preset: github.command (v1)")
 	assert.Contains(t, dryOut, `1/1 [cel] "event.attributes.command == 'review'"`)
 
-	// 2. Reject unavailable github.comment action clearly, and validate dispatch-agent required flags.
+	// 2. Validate github.comment and dispatch-agent required flags and invalid combinations.
 	triggerPresetApplyDryRun = false
-	triggerPresetApplyComment = "hello"
+	triggerPresetApplyAction = "github.comment"
+	triggerPresetApplyName = "gh-comment-missing-body"
 	err := runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "github.comment")
-	assert.Contains(t, err.Error(), "not yet available")
-
-	triggerPresetApplyComment = ""
-	triggerPresetApplyAction = "github.comment"
-	err = runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not yet available")
+	assert.Contains(t, err.Error(), "--comment is required")
 
 	triggerPresetApplyAction = "message"
+	triggerPresetApplyReplyInThread = true
+	err = runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--reply-in-thread requires --comment")
+	triggerPresetApplyReplyInThread = false
+
 	triggerPresetApplyDispatch = true
+	triggerPresetApplyComment = "hello"
+	err = runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--dispatch and --comment cannot be used together")
+	triggerPresetApplyComment = ""
+
 	triggerPresetApplyName = "pr-dispatch"
 	err = runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
 	require.Error(t, err)
