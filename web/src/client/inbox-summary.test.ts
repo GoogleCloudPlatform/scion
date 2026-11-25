@@ -863,5 +863,41 @@ describe('InboxSummaryStore', () => {
         unmount();
       }
     });
+
+    it('continues fetching on subsequent safety polls after an event-triggered fetch', async () => {
+      installSerializedWebLocks();
+      setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+      vi.spyOn(stateManager, 'isConnected', 'get').mockReturnValue(true);
+
+      let seq = 0;
+      fetchMock.mockImplementation(() => {
+        seq += 1;
+        return Promise.resolve(
+          new Response(JSON.stringify(makeSummary(seq)), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      });
+
+      store.ensureStarted('user-1');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Trigger an event-driven fetch (sets pendingEventAt on the store).
+      stateManager.dispatchEvent(
+        new CustomEvent('inbox-changed', { detail: { category: 'approvals' } })
+      );
+      await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+      const callsAfterEvent = fetchMock.mock.calls.length;
+      expect(callsAfterEvent).toBe(2);
+
+      // With no further events for > 3 poll intervals, the first poll may skip
+      // (event fetch was < 1 interval ago), and subsequent safety polls must
+      // keep fetching rather than adopting the tab's own prior payload forever.
+      await vi.advanceTimersByTimeAsync(3 * INBOX_POLL_HEALTHY_MS + 1000);
+      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(callsAfterEvent + 2);
+      expect(store.total).toBe(seq);
+    });
   });
 });

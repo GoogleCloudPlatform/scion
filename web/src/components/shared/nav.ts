@@ -608,13 +608,7 @@ export class ScionNav extends LitElement {
             <sl-icon name="${item.icon}"></sl-icon>
             <span class="nav-link-text">${item.label}</span>
             ${badge
-              ? html`<span
-                  class="nav-badge"
-                  data-nav-badge
-                  aria-hidden="true"
-                  title=${`${badge} items waiting in ${item.label}`}
-                  >${badge}</span
-                >`
+              ? html`<span class="nav-badge" data-nav-badge aria-hidden="true">${badge}</span>`
               : nothing}
           </a>
         </sl-tooltip>

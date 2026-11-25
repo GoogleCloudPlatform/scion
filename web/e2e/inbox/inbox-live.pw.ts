@@ -149,6 +149,14 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       await expect(sidebarInboxLink).toBeVisible({ timeout: 15_000 });
       await expect(sidebarInboxLink.locator('[data-nav-badge]')).toHaveCount(0);
 
+      // Plant a per-page sentinel so we can assert neither tab reloaded.
+      await page1.evaluate(() => {
+        (window as unknown as { __inboxLiveSentinel?: string }).__inboxLiveSentinel = 'alive';
+      });
+      await page2.evaluate(() => {
+        (window as unknown as { __inboxLiveSentinel?: string }).__inboxLiveSentinel = 'alive';
+      });
+
       // Trigger a pending user-scope secret from the agent (202 Accepted).
       const secretKey = `INBOX_LIVE_SECRET_${Date.now()}`;
       const createRes = await agent.request<{ pendingId?: string; state?: string }>(
@@ -206,6 +214,16 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         'Inbox →',
         { timeout: 7_000 }
       );
+
+      // Confirm neither tab reloaded during the create/resolve lifecycle.
+      const sentinel1 = await page1.evaluate(
+        () => (window as unknown as { __inboxLiveSentinel?: string }).__inboxLiveSentinel
+      );
+      const sentinel2 = await page2.evaluate(
+        () => (window as unknown as { __inboxLiveSentinel?: string }).__inboxLiveSentinel
+      );
+      expect(sentinel1).toBe('alive');
+      expect(sentinel2).toBe('alive');
 
       expect(pageErrors).toEqual([]);
     } finally {
