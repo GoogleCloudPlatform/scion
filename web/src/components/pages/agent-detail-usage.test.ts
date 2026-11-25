@@ -112,7 +112,7 @@ describe('agent detail Usage tab experiment gate', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('renders Usage tab and scion-agent-usage-panel when tokenomics.usage_ledger is on', async () => {
+  it('renders Usage tab and lazy-loads scion-agent-usage-panel on first tab show when tokenomics.usage_ledger is on', async () => {
     setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
     const el = await mountWithLoadedAgent();
 
@@ -122,6 +122,20 @@ describe('agent detail Usage tab experiment gate', () => {
     expect(panel).not.toBeNull();
     expect(panel?.querySelector('scion-agent-usage-panel')?.getAttribute('agentId')).toBe(
       'agent-usage-1'
+    );
+
+    // Lazy load (N3): no fetch while Usage tab has not been shown yet.
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const tabGroup = el.shadowRoot!.querySelector('sl-tab-group');
+    tabGroup?.dispatchEvent(
+      new CustomEvent('sl-tab-show', { detail: { name: 'usage' }, bubbles: true, composed: true })
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/agents/agent-usage-1/usage?since=30d',
+      expect.any(Object)
     );
   });
 });

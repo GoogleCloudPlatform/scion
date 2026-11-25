@@ -102,6 +102,7 @@ import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js'
 import '../shared/agent-schedules-tab.js';
 import type { ScionAgentSchedulesTab } from '../shared/agent-schedules-tab.js';
 import '../shared/agent-usage-panel.js';
+import type { ScionAgentUsagePanel } from '../shared/agent-usage-panel.js';
 import '../shared/agent-suspend-screen.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
@@ -111,7 +112,7 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   idleSuspendEnabled,
   isFeatureEnabled,
-  TOKENOMICS_USAGE_LEDGER_FLAG,
+  usageLedgerEnabled,
 } from '../../utils/feature-flags.js';
 import '../shared/secret-list.js';
 import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
@@ -330,7 +331,7 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private get usageLedgerEnabled(): boolean {
-    return isFeatureEnabled(TOKENOMICS_USAGE_LEDGER_FLAG);
+    return usageLedgerEnabled();
   }
 
   /** Whether an agent uses the built-in shell execution container harness. */
@@ -1607,6 +1608,12 @@ export class ScionPageAgentDetail extends LitElement {
         ) as ScionAgentMessageViewer | null;
         viewer?.loadMessages();
       }
+    }
+    if (e.detail.name === 'usage') {
+      const usagePanel = this.shadowRoot?.querySelector(
+        'scion-agent-usage-panel'
+      ) as ScionAgentUsagePanel | null;
+      void usagePanel?.loadIfNeeded();
     }
     if (e.detail.name === 'schedules') {
       const schedulesTab = this.shadowRoot?.querySelector(

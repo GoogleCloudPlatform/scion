@@ -2662,6 +2662,19 @@ export type UsageMeasurementStatus =
   | 'stale';
 
 /**
+ * Per-bucket counts of events in the window where that bucket was NULL while
+ * other events reported known values (mixed known+unknown).
+ */
+export interface AgentUsageBucketUnknownEvents {
+  input?: number;
+  output?: number;
+  cache_read?: number;
+  cache_write?: number;
+  cache_write_1h?: number;
+  reasoning?: number;
+}
+
+/**
  * Nullable canonical Track 1 token buckets (§3.1).
  * null means unknown (never fabricated as 0).
  */
@@ -2673,6 +2686,7 @@ export interface AgentUsageTokens {
   cache_write_1h: number | null;
   reasoning: number | null;
   summable_tokens: number | null;
+  unknown_events?: AgentUsageBucketUnknownEvents;
 }
 
 /**

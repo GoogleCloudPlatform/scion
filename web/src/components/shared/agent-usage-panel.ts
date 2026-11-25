@@ -41,11 +41,44 @@ export type UsageWindowPreset = '7d' | '30d' | '90d';
 
 /**
  * Format a nullable token count. Unknown (null/undefined) always renders as
- * "—", never 0 (§3.1).
+ * "—", never 0 (§3.1). When unknownEvents > 0, prefixes with "≥ " to indicate
+ * a lower bound from partially unknown events.
  */
-export function formatUsageToken(value: number | null | undefined): string {
+export function formatUsageToken(value: number | null | undefined, unknownEvents = 0): string {
   if (value === null || value === undefined) return '—';
-  return formatNumber(value);
+  const formatted = formatNumber(value);
+  return unknownEvents > 0 ? `≥ ${formatted}` : formatted;
+}
+
+/**
+ * Return the maximum unknown-event count affecting summable_tokens
+ * (input, output, cache_read, cache_write, or all-null events).
+ */
+export function summableUnknownEvents(tokens: AgentUsageTokens, nullTokenEvents = 0): number {
+  const u = tokens.unknown_events;
+  return Math.max(
+    nullTokenEvents,
+    u?.input ?? 0,
+    u?.output ?? 0,
+    u?.cache_read ?? 0,
+    u?.cache_write ?? 0
+  );
+}
+
+/**
+ * Return true if any token bucket has mixed known+unknown events.
+ */
+export function hasPartialTokenBuckets(tokens: AgentUsageTokens): boolean {
+  const u = tokens.unknown_events;
+  if (!u) return false;
+  return (
+    (u.input ?? 0) > 0 ||
+    (u.output ?? 0) > 0 ||
+    (u.cache_read ?? 0) > 0 ||
+    (u.cache_write ?? 0) > 0 ||
+    (u.cache_write_1h ?? 0) > 0 ||
+    (u.reasoning ?? 0) > 0
+  );
 }
 
 /**
@@ -116,6 +149,7 @@ export class ScionAgentUsagePanel extends LitElement {
   private usage: AgentUsageResponse | null = null;
 
   private loadGeneration = 0;
+  private loadedForAgentId = '';
 
   static override styles = css`
     :host {
@@ -150,12 +184,19 @@ export class ScionAgentUsagePanel extends LitElement {
     }
 
     .window-select {
-      font-size: 0.875rem;
-      padding: 0.375rem 0.625rem;
-      background: var(--scion-surface);
-      color: var(--scion-text);
-      border: 1px solid var(--scion-border);
-      border-radius: var(--scion-radius);
+      min-width: 9rem;
+    }
+
+    .window-select::part(form-control-label) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }
 
     .card {
@@ -198,12 +239,6 @@ export class ScionAgentUsagePanel extends LitElement {
       font-weight: 600;
       color: var(--scion-text);
       font-variant-numeric: tabular-nums;
-    }
-
-    .info-sub {
-      font-size: 0.8125rem;
-      font-weight: 400;
-      color: var(--scion-text-muted);
     }
 
     .error-count {
@@ -297,14 +332,34 @@ export class ScionAgentUsagePanel extends LitElement {
   `;
 
   override updated(changed: PropertyValues): void {
-    if (changed.has('agentId') && this.agentId) {
+    // Only auto-reload on agentId change if the panel has already been shown
+    // and loaded once; initial loading is triggered lazily via loadIfNeeded()
+    // when the Usage tab is first selected.
+    if (
+      changed.has('agentId') &&
+      this.agentId &&
+      this.loadedForAgentId !== '' &&
+      this.loadedForAgentId !== this.agentId
+    ) {
       void this.loadUsage();
     }
+  }
+
+  /**
+   * Load usage on first tab activation (or when agentId changed since the last
+   * load). Subsequent tab switches reuse the loaded snapshot until Refresh or
+   * a window change is requested.
+   */
+  async loadIfNeeded(): Promise<void> {
+    if (!this.agentId) return;
+    if (this.loadedForAgentId === this.agentId) return;
+    await this.loadUsage();
   }
 
   async loadUsage(): Promise<void> {
     if (!this.agentId) return;
     const gen = ++this.loadGeneration;
+    this.loadedForAgentId = this.agentId;
     this.loading = true;
     this.error = null;
     try {
@@ -329,9 +384,9 @@ export class ScionAgentUsagePanel extends LitElement {
   }
 
   private handleWindowChange(e: Event): void {
-    const target = e.target as HTMLSelectElement;
-    const next = target.value as UsageWindowPreset;
-    if (next !== this.windowPreset) {
+    const target = e.target as HTMLElement & { value?: string };
+    const next = target.value as UsageWindowPreset | undefined;
+    if (next && next !== this.windowPreset) {
       this.windowPreset = next;
       void this.loadUsage();
     }
@@ -374,6 +429,8 @@ export class ScionAgentUsagePanel extends LitElement {
 
     const statusInfo = measurementStatusDisplay(u.measurement_status);
     const t = u.tokens;
+    const unk = t.unknown_events;
+    const showPartialNotice = u.null_token_events > 0 || hasPartialTokenBuckets(t);
 
     return html`
       <div class="toolbar">
@@ -390,17 +447,18 @@ export class ScionAgentUsagePanel extends LitElement {
           </span>
         </div>
         <div class="toolbar-right">
-          <select
+          <sl-select
+            size="small"
             class="window-select"
-            aria-label="Usage time window"
+            label="Usage time window"
             data-testid="usage-window-select"
             .value=${this.windowPreset}
-            @change=${this.handleWindowChange}
+            @sl-change=${this.handleWindowChange}
           >
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-            <option value="90d">Last 90 days</option>
-          </select>
+            <sl-option value="7d">Last 7 days</sl-option>
+            <sl-option value="30d">Last 30 days</sl-option>
+            <sl-option value="90d">Last 90 days</sl-option>
+          </sl-select>
           <sl-button
             size="small"
             variant="default"
@@ -414,14 +472,15 @@ export class ScionAgentUsagePanel extends LitElement {
         </div>
       </div>
 
-      ${u.null_token_events > 0
+      ${showPartialNotice
         ? html`
             <div class="notice" data-testid="usage-null-events-notice">
               <sl-icon name="exclamation-triangle"></sl-icon>
               <span>
-                ${formatNumber(u.null_token_events)} of ${formatNumber(u.events)} usage
-                event${u.events === 1 ? '' : 's'} reported unknown token counts and are excluded
-                from token totals.
+                ${u.null_token_events > 0
+                  ? `${formatNumber(u.null_token_events)} of ${formatNumber(u.events)} usage event${u.events === 1 ? '' : 's'} reported unknown token counts.`
+                  : 'Some events in this window reported unknown values for one or more token buckets.'}
+                Values marked with “≥” are lower bounds.
               </span>
             </div>
           `
@@ -433,27 +492,31 @@ export class ScionAgentUsagePanel extends LitElement {
           <div class="info-item">
             <span class="info-label">Summable Total</span>
             <span class="info-value" data-testid="usage-summable-total">
-              ${formatUsageToken(t.summable_tokens)}
+              ${formatUsageToken(t.summable_tokens, summableUnknownEvents(t, u.null_token_events))}
             </span>
           </div>
           <div class="info-item">
             <span class="info-label">Input</span>
-            <span class="info-value" data-testid="usage-input">${formatUsageToken(t.input)}</span>
+            <span class="info-value" data-testid="usage-input">
+              ${formatUsageToken(t.input, unk?.input ?? 0)}
+            </span>
           </div>
           <div class="info-item">
             <span class="info-label">Output</span>
-            <span class="info-value" data-testid="usage-output">${formatUsageToken(t.output)}</span>
+            <span class="info-value" data-testid="usage-output">
+              ${formatUsageToken(t.output, unk?.output ?? 0)}
+            </span>
           </div>
           <div class="info-item">
             <span class="info-label">Cache Read</span>
             <span class="info-value" data-testid="usage-cache-read">
-              ${formatUsageToken(t.cache_read)}
+              ${formatUsageToken(t.cache_read, unk?.cache_read ?? 0)}
             </span>
           </div>
           <div class="info-item">
             <span class="info-label">Cache Write</span>
             <span class="info-value" data-testid="usage-cache-write">
-              ${formatUsageToken(t.cache_write)}
+              ${formatUsageToken(t.cache_write, unk?.cache_write ?? 0)}
             </span>
           </div>
           <div class="info-item">
@@ -473,7 +536,7 @@ export class ScionAgentUsagePanel extends LitElement {
           <div class="info-item">
             <span class="info-label">Reasoning</span>
             <span class="info-value" data-testid="usage-reasoning">
-              ${formatUsageToken(t.reasoning)}
+              ${formatUsageToken(t.reasoning, unk?.reasoning ?? 0)}
             </span>
           </div>
         </div>
@@ -512,12 +575,37 @@ export class ScionAgentUsagePanel extends LitElement {
                                 >`
                               : nothing}
                           </td>
-                          <td class="num">${formatUsageToken(row.tokens.input)}</td>
-                          <td class="num">${formatUsageToken(row.tokens.output)}</td>
-                          <td class="num">${formatUsageToken(row.tokens.cache_read)}</td>
-                          <td class="num">${formatUsageToken(row.tokens.cache_write)}</td>
+                          <td class="num">
+                            ${formatUsageToken(
+                              row.tokens.input,
+                              row.tokens.unknown_events?.input ?? 0
+                            )}
+                          </td>
+                          <td class="num">
+                            ${formatUsageToken(
+                              row.tokens.output,
+                              row.tokens.unknown_events?.output ?? 0
+                            )}
+                          </td>
+                          <td class="num">
+                            ${formatUsageToken(
+                              row.tokens.cache_read,
+                              row.tokens.unknown_events?.cache_read ?? 0
+                            )}
+                          </td>
+                          <td class="num">
+                            ${formatUsageToken(
+                              row.tokens.cache_write,
+                              row.tokens.unknown_events?.cache_write ?? 0
+                            )}
+                          </td>
                           <td class="num">${formatCacheHitRate(row.tokens)}</td>
-                          <td class="num">${formatUsageToken(row.tokens.summable_tokens)}</td>
+                          <td class="num">
+                            ${formatUsageToken(
+                              row.tokens.summable_tokens,
+                              summableUnknownEvents(row.tokens, row.null_token_events)
+                            )}
+                          </td>
                         </tr>
                       `
                     )}

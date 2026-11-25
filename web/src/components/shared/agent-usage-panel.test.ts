@@ -39,12 +39,14 @@ async function waitForPanel(el: ScionAgentUsagePanel): Promise<void> {
 }
 
 describe('agent-usage-panel helpers', () => {
-  it('formats null and undefined token counts as em dash, never 0', () => {
+  it('formats null and undefined token counts as em dash, never 0, and marks partial counts with ≥', () => {
     expect(formatUsageToken(null)).toBe('—');
     expect(formatUsageToken(undefined)).toBe('—');
+    expect(formatUsageToken(null, 2)).toBe('—');
     expect(formatUsageToken(0)).toBe('0');
     expect(formatUsageToken(18)).toBe('18');
     expect(formatUsageToken(12500)).toBe('12,500');
+    expect(formatUsageToken(18, 1)).toBe('≥ 18');
   });
 
   it('computes cache hit rate from input, cache_read, and cache_write', () => {
@@ -128,13 +130,13 @@ describe('scion-agent-usage-panel', () => {
     vi.unstubAllGlobals();
   });
 
-  it('renders canonical token buckets, cache hit rate, calls, per-model rows, and measured badge', async () => {
+  it('does not fetch until loadIfNeeded is called, then renders canonical buckets and per-model rows', async () => {
     const payload: AgentUsageResponse = {
       agent_id: 'agent-1',
       project_id: 'proj-1',
       window: {
         since: '2026-10-26T00:00:00Z',
-        until: '2026-11-25T18:00:00Z',
+        until: '2026-11-25T23:59:59.999999Z',
       },
       calls: 4,
       error_calls: 1,
@@ -199,10 +201,21 @@ describe('scion-agent-usage-panel', () => {
     container.appendChild(el);
     await waitForPanel(el);
 
+    // Lazy loading (N3): no request until loadIfNeeded() is triggered.
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await el.loadIfNeeded();
+    await waitForPanel(el);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/agents/agent-1/usage?since=30d',
       expect.any(Object)
     );
+
+    // Second loadIfNeeded() for the same agentId is a no-op.
+    await el.loadIfNeeded();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const root = el.shadowRoot!;
     expect(root.querySelector('[data-testid="usage-summable-total"]')?.textContent?.trim()).toBe(
@@ -240,7 +253,7 @@ describe('scion-agent-usage-panel', () => {
       project_id: 'proj-1',
       window: {
         since: '2026-10-26T00:00:00Z',
-        until: '2026-11-25T18:00:00Z',
+        until: '2026-11-25T23:59:59.999999Z',
       },
       calls: 2,
       error_calls: 0,
@@ -266,6 +279,7 @@ describe('scion-agent-usage-panel', () => {
     const el = document.createElement('scion-agent-usage-panel') as ScionAgentUsagePanel;
     el.agentId = 'agent-2';
     container.appendChild(el);
+    await el.loadIfNeeded();
     await waitForPanel(el);
 
     const root = el.shadowRoot!;
@@ -290,11 +304,57 @@ describe('scion-agent-usage-panel', () => {
     expect(root.querySelector('[data-testid="usage-null-events-notice"]')).not.toBeNull();
   });
 
-  it('re-fetches with updated since query param when window selector changes', async () => {
+  it('marks partially-known buckets with ≥ prefix and notice banner (O1)', async () => {
+    const payload: AgentUsageResponse = {
+      agent_id: 'agent-partial',
+      project_id: 'proj-1',
+      window: { since: '2026-10-26T00:00:00Z', until: '2026-11-25T23:59:59.999999Z' },
+      calls: 2,
+      error_calls: 0,
+      events: 2,
+      null_token_events: 0,
+      tokens: {
+        input: 17,
+        output: 7,
+        cache_read: null,
+        cache_write: 5,
+        cache_write_1h: null,
+        reasoning: null,
+        summable_tokens: 29,
+        unknown_events: {
+          cache_write: 1,
+        },
+      },
+      by_model: [],
+      measurement_status: 'measured',
+      as_of: '2026-11-25T18:00:00Z',
+      last_receipt_at: '2026-11-25T17:59:00Z',
+    };
+
+    fetchMock.mockResolvedValue(jsonResponse(payload));
+
+    const el = document.createElement('scion-agent-usage-panel') as ScionAgentUsagePanel;
+    el.agentId = 'agent-partial';
+    container.appendChild(el);
+    await el.loadIfNeeded();
+    await waitForPanel(el);
+
+    const root = el.shadowRoot!;
+    expect(root.querySelector('[data-testid="usage-input"]')?.textContent?.trim()).toBe('17');
+    expect(root.querySelector('[data-testid="usage-cache-write"]')?.textContent?.trim()).toBe(
+      '≥ 5'
+    );
+    expect(root.querySelector('[data-testid="usage-summable-total"]')?.textContent?.trim()).toBe(
+      '≥ 29'
+    );
+    expect(root.querySelector('[data-testid="usage-null-events-notice"]')).not.toBeNull();
+  });
+
+  it('re-fetches with updated since query param when sl-select window changes', async () => {
     const payload: AgentUsageResponse = {
       agent_id: 'agent-3',
       project_id: 'proj-1',
-      window: { since: '2026-11-18T00:00:00Z', until: '2026-11-25T18:00:00Z' },
+      window: { since: '2026-11-18T00:00:00Z', until: '2026-11-25T23:59:59.999999Z' },
       calls: 0,
       error_calls: 0,
       events: 0,
@@ -319,13 +379,15 @@ describe('scion-agent-usage-panel', () => {
     const el = document.createElement('scion-agent-usage-panel') as ScionAgentUsagePanel;
     el.agentId = 'agent-3';
     container.appendChild(el);
+    await el.loadIfNeeded();
     await waitForPanel(el);
 
     const select = el.shadowRoot!.querySelector(
-      '[data-testid="usage-window-select"]'
-    ) as HTMLSelectElement;
+      'sl-select[data-testid="usage-window-select"]'
+    ) as HTMLElement & { value: string };
+    expect(select).not.toBeNull();
     select.value = '7d';
-    select.dispatchEvent(new Event('change'));
+    select.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
     await waitForPanel(el);
 
     expect(fetchMock).toHaveBeenCalledWith(
