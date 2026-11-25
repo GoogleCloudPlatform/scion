@@ -268,3 +268,26 @@ func TestFormatSuspendError_TypedErrors(t *testing.T) {
 	}
 	assert.Contains(t, formatSuspendError("lead", forbidErr).Error(), "only human principals")
 }
+
+type plainSuspendOnlyAgentService struct {
+	hubclient.AgentService
+	suspendCalled bool
+}
+
+func (s *plainSuspendOnlyAgentService) Suspend(_ context.Context, _ string) (*hubclient.LifecycleResponse, error) {
+	s.suspendCalled = true
+	return &hubclient.LifecycleResponse{}, nil
+}
+
+func TestCallAgentSuspend_ForceRequiresLifecycleOptionsSuspender(t *testing.T) {
+	svc := &plainSuspendOnlyAgentService{}
+
+	_, err := callAgentSuspend(context.Background(), svc, "lead", true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--force")
+	assert.False(t, svc.suspendCalled, "must not silently fall back to plain Suspend when --force is set")
+
+	_, err = callAgentSuspend(context.Background(), svc, "lead", false)
+	require.NoError(t, err)
+	assert.True(t, svc.suspendCalled)
+}

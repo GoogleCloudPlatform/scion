@@ -464,6 +464,20 @@ func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWri
 		return true
 	}
 
+	// Converting an auto-waking hub suspend (idle/stalled) to a non-auto-waking
+	// user suspend on a never-suspend agent requires the same human-only force
+	// override and audit as suspending a running never-suspend agent.
+	forced := false
+	if reason.AutoWakes() {
+		var overrideErr error
+		ctx, forced, overrideErr = s.neverSuspendOverride(ctx, agent)
+		if overrideErr != nil {
+			writeNeverSuspendError(w, agent.ID, overrideErr)
+			return true
+		}
+	}
+
+	preActionPhase, preActionSuspendReason, preActionActivity := agent.Phase, agent.SuspendReason, agent.Activity
 	err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
 		Phase:            string(state.PhaseSuspended),
 		SuspendReason:    string(state.SuspendReasonUser),
@@ -497,7 +511,9 @@ func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWri
 		writeErrorFromErr(w, err, "")
 		return true
 	}
-	preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason
+	if forced {
+		s.emitForcedSuspendAudit(ctx, agent, preActionPhase, preActionActivity, string(state.PhaseSuspended))
+	}
 	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(state.SuspendReasonUser))
 	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
 	if isRealThirdPartyLifecycleTransition(preActionPhase, preActionSuspendReason, api.AgentActionSuspend) {

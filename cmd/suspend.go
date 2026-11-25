@@ -89,9 +89,11 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 
 func callAgentSuspend(ctx context.Context, agentSvc hubclient.AgentService, agentName string, force bool) (*hubclient.LifecycleResponse, error) {
 	if force {
-		if suspender, ok := agentSvc.(hubclient.LifecycleOptionsSuspender); ok {
-			return suspender.SuspendWithOptions(ctx, agentName, hubclient.LifecycleSuspendOptions{Force: true})
+		suspender, ok := agentSvc.(hubclient.LifecycleOptionsSuspender)
+		if !ok {
+			return nil, fmt.Errorf("hub client does not support --force suspend")
 		}
+		return suspender.SuspendWithOptions(ctx, agentName, hubclient.LifecycleSuspendOptions{Force: true})
 	}
 	return agentSvc.Suspend(ctx, agentName)
 }
