@@ -45,7 +45,7 @@ def _capture_auth_json(quiet: bool = False, scope: str = "project") -> bool:
         return False
 
     cmd = [
-        "sciontool", "secret", "set", "OPENCODE_AUTH",
+        "scion", "secret", "set", "OPENCODE_AUTH",
         f"@{_OPENCODE_AUTH}",
         "--type", "file",
         "--target", _OPENCODE_AUTH,
@@ -56,10 +56,10 @@ def _capture_auth_json(quiet: bool = False, scope: str = "project") -> bool:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
-        print("capture-auth: sciontool not found in PATH", file=sys.stderr)
+        print("capture-auth: scion not found in PATH", file=sys.stderr)
         return False
     except subprocess.TimeoutExpired:
-        print("capture-auth: sciontool timed out setting OPENCODE_AUTH", file=sys.stderr)
+        print("capture-auth: scion timed out setting OPENCODE_AUTH", file=sys.stderr)
         return False
 
     outcome = scion_harness.secret_set_outcome(result, scope)

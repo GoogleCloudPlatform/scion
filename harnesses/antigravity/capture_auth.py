@@ -110,7 +110,7 @@ def _try_capture_token_file(force: bool, scope: str = "project") -> int | None:
     if not _validate_refresh_token(raw):
         print("capture-auth: AGY_TOKEN file does not contain refresh_token", file=sys.stderr)
         return _CA_EXIT_ERROR
-    cmd = ["sciontool", "secret", "set", "AGY_TOKEN", f"@{expanded}",
+    cmd = ["scion", "secret", "set", "AGY_TOKEN", f"@{expanded}",
            "--type", "file", "--target", _AGY_TOKEN_PATH,
            "--scope", scope]
     if force:
@@ -118,7 +118,7 @@ def _try_capture_token_file(force: bool, scope: str = "project") -> int | None:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        print(f"capture-auth: sciontool error: {exc}", file=sys.stderr)
+        print(f"capture-auth: scion error: {exc}", file=sys.stderr)
         return _CA_EXIT_ERROR
     outcome = scion_harness.secret_set_outcome(result, scope)
     if outcome in ("pending", "stored"):
@@ -130,7 +130,7 @@ def _try_capture_token_file(force: bool, scope: str = "project") -> int | None:
     if outcome == "conflict":
         print('CONFLICT: secret "AGY_TOKEN" already exists (use --force to overwrite)')
         return _CA_EXIT_CONFLICT
-    print(f"capture-auth: sciontool failed: {result.stderr.strip()}", file=sys.stderr)
+    print(f"capture-auth: scion failed: {result.stderr.strip()}", file=sys.stderr)
     return _CA_EXIT_ERROR
 
 
@@ -174,7 +174,7 @@ def main() -> int:
         with os.fdopen(fd, "w") as f:
             f.write(token)
         force = "--force" in sys.argv
-        cmd = ["sciontool", "secret", "set", "AGY_TOKEN", f"@{tmp_path}",
+        cmd = ["scion", "secret", "set", "AGY_TOKEN", f"@{tmp_path}",
                "--type", "file", "--target", target,
                "--scope", known.scope]
         if force:

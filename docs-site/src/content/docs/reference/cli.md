@@ -1160,15 +1160,19 @@ Manages per-user Hub settings.
 
 ### `scion secret`
 
-Manages secrets from the host or within an agent container. Inside an agent container, `scion secret get`, `scion secret list`, and `scion secret request` are available in agent mode (replacing `sciontool secret get` and `sciontool secret list`, which now print a message pointing to the `scion` commands and exit `1`); `scion secret set` is not available in agent mode, and agents write or delete secrets with `sciontool secret set` (supports `--scope project|user|agent`, reading stdin via `-`) and `sciontool secret delete --scope agent`.
+Manages secrets from the host or within an agent container. Inside an agent container, `scion secret get`, `scion secret list`, `scion secret set`, and `scion secret request` are available in agent mode (replacing `sciontool secret get`, `sciontool secret list`, and `sciontool secret set`, which now print a message pointing to the `scion` commands and exit `1`). Agents delete agent-scoped secrets with `sciontool secret delete --scope agent`.
 
-Unlike `scion hub secret` (which supports managing secrets at any scope: user, hub, project, broker, or agent), `scion secret` is streamlined for project-scoped secrets on the host and agent/project secrets inside an agent container.
+Unlike `scion hub secret` (which supports managing secrets at any scope: user, hub, project, broker, or agent), `scion secret` is streamlined for project-scoped secrets on the host and project, user (pending approval), or agent secrets inside an agent container.
 
-- `scion secret set KEY VALUE`: Store a project-scoped secret in the Hub.
+- `scion secret set KEY VALUE`: Store a secret in the Hub.
+    - If `VALUE` is `-`, the secret value is read from stdin (up to 64 KiB) so it stays out of process listings; for non-file types, a single trailing `\r\n` or `\n` is trimmed.
     - If `VALUE` starts with `@`, the remainder is treated as a file path. The file contents are read and base64-encoded, and `--type` defaults to `file`.
     - Flags:
+        - `--scope <project|user|agent>`: Secret scope. Defaults to `project`. Inside an agent container, `--scope agent` stores a secret private to the calling agent (requires the `hub.agent_secrets` [experiment](/scion/reference/experiments/)), and `--scope user` creates a pending user-scope secret that awaits the originating user's approval in Scion.
         - `--type <string>`: Secret type: `environment` (default), `variable`, or `file`.
         - `--target <string>`: Injection target path (defaults to key for env, required for file-type secrets).
+        - `--force`: Overwrite an existing secret (ignored for `--scope user`).
+        - `--allow-progeny`: Allow progeny agents to inherit this secret (`--scope user` only; defaults to `true` when `--scope user` is specified inside an agent container).
 - `scion secret get KEY`: Print the metadata of a secret (key, scope, type, target, version, timestamps). Inside an agent container (with `hub.agent_secrets` enabled), lookups check `agent` scope first, then `project` scope.
     - Flags:
         - `--value`: Print the decoded value instead. It is written to stdout as-is, with no added newline or labels, so `$(scion secret get --value API_KEY)` works inline. Reading a value requires an agent's hub identity, so it works only inside an agent container; elsewhere the command fails with a message saying so. Cannot be combined with `--metadata` or `--format json`.
@@ -1465,7 +1469,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `list`: List secrets in the selected scope. At user scope (`scope=user`), calls `GET /api/v1/secrets?scope=user&includePending=true` and prints a `STATE` column (`approved` or `pending`) alongside `NAME`, `TYPE`, `PROGENY`, `VERSION`, and `UPDATED`, so agent-written user secrets awaiting approval appear alongside active user secrets. Honors `--format json` (as well as `--json`).
     - `update <key>`: Update secret metadata (`--type`, `--target`, `--injection-mode`, `--description`, `--allow-progeny`) without re-entering the value.
     - `clear <key>` (alias `delete`): Remove a secret.
-    - `pending`: Review and resolve user-scoped secrets written by your agents (`sciontool secret set --scope user`), which wait in pending state until you approve or reject them. User-only (not available in agent mode); see [Approving User Secrets Saved by Your Agents](/scion/hosted/user/secrets/#approving-user-secrets-saved-by-your-agents).
+    - `pending`: Review and resolve user-scoped secrets written by your agents (`scion secret set --scope user`), which wait in pending state until you approve or reject them. User-only (not available in agent mode); see [Approving User Secrets Saved by Your Agents](/scion/hosted/user/secrets/#approving-user-secrets-saved-by-your-agents).
         - `list`: List your pending user secrets (`id`, `key`, `type`, `target`, `agentSlug`, `agentId`, `projectName`, `projectId`, `created`, `updated`, `expiresAt`, `allowProgeny`, `replacesExisting`). Honors `--json` / `--format json`.
         - `show <ID>`: Show metadata for a pending user secret from `GET /api/v1/secrets?scope=user&includePending=true`, including its `id`, `key`, `type`, `target`, `valueLen`, `agentSlug`, `agentId`, `projectName`, `projectId`, `created`, `updated`, `expiresAt`, `allowProgeny`, `replacesExisting`, `replacesSecretId`, `replacesVersion`, `description`, and `overridesProjectSecrets` (project secrets of the same key that approving it would override). Honors `--json` / `--format json`.
         - `reveal <ID> [--raw]`: Fetch (`POST /api/v1/pending-secrets/{id}/reveal`, audited as `secret_pending_reveal`) and print the plaintext value of a pending user secret so you can inspect what the agent wrote before approving it. When stdout is a terminal and `--raw` is not set, non-printable and control characters are escaped (`\x1b`, etc.) so terminal control sequences cannot execute; pass `--raw` (or redirect stdout) for the exact bytes.

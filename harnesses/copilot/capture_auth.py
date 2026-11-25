@@ -43,7 +43,7 @@ def _capture_config_json(force: bool = False, scope: str = "user") -> str:
         return "failed"
 
     cmd = [
-        "sciontool", "secret", "set", "COPILOT_CONFIG",
+        "scion", "secret", "set", "COPILOT_CONFIG",
         f"@{_COPILOT_CONFIG}",
         "--type", "file",
         "--target", _COPILOT_CONFIG,
@@ -57,10 +57,10 @@ def _capture_config_json(force: bool = False, scope: str = "user") -> str:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
-        print("capture-auth: sciontool not found in PATH", file=sys.stderr)
+        print("capture-auth: scion not found in PATH", file=sys.stderr)
         return "failed"
     except subprocess.TimeoutExpired:
-        print("capture-auth: sciontool timed out setting COPILOT_CONFIG", file=sys.stderr)
+        print("capture-auth: scion timed out setting COPILOT_CONFIG", file=sys.stderr)
         return "failed"
 
     outcome = scion_harness.secret_set_outcome(result, scope)

@@ -43,14 +43,15 @@ func TestSecretRequestCLIModesAndWindowsGate(t *testing.T) {
 		assert.NoError(t, err, "secret request %s is registered on rootCmd", sub)
 	}
 
-	// Verify agent mode keeps secret.request.{list,withdraw} and removes secret.set.
+	// Verify agent mode keeps secret.request.{list,withdraw} and secret.set (ptone/scion#9297).
 	root := cloneCommandForModeExec(rootCmd)
 	applyModeRestrictions(root, ModeAgent)
 	names := collectCommandNames(root)
 	assert.Contains(t, names, "secret.request")
 	assert.Contains(t, names, "secret.request.list")
 	assert.Contains(t, names, "secret.request.withdraw")
-	assert.NotContains(t, names, "secret.set")
+	assert.Contains(t, names, "secret.set")
+	assert.False(t, windowsAllowed["secret.set"], "windowsAllowed[secret.set] should stay false (agent-only command)")
 }
 
 func withMockSecretRequestsServer(t *testing.T, handler http.Handler) {

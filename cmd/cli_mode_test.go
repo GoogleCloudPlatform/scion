@@ -863,7 +863,6 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 		"project.service-accounts.verify",
 		"project.service-accounts.remove",
 		"project.init",
-		"secret.set",
 		"shared-dir.create",
 		"skills.create",
 		"conversation.group.delete",
@@ -990,11 +989,6 @@ func TestAgentModeGatedSubcommandCLI(t *testing.T) {
 			name:    "project_list",
 			args:    []string{"project", "list"},
 			wantErr: `unknown command "list" for "scion project"`,
-		},
-		{
-			name:    "secret_set",
-			args:    []string{"secret", "set"},
-			wantErr: `unknown command "set" for "scion secret"`,
 		},
 		{
 			name:    "completion",

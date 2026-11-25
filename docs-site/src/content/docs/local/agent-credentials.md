@@ -393,7 +393,7 @@ The host generates a capture manifest (`inputs/capture-auth-config.json`) from t
 `auth.types.*.required_files` declarations — every credential file the harness can authenticate
 with that has a well-known path. `capture_auth.py` reads that manifest, locates each file the
 harness just wrote, and stores it as a secret by shelling out to
-`sciontool secret set <key> @<file> --type <type> --target <path> --scope <project|user> --allow-progeny`.
+`scion secret set <key> @<file> --type <type> --target <path> --scope <project|user> --allow-progeny`.
 
 By default, all capture paths use **user scope** with **progeny enabled** (`--allow-progeny`), meaning the credentials are kept private to your user identity but safely passed down to any child agents (progeny) your agent creates.
 
@@ -433,7 +433,7 @@ python3 ~/.scion/harness/capture_auth.py --scope project --force
 
 :::note
 There is currently no `scion auth capture` CLI wrapper; capture is performed by running
-`capture_auth.py` inside the agent (or clicking the button in the Web UI), which delegates to `sciontool secret set`.
+`capture_auth.py` inside the agent (or clicking the button in the Web UI), which delegates to `scion secret set`.
 :::
 
 ## Persistence Across Restarts
