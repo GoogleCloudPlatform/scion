@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
@@ -84,29 +83,30 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	require.NoError(t, err)
 	carol, err := s.GetUser(ctx, tid("rr-carol"))
 	require.NoError(t, err)
+	hubMembers, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+	for _, u := range []*store.User{alice, bob, carol} {
+		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+			GroupID:    hubMembers.ID,
+			MemberType: store.GroupMemberTypeUser,
+			MemberID:   u.ID,
+			Role:       store.GroupMemberRoleMember,
+		}))
+	}
 	_, agentTok := artifactAgent(t, srv, s, p1.ID, "rr-agent", AgentRoleBaseline)
 
 	doAsUser := func(u *store.User, method, target string, body any) *httptest.ResponseRecorder {
-		var r *bytes.Reader
+		var raw []byte
 		if body != nil {
-			b, err := json.Marshal(body)
+			var err error
+			raw, err = json.Marshal(body)
 			require.NoError(t, err)
-			r = bytes.NewReader(b)
-		} else {
-			r = bytes.NewReader(nil)
 		}
-		req := httptest.NewRequest(method, target, r)
-		req = req.WithContext(contextWithAuthenticatedUser(req.Context(), u))
-		rec := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(rec, req)
-		return rec
+		return userArtifactRequest(t, srv, u, method, target, raw)
 	}
 
 	// Publish an artifact as Alice.
-	pubReq := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts?name=plan.md&title=Launch+Plan&scope="+p1.ID, strings.NewReader("# Plan\n"))
-	pubReq = pubReq.WithContext(contextWithAuthenticatedUser(pubReq.Context(), alice))
-	pubRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(pubRec, pubReq)
+	pubRec := userArtifactRequest(t, srv, alice, http.MethodPost, "/api/v1/artifacts?name=plan.md&title=Launch+Plan&scope="+p1.ID, []byte("# Plan\n"))
 	require.Equal(t, http.StatusCreated, pubRec.Code, pubRec.Body.String())
 	var pubResp artifacts.ArtifactResponse
 	require.NoError(t, json.Unmarshal(pubRec.Body.Bytes(), &pubResp))

@@ -388,7 +388,7 @@ func TestReviewRequestDismissAndLostReadAndFilters(t *testing.T) {
 
 	// Revoke Bob's read access: requested=1 must NOT show the unreadable artifact,
 	// yet POST /review-request/dismiss STILL succeeds and returns only the request row.
-	h.fakeHost.deny(principal{PrincipalKindUser, "bob", ""}, "proj-1", PermissionRead)
+	h.deny(principal{PrincipalKindUser, "bob", ""}, "proj-1", PermissionRead)
 	// Also delete Bob's review grant so Bob truly cannot read.
 	grantsRec := doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID+"/grants", "user", "alice", nil)
 	var gl GrantListResponse
