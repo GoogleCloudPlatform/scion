@@ -51,6 +51,7 @@ export const INBOX_POLL_UNHEALTHY_MS = 30 * 1000;
 export const INBOX_FETCH_TIMEOUT_MS = 15_000;
 export const INBOX_LOCK_WAIT_MS = 10_000;
 export const INBOX_PAGE_PREVIEWS = 3;
+export const INBOX_CHAT_EXPANDED_PREVIEWS = 10;
 
 const MAX_EXPIRY_TIMER_MS = 60 * 60 * 1000; // 1 hour clamp
 const MOUNT_STALE_MS = 60 * 60 * 1000;
@@ -58,6 +59,8 @@ const MOUNT_STALE_MS = 60 * 60 * 1000;
 export type InboxCategoryState = 'ok' | 'disabled' | 'unavailable' | 'error';
 
 export type InboxCategoryKey = 'decisions' | 'waiting' | 'reviews' | 'approvals' | 'chat';
+
+export type InboxChatFilter = 'all' | 'dms' | 'mentions';
 
 export interface InboxApprovalPreview {
   id: string;
@@ -72,6 +75,46 @@ export interface InboxApprovalPreview {
   replacesExisting: boolean;
   allowProgeny: boolean;
   expiresAt: string;
+}
+
+export interface InboxDecisionChoice {
+  id: string;
+  label: string;
+}
+
+export interface InboxDecisionInline {
+  decisionRowId: string;
+  choices: InboxDecisionChoice[];
+  allowsOther: boolean;
+}
+
+export interface InboxDecisionPreview {
+  id: string;
+  projectId: string;
+  projectName: string;
+  createdAt: string;
+  href: string;
+  promptMessageId: string;
+  conversationLabel: string;
+  askerAgentName: string;
+  question: string;
+  decisionCount: number;
+  answerMode: string;
+  canAnswer: boolean;
+  disabledReason?: string;
+  inline?: InboxDecisionInline;
+}
+
+export interface InboxChatPreview {
+  id: string;
+  kind: 'dm' | 'mention' | 'thread';
+  projectId: string;
+  projectName: string;
+  createdAt: string;
+  href: string;
+  conversationKey: string;
+  label: string;
+  lastMessageAt: string;
 }
 
 export interface InboxCategory<TPreview = unknown> {
@@ -91,11 +134,11 @@ export interface InboxSummaryResponse {
   total: number;
   totalCapped: boolean;
   categories: {
-    decisions: InboxCategory;
+    decisions: InboxCategory<InboxDecisionPreview>;
     waiting: InboxCategory;
     reviews: InboxCategory;
     approvals: InboxCategory<InboxApprovalPreview>;
-    chat: InboxCategory;
+    chat: InboxCategory<InboxChatPreview>;
   };
 }
 
@@ -465,6 +508,50 @@ export class InboxSummaryStore {
       });
     }
     this.requestRefresh({ immediate: true, force: true });
+  }
+
+  /**
+   * Optimistically removes a decision preview and decrements the decisions
+   * count/total immediately after an inline answer, then schedules a server
+   * refetch to reconcile. Returns the optimistic decisions count (or null if
+   * unavailable) so callers can sync `/profile/decisions` badges immediately.
+   */
+  optimisticRemoveDecision(id: string): number | null {
+    if (!this._summary) {
+      this.requestRefresh({ immediate: true });
+      return null;
+    }
+    const decisions = this._summary.categories.decisions;
+    if (decisions.state !== 'ok') {
+      this.requestRefresh({ immediate: true });
+      return null;
+    }
+    const nextPreviews = decisions.previews.filter((p) => p.id !== id);
+    const nextCount = Math.max(0, decisions.count - 1);
+    const delta = decisions.count - nextCount;
+    const nextSummary: InboxSummaryResponse = {
+      ...this._summary,
+      total: Math.max(0, this._summary.total - delta),
+      categories: {
+        ...this._summary.categories,
+        decisions: {
+          ...decisions,
+          count: nextCount,
+          previews: nextPreviews,
+        },
+      },
+    };
+    this.applySummary(nextSummary, this._summaryPreviews);
+    if (this.userId) {
+      writeSharedPayload({
+        userId: this.userId,
+        previews: this._summaryPreviews,
+        fetchedAt: Date.now(),
+        summary: nextSummary,
+      });
+    }
+    this.requestRefresh({ immediate: true, force: true });
+    return nextCount;
   }
 
   /** @internal test-only reset. */

@@ -21,6 +21,7 @@ import {
   collectWaitingOnOthersItems,
   countActionableInPrompt,
   promptHasWaitingOnOthers,
+  surfaceDisplay,
 } from './decisions-format.js';
 
 function makeDecision(over: Partial<DecisionView> = {}): DecisionView {
@@ -142,5 +143,9 @@ describe('decisions-format positive open checks', () => {
       ],
     });
     expect(countActionableInPrompt(prompt, 'u-me')).toBe(1);
+  });
+
+  it('maps inbox surface to the inbox icon and label', () => {
+    expect(surfaceDisplay('inbox')).toEqual({ icon: 'inbox', label: 'Inbox' });
   });
 });

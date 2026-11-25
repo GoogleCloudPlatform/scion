@@ -31,8 +31,8 @@ import type {
   Message,
 } from '../shared/types.js';
 
-/** Web surface submitting a decision answer (`native` in chat, `decisions_page` on `/projects/:id/decisions`). */
-export type DecisionAnswerSurface = 'native' | 'decisions_page';
+/** Web surface submitting a decision answer (`native` in chat, `decisions_page` on `/projects/:id/decisions`, `inbox` on `/profile/inbox`). */
+export type DecisionAnswerSurface = 'native' | 'decisions_page' | 'inbox';
 
 /** Minimum version age before a decision may be dismissed (`store.DecisionDismissMinAge`, 5 minutes). */
 export const DISMISS_MIN_AGE_MS = 5 * 60 * 1000;
@@ -277,7 +277,7 @@ export async function answerDecision(
       body: JSON.stringify({
         choice_id: choiceId,
         idempotency_key: idempotencyKey,
-        ...(surface === 'decisions_page' ? { surface: 'decisions_page' } : {}),
+        ...(surface && surface !== 'native' ? { surface } : {}),
         ...(otherText !== undefined ? { other_text: otherText } : {}),
       }),
     });
@@ -365,7 +365,7 @@ export async function answerDecisionSet(
           choice_id: a.choiceId,
           ...(a.otherText !== undefined ? { other_text: a.otherText } : {}),
         })),
-        ...(surface === 'decisions_page' ? { surface: 'decisions_page' } : {}),
+        ...(surface && surface !== 'native' ? { surface } : {}),
       }),
     });
   } catch {
