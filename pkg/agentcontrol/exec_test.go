@@ -253,3 +253,40 @@ func TestExecStartRequestTriggerContextValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateExecWorkdir(t *testing.T) {
+	valid := []string{
+		"",
+		"~",
+		"/",
+		"/home/scion",
+		"/home/scion/repo",
+		"/tmp/a-b_c.1",
+	}
+	for _, wd := range valid {
+		if err := ValidateExecWorkdir(wd); err != nil {
+			t.Errorf("ValidateExecWorkdir(%q) = %v, want nil", wd, err)
+		}
+	}
+
+	invalid := []string{
+		"relative/path",
+		"~/sub",
+		"/home/scion/../etc",
+		"/home/scion/",
+		"/home//scion",
+		"/home/scion/.",
+		"/home/scion\x00evil",
+		"/home/scion\nevil",
+		"/home/scion\x7f",
+		"/" + strings.Repeat("a", MaxExecWorkdirBytes),
+		"/bad/\xff",
+	}
+	for _, wd := range invalid {
+		err := ValidateExecWorkdir(wd)
+		var fe *ExecFieldError
+		if !errors.As(err, &fe) || fe.Field != FieldWorkdir {
+			t.Errorf("ValidateExecWorkdir(%q) = %v, want FieldWorkdir error", wd, err)
+		}
+	}
+}

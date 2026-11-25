@@ -127,7 +127,7 @@ func TestAgentExecClient_RoundTrip(t *testing.T) {
 			f.startControlAgentWithOptions(t, hubURL, true, execControlOptions(t), c.wrap)
 			ctx := context.Background()
 			sent := time.Now()
-			res, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("sh", "-c", "exit 3"))
+			res, err := f.srv.StartAgentExecRun(ctx, execOwnerScheduled, f.launched.ID, f.launched.RunID, execStartReq("sh", "-c", "exit 3"))
 			require.NoError(t, err)
 			assert.Equal(t, http.StatusAccepted, res.Status)
 			assert.Equal(t, agentcontrol.ExecStateRunning, res.State)
@@ -144,14 +144,14 @@ func TestAgentExecClient_RoundTrip(t *testing.T) {
 			assert.Equal(t, agentcontrol.ExecOutcomeNonzero, fin.Outcome)
 			assert.Equal(t, 3, fin.ExitCode)
 
-			res, err = f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("sh", "-c", "exit 3"))
+			res, err = f.srv.StartAgentExecRun(ctx, execOwnerScheduled, f.launched.ID, f.launched.RunID, execStartReq("sh", "-c", "exit 3"))
 			require.NoError(t, err)
 			assert.Equal(t, http.StatusOK, res.Status)
 			assert.True(t, res.Replayed)
 			assert.True(t, res.Finished())
 
 			// A different command under the same run_id is a mismatch.
-			res, err = f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
+			res, err = f.srv.StartAgentExecRun(ctx, execOwnerScheduled, f.launched.ID, f.launched.RunID, execStartReq("true"))
 			require.NoError(t, err)
 			assert.Equal(t, http.StatusConflict, res.Status)
 			assert.Equal(t, agentcontrol.ExecOutcomeMismatch, res.Outcome)
@@ -171,7 +171,7 @@ func TestAgentExecClient_NotReached(t *testing.T) {
 	f := newPTYConduitFixture(t)
 	enableExecSchedules(t, f.srv)
 	ctx := context.Background()
-	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
+	_, err := f.srv.StartAgentExecRun(ctx, execOwnerScheduled, f.launched.ID, f.launched.RunID, execStartReq("true"))
 	require.ErrorIs(t, err, router.ErrNoSession)
 	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID, "")
 	require.ErrorIs(t, err, router.ErrNoSession)
@@ -179,7 +179,7 @@ func TestAgentExecClient_NotReached(t *testing.T) {
 	// The real control handler without exec options: exec routes are
 	// neither advertised nor served.
 	ca := f.startControlAgent(t, f.public.URL, true, nil)
-	_, err = f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
+	_, err = f.srv.StartAgentExecRun(ctx, execOwnerScheduled, f.launched.ID, f.launched.RunID, execStartReq("true"))
 	require.ErrorIs(t, err, ErrAgentControlNotAdvertised)
 	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID, "")
 	require.ErrorIs(t, err, ErrAgentControlNotAdvertised)
@@ -214,7 +214,7 @@ func TestAgentExecClient_SchemaMismatchIsError(t *testing.T) {
 		{202, ``},
 	} {
 		set(a.status, a.body)
-		_, err := f.srv.StartAgentExecRun(context.Background(), f.launched.ID, f.launched.RunID, execStartReq("true"))
+		_, err := f.srv.StartAgentExecRun(context.Background(), execOwnerScheduled, f.launched.ID, f.launched.RunID, execStartReq("true"))
 		assert.ErrorIs(t, err, agentcontrol.ErrExecSchema, "start %d %s", a.status, a.body)
 	}
 	for _, a := range []struct {
@@ -240,13 +240,13 @@ func TestAgentExecClient_InvalidRequestNotSent(t *testing.T) {
 	c := &execCapture{}
 	ca := f.startControlAgentWithOptions(t, f.public.URL, true, execControlOptions(t), c.wrap)
 	bad := execStartReq("a\x00b")
-	_, err := f.srv.StartAgentExecRun(context.Background(), f.launched.ID, f.launched.RunID, bad)
+	_, err := f.srv.StartAgentExecRun(context.Background(), execOwnerScheduled, f.launched.ID, f.launched.RunID, bad)
 	var fe *agentcontrol.ExecFieldError
 	require.ErrorAs(t, err, &fe)
 	assert.Equal(t, agentcontrol.FieldArgv, fe.Field)
 	bad = execStartReq("true")
 	bad.TimeoutS = agentcontrol.MaxExecTimeoutSec + 1
-	_, err = f.srv.StartAgentExecRun(context.Background(), f.launched.ID, f.launched.RunID, bad)
+	_, err = f.srv.StartAgentExecRun(context.Background(), execOwnerScheduled, f.launched.ID, f.launched.RunID, bad)
 	require.ErrorAs(t, err, &fe)
 	_, err = f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, "not-a-uuid", "")
 	require.ErrorAs(t, err, &fe)
@@ -260,7 +260,7 @@ func TestAgentExecClient_LaunchPinned(t *testing.T) {
 	enableExecSchedules(t, f.srv)
 	ctx := context.Background()
 	ca := f.startControlAgentWithOptions(t, f.public.URL, true, execControlOptions(t), (&execCapture{}).wrap)
-	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, "other-launch", execStartReq("true"))
+	_, err := f.srv.StartAgentExecRun(ctx, execOwnerScheduled, f.launched.ID, "other-launch", execStartReq("true"))
 	var le *AgentExecLaunchChangedError
 	require.ErrorAs(t, err, &le)
 	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "other-launch", execTestRunID, "")
@@ -325,7 +325,7 @@ func TestAgentExecClient_StaleSnapshotNeverReachesReplacement(t *testing.T) {
 			marker := filepath.Join(opts.Exec.Workdir, "wrong-incarnation-started")
 
 			ctx := context.WithValue(context.Background(), execSnapshotKey{}, true)
-			_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, "old-launch", execStartReq("sh", "-c", "touch "+marker))
+			_, err := f.srv.StartAgentExecRun(ctx, execOwnerScheduled, f.launched.ID, "old-launch", execStartReq("sh", "-c", "touch "+marker))
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, ErrAgentExecLaunchChanged) || errors.Is(err, router.ErrNoSession), "err = %v", err)
 
@@ -353,7 +353,7 @@ func TestAgentExecClient_GenerationFallbackSessionRefused(t *testing.T) {
 	enableExecSchedules(t, f.srv)
 	ca := f.startControlAgentAs(t, f.public.URL, "", true, execControlOptions(t), (&execCapture{}).wrap)
 	ctx := context.Background()
-	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
+	_, err := f.srv.StartAgentExecRun(ctx, execOwnerScheduled, f.launched.ID, f.launched.RunID, execStartReq("true"))
 	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
 	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID, "")
 	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
@@ -377,7 +377,7 @@ func TestAgentExecClient_CallTimeout(t *testing.T) {
 	}}
 	ca := f.startControlAgentWithOptions(t, f.public.URL, true, execControlOptions(t), c.wrap)
 	start := time.Now()
-	_, err := f.srv.StartAgentExecRun(context.Background(), f.launched.ID, f.launched.RunID, execStartReq("true"))
+	_, err := f.srv.StartAgentExecRun(context.Background(), execOwnerScheduled, f.launched.ID, f.launched.RunID, execStartReq("true"))
 	took := time.Since(start)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.GreaterOrEqual(t, took, agentcontrol.HubExecCallTimeout-time.Second)
@@ -409,6 +409,67 @@ func TestDispatchExperiments_CommandRequests(t *testing.T) {
 	assert.False(t, has(), "command_requests off")
 	setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: false, experiments.CommandRequests: true})
 	assert.False(t, has(), "conduit off")
+}
+
+// TestApplyAgentExperiments_CommandRequests: hub.command_requests is forwarded
+// in SCION_HUB_EXPERIMENTS, and sciontool enables exec routes only when the
+// container is a shell execution container (AC-S2).
+func TestApplyAgentExperiments_CommandRequests(t *testing.T) {
+	env := map[string]string{}
+	cls := map[string]api.EnvKind{}
+	applyAgentExperiments(env, &cls, []string{conduitExperiment, experiments.CommandRequests, experiments.K8sNFSHome})
+	assert.Equal(t, "hub.conduit,hub.command_requests", env[envHubExperiments])
+	if runtime.GOOS == "linux" {
+		assert.False(t, control.ExecEnabled(func(k string) string {
+			if k == "SCION_HARNESS" {
+				return "claude"
+			}
+			return env[k]
+		}), "LLM agent must not gain exec routes from hub.command_requests alone")
+		assert.True(t, control.ExecEnabled(func(k string) string {
+			if k == "SCION_HARNESS" {
+				return "shell"
+			}
+			return env[k]
+		}), "shell execution container must enable exec routes from hub.command_requests")
+	}
+}
+
+// TestAgentExecClient_CommandRunOwnerGate verifies the Hub gate split for
+// execOwnerCommandRun (design §4.8, AC-S2): requires hub.command_requests +
+// hub.conduit + conduitRoutable(), refuses non-shell targets before sending,
+// and succeeds on shell targets even while hub.exec_schedules is off.
+func TestAgentExecClient_CommandRunOwnerGate(t *testing.T) {
+	f := newPTYConduitFixture(t)
+	c := &execCapture{}
+	ca := f.startControlAgentWithOptions(t, f.public.URL, true, execControlOptions(t), c.wrap)
+	ctx := context.Background()
+
+	// 1. Flag off -> ErrCommandRequestsDisabled, nothing sent.
+	setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: true, experiments.CommandRequests: false})
+	_, err := f.srv.StartAgentExecRun(ctx, execOwnerCommandRun, f.launched.ID, f.launched.RunID, execStartReq("true"))
+	require.ErrorIs(t, err, ErrCommandRequestsDisabled)
+	assert.Zero(t, ca.rpcs.Load())
+
+	// 2. Flag on, target is NOT a shell agent -> ErrCommandRunTargetNotShell, nothing sent (AC-S2).
+	setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: true, experiments.CommandRequests: true, experiments.ExecSchedules: false})
+	_, err = f.srv.StartAgentExecRun(ctx, execOwnerCommandRun, f.launched.ID, f.launched.RunID, execStartReq("true"))
+	require.ErrorIs(t, err, ErrCommandRunTargetNotShell)
+	assert.Zero(t, ca.rpcs.Load())
+
+	// 3. Mark target as a shell execution container -> succeeds even with hub.exec_schedules OFF.
+	ag, err := f.srv.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	ag.HarnessConfig = "shell"
+	require.NoError(t, f.srv.store.UpdateAgent(ctx, ag))
+
+	req := execStartReq("true")
+	req.Workdir = "~"
+	res, err := f.srv.StartAgentExecRun(ctx, execOwnerCommandRun, f.launched.ID, f.launched.RunID, req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusAccepted, res.Status)
+	assert.Equal(t, agentcontrol.ExecStateRunning, res.State)
+	assert.Equal(t, int32(1), ca.rpcs.Load())
 }
 
 // TestApplyAgentExperiments_ExecSchedules: the launch flag is sent to the

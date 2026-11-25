@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -42,6 +43,10 @@ const (
 	// FeatureExecCapture is the Hello.capabilities.features token advertised
 	// by sciontool when the exec routes support bounded output capture.
 	FeatureExecCapture = "exec_capture.v1"
+	// FeatureExecWorkdir is the Hello.capabilities.features token advertised
+	// by sciontool when exec-start accepts the optional workdir field ("~" or
+	// an explicit absolute directory path with no fallback).
+	FeatureExecWorkdir = "exec_workdir.v1"
 )
 
 // ExecVersion is the request version of exec-start and exec-status.
@@ -66,6 +71,7 @@ const (
 	MaxExecArgBytes            = 4096
 	MaxExecArgvBytes           = 16384
 	MaxExecTriggerContextBytes = 16384
+	MaxExecWorkdirBytes        = 512
 	MaxExecTimeoutSec          = 3600      // D10 = b
 	MaxExecCaptureBytes        = 64 * 1024 // 64 KiB fixed output capture bound
 	// ExecNotAfter is how far after its send the hub sets
@@ -182,6 +188,12 @@ type ExecStartRequest struct {
 	// trigger-routed exec runs as SCION_TRIGGER_CONTEXT. Sent only when the
 	// session advertises FeatureExecContextV1.
 	TriggerContext string `json:"trigger_context,omitempty"`
+	// Workdir is the optional working directory for the run: "" keeps the
+	// legacy default (/workspace if present), "~" selects the run environment's
+	// HOME (falling back to /home/<user>), and an absolute path must exist and
+	// be a directory after EvalSymlinks (otherwise start_failed, never falls
+	// back). Sent only when the session advertises FeatureExecWorkdir.
+	Workdir string `json:"workdir,omitempty"`
 }
 
 // ExecStatusRequest is the exec-status request body.
@@ -199,6 +211,7 @@ const (
 	FieldTimeoutS       = "timeout_s"
 	FieldCapture        = "capture"
 	FieldTriggerContext = "trigger_context"
+	FieldWorkdir        = "workdir"
 )
 
 // States in an exec answer.
@@ -330,6 +343,28 @@ func ExecTriggerContextDigest(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ValidateExecWorkdir checks workdir against the exec_workdir.v1 bounds:
+// "" (legacy default) and "~" (run env HOME) are valid; otherwise it must be
+// a clean absolute POSIX path <= MaxExecWorkdirBytes with valid UTF-8 and no
+// NUL, C0 control, or DEL characters.
+func ValidateExecWorkdir(workdir string) error {
+	if workdir == "" || workdir == "~" {
+		return nil
+	}
+	if len(workdir) > MaxExecWorkdirBytes || !utf8.ValidString(workdir) {
+		return execFieldError(FieldWorkdir)
+	}
+	for _, r := range workdir {
+		if r < 0x20 || r == 0x7f {
+			return execFieldError(FieldWorkdir)
+		}
+	}
+	if !strings.HasPrefix(workdir, "/") || path.Clean(workdir) != workdir {
+		return execFieldError(FieldWorkdir)
+	}
+	return nil
+}
+
 // Validate checks r against the fixed schema and bounds and returns a
 // *ExecFieldError naming the first field that fails, in a fixed order. It does
 // not judge not_after_unix_ms against a clock; only that it is set.
@@ -359,6 +394,9 @@ func (r *ExecStartRequest) Validate() error {
 	}
 	if !ValidExecCapture(r.Capture) {
 		return execFieldError(FieldCapture)
+	}
+	if err := ValidateExecWorkdir(r.Workdir); err != nil {
+		return err
 	}
 	return nil
 }

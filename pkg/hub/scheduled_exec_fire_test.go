@@ -390,7 +390,7 @@ func TestScheduledExecFire_HubGate(t *testing.T) {
 			assert.Equal(t, store.ScheduledEventSkipped, got.Status)
 			assert.Equal(t, execReasonDisabled, got.Error)
 			assert.Equal(t, starts, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "no new exec-start")
-			_, err := f.srv.StartAgentExecRun(context.Background(), f.launched.ID, f.launched.RunID,
+			_, err := f.srv.StartAgentExecRun(context.Background(), execOwnerScheduled, f.launched.ID, f.launched.RunID,
 				agentcontrol.ExecStartRequest{RunID: uuid.NewString(), Argv: []string{"true"}, TimeoutS: 1})
 			require.ErrorIs(t, err, ErrExecSchedulesDisabled)
 
