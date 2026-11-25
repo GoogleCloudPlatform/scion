@@ -17,6 +17,7 @@
 package bundle
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -54,7 +55,7 @@ func TestStatAccessChecker_RootAndNonRootCases(t *testing.T) {
 		rootReadProbe = origProbe
 	})
 
-	t.Run("root on root_squash export refuses 0600 file and skips open for 0644", func(t *testing.T) {
+	t.Run("root on root_squash export refuses 0600 file", func(t *testing.T) {
 		statAccessEUID = func() int { return 0 }
 		statAccessEGID = func() int { return 0 }
 		statAccessGroups = func() ([]int, error) { return nil, nil }
@@ -65,13 +66,11 @@ func TestStatAccessChecker_RootAndNonRootCases(t *testing.T) {
 		}
 
 		c := newStatAccessChecker()
-		assert.NoError(t, c.checkReadable(root, "world.txt", worldInfo, false))
-		assert.Equal(t, 0, probes, "world-readable file must not consume a root probe")
 		assert.ErrorIs(t, c.checkReadable(root, "pod-private.txt", privInfo, false), fs.ErrPermission)
 		assert.Equal(t, 1, probes, "non-world-readable 0600 file must be probed and refused on root_squash")
 	})
 
-	t.Run("root on non-squashed export allows 0600 file up to cap then falls back to other bits", func(t *testing.T) {
+	t.Run("root where every entry is world-readable allows with 0 opens", func(t *testing.T) {
 		statAccessEUID = func() int { return 0 }
 		statAccessEGID = func() int { return 0 }
 		statAccessGroups = func() ([]int, error) { return nil, nil }
@@ -82,14 +81,27 @@ func TestStatAccessChecker_RootAndNonRootCases(t *testing.T) {
 		}
 
 		c := newStatAccessChecker()
-		assert.NoError(t, c.checkReadable(root, "pod-private.txt", privInfo, false))
-		assert.Equal(t, 1, probes)
+		for i := 0; i < 10; i++ {
+			assert.NoError(t, c.checkReadable(root, fmt.Sprintf("world-%d.txt", i), worldInfo, false))
+		}
+		assert.Equal(t, 0, probes, "world-readable entries must be accepted with 0 opens")
+	})
 
-		// At the probe cap, root falls back to other-read bits (refusing 0600, allowing 0644).
-		c.rootProbes = maxRootReadProbes
-		assert.ErrorIs(t, c.checkReadable(root, "pod-private.txt", privInfo, false), fs.ErrPermission)
-		assert.NoError(t, c.checkReadable(root, "world.txt", worldInfo, false))
-		assert.Equal(t, 1, probes, "must not probe past maxRootReadProbes")
+	t.Run("root with 2001 readable 0600 files on no_root_squash allows with exactly 1 open", func(t *testing.T) {
+		statAccessEUID = func() int { return 0 }
+		statAccessEGID = func() int { return 0 }
+		statAccessGroups = func() ([]int, error) { return nil, nil }
+		probes := 0
+		rootReadProbe = func(_ *os.Root, _ string, _ bool) error {
+			probes++
+			return nil
+		}
+
+		c := newStatAccessChecker()
+		for i := 0; i < 2005; i++ {
+			require.NoError(t, c.checkReadable(root, fmt.Sprintf("priv-%04d.txt", i), privInfo, false))
+		}
+		assert.Equal(t, 1, probes, "squash detection must perform exactly 1 open across 2001+ readable 0600 files")
 	})
 
 	t.Run("non-root owner, group, and other precedence", func(t *testing.T) {

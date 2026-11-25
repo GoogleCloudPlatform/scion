@@ -25,12 +25,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
-// maxRootReadProbes caps the number of real open/opendir probes performed when
-// the broker runs as euid 0 on non-world-readable entries. Beyond this cap,
-// root falls back to requiring the "other" read/traverse bits so probe cost
-// stays strictly bounded while still failing closed on root_squash NFS exports.
-const maxRootReadProbes = 2000
-
 // Injectable identity and probe seams for unit tests (e.g. testing euid 0
 // root_squash vs non-squashed exports without requiring root privileges).
 var (
@@ -58,10 +52,10 @@ func defaultRootReadProbe(root *os.Root, rel string, isDir bool) error {
 }
 
 type statAccessChecker struct {
-	euid       uint32
-	egid       uint32
-	groups     map[uint32]struct{}
-	rootProbes int
+	euid         uint32
+	egid         uint32
+	groups       map[uint32]struct{}
+	rootVerified bool
 }
 
 func newStatAccessChecker() statAccessChecker {
@@ -84,15 +78,16 @@ func newStatAccessChecker() statAccessChecker {
 // For non-root processes, it performs a zero-open POSIX DAC check against the
 // process's effective uid/gid and supplementary groups.
 //
-// For euid 0 (root), it does NOT short-circuit to readable because on a
-// root_squash NFS export root is mapped to nobody and cannot read pod-owned
-// 0600 files. Instead:
-//   - world-readable/traversable entries pass with zero opens;
-//   - non-world-readable entries are probed via rootopen up to maxRootReadProbes
-//     (allowing non-squashed exports and failing closed with fs.ErrPermission on
-//     root_squash);
-//   - beyond maxRootReadProbes, root falls back to requiring the "other" bits
-//     (failing closed on non-world-readable entries).
+// For euid 0 (root), it performs squash detection with at most one open per
+// walk:
+//   - world-readable/traversable entries are accepted with zero opens;
+//   - on the first non-world-readable entry, a single real open/opendir probe
+//     runs through pkg/util/rootopen;
+//   - if that probe succeeds, the export does not squash root, rootVerified is
+//     set, and all remaining entries in the walk are accepted without further
+//     opens;
+//   - if that probe fails (e.g. fs.ErrPermission on root_squash), the error is
+//     returned immediately.
 func (c *statAccessChecker) checkReadable(root *os.Root, rel string, info fs.FileInfo, isDir bool) error {
 	if info == nil {
 		return nil
@@ -105,14 +100,14 @@ func (c *statAccessChecker) checkReadable(root *os.Root, rel string, info fs.Fil
 	}
 	perm := info.Mode().Perm()
 	if c.euid == 0 {
-		if perm&otherNeed == otherNeed {
+		if c.rootVerified || perm&otherNeed == otherNeed {
 			return nil
 		}
-		if c.rootProbes < maxRootReadProbes {
-			c.rootProbes++
-			return rootReadProbe(root, filepath.FromSlash(rel), isDir)
+		if err := rootReadProbe(root, filepath.FromSlash(rel), isDir); err != nil {
+			return err
 		}
-		return fs.ErrPermission
+		c.rootVerified = true
+		return nil
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
