@@ -904,6 +904,12 @@ export class ScionPageAgents extends LitElement {
       // membership, so a brand-new SSE agent is not added under a filter.
       // An ID already held keeps getting its updates regardless.
       shouldAdd: (agent): boolean => {
+        if (
+          this.loadedServerQ === '' &&
+          !hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)
+        ) {
+          return true;
+        }
         return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
       },
       scopeCapabilities: this.scopeCapabilities,

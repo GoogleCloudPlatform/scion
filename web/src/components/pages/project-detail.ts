@@ -1678,6 +1678,12 @@ export class ScionPageProjectDetail extends LitElement {
       // getting its updates until an explicit `deleted` removes it).
       shouldAdd: (agent): boolean => {
         if (agent.projectId !== this.projectId) return false;
+        if (
+          this.loadedServerQ === '' &&
+          !hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)
+        ) {
+          return true;
+        }
         return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
       },
       scopeCapabilities: this.agentScopeCapabilities,

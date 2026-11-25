@@ -842,12 +842,9 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
 
     dispatchSseCreate(liveDirect1);
     dispatchSseCreate(liveOwner1);
-    expect((agentsEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toContain(
-      'live-direct-1'
-    );
-    expect((agentsEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).not.toContain(
-      'live-owner-1'
-    );
+    // Display reflects committed mode:direct; held set stays complete when loadedServerQ === ''.
+    expect(globalWin.display.map((a) => a.id)).toContain('live-direct-1');
+    expect(globalWin.display.map((a) => a.id)).not.toContain('live-owner-1');
     agentsEl.remove();
 
     // 2. Project detail page: ?q=mode:owner -> commit mode:direct
@@ -899,12 +896,150 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
 
     dispatchSseCreate(liveDirect2);
     dispatchSseCreate(liveOwner2);
-    expect((projEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toContain(
-      'live-proj-direct-1'
+    expect(projWin.display.map((a) => a.id)).toContain('live-proj-direct-1');
+    expect(projWin.display.map((a) => a.id)).not.toContain('live-proj-owner-1');
+    projEl.remove();
+  });
+
+  it('keeps SSE-created agents in non-matching phase visible after clearing a phase chip without refetch (global and project)', async () => {
+    const dispatchSseCreate = (agent: Agent): void => {
+      stateManager.seedAgents([agent]);
+      stateManager.dispatchEvent(
+        new CustomEvent('agents-changed', {
+          detail: {
+            data: {
+              upserted: [agent.id],
+              deleted: [],
+              unknown: new Map(),
+              generation: stateManager.scopeGeneration,
+            },
+          },
+        })
+      );
+    };
+
+    // 1. Global agents page: complete unfiltered set -> phase:running -> SSE create in provisioning -> clear phase chip.
+    const globalFetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            agents: [
+              {
+                id: 'g-run',
+                name: 'g-run',
+                slug: 'g-run',
+                projectId: 'proj-1',
+                template: 'developer',
+                phase: 'running',
+              },
+            ],
+            complete: true,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
     );
-    expect((projEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).not.toContain(
-      'live-proj-owner-1'
-    );
+    vi.stubGlobal('fetch', globalFetch);
+    const agentsEl = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(agentsEl);
+    await new Promise((r) => setTimeout(r, 20));
+    await agentsEl.updateComplete;
+
+    const globalFetchesBefore = globalFetch.mock.calls.length;
+    const runningBtn = Array.from(agentsEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
+      (b) => b.textContent?.trim() === 'Running'
+    ) as HTMLButtonElement;
+    runningBtn.click();
+    await agentsEl.updateComplete;
+    expect(globalFetch.mock.calls.length).toBe(globalFetchesBefore);
+
+    const newGlobalAgent: Agent = {
+      id: 'g-new-prov',
+      name: 'g-new-prov',
+      slug: 'g-new-prov',
+      projectId: 'proj-1',
+      template: 'developer',
+      phase: 'provisioning',
+    };
+    dispatchSseCreate(newGlobalAgent);
+    const globalWin = (agentsEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(globalWin.display.map((a) => a.id)).toEqual(['g-run']);
+
+    const allPhaseBtn = Array.from(agentsEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
+      (b) => b.textContent?.trim() === 'All'
+    ) as HTMLButtonElement;
+    allPhaseBtn.click();
+    await agentsEl.updateComplete;
+    expect(globalFetch.mock.calls.length).toBe(globalFetchesBefore);
+    expect(globalWin.display.map((a) => a.id)).toContain('g-new-prov');
+    agentsEl.remove();
+
+    // 2. Project detail page: complete unfiltered set -> phase:running -> SSE create in provisioning -> clear phase chip.
+    window.history.replaceState(null, '', '/projects/proj-123');
+    const projFetch = vi.fn((input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/api/v1/projects/proj-123/agents')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  id: 'p-run',
+                  name: 'p-run',
+                  slug: 'p-run',
+                  projectId: 'proj-123',
+                  template: 'developer',
+                  phase: 'running',
+                },
+              ],
+              complete: true,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: 'proj-123', name: 'Proj 123', slug: 'proj-123' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    });
+    vi.stubGlobal('fetch', projFetch);
+    const projEl = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    projEl.projectId = 'proj-123';
+    document.body.appendChild(projEl);
+    await new Promise((r) => setTimeout(r, 20));
+    await projEl.updateComplete;
+
+    const projFetchesBefore = projFetch.mock.calls.length;
+    const projRunBtn = Array.from(projEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
+      (b) => b.textContent?.trim() === 'Running'
+    ) as HTMLButtonElement;
+    projRunBtn.click();
+    await projEl.updateComplete;
+    expect(projFetch.mock.calls.length).toBe(projFetchesBefore);
+
+    const newProjAgent: Agent = {
+      id: 'p-new-prov',
+      name: 'p-new-prov',
+      slug: 'p-new-prov',
+      projectId: 'proj-123',
+      template: 'developer',
+      phase: 'provisioning',
+    };
+    dispatchSseCreate(newProjAgent);
+    const projWin = (projEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(projWin.display.map((a) => a.id)).toEqual(['p-run']);
+
+    const projAllBtn = Array.from(projEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
+      (b) => b.textContent?.trim() === 'All'
+    ) as HTMLButtonElement;
+    projAllBtn.click();
+    await projEl.updateComplete;
+    expect(projFetch.mock.calls.length).toBe(projFetchesBefore);
+    expect(projWin.display.map((a) => a.id)).toContain('p-new-prov');
     projEl.remove();
   });
 });
