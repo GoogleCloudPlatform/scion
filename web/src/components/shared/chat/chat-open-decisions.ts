@@ -27,8 +27,9 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 
 import {
-  fetchConversationOpenDecisions,
+  ConversationOpenDecisionsController,
   type ConversationDecisionCounts,
+  type ConversationOpenDecisionsSnapshot,
   type ConversationOpenPromptItem,
 } from '../../../client/conversation-open-decisions.js';
 import { formatInstantWithZone, formatRelative } from '../../../utils/time.js';
@@ -67,11 +68,12 @@ export class ScionChatOpenDecisions extends LitElement {
   @state() private error = '';
   @state() private othersExpanded = false;
 
-  private generation = 0;
-  private abort: AbortController | null = null;
   private readonly panelId = `open-decisions-panel-${++panelSeq}`;
   private readonly headingId = `${this.panelId}-heading`;
   readonly _zone = new DisplayZoneController(this);
+  private readonly controller = new ConversationOpenDecisionsController({
+    onChange: (snap: ConversationOpenDecisionsSnapshot) => this.applySnapshot(snap),
+  });
 
   static override styles = css`
     :host {
@@ -320,28 +322,36 @@ export class ScionChatOpenDecisions extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     if (this.conversationKey) {
-      void this.load();
+      this.controller.setConversation(this.conversationKey);
     }
+    this.controller.connect();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopListening();
-    this.generation++;
-    this.abort?.abort();
-    this.abort = null;
+    this.controller.disconnect();
   }
 
   protected override willUpdate(changed: PropertyValues): void {
     if (changed.has('conversationKey') && changed.get('conversationKey') !== undefined) {
       this.closePanel(false);
-      this.reset();
-      if (this.isConnected && this.conversationKey) {
-        void this.load();
-      }
+      this.othersExpanded = false;
+      this.controller.setConversation(this.conversationKey);
     }
     if (changed.has('hiddenBy404')) {
       this.toggleAttribute('data-hidden', this.hiddenBy404);
+    }
+  }
+
+  private applySnapshot(snap: ConversationOpenDecisionsSnapshot): void {
+    this.counts = snap.counts;
+    this.prompts = snap.prompts;
+    this.loading = snap.loading;
+    this.error = snap.error;
+    this.hiddenBy404 = snap.hiddenBy404;
+    if (snap.hiddenBy404 && this.open) {
+      this.closePanel(false);
     }
   }
 
@@ -374,50 +384,6 @@ export class ScionChatOpenDecisions extends LitElement {
     return `Open decisions in this conversation: ${total}, none waiting on you`;
   }
 
-  private reset(): void {
-    this.generation++;
-    this.abort?.abort();
-    this.abort = null;
-    this.hiddenBy404 = false;
-    this.counts = { waitingOnYou: 0, waitingOnOthers: 0 };
-    this.prompts = [];
-    this.loading = false;
-    this.error = '';
-    this.othersExpanded = false;
-  }
-
-  private async load(): Promise<void> {
-    const key = this.conversationKey;
-    if (!key) return;
-    const generation = ++this.generation;
-    this.abort?.abort();
-    const abort = new AbortController();
-    this.abort = abort;
-    this.loading = true;
-    try {
-      const resp = await fetchConversationOpenDecisions(key, abort.signal);
-      if (generation !== this.generation || abort.signal.aborted) return;
-      if (resp === null) {
-        this.hiddenBy404 = true;
-        this.closePanel(false);
-        return;
-      }
-      this.hiddenBy404 = false;
-      this.counts = resp.counts;
-      this.prompts = resp.prompts;
-      this.error = '';
-    } catch (err) {
-      if (generation !== this.generation || abort.signal.aborted) return;
-      this.error =
-        err instanceof Error && err.message ? err.message : 'Could not load open decisions.';
-    } finally {
-      if (generation === this.generation && this.abort === abort) {
-        this.loading = false;
-        this.abort = null;
-      }
-    }
-  }
-
   private toggle(): void {
     if (this.open) {
       this.closePanel(true);
@@ -427,7 +393,7 @@ export class ScionChatOpenDecisions extends LitElement {
     document.addEventListener('pointerdown', this.handleOutsidePointer, true);
     window.addEventListener('resize', this.handleResize);
     window.addEventListener('popstate', this.handlePopState);
-    void this.load();
+    void this.controller.refetchNow();
     void this.updateComplete.then(() => {
       this.renderRoot.querySelector<HTMLElement>('.panel')?.focus();
     });
@@ -549,7 +515,10 @@ export class ScionChatOpenDecisions extends LitElement {
     if (!hasRows && this.error) {
       return html`<div class="status" role="alert">
         <span>${this.error}</span>
-        <sl-button size="small" variant="text" @click=${(): void => void this.load()}
+        <sl-button
+          size="small"
+          variant="text"
+          @click=${(): void => void this.controller.refetchNow()}
           >Retry</sl-button
         >
       </div>`;
