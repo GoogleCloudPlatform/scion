@@ -149,6 +149,7 @@ writes YAML by default. The JSON schema lives at
   `DOCS_BASE=/scion/v0.3.0 DOCS_CHANNEL=stable DOCS_VERSION=v0.3.0 npm run build && DOCS_BASE=/scion/v0.3.0 npm run verify-snapshot`.
 - **Link Check**: `starlight-links-validator` runs during `npm run build` (Node ≥ 22).
   Fix every reported broken link.
+- **Fast Link Check**: Run `make check-docs-links` (or `node hack/check-docs-links.mjs`) for a fast, zero-dependency check of internal links, `#heading` anchors, `/scion/` prefixes, and legacy redirects without `node_modules` or `d2`.
 - **Formatting**: Standard Markdown. Starlight supports
   [Callouts](https://starlight.astro.build/guides/authoring-content/#asides) (Note,
   Tip, Caution, Danger).
