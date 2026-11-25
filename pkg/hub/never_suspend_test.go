@@ -710,6 +710,8 @@ func TestNeverSuspend_ManualSuspendAndForce(t *testing.T) {
 			},
 		}
 		require.NoError(t, s.CreateAgent(ctx, ag))
+		_, err := srv.recordRunIntent(ctx, ag, store.RunIntentRunning)
+		require.NoError(t, err)
 		return ag
 	}
 
