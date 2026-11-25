@@ -293,7 +293,7 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 	emitDispatched := func() {
 		s.emitCommandRunAudit(context.WithoutCancel(ctx), req, run, msgaction.EventCmdRunDispatched, "", map[string]string{
 			"exec_argv_sha256": agentcontrol.ExecArgvDigest(argv),
-			"workdir_kind":     commandWorkdirKind(workdir),
+			"workdir_kind":     messages.CommandWorkdirKind(workdir),
 		})
 	}
 
@@ -591,7 +591,7 @@ func (s *Server) finishCommandRun(
 	// 1. Audit event with allow-listed details only (never script text or output).
 	auditDetails := map[string]string{
 		"outcome":      status,
-		"workdir_kind": commandWorkdirKind(run.Workdir),
+		"workdir_kind": messages.CommandWorkdirKind(run.Workdir),
 	}
 	if fin.ExitCode != nil {
 		auditDetails["exit_code"] = strconv.Itoa(*fin.ExitCode)
@@ -617,9 +617,9 @@ func (s *Server) finishCommandRun(
 		"reason", reason,
 		"output_status", fin.OutputStatus)
 
-	// 2. Publish live card update via SSE (uniform CommandRequestView shape, no output bytes; O1).
+	// 2. Publish live card update via SSE (uniform CommandRequestView shape, no output bytes or exec container IDs).
 	if req != nil {
-		s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestView(req, nil, run))
+		s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestSSEView(req, nil, run))
 	}
 
 	// 3. Deliver outcome-only command-response message to the asker agent (§4.9, P1).

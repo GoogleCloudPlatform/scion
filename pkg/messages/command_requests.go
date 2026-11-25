@@ -24,8 +24,33 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
+
+// Command workdir classification constants (ptone/scion#9278 §5 T5).
+const (
+	CommandWorkdirKindHome      = "home"
+	CommandWorkdirKindWorkspace = "workspace"
+	CommandWorkdirKindSharedDir = "shared_dir"
+	CommandWorkdirKindExplicit  = "explicit"
+)
+
+// CommandWorkdirKind classifies a command working directory for audit metadata
+// and agent-writable directory warnings.
+func CommandWorkdirKind(workdir string) string {
+	switch {
+	case workdir == "" || workdir == "~":
+		return CommandWorkdirKindHome
+	case workdir == "/workspace" || strings.HasPrefix(workdir, "/workspace/"):
+		return CommandWorkdirKindWorkspace
+	case workdir == "/scion-volumes" || strings.HasPrefix(workdir, "/scion-volumes/") ||
+		workdir == "/.scion-volumes" || strings.HasPrefix(workdir, "/.scion-volumes/"):
+		return CommandWorkdirKindSharedDir
+	default:
+		return CommandWorkdirKindExplicit
+	}
+}
 
 // Limits and defaults for command requests (ptone/scion#9278 §4.3-§4.5).
 const (
@@ -72,9 +97,20 @@ func isBidiControl(r rune) bool {
 		r == 0x200E || r == 0x200F || r == 0x061C
 }
 
+// isInvisibleOrNonASCIIWhitespace reports whether r is a non-ASCII format
+// character (Cf), line/paragraph separator (Zl, Zp), non-ASCII space (Zs),
+// Other_Default_Ignorable_Code_Point, or Hangul filler that renderers draw as
+// blank or a line break while bash treats as an ordinary word character.
+func isInvisibleOrNonASCIIWhitespace(r rune) bool {
+	return r > 0x7e && (unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Other_Default_Ignorable_Code_Point) ||
+		unicode.Is(unicode.Zs, r) ||
+		r == 0x115F || r == 0x1160 || r == 0x3164 || r == 0xFFA0)
+}
+
 // ValidateCommandRequestScript validates a command script per §4.5:
 // valid UTF-8, 1..4096 bytes, no NUL, no C0 controls other than \n and \t,
-// no DEL (0x7f), no C1 controls (U+0080–U+009F), and no bidi controls.
+// no DEL (0x7f), no C1 controls (U+0080–U+009F), no bidi controls, and no
+// invisible/non-ASCII whitespace characters.
 func ValidateCommandRequestScript(script string) error {
 	if len(script) == 0 {
 		return fmt.Errorf("script is required")
@@ -98,13 +134,16 @@ func ValidateCommandRequestScript(script string) error {
 		if isBidiControl(r) {
 			return fmt.Errorf("script must not contain bidirectional control character U+%04X", r)
 		}
+		if isInvisibleOrNonASCIIWhitespace(r) {
+			return fmt.Errorf("script must not contain invisible or non-ASCII whitespace character U+%04X", r)
+		}
 	}
 	return nil
 }
 
 // ValidateCommandRequestWorkdir validates an optional command working directory
 // per §4.5: "" means $HOME; otherwise an absolute, clean POSIX path <= 512 bytes
-// with no control (C0, DEL, C1) or bidi characters.
+// with no control (C0, DEL, C1), bidi, or invisible/non-ASCII whitespace characters.
 func ValidateCommandRequestWorkdir(workdir string) error {
 	if workdir == "" {
 		return nil
@@ -121,6 +160,9 @@ func ValidateCommandRequestWorkdir(workdir string) error {
 		}
 		if isBidiControl(r) {
 			return fmt.Errorf("workdir must not contain bidirectional control characters")
+		}
+		if isInvisibleOrNonASCIIWhitespace(r) {
+			return fmt.Errorf("workdir must not contain invisible or non-ASCII whitespace character U+%04X", r)
 		}
 	}
 	if !strings.HasPrefix(workdir, "/") {
@@ -421,6 +463,16 @@ func RenderCommandRequestFallback(intro string, in CommandRequestFallbackInput) 
 	if desc := strings.TrimSpace(in.Description); desc != "" {
 		b.WriteString(escapeMarkdownText(desc))
 		b.WriteString("\n\n")
+	}
+
+	nonASCII := 0
+	for _, r := range in.Script {
+		if r > 0x7e {
+			nonASCII++
+		}
+	}
+	if nonASCII > 0 {
+		fmt.Fprintf(&b, "> **Note:** Script contains %d non-ASCII character(s) — review in the CLI before approving.\n\n", nonASCII)
 	}
 
 	// Pick a fence longer than any backtick run in the script so the script

@@ -90,6 +90,58 @@ func TestNormalizeCommandRequest(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects invisible and non-ASCII whitespace chars in script and workdir (M1)", func(t *testing.T) {
+		scriptCases := []struct {
+			name   string
+			script string
+			code   string
+		}{
+			{"zwsp", "echo done \u200B# ; echo PAYLOAD", "U+200B"},
+			{"soft_hyphen", "echo done \u00AD# ; echo PAYLOAD", "U+00AD"},
+			{"zwj", "echo done \u200D# ; echo PAYLOAD", "U+200D"},
+			{"nbsp", "echo done \u00A0# ; echo PAYLOAD", "U+00A0"},
+			{"hangul_filler", "echo done \u3164# ; echo PAYLOAD", "U+3164"},
+			{"line_sep_before_hash", "echo done\u2028# ; echo PAYLOAD", "U+2028"},
+			{"para_sep", "echo done\u2029# ; echo PAYLOAD", "U+2029"},
+			{"hangul_choseong", "echo \u115F", "U+115F"},
+			{"hangul_jungseong", "echo \u1160", "U+1160"},
+			{"halfwidth_hangul_filler", "echo \uFFA0", "U+FFA0"},
+		}
+		for _, tc := range scriptCases {
+			err := ValidateCommandRequestScript(tc.script)
+			if err == nil {
+				t.Errorf("script %s: expected error, got nil", tc.name)
+				continue
+			}
+			if !strings.Contains(err.Error(), tc.code) {
+				t.Errorf("script %s: error %q does not name %s", tc.name, err.Error(), tc.code)
+			}
+		}
+
+		workdirCases := []struct {
+			name    string
+			workdir string
+			code    string
+		}{
+			{"zwsp", "/tmp/a\u200Bb", "U+200B"},
+			{"soft_hyphen", "/tmp/a\u00ADb", "U+00AD"},
+			{"zwj", "/tmp/a\u200Db", "U+200D"},
+			{"nbsp", "/tmp/a\u00A0b", "U+00A0"},
+			{"hangul_filler", "/tmp/a\u3164b", "U+3164"},
+			{"line_sep", "/tmp/a\u2028b", "U+2028"},
+		}
+		for _, tc := range workdirCases {
+			err := ValidateCommandRequestWorkdir(tc.workdir)
+			if err == nil {
+				t.Errorf("workdir %s: expected error, got nil", tc.name)
+				continue
+			}
+			if !strings.Contains(err.Error(), tc.code) {
+				t.Errorf("workdir %s: error %q does not name %s", tc.name, err.Error(), tc.code)
+			}
+		}
+	})
+
 	t.Run("allows tabs newlines and non-ascii in script", func(t *testing.T) {
 		_, err := NormalizeCommandRequest("command_request", &CommandRequestInput{
 			Key:    "k1",
@@ -177,5 +229,56 @@ func TestStructuredMessage_LogAttrs_OmitsCommandRequestContent(t *testing.T) {
 	}
 	if !foundPlain {
 		t.Errorf("non-command-request message should still emit message_content")
+	}
+}
+
+func TestCommandWorkdirKind(t *testing.T) {
+	cases := []struct {
+		workdir string
+		want    string
+	}{
+		{"", CommandWorkdirKindHome},
+		{"~", CommandWorkdirKindHome},
+		{"/workspace", CommandWorkdirKindWorkspace},
+		{"/workspace/repo", CommandWorkdirKindWorkspace},
+		{"/workspacefoo", CommandWorkdirKindExplicit},
+		{"/scion-volumes", CommandWorkdirKindSharedDir},
+		{"/scion-volumes/scratchpad", CommandWorkdirKindSharedDir},
+		{"/.scion-volumes", CommandWorkdirKindSharedDir},
+		{"/.scion-volumes/data", CommandWorkdirKindSharedDir},
+		{"/scion-volumes-other", CommandWorkdirKindExplicit},
+		{"/home/scion", CommandWorkdirKindExplicit},
+	}
+	for _, tc := range cases {
+		if got := CommandWorkdirKind(tc.workdir); got != tc.want {
+			t.Errorf("CommandWorkdirKind(%q) = %q, want %q", tc.workdir, got, tc.want)
+		}
+	}
+}
+
+func TestRenderCommandRequestFallback_NonASCIINote(t *testing.T) {
+	ascii := RenderCommandRequestFallback("", CommandRequestFallbackInput{
+		Key:      "k1",
+		Version:  1,
+		Script:   "echo hello",
+		TimeoutS: 600,
+	})
+	if strings.Contains(ascii, "non-ASCII") {
+		t.Errorf("pure ASCII script should not emit non-ASCII note: %s", ascii)
+	}
+
+	nonASCII := RenderCommandRequestFallback("", CommandRequestFallbackInput{
+		Key:      "k1",
+		Version:  1,
+		Script:   "echo 'héllo'",
+		TimeoutS: 600,
+	})
+	if !strings.Contains(nonASCII, "contains 1 non-ASCII character(s)") {
+		t.Errorf("expected non-ASCII note above fence, got: %s", nonASCII)
+	}
+	noteIdx := strings.Index(nonASCII, "contains 1 non-ASCII character(s)")
+	fenceIdx := strings.Index(nonASCII, "```sh")
+	if noteIdx < 0 || fenceIdx < 0 || noteIdx > fenceIdx {
+		t.Errorf("expected non-ASCII note before ```sh fence, got: %s", nonASCII)
 	}
 }

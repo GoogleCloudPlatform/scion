@@ -225,6 +225,9 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return formatCommandRequestAPIError(err)
 	}
+	if got := messages.CommandRequestCanonicalHash(detail.Request.Script, detail.Request.Workdir, detail.Request.TimeoutS); got != strings.ToLower(detail.Request.CommandSHA256) {
+		return errors.New("command request hash does not match the displayed script; refusing to approve")
+	}
 
 	out := cmd.OutOrStdout()
 	containerLabel := "your execution container"
@@ -299,8 +302,11 @@ func printCommandRequestConfirmationSummary(out io.Writer, detail *messages.Comm
 		wd = "$HOME"
 	}
 	_, _ = fmt.Fprintf(out, "Workdir:         %s\n", safeText(wd))
-	if strings.HasPrefix(req.Workdir, "/workspace") {
+	switch messages.CommandWorkdirKind(req.Workdir) {
+	case messages.CommandWorkdirKindWorkspace:
 		_, _ = fmt.Fprintln(out, "WARNING:         workdir is under /workspace (agent-writable)")
+	case messages.CommandWorkdirKindSharedDir:
+		_, _ = fmt.Fprintln(out, "WARNING:         workdir is a shared directory (agent-writable)")
 	}
 	_, _ = fmt.Fprintf(out, "Timeout:         %ds\n", req.TimeoutS)
 	_, _ = fmt.Fprintf(out, "Container:       %s", containerLabel)
@@ -314,11 +320,12 @@ func printCommandRequestConfirmationSummary(out io.Writer, detail *messages.Comm
 		_, _ = fmt.Fprintf(out, "WARNING:         script contains %d non-ASCII character(s), shown as \\u{XXXX}\n", nonASCIICount)
 	}
 	_, _ = fmt.Fprintln(out, "--- script ---")
-	_, _ = fmt.Fprint(out, escapedScript)
-	if !strings.HasSuffix(escapedScript, "\n") {
-		_, _ = fmt.Fprintln(out)
+	displayLines := strings.Split(strings.TrimSuffix(escapedScript, "\n"), "\n")
+	for i, line := range displayLines {
+		_, _ = fmt.Fprintf(out, "%4d │ %s\n", i+1, line)
 	}
 	_, _ = fmt.Fprintln(out, "--- end script ---")
+	_, _ = fmt.Fprintf(out, "(%d lines, %d bytes)\n", len(displayLines), len(req.Script))
 }
 
 // formatCommandScriptForDisplay renders an agent-authored script safely for

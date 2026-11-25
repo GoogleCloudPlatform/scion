@@ -153,19 +153,6 @@ func normalizeCommandRequestSurface(raw string) (string, bool) {
 	}
 }
 
-func commandWorkdirKind(workdir string) string {
-	switch {
-	case workdir == "" || workdir == "~":
-		return "home"
-	case workdir == "/workspace" || strings.HasPrefix(workdir, "/workspace/"):
-		return "workspace"
-	case strings.HasPrefix(workdir, "/scion-volumes/") || strings.HasPrefix(workdir, "/.scion-volumes/"):
-		return "shared_dir"
-	default:
-		return "explicit"
-	}
-}
-
 func (s *Server) loadCommandRequestWithMessage(ctx context.Context, reqID string) (*store.CommandRequest, *store.Message, string, error) {
 	row, err := s.store.GetCommandRequest(ctx, reqID)
 	if err != nil {
@@ -473,7 +460,7 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 
 	// Step 7: post-commit SSE card update, audit event, and handoff to executor.
 	if chatKey != "" {
-		s.publishActionUpdated(msgaction.KindCommandRequest, appRes.Request.ProjectID, appRes.Request.MessageID, chatKey, reqView)
+		s.publishActionUpdated(msgaction.KindCommandRequest, appRes.Request.ProjectID, appRes.Request.MessageID, chatKey, commandRequestSSEView(appRes.Request, nil, appRes.Run))
 	}
 	s.emitMessageActionEvent(ctx, &MessageActionEvent{
 		Kind:      msgaction.KindCommandRequest,
@@ -493,7 +480,7 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 			"exec_project_id":  appRes.Run.ExecProjectID,
 			"run_id":           appRes.Run.ID,
 			"approver_user_id": user.ID(),
-			"workdir_kind":     commandWorkdirKind(appRes.Request.Workdir),
+			"workdir_kind":     messages.CommandWorkdirKind(appRes.Request.Workdir),
 			"share_output":     strconv.FormatBool(appRes.Run.ShareOutput),
 		},
 		Timestamp: now,
@@ -533,18 +520,23 @@ func (s *Server) handleAgentCommandRequestList(w http.ResponseWriter, r *http.Re
 	}
 	items := make([]messages.CommandRequestView, len(res.Items))
 	for i, row := range res.Items {
-		view := commandRequestView(row, nil, res.Runs[row.ID])
-		if view.Run != nil {
-			// Omit the human's execution container IDs from the agent view (N2).
-			view.Run.ExecAgentID = ""
-			view.Run.ExecProjectID = ""
-		}
-		items[i] = view
+		items[i] = commandRequestSSEView(row, nil, res.Runs[row.ID])
 	}
 	writeJSON(w, http.StatusOK, messages.AgentCommandRequestListResponse{
 		Items:      items,
 		NextCursor: res.NextCursor,
 	})
+}
+
+// commandRequestSSEView builds a CommandRequestView with the human's execution
+// container IDs stripped (used for SSE broadcasts and the agent list view).
+func commandRequestSSEView(row *store.CommandRequest, replacedBy *store.CommandRequest, run *store.CommandRun) messages.CommandRequestView {
+	v := commandRequestView(row, replacedBy, run)
+	if v.Run != nil {
+		v.Run.ExecAgentID = ""
+		v.Run.ExecProjectID = ""
+	}
+	return v
 }
 
 func commandRequestView(row *store.CommandRequest, replacedBy *store.CommandRequest, run *store.CommandRun) messages.CommandRequestView {

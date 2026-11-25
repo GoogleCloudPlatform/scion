@@ -296,4 +296,117 @@ func TestPrintCommandRequestConfirmationSummary_EscapesUnsafeRunes(t *testing.T)
 	assert.Contains(t, rendered, `\t`)
 	assert.Contains(t, rendered, `\u{0020}\u{0020}`)
 	assert.Contains(t, rendered, "non-ASCII character(s)")
+	assert.Contains(t, rendered, "   1 │ ")
+	assert.Contains(t, rendered, "   2 │ ")
+	assert.Contains(t, rendered, "(2 lines, ")
+}
+
+func TestPrintCommandRequestConfirmationSummary_FramingAndWorkdirWarnings(t *testing.T) {
+	t.Run("gutter and footer prevent fake end-script framing (L1)", func(t *testing.T) {
+		script := "echo one\n--- end script ---\necho two\n"
+		detail := &messages.CommandRequestDetailResponse{
+			Request: messages.CommandRequestView{
+				RowID:         "req-l1",
+				AgentName:     "builder",
+				Key:           "l1-test",
+				Version:       1,
+				Script:        script,
+				TimeoutS:      600,
+				CommandSHA256: messages.CommandRequestCanonicalHash(script, "", 600),
+			},
+		}
+		var out bytes.Buffer
+		printCommandRequestConfirmationSummary(&out, detail, "my-shell")
+		rendered := out.String()
+		assert.Contains(t, rendered, "   1 │ echo one\n")
+		assert.Contains(t, rendered, "   2 │ --- end script ---\n")
+		assert.Contains(t, rendered, "   3 │ echo two\n")
+		assert.Contains(t, rendered, "--- end script ---\n(3 lines, 37 bytes)\n")
+	})
+
+	t.Run("workdir warnings cover workspace and shared_dir without prefix false positive (L3)", func(t *testing.T) {
+		cases := []struct {
+			workdir  string
+			wantWarn string
+		}{
+			{"/workspace", "workdir is under /workspace (agent-writable)"},
+			{"/workspace/repo", "workdir is under /workspace (agent-writable)"},
+			{"/scion-volumes/scratchpad", "workdir is a shared directory (agent-writable)"},
+			{"/.scion-volumes/data", "workdir is a shared directory (agent-writable)"},
+			{"/workspacefoo", ""},
+			{"/home/scion", ""},
+		}
+		for _, tc := range cases {
+			detail := &messages.CommandRequestDetailResponse{
+				Request: messages.CommandRequestView{
+					RowID:         "req-l3",
+					AgentName:     "builder",
+					Key:           "l3-test",
+					Version:       1,
+					Script:        "pwd",
+					Workdir:       tc.workdir,
+					TimeoutS:      600,
+					CommandSHA256: messages.CommandRequestCanonicalHash("pwd", tc.workdir, 600),
+				},
+			}
+			var out bytes.Buffer
+			printCommandRequestConfirmationSummary(&out, detail, "my-shell")
+			rendered := out.String()
+			if tc.wantWarn != "" {
+				assert.Contains(t, rendered, tc.wantWarn, "workdir=%s", tc.workdir)
+			} else {
+				assert.NotContains(t, rendered, "WARNING:         workdir", "workdir=%s", tc.workdir)
+			}
+		}
+	})
+}
+
+func TestCommandRequestCLI_ApproveRefusesServerHashMismatch(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "human")
+	prevTTY := commandApproveIsTerminal
+	commandApproveIsTerminal = func() bool { return false }
+	t.Cleanup(func() { commandApproveIsTerminal = prevTTY })
+
+	serverHash := messages.CommandRequestCanonicalHash("echo benign", "", 600)
+	approveCalled := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/command-requests/req-bad":
+			_ = json.NewEncoder(w).Encode(messages.CommandRequestDetailResponse{
+				Request: messages.CommandRequestView{
+					RowID:         "req-bad",
+					AgentName:     "builder",
+					Key:           "tampered",
+					Version:       1,
+					Script:        "echo tampered",
+					TimeoutS:      600,
+					CommandSHA256: serverHash,
+					Status:        "pending",
+				},
+				CanApprove: true,
+			})
+		case r.Method == http.MethodPost:
+			approveCalled = true
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	prevFactory := commandRequestsClientFactory
+	commandRequestsClientFactory = func() (hubclient.Client, error) {
+		return hubclient.New(ts.URL)
+	}
+	t.Cleanup(func() { commandRequestsClientFactory = prevFactory })
+
+	cmd := newCommandRequestApproveCmd()
+	require.NoError(t, cmd.Flags().Set("confirm-sha256", serverHash))
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	err := runCommandRequestApprove(cmd, []string{"req-bad"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not match the displayed script")
+	assert.False(t, approveCalled, "POST /approve must not be called when displayed script hash mismatches")
 }

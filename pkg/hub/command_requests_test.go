@@ -504,7 +504,24 @@ func TestCommandRequests_EndToEnd(t *testing.T) {
 	f.launchMu.Lock()
 	require.Len(t, f.launched, 1)
 	assert.Equal(t, appResp.Run.RunID, f.launched[0].ID)
+	launchedRun := f.launched[0]
 	f.launchMu.Unlock()
+
+	// I3: approver GET retains execAgentId/execProjectId, while SSE-published view strips them.
+	rrGetAfterApprove := f.doBearerJSON(t, http.MethodGet, "/api/v1/command-requests/"+v2ID, cliToken, nil)
+	require.Equal(t, http.StatusOK, rrGetAfterApprove.Code, rrGetAfterApprove.Body.String())
+	var detailAfter messages.CommandRequestDetailResponse
+	require.NoError(t, json.Unmarshal(rrGetAfterApprove.Body.Bytes(), &detailAfter))
+	require.NotNil(t, detailAfter.Run)
+	assert.Equal(t, f.execAgent.ID, detailAfter.Run.ExecAgentID)
+	assert.Equal(t, f.project.ID, detailAfter.Run.ExecProjectID)
+
+	storedReq, err := f.store.GetCommandRequest(ctx, v2ID)
+	require.NoError(t, err)
+	sseView := commandRequestSSEView(storedReq, nil, launchedRun)
+	require.NotNil(t, sseView.Run)
+	assert.Empty(t, sseView.Run.ExecAgentID, "SSE view must omit execAgentId (I3)")
+	assert.Empty(t, sseView.Run.ExecProjectID, "SSE view must omit execProjectId (I3)")
 
 	// 12. Idempotent replay returns 200 and does NOT re-launch.
 	rrReplay := f.doBearerJSON(t, http.MethodPost, "/api/v1/command-requests/"+v2ID+"/approve", cliToken, messages.ApproveCommandRequestBody{

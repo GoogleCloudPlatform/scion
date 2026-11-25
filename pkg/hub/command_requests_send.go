@@ -211,7 +211,7 @@ func (s *Server) emitCommandRequestSendAudit(ctx context.Context, res *store.Com
 	details := map[string]string{
 		"command_sha256":   row.CommandSHA256,
 		"approver_user_id": row.ApproverUserID,
-		"workdir_kind":     commandWorkdirKind(row.Workdir),
+		"workdir_kind":     messages.CommandWorkdirKind(row.Workdir),
 	}
 	s.emitMessageActionEvent(ctx, &MessageActionEvent{
 		Kind:          msgaction.KindCommandRequest,
