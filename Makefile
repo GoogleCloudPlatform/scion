@@ -221,7 +221,7 @@ hubshard-shard-run-selftest:
 # compiles the shard, checks its test list against hubshard -list, then
 # runs it. The common files' tests run only in shard 1.
 test-hub-shard:
-	@./hack/hubshard/shard.sh test $(SHARD) $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race) $(if $(RUN),-run '$(subst ','\'',$(RUN))')
+	@./hack/hubshard/shard.sh test $(SHARD) $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race) $(if $(value RUN),-run '$(subst ','\'',$(value RUN))')
 
 ## test-hub-shards: Run every pkg/hub test shard in turn (NOSQLITE=1, RACE=1 as for test-hub-shard)
 # The shard list comes from hack/hubshard/hubshard.sh -shards. Every shard

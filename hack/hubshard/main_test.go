@@ -502,6 +502,32 @@ func TestListSkipLocate(t *testing.T) {
 	if _, err := runOut("-match", "[invalid"); err == nil {
 		t.Error("-match with invalid regex should fail")
 	}
+
+	// Benchmarks are excluded from -match because go test -run does not run them.
+	if err := os.WriteFile(filepath.Join(dir, "bench_test.go"), []byte(header+"import \"testing\"\n\nfunc BenchmarkCommon(b *testing.B) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = runOut("-match", "BenchmarkCommon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("-match BenchmarkCommon = %q, want empty", got)
+	}
+}
+
+func TestTopLevelRunRegex(t *testing.T) {
+	for in, want := range map[string]string{
+		"^TestA$/subtest":              "^TestA$",
+		"TestA/sub1|TestB/sub2":        "(?:TestA)|(?:TestB)",
+		"Test[[:alpha:]/]lpha":         "Test[[:alpha:]/]lpha",
+		"Test[[:alpha:]/]lpha/subtest": "Test[[:alpha:]/]lpha",
+		`Test[\]]/sub`:                 `Test[\]]`,
+	} {
+		if got := topLevelRunRegex(in); got != want {
+			t.Errorf("topLevelRunRegex(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 func TestShards(t *testing.T) {

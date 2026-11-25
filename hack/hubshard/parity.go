@@ -259,7 +259,7 @@ func topLevelRunRegex(pattern string) string {
 	var alts []string
 	var cur strings.Builder
 	parenDepth := 0
-	inBracket := false
+	bracketDepth := 0
 	escaped := false
 	skipSub := false
 	for i := 0; i < len(pattern); i++ {
@@ -278,21 +278,29 @@ func topLevelRunRegex(pattern string) string {
 			escaped = true
 			continue
 		}
-		if inBracket {
+		if c == '[' {
+			bracketDepth++
 			if !skipSub {
 				cur.WriteByte(c)
 			}
-			if c == ']' {
-				inBracket = false
+			continue
+		}
+		if c == ']' {
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+			if !skipSub {
+				cur.WriteByte(c)
+			}
+			continue
+		}
+		if bracketDepth > 0 {
+			if !skipSub {
+				cur.WriteByte(c)
 			}
 			continue
 		}
 		switch c {
-		case '[':
-			inBracket = true
-			if !skipSub {
-				cur.WriteByte(c)
-			}
 		case '(':
 			parenDepth++
 			if !skipSub {

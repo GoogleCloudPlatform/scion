@@ -65,11 +65,21 @@ for i in 01 02 03 04 05 06 07 08 09 10; do
 	cat >"$repo/pkg/hub/f${i}_test.go" <<EOF
 package hub
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestShardFile${i}(t *testing.T) {
 	sharedHelper()
 	t.Run("sub", func(t *testing.T) {})
+}
+
+func TestShardFile${i}Other(t *testing.T) {
+	sharedHelper()
+	if os.Getenv("HUBSHARD_FAIL_OTHER") == "1" {
+		t.Fatal("other test must not run when -run excludes it")
+	}
 }
 EOF
 done
@@ -154,12 +164,14 @@ run_shard "$tmp/out3" "$tmp/err3" test 1 "--run=^${other_test}\$/sub" || rc=$?
 [ "$rc" -ne 0 ] || fail "subtest wrong shard: expected non-zero exit, got 0"
 assert_contains "subtest wrong shard" "$tmp/err3" "shard(s): $other_shard"
 
-# 4. Matching-shard -run succeeds and runs the test.
+# 4. Matching-shard -run succeeds and passes -test.run to the binary (so the
+# sibling *Other test that fails under HUBSHARD_FAIL_OTHER=1 does not run).
 rc=0
-run_shard "$tmp/out4" "$tmp/err4" test "$other_shard" -run "^${other_test}\$" || rc=$?
+HUBSHARD_FAIL_OTHER=1 run_shard "$tmp/out4" "$tmp/err4" test "$other_shard" -run "^${other_test}\$" || rc=$?
 [ "$rc" -eq 0 ] || fail "matching-shard -run: expected exit 0, got $rc (stderr: $(cat "$tmp/err4"))"
 assert_contains "matching-shard -run" "$tmp/out4" "ok  	pkg/hub shard $other_shard"
 assert_not_contains "matching-shard -run" "$tmp/out4" "no tests to run"
+assert_not_contains "matching-shard -run" "$tmp/err4" "also matches"
 
 # 5. Normal shard run without -run behaves unchanged.
 rc=0
@@ -191,6 +203,22 @@ rc=0
 run_shard "$tmp/out9" "$tmp/err9" build 1 -run TestCommonHelper || rc=$?
 [ "$rc" -ne 0 ] || fail "build -run: expected non-zero exit, got 0"
 assert_contains "build -run" "$tmp/err9" "-run is only valid for test"
+
+# 10. Pattern matching both this shard and other shards succeeds and prints a note.
+rc=0
+run_shard "$tmp/out10" "$tmp/err10" test "$other_shard" -run '^TestShardFile' || rc=$?
+[ "$rc" -eq 0 ] || fail "multi-shard -run: expected exit 0, got $rc (stderr: $(cat "$tmp/err10"))"
+assert_contains "multi-shard -run" "$tmp/out10" "ok  	pkg/hub shard $other_shard"
+assert_contains "multi-shard -run" "$tmp/err10" "NOTE: -run '^TestShardFile' also matches"
+
+# 11. Makefile test-hub-shard preserves literal $ and single quotes in RUN=,
+# and omits -run when RUN is unset.
+make -n -C "$root" test-hub-shard SHARD=1 RUN='^TestA$/sub|^TestB$' >"$tmp/make1" 2>&1
+assert_contains "make RUN with dollar" "$tmp/make1" "-run '^TestA\$/sub|^TestB\$'"
+make -n -C "$root" test-hub-shard SHARD=1 RUN="it's" >"$tmp/make2" 2>&1
+assert_contains "make RUN with quote" "$tmp/make2" "-run 'it'\''s'"
+env -u RUN make -n -C "$root" test-hub-shard SHARD=1 >"$tmp/make3" 2>&1
+assert_not_contains "make without RUN" "$tmp/make3" "-run"
 
 if [ "$fails" -ne 0 ]; then
 	echo "hubshard shard -run selftest: $fails failure(s)" >&2

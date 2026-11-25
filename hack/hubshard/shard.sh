@@ -219,6 +219,12 @@ test)
 			fi
 			die "-run '$run_pattern' matches no tests in any pkg/hub shard (tags: $tag_label)"
 		fi
+		other_matches=$(awk -v k="$shard" '$2 != k {print $2}' "$tmp/matched")
+		if [ -n "$other_matches" ]; then
+			other_count=$(printf '%s\n' "$other_matches" | wc -l | tr -d ' ')
+			other_shards=$(printf '%s\n' "$other_matches" | sort -nu | paste -sd ',' -)
+			echo "NOTE: -run '$run_pattern' also matches $other_count test(s) in other pkg/hub shard(s): $other_shards" >&2
+		fi
 	fi
 	compile "$shard" "$nosqlite" "$tmp/bin"
 
