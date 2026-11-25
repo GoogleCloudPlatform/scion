@@ -836,7 +836,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 			e.Name == experiments.ArtifactsOpenReviewCheck || e.Name == experiments.ArtifactsReviewDrafts ||
 			e.Name == experiments.ArtifactsTransfer ||
 			e.Name == experiments.ProjectSelfLeave || e.Name == experiments.RuntimeOrphanReconcile ||
-			e.Name == experiments.Triggers {
+			e.Name == experiments.Triggers || e.Name == experiments.TokenomicsUsageLedger {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -858,6 +858,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.ProjectSelfLeave))
 	require.True(t, srv.experimentEnabled(experiments.RuntimeOrphanReconcile))
 	require.True(t, srv.experimentEnabled(experiments.Triggers))
+	require.True(t, srv.experimentEnabled(experiments.TokenomicsUsageLedger))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
 	// that bodyOverrides sends, so the route reaches its caller checks.
@@ -1163,6 +1164,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/refresh-token":                         {"id": f.agent},
 		"/api/v1/agents/{id}/outbound-message":                      {"id": f.agent},
 		"/api/v1/agents/{id}/metrics":                               {"id": f.agent},
+		"/api/v1/agents/{id}/usage/events":                          {"id": f.agent},
+		"/api/v1/agents/{id}/usage/capabilities":                    {"id": f.agent},
 		"/api/v1/projects/{projectId}/agents/{id}/outbound-message": {"projectId": f.project, "id": f.agent},
 
 		// --- agent lifecycle family ---
