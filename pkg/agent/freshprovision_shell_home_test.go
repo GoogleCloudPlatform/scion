@@ -122,4 +122,33 @@ func TestManagerStart_FreshProvisionWipesShellHome(t *testing.T) {
 			t.Fatalf("non-shell home file content changed: got %q", string(data))
 		}
 	})
+
+	t.Run("external agents dir home is wiped even when in-repo agentDir is absent", func(t *testing.T) {
+		fx := newFreshProvisionManagerFixture(t)
+
+		// Enable split storage (external agents dir) by writing project-id.
+		const projectID = "11111111-2222-3333-4444-555555555555"
+		writeFile(t, filepath.Join(fx.projectScionDir, "project-id"), projectID+"\n")
+
+		// Remove the in-repo agentDir completely so only the external home remains.
+		inRepoAgentDir := filepath.Join(fx.projectScionDir, "agents", "existing-agent")
+		if err := os.RemoveAll(inRepoAgentDir); err != nil {
+			t.Fatalf("failed to remove in-repo agentDir: %v", err)
+		}
+
+		extHome := config.GetAgentHomePath(fx.projectScionDir, "existing-agent")
+		credPath := filepath.Join(extHome, ".config", "gcloud", "credentials")
+		mkdirAll(t, filepath.Dir(credPath))
+		writeFile(t, credPath, "gcloud-secret-token\n")
+
+		opts := fx.opts
+		opts.FreshProvision = true
+		opts.HarnessConfig = config.ShellHarnessConfigName
+		if _, err := fx.mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("Manager.Start(FreshProvision=true, external home, shell) failed: %v", err)
+		}
+		if _, err := os.Stat(credPath); !os.IsNotExist(err) {
+			t.Fatalf("expected external credential file %s to be wiped on fresh provision, stat err=%v", credPath, err)
+		}
+	})
 }

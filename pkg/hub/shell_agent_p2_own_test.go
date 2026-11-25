@@ -19,9 +19,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -609,4 +612,44 @@ func TestShellAgentDelete_ForcesDeleteFilesForNonOwner(t *testing.T) {
 		assert.False(t, gotDeleteFiles, "non-shell agent deleteFiles=false behaviour must remain unchanged")
 		_ = ctx
 	})
+
+	t.Run("indeterminate attach check on deleteFiles=false refuses delete with 503", func(t *testing.T) {
+		srvFault, sFault := testServer(t)
+		dispFault := &p2OwnShellTestDispatcher{}
+		srvFault.SetDispatcher(dispFault)
+		projFault, brokerFault := p2OwnSeedProjectAndBroker(t, sFault)
+
+		faultOwner := p2OwnSeedUser(t, sFault, "h1-indet-owner@test.com", "H1 Indet Owner")
+		p2OwnBindProjectRole(t, sFault, projFault.ID, faultOwner.ID, "project-member")
+		a := p2OwnSeedAgent(t, sFault, projFault.ID, brokerFault.ID, "shell-h1-indet", faultOwner.ID, config.ShellHarnessConfigName, state.PhaseRunning, []string{faultOwner.ID})
+
+		var roleCalls atomic.Int32
+		wrapped, fault := installStoreFault(t, srvFault, func(inner store.Store, sw *storeFaultSwitch) *p2OwnIndetAuthzStore {
+			return &p2OwnIndetAuthzStore{Store: inner, sw: sw, calls: &roleCalls}
+		})
+		srvFault.authzService = NewAuthzService(wrapped, slog.Default())
+		fault.Arm()
+
+		rec := doRequestAsUser(t, srvFault, faultOwner, http.MethodDelete, "/api/v1/agents/"+a.ID+"?force=true&deleteFiles=false", nil)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		_, dispatched := dispFault.deletedFiles[a.ID]
+		assert.False(t, dispatched, "delete must not dispatch when attach check is indeterminate")
+	})
+}
+
+type p2OwnIndetAuthzStore struct {
+	store.Store
+	sw    *storeFaultSwitch
+	calls *atomic.Int32
+}
+
+func (f *p2OwnIndetAuthzStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
+	// Let the first authorization check (ActionDelete, which calls
+	// GetEffectiveGroups for role bindings and relationship project-access)
+	// succeed, then fail the subsequent ActionAttach check so Decide returns
+	// an indeterminate decision.
+	if f.sw.Active() && f.calls.Add(1) > 2 {
+		return nil, errors.New("transient store failure")
+	}
+	return f.Store.GetEffectiveGroups(ctx, userID)
 }

@@ -5664,10 +5664,18 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	// §3.4 I1/S8): a caller holding agent.delete without attach (such as a
 	// project admin/owner) must not be able to preserve the container's files on
 	// delete and inherit $HOME by creating a same-named agent. Force
-	// deleteFiles=true unless the caller passes ActionAttach.
-	if isShellAgent(agent) && !params.deleteFiles &&
-		s.authorizeAgentTargetAction(ctx, identity, agent, ActionAttach) != nil {
-		params.deleteFiles = true
+	// deleteFiles=true unless the caller passes ActionAttach; if the attach
+	// decision is indeterminate, fail closed with 503 rather than silently
+	// overwriting the caller's deleteFiles=false choice.
+	if isShellAgent(agent) && !params.deleteFiles {
+		if denial := s.authorizeAgentTargetAction(ctx, identity, agent, ActionAttach); denial != nil {
+			if denial.indeterminate {
+				writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+					"Could not verify execution container attach authorization; retry", nil)
+				return
+			}
+			params.deleteFiles = true
+		}
 	}
 
 	for attempt := 0; ; attempt++ {

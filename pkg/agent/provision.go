@@ -4741,9 +4741,6 @@ func shellFreshProvisionConfig(agentDir, agentHome, harnessConfig string, inline
 // offline-broker force-delete). Fails closed with config.ErrAgentStateConflict
 // if the home cannot be inspected or safely wiped.
 func wipeShellHomeOnFreshProvisionGuarded(g *agentFilesGuard, agentName, agentDir, agentHome string) error {
-	if _, err := os.Stat(agentDir); err != nil {
-		return nil
-	}
 	homes := []string{agentHome}
 	if inDir := filepath.Join(agentDir, "home"); filepath.Clean(inDir) != filepath.Clean(agentHome) {
 		homes = append(homes, inDir)

@@ -28,8 +28,10 @@ import (
 
 // patchBodyHasOwnerField reports whether a raw JSON PATCH body contains an
 // ownerId or owner_id top-level key (case-insensitive, matching encoding/json).
-// Used by applyAgentUpdate to explicitly refuse ownership transfer attempts on
-// execution containers (ptone/scion#8812 §3.4 S8).
+// Used by applyAgentUpdate as explicit HTTP-layer defence in depth to refuse
+// ownership transfer attempts on execution containers (ptone/scion#8812 §3.4
+// S8); the store guard in entadapter's buildAgentUpdate is the enforcement
+// point.
 func patchBodyHasOwnerField(body []byte) bool {
 	if len(body) == 0 {
 		return false
