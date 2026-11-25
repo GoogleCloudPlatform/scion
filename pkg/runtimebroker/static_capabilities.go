@@ -144,17 +144,6 @@ func moveBundleSupported(rt scionrt.Runtime) bool {
 	}
 }
 
-// moveBundleSupportedAny reports whether at least one runtime in rts supports
-// move-bundle transfers.
-func moveBundleSupportedAny(rts ...scionrt.Runtime) bool {
-	for _, rt := range rts {
-		if moveBundleSupported(rt) {
-			return true
-		}
-	}
-	return false
-}
-
 // StaticCapabilityNames is StaticCapabilities as the capability names the
 // registration and join requests carry (the names the Hub's
 // capabilitiesFromStrings accepts).
