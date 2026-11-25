@@ -42,13 +42,19 @@ const (
 	// LimitTransfer covers POST /api/v1/artifacts/{id}/transfer (ptone/scion#9337):
 	// 30 transfers per hour per user, 300 per hour globally per hub instance.
 	LimitTransfer LimitFamily = "transfer"
+	// LimitReviewRequest covers POST /api/v1/artifacts/{id}/review-requests
+	// (ptone/scion#9296): 30/h per user, 600/h global.
+	LimitReviewRequest LimitFamily = "review_request"
+	// LimitReviewRequestDismiss covers POST /api/v1/artifacts/{id}/review-request/dismiss
+	// (ptone/scion#9296): 30/h per user, 600/h global.
+	LimitReviewRequestDismiss LimitFamily = "review_request_dismiss"
 )
 
 // familyLimit is one family's rates: a principal's sustained rate and
 // burst, and the rate of all principals together on one hub instance.
 // period defaults to time.Minute when zero.
 type familyLimit struct {
-	perMinute, burst, globalPerMinute int
+	perPeriod, burst, globalPerPeriod int
 	period                            time.Duration
 }
 
@@ -61,12 +67,15 @@ type familyLimit struct {
 // yet; their rates are set for the planned uses: review_list read on page
 // load, on return to a tab (at most every 30 s) and on entering edit mode,
 // and draft_write an autosave every few seconds while typing. transfer:
-// 30/h per user, 300/h global.
+// 30/h per user, 300/h global. review_request and review_request_dismiss
+// follow design §4.7 (30/h per user, 600/h global).
 var principalFamilyLimits = map[LimitFamily]familyLimit{
-	LimitReviewBeat: {perMinute: 24, burst: 24, globalPerMinute: 2400},
-	LimitReviewList: {perMinute: 10, burst: 10, globalPerMinute: 1000},
-	LimitDraftWrite: {perMinute: 12, burst: 12, globalPerMinute: 1200},
-	LimitTransfer:   {perMinute: 30, burst: 30, globalPerMinute: 300, period: time.Hour},
+	LimitReviewBeat:           {perPeriod: 24, burst: 24, globalPerPeriod: 2400, period: time.Minute},
+	LimitReviewList:           {perPeriod: 10, burst: 10, globalPerPeriod: 1000, period: time.Minute},
+	LimitDraftWrite:           {perPeriod: 12, burst: 12, globalPerPeriod: 1200, period: time.Minute},
+	LimitTransfer:             {perPeriod: 30, burst: 30, globalPerPeriod: 300, period: time.Hour},
+	LimitReviewRequest:        {perPeriod: 30, burst: 30, globalPerPeriod: 600, period: time.Hour},
+	LimitReviewRequestDismiss: {perPeriod: 30, burst: 30, globalPerPeriod: 600, period: time.Hour},
 }
 
 // principalMaxClients caps the principals one family tracks at once. As
@@ -96,7 +105,7 @@ func newPrincipalLimiter(now func() time.Time) *principalLimiter {
 		if period <= 0 {
 			period = time.Minute
 		}
-		l.families[f] = newPeriodLimiter(now, lim.perMinute, period, lim.burst, lim.globalPerMinute, period, lim.globalPerMinute, principalMaxClients)
+		l.families[f] = newPeriodLimiter(now, lim.perPeriod, period, lim.burst, lim.globalPerPeriod, period, lim.globalPerPeriod, principalMaxClients)
 	}
 	return l
 }

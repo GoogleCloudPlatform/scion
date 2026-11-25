@@ -44,6 +44,10 @@ const (
 	EventGrantChanged     = "grant_changed"
 	EventLinkCreated      = "link_created"
 	EventOwnerTransferred = "owner_transferred"
+	// Review request lifecycle events (ptone/scion#9296).
+	EventReviewRequestCreated   = "review_request.created"
+	EventReviewRequestReminded  = "review_request.reminded"
+	EventReviewRequestDismissed = "review_request.dismissed"
 )
 
 // Event actor kinds: the principal kinds, and system for the hub's own
@@ -72,6 +76,10 @@ const (
 	// creates (ptone/scion#7134; see sponsor_review.go). Only the creation
 	// path records it.
 	AuthoritySponsorReview = "sponsor_review"
+	// AuthorityPublisher and AuthorityReviewer are the authorities recorded
+	// for review request lifecycle events (ptone/scion#9296).
+	AuthorityPublisher = "publisher"
+	AuthorityReviewer  = "reviewer"
 )
 
 // isSteward reports whether authority is a steward clause. A steward may

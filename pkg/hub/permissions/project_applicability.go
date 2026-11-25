@@ -190,6 +190,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// (Resource{Type: artifact, ParentType: project}).
 	"artifact.read": true, "artifact.create": true, "artifact.update": true,
 	"artifact.delete": true, "artifact.manage": true, "artifact.steward": true,
+	"artifact.request_review": true,
 
 	// scheduled_event.* — always scoped to a project.
 	"scheduled_event.read": true, "scheduled_event.list": true, "scheduled_event.create": true,
@@ -271,7 +272,8 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"artifact.read": {BoundaryKindProject, BoundaryKindHub}, "artifact.create": {BoundaryKindProject, BoundaryKindHub},
 	"artifact.update": {BoundaryKindProject, BoundaryKindHub}, "artifact.delete": {BoundaryKindProject, BoundaryKindHub},
 	"artifact.manage": {BoundaryKindProject, BoundaryKindHub}, "artifact.steward": {BoundaryKindProject, BoundaryKindHub},
-	"template.create": {BoundaryKindProject, BoundaryKindHub}, "template.read": {BoundaryKindProject, BoundaryKindHub},
+	"artifact.request_review": {BoundaryKindProject, BoundaryKindHub},
+	"template.create":         {BoundaryKindProject, BoundaryKindHub}, "template.read": {BoundaryKindProject, BoundaryKindHub},
 	"template.update": {BoundaryKindProject, BoundaryKindHub}, "template.delete": {BoundaryKindProject, BoundaryKindHub},
 	"template.list":          {BoundaryKindProject, BoundaryKindHub},
 	"template.create_global": {BoundaryKindHub}, "template.update_global": {BoundaryKindHub}, "template.delete_global": {BoundaryKindHub},
@@ -465,6 +467,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},
 	"artifact.update": {TargetClassKindProjectScoped}, "artifact.delete": {TargetClassKindProjectScoped},
 	"artifact.manage": {TargetClassKindProjectScoped}, "artifact.steward": {TargetClassKindProjectScoped},
+	"artifact.request_review": {TargetClassKindProjectScoped},
 
 	// skill.* — read/list support both project and global catalog classes;
 	// create/update/delete are project-scoped only; register is a hub-level

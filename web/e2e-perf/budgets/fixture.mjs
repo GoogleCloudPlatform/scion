@@ -180,6 +180,7 @@ export function buildFixture() {
           'hub.artifacts': false,
           'hub.artifacts_open_review_check': false,
           'hub.artifacts_review_drafts': false,
+          'hub.artifacts_review_requests': false,
           'hub.attachment_artifacts': false,
           'hub.chat_retention': false,
           'hub.code_span_mentions': false,

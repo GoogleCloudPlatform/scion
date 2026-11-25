@@ -1129,6 +1129,7 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}
+	s.populateReviewState(r.Context(), b, a, &resp)
 	resp.Archive = s.archiveInfo(r.Context(), b, files)
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -155,21 +155,21 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    17, // R17: project.manage_system_one_instances (ptone/scion#8045); R16: webhook_endpoint.send (ptone/scion#8061); R15: webhook_endpoint.update (ptone/scion#8060); R14: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R13: trigger.*, webhook_endpoint.* (ptone/scion#8028); R12: github_trigger.{comment,configure} (ptone/scion#8090); R11: project.chat_post (ptone/scion#5518); R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    18, // R18: artifact.request_review (ptone/scion#9296); R17: project.manage_system_one_instances (ptone/scion#8045); R16: webhook_endpoint.send (ptone/scion#8061); R15: webhook_endpoint.update (ptone/scion#8060); R14: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R13: trigger.*, webhook_endpoint.* (ptone/scion#8028); R12: github_trigger.{comment,configure} (ptone/scion#8090); R11: project.chat_post (ptone/scion#5518); R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    15, // R15: project.manage_system_one_instances (ptone/scion#8045); R14: webhook_endpoint.send (ptone/scion#8061); R13: webhook_endpoint.update (ptone/scion#8060); R12: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R11: trigger.{create,list,read,update}, webhook_endpoint.{create,list,read} (ptone/scion#8028); R10: github_trigger.{comment,configure} (ptone/scion#8090); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    16, // R16: artifact.request_review (ptone/scion#9296); R15: project.manage_system_one_instances (ptone/scion#8045); R14: webhook_endpoint.send (ptone/scion#8061); R13: webhook_endpoint.update (ptone/scion#8060); R12: project.manage_message_policies, project.read_message_policies (ptone/scion#8047); R11: trigger.{create,list,read,update}, webhook_endpoint.{create,list,read} (ptone/scion#8028); R10: github_trigger.{comment,configure} (ptone/scion#8090); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    10, // R10: webhook_endpoint.send (ptone/scion#8061); R9: project.read_message_policies (ptone/scion#8047); R8: trigger.{create,list,read}, webhook_endpoint.{create,list,read} (ptone/scion#8028); R7: github_trigger.comment (ptone/scion#8090); R6: project.chat_post (ptone/scion#5518); R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    11, // R11: artifact.request_review (ptone/scion#9296); R10: webhook_endpoint.send (ptone/scion#8061); R9: project.read_message_policies (ptone/scion#8047); R8: trigger.{create,list,read}, webhook_endpoint.{create,list,read} (ptone/scion#8028); R7: github_trigger.comment (ptone/scion#8090); R6: project.chat_post (ptone/scion#5518); R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 		{
@@ -332,6 +332,7 @@ func projectOwnerPermissionIDs() []string {
 		// admin grant or a move, and never a user-owned artifact).
 		"artifact.create",
 		"artifact.read",
+		"artifact.request_review",
 		"artifact.steward",
 		// Agent lifecycle and operations — human control-plane permissions.
 		// Agent-self credential permissions (status_update, log_append,
@@ -463,6 +464,7 @@ func projectAdminPermissionIDs() []string {
 		// an explicit grant, not to project roles (design D7).
 		"artifact.create",
 		"artifact.read",
+		"artifact.request_review",
 		// Agent lifecycle and operations (no delete, no set_message_mode,
 		// no agent-self credential permissions, no attach — see
 		// projectOwnerPermissionIDs for the rationale)
@@ -558,6 +560,7 @@ func projectMemberCuratedPermissionIDs() []string {
 		// an explicit grant, not to project roles (design D7).
 		"artifact.create",
 		"artifact.read",
+		"artifact.request_review",
 		// Agent operations (create, read, list)
 		"agent.create",
 		"agent.list",

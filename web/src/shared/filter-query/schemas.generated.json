@@ -251,6 +251,7 @@
         "exec": "server",
         "enum": [
           "review",
+          "requested",
           "mine",
           "shared"
         ],
@@ -277,13 +278,14 @@
     "keys": [
       {
         "name": "is",
-        "help": "Artifacts shared with this project",
+        "help": "Artifact state or shared with this project",
         "kind": "flag_set",
         "exec": "server",
         "enum": [
-          "shared"
+          "shared",
+          "requested"
         ],
-        "multiValued": false
+        "multiValued": true
       }
     ],
     "textHelp": "Matches artifact title or key"

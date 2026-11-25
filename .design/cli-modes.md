@@ -151,6 +151,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | Command | `human` | `agent` |
 |---------|:-------:|:-------:|
 | `attach` | Y | - |
+| `artifact request-review` | Y | - (human-only in Phase 1, ptone/scion#9306; agent mode arrives in Phase 4) |
+| `artifact dismiss-review` | Y | - (human-only: agents are never requested reviewers, ptone/scion#9306) |
 | `broker` (all) | Y | - |
 | `cdw` | Y | - |
 | `clean` | Y | - |

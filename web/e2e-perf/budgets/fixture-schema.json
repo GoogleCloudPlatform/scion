@@ -44,6 +44,7 @@
         "experiments.hub.artifacts:boolean",
         "experiments.hub.artifacts_open_review_check:boolean",
         "experiments.hub.artifacts_review_drafts:boolean",
+        "experiments.hub.artifacts_review_requests:boolean",
         "experiments.hub.attachment_artifacts:boolean",
         "experiments.hub.chat_retention:boolean",
         "experiments.hub.code_span_mentions:boolean",

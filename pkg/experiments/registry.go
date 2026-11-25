@@ -529,6 +529,14 @@ const ArtifactsReviewDrafts = "hub.artifacts_review_drafts"
 // canTransfer is false.
 const ArtifactsTransfer = "hub.artifacts_transfer"
 
+// ArtifactsReviewRequests gates durable artifact review requests
+// (ptone/scion#9296, ptone/scion#9306): POST /api/v1/artifacts/{id}/review-requests,
+// POST /api/v1/artifacts/{id}/review-request/dismiss, the reviewState.requestedOfMe
+// response field, the reviewRequested list field, and the requested=1 /
+// is:requested list filters. While it is off the review-request routes answer
+// 404, request fields are absent, and the requested filters match nothing.
+const ArtifactsReviewRequests = "hub.artifacts_review_requests"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -1306,6 +1314,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#9337",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-03-01",
+	},
+	{
+		Name:        ArtifactsReviewRequests,
+		Title:       "Artifact review requests",
+		Description: "Enables durable review requests on artifacts (requesting reviews from users, dismissing with a note, filtering by requested reviews, and review-request notifications). Needs hub.artifacts. While off, the review-request routes answer 404, request fields are omitted, and requested filters match nothing.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9296",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-05-25",
 	},
 	{
 		Name:        UserDeleteForceCascade,

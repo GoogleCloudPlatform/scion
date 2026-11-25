@@ -117,6 +117,38 @@ type ArtifactResponse struct {
 	// woken, or remains suspended (ptone/scion#8946). Omitted for running
 	// agents and non-agent owners.
 	ReviewDelivery *ReviewDeliveryInfo `json:"reviewDelivery,omitempty"`
+	// ReviewState, on a GET of the artifact or of one of its versions while
+	// hub.artifacts_review_requests is enabled, reports the caller's review
+	// request state (ptone/scion#9296). Omitted while the experiment is off.
+	ReviewState *ReviewStateInfo `json:"reviewState,omitempty"`
+}
+
+// ReviewStateInfo carries viewer-specific review state on ArtifactResponse.
+type ReviewStateInfo struct {
+	RequestedOfMe *ReviewRequestInfo `json:"requestedOfMe"`
+}
+
+// ReviewRequestPrincipal identifies a reviewer or requester in API responses.
+type ReviewRequestPrincipal struct {
+	Kind        string `json:"kind,omitempty"`
+	Ref         string `json:"ref"`
+	DisplayName string `json:"displayName,omitempty"`
+}
+
+// ReviewRequestInfo is the JSON representation of one artifact review request.
+type ReviewRequestInfo struct {
+	ID           string                 `json:"id"`
+	Reviewer     ReviewRequestPrincipal `json:"reviewer"`
+	Requester    ReviewRequestPrincipal `json:"requester"`
+	RequestedSeq int                    `json:"requestedSeq"`
+	Note         string                 `json:"note,omitempty"`
+	Access       string                 `json:"access"`
+	State        string                 `json:"state"`
+	ResponseNote string                 `json:"responseNote,omitempty"`
+	ResolvedSeq  *int                   `json:"resolvedSeq,omitempty"`
+	CreatedAt    time.Time              `json:"createdAt"`
+	RemindedAt   *time.Time             `json:"remindedAt,omitempty"`
+	ResolvedAt   *time.Time             `json:"resolvedAt,omitempty"`
 }
 
 // ReviewDeliveryStatus values describe what happened to the review notice

@@ -2947,6 +2947,10 @@ const (
 	// artifact and the granter asked for the user to be told
 	// (ptone/scion#5145). ResourceType is NotificationResourceArtifact.
 	NotificationKindArtifactGrant = "artifact_grant"
+	// NotificationKindArtifactReviewRequest: a user was asked to review an
+	// artifact, or a reviewer dismissed a review request (ptone/scion#9296).
+	// ResourceType is NotificationResourceArtifact.
+	NotificationKindArtifactReviewRequest = "artifact_review_request"
 	// NotificationKindArtifactReviewSummary: a review of a user's artifact
 	// was finalized by a reviewer other than the owner whom the finalize
 	// request admitted to submit it (ptone/scion#6853). The artifact's owner is the only recipient.
@@ -2989,6 +2993,9 @@ const (
 	// NotificationStatusArtifactReviewRequested: the user was given review
 	// access and asked to review the artifact.
 	NotificationStatusArtifactReviewRequested = "ARTIFACT_REVIEW_REQUESTED"
+	// NotificationStatusArtifactReviewDismissed: the requested reviewer
+	// dismissed the review request (ptone/scion#9296).
+	NotificationStatusArtifactReviewDismissed = "ARTIFACT_REVIEW_DISMISSED"
 	// NotificationStatusArtifactShared: the user was given view, edit or
 	// manage access to the artifact.
 	NotificationStatusArtifactShared = "ARTIFACT_SHARED"

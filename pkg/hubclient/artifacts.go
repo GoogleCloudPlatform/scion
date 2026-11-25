@@ -117,6 +117,14 @@ type ArtifactService interface {
 	// TransferTargets lists eligible target agents for ownership transfer
 	// (GET /api/v1/artifacts/{id}/transfer-targets).
 	TransferTargets(ctx context.Context, id string) (*ArtifactTransferTargetsResponse, error)
+
+	// RequestReview requests or reminds a review of artifact id from one or
+	// more users (POST /api/v1/artifacts/{id}/review-requests).
+	RequestReview(ctx context.Context, id string, req *ArtifactReviewRequestsInput) (*ArtifactReviewRequestsResponse, error)
+
+	// DismissReviewRequest dismisses the caller's open review request on
+	// artifact id with an optional note (POST /api/v1/artifacts/{id}/review-request/dismiss).
+	DismissReviewRequest(ctx context.Context, id, note string) (*ArtifactDismissReviewRequestResponse, error)
 }
 
 // ArtifactLink describes a share link. It never carries the token.
@@ -200,6 +208,8 @@ type ListArtifactsOptions struct {
 	Query string
 	// ReviewPending keeps artifacts whose current version is a review.
 	ReviewPending bool
+	// Requested keeps artifacts where the caller has an open review request.
+	Requested bool
 	// OwnedOnly keeps artifacts the caller owns.
 	OwnedOnly bool
 	// Limit is the page size (0 = the hub's default).
@@ -224,7 +234,8 @@ type ArtifactListResponse struct {
 // ArtifactListItem is one listed artifact.
 type ArtifactListItem struct {
 	Artifact
-	ReviewPending bool `json:"reviewPending"`
+	ReviewPending   bool `json:"reviewPending"`
+	ReviewRequested bool `json:"reviewRequested,omitempty"`
 	// Access is why the caller sees the artifact: "owned", "project" or
 	// "shared".
 	Access string `json:"access,omitempty"`
@@ -293,10 +304,11 @@ type ArtifactGrantResult struct {
 
 // ArtifactResponse mirrors the hub's artifact response body.
 type ArtifactResponse struct {
-	Artifact    Artifact         `json:"artifact"`
-	Version     *ArtifactVersion `json:"version,omitempty"`
-	Warnings    []string         `json:"warnings,omitempty"`
-	CanTransfer bool             `json:"canTransfer,omitempty"`
+	Artifact    Artifact             `json:"artifact"`
+	Version     *ArtifactVersion     `json:"version,omitempty"`
+	Warnings    []string             `json:"warnings,omitempty"`
+	CanTransfer bool                 `json:"canTransfer,omitempty"`
+	ReviewState *ArtifactReviewState `json:"reviewState,omitempty"`
 }
 
 // ArtifactTransferRequest is the body of POST /api/v1/artifacts/{id}/transfer.
@@ -333,6 +345,62 @@ type ArtifactTransferCandidate struct {
 type ArtifactTransferTargetsResponse struct {
 	Agents    []ArtifactTransferCandidate `json:"agents"`
 	Truncated bool                        `json:"truncated"`
+}
+
+// ArtifactReviewState mirrors reviewState on ArtifactResponse.
+type ArtifactReviewState struct {
+	RequestedOfMe *ArtifactReviewRequest `json:"requestedOfMe"`
+}
+
+// ArtifactReviewRequestPrincipal identifies a reviewer or requester.
+type ArtifactReviewRequestPrincipal struct {
+	Kind        string `json:"kind,omitempty"`
+	Ref         string `json:"ref"`
+	DisplayName string `json:"displayName,omitempty"`
+}
+
+// ArtifactReviewRequest mirrors ReviewRequestInfo from the hub.
+type ArtifactReviewRequest struct {
+	ID           string                         `json:"id"`
+	Reviewer     ArtifactReviewRequestPrincipal `json:"reviewer"`
+	Requester    ArtifactReviewRequestPrincipal `json:"requester"`
+	RequestedSeq int                            `json:"requestedSeq"`
+	Note         string                         `json:"note,omitempty"`
+	Access       string                         `json:"access"`
+	State        string                         `json:"state"`
+	ResponseNote string                         `json:"responseNote,omitempty"`
+	ResolvedSeq  *int                           `json:"resolvedSeq,omitempty"`
+	CreatedAt    time.Time                      `json:"createdAt"`
+	RemindedAt   *time.Time                     `json:"remindedAt,omitempty"`
+	ResolvedAt   *time.Time                     `json:"resolvedAt,omitempty"`
+}
+
+// ArtifactReviewRequestsInput is the body of POST /api/v1/artifacts/{id}/review-requests.
+type ArtifactReviewRequestsInput struct {
+	Reviewers []string `json:"reviewers"`
+	Note      string   `json:"note,omitempty"`
+}
+
+// ArtifactReviewRequestResult is one reviewer's outcome in ArtifactReviewRequestsResponse.
+type ArtifactReviewRequestResult struct {
+	Reviewer      string                 `json:"reviewer"`
+	Outcome       string                 `json:"outcome"`
+	Code          string                 `json:"code,omitempty"`
+	Access        string                 `json:"access,omitempty"`
+	Request       *ArtifactReviewRequest `json:"request,omitempty"`
+	Notified      bool                   `json:"notified"`
+	NotifySkipped string                 `json:"notifySkipped,omitempty"`
+}
+
+// ArtifactReviewRequestsResponse mirrors the body of POST /api/v1/artifacts/{id}/review-requests.
+type ArtifactReviewRequestsResponse struct {
+	Requests []ArtifactReviewRequestResult `json:"requests"`
+}
+
+// ArtifactDismissReviewRequestResponse mirrors the body of POST /api/v1/artifacts/{id}/review-request/dismiss.
+type ArtifactDismissReviewRequestResponse struct {
+	Request        ArtifactReviewRequest `json:"request"`
+	AuthorNotified bool                  `json:"authorNotified"`
 }
 
 // Artifact describes an artifact.
@@ -459,6 +527,9 @@ func (s *artifactService) List(ctx context.Context, opts *ListArtifactsOptions) 
 		}
 		if opts.ReviewPending {
 			q.Set("review_pending", "1")
+		}
+		if opts.Requested {
+			q.Set("requested", "1")
 		}
 		if opts.OwnedOnly {
 			q.Set("owner", "me")
@@ -775,4 +846,25 @@ func (s *artifactService) TransferTargets(ctx context.Context, id string) (*Arti
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ArtifactTransferTargetsResponse](resp)
+}
+
+// RequestReview implements ArtifactService.
+func (s *artifactService) RequestReview(ctx context.Context, id string, req *ArtifactReviewRequestsInput) (*ArtifactReviewRequestsResponse, error) {
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/review-requests", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactReviewRequestsResponse](resp)
+}
+
+// DismissReviewRequest implements ArtifactService.
+func (s *artifactService) DismissReviewRequest(ctx context.Context, id, note string) (*ArtifactDismissReviewRequestResponse, error) {
+	body := struct {
+		Note string `json:"note,omitempty"`
+	}{Note: note}
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/review-request/dismiss", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactDismissReviewRequestResponse](resp)
 }

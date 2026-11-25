@@ -707,6 +707,24 @@ type Store interface {
 	// sponsor's automatic review grant, and appending the owner_transferred
 	// event.
 	TransferOwner(ctx context.Context, artifactID string, opts TransferOptions, actor *Actor, now time.Time) (*Artifact, TransferResult, error)
+
+	// CreateOrRemindReviewRequest creates an open review request for
+	// (req.ArtifactID, req.ReviewerKind, req.ReviewerRef), or reminds an
+	// existing open request if remindCooldown has elapsed since its last
+	// reminder (or if it has never been reminded). Runs under
+	// lockLiveArtifact and sets requested_seq = current_seq at commit.
+	// Returns the row and the outcome (created, reminded, unchanged).
+	CreateOrRemindReviewRequest(ctx context.Context, req ReviewRequest, remindCooldown time.Duration, now time.Time, actor *Actor) (ReviewRequest, string, error)
+
+	// DismissReviewRequest transitions the caller's open review request on
+	// artifactID to dismissed using a CAS on state='open'. Returns
+	// ErrNotFound when no open request exists, and ErrRequestClosed when
+	// the CAS loses to a concurrent close.
+	DismissReviewRequest(ctx context.Context, artifactID, reviewerKind, reviewerRef, responseNote string, now time.Time, actor *Actor) (ReviewRequest, error)
+
+	// GetOpenReviewRequest returns the open review request for
+	// (artifactID, reviewerKind, reviewerRef), or ErrNotFound.
+	GetOpenReviewRequest(ctx context.Context, artifactID, reviewerKind, reviewerRef string) (*ReviewRequest, error)
 }
 
 // TransferOptions qualifies Store.TransferOwner.
@@ -786,6 +804,14 @@ type CandidateQuery struct {
 	OwnedOnly bool
 	// ReviewPending keeps only rows whose current version is a review.
 	ReviewPending bool
+	// RequestedOnly keeps only rows with an open review request addressed to
+	// the caller (when ReviewRequestsEnabled is true; matches nothing when
+	// false).
+	RequestedOnly bool
+	// ReviewRequestsEnabled reports whether hub.artifacts_review_requests is
+	// enabled for this query. When false, RequestedOnly and is:requested match
+	// nothing and Candidate.RequestedByMe is always false.
+	ReviewRequestsEnabled bool
 	// HomeScope, when set, keeps only rows homed in this project, and
 	// with ScopeShares also those carrying an unexpired read, write or
 	// admin scope grant to it. It narrows the other conditions and never
@@ -837,7 +863,8 @@ type Position struct {
 // current version ("" when it has none).
 type Candidate struct {
 	Artifact
-	CurrentKind string
+	CurrentKind   string
+	RequestedByMe bool
 }
 
 // NewStore returns the Store for db. driverName selects the SQL dialect:
