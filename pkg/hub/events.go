@@ -245,6 +245,9 @@ type AgentStatusEvent struct {
 	// must reach the web to clear a merged size.
 	HarnessVendor string `json:"harnessVendor,omitempty"`
 	ModelSize     string `json:"modelSize"`
+	// Forced is true when this status event records a forced manual suspend
+	// that overrode an active never-suspend policy.
+	Forced bool `json:"forced,omitempty"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -738,6 +741,9 @@ func agentStatusVisiblyChanged(before, after *store.Agent) bool {
 // regression signal.
 func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agent) {
 	evt := agentStatusEvent(agent, time.Now())
+	if lifecycleSuspendForcedFromContext(ctx) {
+		evt.Forced = true
+	}
 	sink := p.statusSink(ctx)
 	sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {

@@ -188,6 +188,12 @@ const (
 	// Details carry every missing scope under "scopes" (and the first under
 	// "scope").
 	ErrCodeMissingScope = "missing_scope"
+	// ErrCodeAgentNeverSuspend is the hub's 409 code when a manual suspend
+	// targets an agent with an active never-suspend policy without force=true.
+	ErrCodeAgentNeverSuspend = "agent_never_suspend"
+	// ErrCodeForceSuspendForbidden is the hub's 403 code when an agent
+	// principal attempts a forced suspend of a never-suspend agent.
+	ErrCodeForceSuspendForbidden = "force_suspend_forbidden"
 )
 
 // errorResponse matches the API error response format.
@@ -339,6 +345,26 @@ func IsConflictError(err error) bool {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.IsConflict()
+	}
+	return false
+}
+
+// IsAgentNeverSuspendError reports whether err is a Hub 409 refusal stating
+// that the agent has an active never-suspend policy and requires force=true.
+func IsAgentNeverSuspendError(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusConflict && apiErr.Code == ErrCodeAgentNeverSuspend
+	}
+	return false
+}
+
+// IsForceSuspendForbiddenError reports whether err is a Hub 403 refusal stating
+// that only human principals may force-suspend a never-suspend agent.
+func IsForceSuspendForbiddenError(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusForbidden && apiErr.Code == ErrCodeForceSuspendForbidden
 	}
 	return false
 }

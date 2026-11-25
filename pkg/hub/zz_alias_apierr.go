@@ -59,6 +59,8 @@ const (
 	ErrCodeEmptyRoleSet                     = apierr.ErrCodeEmptyRoleSet
 	ErrCodeExperimentDisabled               = apierr.ErrCodeExperimentDisabled
 	ErrCodeSuspendPolicyCreateOnly          = apierr.ErrCodeSuspendPolicyCreateOnly
+	ErrCodeAgentNeverSuspend                = apierr.ErrCodeAgentNeverSuspend
+	ErrCodeForceSuspendForbidden            = apierr.ErrCodeForceSuspendForbidden
 	ErrCodeGitHubNotAssociated              = apierr.ErrCodeGitHubNotAssociated
 	ErrCodeHarnessConfigNotFound            = apierr.ErrCodeHarnessConfigNotFound
 	ErrCodeHarnessCredentialsMissing        = apierr.ErrCodeHarnessCredentialsMissing

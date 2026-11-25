@@ -40,9 +40,12 @@ const thirdPartyReasonMaxRunes = 200
 // "suspend", and "stop-all" lifecycle actions.
 type AgentLifecycleStopRequest struct {
 	Reason string `json:"reason,omitempty"`
+	Force  bool   `json:"force,omitempty"`
 }
 
 type lifecycleStopReasonKey struct{}
+type lifecycleSuspendForceKey struct{}
+type lifecycleSuspendForcedKey struct{}
 
 func withLifecycleStopReason(ctx context.Context, reason string) context.Context {
 	if reason == "" {
@@ -61,17 +64,51 @@ func lifecycleStopReasonFromContext(ctx context.Context) string {
 	return ""
 }
 
-// parseLifecycleStopReason extracts an optional reason from a stop, suspend,
-// or stop-all request body. Missing, empty, or unreadable bodies return "".
-func parseLifecycleStopReason(r *http.Request) string {
+// withLifecycleSuspendForce records that the HTTP suspend caller set force=true.
+func withLifecycleSuspendForce(ctx context.Context) context.Context {
+	return context.WithValue(ctx, lifecycleSuspendForceKey{}, true)
+}
+
+func lifecycleSuspendForceFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(lifecycleSuspendForceKey{}).(bool)
+	return v
+}
+
+// withLifecycleSuspendForced records that a suspend actually overrode an active
+// never-suspend policy so downstream status events and notifications carry
+// forced=true.
+func withLifecycleSuspendForced(ctx context.Context) context.Context {
+	return context.WithValue(ctx, lifecycleSuspendForcedKey{}, true)
+}
+
+func lifecycleSuspendForcedFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(lifecycleSuspendForcedKey{}).(bool)
+	return v
+}
+
+// parseLifecycleStopRequest extracts the optional stop/suspend request body.
+// Missing, empty, or unreadable bodies return a zero value.
+func parseLifecycleStopRequest(r *http.Request) AgentLifecycleStopRequest {
 	if r == nil || r.Body == nil || r.ContentLength == 0 {
-		return ""
+		return AgentLifecycleStopRequest{}
 	}
 	var req AgentLifecycleStopRequest
 	if err := readJSON(r, &req); err != nil {
-		return ""
+		return AgentLifecycleStopRequest{}
 	}
-	return req.Reason
+	return req
+}
+
+// parseLifecycleStopReason extracts an optional reason from a stop, suspend,
+// or stop-all request body. Missing, empty, or unreadable bodies return "".
+func parseLifecycleStopReason(r *http.Request) string {
+	return parseLifecycleStopRequest(r).Reason
 }
 
 // isRealThirdPartyLifecycleTransition reports whether applying action to an
@@ -168,6 +205,7 @@ func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *sto
 				AgentID:   agent.ID,
 				ProjectID: agent.ProjectID,
 				Phase:     phase,
+				Forced:    lifecycleSuspendForcedFromContext(persistCtx),
 			}
 
 			notif := nd.storeNotification(persistCtx, sub, evt, message)
