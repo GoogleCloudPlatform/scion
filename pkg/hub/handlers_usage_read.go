@@ -179,7 +179,7 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		return
 	}
 
-	targetRunID, currentRunAttr := resolveCurrentRunForUsage(agent, runs)
+	targetRunID, _ := resolveCurrentRunForUsage(agent, runs)
 	var currentRunHasEvents bool
 	if targetRunID != "" {
 		currentRunHasEvents, err = s.store.HasUsageEventsForRun(ctx, agent.ID, targetRunID)
@@ -189,7 +189,7 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		}
 	}
 
-	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, presence, runs, targetRunID, currentRunAttr, meterRows, currentRunHasEvents)
+	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, presence, runs, targetRunID, meterRows, currentRunHasEvents)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -281,13 +281,13 @@ func parseUsageWindow(sinceRaw, untilRaw string, now time.Time) (time.Time, time
 	}
 
 	if since.After(snappedUntil) {
-		return time.Time{}, time.Time{}, fmt.Errorf("since (%s) must not be after until (%s)", since.Format(time.RFC3339), until.Format(time.RFC3339))
+		return time.Time{}, time.Time{}, fmt.Errorf("since (%s) must not be after until (%s)", since.UTC().Format(time.RFC3339), until.UTC().Format(time.RFC3339))
 	}
 
 	// Snap to inclusive UTC day boundaries to match usage_rollups_daily grain.
 	snappedSince := time.Date(since.Year(), since.Month(), since.Day(), 0, 0, 0, 0, time.UTC)
 	if snappedSince.After(snappedUntil) {
-		return time.Time{}, time.Time{}, fmt.Errorf("since (%s) must not be after until (%s)", snappedSince.Format(time.RFC3339), snappedUntil.Format(time.RFC3339))
+		return time.Time{}, time.Time{}, fmt.Errorf("since (%s) must not be after until (%s)", snappedSince.UTC().Format(time.RFC3339), snappedUntil.UTC().Format(time.RFC3339))
 	}
 	return snappedSince, snappedUntil, nil
 }
@@ -370,7 +370,6 @@ func buildAgentUsageResponse(
 	presence []*store.UsageTokenPresence,
 	runs []*store.RunAttribution,
 	targetRunID string,
-	currentRunAttr *store.RunAttribution,
 	meterRows []*store.MeterHealth,
 	currentRunHasEvents bool,
 ) AgentUsageResponse {
@@ -539,7 +538,6 @@ func buildAgentUsageResponse(
 	}
 
 	status := deriveMeasurementStatus(measurementStatusInput{
-		RunAttribution:    currentRunAttr,
 		MeterHealth:       currentRunMeterRows,
 		HasRunUsageEvents: hasRunData,
 		DBNow:             dbNow,
@@ -641,7 +639,6 @@ func resolveNullableTokens(
 // Kept in a single struct + single function so P2 can extend it with usage.yaml
 // harness capability metadata without changing call sites.
 type measurementStatusInput struct {
-	RunAttribution    *store.RunAttribution
 	MeterHealth       []*store.MeterHealth
 	HasRunUsageEvents bool
 	DBNow             time.Time

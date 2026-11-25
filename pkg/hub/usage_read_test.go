@@ -366,7 +366,6 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 
 	// Last receipt 4m ago (> 3 * 60s = 180s) on an open meter -> stale.
 	assert.Equal(t, MeasurementStatusStale, deriveMeasurementStatus(measurementStatusInput{
-		RunAttribution: &store.RunAttribution{RunID: "r1", CreatedAt: dbNow.Add(-10 * time.Minute)},
 		MeterHealth: []*store.MeterHealth{{
 			RunID:         "r1",
 			LastReceiptAt: dbNow.Add(-4 * time.Minute),
@@ -378,7 +377,6 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 
 	// Fresh receipt 30s ago on an open meter with events -> measured.
 	assert.Equal(t, MeasurementStatusMeasured, deriveMeasurementStatus(measurementStatusInput{
-		RunAttribution: &store.RunAttribution{RunID: "r1", CreatedAt: dbNow.Add(-10 * time.Minute)},
 		MeterHealth: []*store.MeterHealth{{
 			RunID:         "r1",
 			LastReceiptAt: dbNow.Add(-30 * time.Second),
@@ -390,7 +388,6 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 
 	// Cleanly closed run (final_state="final") with old receipt -> stays measured, never stale.
 	assert.Equal(t, MeasurementStatusMeasured, deriveMeasurementStatus(measurementStatusInput{
-		RunAttribution: &store.RunAttribution{RunID: "r1", CreatedAt: dbNow.Add(-10 * time.Minute)},
 		MeterHealth: []*store.MeterHealth{{
 			RunID:         "r1",
 			LastReceiptAt: dbNow.Add(-10 * time.Minute),
@@ -606,7 +603,7 @@ func TestAgentUsage_VerticalSliceIngestReplayAndRead(t *testing.T) {
 		ProjectID:     proj.ID,
 		OwnerID:       owner.ID,
 		CreatedBy:     owner.ID,
-		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "claude"},
 		Template:      "default",
 		Phase:         string(state.PhaseRunning),
 	}
@@ -680,6 +677,56 @@ func TestAgentUsage_VerticalSliceIngestReplayAndRead(t *testing.T) {
 
 	require.Len(t, resp.ByModel, 1)
 	assert.Equal(t, "claude-sonnet-4-6", resp.ByModel[0].Model)
+	assert.Equal(t, "claude", resp.ByModel[0].Harness)
 	require.NotNil(t, resp.ByModel[0].Tokens.SummableTokens)
 	assert.Equal(t, int64(18), *resp.ByModel[0].Tokens.SummableTokens)
+}
+
+func TestAgentUsageRead_ResolveCurrentRunNoCrossRunFallbackAndModelTieBreak(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// (a) Regression test: when agent.RunID is set but has no matching
+	// run_attribution row, resolveCurrentRunForUsage must NOT fall back to a
+	// different run's attribution.
+	olderAttr := &store.RunAttribution{
+		RunID:     "run-old",
+		AgentID:   "ag-1",
+		ProjectID: "proj-1",
+		Harness:   "claude",
+		CreatedAt: now.Add(-1 * time.Hour),
+	}
+	ag := &store.Agent{
+		ID:        "ag-1",
+		ProjectID: "proj-1",
+		RunID:     "run-current-missing-attr",
+	}
+	gotRunID, gotAttr := resolveCurrentRunForUsage(ag, []*store.RunAttribution{olderAttr})
+	assert.Equal(t, "run-current-missing-attr", gotRunID)
+	assert.Nil(t, gotAttr, "must not fall back to another run's attribution when agent.RunID is set")
+
+	// When agent.RunID matches a row in runs, return that exact attribution.
+	agMatch := &store.Agent{ID: "ag-1", ProjectID: "proj-1", RunID: "run-old"}
+	gotRunID, gotAttr = resolveCurrentRunForUsage(agMatch, []*store.RunAttribution{olderAttr})
+	assert.Equal(t, "run-old", gotRunID)
+	assert.Equal(t, olderAttr, gotAttr)
+
+	// (b) Sort tie-break test: equal summable tokens, equal calls, and equal
+	// model must break ties deterministically on Harness ASC, then UsageSource ASC
+	// (including "" for unknown harness per NOT NULL DEFAULT '' schema).
+	rollups := []*store.UsageRollupDaily{
+		{Model: "claude-sonnet-4-6", Harness: "codex", UsageSource: store.UsageSourceNative, Calls: 2, Input: 10, Output: 5, Events: 2},
+		{Model: "claude-sonnet-4-6", Harness: "claude", UsageSource: store.UsageSourceNative, Calls: 2, Input: 10, Output: 5, Events: 2},
+		{Model: "claude-sonnet-4-6", Harness: "claude", UsageSource: store.UsageSourceHooks, Calls: 2, Input: 10, Output: 5, Events: 2},
+		{Model: "claude-sonnet-4-6", Harness: "", UsageSource: store.UsageSourceNative, Calls: 2, Input: 10, Output: 5, Events: 2},
+	}
+	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, nil, ag.RunID, nil, false)
+	require.Len(t, resp.ByModel, 4)
+	assert.Equal(t, "", resp.ByModel[0].Harness)
+	assert.Equal(t, store.UsageSourceNative, resp.ByModel[0].UsageSource)
+	assert.Equal(t, "claude", resp.ByModel[1].Harness)
+	assert.Equal(t, store.UsageSourceHooks, resp.ByModel[1].UsageSource)
+	assert.Equal(t, "claude", resp.ByModel[2].Harness)
+	assert.Equal(t, store.UsageSourceNative, resp.ByModel[2].UsageSource)
+	assert.Equal(t, "codex", resp.ByModel[3].Harness)
+	assert.Equal(t, store.UsageSourceNative, resp.ByModel[3].UsageSource)
 }
