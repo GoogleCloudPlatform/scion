@@ -108,9 +108,11 @@
         "kind": "enum",
         "exec": "client",
         "enum": [
+          "hub",
           "project",
-          "branch",
-          "lineage",
+          "tree",
+          "direct",
+          "owner",
           "none",
           "can_message",
           "cannot_message"
@@ -205,9 +207,11 @@
         "kind": "enum",
         "exec": "client",
         "enum": [
+          "hub",
           "project",
-          "branch",
-          "lineage",
+          "tree",
+          "direct",
+          "owner",
           "none"
         ],
         "multiValued": false
@@ -355,8 +359,9 @@
         "enum": [
           "hub",
           "project",
-          "branch",
-          "lineage",
+          "tree",
+          "direct",
+          "owner",
           "none",
           "can_message",
           "cannot_message"

@@ -695,12 +695,10 @@ export class ScionPageAgents extends LitElement {
           migrated.push(`phase:${storedPhase}`);
         }
         if (
-          storedMode === 'project' ||
-          storedMode === 'branch' ||
-          storedMode === 'lineage' ||
-          storedMode === 'none' ||
-          storedMode === 'can_message' ||
-          storedMode === 'cannot_message'
+          storedMode &&
+          (storedMode === 'can_message' ||
+            storedMode === 'cannot_message' ||
+            Object.hasOwn(MESSAGE_MODE_DISPLAY, storedMode))
         ) {
           migrated.push(`mode:${storedMode}`);
         }

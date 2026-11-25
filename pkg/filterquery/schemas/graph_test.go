@@ -45,7 +45,7 @@ func TestGraphSchemaParse(t *testing.T) {
 		"phase:running",
 		"harness:antigravity",
 		"activity:working,blocked",
-		"mode:branch",
+		"mode:direct",
 		"project:demo template:developer -label:tmp",
 	} {
 		q, err := filterquery.Parse(input, schemas.Graph.HasKey)

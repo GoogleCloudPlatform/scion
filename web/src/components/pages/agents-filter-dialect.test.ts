@@ -156,7 +156,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
   it('retires old mode dropdown and migrates scope/mode from localStorage when dialect is on', async () => {
     setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     localStorage.setItem('scion-scope-agents', 'mine');
-    localStorage.setItem('scion-filter-agents-mode', 'lineage');
+    localStorage.setItem('scion-filter-agents-mode', 'owner');
 
     const el = document.createElement('scion-page-agents') as ScionPageAgents;
     el.pageData = {
@@ -170,10 +170,10 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
 
     expect(localStorage.getItem('scion-scope-agents')).toBeNull();
     expect(localStorage.getItem('scion-filter-agents-mode')).toBeNull();
-    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:mine mode:lineage');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:mine mode:owner');
 
     // Mode dropdown is retired; only is:mine is sent to hub (mode: stripped).
-    expect(el.shadowRoot?.querySelector('sl-menu-item[value="lineage"]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('sl-menu-item[value="owner"]')).toBeNull();
     const agentFetches = fetchUrls.filter((u) => u.includes('/api/v1/agents'));
     expect(agentFetches.length).toBeGreaterThan(0);
     expect(agentFetches.some((u) => u.includes('q=is%3Amine') && !u.includes('mode'))).toBe(true);
@@ -546,7 +546,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
       template: 'developer',
       phase: 'running',
       ownerId,
-      messageMode: 'lineage',
+      messageMode: 'owner',
     });
 
     const user = { id: 'me-id', email: 'me@example.com', name: 'Me', role: 'admin' as const };
@@ -623,7 +623,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     elFit.remove();
 
     // (C) agents.ts drainGlobalAgents isMember (SSE create during in-flight drain)
-    window.history.replaceState(null, '', '/agents?q=mode%3Alineage%20owner%3Abob%40example.com');
+    window.history.replaceState(null, '', '/agents?q=mode%3Aowner%20owner%3Abob%40example.com');
     let resolveDrain!: (r: Response) => void;
     vi.stubGlobal(
       'fetch',
@@ -718,7 +718,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     window.history.replaceState(
       null,
       '',
-      '/projects/proj-123?q=mode%3Alineage%20owner%3Abob%40example.com'
+      '/projects/proj-123?q=mode%3Aowner%20owner%3Abob%40example.com'
     );
     let resolveProjDrain!: (r: Response) => void;
     vi.stubGlobal(
@@ -761,7 +761,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     const makeModeAgent = (
       id: string,
       projectId: string,
-      messageMode: 'lineage' | 'branch'
+      messageMode: 'owner' | 'direct'
     ): Agent => ({
       id,
       name: `agent-${id}`,
@@ -788,13 +788,13 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
       );
     };
 
-    // 1. Global agents page: ?q=mode:lineage -> commit mode:branch
-    window.history.replaceState(null, '', '/agents?q=mode%3Alineage');
+    // 1. Global agents page: ?q=mode:owner -> commit mode:direct
+    window.history.replaceState(null, '', '/agents?q=mode%3Aowner');
     const globalFetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
-            agents: [makeModeAgent('a-lineage-0', 'proj-1', 'lineage')],
+            agents: [makeModeAgent('a-owner-0', 'proj-1', 'owner')],
             complete: true,
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -811,7 +811,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     const fetchCountBefore = globalFetch.mock.calls.length;
     const box1 = agentsEl.shadowRoot?.querySelector('scion-filter-box');
     const input1 = box1?.shadowRoot?.querySelector('input') as HTMLInputElement;
-    input1.value = 'mode:branch';
+    input1.value = 'mode:direct';
     input1.dispatchEvent(new Event('input'));
     input1.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await agentsEl.updateComplete;
@@ -820,23 +820,23 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(globalFetch.mock.calls.length).toBe(fetchCountBefore);
 
     const globalWin = (agentsEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
-    const liveBranch1 = makeModeAgent('live-branch-1', 'proj-1', 'branch');
-    const liveLineage1 = makeModeAgent('live-lineage-1', 'proj-1', 'lineage');
-    expect(globalWin.passesCommittedLabel(liveBranch1)).toBe(true);
-    expect(globalWin.passesCommittedLabel(liveLineage1)).toBe(false);
+    const liveDirect1 = makeModeAgent('live-direct-1', 'proj-1', 'direct');
+    const liveOwner1 = makeModeAgent('live-owner-1', 'proj-1', 'owner');
+    expect(globalWin.passesCommittedLabel(liveDirect1)).toBe(true);
+    expect(globalWin.passesCommittedLabel(liveOwner1)).toBe(false);
 
-    dispatchSseCreate(liveBranch1);
-    dispatchSseCreate(liveLineage1);
+    dispatchSseCreate(liveDirect1);
+    dispatchSseCreate(liveOwner1);
     expect((agentsEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toContain(
-      'live-branch-1'
+      'live-direct-1'
     );
     expect((agentsEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).not.toContain(
-      'live-lineage-1'
+      'live-owner-1'
     );
     agentsEl.remove();
 
-    // 2. Project detail page: ?q=mode:lineage -> commit mode:branch
-    window.history.replaceState(null, '', '/projects/proj-123?q=mode%3Alineage');
+    // 2. Project detail page: ?q=mode:owner -> commit mode:direct
+    window.history.replaceState(null, '', '/projects/proj-123?q=mode%3Aowner');
     const projFetch = vi.fn((input: RequestInfo | URL) => {
       const url =
         typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -844,7 +844,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              agents: [makeModeAgent('p-lineage-0', 'proj-123', 'lineage')],
+              agents: [makeModeAgent('p-owner-0', 'proj-123', 'owner')],
               complete: true,
             }),
             { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -869,7 +869,7 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     const projFetchBefore = projFetch.mock.calls.length;
     const box2 = projEl.shadowRoot?.querySelector('scion-filter-box');
     const input2 = box2?.shadowRoot?.querySelector('input') as HTMLInputElement;
-    input2.value = 'mode:branch';
+    input2.value = 'mode:direct';
     input2.dispatchEvent(new Event('input'));
     input2.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await projEl.updateComplete;
@@ -877,18 +877,18 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(projFetch.mock.calls.length).toBe(projFetchBefore);
 
     const projWin = (projEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
-    const liveBranch2 = makeModeAgent('live-proj-branch-1', 'proj-123', 'branch');
-    const liveLineage2 = makeModeAgent('live-proj-lineage-1', 'proj-123', 'lineage');
-    expect(projWin.passesCommittedLabel(liveBranch2)).toBe(true);
-    expect(projWin.passesCommittedLabel(liveLineage2)).toBe(false);
+    const liveDirect2 = makeModeAgent('live-proj-direct-1', 'proj-123', 'direct');
+    const liveOwner2 = makeModeAgent('live-proj-owner-1', 'proj-123', 'owner');
+    expect(projWin.passesCommittedLabel(liveDirect2)).toBe(true);
+    expect(projWin.passesCommittedLabel(liveOwner2)).toBe(false);
 
-    dispatchSseCreate(liveBranch2);
-    dispatchSseCreate(liveLineage2);
+    dispatchSseCreate(liveDirect2);
+    dispatchSseCreate(liveOwner2);
     expect((projEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).toContain(
-      'live-proj-branch-1'
+      'live-proj-direct-1'
     );
     expect((projEl as unknown as { agents: Agent[] }).agents.map((a) => a.id)).not.toContain(
-      'live-proj-lineage-1'
+      'live-proj-owner-1'
     );
     projEl.remove();
   });

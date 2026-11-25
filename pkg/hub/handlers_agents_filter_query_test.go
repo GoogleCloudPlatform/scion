@@ -146,7 +146,7 @@ func TestListAgents_FilterQuery_StructuredAndErrorsAndPagination(t *testing.T) {
 	assert.Equal(t, float64(12), enumResp.Error.Details["length"])
 
 	// Client-only key (mode:) -> 400 invalid_filter_query.
-	recMode := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("mode:lineage"), nil)
+	recMode := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("mode:owner"), nil)
 	require.Equal(t, http.StatusBadRequest, recMode.Code)
 	var modeResp ErrorResponse
 	require.NoError(t, json.Unmarshal(recMode.Body.Bytes(), &modeResp))
@@ -364,7 +364,7 @@ func TestListProjectAgents_FilterQuery(t *testing.T) {
 	assert.Equal(t, 1, respOn.TotalCount)
 
 	// Client-only key mode: is rejected with 400.
-	recMode := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("mode:lineage"), nil)
+	recMode := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("mode:owner"), nil)
 	require.Equal(t, http.StatusBadRequest, recMode.Code)
 
 	// project: is not a known key on project_agents, so it searches as text and never widens to projB.

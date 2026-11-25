@@ -41,7 +41,7 @@ Text search matches agent **name** or **slug** (case-insensitive substring).
 | `template` | string | template name (case-insensitive) | server | `template:developer` | Agent template name |
 | `owner` | ref | user ID, email, or `me` | server | `owner:me` | Owner ID, email, or 'me' |
 | `is` | flag_set | `mine`, `shared` (mutually exclusive) | server | `is:mine`, `is:shared` | Scope filter (mine or shared) |
-| `mode` | enum | `project`, `branch`, `lineage`, `none`, `can_message`, `cannot_message` | client | `mode:lineage`, `mode:can_message` | Messaging mode or reachability (client-side) |
+| `mode` | enum | `hub`, `project`, `tree`, `direct`, `owner`, `none`, `can_message`, `cannot_message` | client | `mode:owner`, `mode:can_message` | Messaging mode or reachability (client-side) |
 
 ### `project_agents` (Project agents list)
 
@@ -56,7 +56,7 @@ Text search matches agent **name** or **slug** (case-insensitive substring). Sco
 | `broker` | ref | runtime broker name or ID | server | `broker:local-docker` | Runtime broker name or ID |
 | `template` | string | template name (case-insensitive) | server | `template:developer` | Agent template name |
 | `owner` | ref | user ID, email, or `me` | server | `owner:me` | Owner ID, email, or 'me' |
-| `mode` | enum | `project`, `branch`, `lineage`, `none` | client | `mode:lineage` | Messaging mode (client-side) |
+| `mode` | enum | `hub`, `project`, `tree`, `direct`, `owner`, `none` | client | `mode:owner` | Messaging mode (client-side) |
 
 ### `artifacts` (Artifacts list)
 
@@ -95,4 +95,4 @@ Text search matches agent **name** or **slug** (case-insensitive substring). Non
 | `project` | ref | project slug, name, or ID | client | `project:demo` | Project slug, name, or ID |
 | `template` | string | template name | client | `template:developer` | Agent template name |
 | `harness` | string | harness config name | client | `harness:antigravity` | Harness config name |
-| `mode` | enum | `hub`, `project`, `branch`, `lineage`, `none`, `can_message`, `cannot_message` | client | `mode:branch`, `mode:can_message` | Messaging mode or messageability |
+| `mode` | enum | `hub`, `project`, `tree`, `direct`, `owner`, `none`, `can_message`, `cannot_message` | client | `mode:direct`, `mode:can_message` | Messaging mode or messageability |
