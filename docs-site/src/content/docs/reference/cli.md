@@ -1809,7 +1809,7 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
 - `scion runtime-broker register`: Register this host as a Runtime Broker with the Hub. The local broker server must be running. Registering from the global context (`--global`, or outside any project) never offers to link the `global` pseudo-project or add the broker as its provider, so no `global` project is created on the Hub; use `provide --project <name>` to provide for a Hub project. Requires the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)). Each Hub connection is saved to `~/.scion/hub-credentials/<name>.json` (`hub_connections` is not written into settings files).
     - `--name <name>`: Name for this Hub connection. Default: derived from the Hub endpoint.
     - `--broker-name <name>`: Name this broker registers under on the Hub, saved to global settings. Default: the saved name, else the hostname. The Hub keeps the name of a broker that is already registered; to change it, deregister first. Restart the broker afterwards so it uses the new name locally.
-    - `--force`: Register again even if already registered. This also issues a new broker secret.
+    - `--force`: Register again even if already registered locally, or while the broker is online on the Hub. This also issues a new broker secret. Without it, re-registering a broker that is online on the Hub (`409 broker_online`) asks for confirmation on a terminal and fails without one, even with `--yes` (see [Re-registering a broker that is online](/scion/hosted/ha/runtime-broker/#re-registering-a-broker-that-is-online)).
     - `--auto-provide`: Automatically add this broker as a provider for new projects.
     - `--admin-managed`: Register this Runtime Broker as admin-managed (works for both host registration and `--instance` flat Runtime Broker registration; requires `broker.manage` with an interactive sign-in or dev credential — not a user access token — and experiment `hub.admin_managed_brokers`; required for new Runtime Brokers when `broker_policy.admin_managed_only` is active).
     - `--transport-mode <iap|cloudrun_invoker>`, `--transport-audience <audience>`: Transport auth for a Hub behind IAP or Cloud Run, saved to the credentials file (see [Transport Auth for IAP-Protected Hubs](/scion/hosted/ha/runtime-broker/#transport-auth-for-iap-protected-hubs)).
@@ -2025,6 +2025,17 @@ available inside agent containers.
   and `profiles` placement settings and existing agents whose stored pod placement disagrees
   with the resolved operator policy, the deprecated server hub endpoint source on hosts
   configured as a server, telemetry, container images, broker credentials).
+  - Container images: on Docker or Podman (not Kubernetes, Cloud Run or the Apple container
+    runtime), doctor also inspects each local image that matches a configured harness image
+    (from the harness-config directories and the `harness_configs` and harness override settings,
+    with `image_registry` and `image_tag` applied; the registry prefix is ignored when matching).
+    `container-image-capabilities[<image>]` warns when the image's `scion.sciontool.capabilities`
+    label does not list `netns-setup`: with GCP metadata mode `block` or `assign` on Docker or rootful
+    Podman, the Runtime Broker cannot confirm support before start, and the start fails if the
+    image's sciontool lacks it. `container-image-version[<image>]` is an informational result when
+    the image's `org.opencontainers.image.version` or `org.opencontainers.image.revision` label
+    differs from this `scion` binary's version or commit; it is skipped for development builds.
+    Rebuild or pull an agent image that matches the binary to clear either.
 - **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
   data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
   every "Needs attention" item in the Hub's order (critical items as failures, warnings as
