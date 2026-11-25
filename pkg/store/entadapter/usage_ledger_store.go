@@ -620,7 +620,7 @@ func (s *UsageLedgerStore) UpsertMeterHealth(ctx context.Context, mh *store.Mete
 		return fmt.Errorf("%w: agent_id, run_id, and producer_epoch are required", store.ErrInvalidInput)
 	}
 	run := func(client *ent.Client) error {
-		return s.upsertMeterHealthTx(ctx, client, mh, 0, nil)
+		return s.upsertMeterHealthTx(ctx, client, mh, 0, nil, false)
 	}
 	if s.inTx {
 		return run(s.client)
@@ -639,15 +639,18 @@ func (s *UsageLedgerStore) UpsertMeterHealth(ctx context.Context, mh *store.Mete
 // upsertMeterHealthTx performs a race-safe monotonic upsert of meter_health
 // inside the caller's transaction. When anomalousDelta > 0, it is added to
 // existing.AnomalousCount instead of taking max(existing, mh.AnomalousCount).
-// When receivedSeqs is non-empty, sequence continuity (last_contiguous_seq,
-// max_seq_seen, missing_ranges) is updated from those exact received sequence
-// numbers as well as mh's fields.
+// When ingestMode is true (called from IngestUsageBatch), the Hub is the sole
+// authority on sequence gaps and contiguity: (existingMax, maxSeq] minus
+// receivedSeqs is always added to missing_ranges, producer-supplied
+// missing_ranges and last_contiguous_seq are ignored, and last_contiguous_seq
+// advances strictly through receivedSeqs.
 func (s *UsageLedgerStore) upsertMeterHealthTx(
 	ctx context.Context,
 	client *ent.Client,
 	mh *store.MeterHealth,
 	anomalousDelta int64,
 	receivedSeqs []int64,
+	ingestMode bool,
 ) error {
 	lastReceipt := mh.LastReceiptAt
 	if lastReceipt.IsZero() {
@@ -687,10 +690,16 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 	}
 
 	if existing == nil {
-		initContig, initMax, initMissing := advanceSeqState(
-			0, 0, nil,
-			mh.LastContiguousSeq, mh.MaxSeqSeen, mh.MissingRanges, receivedSeqs,
-		)
+		var initContig, initMax int64
+		var initMissing []store.SeqRange
+		if ingestMode {
+			initContig, initMax, initMissing = advanceIngestSeqState(0, 0, nil, mh.MaxSeqSeen, receivedSeqs)
+		} else {
+			initContig, initMax, initMissing = advanceSeqState(
+				0, 0, nil,
+				mh.LastContiguousSeq, mh.MaxSeqSeen, mh.MissingRanges, receivedSeqs,
+			)
+		}
 		initAnom := mh.AnomalousCount
 		if anomalousDelta > 0 {
 			initAnom = anomalousDelta
@@ -740,10 +749,19 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 	if lastReceipt.After(nextReceipt) {
 		nextReceipt = lastReceipt
 	}
-	nextContig, nextMax, nextMissing := advanceSeqState(
-		existing.LastContiguousSeq, existing.MaxSeqSeen, existing.MissingRanges,
-		mh.LastContiguousSeq, mh.MaxSeqSeen, mh.MissingRanges, receivedSeqs,
-	)
+	var nextContig, nextMax int64
+	var nextMissing []store.SeqRange
+	if ingestMode {
+		nextContig, nextMax, nextMissing = advanceIngestSeqState(
+			existing.LastContiguousSeq, existing.MaxSeqSeen, existing.MissingRanges,
+			mh.MaxSeqSeen, receivedSeqs,
+		)
+	} else {
+		nextContig, nextMax, nextMissing = advanceSeqState(
+			existing.LastContiguousSeq, existing.MaxSeqSeen, existing.MissingRanges,
+			mh.LastContiguousSeq, mh.MaxSeqSeen, mh.MissingRanges, receivedSeqs,
+		)
+	}
 
 	nextAnomalous := existing.AnomalousCount
 	if anomalousDelta > 0 {

@@ -729,3 +729,112 @@ func TestUsageIngest_RollupInt64OverflowSaturates(t *testing.T) {
 	assert.Equal(t, int64(1200), rollup.Events)
 	assert.Equal(t, int64(1200), rollup.Calls)
 }
+
+func TestMeterHealth_HubAuthorityIgnoresProducerMissingRanges(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "mh-hub-authority")
+	agentID := uuid.NewString()
+	t0 := time.Date(2026, 11, 25, 20, 0, 0, 0, time.UTC)
+
+	// Scenario A (RV1): state contiguous=2, max=2; heartbeat arrives with
+	// producer_seq=10 and producer-supplied missing=[3,4]. Hub must keep
+	// every unreceived sequence in 3..10 (including 5..10) in missing_ranges.
+	runA := "run-rv1-a-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runA, nil)
+	makeEv := func(runID, epoch string, seq int64) *store.UsageEvent {
+		ev := makeStoreUsageEvent("hub-test", fmt.Sprintf("%s-evt-%02d", runID, seq), runID, projectID, agentID, nil, seq, t0, 1, 1, 0, 0)
+		ev.ProducerEpoch = epoch
+		return ev
+	}
+
+	_, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{makeEv(runA, "ep-a", 1), makeEv(runA, "ep-a", 2)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runA,
+			ProducerEpoch: "ep-a",
+			LastReceiptAt: t0,
+			ProducerSeq:   2,
+			ReceivedSeqs:  []int64{1, 2},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runA,
+			ProducerEpoch: "ep-a",
+			LastReceiptAt: t0.Add(time.Second),
+			ProducerSeq:   10,
+			MissingRanges: []store.SeqRange{{Start: 3, End: 4}},
+		},
+	})
+	require.NoError(t, err)
+
+	mhsA, err := cs.GetMeterHealth(ctx, agentID, runA)
+	require.NoError(t, err)
+	require.Len(t, mhsA, 1)
+	assert.Equal(t, int64(2), mhsA[0].LastContiguousSeq)
+	assert.Equal(t, int64(10), mhsA[0].MaxSeqSeen)
+	assert.Equal(t, []store.SeqRange{{Start: 3, End: 10}}, mhsA[0].MissingRanges, "heartbeat with producer missing=[3,4] must still keep 3..10 (including 5..10) missing")
+
+	// Scenario B (RV1): from contiguous=4, max=10, missing=[5,10], a batch
+	// delivering {5} with producer-supplied missing=[3,4] must yield
+	// contiguous=5 and missing=[6,10] (never jumping contiguous to 10).
+	runB := "run-rv1-b-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runB, nil)
+
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events: []*store.UsageEvent{
+			makeEv(runB, "ep-b", 1),
+			makeEv(runB, "ep-b", 2),
+			makeEv(runB, "ep-b", 3),
+			makeEv(runB, "ep-b", 4),
+		},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runB,
+			ProducerEpoch: "ep-b",
+			LastReceiptAt: t0,
+			ProducerSeq:   10,
+			ReceivedSeqs:  []int64{1, 2, 3, 4},
+		},
+	})
+	require.NoError(t, err)
+
+	mhsB, err := cs.GetMeterHealth(ctx, agentID, runB)
+	require.NoError(t, err)
+	require.Len(t, mhsB, 1)
+	require.Equal(t, int64(4), mhsB[0].LastContiguousSeq)
+	require.Equal(t, []store.SeqRange{{Start: 5, End: 10}}, mhsB[0].MissingRanges)
+
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{makeEv(runB, "ep-b", 5)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runB,
+			ProducerEpoch: "ep-b",
+			LastReceiptAt: t0.Add(time.Second),
+			ProducerSeq:   10,
+			ReceivedSeqs:  []int64{5},
+			MissingRanges: []store.SeqRange{{Start: 3, End: 4}},
+		},
+	})
+	require.NoError(t, err)
+
+	mhsB, err = cs.GetMeterHealth(ctx, agentID, runB)
+	require.NoError(t, err)
+	require.Len(t, mhsB, 1)
+	assert.Equal(t, int64(5), mhsB[0].LastContiguousSeq, "contiguous must advance only to 5, never jumping over 6..10")
+	assert.Equal(t, int64(10), mhsB[0].MaxSeqSeen)
+	assert.Equal(t, []store.SeqRange{{Start: 6, End: 10}}, mhsB[0].MissingRanges, "producer missing=[3,4] must never erase Hub-recorded gap [6,10]")
+}

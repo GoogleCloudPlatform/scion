@@ -241,7 +241,7 @@ RETURNING event_id`)
 			SchemaDriftDetected:  mhUpd.SchemaDriftDetected,
 			FinalState:           mhUpd.FinalState,
 		}
-		if err := s.upsertMeterHealthTx(ctx, client, mh, anomalousDelta, mhUpd.ReceivedSeqs); err != nil {
+		if err := s.upsertMeterHealthTx(ctx, client, mh, anomalousDelta, mhUpd.ReceivedSeqs, true); err != nil {
 			return nil, err
 		}
 	}
@@ -617,6 +617,55 @@ DO UPDATE SET
 		}
 	}
 	return nil
+}
+
+// advanceIngestSeqState computes (last_contiguous_seq, max_seq_seen,
+// missing_ranges) for IngestUsageBatch where the Hub is the sole authority on
+// sequence gaps and contiguity (RV1):
+//   - Always adds (existingMax, nextMax] minus receivedSeqs to missing_ranges,
+//     regardless of any producer-supplied missing_ranges.
+//   - Producer-supplied missing_ranges and last_contiguous_seq are ignored so
+//     they can never shrink or close Hub-recorded gaps for unreceived seqs.
+//   - last_contiguous_seq advances strictly through received sequences.
+func advanceIngestSeqState(
+	existingContig, existingMax int64,
+	existingMissing []store.SeqRange,
+	producerSeq int64,
+	receivedSeqs []int64,
+) (nextContig, nextMax int64, nextMissing []store.SeqRange) {
+	nextContig = existingContig
+	nextMax = existingMax
+	if producerSeq > nextMax {
+		nextMax = producerSeq
+	}
+	for _, seq := range receivedSeqs {
+		if seq > nextMax {
+			nextMax = seq
+		}
+	}
+
+	cur := normalizeSeqRanges(existingMissing)
+	if nextMax > existingMax {
+		cur = normalizeSeqRanges(append(cur, store.SeqRange{Start: existingMax + 1, End: nextMax}))
+	}
+	if len(receivedSeqs) > 0 {
+		cur = subtractSeqsFromRanges(cur, receivedSeqs)
+	}
+	cur = pruneRangesAtOrBelow(cur, nextContig)
+
+	if len(receivedSeqs) > 0 && nextMax > nextContig {
+		if len(cur) == 0 {
+			nextContig = nextMax
+		} else if cur[0].Start-1 > nextContig {
+			nextContig = cur[0].Start - 1
+		}
+		cur = pruneRangesAtOrBelow(cur, nextContig)
+	}
+
+	if len(cur) == 0 {
+		return nextContig, nextMax, nil
+	}
+	return nextContig, nextMax, cur
 }
 
 // advanceSeqState computes the monotonic (last_contiguous_seq, max_seq_seen,
