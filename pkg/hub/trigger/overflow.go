@@ -77,13 +77,21 @@ const (
 	// DefaultOverflowUploadTimeout bounds pre-transaction object storage uploads.
 	DefaultOverflowUploadTimeout = 10 * time.Second
 
+	// DefaultOverflowTxTimeout bounds the post-upload ingress transaction
+	// (including BeginTx pool wait and LockTriggerQuota advisory lock wait) so
+	// the upload-to-commit window is explicitly bounded well below
+	// DefaultOverflowOrphanMinAge (10s + 60s = 70s << 5m).
+	DefaultOverflowTxTimeout = 60 * time.Second
+
 	// DefaultOverflowDownloadTimeout bounds object storage reads for delivery
 	// previews and maintenance/cleanup deletes.
 	DefaultOverflowDownloadTimeout = 10 * time.Second
 
 	// DefaultOverflowOrphanMinAge prevents the hourly orphan sweep from
-	// deleting an object whose ingress transaction is still in flight
-	// (strictly longer than worst-case upload-to-commit wait).
+	// deleting an object whose ingress transaction is still in flight.
+	// Invariant: DefaultOverflowOrphanMinAge MUST remain strictly greater than
+	// DefaultOverflowUploadTimeout + DefaultOverflowTxTimeout (currently 70s vs 5m)
+	// so an in-flight upload can never be swept before its transaction commits.
 	DefaultOverflowOrphanMinAge = 5 * time.Minute
 
 	// DefaultOverflowOrphanSweepBatch is the page size used when listing

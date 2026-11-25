@@ -2148,7 +2148,7 @@ func (s *TriggerStore) SumTriggerEventOverflowBytes(ctx context.Context, project
 	err = s.client.TriggerEvent.Query().
 		Where(
 			triggerevent.ProjectIDEQ(pid),
-			triggerevent.PayloadRefNEQ(""),
+			triggerevent.PayloadRefGT(""),
 			triggerevent.CreatedGTE(since.UTC()),
 		).
 		Aggregate(ent.As(ent.Sum(triggerevent.FieldPayloadBytes), "sum_payload_bytes")).
@@ -3523,7 +3523,7 @@ func (s *TriggerStore) PurgeOldTriggerHistoryWithPayloadRefs(ctx context.Context
 			triggerevent.CreatedLT(cutoff),
 		}
 		refs, err := c.TriggerEvent.Query().
-			Where(append(append([]predicate.TriggerEvent{}, evPreds...), triggerevent.PayloadRefNEQ(""))...).
+			Where(append(append([]predicate.TriggerEvent{}, evPreds...), triggerevent.PayloadRefGT(""))...).
 			Select(triggerevent.FieldPayloadRef).
 			Strings(ctx)
 		if err != nil {

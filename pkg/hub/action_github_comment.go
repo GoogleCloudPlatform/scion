@@ -417,6 +417,12 @@ func (a *githubCommentAction) Fire(
 			"project_id", req.ProjectID,
 			"event_id", req.Event.ID,
 			"error", renderErr)
+		if isPayloadOutOfLineRenderErr(renderErr) {
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusRefused,
+				Error:  triggertemplate.ErrPayloadOutOfLine.Error(),
+			}, nil
+		}
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusFailed,
 			Error:  "github comment failed",
@@ -684,6 +690,11 @@ type githubCommentAuditParams struct {
 
 // emitGitHubCommentAudit emits the content-free trigger.fire.github_comment
 // audit record (§7.1, §8.3). Comment bodies are never logged or audited.
+func isPayloadOutOfLineRenderErr(err error) bool {
+	var re *triggertemplate.RenderError
+	return errors.As(err, &re) && re.Reason == triggertemplate.ErrPayloadOutOfLine.Error()
+}
+
 func emitGitHubCommentAudit(ctx context.Context, p githubCommentAuditParams) {
 	attrs := []slog.Attr{
 		slog.String("event_type", githubCommentAuditEventType),
@@ -1031,6 +1042,10 @@ func (s *Server) postDispatchAgentAckComment(
 	}
 	renderedBody, _, renderErr := tmpl.Render(vars, da.payload.UntrustedVars)
 	if renderErr != nil {
+		if isPayloadOutOfLineRenderErr(renderErr) {
+			recordAckFailure(hubfire.FireStatusRefused, triggertemplate.ErrPayloadOutOfLine.Error())
+			return
+		}
 		recordAckFailure(hubfire.FireStatusRefused, "ackComment render failed")
 		return
 	}

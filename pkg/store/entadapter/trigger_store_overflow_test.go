@@ -18,6 +18,9 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
@@ -170,4 +174,103 @@ func TestTriggerEventOverflowStore_SumExistingAndPurge(t *testing.T) {
 	existingAfterB, err := cs.ExistingTriggerEventPayloadRefs(ctx, projB, []string{refLiveB})
 	require.NoError(t, err)
 	assert.True(t, existingAfterB[refLiveB])
+}
+
+// TestTriggerEventOverflowStore_SumUsesIndexOnPostgres verifies O-A:
+// SumTriggerEventOverflowBytes filters with payload_ref > ” so PostgreSQL uses
+// the (project_id, payload_ref) index instead of sequentially scanning inline rows.
+func TestTriggerEventOverflowStore_SumUsesIndexOnPostgres(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	dialect := client.Driver().Dialect()
+	t.Logf("dialect=%s", dialect)
+	cs := NewCompositeStore(client)
+
+	projID := uuid.NewString()
+	pid := uuid.MustParse(projID)
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projID, Name: "sum-idx", Slug: "sum-idx-" + projID[:8]}))
+	srcID := uuid.NewString()
+	now := time.Now().UTC()
+
+	inlineCount := 200
+	if dialect == "postgres" {
+		inlineCount = 20000
+	}
+	const overflowCount = 20
+	const overflowBytes = 100 * 1024
+
+	// Bulk-insert inline rows in batches of 500 for speed.
+	const batchSize = 500
+	for start := 0; start < inlineCount; start += batchSize {
+		end := min(start+batchSize, inlineCount)
+		builders := make([]*ent.TriggerEventCreate, 0, end-start)
+		for i := start; i < end; i++ {
+			builders = append(builders, client.TriggerEvent.Create().
+				SetID(uuid.New()).
+				SetProjectID(pid).
+				SetSourceKind(store.TriggerSourceKindWebhook).
+				SetSourceID(srcID).
+				SetType("webhook.inline").
+				SetSubject("webhook:"+srcID).
+				SetDedupKey(fmt.Sprintf("inline-%d", i)).
+				SetOccurredAt(now).
+				SetReceivedAt(now).
+				SetCreated(now).
+				SetPayload(`{"a":1}`).
+				SetPayloadRef("").
+				SetPayloadBytes(7).
+				SetStatus(store.TriggerEventStatusProcessed))
+		}
+		require.NoError(t, client.TriggerEvent.CreateBulk(builders...).Exec(ctx))
+	}
+
+	overflowBuilders := make([]*ent.TriggerEventCreate, 0, overflowCount)
+	for i := 0; i < overflowCount; i++ {
+		id := uuid.New()
+		overflowBuilders = append(overflowBuilders, client.TriggerEvent.Create().
+			SetID(id).
+			SetProjectID(pid).
+			SetSourceKind(store.TriggerSourceKindWebhook).
+			SetSourceID(srcID).
+			SetType("webhook.overflow").
+			SetSubject("webhook:"+srcID).
+			SetDedupKey(fmt.Sprintf("overflow-%d", i)).
+			SetOccurredAt(now).
+			SetReceivedAt(now).
+			SetCreated(now).
+			SetPayload("").
+			SetPayloadRef("trigger-events/"+projID+"/"+id.String()+".json").
+			SetPayloadBytes(overflowBytes).
+			SetStatus(store.TriggerEventStatusProcessed))
+	}
+	require.NoError(t, client.TriggerEvent.CreateBulk(overflowBuilders...).Exec(ctx))
+
+	sum, err := cs.SumTriggerEventOverflowBytes(ctx, projID, now.Add(-7*24*time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, int64(overflowCount*overflowBytes), sum)
+
+	if dialect != "postgres" {
+		return
+	}
+	dbDriver, ok := client.Driver().(interface{ DB() *sql.DB })
+	require.True(t, ok, "postgres driver must expose *sql.DB")
+	_, err = dbDriver.DB().ExecContext(ctx, "ANALYZE trigger_events")
+	require.NoError(t, err)
+
+	q := "EXPLAIN (ANALYZE, BUFFERS) SELECT SUM(payload_bytes) FROM trigger_events WHERE project_id = $1 AND payload_ref > '' AND created >= $2"
+	rows, err := dbDriver.DB().QueryContext(ctx, q, pid, now.Add(-7*24*time.Hour))
+	require.NoError(t, err)
+
+	var planLines []string
+	for rows.Next() {
+		var line string
+		require.NoError(t, rows.Scan(&line))
+		planLines = append(planLines, line)
+		t.Log(line)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	plan := strings.Join(planLines, "\n")
+	assert.Contains(t, plan, "triggerevent_project_id_payload_ref", "PG plan must use the (project_id, payload_ref) index")
+	assert.NotContains(t, plan, "Seq Scan on trigger_events", "PG plan must not sequentially scan trigger_events")
 }

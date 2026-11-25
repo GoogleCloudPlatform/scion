@@ -245,6 +245,7 @@ type IngressConfig struct {
 	Storage                    func() storage.Storage
 	MaxOverflowBytesPerProject int64
 	OverflowUploadTimeout      time.Duration
+	OverflowTxTimeout          time.Duration
 	LoadSecret                 SecretLoader
 	AuthorizeHubToken          HubTokenAuthorizer
 	ClientIP                   ClientIPFunc
@@ -268,6 +269,7 @@ type Ingress struct {
 	storageFn             func() storage.Storage
 	maxOverflowBytes      int64
 	overflowUploadTimeout time.Duration
+	overflowTxTimeout     time.Duration
 	loadSecret            SecretLoader
 	authorizeHubToken     HubTokenAuthorizer
 	clientIP              ClientIPFunc
@@ -340,6 +342,10 @@ func NewIngress(cfg IngressConfig) *Ingress {
 	if uploadTimeout <= 0 {
 		uploadTimeout = DefaultOverflowUploadTimeout
 	}
+	txTimeout := cfg.OverflowTxTimeout
+	if txTimeout <= 0 {
+		txTimeout = DefaultOverflowTxTimeout
+	}
 	return &Ingress{
 		store:                 cfg.Store,
 		queueStore:            cfg.QueueStore,
@@ -347,6 +353,7 @@ func NewIngress(cfg IngressConfig) *Ingress {
 		storageFn:             cfg.Storage,
 		maxOverflowBytes:      maxOverflowBytes,
 		overflowUploadTimeout: uploadTimeout,
+		overflowTxTimeout:     txTimeout,
 		loadSecret:            cfg.LoadSecret,
 		authorizeHubToken:     cfg.AuthorizeHubToken,
 		clientIP:              clientIP,
@@ -791,6 +798,37 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Pre-tx non-locking advisory pending-cap check (O-C): refuse early when
+		// the project's durable queue is already at the cap to avoid wasted
+		// storage write+delete churn. Authoritative check still runs inside
+		// LockTriggerQuota below.
+		var preCounter store.DurableQueuePendingCounter
+		if c, ok := h.store.(store.DurableQueuePendingCounter); ok {
+			preCounter = c
+		} else if c, ok := h.queueStore.(store.DurableQueuePendingCounter); ok {
+			preCounter = c
+		}
+		if preCounter != nil {
+			pending, pErr := preCounter.CountDurableQueuePending(ctx, EventQueueKind, ep.ProjectID)
+			if pErr != nil {
+				h.failedStore.Add(1)
+				h.recordMetric(IngressResultFailedStore)
+				h.logger.Error("Pre-upload webhook pending-cap lookup failed",
+					"endpoint_id", ep.ID,
+					"project_id", ep.ProjectID,
+					"error", pErr,
+				)
+				apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeInternalError, "failed to persist webhook event", nil)
+				return
+			}
+			if pending >= MaxPendingEventsPerProject {
+				h.rejectedQueueFull.Add(1)
+				h.recordMetric(IngressResultRejectedQueueFull)
+				writeRateLimited(w, "30", "queue full")
+				return
+			}
+		}
+
 		// Pre-tx non-locking advisory budget check: refuse early when the
 		// project is already over its 256 MiB retention budget to avoid a
 		// wasted upload. Authoritative budget still runs inside LockTriggerQuota.
@@ -841,19 +879,27 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		dupEventID string
 		closureErr error
 	)
-	txErr := h.store.WithTx(ctx, func(tx store.Store) error {
+	// O-B: explicitly bound the upload-to-commit window (pool wait + lock wait +
+	// tx body) well below DefaultOverflowOrphanMinAge so an in-flight overflow
+	// upload can never be swept before its transaction commits.
+	txCtx := ctx
+	var cancelTx context.CancelFunc
+	if uploadedOverflow {
+		txCtx, cancelTx = context.WithTimeout(ctx, h.overflowTxTimeout)
+	}
+	txErr := h.store.WithTx(txCtx, func(tx store.Store) error {
 		ret := func(err error) error {
 			closureErr = err
 			return err
 		}
-		if lErr := tx.LockTriggerQuota(ctx, ep.ProjectID); lErr != nil {
+		if lErr := tx.LockTriggerQuota(txCtx, ep.ProjectID); lErr != nil {
 			return ret(lErr)
 		}
 		// §6.2: duplicate redeliveries (when X-Scion-Delivery is present) are
 		// acknowledged with 202 "duplicate" BEFORE the pending-cap and overflow
 		// budget checks so a redelivery at the cap never returns 429.
 		if delivery != "" {
-			existing, gErr := tx.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
+			existing, gErr := tx.GetTriggerEventByDedupKey(txCtx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
 			if gErr == nil && existing != nil {
 				dupEventID = existing.ID
 				return ret(errDuplicateDelivery)
@@ -866,7 +912,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return ret(errTxMissingQueuePendingCounter)
 		}
-		pending, sErr := txCounter.CountDurableQueuePending(ctx, EventQueueKind, ep.ProjectID)
+		pending, sErr := txCounter.CountDurableQueuePending(txCtx, EventQueueKind, ep.ProjectID)
 		if sErr != nil {
 			return ret(sErr)
 		}
@@ -877,7 +923,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// O1: compute the overflow byte sum authoritatively inside
 			// LockTriggerQuota so concurrent/multi-replica bursts cannot
 			// overshoot the 256 MiB per-project budget.
-			usedBytes, sumErr := tx.SumTriggerEventOverflowBytes(ctx, ep.ProjectID, now.Add(-HistoryRetention))
+			usedBytes, sumErr := tx.SumTriggerEventOverflowBytes(txCtx, ep.ProjectID, now.Add(-HistoryRetention))
 			if sumErr != nil {
 				return ret(sumErr)
 			}
@@ -885,11 +931,14 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return ret(errQueueFull)
 			}
 		}
-		if _, enqErr := EnqueueEvent(ctx, tx, tx, h.queue, &ev); enqErr != nil {
+		if _, enqErr := EnqueueEvent(txCtx, tx, tx, h.queue, &ev); enqErr != nil {
 			return ret(enqErr)
 		}
 		return nil
 	})
+	if cancelTx != nil {
+		cancelTx()
+	}
 
 	if txErr != nil {
 		// R1 cleanup rule: delete the just-uploaded object ONLY when the tx

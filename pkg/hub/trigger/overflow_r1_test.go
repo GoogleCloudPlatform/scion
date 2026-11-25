@@ -412,8 +412,12 @@ func TestOverflowIngress_ClosureErrorDeletes_CommitErrorDoesNotDelete(t *testing
 	assert.Len(t, listedB.Objects, 1, "object from ambiguous commit must survive for sweep")
 }
 
-// TestOverflowIngress_TwoReplicasExactBudget verifies O1: two independent Ingress
-// replicas sharing a DB enforce the 1500 KiB budget authoritatively with no cache lag.
+// TestOverflowIngress_TwoReplicasExactBudget verifies O1 (Nit-1): two independent
+// Ingress replicas sharing a DB both clear the pre-tx advisory budget check
+// concurrently (gated by a storage barrier), both upload 900 KiB, and the
+// in-lock LockTriggerQuota + SumTriggerEventOverflowBytes check admits exactly
+// one (202) and refuses the other (429 "queue full") while deleting the refused
+// replica's uploaded object.
 func TestOverflowIngress_TwoReplicasExactBudget(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
@@ -421,6 +425,9 @@ func TestOverflowIngress_TwoReplicasExactBudget(t *testing.T) {
 	cs := entadapter.NewCompositeStore(client)
 	local, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
 	require.NoError(t, err)
+
+	barrier := make(chan struct{})
+	stor := &slowStorage{Storage: local, barrier: barrier}
 
 	projID := uuid.NewString()
 	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projID, Name: "o1-p", Slug: "o1-" + projID[:8]}))
@@ -436,7 +443,7 @@ func TestOverflowIngress_TwoReplicasExactBudget(t *testing.T) {
 	mkReplica := func() *trigger.Ingress {
 		return trigger.NewIngress(trigger.IngressConfig{
 			Store: cs, QueueStore: cs, Queue: q,
-			Storage:                    func() storage.Storage { return local },
+			Storage:                    func() storage.Storage { return stor },
 			MaxOverflowBytesPerProject: 1500 * 1024,
 			LoadSecret:                 func(_ context.Context, _, _ string, _ int) (string, error) { return "o1-secret-1234567890", nil },
 			Enabled:                    func() bool { return true },
@@ -446,13 +453,195 @@ func TestOverflowIngress_TwoReplicasExactBudget(t *testing.T) {
 	replica2 := mkReplica()
 	body900K := makeJSONBodyOfSize(900 * 1024)
 
-	rec1 := httptest.NewRecorder()
-	replica1.ServeHTTP(rec1, newSignedWebhookRequest(t, ep.ID, "o1-secret-1234567890", time.Now(), "o1-r1", "ev", "", body900K))
-	require.Equal(t, http.StatusAccepted, rec1.Code, rec1.Body.String())
+	var wg sync.WaitGroup
+	recs := []*httptest.ResponseRecorder{httptest.NewRecorder(), httptest.NewRecorder()}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		replica1.ServeHTTP(recs[0], newSignedWebhookRequest(t, ep.ID, "o1-secret-1234567890", time.Now(), "o1-r1", "ev", "", body900K))
+	}()
+	go func() {
+		defer wg.Done()
+		replica2.ServeHTTP(recs[1], newSignedWebhookRequest(t, ep.ID, "o1-secret-1234567890", time.Now(), "o1-r2", "ev", "", body900K))
+	}()
 
-	// Replica 2 sees replica 1's committed row immediately -> 429 queue full.
-	rec2 := httptest.NewRecorder()
-	replica2.ServeHTTP(rec2, newSignedWebhookRequest(t, ep.ID, "o1-secret-1234567890", time.Now(), "o1-r2", "ev", "", body900K))
-	assert.Equal(t, http.StatusTooManyRequests, rec2.Code, rec2.Body.String())
-	assert.Contains(t, rec2.Body.String(), "queue full")
+	// Wait until both replicas have passed the pre-tx advisory SUM (seeing 0)
+	// and entered Upload concurrently.
+	deadline := time.Now().Add(5 * time.Second)
+	for stor.uploadCalled.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Equal(t, int64(2), stor.uploadCalled.Load(), "both replicas must reach Upload past the pre-tx advisory check")
+	close(barrier)
+	wg.Wait()
+
+	var n202, n429 int
+	for _, rec := range recs {
+		switch rec.Code {
+		case http.StatusAccepted:
+			n202++
+		case http.StatusTooManyRequests:
+			n429++
+			assert.Contains(t, rec.Body.String(), "queue full")
+		default:
+			t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	assert.Equal(t, 1, n202, "exactly one replica must be admitted under the 1500 KiB budget")
+	assert.Equal(t, 1, n429, "second replica must be refused by the in-lock budget check")
+	assert.Equal(t, int64(1), stor.deleteCalled.Load(), "refused replica must delete its uploaded object")
+
+	listed, err := local.List(ctx, storage.ListOptions{Prefix: trigger.OverflowPayloadPrefix})
+	require.NoError(t, err)
+	assert.Len(t, listed.Objects, 1, "only the admitted replica's object must remain")
+}
+
+// TestOverflowTimeouts_BoundedUnderOrphanGrace pins the O-B invariant locally:
+// upload timeout + tx timeout must stay strictly below DefaultOverflowOrphanMinAge
+// so the hourly orphan sweep can never delete an object whose ingress transaction
+// is still in flight.
+func TestOverflowTimeouts_BoundedUnderOrphanGrace(t *testing.T) {
+	assert.Less(t, trigger.DefaultOverflowUploadTimeout+trigger.DefaultOverflowTxTimeout, trigger.DefaultOverflowOrphanMinAge,
+		"upload + tx timeout must remain strictly below DefaultOverflowOrphanMinAge")
+}
+
+// blockingLockStore wraps CompositeStore to block LockTriggerQuota until ctx is
+// cancelled, exercising O-B's explicit OverflowTxTimeout bound.
+type blockingLockStore struct {
+	*entadapter.CompositeStore
+	lockEntered chan struct{}
+}
+
+func (b *blockingLockStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return b.CompositeStore.WithTx(ctx, func(tx store.Store) error {
+		return fn(&blockingLockTx{Store: tx, lockEntered: b.lockEntered})
+	})
+}
+
+type blockingLockTx struct {
+	store.Store
+	lockEntered chan struct{}
+}
+
+func (b *blockingLockTx) LockTriggerQuota(ctx context.Context, _ string) error {
+	close(b.lockEntered)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestOverflowIngress_TxTimeoutDeletesUploadedObject verifies O-B: when the
+// post-upload transaction blocks on LockTriggerQuota longer than OverflowTxTimeout,
+// the closure returns context.DeadlineExceeded, the tx rolls back, and the
+// uploaded object is deleted (never left to commit past the orphan grace window).
+func TestOverflowIngress_TxTimeoutDeletesUploadedObject(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	t.Logf("dialect=%s", client.Driver().Dialect())
+	cs := entadapter.NewCompositeStore(client)
+	local, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	require.NoError(t, err)
+	stor := &slowStorage{Storage: local}
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projID, Name: "ob-p", Slug: "ob-" + projID[:8]}))
+	ep := &store.WebhookEndpoint{
+		ID: uuid.NewString(), ProjectID: projID, Name: "ob-ep",
+		OwnerPrincipalKind: store.DelegationPrincipalUser, OwnerPrincipalID: uuid.NewString(), OwnerCredentialKind: "session",
+		AuthMode: store.WebhookAuthModeHMAC, SignatureMode: store.WebhookSignatureModeScionV1,
+		MaxBodyBytes: 1024 * 1024, SecretVersion: 1, Status: store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, ep))
+	q := durablequeue.NewQueue(cs)
+
+	lockEntered := make(chan struct{})
+	blk := &blockingLockStore{CompositeStore: cs, lockEntered: lockEntered}
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:             blk,
+		QueueStore:        cs,
+		Queue:             q,
+		Storage:           func() storage.Storage { return stor },
+		OverflowTxTimeout: 100 * time.Millisecond,
+		LoadSecret:        func(_ context.Context, _, _ string, _ int) (string, error) { return "ob-secret-1234567890", nil },
+		Enabled:           func() bool { return true },
+	})
+
+	body := makeJSONBodyOfSize(100 * 1024)
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	// Bare background request ctx (no request timeout) proves OverflowTxTimeout bounds the wait.
+	ing.ServeHTTP(rec, newSignedWebhookRequest(t, ep.ID, "ob-secret-1234567890", time.Now(), "ob-1", "ev", "", body))
+	elapsed := time.Since(start)
+
+	select {
+	case <-lockEntered:
+	default:
+		t.Fatal("expected LockTriggerQuota to be entered")
+	}
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Less(t, elapsed, 2*time.Second, "OverflowTxTimeout must bound the lock wait")
+	assert.Equal(t, int64(1), stor.uploadCalled.Load())
+	assert.Equal(t, int64(1), stor.deleteCalled.Load(), "timed-out tx closure must delete uploaded object")
+
+	listed, err := local.List(ctx, storage.ListOptions{Prefix: trigger.OverflowPayloadPrefix})
+	require.NoError(t, err)
+	assert.Empty(t, listed.Objects, "uploaded object must be cleaned up on tx timeout")
+	evs, err := cs.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: projID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, evs.Items, "timed-out tx must never commit a row")
+}
+
+// fullQueueStore wraps CompositeStore to report MaxPendingEventsPerProject
+// from CountDurableQueuePending, exercising O-C's pre-upload pending-cap check.
+type fullQueueStore struct {
+	*entadapter.CompositeStore
+	pendingCount int64
+}
+
+var _ store.DurableQueuePendingCounter = (*fullQueueStore)(nil)
+
+func (f *fullQueueStore) CountDurableQueuePending(_ context.Context, _, _ string) (int64, error) {
+	return f.pendingCount, nil
+}
+
+// TestOverflowIngress_PendingCapPreCheck_429SkipsUpload verifies O-C: when the
+// project's pending queue is already at MaxPendingEventsPerProject, an overflow
+// delivery is refused with 429 "queue full" before uploading to object storage
+// (uploadCalled == 0).
+func TestOverflowIngress_PendingCapPreCheck_429SkipsUpload(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	t.Logf("dialect=%s", client.Driver().Dialect())
+	cs := entadapter.NewCompositeStore(client)
+	local, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	require.NoError(t, err)
+	stor := &slowStorage{Storage: local}
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projID, Name: "oc-p", Slug: "oc-" + projID[:8]}))
+	ep := &store.WebhookEndpoint{
+		ID: uuid.NewString(), ProjectID: projID, Name: "oc-ep",
+		OwnerPrincipalKind: store.DelegationPrincipalUser, OwnerPrincipalID: uuid.NewString(), OwnerCredentialKind: "session",
+		AuthMode: store.WebhookAuthModeHMAC, SignatureMode: store.WebhookSignatureModeScionV1,
+		MaxBodyBytes: 1024 * 1024, SecretVersion: 1, Status: store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, ep))
+	q := durablequeue.NewQueue(cs)
+
+	fq := &fullQueueStore{CompositeStore: cs, pendingCount: trigger.MaxPendingEventsPerProject}
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      fq,
+		QueueStore: cs,
+		Queue:      q,
+		Storage:    func() storage.Storage { return stor },
+		LoadSecret: func(_ context.Context, _, _ string, _ int) (string, error) { return "oc-secret-1234567890", nil },
+		Enabled:    func() bool { return true },
+	})
+
+	body := makeJSONBodyOfSize(100 * 1024)
+	rec := httptest.NewRecorder()
+	ing.ServeHTTP(rec, newSignedWebhookRequest(t, ep.ID, "oc-secret-1234567890", time.Now(), "oc-1", "ev", "", body))
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assert.Contains(t, rec.Body.String(), "queue full")
+	assert.Equal(t, int64(0), stor.uploadCalled.Load(), "pre-upload pending-cap refusal must not upload to object storage")
 }

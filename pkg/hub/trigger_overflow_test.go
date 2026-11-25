@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -564,4 +565,103 @@ func TestTriggerOverflow_StreamPayload_RejectsCrossProjectRef(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "other-project", "cross-project object bytes must never be streamed")
+}
+
+// TestTriggerOverflow_GitHubComment_OutOfLineParity verifies O-D:
+// github.comment on an overflow event expands optional ${event.payload.x?} to
+// empty and refuses required ${event.payload.x} with FireStatusRefused and
+// "payload stored out of line", matching dispatch_agent and POST /render.
+func TestTriggerOverflow_GitHubComment_OutOfLineParity(t *testing.T) {
+	f, gh, _, _, instID := setupGitHubCommentFixture(t)
+	ctx := context.Background()
+
+	// Trigger 1: required ${event.payload.repo} -> refused with "payload stored out of line".
+	reqRec := f.doTrigger(t, f.memberAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-comment-o2-required",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{
+			Type:          store.TriggerActionGitHubComment,
+			Body:          "Repo=${event.payload.repo}",
+			Target:        "event",
+			UntrustedVars: []string{"event.payload.repo"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, reqRec.Code, reqRec.Body.String())
+	var trReqResp TriggerResponse
+	require.NoError(t, json.Unmarshal(reqRec.Body.Bytes(), &trReqResp))
+	trReqRow, err := f.store.GetTrigger(ctx, trReqResp.ID)
+	require.NoError(t, err)
+
+	// Trigger 2: optional ${event.payload.repo?} -> fires with empty expansion.
+	optRec := f.doTrigger(t, f.memberAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-comment-o2-optional",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{
+			Type:          store.TriggerActionGitHubComment,
+			Body:          "Repo=[${event.payload.repo?}]",
+			Target:        "event",
+			UntrustedVars: []string{"event.payload.repo"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, optRec.Code, optRec.Body.String())
+	var trOptResp TriggerResponse
+	require.NoError(t, json.Unmarshal(optRec.Body.Bytes(), &trOptResp))
+	trOptRow, err := f.store.GetTrigger(ctx, trOptResp.ID)
+	require.NoError(t, err)
+
+	evID := uuid.NewString()
+	mkOverflowReq := func(trRow *store.Trigger, fireID string) hubfire.FireRequest {
+		return hubfire.FireRequest{
+			ProjectID: f.projectID,
+			Authority: hubfire.RecordedAuthority{
+				Attribution:    trRow.InitiatorAttribution,
+				Ceiling:        trRow.AuthorityCeiling,
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   trRow.ID,
+				FireID:         fireID,
+			},
+			ActionType: trRow.ActionType,
+			Payload:    trRow.ActionPayload,
+			Event: &hubfire.FireEvent{
+				ID:           evID,
+				ProjectID:    f.projectID,
+				SourceKind:   store.TriggerSourceKindGitHub,
+				SourceID:     strconv.FormatInt(instID, 10),
+				Type:         "github.issue_comment.created",
+				Subject:      "acme/widgets#42",
+				OccurredAt:   time.Now().UTC(),
+				ReceivedAt:   time.Now().UTC().Add(-time.Second),
+				Payload:      nil,
+				PayloadRef:   "trigger-events/" + f.projectID + "/" + evID + ".json",
+				PayloadBytes: 900 * 1024,
+				Attributes: map[string]string{
+					"repo":       "acme/widgets",
+					"repo_owner": "acme",
+					"repo_name":  "widgets",
+					"number":     "42",
+					"sender":     "alice",
+				},
+				Trigger: &hubfire.FireTriggerRef{ID: trRow.ID, Name: trRow.Name},
+			},
+			Executor: hubfire.ExecutorContext{
+				Kind: trigger.ExecutorKindTriggerDrainer,
+				ID:   trigger.ExecutorIDPrefixTriggerEvent + evID,
+			},
+			FireAt:   time.Now().UTC(),
+			Attempts: 1,
+		}
+	}
+
+	outReq := f.srv.fireAction(ctx, mkOverflowReq(trReqRow, "fire-gh-o2-req"))
+	assert.Equal(t, hubfire.FireStatusRefused, outReq.Status)
+	assert.Equal(t, "payload stored out of line", outReq.Error)
+	assert.Empty(t, gh.snapshotComments(), "refused github.comment must not post a comment")
+
+	outOpt := f.srv.fireAction(ctx, mkOverflowReq(trOptRow, "fire-gh-o2-opt"))
+	require.Equal(t, hubfire.FireStatusFired, outOpt.Status, "err=%s", outOpt.Error)
+	posted := gh.snapshotComments()
+	require.Len(t, posted, 1)
+	assert.Contains(t, posted[0].Body, "Repo=[]")
 }
