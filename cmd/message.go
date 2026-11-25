@@ -177,8 +177,7 @@ Examples:
 		// --body-file provides the message, so we only need recipient.
 		// With decisions or secret requests the body (the intro above the card) is optional.
 		bodyFile, _ := cmd.Flags().GetString("body-file")
-		withDecisions := cmd.Flags().Changed("decisions") || cmd.Flags().Changed("decisions-file") ||
-			cmd.Flags().Changed("choices") || cmd.Flags().Changed("choices-file")
+		withDecisions := cmd.Flags().Changed("decisions") || cmd.Flags().Changed("decisions-file")
 		withSecretRequests := cmd.Flags().Changed("secret-request") || cmd.Flags().Changed("secret-request-file")
 		if bodyFile != "" || withDecisions || withSecretRequests {
 			if len(args) < 1 {
