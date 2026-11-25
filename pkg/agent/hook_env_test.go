@@ -127,7 +127,7 @@ func TestTrackedAgentEnv_AllLayersAndPrecedence(t *testing.T) {
 		"DEFAULT_ONLY": "from-default",
 	}
 
-	tracked, _, _, _ := buildTrackedAgentEnv(bundleEnv, scionCfg, optsEnv, settingsHCEnv, callerEnv, inlineEnv, defaultEnv, true)
+	tracked, _, _, _ := buildTrackedAgentEnv(bundleEnv, scionCfg, optsEnv, settingsHCEnv, callerEnv, inlineEnv, defaultEnv, true, false)
 
 	// Post-build mutations: no-auth sidecar (HC) and broker-system override.
 	noAuthCfg := &config.HarnessNoAuthConfig{

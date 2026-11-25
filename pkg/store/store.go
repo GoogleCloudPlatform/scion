@@ -2310,6 +2310,17 @@ type BrokerDispatchStore interface {
 	// Returns counts of re-driven and failed rows.
 	ReapStuckDispatch(ctx context.Context, stuckBefore time.Time, maxAttempts int) (requeued, failed int, err error)
 
+	// ReapExpiredPendingDispatch fails and scrubs pending create-family
+	// dispatches (create, create_with_gather, finalize_env, provision,
+	// reprovision — the ops that carry HomeFiles or creation args) that have
+	// never been claimed past staleBefore (updated_at < staleBefore) or past
+	// their deadline_at (currently unset by production writers; kept for parity
+	// with ReapStuckDispatch), so serialized args cannot linger indefinitely in
+	// the database. Lifecycle control ops (stop, start, restart, delete, …)
+	// queued for an offline broker are never expired here. Returns the number
+	// of rows transitioned to failed.
+	ReapExpiredPendingDispatch(ctx context.Context, staleBefore time.Time) (int, error)
+
 	// CountBrokerDispatchHealth counts broker_dispatch rows for the health
 	// summary: stuck = state in_progress with updated_at < stuckBefore (the
 	// reaper's staleness test, without its deadline arm); failed = state

@@ -1056,7 +1056,8 @@ func brokerRuntimeTargetRefusal(err error) (*brokerStatusError, string, map[stri
 // restart error switch passes through verbatim instead of mapping them to
 // 502: flat Runtime Broker refusals and required-skill resolution failures.
 func relayDispatchRefusal(w http.ResponseWriter, err error) bool {
-	if errors.Is(err, ErrBrokerLacksHomeFiles) || errors.Is(err, ErrHomeFilesEnvGatherDeferred) ||
+	if errors.Is(err, ErrBrokerLacksHomeFiles) || errors.Is(err, ErrBrokerLacksGitHubTokenInstallationOnly) ||
+		errors.Is(err, ErrHomeFilesEnvGatherDeferred) ||
 		errors.Is(err, ErrHomeFilesCreateNotDeferrable) {
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, err.Error(), nil)
 		return true

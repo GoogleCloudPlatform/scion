@@ -187,6 +187,7 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		StartsInFlight:               c.StartsInFlight,
 		AttachmentDelivery:           c.AttachmentDelivery,
 		HomeFiles:                    c.HomeFiles,
+		GitHubTokenInstallationOnly:  c.GitHubTokenInstallationOnly,
 		WITargetsV1:                  c.WITargetsV1,
 		NodeImageRegistry:            c.NodeImageRegistry,
 	}

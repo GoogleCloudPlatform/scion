@@ -1138,6 +1138,10 @@ type StartExtras struct {
 	// wrappers (sendStart, sendRestart) from the hub's server.hub.init_firewall
 	// config; any value set earlier is overwritten. Nil sends nothing.
 	InitFirewall *RemoteInitFirewall
+	// GitHubTokenInstallationOnly mirrors
+	// RemoteCreateAgentRequest.GitHubTokenInstallationOnly on start and restart
+	// (wire key githubTokenInstallationOnly). False sends nothing.
+	GitHubTokenInstallationOnly bool
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -1175,6 +1179,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.NoAuth {
 		payload["noAuth"] = true
+	}
+	if extras.GitHubTokenInstallationOnly {
+		payload["githubTokenInstallationOnly"] = true
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
@@ -1934,6 +1941,10 @@ type RemoteCreateAgentRequest struct {
 	// api.ValidateHomeFiles; never set on start, resume, restart, or
 	// reprovision.
 	HomeFiles []api.HomeFile `json:"homeFiles,omitempty"`
+	// GitHubTokenInstallationOnly instructs the broker to refuse host-env
+	// passthrough and non-Hub config/bundle injection for blocked GitHub token
+	// env keys (Stage 2 §5.1a, ptone/scion#8058).
+	GitHubTokenInstallationOnly bool `json:"githubTokenInstallationOnly,omitempty"`
 }
 
 // ResolvedSecret represents a secret resolved by the Hub for projection into an agent container.

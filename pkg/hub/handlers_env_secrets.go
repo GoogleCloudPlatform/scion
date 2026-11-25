@@ -1191,7 +1191,7 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 	}
 
 	meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-	if err == nil && (meta.SecretType == store.SecretTypeInternal || agentHiddenHubSecret(ctx, scope, *meta) || (installationOnly && isBlockedInstallationGitHubEnvKey(meta.Target))) {
+	if err == nil && (meta.SecretType == store.SecretTypeInternal || agentHiddenHubSecret(ctx, scope, *meta) || (installationOnly && isBlockedInstallationGitHubSecret(meta.SecretType, meta.Name, meta.Target))) {
 		// The same response as a key that does not exist.
 		err = store.ErrNotFound
 	}
@@ -2387,7 +2387,7 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 					continue
 				}
 				if usesInstallationGitHubToken(facts.Agent) &&
-					(isBlockedInstallationGitHubEnvKey(m.Name) || isBlockedInstallationGitHubEnvKey(m.Target)) {
+					isBlockedInstallationGitHubSecret(m.SecretType, m.Name, m.Target) {
 					continue
 				}
 				target := m.Target
@@ -2446,7 +2446,7 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 						continue
 					}
 					if usesInstallationGitHubToken(facts.Agent) &&
-						(isBlockedInstallationGitHubEnvKey(m.Name) || isBlockedInstallationGitHubEnvKey(m.Target)) {
+						isBlockedInstallationGitHubSecret(m.SecretType, m.Name, m.Target) {
 						continue
 					}
 					target := m.Target
@@ -2870,7 +2870,7 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-		if err == nil && (meta.SecretType == store.SecretTypeInternal || (installationOnly && isBlockedInstallationGitHubEnvKey(meta.Target))) {
+		if err == nil && (meta.SecretType == store.SecretTypeInternal || (installationOnly && isBlockedInstallationGitHubSecret(meta.SecretType, meta.Name, meta.Target))) {
 			err = store.ErrNotFound
 		}
 		if err != nil {

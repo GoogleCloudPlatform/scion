@@ -873,3 +873,53 @@ func (s *BrokerDispatchStore) ReapStuckDispatch(ctx context.Context, stuckBefore
 
 	return requeued, failed, nil
 }
+
+// pendingReapCreateOps lists the create-family broker_dispatch ops eligible for
+// the pending-dispatch TTL sweep (P1c-4a security L-1). Today
+// deferredDataOpResult writes only "create" and "finalize_env" rows;
+// "create_with_gather", "provision", and "reprovision" are included defensively
+// so every create-family op is covered if deferred in the future. Lifecycle
+// control ops (stop, start, restart, delete, check_prompt) — notably
+// offline-queued stops meant to apply when a broker reconnects — are
+// deliberately excluded.
+var pendingReapCreateOps = []string{
+	"create",
+	"create_with_gather",
+	"finalize_env",
+	"provision",
+	"reprovision",
+}
+
+// ReapExpiredPendingDispatch fails and scrubs pending create-family dispatches
+// (pendingReapCreateOps) whose updated_at is older than staleBefore or whose
+// deadline_at has passed (note: no production writer sets deadline_at today;
+// that arm is kept for parity with ReapStuckDispatch). Clearing args in the
+// same atomic conditional update guarantees that HomeFiles event bodies and
+// other serialized creation arguments cannot linger on rows that never reach a
+// terminal state, while leaving offline-queued lifecycle control ops (such as
+// stop) untouched for reconnect drain.
+func (s *BrokerDispatchStore) ReapExpiredPendingDispatch(ctx context.Context, staleBefore time.Time) (int, error) {
+	now := time.Now()
+	stalePendingPred := brokerdispatch.And(
+		brokerdispatch.StateEQ(store.DispatchStatePending),
+		brokerdispatch.OpIn(pendingReapCreateOps...),
+		brokerdispatch.Or(
+			brokerdispatch.UpdatedAtLT(staleBefore),
+			brokerdispatch.And(
+				brokerdispatch.DeadlineAtNotNil(),
+				brokerdispatch.DeadlineAtLT(now),
+			),
+		),
+	)
+	expired, err := s.client.BrokerDispatch.Update().
+		Where(stalePendingPred).
+		SetState(store.DispatchStateFailed).
+		SetError("reaper: pending dispatch expired").
+		ClearArgs().
+		SetUpdatedAt(now).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return expired, nil
+}

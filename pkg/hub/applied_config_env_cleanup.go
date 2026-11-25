@@ -44,8 +44,9 @@ import (
 // concurrently with normal traffic and safe to re-run (a clean row is a
 // no-op, so the operation is idempotent).
 //
-// The decision for each AppliedConfig.Env key, other than GITHUB_TOKEN
-// (always stripped):
+// The decision for each AppliedConfig.Env key, other than blocked GitHub token
+// keys (GITHUB_TOKEN, GH_TOKEN, GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN,
+// SCION_USER_GITHUB_TOKEN — always stripped from AppliedConfig.Env residue):
 //
 //   - If the key matches the name (or, for an environment-type secret, the
 //     injection target) of an entry in the agent's reachable secret scopes
@@ -284,7 +285,7 @@ func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent
 	}
 
 	for k, v := range cfg.Env {
-		if isKnownSecret(k) {
+		if isKnownSecret(k) || isBlockedInstallationGitHubEnvKey(k) {
 			applied = append(applied, k)
 			continue
 		}

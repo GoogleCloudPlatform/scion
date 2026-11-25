@@ -37,6 +37,17 @@ const (
 	dispatchMaxRetries = 3
 )
 
+// pendingDispatchTTL returns the bounded lifetime for a pending create-family
+// dispatch row that is never claimed (or whose broker never drains it).
+// Derived at reap time as at least startClaimSettings().CreateUnconfirmedHold
+// (default 16m, api.SyncStartCeiling + 60s) so a broker reconnecting within the
+// hub's create unconfirmed hold window can still drain and complete the create
+// before the reaper fails the row and scrubs its args (including HomeFiles
+// event bodies; P1c-4a security L-1).
+func (s *Server) pendingDispatchTTL() time.Duration {
+	return s.startClaimSettings().CreateUnconfirmedHold
+}
+
 // brokerHeartbeatTimeoutHandler returns a recurring handler that marks brokers
 // as offline when their last heartbeat exceeds a 5-minute threshold. It publishes
 // status events for each affected broker so SSE subscribers are informed. The
@@ -116,15 +127,21 @@ func (s *Server) brokerAffinityReapHandler() func(ctx context.Context) {
 			return
 		}
 
+		expiredPending, err := s.store.ReapExpiredPendingDispatch(ctx, now.Add(-s.pendingDispatchTTL()))
+		if err != nil {
+			slog.Error("Scheduler: expired pending dispatch reap failed", "error", err)
+		}
+
 		requeued, failed, err := s.store.ReapStuckDispatch(ctx, now.Add(-dispatchStuckAge), dispatchMaxRetries)
 		if err != nil {
 			slog.Error("Scheduler: stuck dispatch reap failed", "error", err)
 			return
 		}
 
-		if cleared > 0 || requeued > 0 || failed > 0 {
+		if cleared > 0 || expiredPending > 0 || requeued > 0 || failed > 0 {
 			slog.Info("Scheduler: broker affinity reap complete",
 				"affinity_cleared", cleared,
+				"pending_expired", expiredPending,
 				"dispatch_requeued", requeued,
 				"dispatch_failed", failed)
 		}

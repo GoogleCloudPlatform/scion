@@ -263,7 +263,7 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 	if !item.Allowed {
 		return item, nil, permission, detail
 	}
-	if installationOnly && isBlockedInstallationGitHubEnvKey(item.Meta.Target) {
+	if installationOnly && isBlockedInstallationGitHubSecret(item.Meta.SecretType, item.Meta.Name, item.Meta.Target) {
 		item.Allowed = false
 		item.Reason = ReasonGitHubTokenInstallationOnly
 		return item, nil, permission, ""

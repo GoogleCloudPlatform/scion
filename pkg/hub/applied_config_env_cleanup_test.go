@@ -802,3 +802,87 @@ func TestAppliedConfigEnvCleanupCachesPerScopeLookups(t *testing.T) {
 		}
 	}
 }
+
+// TestAppliedConfigEnvCleanupPreservesExplicitGHEnvForNonInstallationAgents
+// verifies R2 (lifted from p1c4b-review-2 probe): the cleanup migration strips
+// blocked GitHub token keys from AppliedConfig.Env merge-back residue, but
+// preserves user-typed GH_TOKEN and GH_ENTERPRISE_TOKEN in explicit
+// InlineConfig.Env and CreateInputs.InlineConfig.Env for non-installation
+// (default / user_preferred) agents.
+func TestAppliedConfigEnvCleanupPreservesExplicitGHEnvForNonInstallationAgents(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{ID: tid("proj-gh-explicit"), Name: "GH Explicit", Slug: "gh-explicit"}
+	require.NoError(t, memStore.CreateProject(ctx, project))
+
+	for _, pref := range []string{"", DispatchAgentGitHubTokenUserPreferred} {
+		name := "default"
+		if pref != "" {
+			name = pref
+		}
+		t.Run("pref_"+name, func(t *testing.T) {
+			explicit := func() map[string]string {
+				return map[string]string{
+					"GITHUB_TOKEN":        "ghp_explicit_root",
+					"GH_TOKEN":            "ghp_user_typed",
+					"GH_ENTERPRISE_TOKEN": "ghe_user_typed",
+					"PLAIN":               "x",
+				}
+			}
+			agent := &store.Agent{
+				ID:        api.NewUUID(),
+				Name:      "gh-explicit-" + name,
+				Slug:      "gh-explicit-" + name,
+				ProjectID: project.ID,
+				AppliedConfig: &store.AgentAppliedConfig{
+					GitHubTokenPreference: pref,
+					Env:                   explicit(),
+					InlineConfig:          &api.ScionConfig{Env: explicit()},
+					CreateInputs: &store.AgentCreateInputs{
+						InlineConfig: &api.ScionConfig{Env: explicit()},
+					},
+				},
+			}
+			require.NoError(t, memStore.CreateAgent(ctx, agent))
+
+			exec := &AppliedConfigEnvCleanupExecutor{Store: memStore, SecretBackend: &cleanupTestSecretBackend{}}
+			var logBuf bytes.Buffer
+			require.NoError(t, exec.Run(ctx, &logBuf, nil))
+
+			updated, err := memStore.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+
+			// AppliedConfig.Env residue: all blocked GitHub token keys stripped.
+			for _, k := range []string{"GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN"} {
+				if _, ok := updated.AppliedConfig.Env[k]; ok {
+					t.Errorf("expected AppliedConfig.Env[%q] residue to be stripped", k)
+				}
+			}
+			if got := updated.AppliedConfig.Env["PLAIN"]; got != "x" {
+				t.Errorf("expected AppliedConfig.Env[PLAIN]=x, got %q", got)
+			}
+
+			// Explicit InlineConfig.Env and CreateInputs.InlineConfig.Env:
+			// GITHUB_TOKEN is stripped, while user-typed GH_TOKEN and
+			// GH_ENTERPRISE_TOKEN survive.
+			for label, m := range map[string]map[string]string{
+				"InlineConfig.Env":              updated.AppliedConfig.InlineConfig.Env,
+				"CreateInputs.InlineConfig.Env": updated.AppliedConfig.CreateInputs.InlineConfig.Env,
+			} {
+				if _, ok := m["GITHUB_TOKEN"]; ok {
+					t.Errorf("%s: expected GITHUB_TOKEN to be stripped", label)
+				}
+				if got := m["GH_TOKEN"]; got != "ghp_user_typed" {
+					t.Errorf("%s: expected GH_TOKEN to survive, got %q", label, got)
+				}
+				if got := m["GH_ENTERPRISE_TOKEN"]; got != "ghe_user_typed" {
+					t.Errorf("%s: expected GH_ENTERPRISE_TOKEN to survive, got %q", label, got)
+				}
+				if got := m["PLAIN"]; got != "x" {
+					t.Errorf("%s: expected PLAIN=x, got %q", label, got)
+				}
+			}
+		})
+	}
+}

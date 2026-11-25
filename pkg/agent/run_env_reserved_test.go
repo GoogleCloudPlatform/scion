@@ -155,17 +155,17 @@ func TestExpandConfigHubEndpoint_RefusesReservedHostEnv(t *testing.T) {
 	setReservedHostEnv(t)
 	t.Setenv("ORDINARY_HUB_HOST", "hub.example.com")
 	for _, name := range reservedHostEnvNames {
-		if got := expandConfigHubEndpoint("a", map[string]string{"SCION_HUB_ENDPOINT": "${" + name + "}"}); got != "" {
+		if got := expandConfigHubEndpoint("a", map[string]string{"SCION_HUB_ENDPOINT": "${" + name + "}"}, refuseHostEnvForAgent); got != "" {
 			t.Errorf("%s: expandConfigHubEndpoint = %q, want empty", name, got)
 		}
-		if got := expandConfigHubEndpoint("a", map[string]string{"SCION_HUB_ENDPOINT": "https://$" + name}); strings.Contains(got, reservedHostEnvSentinel) {
+		if got := expandConfigHubEndpoint("a", map[string]string{"SCION_HUB_ENDPOINT": "https://$" + name}, refuseHostEnvForAgent); strings.Contains(got, reservedHostEnvSentinel) {
 			t.Errorf("%s: expandConfigHubEndpoint carries a reserved host value", name)
 		}
 	}
-	if got := expandConfigHubEndpoint("a", map[string]string{"SCION_HUB_ENDPOINT": "https://${ORDINARY_HUB_HOST}"}); got != "https://hub.example.com" {
+	if got := expandConfigHubEndpoint("a", map[string]string{"SCION_HUB_ENDPOINT": "https://${ORDINARY_HUB_HOST}"}, refuseHostEnvForAgent); got != "https://hub.example.com" {
 		t.Errorf("expandConfigHubEndpoint = %q, want ordinary expansion", got)
 	}
-	if got := expandConfigHubEndpoint("a", nil); got != "" {
+	if got := expandConfigHubEndpoint("a", nil, refuseHostEnvForAgent); got != "" {
 		t.Errorf("expandConfigHubEndpoint(nil) = %q, want empty", got)
 	}
 }

@@ -60,7 +60,7 @@ func newTriggerDispatchAgentFixture(t *testing.T, tag string) *triggerDispatchAg
 	ctx := context.Background()
 	broker, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
 	require.NoError(t, err)
-	broker.Capabilities = &store.BrokerCapabilities{HomeFiles: true}
+	broker.Capabilities = &store.BrokerCapabilities{HomeFiles: true, GitHubTokenInstallationOnly: true}
 	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, broker))
 
 	return &triggerDispatchAgentFixture{

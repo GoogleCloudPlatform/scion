@@ -257,6 +257,11 @@ type startContextInputs struct {
 	// HomeFiles are create-only files written under .scion/ in the agent home
 	// directory during fresh provisioning.
 	HomeFiles []api.HomeFile
+
+	// GitHubTokenInstallationOnly instructs the broker and agent env builder to
+	// refuse host-env passthrough and non-Hub config/bundle injection for
+	// blocked GitHub token keys (Stage 2 §5.1a, ptone/scion#8058).
+	GitHubTokenInstallationOnly bool
 }
 
 // prehydratedBundle records hub hydration already performed for a dispatch.
@@ -767,11 +772,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// 2. Config.Env (takes precedence). The native Cloud Run marker is never
-	// taken from it: only the hub sets that key (cloudRunNativeMarked).
+	// taken from it: only the hub sets that key (cloudRunNativeMarked). When
+	// GitHubTokenInstallationOnly is set, blocked GitHub token keys are also
+	// ignored here so only the Hub-minted token in ResolvedEnv can supply
+	// GITHUB_TOKEN.
 	if in.Config != nil {
 		for _, e := range in.Config.Env {
 			parts := strings.SplitN(e, "=", 2)
 			if len(parts) == 2 && parts[0] == cloudRunNativeMarkerEnv {
+				continue
+			}
+			if len(parts) == 2 && in.GitHubTokenInstallationOnly && api.IsBlockedInstallationGitHubEnvKey(parts[0]) {
 				continue
 			}
 			if len(parts) == 2 {
@@ -1104,8 +1115,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
-		FreshProvision: in.Operation == opCreate,
-		RunID:          in.RunID,
+		FreshProvision:              in.Operation == opCreate,
+		RunID:                       in.RunID,
+		GitHubTokenInstallationOnly: in.GitHubTokenInstallationOnly,
 	}
 	if in.Operation == opCreate && len(in.HomeFiles) > 0 {
 		opts.HomeFiles = api.CloneHomeFiles(in.HomeFiles)
@@ -1138,7 +1150,23 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	if in.InlineConfig != nil {
-		opts.InlineConfig = in.InlineConfig
+		if in.GitHubTokenInstallationOnly && len(in.InlineConfig.Env) > 0 {
+			copied := *in.InlineConfig
+			filtered := make(map[string]string, len(in.InlineConfig.Env))
+			for k, v := range in.InlineConfig.Env {
+				if api.IsBlockedInstallationGitHubEnvKey(k) {
+					continue
+				}
+				filtered[k] = v
+			}
+			if len(filtered) == 0 {
+				filtered = nil
+			}
+			copied.Env = filtered
+			opts.InlineConfig = &copied
+		} else {
+			opts.InlineConfig = in.InlineConfig
+		}
 	}
 
 	// ResolvedKubernetesServiceAccountName (not InlineConfig) is how the

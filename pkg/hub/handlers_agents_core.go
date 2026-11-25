@@ -3309,6 +3309,15 @@ func (s *Server) createAgentInProject(
 					acceptedLaunch = true
 					warnings = append(warnings, s.adoptAcceptedLaunch(ctx, agent)...)
 				} else if envReqs != nil {
+					if len(envReqs.Needs) > 0 && len(filterInstallationEnvGatherKeys(agent, envReqs.Needs)) == 0 {
+						// Broker answered 202 (agent not started, waiting on finalize-env)
+						// requesting only blocked GitHub token keys for an installation-only
+						// agent. Fail closed rather than returning an empty needs list.
+						failCreate(createRollback{Stage: createStageMissingEnv, Cause: ErrBrokerRequestedBlockedGitHubEnv, RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+							writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, ErrBrokerRequestedBlockedGitHubEnv.Error(), nil)
+						})
+						return
+					}
 					// Broker returned 202: needs env gather
 					agent.Phase = string(state.PhaseProvisioning)
 					if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
@@ -3408,6 +3417,17 @@ func (s *Server) createAgentInProject(
 					acceptedLaunch = true
 					warnings = append(warnings, s.adoptAcceptedLaunch(ctx, agent)...)
 				} else if envReqs != nil && len(envReqs.Needs) > 0 {
+					filteredNeeds := filterInstallationEnvGatherKeys(agent, envReqs.Needs)
+					if len(filteredNeeds) == 0 {
+						// Broker answered 202 (agent not started, waiting on finalize-env)
+						// requesting only blocked GitHub token keys for an installation-only
+						// agent. Fail closed rather than treating the unstarted response as
+						// success; rollback revokes any minted credential and removes the row.
+						failCreate(createRollback{Stage: createStageMissingEnv, Cause: ErrBrokerRequestedBlockedGitHubEnv, RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+							writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, ErrBrokerRequestedBlockedGitHubEnv.Error(), nil)
+						})
+						return
+					}
 					// Broker reported missing required env vars — fail the dispatch.
 					// Clean up the provisioning agent and its files so orphaned
 					// local state doesn't trigger spurious sync-registration.
@@ -3418,7 +3438,10 @@ func (s *Server) createAgentInProject(
 					// (RevokeCredentials), before the row is deleted
 					// (ptone/scion#1956: a create that fails after the mint must
 					// not leave the credential valid for its full TTL).
-					failCreate(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
+					failCreate(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						hubEnvGather := s.buildEnvGatherResponse(ctx, agent, envReqs)
+						MissingEnvVars(w, hubEnvGather.Needs, hubEnvGather)
+					})
 					return
 				} else {
 					if !s.preserveTerminalPhase(ctx, agent) {
@@ -3765,6 +3788,23 @@ func isTerminalAgentPhase(phase string) bool {
 	}
 }
 
+// filterInstallationEnvGatherKeys omits blocked GitHub token keys from an
+// env-gather key slice when agent uses installation-only GitHub tokens so the
+// failure check and the returned EnvGatherResponse agree on the same needs set.
+func filterInstallationEnvGatherKeys(agent *store.Agent, keys []string) []string {
+	if !usesInstallationGitHubToken(agent) || len(keys) == 0 {
+		return keys
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if isBlockedInstallationGitHubEnvKey(k) {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
 // buildEnvGatherResponse converts a broker's env requirements into the Hub-level
 // response format, enriching it with scope information from the dispatcher.
 func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent, brokerReqs *RemoteEnvRequirementsResponse) *EnvGatherResponse {
@@ -3774,11 +3814,13 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// TZ is never gathered: never forward it to the CLI as a need, even if
 	// an older broker reported one the dispatcher did not already remove.
 	takeTZGatherNeed(brokerReqs)
+	installationOnly := usesInstallationGitHubToken(agent)
+
 	resp := &EnvGatherResponse{
 		AgentID:   agent.ID,
-		Required:  brokerReqs.Required,
-		BrokerHas: brokerReqs.BrokerHas,
-		Needs:     brokerReqs.Needs,
+		Required:  filterInstallationEnvGatherKeys(agent, brokerReqs.Required),
+		BrokerHas: filterInstallationEnvGatherKeys(agent, brokerReqs.BrokerHas),
+		Needs:     filterInstallationEnvGatherKeys(agent, brokerReqs.Needs),
 	}
 
 	// The env var storage scopes that apply to this agent, in the order the
@@ -3794,6 +3836,9 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 
 	// Label each key the Hub provided with the source whose value won.
 	for _, key := range brokerReqs.HubHas {
+		if installationOnly && isBlockedInstallationGitHubEnvKey(key) {
+			continue
+		}
 		if key == agentTZEnvKey {
 			// TZ is labelled with the rung of the agent TZ chain. The
 			// label is advisory, like envGatherStoredScope: a failed
@@ -3815,11 +3860,17 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	if len(brokerReqs.SecretInfo) > 0 {
 		resp.SecretInfo = make(map[string]SecretKeyInfo, len(brokerReqs.SecretInfo))
 		for k, v := range brokerReqs.SecretInfo {
+			if installationOnly && isBlockedInstallationGitHubEnvKey(k) {
+				continue
+			}
 			resp.SecretInfo[k] = SecretKeyInfo{
 				Description: v.Description,
 				Source:      v.Source,
 				Type:        v.Type,
 			}
+		}
+		if len(resp.SecretInfo) == 0 {
+			resp.SecretInfo = nil
 		}
 	}
 
@@ -3827,7 +3878,7 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// Hub actually has it in storage (env_vars table or secret backend).  If
 	// found, this indicates a resolution mismatch — the dispatch should have
 	// included it but didn't.
-	for _, key := range brokerReqs.Needs {
+	for _, key := range resp.Needs {
 		// Check env_vars table, highest-precedence scope first.
 		// as_needed rows count here: they are the usual reason a stored key
 		// was left out of the first dispatch pass.
@@ -4124,8 +4175,13 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		}
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
-			MissingEnvVars(w, stillMissing.Requirements.Needs,
-				s.buildEnvGatherResponse(ctx, agent, stillMissing.Requirements))
+			filteredNeeds := filterInstallationEnvGatherKeys(agent, stillMissing.Requirements.Needs)
+			if len(stillMissing.Requirements.Needs) > 0 && len(filteredNeeds) == 0 {
+				writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, ErrBrokerRequestedBlockedGitHubEnv.Error(), nil)
+				return
+			}
+			hubEnvGather := s.buildEnvGatherResponse(ctx, agent, stillMissing.Requirements)
+			MissingEnvVars(w, hubEnvGather.Needs, hubEnvGather)
 			return
 		}
 		if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
@@ -5489,11 +5545,16 @@ func removedConfigEntries(old, req *api.ScionConfig, present map[string]bool, ca
 }
 
 // removedEntriesWarnings returns the PATCH warnings naming the entries
-// removedConfigEntries reports.
+// removedConfigEntries reports. Env keys recorded in ClearedFields are removed
+// by the broker at the next start, whereas mcp_servers and volumes remain until
+// the next reincarnation.
 func removedEntriesWarnings(removed map[string][]string) []string {
 	var out []string
+	if r := removed["env"]; len(r) > 0 {
+		out = append(out, "config.env: removed "+strings.Join(r, ", ")+" now; those variables will be removed at the next start")
+	}
 	for _, w := range []struct{ key, what string }{
-		{"env", "variables"}, {"mcp_servers", "MCP servers"}, {"volumes", "volumes"},
+		{"mcp_servers", "MCP servers"}, {"volumes", "volumes"},
 	} {
 		if r := removed[w.key]; len(r) > 0 {
 			out = append(out, "config."+w.key+": removed "+strings.Join(r, ", ")+" now; the agent keeps those "+w.what+" until the next reincarnation (a plain start does not remove them)")

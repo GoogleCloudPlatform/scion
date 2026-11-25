@@ -50,6 +50,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'clearedResourceSubfields',
   'emptyPerAgentWorkspace',
   'ephemeralPersistence',
+  'githubTokenInstallationOnly',
   'homeFiles',
   'nodeImageRegistry',
   'reprovision',

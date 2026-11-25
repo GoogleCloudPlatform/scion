@@ -677,6 +677,46 @@ type AgentAppliedConfig struct {
 // redactMCPServersForResponse and redactServicesForResponse), matching env:
 // the entries themselves stay in the response.
 //
+// GitHubTokenPreferenceInstallation is the AppliedConfig.GitHubTokenPreference
+// value that restricts an agent to Hub-minted GitHub App installation tokens.
+const GitHubTokenPreferenceInstallation = "installation"
+
+// isRedactedResponseEnvKey reports whether key must be withheld from API
+// response views of an agent's config env. GITHUB_TOKEN is always withheld;
+// for installation-only agents, the full api.IsBlockedInstallationGitHubEnvKey
+// set is withheld as well. Non-installation agents keep user-typed GH_* keys
+// visible so edit-page echoes do not drop them.
+func isRedactedResponseEnvKey(key string, installationOnly bool) bool {
+	if installationOnly {
+		return api.IsBlockedInstallationGitHubEnvKey(key)
+	}
+	return key == "GITHUB_TOKEN"
+}
+
+// stripBlockedInstallationGitHubEnv removes all
+// api.IsBlockedInstallationGitHubEnvKey entries from cfg.Env in place. Called
+// only on the freshly copied InlineConfig inside AgentAppliedConfig.ResponseView
+// for installation-only agents so redactInlineConfigForResponse and
+// redactCreateInputsForResponse keep their two-argument canAttach chain.
+func stripBlockedInstallationGitHubEnv(cfg *api.ScionConfig) {
+	if cfg == nil || len(cfg.Env) == 0 {
+		return
+	}
+	for k := range cfg.Env {
+		if api.IsBlockedInstallationGitHubEnvKey(k) {
+			delete(cfg.Env, k)
+		}
+	}
+	if len(cfg.Env) == 0 {
+		cfg.Env = nil
+	}
+}
+
+// ResponseView returns a copy of ac for an API response. canAttach must be
+// the caller's attach-equivalent access to the agent: without it Env is
+// omitted; with it GITHUB_TOKEN is stripped (and for installation-only agents,
+// all api.IsBlockedInstallationGitHubEnvKey keys are stripped).
+//
 // CreateInputs.InlineConfig gets the same treatment as InlineConfig, through
 // a deep copy of CreateInputs (see redactCreateInputsForResponse).
 //
@@ -691,6 +731,12 @@ func (ac *AgentAppliedConfig) ResponseView(canAttach bool) *AgentAppliedConfig {
 	view.envResponseVisible = canAttach
 	view.InlineConfig = redactInlineConfigForResponse(ac.InlineConfig, canAttach)
 	view.CreateInputs = redactCreateInputsForResponse(ac.CreateInputs, canAttach)
+	if ac.GitHubTokenPreference == GitHubTokenPreferenceInstallation {
+		stripBlockedInstallationGitHubEnv(view.InlineConfig)
+		if view.CreateInputs != nil {
+			stripBlockedInstallationGitHubEnv(view.CreateInputs.InlineConfig)
+		}
+	}
 	return &view
 }
 
@@ -858,9 +904,10 @@ func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
 	if !ac.envResponseVisible {
 		out.Env = nil
 	} else if len(out.Env) > 0 {
+		installationOnly := ac.GitHubTokenPreference == GitHubTokenPreferenceInstallation
 		filtered := make(map[string]string, len(out.Env))
 		for k, v := range out.Env {
-			if k == "GITHUB_TOKEN" {
+			if isRedactedResponseEnvKey(k, installationOnly) {
 				continue
 			}
 			filtered[k] = v
@@ -1546,6 +1593,12 @@ type BrokerCapabilities struct {
 	// starting the harness (ptone/scion#8058). The hub refuses to dispatch a
 	// create carrying non-empty HomeFiles to a broker without it.
 	HomeFiles bool `json:"homeFiles,omitempty"`
+	// GitHubTokenInstallationOnly indicates the broker honours the
+	// githubTokenInstallationOnly dispatch flag by refusing broker-side host
+	// env passthrough and config/bundle injection for blocked GitHub token
+	// keys (ptone/scion#8058). The hub refuses to dispatch installation-only
+	// agents to a broker without it.
+	GitHubTokenInstallationOnly bool `json:"githubTokenInstallationOnly,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker

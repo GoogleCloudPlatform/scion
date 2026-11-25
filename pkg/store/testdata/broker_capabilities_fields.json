@@ -12,6 +12,7 @@
     "clearedResourceSubfields",
     "emptyPerAgentWorkspace",
     "ephemeralPersistence",
+    "githubTokenInstallationOnly",
     "homeFiles",
     "nodeImageRegistry",
     "reprovision",

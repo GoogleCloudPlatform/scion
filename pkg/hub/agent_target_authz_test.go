@@ -619,6 +619,7 @@ func TestInstallationAgent_CrossAgentAttachAndLifecycleRefused(t *testing.T) {
 	})
 
 	t.Run("peer_env_redacted_in_list_and_get_for_installation_caller", func(t *testing.T) {
+		const peerPlainEnv = "plainval_peer_non_gh_env"
 		const peerGHToken = "plainval_peer_gh_token_pat"
 		const childAllowedEnv = "child_allowed_env_val"
 
@@ -628,8 +629,9 @@ func TestInstallationAgent_CrossAgentAttachAndLifecycleRefused(t *testing.T) {
 
 		f.sibling.AppliedConfig = &store.AgentAppliedConfig{
 			Env: map[string]string{
-				"GITHUB_TOKEN": "ghp_peer_pat_never_serialized",
-				"GH_TOKEN":     peerGHToken,
+				"GITHUB_TOKEN":   "ghp_peer_pat_never_serialized",
+				"GH_TOKEN":       peerGHToken,
+				"PEER_PLAIN_ENV": peerPlainEnv,
 			},
 		}
 		require.NoError(t, f.store.UpdateAgent(ctx, f.sibling))
@@ -640,10 +642,13 @@ func TestInstallationAgent_CrossAgentAttachAndLifecycleRefused(t *testing.T) {
 		}
 		require.NoError(t, f.store.UpdateAgent(ctx, f.child))
 
-		// Control: user_preferred caller sees peer GH_TOKEN in project agent list.
+		// Control: user_preferred caller sees non-installation peer plain and GH_TOKEN env
+		// in project agent list, while GITHUB_TOKEN is always stripped by the store serializer.
 		recCtrl := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents", nil, scopes...)
 		require.Equal(t, http.StatusOK, recCtrl.Code, recCtrl.Body.String())
-		assert.Contains(t, recCtrl.Body.String(), peerGHToken, "control user_preferred caller sees peer env")
+		assert.Contains(t, recCtrl.Body.String(), peerPlainEnv, "control user_preferred caller sees peer plain env")
+		assert.Contains(t, recCtrl.Body.String(), peerGHToken, "control user_preferred caller sees non-installation peer GH_TOKEN")
+		assert.NotContains(t, recCtrl.Body.String(), "ghp_peer_pat_never_serialized")
 
 		// Switch caller to installation-only: peer env is redacted in project list,
 		// global list, and single-agent GET, while own installation child env stays visible.
@@ -652,12 +657,14 @@ func TestInstallationAgent_CrossAgentAttachAndLifecycleRefused(t *testing.T) {
 
 		recList := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents", nil, scopes...)
 		require.Equal(t, http.StatusOK, recList.Code, recList.Body.String())
+		assert.NotContains(t, recList.Body.String(), peerPlainEnv, "installation caller must not see peer env in project list")
 		assert.NotContains(t, recList.Body.String(), peerGHToken, "installation caller must not see peer GH_TOKEN in project list")
 		assert.NotContains(t, recList.Body.String(), "ghp_peer_pat_never_serialized")
 		assert.Contains(t, recList.Body.String(), childAllowedEnv, "installation caller still sees own installation child env")
 
 		recGlobal := f.asAgent(t, http.MethodGet, "/api/v1/agents", nil, scopes...)
 		require.Equal(t, http.StatusOK, recGlobal.Code, recGlobal.Body.String())
+		assert.NotContains(t, recGlobal.Body.String(), peerPlainEnv, "installation caller must not see peer env in global list")
 		assert.NotContains(t, recGlobal.Body.String(), peerGHToken, "installation caller must not see peer GH_TOKEN in global list")
 
 		// Direct helper parity check for single-agent GET / PendingConfig / EffectiveNextRun

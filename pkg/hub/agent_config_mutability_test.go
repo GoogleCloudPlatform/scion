@@ -685,6 +685,7 @@ func TestRemovedEntriesWarnings(t *testing.T) {
 	got := warnings(old, req, all, true)
 	require.Len(t, got, 3)
 	assert.Contains(t, got[0], "config.env: removed GONE now")
+	assert.Contains(t, got[0], "removed at the next start")
 	assert.Contains(t, got[1], "config.mcp_servers: removed b now")
 	assert.Contains(t, got[2], "config.volumes: removed /x now")
 

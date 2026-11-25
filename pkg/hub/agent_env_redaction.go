@@ -73,7 +73,8 @@ func (s *Server) redactAgentConfigsForResponse(ac *store.AgentAppliedConfig, pc 
 	if !s.heldEditsEnabled() {
 		pc = nil
 	}
-	return redactAppliedConfigEnvForResponse(ac, canAttach), pc.ResponseView(canAttach)
+	installationOnly := ac != nil && ac.GitHubTokenPreference == DispatchAgentGitHubTokenInstallation
+	return redactAppliedConfigEnvForResponse(ac, canAttach), pc.ResponseViewForGitHubPolicy(canAttach, installationOnly)
 }
 
 // canViewAgentEnv answers the same access-level question as
