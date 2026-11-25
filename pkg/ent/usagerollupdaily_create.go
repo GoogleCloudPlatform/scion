@@ -76,6 +76,14 @@ func (_c *UsageRollupDailyCreate) SetModel(v string) *UsageRollupDailyCreate {
 	return _c
 }
 
+// SetNillableModel sets the "model" field if the given value is not nil.
+func (_c *UsageRollupDailyCreate) SetNillableModel(v *string) *UsageRollupDailyCreate {
+	if v != nil {
+		_c.SetModel(*v)
+	}
+	return _c
+}
+
 // SetUsageSource sets the "usage_source" field.
 func (_c *UsageRollupDailyCreate) SetUsageSource(v string) *UsageRollupDailyCreate {
 	_c.mutation.SetUsageSource(v)
@@ -305,6 +313,10 @@ func (_c *UsageRollupDailyCreate) defaults() {
 		v := usagerollupdaily.DefaultHarness
 		_c.mutation.SetHarness(v)
 	}
+	if _, ok := _c.mutation.Model(); !ok {
+		v := usagerollupdaily.DefaultModel
+		_c.mutation.SetModel(v)
+	}
 	if _, ok := _c.mutation.Calls(); !ok {
 		v := usagerollupdaily.DefaultCalls
 		_c.mutation.SetCalls(v)
@@ -379,13 +391,11 @@ func (_c *UsageRollupDailyCreate) check() error {
 			return &ValidationError{Name: "agent_id", err: fmt.Errorf(`ent: validator failed for field "UsageRollupDaily.agent_id": %w`, err)}
 		}
 	}
+	if _, ok := _c.mutation.Harness(); !ok {
+		return &ValidationError{Name: "harness", err: errors.New(`ent: missing required field "UsageRollupDaily.harness"`)}
+	}
 	if _, ok := _c.mutation.Model(); !ok {
 		return &ValidationError{Name: "model", err: errors.New(`ent: missing required field "UsageRollupDaily.model"`)}
-	}
-	if v, ok := _c.mutation.Model(); ok {
-		if err := usagerollupdaily.ModelValidator(v); err != nil {
-			return &ValidationError{Name: "model", err: fmt.Errorf(`ent: validator failed for field "UsageRollupDaily.model": %w`, err)}
-		}
 	}
 	if _, ok := _c.mutation.UsageSource(); !ok {
 		return &ValidationError{Name: "usage_source", err: errors.New(`ent: missing required field "UsageRollupDaily.usage_source"`)}

@@ -751,16 +751,6 @@ func HarnessHasSuffix(v string) predicate.UsageEvent {
 	return predicate.UsageEvent(sql.FieldHasSuffix(FieldHarness, v))
 }
 
-// HarnessIsNil applies the IsNil predicate on the "harness" field.
-func HarnessIsNil() predicate.UsageEvent {
-	return predicate.UsageEvent(sql.FieldIsNull(FieldHarness))
-}
-
-// HarnessNotNil applies the NotNil predicate on the "harness" field.
-func HarnessNotNil() predicate.UsageEvent {
-	return predicate.UsageEvent(sql.FieldNotNull(FieldHarness))
-}
-
 // HarnessEqualFold applies the EqualFold predicate on the "harness" field.
 func HarnessEqualFold(v string) predicate.UsageEvent {
 	return predicate.UsageEvent(sql.FieldEqualFold(FieldHarness, v))

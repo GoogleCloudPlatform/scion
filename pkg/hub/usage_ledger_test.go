@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -334,4 +335,25 @@ func TestUsageLedger_PeriodicRetryAfterFailure(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "periodic retry timer must backfill after transient failure")
 	srv.stopUsageLedger()
 	assert.GreaterOrEqual(t, calls.Load(), int32(2))
+}
+
+func TestUsageLedger_ShellHarnessParityAndRetryBackoff(t *testing.T) {
+	// Pin store.CanonicalHarnessName parity with config.ShellHarnessConfigName
+	// without making pkg/store depend on pkg/config.
+	assert.Equal(t, config.ShellHarnessConfigName, store.CanonicalHarnessName(config.ShellHarnessConfigName))
+
+	// Verify exponential backoff doubles from 2m up to the 30m cap.
+	rt := &usageLedgerRuntime{}
+	want := []time.Duration{
+		2 * time.Minute,
+		4 * time.Minute,
+		8 * time.Minute,
+		16 * time.Minute,
+		30 * time.Minute,
+		30 * time.Minute,
+	}
+	for i, w := range want {
+		rt.retryAttempts = i
+		assert.Equal(t, w, rt.nextRetryDelay(), "attempt %d", i)
+	}
 }

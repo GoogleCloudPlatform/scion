@@ -328,9 +328,6 @@ func (_u *UsageRollupDailyUpdate) sqlSave(ctx context.Context) (_node int, err e
 			}
 		}
 	}
-	if _u.mutation.HarnessCleared() {
-		_spec.ClearField(usagerollupdaily.FieldHarness, field.TypeString)
-	}
 	if value, ok := _u.mutation.Calls(); ok {
 		_spec.SetField(usagerollupdaily.FieldCalls, field.TypeInt64, value)
 	}
@@ -752,9 +749,6 @@ func (_u *UsageRollupDailyUpdateOne) sqlSave(ctx context.Context) (_node *UsageR
 				ps[i](selector)
 			}
 		}
-	}
-	if _u.mutation.HarnessCleared() {
-		_spec.ClearField(usagerollupdaily.FieldHarness, field.TypeString)
 	}
 	if value, ok := _u.mutation.Calls(); ok {
 		_spec.SetField(usagerollupdaily.FieldCalls, field.TypeInt64, value)

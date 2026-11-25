@@ -85,9 +85,6 @@ func (_u *UsageEventUpdate) sqlSave(ctx context.Context) (_node int, err error) 
 	if _u.mutation.BrokerIDCleared() {
 		_spec.ClearField(usageevent.FieldBrokerID, field.TypeString)
 	}
-	if _u.mutation.HarnessCleared() {
-		_spec.ClearField(usageevent.FieldHarness, field.TypeString)
-	}
 	if _u.mutation.SourceKindCleared() {
 		_spec.ClearField(usageevent.FieldSourceKind, field.TypeString)
 	}
@@ -246,9 +243,6 @@ func (_u *UsageEventUpdateOne) sqlSave(ctx context.Context) (_node *UsageEvent, 
 	}
 	if _u.mutation.BrokerIDCleared() {
 		_spec.ClearField(usageevent.FieldBrokerID, field.TypeString)
-	}
-	if _u.mutation.HarnessCleared() {
-		_spec.ClearField(usageevent.FieldHarness, field.TypeString)
 	}
 	if _u.mutation.SourceKindCleared() {
 		_spec.ClearField(usageevent.FieldSourceKind, field.TypeString)

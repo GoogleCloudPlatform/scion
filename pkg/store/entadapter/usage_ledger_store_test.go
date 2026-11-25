@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
@@ -908,6 +910,140 @@ func TestRunAttribution_LabelsRoundTripAsJSONObject(t *testing.T) {
 	var jsonType string
 	require.NoError(t, rows.Scan(&jsonType))
 	assert.Equal(t, "object", jsonType)
+}
+
+func TestUsageLedger_ConflictKeysNotNullAndEmptyRollupUpsert(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "usage-conflict-notnull")
+	agentID := uuid.NewString()
+	runID := "run-conflict-" + uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	dayUTC := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:     runID,
+		ProjectID: projectID,
+		AgentID:   agentID,
+	})
+	require.NoError(t, err)
+
+	drv := client.Driver()
+	d := drv.Dialect()
+
+	// 1. Database must reject NULL harness on usage_events and usage_rollups_daily.
+	nullEventQ, nullEventArgs := entsql.Dialect(d).
+		Insert(usageevent.Table).
+		Columns(
+			usageevent.FieldID, usageevent.FieldHubID, usageevent.FieldEventID,
+			usageevent.FieldRunID, usageevent.FieldProjectID, usageevent.FieldAgentID,
+			usageevent.FieldHarness, usageevent.FieldModel, usageevent.FieldModelSource,
+			usageevent.FieldUsageSource, usageevent.FieldStatus, usageevent.FieldTokenStatus,
+			usageevent.FieldEventTs, usageevent.FieldReceivedAt,
+		).
+		Values(
+			uuid.New(), "hub-1", "evt-null-harness", runID, projectID, agentID,
+			nil, "unknown", "unknown", store.UsageSourceHooks, "success", "not_reported",
+			now, now,
+		).Query()
+	var res sql.Result
+	err = drv.Exec(ctx, nullEventQ, nullEventArgs, &res)
+	require.Error(t, err, "usage_events.harness must be NOT NULL")
+
+	nullRollupQ, nullRollupArgs := entsql.Dialect(d).
+		Insert(usagerollupdaily.Table).
+		Columns(
+			usagerollupdaily.FieldID, usagerollupdaily.FieldBucketStart,
+			usagerollupdaily.FieldProjectID, usagerollupdaily.FieldBillingUserID,
+			usagerollupdaily.FieldAgentID, usagerollupdaily.FieldHarness,
+			usagerollupdaily.FieldModel, usagerollupdaily.FieldUsageSource,
+			usagerollupdaily.FieldFirstEventTs, usagerollupdaily.FieldLastEventTs,
+		).
+		Values(
+			uuid.New(), dayUTC, projectID, "", agentID, nil, "", store.UsageSourceHooks, now, now,
+		).Query()
+	err = drv.Exec(ctx, nullRollupQ, nullRollupArgs, &res)
+	require.Error(t, err, "usage_rollups_daily.harness must be NOT NULL")
+
+	// 2. Repeated ON CONFLICT DO UPDATE upserts with empty harness and empty model
+	//    (and omitted harness using DEFAULT '') must collide and update a single row.
+	upsertRollup := func(calls int64, omitHarness bool) {
+		cols := []string{
+			usagerollupdaily.FieldID, usagerollupdaily.FieldBucketStart,
+			usagerollupdaily.FieldProjectID, usagerollupdaily.FieldBillingUserID,
+			usagerollupdaily.FieldAgentID, usagerollupdaily.FieldModel,
+			usagerollupdaily.FieldUsageSource, usagerollupdaily.FieldCalls,
+			usagerollupdaily.FieldFirstEventTs, usagerollupdaily.FieldLastEventTs,
+		}
+		vals := []any{
+			uuid.New(), dayUTC, projectID, "", agentID, "", store.UsageSourceHooks, calls, now, now,
+		}
+		if !omitHarness {
+			cols = append(cols, usagerollupdaily.FieldHarness)
+			vals = append(vals, "")
+		}
+		q, args := entsql.Dialect(d).
+			Insert(usagerollupdaily.Table).
+			Columns(cols...).
+			Values(vals...).
+			OnConflict(
+				entsql.ConflictColumns(
+					usagerollupdaily.FieldBucketStart,
+					usagerollupdaily.FieldProjectID,
+					usagerollupdaily.FieldBillingUserID,
+					usagerollupdaily.FieldAgentID,
+					usagerollupdaily.FieldHarness,
+					usagerollupdaily.FieldModel,
+					usagerollupdaily.FieldUsageSource,
+				),
+				entsql.ResolveWith(func(u *entsql.UpdateSet) {
+					u.Add(usagerollupdaily.FieldCalls, calls)
+				}),
+			).Query()
+		require.NoError(t, drv.Exec(ctx, q, args, &res))
+	}
+
+	upsertRollup(3, true)  // omits harness -> DEFAULT ''
+	upsertRollup(4, false) // explicit harness = ''
+
+	rows, err := client.UsageRollupDaily.Query().
+		Where(usagerollupdaily.ProjectIDEQ(projectID), usagerollupdaily.AgentIDEQ(agentID)).
+		All(ctx)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "repeated upserts with empty harness/model must collide into one row")
+	assert.Equal(t, int64(7), rows[0].Calls)
+	assert.Equal(t, "", rows[0].Harness)
+	assert.Equal(t, "", rows[0].Model)
+}
+
+func TestRunAttribution_WithTxSetAgentRunID(t *testing.T) {
+	ctx := context.Background()
+	cs := NewCompositeStore(enttest.NewClient(t))
+	t.Cleanup(func() { _ = cs.Close() })
+	cs.SetRunAttributionConfig(&store.RunAttributionConfig{HubID: "hub-withtx"})
+
+	projectID := createTestProject(t, cs, "attr-withtx")
+	userID := createTestUser(t, cs, "withtx-user@example.com")
+	ag := makeAgent(projectID, "worker-withtx")
+	ag.OwnerID = userID
+	ag.AppliedConfig = &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "my-claude"}
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+
+	err := cs.WithTx(ctx, func(tx store.Store) error {
+		_, setErr := tx.SetAgentRunID(ctx, ag.ID, "run-inside-withtx", nil)
+		return setErr
+	})
+	require.NoError(t, err)
+
+	attr, err := cs.GetRunAttribution(ctx, "run-inside-withtx")
+	require.NoError(t, err)
+	assert.Equal(t, "hub-withtx", attr.HubID)
+	assert.Equal(t, "claude", attr.Harness)
+	require.NotNil(t, attr.BillingUserID)
+	assert.Equal(t, userID, *attr.BillingUserID)
 }
 
 func TestBackfillActiveRunAttributions_Idempotent(t *testing.T) {

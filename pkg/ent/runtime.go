@@ -4205,8 +4205,8 @@ func init() {
 	usagerollupdaily.DefaultHarness = usagerollupdailyDescHarness.Default.(string)
 	// usagerollupdailyDescModel is the schema descriptor for model field.
 	usagerollupdailyDescModel := usagerollupdailyFields[6].Descriptor()
-	// usagerollupdaily.ModelValidator is a validator for the "model" field. It is called by the builders before save.
-	usagerollupdaily.ModelValidator = usagerollupdailyDescModel.Validators[0].(func(string) error)
+	// usagerollupdaily.DefaultModel holds the default value on creation for the model field.
+	usagerollupdaily.DefaultModel = usagerollupdailyDescModel.Default.(string)
 	// usagerollupdailyDescUsageSource is the schema descriptor for usage_source field.
 	usagerollupdailyDescUsageSource := usagerollupdailyFields[7].Descriptor()
 	// usagerollupdaily.UsageSourceValidator is a validator for the "usage_source" field. It is called by the builders before save.

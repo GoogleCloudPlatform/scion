@@ -19,12 +19,12 @@ import (
 	"errors"
 	"strings"
 	"time"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // CanonicalHarnessName normalizes a known harness name to its canonical
 // identifier, or returns "" when name is not one of the built-in harness names.
+// Parity with config.ShellHarnessConfigName is pinned by a test in pkg/hub so
+// pkg/store stays free of a dependency on pkg/config.
 func CanonicalHarnessName(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "claude":
@@ -37,8 +37,8 @@ func CanonicalHarnessName(name string) string {
 		return "codex"
 	case "generic":
 		return "generic"
-	case config.ShellHarnessConfigName:
-		return config.ShellHarnessConfigName
+	case "shell":
+		return "shell"
 	default:
 		return ""
 	}

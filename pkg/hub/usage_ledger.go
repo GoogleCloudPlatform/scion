@@ -24,10 +24,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// defaultUsageLedgerBackfillRetryInterval bounds how long a failed active-run
-// backfill waits before retrying automatically while tokenomics.usage_ledger
-// stays enabled.
-const defaultUsageLedgerBackfillRetryInterval = 2 * time.Minute
+// Backfill retry backoff bounds: starts at 2m and doubles up to a 30m cap
+// while tokenomics.usage_ledger remains enabled and backfill has not succeeded.
+const (
+	defaultUsageLedgerBackfillRetryInterval = 2 * time.Minute
+	defaultUsageLedgerBackfillRetryMax      = 30 * time.Minute
+)
 
 // usageLedgerHookStore is the optional Ent-backed store capability used by the
 // Hub to enable/disable atomic run_attribution writes on run-ID minting and
@@ -60,17 +62,37 @@ type usageLedgerRuntime struct {
 	backfillCancel    context.CancelFunc
 	backfillDone      chan struct{}
 	retryTimer        *time.Timer
-	// retryInterval overrides defaultUsageLedgerBackfillRetryInterval in tests.
+	retryAttempts     int
+	// retryInterval and retryMax override the backoff defaults in tests.
 	retryInterval time.Duration
+	retryMax      time.Duration
 	// backfillFn overrides uls.BackfillActiveRunAttributions in tests.
 	backfillFn func(ctx context.Context, hubID string) (int, error)
 }
 
-func (rt *usageLedgerRuntime) effectiveRetryInterval() time.Duration {
-	if rt.retryInterval > 0 {
-		return rt.retryInterval
+func (rt *usageLedgerRuntime) nextRetryDelay() time.Duration {
+	base := rt.retryInterval
+	if base <= 0 {
+		base = defaultUsageLedgerBackfillRetryInterval
 	}
-	return defaultUsageLedgerBackfillRetryInterval
+	maxDelay := rt.retryMax
+	if maxDelay <= 0 {
+		maxDelay = defaultUsageLedgerBackfillRetryMax
+	}
+	if maxDelay < base {
+		maxDelay = base
+	}
+	delay := base
+	for i := 0; i < rt.retryAttempts; i++ {
+		if delay >= maxDelay/2 {
+			return maxDelay
+		}
+		delay *= 2
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
 }
 
 // reconcileUsageLedger synchronizes the store's atomic run_attribution writer
@@ -107,6 +129,7 @@ func (s *Server) reconcileUsageLedgerMode(ctx context.Context, async bool) {
 		}
 		rt.enabled = false
 		rt.backfillSucceeded = false
+		rt.retryAttempts = 0
 		if rt.retryTimer != nil {
 			rt.retryTimer.Stop()
 			rt.retryTimer = nil
@@ -131,6 +154,7 @@ func (s *Server) reconcileUsageLedgerMode(ctx context.Context, async bool) {
 		rt.gen++
 		rt.enabled = true
 		rt.backfillSucceeded = false
+		rt.retryAttempts = 0
 	}
 	rt.hubID = hubID
 	wasInstalled := uls.RunAttributionConfigInstalled()
@@ -197,14 +221,17 @@ func (s *Server) prepareBackfillLocked(ctx context.Context, uls usageLedgerHookS
 			nextRun = s.prepareBackfillLocked(context.Background(), uls)
 		case err == nil && ctxErr == nil:
 			rt.backfillSucceeded = true
+			rt.retryAttempts = 0
 			if inserted > 0 {
 				slog.Info("tokenomics.usage_ledger: backfilled run_attribution rows for active runs", "inserted", inserted)
 			}
 		default:
+			delay := rt.nextRetryDelay()
+			rt.retryAttempts++
 			slog.Warn("tokenomics.usage_ledger: active-run attribution backfill failed; scheduling retry",
-				"inserted", inserted, "retry_in", rt.effectiveRetryInterval(), "error", err)
+				"inserted", inserted, "attempt", rt.retryAttempts, "retry_in", delay, "error", err)
 			retryGen := rt.gen
-			rt.retryTimer = time.AfterFunc(rt.effectiveRetryInterval(), func() {
+			rt.retryTimer = time.AfterFunc(delay, func() {
 				rt.mu.Lock()
 				stillRelevant := rt.enabled && rt.gen == retryGen && !rt.backfillSucceeded
 				rt.mu.Unlock()

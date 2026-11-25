@@ -131267,22 +131267,9 @@ func (m *UsageEventMutation) OldHarness(ctx context.Context) (v string, err erro
 	return oldValue.Harness, nil
 }
 
-// ClearHarness clears the value of the "harness" field.
-func (m *UsageEventMutation) ClearHarness() {
-	m.harness = nil
-	m.clearedFields[usageevent.FieldHarness] = struct{}{}
-}
-
-// HarnessCleared returns if the "harness" field was cleared in this mutation.
-func (m *UsageEventMutation) HarnessCleared() bool {
-	_, ok := m.clearedFields[usageevent.FieldHarness]
-	return ok
-}
-
 // ResetHarness resets all changes to the "harness" field.
 func (m *UsageEventMutation) ResetHarness() {
 	m.harness = nil
-	delete(m.clearedFields, usageevent.FieldHarness)
 }
 
 // SetModel sets the "model" field.
@@ -133435,9 +133422,6 @@ func (m *UsageEventMutation) ClearedFields() []string {
 	if m.FieldCleared(usageevent.FieldBrokerID) {
 		fields = append(fields, usageevent.FieldBrokerID)
 	}
-	if m.FieldCleared(usageevent.FieldHarness) {
-		fields = append(fields, usageevent.FieldHarness)
-	}
 	if m.FieldCleared(usageevent.FieldSourceKind) {
 		fields = append(fields, usageevent.FieldSourceKind)
 	}
@@ -133508,9 +133492,6 @@ func (m *UsageEventMutation) ClearField(name string) error {
 		return nil
 	case usageevent.FieldBrokerID:
 		m.ClearBrokerID()
-		return nil
-	case usageevent.FieldHarness:
-		m.ClearHarness()
 		return nil
 	case usageevent.FieldSourceKind:
 		m.ClearSourceKind()
@@ -134898,22 +134879,9 @@ func (m *UsageRollupDailyMutation) OldHarness(ctx context.Context) (v string, er
 	return oldValue.Harness, nil
 }
 
-// ClearHarness clears the value of the "harness" field.
-func (m *UsageRollupDailyMutation) ClearHarness() {
-	m.harness = nil
-	m.clearedFields[usagerollupdaily.FieldHarness] = struct{}{}
-}
-
-// HarnessCleared returns if the "harness" field was cleared in this mutation.
-func (m *UsageRollupDailyMutation) HarnessCleared() bool {
-	_, ok := m.clearedFields[usagerollupdaily.FieldHarness]
-	return ok
-}
-
 // ResetHarness resets all changes to the "harness" field.
 func (m *UsageRollupDailyMutation) ResetHarness() {
 	m.harness = nil
-	delete(m.clearedFields, usagerollupdaily.FieldHarness)
 }
 
 // SetModel sets the "model" field.
@@ -136181,11 +136149,7 @@ func (m *UsageRollupDailyMutation) AddField(name string, value ent.Value) error 
 // ClearedFields returns all nullable fields that were cleared during this
 // mutation.
 func (m *UsageRollupDailyMutation) ClearedFields() []string {
-	var fields []string
-	if m.FieldCleared(usagerollupdaily.FieldHarness) {
-		fields = append(fields, usagerollupdaily.FieldHarness)
-	}
-	return fields
+	return nil
 }
 
 // FieldCleared returns a boolean indicating if a field with the given name was
@@ -136198,11 +136162,6 @@ func (m *UsageRollupDailyMutation) FieldCleared(name string) bool {
 // ClearField clears the value of the field with the given name. It returns an
 // error if the field is not defined in the schema.
 func (m *UsageRollupDailyMutation) ClearField(name string) error {
-	switch name {
-	case usagerollupdaily.FieldHarness:
-		m.ClearHarness()
-		return nil
-	}
 	return fmt.Errorf("unknown UsageRollupDaily nullable field %s", name)
 }
 

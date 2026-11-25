@@ -48,12 +48,13 @@ func (UsageRollupDaily) Fields() []ent.Field {
 		field.String("agent_id").
 			NotEmpty().
 			Immutable(),
+		// Every column in usage_rollups_daily_key must be NOT NULL so
+		// ON CONFLICT DO UPDATE upserts always collide on the same logical key.
 		field.String("harness").
-			Optional().
 			Default("").
 			Immutable(),
 		field.String("model").
-			NotEmpty().
+			Default("").
 			Immutable(),
 		field.String("usage_source").
 			NotEmpty().

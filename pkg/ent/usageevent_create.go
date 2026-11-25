@@ -555,6 +555,9 @@ func (_c *UsageEventCreate) check() error {
 			return &ValidationError{Name: "agent_id", err: fmt.Errorf(`ent: validator failed for field "UsageEvent.agent_id": %w`, err)}
 		}
 	}
+	if _, ok := _c.mutation.Harness(); !ok {
+		return &ValidationError{Name: "harness", err: errors.New(`ent: missing required field "UsageEvent.harness"`)}
+	}
 	if _, ok := _c.mutation.Model(); !ok {
 		return &ValidationError{Name: "model", err: errors.New(`ent: missing required field "UsageEvent.model"`)}
 	}

@@ -100,8 +100,8 @@ var (
 	AgentIDValidator func(string) error
 	// DefaultHarness holds the default value on creation for the "harness" field.
 	DefaultHarness string
-	// ModelValidator is a validator for the "model" field. It is called by the builders before save.
-	ModelValidator func(string) error
+	// DefaultModel holds the default value on creation for the "model" field.
+	DefaultModel string
 	// UsageSourceValidator is a validator for the "usage_source" field. It is called by the builders before save.
 	UsageSourceValidator func(string) error
 	// DefaultCalls holds the default value on creation for the "calls" field.

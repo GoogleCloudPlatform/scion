@@ -62,8 +62,8 @@ func (UsageEvent) Fields() []ent.Field {
 			Optional().
 			Default("").
 			Immutable(),
+		// NOT NULL DEFAULT '' so unknown harness has one canonical encoding ("").
 		field.String("harness").
-			Optional().
 			Default("").
 			Immutable(),
 		field.String("model").
