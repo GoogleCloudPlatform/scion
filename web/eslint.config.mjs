@@ -156,6 +156,7 @@ export default defineConfig([
   project(
     [
       'e2e/agent-create-secrets/*.ts',
+      'e2e/agent-graph/*.ts',
       'e2e/agent-store-count/*.ts',
       'e2e/artifacts-access/*.ts',
       'e2e/artifacts-agent-owned/*.ts',

@@ -264,6 +264,18 @@ describe('scion-agent-tree-view context dimming & filtered empty state', () => {
     expect(childLink!.hasAttribute('aria-description')).toBe(false);
   });
 
+  it('does not pin opacity/transform after node-in finishes via forwards/both fill-mode', () => {
+    const ctor = customElements.get('scion-agent-tree-view') as
+      | typeof ScionAgentTreeView
+      | undefined;
+    const styles = ctor?.styles;
+    const text = Array.isArray(styles)
+      ? styles.map((s) => s.cssText).join('\n')
+      : (styles?.cssText ?? '');
+    expect(text).toMatch(/animation:\s*node-in\b[^;]*;/);
+    expect(text).not.toMatch(/animation:\s*node-in[^;]*\b(both|forwards)\b/);
+  });
+
   it('renders filtered empty state with Clear filter button that dispatches clear-filter', async () => {
     tree = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
     tree.agents = [];

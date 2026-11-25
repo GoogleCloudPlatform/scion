@@ -11,6 +11,7 @@
   },
   "include": [
     "./agent-create-secrets/*.ts",
+    "./agent-graph/*.ts",
     "./agent-store-count/*.ts",
     "./artifacts-access/*.ts",
     "./artifacts-agent-owned/*.ts",

@@ -518,17 +518,13 @@ export class ScionAgentTreeView extends LitElement {
         opacity 0.2s ease,
         box-shadow 0.15s ease,
         transform 0.15s ease;
-      animation: node-in 0.35s ease both;
+      animation: node-in 0.35s ease backwards;
     }
 
     @keyframes node-in {
       from {
         opacity: 0;
         transform: translateY(-8px) scale(0.96);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0) scale(1);
       }
     }
 
