@@ -567,6 +567,7 @@ func serveControlGRPCProcess(t *testing.T, address string) {
 		grpc.StreamInterceptor(grpcbroker.StreamAuthInterceptor(validator)),
 	)
 	brokerv1.RegisterBrokerServiceServer(server, grpcbroker.NewServer(broker))
+	signalHelperReady(t)
 	if err := server.Serve(listener); err != nil {
 		t.Fatal(err)
 	}
