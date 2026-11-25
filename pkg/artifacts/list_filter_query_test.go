@@ -21,10 +21,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
 )
 
 func TestListFilterQueryDialect_GlobalAndPureText(t *testing.T) {
@@ -366,4 +370,89 @@ func TestListCandidates_FilterQuerySQLPushdown(t *testing.T) {
 			}
 		})
 	}
+}
+
+type countingScopeHost struct {
+	*fakeHost
+	resolved map[string]string
+	calls    map[string]int
+	total    int
+}
+
+func (c *countingScopeHost) ResolveScope(_ context.Context, slugOrID string) (string, error) {
+	if c.calls == nil {
+		c.calls = make(map[string]int)
+	}
+	c.calls[slugOrID]++
+	c.total++
+	return c.resolved[slugOrID], nil
+}
+
+func TestFilterQueryToArtifactStoreTerms_MemoisesProjectLookups(t *testing.T) {
+	base := newFixture(t, false)
+	resolved := map[string]string{
+		"foo": "project-foo",
+		"bar": "project-bar",
+		"a":   "project-a",
+	}
+
+	parseValidated := func(raw string) filterquery.Query {
+		t.Helper()
+		q, err := filterquery.Parse(raw, schemas.Artifacts.HasKey)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", raw, err)
+		}
+		if err := schemas.Artifacts.Validate(q); err != nil {
+			t.Fatalf("Validate(%q): %v", raw, err)
+		}
+		return q
+	}
+
+	t.Run("repeats within term, across terms, and case variants", func(t *testing.T) {
+		ch := &countingScopeHost{fakeHost: base.host, resolved: resolved}
+		q := parseValidated("project:Foo,foo,FOO project:foo,BAR -project:bar,Bar")
+		got, err := filterQueryToArtifactStoreTerms(context.Background(), ch, q)
+		if err != nil {
+			t.Fatalf("filterQueryToArtifactStoreTerms: %v", err)
+		}
+		if ch.total != 2 {
+			t.Fatalf("ResolveScope total calls = %d, want 2 (calls=%v)", ch.total, ch.calls)
+		}
+		if ch.calls["foo"] != 1 || ch.calls["bar"] != 1 {
+			t.Fatalf("ResolveScope per-value calls = %v, want foo=1 bar=1", ch.calls)
+		}
+
+		// Results must be identical to an un-duplicated query.
+		chClean := &countingScopeHost{fakeHost: base.host, resolved: resolved}
+		qClean := parseValidated("project:foo project:foo,bar -project:bar")
+		want, err := filterQueryToArtifactStoreTerms(context.Background(), chClean, qClean)
+		if err != nil {
+			t.Fatalf("filterQueryToArtifactStoreTerms (clean): %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("translated QueryTerms mismatch: got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("200 repeated project values resolve in 1 lookup", func(t *testing.T) {
+		ch := &countingScopeHost{fakeHost: base.host, resolved: resolved}
+		twenty := "project:" + strings.Repeat("a,", 19) + "a"
+		raw := strings.TrimSpace(strings.Repeat(twenty+" ", 10))
+		q := parseValidated(raw)
+		got, err := filterQueryToArtifactStoreTerms(context.Background(), ch, q)
+		if err != nil {
+			t.Fatalf("filterQueryToArtifactStoreTerms: %v", err)
+		}
+		if ch.total != 1 || ch.calls["a"] != 1 {
+			t.Fatalf("ResolveScope calls = %d (%v), want 1 call for 'a'", ch.total, ch.calls)
+		}
+		if len(got.Terms) != 10 {
+			t.Fatalf("terms count = %d, want 10", len(got.Terms))
+		}
+		for _, term := range got.Terms {
+			if !slices.Equal(term.Values, []string{"project-a"}) {
+				t.Errorf("term values = %v, want [project-a]", term.Values)
+			}
+		}
+	})
 }

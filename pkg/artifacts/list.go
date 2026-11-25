@@ -395,6 +395,7 @@ func filterQueryToArtifactStoreTerms(ctx context.Context, host Host, q filterque
 		qt.ExcludeText = slices.Compact(excl)
 	}
 	resolver, hasResolver := host.(ScopeResolver)
+	var projectCache map[string]string
 	if len(q.Terms) > 0 {
 		terms := make([]QueryTerm, 0, len(q.Terms))
 		for _, t := range q.Terms {
@@ -403,10 +404,18 @@ func filterQueryToArtifactStoreTerms(ctx context.Context, host Host, q filterque
 			for i, v := range t.Values {
 				lower := strings.ToLower(v)
 				if key == "project" {
+					if cached, ok := projectCache[lower]; ok {
+						vals[i] = cached
+						continue
+					}
 					resolved, err := resolveProjectValue(ctx, resolver, hasResolver, lower)
 					if err != nil {
 						return nil, err
 					}
+					if projectCache == nil {
+						projectCache = make(map[string]string)
+					}
+					projectCache[lower] = resolved
 					vals[i] = resolved
 				} else {
 					vals[i] = lower
