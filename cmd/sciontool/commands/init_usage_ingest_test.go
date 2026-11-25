@@ -265,7 +265,7 @@ func TestProbeAndConfigureUsageIngest_Transient503Then200(t *testing.T) {
 		}
 	})
 
-	t.Run("periodic re-probe activates Hub-only sink after init 503s exhaust", func(t *testing.T) {
+	t.Run("Hub-only negative after init retries stays off Hub ledger with no heartbeats", func(t *testing.T) {
 		var mu sync.Mutex
 		var probeCalls int
 		var ingestCalls int
@@ -301,8 +301,9 @@ func TestProbeAndConfigureUsageIngest_Transient503Then200(t *testing.T) {
 		}))
 		defer srv.Close()
 
+		agentHome := t.TempDir()
 		p := telemetry.NewWithConfig(&telemetry.Config{Enabled: true, CloudEnabled: false, GRPCPort: 0, HTTPPort: 0})
-		p.SetAnalyticsOutbox(t.TempDir(), 0, 0)
+		p.SetAnalyticsOutbox(agentHome, 0, 0)
 		p.SetHubUsageProbeInterval(15 * time.Millisecond)
 		newClient := func() *hub.Client { return hub.NewClientWithConfig(srv.URL, "tok-1", "agent-1") }
 
@@ -312,27 +313,33 @@ func TestProbeAndConfigureUsageIngest_Transient503Then200(t *testing.T) {
 		if err := p.Start(context.Background()); err != nil {
 			t.Fatalf("Pipeline.Start: %v", err)
 		}
-		defer func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = p.Stop(stopCtx)
-		}()
 
-		// Wait for periodic re-probe to succeed and activate the Hub sink.
-		deadline := time.Now().Add(3 * time.Second)
-		activated := false
-		for time.Now().Before(deadline) {
-			if _, ok, reason := p.AnalyticsDiagnostics(); ok && reason == "" {
-				activated = true
-				break
-			}
-			time.Sleep(15 * time.Millisecond)
+		// Wait past several probe intervals to confirm Hub-only does NOT late-activate.
+		time.Sleep(60 * time.Millisecond)
+
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := p.Stop(stopCtx); err != nil {
+			t.Fatalf("Pipeline.Stop: %v", err)
 		}
-		if !activated {
-			t.Fatal("expected periodic re-probe to activate Hub sink when Hub returned 200")
+
+		if _, ok, reason := p.AnalyticsDiagnostics(); ok || reason != telemetry.AnalyticsDisabledNoGCPExporter {
+			t.Errorf("AnalyticsDiagnostics() = ok:%v reason:%q, want ok:false reason:%q", ok, reason, telemetry.AnalyticsDisabledNoGCPExporter)
 		}
-		if got := os.Getenv(telemetry.EnvUsageHubIngest); got != "1" {
-			t.Errorf("%s = %q after re-probe activation, want \"1\"", telemetry.EnvUsageHubIngest, got)
+		if got := os.Getenv(telemetry.EnvUsageHubIngest); got != "0" {
+			t.Errorf("%s = %q, want \"0\"", telemetry.EnvUsageHubIngest, got)
+		}
+		if _, err := os.Stat(telemetry.AnalyticsOutboxDirFor(agentHome)); !os.IsNotExist(err) {
+			t.Error("outbox directory should not be created in Hub-only mode when init probe failed")
+		}
+		mu.Lock()
+		gotProbes, gotIngests := probeCalls, ingestCalls
+		mu.Unlock()
+		if gotProbes != 3 {
+			t.Errorf("probeCalls = %d, want 3 (init retries only, no background re-probe in Hub-only mode)", gotProbes)
+		}
+		if gotIngests != 0 {
+			t.Errorf("ingestCalls = %d, want 0 (no heartbeats or usage events sent)", gotIngests)
 		}
 	})
 }

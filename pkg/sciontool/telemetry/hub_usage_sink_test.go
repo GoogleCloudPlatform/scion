@@ -1539,7 +1539,9 @@ func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
 func TestDualAnalyticsDrainer_ReclaimDuringInFlightDrainRace(t *testing.T) {
 	inFlightStarted := make(chan struct{})
 	releaseHub := make(chan struct{})
-	var startOnce sync.Once
+	var startOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHub) }) }
+	t.Cleanup(release)
 	var mu sync.Mutex
 	var deliveredSeqs []int64
 
@@ -1612,7 +1614,7 @@ func TestDualAnalyticsDrainer_ReclaimDuringInFlightDrainRace(t *testing.T) {
 	}
 
 	// Release the in-flight Hub POST and verify clean completion with no race.
-	close(releaseHub)
+	release()
 	<-drainDone
 
 	hubFileAfter, _, err := o.readCursorNamed(HubAnalyticsCursorName)

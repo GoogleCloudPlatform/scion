@@ -662,9 +662,6 @@ func analyticsHubEndpoint() string {
 // native producer handed to the UsageDeriver, and the drainer. Its zero
 // value is "disabled"; only start enables it.
 type analyticsState struct {
-	// mu is allocated before starting any background re-probe goroutine so
-	// analyticsState remains value-copyable for existing unit tests.
-	mu             *sync.Mutex
 	native         *UsageAnalytics
 	drainer        *AnalyticsDrainer
 	disabledReason string
@@ -681,10 +678,6 @@ type analyticsState struct {
 	hubProbe         HubUsageProbeFunc
 	hubProbeInterval time.Duration
 	supportedSignals func() []string
-	onHubActivated   func(*UsageAnalytics)
-
-	probeCancel context.CancelFunc
-	probeDone   chan struct{}
 }
 
 // SetHubUsageSink configures the pipeline's analytics outbox to drain usage
@@ -698,10 +691,13 @@ func (p *Pipeline) SetHubUsageSink(cfg HubUsageSinkConfig) {
 	p.analytics.hubSinkCfg = &c
 }
 
-// SetHubUsageProbe registers a periodic capability re-probe used when the
-// initial probe at init was negative (O1). If a later re-probe succeeds, the
-// Hub sink activates dynamically (dual-run with cursor.hub when GCP is active,
-// or Hub-only with cursor.hub otherwise). Must be called before Start.
+// SetHubUsageProbe registers a periodic capability re-probe used in dual-run
+// (when a GCP exporter is active) after a negative initial probe at init (O1).
+// When a later re-probe succeeds, the Hub sink activates alongside GCP with
+// cursor.hub without interrupting GCP delivery. Hub-only mode (no GCP exporter)
+// never late-activates after a negative init probe so the Hub does not receive
+// empty heartbeats for a run whose producers were not wired to the outbox.
+// Must be called before Start.
 func (p *Pipeline) SetHubUsageProbe(probe HubUsageProbeFunc) {
 	if p == nil || probe == nil {
 		return
@@ -750,34 +746,21 @@ func (p *Pipeline) AnalyticsOutboxDir() string {
 	return p.analytics.native.Dir() // nil-safe; the evidence dir when failed
 }
 
-func (a *analyticsState) lock() func() {
-	if a.mu == nil {
-		return func() {}
-	}
-	a.mu.Lock()
-	return a.mu.Unlock
-}
-
 // start enables analytics when either the Hub usage sink or the GCP exporter
 // is active. Any failure leaves analytics disabled with a reason; it never
 // fails the pipeline.
 func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
-	if a.mu == nil {
-		a.mu = &sync.Mutex{}
-	}
-	unlock := a.lock()
-	defer unlock()
 	if a.drainer != nil {
 		return
 	}
 	if a.hubSinkCfg == nil && gcp == nil {
+		// Hub-only mode (no GCP exporter) does not late-activate after a
+		// negative init probe: without producers wired at startup, heartbeats
+		// would falsely advertise a healthy idle meter while usage is dropped.
 		a.disabledReason = AnalyticsDisabledNoGCPExporter
-		if a.hubProbe != nil && a.probeCancel == nil {
-			a.startHubReprobeLoopLocked(ctx)
-		}
 		return
 	}
-	a.startDrainerLocked(ctx, gcp)
+	a.startDrainer(ctx, gcp)
 }
 
 func (a *analyticsState) probeInterval() time.Duration {
@@ -787,54 +770,7 @@ func (a *analyticsState) probeInterval() time.Duration {
 	return analyticsHubProbeInterval
 }
 
-// startHubReprobeLoopLocked runs a lightweight background re-probe when
-// neither the Hub sink nor a GCP exporter is active at startup. While negative,
-// the outbox is not created and AnalyticsDisabledNoGCPExporter stays in effect.
-// When a re-probe succeeds, the outbox and Hub-only drainer start dynamically.
-func (a *analyticsState) startHubReprobeLoopLocked(ctx context.Context) {
-	pctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	a.probeCancel = cancel
-	a.probeDone = done
-	probe := a.hubProbe
-	interval := a.probeInterval()
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-pctx.Done():
-				return
-			case <-ticker.C:
-			}
-			callCtx, callCancel := context.WithTimeout(pctx, analyticsHubIDTimeout)
-			cfg, err := probe(callCtx)
-			callCancel()
-			if err != nil || cfg == nil || cfg.Post == nil {
-				continue
-			}
-			a.mu.Lock()
-			if pctx.Err() != nil || a.drainer != nil {
-				a.mu.Unlock()
-				return
-			}
-			c := *cfg
-			a.hubSinkCfg = &c
-			a.startDrainerLocked(ctx, nil)
-			native := a.native
-			onAct := a.onHubActivated
-			a.mu.Unlock()
-			if onAct != nil && native != nil {
-				onAct(native)
-			}
-			log.Info("Usage analytics Hub sink activated after periodic re-probe")
-			return
-		}
-	}()
-}
-
-func (a *analyticsState) startDrainerLocked(ctx context.Context, gcp *GCPExporter) {
+func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 	dir := a.outboxDir
 	if dir == "" {
 		// Not set by init (tests, or a pipeline run as the agent user):
@@ -901,26 +837,11 @@ func (a *analyticsState) startDrainerLocked(ctx context.Context, gcp *GCPExporte
 	a.disabledReason = ""
 }
 
-// stop ends any background re-probe loop and the drainer after one final drain
-// bounded by its own sub-deadline: at most analyticsStopBudget and at most half
-// of ctx's remaining time, so the exporter shutdown that follows keeps its share.
+// stop ends the drainer after one final drain bounded by its own sub-deadline:
+// at most analyticsStopBudget and at most half of ctx's remaining time, so the
+// exporter shutdown that follows keeps its share.
 func (a *analyticsState) stop(ctx context.Context) {
-	unlock := a.lock()
-	probeCancel := a.probeCancel
-	probeDone := a.probeDone
-	a.probeCancel = nil
-	a.probeDone = nil
-	unlock()
-	if probeCancel != nil {
-		probeCancel()
-		<-probeDone
-	}
-
-	unlock = a.lock()
-	drainer := a.drainer
-	a.drainer = nil
-	unlock()
-	if drainer == nil {
+	if a.drainer == nil {
 		return
 	}
 	budget := analyticsStopBudget
@@ -934,7 +855,8 @@ func (a *analyticsState) stop(ctx context.Context) {
 	}
 	sctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	drainer.Stop(sctx)
+	a.drainer.Stop(sctx)
+	a.drainer = nil
 }
 
 // AnalyticsLedger returns the analytics outbox's on-disk ledger snapshot

@@ -1004,8 +1004,6 @@ func (p *Pipeline) metricRejectReasons(limit int) string {
 
 // handles returns the analytics objects the health snapshot reads.
 func (a *analyticsState) handles() analyticsHandles {
-	unlock := a.lock()
-	defer unlock()
 	return analyticsHandles{native: a.native, drainer: a.drainer, send: a.send, disabledReason: a.disabledReason}
 }
 

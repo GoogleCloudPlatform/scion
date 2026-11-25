@@ -161,13 +161,12 @@ func probeAndConfigureUsageIngest(ctx context.Context, pipeline *telemetry.Pipel
 	}
 
 	// Probe ended negative: keep legacy behavior and register periodic re-probe
-	// so the Hub sink activates if the Hub recovers or enables the experiment.
+	// for dual-run mode (when a GCP exporter is active). Hub-only mode does not
+	// late-activate after a negative init probe so the Hub reads unmeasured
+	// rather than receiving empty heartbeats for unwired producers.
 	_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
 	pipeline.SetHubUsageProbe(func(pctx context.Context) (*telemetry.HubUsageSinkConfig, error) {
 		cfg, _, err := probeUsageOnce(pctx, newClient)
-		if cfg != nil {
-			_ = os.Setenv(telemetry.EnvUsageHubIngest, "1")
-		}
 		return cfg, err
 	})
 	return false

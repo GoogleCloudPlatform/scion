@@ -361,11 +361,6 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		gcpExporter = p.exporter.gcpExporter
 	}
 	p.analytics.supportedSignals = p.supportedUsageSignals
-	p.analytics.onHubActivated = func(_ *UsageAnalytics) {
-		p.health.mu.Lock()
-		p.health.analyticsHandles = p.analytics.handles()
-		p.health.mu.Unlock()
-	}
 	p.analytics.start(ctx, gcpExporter)
 
 	// Create receiver with span and metric handlers
