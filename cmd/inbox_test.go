@@ -32,16 +32,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestInboxSummaryClientTypeMatchesHub keeps hubclient.InboxSummaryResponse
-// and hubclient.InboxApprovalPreview in step with pkg/hub's wire types.
-//
-// TODO(ptone/scion#8962): add parity pairs once the remaining category preview
-// types land on main:
-//   - hub.InboxWaitingAgentPreview <-> hubclient.InboxWaitingAgentPreview (P2)
-//   - hub.InboxDecisionPreview     <-> hubclient.InboxDecisionPreview     (P3)
-//   - hub.InboxDecisionInline      <-> hubclient.InboxDecisionInline      (P3)
-//   - hub.InboxReviewPreview       <-> hubclient.InboxReviewPreview       (P4)
-//   - hub.InboxChatPreview         <-> hubclient.InboxChatPreview         (P5)
+// TestInboxSummaryClientTypeMatchesHub keeps hubclient's inbox wire types in
+// step with pkg/hub across the summary envelope and all five preview shapes.
 func TestInboxSummaryClientTypeMatchesHub(t *testing.T) {
 	pairs := []struct {
 		name       string
@@ -62,6 +54,31 @@ func TestInboxSummaryClientTypeMatchesHub(t *testing.T) {
 			name:       "InboxApprovalPreview",
 			hubType:    reflect.TypeOf(hub.InboxApprovalPreview{}),
 			clientType: reflect.TypeOf(hubclient.InboxApprovalPreview{}),
+		},
+		{
+			name:       "InboxWaitingAgentPreview",
+			hubType:    reflect.TypeOf(hub.InboxWaitingAgentPreview{}),
+			clientType: reflect.TypeOf(hubclient.InboxWaitingAgentPreview{}),
+		},
+		{
+			name:       "InboxDecisionPreview",
+			hubType:    reflect.TypeOf(hub.InboxDecisionPreview{}),
+			clientType: reflect.TypeOf(hubclient.InboxDecisionPreview{}),
+		},
+		{
+			name:       "InboxDecisionInline",
+			hubType:    reflect.TypeOf(hub.InboxDecisionInline{}),
+			clientType: reflect.TypeOf(hubclient.InboxDecisionInline{}),
+		},
+		{
+			name:       "InboxReviewPreview",
+			hubType:    reflect.TypeOf(hub.InboxReviewPreview{}),
+			clientType: reflect.TypeOf(hubclient.InboxReviewPreview{}),
+		},
+		{
+			name:       "InboxChatPreview",
+			hubType:    reflect.TypeOf(hub.InboxChatPreview{}),
+			clientType: reflect.TypeOf(hubclient.InboxChatPreview{}),
 		},
 	}
 
@@ -486,6 +503,34 @@ func TestInboxCmd_ExperimentDisabled404(t *testing.T) {
 	_, err := runInboxCmdForTest(t, "")
 	require.Error(t, err)
 	assert.Equal(t, "Inbox is not enabled on this hub (experiment web.inbox_dashboard)", err.Error())
+}
+
+func TestInboxCmd_Forbidden403HintAndUnauthorized401NoHint(t *testing.T) {
+	t.Run("403 appends inbox:read scope hint", func(t *testing.T) {
+		withInboxFakeHub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"missing required scope"}}`))
+		})
+
+		_, err := runInboxCmdForTest(t, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing required scope")
+		assert.Contains(t, err.Error(), errHintInboxForbiddenScope)
+	})
+
+	t.Run("401 does not append 403 scope hint", func(t *testing.T) {
+		withInboxFakeHub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"authentication required"}}`))
+		})
+
+		_, err := runInboxCmdForTest(t, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "authentication required")
+		assert.NotContains(t, err.Error(), errHintInboxForbiddenScope)
+	})
 }
 
 func TestInboxCmd_FlagValidation(t *testing.T) {

@@ -35,6 +35,7 @@ import (
 
 const (
 	errMsgInboxExperimentRequired = "Inbox is not enabled on this hub (experiment web.inbox_dashboard)"
+	errHintInboxForbiddenScope    = "this token needs the inbox:read scope (or log in with a session)"
 	inboxPreviewQuestionMaxRunes  = 100
 )
 
@@ -169,8 +170,13 @@ func (inboxDisabledError) Error() string { return errMsgInboxExperimentRequired 
 
 func formatInboxAPIError(err error) error {
 	var apiErr *apiclient.APIError
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-		return inboxDisabledError{}
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case http.StatusNotFound:
+			return inboxDisabledError{}
+		case http.StatusForbidden:
+			return fmt.Errorf("%w\nhint: %s", err, errHintInboxForbiddenScope)
+		}
 	}
 	return err
 }
