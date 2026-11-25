@@ -327,8 +327,8 @@ func TestPrintSecretMetadata(t *testing.T) {
 	assert.NotContains(t, buf.String(), "Target:")
 }
 
-// TestSecretCmd_AgentMode checks that agent mode keeps secret get and list
-// and removes secret set, against the real command tree (ptone/scion#5013).
+// TestSecretCmd_AgentMode checks that agent mode keeps secret get, list,
+// and set against the real command tree (ptone/scion#5013, ptone/scion#9297).
 func TestSecretCmd_AgentMode(t *testing.T) {
 	realSecret := resolveCommandPath(rootCmd, "secret")
 	require.NotNil(t, realSecret, "scion secret must exist in the real command tree")
@@ -342,5 +342,5 @@ func TestSecretCmd_AgentMode(t *testing.T) {
 	applyModeRestrictions(root, resolveMode())
 	assert.NotNil(t, resolveCommandPath(root, "secret.get"), "secret get must be available in agent mode")
 	assert.NotNil(t, resolveCommandPath(root, "secret.list"), "secret list must be available in agent mode")
-	assert.Nil(t, resolveCommandPath(root, "secret.set"), "secret set must stay out of agent mode")
+	assert.NotNil(t, resolveCommandPath(root, "secret.set"), "secret set must be available in agent mode")
 }

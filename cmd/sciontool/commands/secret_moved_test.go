@@ -20,11 +20,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestSecretReadCommandsMoved checks that sciontool secret get and list are
+// TestSecretCommandsMoved checks that sciontool secret get, list, and set are
 // hidden stubs that fail with a message naming the scion command, whatever
-// arguments and flags they are given, and that secret set is still a real
-// command (ptone/scion#5013).
-func TestSecretReadCommandsMoved(t *testing.T) {
+// arguments and flags they are given (ptone/scion#5013, ptone/scion#9297).
+func TestSecretCommandsMoved(t *testing.T) {
 	sub := func(name string) *cobra.Command {
 		for _, c := range secretCmd.Commands() {
 			if c.Name() == name {
@@ -34,7 +33,11 @@ func TestSecretReadCommandsMoved(t *testing.T) {
 		return nil
 	}
 
-	for name, target := range map[string]string{"get": "secret get --value", "list": "secret list"} {
+	for name, target := range map[string]string{
+		"get":  "secret get --value",
+		"list": "secret list",
+		"set":  "secret set",
+	} {
 		t.Run(name, func(t *testing.T) {
 			stub := sub(name)
 			if stub == nil {
@@ -55,13 +58,5 @@ func TestSecretReadCommandsMoved(t *testing.T) {
 				t.Errorf("error = %q, want %q", err.Error(), want)
 			}
 		})
-	}
-
-	set := sub("set")
-	if set == nil {
-		t.Fatal("sciontool secret set must stay registered")
-	}
-	if set.Hidden || set.Run == nil {
-		t.Error("sciontool secret set must stay a visible, working command")
 	}
 }

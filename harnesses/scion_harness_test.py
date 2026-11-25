@@ -2988,7 +2988,7 @@ class TestCaptureAuthPendingApproval(unittest.TestCase):
         self.bundle = bundle
 
     def run_capture(self, results, argv=()):
-        """Run capture_auth_main with sciontool answering results in turn."""
+        """Run capture_auth_main with scion answering results in turn."""
         calls = []
 
         def fake_run(cmd, **_kwargs):
@@ -3005,24 +3005,25 @@ class TestCaptureAuthPendingApproval(unittest.TestCase):
     def test_outcome_classification(self):
         cp = sh.subprocess.CompletedProcess
         cases = [
-            (cp([], 0, "", 'INFO Secret "K" saved, pending approval in Scion (scope: user)'), "pending"),
-            (cp([], 0, "", 'INFO Secret "K" stored (scope: project)'), "stored"),
-            (cp([], 1, "", "ERROR secret \"K\": ... (secret_pending_held_by_other_agent)"), "held"),
-            (cp([], 1, "", 'ERROR secret "K" already exists (use --force to overwrite)'), "conflict"),
-            (cp([], 1, "", "ERROR hub returned error 500"), "error"),
+            (cp([], 0, 'Secret "K" saved, pending approval in Scion (scope: user)\n', ""), "pending"),
+            (cp([], 0, 'Secret "K" stored (scope: project)\n', ""), "stored"),
+            (cp([], 1, "", 'Error: secret "K": ... (secret_pending_held_by_other_agent)'), "held"),
+            (cp([], 1, "", 'Error: secret "K" already exists (use --force to overwrite)'), "conflict"),
+            (cp([], 1, "", "Error: hub returned error 500"), "error"),
         ]
         for result, want in cases:
             with self.subTest(want=want):
                 self.assertEqual(sh.secret_set_outcome(result), want)
 
     def test_user_scope_save_is_pending_without_output(self):
-        # sciontool at a warn or error log level prints no info line; a
-        # successful user-scope save still waits for the owner's approval.
+        # Even without output, a successful user-scope save still waits for
+        # the owner's approval.
         cp = sh.subprocess.CompletedProcess
         self.assertEqual(sh.secret_set_outcome(cp([], 0, "", ""), "user"), "pending")
         self.assertEqual(sh.secret_set_outcome(cp([], 0, "", ""), "project"), "stored")
-        rc, _, out = self.run_capture([(0, "")])
+        rc, calls, out = self.run_capture([(0, "")])
         self.assertEqual(rc, sh._CA_EXIT_OK)
+        self.assertEqual(calls[0][:3], ["scion", "secret", "set"])
         self.assertIn("capture-auth: TOOL_AUTH: captured (pending approval in Scion)", out)
 
     def test_user_scope_reauth_completes_in_one_run(self):

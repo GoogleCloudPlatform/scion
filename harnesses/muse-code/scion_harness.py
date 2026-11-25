@@ -2562,7 +2562,7 @@ SECRET_PENDING_HELD_BY_OTHER_AGENT = "secret_pending_held_by_other_agent"
 
 
 def secret_set_outcome(result: "subprocess.CompletedProcess[str]", scope: str = "") -> str:
-    """Classify a finished ``sciontool secret set`` run at the given scope.
+    """Classify a finished ``scion secret set`` run at the given scope.
 
     A successful user-scope save is always "pending": every user-scope
     secret an agent saves waits for the owner's approval, whatever the
@@ -2697,7 +2697,7 @@ def capture_auth_main(argv: list[str] | None = None) -> int:
 
 
 def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "user") -> tuple[str, str | None]:
-    """Save one credential with ``sciontool secret set``.
+    """Save one credential with ``scion secret set``.
 
     Returns (outcome, error): outcome is a secret_set_outcome value, or ""
     when nothing was attempted; error describes an "error" outcome or an
@@ -2716,7 +2716,7 @@ def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "user") -
     if not os.path.isfile(source):
         return "", None
 
-    cmd = ["sciontool", "secret", "set", key, f"@{source}",
+    cmd = ["scion", "secret", "set", key, f"@{source}",
            "--type", secret_type, "--target", target,
            "--scope", scope]
     if scope == "user":
@@ -2727,11 +2727,11 @@ def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "user") -
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
-        return "error", "sciontool not found in PATH"
+        return "error", "scion not found in PATH"
     except subprocess.TimeoutExpired:
-        return "error", f"sciontool timed out for key {key}"
+        return "error", f"scion timed out for key {key}"
 
     outcome = secret_set_outcome(result, scope)
     if outcome == "error":
-        return outcome, f"sciontool failed for {key}: {result.stderr.strip()}"
+        return outcome, f"scion failed for {key}: {result.stderr.strip()}"
     return outcome, None

@@ -411,7 +411,7 @@ class FileModeTest(unittest.TestCase):
 
 
 class CaptureAuthTest(unittest.TestCase):
-    """Runs capture_auth.py with a fake sciontool that only logs its argv."""
+    """Runs capture_auth.py with a fake scion binary that only logs its argv."""
 
     FAKE = (
         "#!/bin/sh\n"
@@ -425,7 +425,7 @@ class CaptureAuthTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = os.path.join(tmp, "bin")
             os.makedirs(bin_dir)
-            fake = os.path.join(bin_dir, "sciontool")
+            fake = os.path.join(bin_dir, "scion")
             with open(fake, "w", encoding="utf-8") as f:
                 f.write(self.FAKE)
             os.chmod(fake, 0o755)

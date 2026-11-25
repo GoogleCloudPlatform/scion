@@ -170,7 +170,7 @@ scion hub env set --broker=my-gpu-node CUDA_VISIBLE_DEVICES=0
 
 ## Managing Secrets
 
-Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `scion secret` CLI commands (and write secrets via `sciontool secret set`). As with environment variables above, User- and Hub-scope secret operations (`scion hub secret` without `--project` or `--broker`, or with `--hub-scope`) require an interactive login (`scion hub auth login`) and refuse user access tokens with `403` (`details.reason: "CREDENTIAL_MANAGEMENT"`).
+Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve and write secrets at runtime via the Hub API or the `scion secret` CLI commands. As with environment variables above, User- and Hub-scope secret operations (`scion hub secret` without `--project` or `--broker`, or with `--hub-scope`) require an interactive login (`scion hub auth login`) and refuse user access tokens with `403` (`details.reason: "CREDENTIAL_MANAGEMENT"`).
 
 ### Setting Secrets
 Secrets can be set manually via the CLI or Web Dashboard, or gathered interactively during agent creation.
@@ -289,17 +289,17 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     ```
     Without `--value` (or with `--metadata`), `scion secret get MY_API_KEY` prints the secret's metadata. `--format json` returns metadata only and cannot be combined with `--value`.
 
-`sciontool secret get` has moved to `scion secret get --value`, and `sciontool secret list` to `scion secret list`; the old commands now print a message naming the `scion` command and exit `1`.
+`sciontool secret get` has moved to `scion secret get --value`, `sciontool secret list` to `scion secret list`, and `sciontool secret set` to `scion secret set`; the old commands now print a message naming the `scion` command and exit `1`.
 
-#### Writing secrets with `sciontool`
+#### Writing secrets from an agent container
 
-*   **Set a Secret**: You can write/update secrets from inside the container to persist credentials discovered or generated at runtime. Secrets can be scoped to either the **project** (visible to all agents in the project) or the **user** (personal secrets visible only to your own agents):
+*   **Set a Secret**: You can write/update secrets from inside the container to persist credentials discovered or generated at runtime. Secrets can be scoped to the **project** (visible to all agents in the project), the **user** (personal secrets awaiting your approval, visible only to your own agents), or the **agent** (private to the calling agent):
     ```bash
-    # Set a project-scoped secret (default)
-    sciontool secret set NEW_TOKEN "secret-value"
+    # Set a project-scoped secret (default) from stdin
+    printf '%s' "$NEW_TOKEN" | scion secret set NEW_TOKEN -
 
-    # Set a user-scoped (personal) secret
-    sciontool secret set MY_PERSONAL_TOKEN "token-xyz" --scope user
+    # Set a user-scoped (personal) secret pending approval
+    printf '%s' "$PERSONAL_TOKEN" | scion secret set MY_PERSONAL_TOKEN - --scope user
     ```
     *Note: `--scope` accepts `project` (default), `user`, or `agent`. `--scope agent` stores a secret private to the calling agent and needs the `hub.agent_secrets` experiment; the agent removes it with `sciontool secret delete KEY --scope agent`. See [Agent-Scoped Secrets](#agent-scoped-secrets).*
 
@@ -311,11 +311,11 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
 
 #### Approving user secrets saved by your agents
 
-A user-scoped secret that an agent saves (with `sciontool secret set --scope user`, or through
+A user-scoped secret that an agent saves (with `scion secret set --scope user`, or through
 harness credential capture) is not delivered to any agent until you approve it. A user secret
 reaches your agents in every project, so you decide on each one an agent saves:
 
-*   The save is held as a **pending secret**. `sciontool` reports
+*   The save is held as a **pending secret**. `scion secret set` reports
     `saved, pending approval in Scion`, and capture-auth reports `captured (pending approval in Scion)`.
     `--force` has no effect at user scope.
 *   If you already have a user secret with the same name, it stays in effect until you approve
@@ -561,12 +561,12 @@ Inside a running agent container (with `hub.agent_secrets` enabled):
   curl -H "Authorization: Bearer $(scion secret get --value GITHUB_TOKEN)" https://api.github.com/user
   ```
   Reading an agent's own `agent`-scope secrets does not require `project:secret:read` (so agents created from user access tokens can still read their own agent-scoped secrets).
-- **Write and delete (`sciontool secret`):** Lead with stdin (`-`) rather than passing values as command-line arguments:
+- **Write (`scion secret set`) and delete (`sciontool secret delete`):** Lead with stdin (`-`) rather than passing values as command-line arguments:
   ```bash
-  printf '%s' "$TOKEN" | sciontool secret set MY_AGENT_TOKEN - --scope agent
+  printf '%s' "$TOKEN" | scion secret set MY_AGENT_TOKEN - --scope agent
   sciontool secret delete MY_AGENT_TOKEN --scope agent
   ```
-  When passing `-` to `sciontool secret set`, stdin is read up to 64 KiB; a single trailing `\r\n` or `\n` is trimmed for `environment` and `variable` types, while `file` secrets preserve stdin bytes verbatim. Agent-scope writes are stored immediately (no pending approval step, and not blocked by `agent_secrets.user_scope_only`).
+  When passing `-` to `scion secret set`, stdin is read up to 64 KiB; a single trailing `\r\n` or `\n` is trimmed for `environment` and `variable` types, while `file` secrets preserve stdin bytes verbatim. Agent-scope writes are stored immediately (no pending approval step, and not blocked by `agent_secrets.user_scope_only`).
 - **File target restriction:** Any `--scope agent` file secret written by an agent (or requested via a file-type secret request) must target a path under the agent home (`~/...`) and must not contain `..`.
 
 ### Secret Requests (Agent Asks, Human Supplies)

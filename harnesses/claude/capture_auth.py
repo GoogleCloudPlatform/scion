@@ -51,11 +51,12 @@ def _extract_oauth_from_scrollback() -> str | None:
 
 
 def _store_oauth_token(token: str, scope: str = "project") -> bool:
-    """Store a token as CLAUDE_CODE_OAUTH_TOKEN via sciontool secret set."""
+    """Store a token as CLAUDE_CODE_OAUTH_TOKEN via scion secret set."""
     try:
         result = subprocess.run(
-            ["sciontool", "secret", "set", "CLAUDE_CODE_OAUTH_TOKEN", token,
+            ["scion", "secret", "set", "CLAUDE_CODE_OAUTH_TOKEN", "-",
              "--scope", scope],
+            input=token,
             capture_output=True, text=True, timeout=10,
         )
         outcome = scion_harness.secret_set_outcome(result, scope)

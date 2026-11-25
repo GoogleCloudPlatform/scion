@@ -32,15 +32,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// maxAgentSecretValueBytes caps secret values read from stdin, @file, or argv.
+const maxAgentSecretValueBytes = 64 * 1024
+
 // Flag variables for agent secret commands. Named with "agentSecret" prefix
 // to avoid collisions with the hub secret command flags in hub_secret.go.
 var (
-	agentSecretType        string
-	agentSecretTarget      string
-	agentSecretGetMetadata bool
-	agentSecretGetValue    bool
-	agentSecretGetScope    string
-	agentSecretListScope   string
+	agentSecretType         string
+	agentSecretTarget       string
+	agentSecretSetScope     string
+	agentSecretForce        bool
+	agentSecretAllowProgeny bool
+	agentSecretGetMetadata  bool
+	agentSecretGetValue     bool
+	agentSecretGetScope     string
+	agentSecretListScope    string
 )
 
 // agentSecretCmd is the top-level `scion secret` command group.
@@ -52,10 +58,11 @@ var agentSecretCmd = &cobra.Command{
 On the host, secrets default to the current project's scope. Inside a running
 agent container, 'scion secret list' and 'scion secret get' support project
 scope and (when hub.agent_secrets is enabled) agent scope via '--scope agent'
-(default: agent then project for 'get', all for 'list'), and 'scion secret
-request' lists or withdraws the agent's secret requests. To write or delete
-agent-scoped secrets from inside an agent container, use 'sciontool secret
-set --scope agent' or 'sciontool secret delete --scope agent'.
+(default: agent then project for 'get', all for 'list'); 'scion secret set'
+stores secrets at project, user (pending approval), or agent scope; and
+'scion secret request' lists or withdraws the agent's secret requests. To
+delete an agent-scoped secret from inside an agent container, use
+'sciontool secret delete --scope agent'.
 
 For full scope management (--scope hub, --project, --broker, --agent), use 'scion hub secret'.`,
 }
@@ -110,21 +117,35 @@ Examples:
 	RunE: runAgentSecretGet,
 }
 
-// agentSecretSetCmd stores a project-scoped secret.
+// agentSecretSetCmd stores a secret in the Hub.
 var agentSecretSetCmd = &cobra.Command{
 	Use:   "set KEY VALUE",
-	Short: "Store a project-scoped secret",
-	Long: `Store a project-scoped secret in the Hub from within an agent container.
+	Short: "Store a secret in the Hub",
+	Long: `Store a secret in the Hub from the host or within an agent container.
 
-The secret is scoped to the current agent's project. Subsequent agents in the
-same project will receive this secret automatically.
+By default, the secret is scoped to the current project. Inside an agent
+container, use --scope=agent to store a secret private to the current agent
+(requires the hub.agent_secrets experiment) or --scope=user to save a personal
+credential for your originating user: a user-scope secret waits for user
+approval in Scion before any agent receives it, and --force has no effect on it.
+
+If VALUE is "-", the secret value is read from stdin (up to 64 KiB) so it
+stays out of process listings. For non-file types, a single trailing newline
+is trimmed from stdin. Prefer "-" (stdin): values given as arguments are
+visible in process listings and shell history.
 
 If VALUE starts with @, the remainder is treated as a file path. The file
 contents are read and base64-encoded, and --type defaults to "file".
 
 Examples:
-  # Store a simple environment variable secret
-  scion secret set MY_API_KEY "sk-abc123"
+  # Store an agent-scoped secret from stdin
+  printf '%s' "$TOKEN" | scion secret set MY_AGENT_TOKEN - --scope agent
+
+  # Store a user-scoped (personal) secret pending user approval
+  printf '%s' "$TOKEN" | scion secret set MY_TOKEN - --scope user
+
+  # Store a project-scoped secret from stdin
+  printf '%s' "$API_KEY" | scion secret set MY_API_KEY -
 
   # Store a credential file
   scion secret set CLAUDE_AUTH @~/.claude/.credentials.json
@@ -132,8 +153,8 @@ Examples:
   # Store a file secret with explicit target path
   scion secret set MY_CERT @/tmp/cert.pem --type file --target ~/certs/cert.pem
 
-  # Update an existing secret (overwrites automatically)
-  scion secret set MY_KEY "new-value"`,
+  # Overwrite an existing project-scoped secret
+  printf '%s' "$NEW_VAL" | scion secret set MY_KEY - --force`,
 	Args: cobra.ExactArgs(2),
 	RunE: runAgentSecretSet,
 }
@@ -173,6 +194,9 @@ func init() {
 
 	agentSecretSetCmd.Flags().StringVar(&agentSecretType, "type", "", "Secret type: environment (default), variable, file")
 	agentSecretSetCmd.Flags().StringVar(&agentSecretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")
+	agentSecretSetCmd.Flags().StringVar(&agentSecretSetScope, "scope", "", "Secret scope: project (default), user, or agent")
+	agentSecretSetCmd.Flags().BoolVar(&agentSecretForce, "force", false, "Overwrite existing secret")
+	agentSecretSetCmd.Flags().BoolVar(&agentSecretAllowProgeny, "allow-progeny", false, "Allow progeny agents to inherit this secret (user scope only)")
 }
 
 // secretGetWantsValue reports whether `scion secret get` should print the
@@ -408,11 +432,39 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 		return newUsageError("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
+	// Validate scope flag.
+	if agentSecretSetScope != "" && agentSecretSetScope != "project" && agentSecretSetScope != "user" && agentSecretSetScope != "agent" {
+		return newUsageError("--scope must be \"project\", \"user\", or \"agent\"")
+	}
+
 	localType := agentSecretType
 	localTarget := agentSecretTarget
 
-	// Handle @file syntax: read file and base64-encode contents.
-	if strings.HasPrefix(value, "@") {
+	switch {
+	case value == "-":
+		data, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), maxAgentSecretValueBytes+1))
+		if err != nil {
+			return fmt.Errorf("failed to read secret value from stdin: %w", err)
+		}
+		if len(data) > maxAgentSecretValueBytes {
+			return fmt.Errorf("secret value from stdin exceeds 64KB limit")
+		}
+		if localType != "file" {
+			s := string(data)
+			if strings.HasSuffix(s, "\r\n") {
+				s = strings.TrimSuffix(s, "\r\n")
+			} else {
+				s = strings.TrimSuffix(s, "\n")
+			}
+			data = []byte(s)
+		}
+		if len(data) == 0 {
+			return fmt.Errorf("secret value from stdin is empty")
+		}
+		value = base64.StdEncoding.EncodeToString(data)
+
+	case strings.HasPrefix(value, "@"):
+		// Handle @file syntax: read file and base64-encode contents.
 		filePath := value[1:]
 		if filePath == "" {
 			return newUsageError("empty file path: VALUE starting with @ must be followed by a file path (e.g., @/path/to/file)")
@@ -432,7 +484,7 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 		if info.IsDir() {
 			return fmt.Errorf("cannot read secret from directory: %s (expected a file)", filePath)
 		}
-		if info.Size() > 64*1024 {
+		if info.Size() > maxAgentSecretValueBytes {
 			return fmt.Errorf("file exceeds 64KB limit (%d bytes)", info.Size())
 		}
 		data, err := os.ReadFile(filePath)
@@ -458,8 +510,49 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 				localTarget = absPath
 			}
 		}
+
+	default:
+		if len(value) > maxAgentSecretValueBytes {
+			return fmt.Errorf("secret value exceeds 64KB limit")
+		}
+		value = base64.StdEncoding.EncodeToString([]byte(value))
 	}
 
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	// Inside an agent container, write through the agent-scoped Hub endpoint
+	// (PUT /api/v1/agents/{agentID}/secrets/{key}) using the agent token.
+	if agentClient := newSecretValueHubClient(); agentClient != nil && agentClient.IsConfigured() {
+		// Resolve allowProgeny. User-scoped captured secrets default to
+		// enabling progeny so spawned children inherit the credential,
+		// unless the caller explicitly passed --allow-progeny.
+		var allowProgeny *bool
+		if cmd.Flags().Changed("allow-progeny") {
+			allowProgeny = &agentSecretAllowProgeny
+		} else if agentSecretSetScope == "user" {
+			t := true
+			allowProgeny = &t
+		}
+
+		resp, err := agentClient.SetSecret(ctx, key, value, localType, localTarget, agentSecretSetScope, agentSecretForce, allowProgeny)
+		if err != nil {
+			return err
+		}
+		if isJSONOutput() {
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			return enc.Encode(resp)
+		}
+		reportAgentSetSecretResult(cmd.OutOrStdout(), key, agentSecretSetScope, resp)
+		return nil
+	}
+
+	if agentSecretSetScope == "agent" || agentSecretSetScope == "user" {
+		return fmt.Errorf("--scope %s on 'scion secret set' requires an agent's hub identity (run inside an agent container); on the host, use 'scion hub secret set'", agentSecretSetScope)
+	}
+
+	// Host fallback for project-scoped secrets.
 	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
@@ -469,54 +562,13 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 		return wrapHubError(err)
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-	defer cancel()
-
 	typeLabel := localType
 	if typeLabel == "" {
 		typeLabel = "environment"
 	}
 
-	// Use the agent-scoped endpoint when running as an agent. The generic
-	// /api/v1/secrets endpoint forbids project-scope writes from agent JWTs,
-	// so agents must use /api/v1/agents/{id}/secrets/{key} instead.
-	agentID := os.Getenv("SCION_AGENT_ID")
-	if agentID != "" {
-		// Base64-encode non-file values before sending. The hub expects
-		// base64-encoded values by default; file values are already
-		// base64-encoded by the @file handling above.
-		agentValue := value
-		if !strings.HasPrefix(args[1], "@") {
-			agentValue = base64.StdEncoding.EncodeToString([]byte(value))
-		}
-		req := &hubclient.AgentSetSecretRequest{
-			Value:  agentValue,
-			Type:   localType,
-			Target: localTarget,
-			Force:  true, // scion secret set always overwrites
-		}
-
-		resp, err := hubCtx.Client.Secrets().AgentSet(ctx, agentID, key, req)
-		if err != nil {
-			return wrapHubError(fmt.Errorf("failed to set secret: %w", err))
-		}
-
-		if resp.Created {
-			fmt.Printf("Created secret %s (scope: project, type: %s)\n", key, typeLabel)
-		} else {
-			fmt.Printf("Updated secret %s (scope: project, type: %s)\n", key, typeLabel)
-		}
-		return nil
-	}
-
-	// Fall back to the user-scoped endpoint for non-agent contexts.
-	// Base64-encode non-file values; file values are already encoded above.
-	userValue := value
-	if !strings.HasPrefix(args[1], "@") {
-		userValue = base64.StdEncoding.EncodeToString([]byte(value))
-	}
 	req := &hubclient.SetSecretRequest{
-		Value:   userValue,
+		Value:   value,
 		Scope:   "project",
 		ScopeID: projectID,
 		Type:    localType,
@@ -529,16 +581,39 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 	}
 
 	if resp.Created {
-		fmt.Printf("Created secret %s (scope: project, type: %s)\n", key, typeLabel)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created secret %s (scope: project, type: %s)\n", key, typeLabel)
 	} else {
 		version := 0
 		if resp.Secret != nil {
 			version = resp.Secret.Version
 		}
-		fmt.Printf("Updated secret %s (scope: project, type: %s, version: %d)\n", key, typeLabel, version)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Updated secret %s (scope: project, type: %s, version: %d)\n", key, typeLabel, version)
 	}
 
 	return nil
+}
+
+// reportAgentSetSecretResult reports a successful agent-originated secret save.
+// Pending user-scope results include "pending approval in Scion" on stdout so
+// callers such as capture_auth.py can detect them reliably.
+func reportAgentSetSecretResult(w io.Writer, key, requestedScope string, resp *sciontoolhub.SetSecretResponse) {
+	if resp != nil && resp.Pending() {
+		msg := fmt.Sprintf("Secret %q saved, pending approval in Scion (scope: %s)", resp.Key, resp.Scope)
+		if resp.ReplacesExisting {
+			msg += "; it replaces your existing secret once approved"
+		}
+		_, _ = fmt.Fprintln(w, msg)
+		return
+	}
+	scopeLabel := ""
+	if resp != nil && resp.Scope != "" {
+		scopeLabel = resp.Scope
+	} else if requestedScope != "" {
+		scopeLabel = requestedScope
+	} else {
+		scopeLabel = "project"
+	}
+	_, _ = fmt.Fprintf(w, "Secret %q stored (scope: %s)\n", key, scopeLabel)
 }
 
 func runAgentSecretList(cmd *cobra.Command, _ []string) error {
