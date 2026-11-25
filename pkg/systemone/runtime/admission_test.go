@@ -138,10 +138,12 @@ func TestAdmission_InstanceMaxInFlightCapsConcurrencyAndReturnsCapacity(t *testi
 
 	compiled := compileAdmissionTestRule(t, "limited-inst")
 
-	// Start 2 requests that occupy all 2 instance permits. Temporarily widen
-	// admissionWait while the holders enter Invoke so CPU starvation cannot
-	// cause a holder to fail admission and deadlock the test.
-	rt.admission.admissionWait = 5 * time.Second
+	// Start 2 requests that occupy all 2 instance permits, with bounded failure
+	// diagnostics and cleanup so a refused holder never hangs or gets swallowed.
+	var releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
+
 	var wg sync.WaitGroup
 	holderErrs := make([]error, 2)
 	holderDone := make(chan error, 2)
@@ -160,14 +162,15 @@ func TestAdmission_InstanceMaxInFlightCapsConcurrencyAndReturnsCapacity(t *testi
 		select {
 		case <-started:
 		case err := <-holderDone:
-			close(release)
-			t.Fatalf("holder %d failed before reaching Invoke: %v", i, err)
-		case <-time.After(10 * time.Second):
-			close(release)
-			t.Fatalf("timed out waiting for holder %d to enter Invoke", i)
+			closeRelease()
+			wg.Wait()
+			t.Fatalf("holder %d failed before reaching Invoke (inFlight=%d): %v", i, inFlight.Load(), err)
+		case <-time.After(5 * time.Second):
+			closeRelease()
+			wg.Wait()
+			t.Fatalf("timed out waiting for holder %d to enter Invoke (inFlight=%d)", i, inFlight.Load())
 		}
 	}
-	rt.admission.admissionWait = 60 * time.Millisecond
 
 	// Launch 3 excess requests concurrently; all 3 must fail with capacity after ~admissionWait
 	// and make 0 provider requests.
@@ -188,7 +191,7 @@ func TestAdmission_InstanceMaxInFlightCapsConcurrencyAndReturnsCapacity(t *testi
 	}
 	excessWG.Wait()
 
-	close(release)
+	closeRelease()
 	wg.Wait()
 
 	for i, err := range holderErrs {
@@ -246,10 +249,14 @@ func TestAdmission_SemaphoreAdmitsWaiterWhenPermitFreedWithinAdmissionWait(t *te
 	rt := New(Config{
 		Registry:              reg,
 		Instances:             StaticInstances(inst),
-		AdmissionWait:         1 * time.Second,
+		AdmissionWait:         200 * time.Millisecond,
 		MaxInFlightPerProject: -1,
 	})
 	compiled := compileAdmissionTestRule(t, "handoff-inst")
+
+	var releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
 
 	var wg sync.WaitGroup
 	holderDone := make(chan error, 1)
@@ -265,17 +272,19 @@ func TestAdmission_SemaphoreAdmitsWaiterWhenPermitFreedWithinAdmissionWait(t *te
 	select {
 	case <-started:
 	case err := <-holderDone:
-		close(release)
-		t.Fatalf("holder failed before reaching Invoke: %v", err)
-	case <-time.After(10 * time.Second):
-		close(release)
-		t.Fatal("timed out waiting for holder to enter Invoke")
+		closeRelease()
+		wg.Wait()
+		t.Fatalf("holder failed before reaching Invoke (providerCalls=%d): %v", providerCalls.Load(), err)
+	case <-time.After(5 * time.Second):
+		closeRelease()
+		wg.Wait()
+		t.Fatalf("timed out waiting for holder to enter Invoke (providerCalls=%d)", providerCalls.Load())
 	}
 
 	// Release the holder ~25ms into the waiter's 200ms admissionWait; waiter must be admitted.
 	go func() {
 		time.Sleep(25 * time.Millisecond)
-		close(release)
+		closeRelease()
 	}()
 
 	dec, err := rt.Evaluate(context.Background(), compiled, ProbeInput("waiter"), EvalOptions{})
@@ -451,9 +460,12 @@ func TestAdmission_PerProjectSemaphoreIsolatesProjects(t *testing.T) {
 	})
 	compiled := compileAdmissionTestRule(t, "shared-inst")
 
-	// Saturate project A's limit (2 in-flight). Temporarily widen admissionWait
-	// so holders cannot fail admission under CPU contention.
-	rt.admission.admissionWait = 5 * time.Second
+	// Saturate project A's limit (2 in-flight), with bounded failure diagnostics
+	// and cleanup so a refused holder never hangs or gets swallowed.
+	var releaseAOnce sync.Once
+	closeReleaseA := func() { releaseAOnce.Do(func() { close(releaseA) }) }
+	t.Cleanup(closeReleaseA)
+
 	var wgA sync.WaitGroup
 	holderDoneA := make(chan error, 2)
 	for i := 0; i < 2; i++ {
@@ -471,14 +483,15 @@ func TestAdmission_PerProjectSemaphoreIsolatesProjects(t *testing.T) {
 		select {
 		case <-startedA:
 		case err := <-holderDoneA:
-			close(releaseA)
-			t.Fatalf("project-A holder %d failed before reaching Invoke: %v", i, err)
-		case <-time.After(10 * time.Second):
-			close(releaseA)
-			t.Fatalf("timed out waiting for project-A holder %d", i)
+			closeReleaseA()
+			wgA.Wait()
+			t.Fatalf("project-A holder %d failed before reaching Invoke (callsA=%d): %v", i, callsA.Load(), err)
+		case <-time.After(5 * time.Second):
+			closeReleaseA()
+			wgA.Wait()
+			t.Fatalf("timed out waiting for project-A holder %d (callsA=%d)", i, callsA.Load())
 		}
 	}
-	rt.admission.admissionWait = 50 * time.Millisecond
 
 	// A 3rd call for project A fails with capacity (0 requests).
 	_, errA3 := rt.Evaluate(context.Background(), compiled, ProbeInput("proj-A"), EvalOptions{ProjectID: "proj-A"})
@@ -497,7 +510,7 @@ func TestAdmission_PerProjectSemaphoreIsolatesProjects(t *testing.T) {
 	}
 	assert.Equal(t, int32(3), callsB.Load())
 
-	close(releaseA)
+	closeReleaseA()
 	wgA.Wait()
 	assert.Equal(t, int32(2), callsA.Load())
 }
@@ -540,6 +553,10 @@ func TestAdmission_WaitNeverExceedsAttemptDeadlineOrCallerCancel(t *testing.T) {
 	})
 	compiled := compileAdmissionTestRule(t, "dl-inst")
 
+	var releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
+
 	var wg sync.WaitGroup
 	holderDone := make(chan error, 1)
 	wg.Add(1)
@@ -553,10 +570,12 @@ func TestAdmission_WaitNeverExceedsAttemptDeadlineOrCallerCancel(t *testing.T) {
 	select {
 	case <-started:
 	case err := <-holderDone:
-		close(release)
+		closeRelease()
+		wg.Wait()
 		t.Fatalf("holder failed before reaching Invoke: %v", err)
-	case <-time.After(10 * time.Second):
-		close(release)
+	case <-time.After(5 * time.Second):
+		closeRelease()
+		wg.Wait()
 		t.Fatal("timed out waiting for holder to enter Invoke")
 	}
 
@@ -590,7 +609,7 @@ func TestAdmission_WaitNeverExceedsAttemptDeadlineOrCallerCancel(t *testing.T) {
 	assert.Equal(t, string(provider.FailCanceled), evalCancel.Reason)
 	assert.Less(t, cancelElapsed, 1500*time.Millisecond)
 
-	close(release)
+	closeRelease()
 	wg.Wait()
 }
 
@@ -925,14 +944,18 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 	}
 
 	// (a) Runtime deadline is the limiting bound (Budget and EngineMaxEvalTime) -> FailTimeout (R1).
+	// Explicitly asserts caller ctx.Err() == nil at classification so we prove the
+	// runtime deadline (not caller cancellation) was the bound that fired.
 	t.Run("a_runtime_deadline_gives_timeout", func(t *testing.T) {
 		// 1. Real Budget (30ms << 250ms AdmissionWait), live caller ctx -> FailTimeout.
 		rt1, _, compiled1, rel1 := newTestRuntime(250 * time.Millisecond)
 		defer rel1()
-		_, err := rt1.Evaluate(context.Background(), compiled1, ProbeInput("budget-timeout"), EvalOptions{
+		caller1 := context.Background()
+		_, err := rt1.Evaluate(caller1, compiled1, ProbeInput("budget-timeout"), EvalOptions{
 			ProjectID: "proj-2",
 			Budget:    30 * time.Millisecond,
 		})
+		require.NoError(t, caller1.Err(), "caller ctx must still be live when runtime budget fires")
 		require.Error(t, err)
 		eval1, ok := EvaluationFrom(err)
 		require.True(t, ok)
@@ -949,6 +972,7 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 			ProjectID:         "proj-2",
 			EngineMaxEvalTime: 40 * time.Millisecond,
 		})
+		require.NoError(t, engineCtx.Err(), "caller/engine ctx must still be live when EngineMaxEvalTime fires")
 		require.Error(t, err)
 		eval2, ok := EvaluationFrom(err)
 		require.True(t, ok)
@@ -967,10 +991,12 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 			cancel()
 			return wctx, cancel
 		}
-		_, err = rt3.Evaluate(context.Background(), compiled3, ProbeInput("seam-runtime-timeout"), EvalOptions{
+		caller3 := context.Background()
+		_, err = rt3.Evaluate(caller3, compiled3, ProbeInput("seam-runtime-timeout"), EvalOptions{
 			ProjectID: "proj-2",
 			Budget:    50 * time.Millisecond,
 		})
+		require.NoError(t, caller3.Err(), "caller ctx must still be live at classification")
 		require.Error(t, err)
 		eval3, ok := EvaluationFrom(err)
 		require.True(t, ok)
