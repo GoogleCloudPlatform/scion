@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -665,28 +666,27 @@ func TestNeverSuspend_FilterQueryAndMetric(t *testing.T) {
 
 type failReleaseNeverSuspendStore struct {
 	store.Store
-	fault         *storeFaultSwitch
+	armed         atomic.Bool
 	targetLimitID string
 }
 
-func (f *failReleaseNeverSuspendStore) ReleaseUsageReservation(ctx context.Context, limitDefinitionID, resourceID string) error {
-	if f.fault.Active() && limitDefinitionID == f.targetLimitID {
+func (f *failReleaseNeverSuspendStore) ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error {
+	if f.armed.Load() && limitDefinitionID == f.targetLimitID {
 		return errors.New("injected release failure")
 	}
-	return f.Store.ReleaseUsageReservation(ctx, limitDefinitionID, resourceID)
+	return f.Store.ReleaseReservation(ctx, limitDefinitionID, resourceID)
 }
 
 type softDeleteOnReserveStore struct {
 	store.Store
-	fault   *storeFaultSwitch
+	armed   atomic.Bool
 	agentID string
 	onHook  func()
 }
 
 func (f *softDeleteOnReserveStore) CreateUsageReservation(ctx context.Context, r *store.UsageReservation) (*store.UsageReservation, error) {
 	res, err := f.Store.CreateUsageReservation(ctx, r)
-	if err == nil && f.fault.Active() && r.ResourceID == f.agentID && f.onHook != nil {
-		f.fault.Disarm()
+	if err == nil && f.armed.CompareAndSwap(true, false) && r.ResourceID == f.agentID && f.onHook != nil {
 		f.onHook()
 	}
 	return res, err
@@ -702,9 +702,10 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		require.NoError(t, err)
 		setProjectNeverSuspendCeiling(t, s, 1)
 
-		_, fault := installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *failReleaseNeverSuspendStore {
-			return &failReleaseNeverSuspendStore{Store: inner, fault: sw, targetLimitID: def.ID}
+		wrapped, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *failReleaseNeverSuspendStore {
+			return &failReleaseNeverSuspendStore{Store: inner, targetLimitID: def.ID}
 		})
+		srv.quotaService = NewQuotaService(wrapped, srv.quotaService.logger)
 
 		projectID := tid("ns-rec-project")
 		require.NoError(t, s.CreateProject(ctx, &store.Project{
@@ -736,10 +737,10 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		require.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID))
 
 		// Hard-delete agent 1 while never-suspend release is injected to fail.
-		fault.Arm()
+		wrapped.armed.Store(true)
 		delRec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+resp1.Agent.ID, nil)
 		require.Equal(t, http.StatusNoContent, delRec.Code, "body: %s", delRec.Body.String())
-		fault.Disarm()
+		wrapped.armed.Store(false)
 
 		// Reservation was stranded by the failed release.
 		require.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID))
@@ -775,14 +776,15 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		}
 		require.NoError(t, s.CreateAgent(ctx, a))
 
-		hook, fault := installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *softDeleteOnReserveStore {
-			return &softDeleteOnReserveStore{Store: inner, fault: sw, agentID: a.ID}
+		hook, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *softDeleteOnReserveStore {
+			return &softDeleteOnReserveStore{Store: inner, agentID: a.ID}
 		})
+		srv.quotaService = NewQuotaService(hook, srv.quotaService.logger)
 		hook.onHook = func() {
 			// Soft-delete the agent after PATCH reserved quota, before SetAgentSuspendPolicy runs.
 			softDeleteAgentRow(t, s, a.ID)
 		}
-		fault.Arm()
+		hook.armed.Store(true)
 
 		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+a.ID, map[string]any{
 			"suspendPolicy": store.SuspendPolicyNever,
