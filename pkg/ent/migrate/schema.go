@@ -1148,6 +1148,133 @@ var (
 			},
 		},
 	}
+	// CommandRequestsColumns holds the columns for the "command_requests" table.
+	CommandRequestsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "agent_id", Type: field.TypeUUID},
+		{Name: "agent_name", Type: field.TypeString},
+		{Name: "key", Type: field.TypeString, Size: 128},
+		{Name: "key_norm", Type: field.TypeString, Size: 128},
+		{Name: "version", Type: field.TypeInt},
+		{Name: "description", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "script", Type: field.TypeString, Size: 2147483647},
+		{Name: "workdir", Type: field.TypeString, Size: 512, Default: ""},
+		{Name: "timeout_s", Type: field.TypeInt},
+		{Name: "share_output_requested", Type: field.TypeBool, Default: false},
+		{Name: "command_sha256", Type: field.TypeString, Size: 64},
+		{Name: "approver_user_id", Type: field.TypeString, Size: 128},
+		{Name: "message_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "intro_length", Type: field.TypeInt, Default: 0},
+		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "chat_key", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "approved", "replaced", "withdrawn", "dismissed", "expired"}, Default: "pending"},
+		{Name: "replaced_by_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "replaced_at", Type: field.TypeTime, Nullable: true},
+		{Name: "withdrawn_reason", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "withdrawn_by", Type: field.TypeString, Nullable: true, Size: 32},
+		{Name: "dismiss_reason", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "resolved_by_user_id", Type: field.TypeString, Nullable: true, Size: 128},
+		{Name: "resolved_by_name", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "resolved_by_email", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "resolved_at", Type: field.TypeTime, Nullable: true},
+		{Name: "surface", Type: field.TypeEnum, Nullable: true, Enums: []string{"native", "standalone_page", "cli", "markdown_block"}},
+		{Name: "idempotency_key", Type: field.TypeString, Nullable: true, Size: 128},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "expires_at", Type: field.TypeTime},
+	}
+	// CommandRequestsTable holds the schema information for the "command_requests" table.
+	CommandRequestsTable = &schema.Table{
+		Name:       "command_requests",
+		Columns:    CommandRequestsColumns,
+		PrimaryKey: []*schema.Column{CommandRequestsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "commandrequest_agent_id_key_norm_version",
+				Unique:  true,
+				Columns: []*schema.Column{CommandRequestsColumns[2], CommandRequestsColumns[5], CommandRequestsColumns[6]},
+			},
+			{
+				Name:    "commandrequest_agent_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRequestsColumns[2], CommandRequestsColumns[18]},
+			},
+			{
+				Name:    "commandrequest_status_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRequestsColumns[18], CommandRequestsColumns[31]},
+			},
+			{
+				Name:    "commandrequest_message_id",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRequestsColumns[14]},
+			},
+			{
+				Name:    "commandrequest_project_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRequestsColumns[1], CommandRequestsColumns[30]},
+			},
+		},
+	}
+	// CommandRunsColumns holds the columns for the "command_runs" table.
+	CommandRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "request_id", Type: field.TypeUUID, Unique: true},
+		{Name: "command_sha256", Type: field.TypeString, Size: 64},
+		{Name: "script_len", Type: field.TypeInt},
+		{Name: "approver_user_id", Type: field.TypeString, Size: 128},
+		{Name: "exec_agent_id", Type: field.TypeUUID},
+		{Name: "exec_project_id", Type: field.TypeUUID},
+		{Name: "launch_id", Type: field.TypeString, Default: ""},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"queued", "waking", "dispatching", "running", "succeeded", "failed", "unknown", "not_started"}, Default: "queued"},
+		{Name: "reason", Type: field.TypeString, Size: 128, Default: ""},
+		{Name: "wake", Type: field.TypeEnum, Enums: []string{"none", "resume"}, Default: "none"},
+		{Name: "share_output", Type: field.TypeBool, Default: false},
+		{Name: "timeout_s", Type: field.TypeInt},
+		{Name: "capture_mode", Type: field.TypeString, Size: 32, Default: "tail"},
+		{Name: "workdir", Type: field.TypeString, Size: 512, Default: ""},
+		{Name: "exit_code", Type: field.TypeInt, Nullable: true},
+		{Name: "duration_ms", Type: field.TypeInt64, Nullable: true},
+		{Name: "output_bytes", Type: field.TypeInt64, Nullable: true},
+		{Name: "output_status", Type: field.TypeString, Size: 32, Default: ""},
+		{Name: "not_after", Type: field.TypeTime, Nullable: true},
+		{Name: "lease_until", Type: field.TypeTime},
+		{Name: "last_polled_at", Type: field.TypeTime, Nullable: true},
+		{Name: "poll_claimed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "dispatched_at", Type: field.TypeTime, Nullable: true},
+		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
+		{Name: "outcome_delivered_at", Type: field.TypeTime, Nullable: true},
+		{Name: "outcome_message_id", Type: field.TypeUUID, Nullable: true},
+	}
+	// CommandRunsTable holds the schema information for the "command_runs" table.
+	CommandRunsTable = &schema.Table{
+		Name:       "command_runs",
+		Columns:    CommandRunsColumns,
+		PrimaryKey: []*schema.Column{CommandRunsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "commandrun_finished_at_lease_until",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRunsColumns[25], CommandRunsColumns[20]},
+			},
+			{
+				Name:    "commandrun_exec_agent_id_finished_at",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRunsColumns[5], CommandRunsColumns[25]},
+			},
+			{
+				Name:    "commandrun_approver_user_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRunsColumns[4], CommandRunsColumns[23]},
+			},
+			{
+				Name:    "commandrun_finished_at_outcome_delivered_at",
+				Unique:  false,
+				Columns: []*schema.Column{CommandRunsColumns[25], CommandRunsColumns[26]},
+			},
+		},
+	}
 	// ConduitPrincipalEpochsColumns holds the columns for the "conduit_principal_epochs" table.
 	ConduitPrincipalEpochsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
@@ -1754,7 +1881,7 @@ var (
 	// ExecRunOutputsColumns holds the columns for the "exec_run_outputs" table.
 	ExecRunOutputsColumns = []*schema.Column{
 		{Name: "run_id", Type: field.TypeUUID},
-		{Name: "owner_kind", Type: field.TypeEnum, Enums: []string{"scheduled_exec"}},
+		{Name: "owner_kind", Type: field.TypeEnum, Enums: []string{"scheduled_exec", "action_run"}},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "capture_mode", Type: field.TypeString},
 		{Name: "content", Type: field.TypeBytes, Size: 65536},
@@ -4950,6 +5077,8 @@ var (
 		ChatLinkCodesTable,
 		ChatRetentionCursorsTable,
 		ChatRetentionRunsTable,
+		CommandRequestsTable,
+		CommandRunsTable,
 		ConduitPrincipalEpochsTable,
 		ConduitSessionsTable,
 		ConversationsTable,
@@ -5112,6 +5241,12 @@ func init() {
 	}
 	ChatRetentionRunsTable.Annotation = &entsql.Annotation{
 		Table: "chat_retention_runs",
+	}
+	CommandRequestsTable.Annotation = &entsql.Annotation{
+		Table: "command_requests",
+	}
+	CommandRunsTable.Annotation = &entsql.Annotation{
+		Table: "command_runs",
 	}
 	ConduitPrincipalEpochsTable.Annotation = &entsql.Annotation{
 		Table: "conduit_principal_epochs",

@@ -622,6 +622,9 @@ type Store interface {
 	// Agent-to-human secret requests (ptone/scion#8747)
 	SecretRequestStore
 
+	// Human-approved command requests and runs (ptone/scion#9278)
+	CommandRequestStore
+
 	// System One provider instances (ptone/scion#8044)
 	SystemOneInstanceStore
 

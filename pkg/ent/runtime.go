@@ -34,6 +34,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentioncursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentionrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrequest"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
@@ -1115,6 +1117,230 @@ func init() {
 	chatretentionrunDescID := chatretentionrunFields[0].Descriptor()
 	// chatretentionrun.DefaultID holds the default value on creation for the id field.
 	chatretentionrun.DefaultID = chatretentionrunDescID.Default.(func() uuid.UUID)
+	commandrequestFields := schema.CommandRequest{}.Fields()
+	_ = commandrequestFields
+	// commandrequestDescKey is the schema descriptor for key field.
+	commandrequestDescKey := commandrequestFields[4].Descriptor()
+	// commandrequest.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	commandrequest.KeyValidator = func() func(string) error {
+		validators := commandrequestDescKey.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(key string) error {
+			for _, fn := range fns {
+				if err := fn(key); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// commandrequestDescKeyNorm is the schema descriptor for key_norm field.
+	commandrequestDescKeyNorm := commandrequestFields[5].Descriptor()
+	// commandrequest.KeyNormValidator is a validator for the "key_norm" field. It is called by the builders before save.
+	commandrequest.KeyNormValidator = func() func(string) error {
+		validators := commandrequestDescKeyNorm.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(key_norm string) error {
+			for _, fn := range fns {
+				if err := fn(key_norm); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// commandrequestDescVersion is the schema descriptor for version field.
+	commandrequestDescVersion := commandrequestFields[6].Descriptor()
+	// commandrequest.VersionValidator is a validator for the "version" field. It is called by the builders before save.
+	commandrequest.VersionValidator = commandrequestDescVersion.Validators[0].(func(int) error)
+	// commandrequestDescDescription is the schema descriptor for description field.
+	commandrequestDescDescription := commandrequestFields[7].Descriptor()
+	// commandrequest.DefaultDescription holds the default value on creation for the description field.
+	commandrequest.DefaultDescription = commandrequestDescDescription.Default.(string)
+	// commandrequestDescScript is the schema descriptor for script field.
+	commandrequestDescScript := commandrequestFields[8].Descriptor()
+	// commandrequest.ScriptValidator is a validator for the "script" field. It is called by the builders before save.
+	commandrequest.ScriptValidator = commandrequestDescScript.Validators[0].(func(string) error)
+	// commandrequestDescWorkdir is the schema descriptor for workdir field.
+	commandrequestDescWorkdir := commandrequestFields[9].Descriptor()
+	// commandrequest.DefaultWorkdir holds the default value on creation for the workdir field.
+	commandrequest.DefaultWorkdir = commandrequestDescWorkdir.Default.(string)
+	// commandrequest.WorkdirValidator is a validator for the "workdir" field. It is called by the builders before save.
+	commandrequest.WorkdirValidator = commandrequestDescWorkdir.Validators[0].(func(string) error)
+	// commandrequestDescTimeoutS is the schema descriptor for timeout_s field.
+	commandrequestDescTimeoutS := commandrequestFields[10].Descriptor()
+	// commandrequest.TimeoutSValidator is a validator for the "timeout_s" field. It is called by the builders before save.
+	commandrequest.TimeoutSValidator = commandrequestDescTimeoutS.Validators[0].(func(int) error)
+	// commandrequestDescShareOutputRequested is the schema descriptor for share_output_requested field.
+	commandrequestDescShareOutputRequested := commandrequestFields[11].Descriptor()
+	// commandrequest.DefaultShareOutputRequested holds the default value on creation for the share_output_requested field.
+	commandrequest.DefaultShareOutputRequested = commandrequestDescShareOutputRequested.Default.(bool)
+	// commandrequestDescCommandSha256 is the schema descriptor for command_sha256 field.
+	commandrequestDescCommandSha256 := commandrequestFields[12].Descriptor()
+	// commandrequest.CommandSha256Validator is a validator for the "command_sha256" field. It is called by the builders before save.
+	commandrequest.CommandSha256Validator = func() func(string) error {
+		validators := commandrequestDescCommandSha256.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(command_sha256 string) error {
+			for _, fn := range fns {
+				if err := fn(command_sha256); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// commandrequestDescApproverUserID is the schema descriptor for approver_user_id field.
+	commandrequestDescApproverUserID := commandrequestFields[13].Descriptor()
+	// commandrequest.ApproverUserIDValidator is a validator for the "approver_user_id" field. It is called by the builders before save.
+	commandrequest.ApproverUserIDValidator = func() func(string) error {
+		validators := commandrequestDescApproverUserID.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(approver_user_id string) error {
+			for _, fn := range fns {
+				if err := fn(approver_user_id); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// commandrequestDescIntroLength is the schema descriptor for intro_length field.
+	commandrequestDescIntroLength := commandrequestFields[15].Descriptor()
+	// commandrequest.DefaultIntroLength holds the default value on creation for the intro_length field.
+	commandrequest.DefaultIntroLength = commandrequestDescIntroLength.Default.(int)
+	// commandrequest.IntroLengthValidator is a validator for the "intro_length" field. It is called by the builders before save.
+	commandrequest.IntroLengthValidator = commandrequestDescIntroLength.Validators[0].(func(int) error)
+	// commandrequestDescChatKey is the schema descriptor for chat_key field.
+	commandrequestDescChatKey := commandrequestFields[17].Descriptor()
+	// commandrequest.ChatKeyValidator is a validator for the "chat_key" field. It is called by the builders before save.
+	commandrequest.ChatKeyValidator = commandrequestDescChatKey.Validators[0].(func(string) error)
+	// commandrequestDescWithdrawnBy is the schema descriptor for withdrawn_by field.
+	commandrequestDescWithdrawnBy := commandrequestFields[22].Descriptor()
+	// commandrequest.WithdrawnByValidator is a validator for the "withdrawn_by" field. It is called by the builders before save.
+	commandrequest.WithdrawnByValidator = commandrequestDescWithdrawnBy.Validators[0].(func(string) error)
+	// commandrequestDescResolvedByUserID is the schema descriptor for resolved_by_user_id field.
+	commandrequestDescResolvedByUserID := commandrequestFields[24].Descriptor()
+	// commandrequest.ResolvedByUserIDValidator is a validator for the "resolved_by_user_id" field. It is called by the builders before save.
+	commandrequest.ResolvedByUserIDValidator = commandrequestDescResolvedByUserID.Validators[0].(func(string) error)
+	// commandrequestDescResolvedByName is the schema descriptor for resolved_by_name field.
+	commandrequestDescResolvedByName := commandrequestFields[25].Descriptor()
+	// commandrequest.ResolvedByNameValidator is a validator for the "resolved_by_name" field. It is called by the builders before save.
+	commandrequest.ResolvedByNameValidator = commandrequestDescResolvedByName.Validators[0].(func(string) error)
+	// commandrequestDescResolvedByEmail is the schema descriptor for resolved_by_email field.
+	commandrequestDescResolvedByEmail := commandrequestFields[26].Descriptor()
+	// commandrequest.ResolvedByEmailValidator is a validator for the "resolved_by_email" field. It is called by the builders before save.
+	commandrequest.ResolvedByEmailValidator = commandrequestDescResolvedByEmail.Validators[0].(func(string) error)
+	// commandrequestDescIdempotencyKey is the schema descriptor for idempotency_key field.
+	commandrequestDescIdempotencyKey := commandrequestFields[29].Descriptor()
+	// commandrequest.IdempotencyKeyValidator is a validator for the "idempotency_key" field. It is called by the builders before save.
+	commandrequest.IdempotencyKeyValidator = commandrequestDescIdempotencyKey.Validators[0].(func(string) error)
+	// commandrequestDescCreatedAt is the schema descriptor for created_at field.
+	commandrequestDescCreatedAt := commandrequestFields[30].Descriptor()
+	// commandrequest.DefaultCreatedAt holds the default value on creation for the created_at field.
+	commandrequest.DefaultCreatedAt = commandrequestDescCreatedAt.Default.(func() time.Time)
+	// commandrequestDescID is the schema descriptor for id field.
+	commandrequestDescID := commandrequestFields[0].Descriptor()
+	// commandrequest.DefaultID holds the default value on creation for the id field.
+	commandrequest.DefaultID = commandrequestDescID.Default.(func() uuid.UUID)
+	commandrunFields := schema.CommandRun{}.Fields()
+	_ = commandrunFields
+	// commandrunDescCommandSha256 is the schema descriptor for command_sha256 field.
+	commandrunDescCommandSha256 := commandrunFields[2].Descriptor()
+	// commandrun.CommandSha256Validator is a validator for the "command_sha256" field. It is called by the builders before save.
+	commandrun.CommandSha256Validator = func() func(string) error {
+		validators := commandrunDescCommandSha256.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(command_sha256 string) error {
+			for _, fn := range fns {
+				if err := fn(command_sha256); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// commandrunDescScriptLen is the schema descriptor for script_len field.
+	commandrunDescScriptLen := commandrunFields[3].Descriptor()
+	// commandrun.ScriptLenValidator is a validator for the "script_len" field. It is called by the builders before save.
+	commandrun.ScriptLenValidator = commandrunDescScriptLen.Validators[0].(func(int) error)
+	// commandrunDescApproverUserID is the schema descriptor for approver_user_id field.
+	commandrunDescApproverUserID := commandrunFields[4].Descriptor()
+	// commandrun.ApproverUserIDValidator is a validator for the "approver_user_id" field. It is called by the builders before save.
+	commandrun.ApproverUserIDValidator = func() func(string) error {
+		validators := commandrunDescApproverUserID.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(approver_user_id string) error {
+			for _, fn := range fns {
+				if err := fn(approver_user_id); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// commandrunDescLaunchID is the schema descriptor for launch_id field.
+	commandrunDescLaunchID := commandrunFields[7].Descriptor()
+	// commandrun.DefaultLaunchID holds the default value on creation for the launch_id field.
+	commandrun.DefaultLaunchID = commandrunDescLaunchID.Default.(string)
+	// commandrunDescReason is the schema descriptor for reason field.
+	commandrunDescReason := commandrunFields[9].Descriptor()
+	// commandrun.DefaultReason holds the default value on creation for the reason field.
+	commandrun.DefaultReason = commandrunDescReason.Default.(string)
+	// commandrun.ReasonValidator is a validator for the "reason" field. It is called by the builders before save.
+	commandrun.ReasonValidator = commandrunDescReason.Validators[0].(func(string) error)
+	// commandrunDescShareOutput is the schema descriptor for share_output field.
+	commandrunDescShareOutput := commandrunFields[11].Descriptor()
+	// commandrun.DefaultShareOutput holds the default value on creation for the share_output field.
+	commandrun.DefaultShareOutput = commandrunDescShareOutput.Default.(bool)
+	// commandrunDescTimeoutS is the schema descriptor for timeout_s field.
+	commandrunDescTimeoutS := commandrunFields[12].Descriptor()
+	// commandrun.TimeoutSValidator is a validator for the "timeout_s" field. It is called by the builders before save.
+	commandrun.TimeoutSValidator = commandrunDescTimeoutS.Validators[0].(func(int) error)
+	// commandrunDescCaptureMode is the schema descriptor for capture_mode field.
+	commandrunDescCaptureMode := commandrunFields[13].Descriptor()
+	// commandrun.DefaultCaptureMode holds the default value on creation for the capture_mode field.
+	commandrun.DefaultCaptureMode = commandrunDescCaptureMode.Default.(string)
+	// commandrun.CaptureModeValidator is a validator for the "capture_mode" field. It is called by the builders before save.
+	commandrun.CaptureModeValidator = commandrunDescCaptureMode.Validators[0].(func(string) error)
+	// commandrunDescWorkdir is the schema descriptor for workdir field.
+	commandrunDescWorkdir := commandrunFields[14].Descriptor()
+	// commandrun.DefaultWorkdir holds the default value on creation for the workdir field.
+	commandrun.DefaultWorkdir = commandrunDescWorkdir.Default.(string)
+	// commandrun.WorkdirValidator is a validator for the "workdir" field. It is called by the builders before save.
+	commandrun.WorkdirValidator = commandrunDescWorkdir.Validators[0].(func(string) error)
+	// commandrunDescOutputStatus is the schema descriptor for output_status field.
+	commandrunDescOutputStatus := commandrunFields[18].Descriptor()
+	// commandrun.DefaultOutputStatus holds the default value on creation for the output_status field.
+	commandrun.DefaultOutputStatus = commandrunDescOutputStatus.Default.(string)
+	// commandrun.OutputStatusValidator is a validator for the "output_status" field. It is called by the builders before save.
+	commandrun.OutputStatusValidator = commandrunDescOutputStatus.Validators[0].(func(string) error)
+	// commandrunDescCreatedAt is the schema descriptor for created_at field.
+	commandrunDescCreatedAt := commandrunFields[23].Descriptor()
+	// commandrun.DefaultCreatedAt holds the default value on creation for the created_at field.
+	commandrun.DefaultCreatedAt = commandrunDescCreatedAt.Default.(func() time.Time)
+	// commandrunDescID is the schema descriptor for id field.
+	commandrunDescID := commandrunFields[0].Descriptor()
+	// commandrun.DefaultID holds the default value on creation for the id field.
+	commandrun.DefaultID = commandrunDescID.Default.(func() uuid.UUID)
 	conduitprincipalepochFields := schema.ConduitPrincipalEpoch{}.Fields()
 	_ = conduitprincipalepochFields
 	// conduitprincipalepochDescPrincipalKind is the schema descriptor for principal_kind field.

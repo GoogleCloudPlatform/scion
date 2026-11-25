@@ -90,6 +90,12 @@ type ChatRetentionCursor func(*sql.Selector)
 // ChatRetentionRun is the predicate function for chatretentionrun builders.
 type ChatRetentionRun func(*sql.Selector)
 
+// CommandRequest is the predicate function for commandrequest builders.
+type CommandRequest func(*sql.Selector)
+
+// CommandRun is the predicate function for commandrun builders.
+type CommandRun func(*sql.Selector)
+
 // ConduitPrincipalEpoch is the predicate function for conduitprincipalepoch builders.
 type ConduitPrincipalEpoch func(*sql.Selector)
 

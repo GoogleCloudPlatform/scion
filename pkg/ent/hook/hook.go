@@ -345,6 +345,30 @@ func (f ChatRetentionRunFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ChatRetentionRunMutation", m)
 }
 
+// The CommandRequestFunc type is an adapter to allow the use of ordinary
+// function as CommandRequest mutator.
+type CommandRequestFunc func(context.Context, *ent.CommandRequestMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f CommandRequestFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.CommandRequestMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.CommandRequestMutation", m)
+}
+
+// The CommandRunFunc type is an adapter to allow the use of ordinary
+// function as CommandRun mutator.
+type CommandRunFunc func(context.Context, *ent.CommandRunMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f CommandRunFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.CommandRunMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.CommandRunMutation", m)
+}
+
 // The ConduitPrincipalEpochFunc type is an adapter to allow the use of ordinary
 // function as ConduitPrincipalEpoch mutator.
 type ConduitPrincipalEpochFunc func(context.Context, *ent.ConduitPrincipalEpochMutation) (ent.Value, error)

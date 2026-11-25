@@ -44,6 +44,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentioncursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentionrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrequest"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
@@ -198,6 +200,10 @@ type Client struct {
 	ChatRetentionCursor *ChatRetentionCursorClient
 	// ChatRetentionRun is the client for interacting with the ChatRetentionRun builders.
 	ChatRetentionRun *ChatRetentionRunClient
+	// CommandRequest is the client for interacting with the CommandRequest builders.
+	CommandRequest *CommandRequestClient
+	// CommandRun is the client for interacting with the CommandRun builders.
+	CommandRun *CommandRunClient
 	// ConduitPrincipalEpoch is the client for interacting with the ConduitPrincipalEpoch builders.
 	ConduitPrincipalEpoch *ConduitPrincipalEpochClient
 	// ConduitSession is the client for interacting with the ConduitSession builders.
@@ -419,6 +425,8 @@ func (c *Client) init() {
 	c.ChatLinkCode = NewChatLinkCodeClient(c.config)
 	c.ChatRetentionCursor = NewChatRetentionCursorClient(c.config)
 	c.ChatRetentionRun = NewChatRetentionRunClient(c.config)
+	c.CommandRequest = NewCommandRequestClient(c.config)
+	c.CommandRun = NewCommandRunClient(c.config)
 	c.ConduitPrincipalEpoch = NewConduitPrincipalEpochClient(c.config)
 	c.ConduitSession = NewConduitSessionClient(c.config)
 	c.Conversation = NewConversationClient(c.config)
@@ -630,6 +638,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		ChatLinkCode:                  NewChatLinkCodeClient(cfg),
 		ChatRetentionCursor:           NewChatRetentionCursorClient(cfg),
 		ChatRetentionRun:              NewChatRetentionRunClient(cfg),
+		CommandRequest:                NewCommandRequestClient(cfg),
+		CommandRun:                    NewCommandRunClient(cfg),
 		ConduitPrincipalEpoch:         NewConduitPrincipalEpochClient(cfg),
 		ConduitSession:                NewConduitSessionClient(cfg),
 		Conversation:                  NewConversationClient(cfg),
@@ -768,6 +778,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		ChatLinkCode:                  NewChatLinkCodeClient(cfg),
 		ChatRetentionCursor:           NewChatRetentionCursorClient(cfg),
 		ChatRetentionRun:              NewChatRetentionRunClient(cfg),
+		CommandRequest:                NewCommandRequestClient(cfg),
+		CommandRun:                    NewCommandRunClient(cfg),
 		ConduitPrincipalEpoch:         NewConduitPrincipalEpochClient(cfg),
 		ConduitSession:                NewConduitSessionClient(cfg),
 		Conversation:                  NewConversationClient(cfg),
@@ -895,8 +907,8 @@ func (c *Client) Use(hooks ...Hook) {
 		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AgentSuspendScreen,
 		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
 		c.BrokerReportedRun, c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory,
-		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun,
-		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
+		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun, c.CommandRequest,
+		c.CommandRun, c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
 		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionFacetEntry,
 		c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
 		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExecRunOutput,
@@ -937,8 +949,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AgentSuspendScreen,
 		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
 		c.BrokerReportedRun, c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory,
-		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun,
-		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
+		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun, c.CommandRequest,
+		c.CommandRun, c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
 		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionFacetEntry,
 		c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
 		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExecRunOutput,
@@ -1027,6 +1039,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.ChatRetentionCursor.mutate(ctx, m)
 	case *ChatRetentionRunMutation:
 		return c.ChatRetentionRun.mutate(ctx, m)
+	case *CommandRequestMutation:
+		return c.CommandRequest.mutate(ctx, m)
+	case *CommandRunMutation:
+		return c.CommandRun.mutate(ctx, m)
 	case *ConduitPrincipalEpochMutation:
 		return c.ConduitPrincipalEpoch.mutate(ctx, m)
 	case *ConduitSessionMutation:
@@ -5127,6 +5143,272 @@ func (c *ChatRetentionRunClient) mutate(ctx context.Context, m *ChatRetentionRun
 		return (&ChatRetentionRunDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown ChatRetentionRun mutation op: %q", m.Op())
+	}
+}
+
+// CommandRequestClient is a client for the CommandRequest schema.
+type CommandRequestClient struct {
+	config
+}
+
+// NewCommandRequestClient returns a client for the CommandRequest from the given config.
+func NewCommandRequestClient(c config) *CommandRequestClient {
+	return &CommandRequestClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `commandrequest.Hooks(f(g(h())))`.
+func (c *CommandRequestClient) Use(hooks ...Hook) {
+	c.hooks.CommandRequest = append(c.hooks.CommandRequest, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `commandrequest.Intercept(f(g(h())))`.
+func (c *CommandRequestClient) Intercept(interceptors ...Interceptor) {
+	c.inters.CommandRequest = append(c.inters.CommandRequest, interceptors...)
+}
+
+// Create returns a builder for creating a CommandRequest entity.
+func (c *CommandRequestClient) Create() *CommandRequestCreate {
+	mutation := newCommandRequestMutation(c.config, OpCreate)
+	return &CommandRequestCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of CommandRequest entities.
+func (c *CommandRequestClient) CreateBulk(builders ...*CommandRequestCreate) *CommandRequestCreateBulk {
+	return &CommandRequestCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *CommandRequestClient) MapCreateBulk(slice any, setFunc func(*CommandRequestCreate, int)) *CommandRequestCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &CommandRequestCreateBulk{err: fmt.Errorf("calling to CommandRequestClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*CommandRequestCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &CommandRequestCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for CommandRequest.
+func (c *CommandRequestClient) Update() *CommandRequestUpdate {
+	mutation := newCommandRequestMutation(c.config, OpUpdate)
+	return &CommandRequestUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *CommandRequestClient) UpdateOne(_m *CommandRequest) *CommandRequestUpdateOne {
+	mutation := newCommandRequestMutation(c.config, OpUpdateOne, withCommandRequest(_m))
+	return &CommandRequestUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *CommandRequestClient) UpdateOneID(id uuid.UUID) *CommandRequestUpdateOne {
+	mutation := newCommandRequestMutation(c.config, OpUpdateOne, withCommandRequestID(id))
+	return &CommandRequestUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for CommandRequest.
+func (c *CommandRequestClient) Delete() *CommandRequestDelete {
+	mutation := newCommandRequestMutation(c.config, OpDelete)
+	return &CommandRequestDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *CommandRequestClient) DeleteOne(_m *CommandRequest) *CommandRequestDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *CommandRequestClient) DeleteOneID(id uuid.UUID) *CommandRequestDeleteOne {
+	builder := c.Delete().Where(commandrequest.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &CommandRequestDeleteOne{builder}
+}
+
+// Query returns a query builder for CommandRequest.
+func (c *CommandRequestClient) Query() *CommandRequestQuery {
+	return &CommandRequestQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeCommandRequest},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a CommandRequest entity by its id.
+func (c *CommandRequestClient) Get(ctx context.Context, id uuid.UUID) (*CommandRequest, error) {
+	return c.Query().Where(commandrequest.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *CommandRequestClient) GetX(ctx context.Context, id uuid.UUID) *CommandRequest {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *CommandRequestClient) Hooks() []Hook {
+	return c.hooks.CommandRequest
+}
+
+// Interceptors returns the client interceptors.
+func (c *CommandRequestClient) Interceptors() []Interceptor {
+	return c.inters.CommandRequest
+}
+
+func (c *CommandRequestClient) mutate(ctx context.Context, m *CommandRequestMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&CommandRequestCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&CommandRequestUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&CommandRequestUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&CommandRequestDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown CommandRequest mutation op: %q", m.Op())
+	}
+}
+
+// CommandRunClient is a client for the CommandRun schema.
+type CommandRunClient struct {
+	config
+}
+
+// NewCommandRunClient returns a client for the CommandRun from the given config.
+func NewCommandRunClient(c config) *CommandRunClient {
+	return &CommandRunClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `commandrun.Hooks(f(g(h())))`.
+func (c *CommandRunClient) Use(hooks ...Hook) {
+	c.hooks.CommandRun = append(c.hooks.CommandRun, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `commandrun.Intercept(f(g(h())))`.
+func (c *CommandRunClient) Intercept(interceptors ...Interceptor) {
+	c.inters.CommandRun = append(c.inters.CommandRun, interceptors...)
+}
+
+// Create returns a builder for creating a CommandRun entity.
+func (c *CommandRunClient) Create() *CommandRunCreate {
+	mutation := newCommandRunMutation(c.config, OpCreate)
+	return &CommandRunCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of CommandRun entities.
+func (c *CommandRunClient) CreateBulk(builders ...*CommandRunCreate) *CommandRunCreateBulk {
+	return &CommandRunCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *CommandRunClient) MapCreateBulk(slice any, setFunc func(*CommandRunCreate, int)) *CommandRunCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &CommandRunCreateBulk{err: fmt.Errorf("calling to CommandRunClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*CommandRunCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &CommandRunCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for CommandRun.
+func (c *CommandRunClient) Update() *CommandRunUpdate {
+	mutation := newCommandRunMutation(c.config, OpUpdate)
+	return &CommandRunUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *CommandRunClient) UpdateOne(_m *CommandRun) *CommandRunUpdateOne {
+	mutation := newCommandRunMutation(c.config, OpUpdateOne, withCommandRun(_m))
+	return &CommandRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *CommandRunClient) UpdateOneID(id uuid.UUID) *CommandRunUpdateOne {
+	mutation := newCommandRunMutation(c.config, OpUpdateOne, withCommandRunID(id))
+	return &CommandRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for CommandRun.
+func (c *CommandRunClient) Delete() *CommandRunDelete {
+	mutation := newCommandRunMutation(c.config, OpDelete)
+	return &CommandRunDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *CommandRunClient) DeleteOne(_m *CommandRun) *CommandRunDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *CommandRunClient) DeleteOneID(id uuid.UUID) *CommandRunDeleteOne {
+	builder := c.Delete().Where(commandrun.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &CommandRunDeleteOne{builder}
+}
+
+// Query returns a query builder for CommandRun.
+func (c *CommandRunClient) Query() *CommandRunQuery {
+	return &CommandRunQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeCommandRun},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a CommandRun entity by its id.
+func (c *CommandRunClient) Get(ctx context.Context, id uuid.UUID) (*CommandRun, error) {
+	return c.Query().Where(commandrun.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *CommandRunClient) GetX(ctx context.Context, id uuid.UUID) *CommandRun {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *CommandRunClient) Hooks() []Hook {
+	return c.hooks.CommandRun
+}
+
+// Interceptors returns the client interceptors.
+func (c *CommandRunClient) Interceptors() []Interceptor {
+	return c.inters.CommandRun
+}
+
+func (c *CommandRunClient) mutate(ctx context.Context, m *CommandRunMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&CommandRunCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&CommandRunUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&CommandRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&CommandRunDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown CommandRun mutation op: %q", m.Op())
 	}
 }
 
@@ -17882,22 +18164,22 @@ type (
 		AgentReincarnation, AgentServiceAccountAssignment, AgentSessionMetrics,
 		AgentSuspendScreen, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
 		BrokerReportedRun, BrokerSecret, BrokerSetting, BrokerTargetInventory,
-		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch,
-		ConduitSession, Conversation, ConversationParticipant, Decision,
-		DecisionAnswer, DecisionFacetEntry, DecisionKeyCounter, DelegationAdoption,
-		DelegationEdge, DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput,
-		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
-		Group, GroupMembership, HarnessConfig, HubEncryptionMigration,
-		HubEncryptionPolicy, HubInstance, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
-		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
-		MessagePolicy, MessagePolicyDecision, MeterHealth, MutationAudit, NonceCache,
-		Notification, NotificationSubscription, PendingSecret, PolicyBinding, Project,
-		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
-		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
-		RoleDefinition, RunAttribution, RuntimeBroker, RuntimeOrphan, Schedule,
-		ScheduledEvent, ScheduledExecPollCursor, ScheduledExecRun, Secret,
+		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, CommandRequest,
+		CommandRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
+		ConversationParticipant, Decision, DecisionAnswer, DecisionFacetEntry,
+		DecisionKeyCounter, DelegationAdoption, DelegationEdge, DurableQueueItem,
+		EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy, HubInstance,
+		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
+		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
+		MessageAddressee, MessagePolicy, MessagePolicyDecision, MeterHealth,
+		MutationAudit, NonceCache, Notification, NotificationSubscription,
+		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
+		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
+		RoleBinding, RoleDefinition, RunAttribution, RuntimeBroker, RuntimeOrphan,
+		Schedule, ScheduledEvent, ScheduledExecPollCursor, ScheduledExecRun, Secret,
 		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
@@ -17913,22 +18195,22 @@ type (
 		AgentReincarnation, AgentServiceAccountAssignment, AgentSessionMetrics,
 		AgentSuspendScreen, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
 		BrokerReportedRun, BrokerSecret, BrokerSetting, BrokerTargetInventory,
-		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch,
-		ConduitSession, Conversation, ConversationParticipant, Decision,
-		DecisionAnswer, DecisionFacetEntry, DecisionKeyCounter, DelegationAdoption,
-		DelegationEdge, DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput,
-		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
-		Group, GroupMembership, HarnessConfig, HubEncryptionMigration,
-		HubEncryptionPolicy, HubInstance, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
-		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
-		MessagePolicy, MessagePolicyDecision, MeterHealth, MutationAudit, NonceCache,
-		Notification, NotificationSubscription, PendingSecret, PolicyBinding, Project,
-		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
-		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
-		RoleDefinition, RunAttribution, RuntimeBroker, RuntimeOrphan, Schedule,
-		ScheduledEvent, ScheduledExecPollCursor, ScheduledExecRun, Secret,
+		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, CommandRequest,
+		CommandRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
+		ConversationParticipant, Decision, DecisionAnswer, DecisionFacetEntry,
+		DecisionKeyCounter, DelegationAdoption, DelegationEdge, DurableQueueItem,
+		EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy, HubInstance,
+		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
+		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
+		MessageAddressee, MessagePolicy, MessagePolicyDecision, MeterHealth,
+		MutationAudit, NonceCache, Notification, NotificationSubscription,
+		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
+		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
+		RoleBinding, RoleDefinition, RunAttribution, RuntimeBroker, RuntimeOrphan,
+		Schedule, ScheduledEvent, ScheduledExecPollCursor, ScheduledExecRun, Secret,
 		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,

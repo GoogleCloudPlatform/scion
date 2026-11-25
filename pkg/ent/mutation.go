@@ -40,6 +40,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentioncursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentionrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrequest"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
@@ -175,6 +177,8 @@ const (
 	TypeChatLinkCode                  = "ChatLinkCode"
 	TypeChatRetentionCursor           = "ChatRetentionCursor"
 	TypeChatRetentionRun              = "ChatRetentionRun"
+	TypeCommandRequest                = "CommandRequest"
+	TypeCommandRun                    = "CommandRun"
 	TypeConduitPrincipalEpoch         = "ConduitPrincipalEpoch"
 	TypeConduitSession                = "ConduitSession"
 	TypeConversation                  = "Conversation"
@@ -36367,6 +36371,4429 @@ func (m *ChatRetentionRunMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *ChatRetentionRunMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ChatRetentionRun edge %s", name)
+}
+
+// CommandRequestMutation represents an operation that mutates the CommandRequest nodes in the graph.
+type CommandRequestMutation struct {
+	config
+	op                     Op
+	typ                    string
+	id                     *uuid.UUID
+	project_id             *uuid.UUID
+	agent_id               *uuid.UUID
+	agent_name             *string
+	key                    *string
+	key_norm               *string
+	version                *int
+	addversion             *int
+	description            *string
+	script                 *string
+	workdir                *string
+	timeout_s              *int
+	addtimeout_s           *int
+	share_output_requested *bool
+	command_sha256         *string
+	approver_user_id       *string
+	message_id             *uuid.UUID
+	intro_length           *int
+	addintro_length        *int
+	conversation_id        *uuid.UUID
+	chat_key               *string
+	status                 *commandrequest.Status
+	replaced_by_id         *uuid.UUID
+	replaced_at            *time.Time
+	withdrawn_reason       *string
+	withdrawn_by           *string
+	dismiss_reason         *string
+	resolved_by_user_id    *string
+	resolved_by_name       *string
+	resolved_by_email      *string
+	resolved_at            *time.Time
+	surface                *commandrequest.Surface
+	idempotency_key        *string
+	created_at             *time.Time
+	expires_at             *time.Time
+	clearedFields          map[string]struct{}
+	done                   bool
+	oldValue               func(context.Context) (*CommandRequest, error)
+	predicates             []predicate.CommandRequest
+}
+
+var _ ent.Mutation = (*CommandRequestMutation)(nil)
+
+// commandrequestOption allows management of the mutation configuration using functional options.
+type commandrequestOption func(*CommandRequestMutation)
+
+// newCommandRequestMutation creates new mutation for the CommandRequest entity.
+func newCommandRequestMutation(c config, op Op, opts ...commandrequestOption) *CommandRequestMutation {
+	m := &CommandRequestMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeCommandRequest,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withCommandRequestID sets the ID field of the mutation.
+func withCommandRequestID(id uuid.UUID) commandrequestOption {
+	return func(m *CommandRequestMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *CommandRequest
+		)
+		m.oldValue = func(ctx context.Context) (*CommandRequest, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().CommandRequest.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withCommandRequest sets the old CommandRequest of the mutation.
+func withCommandRequest(node *CommandRequest) commandrequestOption {
+	return func(m *CommandRequestMutation) {
+		m.oldValue = func(context.Context) (*CommandRequest, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m CommandRequestMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m CommandRequestMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of CommandRequest entities.
+func (m *CommandRequestMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *CommandRequestMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *CommandRequestMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().CommandRequest.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *CommandRequestMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *CommandRequestMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *CommandRequestMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *CommandRequestMutation) SetAgentID(u uuid.UUID) {
+	m.agent_id = &u
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *CommandRequestMutation) AgentID() (r uuid.UUID, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldAgentID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *CommandRequestMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetAgentName sets the "agent_name" field.
+func (m *CommandRequestMutation) SetAgentName(s string) {
+	m.agent_name = &s
+}
+
+// AgentName returns the value of the "agent_name" field in the mutation.
+func (m *CommandRequestMutation) AgentName() (r string, exists bool) {
+	v := m.agent_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentName returns the old "agent_name" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldAgentName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentName: %w", err)
+	}
+	return oldValue.AgentName, nil
+}
+
+// ResetAgentName resets all changes to the "agent_name" field.
+func (m *CommandRequestMutation) ResetAgentName() {
+	m.agent_name = nil
+}
+
+// SetKey sets the "key" field.
+func (m *CommandRequestMutation) SetKey(s string) {
+	m.key = &s
+}
+
+// Key returns the value of the "key" field in the mutation.
+func (m *CommandRequestMutation) Key() (r string, exists bool) {
+	v := m.key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKey returns the old "key" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKey: %w", err)
+	}
+	return oldValue.Key, nil
+}
+
+// ResetKey resets all changes to the "key" field.
+func (m *CommandRequestMutation) ResetKey() {
+	m.key = nil
+}
+
+// SetKeyNorm sets the "key_norm" field.
+func (m *CommandRequestMutation) SetKeyNorm(s string) {
+	m.key_norm = &s
+}
+
+// KeyNorm returns the value of the "key_norm" field in the mutation.
+func (m *CommandRequestMutation) KeyNorm() (r string, exists bool) {
+	v := m.key_norm
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKeyNorm returns the old "key_norm" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldKeyNorm(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKeyNorm is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKeyNorm requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKeyNorm: %w", err)
+	}
+	return oldValue.KeyNorm, nil
+}
+
+// ResetKeyNorm resets all changes to the "key_norm" field.
+func (m *CommandRequestMutation) ResetKeyNorm() {
+	m.key_norm = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *CommandRequestMutation) SetVersion(i int) {
+	m.version = &i
+	m.addversion = nil
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *CommandRequestMutation) Version() (r int, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// AddVersion adds i to the "version" field.
+func (m *CommandRequestMutation) AddVersion(i int) {
+	if m.addversion != nil {
+		*m.addversion += i
+	} else {
+		m.addversion = &i
+	}
+}
+
+// AddedVersion returns the value that was added to the "version" field in this mutation.
+func (m *CommandRequestMutation) AddedVersion() (r int, exists bool) {
+	v := m.addversion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *CommandRequestMutation) ResetVersion() {
+	m.version = nil
+	m.addversion = nil
+}
+
+// SetDescription sets the "description" field.
+func (m *CommandRequestMutation) SetDescription(s string) {
+	m.description = &s
+}
+
+// Description returns the value of the "description" field in the mutation.
+func (m *CommandRequestMutation) Description() (r string, exists bool) {
+	v := m.description
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDescription returns the old "description" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldDescription(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDescription is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDescription requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDescription: %w", err)
+	}
+	return oldValue.Description, nil
+}
+
+// ResetDescription resets all changes to the "description" field.
+func (m *CommandRequestMutation) ResetDescription() {
+	m.description = nil
+}
+
+// SetScript sets the "script" field.
+func (m *CommandRequestMutation) SetScript(s string) {
+	m.script = &s
+}
+
+// Script returns the value of the "script" field in the mutation.
+func (m *CommandRequestMutation) Script() (r string, exists bool) {
+	v := m.script
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScript returns the old "script" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldScript(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScript is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScript requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScript: %w", err)
+	}
+	return oldValue.Script, nil
+}
+
+// ResetScript resets all changes to the "script" field.
+func (m *CommandRequestMutation) ResetScript() {
+	m.script = nil
+}
+
+// SetWorkdir sets the "workdir" field.
+func (m *CommandRequestMutation) SetWorkdir(s string) {
+	m.workdir = &s
+}
+
+// Workdir returns the value of the "workdir" field in the mutation.
+func (m *CommandRequestMutation) Workdir() (r string, exists bool) {
+	v := m.workdir
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWorkdir returns the old "workdir" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldWorkdir(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWorkdir is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWorkdir requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWorkdir: %w", err)
+	}
+	return oldValue.Workdir, nil
+}
+
+// ResetWorkdir resets all changes to the "workdir" field.
+func (m *CommandRequestMutation) ResetWorkdir() {
+	m.workdir = nil
+}
+
+// SetTimeoutS sets the "timeout_s" field.
+func (m *CommandRequestMutation) SetTimeoutS(i int) {
+	m.timeout_s = &i
+	m.addtimeout_s = nil
+}
+
+// TimeoutS returns the value of the "timeout_s" field in the mutation.
+func (m *CommandRequestMutation) TimeoutS() (r int, exists bool) {
+	v := m.timeout_s
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTimeoutS returns the old "timeout_s" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldTimeoutS(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTimeoutS is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTimeoutS requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTimeoutS: %w", err)
+	}
+	return oldValue.TimeoutS, nil
+}
+
+// AddTimeoutS adds i to the "timeout_s" field.
+func (m *CommandRequestMutation) AddTimeoutS(i int) {
+	if m.addtimeout_s != nil {
+		*m.addtimeout_s += i
+	} else {
+		m.addtimeout_s = &i
+	}
+}
+
+// AddedTimeoutS returns the value that was added to the "timeout_s" field in this mutation.
+func (m *CommandRequestMutation) AddedTimeoutS() (r int, exists bool) {
+	v := m.addtimeout_s
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTimeoutS resets all changes to the "timeout_s" field.
+func (m *CommandRequestMutation) ResetTimeoutS() {
+	m.timeout_s = nil
+	m.addtimeout_s = nil
+}
+
+// SetShareOutputRequested sets the "share_output_requested" field.
+func (m *CommandRequestMutation) SetShareOutputRequested(b bool) {
+	m.share_output_requested = &b
+}
+
+// ShareOutputRequested returns the value of the "share_output_requested" field in the mutation.
+func (m *CommandRequestMutation) ShareOutputRequested() (r bool, exists bool) {
+	v := m.share_output_requested
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldShareOutputRequested returns the old "share_output_requested" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldShareOutputRequested(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldShareOutputRequested is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldShareOutputRequested requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldShareOutputRequested: %w", err)
+	}
+	return oldValue.ShareOutputRequested, nil
+}
+
+// ResetShareOutputRequested resets all changes to the "share_output_requested" field.
+func (m *CommandRequestMutation) ResetShareOutputRequested() {
+	m.share_output_requested = nil
+}
+
+// SetCommandSha256 sets the "command_sha256" field.
+func (m *CommandRequestMutation) SetCommandSha256(s string) {
+	m.command_sha256 = &s
+}
+
+// CommandSha256 returns the value of the "command_sha256" field in the mutation.
+func (m *CommandRequestMutation) CommandSha256() (r string, exists bool) {
+	v := m.command_sha256
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCommandSha256 returns the old "command_sha256" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldCommandSha256(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCommandSha256 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCommandSha256 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCommandSha256: %w", err)
+	}
+	return oldValue.CommandSha256, nil
+}
+
+// ResetCommandSha256 resets all changes to the "command_sha256" field.
+func (m *CommandRequestMutation) ResetCommandSha256() {
+	m.command_sha256 = nil
+}
+
+// SetApproverUserID sets the "approver_user_id" field.
+func (m *CommandRequestMutation) SetApproverUserID(s string) {
+	m.approver_user_id = &s
+}
+
+// ApproverUserID returns the value of the "approver_user_id" field in the mutation.
+func (m *CommandRequestMutation) ApproverUserID() (r string, exists bool) {
+	v := m.approver_user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldApproverUserID returns the old "approver_user_id" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldApproverUserID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldApproverUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldApproverUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldApproverUserID: %w", err)
+	}
+	return oldValue.ApproverUserID, nil
+}
+
+// ResetApproverUserID resets all changes to the "approver_user_id" field.
+func (m *CommandRequestMutation) ResetApproverUserID() {
+	m.approver_user_id = nil
+}
+
+// SetMessageID sets the "message_id" field.
+func (m *CommandRequestMutation) SetMessageID(u uuid.UUID) {
+	m.message_id = &u
+}
+
+// MessageID returns the value of the "message_id" field in the mutation.
+func (m *CommandRequestMutation) MessageID() (r uuid.UUID, exists bool) {
+	v := m.message_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMessageID returns the old "message_id" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldMessageID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMessageID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMessageID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMessageID: %w", err)
+	}
+	return oldValue.MessageID, nil
+}
+
+// ClearMessageID clears the value of the "message_id" field.
+func (m *CommandRequestMutation) ClearMessageID() {
+	m.message_id = nil
+	m.clearedFields[commandrequest.FieldMessageID] = struct{}{}
+}
+
+// MessageIDCleared returns if the "message_id" field was cleared in this mutation.
+func (m *CommandRequestMutation) MessageIDCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldMessageID]
+	return ok
+}
+
+// ResetMessageID resets all changes to the "message_id" field.
+func (m *CommandRequestMutation) ResetMessageID() {
+	m.message_id = nil
+	delete(m.clearedFields, commandrequest.FieldMessageID)
+}
+
+// SetIntroLength sets the "intro_length" field.
+func (m *CommandRequestMutation) SetIntroLength(i int) {
+	m.intro_length = &i
+	m.addintro_length = nil
+}
+
+// IntroLength returns the value of the "intro_length" field in the mutation.
+func (m *CommandRequestMutation) IntroLength() (r int, exists bool) {
+	v := m.intro_length
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIntroLength returns the old "intro_length" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldIntroLength(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIntroLength is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIntroLength requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIntroLength: %w", err)
+	}
+	return oldValue.IntroLength, nil
+}
+
+// AddIntroLength adds i to the "intro_length" field.
+func (m *CommandRequestMutation) AddIntroLength(i int) {
+	if m.addintro_length != nil {
+		*m.addintro_length += i
+	} else {
+		m.addintro_length = &i
+	}
+}
+
+// AddedIntroLength returns the value that was added to the "intro_length" field in this mutation.
+func (m *CommandRequestMutation) AddedIntroLength() (r int, exists bool) {
+	v := m.addintro_length
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetIntroLength resets all changes to the "intro_length" field.
+func (m *CommandRequestMutation) ResetIntroLength() {
+	m.intro_length = nil
+	m.addintro_length = nil
+}
+
+// SetConversationID sets the "conversation_id" field.
+func (m *CommandRequestMutation) SetConversationID(u uuid.UUID) {
+	m.conversation_id = &u
+}
+
+// ConversationID returns the value of the "conversation_id" field in the mutation.
+func (m *CommandRequestMutation) ConversationID() (r uuid.UUID, exists bool) {
+	v := m.conversation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConversationID returns the old "conversation_id" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldConversationID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConversationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConversationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConversationID: %w", err)
+	}
+	return oldValue.ConversationID, nil
+}
+
+// ClearConversationID clears the value of the "conversation_id" field.
+func (m *CommandRequestMutation) ClearConversationID() {
+	m.conversation_id = nil
+	m.clearedFields[commandrequest.FieldConversationID] = struct{}{}
+}
+
+// ConversationIDCleared returns if the "conversation_id" field was cleared in this mutation.
+func (m *CommandRequestMutation) ConversationIDCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldConversationID]
+	return ok
+}
+
+// ResetConversationID resets all changes to the "conversation_id" field.
+func (m *CommandRequestMutation) ResetConversationID() {
+	m.conversation_id = nil
+	delete(m.clearedFields, commandrequest.FieldConversationID)
+}
+
+// SetChatKey sets the "chat_key" field.
+func (m *CommandRequestMutation) SetChatKey(s string) {
+	m.chat_key = &s
+}
+
+// ChatKey returns the value of the "chat_key" field in the mutation.
+func (m *CommandRequestMutation) ChatKey() (r string, exists bool) {
+	v := m.chat_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChatKey returns the old "chat_key" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldChatKey(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChatKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChatKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChatKey: %w", err)
+	}
+	return oldValue.ChatKey, nil
+}
+
+// ClearChatKey clears the value of the "chat_key" field.
+func (m *CommandRequestMutation) ClearChatKey() {
+	m.chat_key = nil
+	m.clearedFields[commandrequest.FieldChatKey] = struct{}{}
+}
+
+// ChatKeyCleared returns if the "chat_key" field was cleared in this mutation.
+func (m *CommandRequestMutation) ChatKeyCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldChatKey]
+	return ok
+}
+
+// ResetChatKey resets all changes to the "chat_key" field.
+func (m *CommandRequestMutation) ResetChatKey() {
+	m.chat_key = nil
+	delete(m.clearedFields, commandrequest.FieldChatKey)
+}
+
+// SetStatus sets the "status" field.
+func (m *CommandRequestMutation) SetStatus(c commandrequest.Status) {
+	m.status = &c
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *CommandRequestMutation) Status() (r commandrequest.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldStatus(ctx context.Context) (v commandrequest.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *CommandRequestMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetReplacedByID sets the "replaced_by_id" field.
+func (m *CommandRequestMutation) SetReplacedByID(u uuid.UUID) {
+	m.replaced_by_id = &u
+}
+
+// ReplacedByID returns the value of the "replaced_by_id" field in the mutation.
+func (m *CommandRequestMutation) ReplacedByID() (r uuid.UUID, exists bool) {
+	v := m.replaced_by_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReplacedByID returns the old "replaced_by_id" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldReplacedByID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReplacedByID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReplacedByID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReplacedByID: %w", err)
+	}
+	return oldValue.ReplacedByID, nil
+}
+
+// ClearReplacedByID clears the value of the "replaced_by_id" field.
+func (m *CommandRequestMutation) ClearReplacedByID() {
+	m.replaced_by_id = nil
+	m.clearedFields[commandrequest.FieldReplacedByID] = struct{}{}
+}
+
+// ReplacedByIDCleared returns if the "replaced_by_id" field was cleared in this mutation.
+func (m *CommandRequestMutation) ReplacedByIDCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldReplacedByID]
+	return ok
+}
+
+// ResetReplacedByID resets all changes to the "replaced_by_id" field.
+func (m *CommandRequestMutation) ResetReplacedByID() {
+	m.replaced_by_id = nil
+	delete(m.clearedFields, commandrequest.FieldReplacedByID)
+}
+
+// SetReplacedAt sets the "replaced_at" field.
+func (m *CommandRequestMutation) SetReplacedAt(t time.Time) {
+	m.replaced_at = &t
+}
+
+// ReplacedAt returns the value of the "replaced_at" field in the mutation.
+func (m *CommandRequestMutation) ReplacedAt() (r time.Time, exists bool) {
+	v := m.replaced_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReplacedAt returns the old "replaced_at" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldReplacedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReplacedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReplacedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReplacedAt: %w", err)
+	}
+	return oldValue.ReplacedAt, nil
+}
+
+// ClearReplacedAt clears the value of the "replaced_at" field.
+func (m *CommandRequestMutation) ClearReplacedAt() {
+	m.replaced_at = nil
+	m.clearedFields[commandrequest.FieldReplacedAt] = struct{}{}
+}
+
+// ReplacedAtCleared returns if the "replaced_at" field was cleared in this mutation.
+func (m *CommandRequestMutation) ReplacedAtCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldReplacedAt]
+	return ok
+}
+
+// ResetReplacedAt resets all changes to the "replaced_at" field.
+func (m *CommandRequestMutation) ResetReplacedAt() {
+	m.replaced_at = nil
+	delete(m.clearedFields, commandrequest.FieldReplacedAt)
+}
+
+// SetWithdrawnReason sets the "withdrawn_reason" field.
+func (m *CommandRequestMutation) SetWithdrawnReason(s string) {
+	m.withdrawn_reason = &s
+}
+
+// WithdrawnReason returns the value of the "withdrawn_reason" field in the mutation.
+func (m *CommandRequestMutation) WithdrawnReason() (r string, exists bool) {
+	v := m.withdrawn_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWithdrawnReason returns the old "withdrawn_reason" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldWithdrawnReason(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWithdrawnReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWithdrawnReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWithdrawnReason: %w", err)
+	}
+	return oldValue.WithdrawnReason, nil
+}
+
+// ClearWithdrawnReason clears the value of the "withdrawn_reason" field.
+func (m *CommandRequestMutation) ClearWithdrawnReason() {
+	m.withdrawn_reason = nil
+	m.clearedFields[commandrequest.FieldWithdrawnReason] = struct{}{}
+}
+
+// WithdrawnReasonCleared returns if the "withdrawn_reason" field was cleared in this mutation.
+func (m *CommandRequestMutation) WithdrawnReasonCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldWithdrawnReason]
+	return ok
+}
+
+// ResetWithdrawnReason resets all changes to the "withdrawn_reason" field.
+func (m *CommandRequestMutation) ResetWithdrawnReason() {
+	m.withdrawn_reason = nil
+	delete(m.clearedFields, commandrequest.FieldWithdrawnReason)
+}
+
+// SetWithdrawnBy sets the "withdrawn_by" field.
+func (m *CommandRequestMutation) SetWithdrawnBy(s string) {
+	m.withdrawn_by = &s
+}
+
+// WithdrawnBy returns the value of the "withdrawn_by" field in the mutation.
+func (m *CommandRequestMutation) WithdrawnBy() (r string, exists bool) {
+	v := m.withdrawn_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWithdrawnBy returns the old "withdrawn_by" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldWithdrawnBy(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWithdrawnBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWithdrawnBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWithdrawnBy: %w", err)
+	}
+	return oldValue.WithdrawnBy, nil
+}
+
+// ClearWithdrawnBy clears the value of the "withdrawn_by" field.
+func (m *CommandRequestMutation) ClearWithdrawnBy() {
+	m.withdrawn_by = nil
+	m.clearedFields[commandrequest.FieldWithdrawnBy] = struct{}{}
+}
+
+// WithdrawnByCleared returns if the "withdrawn_by" field was cleared in this mutation.
+func (m *CommandRequestMutation) WithdrawnByCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldWithdrawnBy]
+	return ok
+}
+
+// ResetWithdrawnBy resets all changes to the "withdrawn_by" field.
+func (m *CommandRequestMutation) ResetWithdrawnBy() {
+	m.withdrawn_by = nil
+	delete(m.clearedFields, commandrequest.FieldWithdrawnBy)
+}
+
+// SetDismissReason sets the "dismiss_reason" field.
+func (m *CommandRequestMutation) SetDismissReason(s string) {
+	m.dismiss_reason = &s
+}
+
+// DismissReason returns the value of the "dismiss_reason" field in the mutation.
+func (m *CommandRequestMutation) DismissReason() (r string, exists bool) {
+	v := m.dismiss_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDismissReason returns the old "dismiss_reason" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldDismissReason(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDismissReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDismissReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDismissReason: %w", err)
+	}
+	return oldValue.DismissReason, nil
+}
+
+// ClearDismissReason clears the value of the "dismiss_reason" field.
+func (m *CommandRequestMutation) ClearDismissReason() {
+	m.dismiss_reason = nil
+	m.clearedFields[commandrequest.FieldDismissReason] = struct{}{}
+}
+
+// DismissReasonCleared returns if the "dismiss_reason" field was cleared in this mutation.
+func (m *CommandRequestMutation) DismissReasonCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldDismissReason]
+	return ok
+}
+
+// ResetDismissReason resets all changes to the "dismiss_reason" field.
+func (m *CommandRequestMutation) ResetDismissReason() {
+	m.dismiss_reason = nil
+	delete(m.clearedFields, commandrequest.FieldDismissReason)
+}
+
+// SetResolvedByUserID sets the "resolved_by_user_id" field.
+func (m *CommandRequestMutation) SetResolvedByUserID(s string) {
+	m.resolved_by_user_id = &s
+}
+
+// ResolvedByUserID returns the value of the "resolved_by_user_id" field in the mutation.
+func (m *CommandRequestMutation) ResolvedByUserID() (r string, exists bool) {
+	v := m.resolved_by_user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResolvedByUserID returns the old "resolved_by_user_id" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldResolvedByUserID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResolvedByUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResolvedByUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResolvedByUserID: %w", err)
+	}
+	return oldValue.ResolvedByUserID, nil
+}
+
+// ClearResolvedByUserID clears the value of the "resolved_by_user_id" field.
+func (m *CommandRequestMutation) ClearResolvedByUserID() {
+	m.resolved_by_user_id = nil
+	m.clearedFields[commandrequest.FieldResolvedByUserID] = struct{}{}
+}
+
+// ResolvedByUserIDCleared returns if the "resolved_by_user_id" field was cleared in this mutation.
+func (m *CommandRequestMutation) ResolvedByUserIDCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldResolvedByUserID]
+	return ok
+}
+
+// ResetResolvedByUserID resets all changes to the "resolved_by_user_id" field.
+func (m *CommandRequestMutation) ResetResolvedByUserID() {
+	m.resolved_by_user_id = nil
+	delete(m.clearedFields, commandrequest.FieldResolvedByUserID)
+}
+
+// SetResolvedByName sets the "resolved_by_name" field.
+func (m *CommandRequestMutation) SetResolvedByName(s string) {
+	m.resolved_by_name = &s
+}
+
+// ResolvedByName returns the value of the "resolved_by_name" field in the mutation.
+func (m *CommandRequestMutation) ResolvedByName() (r string, exists bool) {
+	v := m.resolved_by_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResolvedByName returns the old "resolved_by_name" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldResolvedByName(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResolvedByName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResolvedByName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResolvedByName: %w", err)
+	}
+	return oldValue.ResolvedByName, nil
+}
+
+// ClearResolvedByName clears the value of the "resolved_by_name" field.
+func (m *CommandRequestMutation) ClearResolvedByName() {
+	m.resolved_by_name = nil
+	m.clearedFields[commandrequest.FieldResolvedByName] = struct{}{}
+}
+
+// ResolvedByNameCleared returns if the "resolved_by_name" field was cleared in this mutation.
+func (m *CommandRequestMutation) ResolvedByNameCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldResolvedByName]
+	return ok
+}
+
+// ResetResolvedByName resets all changes to the "resolved_by_name" field.
+func (m *CommandRequestMutation) ResetResolvedByName() {
+	m.resolved_by_name = nil
+	delete(m.clearedFields, commandrequest.FieldResolvedByName)
+}
+
+// SetResolvedByEmail sets the "resolved_by_email" field.
+func (m *CommandRequestMutation) SetResolvedByEmail(s string) {
+	m.resolved_by_email = &s
+}
+
+// ResolvedByEmail returns the value of the "resolved_by_email" field in the mutation.
+func (m *CommandRequestMutation) ResolvedByEmail() (r string, exists bool) {
+	v := m.resolved_by_email
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResolvedByEmail returns the old "resolved_by_email" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldResolvedByEmail(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResolvedByEmail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResolvedByEmail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResolvedByEmail: %w", err)
+	}
+	return oldValue.ResolvedByEmail, nil
+}
+
+// ClearResolvedByEmail clears the value of the "resolved_by_email" field.
+func (m *CommandRequestMutation) ClearResolvedByEmail() {
+	m.resolved_by_email = nil
+	m.clearedFields[commandrequest.FieldResolvedByEmail] = struct{}{}
+}
+
+// ResolvedByEmailCleared returns if the "resolved_by_email" field was cleared in this mutation.
+func (m *CommandRequestMutation) ResolvedByEmailCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldResolvedByEmail]
+	return ok
+}
+
+// ResetResolvedByEmail resets all changes to the "resolved_by_email" field.
+func (m *CommandRequestMutation) ResetResolvedByEmail() {
+	m.resolved_by_email = nil
+	delete(m.clearedFields, commandrequest.FieldResolvedByEmail)
+}
+
+// SetResolvedAt sets the "resolved_at" field.
+func (m *CommandRequestMutation) SetResolvedAt(t time.Time) {
+	m.resolved_at = &t
+}
+
+// ResolvedAt returns the value of the "resolved_at" field in the mutation.
+func (m *CommandRequestMutation) ResolvedAt() (r time.Time, exists bool) {
+	v := m.resolved_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResolvedAt returns the old "resolved_at" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldResolvedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResolvedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResolvedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResolvedAt: %w", err)
+	}
+	return oldValue.ResolvedAt, nil
+}
+
+// ClearResolvedAt clears the value of the "resolved_at" field.
+func (m *CommandRequestMutation) ClearResolvedAt() {
+	m.resolved_at = nil
+	m.clearedFields[commandrequest.FieldResolvedAt] = struct{}{}
+}
+
+// ResolvedAtCleared returns if the "resolved_at" field was cleared in this mutation.
+func (m *CommandRequestMutation) ResolvedAtCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldResolvedAt]
+	return ok
+}
+
+// ResetResolvedAt resets all changes to the "resolved_at" field.
+func (m *CommandRequestMutation) ResetResolvedAt() {
+	m.resolved_at = nil
+	delete(m.clearedFields, commandrequest.FieldResolvedAt)
+}
+
+// SetSurface sets the "surface" field.
+func (m *CommandRequestMutation) SetSurface(c commandrequest.Surface) {
+	m.surface = &c
+}
+
+// Surface returns the value of the "surface" field in the mutation.
+func (m *CommandRequestMutation) Surface() (r commandrequest.Surface, exists bool) {
+	v := m.surface
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSurface returns the old "surface" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldSurface(ctx context.Context) (v *commandrequest.Surface, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSurface is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSurface requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSurface: %w", err)
+	}
+	return oldValue.Surface, nil
+}
+
+// ClearSurface clears the value of the "surface" field.
+func (m *CommandRequestMutation) ClearSurface() {
+	m.surface = nil
+	m.clearedFields[commandrequest.FieldSurface] = struct{}{}
+}
+
+// SurfaceCleared returns if the "surface" field was cleared in this mutation.
+func (m *CommandRequestMutation) SurfaceCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldSurface]
+	return ok
+}
+
+// ResetSurface resets all changes to the "surface" field.
+func (m *CommandRequestMutation) ResetSurface() {
+	m.surface = nil
+	delete(m.clearedFields, commandrequest.FieldSurface)
+}
+
+// SetIdempotencyKey sets the "idempotency_key" field.
+func (m *CommandRequestMutation) SetIdempotencyKey(s string) {
+	m.idempotency_key = &s
+}
+
+// IdempotencyKey returns the value of the "idempotency_key" field in the mutation.
+func (m *CommandRequestMutation) IdempotencyKey() (r string, exists bool) {
+	v := m.idempotency_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIdempotencyKey returns the old "idempotency_key" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldIdempotencyKey(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIdempotencyKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIdempotencyKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIdempotencyKey: %w", err)
+	}
+	return oldValue.IdempotencyKey, nil
+}
+
+// ClearIdempotencyKey clears the value of the "idempotency_key" field.
+func (m *CommandRequestMutation) ClearIdempotencyKey() {
+	m.idempotency_key = nil
+	m.clearedFields[commandrequest.FieldIdempotencyKey] = struct{}{}
+}
+
+// IdempotencyKeyCleared returns if the "idempotency_key" field was cleared in this mutation.
+func (m *CommandRequestMutation) IdempotencyKeyCleared() bool {
+	_, ok := m.clearedFields[commandrequest.FieldIdempotencyKey]
+	return ok
+}
+
+// ResetIdempotencyKey resets all changes to the "idempotency_key" field.
+func (m *CommandRequestMutation) ResetIdempotencyKey() {
+	m.idempotency_key = nil
+	delete(m.clearedFields, commandrequest.FieldIdempotencyKey)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *CommandRequestMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *CommandRequestMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *CommandRequestMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *CommandRequestMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *CommandRequestMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the CommandRequest entity.
+// If the CommandRequest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRequestMutation) OldExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *CommandRequestMutation) ResetExpiresAt() {
+	m.expires_at = nil
+}
+
+// Where appends a list predicates to the CommandRequestMutation builder.
+func (m *CommandRequestMutation) Where(ps ...predicate.CommandRequest) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the CommandRequestMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *CommandRequestMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.CommandRequest, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *CommandRequestMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *CommandRequestMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (CommandRequest).
+func (m *CommandRequestMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *CommandRequestMutation) Fields() []string {
+	fields := make([]string, 0, 31)
+	if m.project_id != nil {
+		fields = append(fields, commandrequest.FieldProjectID)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, commandrequest.FieldAgentID)
+	}
+	if m.agent_name != nil {
+		fields = append(fields, commandrequest.FieldAgentName)
+	}
+	if m.key != nil {
+		fields = append(fields, commandrequest.FieldKey)
+	}
+	if m.key_norm != nil {
+		fields = append(fields, commandrequest.FieldKeyNorm)
+	}
+	if m.version != nil {
+		fields = append(fields, commandrequest.FieldVersion)
+	}
+	if m.description != nil {
+		fields = append(fields, commandrequest.FieldDescription)
+	}
+	if m.script != nil {
+		fields = append(fields, commandrequest.FieldScript)
+	}
+	if m.workdir != nil {
+		fields = append(fields, commandrequest.FieldWorkdir)
+	}
+	if m.timeout_s != nil {
+		fields = append(fields, commandrequest.FieldTimeoutS)
+	}
+	if m.share_output_requested != nil {
+		fields = append(fields, commandrequest.FieldShareOutputRequested)
+	}
+	if m.command_sha256 != nil {
+		fields = append(fields, commandrequest.FieldCommandSha256)
+	}
+	if m.approver_user_id != nil {
+		fields = append(fields, commandrequest.FieldApproverUserID)
+	}
+	if m.message_id != nil {
+		fields = append(fields, commandrequest.FieldMessageID)
+	}
+	if m.intro_length != nil {
+		fields = append(fields, commandrequest.FieldIntroLength)
+	}
+	if m.conversation_id != nil {
+		fields = append(fields, commandrequest.FieldConversationID)
+	}
+	if m.chat_key != nil {
+		fields = append(fields, commandrequest.FieldChatKey)
+	}
+	if m.status != nil {
+		fields = append(fields, commandrequest.FieldStatus)
+	}
+	if m.replaced_by_id != nil {
+		fields = append(fields, commandrequest.FieldReplacedByID)
+	}
+	if m.replaced_at != nil {
+		fields = append(fields, commandrequest.FieldReplacedAt)
+	}
+	if m.withdrawn_reason != nil {
+		fields = append(fields, commandrequest.FieldWithdrawnReason)
+	}
+	if m.withdrawn_by != nil {
+		fields = append(fields, commandrequest.FieldWithdrawnBy)
+	}
+	if m.dismiss_reason != nil {
+		fields = append(fields, commandrequest.FieldDismissReason)
+	}
+	if m.resolved_by_user_id != nil {
+		fields = append(fields, commandrequest.FieldResolvedByUserID)
+	}
+	if m.resolved_by_name != nil {
+		fields = append(fields, commandrequest.FieldResolvedByName)
+	}
+	if m.resolved_by_email != nil {
+		fields = append(fields, commandrequest.FieldResolvedByEmail)
+	}
+	if m.resolved_at != nil {
+		fields = append(fields, commandrequest.FieldResolvedAt)
+	}
+	if m.surface != nil {
+		fields = append(fields, commandrequest.FieldSurface)
+	}
+	if m.idempotency_key != nil {
+		fields = append(fields, commandrequest.FieldIdempotencyKey)
+	}
+	if m.created_at != nil {
+		fields = append(fields, commandrequest.FieldCreatedAt)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, commandrequest.FieldExpiresAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *CommandRequestMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case commandrequest.FieldProjectID:
+		return m.ProjectID()
+	case commandrequest.FieldAgentID:
+		return m.AgentID()
+	case commandrequest.FieldAgentName:
+		return m.AgentName()
+	case commandrequest.FieldKey:
+		return m.Key()
+	case commandrequest.FieldKeyNorm:
+		return m.KeyNorm()
+	case commandrequest.FieldVersion:
+		return m.Version()
+	case commandrequest.FieldDescription:
+		return m.Description()
+	case commandrequest.FieldScript:
+		return m.Script()
+	case commandrequest.FieldWorkdir:
+		return m.Workdir()
+	case commandrequest.FieldTimeoutS:
+		return m.TimeoutS()
+	case commandrequest.FieldShareOutputRequested:
+		return m.ShareOutputRequested()
+	case commandrequest.FieldCommandSha256:
+		return m.CommandSha256()
+	case commandrequest.FieldApproverUserID:
+		return m.ApproverUserID()
+	case commandrequest.FieldMessageID:
+		return m.MessageID()
+	case commandrequest.FieldIntroLength:
+		return m.IntroLength()
+	case commandrequest.FieldConversationID:
+		return m.ConversationID()
+	case commandrequest.FieldChatKey:
+		return m.ChatKey()
+	case commandrequest.FieldStatus:
+		return m.Status()
+	case commandrequest.FieldReplacedByID:
+		return m.ReplacedByID()
+	case commandrequest.FieldReplacedAt:
+		return m.ReplacedAt()
+	case commandrequest.FieldWithdrawnReason:
+		return m.WithdrawnReason()
+	case commandrequest.FieldWithdrawnBy:
+		return m.WithdrawnBy()
+	case commandrequest.FieldDismissReason:
+		return m.DismissReason()
+	case commandrequest.FieldResolvedByUserID:
+		return m.ResolvedByUserID()
+	case commandrequest.FieldResolvedByName:
+		return m.ResolvedByName()
+	case commandrequest.FieldResolvedByEmail:
+		return m.ResolvedByEmail()
+	case commandrequest.FieldResolvedAt:
+		return m.ResolvedAt()
+	case commandrequest.FieldSurface:
+		return m.Surface()
+	case commandrequest.FieldIdempotencyKey:
+		return m.IdempotencyKey()
+	case commandrequest.FieldCreatedAt:
+		return m.CreatedAt()
+	case commandrequest.FieldExpiresAt:
+		return m.ExpiresAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *CommandRequestMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case commandrequest.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case commandrequest.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case commandrequest.FieldAgentName:
+		return m.OldAgentName(ctx)
+	case commandrequest.FieldKey:
+		return m.OldKey(ctx)
+	case commandrequest.FieldKeyNorm:
+		return m.OldKeyNorm(ctx)
+	case commandrequest.FieldVersion:
+		return m.OldVersion(ctx)
+	case commandrequest.FieldDescription:
+		return m.OldDescription(ctx)
+	case commandrequest.FieldScript:
+		return m.OldScript(ctx)
+	case commandrequest.FieldWorkdir:
+		return m.OldWorkdir(ctx)
+	case commandrequest.FieldTimeoutS:
+		return m.OldTimeoutS(ctx)
+	case commandrequest.FieldShareOutputRequested:
+		return m.OldShareOutputRequested(ctx)
+	case commandrequest.FieldCommandSha256:
+		return m.OldCommandSha256(ctx)
+	case commandrequest.FieldApproverUserID:
+		return m.OldApproverUserID(ctx)
+	case commandrequest.FieldMessageID:
+		return m.OldMessageID(ctx)
+	case commandrequest.FieldIntroLength:
+		return m.OldIntroLength(ctx)
+	case commandrequest.FieldConversationID:
+		return m.OldConversationID(ctx)
+	case commandrequest.FieldChatKey:
+		return m.OldChatKey(ctx)
+	case commandrequest.FieldStatus:
+		return m.OldStatus(ctx)
+	case commandrequest.FieldReplacedByID:
+		return m.OldReplacedByID(ctx)
+	case commandrequest.FieldReplacedAt:
+		return m.OldReplacedAt(ctx)
+	case commandrequest.FieldWithdrawnReason:
+		return m.OldWithdrawnReason(ctx)
+	case commandrequest.FieldWithdrawnBy:
+		return m.OldWithdrawnBy(ctx)
+	case commandrequest.FieldDismissReason:
+		return m.OldDismissReason(ctx)
+	case commandrequest.FieldResolvedByUserID:
+		return m.OldResolvedByUserID(ctx)
+	case commandrequest.FieldResolvedByName:
+		return m.OldResolvedByName(ctx)
+	case commandrequest.FieldResolvedByEmail:
+		return m.OldResolvedByEmail(ctx)
+	case commandrequest.FieldResolvedAt:
+		return m.OldResolvedAt(ctx)
+	case commandrequest.FieldSurface:
+		return m.OldSurface(ctx)
+	case commandrequest.FieldIdempotencyKey:
+		return m.OldIdempotencyKey(ctx)
+	case commandrequest.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case commandrequest.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown CommandRequest field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *CommandRequestMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case commandrequest.FieldProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case commandrequest.FieldAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case commandrequest.FieldAgentName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentName(v)
+		return nil
+	case commandrequest.FieldKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKey(v)
+		return nil
+	case commandrequest.FieldKeyNorm:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKeyNorm(v)
+		return nil
+	case commandrequest.FieldVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case commandrequest.FieldDescription:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDescription(v)
+		return nil
+	case commandrequest.FieldScript:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScript(v)
+		return nil
+	case commandrequest.FieldWorkdir:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWorkdir(v)
+		return nil
+	case commandrequest.FieldTimeoutS:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTimeoutS(v)
+		return nil
+	case commandrequest.FieldShareOutputRequested:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetShareOutputRequested(v)
+		return nil
+	case commandrequest.FieldCommandSha256:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCommandSha256(v)
+		return nil
+	case commandrequest.FieldApproverUserID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetApproverUserID(v)
+		return nil
+	case commandrequest.FieldMessageID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMessageID(v)
+		return nil
+	case commandrequest.FieldIntroLength:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIntroLength(v)
+		return nil
+	case commandrequest.FieldConversationID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConversationID(v)
+		return nil
+	case commandrequest.FieldChatKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChatKey(v)
+		return nil
+	case commandrequest.FieldStatus:
+		v, ok := value.(commandrequest.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case commandrequest.FieldReplacedByID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReplacedByID(v)
+		return nil
+	case commandrequest.FieldReplacedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReplacedAt(v)
+		return nil
+	case commandrequest.FieldWithdrawnReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWithdrawnReason(v)
+		return nil
+	case commandrequest.FieldWithdrawnBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWithdrawnBy(v)
+		return nil
+	case commandrequest.FieldDismissReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDismissReason(v)
+		return nil
+	case commandrequest.FieldResolvedByUserID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResolvedByUserID(v)
+		return nil
+	case commandrequest.FieldResolvedByName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResolvedByName(v)
+		return nil
+	case commandrequest.FieldResolvedByEmail:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResolvedByEmail(v)
+		return nil
+	case commandrequest.FieldResolvedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResolvedAt(v)
+		return nil
+	case commandrequest.FieldSurface:
+		v, ok := value.(commandrequest.Surface)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSurface(v)
+		return nil
+	case commandrequest.FieldIdempotencyKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIdempotencyKey(v)
+		return nil
+	case commandrequest.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case commandrequest.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown CommandRequest field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *CommandRequestMutation) AddedFields() []string {
+	var fields []string
+	if m.addversion != nil {
+		fields = append(fields, commandrequest.FieldVersion)
+	}
+	if m.addtimeout_s != nil {
+		fields = append(fields, commandrequest.FieldTimeoutS)
+	}
+	if m.addintro_length != nil {
+		fields = append(fields, commandrequest.FieldIntroLength)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *CommandRequestMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case commandrequest.FieldVersion:
+		return m.AddedVersion()
+	case commandrequest.FieldTimeoutS:
+		return m.AddedTimeoutS()
+	case commandrequest.FieldIntroLength:
+		return m.AddedIntroLength()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *CommandRequestMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case commandrequest.FieldVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddVersion(v)
+		return nil
+	case commandrequest.FieldTimeoutS:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTimeoutS(v)
+		return nil
+	case commandrequest.FieldIntroLength:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddIntroLength(v)
+		return nil
+	}
+	return fmt.Errorf("unknown CommandRequest numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *CommandRequestMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(commandrequest.FieldMessageID) {
+		fields = append(fields, commandrequest.FieldMessageID)
+	}
+	if m.FieldCleared(commandrequest.FieldConversationID) {
+		fields = append(fields, commandrequest.FieldConversationID)
+	}
+	if m.FieldCleared(commandrequest.FieldChatKey) {
+		fields = append(fields, commandrequest.FieldChatKey)
+	}
+	if m.FieldCleared(commandrequest.FieldReplacedByID) {
+		fields = append(fields, commandrequest.FieldReplacedByID)
+	}
+	if m.FieldCleared(commandrequest.FieldReplacedAt) {
+		fields = append(fields, commandrequest.FieldReplacedAt)
+	}
+	if m.FieldCleared(commandrequest.FieldWithdrawnReason) {
+		fields = append(fields, commandrequest.FieldWithdrawnReason)
+	}
+	if m.FieldCleared(commandrequest.FieldWithdrawnBy) {
+		fields = append(fields, commandrequest.FieldWithdrawnBy)
+	}
+	if m.FieldCleared(commandrequest.FieldDismissReason) {
+		fields = append(fields, commandrequest.FieldDismissReason)
+	}
+	if m.FieldCleared(commandrequest.FieldResolvedByUserID) {
+		fields = append(fields, commandrequest.FieldResolvedByUserID)
+	}
+	if m.FieldCleared(commandrequest.FieldResolvedByName) {
+		fields = append(fields, commandrequest.FieldResolvedByName)
+	}
+	if m.FieldCleared(commandrequest.FieldResolvedByEmail) {
+		fields = append(fields, commandrequest.FieldResolvedByEmail)
+	}
+	if m.FieldCleared(commandrequest.FieldResolvedAt) {
+		fields = append(fields, commandrequest.FieldResolvedAt)
+	}
+	if m.FieldCleared(commandrequest.FieldSurface) {
+		fields = append(fields, commandrequest.FieldSurface)
+	}
+	if m.FieldCleared(commandrequest.FieldIdempotencyKey) {
+		fields = append(fields, commandrequest.FieldIdempotencyKey)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *CommandRequestMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *CommandRequestMutation) ClearField(name string) error {
+	switch name {
+	case commandrequest.FieldMessageID:
+		m.ClearMessageID()
+		return nil
+	case commandrequest.FieldConversationID:
+		m.ClearConversationID()
+		return nil
+	case commandrequest.FieldChatKey:
+		m.ClearChatKey()
+		return nil
+	case commandrequest.FieldReplacedByID:
+		m.ClearReplacedByID()
+		return nil
+	case commandrequest.FieldReplacedAt:
+		m.ClearReplacedAt()
+		return nil
+	case commandrequest.FieldWithdrawnReason:
+		m.ClearWithdrawnReason()
+		return nil
+	case commandrequest.FieldWithdrawnBy:
+		m.ClearWithdrawnBy()
+		return nil
+	case commandrequest.FieldDismissReason:
+		m.ClearDismissReason()
+		return nil
+	case commandrequest.FieldResolvedByUserID:
+		m.ClearResolvedByUserID()
+		return nil
+	case commandrequest.FieldResolvedByName:
+		m.ClearResolvedByName()
+		return nil
+	case commandrequest.FieldResolvedByEmail:
+		m.ClearResolvedByEmail()
+		return nil
+	case commandrequest.FieldResolvedAt:
+		m.ClearResolvedAt()
+		return nil
+	case commandrequest.FieldSurface:
+		m.ClearSurface()
+		return nil
+	case commandrequest.FieldIdempotencyKey:
+		m.ClearIdempotencyKey()
+		return nil
+	}
+	return fmt.Errorf("unknown CommandRequest nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *CommandRequestMutation) ResetField(name string) error {
+	switch name {
+	case commandrequest.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case commandrequest.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case commandrequest.FieldAgentName:
+		m.ResetAgentName()
+		return nil
+	case commandrequest.FieldKey:
+		m.ResetKey()
+		return nil
+	case commandrequest.FieldKeyNorm:
+		m.ResetKeyNorm()
+		return nil
+	case commandrequest.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case commandrequest.FieldDescription:
+		m.ResetDescription()
+		return nil
+	case commandrequest.FieldScript:
+		m.ResetScript()
+		return nil
+	case commandrequest.FieldWorkdir:
+		m.ResetWorkdir()
+		return nil
+	case commandrequest.FieldTimeoutS:
+		m.ResetTimeoutS()
+		return nil
+	case commandrequest.FieldShareOutputRequested:
+		m.ResetShareOutputRequested()
+		return nil
+	case commandrequest.FieldCommandSha256:
+		m.ResetCommandSha256()
+		return nil
+	case commandrequest.FieldApproverUserID:
+		m.ResetApproverUserID()
+		return nil
+	case commandrequest.FieldMessageID:
+		m.ResetMessageID()
+		return nil
+	case commandrequest.FieldIntroLength:
+		m.ResetIntroLength()
+		return nil
+	case commandrequest.FieldConversationID:
+		m.ResetConversationID()
+		return nil
+	case commandrequest.FieldChatKey:
+		m.ResetChatKey()
+		return nil
+	case commandrequest.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case commandrequest.FieldReplacedByID:
+		m.ResetReplacedByID()
+		return nil
+	case commandrequest.FieldReplacedAt:
+		m.ResetReplacedAt()
+		return nil
+	case commandrequest.FieldWithdrawnReason:
+		m.ResetWithdrawnReason()
+		return nil
+	case commandrequest.FieldWithdrawnBy:
+		m.ResetWithdrawnBy()
+		return nil
+	case commandrequest.FieldDismissReason:
+		m.ResetDismissReason()
+		return nil
+	case commandrequest.FieldResolvedByUserID:
+		m.ResetResolvedByUserID()
+		return nil
+	case commandrequest.FieldResolvedByName:
+		m.ResetResolvedByName()
+		return nil
+	case commandrequest.FieldResolvedByEmail:
+		m.ResetResolvedByEmail()
+		return nil
+	case commandrequest.FieldResolvedAt:
+		m.ResetResolvedAt()
+		return nil
+	case commandrequest.FieldSurface:
+		m.ResetSurface()
+		return nil
+	case commandrequest.FieldIdempotencyKey:
+		m.ResetIdempotencyKey()
+		return nil
+	case commandrequest.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case commandrequest.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	}
+	return fmt.Errorf("unknown CommandRequest field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *CommandRequestMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *CommandRequestMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *CommandRequestMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *CommandRequestMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *CommandRequestMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *CommandRequestMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *CommandRequestMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown CommandRequest unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *CommandRequestMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown CommandRequest edge %s", name)
+}
+
+// CommandRunMutation represents an operation that mutates the CommandRun nodes in the graph.
+type CommandRunMutation struct {
+	config
+	op                   Op
+	typ                  string
+	id                   *uuid.UUID
+	request_id           *uuid.UUID
+	command_sha256       *string
+	script_len           *int
+	addscript_len        *int
+	approver_user_id     *string
+	exec_agent_id        *uuid.UUID
+	exec_project_id      *uuid.UUID
+	launch_id            *string
+	status               *commandrun.Status
+	reason               *string
+	wake                 *commandrun.Wake
+	share_output         *bool
+	timeout_s            *int
+	addtimeout_s         *int
+	capture_mode         *string
+	workdir              *string
+	exit_code            *int
+	addexit_code         *int
+	duration_ms          *int64
+	addduration_ms       *int64
+	output_bytes         *int64
+	addoutput_bytes      *int64
+	output_status        *string
+	not_after            *time.Time
+	lease_until          *time.Time
+	last_polled_at       *time.Time
+	poll_claimed_at      *time.Time
+	created_at           *time.Time
+	dispatched_at        *time.Time
+	finished_at          *time.Time
+	outcome_delivered_at *time.Time
+	outcome_message_id   *uuid.UUID
+	clearedFields        map[string]struct{}
+	done                 bool
+	oldValue             func(context.Context) (*CommandRun, error)
+	predicates           []predicate.CommandRun
+}
+
+var _ ent.Mutation = (*CommandRunMutation)(nil)
+
+// commandrunOption allows management of the mutation configuration using functional options.
+type commandrunOption func(*CommandRunMutation)
+
+// newCommandRunMutation creates new mutation for the CommandRun entity.
+func newCommandRunMutation(c config, op Op, opts ...commandrunOption) *CommandRunMutation {
+	m := &CommandRunMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeCommandRun,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withCommandRunID sets the ID field of the mutation.
+func withCommandRunID(id uuid.UUID) commandrunOption {
+	return func(m *CommandRunMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *CommandRun
+		)
+		m.oldValue = func(ctx context.Context) (*CommandRun, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().CommandRun.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withCommandRun sets the old CommandRun of the mutation.
+func withCommandRun(node *CommandRun) commandrunOption {
+	return func(m *CommandRunMutation) {
+		m.oldValue = func(context.Context) (*CommandRun, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m CommandRunMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m CommandRunMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of CommandRun entities.
+func (m *CommandRunMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *CommandRunMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *CommandRunMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().CommandRun.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetRequestID sets the "request_id" field.
+func (m *CommandRunMutation) SetRequestID(u uuid.UUID) {
+	m.request_id = &u
+}
+
+// RequestID returns the value of the "request_id" field in the mutation.
+func (m *CommandRunMutation) RequestID() (r uuid.UUID, exists bool) {
+	v := m.request_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRequestID returns the old "request_id" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldRequestID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRequestID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRequestID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRequestID: %w", err)
+	}
+	return oldValue.RequestID, nil
+}
+
+// ResetRequestID resets all changes to the "request_id" field.
+func (m *CommandRunMutation) ResetRequestID() {
+	m.request_id = nil
+}
+
+// SetCommandSha256 sets the "command_sha256" field.
+func (m *CommandRunMutation) SetCommandSha256(s string) {
+	m.command_sha256 = &s
+}
+
+// CommandSha256 returns the value of the "command_sha256" field in the mutation.
+func (m *CommandRunMutation) CommandSha256() (r string, exists bool) {
+	v := m.command_sha256
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCommandSha256 returns the old "command_sha256" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldCommandSha256(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCommandSha256 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCommandSha256 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCommandSha256: %w", err)
+	}
+	return oldValue.CommandSha256, nil
+}
+
+// ResetCommandSha256 resets all changes to the "command_sha256" field.
+func (m *CommandRunMutation) ResetCommandSha256() {
+	m.command_sha256 = nil
+}
+
+// SetScriptLen sets the "script_len" field.
+func (m *CommandRunMutation) SetScriptLen(i int) {
+	m.script_len = &i
+	m.addscript_len = nil
+}
+
+// ScriptLen returns the value of the "script_len" field in the mutation.
+func (m *CommandRunMutation) ScriptLen() (r int, exists bool) {
+	v := m.script_len
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScriptLen returns the old "script_len" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldScriptLen(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScriptLen is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScriptLen requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScriptLen: %w", err)
+	}
+	return oldValue.ScriptLen, nil
+}
+
+// AddScriptLen adds i to the "script_len" field.
+func (m *CommandRunMutation) AddScriptLen(i int) {
+	if m.addscript_len != nil {
+		*m.addscript_len += i
+	} else {
+		m.addscript_len = &i
+	}
+}
+
+// AddedScriptLen returns the value that was added to the "script_len" field in this mutation.
+func (m *CommandRunMutation) AddedScriptLen() (r int, exists bool) {
+	v := m.addscript_len
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetScriptLen resets all changes to the "script_len" field.
+func (m *CommandRunMutation) ResetScriptLen() {
+	m.script_len = nil
+	m.addscript_len = nil
+}
+
+// SetApproverUserID sets the "approver_user_id" field.
+func (m *CommandRunMutation) SetApproverUserID(s string) {
+	m.approver_user_id = &s
+}
+
+// ApproverUserID returns the value of the "approver_user_id" field in the mutation.
+func (m *CommandRunMutation) ApproverUserID() (r string, exists bool) {
+	v := m.approver_user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldApproverUserID returns the old "approver_user_id" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldApproverUserID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldApproverUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldApproverUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldApproverUserID: %w", err)
+	}
+	return oldValue.ApproverUserID, nil
+}
+
+// ResetApproverUserID resets all changes to the "approver_user_id" field.
+func (m *CommandRunMutation) ResetApproverUserID() {
+	m.approver_user_id = nil
+}
+
+// SetExecAgentID sets the "exec_agent_id" field.
+func (m *CommandRunMutation) SetExecAgentID(u uuid.UUID) {
+	m.exec_agent_id = &u
+}
+
+// ExecAgentID returns the value of the "exec_agent_id" field in the mutation.
+func (m *CommandRunMutation) ExecAgentID() (r uuid.UUID, exists bool) {
+	v := m.exec_agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecAgentID returns the old "exec_agent_id" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldExecAgentID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecAgentID: %w", err)
+	}
+	return oldValue.ExecAgentID, nil
+}
+
+// ResetExecAgentID resets all changes to the "exec_agent_id" field.
+func (m *CommandRunMutation) ResetExecAgentID() {
+	m.exec_agent_id = nil
+}
+
+// SetExecProjectID sets the "exec_project_id" field.
+func (m *CommandRunMutation) SetExecProjectID(u uuid.UUID) {
+	m.exec_project_id = &u
+}
+
+// ExecProjectID returns the value of the "exec_project_id" field in the mutation.
+func (m *CommandRunMutation) ExecProjectID() (r uuid.UUID, exists bool) {
+	v := m.exec_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecProjectID returns the old "exec_project_id" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldExecProjectID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecProjectID: %w", err)
+	}
+	return oldValue.ExecProjectID, nil
+}
+
+// ResetExecProjectID resets all changes to the "exec_project_id" field.
+func (m *CommandRunMutation) ResetExecProjectID() {
+	m.exec_project_id = nil
+}
+
+// SetLaunchID sets the "launch_id" field.
+func (m *CommandRunMutation) SetLaunchID(s string) {
+	m.launch_id = &s
+}
+
+// LaunchID returns the value of the "launch_id" field in the mutation.
+func (m *CommandRunMutation) LaunchID() (r string, exists bool) {
+	v := m.launch_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLaunchID returns the old "launch_id" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldLaunchID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLaunchID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLaunchID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLaunchID: %w", err)
+	}
+	return oldValue.LaunchID, nil
+}
+
+// ResetLaunchID resets all changes to the "launch_id" field.
+func (m *CommandRunMutation) ResetLaunchID() {
+	m.launch_id = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *CommandRunMutation) SetStatus(c commandrun.Status) {
+	m.status = &c
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *CommandRunMutation) Status() (r commandrun.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldStatus(ctx context.Context) (v commandrun.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *CommandRunMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetReason sets the "reason" field.
+func (m *CommandRunMutation) SetReason(s string) {
+	m.reason = &s
+}
+
+// Reason returns the value of the "reason" field in the mutation.
+func (m *CommandRunMutation) Reason() (r string, exists bool) {
+	v := m.reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReason returns the old "reason" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReason: %w", err)
+	}
+	return oldValue.Reason, nil
+}
+
+// ResetReason resets all changes to the "reason" field.
+func (m *CommandRunMutation) ResetReason() {
+	m.reason = nil
+}
+
+// SetWake sets the "wake" field.
+func (m *CommandRunMutation) SetWake(c commandrun.Wake) {
+	m.wake = &c
+}
+
+// Wake returns the value of the "wake" field in the mutation.
+func (m *CommandRunMutation) Wake() (r commandrun.Wake, exists bool) {
+	v := m.wake
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWake returns the old "wake" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldWake(ctx context.Context) (v commandrun.Wake, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWake is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWake requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWake: %w", err)
+	}
+	return oldValue.Wake, nil
+}
+
+// ResetWake resets all changes to the "wake" field.
+func (m *CommandRunMutation) ResetWake() {
+	m.wake = nil
+}
+
+// SetShareOutput sets the "share_output" field.
+func (m *CommandRunMutation) SetShareOutput(b bool) {
+	m.share_output = &b
+}
+
+// ShareOutput returns the value of the "share_output" field in the mutation.
+func (m *CommandRunMutation) ShareOutput() (r bool, exists bool) {
+	v := m.share_output
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldShareOutput returns the old "share_output" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldShareOutput(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldShareOutput is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldShareOutput requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldShareOutput: %w", err)
+	}
+	return oldValue.ShareOutput, nil
+}
+
+// ResetShareOutput resets all changes to the "share_output" field.
+func (m *CommandRunMutation) ResetShareOutput() {
+	m.share_output = nil
+}
+
+// SetTimeoutS sets the "timeout_s" field.
+func (m *CommandRunMutation) SetTimeoutS(i int) {
+	m.timeout_s = &i
+	m.addtimeout_s = nil
+}
+
+// TimeoutS returns the value of the "timeout_s" field in the mutation.
+func (m *CommandRunMutation) TimeoutS() (r int, exists bool) {
+	v := m.timeout_s
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTimeoutS returns the old "timeout_s" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldTimeoutS(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTimeoutS is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTimeoutS requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTimeoutS: %w", err)
+	}
+	return oldValue.TimeoutS, nil
+}
+
+// AddTimeoutS adds i to the "timeout_s" field.
+func (m *CommandRunMutation) AddTimeoutS(i int) {
+	if m.addtimeout_s != nil {
+		*m.addtimeout_s += i
+	} else {
+		m.addtimeout_s = &i
+	}
+}
+
+// AddedTimeoutS returns the value that was added to the "timeout_s" field in this mutation.
+func (m *CommandRunMutation) AddedTimeoutS() (r int, exists bool) {
+	v := m.addtimeout_s
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTimeoutS resets all changes to the "timeout_s" field.
+func (m *CommandRunMutation) ResetTimeoutS() {
+	m.timeout_s = nil
+	m.addtimeout_s = nil
+}
+
+// SetCaptureMode sets the "capture_mode" field.
+func (m *CommandRunMutation) SetCaptureMode(s string) {
+	m.capture_mode = &s
+}
+
+// CaptureMode returns the value of the "capture_mode" field in the mutation.
+func (m *CommandRunMutation) CaptureMode() (r string, exists bool) {
+	v := m.capture_mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCaptureMode returns the old "capture_mode" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldCaptureMode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCaptureMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCaptureMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCaptureMode: %w", err)
+	}
+	return oldValue.CaptureMode, nil
+}
+
+// ResetCaptureMode resets all changes to the "capture_mode" field.
+func (m *CommandRunMutation) ResetCaptureMode() {
+	m.capture_mode = nil
+}
+
+// SetWorkdir sets the "workdir" field.
+func (m *CommandRunMutation) SetWorkdir(s string) {
+	m.workdir = &s
+}
+
+// Workdir returns the value of the "workdir" field in the mutation.
+func (m *CommandRunMutation) Workdir() (r string, exists bool) {
+	v := m.workdir
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWorkdir returns the old "workdir" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldWorkdir(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWorkdir is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWorkdir requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWorkdir: %w", err)
+	}
+	return oldValue.Workdir, nil
+}
+
+// ResetWorkdir resets all changes to the "workdir" field.
+func (m *CommandRunMutation) ResetWorkdir() {
+	m.workdir = nil
+}
+
+// SetExitCode sets the "exit_code" field.
+func (m *CommandRunMutation) SetExitCode(i int) {
+	m.exit_code = &i
+	m.addexit_code = nil
+}
+
+// ExitCode returns the value of the "exit_code" field in the mutation.
+func (m *CommandRunMutation) ExitCode() (r int, exists bool) {
+	v := m.exit_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExitCode returns the old "exit_code" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldExitCode(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExitCode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExitCode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExitCode: %w", err)
+	}
+	return oldValue.ExitCode, nil
+}
+
+// AddExitCode adds i to the "exit_code" field.
+func (m *CommandRunMutation) AddExitCode(i int) {
+	if m.addexit_code != nil {
+		*m.addexit_code += i
+	} else {
+		m.addexit_code = &i
+	}
+}
+
+// AddedExitCode returns the value that was added to the "exit_code" field in this mutation.
+func (m *CommandRunMutation) AddedExitCode() (r int, exists bool) {
+	v := m.addexit_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearExitCode clears the value of the "exit_code" field.
+func (m *CommandRunMutation) ClearExitCode() {
+	m.exit_code = nil
+	m.addexit_code = nil
+	m.clearedFields[commandrun.FieldExitCode] = struct{}{}
+}
+
+// ExitCodeCleared returns if the "exit_code" field was cleared in this mutation.
+func (m *CommandRunMutation) ExitCodeCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldExitCode]
+	return ok
+}
+
+// ResetExitCode resets all changes to the "exit_code" field.
+func (m *CommandRunMutation) ResetExitCode() {
+	m.exit_code = nil
+	m.addexit_code = nil
+	delete(m.clearedFields, commandrun.FieldExitCode)
+}
+
+// SetDurationMs sets the "duration_ms" field.
+func (m *CommandRunMutation) SetDurationMs(i int64) {
+	m.duration_ms = &i
+	m.addduration_ms = nil
+}
+
+// DurationMs returns the value of the "duration_ms" field in the mutation.
+func (m *CommandRunMutation) DurationMs() (r int64, exists bool) {
+	v := m.duration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDurationMs returns the old "duration_ms" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldDurationMs(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDurationMs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDurationMs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDurationMs: %w", err)
+	}
+	return oldValue.DurationMs, nil
+}
+
+// AddDurationMs adds i to the "duration_ms" field.
+func (m *CommandRunMutation) AddDurationMs(i int64) {
+	if m.addduration_ms != nil {
+		*m.addduration_ms += i
+	} else {
+		m.addduration_ms = &i
+	}
+}
+
+// AddedDurationMs returns the value that was added to the "duration_ms" field in this mutation.
+func (m *CommandRunMutation) AddedDurationMs() (r int64, exists bool) {
+	v := m.addduration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearDurationMs clears the value of the "duration_ms" field.
+func (m *CommandRunMutation) ClearDurationMs() {
+	m.duration_ms = nil
+	m.addduration_ms = nil
+	m.clearedFields[commandrun.FieldDurationMs] = struct{}{}
+}
+
+// DurationMsCleared returns if the "duration_ms" field was cleared in this mutation.
+func (m *CommandRunMutation) DurationMsCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldDurationMs]
+	return ok
+}
+
+// ResetDurationMs resets all changes to the "duration_ms" field.
+func (m *CommandRunMutation) ResetDurationMs() {
+	m.duration_ms = nil
+	m.addduration_ms = nil
+	delete(m.clearedFields, commandrun.FieldDurationMs)
+}
+
+// SetOutputBytes sets the "output_bytes" field.
+func (m *CommandRunMutation) SetOutputBytes(i int64) {
+	m.output_bytes = &i
+	m.addoutput_bytes = nil
+}
+
+// OutputBytes returns the value of the "output_bytes" field in the mutation.
+func (m *CommandRunMutation) OutputBytes() (r int64, exists bool) {
+	v := m.output_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutputBytes returns the old "output_bytes" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldOutputBytes(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutputBytes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutputBytes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutputBytes: %w", err)
+	}
+	return oldValue.OutputBytes, nil
+}
+
+// AddOutputBytes adds i to the "output_bytes" field.
+func (m *CommandRunMutation) AddOutputBytes(i int64) {
+	if m.addoutput_bytes != nil {
+		*m.addoutput_bytes += i
+	} else {
+		m.addoutput_bytes = &i
+	}
+}
+
+// AddedOutputBytes returns the value that was added to the "output_bytes" field in this mutation.
+func (m *CommandRunMutation) AddedOutputBytes() (r int64, exists bool) {
+	v := m.addoutput_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearOutputBytes clears the value of the "output_bytes" field.
+func (m *CommandRunMutation) ClearOutputBytes() {
+	m.output_bytes = nil
+	m.addoutput_bytes = nil
+	m.clearedFields[commandrun.FieldOutputBytes] = struct{}{}
+}
+
+// OutputBytesCleared returns if the "output_bytes" field was cleared in this mutation.
+func (m *CommandRunMutation) OutputBytesCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldOutputBytes]
+	return ok
+}
+
+// ResetOutputBytes resets all changes to the "output_bytes" field.
+func (m *CommandRunMutation) ResetOutputBytes() {
+	m.output_bytes = nil
+	m.addoutput_bytes = nil
+	delete(m.clearedFields, commandrun.FieldOutputBytes)
+}
+
+// SetOutputStatus sets the "output_status" field.
+func (m *CommandRunMutation) SetOutputStatus(s string) {
+	m.output_status = &s
+}
+
+// OutputStatus returns the value of the "output_status" field in the mutation.
+func (m *CommandRunMutation) OutputStatus() (r string, exists bool) {
+	v := m.output_status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutputStatus returns the old "output_status" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldOutputStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutputStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutputStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutputStatus: %w", err)
+	}
+	return oldValue.OutputStatus, nil
+}
+
+// ResetOutputStatus resets all changes to the "output_status" field.
+func (m *CommandRunMutation) ResetOutputStatus() {
+	m.output_status = nil
+}
+
+// SetNotAfter sets the "not_after" field.
+func (m *CommandRunMutation) SetNotAfter(t time.Time) {
+	m.not_after = &t
+}
+
+// NotAfter returns the value of the "not_after" field in the mutation.
+func (m *CommandRunMutation) NotAfter() (r time.Time, exists bool) {
+	v := m.not_after
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotAfter returns the old "not_after" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldNotAfter(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotAfter is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotAfter requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotAfter: %w", err)
+	}
+	return oldValue.NotAfter, nil
+}
+
+// ClearNotAfter clears the value of the "not_after" field.
+func (m *CommandRunMutation) ClearNotAfter() {
+	m.not_after = nil
+	m.clearedFields[commandrun.FieldNotAfter] = struct{}{}
+}
+
+// NotAfterCleared returns if the "not_after" field was cleared in this mutation.
+func (m *CommandRunMutation) NotAfterCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldNotAfter]
+	return ok
+}
+
+// ResetNotAfter resets all changes to the "not_after" field.
+func (m *CommandRunMutation) ResetNotAfter() {
+	m.not_after = nil
+	delete(m.clearedFields, commandrun.FieldNotAfter)
+}
+
+// SetLeaseUntil sets the "lease_until" field.
+func (m *CommandRunMutation) SetLeaseUntil(t time.Time) {
+	m.lease_until = &t
+}
+
+// LeaseUntil returns the value of the "lease_until" field in the mutation.
+func (m *CommandRunMutation) LeaseUntil() (r time.Time, exists bool) {
+	v := m.lease_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseUntil returns the old "lease_until" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldLeaseUntil(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseUntil: %w", err)
+	}
+	return oldValue.LeaseUntil, nil
+}
+
+// ResetLeaseUntil resets all changes to the "lease_until" field.
+func (m *CommandRunMutation) ResetLeaseUntil() {
+	m.lease_until = nil
+}
+
+// SetLastPolledAt sets the "last_polled_at" field.
+func (m *CommandRunMutation) SetLastPolledAt(t time.Time) {
+	m.last_polled_at = &t
+}
+
+// LastPolledAt returns the value of the "last_polled_at" field in the mutation.
+func (m *CommandRunMutation) LastPolledAt() (r time.Time, exists bool) {
+	v := m.last_polled_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastPolledAt returns the old "last_polled_at" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldLastPolledAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastPolledAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastPolledAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastPolledAt: %w", err)
+	}
+	return oldValue.LastPolledAt, nil
+}
+
+// ClearLastPolledAt clears the value of the "last_polled_at" field.
+func (m *CommandRunMutation) ClearLastPolledAt() {
+	m.last_polled_at = nil
+	m.clearedFields[commandrun.FieldLastPolledAt] = struct{}{}
+}
+
+// LastPolledAtCleared returns if the "last_polled_at" field was cleared in this mutation.
+func (m *CommandRunMutation) LastPolledAtCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldLastPolledAt]
+	return ok
+}
+
+// ResetLastPolledAt resets all changes to the "last_polled_at" field.
+func (m *CommandRunMutation) ResetLastPolledAt() {
+	m.last_polled_at = nil
+	delete(m.clearedFields, commandrun.FieldLastPolledAt)
+}
+
+// SetPollClaimedAt sets the "poll_claimed_at" field.
+func (m *CommandRunMutation) SetPollClaimedAt(t time.Time) {
+	m.poll_claimed_at = &t
+}
+
+// PollClaimedAt returns the value of the "poll_claimed_at" field in the mutation.
+func (m *CommandRunMutation) PollClaimedAt() (r time.Time, exists bool) {
+	v := m.poll_claimed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPollClaimedAt returns the old "poll_claimed_at" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldPollClaimedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPollClaimedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPollClaimedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPollClaimedAt: %w", err)
+	}
+	return oldValue.PollClaimedAt, nil
+}
+
+// ClearPollClaimedAt clears the value of the "poll_claimed_at" field.
+func (m *CommandRunMutation) ClearPollClaimedAt() {
+	m.poll_claimed_at = nil
+	m.clearedFields[commandrun.FieldPollClaimedAt] = struct{}{}
+}
+
+// PollClaimedAtCleared returns if the "poll_claimed_at" field was cleared in this mutation.
+func (m *CommandRunMutation) PollClaimedAtCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldPollClaimedAt]
+	return ok
+}
+
+// ResetPollClaimedAt resets all changes to the "poll_claimed_at" field.
+func (m *CommandRunMutation) ResetPollClaimedAt() {
+	m.poll_claimed_at = nil
+	delete(m.clearedFields, commandrun.FieldPollClaimedAt)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *CommandRunMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *CommandRunMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *CommandRunMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetDispatchedAt sets the "dispatched_at" field.
+func (m *CommandRunMutation) SetDispatchedAt(t time.Time) {
+	m.dispatched_at = &t
+}
+
+// DispatchedAt returns the value of the "dispatched_at" field in the mutation.
+func (m *CommandRunMutation) DispatchedAt() (r time.Time, exists bool) {
+	v := m.dispatched_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDispatchedAt returns the old "dispatched_at" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldDispatchedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDispatchedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDispatchedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDispatchedAt: %w", err)
+	}
+	return oldValue.DispatchedAt, nil
+}
+
+// ClearDispatchedAt clears the value of the "dispatched_at" field.
+func (m *CommandRunMutation) ClearDispatchedAt() {
+	m.dispatched_at = nil
+	m.clearedFields[commandrun.FieldDispatchedAt] = struct{}{}
+}
+
+// DispatchedAtCleared returns if the "dispatched_at" field was cleared in this mutation.
+func (m *CommandRunMutation) DispatchedAtCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldDispatchedAt]
+	return ok
+}
+
+// ResetDispatchedAt resets all changes to the "dispatched_at" field.
+func (m *CommandRunMutation) ResetDispatchedAt() {
+	m.dispatched_at = nil
+	delete(m.clearedFields, commandrun.FieldDispatchedAt)
+}
+
+// SetFinishedAt sets the "finished_at" field.
+func (m *CommandRunMutation) SetFinishedAt(t time.Time) {
+	m.finished_at = &t
+}
+
+// FinishedAt returns the value of the "finished_at" field in the mutation.
+func (m *CommandRunMutation) FinishedAt() (r time.Time, exists bool) {
+	v := m.finished_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFinishedAt returns the old "finished_at" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldFinishedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFinishedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFinishedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFinishedAt: %w", err)
+	}
+	return oldValue.FinishedAt, nil
+}
+
+// ClearFinishedAt clears the value of the "finished_at" field.
+func (m *CommandRunMutation) ClearFinishedAt() {
+	m.finished_at = nil
+	m.clearedFields[commandrun.FieldFinishedAt] = struct{}{}
+}
+
+// FinishedAtCleared returns if the "finished_at" field was cleared in this mutation.
+func (m *CommandRunMutation) FinishedAtCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldFinishedAt]
+	return ok
+}
+
+// ResetFinishedAt resets all changes to the "finished_at" field.
+func (m *CommandRunMutation) ResetFinishedAt() {
+	m.finished_at = nil
+	delete(m.clearedFields, commandrun.FieldFinishedAt)
+}
+
+// SetOutcomeDeliveredAt sets the "outcome_delivered_at" field.
+func (m *CommandRunMutation) SetOutcomeDeliveredAt(t time.Time) {
+	m.outcome_delivered_at = &t
+}
+
+// OutcomeDeliveredAt returns the value of the "outcome_delivered_at" field in the mutation.
+func (m *CommandRunMutation) OutcomeDeliveredAt() (r time.Time, exists bool) {
+	v := m.outcome_delivered_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutcomeDeliveredAt returns the old "outcome_delivered_at" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldOutcomeDeliveredAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutcomeDeliveredAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutcomeDeliveredAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutcomeDeliveredAt: %w", err)
+	}
+	return oldValue.OutcomeDeliveredAt, nil
+}
+
+// ClearOutcomeDeliveredAt clears the value of the "outcome_delivered_at" field.
+func (m *CommandRunMutation) ClearOutcomeDeliveredAt() {
+	m.outcome_delivered_at = nil
+	m.clearedFields[commandrun.FieldOutcomeDeliveredAt] = struct{}{}
+}
+
+// OutcomeDeliveredAtCleared returns if the "outcome_delivered_at" field was cleared in this mutation.
+func (m *CommandRunMutation) OutcomeDeliveredAtCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldOutcomeDeliveredAt]
+	return ok
+}
+
+// ResetOutcomeDeliveredAt resets all changes to the "outcome_delivered_at" field.
+func (m *CommandRunMutation) ResetOutcomeDeliveredAt() {
+	m.outcome_delivered_at = nil
+	delete(m.clearedFields, commandrun.FieldOutcomeDeliveredAt)
+}
+
+// SetOutcomeMessageID sets the "outcome_message_id" field.
+func (m *CommandRunMutation) SetOutcomeMessageID(u uuid.UUID) {
+	m.outcome_message_id = &u
+}
+
+// OutcomeMessageID returns the value of the "outcome_message_id" field in the mutation.
+func (m *CommandRunMutation) OutcomeMessageID() (r uuid.UUID, exists bool) {
+	v := m.outcome_message_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutcomeMessageID returns the old "outcome_message_id" field's value of the CommandRun entity.
+// If the CommandRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *CommandRunMutation) OldOutcomeMessageID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutcomeMessageID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutcomeMessageID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutcomeMessageID: %w", err)
+	}
+	return oldValue.OutcomeMessageID, nil
+}
+
+// ClearOutcomeMessageID clears the value of the "outcome_message_id" field.
+func (m *CommandRunMutation) ClearOutcomeMessageID() {
+	m.outcome_message_id = nil
+	m.clearedFields[commandrun.FieldOutcomeMessageID] = struct{}{}
+}
+
+// OutcomeMessageIDCleared returns if the "outcome_message_id" field was cleared in this mutation.
+func (m *CommandRunMutation) OutcomeMessageIDCleared() bool {
+	_, ok := m.clearedFields[commandrun.FieldOutcomeMessageID]
+	return ok
+}
+
+// ResetOutcomeMessageID resets all changes to the "outcome_message_id" field.
+func (m *CommandRunMutation) ResetOutcomeMessageID() {
+	m.outcome_message_id = nil
+	delete(m.clearedFields, commandrun.FieldOutcomeMessageID)
+}
+
+// Where appends a list predicates to the CommandRunMutation builder.
+func (m *CommandRunMutation) Where(ps ...predicate.CommandRun) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the CommandRunMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *CommandRunMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.CommandRun, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *CommandRunMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *CommandRunMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (CommandRun).
+func (m *CommandRunMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *CommandRunMutation) Fields() []string {
+	fields := make([]string, 0, 27)
+	if m.request_id != nil {
+		fields = append(fields, commandrun.FieldRequestID)
+	}
+	if m.command_sha256 != nil {
+		fields = append(fields, commandrun.FieldCommandSha256)
+	}
+	if m.script_len != nil {
+		fields = append(fields, commandrun.FieldScriptLen)
+	}
+	if m.approver_user_id != nil {
+		fields = append(fields, commandrun.FieldApproverUserID)
+	}
+	if m.exec_agent_id != nil {
+		fields = append(fields, commandrun.FieldExecAgentID)
+	}
+	if m.exec_project_id != nil {
+		fields = append(fields, commandrun.FieldExecProjectID)
+	}
+	if m.launch_id != nil {
+		fields = append(fields, commandrun.FieldLaunchID)
+	}
+	if m.status != nil {
+		fields = append(fields, commandrun.FieldStatus)
+	}
+	if m.reason != nil {
+		fields = append(fields, commandrun.FieldReason)
+	}
+	if m.wake != nil {
+		fields = append(fields, commandrun.FieldWake)
+	}
+	if m.share_output != nil {
+		fields = append(fields, commandrun.FieldShareOutput)
+	}
+	if m.timeout_s != nil {
+		fields = append(fields, commandrun.FieldTimeoutS)
+	}
+	if m.capture_mode != nil {
+		fields = append(fields, commandrun.FieldCaptureMode)
+	}
+	if m.workdir != nil {
+		fields = append(fields, commandrun.FieldWorkdir)
+	}
+	if m.exit_code != nil {
+		fields = append(fields, commandrun.FieldExitCode)
+	}
+	if m.duration_ms != nil {
+		fields = append(fields, commandrun.FieldDurationMs)
+	}
+	if m.output_bytes != nil {
+		fields = append(fields, commandrun.FieldOutputBytes)
+	}
+	if m.output_status != nil {
+		fields = append(fields, commandrun.FieldOutputStatus)
+	}
+	if m.not_after != nil {
+		fields = append(fields, commandrun.FieldNotAfter)
+	}
+	if m.lease_until != nil {
+		fields = append(fields, commandrun.FieldLeaseUntil)
+	}
+	if m.last_polled_at != nil {
+		fields = append(fields, commandrun.FieldLastPolledAt)
+	}
+	if m.poll_claimed_at != nil {
+		fields = append(fields, commandrun.FieldPollClaimedAt)
+	}
+	if m.created_at != nil {
+		fields = append(fields, commandrun.FieldCreatedAt)
+	}
+	if m.dispatched_at != nil {
+		fields = append(fields, commandrun.FieldDispatchedAt)
+	}
+	if m.finished_at != nil {
+		fields = append(fields, commandrun.FieldFinishedAt)
+	}
+	if m.outcome_delivered_at != nil {
+		fields = append(fields, commandrun.FieldOutcomeDeliveredAt)
+	}
+	if m.outcome_message_id != nil {
+		fields = append(fields, commandrun.FieldOutcomeMessageID)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *CommandRunMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case commandrun.FieldRequestID:
+		return m.RequestID()
+	case commandrun.FieldCommandSha256:
+		return m.CommandSha256()
+	case commandrun.FieldScriptLen:
+		return m.ScriptLen()
+	case commandrun.FieldApproverUserID:
+		return m.ApproverUserID()
+	case commandrun.FieldExecAgentID:
+		return m.ExecAgentID()
+	case commandrun.FieldExecProjectID:
+		return m.ExecProjectID()
+	case commandrun.FieldLaunchID:
+		return m.LaunchID()
+	case commandrun.FieldStatus:
+		return m.Status()
+	case commandrun.FieldReason:
+		return m.Reason()
+	case commandrun.FieldWake:
+		return m.Wake()
+	case commandrun.FieldShareOutput:
+		return m.ShareOutput()
+	case commandrun.FieldTimeoutS:
+		return m.TimeoutS()
+	case commandrun.FieldCaptureMode:
+		return m.CaptureMode()
+	case commandrun.FieldWorkdir:
+		return m.Workdir()
+	case commandrun.FieldExitCode:
+		return m.ExitCode()
+	case commandrun.FieldDurationMs:
+		return m.DurationMs()
+	case commandrun.FieldOutputBytes:
+		return m.OutputBytes()
+	case commandrun.FieldOutputStatus:
+		return m.OutputStatus()
+	case commandrun.FieldNotAfter:
+		return m.NotAfter()
+	case commandrun.FieldLeaseUntil:
+		return m.LeaseUntil()
+	case commandrun.FieldLastPolledAt:
+		return m.LastPolledAt()
+	case commandrun.FieldPollClaimedAt:
+		return m.PollClaimedAt()
+	case commandrun.FieldCreatedAt:
+		return m.CreatedAt()
+	case commandrun.FieldDispatchedAt:
+		return m.DispatchedAt()
+	case commandrun.FieldFinishedAt:
+		return m.FinishedAt()
+	case commandrun.FieldOutcomeDeliveredAt:
+		return m.OutcomeDeliveredAt()
+	case commandrun.FieldOutcomeMessageID:
+		return m.OutcomeMessageID()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *CommandRunMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case commandrun.FieldRequestID:
+		return m.OldRequestID(ctx)
+	case commandrun.FieldCommandSha256:
+		return m.OldCommandSha256(ctx)
+	case commandrun.FieldScriptLen:
+		return m.OldScriptLen(ctx)
+	case commandrun.FieldApproverUserID:
+		return m.OldApproverUserID(ctx)
+	case commandrun.FieldExecAgentID:
+		return m.OldExecAgentID(ctx)
+	case commandrun.FieldExecProjectID:
+		return m.OldExecProjectID(ctx)
+	case commandrun.FieldLaunchID:
+		return m.OldLaunchID(ctx)
+	case commandrun.FieldStatus:
+		return m.OldStatus(ctx)
+	case commandrun.FieldReason:
+		return m.OldReason(ctx)
+	case commandrun.FieldWake:
+		return m.OldWake(ctx)
+	case commandrun.FieldShareOutput:
+		return m.OldShareOutput(ctx)
+	case commandrun.FieldTimeoutS:
+		return m.OldTimeoutS(ctx)
+	case commandrun.FieldCaptureMode:
+		return m.OldCaptureMode(ctx)
+	case commandrun.FieldWorkdir:
+		return m.OldWorkdir(ctx)
+	case commandrun.FieldExitCode:
+		return m.OldExitCode(ctx)
+	case commandrun.FieldDurationMs:
+		return m.OldDurationMs(ctx)
+	case commandrun.FieldOutputBytes:
+		return m.OldOutputBytes(ctx)
+	case commandrun.FieldOutputStatus:
+		return m.OldOutputStatus(ctx)
+	case commandrun.FieldNotAfter:
+		return m.OldNotAfter(ctx)
+	case commandrun.FieldLeaseUntil:
+		return m.OldLeaseUntil(ctx)
+	case commandrun.FieldLastPolledAt:
+		return m.OldLastPolledAt(ctx)
+	case commandrun.FieldPollClaimedAt:
+		return m.OldPollClaimedAt(ctx)
+	case commandrun.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case commandrun.FieldDispatchedAt:
+		return m.OldDispatchedAt(ctx)
+	case commandrun.FieldFinishedAt:
+		return m.OldFinishedAt(ctx)
+	case commandrun.FieldOutcomeDeliveredAt:
+		return m.OldOutcomeDeliveredAt(ctx)
+	case commandrun.FieldOutcomeMessageID:
+		return m.OldOutcomeMessageID(ctx)
+	}
+	return nil, fmt.Errorf("unknown CommandRun field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *CommandRunMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case commandrun.FieldRequestID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRequestID(v)
+		return nil
+	case commandrun.FieldCommandSha256:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCommandSha256(v)
+		return nil
+	case commandrun.FieldScriptLen:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScriptLen(v)
+		return nil
+	case commandrun.FieldApproverUserID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetApproverUserID(v)
+		return nil
+	case commandrun.FieldExecAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecAgentID(v)
+		return nil
+	case commandrun.FieldExecProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecProjectID(v)
+		return nil
+	case commandrun.FieldLaunchID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLaunchID(v)
+		return nil
+	case commandrun.FieldStatus:
+		v, ok := value.(commandrun.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case commandrun.FieldReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReason(v)
+		return nil
+	case commandrun.FieldWake:
+		v, ok := value.(commandrun.Wake)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWake(v)
+		return nil
+	case commandrun.FieldShareOutput:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetShareOutput(v)
+		return nil
+	case commandrun.FieldTimeoutS:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTimeoutS(v)
+		return nil
+	case commandrun.FieldCaptureMode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCaptureMode(v)
+		return nil
+	case commandrun.FieldWorkdir:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWorkdir(v)
+		return nil
+	case commandrun.FieldExitCode:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExitCode(v)
+		return nil
+	case commandrun.FieldDurationMs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDurationMs(v)
+		return nil
+	case commandrun.FieldOutputBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutputBytes(v)
+		return nil
+	case commandrun.FieldOutputStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutputStatus(v)
+		return nil
+	case commandrun.FieldNotAfter:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotAfter(v)
+		return nil
+	case commandrun.FieldLeaseUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseUntil(v)
+		return nil
+	case commandrun.FieldLastPolledAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastPolledAt(v)
+		return nil
+	case commandrun.FieldPollClaimedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPollClaimedAt(v)
+		return nil
+	case commandrun.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case commandrun.FieldDispatchedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDispatchedAt(v)
+		return nil
+	case commandrun.FieldFinishedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFinishedAt(v)
+		return nil
+	case commandrun.FieldOutcomeDeliveredAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutcomeDeliveredAt(v)
+		return nil
+	case commandrun.FieldOutcomeMessageID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutcomeMessageID(v)
+		return nil
+	}
+	return fmt.Errorf("unknown CommandRun field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *CommandRunMutation) AddedFields() []string {
+	var fields []string
+	if m.addscript_len != nil {
+		fields = append(fields, commandrun.FieldScriptLen)
+	}
+	if m.addtimeout_s != nil {
+		fields = append(fields, commandrun.FieldTimeoutS)
+	}
+	if m.addexit_code != nil {
+		fields = append(fields, commandrun.FieldExitCode)
+	}
+	if m.addduration_ms != nil {
+		fields = append(fields, commandrun.FieldDurationMs)
+	}
+	if m.addoutput_bytes != nil {
+		fields = append(fields, commandrun.FieldOutputBytes)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *CommandRunMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case commandrun.FieldScriptLen:
+		return m.AddedScriptLen()
+	case commandrun.FieldTimeoutS:
+		return m.AddedTimeoutS()
+	case commandrun.FieldExitCode:
+		return m.AddedExitCode()
+	case commandrun.FieldDurationMs:
+		return m.AddedDurationMs()
+	case commandrun.FieldOutputBytes:
+		return m.AddedOutputBytes()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *CommandRunMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case commandrun.FieldScriptLen:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddScriptLen(v)
+		return nil
+	case commandrun.FieldTimeoutS:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTimeoutS(v)
+		return nil
+	case commandrun.FieldExitCode:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddExitCode(v)
+		return nil
+	case commandrun.FieldDurationMs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDurationMs(v)
+		return nil
+	case commandrun.FieldOutputBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddOutputBytes(v)
+		return nil
+	}
+	return fmt.Errorf("unknown CommandRun numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *CommandRunMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(commandrun.FieldExitCode) {
+		fields = append(fields, commandrun.FieldExitCode)
+	}
+	if m.FieldCleared(commandrun.FieldDurationMs) {
+		fields = append(fields, commandrun.FieldDurationMs)
+	}
+	if m.FieldCleared(commandrun.FieldOutputBytes) {
+		fields = append(fields, commandrun.FieldOutputBytes)
+	}
+	if m.FieldCleared(commandrun.FieldNotAfter) {
+		fields = append(fields, commandrun.FieldNotAfter)
+	}
+	if m.FieldCleared(commandrun.FieldLastPolledAt) {
+		fields = append(fields, commandrun.FieldLastPolledAt)
+	}
+	if m.FieldCleared(commandrun.FieldPollClaimedAt) {
+		fields = append(fields, commandrun.FieldPollClaimedAt)
+	}
+	if m.FieldCleared(commandrun.FieldDispatchedAt) {
+		fields = append(fields, commandrun.FieldDispatchedAt)
+	}
+	if m.FieldCleared(commandrun.FieldFinishedAt) {
+		fields = append(fields, commandrun.FieldFinishedAt)
+	}
+	if m.FieldCleared(commandrun.FieldOutcomeDeliveredAt) {
+		fields = append(fields, commandrun.FieldOutcomeDeliveredAt)
+	}
+	if m.FieldCleared(commandrun.FieldOutcomeMessageID) {
+		fields = append(fields, commandrun.FieldOutcomeMessageID)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *CommandRunMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *CommandRunMutation) ClearField(name string) error {
+	switch name {
+	case commandrun.FieldExitCode:
+		m.ClearExitCode()
+		return nil
+	case commandrun.FieldDurationMs:
+		m.ClearDurationMs()
+		return nil
+	case commandrun.FieldOutputBytes:
+		m.ClearOutputBytes()
+		return nil
+	case commandrun.FieldNotAfter:
+		m.ClearNotAfter()
+		return nil
+	case commandrun.FieldLastPolledAt:
+		m.ClearLastPolledAt()
+		return nil
+	case commandrun.FieldPollClaimedAt:
+		m.ClearPollClaimedAt()
+		return nil
+	case commandrun.FieldDispatchedAt:
+		m.ClearDispatchedAt()
+		return nil
+	case commandrun.FieldFinishedAt:
+		m.ClearFinishedAt()
+		return nil
+	case commandrun.FieldOutcomeDeliveredAt:
+		m.ClearOutcomeDeliveredAt()
+		return nil
+	case commandrun.FieldOutcomeMessageID:
+		m.ClearOutcomeMessageID()
+		return nil
+	}
+	return fmt.Errorf("unknown CommandRun nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *CommandRunMutation) ResetField(name string) error {
+	switch name {
+	case commandrun.FieldRequestID:
+		m.ResetRequestID()
+		return nil
+	case commandrun.FieldCommandSha256:
+		m.ResetCommandSha256()
+		return nil
+	case commandrun.FieldScriptLen:
+		m.ResetScriptLen()
+		return nil
+	case commandrun.FieldApproverUserID:
+		m.ResetApproverUserID()
+		return nil
+	case commandrun.FieldExecAgentID:
+		m.ResetExecAgentID()
+		return nil
+	case commandrun.FieldExecProjectID:
+		m.ResetExecProjectID()
+		return nil
+	case commandrun.FieldLaunchID:
+		m.ResetLaunchID()
+		return nil
+	case commandrun.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case commandrun.FieldReason:
+		m.ResetReason()
+		return nil
+	case commandrun.FieldWake:
+		m.ResetWake()
+		return nil
+	case commandrun.FieldShareOutput:
+		m.ResetShareOutput()
+		return nil
+	case commandrun.FieldTimeoutS:
+		m.ResetTimeoutS()
+		return nil
+	case commandrun.FieldCaptureMode:
+		m.ResetCaptureMode()
+		return nil
+	case commandrun.FieldWorkdir:
+		m.ResetWorkdir()
+		return nil
+	case commandrun.FieldExitCode:
+		m.ResetExitCode()
+		return nil
+	case commandrun.FieldDurationMs:
+		m.ResetDurationMs()
+		return nil
+	case commandrun.FieldOutputBytes:
+		m.ResetOutputBytes()
+		return nil
+	case commandrun.FieldOutputStatus:
+		m.ResetOutputStatus()
+		return nil
+	case commandrun.FieldNotAfter:
+		m.ResetNotAfter()
+		return nil
+	case commandrun.FieldLeaseUntil:
+		m.ResetLeaseUntil()
+		return nil
+	case commandrun.FieldLastPolledAt:
+		m.ResetLastPolledAt()
+		return nil
+	case commandrun.FieldPollClaimedAt:
+		m.ResetPollClaimedAt()
+		return nil
+	case commandrun.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case commandrun.FieldDispatchedAt:
+		m.ResetDispatchedAt()
+		return nil
+	case commandrun.FieldFinishedAt:
+		m.ResetFinishedAt()
+		return nil
+	case commandrun.FieldOutcomeDeliveredAt:
+		m.ResetOutcomeDeliveredAt()
+		return nil
+	case commandrun.FieldOutcomeMessageID:
+		m.ResetOutcomeMessageID()
+		return nil
+	}
+	return fmt.Errorf("unknown CommandRun field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *CommandRunMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *CommandRunMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *CommandRunMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *CommandRunMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *CommandRunMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *CommandRunMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *CommandRunMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown CommandRun unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *CommandRunMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown CommandRun edge %s", name)
 }
 
 // ConduitPrincipalEpochMutation represents an operation that mutates the ConduitPrincipalEpoch nodes in the graph.

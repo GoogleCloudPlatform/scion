@@ -40,6 +40,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentioncursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentionrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrequest"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/commandrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
@@ -219,6 +221,8 @@ func checkColumn(t, c string) error {
 			chatlinkcode.Table:                  chatlinkcode.ValidColumn,
 			chatretentioncursor.Table:           chatretentioncursor.ValidColumn,
 			chatretentionrun.Table:              chatretentionrun.ValidColumn,
+			commandrequest.Table:                commandrequest.ValidColumn,
+			commandrun.Table:                    commandrun.ValidColumn,
 			conduitprincipalepoch.Table:         conduitprincipalepoch.ValidColumn,
 			conduitsession.Table:                conduitsession.ValidColumn,
 			conversation.Table:                  conversation.ValidColumn,
