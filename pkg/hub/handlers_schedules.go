@@ -1286,7 +1286,7 @@ func (s *Server) runScheduleNow(w http.ResponseWriter, r *http.Request, projectI
 		} else {
 			msg := errScheduledWakeShuttingDown.Error()
 			log.Warn("manual schedule run: " + msg)
-			_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, store.ScheduledEventFailed, time.Now(), msg, schedule.ID, now)
+			_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, store.ScheduledEventFailed, now, msg, schedule.ID, now)
 		}
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "hub is shutting down", nil)
 		return

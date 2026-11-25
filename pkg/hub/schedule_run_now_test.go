@@ -846,3 +846,61 @@ func TestScheduleRunNow_DetachedSlotHeldUntilGoroutineFinishes(t *testing.T) {
 		return err == nil && sc.RunCount == 2
 	}, 5*time.Second, 20*time.Millisecond)
 }
+
+// TestScheduleRunNow_DetachedShutdownRecordsConsistentFiredAt verifies that
+// when a detached non-exec manual run is rejected because detached-fire
+// admission is closed during hub shutdown, runScheduleNow returns 503 and
+// finalizes the firing event using the pre-captured UTC timestamp (matching
+// evt.FireAt and schedule.LastRunAt) rather than a fresh local time.Now().
+func TestScheduleRunNow_DetachedShutdownRecordsConsistentFiredAt(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	agent := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "wake-shutdown-worker",
+		Name:      "Wake Shutdown Worker",
+		ProjectID: projectID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name:      "detached-shutdown-check",
+		CronExpr:  "0 9 * * *",
+		EventType: "message",
+		AgentName: agent.Slug,
+		Message:   "wake ping",
+		Wake:      true,
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&created))
+
+	// Close detached-fire admission to simulate hub shutdown.
+	srv.scheduledDetachedFires.closeAdmission()
+
+	runPath := "/api/v1/projects/" + projectID + "/schedules/" + created.ID + "/run"
+	rec := doRequest(t, srv, http.MethodPost, runPath, nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+
+	events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{
+		ProjectID:  projectID,
+		ScheduleID: created.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, events.Items, 1)
+
+	ev := events.Items[0]
+	assert.Equal(t, store.ScheduledEventFailed, ev.Status)
+	assert.True(t, ev.Manual)
+	assert.Equal(t, errScheduledWakeShuttingDown.Error(), ev.Error)
+	require.NotNil(t, ev.FiredAt)
+	assert.True(t, ev.FiredAt.Equal(ev.FireAt), "expected fired_at (%v) to equal pre-captured UTC fire_at (%v)", ev.FiredAt, ev.FireAt)
+
+	sched, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, sched.RunCount)
+	require.NotNil(t, sched.LastRunAt)
+	assert.True(t, ev.FiredAt.Equal(*sched.LastRunAt), "expected fired_at (%v) to equal schedule last_run_at (%v)", ev.FiredAt, sched.LastRunAt)
+}
