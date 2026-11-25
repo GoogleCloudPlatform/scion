@@ -73,6 +73,15 @@ jobs:
           fi
           ./scripts/release/select-weekly-preview.sh "${args[@]}"
 
+      - name: Check DowngradeFloor
+        if: steps.select.outputs.selected == 'true'
+        env:
+          SHA: ${{ steps.select.outputs.sha }}
+          TAG: ${{ steps.select.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ./scripts/release/check-downgrade-floor.sh --ref "$SHA" "$TAG"
+
       - name: Fast-forward release branch and push tag
         id: push
         if: steps.select.outputs.selected == 'true'

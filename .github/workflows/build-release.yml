@@ -39,8 +39,31 @@ on:
 # skip propagation through `needs`. Same repository guard as build-nightly.yml (applied to every job here). When called
 # via workflow_call, `github` is the caller's context, so upstream callers still run.
 jobs:
+  check-downgrade-floor:
+    name: Check DowngradeFloor
+    runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify DowngradeFloor is not dated after release
+        env:
+          REF: ${{ inputs.ref || github.ref }}
+        run: |
+          set -euo pipefail
+          TAG="${REF#refs/tags/}"
+          ./scripts/release/check-downgrade-floor.sh "$TAG"
+
   build:
     name: Build Multi-Arch Binaries
+    needs: check-downgrade-floor
     runs-on: ubuntu-latest
     if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
@@ -229,6 +252,7 @@ jobs:
 
   build-plugins:
     name: Build Plugin Binaries
+    needs: check-downgrade-floor
     runs-on: ubuntu-latest
     if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
