@@ -31,6 +31,7 @@ import { applyBranding, BRANDING_STYLE_ID } from './branding.js';
 import { readInitialPageData, setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
 import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
 import { legacyAgentRedirect } from './agent-routes.js';
+import { legacyIntegrationRedirect } from '../components/pages/admin-integrations-tabs.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
@@ -625,12 +626,7 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/admin-maintenance.js'),
   },
   {
-    pattern: /^\/admin\/integrations$/,
-    tag: 'scion-page-admin-integrations',
-    load: () => import('../components/pages/admin-integrations.js'),
-  },
-  {
-    pattern: /^\/admin\/integrations\/[^/]+$/,
+    pattern: /^\/admin\/integrations(?:\/(chat|github)(?:\/[^/]+)?)?$/,
     tag: 'scion-page-admin-integrations',
     load: () => import('../components/pages/admin-integrations.js'),
   },
@@ -1236,7 +1232,9 @@ function preloadInitialRoute(pathname: string): void {
   ) {
     return;
   }
-  const route = resolveRoute(legacyAgentRedirect(pathname) ?? pathname);
+  const route = resolveRoute(
+    legacyAgentRedirect(pathname) ?? legacyIntegrationRedirect(pathname) ?? pathname
+  );
   startRouteLoads(route, getShellType(route)).catch(() => undefined);
 }
 
@@ -1277,12 +1275,21 @@ async function renderRoute(path: string, options?: RouteNavigationOptions): Prom
     window.history.replaceState({}, '', browserPath(path));
     noteShownEntry();
   }
-  const redirected = legacyAgentRedirect(pathname);
+  const redirected = legacyAgentRedirect(pathname) ?? legacyIntegrationRedirect(pathname);
   if (redirected) {
     pathname = redirected;
     path = redirected;
     window.history.replaceState({}, '', browserPath(path));
     noteShownEntry();
+  }
+  if (pathname === '/admin/server-config') {
+    const queryStr = path.includes('?') ? path.slice(path.indexOf('?')) : window.location.search;
+    if (new URLSearchParams(queryStr).get('tab') === 'github-app') {
+      pathname = '/admin/integrations/github';
+      path = '/admin/integrations/github';
+      window.history.replaceState({}, '', browserPath(path));
+      noteShownEntry();
+    }
   }
   if (pathname === '/terminals' || terminalAgentRoute.test(pathname)) {
     if (!currentUser?.id) {

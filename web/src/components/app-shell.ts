@@ -82,6 +82,8 @@ const PAGE_TITLES: Record<string, string> = {
   '/admin/branding': 'Branding',
   '/admin/federation': 'Federation',
   '/admin/integrations': 'Integrations',
+  '/admin/integrations/chat': 'Integrations',
+  '/admin/integrations/github': 'Integrations',
   '/admin/system-one': 'System One Providers',
   '/admin/roles': 'Roles',
   '/admin/role-bindings': 'Role Bindings',
@@ -473,6 +475,9 @@ export class ScionApp extends LitElement {
     }
     if (path === '/admin/maintenance') {
       return 'Maintenance';
+    }
+    if (path.match(/^\/admin\/integrations\/chat\/[^/]+$/)) {
+      return 'Integration';
     }
     if (path.match(/^\/admin\/integrations\/[^/]+$/)) {
       return 'Integration';

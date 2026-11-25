@@ -421,7 +421,8 @@ export class ScionPageGitHubAppSetup extends LitElement {
         </h1>
         <p>
           Your GitHub App installation has been recorded. Set up projects for your repositories
-          below.
+          below, or manage hub-level GitHub App settings under
+          <a href="/admin/integrations/github">Integrations → GitHub</a>.
         </p>
       </div>
 

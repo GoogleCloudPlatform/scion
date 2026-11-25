@@ -39,7 +39,6 @@ import type { UpdateStatus } from './admin-maintenance-update-card.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import {
-  fallbackFieldKey,
   fieldErrorMessages,
   genericSaveErrorText,
   readSettingsSaveError,
@@ -50,16 +49,14 @@ import { diffPayload } from '../../shared/settings-diff.js';
 import type {
   SettingsConflict,
   SettingsFieldError,
-  SettingsSaveError,
   SettingsSkippedKey,
 } from '../../shared/settings-save-errors.js';
 import {
-  renderConflictNotice,
   renderFieldErrorMessages,
-  renderLayer0Notice,
   renderSectionErrorSummary,
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
+import { navigateTo } from '../../client/navigation.js';
 import './admin-experiments.js';
 import './admin-chat-retention.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
@@ -321,31 +318,6 @@ interface V1GitHubAppConfig {
   api_base_url?: string;
   webhooks_enabled?: boolean;
   installation_url?: string;
-}
-
-/**
- * The server.github_app block echoed by the main Server Config save. Every
- * non-secret field is present, so an empty one goes as an explicit clear (0
- * or ""): the server keeps the stored value for an omitted key, so dropping
- * an empty field would restore it.
- *
- * The echo is the state when the card last loaded or saved, so a save from a
- * stale tab can clear a value set elsewhere since then. That last-write-wins
- * risk applies to every field on this page; optimistic concurrency is
- * tracked in ptone/scion#3922.
- */
-function githubAppEcho(
-  appId: number | undefined,
-  apiBaseUrl: string | undefined,
-  installationUrl: string | undefined,
-  webhooksEnabled: boolean
-): V1GitHubAppConfig {
-  return {
-    app_id: appId || 0,
-    api_base_url: apiBaseUrl || '',
-    webhooks_enabled: webhooksEnabled,
-    installation_url: installationUrl || '',
-  };
 }
 
 interface V1ServerConfig {
@@ -709,34 +681,6 @@ interface ConflictInfo {
   appliedKeys: string[];
   pendingRestart: string[];
   skipped: SkippedKey[];
-}
-
-interface GitHubInstallationInfo {
-  installation_id: number;
-  account_login: string;
-  account_type: string;
-  repositories: string[];
-  status: string;
-}
-
-interface RateLimitInfo {
-  limit: number;
-  remaining: number;
-  reset: string;
-  used: number;
-}
-
-interface GitHubAppConfigData {
-  app_id: number;
-  api_base_url?: string;
-  webhooks_enabled: boolean;
-  configured: boolean;
-  has_private_key: boolean;
-  private_key_source?: 'config' | 'file' | 'secret' | '';
-  private_key_overrides_secret?: boolean;
-  has_webhook_secret: boolean;
-  installation_url?: string;
-  rate_limit?: RateLimitInfo;
 }
 
 /**
@@ -1369,41 +1313,6 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private crossProjectMessagingLoading = false;
   @state() private crossProjectMessagingError: string | null = null;
   @state() private crossProjectMessagingSuccess: string | null = null;
-
-  // GitHub App
-  @state() private githubAppConfigured = false;
-  /**
-   * True once GET /api/v1/github-app has succeeded, false after one fails.
-   * Until it is true the card's fields hold defaults, not the stored config,
-   * so the card cannot be saved and the main save does not echo
-   * server.github_app: either would send the defaults as explicit clears
-   * and wipe the stored App. A reload keeps the previous value while it is
-   * in flight (so the reload after a card save does not flash the "did not
-   * load" hint) and sets it from the result.
-   */
-  @state() private githubAppLoaded = false;
-  @state() private githubAppId = 0;
-  @state() private githubAppApiBaseUrl = '';
-  @state() private githubAppWebhooksEnabled = false;
-  @state() private githubAppHasPrivateKey = false;
-  @state() private githubAppPrivateKeySource = '';
-  @state() private githubAppPrivateKeyOverridesSecret = false;
-  @state() private githubAppHasWebhookSecret = false;
-  @state() private githubAppPrivateKey = '';
-  @state() private githubAppWebhookSecret = '';
-  @state() private githubAppInstallationUrl = '';
-  @state() private githubAppSaving = false;
-  @state() private githubAppError: string | null = null;
-  // Structured error from the last failed GitHub App card save
-  // (PUT /api/v1/github-app, ptone/scion#3923).
-  @state() private githubAppSaveError: SettingsSaveError | null = null;
-  @state() private githubAppSuccess: string | null = null;
-  @state() private githubAppInstallations: GitHubInstallationInfo[] = [];
-  @state() private githubAppInstallationsLoading = false;
-  @state() private githubAppSyncLoading = false;
-  @state() private githubAppSyncResult: string | null = null;
-  @state() private githubAppDiscoverLoading = false;
-  @state() private githubAppRateLimit: RateLimitInfo | null = null;
 
   // GCP Identity Quota
   @state() private gcpQuotaLoading = false;
@@ -2193,6 +2102,27 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-family: var(--sl-font-mono, monospace);
       font-size: 0.75rem;
     }
+    .moved-notice {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+      background: var(--scion-bg-subtle, #f8fafc);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .moved-notice sl-icon {
+      color: var(--scion-primary, #3b82f6);
+      flex-shrink: 0;
+    }
+
+    .moved-notice span {
+      flex: 1;
+    }
   `;
 
   private readonly onFlagsChanged = (): void => {
@@ -2201,12 +2131,15 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    if (new URLSearchParams(window.location.search).get('tab') === 'github-app') {
+      navigateTo('/admin/integrations/github');
+      return;
+    }
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
     void this.loadConfig();
     void this.loadHarnessConfigs();
     void this.loadRuntimeBrokers();
     void this.loadHubGCPServiceAccounts();
-    void this.loadGitHubAppInstallations();
     void this.loadMessagingSettings();
     void this.loadUpdateStatus();
   }
@@ -2235,9 +2168,6 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.rawConfig = data;
       this.populateForm(data);
       this.layer0Snapshot = this.buildLayer0Candidate();
-      // Load GitHub App config before releasing the loading gate so values
-      // are present when the form first renders (avoids Shoelace timing issues).
-      await this.loadGitHubAppConfig();
       // The baseline is taken after every field is loaded, so an unchanged
       // form compares equal section by section.
       if (this.settingsTier === 'db') {
@@ -3110,19 +3040,15 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Broker, database, storage, secrets, message_broker, native_chat —
     // all Layer-0, omitted
 
-    // Preserve notification channels and GitHub App from raw config
-    // (server.oauth is Layer-0 / secrets stack — excluded from DB payload).
+    // Preserve notification channels from raw config
+    // (server.oauth is Layer-0 / secrets stack — excluded from DB payload;
+    // server.github_app is managed under Integrations → GitHub and omitted
+    // here so the server keeps what it has stored).
     // A block still holding a masked secret is the unedited GET value: omit
     // it so the server keeps what it has stored.
     const ncDb = this.rawConfig?.server?.notification_channels;
     if (ncDb && !containsMaskedValue(ncDb)) {
       server.notification_channels = ncDb;
-    }
-    // github_app is echoed only once the card has loaded it (see
-    // githubAppLoaded); left out, the server keeps what it has stored.
-    const ghDb = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
-    if (ghDb && !containsMaskedValue(ghDb)) {
-      server.github_app = ghDb;
     }
 
     if (Object.keys(server).length > 0) payload.server = server;
@@ -3585,7 +3511,9 @@ export class ScionPageAdminServerConfig extends LitElement {
       server.native_chat = { enabled: this.nativeChatEnabled };
     }
 
-    // Preserve notification channels, OAuth, and GitHub App from raw config.
+    // Preserve notification channels and OAuth from raw config
+    // (server.github_app is managed under Integrations → GitHub and omitted
+    // here so the server keeps what it has stored).
     // A block still holding a masked secret is the unedited GET value: omit
     // it so the server keeps what it has stored (file mode merges the server
     // section key by key).
@@ -3596,10 +3524,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     const oauthFile = this.rawConfig?.server?.oauth;
     if (oauthFile && !containsMaskedValue(oauthFile)) {
       server.oauth = oauthFile;
-    }
-    const ghFile = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
-    if (ghFile && !containsMaskedValue(ghFile)) {
-      server.github_app = ghFile;
     }
 
     payload.server = server;
@@ -3773,14 +3697,8 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   /** Inline validation and deployment-managed messages for one field. */
   private renderFieldErrors(koanfKey: string): typeof nothing | ReturnType<typeof html> {
-    const messages = [
-      ...fieldErrorMessages(this.validationErrors, koanfKey),
-      ...fieldErrorMessages(this.githubAppFieldErrors, koanfKey),
-    ];
-    const layer0Keys = [
-      ...(this.safetyNetKeys ?? []),
-      ...(this.githubAppSaveError?.kind === 'layer0' ? this.githubAppSaveError.keys : []),
-    ];
+    const messages = fieldErrorMessages(this.validationErrors, koanfKey);
+    const layer0Keys = this.safetyNetKeys ?? [];
     const layer0 = layer0Keys.some((k) => k === koanfKey || k.startsWith(`${koanfKey}.`));
     if (messages.length === 0 && !layer0) return nothing;
     // No role="alert" here: the section summary and the page banner already
@@ -3791,41 +3709,6 @@ export class ScionPageAdminServerConfig extends LitElement {
           here.</span
         >`
       : nothing}`;
-  }
-
-  /**
-   * Validation entries from a failed GitHub App card save. The card's body
-   * uses the section's leaf names (app_id, private_key, ...), so a path
-   * that maps to no registered koanf path is placed under server.github_app.
-   *
-   * PUT /api/v1/github-app emits no validation, conflict or layer0 body
-   * today (only invalid_request and internal errors). This handling is kept
-   * so the card shows such errors at the field once the handler sends them,
-   * in the same shape as the server-config PUT (ptone/scion#3923).
-   */
-  private get githubAppFieldErrors(): SettingsFieldError[] {
-    const err = this.githubAppSaveError;
-    if (err?.kind !== 'validation') return [];
-    return err.fieldErrors.map((e) =>
-      e.key === null ? { ...e, key: fallbackFieldKey('server.github_app', e.path) } : e
-    );
-  }
-
-  private renderGitHubAppSaveError(): typeof nothing | ReturnType<typeof html> {
-    const err = this.githubAppSaveError;
-    if (!err) return nothing;
-    if (err.kind === 'conflict') {
-      return renderConflictNotice(err, () => {
-        this.githubAppSaveError = null;
-        this.githubAppError = null;
-        this.githubAppSuccess = null;
-        this.githubAppPrivateKey = '';
-        this.githubAppWebhookSecret = '';
-        void this.loadGitHubAppConfig();
-      });
-    }
-    if (err.kind === 'layer0') return renderLayer0Notice(err);
-    return renderSectionErrorSummary(this.githubAppFieldErrors, 'github_app_card');
   }
 
   /**
@@ -4491,9 +4374,6 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab slot="nav" panel="telemetry" ?active=${this.activeTab === 'telemetry'}
           >Telemetry</sl-tab
         >
-        <sl-tab slot="nav" panel="github-app" ?active=${this.activeTab === 'github-app'}
-          >GitHub App</sl-tab
-        >
         <sl-tab slot="nav" panel="gcp-identity" ?active=${this.activeTab === 'gcp-identity'}
           >GCP Identity</sl-tab
         >
@@ -4508,7 +4388,6 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab-panel name="runtimes-profiles">${this.renderRuntimesProfilesTab()}</sl-tab-panel>
         <sl-tab-panel name="auth">${this.renderAuthTab()}</sl-tab-panel>
         <sl-tab-panel name="telemetry">${this.renderTelemetryTab()}</sl-tab-panel>
-        <sl-tab-panel name="github-app">${this.renderGitHubAppTab()}</sl-tab-panel>
         <sl-tab-panel name="gcp-identity">${this.renderGCPIdentityTab()}</sl-tab-panel>
         <sl-tab-panel name="experiments">
           <scion-admin-experiments
@@ -4516,6 +4395,22 @@ export class ScionPageAdminServerConfig extends LitElement {
           ></scion-admin-experiments>
         </sl-tab-panel>
       </sl-tab-group>
+
+      <div class="moved-notice" data-github-app-moved-notice>
+        <sl-icon name="info-circle"></sl-icon>
+        <span>GitHub App settings moved to <strong>Integrations → GitHub</strong>.</span>
+        <sl-button
+          size="small"
+          variant="default"
+          href="/admin/integrations/github"
+          @click=${(e: Event) => {
+            e.preventDefault();
+            navigateTo('/admin/integrations/github');
+          }}
+        >
+          Open
+        </sl-button>
+      </div>
 
       ${this.activeTab !== 'experiments'
         ? html`
@@ -8558,392 +8453,6 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── GitHub App Tab ──
 
-  private renderGitHubAppTab() {
-    return html`
-      ${this.githubAppError
-        ? html`<div class="status-message error">${this.githubAppError}</div>`
-        : ''}
-      ${this.githubAppSuccess
-        ? html`<div class="status-message success">${this.githubAppSuccess}</div>`
-        : ''}
-
-      <div class="section">
-        ${this.renderSectionHeader('GitHub App Configuration', 'github_app')}
-        ${this.renderGitHubAppSaveError()} ${this.renderSectionMeta('github_app')}
-        <div class="form-grid">
-          <div class="form-field">
-            <label>App ID</label>
-            <span class="hint">The numeric ID of your registered GitHub App</span>
-            ${this.renderFieldValue(
-              'server.github_app.app_id',
-              this.githubAppId ? String(this.githubAppId) : '—',
-              html`${this.renderEnvBadge('server.github_app.app_id', 'server.github_app')}<sl-input
-                  .value=${this.githubAppId ? String(this.githubAppId) : ''}
-                  placeholder="e.g. 123456"
-                  inputmode="numeric"
-                  @sl-input=${(e: Event) => {
-                    this.githubAppId = parseInt((e.target as HTMLInputElement).value) || 0;
-                  }}
-                ></sl-input>`
-            )}
-          </div>
-          <div class="form-field">
-            <label>API Base URL</label>
-            <span class="hint"
-              >Override for GitHub Enterprise Server (leave empty for github.com)</span
-            >
-            ${this.renderFieldValue(
-              'server.github_app.api_base_url',
-              this.githubAppApiBaseUrl || '—',
-              html`${this.renderEnvBadge(
-                  'server.github_app.api_base_url',
-                  'server.github_app'
-                )}<sl-input
-                  .value=${this.githubAppApiBaseUrl}
-                  placeholder="https://api.github.com"
-                  @sl-input=${(e: Event) => {
-                    this.githubAppApiBaseUrl = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>`
-            )}
-          </div>
-          <div class="form-field full-width">
-            <label>Private Key (PEM)</label>
-            <span class="hint">
-              ${this.githubAppHasPrivateKey
-                ? 'A private key is configured. Paste a new key to replace it, or leave empty to keep the current key.'
-                : 'Paste the PEM-encoded private key from your GitHub App settings.'}
-            </span>
-            <sl-textarea
-              rows=${4}
-              .value=${this.githubAppPrivateKey}
-              placeholder=${this.githubAppHasPrivateKey
-                ? '(configured — leave empty to keep current)'
-                : '-----BEGIN RSA PRIVATE KEY-----\n...'}
-              @sl-input=${(e: Event) => {
-                this.githubAppPrivateKey = (e.target as HTMLTextAreaElement).value;
-              }}
-            ></sl-textarea>
-            ${this.renderFieldErrors('server.github_app.private_key')}
-            ${this.githubAppHasPrivateKey
-              ? html`<span
-                  data-github-app-key-source
-                  style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
-                  >${this.githubAppPrivateKeySource === 'config'
-                    ? 'Active key source: server configuration / environment'
-                    : this.githubAppPrivateKeySource === 'file'
-                      ? 'Active key source: private key file (private_key_path)'
-                      : 'Stored as hub secret: GITHUB_APP_PRIVATE_KEY'}</span
-                >`
-              : ''}
-            ${this.githubAppPrivateKeyOverridesSecret
-              ? html`<div
-                  class="status-message warning"
-                  data-github-app-key-override-warning
-                  style="margin-top: 0.5rem; margin-bottom: 0;"
-                >
-                  A configured private key
-                  (${this.githubAppPrivateKeySource === 'file'
-                    ? 'private_key_path'
-                    : 'server configuration / environment'})
-                  is overriding the stored hub secret (GITHUB_APP_PRIVATE_KEY). Remove the
-                  configured private key or private_key_path to use the key uploaded here.
-                </div>`
-              : ''}
-          </div>
-          <div class="form-field">
-            <label>Webhook Secret</label>
-            <span class="hint">
-              ${this.githubAppHasWebhookSecret
-                ? 'A webhook secret is configured. Enter a new value to replace it.'
-                : 'Secret for validating incoming GitHub webhook payloads.'}
-            </span>
-            <sl-input
-              type="password"
-              password-toggle
-              .value=${this.githubAppWebhookSecret}
-              placeholder=${this.githubAppHasWebhookSecret
-                ? '(configured — leave empty to keep current)'
-                : 'whsec_...'}
-              @sl-input=${(e: Event) => {
-                this.githubAppWebhookSecret = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
-            ${this.renderFieldErrors('server.github_app.webhook_secret')}
-            ${this.githubAppHasWebhookSecret
-              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
-                  >Stored as hub secret: GITHUB_APP_WEBHOOK_SECRET</span
-                >`
-              : ''}
-          </div>
-          <div class="form-field">
-            <label>Webhooks</label>
-            <span class="hint"
-              >Indicates webhooks are configured on GitHub: adjusts background installation health
-              checks from every 6 hours to every 24 hours. Incoming webhooks are accepted whenever a
-              webhook secret is configured.</span
-            >
-            ${this.renderFieldValue(
-              'server.github_app.webhooks_enabled',
-              this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge(
-                  'server.github_app.webhooks_enabled',
-                  'server.github_app'
-                )}<sl-switch
-                  .checked=${this.githubAppWebhooksEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.githubAppWebhooksEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                >
-                  ${this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled'}
-                </sl-switch>`
-            )}
-          </div>
-          <div class="form-field full-width">
-            <label>Public Installation URL</label>
-            <span class="hint"
-              >The public link where users can install this GitHub App on their org or account</span
-            >
-            ${this.renderFieldValue(
-              'server.github_app.installation_url',
-              this.githubAppInstallationUrl || '—',
-              html`${this.renderEnvBadge(
-                  'server.github_app.installation_url',
-                  'server.github_app'
-                )}<sl-input
-                  .value=${this.githubAppInstallationUrl}
-                  placeholder="https://github.com/apps/your-app-name/installations/new"
-                  @sl-input=${(e: Event) => {
-                    this.githubAppInstallationUrl = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>`
-            )}
-          </div>
-        </div>
-
-        ${this.githubAppRateLimit
-          ? html`
-              <div style="margin-top: 1rem;">
-                <span class="hint">Rate Limit</span>
-                <div style="font-size: 0.875rem; margin-top: 0.25rem;">
-                  ${this.githubAppRateLimit.remaining}/${this.githubAppRateLimit.limit} remaining
-                  ${this.githubAppRateLimit.remaining < this.githubAppRateLimit.limit / 5
-                    ? html`<span style="color: var(--sl-color-danger-600);"> (low)</span>`
-                    : ''}
-                </div>
-              </div>
-            `
-          : ''}
-
-        <div class="actions">
-          <sl-button
-            variant="primary"
-            ?loading=${this.githubAppSaving}
-            ?disabled=${!this.githubAppLoaded}
-            data-action="save-github-app"
-            @click=${() => this.handleSaveGitHubApp()}
-          >
-            <sl-icon slot="prefix" name="check-lg"></sl-icon>
-            Save GitHub App Configuration
-          </sl-button>
-          ${!this.githubAppLoaded
-            ? html`<span
-                class="hint"
-                data-github-app-not-loaded
-                style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
-                >Cannot save: the GitHub App configuration did not load. Reload the page.</span
-              >`
-            : this.githubAppConfigured
-              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
-                  >Configured</span
-                >`
-              : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
-                  >Not configured</span
-                >`}
-        </div>
-      </div>
-
-      ${this.githubAppConfigured
-        ? html`
-            <div class="section">
-              <h3 class="section-title">Installations</h3>
-              <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
-                <sl-button
-                  size="small"
-                  variant="default"
-                  ?loading=${this.githubAppDiscoverLoading}
-                  @click=${() => this.handleGitHubAppDiscover()}
-                >
-                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-                  Discover from GitHub
-                </sl-button>
-                <sl-button
-                  size="small"
-                  variant="default"
-                  ?loading=${this.githubAppSyncLoading}
-                  @click=${() => this.handleGitHubAppSyncPermissions()}
-                >
-                  <sl-icon slot="prefix" name="shield-check"></sl-icon>
-                  Sync Permissions
-                </sl-button>
-              </div>
-
-              ${this.githubAppSyncResult
-                ? html` <div class="status-message success">${this.githubAppSyncResult}</div> `
-                : ''}
-              ${this.githubAppInstallationsLoading
-                ? html`<div style="text-align: center; padding: 1rem;">
-                    <sl-spinner></sl-spinner>
-                  </div>`
-                : this.githubAppInstallations.length === 0
-                  ? html`<p style="color: var(--scion-text-muted);">
-                      No installations found. Click "Discover from GitHub" to sync.
-                    </p>`
-                  : html`
-                      <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                        ${this.githubAppInstallations.map(
-                          (inst) => html`
-                            <div
-                              style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--scion-bg-subtle, #f8fafc); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius, 0.5rem);"
-                            >
-                              <sl-icon
-                                name=${inst.account_type === 'Organization' ? 'building' : 'person'}
-                              ></sl-icon>
-                              <div style="flex: 1;">
-                                <strong>${inst.account_login}</strong>
-                                <div style="font-size: 0.75rem; color: var(--scion-text-muted);">
-                                  ${inst.account_type} · ${inst.repositories?.length || 0} repos ·
-                                  ID: ${inst.installation_id}
-                                </div>
-                              </div>
-                              <span
-                                style="font-size: 0.6875rem; padding: 0.125rem 0.5rem; border-radius: 9999px; background: ${inst.status ===
-                                'active'
-                                  ? 'var(--scion-badge-success-bg, #dcfce7)'
-                                  : 'var(--scion-error-bg, #fef2f2)'}; color: ${inst.status ===
-                                'active'
-                                  ? 'var(--scion-badge-success-text, #166534)'
-                                  : 'var(--scion-error-text, #991b1b)'};"
-                              >
-                                ${inst.status}
-                              </span>
-                            </div>
-                          `
-                        )}
-                      </div>
-                    `}
-            </div>
-          `
-        : ''}
-    `;
-  }
-
-  /**
-   * Keeps the main save's baseline in step with the github_app echo the
-   * page rewrites after load (a GitHub App card save, or a reload of the
-   * card). The echo is not an edit of the main form, so the section must
-   * not count as changed on the next main save (ptone/scion#3922). No-op
-   * before the first baseline (the initial load takes it afterwards).
-   */
-  private syncGitHubAppBaseline(): void {
-    if (!this.layer1Baseline) return;
-    const server = this.buildLayer1Payload().server as Record<string, unknown> | undefined;
-    const current = server?.github_app;
-    const base = this.layer1Baseline;
-    if (current === undefined) {
-      const baseServer = base.server as Record<string, unknown> | undefined;
-      if (baseServer) delete baseServer.github_app;
-      return;
-    }
-    if (typeof base.server !== 'object' || base.server === null) base.server = {};
-    (base.server as Record<string, unknown>).github_app = JSON.parse(JSON.stringify(current));
-  }
-
-  /**
-   * Re-reads one section's revision from GET /api/v1/admin/server-config
-   * after a save made outside the main form changed it. Leaves the loaded
-   * revision as it was if the read fails (a later save then answers 409
-   * and the reload banner, which is safe).
-   */
-  private async refreshSectionRevision(section: string): Promise<void> {
-    if (this.settingsTier !== 'db') return;
-    try {
-      const res = await apiFetch('/api/v1/admin/server-config');
-      if (!res.ok) return;
-      const data = (await res.json()) as ServerConfigResponse;
-      const rev = revisionsFromMetadata(data.section_metadata)[section];
-      if (typeof rev === 'number') {
-        this.loadedRevisions = { ...this.loadedRevisions, [section]: rev };
-      }
-      if (this.sectionMetadata && data.section_metadata?.[section]) {
-        this.sectionMetadata = {
-          ...this.sectionMetadata,
-          [section]: data.section_metadata[section],
-        };
-      }
-    } catch {
-      // keep the loaded revision
-    }
-  }
-
-  private async loadGitHubAppConfig(): Promise<void> {
-    try {
-      const res = await apiFetch('/api/v1/github-app');
-      if (res.ok) {
-        this.githubAppError = null;
-        const data = (await res.json()) as GitHubAppConfigData;
-        this.githubAppConfigured = data.configured;
-        this.githubAppId = data.app_id;
-        this.githubAppApiBaseUrl = data.api_base_url || '';
-        this.githubAppWebhooksEnabled = data.webhooks_enabled;
-        this.githubAppHasPrivateKey = data.has_private_key;
-        this.githubAppPrivateKeySource = data.private_key_source || '';
-        this.githubAppPrivateKeyOverridesSecret = Boolean(data.private_key_overrides_secret);
-        this.githubAppHasWebhookSecret = data.has_webhook_secret;
-        this.githubAppInstallationUrl = data.installation_url || '';
-        this.githubAppRateLimit = data.rate_limit || null;
-        // Keep rawConfig in sync so Save & Reload preserves these values
-        if (this.rawConfig) {
-          if (!this.rawConfig.server) {
-            this.rawConfig.server = {};
-          }
-          this.rawConfig.server.github_app = githubAppEcho(
-            data.app_id,
-            data.api_base_url,
-            data.installation_url,
-            data.webhooks_enabled
-          );
-        }
-        // Clear write-only fields after load
-        this.githubAppPrivateKey = '';
-        this.githubAppWebhookSecret = '';
-        this.githubAppLoaded = true;
-        this.syncGitHubAppBaseline();
-      } else {
-        this.githubAppLoaded = false;
-        this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
-      }
-    } catch {
-      this.githubAppLoaded = false;
-      this.githubAppError = 'Failed to load GitHub App configuration';
-    }
-  }
-
-  private async loadGitHubAppInstallations(): Promise<void> {
-    this.githubAppInstallationsLoading = true;
-    try {
-      const res = await apiFetch('/api/v1/github-app/installations');
-      if (res.ok) {
-        const data = (await res.json()) as { installations: GitHubInstallationInfo[] };
-        this.githubAppInstallations = data.installations || [];
-      }
-    } catch (e) {
-      // Non-critical
-    } finally {
-      this.githubAppInstallationsLoading = false;
-    }
-  }
-
   // ── Cross-project messaging (admin/messaging API) ──
 
   private async loadMessagingSettings(): Promise<void> {
@@ -9010,135 +8519,6 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.crossProjectMessagingEnabled = previous; // revert
     } finally {
       this.crossProjectMessagingLoading = false;
-    }
-  }
-
-  private async handleGitHubAppDiscover(): Promise<void> {
-    this.githubAppDiscoverLoading = true;
-    this.githubAppSyncResult = null;
-    try {
-      const res = await apiFetch('/api/v1/github-app/installations/discover', { method: 'POST' });
-      if (res.ok) {
-        const data = (await res.json()) as { total: number };
-        this.githubAppSyncResult = `Discovered ${data.total} installation(s) from GitHub.`;
-        await this.loadGitHubAppInstallations();
-      } else {
-        const err = (await res.json().catch(() => ({}))) as { message?: string };
-        this.githubAppSyncResult = `Discovery failed: ${err.message || res.statusText}`;
-      }
-    } catch (e) {
-      this.githubAppSyncResult = 'Discovery failed: network error';
-    } finally {
-      this.githubAppDiscoverLoading = false;
-    }
-  }
-
-  private async handleGitHubAppSyncPermissions(): Promise<void> {
-    this.githubAppSyncLoading = true;
-    this.githubAppSyncResult = null;
-    try {
-      const res = await apiFetch('/api/v1/github-app/sync-permissions', { method: 'POST' });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          affected_projects?: number;
-          app_permissions?: Record<string, string>;
-        };
-        const perms = data.app_permissions
-          ? Object.entries(data.app_permissions)
-              .map(([k, v]) => `${k}:${v}`)
-              .join(', ')
-          : 'none';
-        this.githubAppSyncResult = `Permissions synced. App permissions: ${perms}. ${data.affected_projects || 0} project(s) affected.`;
-      } else {
-        const err = (await res.json().catch(() => ({}))) as { message?: string };
-        this.githubAppSyncResult = `Sync failed: ${err.message || res.statusText}`;
-      }
-    } catch (e) {
-      this.githubAppSyncResult = 'Sync failed: network error';
-    } finally {
-      this.githubAppSyncLoading = false;
-    }
-  }
-
-  private async handleSaveGitHubApp(): Promise<void> {
-    // The fields hold defaults, not the stored config, until the load
-    // succeeds; saving them would clear the stored App (see githubAppLoaded).
-    if (!this.githubAppLoaded) return;
-    this.githubAppSaving = true;
-    this.githubAppError = null;
-    this.githubAppSaveError = null;
-    this.githubAppSuccess = null;
-
-    try {
-      // Every non-secret field is sent, so a cleared one goes as an
-      // explicit clear (0 or ""). The endpoint reads null as "keep the
-      // stored value", so null cannot be used here.
-      const payload: Record<string, unknown> = {
-        app_id: this.githubAppId || 0,
-        api_base_url: this.githubAppApiBaseUrl,
-        webhooks_enabled: this.githubAppWebhooksEnabled,
-        installation_url: this.githubAppInstallationUrl,
-      };
-
-      // Only send secrets if the user provided new values
-      if (this.githubAppPrivateKey.trim()) {
-        payload.private_key = this.githubAppPrivateKey.trim();
-      }
-      if (this.githubAppWebhookSecret.trim()) {
-        payload.webhook_secret = this.githubAppWebhookSecret.trim();
-      }
-
-      const res = await apiFetch('/api/v1/github-app', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (!res.ok) {
-        const err = await readSettingsSaveError(res, {
-          sectionKoanfPaths: this.sectionKoanfPaths,
-          defaultSection: 'github_app',
-        });
-        if (err.kind === 'generic') {
-          this.githubAppError = genericSaveErrorText(
-            err,
-            'Failed to save GitHub App configuration'
-          );
-        } else {
-          this.githubAppSaveError = err;
-        }
-        return;
-      }
-
-      this.githubAppSuccess = 'GitHub App configuration saved successfully.';
-      // Update rawConfig so the main Save & Reload preserves current values
-      if (this.rawConfig) {
-        if (!this.rawConfig.server) {
-          this.rawConfig.server = {};
-        }
-        this.rawConfig.server.github_app = githubAppEcho(
-          this.githubAppId,
-          this.githubAppApiBaseUrl,
-          this.githubAppInstallationUrl,
-          this.githubAppWebhooksEnabled
-        );
-      }
-      // The card's save bumped the github_app section's revision: re-read it
-      // BEFORE the card reload below, which re-baselines the echo. A save by
-      // someone else in between then leaves an older revision next to a
-      // newer echo, so a later main save of github_app fails safe with a
-      // 409, never a newer revision next to an older echo.
-      await this.refreshSectionRevision('github_app');
-      // Reload to get fresh state (has_private_key, has_webhook_secret, configured)
-      await this.loadGitHubAppConfig();
-      // Reload installations if now configured
-      if (this.githubAppConfigured) {
-        await this.loadGitHubAppInstallations();
-      }
-    } catch {
-      this.githubAppError = 'Failed to save GitHub App configuration';
-    } finally {
-      this.githubAppSaving = false;
     }
   }
 
