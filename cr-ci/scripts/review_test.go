@@ -27,7 +27,7 @@ func TestNotFoundPerResource(t *testing.T) {
 		{"secret", "bootstrap-gcp.sh", nil, "cr-runner-gh-app-private-key", nil, "secrets create cr-runner-gh-app-private-key"},
 		{"image", "build-runner-image.sh", []string{"--tag", "golden"}, "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden", nil, "builds submit runner"},
 		{"run job", "deploy-job.sh", []string{"--tag", "golden"}, "cr-gh-runner-8c32g", []string{"us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden"}, "run jobs create cr-gh-runner-8c32g"},
-		{"mediator image", "deploy-mediator.sh", []string{"--tag", "golden"}, "us-central1-docker.pkg.dev/example-project/cr-runners/cr-runner-mediator:golden", []string{"cr-runner-mediator"}, "builds submit ."},
+		{"mediator image", "deploy-mediator.sh", []string{"--tag", "golden", "--yes"}, "us-central1-docker.pkg.dev/example-project/cr-runners/cr-runner-mediator:golden", []string{"cr-runner-mediator"}, "builds submit ."},
 		{"scheduler job", "deploy-scheduler.sh", nil, "cr-runner-reconciler", nil, "scheduler jobs create http cr-runner-reconciler"},
 		{"run service (teardown skips)", "teardown.sh", []string{"--confirm", project}, "cr-runner-mediator", nil, "run jobs describe"},
 		{"run job (teardown skips)", "teardown.sh", []string{"--confirm", project}, "cr-gh-runner-8c32g", nil, "artifacts repositories describe"},
@@ -231,14 +231,18 @@ func TestBuildKitEverywhere(t *testing.T) {
 	if !strings.Contains(string(cb), "env: ['DOCKER_BUILDKIT=1']") {
 		t.Errorf("scripts/cloudbuild.yaml does not set DOCKER_BUILDKIT=1 on the docker step:\n%s", cb)
 	}
-	for _, s := range []struct{ script, image string }{
-		{"build-runner-image.sh", "gh-runner"},
-		{"deploy-mediator.sh", "cr-runner-mediator"},
+	for _, s := range []struct {
+		script, image string
+		extra         []string
+	}{
+		{"build-runner-image.sh", "gh-runner", nil},
+		{"deploy-mediator.sh", "cr-runner-mediator", []string{"--yes"}},
 	} {
 		e := newEnv(t, baseConfig())
 		e.state("exists", "cr-runner-mediator", "cr-gh-runner-8c32g")
+		baseArgs := append([]string{"--config", "config.env", "--apply", "--tag", "golden"}, s.extra...)
 		// Cloud Build: the shared config (with BuildKit) is the only one used.
-		r := e.run(s.script, "", "--config", "config.env", "--apply", "--tag", "golden")
+		r := e.run(s.script, "", baseArgs...)
 		wantCode(t, r, 0)
 		n := 0
 		for _, c := range r.calls {
@@ -253,7 +257,7 @@ func TestBuildKitEverywhere(t *testing.T) {
 			t.Errorf("%s: %d Cloud Build submissions, want 1", s.script, n)
 		}
 		// Local: docker build runs with DOCKER_BUILDKIT=1.
-		r = e.run(s.script, "", "--config", "config.env", "--apply", "--tag", "golden", "--local")
+		r = e.run(s.script, "", append(baseArgs, "--local")...)
 		wantCode(t, r, 0)
 		builds := 0
 		for _, c := range r.calls {
