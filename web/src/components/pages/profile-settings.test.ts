@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { getPreferredTimeZone, setPreferredTimeZone } from '../../utils/time.js';
-import { DECISIONS_FLAG, setFeatureFlag } from '../../utils/feature-flags.js';
+import { DECISIONS_FLAG, EXEC_CONTAINERS_FLAG, setFeatureFlag } from '../../utils/feature-flags.js';
 import {
   preselectRecommendedChoices,
   setPreselectRecommendedChoices,
@@ -688,5 +688,479 @@ describe('scion-page-profile-settings — preselect recommended choices (ptone/s
     expect(preselectRecommendedChoices()).toBe(false);
     expect(preselectSwitch(element)?.hasAttribute('checked')).toBe(false);
     expect(shadowText(element)).toContain('boom');
+  });
+});
+
+describe('scion-page-profile-settings — execution container (ptone/scion#8819)', () => {
+  let element: AnyEl = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler({})));
+    await import('./profile-settings.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    const features = { ...window.__SCION_FEATURES__ };
+    delete features[EXEC_CONTAINERS_FLAG];
+    window.__SCION_FEATURES__ = features;
+    vi.restoreAllMocks();
+  });
+
+  interface ExecContainerMockOpts {
+    getStatus?: number;
+    getBody?: Record<string, unknown>;
+    putHandler?: (body: Record<string, unknown>) => {
+      status: number;
+      body: Record<string, unknown>;
+    };
+    deleteHandler?: () => { status: number; body?: Record<string, unknown> };
+    agents?: Array<Record<string, unknown>>;
+    agentsStatus?: number;
+  }
+
+  function makeExecFetch(opts: ExecContainerMockOpts = {}) {
+    const base = createFetchHandler({});
+    return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      const json = (status: number, body: unknown): Promise<Response> =>
+        Promise.resolve(
+          new Response(status === 204 ? null : JSON.stringify(body), {
+            status,
+            headers: status === 204 ? {} : { 'Content-Type': 'application/json' },
+          })
+        );
+
+      if (path.endsWith('/api/v1/users/me/exec-container')) {
+        if (init?.method === 'PUT') {
+          const parsed = JSON.parse(init.body as string) as Record<string, unknown>;
+          const res = opts.putHandler
+            ? opts.putHandler(parsed)
+            : { status: 200, body: { configured: true, state: 'ready' } };
+          return json(res.status, res.body);
+        }
+        if (init?.method === 'DELETE') {
+          const res = opts.deleteHandler ? opts.deleteHandler() : { status: 204 };
+          return json(res.status, res.body ?? {});
+        }
+        return json(opts.getStatus ?? 200, opts.getBody ?? { configured: false });
+      }
+      if (path.startsWith('/api/v1/agents')) {
+        if (opts.agentsStatus && opts.agentsStatus >= 400) {
+          return json(opts.agentsStatus, { error: { message: 'backend unavailable' } });
+        }
+        return json(200, { agents: opts.agents ?? [] });
+      }
+      return base(url, init);
+    };
+  }
+
+  const card = (el: AnyEl): AnyEl =>
+    el.shadowRoot?.querySelector('[data-testid="exec-container-card"]');
+
+  it('is hidden while hub.exec_containers is off and makes no exec-container API request', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, false);
+    element = await createComponent(makeExecFetch());
+
+    expect(card(element)).toBeNull();
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const urls = (fetchMock.mock.calls as Array<[unknown]>).map(([u]) => String(u));
+    expect(urls.some((u) => u.includes('/exec-container'))).toBe(false);
+    expect(urls.some((u) => u.includes('/api/v1/agents'))).toBe(false);
+  });
+
+  it('renders unconfigured state with shell-only candidates and link to start a new one', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    element = await createComponent(
+      makeExecFetch({
+        getBody: { configured: false },
+        agents: [
+          {
+            id: 'a-shell-1',
+            name: 'ops-shell',
+            projectId: 'p1',
+            project: 'infra',
+            harnessConfig: 'shell',
+            phase: 'running',
+            _capabilities: { actions: ['read', 'attach'] },
+          },
+          {
+            id: 'a-shell-stopped',
+            name: 'backup-shell',
+            projectId: 'p1',
+            project: 'infra',
+            harnessConfig: 'shell',
+            phase: 'stopped',
+            _capabilities: { actions: ['read', 'attach'] },
+          },
+          {
+            id: 'a-llm',
+            name: 'claude-bot',
+            projectId: 'p1',
+            project: 'infra',
+            harnessConfig: 'claude',
+            phase: 'running',
+            _capabilities: { actions: ['read', 'attach'] },
+          },
+          {
+            id: 'a-no-attach',
+            name: 'foreign-shell',
+            projectId: 'p2',
+            project: 'other',
+            harnessConfig: 'shell',
+            phase: 'running',
+            _capabilities: { actions: ['read'] },
+          },
+        ],
+      })
+    );
+
+    expect(card(element)).not.toBeNull();
+    const text = shadowText(element);
+    expect(text).toContain('Execution container');
+    expect(text).toContain('$HOME');
+    expect(text).toContain('/workspace');
+
+    const options = Array.from(
+      element.shadowRoot.querySelectorAll('.exec-container-select sl-option')
+    ) as HTMLElement[];
+    expect(options.map((o) => o.getAttribute('value'))).toEqual(['a-shell-stopped', 'a-shell-1']);
+
+    const createLink = element.shadowRoot.querySelector(
+      '[data-testid="exec-container-create-link"]'
+    );
+    expect(createLink?.getAttribute('href')).toBe('/agents/new?harness=shell');
+  });
+
+  it('registers a container via PUT and shows configured state', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    let putBody: Record<string, unknown> | null = null;
+    element = await createComponent(
+      makeExecFetch({
+        getBody: { configured: false },
+        agents: [
+          {
+            id: '11111111-1111-1111-1111-111111111111',
+            name: 'ops-shell',
+            projectId: 'p1',
+            project: 'infra',
+            harnessConfig: 'shell',
+            phase: 'running',
+          },
+        ],
+        putHandler: (body) => {
+          putBody = body;
+          return {
+            status: 200,
+            body: {
+              configured: true,
+              state: 'ready',
+              agent: {
+                id: '11111111-1111-1111-1111-111111111111',
+                slug: 'ops-shell',
+                name: 'ops-shell',
+                projectId: 'p1',
+                projectName: 'infra',
+                phase: 'running',
+                activity: 'idle',
+              },
+            },
+          };
+        },
+      })
+    );
+
+    const sel = element.shadowRoot.querySelector('.exec-container-select') as AnyEl;
+    sel.value = '11111111-1111-1111-1111-111111111111';
+    sel.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await settle(element);
+    await settle(element);
+
+    expect(putBody).toEqual({ agentId: '11111111-1111-1111-1111-111111111111' });
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-configured"]')
+    ).not.toBeNull();
+    expect(shadowText(element)).toContain('ops-shell');
+    expect(shadowText(element)).toContain('infra');
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-state"]')?.textContent?.trim()
+    ).toBe('Ready');
+    // homePersistent absent -> warning hidden
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-home-warning"]')
+    ).toBeNull();
+  });
+
+  it('renders the uniform 422 message as returned by PUT', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    const uniformMsg =
+      "That agent can't be used as your default execution container. It must be an execution container you can attach to, in a project you can access.";
+    element = await createComponent(
+      makeExecFetch({
+        getBody: { configured: false },
+        agents: [
+          {
+            id: '22222222-2222-2222-2222-222222222222',
+            name: 'ops-shell',
+            projectId: 'p1',
+            harnessConfig: 'shell',
+            phase: 'running',
+          },
+        ],
+        putHandler: () => ({
+          status: 422,
+          body: { error: { code: 'exec_container_ineligible', message: uniformMsg } },
+        }),
+      })
+    );
+
+    const sel = element.shadowRoot.querySelector('.exec-container-select') as AnyEl;
+    sel.value = '22222222-2222-2222-2222-222222222222';
+    sel.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await settle(element);
+    await settle(element);
+
+    const errEl = element.shadowRoot.querySelector('[data-testid="exec-container-error"]');
+    expect(errEl?.textContent).toContain(uniformMsg);
+  });
+
+  it('shows home-persistence warning only when homePersistent is explicitly false', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    element = await createComponent(
+      makeExecFetch({
+        getBody: {
+          configured: true,
+          state: 'suspended',
+          agent: {
+            id: 'a-1',
+            slug: 'ephemeral-ops',
+            name: 'ephemeral-ops',
+            projectId: 'p1',
+            projectName: 'cloud-proj',
+            phase: 'suspended',
+            homePersistent: false,
+          },
+        },
+      })
+    );
+
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-state"]')?.textContent?.trim()
+    ).toBe('Suspended');
+    const warn = element.shadowRoot.querySelector('[data-testid="exec-container-home-warning"]');
+    expect(warn).not.toBeNull();
+    expect(warn?.textContent?.replace(/\s+/g, ' ')).toContain('logins will not survive a restart');
+
+    // When homePersistent is true, warning must not render.
+    element.remove();
+    element = await createComponent(
+      makeExecFetch({
+        getBody: {
+          configured: true,
+          state: 'ready',
+          agent: {
+            id: 'a-1',
+            slug: 'persist-ops',
+            name: 'persist-ops',
+            projectId: 'p1',
+            projectName: 'local-proj',
+            phase: 'running',
+            homePersistent: true,
+          },
+        },
+      })
+    );
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-home-warning"]')
+    ).toBeNull();
+  });
+
+  it('clears a configured container via DELETE and returns to unconfigured state', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    let deleted = false;
+    element = await createComponent(
+      makeExecFetch({
+        getBody: {
+          configured: true,
+          state: 'stopped',
+          agent: {
+            id: 'a-1',
+            slug: 'ops-shell',
+            name: 'ops-shell',
+            projectId: 'p1',
+            projectName: 'infra',
+            phase: 'stopped',
+          },
+        },
+        deleteHandler: () => {
+          deleted = true;
+          return { status: 204 };
+        },
+      })
+    );
+
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-state"]')?.textContent?.trim()
+    ).toBe('Stopped');
+
+    const clearBtn = element.shadowRoot.querySelector('[data-testid="exec-container-clear"]');
+    clearBtn.click();
+    await settle(element);
+    await settle(element);
+
+    expect(deleted).toBe(true);
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-configured"]')
+    ).toBeNull();
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-picker"]')
+    ).not.toBeNull();
+  });
+
+  it('renders unavailable state with generic notice and Clear button', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    const reason = 'Your registered execution container is no longer available. Register another.';
+    element = await createComponent(
+      makeExecFetch({
+        getBody: {
+          configured: true,
+          state: 'unavailable',
+          reason,
+        },
+      })
+    );
+
+    const notice = element.shadowRoot.querySelector('[data-testid="exec-container-unavailable"]');
+    expect(notice?.textContent).toContain(reason);
+    expect(notice?.getAttribute('role')).toBe('alert');
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-configured"]')
+    ).toBeNull();
+    expect(element.shadowRoot.querySelector('[data-testid="exec-container-clear"]')).not.toBeNull();
+  });
+
+  it('requests server-side harnessConfig=shell filter when loading candidates', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    element = await createComponent(makeExecFetch({ getBody: { configured: false }, agents: [] }));
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const agentCalls = (fetchMock.mock.calls as Array<[unknown]>)
+      .map(([u]) => String(u))
+      .filter((u) => u.startsWith('/api/v1/agents'));
+    expect(agentCalls).toHaveLength(1);
+    expect(agentCalls[0]).toContain('harnessConfig=shell');
+  });
+
+  it('renders an alert error instead of "No execution containers available" when candidate fetch fails', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    element = await createComponent(
+      makeExecFetch({ getBody: { configured: false }, agentsStatus: 500 })
+    );
+
+    const errEl = element.shadowRoot.querySelector('[data-testid="exec-container-error"]');
+    expect(errEl).not.toBeNull();
+    expect(errEl?.getAttribute('role')).toBe('alert');
+    expect(errEl?.textContent).toContain('Could not load execution containers');
+    expect(element.shadowRoot.querySelector('.exec-container-select')).toBeNull();
+    expect(shadowText(element)).not.toContain('No execution containers available');
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-candidates-retry"]')
+    ).not.toBeNull();
+  });
+
+  it('renders only the error and Retry (not the picker) when GET /users/me/exec-container fails', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    element = await createComponent(
+      makeExecFetch({
+        getStatus: 500,
+        getBody: { error: { message: 'server error loading exec container' } },
+      })
+    );
+
+    const errEl = element.shadowRoot.querySelector('[data-testid="exec-container-error"]');
+    expect(errEl).not.toBeNull();
+    expect(errEl?.getAttribute('role')).toBe('alert');
+    expect(errEl?.textContent).toContain('server error loading exec container');
+    expect(element.shadowRoot.querySelector('[data-testid="exec-container-retry"]')).not.toBeNull();
+    expect(element.shadowRoot.querySelector('[data-testid="exec-container-picker"]')).toBeNull();
+  });
+
+  it('supports Change -> pick -> PUT from the configured state', async () => {
+    setFeatureFlag(EXEC_CONTAINERS_FLAG, true);
+    let putBody: Record<string, unknown> | null = null;
+    element = await createComponent(
+      makeExecFetch({
+        getBody: {
+          configured: true,
+          state: 'ready',
+          agent: {
+            id: '11111111-1111-1111-1111-111111111111',
+            slug: 'ops-1',
+            name: 'ops-1',
+            projectId: 'p1',
+            projectName: 'infra',
+            phase: 'running',
+            activity: 'idle',
+          },
+        },
+        agents: [
+          {
+            id: '11111111-1111-1111-1111-111111111111',
+            name: 'ops-1',
+            projectId: 'p1',
+            project: 'infra',
+            harnessConfig: 'shell',
+            phase: 'running',
+          },
+          {
+            id: '22222222-2222-2222-2222-222222222222',
+            name: 'ops-2',
+            projectId: 'p2',
+            project: 'staging',
+            harnessConfig: 'shell',
+            phase: 'stopped',
+          },
+        ],
+        putHandler: (body) => {
+          putBody = body;
+          return {
+            status: 200,
+            body: {
+              configured: true,
+              state: 'stopped',
+              agent: {
+                id: '22222222-2222-2222-2222-222222222222',
+                slug: 'ops-2',
+                name: 'ops-2',
+                projectId: 'p2',
+                projectName: 'staging',
+                phase: 'stopped',
+              },
+            },
+          };
+        },
+      })
+    );
+
+    const changeBtn = element.shadowRoot.querySelector('[data-testid="exec-container-change"]');
+    changeBtn.click();
+    await settle(element);
+    await settle(element);
+
+    const sel = element.shadowRoot.querySelector('.exec-container-select') as AnyEl;
+    expect(sel).not.toBeNull();
+    sel.value = '22222222-2222-2222-2222-222222222222';
+    sel.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await settle(element);
+    await settle(element);
+
+    expect(putBody).toEqual({ agentId: '22222222-2222-2222-2222-222222222222' });
+    expect(shadowText(element)).toContain('ops-2');
+    expect(shadowText(element)).toContain('staging');
+    expect(
+      element.shadowRoot.querySelector('[data-testid="exec-container-state"]')?.textContent?.trim()
+    ).toBe('Stopped');
+    expect(element.shadowRoot.querySelector('[data-testid="exec-container-picker"]')).toBeNull();
   });
 });

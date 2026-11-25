@@ -106,6 +106,7 @@ import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
 import {
   AGENT_SECRETS_FLAG,
+  execContainersEnabled,
   FEATURE_FLAGS_CHANGED_EVENT,
   idleSuspendEnabled,
   isFeatureEnabled,
@@ -326,6 +327,13 @@ export class ScionPageAgentDetail extends LitElement {
     return isFeatureEnabled(AGENT_SECRETS_FLAG);
   }
 
+  /** Whether an agent uses the built-in shell execution container harness. */
+  private isShellAgent(agent: Agent | null | undefined): boolean {
+    if (!agent) return false;
+    const hc = agent.harnessConfig || agent.appliedConfig?.harnessConfig;
+    return hc === 'shell';
+  }
+
   private readonly boundOnFeatureFlagsChanged = (): void => {
     this.requestUpdate();
   };
@@ -391,6 +399,9 @@ export class ScionPageAgentDetail extends LitElement {
     .project-link sl-icon,
     .broker-link sl-icon {
       flex-shrink: 0;
+    }
+    .exec-container-badge sl-icon {
+      margin-right: 0.25rem;
     }
     .project-link:hover,
     .broker-link:hover {
@@ -1813,6 +1824,8 @@ export class ScionPageAgentDetail extends LitElement {
       return this.renderError();
     }
 
+    const isShell = this.isShellAgent(this.agent);
+
     return html`
       ${this.renderHeader()} ${this.renderDeletionBanner()} ${this.renderStateBanner()}
 
@@ -1820,7 +1833,7 @@ export class ScionPageAgentDetail extends LitElement {
         <sl-tab slot="nav" panel="status">Status</sl-tab>
         <sl-tab slot="nav" panel="metrics">Metrics</sl-tab>
         <sl-tab slot="nav" panel="logs">Logs</sl-tab>
-        <sl-tab slot="nav" panel="messages">Messages</sl-tab>
+        ${!isShell ? html`<sl-tab slot="nav" panel="messages">Messages</sl-tab>` : nothing}
         <sl-tab slot="nav" panel="schedules" data-testid="agent-schedules-tab">Schedules</sl-tab>
         <sl-tab slot="nav" panel="configuration">Configuration</sl-tab>
         ${this.agentSecretsEnabled
@@ -1843,7 +1856,9 @@ export class ScionPageAgentDetail extends LitElement {
               : {}}
           ></scion-agent-log-viewer>
         </sl-tab-panel>
-        <sl-tab-panel name="messages"> ${this.renderMessagesPanel()} </sl-tab-panel>
+        ${!isShell
+          ? html`<sl-tab-panel name="messages"> ${this.renderMessagesPanel()} </sl-tab-panel>`
+          : nothing}
         <sl-tab-panel name="schedules" data-testid="agent-schedules-panel">
           <scion-agent-schedules-tab
             projectId=${this.agent.projectId || ''}
@@ -1863,15 +1878,19 @@ export class ScionPageAgentDetail extends LitElement {
           : nothing}
       </sl-tab-group>
 
-      <scion-quick-message-dialog
-        agentId=${this.agentId}
-        agentName=${this.agent.name || ''}
-        userId=${this.currentUserId}
-        ?open=${this.quickMessageOpen}
-        @sl-request-close=${() => {
-          this.quickMessageOpen = false;
-        }}
-      ></scion-quick-message-dialog>
+      ${!isShell
+        ? html`
+            <scion-quick-message-dialog
+              agentId=${this.agentId}
+              agentName=${this.agent.name || ''}
+              userId=${this.currentUserId}
+              ?open=${this.quickMessageOpen}
+              @sl-request-close=${() => {
+                this.quickMessageOpen = false;
+              }}
+            ></scion-quick-message-dialog>
+          `
+        : nothing}
     `;
   }
 
@@ -1910,6 +1929,10 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderMessagesPanel() {
     const agent = this.agent!;
+    // S5: shell execution containers never receive messages.
+    if (this.isShellAgent(agent)) {
+      return nothing;
+    }
 
     // When the feature flag is off, render exactly the existing message viewer
     // (AC9 — byte-for-byte current Messages tab behaviour).
@@ -1990,6 +2013,7 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderHeader() {
     const agent = this.agent!;
+    const isShell = this.isShellAgent(agent);
     // While the hub is deleting, hide every lifecycle action and Delete.
     const deleting = this.deletionLease.isDeleting(agent);
     const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
@@ -2007,17 +2031,37 @@ export class ScionPageAgentDetail extends LitElement {
         ></scion-breadcrumb>
         <sl-icon slot="icon" name="cpu"></sl-icon>
         ${agentStatusBadge(agent)}
+        ${isShell && execContainersEnabled()
+          ? html`
+              <sl-badge
+                variant="neutral"
+                class="exec-container-badge"
+                data-testid="exec-container-badge"
+              >
+                <sl-icon name="terminal"></sl-icon>
+                Execution container
+              </sl-badge>
+            `
+          : nothing}
         <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
         <scion-authority-badge .authority=${agent.authority}></scion-authority-badge>
-        <scion-message-mode-badge
-          mode=${agent.messageMode || 'project'}
-          size="medium"
-        ></scion-message-mode-badge>
+        ${!isShell
+          ? html`
+              <scion-message-mode-badge
+                mode=${agent.messageMode || 'project'}
+                size="medium"
+              ></scion-message-mode-badge>
+            `
+          : nothing}
         <div slot="meta" class="header-meta">
-          <span class="template-badge">
-            <sl-icon name="code-square"></sl-icon>
-            ${agent.template}
-          </span>
+          ${!isShell || agent.template
+            ? html`
+                <span class="template-badge">
+                  <sl-icon name="code-square"></sl-icon>
+                  ${agent.template}
+                </span>
+              `
+            : nothing}
           ${this.project
             ? html`
                 <a href="/projects/${this.project.id}" class="project-link">
@@ -2048,7 +2092,7 @@ export class ScionPageAgentDetail extends LitElement {
               </sl-button>
             </a>
           </sl-tooltip>
-          ${agent.messageMode === 'none'
+          ${isShell || agent.messageMode === 'none'
             ? nothing
             : agent._messageability?.canMessage === false
               ? html`
@@ -2318,6 +2362,7 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private renderCurrentTaskCard(agent: Agent) {
+    if (this.isShellAgent(agent)) return nothing;
     const task = agent.detail?.taskSummary || agent.taskSummary;
     if (!task) return nothing;
     return html`
@@ -2825,6 +2870,7 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderMessagingCard() {
     const agent = this.agent!;
+    if (this.isShellAgent(agent)) return nothing;
     const modeDisplay = getMessageModeDisplay(agent.messageMode);
     const messageability = agent._messageability as AgentMessageabilityDetail | undefined;
     const canSetMode = can(agent._capabilities, 'set_message_mode');
@@ -3488,6 +3534,7 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private renderInitialTaskCard(cfg: AgentAppliedConfig | undefined) {
+    if (this.isShellAgent(this.agent)) return nothing;
     const task = cfg?.task;
     if (!task) return nothing;
 
