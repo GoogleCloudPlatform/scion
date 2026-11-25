@@ -25,7 +25,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -1245,79 +1244,119 @@ func TestDecisionResponseView_AttributionAndOutcomes(t *testing.T) {
 	assert.Contains(t, string(setItemJSON), `"answeredByName":"Old User"`)
 }
 
-// ptone/scion#8224 (plan §6): POST /api/v1/agents/{id}/outbound-message accepts
-// legacy choices / choices_update when decisions / decisions_update are absent
-// (logging at debug level with agent_id), and rejects requests carrying both
-// choices and decisions with 400 invalid_request.
-func TestDecisionsSend_LegacyChoicesFallbackAndConflict(t *testing.T) {
+// ptone/scion#8249: POST /api/v1/agents/{id}/outbound-message explicitly
+// rejects the removed legacy "choices" and "choices_update" request keys with
+// 400 validation_error (even when empty, false, or null, and whether or not
+// msg is present), directing callers to "decisions" and an updated CLI.
+func TestDecisionsSend_RejectsLegacyChoicesFields(t *testing.T) {
 	f := newDecisionsFixture(t)
-	var logBuf bytes.Buffer
-	var logMu sync.Mutex
-	f.srv.messageLog = slog.New(slog.NewJSONHandler(&syncWriter{mu: &logMu, w: &logBuf}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	takeLog := func() string {
-		logMu.Lock()
-		defer logMu.Unlock()
-		out := logBuf.String()
-		logBuf.Reset()
-		return out
-	}
-
-	// 1. Primary decisions field succeeds without firing the legacy debug log.
+	// Primary decisions field continues to succeed.
 	rrPrimary := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","msg":"Primary","decisions":[{"id":"D-leg","question":"Ship v1?","choices":["yes","no"]}]}`))
 	require.Equal(t, http.StatusOK, rrPrimary.Code, rrPrimary.Body.String())
-	assert.NotContains(t, takeLog(), "legacy choices request field used")
 
-	// 2. Legacy choices + choices_update falls back cleanly, mints decision-prompt,
-	//    and logs at debug level with the agent ID.
-	rrFallback := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","msg":"Fallback","choices":[{"id":"D-leg","question":"Ship v2?","choices":["yes","no"]}],"choices_update":true}`))
-	require.Equal(t, http.StatusOK, rrFallback.Code, rrFallback.Body.String())
-	var fbResp decisionSendResponse
-	require.NoError(t, json.Unmarshal(rrFallback.Body.Bytes(), &fbResp))
-	require.Len(t, fbResp.Decisions, 1)
-	assert.Equal(t, 2, fbResp.Decisions[0].Version)
-	fbMsg, err := f.store.GetMessage(context.Background(), fbResp.MessageID)
-	require.NoError(t, err)
-	assert.Equal(t, messages.TypeDecisionPrompt, fbMsg.Type)
+	cases := []struct {
+		name      string
+		payload   string
+		wantField string
+	}{
+		{
+			name:      "choices populated with msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","msg":"Pick one","choices":[{"id":"D-old","question":"Ship?","choices":["yes","no"]}]}`,
+			wantField: "choices",
+		},
+		{
+			name:      "choices populated without msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","choices":[{"id":"D-old","question":"Ship?","choices":["yes","no"]}]}`,
+			wantField: "choices",
+		},
+		{
+			name:      "choices empty array with msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","msg":"Pick one","choices":[]}`,
+			wantField: "choices",
+		},
+		{
+			name:      "choices empty array without msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","choices":[]}`,
+			wantField: "choices",
+		},
+		{
+			name:      "choices null with msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","msg":"Pick one","choices":null}`,
+			wantField: "choices",
+		},
+		{
+			name:      "choices null without msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","choices":null}`,
+			wantField: "choices",
+		},
+		{
+			name:      "choices_update true with msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","msg":"Update","choices_update":true}`,
+			wantField: "choices_update",
+		},
+		{
+			name:      "choices_update true without msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","choices_update":true}`,
+			wantField: "choices_update",
+		},
+		{
+			name:      "choices_update false with msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","msg":"Update","choices_update":false}`,
+			wantField: "choices_update",
+		},
+		{
+			name:      "choices_update false without msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","choices_update":false}`,
+			wantField: "choices_update",
+		},
+		{
+			name:      "choices_update null with msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","msg":"Update","choices_update":null}`,
+			wantField: "choices_update",
+		},
+		{
+			name:      "choices_update null without msg",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","choices_update":null}`,
+			wantField: "choices_update",
+		},
+		{
+			name:      "both decisions and choices",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","decisions":[{"question":"A?","choices":["y","n"]}],"choices":[{"question":"B?","choices":["y","n"]}]}`,
+			wantField: "choices",
+		},
+		{
+			name:      "choices and choices_update together",
+			payload:   `{"recipient":"user:` + f.bob.Email + `","msg":"Fallback","choices":[{"id":"D-leg","question":"Ship v2?","choices":["yes","no"]}],"choices_update":true}`,
+			wantField: "choices",
+		},
+	}
 
-	logged := takeLog()
-	assert.Contains(t, logged, "legacy choices request field used")
-	assert.Contains(t, logged, f.agent.ID)
-
-	// 3. Validation errors on fallback still report the primary decisions[i] root.
-	rrBadFallback := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","choices":[{"question":"No choices?","choices":[]}]}`))
-	require.Equal(t, http.StatusBadRequest, rrBadFallback.Code, rrBadFallback.Body.String())
-	assert.Equal(t, ErrCodeValidationError, errorCode(t, rrBadFallback))
-	assert.Contains(t, rrBadFallback.Body.String(), "decisions[0].choices")
-	_ = takeLog()
-
-	// 4. Sending both choices and decisions (even an empty decisions slice) is 400 invalid_request.
-	for name, payload := range map[string]string{
-		"both populated":               `{"recipient":"user:` + f.bob.Email + `","decisions":[{"question":"A?","choices":["y","n"]}],"choices":[{"question":"B?","choices":["y","n"]}]}`,
-		"empty decisions with choices": `{"recipient":"user:` + f.bob.Email + `","decisions":[],"choices":[{"question":"B?","choices":["y","n"]}]}`,
-	} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			before, lerr := f.store.ListMessages(context.Background(), store.MessageFilter{SenderID: f.agent.ID}, store.ListOptions{Limit: 20})
 			require.NoError(t, lerr)
-			rr := f.sendRawAsAgent(t, []byte(payload))
+
+			rr := f.sendRawAsAgent(t, []byte(tc.payload))
 			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-			assert.Equal(t, ErrCodeInvalidRequest, errorCode(t, rr))
+			assert.Equal(t, ErrCodeValidationError, errorCode(t, rr))
+			body := rr.Body.String()
+			assert.Contains(t, body, "decisions")
+			assert.Contains(t, body, "update your scion CLI")
+
+			var env struct {
+				Error struct {
+					Details map[string]interface{} `json:"details"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &env))
+			assert.Equal(t, tc.wantField, env.Error.Details["field"])
+
 			after, lerr := f.store.ListMessages(context.Background(), store.MessageFilter{SenderID: f.agent.ID}, store.ListOptions{Limit: 20})
 			require.NoError(t, lerr)
-			assert.Equal(t, before.TotalCount, after.TotalCount, "conflict stores nothing")
+			assert.Equal(t, before.TotalCount, after.TotalCount, "rejected request must store nothing")
 		})
 	}
-}
-
-type syncWriter struct {
-	mu *sync.Mutex
-	w  *bytes.Buffer
-}
-
-func (s *syncWriter) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.w.Write(p)
 }
 
 // ptone/scion#8224 (plan §5.2 & §12 item 3): clean break for legacy message

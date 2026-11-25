@@ -101,7 +101,7 @@ func (s *Server) prepareSecretRequestSend(w http.ResponseWriter, ctx context.Con
 			map[string]interface{}{"experiment": experiments.AgentSecrets})
 		return nil, false
 	}
-	if req.Decisions != nil || req.DecisionsUpdate || req.Choices != nil || req.ChoicesUpdate {
+	if req.Decisions != nil || req.DecisionsUpdate {
 		ValidationError(w, "cannot combine secret_requests with decisions in the same message",
 			map[string]interface{}{"field": "secret_requests"})
 		return nil, false
