@@ -1131,6 +1131,7 @@ func (s *Server) profileMadeByProjectGroups(
 // waiting-on-you classified prompts.
 type waitingOnYouDecisionSummary struct {
 	total             int
+	agents            int
 	projects          int
 	truncatedProjects bool
 	scopeSet          *decisionScopeSet
@@ -1176,11 +1177,17 @@ func (s *Server) waitingOnYouSummary(
 		return waitingOnYouDecisionSummary{}, err
 	}
 
+	agentsWithWaiting := make(map[string]bool)
 	projectsWithWaiting := make(map[string]bool)
 	var waiting []classifiedOpenPrompt
 	for _, p := range classified {
 		if p.onYou > 0 {
-			projectsWithWaiting[p.raw.ProjectID] = true
+			if p.raw.AskerAgentID != "" {
+				agentsWithWaiting[p.raw.AskerAgentID] = true
+			}
+			if p.raw.ProjectID != "" {
+				projectsWithWaiting[p.raw.ProjectID] = true
+			}
 			if maxPrompts > 0 {
 				waiting = append(waiting, p)
 			}
@@ -1201,6 +1208,7 @@ func (s *Server) waitingOnYouSummary(
 
 	return waitingOnYouDecisionSummary{
 		total:             counts.WaitingOnYou,
+		agents:            len(agentsWithWaiting),
 		projects:          len(projectsWithWaiting),
 		truncatedProjects: truncated,
 		scopeSet:          set,

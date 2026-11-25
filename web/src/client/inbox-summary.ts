@@ -16,17 +16,18 @@
 
 /**
  * InboxSummaryStore — client-side store for `GET /api/v1/users/me/inbox/summary`
- * (design §5.3).
+ * (design §6.5).
  *
  * - Lazily started when `web.inbox_dashboard` is enabled.
  * - Cross-tab coordination: leader election via Web Locks (`scion-inbox-summary`),
  *   broadcasting fetched summaries over `localStorage` (`scion:inbox-summary`).
  * - Debounces invalidation triggers (750 ms trailing / 4 s max-wait) so bursts
  *   of SSE events fold into a single fetch.
- * - Badge-only consumers fetch `previews=0`; while any tab has `/profile/inbox`
- *   mounted (tracked via `localStorage`), the leader fetches `previews=3`.
+ * - Always fetches `previews=0`; Inbox cards render summary-of-state prose from
+ *   `count`, `capped`, and `breakdown`.
  * - Safety poll: 5 min while SSE is healthy, 30 s while unhealthy.
- * - Schedules an expiry timer for the soonest approval `expiresAt`.
+ * - Schedules an expiry refresh from `min(category.nextExpiresAt)` across
+ *   expiring categories (`pending_secrets`, `agent_secrets`).
  */
 
 import { apiFetch } from './api.js';
@@ -42,7 +43,6 @@ export { INBOX_SUMMARY_CHANGED_EVENT };
 export const INBOX_SUMMARY_API = '/api/v1/users/me/inbox/summary';
 export const INBOX_LOCK_NAME = 'scion-inbox-summary';
 export const INBOX_SHARE_KEY = 'scion:inbox-summary';
-export const INBOX_MOUNT_KEY = 'scion:inbox-page-mounted';
 
 export const INBOX_DEBOUNCE_MS = 750;
 export const INBOX_MAX_WAIT_MS = 4000;
@@ -50,101 +50,21 @@ export const INBOX_POLL_HEALTHY_MS = 5 * 60 * 1000;
 export const INBOX_POLL_UNHEALTHY_MS = 30 * 1000;
 export const INBOX_FETCH_TIMEOUT_MS = 15_000;
 export const INBOX_LOCK_WAIT_MS = 10_000;
-export const INBOX_PAGE_PREVIEWS = 3;
-export const INBOX_CHAT_EXPANDED_PREVIEWS = 10;
 
 const MAX_EXPIRY_TIMER_MS = 60 * 60 * 1000; // 1 hour clamp
-const MOUNT_STALE_MS = 60 * 60 * 1000;
 
 export type InboxCategoryState = 'ok' | 'disabled' | 'unavailable' | 'error';
 
-export type InboxCategoryKey = 'decisions' | 'waiting' | 'reviews' | 'approvals' | 'chat';
+export type InboxCategoryKey = 'decisions' | 'waiting' | 'pending_secrets' | 'reviews' | 'chat';
 
-export type InboxChatFilter = 'all' | 'dms' | 'mentions';
-
-export interface InboxApprovalPreview {
-  id: string;
-  kind: string;
-  projectId: string;
-  projectName: string;
-  createdAt: string;
-  href: string;
-  key: string;
-  agentSlug: string;
-  injectionMode?: string;
-  replacesExisting: boolean;
-  allowProgeny: boolean;
-  expiresAt: string;
-}
-
-export interface InboxDecisionChoice {
-  id: string;
-  label: string;
-}
-
-export interface InboxDecisionInline {
-  decisionRowId: string;
-  choices: InboxDecisionChoice[];
-  allowsOther: boolean;
-}
-
-export interface InboxDecisionPreview {
-  id: string;
-  projectId: string;
-  projectName: string;
-  createdAt: string;
-  href: string;
-  promptMessageId: string;
-  conversationLabel: string;
-  askerAgentName: string;
-  question: string;
-  decisionCount: number;
-  answerMode: string;
-  canAnswer: boolean;
-  disabledReason?: string;
-  inline?: InboxDecisionInline;
-}
-
-export interface InboxChatPreview {
-  id: string;
-  kind: 'dm' | 'mention' | 'thread';
-  projectId: string;
-  projectName: string;
-  createdAt: string;
-  href: string;
-  conversationKey: string;
-  label: string;
-  lastMessageAt: string;
-}
-
-export interface InboxWaitingAgentPreview {
-  id: string;
-  projectId: string;
-  projectName: string;
-  createdAt: string;
-  href: string;
-  agentId: string;
-  agentName: string;
-  agentSlug: string;
-  question: string;
-  since: string;
-}
-
-export type InboxReviewKind = 'to_address' | 'requested';
-
-export interface InboxReviewPreview {
-  id: string;
-  kind: InboxReviewKind;
-  projectId: string;
-  projectName: string;
-  createdAt: string;
-  href: string;
-  artifactId: string;
-  title: string;
-  scopeRef: string;
-  requestedBy?: string;
-  notificationId?: string;
-}
+export type InboxBreakdownKey =
+  | 'agents'
+  | 'projects'
+  | 'toAddress'
+  | 'requested'
+  | 'unreadConversations'
+  | 'dms'
+  | 'mentions';
 
 export interface InboxCategory<TPreview = unknown> {
   state: InboxCategoryState;
@@ -155,7 +75,8 @@ export interface InboxCategory<TPreview = unknown> {
   errorCode?: string;
   previews: TPreview[];
   agentIds?: string[];
-  breakdown?: Record<string, number>;
+  breakdown?: Partial<Record<InboxBreakdownKey, number>> & Record<string, number>;
+  nextExpiresAt?: string;
 }
 
 export interface InboxSummaryResponse {
@@ -163,11 +84,12 @@ export interface InboxSummaryResponse {
   total: number;
   totalCapped: boolean;
   categories: {
-    decisions: InboxCategory<InboxDecisionPreview>;
-    waiting: InboxCategory<InboxWaitingAgentPreview>;
-    reviews: InboxCategory<InboxReviewPreview>;
-    approvals: InboxCategory<InboxApprovalPreview>;
-    chat: InboxCategory<InboxChatPreview>;
+    decisions: InboxCategory;
+    waiting: InboxCategory;
+    pending_secrets: InboxCategory;
+    reviews: InboxCategory;
+    chat: InboxCategory;
+    agent_secrets?: InboxCategory;
   };
 }
 
@@ -179,48 +101,8 @@ export interface InboxHintEvent {
 
 interface SharedInboxPayload {
   userId: string;
-  previews: number;
   fetchedAt: number;
   summary: InboxSummaryResponse;
-}
-
-interface MountMap {
-  [tabId: string]: number;
-}
-
-function createTabId(): string {
-  return `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function readMountMap(): MountMap {
-  try {
-    const raw = localStorage.getItem(INBOX_MOUNT_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const now = Date.now();
-    const out: MountMap = {};
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof v === 'number' && now - v < MOUNT_STALE_MS) {
-        out[k] = v;
-      }
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function writeMountMap(map: MountMap): void {
-  try {
-    if (Object.keys(map).length === 0) {
-      localStorage.removeItem(INBOX_MOUNT_KEY);
-    } else {
-      localStorage.setItem(INBOX_MOUNT_KEY, JSON.stringify(map));
-    }
-  } catch {
-    // Ignore storage quota/availability errors.
-  }
 }
 
 function readSharedPayload(userId: string): SharedInboxPayload | null {
@@ -232,7 +114,6 @@ function readSharedPayload(userId: string): SharedInboxPayload | null {
       !parsed ||
       parsed.userId !== userId ||
       typeof parsed.fetchedAt !== 'number' ||
-      typeof parsed.previews !== 'number' ||
       !parsed.summary
     ) {
       return null;
@@ -252,12 +133,9 @@ function writeSharedPayload(payload: SharedInboxPayload): void {
 }
 
 export class InboxSummaryStore {
-  private readonly tabId = createTabId();
   private started = false;
   private userId = '';
-  private pageMountCount = 0;
   private _summary: InboxSummaryResponse | null = null;
-  private _summaryPreviews = 0;
   private _loading = false;
   private _error: string | null = null;
   private _unavailable404 = false;
@@ -297,28 +175,14 @@ export class InboxSummaryStore {
     if (e.key === INBOX_SHARE_KEY && this.userId) {
       const shared = readSharedPayload(this.userId);
       if (shared) {
-        this.applySummary(shared.summary, shared.previews);
+        this.applySummary(shared.summary);
       }
-    } else if (
-      e.key === INBOX_MOUNT_KEY &&
-      this.hasAnyMountedPage() &&
-      this._summaryPreviews < INBOX_PAGE_PREVIEWS
-    ) {
-      this.requestRefresh({ immediate: true });
     }
   };
 
   private boundOnFeatureFlagsChanged = (): void => {
     if (!isInboxDashboardEnabled()) {
       this.stop();
-    }
-  };
-
-  private boundOnUnload = (): void => {
-    if (this.pageMountCount > 0) {
-      const map = readMountMap();
-      delete map[this.tabId];
-      writeMountMap(map);
     }
   };
 
@@ -370,12 +234,11 @@ export class InboxSummaryStore {
           this.expiryTimer = null;
         }
         this._summary = null;
-        this._summaryPreviews = 0;
         this._error = null;
         this._unavailable404 = false;
         const shared = readSharedPayload(this.userId);
         if (shared) {
-          this.applySummary(shared.summary, shared.previews);
+          this.applySummary(shared.summary);
         } else {
           this.emitChanged();
         }
@@ -397,7 +260,6 @@ export class InboxSummaryStore {
       window.addEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnTriggerEvent);
       window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
       window.addEventListener('storage', this.boundOnStorage);
-      window.addEventListener('beforeunload', this.boundOnUnload);
     }
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', this.boundOnVisibilityChange);
@@ -407,7 +269,7 @@ export class InboxSummaryStore {
     if (this.userId) {
       const shared = readSharedPayload(this.userId);
       if (shared) {
-        this.applySummary(shared.summary, shared.previews);
+        this.applySummary(shared.summary);
       }
     }
 
@@ -431,7 +293,6 @@ export class InboxSummaryStore {
       window.removeEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnTriggerEvent);
       window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
       window.removeEventListener('storage', this.boundOnStorage);
-      window.removeEventListener('beforeunload', this.boundOnUnload);
     }
     if (typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', this.boundOnVisibilityChange);
@@ -439,32 +300,16 @@ export class InboxSummaryStore {
   }
 
   /**
-   * Registers an active `/profile/inbox` page mount so the leader fetches
-   * previews (`previews=3`) instead of counts-only (`previews=0`).
-   * Returns a cleanup function to call on unmount.
+   * Ensures the store is started when `/profile/inbox` mounts and refreshes
+   * immediately if no summary is loaded yet. Returns a cleanup function.
    */
   mountPage(userId?: string): () => void {
-    this.pageMountCount += 1;
-    const map = readMountMap();
-    map[this.tabId] = Date.now();
-    writeMountMap(map);
-
+    const wasStarted = this.started;
     this.ensureStarted(userId);
-    if (!this._summary || this._summaryPreviews < INBOX_PAGE_PREVIEWS) {
+    if (wasStarted && !this._summary && !this.inFlight) {
       this.requestRefresh({ immediate: true });
     }
-
-    let cleaned = false;
-    return () => {
-      if (cleaned) return;
-      cleaned = true;
-      this.pageMountCount = Math.max(0, this.pageMountCount - 1);
-      if (this.pageMountCount === 0) {
-        const current = readMountMap();
-        delete current[this.tabId];
-        writeMountMap(current);
-      }
-    };
+    return () => {};
   }
 
   /**
@@ -497,215 +342,18 @@ export class InboxSummaryStore {
     }
   }
 
-  /**
-   * Optimistically removes an approval preview and decrements the approvals
-   * count/total immediately after an inline approve/reject, then schedules a
-   * server refetch to reconcile.
-   */
-  optimisticRemoveApproval(id: string): void {
-    if (!this._summary) {
-      this.requestRefresh({ immediate: true });
-      return;
-    }
-    const approvals = this._summary.categories.approvals;
-    if (approvals.state !== 'ok') {
-      this.requestRefresh({ immediate: true });
-      return;
-    }
-    const nextPreviews = approvals.previews.filter((p) => p.id !== id);
-    const nextCount = Math.max(0, approvals.count - 1);
-    const delta = approvals.count - nextCount;
-    const nextSummary: InboxSummaryResponse = {
-      ...this._summary,
-      total: Math.max(0, this._summary.total - delta),
-      categories: {
-        ...this._summary.categories,
-        approvals: {
-          ...approvals,
-          count: nextCount,
-          previews: nextPreviews,
-        },
-      },
-    };
-    this.applySummary(nextSummary, this._summaryPreviews);
-    if (this.userId) {
-      writeSharedPayload({
-        userId: this.userId,
-        previews: this._summaryPreviews,
-        fetchedAt: Date.now(),
-        summary: nextSummary,
-      });
-    }
-    this.requestRefresh({ immediate: true, force: true });
-  }
-
-  /**
-   * Optimistically removes a decision preview and decrements the decisions
-   * count/total immediately after an inline answer, then schedules a server
-   * refetch to reconcile. Returns the optimistic decisions count (or null if
-   * unavailable) so callers can sync `/profile/decisions` badges immediately.
-   */
-  optimisticRemoveDecision(id: string): number | null {
-    if (!this._summary) {
-      this.requestRefresh({ immediate: true });
-      return null;
-    }
-    const decisions = this._summary.categories.decisions;
-    if (decisions.state !== 'ok') {
-      this.requestRefresh({ immediate: true });
-      return null;
-    }
-    const nextPreviews = decisions.previews.filter((p) => p.id !== id);
-    const nextCount = Math.max(0, decisions.count - 1);
-    const delta = decisions.count - nextCount;
-    const nextSummary: InboxSummaryResponse = {
-      ...this._summary,
-      total: Math.max(0, this._summary.total - delta),
-      categories: {
-        ...this._summary.categories,
-        decisions: {
-          ...decisions,
-          count: nextCount,
-          previews: nextPreviews,
-        },
-      },
-    };
-    this.applySummary(nextSummary, this._summaryPreviews);
-    if (this.userId) {
-      writeSharedPayload({
-        userId: this.userId,
-        previews: this._summaryPreviews,
-        fetchedAt: Date.now(),
-        summary: nextSummary,
-      });
-    }
-    this.requestRefresh({ immediate: true, force: true });
-    return nextCount;
-  }
-
-  /**
-   * Optimistically removes a review preview and decrements the reviews
-   * count/breakdown/total before the ack POST settles. Returns a targeted
-   * rollback function to restore the removed row if the request fails or is
-   * aborted. Callers trigger `requestRefresh` after the POST succeeds.
-   */
-  optimisticRemoveReview(id: string): (() => void) | null {
-    if (!this._summary) return null;
-    const reviews = this._summary.categories.reviews;
-    if (reviews.state !== 'ok') return null;
-
-    const prevIndex = reviews.previews.findIndex((p) => p.id === id);
-    if (prevIndex === -1) return null;
-    const removed = reviews.previews[prevIndex];
-
-    const nextPreviews = reviews.previews.filter((p) => p.id !== id);
-    const nextCount = Math.max(0, reviews.count - 1);
-    const delta = reviews.count - nextCount;
-
-    const breakdownKey = removed.kind === 'requested' ? 'requested' : 'toAddress';
-    const nextBreakdown = reviews.breakdown ? { ...reviews.breakdown } : undefined;
-    let breakdownDelta = 0;
-    if (nextBreakdown && typeof nextBreakdown[breakdownKey] === 'number') {
-      const prevVal = nextBreakdown[breakdownKey];
-      const nextVal = Math.max(0, prevVal - 1);
-      breakdownDelta = prevVal - nextVal;
-      nextBreakdown[breakdownKey] = nextVal;
-    }
-
-    const nextSummary: InboxSummaryResponse = {
-      ...this._summary,
-      total: Math.max(0, this._summary.total - delta),
-      categories: {
-        ...this._summary.categories,
-        reviews: {
-          ...reviews,
-          count: nextCount,
-          previews: nextPreviews,
-          ...(nextBreakdown ? { breakdown: nextBreakdown } : {}),
-        },
-      },
-    };
-    this.applySummary(nextSummary, this._summaryPreviews);
-    if (this.userId) {
-      writeSharedPayload({
-        userId: this.userId,
-        previews: this._summaryPreviews,
-        fetchedAt: Date.now(),
-        summary: nextSummary,
-      });
-    }
-
-    let rolledBack = false;
-    return () => {
-      if (rolledBack) return;
-      rolledBack = true;
-      if (!this._summary) return;
-      const currentReviews = this._summary.categories.reviews;
-      if (currentReviews.state !== 'ok') return;
-      if (currentReviews.previews.some((p) => p.id === removed.id)) return;
-
-      const restoredPreviews = [...currentReviews.previews];
-      restoredPreviews.splice(Math.min(prevIndex, restoredPreviews.length), 0, removed);
-
-      const restoredBreakdown = currentReviews.breakdown
-        ? { ...currentReviews.breakdown }
-        : undefined;
-      if (
-        restoredBreakdown &&
-        breakdownDelta > 0 &&
-        typeof restoredBreakdown[breakdownKey] === 'number'
-      ) {
-        restoredBreakdown[breakdownKey] += breakdownDelta;
-      }
-
-      const restoredSummary: InboxSummaryResponse = {
-        ...this._summary,
-        total: this._summary.total + delta,
-        categories: {
-          ...this._summary.categories,
-          reviews: {
-            ...currentReviews,
-            count: currentReviews.count + delta,
-            previews: restoredPreviews,
-            ...(restoredBreakdown ? { breakdown: restoredBreakdown } : {}),
-          },
-        },
-      };
-      this.applySummary(restoredSummary, this._summaryPreviews);
-      if (this.userId) {
-        writeSharedPayload({
-          userId: this.userId,
-          previews: this._summaryPreviews,
-          fetchedAt: Date.now(),
-          summary: restoredSummary,
-        });
-      }
-    };
-  }
-
   /** @internal test-only reset. */
   resetForTests(): void {
     this.stop();
     resetInboxSummaryBadgeCacheForTests();
     this.userId = '';
-    this.pageMountCount = 0;
     this._summary = null;
-    this._summaryPreviews = 0;
     this._loading = false;
     this._error = null;
     this._unavailable404 = false;
     this.inFlight = false;
     this.pendingRefetch = false;
     this.pendingEventAt = 0;
-  }
-
-  private hasAnyMountedPage(): boolean {
-    if (this.pageMountCount > 0) return true;
-    return Object.keys(readMountMap()).length > 0;
-  }
-
-  private desiredPreviews(): number {
-    return this.hasAnyMountedPage() ? INBOX_PAGE_PREVIEWS : 0;
   }
 
   private clearDebounceTimers(): void {
@@ -755,12 +403,12 @@ export class InboxSummaryStore {
       clearTimeout(this.expiryTimer);
       this.expiryTimer = null;
     }
-    const approvals = summary.categories?.approvals;
-    if (!approvals || approvals.state !== 'ok' || approvals.previews.length === 0) return;
+    const candidates = [summary.categories?.pending_secrets, summary.categories?.agent_secrets];
 
     let soonestMs = Number.POSITIVE_INFINITY;
-    for (const p of approvals.previews) {
-      const ts = Date.parse(p.expiresAt);
+    for (const cat of candidates) {
+      if (!cat || cat.state !== 'ok' || !cat.nextExpiresAt) continue;
+      const ts = Date.parse(cat.nextExpiresAt);
       if (!Number.isNaN(ts) && ts < soonestMs) {
         soonestMs = ts;
       }
@@ -774,9 +422,8 @@ export class InboxSummaryStore {
     }, delay);
   }
 
-  private applySummary(summary: InboxSummaryResponse, previews: number): void {
+  private applySummary(summary: InboxSummaryResponse): void {
     this._summary = summary;
-    this._summaryPreviews = previews;
     this._error = null;
     this._unavailable404 = false;
     this.scheduleExpiryTimer(summary);
@@ -807,7 +454,6 @@ export class InboxSummaryStore {
     if (!isPoll) {
       this.pendingEventAt = 0;
     }
-    const previews = this.desiredPreviews();
     const isFirstLoad = this._summary === null;
     if (isFirstLoad) {
       this._loading = true;
@@ -820,18 +466,18 @@ export class InboxSummaryStore {
         const uid = this.userId || stateManager.getCurrentUserId() || '';
         if (uid) this.userId = uid;
 
-        // If another tab already fetched a fresh summary with enough previews,
-        // adopt it instead of issuing a duplicate request:
+        // If another tab already fetched a fresh summary, adopt it instead of
+        // issuing a duplicate request:
         // - event-triggered refreshes adopt payloads fetched at/after the event;
         // - safety polls adopt payloads younger than the active poll interval.
         if (!force && uid && (triggeredAt > 0 || isPoll)) {
           const shared = readSharedPayload(uid);
-          if (shared && shared.previews >= previews) {
+          if (shared) {
             const eventFresh = triggeredAt > 0 && shared.fetchedAt >= triggeredAt;
             const age = Date.now() - shared.fetchedAt;
             const pollFresh = isPoll && age >= 0 && age < this.pollIntervalMs();
             if (eventFresh || pollFresh) {
-              this.applySummary(shared.summary, shared.previews);
+              this.applySummary(shared.summary);
               return;
             }
           }
@@ -841,7 +487,7 @@ export class InboxSummaryStore {
         const timeout = setTimeout(() => controller.abort(), INBOX_FETCH_TIMEOUT_MS);
         const fetchedAt = Date.now();
         try {
-          const res = await apiFetch(`${INBOX_SUMMARY_API}?previews=${previews}`, {
+          const res = await apiFetch(`${INBOX_SUMMARY_API}?previews=0`, {
             signal: controller.signal,
           });
           if (!this.started || (uid && this.userId && this.userId !== uid)) return;
@@ -859,9 +505,9 @@ export class InboxSummaryStore {
           }
           const data = (await res.json()) as InboxSummaryResponse;
           if (!this.started || (uid && this.userId && this.userId !== uid)) return;
-          this.applySummary(data, previews);
+          this.applySummary(data);
           if (uid) {
-            writeSharedPayload({ userId: uid, previews, fetchedAt, summary: data });
+            writeSharedPayload({ userId: uid, fetchedAt, summary: data });
           }
         } catch (err) {
           if (!this.started || (uid && this.userId && this.userId !== uid)) return;

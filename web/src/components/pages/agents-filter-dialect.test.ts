@@ -83,6 +83,82 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(el.shadowRoot?.querySelector('sl-input[placeholder*="label"]')).not.toBeNull();
   });
 
+  it('hydrates ?q=activity%3Awaiting_for_input in both dialect-on and dialect-off modes (ptone/scion#9300)', async () => {
+    const waitingAgent: Agent = {
+      id: 'a-wait',
+      name: 'Waiting Bot',
+      slug: 'waiting-bot',
+      projectId: 'p1',
+      template: 'developer',
+      phase: 'running',
+      activity: 'waiting_for_input',
+    };
+    const thinkingAgent: Agent = {
+      id: 'a-think',
+      name: 'Thinking Bot',
+      slug: 'thinking-bot',
+      projectId: 'p1',
+      template: 'developer',
+      phase: 'running',
+      activity: 'thinking',
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        fetchUrls.push(url);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [waitingAgent, thinkingAgent],
+              complete: true,
+              totalCount: 2,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      })
+    );
+
+    // 1. Dialect ON: hydrates <scion-filter-box> and sends q=activity%3Awaiting_for_input.
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    window.history.replaceState(null, '', '/agents?q=activity%3Awaiting_for_input');
+    const elOn = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(elOn);
+    await new Promise((r) => setTimeout(r, 15));
+    await elOn.updateComplete;
+
+    const box = elOn.shadowRoot?.querySelector('scion-filter-box');
+    expect(box?.value).toBe('activity:waiting_for_input');
+    expect(fetchUrls.some((u) => u.includes('q=activity%3Awaiting_for_input'))).toBe(true);
+    expect(elOn.shadowRoot?.textContent).toContain('Waiting Bot');
+    expect(elOn.shadowRoot?.textContent).not.toContain('Thinking Bot');
+    elOn.remove();
+
+    // 2. Dialect OFF: hydrates activityFilter, renders removable tag, and filters client-side.
+    fetchUrls = [];
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
+    window.history.replaceState(null, '', '/agents?q=activity%3Awaiting_for_input');
+    const elOff = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(elOff);
+    await new Promise((r) => setTimeout(r, 15));
+    await elOff.updateComplete;
+
+    const tag = elOff.shadowRoot?.querySelector('[data-activity-filter-tag]');
+    expect(tag?.textContent?.trim()).toBe('activity:waiting_for_input');
+    expect(elOff.shadowRoot?.textContent).toContain('Waiting Bot');
+    expect(elOff.shadowRoot?.textContent).not.toContain('Thinking Bot');
+
+    // Removing the tag clears the filter and strips ?q= from the URL.
+    tag?.dispatchEvent(new CustomEvent('sl-remove', { bubbles: true }));
+    await elOff.updateComplete;
+    expect(new URLSearchParams(window.location.search).get('q')).toBeNull();
+    expect(elOff.shadowRoot?.querySelector('[data-activity-filter-tag]')).toBeNull();
+    expect(elOff.shadowRoot?.textContent).toContain('Thinking Bot');
+    elOff.remove();
+  });
+
   it('migrates localStorage phase once to ?q= and renders <scion-filter-box> when on', async () => {
     setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     localStorage.setItem('scion-filter-agents-phase', 'running');

@@ -413,7 +413,7 @@ func TestUserMeInboxSummary_DecisionsForcedErrorIsolation(t *testing.T) {
 	setInboxAndDecisionsExperiments(t, f.srv, true, true)
 
 	// Seed one open decision and one live pending secret for f.bob so we can
-	// verify approvals remains intact and decisions is excluded from total when
+	// verify pending_secrets remains intact and decisions is excluded from total when
 	// ListOpenPrompts fails.
 	f.topicPrompt(t, oneDecision, false)
 	now := time.Now().UTC()
@@ -436,14 +436,14 @@ func TestUserMeInboxSummary_DecisionsForcedErrorIsolation(t *testing.T) {
 	require.NoError(t, err)
 
 	// 1. Internal store error on ListOpenPrompts -> HTTP 200, decisions error("internal"),
-	// approvals ok(1), total == 1.
+	// pending_secrets ok(1), total == 1.
 	faultStore.setErr(errors.New("forced ListOpenPrompts failure"))
 	fault.Arm()
 	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeInboxSummaryPath, nil)
 	resp := decodeInboxSummary(t, rec)
 	assert.Equal(t, 1, resp.Total, "errored decisions category must be excluded from total")
-	assert.Equal(t, InboxStateOK, resp.Categories[InboxCategoryApprovals].State)
-	assert.Equal(t, 1, resp.Categories[InboxCategoryApprovals].Count)
+	assert.Equal(t, InboxStateOK, resp.Categories[InboxCategoryPendingSecrets].State)
+	assert.Equal(t, 1, resp.Categories[InboxCategoryPendingSecrets].Count)
 	decCat := resp.Categories[InboxCategoryDecisions]
 	assert.Equal(t, InboxStateError, decCat.State)
 	assert.Equal(t, 0, decCat.Count)
@@ -452,12 +452,12 @@ func TestUserMeInboxSummary_DecisionsForcedErrorIsolation(t *testing.T) {
 	assert.Equal(t, "/profile/decisions?tab=pending", decCat.Href)
 
 	// 2. Timeout error on ListOpenPrompts -> HTTP 200, decisions error("timeout"),
-	// approvals still ok(1), total == 1.
+	// pending_secrets still ok(1), total == 1.
 	faultStore.setErr(context.DeadlineExceeded)
 	recTO := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeInboxSummaryPath, nil)
 	respTO := decodeInboxSummary(t, recTO)
 	assert.Equal(t, 1, respTO.Total)
-	assert.Equal(t, InboxStateOK, respTO.Categories[InboxCategoryApprovals].State)
+	assert.Equal(t, InboxStateOK, respTO.Categories[InboxCategoryPendingSecrets].State)
 	assert.Equal(t, InboxStateError, respTO.Categories[InboxCategoryDecisions].State)
 	assert.Equal(t, 0, respTO.Categories[InboxCategoryDecisions].Count)
 	assert.Equal(t, InboxErrorTimeout, respTO.Categories[InboxCategoryDecisions].ErrorCode)

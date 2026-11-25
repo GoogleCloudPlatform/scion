@@ -134,7 +134,7 @@ describe('inbox-tabs mixed-version Decisions visibility', () => {
                     href: '/artifacts',
                     previews: [],
                   },
-                  approvals: {
+                  pending_secrets: {
                     state: 'ok',
                     count: 0,
                     capped: false,

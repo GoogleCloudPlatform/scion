@@ -219,7 +219,7 @@ describe('StateManager own chat subject', () => {
     sm.addEventListener('inbox-changed', inboxChanged);
     sm.addEventListener('notification-created', created);
 
-    const data = { category: 'approvals' };
+    const data = { category: 'pending_secrets' };
     emit(sm, 'user.b.inbox', data);
 
     expect(inboxChanged).toHaveBeenCalledTimes(1);

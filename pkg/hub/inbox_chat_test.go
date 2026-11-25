@@ -383,7 +383,7 @@ func TestUserMeInboxSummary_ChatTokenScoping(t *testing.T) {
 	tokHub := f.mint(t, f.member, hubBoundary(), "inbox:read", "project:read", "agent:read")
 	hubUnread := h.decodeUnreadCount(f.call(t, tokHub, http.MethodGet, "/api/v1/chat/unread-count", nil))
 	hubSummary := h.decodeSummary(f.call(t, tokHub, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=10", nil))
-	assert.Equal(t, InboxStateUnavailable, hubSummary.Categories[InboxCategoryApprovals].State)
+	assert.Equal(t, InboxStateUnavailable, hubSummary.Categories[InboxCategoryPendingSecrets].State)
 	assert.Equal(t, InboxStateOK, hubSummary.Categories[InboxCategoryChat].State)
 	assert.Equal(t, hubUnread.Conversations, hubSummary.Categories[InboxCategoryChat].Count)
 	assert.Equal(t, 5, hubSummary.Categories[InboxCategoryChat].Count)
@@ -467,7 +467,7 @@ func TestUserMeInboxSummary_ChatDisabledAndErrorStates(t *testing.T) {
 	assert.False(t, resp.Categories[InboxCategoryChat].CountsTowardTotal)
 	assert.Equal(t, InboxErrorInternal, resp.Categories[InboxCategoryChat].ErrorCode)
 	assert.Equal(t, 0, resp.Categories[InboxCategoryChat].Count)
-	assert.Equal(t, InboxStateOK, resp.Categories[InboxCategoryApprovals].State)
+	assert.Equal(t, InboxStateOK, resp.Categories[InboxCategoryPendingSecrets].State)
 
 	// 4. UnreadMentionKeys timeout -> state:"error", errorCode:"timeout", HTTP 200.
 	faultWCS.mentionErr = context.DeadlineExceeded

@@ -137,11 +137,11 @@ func TestUserService_InboxSummary_DecodeAndRawPreserved(t *testing.T) {
         }
       ]
     },
-    "approvals": {
+    "pending_secrets": {
       "state": "unavailable",
       "count": 0,
       "capped": false,
-      "countsTowardTotal": true,
+      "countsTowardTotal": false,
       "href": "/profile/secrets",
       "previews": []
     },
@@ -194,8 +194,8 @@ func TestUserService_InboxSummary_DecodeAndRawPreserved(t *testing.T) {
 	wait := got.Categories[InboxCategoryWaiting]
 	assert.Equal(t, []string{"a1"}, wait.AgentIDs)
 
-	app := got.Categories[InboxCategoryApprovals]
-	assert.Equal(t, InboxStateUnavailable, app.State)
+	pending := got.Categories[InboxCategoryPendingSecrets]
+	assert.Equal(t, InboxStateUnavailable, pending.State)
 
 	rev := got.Categories[InboxCategoryReviews]
 	assert.Equal(t, InboxStateError, rev.State)
