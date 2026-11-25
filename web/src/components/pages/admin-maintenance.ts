@@ -39,11 +39,13 @@ import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
 import {
   LAST_UPDATE_LABELS,
+  formatUtcInstant,
   isOlderClass,
   renderInstallerUnsupported,
   rollbackTarget,
 } from './admin-maintenance-update-card.js';
 import type {
+  AutoUpdateStatus,
   LastUpdate,
   PendingUpdate,
   ViewRunDetail,
@@ -2453,6 +2455,11 @@ export class ScionPageAdminMaintenance extends LitElement {
         .reconnectError=${this.updateReconnectError}
         ?busy=${busy}
         @reload-status=${() => this.fetchUpdateStatus()}
+        @auto-update-changed=${(e: CustomEvent<AutoUpdateStatus>) => {
+          if (this.updateStatus) {
+            this.updateStatus = { ...this.updateStatus, autoUpdate: e.detail };
+          }
+        }}
         @view-run=${(e: CustomEvent<ViewRunDetail>) =>
           void this.viewRunDetail({
             id: e.detail.runId,
@@ -2636,6 +2643,8 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
 
     const update = this.updateAvailable.update;
+    const au = this.updateStatus?.autoUpdate;
+    const nextRunAt = au?.active && au.nextRunAt ? au.nextRunAt : null;
 
     return html`
       <div class="update-available-banner">
@@ -2643,6 +2652,12 @@ export class ScionPageAdminMaintenance extends LitElement {
         <span class="banner-text">
           <strong>Update available: ${update.version}</strong>
           ${update.channel ? html` (${update.channel} channel)` : nothing}
+          ${nextRunAt
+            ? html` &middot;
+                <span class="banner-auto-update" title=${formatUtcInstant(nextRunAt)}
+                  >${`Will install automatically at ${formatInstantWithZone(nextRunAt, 'datetime')}`}</span
+                >`
+            : nothing}
         </span>
         <div class="banner-actions">
           <sl-button

@@ -121,6 +121,12 @@ export interface AutoUpdateStatus {
     | 'config_locked'
     | (string & {});
   windowStartHourUtc: number;
+  nextRunAt?: string | null;
+  lastCheckAt?: string;
+  lastRunId?: string;
+  lastTarget?: string;
+  lastOutcome?: string;
+  suppressedTag?: string;
 }
 
 /**
@@ -206,6 +212,62 @@ export const LAST_UPDATE_LABELS: Record<string, string> = {
   verified: 'verified',
   failed: 'failed',
   rolled_back: 'rolled back',
+};
+
+const UTC_MONTHS_SHORT = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+/** Formats an ISO instant as a compact UTC timestamp for tooltips (e.g. "Nov 25, 2026, 04:17 UTC"). */
+export function formatUtcInstant(iso: string | undefined | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const mon = UTC_MONTHS_SHORT[d.getUTCMonth()];
+  const day = d.getUTCDate();
+  const year = d.getUTCFullYear();
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${mon} ${day}, ${year}, ${hh}:${mm} UTC`;
+}
+
+/** Daily UTC window hours 0..23 for the auto-update hour picker. */
+const AUTO_UPDATE_HOURS = Array.from({ length: 24 }, (_, h) => h);
+
+function formatUtcHour(hour: number): string {
+  return `${String(hour).padStart(2, '0')}:00`;
+}
+
+const AUTO_UPDATE_RUN_OUTCOMES = new Set(['started', 'verified', 'failed', 'rolled_back']);
+
+/** Whether an auto-update outcome corresponds to an actual update-binary run. */
+export function isAutoUpdateRunOutcome(outcome: string | undefined): boolean {
+  return !!outcome && AUTO_UPDATE_RUN_OUTCOMES.has(outcome);
+}
+
+export const AUTO_UPDATE_OUTCOME_LABELS: Record<string, string> = {
+  started: 'started',
+  verified: 'verified',
+  failed: 'failed',
+  rolled_back: 'rolled back',
+  no_update: 'no update available',
+  'skipped:maintenance_mode': 'skipped (maintenance mode)',
+  'skipped:check_failed': 'skipped (release check failed)',
+  'skipped:suppressed': 'skipped (suppressed after failure)',
+  'skipped:in_flight': 'skipped (update already in progress)',
+  'skipped:refused': 'skipped (update refused)',
+  'skipped:error': 'skipped (error)',
 };
 
 /** Older than the running version: the hub asks for a typed confirmation. */
@@ -423,11 +485,18 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
   @state()
   private autoUpdatePendingChecked: boolean | null = null;
 
+  /** Optimistic hour selection while PUT /auto-update is in flight. */
+  @state()
+  private autoUpdatePendingHour: number | null = null;
+
   @state()
   private autoUpdateSaving = false;
 
   @state()
   private autoUpdateError: string | null = null;
+
+  /** Keeps autoUpdateError across the single status reload triggered by a 409 conflict. */
+  private preserveAutoUpdateErrorOnNextStatus = false;
 
   /**
    * The panel shown: the toggle's pick when a maintenance repo is
@@ -610,12 +679,48 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
       margin-top: 0.75rem;
     }
 
+    .auto-update-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.375rem;
+      font-size: 0.8125rem;
+    }
+
+    .auto-update-hour-select {
+      width: 6.25rem;
+    }
+
+    .auto-update-hour-select::part(form-control-label) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .auto-update-note,
-    .auto-update-hint {
+    .auto-update-hint,
+    .auto-update-status {
       margin-top: 0.25rem;
       margin-left: 1.5rem;
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
+    }
+
+    .auto-update-status a {
+      margin-left: 0.25rem;
+    }
+
+    .auto-update-suppressed {
+      margin-top: 0.25rem;
+      margin-left: 1.5rem;
+      font-size: 0.75rem;
+      color: var(--sl-color-warning-700, #a16207);
     }
 
     .update-blocked {
@@ -679,6 +784,11 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     super.willUpdate(changed);
     if (changed.has('status')) {
       this.autoUpdateOverride = null;
+      if (this.preserveAutoUpdateErrorOnNextStatus) {
+        this.preserveAutoUpdateErrorOnNextStatus = false;
+      } else {
+        this.autoUpdateError = null;
+      }
       this.maybeLoadReleases();
       // An upstream check is relative to the running commit.
       const commit = this.status?.current.commit ?? null;
@@ -888,23 +998,22 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     return null;
   }
 
-  private async onAutoUpdateToggle(e: Event): Promise<void> {
-    const au = this.currentAutoUpdate;
-    if (!au || this.autoUpdateSaving || this.autoUpdateDisabledReason()) return;
-    const checkbox = e.target as HTMLElement & { checked: boolean };
-    const nextEnabled = Boolean(checkbox.checked);
-    const prevEnabled = au.enabled;
+  private async saveAutoUpdate(
+    body: { enabled: boolean; windowStartHourUtc?: number },
+    onRevert: () => void
+  ): Promise<void> {
     this.autoUpdateSaving = true;
     this.autoUpdateError = null;
-    this.autoUpdatePendingChecked = nextEnabled;
+    this.preserveAutoUpdateErrorOnNextStatus = false;
     try {
       const res = await apiFetch(AUTO_UPDATE_PATH, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: nextEnabled }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         if (res.status === 409) {
+          this.preserveAutoUpdateErrorOnNextStatus = true;
           this.dispatchEvent(new CustomEvent('reload-status', { bubbles: true, composed: true }));
         }
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
@@ -912,14 +1021,49 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
       const updated = (await res.json()) as AutoUpdateStatus;
       this.autoUpdateOverride = updated;
       this.autoUpdatePendingChecked = null;
+      this.autoUpdatePendingHour = null;
+      this.dispatchEvent(
+        new CustomEvent<AutoUpdateStatus>('auto-update-changed', {
+          detail: updated,
+          bubbles: true,
+          composed: true,
+        })
+      );
     } catch (err) {
       this.autoUpdatePendingChecked = null;
-      checkbox.checked = prevEnabled;
+      this.autoUpdatePendingHour = null;
+      onRevert();
       this.autoUpdateError =
         err instanceof Error ? err.message : 'Failed to save automatic update setting';
     } finally {
       this.autoUpdateSaving = false;
     }
+  }
+
+  private async onAutoUpdateToggle(e: Event): Promise<void> {
+    const au = this.currentAutoUpdate;
+    if (!au || this.autoUpdateSaving || this.autoUpdateDisabledReason()) return;
+    const checkbox = e.target as HTMLElement & { checked: boolean };
+    const nextEnabled = Boolean(checkbox.checked);
+    const prevEnabled = au.enabled;
+    this.autoUpdatePendingChecked = nextEnabled;
+    await this.saveAutoUpdate({ enabled: nextEnabled }, () => {
+      checkbox.checked = prevEnabled;
+    });
+  }
+
+  private async onAutoUpdateHourChange(e: Event): Promise<void> {
+    const au = this.currentAutoUpdate;
+    if (!au || this.autoUpdateSaving || this.autoUpdateDisabledReason()) return;
+    const select = e.target as HTMLElement & { value: string };
+    const nextHour = Number.parseInt(select.value, 10);
+    if (!Number.isInteger(nextHour) || nextHour < 0 || nextHour > 23) return;
+    const prevHour = au.windowStartHourUtc;
+    if (nextHour === prevHour) return;
+    this.autoUpdatePendingHour = nextHour;
+    await this.saveAutoUpdate({ enabled: au.enabled, windowStartHourUtc: nextHour }, () => {
+      select.value = String(prevHour);
+    });
   }
 
   private onUpdateClick(): void {
@@ -1046,7 +1190,11 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
             ? html`
                 <div class="release-field">
                   <span class="release-label">Pin:</span>
-                  <span class="pin-state">${pinLabel(st.pin)}</span>
+                  <span class="pin-state"
+                    >${pinLabel(st.pin)}${this.currentAutoUpdate?.active
+                      ? html` &middot; updates automatically daily`
+                      : nothing}</span
+                  >
                 </div>
               `
             : nothing}
@@ -1223,28 +1371,104 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     if (!au) return nothing;
     const disabledReason = this.autoUpdateDisabledReason();
     const checked = this.autoUpdatePendingChecked ?? au.enabled;
+    const selectedHour = this.autoUpdatePendingHour ?? au.windowStartHourUtc;
     const disabled = this.autoUpdateSaving || !!disabledReason;
+    const nextRunAt = au.active && au.nextRunAt ? au.nextRunAt : null;
+    const hasOutcome = !!au.lastOutcome;
+    const isRunOutcome = isAutoUpdateRunOutcome(au.lastOutcome);
+    const outcomeLabel = au.lastOutcome
+      ? (AUTO_UPDATE_OUTCOME_LABELS[au.lastOutcome] ?? au.lastOutcome)
+      : '';
     return html`
       <div class="auto-update-control">
-        <sl-checkbox
-          class="auto-update-checkbox"
-          size="small"
-          ?checked=${checked}
-          .checked=${checked}
-          ?disabled=${disabled}
-          @sl-change=${(e: Event) => void this.onAutoUpdateToggle(e)}
-        >
-          Update automatically every day
-        </sl-checkbox>
+        <div class="auto-update-row">
+          <sl-checkbox
+            class="auto-update-checkbox"
+            size="small"
+            ?checked=${checked}
+            .checked=${checked}
+            ?disabled=${disabled}
+            @sl-change=${(e: Event) => void this.onAutoUpdateToggle(e)}
+          >
+            Update automatically every day
+          </sl-checkbox>
+          <span class="auto-update-at">at</span>
+          <sl-select
+            class="auto-update-hour-select"
+            label="Daily update window start hour (UTC)"
+            size="small"
+            hoist
+            .value=${String(selectedHour)}
+            ?disabled=${disabled}
+            @sl-change=${(e: Event) => void this.onAutoUpdateHourChange(e)}
+          >
+            ${AUTO_UPDATE_HOURS.map(
+              (h) => html`<sl-option value=${String(h)}>${formatUtcHour(h)}</sl-option>`
+            )}
+          </sl-select>
+          <span class="auto-update-utc">UTC</span>
+        </div>
         ${disabledReason
           ? html`<div class="auto-update-note">${disabledReason}</div>`
           : html`<div class="auto-update-hint">
               Installs the newest ${this.status?.channel.effective} release once a day. The hub
               restarts to apply it.
             </div>`}
+        ${nextRunAt || hasOutcome
+          ? html`
+              <div class="auto-update-status">
+                ${nextRunAt
+                  ? html`<span class="auto-update-next" title=${formatUtcInstant(nextRunAt)}
+                      >Next check: ${formatInstantWithZone(nextRunAt, 'datetime')}</span
+                    >`
+                  : nothing}
+                ${nextRunAt && hasOutcome ? html` &middot; ` : nothing}
+                ${hasOutcome
+                  ? html`<span class="auto-update-last"
+                      >Last automatic update:
+                      ${isRunOutcome && au.lastTarget
+                        ? html`${au.lastTarget} &mdash; `
+                        : nothing}${outcomeLabel}${isRunOutcome && au.lastRunId
+                        ? html`<a
+                            href="#"
+                            class="auto-update-last-run"
+                            @click=${(e: Event) => {
+                              e.preventDefault();
+                              this.dispatchEvent(
+                                new CustomEvent<ViewRunDetail>('view-run', {
+                                  detail: {
+                                    runId: au.lastRunId!,
+                                    operationKey: 'update-binary',
+                                  },
+                                  bubbles: true,
+                                  composed: true,
+                                })
+                              );
+                            }}
+                            >View run</a
+                          >`
+                        : nothing}</span
+                    >`
+                  : nothing}
+              </div>
+            `
+          : nothing}
+        ${au.suppressedTag
+          ? html`<div class="auto-update-suppressed">
+              Skipped ${au.suppressedTag} after a failed update; waiting for a newer release.
+            </div>`
+          : nothing}
         ${this.autoUpdateError
           ? html`
-              <sl-alert variant="danger" open class="auto-update-error">
+              <sl-alert
+                variant="danger"
+                open
+                closable
+                class="auto-update-error"
+                @sl-after-hide=${() => {
+                  this.autoUpdateError = null;
+                }}
+              >
                 <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
                 Could not save automatic update setting: ${this.autoUpdateError}
               </sl-alert>
