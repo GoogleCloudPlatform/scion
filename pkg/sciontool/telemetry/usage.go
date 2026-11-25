@@ -1068,10 +1068,11 @@ func (d *UsageDeriver) recordAnalytics(obs UsageObservation) {
 
 // record emits the canonical increments. Point labels are exactly the
 // producer set from design §3.2: gen_ai.api.calls gets harness, model,
-// status (matching the hook path, apiCallsAttrs); scion.usage.tokens gets
-// harness, model, token_type only. Neither carries the unprefixed
-// agent_id/project_id: the pipeline stamps the canonical scion_* identity
-// labels on every exported point (ptone/scion#3668).
+// status (harness omitted when SCION_HARNESS is unset, matching the hook
+// path, apiCallsAttrs); scion.usage.tokens gets harness, model, token_type
+// only. Neither carries the unprefixed agent_id/project_id: the pipeline
+// stamps the canonical scion_* identity labels on every exported point
+// (ptone/scion#3668).
 func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
 	if d.sessionUsage != nil {
 		if u := sessionUsageFromIncrement(increment); !u.IsZero() {

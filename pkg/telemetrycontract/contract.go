@@ -113,11 +113,12 @@ func UsageTokenPointAttrs(harness, model string) []LabelKV {
 }
 
 // APICallsPointAttrs returns the producer point-label set for MetricAPICalls
-// (design §3.2): harness (omitted when empty, matching UsageTokenPointAttrs),
-// model, and status. Both the hook handler (pkg/sciontool/hooks/handlers)
-// and the native UsageDeriver (pkg/sciontool/telemetry) build
-// gen_ai.api.calls point labels through this helper so the two paths cannot
-// drift when SCION_HARNESS is unset (ptone/scion#5892).
+// (design §3.2): harness, model, and status, each omitted when empty
+// (matching UsageTokenPointAttrs). Both the hook handler
+// (pkg/sciontool/hooks/handlers) and the native UsageDeriver
+// (pkg/sciontool/telemetry) build gen_ai.api.calls point labels through this
+// helper so the two paths cannot drift when SCION_HARNESS is unset
+// (ptone/scion#5892).
 func APICallsPointAttrs(harness, model, status string) []LabelKV {
 	var attrs []LabelKV
 	if harness != "" {
