@@ -440,3 +440,7 @@ func (plainAuditLogger) LogMessageActionEvent(context.Context, *MessageActionEve
 func (plainAuditLogger) LogMaintenanceOverrideEvent(context.Context, *rebuildpreflight.MaintenanceOverrideEvent) error {
 	return nil
 }
+
+func (plainAuditLogger) LogMaintenanceAutoUpdateEvent(context.Context, *MaintenanceAutoUpdateEvent) error {
+	return nil
+}

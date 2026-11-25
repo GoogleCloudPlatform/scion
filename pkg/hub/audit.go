@@ -330,6 +330,45 @@ type AuditLogger interface {
 	// override to the hub.audit stream (S4-S6). The audit stream is an index
 	// and may be incomplete; the maintenance run rows are authoritative.
 	LogMaintenanceOverrideEvent(ctx context.Context, event *rebuildpreflight.MaintenanceOverrideEvent) error
+	// LogMaintenanceAutoUpdateEvent logs a daily auto-update setting change or
+	// scheduled run lifecycle event to the hub.audit stream.
+	LogMaintenanceAutoUpdateEvent(ctx context.Context, event *MaintenanceAutoUpdateEvent) error
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance auto-update audit events
+// ---------------------------------------------------------------------------
+
+// MaintenanceAutoUpdateEventKind defines the kind of maintenance auto-update audit event.
+type MaintenanceAutoUpdateEventKind string
+
+const (
+	// MaintenanceAutoUpdateKindSettingChanged is emitted when an admin changes
+	// the daily auto-update setting via PUT /api/v1/admin/maintenance/auto-update.
+	MaintenanceAutoUpdateKindSettingChanged MaintenanceAutoUpdateEventKind = "setting_changed"
+	// MaintenanceAutoUpdateKindRunStarted is emitted when the release-auto-update
+	// job starts an update-binary run.
+	MaintenanceAutoUpdateKindRunStarted MaintenanceAutoUpdateEventKind = "run_started"
+	// MaintenanceAutoUpdateKindRunOutcome is emitted when the release-auto-update
+	// job reconciles a terminal outcome (verified, failed, rolled_back) for a
+	// previously started run.
+	MaintenanceAutoUpdateKindRunOutcome MaintenanceAutoUpdateEventKind = "run_outcome"
+)
+
+// MaintenanceAutoUpdateEvent represents an auditable daily auto-update event.
+type MaintenanceAutoUpdateEvent struct {
+	Kind       MaintenanceAutoUpdateEventKind `json:"kind"`
+	Actor      string                         `json:"actor"`
+	ActorID    string                         `json:"actorId,omitempty"`
+	OldEnabled bool                           `json:"oldEnabled"`
+	NewEnabled bool                           `json:"newEnabled"`
+	OldHourUTC int                            `json:"oldHourUtc"`
+	NewHourUTC int                            `json:"newHourUtc"`
+	From       string                         `json:"from,omitempty"`
+	Target     string                         `json:"target,omitempty"`
+	RunID      string                         `json:"runId,omitempty"`
+	Outcome    string                         `json:"outcome,omitempty"`
+	Timestamp  time.Time                      `json:"timestamp"`
 }
 
 // Compile-time assertion that an AuditLogger is usable as the store-side sink.
@@ -695,6 +734,58 @@ func (l *LogAuditLogger) LogMaintenanceOverrideEvent(ctx context.Context, event 
 		attrs = append(attrs, slog.String("could_not_run_class", event.CouldNotRunClass))
 	}
 	l.logger().LogAttrs(ctx, slog.LevelWarn, "maintenance preflight override audit event", attrs...)
+	return nil
+}
+
+// LogMaintenanceAutoUpdateEvent logs a daily auto-update setting change or
+// scheduled run lifecycle event to the hub.audit slog stream.
+func (l *LogAuditLogger) LogMaintenanceAutoUpdateEvent(ctx context.Context, event *MaintenanceAutoUpdateEvent) error {
+	if l == nil || event == nil {
+		return nil
+	}
+	ts := event.Timestamp
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+
+	level := slog.LevelInfo
+	if event.Kind == MaintenanceAutoUpdateKindRunOutcome &&
+		(event.Outcome == AutoUpdateOutcomeFailed || event.Outcome == AutoUpdateOutcomeRolledBack) {
+		level = slog.LevelWarn
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", "maintenance_auto_update"),
+		slog.String("kind", string(event.Kind)),
+		slog.String("actor", event.Actor),
+		slog.String("timestamp", ts.UTC().Format(time.RFC3339)),
+	}
+	if event.ActorID != "" {
+		attrs = append(attrs, slog.String("actor_id", event.ActorID))
+	}
+	switch event.Kind {
+	case MaintenanceAutoUpdateKindSettingChanged:
+		attrs = append(attrs,
+			slog.Bool("old_enabled", event.OldEnabled),
+			slog.Bool("new_enabled", event.NewEnabled),
+			slog.Int("old_hour_utc", event.OldHourUTC),
+			slog.Int("new_hour_utc", event.NewHourUTC),
+		)
+	case MaintenanceAutoUpdateKindRunStarted, MaintenanceAutoUpdateKindRunOutcome:
+		attrs = append(attrs,
+			slog.String("run_id", event.RunID),
+			slog.String("from", event.From),
+			slog.String("target", event.Target),
+		)
+		if event.Outcome != "" {
+			attrs = append(attrs, slog.String("outcome", event.Outcome))
+		}
+	}
+	if credAttr, ok := credentialLogAttr(ctx); ok {
+		attrs = append(attrs, credAttr)
+	}
+
+	l.logger().LogAttrs(ctx, level, "maintenance auto-update audit event", attrs...)
 	return nil
 }
 

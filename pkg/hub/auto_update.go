@@ -247,6 +247,8 @@ func (s *Server) handleAdminMaintenanceAutoUpdate(w http.ResponseWriter, r *http
 		return
 	}
 
+	prev := effectiveAutoUpdate(mc, existing)
+
 	windowHour := validAutoUpdateWindowHour(existing)
 	if body.WindowStartHourUTC != nil {
 		windowHour = *body.WindowStartHourUTC
@@ -262,11 +264,12 @@ func (s *Server) handleAdminMaintenanceAutoUpdate(w http.ResponseWriter, r *http
 		}
 	}
 
+	now := time.Now().UTC()
 	next := AutoUpdateSetting{
 		Enabled:        *body.Enabled,
 		WindowStartUTC: windowHour,
 		SetBy:          actor,
-		SetAt:          time.Now().UTC().Format(time.RFC3339),
+		SetAt:          now.Format(time.RFC3339),
 	}
 	if err := s.writeAutoUpdateSetting(ctx, next, updatedBy, rev); err != nil {
 		if errors.Is(err, store.ErrRevisionConflict) {
@@ -278,6 +281,17 @@ func (s *Server) handleAdminMaintenanceAutoUpdate(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to update auto-update setting", nil)
 		return
 	}
+
+	s.emitMaintenanceAutoUpdateEvent(ctx, &MaintenanceAutoUpdateEvent{
+		Kind:       MaintenanceAutoUpdateKindSettingChanged,
+		Actor:      actor,
+		ActorID:    updatedBy,
+		OldEnabled: prev.Enabled,
+		NewEnabled: next.Enabled,
+		OldHourUTC: prev.WindowStartHourUTC,
+		NewHourUTC: next.WindowStartUTC,
+		Timestamp:  now,
+	})
 
 	sel, err := s.readReleaseSelection(ctx)
 	if err != nil {
@@ -297,4 +311,14 @@ func (s *Server) handleAdminMaintenanceAutoUpdate(w http.ResponseWriter, r *http
 		s.maintenance != nil && s.maintenance.IsEnabled(),
 	)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) emitMaintenanceAutoUpdateEvent(ctx context.Context, ev *MaintenanceAutoUpdateEvent) {
+	if s == nil || s.auditLogger == nil || ev == nil {
+		return
+	}
+	if err := s.auditLogger.LogMaintenanceAutoUpdateEvent(ctx, ev); err != nil && s.maintenanceLog != nil {
+		s.maintenanceLog.Warn("Failed to emit maintenance auto-update audit event",
+			"kind", ev.Kind, "run_id", ev.RunID, "error", err)
+	}
 }
