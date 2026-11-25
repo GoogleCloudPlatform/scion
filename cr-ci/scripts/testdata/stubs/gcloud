@@ -57,6 +57,7 @@ if [[ $args == *" describe "* ]]; then
   case $args in
     *status.url*) echo "${STUB_URL:-https://cr-runner-mediator-abc123-uc.a.run.app}" ;;
     *containers\[0\].image*) echo "${STUB_JOB_IMAGE:-us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden}" ;;
+    *containers\[0\].env*) [[ -n ${STUB_MEDIATOR_ENV:-} ]] && printf '%s\n' "$STUB_MEDIATOR_ENV" ;;
     *run.googleapis.com/urls*) echo "${STUB_URLS:-[\"https://cr-runner-mediator-abc123-uc.a.run.app\"]}" ;;
     *maxScale*) echo "${STUB_MAXSCALE:-1}" ;;
   esac

@@ -13,7 +13,7 @@ The step-by-step order is in [docs/gcp-setup.md](../docs/gcp-setup.md) and the
 | `set-secrets.sh` | Add secret versions from a file (0600, outside the checkout) or stdin: App private key, webhook secret, or a generated webhook secret | C5, C9 |
 | `build-runner-image.sh` | Build `runner/` with Cloud Build (or `--local` docker) as `BUILD_SA_NAME` and push it to `ARTIFACT_REPO` | C7 |
 | `deploy-job.sh` | Create or update the Cloud Run Job `RUNNER_JOB_NAME` (shape, ephemeral disk mounted at HOME, no retries, task timeout, `EXEC_SA_NAME`); binding C10 | C8, C10 |
-| `deploy-mediator.sh` | Refuse the placeholder `GITHUB_APP_ID=1`; build `mediator/Dockerfile` (upload limited by the `.gcloudignore` allowlist) and deploy `MEDIATOR_SERVICE_NAME` (`max-instances=1`, env from the config, secrets by name); binding C13; prints the URL for `MEDIATOR_URL` | C12, C13 |
+| `deploy-mediator.sh` | Refuse the placeholder `GITHUB_APP_ID=1`; diff `config.env` against the live mediator service and confirm changes before building/deploying (`--yes` to skip prompt); build `mediator/Dockerfile` (upload limited by the `.gcloudignore` allowlist) and deploy `MEDIATOR_SERVICE_NAME` (`max-instances=1`, env from the config, secrets by name); binding C13; prints the URL for `MEDIATOR_URL` | C12, C13 |
 | `deploy-scheduler.sh` | Create or update `RECONCILER_JOB_NAME` (POST `/reconcile`, OIDC as `SCHEDULER_SA_NAME`, audience `MEDIATOR_URL`) | C14 |
 | `set-routing-variable.sh` | Set or clear `ROUTING_VARIABLE_NAME` on `TARGET_REPOS` (gh only; `--repo`, `--clear`, `--value`) (P5) | G10, G11 |
 | `teardown.sh` | Delete everything above in reverse order (typed confirmation; `--keep-secrets`, `--keep-images`) | C18 |

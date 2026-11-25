@@ -87,7 +87,7 @@ commands without `--apply`; read that transcript before applying.
 
 | Change | Command |
 | :--- | :--- |
-| Any config value the mediator uses (`TARGET_REPOS`, `MAX_CONCURRENT_RUNNERS`, `CLAIM_TTL`, `MEDIATOR_MIN_INSTANCES`, ...) | edit `config.env`, `scripts/deploy-mediator.sh --apply` |
+| Any config value the mediator uses (`TARGET_REPOS`, `MAX_CONCURRENT_RUNNERS`, `CLAIM_TTL`, `MEDIATOR_MIN_INSTANCES`, ...) | edit `config.env`, `scripts/deploy-mediator.sh --apply` (see [Reconstructing and diffing `config.env`](#reconstructing-and-diffing-configenv) if `config.env` is missing) |
 | Mediator code | commit, then `scripts/deploy-mediator.sh --apply` (new tag from the source tree hash) |
 | Runner shape (`RUNNER_CPU`, `RUNNER_MEMORY`, `RUNNER_DISK_GI`, `TASK_TIMEOUT`, `RUNNER_IDLE_TIMEOUT`) | edit `config.env`, `scripts/deploy-job.sh --apply` |
 | Runner image | see [Runner image updates](#runner-image-updates) |
@@ -112,6 +112,110 @@ recovery. A mediator deploy restarts the single instance and loses pending
 claims; affected jobs are relaunched by the next reconcile
 ([single instance](#mediator-single-instance)). Deploy outside busy CI
 periods when possible.
+
+## Reconstructing and diffing `config.env`
+
+`cr-ci/config.env` is gitignored and lives only on the deployer's workstation.
+Because `scripts/deploy-mediator.sh --apply` passes **every** key from
+`config.example.env` via `--set-env-vars` (replacing the entire set on the
+Cloud Run service), redeploying from a hand-rebuilt or stale `config.env`
+risks silently overwriting live values.
+
+**Where to run and permissions needed:** run all commands below from the
+`cr-ci/` directory of a checkout (target file: `cr-ci/config.env`). Reading
+the live configuration requires `roles/run.viewer` (or `run.services.get` and
+`run.jobs.get`) on `GCP_PROJECT`, plus optionally `roles/cloudscheduler.viewer`
+to cross-check the scheduler. Applying changes requires the C12/C13 roles in
+[permissions-matrix.md, section 3](permissions-matrix.md#3-operations-at-a-glance).
+
+### 1. Reconstruct `config.env` from the live mediator service
+
+`deploy-mediator.sh` sets all 32 keys of `config.example.env` as environment
+variables on the mediator Cloud Run service, so describing that service recovers
+the full `config.env` in one command (the `awk` pass appends `=` when a key's
+value is empty, such as `BUILD_STAGING_BUCKET=`):
+
+```bash
+cd cr-ci
+gcloud run services describe MEDIATOR_SERVICE_NAME \
+  --region=REGION --project=GCP_PROJECT \
+  --flatten='spec.template.spec.containers[0].env[]' \
+  --format='value[separator="="](spec.template.spec.containers[0].env.name,spec.template.spec.containers[0].env.value)' \
+  | awk -F= 'NF == 0 { next } NF == 1 { print $0 "="; next } { print }' \
+  > config.env
+```
+
+Validate the reconstructed file immediately (this checks every key against
+`config.example.env` and catches unknown, duplicate, or invalid values):
+
+```bash
+scripts/check-config.sh
+```
+
+### 2. Cross-check against the live Cloud Run Job (and Scheduler)
+
+If the runner job or scheduler was updated separately from the mediator, verify
+that the live runner shape and schedule match the reconstructed `config.env`:
+
+```bash
+gcloud run jobs describe RUNNER_JOB_NAME \
+  --region=REGION --project=GCP_PROJECT \
+  --format='yaml(spec.template.spec.template.spec.serviceAccountName,spec.template.spec.template.spec.timeoutSeconds,spec.template.spec.template.spec.containers[0].image,spec.template.spec.template.spec.containers[0].resources.limits,spec.template.spec.template.spec.containers[0].env,spec.template.spec.template.spec.volumes)'
+
+gcloud scheduler jobs describe RECONCILER_JOB_NAME \
+  --location=REGION --project=GCP_PROJECT \
+  --format='yaml(schedule,httpTarget.uri,httpTarget.oidcToken.serviceAccountEmail)'
+```
+
+### 3. Key map (secret vs. non-secret)
+
+`config.env` **never contains secret values.** The GitHub App private key (PEM)
+and webhook secret live only in Secret Manager; `config.env` and the mediator's
+environment hold only their Secret Manager **names** (non-secret identifiers).
+
+| Keys in `config.env` | Secret? | Where `deploy-mediator.sh` / sibling scripts push them |
+| :--- | :--- | :--- |
+| `TARGET_REPOS`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_SCOPE`, `RUNNER_LABEL`, `CLAIM_TTL`, `MAX_CONCURRENT_RUNNERS`, `GITHUB_RUNNER_GROUP_ID`, `ROUTING_VARIABLE_NAME` | Non-secret | Mediator service env (`spec.template.spec.containers[0].env`) |
+| `GCP_PROJECT`, `REGION`, `ARTIFACT_REPO`, `BUILD_STAGING_BUCKET`, `MEDIATOR_SERVICE_NAME`, `MEDIATOR_IMAGE_NAME`, `MEDIATOR_URL` | Non-secret | Mediator service env; also service name/region/image and `status.url` / `run.googleapis.com/urls` |
+| `MEDIATOR_MIN_INSTANCES` | Non-secret | Mediator service env and `--min-instances` (`autoscaling.knative.dev/minScale`; `maxScale` is always `1`) |
+| `RUNNER_JOB_NAME`, `RUNNER_IMAGE_NAME`, `RUNNER_CPU`, `RUNNER_MEMORY`, `RUNNER_DISK_GI`, `RUNNER_BUILD_CACHE_IN_RAM`, `TASK_TIMEOUT`, `RUNNER_IDLE_TIMEOUT` | Non-secret | Mediator service env; also Cloud Run Job `RUNNER_JOB_NAME` spec (`image`, `resources.limits.cpu`/`memory`, ephemeral-disk `volumes[].emptyDir.sizeLimit`, `RUNNER_BUILD_CACHE_IN_RAM`, `timeoutSeconds`, and `RUNNER_IDLE_TIMEOUT_SECONDS`) |
+| `RECONCILER_JOB_NAME`, `RECONCILE_SCHEDULE` | Non-secret | Mediator service env; also Cloud Scheduler job `RECONCILER_JOB_NAME` (`schedule`) |
+| `BUILD_SA_NAME`, `MEDIATOR_SA_NAME`, `SCHEDULER_SA_NAME`, `EXEC_SA_NAME` | Non-secret | Mediator service env; also service accounts on Cloud Build, mediator service (`serviceAccountName`), scheduler OIDC token, and runner job (`serviceAccountName`) |
+| `GITHUB_APP_PRIVATE_KEY_SECRET_NAME`, `GITHUB_WEBHOOK_SECRET_NAME` | **Secret name only** (value lives in Secret Manager) | Mediator service env; the mediator reads `latest` from Secret Manager at runtime |
+
+### 4. Diff before running `deploy-mediator.sh --apply`
+
+To inspect changes read-only before running `--apply`:
+
+```bash
+# 1. Read-only diff of live mediator env vs. resolved config.env:
+diff -u \
+  <(gcloud run services describe MEDIATOR_SERVICE_NAME \
+      --region=REGION --project=GCP_PROJECT \
+      --flatten='spec.template.spec.containers[0].env[]' \
+      --format='value[separator="="](spec.template.spec.containers[0].env.name,spec.template.spec.containers[0].env.value)' \
+    | awk -F= 'NF == 0 { next } NF == 1 { print $0 "="; next } { print }' \
+    | sort) \
+  <(scripts/check-config.sh | sort)
+
+# 2. Dry-run to review the exact gcloud commands:
+scripts/deploy-mediator.sh
+```
+
+When you run `scripts/deploy-mediator.sh --apply` against an existing mediator
+service, the script also performs a built-in pre-apply diff automatically:
+
+1. It fetches the live service's environment variables and compares every key
+   against `config.env` (including any extra live keys that `--set-env-vars`
+   would remove).
+2. If all keys match, it prints `config matches live service ... (N keys unchanged)`
+   and proceeds without prompting.
+3. If any key differs, it prints the diff (`- KEY=live` / `+ KEY=config`) along
+   with the unchanged count and prompts `Apply these config changes to ...? [y/N]`
+   before building or deploying. Answering anything other than `y`/`yes` aborts
+   with nothing changed.
+4. For non-interactive runs, pass `--yes` (`scripts/deploy-mediator.sh --apply --yes`)
+   to print the diff and apply without prompting.
 
 ## Two stacks (region move)
 

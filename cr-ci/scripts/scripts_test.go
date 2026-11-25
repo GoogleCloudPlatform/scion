@@ -335,7 +335,7 @@ func TestApplyRunsExactlyTheDryRunCommands(t *testing.T) {
 		{"deploy-job-warm-up", "deploy-job.sh", []string{"--tag", "golden", "--warm-up"}, func(e *env) {
 			e.state("exists", "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden")
 		}},
-		{"deploy-mediator", "deploy-mediator.sh", []string{"--tag", "golden"}, func(e *env) {
+		{"deploy-mediator", "deploy-mediator.sh", []string{"--tag", "golden", "--yes"}, func(e *env) {
 			e.state("exists", "cr-runner-mediator")
 		}},
 		{"deploy-scheduler", "deploy-scheduler.sh", nil, nil},
@@ -410,7 +410,7 @@ func TestIdempotentSecondRun(t *testing.T) {
 		{"bootstrap-gcp.sh", nil, []string{"add-iam-policy-binding"}},
 		{"build-runner-image.sh", []string{"--tag", "golden"}, nil},
 		{"deploy-job.sh", []string{"--tag", "golden"}, []string{"run jobs update cr-gh-runner-8c32g", "--clear-volumes --clear-volume-mounts --add-volume=name=scratch,type=ephemeral-disk,size=10Gi --add-volume-mount=volume=scratch,mount-path=/home/runner"}},
-		{"deploy-mediator.sh", []string{"--tag", "golden"}, []string{"run deploy cr-runner-mediator"}},
+		{"deploy-mediator.sh", []string{"--tag", "golden", "--yes"}, []string{"run deploy cr-runner-mediator"}},
 		{"deploy-scheduler.sh", nil, []string{"scheduler jobs update http cr-runner-reconciler"}},
 	} {
 		r := e.run(s.script, "", append([]string{"--config", "config.env", "--apply"}, s.args...)...)
@@ -569,7 +569,7 @@ func TestSetSecretsRefusals(t *testing.T) {
 func TestMediatorDeploy(t *testing.T) {
 	e := newEnv(t, baseConfig())
 	e.state("exists", allExisting...)
-	r := e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden")
+	r := e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden", "--yes")
 	wantCode(t, r, 0)
 	var deploy string
 	for _, c := range r.calls {
@@ -586,7 +586,7 @@ func TestMediatorDeploy(t *testing.T) {
 
 	// A service that does not end up at max-instances=1 fails the run.
 	e.extra = []string{"STUB_MAXSCALE=3"}
-	r = e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden")
+	r = e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden", "--yes")
 	if r.code == 0 || !strings.Contains(r.stderr, "must be 1") {
 		t.Errorf("max-instances 3 accepted: code %d, stderr %q", r.code, r.stderr)
 	}
@@ -594,7 +594,7 @@ func TestMediatorDeploy(t *testing.T) {
 	// URL mismatch warns; empty MEDIATOR_URL tells the operator what to do.
 	e.extra = []string{"STUB_URL=https://cr-runner-mediator-other-uc.a.run.app",
 		`STUB_URLS=["https://cr-runner-mediator-other-uc.a.run.app"]`}
-	r = e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden")
+	r = e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden", "--yes")
 	wantCode(t, r, 0)
 	if !strings.Contains(r.stderr, "WARNING: MEDIATOR_URL=") {
 		t.Errorf("no warning for a URL mismatch:\n%s", r.stderr)
@@ -602,7 +602,7 @@ func TestMediatorDeploy(t *testing.T) {
 	// MEDIATOR_URL may be any of the service's URLs (deterministic form).
 	e.extra = []string{"STUB_URL=https://cr-runner-mediator-hash-uc.a.run.app",
 		`STUB_URLS=["https://cr-runner-mediator-hash-uc.a.run.app","` + mediatorURL + `"]`}
-	r = e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden")
+	r = e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden", "--yes")
 	wantCode(t, r, 0)
 	if strings.Contains(r.stderr, "WARNING: MEDIATOR_URL") {
 		t.Errorf("warned although MEDIATOR_URL is one of the service URLs:\n%s", r.stderr)
@@ -611,7 +611,7 @@ func TestMediatorDeploy(t *testing.T) {
 	delete(cfg, "MEDIATOR_URL")
 	e.extra = nil
 	e.config = e.writeConfig("config.env", cfg)
-	r = e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden")
+	r = e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden", "--yes")
 	wantCode(t, r, 0)
 	if !strings.Contains(r.stdout, "set MEDIATOR_URL="+mediatorURL) {
 		t.Errorf("first deploy does not say how to set MEDIATOR_URL:\n%s", r.stdout)
@@ -942,19 +942,19 @@ func TestDefaultTag(t *testing.T) {
 	e.state("exists", allExisting...)
 	img := "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:"
 	e.extra = []string{"STUB_JOB_IMAGE=" + img + "git-" + tree[:12]}
-	r = e.run(med, "", "--config", "config.env", "--apply", "--tag", "golden")
+	r = e.run(med, "", "--config", "config.env", "--apply", "--tag", "golden", "--yes")
 	wantCode(t, r, 0)
 	if strings.Contains(r.stderr, "not the current runner tag") {
 		t.Errorf("warned although the job runs the current runner image:\n%s", r.stderr)
 	}
 	e.extra = []string{"STUB_JOB_IMAGE=" + img + "git-000000000000"}
-	r = e.run(med, "", "--config", "config.env", "--apply", "--tag", "golden")
+	r = e.run(med, "", "--config", "config.env", "--apply", "--tag", "golden", "--yes")
 	wantCode(t, r, 0)
 	if !strings.Contains(r.stderr, "not the current runner tag git-"+tree[:12]) {
 		t.Errorf("no warning for an older runner image on the job:\n%s", r.stderr)
 	}
 	e.state("exists", "cr-runner-mediator")
-	r = e.run(med, "", "--config", "config.env", "--apply", "--tag", "golden")
+	r = e.run(med, "", "--config", "config.env", "--apply", "--tag", "golden", "--yes")
 	if !strings.Contains(r.stderr, "runner job cr-gh-runner-8c32g not found") {
 		t.Errorf("no warning for a missing runner job:\n%s", r.stderr)
 	}
@@ -999,4 +999,158 @@ func TestDeployJobDiskLimitHint(t *testing.T) {
 	e.extra = []string{"STUB_DISK_LIMIT_GI=23"}
 	r = e.run("deploy-job.sh", "", "--config", "config.env", "--tag", "golden", "--apply")
 	wantCode(t, r, 0)
+}
+
+// TestDeployMediatorConfigDiffAndConfirm verifies the pre-apply live config
+// diff and interactive confirmation in deploy-mediator.sh:
+//   - unchanged live config proceeds without prompting (including empty values
+//     with or without a trailing '=' from gcloud);
+//   - changed, added, or removed keys print a clear diff and abort on decline
+//     or EOF before building or deploying;
+//   - answering y/yes or passing --yes proceeds to deploy;
+//   - first deploy (service not found) skips the diff without prompting.
+func TestDeployMediatorConfigDiffAndConfirm(t *testing.T) {
+	hasDeployOrBuild := func(cs []call) bool {
+		for _, c := range cs {
+			s := c.String()
+			if strings.Contains(s, "run deploy ") || strings.Contains(s, "builds submit ") {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Build a full resolved live env snapshot from baseConfig() via check-config.sh.
+	baseEnv := newEnv(t, baseConfig())
+	check := baseEnv.run("check-config.sh", "", "--config", "config.env")
+	wantCode(t, check, 0)
+	liveExact := strings.TrimRight(check.stdout, "\n")
+
+	// 1. All keys match live -> no prompt, deploys cleanly even with empty stdin.
+	t.Run("unchanged", func(t *testing.T) {
+		e := newEnv(t, baseConfig())
+		e.state("exists", allExisting...)
+		// Also verify gcloud omitting '=' on empty values (BUILD_STAGING_BUCKET).
+		liveNoEq := strings.Replace(liveExact, "BUILD_STAGING_BUCKET=", "BUILD_STAGING_BUCKET", 1)
+		e.extra = []string{"STUB_MEDIATOR_ENV=" + liveNoEq}
+		r := e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden")
+		wantCode(t, r, 0)
+		if !strings.Contains(r.stdout, "config matches live service cr-runner-mediator (32 keys unchanged)") {
+			t.Errorf("missing unchanged summary:\n%s", r.stdout)
+		}
+		if strings.Contains(r.stderr, "Apply these config changes") {
+			t.Errorf("unexpected confirmation prompt when config is unchanged:\n%s", r.stderr)
+		}
+		if !hasDeployOrBuild(r.calls) {
+			t.Errorf("expected deploy to run when config is unchanged; calls: %v", callStrings(r.calls))
+		}
+	})
+
+	// Prepare a local config with 2 changed keys, 1 new key (missing from live),
+	// and 1 extra live key that --set-env-vars will remove.
+	cfgChanged := baseConfig()
+	cfgChanged["MAX_CONCURRENT_RUNNERS"] = "10"
+	cfgChanged["MEDIATOR_MIN_INSTANCES"] = "1"
+
+	var liveDiffLines []string
+	for _, l := range strings.Split(liveExact, "\n") {
+		if strings.HasPrefix(l, "CLAIM_TTL=") {
+			continue // simulate key missing on live service
+		}
+		liveDiffLines = append(liveDiffLines, l)
+	}
+	liveDiffLines = append(liveDiffLines, "STALE_EXTRA_KEY=oldval")
+	liveDiff := strings.Join(liveDiffLines, "\n")
+
+	wantDiffSnippets := []string{
+		"config diff against live service cr-runner-mediator (4 changed, 29 unchanged):",
+		"  - MAX_CONCURRENT_RUNNERS=5",
+		"  + MAX_CONCURRENT_RUNNERS=10",
+		"  - MEDIATOR_MIN_INSTANCES=0",
+		"  + MEDIATOR_MIN_INSTANCES=1",
+		"  + CLAIM_TTL=300s (new)",
+		"  - STALE_EXTRA_KEY=oldval (removed)",
+	}
+
+	// 2. Decline ("n") and EOF ("") both abort before building or deploying.
+	for name, stdin := range map[string]string{"decline_n": "n\n", "decline_eof": ""} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, cfgChanged)
+			e.state("exists", "cr-runner-mediator", "cr-gh-runner-8c32g")
+			e.extra = []string{"STUB_MEDIATOR_ENV=" + liveDiff}
+			r := e.run("deploy-mediator.sh", stdin, "--config", "config.env", "--apply", "--tag", "golden")
+			if r.code == 0 {
+				t.Fatalf("%s: expected non-zero exit on declined diff\nstdout:\n%s", name, r.stdout)
+			}
+			for _, w := range wantDiffSnippets {
+				if !strings.Contains(r.stdout, w) {
+					t.Errorf("%s: stdout missing diff line %q:\n%s", name, w, r.stdout)
+				}
+			}
+			if !strings.Contains(r.stderr, "Apply these config changes to cr-runner-mediator in us-central1 (example-project)? [y/N]") {
+				t.Errorf("%s: stderr missing confirmation prompt:\n%s", name, r.stderr)
+			}
+			if !strings.Contains(r.stderr, "aborted; nothing deployed") {
+				t.Errorf("%s: stderr missing abort message:\n%s", name, r.stderr)
+			}
+			if hasDeployOrBuild(r.calls) {
+				t.Errorf("%s: built or deployed after decline: %v", name, callStrings(r.calls))
+			}
+		})
+	}
+
+	// 3. Confirm ("y" and "YES") proceeds to deploy.
+	for name, stdin := range map[string]string{"confirm_y": "y\n", "confirm_YES": "YES\n"} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, cfgChanged)
+			e.state("exists", allExisting...)
+			e.extra = []string{"STUB_MEDIATOR_ENV=" + liveDiff}
+			r := e.run("deploy-mediator.sh", stdin, "--config", "config.env", "--apply", "--tag", "golden")
+			wantCode(t, r, 0)
+			for _, w := range wantDiffSnippets {
+				if !strings.Contains(r.stdout, w) {
+					t.Errorf("%s: stdout missing diff line %q:\n%s", name, w, r.stdout)
+				}
+			}
+			if !hasDeployOrBuild(r.calls) {
+				t.Errorf("%s: deploy did not run after confirmation", name)
+			}
+		})
+	}
+
+	// 4. --yes prints the diff and deploys without prompting.
+	t.Run("yes_flag", func(t *testing.T) {
+		e := newEnv(t, cfgChanged)
+		e.state("exists", allExisting...)
+		e.extra = []string{"STUB_MEDIATOR_ENV=" + liveDiff}
+		r := e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden", "--yes")
+		wantCode(t, r, 0)
+		for _, w := range append(wantDiffSnippets, "--yes set; applying config changes without prompting") {
+			if !strings.Contains(r.stdout, w) {
+				t.Errorf("stdout missing %q:\n%s", w, r.stdout)
+			}
+		}
+		if strings.Contains(r.stderr, "Apply these config changes") {
+			t.Errorf("prompted despite --yes:\n%s", r.stderr)
+		}
+		if !hasDeployOrBuild(r.calls) {
+			t.Errorf("deploy did not run with --yes")
+		}
+	})
+
+	// 5. First deploy (service absent) skips the live diff and proceeds without prompting.
+	t.Run("first_deploy_service_absent", func(t *testing.T) {
+		e := newEnv(t, baseConfig())
+		e.state("exists", "us-central1-docker.pkg.dev/example-project/cr-runners/cr-runner-mediator:golden")
+		r := e.run("deploy-mediator.sh", "", "--config", "config.env", "--apply", "--tag", "golden")
+		if !strings.Contains(r.stdout, "service cr-runner-mediator does not exist yet; skipping live config diff") {
+			t.Errorf("stdout missing first-deploy note:\n%s", r.stdout)
+		}
+		if strings.Contains(r.stderr, "Apply these config changes") {
+			t.Errorf("prompted on first deploy:\n%s", r.stderr)
+		}
+		if !hasDeployOrBuild(r.calls) {
+			t.Errorf("deploy did not run on first deploy; calls: %v", callStrings(r.calls))
+		}
+	})
 }

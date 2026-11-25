@@ -10,21 +10,28 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-USAGE="Usage: deploy-mediator.sh [--tag TAG] [--local] [--no-invoker-iam-check] [--config FILE] [--dry-run | --apply]
+USAGE="Usage: deploy-mediator.sh [--tag TAG] [--local] [--no-invoker-iam-check] [--yes] [--config FILE] [--dry-run | --apply]
 
   --tag TAG               mediator image tag (default: git-<12 hex of mediator/ + go.mod at HEAD>)
   --local                 build with the local docker daemon instead of Cloud Build
   --no-invoker-iam-check  public ingress without the allUsers invoker binding, for
                           projects whose org policy forbids allUsers (permissions-matrix U6)
+  --yes                   skip the confirmation prompt when --apply detects config changes
+                          against the live mediator service
 
 First deploy: MEDIATOR_URL may be empty; the service then answers 503 on
 /webhook and /reconcile. Put the printed URL into MEDIATOR_URL and run again.
+
+With --apply on an existing service, the script compares the live service's
+environment against config.env, prints any differences, and prompts for
+confirmation before building or deploying (pass --yes to skip the prompt).
 
 $crci_common_help"
 
 TAG=""
 LOCAL=0
 NO_INVOKER_CHECK=0
+YES=0
 while (($#)); do
   case $1 in
     --tag)
@@ -38,6 +45,10 @@ while (($#)); do
       ;;
     --no-invoker-iam-check)
       NO_INVOKER_CHECK=1
+      shift
+      ;;
+    --yes)
+      YES=1
       shift
       ;;
     *)
@@ -81,6 +92,80 @@ if crci_exists gcloud run jobs describe "${CFG[RUNNER_JOB_NAME]}" --region="$R" 
   fi
 elif [[ $CRCI_MODE == apply ]]; then
   printf '%s: WARNING: runner job %s not found; run deploy-job.sh before any job is routed.\n' "$CRCI_PROG" "${CFG[RUNNER_JOB_NAME]}" >&2
+fi
+
+# Diff config.env against the live mediator service before building or
+# deploying: deploy-mediator.sh passes every key via --set-env-vars (replacing
+# the full set), so an incomplete or stale config.env would silently overwrite
+# live values. Dry-run prints the describe check only.
+crci_note "check: diff config.env against live service $SVC (apply only)"
+if crci_exists gcloud run services describe "$SVC" --region="$R" --project="$P" --format='value(metadata.name)'; then
+  LIVE_ENV=""
+  crci_read LIVE_ENV "" gcloud run services describe "$SVC" --region="$R" --project="$P" \
+    --flatten='spec.template.spec.containers[0].env[]' \
+    --format='value[separator="="](spec.template.spec.containers[0].env.name,spec.template.spec.containers[0].env.value)'
+
+  declare -A LIVE_CFG=()
+  declare -a LIVE_EXTRA_KEYS=()
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    if [[ $line == *=* ]]; then
+      lk=${line%%=*}
+      lv=${line#*=}
+    else
+      lk=$line
+      lv=""
+    fi
+    LIVE_CFG[$lk]=$lv
+    if [[ ! -v CRCI_DEFAULTS[$lk] ]]; then
+      LIVE_EXTRA_KEYS+=("$lk")
+    fi
+  done <<<"$LIVE_ENV"
+
+  changed=0
+  unchanged=0
+  declare -a DIFF_LINES=()
+  for k in "${CRCI_KEYS[@]}"; do
+    want=${CFG[$k]}
+    if [[ ! -v LIVE_CFG[$k] ]]; then
+      DIFF_LINES+=("  + $k=$want (new)")
+      changed=$((changed + 1))
+    elif [[ ${LIVE_CFG[$k]} != "$want" ]]; then
+      DIFF_LINES+=("  - $k=${LIVE_CFG[$k]}" "  + $k=$want")
+      changed=$((changed + 1))
+    else
+      unchanged=$((unchanged + 1))
+    fi
+  done
+  if ((${#LIVE_EXTRA_KEYS[@]} > 0)); then
+    mapfile -t LIVE_EXTRA_KEYS < <(printf '%s\n' "${LIVE_EXTRA_KEYS[@]}" | LC_ALL=C sort -u)
+    for k in "${LIVE_EXTRA_KEYS[@]}"; do
+      DIFF_LINES+=("  - $k=${LIVE_CFG[$k]} (removed)")
+      changed=$((changed + 1))
+    done
+  fi
+
+  if ((changed == 0)); then
+    crci_note "config matches live service $SVC ($unchanged keys unchanged)"
+  else
+    crci_note "config diff against live service $SVC ($changed changed, $unchanged unchanged):"
+    for dl in "${DIFF_LINES[@]}"; do
+      crci_note "$dl"
+    done
+    if [[ $YES == 1 ]]; then
+      crci_note "--yes set; applying config changes without prompting"
+    else
+      CONFIRM=""
+      printf 'Apply these config changes to %s in %s (%s)? [y/N] ' "$SVC" "$R" "$P" >&2
+      IFS= read -r CONFIRM || CONFIRM=""
+      case ${CONFIRM,,} in
+        y | yes) ;;
+        *) crci_die "aborted; nothing deployed" ;;
+      esac
+    fi
+  fi
+elif [[ $CRCI_MODE == apply ]]; then
+  crci_note "service $SVC does not exist yet; skipping live config diff"
 fi
 
 crci_note "mediator image ${CFG[MEDIATOR_IMAGE_NAME]}:$TAG"
