@@ -90,6 +90,7 @@ var agentAllowed = map[string]bool{
 	"schedule.create-recurring":   true,
 	"schedule.pause":              true,
 	"schedule.resume":             true,
+	"schedule.run":                true,
 	"schedule.delete":             true,
 	"schedule.history":            true,
 	"shared-dir":                  true,

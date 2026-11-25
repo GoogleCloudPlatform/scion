@@ -218,7 +218,7 @@ func buildTestTree() *cobra.Command {
 
 	// schedule with subcommands
 	sched := &cobra.Command{Use: "schedule"}
-	for _, name := range []string{"list", "get", "cancel", "create", "create-recurring", "pause", "resume", "delete", "history"} {
+	for _, name := range []string{"list", "get", "cancel", "create", "create-recurring", "pause", "resume", "run", "delete", "history"} {
 		sched.AddCommand(&cobra.Command{Use: name})
 	}
 	root.AddCommand(sched)
@@ -323,7 +323,7 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"resume",
 		"schedule", "schedule.cancel", "schedule.create", "schedule.create-recurring",
 		"schedule.delete", "schedule.get", "schedule.history", "schedule.list",
-		"schedule.pause", "schedule.resume",
+		"schedule.pause", "schedule.resume", "schedule.run",
 		"shared-dir", "shared-dir.info", "shared-dir.list",
 		"start", "stop",
 		"template",
@@ -383,6 +383,7 @@ func TestApplyModeRestrictions_AgentScheduleSubcommands(t *testing.T) {
 	assert.Contains(t, remaining, "schedule.create-recurring")
 	assert.Contains(t, remaining, "schedule.pause")
 	assert.Contains(t, remaining, "schedule.resume")
+	assert.Contains(t, remaining, "schedule.run")
 	assert.Contains(t, remaining, "schedule.delete")
 }
 
@@ -446,7 +447,7 @@ func TestAgentAllowedList(t *testing.T) {
 		"hub.test-identity.cleanup", "hub.test-identity.provenance",
 		"notifications",
 		"schedule", "schedule.list", "schedule.get", "schedule.cancel", "schedule.history",
-		"schedule.create", "schedule.create-recurring", "schedule.pause", "schedule.resume", "schedule.delete",
+		"schedule.create", "schedule.create-recurring", "schedule.pause", "schedule.resume", "schedule.run", "schedule.delete",
 		"shared-dir", "shared-dir.list", "shared-dir.info",
 		"templates", "templates.list", "templates.show", "templates.create",
 		"templates.clone", "templates.delete", "templates.update-default",

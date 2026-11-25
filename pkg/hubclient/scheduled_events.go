@@ -106,6 +106,7 @@ type ScheduledEvent struct {
 	FiredAt     *time.Time   `json:"firedAt,omitempty"`
 	Error       string       `json:"error,omitempty"`
 	ScheduleID  string       `json:"scheduleId,omitempty"`
+	Manual      bool         `json:"manual,omitempty"`
 	ExecSummary *ExecSummary `json:"execSummary,omitempty"`
 }
 

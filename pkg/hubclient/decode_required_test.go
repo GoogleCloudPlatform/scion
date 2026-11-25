@@ -112,6 +112,7 @@ func requiredBodyCases() []requiredBodyCase {
 		}},
 		{"ScheduledEvents.Get", func(ctx context.Context, c Client) error { return expectNoResult(c.ScheduledEvents("p").Get(ctx, "e")) }},
 		{"Schedules.Get", func(ctx context.Context, c Client) error { return expectNoResult(c.Schedules("p").Get(ctx, "s")) }},
+		{"Schedules.Run", func(ctx context.Context, c Client) error { return expectNoResult(c.Schedules("p").Run(ctx, "s")) }},
 		{"WebhookEndpoints.Get", func(ctx context.Context, c Client) error {
 			return expectNoResult(c.WebhookEndpoints("p").Get(ctx, "ep"))
 		}},
