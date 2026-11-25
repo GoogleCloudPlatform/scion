@@ -137,12 +137,23 @@ export class ScionReviewNoteDialog extends LitElement {
     }
   }
 
-  private onShow = (e: Event): void => {
+  private focusTextarea(): void {
+    if (!this.open || !this.textarea) return;
+    if (this.shadowRoot?.activeElement !== this.textarea) {
+      this.textarea.focus({ preventScroll: true });
+      this.textarea.select();
+    }
+  }
+
+  private onInitialFocus = (e: Event): void => {
     if (e.target !== e.currentTarget) return;
-    requestAnimationFrame(() => {
-      this.textarea?.focus();
-      this.textarea?.select();
-    });
+    e.preventDefault();
+    this.focusTextarea();
+  };
+
+  private onAfterShow = (e: Event): void => {
+    if (e.target !== e.currentTarget) return;
+    this.focusTextarea();
   };
 
   override render(): TemplateResult {
@@ -152,7 +163,8 @@ export class ScionReviewNoteDialog extends LitElement {
     return html`<sl-dialog
       label=${label}
       ?open=${this.open}
-      @sl-after-show=${this.onShow}
+      @sl-initial-focus=${this.onInitialFocus}
+      @sl-after-show=${this.onAfterShow}
       @sl-request-close=${(): void => this.finish(null)}
     >
       ${req?.quote

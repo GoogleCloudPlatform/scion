@@ -203,9 +203,11 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   await selectWord(page, 'written');
   await page.locator('scion-page-artifact-detail .g-toolbar sl-button.comment').click();
   const dialog = page.locator('scion-review-note-dialog sl-dialog');
+  const note = page.locator('scion-review-note-dialog textarea');
   await expect(dialog).toHaveAttribute('open', '');
   await expect(page.locator('scion-review-note-dialog .quote')).toHaveText('written');
-  await page.locator('scion-review-note-dialog textarea').fill('Why?');
+  await expect(note).toBeFocused();
+  await note.fill('Why?');
   await page.keyboard.press('Enter');
   await expect(dialog).not.toHaveAttribute('open', '');
   await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
@@ -215,7 +217,8 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   await endOf(page, 'Review journey');
   await page.keyboard.press('Control+Alt+m');
   await expect(dialog).toHaveAttribute('open', '');
-  await page.locator('scion-review-note-dialog textarea').fill('Title note');
+  await expect(note).toBeFocused();
+  await note.fill('Title note');
   await page.keyboard.press('Enter');
   await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
   expect(await editorText(page)).toContain('# Review journey{>>Title note<<}');
@@ -224,19 +227,21 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   await editor(page).locator('.critic-comment').first().hover();
   await expect(page.locator('scion-review-editor sl-popup .card-note')).toHaveText('Title note');
 
-  // Edit a comment: select its badge and press Enter.
-  await editor(page).locator('.critic-comment').nth(1).click();
+  // Edit a comment: focus its badge and press Enter.
+  await editor(page).locator('.critic-comment').nth(1).focus();
   await page.keyboard.press('Enter');
   await expect(dialog).toHaveAttribute('open', '');
   await expect(dialog).toHaveAttribute('label', 'Edit comment 2');
-  await page.locator('scion-review-note-dialog textarea').fill('Why not?');
+  await expect(note).toBeFocused();
+  await note.fill('Why not?');
   await page.keyboard.press('Enter');
   await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
   expect(await editorText(page)).toContain('{==written==}{>>Why not?<<}');
   // Double-click opens it too; saving it empty deletes it with its highlight.
   await editor(page).locator('.critic-comment').nth(1).dblclick();
   await expect(dialog).toHaveAttribute('label', 'Edit comment 2');
-  await page.locator('scion-review-note-dialog textarea').fill('');
+  await expect(note).toBeFocused();
+  await note.fill('');
   await page.keyboard.press('Enter');
   await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
   let afterDelete = await editorText(page);
@@ -246,7 +251,8 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   await selectWord(page, 'written');
   await page.locator('scion-page-artifact-detail .g-toolbar sl-button.comment').click();
   await expect(dialog).toHaveAttribute('open', '');
-  await page.locator('scion-review-note-dialog textarea').fill('Why?');
+  await expect(note).toBeFocused();
+  await note.fill('Why?');
   await page.keyboard.press('Enter');
   await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
   afterDelete = await editorText(page);
