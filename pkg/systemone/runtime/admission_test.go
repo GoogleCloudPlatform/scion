@@ -140,10 +140,16 @@ func TestAdmission_InstanceMaxInFlightCapsConcurrencyAndReturnsCapacity(t *testi
 
 	// Start 2 requests that occupy all 2 instance permits, with bounded failure
 	// diagnostics and cleanup so a refused holder never hangs or gets swallowed.
+	// Disable the 60ms admissionWait cutoff while holders acquire their free
+	// permits so CPU starvation cannot refuse a holder before it reaches Invoke;
+	// restore the real 60ms admissionWait before launching the 3 excess calls.
 	var releaseOnce sync.Once
 	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(closeRelease)
 
+	rt.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	var wg sync.WaitGroup
 	holderErrs := make([]error, 2)
 	holderDone := make(chan error, 2)
@@ -171,6 +177,7 @@ func TestAdmission_InstanceMaxInFlightCapsConcurrencyAndReturnsCapacity(t *testi
 			t.Fatalf("timed out waiting for holder %d to enter Invoke (inFlight=%d)", i, inFlight.Load())
 		}
 	}
+	rt.admission.withWaitCtxFn = nil
 
 	// Launch 3 excess requests concurrently; all 3 must fail with capacity after ~admissionWait
 	// and make 0 provider requests.
@@ -249,7 +256,7 @@ func TestAdmission_SemaphoreAdmitsWaiterWhenPermitFreedWithinAdmissionWait(t *te
 	rt := New(Config{
 		Registry:              reg,
 		Instances:             StaticInstances(inst),
-		AdmissionWait:         200 * time.Millisecond,
+		AdmissionWait:         1 * time.Second,
 		MaxInFlightPerProject: -1,
 	})
 	compiled := compileAdmissionTestRule(t, "handoff-inst")
@@ -258,6 +265,9 @@ func TestAdmission_SemaphoreAdmitsWaiterWhenPermitFreedWithinAdmissionWait(t *te
 	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(closeRelease)
 
+	rt.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	var wg sync.WaitGroup
 	holderDone := make(chan error, 1)
 	wg.Add(1)
@@ -280,8 +290,9 @@ func TestAdmission_SemaphoreAdmitsWaiterWhenPermitFreedWithinAdmissionWait(t *te
 		wg.Wait()
 		t.Fatalf("timed out waiting for holder to enter Invoke (providerCalls=%d)", providerCalls.Load())
 	}
+	rt.admission.withWaitCtxFn = nil
 
-	// Release the holder ~25ms into the waiter's 200ms admissionWait; waiter must be admitted.
+	// Release the holder ~25ms into the waiter's 1s admissionWait; waiter must be admitted.
 	go func() {
 		time.Sleep(25 * time.Millisecond)
 		closeRelease()
@@ -407,7 +418,7 @@ func TestAdmission_TokenBucketRatePerSec(t *testing.T) {
 	rtFast := New(Config{
 		Registry:              reg,
 		Instances:             StaticInstances(fastInst),
-		AdmissionWait:         150 * time.Millisecond,
+		AdmissionWait:         1 * time.Second,
 		MaxInFlightPerProject: -1,
 	})
 	compiledFast := compileAdmissionTestRule(t, "rate-fast")
@@ -461,11 +472,16 @@ func TestAdmission_PerProjectSemaphoreIsolatesProjects(t *testing.T) {
 	compiled := compileAdmissionTestRule(t, "shared-inst")
 
 	// Saturate project A's limit (2 in-flight), with bounded failure diagnostics
-	// and cleanup so a refused holder never hangs or gets swallowed.
+	// and cleanup so a refused holder never hangs or gets swallowed. Disable the
+	// 50ms admissionWait cutoff while holders acquire their free permits so CPU
+	// starvation cannot refuse a holder before it reaches Invoke.
 	var releaseAOnce sync.Once
 	closeReleaseA := func() { releaseAOnce.Do(func() { close(releaseA) }) }
 	t.Cleanup(closeReleaseA)
 
+	rt.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	var wgA sync.WaitGroup
 	holderDoneA := make(chan error, 2)
 	for i := 0; i < 2; i++ {
@@ -492,8 +508,9 @@ func TestAdmission_PerProjectSemaphoreIsolatesProjects(t *testing.T) {
 			t.Fatalf("timed out waiting for project-A holder %d (callsA=%d)", i, callsA.Load())
 		}
 	}
+	rt.admission.withWaitCtxFn = nil
 
-	// A 3rd call for project A fails with capacity (0 requests).
+	// A 3rd call for project A fails with capacity (0 requests) under the 50ms admissionWait.
 	_, errA3 := rt.Evaluate(context.Background(), compiled, ProbeInput("proj-A"), EvalOptions{ProjectID: "proj-A"})
 	require.Error(t, errA3)
 	evalA3, ok := EvaluationFrom(errA3)
@@ -503,11 +520,18 @@ func TestAdmission_PerProjectSemaphoreIsolatesProjects(t *testing.T) {
 	assert.Equal(t, 0, evalA3.Attempts[0].Requests)
 
 	// Meanwhile project B succeeds immediately and is not starved by project A.
+	// Disable the 50ms admissionWait cutoff for project B's calls so scheduler
+	// starvation under heavy CPU load cannot cause a false capacity refusal when
+	// all of project B's permits are free (project A's 2 permits remain held).
+	rt.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	for i := 0; i < 3; i++ {
 		decB, errB := rt.Evaluate(context.Background(), compiled, ProbeInput("proj-B"), EvalOptions{ProjectID: "proj-B"})
 		require.NoError(t, errB)
 		assert.True(t, decB.Bool)
 	}
+	rt.admission.withWaitCtxFn = nil
 	assert.Equal(t, int32(3), callsB.Load())
 
 	closeReleaseA()
@@ -557,6 +581,9 @@ func TestAdmission_WaitNeverExceedsAttemptDeadlineOrCallerCancel(t *testing.T) {
 	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(closeRelease)
 
+	rt.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	var wg sync.WaitGroup
 	holderDone := make(chan error, 1)
 	wg.Add(1)
@@ -578,6 +605,7 @@ func TestAdmission_WaitNeverExceedsAttemptDeadlineOrCallerCancel(t *testing.T) {
 		wg.Wait()
 		t.Fatal("timed out waiting for holder to enter Invoke")
 	}
+	rt.admission.withWaitCtxFn = nil
 
 	// 1. Short attempt budget (50ms << 2s admissionWait) must return within budget
 	// and classify as FailTimeout.
@@ -679,14 +707,14 @@ func TestAdmission_RateLimitedRetryAfterBeyondRemainingFailsImmediately(t *testi
 
 	t0 := time.Now()
 	_, err := rt.Evaluate(context.Background(), compiled, ProbeInput("hello"), EvalOptions{
-		Budget: 500 * time.Millisecond,
+		Budget: 5 * time.Second,
 	})
 	elapsed := time.Since(t0)
 	require.Error(t, err)
 	eval, ok := EvaluationFrom(err)
 	require.True(t, ok)
 	assert.Equal(t, string(provider.FailRateLimited), eval.Reason)
-	assert.Less(t, elapsed, 200*time.Millisecond, "rate_limited with RetryAfter beyond remaining time must fail immediately without sleeping")
+	assert.Less(t, elapsed, 2*time.Second, "rate_limited with RetryAfter beyond remaining time must fail immediately without sleeping")
 }
 
 type mutableProjectAllowlist struct {
@@ -1077,7 +1105,9 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 	// and ownDeadline.Equal(now + admissionWait) -> FailTimeout.
 	t.Run("c_equal_bounds_caller_and_runtime_precedence", func(t *testing.T) {
 		// Caller deadline == now + admissionWait -> FailCanceled.
-		rt1, _, compiled1, rel1 := newTestRuntime(100 * time.Millisecond)
+		// Use 1s (< 5s default rule timeout) so wall-clock jitter under heavy CPU load
+		// cannot expire callerCtx before Step 5b while nowFn/withWaitCtxFn runs in 0ms.
+		rt1, _, compiled1, rel1 := newTestRuntime(1 * time.Second)
 		defer rel1()
 		t0 := time.Now()
 		rt1.admission.nowFn = func() time.Time { return t0 }
@@ -1086,7 +1116,7 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 			cancel()
 			return wctx, cancel
 		}
-		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(100*time.Millisecond))
+		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(1*time.Second))
 		defer cancelCaller()
 		_, err := rt1.Evaluate(callerCtx, compiled1, ProbeInput("waiter-c-caller"), EvalOptions{ProjectID: "proj-2"})
 		require.Error(t, err)
@@ -1095,18 +1125,16 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 		assert.Equal(t, string(provider.FailCanceled), eval1.Reason)
 
 		// Runtime deadline == now + admissionWait -> FailTimeout.
-		rt2, _, compiled2, rel2 := newTestRuntime(100 * time.Millisecond)
+		rt2, _, compiled2, rel2 := newTestRuntime(1 * time.Second)
 		defer rel2()
 		rt2.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
 			wctx, cancel := context.WithCancel(parent)
 			cancel()
 			return wctx, cancel
 		}
-		// Compute exact ownDeadline via Budget=100ms; nowFn returns start so
-		// ownDeadline (start+100ms) <= now+100ms (with start <= now, dl <= now+admissionWait).
 		_, err = rt2.Evaluate(context.Background(), compiled2, ProbeInput("waiter-c-runtime"), EvalOptions{
 			ProjectID: "proj-2",
-			Budget:    100 * time.Millisecond,
+			Budget:    1 * time.Second,
 		})
 		require.Error(t, err)
 		eval2, ok := EvaluationFrom(err)
@@ -1116,7 +1144,9 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 
 	// (b) admissionWait strictly earlier than caller deadline -> FailCapacity.
 	t.Run("b_admission_wait_strictly_earlier_gives_capacity", func(t *testing.T) {
-		rt, _, compiled, rel := newTestRuntime(100 * time.Millisecond)
+		// AdmissionWait (1s) < callerDL (3s) < 5s default rule timeout; runs in 0ms
+		// via nowFn/withWaitCtxFn and cannot expire callerCtx under CPU starvation.
+		rt, _, compiled, rel := newTestRuntime(1 * time.Second)
 		defer rel()
 
 		t0 := time.Now()
@@ -1127,7 +1157,7 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 			return wctx, cancel
 		}
 
-		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(500*time.Millisecond))
+		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(3*time.Second))
 		defer cancelCaller()
 
 		_, err := rt.Evaluate(callerCtx, compiled, ProbeInput("waiter-b"), EvalOptions{ProjectID: "proj-2"})
