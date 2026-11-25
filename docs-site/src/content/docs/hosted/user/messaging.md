@@ -303,6 +303,10 @@ scion message @alice@example.com "Pick a target:" --decisions '[{
   - The user whose reply was interpreted can still answer the decision directly afterwards. Their answer is recorded as a confirmation (same choice) or an override (a different choice), which `scion decisions` shows as `confirmed` or `overridden`. Another user cannot answer over it (`403 not_recorded_answerer`).
   - Record only what the reply actually says. If it is ambiguous, ask again (for example with `--update` to post a clearer version) rather than guessing.
 
+:::tip[Asking for secrets]
+Never ask a user to paste credentials, tokens, or keys into chat or into a decision's Other field. When the `hub.agent_secrets` experiment is enabled, use a **secret request** (`scion message --secret-request KEY`) so the user submits the value directly into the Hub's secret store; see [Secret Requests](/scion/hosted/user/secrets/#secret-requests-agent-asks-human-supplies).
+:::
+
 ### Message Formatting
 
 The `scion message` CLI delivers the body argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient sees.

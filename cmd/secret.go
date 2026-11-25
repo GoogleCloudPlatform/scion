@@ -47,12 +47,17 @@ var (
 var agentSecretCmd = &cobra.Command{
 	Use:   "secret",
 	Short: "Manage agent secrets",
-	Long: `Commands for managing project-scoped secrets from within an agent container.
+	Long: `Commands for managing secrets from the host or within an agent container.
 
-Secrets are stored securely in the Hub and scoped to the current agent's project.
-Use these commands from within a running agent to manage secrets programmatically.
+On the host, secrets default to the current project's scope. Inside a running
+agent container, 'scion secret list' and 'scion secret get' support project
+scope and (when hub.agent_secrets is enabled) agent scope via '--scope agent'
+(default: agent then project for 'get', all for 'list'), and 'scion secret
+request' lists or withdraws the agent's secret requests. To write or delete
+agent-scoped secrets from inside an agent container, use 'sciontool secret
+set --scope agent' or 'sciontool secret delete --scope agent'.
 
-For admin-level secret management with scope options, use 'scion hub secret'.`,
+For full scope management (--scope hub, --project, --broker, --agent), use 'scion hub secret'.`,
 }
 
 // secretGetPrintsValueByDefault selects what plain `scion secret get KEY`
@@ -74,11 +79,15 @@ var newSecretValueHubClient = func() *sciontoolhub.Client {
 	return sciontoolhub.NewClient()
 }
 
-// agentSecretGetCmd retrieves a project-scoped secret value or its metadata.
+// agentSecretGetCmd retrieves a secret's metadata or (inside an agent container) its value.
 var agentSecretGetCmd = &cobra.Command{
 	Use:   "get KEY",
-	Short: "Get a project-scoped secret's metadata, or its value with --value",
-	Long: `Get a project-scoped secret from the Hub.
+	Short: "Get a secret's metadata, or its value with --value",
+	Long: `Get a secret from the Hub.
+
+On the host, looks up the secret in the current project's scope. Inside an agent
+container (when hub.agent_secrets is enabled), checks agent scope first and then
+project scope; pass --scope agent or --scope project to pin the lookup.
 
 By default this prints the secret's metadata (key, scope, type, target,
 version and timestamps). --format json prints the metadata object and
@@ -129,14 +138,18 @@ Examples:
 	RunE: runAgentSecretSet,
 }
 
-// agentSecretListCmd lists metadata for all project-scoped secrets.
+// agentSecretListCmd lists metadata for available secrets.
 var agentSecretListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List project-scoped secrets",
-	Long: `List metadata for all project-scoped secrets from the Hub.
+	Short: "List secret metadata",
+	Long: `List secret metadata from the Hub.
 
-Only metadata (key, type, allowProgeny, version, updated) is returned —
-secret values are not included.
+Inside an agent container (when hub.agent_secrets is enabled), defaults to
+--scope all and lists both agent- and project-scoped secrets with a SCOPE
+column (filter with --scope agent, --scope project, or --scope all). On the host
+(or when hub.agent_secrets is off), lists project-scoped secrets.
+
+Only metadata is returned — secret values are not included.
 
 Examples:
   scion secret list`,

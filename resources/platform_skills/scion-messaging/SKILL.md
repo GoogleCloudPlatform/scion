@@ -142,6 +142,18 @@ user-facing format. Agent-only messages do not require it.
   `allow_other`, `--update`, `scion decisions withdraw`, and recording prose
   replies.
 <!-- scion:end-experiment -->
+<!-- scion:experiment hub.agent_secrets -->
+- **Request secrets with `--secret-request` (never in chat).** When you need a
+  credential, token, or key from a user, send a secret request with
+  `scion message --secret-request KEY --secret-description "..."` (or
+  `--secret-request-file <file>` for multiple or typed keys) instead of asking
+  them to paste values into chat. When the user submits it, the value is stored
+  directly at agent scope and you receive a `secret-response` message; read it
+  inline each time you need it with `$(scion secret get --value KEY)` and never
+  echo, write to disk, commit, or log it. If a user pastes a secret into chat
+  anyway, do not echo or store it — tell them to rotate it and send a secret
+  request for a replacement instead. See `references/secret-requests.md`.
+<!-- scion:end-experiment -->
 - **Keep details useful.** Avoid dense UUIDs, code line numbers and internal status
   codes unless the user needs them to act. Prefer descriptive Markdown links to
   bare URLs; link supporting evidence instead of pasting a technical inventory.
@@ -339,6 +351,13 @@ on `ask_user` status notifications to deliver the request.
 - `--decisions-file <file>` sends a decision prompt (keyed decisions the user
   answers with a click); `--update` revises one. `scion decisions` lists your
   decisions and records answers given in words. See `references/decisions.md`.
+<!-- scion:end-experiment -->
+<!-- scion:experiment hub.agent_secrets -->
+- `--secret-request <KEY>` (with optional `--secret-description`) or
+  `--secret-request-file <file>` sends a secret request (stored at agent scope,
+  never in chat); `--update` replaces a pending key. `scion secret request list`
+  and `scion secret request withdraw` inspect or retire your requests. See
+  `references/secret-requests.md`.
 <!-- scion:end-experiment -->
 - `scion schedule create` schedules messages; see `scion-scheduler`.
 - `scion notifications subscribe` subscribes to agent state changes.

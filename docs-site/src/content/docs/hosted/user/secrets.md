@@ -22,16 +22,18 @@ Scion distinguishes between regular environment variables and secure secrets:
 
 Both variables and secrets can be scoped to different levels. Scion resolves these hierarchically when an agent starts:
 
-1.  **User Scope** (Highest Priority): Personal secrets or variables for a specific user. Applied to all agents owned by that user.
-2.  **Project Scope**: Project-level secrets or variables. Available to all agents running in a specific Project.
-3.  **Hub Scope**: Platform-wide settings or secrets configured by Hub administrators. Hub-scoped secrets reach agents only as `environment` secrets: `always` secrets are delivered at start and restart, and `as_needed` secrets are filled only by the harness credential pass for keys the harness asks for; see [Hub-Scoped Secrets](#hub-scoped-secrets).
-4.  **Broker Scope** (Lowest Priority): Infrastructure-level secrets or variables. Available only to agents running on a specific Runtime Broker (e.g., for hardware-specific config).
+1.  **Agent Scope** *(Highest Priority, secrets only, behind `hub.agent_secrets`)*: Secrets bound to a single agent, readable only by that agent's token. See [Agent-Scoped Secrets](#agent-scoped-secrets).
+2.  **User Scope**: Personal secrets or variables for a specific user. Applied to all agents owned by that user.
+3.  **Project Scope**: Project-level secrets or variables. Available to all agents running in a specific Project.
+4.  **Hub Scope**: Platform-wide settings or secrets configured by Hub administrators. Hub-scoped secrets reach agents only as `environment` secrets: `always` secrets are delivered at start and restart, and `as_needed` secrets are filled only by the harness credential pass for keys the harness asks for; see [Hub-Scoped Secrets](#hub-scoped-secrets).
+5.  **Broker Scope** (Lowest Priority): Infrastructure-level secrets or variables. Available only to agents running on a specific Runtime Broker (e.g., for hardware-specific config).
 
-**Resolution Priority:** When multiple scopes define the same secret key, the more specific scope wins. The precedence order is:
+**Resolution Priority:** When multiple scopes define the same key, the more specific scope wins. The precedence order is:
 ```text
-runtime_broker  <  hub  <  project  <  user
+Environment variables:  runtime_broker  <  hub  <  project  <  user
+Secrets:                runtime_broker  <  hub  <  project  <  user  <  agent
 ```
-Therefore, user-scoped settings have the highest priority of the four scopes: a user-scoped variable overrides project, hub and broker-scoped variables of the same name, and a user-scoped secret overrides project, hub and broker-scoped secrets of the same name. The scope order applies within variables and within secrets. For the same key, a variable from any scope takes precedence over an environment-type secret. Environment values in the agent-create request (from the API, the web form or `--config`) outrank all four scopes when they are non-empty; an empty value yields to the scopes. A template's `env` block is a fallback, used only for keys that no other source sets. See [Settings Precedence](/scion/reference/settings-precedence/#system-a--environment-variables) for the full order.
+Therefore, agent-scoped secrets have the highest priority among secret scopes (when `hub.agent_secrets` is enabled), and user-scoped settings have the highest priority among environment-variable scopes. The scope order applies within variables and within secrets. For the same key, a variable from any scope takes precedence over an environment-type secret. Environment values in the agent-create request (from the API, the web form or `--config`) outrank all scopes when they are non-empty; an empty value yields to the scopes. A template's `env` block is a fallback, used only for keys that no other source sets. See [Settings Precedence](/scion/reference/settings-precedence/#system-a--environment-variables) for the full order.
 
 ### Scope and Sharing
 
@@ -43,6 +45,7 @@ A scope decides which agents receive a variable or secret, not which people can 
 | **Broker** | Every agent running on that Runtime Broker, started by any user. |
 | **Project** | Every agent in that Project, whoever starts it. |
 | **User** | Only agents owned by that user. An agent started by another agent (a child agent) is owned by its parent agent, so it receives user-scoped values only if they are marked for progeny, with `--allow-progeny` or the hub-wide default (see [Propagation to Descendant Agents](#propagation-to-descendant-agents-progeny)), and (when the agent's delegation chain has recorded provenance) every hop on the chain allows `secret.use`. |
+| **Agent** | Only the single bound agent (`scopeId` equals the agent's UUID; secrets only, gated by `hub.agent_secrets`). Never shared with other agents or progeny (`allowProgeny` is rejected with `400`). |
 
 Hub, Broker and Project scopes apply to child agents in the same way as to the agents users start directly.
 
@@ -56,7 +59,7 @@ Store sensitive secrets at **User** scope, so that only your own agents receive 
 
 ### Start-Time Authorization
 
-When the Hub starts or restarts an agent, it authorizes each User, Project, Hub, and Runtime Broker variable and secret for that agent **before** applying scope precedence (`runtime_broker < hub < project < user`) or reading any secret value from the secret backend. The check follows the agent's recorded delegation chain: the user or agent that delegated authority to it, and so on up to a user. An item the check refuses is left out before scope precedence runs, so a refused higher-scope entry yields to a permitted lower-scope entry with the same key rather than masking it, and the start itself goes ahead. The Hub log has a `Warn` line for each item left out, with its name, scope and the reason, never its value. Only the secrets that survive both authorization and scope precedence are read from the secret backend. When the secret backend cannot resolve the agent's secret metadata at all, the Hub refuses the create, start, or restart with `503` (`agent secrets could not be resolved; the agent was not started`, or `... not created` on create). When an individual secret's metadata resolves but the secret store cannot return its value (`access`, `not_found`, or `missing`), the Hub skips that secret so the dispatch proceeds without it, emits one `WARN` log line (`launch material skipped: secret store read failed`) with `agent_id`, `purpose`, `count`, and `items` (`name`, `scope`, `class` — never secret values, backend references, scope IDs, or backend error text), and returns one warning in the create, start, or restart response's `warnings` array (`secrets not delivered because the secret store could not return them: <items>; the agent was <started|restarted|created> without them`). In that response warning, project-scope secrets are named (`<name> (project)`) for every requester, user-scope secrets are named (`<name> (user)`) when the requester is the agent's owner and counted (`N user-scope secret(s)`) otherwise, and hub- and broker-scope secrets are always counted (`N hub-scope secret(s)`, `N broker-scope secret(s)`).
+When the Hub starts or restarts an agent, it authorizes each Agent (when `hub.agent_secrets` is on), User, Project, Hub, and Runtime Broker variable and secret for that agent **before** applying scope precedence (`runtime_broker < hub < project < user < agent` for secrets; `runtime_broker < hub < project < user` for variables) or reading any secret value from the secret backend. For User, Project, Hub, and Runtime Broker items, the check follows the agent's recorded delegation chain: the user or agent that delegated authority to it, and so on up to a user. For Agent-scope secrets, authorization is a structural association — the secret's `scope_id` must match the dispatched agent's ID in the agent's project — and is not subject to the delegation chain. An item the check refuses is left out before scope precedence runs, so a refused higher-scope entry yields to a permitted lower-scope entry with the same key rather than masking it, and the start itself goes ahead. The Hub log has a `Warn` line for each item left out, with its name, scope and the reason, never its value. Only the secrets that survive both authorization and scope precedence are read from the secret backend. When the secret backend cannot resolve the agent's secret metadata at all, the Hub refuses the create, start, or restart with `503` (`agent secrets could not be resolved; the agent was not started`, or `... not created` on create). When an individual secret's metadata resolves but the secret store cannot return its value (`access`, `not_found`, or `missing`), the Hub skips that secret so the dispatch proceeds without it, emits one `WARN` log line (`launch material skipped: secret store read failed`) with `agent_id`, `purpose`, `count`, and `items` (`name`, `scope`, `class` — never secret values, backend references, scope IDs, or backend error text), and returns one warning in the create, start, or restart response's `warnings` array (`secrets not delivered because the secret store could not return them: <items>; the agent was <started|restarted|created> without them`). In that response warning, project-scope secrets are named (`<name> (project)`) for every requester, agent-scope secrets are named (`<name> (agent)`) only to requesters who can edit the agent (`agent.update`) and counted (`N agent-scope secret(s)`) otherwise, user-scope secrets are named (`<name> (user)`) when the requester is the agent's owner and counted (`N user-scope secret(s)`) otherwise, and hub- and broker-scope secrets are always counted (`N hub-scope secret(s)`, `N broker-scope secret(s)`).
 
 Agents whose delegation chain contains legacy data may not have the recorded chain this check needs. This includes agents created before the chain was recorded, and agents created later under such an agent. The Hub keeps giving those agents their Project, Hub and Runtime Broker values, and logs a rate-limited `Warn` line naming the agent, the item and the group the agent falls in. The groups and the cases that are still refused are listed under [Launch material for legacy agents](/scion/reference/delegation-provenance-adoption/#launch-material-for-legacy-agents).
 
@@ -66,7 +69,7 @@ An agent created from a [user access token](/scion/hosted/user/personal-access-t
 
 As for any agent, launch material reaches the agent only while the user who created it is still a member of the project. A token-created agent, or one of its sub-agents, whose creator has left the project starts without it, and the `Warn` line for each item names the cause, `root user not admitted to the project`.
 
-Reading secrets at runtime (`sciontool secret get`, the agent secret endpoints) is not covered: the agent token the Hub issues to such an agent does not carry `project:secret:read`, so runtime reads and lists are refused. The full agent role is not available from a token for the same reason.
+Reading project-scoped secrets at runtime (`scion secret get --value`, `scion secret list`, and the agent secret endpoints) is not covered: the agent token the Hub issues to such an agent does not carry `project:secret:read`, so project-scope runtime reads and lists are refused. The full agent role is not available from a token for the same reason. When `hub.agent_secrets` is enabled, an agent can still read its own **agent-scoped** secrets without `project:secret:read`.
 
 ### Your Own User Values Follow the Agent's Delegation Chain
 
@@ -99,28 +102,6 @@ One Hub-scoped `file` secret is delivered: the telemetry credential file, when i
 This applies to Hub-scoped secrets only. Hub-scoped environment variables (`scion hub env set`), and secrets at User, Project and Runtime Broker scope, are not affected. To deliver a credential that has to be a file or a variable, store it at Project or User scope.
 
 An agent reading Hub-scoped secrets (`GET /api/v1/secrets?scope=hub`, `GET /api/v1/env?scope=hub` and their single-key routes) sees only the `environment` secrets with the `always` mode. Every other Hub-scoped secret, including the telemetry credential file, is left out of those lists, and a request for it by name answers as for a key that does not exist. Hub administrators see every Hub-scoped secret.
-
-### Agent-Scoped Secrets
-
-:::note[Experimental]
-Agent-scoped secrets require the `hub.agent_secrets` [experiment](/scion/reference/experiments/), which is off by default. While it is off, the Hub rejects the `agent` scope with `400 invalid scope: agent` and delivers no agent-scoped secrets.
-:::
-
-An agent-scoped secret belongs to a single agent. Only that agent receives it at start and restart, and only that agent can read its value at runtime. When the experiment is on, it takes precedence over a secret of the same name at Runtime Broker, Hub, Project or User scope (`runtime_broker < hub < project < user < agent`), and it is deleted when the agent is hard-deleted or purged. The scope exists for secrets only; environment variables cannot be agent-scoped.
-
-- **You** set, list, update and clear an agent's secrets with `scion hub secret --agent <name|id>` (or on the agent's **Secrets** tab in the Web UI). Listing and reading metadata need read access to the agent, and writing or clearing needs update access. As at every scope, values are never returned to you.
-- **The agent** stores and removes its own agent-scoped secrets with `sciontool secret set --scope agent` and `sciontool secret delete --scope agent` (see [Writing secrets with `sciontool`](#writing-secrets-with-sciontool)), and reads them with `scion secret get --value`. An agent cannot read or write another agent's agent-scoped secrets.
-
-```bash
-# Store a secret for one agent (a name is resolved in the current project)
-printf %s "$TOKEN" | scion hub secret set --agent my-agent API_TOKEN -
-
-# List that agent's secrets (metadata only)
-scion hub secret list --agent my-agent
-
-# Remove it
-scion hub secret clear --agent my-agent API_TOKEN
-```
 
 ---
 ## Injection Modes
@@ -293,7 +274,7 @@ This runtime retrieval is accessible either via the `scion` CLI or directly thro
 #### Using the `scion` CLI inside an agent
 From inside an agent container, read secrets with `scion secret`. The calls are made as the agent, with its own hub identity:
 
-*   **List Available Secrets**: Lists metadata (keys, types, versions and update times) for all secrets in the agent's project. Values are omitted.
+*   **List Available Secrets**: Lists metadata (keys, types, versions and update times) for secrets in the agent's project. Values are omitted. When the `hub.agent_secrets` experiment is on, `scion secret list` defaults to `--scope all` and includes agent-scoped secrets alongside project secrets with a `SCOPE` column (see [Agent Self-Service](#agent-self-service)).
     ```bash
     scion secret list
     ```
@@ -488,6 +469,173 @@ Setting a skipped secret again does not change its author, because an update kee
 A repaired secret that is shared with progeny becomes readable at runtime (`scion secret get` inside an agent) by the owner's agents with a recorded delegation chain, in every project, as a secret written after 2026-09-12 already is. Before the repair, these secrets were never readable at runtime.
 
 Whenever authorization withholds a user-scoped secret at start or restart, or refuses a runtime read of one, the Hub logs a warning that names the agent, the secret and the cause, never the value: `start-time user secret withheld by authorization` and `runtime user secret read withheld by authorization`. The warning is logged at most once every 10 minutes for the same agent, secret and cause, and the next one reports how many were suppressed.
+
+---
+
+## Agent-Scoped Secrets
+
+:::note[Experimental]
+Agent-scoped secrets require the `hub.agent_secrets` [experiment](/scion/reference/experiments/), which is off by default. While it is off, the Hub rejects the `agent` scope with `400 invalid scope: agent` and delivers no agent-scoped secrets.
+:::
+
+When `hub.agent_secrets` is enabled, Scion supports **agent-scoped secrets** (`scope=agent`, keyed by the agent's stable UUID): secrets bound to a single agent and readable only by that agent's token.
+
+- **Access boundary:** No API returns an agent-scope value to anyone but the bound agent's token. For humans, agent-scoped secrets are write-only — there is no reveal action (unlike [pending user secrets](#approving-user-secrets-saved-by-your-agents)).
+- **Descriptions are metadata:** Secret descriptions (including those supplied on secret requests) are visible to anyone holding `agent.read` on the agent. Never put secret values in a description.
+- **Secrets only:** Agent scope applies to secrets only, not plain environment variables.
+- **Precedence:** Agent scope sits at the top of the secret precedence ladder (`runtime_broker < hub < project < user < agent`). Non-empty environment values in the agent-create request still outrank every scope, and plain variables from any scope still beat environment-type secrets.
+- **Types, targets, and injection modes:** Supports `environment` (default), `file`, and `variable` types, custom targets, and `as_needed` (default) or `always` injection modes. `file` and `variable` secrets are placed regardless of injection mode.
+- **No progeny propagation:** Agent-scoped secrets never propagate to child agents; setting `allowProgeny` at agent scope is rejected with `400`.
+- **Reserved names:** `SCION_*` and `GCE_METADATA_*` are rejected for `environment`-type secrets, as at every other scope.
+- **Persistence and deletion:** Because agent-scoped secrets are keyed by the agent's stable UUID, they persist across stop, suspend, restart, reincarnation (including `--broker` moves), and soft delete. When the agent is **hard-deleted** or purged by retention, its local-backend secret rows are deleted in the hard-delete transaction and any GCP Secret Manager entries are deleted best-effort post-commit.
+- **GCP Secret Manager naming and labels:** Agent-scoped secrets use the hub-prefixed scheme `scion-<h12>-agent-<sha256(hubID:agentID)[:12]>-<KEY>` (covered by the existing hub-prefix conditioned IAM grant) and carry the labels `scion-scope=agent`, `scion-scope-id=<agentID>`, and `scion-project-id=<projectID>` for project attribution.
+
+### Managing Agent Secrets (Humans)
+
+Listing or reading metadata for an agent's secrets requires `agent.read` on the agent; creating, updating, or deleting requires `agent.update` (accepted from both interactive sessions and user access tokens carrying `agent:update`).
+
+- **CLI (`scion hub secret ... --agent <name|id>`):**
+  ```bash
+  # Set from stdin (recommended — avoids shell history and process listings)
+  printf %s "$TOKEN" | scion hub secret set --agent my-agent GITHUB_TOKEN -
+
+  # Set a file secret from a local file
+  scion hub secret set --agent my-agent --type file --target ~/.ssh/id_ed25519 DEPLOY_KEY @~/.ssh/deploy_key
+
+  # List, inspect metadata, update metadata, or delete
+  scion hub secret list --agent my-agent
+  scion hub secret get --agent my-agent GITHUB_TOKEN
+  scion hub secret update --agent my-agent GITHUB_TOKEN --injection-mode always
+  scion hub secret delete --agent my-agent GITHUB_TOKEN   # alias for clear
+  ```
+  When passing `-` to `scion hub secret set`, stdin is read up to 64 KiB; trailing CR/LF characters are trimmed for `environment` and `variable` types, while `file` secrets preserve stdin bytes verbatim.
+- **Web UI:** The agent detail and edit pages include a **Secrets** tab for adding, editing metadata, and deleting agent-scoped secrets (no reveal).
+
+### Create-Time Secrets
+
+You can bind secrets to an agent when creating or starting it:
+
+- **CLI (`--secrets-file <path>` on `scion create` and `scion start`):** Reads a YAML or JSON file client-side (at most **50 secrets**, up to **64 KiB** per value) and sends the values in `CreateAgentRequest.Secrets`. There is deliberately no `--secret KEY=VALUE` flag so values are never exposed in shell history or process listings. On Unix, the CLI warns to stderr if the file is group- or world-readable.
+  ```yaml
+  # Map shorthand (environment, as_needed — use the full form with
+  # injectionMode: always to inject unconditionally at every start)
+  GITHUB_TOKEN: ghp_example
+  ```
+  ```yaml
+  # Full form
+  secrets:
+    - key: DEPLOY_KEY
+      valueFile: ~/.ssh/deploy_key     # or value: | or fromEnv: VAR
+      type: file
+      target: ~/.ssh/id_ed25519
+      description: Release deploy key
+    - key: OPENAI_API_KEY
+      fromEnv: OPENAI_API_KEY
+      injectionMode: always
+  ```
+  - **Fail-closed creation (`503`):** Secrets are written to the secret backend after the agent record commits and before dispatch. If any write fails, already-written secrets are best-effort deleted, the new agent is hard-deleted, and the Hub returns `503` (`agent secrets could not be stored; the agent was not created`).
+  - **Existing agents:** Running `scion start <existing-agent> --secrets-file <path>` upserts the secrets at agent scope (requiring `agent.update`) before starting the agent.
+  - **Older Hubs:** A Hub that predates agent-scoped secrets silently ignores the `secrets` field on create requests.
+- **Web UI:** The agent create form's **Additional options** includes a **Secrets** tab (create mode only). Values go only into the create request body.
+
+### Web Form Masking and File Loading
+
+Both the create-form **Secrets** tab and the secret-request form use the same masked secret input:
+
+- **Masked by default:** Values are entered through password inputs until you click **Show**. Multi-line values and exact line endings (including CRLF and leading UTF-8 BOM) are preserved verbatim in memory while masked.
+- **Revealed editing and mixed line endings:** Clicking **Show** reveals a `<textarea>`. All-LF and all-CRLF values remain editable while preserving their line endings; values with mixed line endings or bare CR render read-only when revealed with the note *"This value has mixed line endings; Hide, then paste or load to replace it."* so bytes are never silently altered.
+- **Load from file:** File-typed secret inputs offer **Load from file** (UTF-8 text only, up to **64 KiB**; binary files and files containing NUL bytes are rejected).
+- **No browser persistence:** Values are never stored in drafts, `localStorage`, `sessionStorage`, or logs, and are cleared immediately on submit, navigation, or `pagehide`.
+
+:::note[Operator check: browser password managers]
+Before enabling `hub.agent_secrets` broadly, verify how your organization's browser password managers interact with the masked password inputs on the create form and secret-request cards (for example autofill or save-password prompts).
+:::
+
+### Agent Self-Service
+
+Inside a running agent container (with `hub.agent_secrets` enabled):
+
+- **List secrets (`scion secret list`):** Defaults to `--scope all` and prints a `SCOPE` column showing both `agent` and `project` secrets. Filter with `--scope agent` or `--scope project`.
+- **Read a secret (`scion secret get`):** Checks `agent` scope first, then `project` scope. Pin with `--scope agent` or `--scope project`. Use `--value` to write the raw bytes to stdout inline:
+  ```bash
+  curl -H "Authorization: Bearer $(scion secret get --value GITHUB_TOKEN)" https://api.github.com/user
+  ```
+  Reading an agent's own `agent`-scope secrets does not require `project:secret:read` (so agents created from user access tokens can still read their own agent-scoped secrets).
+- **Write and delete (`sciontool secret`):** Lead with stdin (`-`) rather than passing values as command-line arguments:
+  ```bash
+  printf '%s' "$TOKEN" | sciontool secret set MY_AGENT_TOKEN - --scope agent
+  sciontool secret delete MY_AGENT_TOKEN --scope agent
+  ```
+  When passing `-` to `sciontool secret set`, stdin is read up to 64 KiB; a single trailing `\r\n` or `\n` is trimmed for `environment` and `variable` types, while `file` secrets preserve stdin bytes verbatim. Agent-scope writes are stored immediately (no pending approval step, and not blocked by `agent_secrets.user_scope_only`).
+- **File target restriction:** Any `--scope agent` file secret written by an agent (or requested via a file-type secret request) must target a path under the agent home (`~/...`) and must not contain `..`.
+
+### Secret Requests (Agent Asks, Human Supplies)
+
+When an agent needs a credential it does not yet have, it can send a **secret request** (`secret-request` message) instead of asking a human to paste the value into chat.
+
+#### Sending a secret request (agent mode only)
+
+```bash
+# Single key
+scion message conv:<id> --secret-request GITHUB_TOKEN \
+  --secret-description "GitHub PAT with repo scope for org foo" - <<'EOF'
+I need a token to push the release branch.
+EOF
+
+# Multiple keys or typed secrets (JSON array, 1–10 entries, max 32 KiB)
+scion message @alice@example.com --secret-request-file req.json
+```
+
+Each entry in `--secret-request-file` (pass `-` for stdin) is a JSON object with `key` (required, `[A-Za-z_][A-Za-z0-9_]{0,127}`), and optional `description` (up to 1,000 characters), `type` (`environment` default, `file`, or `variable`), and `target` (required for `file`, must be under `~/` without `..`).
+
+- **Destinations:** Users or conversations only (`user:<email>`, `@<email>`, `conv:<id>`, `#<thread>`). Agents, `group[...]`, and broadcasts are refused. Cannot be combined with `--decisions`/`--decisions-file`, `--attach`, `--artifact`, or `--wake`.
+- **Versioning and `--update`:** Keys compare case-insensitively, and an agent can have at most one `pending` version per key. Sending a key that is already `pending` without `--update` is refused with `409 secret_request_key_pending` (listing the version, card message ID, and a hint to pass `--update` or `scion secret request withdraw KEY`). Passing `--update` marks the pending version `replaced` and creates `v(n+1)` (if a fulfill is currently in flight, the send is refused with `409 secret_request_submitting`). Sending a key whose latest version is terminal (`fulfilled`, `withdrawn`, `dismissed`, or `expired`) creates the next version without `--update` — this is the normal way to ask for a secret rotation.
+
+#### Inspecting and withdrawing requests (agent mode only)
+
+```bash
+scion secret request list [--pending | --fulfilled | --withdrawn | --dismissed | --expired | --all] [--json]
+scion secret request withdraw GITHUB_TOKEN --reason "no longer needed"
+scion secret request withdraw GITHUB_TOKEN --set --reason "switched approach"
+```
+
+Withdrawal is all-or-nothing over the named keys' `pending` versions. `--set` also withdraws every other pending key on the same card. Repeating `withdraw` on an already-withdrawn key is an idempotent no-op (`already withdrawn`).
+
+#### Lifecycle states and expiry
+
+| State | Meaning |
+| :--- | :--- |
+| `pending` | Waiting for a human responder. |
+| `fulfilling` *(internal)* | Short-lived claim while the Hub writes to the secret backend; API views report `status: "pending"` with `submitting: true`. Stale claims older than **2 minutes** are automatically recovered back to `pending`. |
+| `fulfilled` | Stored at agent scope (`as_needed`); the agent receives a `secret-response` message (with auto-wake) and can read the value immediately with `scion secret get --value KEY`. `file` and `variable` secrets are placed at every later start; an `environment` secret is stored `as_needed`, reaching the environment at start only when the agent's template or harness requests that key, and otherwise is read with `scion secret get --value` (a human can switch it with `scion hub secret update --agent <agent> KEY --injection-mode always`). |
+| `replaced` | Superseded by a newer version sent with `--update`; the old card links to the newer version and cannot be submitted (`409 replaced`). |
+| `withdrawn` | Retired by the agent (`withdrawn_by: "agent"`) or by the Hub when the agent is hard-deleted (`withdrawn_by: "hub"`, reason `"agent deleted"`). |
+| `dismissed` | Declined by an eligible responder (whole card or selected keys, optional reason up to 500 characters, no minimum age); the agent receives a `secret-response` message. |
+| `expired` | Unanswered for **7 days**; swept automatically with no message sent to the agent. |
+
+Secret request rows never store secret values and are retained as a request log after agent deletion (deleted when the project is deleted).
+
+#### Responding (humans)
+
+- **Authorization:** Only a signed-in human user on an **interactive web session** who is a **recipient** of the request (the DM target, or a participant of the conversation/thread) and holds **`agent.attach`** on the asking agent can fulfill or dismiss a request. User access tokens, visitors, and agents are refused (`403`). Viewing a card (`GET /api/v1/secret-requests/{messageId}`) requires being a recipient and holding `agent.read`; viewers who cannot respond see the form disabled with one of the following reasons:
+  - *"you are not an eligible responder for this secret request"*
+  - *"you need agent.attach permission on this agent to supply or dismiss secrets"*
+  - *"all secret requests on this card are closed"*
+- **Surfaces:**
+  - **Native web chat:** Renders an interactive card with masked inputs, **Show/Hide**, **Load from file** (for `file` type), live state updates (`chat.secret_request.updated`), **Submit** (submits all currently pending keys on the card together), and **Dismiss** (whole card or selected keys, with optional reason).
+  - **Standalone page (`/secret-requests/<messageId>`):** Renders the same form outside chat behind sign-in. A link to a replaced card displays a replacement banner linking to the current version.
+  - **Non-native surfaces** (Slack, Telegram, Discord, Google Chat): Receive a Markdown fallback listing the agent, project, keys, versions, descriptions, a reminder never to paste values into chat, and the standalone link `<hub-public-url>/secret-requests/<messageId>` (the link is omitted if the Hub has no public endpoint configured).
+- **Partial-failure rollback on multi-key fulfill:** If a backend write fails (`503`) partway through fulfilling a multi-key card, rollback deletes **only keys newly created in that call** (preserving any pre-existing keys during rotation) and returns the rows to `pending` so the responder can retry.
+
+### Experiment Gate (`hub.agent_secrets`)
+
+`hub.agent_secrets` is a server- and web-layer experiment (alpha, off by default). While it is off:
+- `scope=agent` is rejected (`400 invalid scope`) on secret CRUD and agent secret routes, and agent-scope secrets are skipped by launch delivery.
+- `CreateAgentRequest.Secrets` is refused with `400 invalid_request` (message `… (experiment not enabled)`), and outbound messages carrying `secret_requests` are refused with `400 experiment_disabled`.
+- `/api/v1/secret-requests/{messageId}` (plus `/fulfill` and `/dismiss`) and `/api/v1/agent/secret-requests` (plus `/withdraw`) answer `404`.
+- The web UI hides the agent detail/edit **Secrets** tab, the create-form **Secrets** tab, and native chat secret-request cards.
+
+See [Experiments](/scion/reference/experiments/#server-experiments-with-notes) for how admins toggle it.
 
 ---
 
@@ -714,9 +862,10 @@ When an agent starts, the Runtime Broker requests a "Resolved Environment" from 
 3. Hub Secrets (global defaults)
 4. Project Secrets
 5. User Secrets
-6. Environment values in the agent-create request (API, web form or `--config`), when non-empty
+6. Agent Secrets *(secrets only, when `hub.agent_secrets` is enabled)*
+7. Environment values in the agent-create request (API, web form or `--config`), when non-empty
 
-The scope order (items 2 to 5) applies within variables and within secrets. For the same key, a variable from any scope takes precedence over an environment-type secret.
+The scope order (items 2 to 6 for secrets; items 2 to 5 for variables) applies within variables and within secrets. For the same key, a variable from any scope takes precedence over an environment-type secret.
 
 ### Security
 Secrets are transmitted over TLS between the Hub and Runtime Brokers. They are only decrypted by the Hub during the dispatch process and sent over an encrypted channel to the Runtime Broker. The Broker then injects them directly into the container's memory space. Brokers never persist agent secrets to disk.

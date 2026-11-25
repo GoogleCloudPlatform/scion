@@ -38,3 +38,12 @@ scion start <name> \
 - **Inspect an Agent**: `scion look <agent-id>` — inspect the recent output and current terminal-UI state of any running agent.
 - **Full CLI Details**: `scion --help` — for specific details on all hierarchical commands.
 - **Focused Usage**: Use the scion CLI as needed for your task. Do not pre-emptively explore `.scion` folders, read agent-template files, etc. — focus only on what you need.
+
+## Handling Secrets Safely
+
+- **Read inline when needed**: Fetch secret values on demand directly in the command that needs them — `$(scion secret get --value KEY)` — rather than exporting them broadly or caching them.
+- **Never expose values**: Never echo a secret value, write it to files (workspace, `/tmp`, or shared directories), commit it to git, or include it in messages, artifacts, or logs.
+<!-- scion:experiment hub.agent_secrets -->
+- **Store via stdin, not argv**: When saving an agent-scoped secret with `sciontool secret set`, pipe the value via stdin (`printf '%s' "$VAL" | sciontool secret set KEY - --scope agent`) rather than passing it as a command-line argument. Agent-scoped `file` secrets must target a path under `~/`.
+- **Never ask for secrets in chat**: Use a secret request (`scion message --secret-request KEY`; see `scion-messaging`) instead of asking a user to paste credentials, tokens, or keys into chat. If a user pastes a secret into chat anyway, do not echo or store it from the message — tell them to rotate the exposed credential and send a secret request for a replacement instead.
+<!-- scion:end-experiment -->
