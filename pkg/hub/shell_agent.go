@@ -316,10 +316,34 @@ func shellReincarnateHarnessSwitchError(agent *store.Agent, reqHarnessConfig str
 	return ""
 }
 
-// isShellPatchLaunchShaping reports whether an agent PATCH touches any
-// launch-shaping field (anything in config, explicitTimezone, gcp_identity, or
-// agentRole). Non-launch metadata (name, labels, annotations, taskSummary)
-// returns false and keeps agent.update (ptone/scion#8812 §3.4 S7).
-func isShellPatchLaunchShaping(hasConfig, hasExplicitTimezone, hasGCPIdentity, hasAgentRole bool) bool {
-	return hasConfig || hasExplicitTimezone || hasGCPIdentity || hasAgentRole
+// shellPatchMetadataKeys is the lower-cased allowlist of top-level PATCH
+// /agents/{id} keys that are pure non-launch metadata (or optimistic-lock
+// control) and keep agent.update on a shell execution container
+// (ptone/scion#8812 §3.4 S7). Any other top-level key — including any future
+// field added to the PATCH body — fails closed to owner-human ActionAttach.
+var shellPatchMetadataKeys = map[string]bool{
+	"name":         true,
+	"labels":       true,
+	"annotations":  true,
+	"tasksummary":  true,
+	"stateversion": true,
+}
+
+// shellPatchHasNonMetadataKeys reports whether raw PATCH body contains any
+// top-level JSON key outside shellPatchMetadataKeys. Fails closed (returns
+// true) on malformed JSON so unknown or unparseable payloads require attach.
+func shellPatchHasNonMetadataKeys(body []byte) bool {
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return false
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return true
+	}
+	for k := range top {
+		if !shellPatchMetadataKeys[strings.ToLower(k)] {
+			return true
+		}
+	}
+	return false
 }

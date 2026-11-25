@@ -4908,12 +4908,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 
 	// S7 (ptone/scion#8812 §3.4): on a shell execution container, every
-	// launch-shaping field (config, explicitTimezone, gcp_identity, agentRole)
-	// requires owner-human authorization via authorizeAgentTargetAction
-	// (ActionAttach), blocking project admins without attach and all agent
-	// principals. Non-launch metadata (name, labels, annotations, taskSummary)
-	// keeps agent.update.
-	if isShellAgent(agent) && isShellPatchLaunchShaping(updates.Config != nil, updates.ExplicitTimezone != nil, updates.GCPIdentity != nil, updates.AgentRole != nil) {
+	// top-level PATCH key outside the non-launch metadata allowlist (name,
+	// labels, annotations, taskSummary, stateVersion) requires owner-human
+	// authorization via authorizeAgentTargetAction (ActionAttach), blocking
+	// project admins without attach and all agent principals. Unknown or
+	// future top-level keys fail closed to ActionAttach by default.
+	if isShellAgent(agent) && shellPatchHasNonMetadataKeys(body) {
 		if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
 			return
 		}

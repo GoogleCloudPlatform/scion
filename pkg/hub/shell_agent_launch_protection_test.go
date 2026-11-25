@@ -193,6 +193,22 @@ func TestShellAgentPatch_S7_EveryFieldTable(t *testing.T) {
 		recOwner := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+shellAgent.ID, body)
 		assert.Equal(t, http.StatusOK, recOwner.Code, recOwner.Body.String())
 	})
+
+	// Allowlist fail-closed: an unknown top-level key on a shell agent requires
+	// owner-human ActionAttach, so a project admin without attach gets 403.
+	t.Run("unknown top-level key requires attach", func(t *testing.T) {
+		shellAgent := seedShellTestAgent(t, s, project.ID, broker.ID, "s7-shell-unknown-key", owner.ID, config.ShellHarnessConfigName, state.PhaseCreated, []string{owner.ID})
+		for _, raw := range []string{
+			`{"unknownFutureField":"x"}`,
+			`{"name":"ok","unknownFutureField":"x"}`,
+		} {
+			recAdmin := doRequestAsUser(t, srv, admin, http.MethodPatch, "/api/v1/agents/"+shellAgent.ID, json.RawMessage(raw))
+			assert.Equal(t, http.StatusForbidden, recAdmin.Code, "body=%s resp=%s", raw, recAdmin.Body.String())
+
+			recOwner := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+shellAgent.ID, json.RawMessage(raw))
+			assert.Equal(t, http.StatusOK, recOwner.Code, "body=%s resp=%s", raw, recOwner.Body.String())
+		}
+	})
 }
 
 func TestShellAgentReincarnate_S7(t *testing.T) {
@@ -270,6 +286,66 @@ func TestShellAgentReincarnate_S7(t *testing.T) {
 		DryRun: true,
 	})
 	assert.NotEqual(t, http.StatusForbidden, recOwner.Code, "owner human should pass S7 reincarnate patch gate: %s", recOwner.Body.String())
+
+	// 6. R2: broker placement move (targetBroker / forceMove) on a shell agent
+	//    requires owner-human ActionAttach, while a plain reincarnate (no patch,
+	//    no move) remains allowed for a project admin with agent.lifecycle (S10).
+	brokerB := &store.RuntimeBroker{
+		ID:     api.NewUUID(),
+		Name:   "shell-test-broker-b",
+		Slug:   "shell-test-broker-b",
+		Status: store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{
+			Reprovision: true,
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(context.Background(), brokerB))
+	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   brokerB.ID,
+		BrokerName: brokerB.Name,
+		LocalPath:  t.TempDir(),
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	for _, dryRun := range []bool{true, false} {
+		recAdminMove := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/reincarnate", ReincarnateAgentRequest{
+			TargetBroker: brokerB.ID,
+			DryRun:       dryRun,
+		})
+		assert.Equal(t, http.StatusForbidden, recAdminMove.Code, "admin targetBroker dryRun=%v: %s", dryRun, recAdminMove.Body.String())
+	}
+
+	recAdminForce := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/reincarnate", ReincarnateAgentRequest{
+		ForceMove: true,
+		DryRun:    true,
+	})
+	assert.Equal(t, http.StatusForbidden, recAdminForce.Code, "admin forceMove: %s", recAdminForce.Body.String())
+
+	parentLLM := seedShellTestAgent(t, s, project.ID, broker.ID, "reinc-parent-llm", owner.ID, "claude", state.PhaseRunning, []string{owner.ID})
+	ancestorIdent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: parentLLM.ID},
+		ProjectID: project.ID,
+		Ancestry:  []string{owner.ID, parentLLM.ID},
+		Scopes:    []AgentTokenScope{ScopeProjectRead, ScopeAgentLifecycle},
+	}}
+	recAncestorMove := doRequestAsIdentity(t, srv, ancestorIdent, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/reincarnate", ReincarnateAgentRequest{
+		TargetBroker: brokerB.ID,
+		DryRun:       true,
+	})
+	assert.Equal(t, http.StatusForbidden, recAncestorMove.Code, "ancestor agent targetBroker: %s", recAncestorMove.Body.String())
+
+	recOwnerMove := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/reincarnate", ReincarnateAgentRequest{
+		TargetBroker: brokerB.ID,
+		DryRun:       true,
+	})
+	assert.NotEqual(t, http.StatusForbidden, recOwnerMove.Code, "owner targetBroker should pass S7 gate: %s", recOwnerMove.Body.String())
+
+	// Plain reincarnate (no patch, no move) by project admin passes S7/S10 authz.
+	recAdminPlain := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/reincarnate", ReincarnateAgentRequest{
+		DryRun: true,
+	})
+	assert.NotEqual(t, http.StatusForbidden, recAdminPlain.Code, "plain reincarnate by admin should remain allowed (S10): %s", recAdminPlain.Body.String())
 }
 
 func TestShellAgentPendingConfig_S7(t *testing.T) {

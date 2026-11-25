@@ -258,11 +258,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		ValidationError(w, msg, nil)
 		return
 	}
-	// S7 (ptone/scion#8812 §3.4): reincarnate patch flags on a shell execution
-	// container require owner-human authorization via authorizeAgentTargetAction
-	// (ActionAttach), blocking project admins without attach and all agent
-	// principals.
-	if isShellAgent(agent) && req.hasPatch() {
+	// S7 (ptone/scion#8812 §3.4): reincarnate patch flags or broker placement
+	// moves (targetBroker / forceMove) on a shell execution container require
+	// owner-human authorization via authorizeAgentTargetAction (ActionAttach),
+	// blocking project admins without attach and all agent principals.
+	if isShellAgent(agent) && (req.hasPatch() || req.TargetBroker != "" || req.ForceMove) {
 		if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
 			return
 		}
