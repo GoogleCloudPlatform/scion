@@ -5621,7 +5621,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingExperimentOff, pendingDiscardTriggerExperimentOff)
 	}
 
-	disposition := agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil, suspendPolicyChanged)
+	disposition := agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil)
 	if len(configHeld) > 0 {
 		disposition.Held = configHeld
 	}
@@ -5789,19 +5789,25 @@ func configPatchPhase(phase string) bool {
 // outside config, as it stood before the PATCH, so the disposition can
 // leave out keys the request echoed unchanged.
 type agentPatchSnapshot struct {
-	name        string
-	labels      map[string]string
-	annotations map[string]string
-	taskSummary string
-	gcpIdentity *store.GCPIdentityConfig
+	name          string
+	labels        map[string]string
+	annotations   map[string]string
+	taskSummary   string
+	gcpIdentity   *store.GCPIdentityConfig
+	suspendPolicy string
 }
 
 func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
+	sp := agent.SuspendPolicy
+	if sp == "" {
+		sp = store.SuspendPolicyAuto
+	}
 	snap := agentPatchSnapshot{
-		name:        agent.Name,
-		labels:      maps.Clone(agent.Labels),
-		annotations: maps.Clone(agent.Annotations),
-		taskSummary: agent.TaskSummary,
+		name:          agent.Name,
+		labels:        maps.Clone(agent.Labels),
+		annotations:   maps.Clone(agent.Annotations),
+		taskSummary:   agent.TaskSummary,
+		suspendPolicy: sp,
 	}
 	if agent.AppliedConfig != nil && agent.AppliedConfig.GCPIdentity != nil {
 		id := *agent.AppliedConfig.GCPIdentity
@@ -5825,7 +5831,7 @@ func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
 // a service-account assignment row; gcp_identity is then listed under
 // applied even when the request names the current account, because the
 // row records this caller as its source.
-func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged, saAssignmentRecorded, suspendPolicyChanged bool) AgentUpdateDisposition {
+func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged, saAssignmentRecorded bool) AgentUpdateDisposition {
 	applied := append([]string{}, configApplied...)
 	if after.Name != before.name {
 		applied = append(applied, "name")
@@ -5849,7 +5855,11 @@ func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, confi
 	if timezoneChanged {
 		applied = append(applied, "explicitTimezone")
 	}
-	if suspendPolicyChanged {
+	afterPolicy := after.SuspendPolicy
+	if afterPolicy == "" {
+		afterPolicy = store.SuspendPolicyAuto
+	}
+	if afterPolicy != before.suspendPolicy {
 		applied = append(applied, "suspendPolicy")
 	}
 	sort.Strings(applied)
