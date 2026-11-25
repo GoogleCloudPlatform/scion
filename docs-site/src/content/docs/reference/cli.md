@@ -2012,6 +2012,17 @@ available inside agent containers.
   and `profiles` placement settings and existing agents whose stored pod placement disagrees
   with the resolved operator policy, the deprecated server hub endpoint source on hosts
   configured as a server, telemetry, container images, broker credentials).
+  - Container images: on Docker or Podman (not Kubernetes, Cloud Run or the Apple container
+    runtime), doctor also inspects each local image that matches a configured harness image
+    (from the harness-config directories and the `harness_configs` and harness override settings,
+    with `image_registry` and `image_tag` applied; the registry prefix is ignored when matching).
+    `container-image-capabilities[<image>]` warns when the image's `scion.sciontool.capabilities`
+    label does not list `netns-setup`: with GCP metadata mode `block` or `assign` on Docker or rootful
+    Podman, the Runtime Broker cannot confirm support before start, and the start fails if the
+    image's sciontool lacks it. `container-image-version[<image>]` is an informational result when
+    the image's `org.opencontainers.image.version` or `org.opencontainers.image.revision` label
+    differs from this `scion` binary's version or commit; it is skipped for development builds.
+    Rebuild or pull an agent image that matches the binary to clear either.
 - **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
   data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
   every "Needs attention" item in the Hub's order (critical items as failures, warnings as
