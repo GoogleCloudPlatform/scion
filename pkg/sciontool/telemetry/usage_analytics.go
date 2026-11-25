@@ -276,11 +276,15 @@ func (a *UsageAnalytics) build(obs UsageObservation) (*telemetrycontract.UsageEv
 	env.ProducerBuild = version.Short()
 	env.HarnessVersion = obs.HarnessVersion
 
-	a.metaMu.RLock()
-	runID := strings.TrimSpace(a.runID)
-	a.metaMu.RUnlock()
+	// Prefer SCION_LAUNCH_ID (the container's own run_id, shared with hook
+	// subprocesses and the X-Scion-Run-Id header); fall back to a.runID only
+	// when SCION_LAUNCH_ID is unset. Using one source prevents epoch
+	// oscillation between native and hook appenders.
+	runID := strings.TrimSpace(os.Getenv("SCION_LAUNCH_ID"))
 	if runID == "" {
-		runID = strings.TrimSpace(os.Getenv("SCION_LAUNCH_ID"))
+		a.metaMu.RLock()
+		runID = strings.TrimSpace(a.runID)
+		a.metaMu.RUnlock()
 	}
 
 	model, modelSource := resolveModelWithSource(obs.Model)

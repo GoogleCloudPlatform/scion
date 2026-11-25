@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -38,9 +39,17 @@ var (
 )
 
 func buildHubUsageSinkConfig(caps *telemetrycontract.UsageCapabilitiesResponse, newClient func() *hub.Client) telemetry.HubUsageSinkConfig {
-	runID := caps.RunID
+	// Prefer the container's own run ID (SCION_LAUNCH_ID, which matches the
+	// runtime's scion.run_id label and X-Scion-Run-Id header) so native
+	// appenders, hook subprocesses, and heartbeats all share one run identity
+	// and never oscillate the outbox epoch if the probe sees a different run.
+	envRunID := strings.TrimSpace(os.Getenv(hub.EnvLaunchID))
+	probeRunID := strings.TrimSpace(caps.RunID)
+	runID := envRunID
 	if runID == "" {
-		runID = os.Getenv(hub.EnvLaunchID)
+		runID = probeRunID
+	} else if probeRunID != "" && probeRunID != envRunID {
+		log.Warn("Hub usage capabilities probe returned run_id=%q differing from %s=%q; using %s", probeRunID, hub.EnvLaunchID, envRunID, hub.EnvLaunchID)
 	}
 	var drainInterval time.Duration
 	if caps.DrainIntervalSec > 0 {

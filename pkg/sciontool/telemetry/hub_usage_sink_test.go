@@ -1803,6 +1803,102 @@ func TestDualAnalyticsDrainer_PeriodicReprobeActivatesHubSink(t *testing.T) {
 	}
 }
 
+// O1: native and hook appenders must share one run identity source
+// (SCION_LAUNCH_ID preferred over a disagreeing probe RunID) so alternating
+// native and hook appends never oscillate producer_epoch and every event
+// carries the container's own run_id.
+func TestHubUsageSink_SingleRunIDSourceNoEpochOscillation(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_LAUNCH_ID", "run-container")
+
+	var mu sync.Mutex
+	var delivered []telemetrycontract.UsageEvent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req telemetrycontract.UsageIngestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		delivered = append(delivered, req.Events...)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+	}))
+	defer srv.Close()
+
+	dir := filepath.Join(t.TempDir(), "outbox")
+	oNative, err := OpenAnalyticsOutbox(dir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(native): %v", err)
+	}
+	oHook, err := OpenAnalyticsOutbox(dir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(hook): %v", err)
+	}
+
+	native := NewUsageAnalytics(oNative, telemetrycontract.UsageSourceNative)
+	// Simulate a probe returning a different fallback RunID; SCION_LAUNCH_ID must win.
+	native.setRunAndActivity("run-probe-different", nil)
+	hook := NewUsageAnalytics(oHook, telemetrycontract.UsageSourceHooks)
+
+	obs := func(id string) UsageObservation {
+		return UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   id,
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(10),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
+		}
+	}
+
+	// Alternate native and hook appends.
+	for i, pair := range []struct {
+		p  *UsageAnalytics
+		id string
+	}{
+		{native, "cmp1:alt-1"},
+		{hook, "cmp1:alt-2"},
+		{native, "cmp1:alt-3"},
+		{hook, "cmp1:alt-4"},
+	} {
+		if _, err := pair.p.Record(obs(pair.id)); err != nil {
+			t.Fatalf("Record[%d]: %v", i, err)
+		}
+	}
+
+	sink := NewHubUsageSink(oNative, HubUsageSinkConfig{
+		Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+		RunID: "run-container",
+	})
+	d := NewHubAnalyticsDrainer(oNative, sink, trustedHub("hub-1"))
+	if sent := d.RunOnce(context.Background()); sent != 4 {
+		t.Fatalf("sent = %d, want 4", sent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(delivered) != 4 {
+		t.Fatalf("delivered = %d, want 4", len(delivered))
+	}
+	epoch0 := delivered[0].ProducerEpoch
+	for i, ev := range delivered {
+		if ev.RunID != "run-container" {
+			t.Errorf("event[%d] RunID = %q, want %q", i, ev.RunID, "run-container")
+		}
+		if ev.ProducerEpoch != epoch0 {
+			t.Errorf("event[%d] ProducerEpoch = %q, want constant %q (epoch oscillated!)", i, ev.ProducerEpoch, epoch0)
+		}
+		if ev.ProducerSeq != int64(i+1) {
+			t.Errorf("event[%d] ProducerSeq = %d, want %d", i, ev.ProducerSeq, i+1)
+		}
+	}
+}
+
 // O4: Hub sink always uses cursor.hub in both dual-run and Hub-only modes.
 func TestHubUsageSink_AlwaysUsesCursorHub(t *testing.T) {
 	t.Run("dual-run to Hub-only restart resumes from cursor.hub without skipping", func(t *testing.T) {

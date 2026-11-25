@@ -343,3 +343,27 @@ func TestProbeAndConfigureUsageIngest_Transient503Then200(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildHubUsageSinkConfig_PrefersLaunchIDOverProbeRunID(t *testing.T) {
+	caps := &telemetrycontract.UsageCapabilitiesResponse{
+		UsageIngestEnabled: true,
+		RunID:              "run-from-probe",
+	}
+	newClient := func() *hub.Client { return hub.NewClientWithConfig("http://127.0.0.1:1", "tok", "agent-1") }
+
+	t.Run("SCION_LAUNCH_ID wins when set", func(t *testing.T) {
+		t.Setenv(hub.EnvLaunchID, "run-from-container")
+		cfg := buildHubUsageSinkConfig(caps, newClient)
+		if cfg.RunID != "run-from-container" {
+			t.Errorf("cfg.RunID = %q, want %q", cfg.RunID, "run-from-container")
+		}
+	})
+
+	t.Run("falls back to probe run_id when SCION_LAUNCH_ID is unset", func(t *testing.T) {
+		t.Setenv(hub.EnvLaunchID, "")
+		cfg := buildHubUsageSinkConfig(caps, newClient)
+		if cfg.RunID != "run-from-probe" {
+			t.Errorf("cfg.RunID = %q, want %q", cfg.RunID, "run-from-probe")
+		}
+	})
+}

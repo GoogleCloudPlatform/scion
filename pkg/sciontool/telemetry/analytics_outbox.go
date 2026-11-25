@@ -262,9 +262,13 @@ type AnalyticsOutbox struct {
 	// keeps "cursor" as primary and registers HubAnalyticsCursorName in
 	// secondaryCursors so ready files are retained until both cursors advance
 	// past them (or the secondary cursor is reclaimed/disabled to protect the
-	// primary path). inFlightCursorFile records the ready file number currently
-	// being drained by DrainBatchCursor for a cursor (0 when idle), so
-	// reclaimSecondaryLagLocked never advances a cursor past in-flight lines.
+	// primary path). inFlightCursorFile is a process-local (in-memory) guard
+	// recording the ready file number currently being drained by
+	// DrainBatchCursor for a cursor (0 when idle), so in-process
+	// reclaimSecondaryLagLocked skips that file. Cross-process reclaim (e.g.
+	// from a hook subprocess) cannot see inFlightCursorFile; that is benign
+	// because advanceCursorLocked is monotonic under the outbox lock, an open
+	// fd continues reading on Unix, and the Hub deduplicates by event_id.
 	cursorMu           sync.Mutex
 	primaryCursor      string
 	secondaryCursors   []string
@@ -1953,10 +1957,13 @@ func (o *AnalyticsOutbox) advanceCursorLocked(name string, file, offset int64) e
 // reclaimSecondaryLagLocked advances lagging secondary cursors past the oldest
 // ready files already delivered by the primary cursor and deletes those files
 // until retainedBytes()+neededBytes <= maxPending (or no such files remain).
-// It never advances a secondary cursor past a ready file that DrainBatchCursor
-// currently has in flight. The Hub is the sole authority for meter_health gaps
-// (via emitted-vs-received sequences), so no client-side missing ranges are
-// recorded or sent. Caller holds the outbox lock.
+// For in-process callers it skips any ready file that DrainBatchCursor
+// currently has in flight (process-local guard; cross-process deletion from a
+// hook subprocess is benign because advanceCursorLocked is monotonic, an open
+// fd keeps reading on Unix, and the Hub deduplicates by event_id). The Hub is
+// the sole authority for meter_health gaps (via emitted-vs-received sequences),
+// so no client-side missing ranges are recorded or sent. Caller holds the
+// outbox lock.
 func (o *AnalyticsOutbox) reclaimSecondaryLagLocked(neededBytes int64) (bool, error) {
 	sec := o.getSecondaryCursors()
 	if len(sec) == 0 {
@@ -2091,9 +2098,9 @@ func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName strin
 			}
 			continue
 		}
-		// Mark ready file n as in-flight before opening so concurrent
-		// reclaimSecondaryLagLocked cannot advance cursorName past n or delete
-		// it while its lines are being read and posted.
+		// Mark ready file n as in-flight (process-local guard) before opening
+		// so in-process reclaimSecondaryLagLocked skips it while its lines are
+		// being read and posted.
 		o.setInFlightCursorFile(cursorName, n)
 		offset := int64(0)
 		if n == curFile {
@@ -2687,16 +2694,15 @@ func (o *AnalyticsOutbox) pendingBytes() (int64, time.Time, error) {
 		}
 		cursors = append(cursors, cursorPos{cf, co})
 	}
-	for _, n := range files {
-		// Use the slowest active cursor for this ready file so PendingBytes
-		// stays non-zero until every active sink has delivered it.
-		var minFile int64
-		var minOffset int64
-		for i, c := range cursors {
-			if i == 0 || c.file < minFile || (c.file == minFile && c.offset < minOffset) {
-				minFile, minOffset = c.file, c.offset
-			}
+	// Compute the slowest active cursor once so PendingBytes stays non-zero
+	// until every active sink has delivered each ready file.
+	var minFile, minOffset int64
+	for i, c := range cursors {
+		if i == 0 || c.file < minFile || (c.file == minFile && c.offset < minOffset) {
+			minFile, minOffset = c.file, c.offset
 		}
+	}
+	for _, n := range files {
 		if n < minFile {
 			continue
 		}
