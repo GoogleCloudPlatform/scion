@@ -15,11 +15,13 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -98,18 +100,11 @@ func (s *Server) handleProjectPreStartHooks(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, &ListProjectPreStartHooksResponse{Hooks: hooks})
 
 	case http.MethodPost:
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "project",
-				ID:      project.ID,
-				OwnerID: project.OwnerID,
-			}, ActionUpdate)
-			if !decision.Allowed {
-				Forbidden(w)
-				return
-			}
-		} else {
-			Forbidden(w)
+		if !s.authorizePreStartHookWrite(w, ctx, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}) {
 			return
 		}
 
@@ -222,13 +217,7 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
-		if userIdent, ok := identity.(UserIdentity); ok {
-			if !s.authzService.CheckAccess(ctx, userIdent, projectRes, ActionUpdate).Allowed {
-				Forbidden(w)
-				return
-			}
-		} else {
-			Forbidden(w)
+		if !s.authorizePreStartHookWrite(w, ctx, projectRes) {
 			return
 		}
 
@@ -262,13 +251,7 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusOK, hook)
 
 	case http.MethodPut:
-		if userIdent, ok := identity.(UserIdentity); ok {
-			if !s.authzService.CheckAccess(ctx, userIdent, projectRes, ActionUpdate).Allowed {
-				Forbidden(w)
-				return
-			}
-		} else {
-			Forbidden(w)
+		if !s.authorizePreStartHookWrite(w, ctx, projectRes) {
 			return
 		}
 
@@ -335,13 +318,7 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusOK, hook)
 
 	case http.MethodDelete:
-		if userIdent, ok := identity.(UserIdentity); ok {
-			if !s.authzService.CheckAccess(ctx, userIdent, projectRes, ActionUpdate).Allowed {
-				Forbidden(w)
-				return
-			}
-		} else {
-			Forbidden(w)
+		if !s.authorizePreStartHookWrite(w, ctx, projectRes) {
 			return
 		}
 
@@ -362,4 +339,24 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
+}
+
+// authorizePreStartHookWrite admits a pre-start hook write (create, update,
+// activate, delete) on project: the caller must be a user on an
+// interactive session or dev credential (the write routes are session-only
+// with the GOV_PENDING reason: no token selector covers
+// project.manage_pre_start_hooks) and must hold
+// project.manage_pre_start_hooks on the project. Otherwise it writes the
+// refusal (401, or 403 with the session-only reason for a token) and
+// returns false.
+func (s *Server) authorizePreStartHookWrite(w http.ResponseWriter, ctx context.Context, project Resource) bool {
+	userIdent, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	if !ok {
+		return false
+	}
+	if !s.authzService.CheckAccess(ctx, userIdent, project, ActionManagePreStartHooks).Allowed {
+		Forbidden(w)
+		return false
+	}
+	return true
 }

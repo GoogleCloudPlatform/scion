@@ -48,12 +48,12 @@ In-container lifecycle hooks (`pre-start`, `post-start`, `pre-stop`, `session-en
 ## Managing Hooks via CLI
 
 You can manage pre-start hooks using two command trees depending on your permission scope:
-- `scion project hook` (for project-scoped hooks; available to project owners)
+- `scion project hook` (for project-scoped hooks; listing and reading are available to project members, writing needs `project.manage_pre_start_hooks`)
 - `scion hub hook` (for hub-scoped hooks; requires hub-admin privileges)
 
 ### Project-Scoped Hooks (`scion project hook`)
 
-Project-scoped hooks let project owners attach customization scripts to a single project. The CLI infers the target project from your current directory's Hub link, or you can specify it explicitly.
+Project-scoped hooks attach customization scripts to a single project. A hook runs inside every agent of the project, with the secrets of each agent's creator, so creating, updating, activating or deleting one needs the `project.manage_pre_start_hooks` permission. No built-in project role holds it, project owners included: hub admins and super-admins hold it hub-wide, and a hub admin can grant it for one project through a custom project role. Writing a hook needs a signed-in session; a user access token cannot write hooks. The CLI infers the target project from your current directory's Hub link, or you can specify it explicitly.
 
 ```bash
 # List all pre-start hooks for the current project

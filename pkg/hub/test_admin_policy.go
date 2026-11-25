@@ -122,8 +122,10 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	// (testAdminGrantableAtProjectScope) so built-in project-owner and
 	// project-admin bindings remain assignable by test admins.
 	"project.manage_system_one_instances": testAdminPolicyDeny,
-	"project.clone":                       testAdminPolicyAllow,
-	"project.list":                        testAdminPolicyAllow,
+	// Pre-start hook writes, held by hub admins only.
+	"project.manage_pre_start_hooks": testAdminPolicyAllow,
+	"project.clone":                  testAdminPolicyAllow,
+	"project.list":                   testAdminPolicyAllow,
 	// Posting into a project's chat threads, held by the built-in
 	// project roles.
 	"project.chat_post": testAdminPolicyAllow,

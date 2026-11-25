@@ -205,7 +205,12 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 }
 
 // TestBuiltInRoles_HubAdminRevision pins the hub-admin revision and its
-// latest additions: revision 15 adds project.manage_message_policies and
+// latest additions: revision 20 adds project.manage_pre_start_hooks
+// (ptone/scion#9355), revision 19 adds project.manage_system_one_instances
+// (ptone/scion#8045), revision 18 adds webhook_endpoint.send
+// (ptone/scion#8061), revision 17 adds webhook_endpoint.update
+// (ptone/scion#8060), revision 16 adds broker.manage (ptone/scion#7829),
+// revision 15 adds project.manage_message_policies and
 // project.read_message_policies (ptone/scion#8047), revision 14 adds trigger.*
 // and webhook_endpoint.* (ptone/scion#8028), revision 13 adds
 // system_one_instance.{read,create,delete,execute}
@@ -218,7 +223,7 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 // (ptone/scion#4603).
 func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
-	assert.Equal(t, 19, admin.Revision)
+	assert.Equal(t, 20, admin.Revision)
 	assert.Contains(t, admin.Permissions, "project.manage_system_one_instances")
 	assert.Contains(t, admin.Permissions, "broker.manage")
 	assert.NotContains(t, admin.Permissions, "broker.update")
@@ -226,6 +231,7 @@ func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	assert.NotContains(t, admin.Permissions, "broker.auto_provide")
 	assert.Contains(t, admin.Permissions, "project.manage_message_policies")
 	assert.Contains(t, admin.Permissions, "project.read_message_policies")
+	assert.Contains(t, admin.Permissions, "project.manage_pre_start_hooks")
 	assert.Contains(t, admin.Permissions, "trigger.read")
 	assert.Contains(t, admin.Permissions, "trigger.list")
 	assert.Contains(t, admin.Permissions, "trigger.create")
