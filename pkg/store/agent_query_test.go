@@ -182,3 +182,40 @@ func TestTranslateAgentQuery_ProjectCaseInsensitiveOrderIndependent(t *testing.T
 		}
 	}
 }
+
+func TestQueryTerms_WithoutPhaseAndMatchesPhase(t *testing.T) {
+	var nilQT *QueryTerms
+	if nilQT.HasPhaseTerms() || nilQT.WithoutPhase() != nil || !nilQT.MatchesPhase("running") {
+		t.Fatalf("nil QueryTerms behaved unexpectedly")
+	}
+
+	// Phase-only query strips to nil.
+	qPhaseOnly, fqErr := filterquery.Parse("phase:running", schemas.Agents.HasKey)
+	if fqErr != nil {
+		t.Fatalf("Parse: %v", fqErr)
+	}
+	qtPhaseOnly := TranslateAgentQuery(qPhaseOnly, AgentQueryResolver{}).Terms
+	if !qtPhaseOnly.HasPhaseTerms() {
+		t.Fatalf("expected HasPhaseTerms=true")
+	}
+	if qtPhaseOnly.WithoutPhase() != nil {
+		t.Fatalf("expected WithoutPhase() == nil for phase-only query, got %+v", qtPhaseOnly.WithoutPhase())
+	}
+	if !qtPhaseOnly.MatchesPhase("running") || qtPhaseOnly.MatchesPhase("stopped") || qtPhaseOnly.MatchesPhase("") {
+		t.Fatalf("MatchesPhase mismatch for phase:running")
+	}
+
+	// Mixed query keeps non-phase terms and evaluates multi-value + negated phase terms.
+	qMixed, fqErr := filterquery.Parse("phase:running,error -phase:error label:env=prod", schemas.Agents.HasKey)
+	if fqErr != nil {
+		t.Fatalf("Parse: %v", fqErr)
+	}
+	qtMixed := TranslateAgentQuery(qMixed, AgentQueryResolver{}).Terms
+	stripped := qtMixed.WithoutPhase()
+	if stripped == nil || stripped.HasPhaseTerms() || len(stripped.Terms) != 1 || stripped.Terms[0].Field != "label" {
+		t.Fatalf("unexpected WithoutPhase result: %+v", stripped)
+	}
+	if !qtMixed.MatchesPhase("running") || qtMixed.MatchesPhase("error") || qtMixed.MatchesPhase("stopped") {
+		t.Fatalf("MatchesPhase mismatch for phase:running,error -phase:error")
+	}
+}

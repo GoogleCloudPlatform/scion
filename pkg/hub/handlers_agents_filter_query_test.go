@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -334,4 +335,107 @@ func TestListProjectAgents_FilterQuery(t *testing.T) {
 	var respProj ListAgentsResponse
 	require.NoError(t, json.Unmarshal(recProj.Body.Bytes(), &respProj))
 	assert.Empty(t, respProj.Agents)
+}
+
+func TestListAgentsSorted_FilterQuery_PhaseIndependentStatsAndFit(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: uuid.NewString(), Name: "PhaseStatsProj", Slug: "phase-stats"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+
+	seed := []*store.Agent{
+		{
+			ID: uuid.NewString(), Name: "run-x-1", Slug: "run-x-1", ProjectID: proj.ID,
+			Phase: "running", Labels: map[string]string{"env": "x"},
+		},
+		{
+			ID: uuid.NewString(), Name: "stop-x-1", Slug: "stop-x-1", ProjectID: proj.ID,
+			Phase: "stopped", Labels: map[string]string{"env": "x"},
+		},
+		{
+			ID: uuid.NewString(), Name: "err-x-1", Slug: "err-x-1", ProjectID: proj.ID,
+			Phase: "error", Labels: map[string]string{"env": "x"},
+		},
+		{
+			ID: uuid.NewString(), Name: "run-y-1", Slug: "run-y-1", ProjectID: proj.ID,
+			Phase: "running", Labels: map[string]string{"env": "y"},
+		},
+	}
+	for _, a := range seed {
+		require.NoError(t, s.CreateAgent(ctx, a))
+	}
+
+	endpoints := []struct {
+		name string
+		base string
+	}{
+		{name: "global", base: "/api/v1/agents"},
+		{name: "project", base: "/api/v1/projects/" + proj.ID + "/agents"},
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep.name, func(t *testing.T) {
+			fetch := func(q string, fit, limit int) ListAgentsResponse {
+				t.Helper()
+				path := fmt.Sprintf("%s?sort=updated&dir=desc&stats=1&fit=%d&limit=%d&q=%s",
+					ep.base, fit, limit, url.QueryEscape(q))
+				rec := doRequest(t, srv, http.MethodGet, path, nil)
+				require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+				var resp ListAgentsResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				return resp
+			}
+
+			// Paged (fit=2 < 3 agents with label:env=x):
+			// stats and fit outcome for `phase:running label:env=x` equal `label:env=x`,
+			// while rows and totalCount contain only running agents.
+			unphasedPaged := fetch("label:env=x", 2, 2)
+			phasedPaged := fetch("phase:running label:env=x", 2, 2)
+
+			require.NotNil(t, unphasedPaged.Complete)
+			require.NotNil(t, phasedPaged.Complete)
+			assert.False(t, *unphasedPaged.Complete)
+			assert.False(t, *phasedPaged.Complete)
+
+			require.NotNil(t, unphasedPaged.Stats)
+			require.NotNil(t, phasedPaged.Stats)
+			assert.Equal(t, 3, unphasedPaged.Stats.Total)
+			assert.Equal(t, 1, unphasedPaged.Stats.Running)
+			assert.Equal(t, unphasedPaged.Stats.Total, phasedPaged.Stats.Total)
+			assert.Equal(t, unphasedPaged.Stats.Running, phasedPaged.Stats.Running)
+			require.NotNil(t, unphasedPaged.Stats.Agents)
+			require.NotNil(t, phasedPaged.Stats.Agents)
+			assert.Equal(t, *unphasedPaged.Stats.Agents, *phasedPaged.Stats.Agents)
+
+			assert.Equal(t, 1, phasedPaged.TotalCount)
+			require.Len(t, phasedPaged.Agents, 1)
+			assert.Equal(t, "run-x-1", phasedPaged.Agents[0].Name)
+
+			// Negated phase term: `-phase:stopped label:env=x` keeps stats identical,
+			// while rows return running + error (2 rows).
+			negPaged := fetch("-phase:stopped label:env=x", 2, 2)
+			require.NotNil(t, negPaged.Complete)
+			assert.False(t, *negPaged.Complete)
+			require.NotNil(t, negPaged.Stats)
+			assert.Equal(t, *unphasedPaged.Stats.Agents, *negPaged.Stats.Agents)
+			assert.Equal(t, 2, negPaged.TotalCount)
+			require.Len(t, negPaged.Agents, 2)
+			for _, a := range negPaged.Agents {
+				assert.NotEqual(t, "stopped", a.Phase)
+			}
+
+			// Complete (fit=10 >= 3 agents with label:env=x):
+			// both return complete=true with the full unphased readable set and identical stats.
+			unphasedSmall := fetch("label:env=x", 10, 10)
+			phasedSmall := fetch("phase:running label:env=x", 10, 10)
+			require.NotNil(t, unphasedSmall.Complete)
+			require.NotNil(t, phasedSmall.Complete)
+			assert.True(t, *unphasedSmall.Complete)
+			assert.True(t, *phasedSmall.Complete)
+			assert.Equal(t, 3, len(phasedSmall.Agents))
+			assert.Equal(t, unphasedSmall.Stats.Total, phasedSmall.Stats.Total)
+			assert.Equal(t, unphasedSmall.Stats.Running, phasedSmall.Stats.Running)
+		})
+	}
 }

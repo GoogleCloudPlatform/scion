@@ -233,3 +233,68 @@ func resolveOrImpossible(raw string, fn func(string) (string, bool)) string {
 	}
 	return resolved
 }
+
+// HasPhaseTerms reports whether qt contains any `phase` terms.
+func (qt *QueryTerms) HasPhaseTerms() bool {
+	if qt == nil {
+		return false
+	}
+	for _, t := range qt.Terms {
+		if t.Field == "phase" && len(t.Values) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// WithoutPhase returns a copy of qt with all `phase` terms removed, or nil if
+// no text, exclude-text, or non-phase terms remain. Returns qt unchanged when
+// qt is nil or has no `phase` terms.
+func (qt *QueryTerms) WithoutPhase() *QueryTerms {
+	if !qt.HasPhaseTerms() {
+		return qt
+	}
+	kept := make([]QueryTerm, 0, len(qt.Terms))
+	for _, t := range qt.Terms {
+		if t.Field == "phase" {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	if qt.Text == "" && len(qt.ExcludeText) == 0 && len(kept) == 0 {
+		return nil
+	}
+	out := &QueryTerms{
+		Text:        qt.Text,
+		ExcludeText: qt.ExcludeText,
+	}
+	if len(kept) > 0 {
+		out.Terms = kept
+	}
+	return out
+}
+
+// MatchesPhase reports whether phase satisfies every `phase` term in qt,
+// mirroring agentQueryTermsPredicates in pkg/store/entadapter/agent_store.go.
+func (qt *QueryTerms) MatchesPhase(phase string) bool {
+	if qt == nil {
+		return true
+	}
+	lower := strings.ToLower(phase)
+	for _, t := range qt.Terms {
+		if t.Field != "phase" || len(t.Values) == 0 {
+			continue
+		}
+		in := lower != "" && slices.Contains(t.Values, lower)
+		if t.Negate {
+			if in {
+				return false
+			}
+		} else {
+			if !in {
+				return false
+			}
+		}
+	}
+	return true
+}

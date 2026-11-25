@@ -297,17 +297,31 @@ func buildAgentStats(members []store.AgentMember) *ListAgentsStats {
 	return stats
 }
 
-// filterMembersByPhase returns the subset of members matching phase, or
-// members unchanged when phase is empty.
-func filterMembersByPhase(members []store.AgentMember, phase string) []store.AgentMember {
-	if phase == "" {
+// unphasedAgentFilter returns filter with both the legacy Phase field and any
+// `phase` terms in filter.Query stripped, so stats populations and fit probes
+// are phase-independent while paged rows still honor the full filter.
+func unphasedAgentFilter(filter store.AgentFilter) store.AgentFilter {
+	filter.Phase = ""
+	filter.Query = filter.Query.WithoutPhase()
+	return filter
+}
+
+// filterMembersByPhase returns the subset of members matching the legacy phase
+// parameter and any `phase` terms in query, or members unchanged when neither
+// constrains phase.
+func filterMembersByPhase(members []store.AgentMember, phase string, query *store.QueryTerms) []store.AgentMember {
+	if phase == "" && !query.HasPhaseTerms() {
 		return members
 	}
 	out := make([]store.AgentMember, 0, len(members))
 	for _, m := range members {
-		if m.Phase == phase {
-			out = append(out, m)
+		if phase != "" && m.Phase != phase {
+			continue
 		}
+		if !query.MatchesPhase(m.Phase) {
+			continue
+		}
+		out = append(out, m)
 	}
 	return out
 }
@@ -344,11 +358,10 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 
 	// Candidate ceiling, member read and candidate-count completeness,
 	// shared with the agent-JWT path.
-	// The member filter is the request filter with Phase cleared: the
-	// ceiling, completeness and stats are all decided on the unphased
-	// candidate set.
-	memberFilter := filter
-	memberFilter.Phase = ""
+	// The member filter is the request filter with Phase and any `phase:`
+	// terms in Query cleared: the ceiling, completeness and stats are all
+	// decided on the phase-independent candidate set.
+	memberFilter := unphasedAgentFilter(filter)
 	members, complete, ok := s.sortedProjectCandidates(w, ctx, memberFilter, p)
 	if !ok {
 		return
@@ -414,7 +427,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		pageReadCaps = readableReadCaps
 		totalCount = len(readable)
 	} else {
-		r := filterMembersByPhase(readable, filter.Phase)
+		r := filterMembersByPhase(readable, filter.Phase, filter.Query)
 		totalCount = len(r)
 		start := 0
 		if cur != nil {
