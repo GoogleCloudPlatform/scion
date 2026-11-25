@@ -34,7 +34,21 @@ export interface Suggestion {
   continueSuggest?: boolean;
 }
 
-export type ValueSuggestionProvider = (key: string, prefix: string) => string[];
+export type ValueSuggestion = string | { value: string; help?: string };
+
+export type ValueSuggestionProvider = (key: string, prefix: string) => ValueSuggestion[];
+
+interface NormalizedValueSuggestion {
+  value: string;
+  help?: string;
+}
+
+function normalizeValueSuggestion(raw: ValueSuggestion): NormalizedValueSuggestion {
+  if (typeof raw === 'string') {
+    return { value: raw };
+  }
+  return raw.help ? { value: raw.value, help: raw.help } : { value: raw.value };
+}
 
 /**
  * Compute key or value autocomplete suggestions at `cursor` within `input`.
@@ -69,31 +83,51 @@ export function getSuggestions(
     const replaceStart =
       tokenStart + negatePrefix.length + colonIdx + 1 + (lastComma >= 0 ? lastComma + 1 : 0);
 
-    const candidates: string[] = [];
+    const candidates: NormalizedValueSuggestion[] = [];
+    const seen = new Set<string>();
+    const addCandidate = (raw: ValueSuggestion): void => {
+      const item = normalizeValueSuggestion(raw);
+      const dedupKey = `${item.value}\0${item.help ?? ''}`;
+      if (!seen.has(dedupKey)) {
+        seen.add(dedupKey);
+        candidates.push(item);
+      }
+    };
     if (keyDef.enum?.length) {
-      candidates.push(...keyDef.enum);
+      for (const e of keyDef.enum) {
+        addCandidate(e);
+      }
     }
     if (valueSuggestions) {
       for (const dyn of valueSuggestions(keyDef.name, valPrefix)) {
-        if (!candidates.includes(dyn)) {
-          candidates.push(dyn);
-        }
+        addCandidate(dyn);
       }
     }
 
     const q = trimASCIISpace(valPrefix).toLowerCase();
     const scored = candidates
-      .map((val) => {
-        if (!q) return { val, tier: 0 };
-        const tier = classifyMatch(q, val);
-        return tier !== null ? { val, tier } : null;
+      .map((item) => {
+        if (!q) return { item, tier: 0 };
+        const valTier = classifyMatch(q, item.value);
+        if (valTier !== null) return { item, tier: valTier };
+        if (item.help) {
+          const helpTier = classifyMatch(q, item.help);
+          if (helpTier !== null) return { item, tier: helpTier + 4 };
+        }
+        return null;
       })
-      .filter((x): x is { val: string; tier: number } => x !== null)
-      .sort((a, b) => a.tier - b.tier || a.val.localeCompare(b.val));
+      .filter((x): x is { item: NormalizedValueSuggestion; tier: number } => x !== null)
+      .sort(
+        (a, b) =>
+          a.tier - b.tier ||
+          a.item.value.localeCompare(b.item.value) ||
+          (a.item.help ?? '').localeCompare(b.item.help ?? '')
+      );
 
-    return scored.slice(0, 12).map(({ val }) => ({
-      insertText: formatValue(val),
-      label: val,
+    return scored.slice(0, 12).map(({ item }) => ({
+      insertText: formatValue(item.value),
+      label: item.value,
+      ...(item.help ? { help: item.help } : {}),
       replaceStart,
       replaceEnd: cursor,
     }));

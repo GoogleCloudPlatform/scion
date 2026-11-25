@@ -34,7 +34,12 @@ export {
   serverSubset,
 } from './canonical.js';
 export { match } from './match.js';
-export { getSuggestions, type Suggestion, type ValueSuggestionProvider } from './suggest.js';
+export {
+  getSuggestions,
+  type Suggestion,
+  type ValueSuggestion,
+  type ValueSuggestionProvider,
+} from './suggest.js';
 export { getActiveSingleKeyValue, setSingleKeyInQuery } from './query-edit.js';
 export {
   agentToFilterRow,
