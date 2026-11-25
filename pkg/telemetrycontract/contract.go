@@ -112,6 +112,27 @@ func UsageTokenPointAttrs(harness, model string) []LabelKV {
 	return attrs
 }
 
+// APICallsPointAttrs returns the producer point-label set for MetricAPICalls
+// (design §3.2): harness, model, and status, each omitted when empty
+// (matching UsageTokenPointAttrs). Both the hook handler
+// (pkg/sciontool/hooks/handlers) and the native UsageDeriver
+// (pkg/sciontool/telemetry) build gen_ai.api.calls point labels through this
+// helper so the two paths cannot drift when SCION_HARNESS is unset
+// (ptone/scion#5892).
+func APICallsPointAttrs(harness, model, status string) []LabelKV {
+	var attrs []LabelKV
+	if harness != "" {
+		attrs = append(attrs, LabelKV{HarnessLabel, harness})
+	}
+	if model != "" {
+		attrs = append(attrs, LabelKV{ModelLabel, model})
+	}
+	if status != "" {
+		attrs = append(attrs, LabelKV{StatusLabel, status})
+	}
+	return attrs
+}
+
 // MaxModelLabelBytes caps the ModelLabel value (design §3.2: "truncated to
 // 128 characters"). The cut is made on a UTF-8 rune boundary, so a value is
 // never split mid-character.

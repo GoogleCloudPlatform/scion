@@ -711,6 +711,7 @@ func clearTelemetryEnv() {
 	}
 	_ = os.Unsetenv(EnvCertFile)
 	_ = os.Unsetenv(EnvKeyFile)
+	_ = os.Unsetenv(EnvHeaders)
 	_ = os.Unsetenv(EnvGRPCPort)
 	_ = os.Unsetenv(EnvHTTPPort)
 	_ = os.Unsetenv(EnvFilterExclude)

@@ -82,3 +82,34 @@ func TestResolveModelLabelTruncatesOnRuneBoundary(t *testing.T) {
 		t.Errorf("len(ResolveModelLabel(wide)) = %d, want 126 (42 whole runes)", len(got))
 	}
 }
+
+func TestAPICallsPointAttrs(t *testing.T) {
+	withHarness := APICallsPointAttrs("claude", "claude-sonnet-4-6", StatusSuccess)
+	wantWith := []LabelKV{
+		{HarnessLabel, "claude"},
+		{ModelLabel, "claude-sonnet-4-6"},
+		{StatusLabel, StatusSuccess},
+	}
+	if len(withHarness) != len(wantWith) {
+		t.Fatalf("with harness: got %v, want %v", withHarness, wantWith)
+	}
+	for i := range wantWith {
+		if withHarness[i] != wantWith[i] {
+			t.Errorf("with harness[%d] = %v, want %v", i, withHarness[i], wantWith[i])
+		}
+	}
+
+	withoutHarness := APICallsPointAttrs("", "claude-sonnet-4-6", StatusError)
+	wantWithout := []LabelKV{
+		{ModelLabel, "claude-sonnet-4-6"},
+		{StatusLabel, StatusError},
+	}
+	if len(withoutHarness) != len(wantWithout) {
+		t.Fatalf("without harness: got %v, want %v", withoutHarness, wantWithout)
+	}
+	for i := range wantWithout {
+		if withoutHarness[i] != wantWithout[i] {
+			t.Errorf("without harness[%d] = %v, want %v", i, withoutHarness[i], wantWithout[i])
+		}
+	}
+}

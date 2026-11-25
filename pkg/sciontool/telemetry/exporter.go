@@ -9,7 +9,9 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/otlptls"
@@ -24,6 +26,7 @@ import (
 	"golang.org/x/oauth2/google"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/oauth"
+	"google.golang.org/grpc/metadata"
 )
 
 var (
@@ -111,6 +114,9 @@ func NewCloudExporter(ctx context.Context, config *Config) (*CloudExporter, erro
 	if !config.IsCloudConfigured() {
 		return nil, nil
 	}
+	if config.headersErr != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvHeaders, config.headersErr)
+	}
 
 	exporter := &CloudExporter{
 		protocol: config.Protocol,
@@ -167,6 +173,11 @@ func (e *CloudExporter) initGRPC(ctx context.Context, config *Config) error {
 	for _, do := range gcpDialOpts {
 		opts = append(opts, otlptracegrpc.WithDialOption(do))
 	}
+	var headers map[string]string
+	if len(config.Headers) > 0 {
+		headers = maps.Clone(config.Headers)
+		opts = append(opts, otlptracegrpc.WithHeaders(headers))
+	}
 
 	traceExp, err := otlptracegrpc.New(ctx, opts...)
 	if err != nil {
@@ -182,6 +193,9 @@ func (e *CloudExporter) initGRPC(ctx context.Context, config *Config) error {
 	}
 	connOpts := []grpc.DialOption{transportCreds}
 	connOpts = append(connOpts, gcpDialOpts...)
+	if len(headers) > 0 {
+		connOpts = append(connOpts, otlpGRPCHeadersDialOption(headers))
+	}
 
 	conn, err := grpc.NewClient(config.Endpoint, connOpts...)
 	if err != nil {
@@ -195,6 +209,23 @@ func (e *CloudExporter) initGRPC(ctx context.Context, config *Config) error {
 	e.logClient = collogspb.NewLogsServiceClient(conn)
 
 	return nil
+}
+
+// otlpGRPCHeadersDialOption returns a gRPC dial option that attaches the
+// configured OTLP headers as outgoing gRPC metadata on every unary RPC.
+func otlpGRPCHeadersDialOption(headers map[string]string) grpc.DialOption {
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(headers)*2)
+	for _, k := range keys {
+		pairs = append(pairs, k, headers[k])
+	}
+	return grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		return invoker(metadata.AppendToOutgoingContext(ctx, pairs...), method, req, reply, cc, opts...)
+	})
 }
 
 // ExportSpans exports a batch of SDK spans to the cloud endpoint.

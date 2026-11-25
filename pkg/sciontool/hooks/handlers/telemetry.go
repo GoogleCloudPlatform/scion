@@ -575,14 +575,7 @@ func (h *TelemetryHandler) metricAttrs() []attribute.KeyValue {
 // exported point, so both usage metrics share one identity label set
 // (ptone/scion#3668). The native UsageDeriver emits the same set.
 func apiCallsAttrs(model, status string) []attribute.KeyValue {
-	var attrs []attribute.KeyValue
-	if v := os.Getenv("SCION_HARNESS"); v != "" {
-		attrs = append(attrs, attribute.String(telemetrycontract.HarnessLabel, v))
-	}
-	return append(attrs,
-		attribute.String(telemetrycontract.ModelLabel, model),
-		attribute.String(telemetrycontract.StatusLabel, status),
-	)
+	return toOTelAttrs(telemetrycontract.APICallsPointAttrs(os.Getenv("SCION_HARNESS"), model, status))
 }
 
 // usageHookRecordingEnabled reports whether this process should record

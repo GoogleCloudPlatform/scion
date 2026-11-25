@@ -18,6 +18,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/otlptls"
 )
 
 // Environment variable names for telemetry configuration.
@@ -40,6 +41,8 @@ const (
 	EnvCertFile = "SCION_OTEL_CERT_FILE"
 	// EnvKeyFile is the path to the PEM-encoded private key for EnvCertFile.
 	EnvKeyFile = "SCION_OTEL_KEY_FILE"
+	// EnvHeaders is a JSON object mapping OTLP export header names to values.
+	EnvHeaders = "SCION_OTEL_HEADERS"
 	// EnvGRPCPort is the local gRPC receiver port.
 	EnvGRPCPort = "SCION_OTEL_GRPC_PORT"
 	// EnvHTTPPort is the local HTTP receiver port.
@@ -113,6 +116,12 @@ type Config struct {
 	CertFile string
 	// KeyFile is the path to the PEM-encoded private key for CertFile.
 	KeyFile string
+	// Headers are extra OTLP export headers (e.g. auth headers) sent to the
+	// configured cloud collector.
+	Headers map[string]string
+	// headersErr holds any parse error from EnvHeaders so NewCloudExporter
+	// can fail with a clear error when cloud export is active.
+	headersErr error
 	// GRPCPort is the local gRPC receiver port.
 	GRPCPort int
 	// HTTPPort is the local HTTP receiver port.
@@ -168,6 +177,7 @@ func SetTelemetryTestSandboxed() func() {
 // to a real backend under a live agent identity. Local telemetry (receiver,
 // pipeline) remains available for tests that need it.
 func LoadConfig() *Config {
+	headers, headersErr := otlptls.ParseHeaders(os.Getenv(EnvHeaders))
 	cfg := &Config{
 		Enabled:       util.ParseBoolEnv(EnvEnabled, true),
 		CloudEnabled:  util.ParseBoolEnv(EnvCloudEnabled, true),
@@ -178,6 +188,8 @@ func LoadConfig() *Config {
 		CAFile:        os.Getenv(EnvCAFile),
 		CertFile:      os.Getenv(EnvCertFile),
 		KeyFile:       os.Getenv(EnvKeyFile),
+		Headers:       headers,
+		headersErr:    headersErr,
 		GRPCPort:      parseIntEnv(EnvGRPCPort, DefaultGRPCPort),
 		HTTPPort:      parseIntEnv(EnvHTTPPort, DefaultHTTPPort),
 		ProjectID:     os.Getenv(EnvProjectID),
@@ -251,6 +263,8 @@ func LoadConfig() *Config {
 		cfg.CloudEnabled = false
 		cfg.Endpoint = ""
 		cfg.GCPCredentialsFile = ""
+		cfg.Headers = nil
+		cfg.headersErr = nil
 	}
 
 	return cfg

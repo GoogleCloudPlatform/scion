@@ -888,6 +888,56 @@ func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
 	}
 }
 
+// TestTelemetryHandler_APICallsOmitsHarnessWhenUnset verifies ptone/scion#5892:
+// when SCION_HARNESS is unset, gen_ai.api.calls emits {model, status} without
+// an empty harness label, matching UsageDeriver.record via
+// telemetrycontract.APICallsPointAttrs.
+func TestTelemetryHandler_APICallsOmitsHarnessWhenUnset(t *testing.T) {
+	scrubTelemetryEnv(t)
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	t.Setenv("SCION_HARNESS", "")
+	t.Setenv("SCION_MODEL", "test-model")
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = mp.Shutdown(context.Background()) }()
+
+	h := NewTelemetryHandler(nil, nil, nil, mp)
+	if err := h.Handle(&hooks.Event{
+		Name: hooks.EventModelEnd,
+		Data: hooks.EventData{Success: true, InputTokens: 10},
+	}); err != nil {
+		t.Fatalf("Handle model-end error: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect error: %v", err)
+	}
+
+	sawCall := false
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != telemetrycontract.MetricAPICalls {
+				continue
+			}
+			sum := m.Data.(metricdata.Sum[int64])
+			for _, pt := range sum.DataPoints {
+				sawCall = true
+				if _, ok := pt.Attributes.Value(attribute.Key(telemetrycontract.HarnessLabel)); ok {
+					t.Errorf("gen_ai.api.calls should omit %q when SCION_HARNESS is unset, got attrs=%v", telemetrycontract.HarnessLabel, pt.Attributes.ToSlice())
+				}
+				if got := pt.Attributes.Len(); got != 2 {
+					t.Errorf("gen_ai.api.calls attr count = %d, want 2 (model, status): %v", got, pt.Attributes.ToSlice())
+				}
+			}
+		}
+	}
+	if !sawCall {
+		t.Fatal("expected gen_ai.api.calls point")
+	}
+}
+
 // TestTelemetryHandler_RecordsCacheWriteAndReasoningTokens pins design §3.7
 // "Hook token plumbing" (GoogleCloudPlatform/scion#2057 review): a model-end
 // with all five token fields populated emits exactly five

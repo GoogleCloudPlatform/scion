@@ -1068,10 +1068,11 @@ func (d *UsageDeriver) recordAnalytics(obs UsageObservation) {
 
 // record emits the canonical increments. Point labels are exactly the
 // producer set from design §3.2: gen_ai.api.calls gets harness, model,
-// status (matching the hook path, apiCallsAttrs); scion.usage.tokens gets
-// harness, model, token_type only. Neither carries the unprefixed
-// agent_id/project_id: the pipeline stamps the canonical scion_* identity
-// labels on every exported point (ptone/scion#3668).
+// status (harness omitted when SCION_HARNESS is unset, matching the hook
+// path, apiCallsAttrs); scion.usage.tokens gets harness, model, token_type
+// only. Neither carries the unprefixed agent_id/project_id: the pipeline
+// stamps the canonical scion_* identity labels on every exported point
+// (ptone/scion#3668).
 func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
 	if d.sessionUsage != nil {
 		if u := sessionUsageFromIncrement(increment); !u.IsZero() {
@@ -1083,26 +1084,30 @@ func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
 	harness := os.Getenv("SCION_HARNESS")
 
 	if increment.Calls != 0 && d.calls != nil {
-		attrs := []attribute.KeyValue{
-			attribute.String(telemetrycontract.HarnessLabel, harness),
-			attribute.String(telemetrycontract.ModelLabel, model),
-			attribute.String(telemetrycontract.StatusLabel, increment.Status),
-		}
+		attrs := contractLabelAttrs(telemetrycontract.APICallsPointAttrs(harness, model, increment.Status))
 		d.calls.Add(ctx, increment.Calls, otelmetric.WithAttributes(attrs...))
 	}
 	if d.tokens == nil {
 		return
 	}
+	baseTokenAttrs := contractLabelAttrs(telemetrycontract.UsageTokenPointAttrs(harness, model))
 	for tokenType, n := range increment.Tokens {
 		if n <= 0 {
 			continue
 		}
-		d.tokens.Add(ctx, n, otelmetric.WithAttributes(
-			attribute.String(telemetrycontract.HarnessLabel, harness),
-			attribute.String(telemetrycontract.ModelLabel, model),
-			attribute.String(telemetrycontract.TokenTypeLabel, tokenType),
-		))
+		pointAttrs := make([]attribute.KeyValue, len(baseTokenAttrs), len(baseTokenAttrs)+1)
+		copy(pointAttrs, baseTokenAttrs)
+		pointAttrs = append(pointAttrs, attribute.String(telemetrycontract.TokenTypeLabel, tokenType))
+		d.tokens.Add(ctx, n, otelmetric.WithAttributes(pointAttrs...))
 	}
+}
+
+func contractLabelAttrs(kvs []telemetrycontract.LabelKV) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, len(kvs))
+	for i, kv := range kvs {
+		attrs[i] = attribute.String(kv.Key, kv.Value)
+	}
+	return attrs
 }
 
 // Diagnostics returns the deriver's fixed-cardinality counters. Safe on a
