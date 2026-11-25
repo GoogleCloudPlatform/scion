@@ -342,6 +342,7 @@ func TestOverflowIngress_GCSFakeUploadFailure503_AndRetryDedup(t *testing.T) {
 	require.NoError(t, cs.CreateWebhookEndpoint(ctx, ep))
 
 	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return now }))
+	metrics := &spyPayloadMetrics{}
 	ing := trigger.NewIngress(trigger.IngressConfig{
 		Store:      cs,
 		QueueStore: cs,
@@ -349,18 +350,20 @@ func TestOverflowIngress_GCSFakeUploadFailure503_AndRetryDedup(t *testing.T) {
 		Storage:    func() storage.Storage { return gcsFake },
 		LoadSecret: func(_ context.Context, _, _ string, _ int) (string, error) { return secret, nil },
 		Enabled:    func() bool { return true },
+		Metrics:    metrics,
 		Now:        func() time.Time { return now },
 	})
 
 	body := makeJSONBodyOfSize(128 * 1024)
 
-	// Attempt 1: GCS upload fails -> 503, DB transaction rolled back (no event row).
+	// Attempt 1: GCS upload fails -> 503, DB transaction never opened, failed_storage recorded (N4).
 	rec1 := httptest.NewRecorder()
 	ing.ServeHTTP(rec1, newSignedWebhookRequest(t, ep.ID, secret, now, "deliv-gcs-1", "deploy", "", body))
 	assert.Equal(t, http.StatusServiceUnavailable, rec1.Code, rec1.Body.String())
 	assert.Equal(t, int64(1), ing.Counts().FailedStorage)
+	assert.Equal(t, 1, metrics.results["webhook:failed_storage"])
 	_, gErr := cs.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, "deliv-gcs-1")
-	assert.ErrorIs(t, gErr, store.ErrNotFound, "failed upload must roll back trigger_events insert")
+	assert.ErrorIs(t, gErr, store.ErrNotFound, "failed upload must not insert trigger_events row")
 
 	// Attempt 2: GCS recovers -> sender retries with same X-Scion-Delivery -> 202 queued.
 	gcsFake.mu.Lock()
@@ -574,15 +577,97 @@ func TestOverflowDispatcher_CELHasPayloadFalse_AndTruncatedPreview(t *testing.T)
 	require.NotNil(t, firedReqs[0].Event)
 	assert.Equal(t, objPath, firedReqs[0].Event.PayloadRef)
 	assert.Equal(t, len(body900K), firedReqs[0].Event.PayloadBytes)
-	assert.LessOrEqual(t, len(firedReqs[0].Event.Payload), messaging.MaxExternalPayloadInlineBytes+4)
-	assert.True(t, bytes.HasPrefix(body900K, firedReqs[0].Event.Payload[:messaging.MaxExternalPayloadInlineBytes]))
+	assert.Empty(t, firedReqs[0].Event.Payload, "overflow FireEvent.Payload must remain empty so templating never parses truncated preview")
+	assert.LessOrEqual(t, len(firedReqs[0].Event.PayloadPreview), messaging.MaxExternalPayloadInlineBytes+4)
+	assert.True(t, bytes.HasPrefix(body900K, firedReqs[0].Event.PayloadPreview[:messaging.MaxExternalPayloadInlineBytes]))
 
 	// ExternalPayload constructed from the preview has truncated=true, bytes=900KiB, text=16KiB prefix.
-	ext := messaging.NewTruncatedExternalPayload(messaging.ExternalVerifiedScionV1, firedReqs[0].Event.Payload, firedReqs[0].Event.PayloadBytes)
+	ext := messaging.NewTruncatedExternalPayload(messaging.ExternalVerifiedScionV1, firedReqs[0].Event.PayloadPreview, firedReqs[0].Event.PayloadBytes)
 	assert.True(t, ext.Truncated)
 	assert.Equal(t, len(body900K), ext.Bytes)
 	assert.Equal(t, string(body900K[:messaging.MaxExternalPayloadInlineBytes]), ext.Text)
 	assert.Empty(t, ext.JSON)
+}
+
+// TestReadOverflowPayloadPreview_RejectsCrossProjectAndInvalidPath pins O5 (kills mutant m5):
+// ReadOverflowPayloadPreview must refuse a ref belonging to another project even when the
+// underlying object exists in storage.
+func TestReadOverflowPayloadPreview_RejectsCrossProjectAndInvalidPath(t *testing.T) {
+	ctx := context.Background()
+	localStor, err := storage.NewLocal(storage.Config{
+		Provider:  storage.ProviderLocal,
+		Bucket:    "o5-bucket",
+		LocalPath: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	projA := uuid.NewString()
+	projB := uuid.NewString()
+	evID := uuid.NewString()
+	refB, err := trigger.OverflowPayloadObjectPath(projB, evID)
+	require.NoError(t, err)
+	_, err = localStor.Upload(ctx, refB, strings.NewReader(`{"secret":"projB-only"}`), storage.UploadOptions{ContentType: "application/json"})
+	require.NoError(t, err)
+
+	// Same-project read succeeds.
+	got, err := trigger.ReadOverflowPayloadPreview(ctx, localStor, projB, refB, time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, `{"secret":"projB-only"}`, string(got))
+
+	// Cross-project read is refused with ErrInvalidPath.
+	_, err = trigger.ReadOverflowPayloadPreview(ctx, localStor, projA, refB, time.Second)
+	assert.ErrorIs(t, err, storage.ErrInvalidPath)
+
+	// Traversal/malformed ref is refused with ErrInvalidPath.
+	_, err = trigger.ReadOverflowPayloadPreview(ctx, localStor, projA, "trigger-events/../escape.json", time.Second)
+	assert.ErrorIs(t, err, storage.ErrInvalidPath)
+}
+
+type zeroTimestampListStorage struct {
+	storage.Storage
+	deleted []string
+}
+
+func (z *zeroTimestampListStorage) List(ctx context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
+	res, err := z.Storage.List(ctx, opts)
+	if err != nil || res == nil {
+		return res, err
+	}
+	for i := range res.Objects {
+		res.Objects[i].Created = time.Time{}
+		res.Objects[i].Updated = time.Time{}
+	}
+	return res, nil
+}
+
+func (z *zeroTimestampListStorage) Delete(ctx context.Context, objectPath string) error {
+	z.deleted = append(z.deleted, objectPath)
+	return z.Storage.Delete(ctx, objectPath)
+}
+
+// TestSweepOrphanOverflowObjects_SkipsZeroTimestamp verifies N3: an object with
+// zero Created/Updated timestamps is never swept.
+func TestSweepOrphanOverflowObjects_SkipsZeroTimestamp(t *testing.T) {
+	ctx := context.Background()
+	ms := newMemTriggerStore()
+	localStor, err := storage.NewLocal(storage.Config{
+		Provider:  storage.ProviderLocal,
+		Bucket:    "n3-bucket",
+		LocalPath: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	ref, err := trigger.OverflowPayloadObjectPath(uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	_, err = localStor.Upload(ctx, ref, strings.NewReader(`{"z":1}`), storage.UploadOptions{ContentType: "application/json"})
+	require.NoError(t, err)
+
+	zeroStor := &zeroTimestampListStorage{Storage: localStor}
+	swept, failed, err := trigger.SweepOrphanOverflowObjects(ctx, ms, zeroStor, time.Now().UTC(), trigger.DefaultOverflowOrphanMinAge, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, swept)
+	assert.Equal(t, 0, failed)
+	assert.Empty(t, zeroStor.deleted, "zero-timestamp objects must be skipped fail-safe")
 }
 
 func TestOverflowMaintenance_PurgeRetryAndOrphanSweep(t *testing.T) {

@@ -1146,23 +1146,19 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 		}
 
-		firePayload := rawPayload
-		if ev.PayloadRef != "" {
-			if !overflowPreviewLoaded {
-				overflowPreviewLoaded = true
-				if d.storageFn != nil {
-					if stor := d.storageFn(); stor != nil {
-						prev, pErr := ReadOverflowPayloadPreview(ctx, stor, ev.ProjectID, ev.PayloadRef, DefaultOverflowDownloadTimeout)
-						if pErr != nil {
-							d.logger.Warn("trigger: failed to read overflow payload preview for delivery",
-								"eventID", ev.ID, "payloadRef", ev.PayloadRef, "error", pErr)
-						} else {
-							overflowPreview = prev
-						}
+		if ev.PayloadRef != "" && !overflowPreviewLoaded {
+			overflowPreviewLoaded = true
+			if d.storageFn != nil {
+				if stor := d.storageFn(); stor != nil {
+					prev, pErr := ReadOverflowPayloadPreview(ctx, stor, ev.ProjectID, ev.PayloadRef, DefaultOverflowDownloadTimeout)
+					if pErr != nil {
+						d.logger.Warn("trigger: failed to read overflow payload preview for delivery",
+							"eventID", ev.ID, "payloadRef", ev.PayloadRef, "error", pErr)
+					} else {
+						overflowPreview = prev
 					}
 				}
 			}
-			firePayload = overflowPreview
 		}
 
 		tracker := newTriggerFireTracker(ctx, d.core)
@@ -1178,20 +1174,21 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			ActionType: tr.ActionType,
 			Payload:    tr.ActionPayload,
 			Event: &hubfire.FireEvent{
-				ID:           ev.ID,
-				ProjectID:    ev.ProjectID,
-				SourceKind:   ev.SourceKind,
-				SourceID:     ev.SourceID,
-				Type:         ev.Type,
-				Subject:      ev.Subject,
-				OccurredAt:   ev.OccurredAt,
-				ReceivedAt:   ev.ReceivedAt,
-				Attributes:   maps.Clone(ev.Attributes),
-				Lists:        cloneStringListMap(ev.Lists),
-				Payload:      firePayload,
-				PayloadBytes: ev.PayloadBytes,
-				PayloadRef:   ev.PayloadRef,
-				Trigger:      &trigRef,
+				ID:             ev.ID,
+				ProjectID:      ev.ProjectID,
+				SourceKind:     ev.SourceKind,
+				SourceID:       ev.SourceID,
+				Type:           ev.Type,
+				Subject:        ev.Subject,
+				OccurredAt:     ev.OccurredAt,
+				ReceivedAt:     ev.ReceivedAt,
+				Attributes:     maps.Clone(ev.Attributes),
+				Lists:          cloneStringListMap(ev.Lists),
+				Payload:        rawPayload,
+				PayloadPreview: overflowPreview,
+				PayloadBytes:   ev.PayloadBytes,
+				PayloadRef:     ev.PayloadRef,
+				Trigger:        &trigRef,
 			},
 			Executor: hubfire.ExecutorContext{
 				Kind: ExecutorKindTriggerDrainer,

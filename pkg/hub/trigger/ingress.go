@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -85,7 +84,6 @@ var (
 
 	errQueueFull                    = errors.New("trigger event queue full for project")
 	errDuplicateDelivery            = errors.New("duplicate webhook delivery")
-	errStorageUpload                = errors.New("overflow payload storage upload failed")
 	errTxMissingQueuePendingCounter = errors.New("transaction store does not implement DurableQueuePendingCounter")
 )
 
@@ -170,6 +168,7 @@ const (
 	IngressResultRejectedBadHeader         = "rejected_bad_header"
 	IngressResultRejectedQueueFull         = "rejected_queue_full"
 	IngressResultFailedStore               = "failed_store"
+	IngressResultFailedStorage             = "failed_storage"
 )
 
 // IngressMetrics observes trigger ingress outcomes by bounded source_kind and
@@ -244,7 +243,6 @@ type IngressConfig struct {
 	QueueStore                 store.DurableQueueStore
 	Queue                      durablequeue.Queue
 	Storage                    func() storage.Storage
-	OverflowBudget             *OverflowBudgetCache
 	MaxOverflowBytesPerProject int64
 	OverflowUploadTimeout      time.Duration
 	LoadSecret                 SecretLoader
@@ -268,7 +266,6 @@ type Ingress struct {
 	queueStore            store.DurableQueueStore
 	queue                 durablequeue.Queue
 	storageFn             func() storage.Storage
-	overflowBudget        *OverflowBudgetCache
 	maxOverflowBytes      int64
 	overflowUploadTimeout time.Duration
 	loadSecret            SecretLoader
@@ -335,10 +332,6 @@ func NewIngress(cfg IngressConfig) *Ingress {
 	if newEventID == nil {
 		newEventID = uuid.NewString
 	}
-	overflowBudget := cfg.OverflowBudget
-	if overflowBudget == nil {
-		overflowBudget = NewOverflowBudgetCache(DefaultOverflowBudgetCacheTTL)
-	}
 	maxOverflowBytes := cfg.MaxOverflowBytesPerProject
 	if maxOverflowBytes <= 0 {
 		maxOverflowBytes = MaxOverflowPayloadBytesPerProject
@@ -352,7 +345,6 @@ func NewIngress(cfg IngressConfig) *Ingress {
 		queueStore:            cfg.QueueStore,
 		queue:                 cfg.Queue,
 		storageFn:             cfg.Storage,
-		overflowBudget:        overflowBudget,
 		maxOverflowBytes:      maxOverflowBytes,
 		overflowUploadTimeout: uploadTimeout,
 		loadSecret:            cfg.LoadSecret,
@@ -736,17 +728,20 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 9: construct TriggerEvent (§8.2) and execute delivery-dedup check,
-	// pending-only cap check, overflow byte-budget + object upload (when
-	// len(body) > MaxPayloadBytes, Stage 2 §8), and event + queue insert in one
-	// locked transaction (§6.2).
+	// Step 9: construct TriggerEvent (§8.2). For overflow bodies
+	// (len(body) > MaxPayloadBytes, Stage 2 §8 deviation R1), run non-locking
+	// dedup + advisory budget pre-checks and upload to hub-private pkg/storage
+	// BEFORE opening WithTx so object-storage latency never holds a DB
+	// connection or advisory lock. Then run the DB-only transaction with
+	// LockTriggerQuota, authoritative dedup, pending cap, authoritative in-lock
+	// byte budget (O1), and event + queue insert.
 	isOverflow := len(body) > MaxPayloadBytes
 	var overflowStor storage.Storage
 	if isOverflow {
 		overflowStor = h.getStorage()
 		if overflowStor == nil {
 			h.failedStorage.Add(1)
-			h.recordMetric(IngressResultFailedStore)
+			h.recordMetric(IngressResultFailedStorage)
 			h.logger.Error("Webhook overflow payload storage is not configured",
 				"endpoint_id", ep.ID,
 				"project_id", ep.ProjectID,
@@ -772,84 +767,154 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var dupEventID string
-	txErr := h.store.WithTx(ctx, func(tx store.Store) error {
-		if lErr := tx.LockTriggerQuota(ctx, ep.ProjectID); lErr != nil {
-			return lErr
-		}
-		// §6.2: duplicate redeliveries (when X-Scion-Delivery is present) are
-		// acknowledged with 202 "duplicate" BEFORE the pending-cap, overflow
-		// budget, and upload checks so a redelivery at the cap never returns 429
-		// or re-uploads an object.
+	var uploadedOverflow bool
+	if isOverflow {
+		// Pre-tx non-locking dedup check: an early 202 duplicate avoids a
+		// pointless upload on redelivery. Authoritative dedup still runs
+		// inside LockTriggerQuota below.
 		if delivery != "" {
-			existing, gErr := tx.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
+			existing, gErr := h.store.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
 			if gErr == nil && existing != nil {
-				dupEventID = existing.ID
-				return errDuplicateDelivery
+				h.writeDuplicateAccepted(w, ctx, ep, existing.ID, eventAttr, len(body), clientIP)
+				return
 			}
 			if gErr != nil && !errors.Is(gErr, store.ErrNotFound) {
-				return gErr
+				h.failedStore.Add(1)
+				h.recordMetric(IngressResultFailedStore)
+				h.logger.Error("Pre-upload webhook dedup lookup failed",
+					"endpoint_id", ep.ID,
+					"project_id", ep.ProjectID,
+					"error", gErr,
+				)
+				apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeInternalError, "failed to persist webhook event", nil)
+				return
 			}
 		}
-		txCounter, ok := tx.(store.DurableQueuePendingCounter)
-		if !ok {
-			return errTxMissingQueuePendingCounter
-		}
-		pending, sErr := txCounter.CountDurableQueuePending(ctx, EventQueueKind, ep.ProjectID)
-		if sErr != nil {
-			return sErr
-		}
-		if pending >= MaxPendingEventsPerProject {
-			return errQueueFull
-		}
-		if isOverflow {
-			usedBytes, fresh := h.overflowBudget.Get(ep.ProjectID, now)
-			if !fresh {
-				sum, sumErr := tx.SumTriggerEventOverflowBytes(ctx, ep.ProjectID, now.Add(-HistoryRetention))
-				if sumErr != nil {
-					return sumErr
-				}
-				usedBytes = sum
-				h.overflowBudget.Set(ep.ProjectID, usedBytes, now)
-			}
-			if usedBytes+int64(len(body)) > h.maxOverflowBytes {
-				return errQueueFull
-			}
-			// Stage 2 §8 / S21: upload inside the ingress transaction with a
-			// bounded timeout; never issue signed URLs; failure rolls back tx
-			// and returns 503 so the sender retries.
-			uploadCtx, cancelUpload := context.WithTimeout(ctx, h.overflowUploadTimeout)
-			_, upErr := overflowStor.Upload(uploadCtx, ev.PayloadRef, bytes.NewReader(body), storage.UploadOptions{
-				ContentType: "application/json",
-				Idempotent:  true,
-			})
-			cancelUpload()
-			if upErr != nil {
-				return fmt.Errorf("%w: %w", errStorageUpload, upErr)
-			}
-		}
-		_, enqErr := EnqueueEvent(ctx, tx, tx, h.queue, &ev)
-		return enqErr
-	})
 
-	if txErr != nil {
-		if errors.Is(txErr, errQueueFull) {
+		// Pre-tx non-locking advisory budget check: refuse early when the
+		// project is already over its 256 MiB retention budget to avoid a
+		// wasted upload. Authoritative budget still runs inside LockTriggerQuota.
+		usedBytes, sumErr := h.store.SumTriggerEventOverflowBytes(ctx, ep.ProjectID, now.Add(-HistoryRetention))
+		if sumErr != nil {
+			h.failedStore.Add(1)
+			h.recordMetric(IngressResultFailedStore)
+			h.logger.Error("Pre-upload webhook overflow budget lookup failed",
+				"endpoint_id", ep.ID,
+				"project_id", ep.ProjectID,
+				"error", sumErr,
+			)
+			apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeInternalError, "failed to persist webhook event", nil)
+			return
+		}
+		if usedBytes+int64(len(body)) > h.maxOverflowBytes {
 			h.rejectedQueueFull.Add(1)
 			h.recordMetric(IngressResultRejectedQueueFull)
 			writeRateLimited(w, "30", "queue full")
 			return
 		}
-		if errors.Is(txErr, errStorageUpload) {
+
+		// Stage 2 §8 / R1 / S21: upload to the event-unique hub-private path
+		// BEFORE opening WithTx, with a bounded timeout; never issue signed URLs.
+		uploadCtx, cancelUpload := context.WithTimeout(ctx, h.overflowUploadTimeout)
+		_, upErr := overflowStor.Upload(uploadCtx, ev.PayloadRef, bytes.NewReader(body), storage.UploadOptions{
+			ContentType: "application/json",
+			Idempotent:  true,
+		})
+		cancelUpload()
+		if upErr != nil {
 			h.failedStorage.Add(1)
-			h.recordMetric(IngressResultFailedStore)
+			h.recordMetric(IngressResultFailedStorage)
 			h.logger.Error("Failed to upload webhook overflow payload to object storage",
 				"endpoint_id", ep.ID,
 				"project_id", ep.ProjectID,
 				"event_id", ev.ID,
 				"payload_bytes", len(body),
-				"error", txErr,
+				"error", upErr,
 			)
 			apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook payload storage unavailable", nil)
+			return
+		}
+		uploadedOverflow = true
+	}
+
+	var (
+		dupEventID string
+		closureErr error
+	)
+	txErr := h.store.WithTx(ctx, func(tx store.Store) error {
+		ret := func(err error) error {
+			closureErr = err
+			return err
+		}
+		if lErr := tx.LockTriggerQuota(ctx, ep.ProjectID); lErr != nil {
+			return ret(lErr)
+		}
+		// §6.2: duplicate redeliveries (when X-Scion-Delivery is present) are
+		// acknowledged with 202 "duplicate" BEFORE the pending-cap and overflow
+		// budget checks so a redelivery at the cap never returns 429.
+		if delivery != "" {
+			existing, gErr := tx.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
+			if gErr == nil && existing != nil {
+				dupEventID = existing.ID
+				return ret(errDuplicateDelivery)
+			}
+			if gErr != nil && !errors.Is(gErr, store.ErrNotFound) {
+				return ret(gErr)
+			}
+		}
+		txCounter, ok := tx.(store.DurableQueuePendingCounter)
+		if !ok {
+			return ret(errTxMissingQueuePendingCounter)
+		}
+		pending, sErr := txCounter.CountDurableQueuePending(ctx, EventQueueKind, ep.ProjectID)
+		if sErr != nil {
+			return ret(sErr)
+		}
+		if pending >= MaxPendingEventsPerProject {
+			return ret(errQueueFull)
+		}
+		if isOverflow {
+			// O1: compute the overflow byte sum authoritatively inside
+			// LockTriggerQuota so concurrent/multi-replica bursts cannot
+			// overshoot the 256 MiB per-project budget.
+			usedBytes, sumErr := tx.SumTriggerEventOverflowBytes(ctx, ep.ProjectID, now.Add(-HistoryRetention))
+			if sumErr != nil {
+				return ret(sumErr)
+			}
+			if usedBytes+int64(len(body)) > h.maxOverflowBytes {
+				return ret(errQueueFull)
+			}
+		}
+		if _, enqErr := EnqueueEvent(ctx, tx, tx, h.queue, &ev); enqErr != nil {
+			return ret(enqErr)
+		}
+		return nil
+	})
+
+	if txErr != nil {
+		// R1 cleanup rule: delete the just-uploaded object ONLY when the tx
+		// closure itself returned an error (rollback is certain). Never delete
+		// on a COMMIT error (closureErr == nil), because Postgres COMMIT errors
+		// can be ambiguous after server-side commit; leave those to the hourly
+		// orphan sweep.
+		if uploadedOverflow && closureErr != nil {
+			delCtx, cancelDel := context.WithTimeout(context.WithoutCancel(ctx), DefaultOverflowDownloadTimeout)
+			if dErr := overflowStor.Delete(delCtx, ev.PayloadRef); dErr != nil && !errors.Is(dErr, storage.ErrNotFound) {
+				h.logger.Warn("Failed to clean up uploaded overflow payload after transaction error; orphan sweep will retry",
+					"endpoint_id", ep.ID,
+					"project_id", ep.ProjectID,
+					"event_id", ev.ID,
+					"payload_ref", ev.PayloadRef,
+					"error", dErr,
+				)
+			}
+			cancelDel()
+		}
+
+		if errors.Is(txErr, errQueueFull) {
+			h.rejectedQueueFull.Add(1)
+			h.recordMetric(IngressResultRejectedQueueFull)
+			writeRateLimited(w, "30", "queue full")
 			return
 		}
 		// Answer 202 "duplicate" strictly for X-Scion-Delivery deduplication:
@@ -877,21 +942,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				dupEventID = existing.ID
 			}
-			h.duplicate.Add(1)
-			h.recordMetric(IngressResultDuplicate)
-			h.audit.RecordReceipt(ctx, ReceiptAuditRecord{
-				ProjectID:    ep.ProjectID,
-				EndpointID:   ep.ID,
-				EventID:      dupEventID,
-				WebhookEvent: eventAttr,
-				PayloadBytes: len(body),
-				Result:       IngressStatusDuplicate,
-				RemoteIP:     clientIP,
-			})
-			apierr.WriteJSON(w, http.StatusAccepted, IngressAcceptedResponse{
-				EventID: dupEventID,
-				Status:  IngressStatusDuplicate,
-			})
+			h.writeDuplicateAccepted(w, ctx, ep, dupEventID, eventAttr, len(body), clientIP)
 			return
 		}
 
@@ -909,7 +960,6 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Step 10: wake local drainer(s), update in-memory counters, emit receipt audit, answer 202.
 	h.queue.Wake(EventQueueKind)
 	if isOverflow {
-		h.overflowBudget.Add(ep.ProjectID, int64(len(body)), now)
 		h.acceptedOverflow.Add(1)
 		h.recordMetric(IngressResultAcceptedOverflow)
 	} else {
@@ -930,6 +980,31 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	apierr.WriteJSON(w, http.StatusAccepted, IngressAcceptedResponse{
 		EventID: ev.ID,
 		Status:  IngressStatusQueued,
+	})
+}
+
+func (h *Ingress) writeDuplicateAccepted(
+	w http.ResponseWriter,
+	ctx context.Context,
+	ep *store.WebhookEndpoint,
+	dupEventID, eventAttr string,
+	payloadBytes int,
+	clientIP string,
+) {
+	h.duplicate.Add(1)
+	h.recordMetric(IngressResultDuplicate)
+	h.audit.RecordReceipt(ctx, ReceiptAuditRecord{
+		ProjectID:    ep.ProjectID,
+		EndpointID:   ep.ID,
+		EventID:      dupEventID,
+		WebhookEvent: eventAttr,
+		PayloadBytes: payloadBytes,
+		Result:       IngressStatusDuplicate,
+		RemoteIP:     clientIP,
+	})
+	apierr.WriteJSON(w, http.StatusAccepted, IngressAcceptedResponse{
+		EventID: dupEventID,
+		Status:  IngressStatusDuplicate,
 	})
 }
 

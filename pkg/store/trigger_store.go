@@ -466,9 +466,10 @@ type TriggerStore interface {
 	// SumTriggerEventOverflowBytes returns the total payload_bytes of trigger_events
 	// in projectID with non-empty payload_ref created at or after since (Stage 2 §8).
 	SumTriggerEventOverflowBytes(ctx context.Context, projectID string, since time.Time) (int64, error)
-	// ExistingTriggerEventPayloadRefs returns the subset of refs that currently
-	// exist in trigger_events.payload_ref (used by the hourly orphan sweep, Stage 2 §8).
-	ExistingTriggerEventPayloadRefs(ctx context.Context, refs []string) (map[string]bool, error)
+	// ExistingTriggerEventPayloadRefs returns the subset of refs belonging to
+	// projectID that currently exist in trigger_events.payload_ref (uses the
+	// (project_id, payload_ref) index during the hourly orphan sweep, Stage 2 §8).
+	ExistingTriggerEventPayloadRefs(ctx context.Context, projectID string, refs []string) (map[string]bool, error)
 	// UpdateTriggerEventAttributes is enrichment-only (Stage 3 §5.5): it updates
 	// attributes and lists on a pending event row before rule evaluation and
 	// never modifies payload, type, subject, headers, dedup_key, or body_sha256.

@@ -78,6 +78,7 @@ func triggerIngressResults() []string {
 		trigger.IngressResultRejectedBadHeader,
 		trigger.IngressResultRejectedQueueFull,
 		trigger.IngressResultFailedStore,
+		trigger.IngressResultFailedStorage,
 		triggerMetricLabelOther,
 	}
 }
@@ -159,7 +160,8 @@ func normalizeTriggerIngressResultLabel(result string) string {
 		trigger.IngressResultRejectedBadJSON,
 		trigger.IngressResultRejectedBadHeader,
 		trigger.IngressResultRejectedQueueFull,
-		trigger.IngressResultFailedStore:
+		trigger.IngressResultFailedStore,
+		trigger.IngressResultFailedStorage:
 		return result
 	default:
 		return triggerMetricLabelOther

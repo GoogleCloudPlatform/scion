@@ -2164,16 +2164,23 @@ func (s *TriggerStore) SumTriggerEventOverflowBytes(ctx context.Context, project
 
 const existingPayloadRefsChunkSize = 500
 
-func (s *TriggerStore) ExistingTriggerEventPayloadRefs(ctx context.Context, refs []string) (map[string]bool, error) {
+func (s *TriggerStore) ExistingTriggerEventPayloadRefs(ctx context.Context, projectID string, refs []string) (map[string]bool, error) {
 	out := make(map[string]bool, len(refs))
 	if len(refs) == 0 {
 		return out, nil
+	}
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
 	}
 	for start := 0; start < len(refs); start += existingPayloadRefsChunkSize {
 		end := min(start+existingPayloadRefsChunkSize, len(refs))
 		chunk := refs[start:end]
 		found, err := s.client.TriggerEvent.Query().
-			Where(triggerevent.PayloadRefIn(chunk...)).
+			Where(
+				triggerevent.ProjectIDEQ(pid),
+				triggerevent.PayloadRefIn(chunk...),
+			).
 			Select(triggerevent.FieldPayloadRef).
 			Strings(ctx)
 		if err != nil {

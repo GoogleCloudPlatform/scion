@@ -700,12 +700,12 @@ func (m *memTriggerStore) SumTriggerEventOverflowBytes(_ context.Context, projec
 	}
 	return total, nil
 }
-func (m *memTriggerStore) ExistingTriggerEventPayloadRefs(_ context.Context, refs []string) (map[string]bool, error) {
+func (m *memTriggerStore) ExistingTriggerEventPayloadRefs(_ context.Context, projectID string, refs []string) (map[string]bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	present := make(map[string]bool, len(m.events))
 	for _, ev := range m.events {
-		if ev.PayloadRef != "" {
+		if ev.ProjectID == projectID && ev.PayloadRef != "" {
 			present[ev.PayloadRef] = true
 		}
 	}

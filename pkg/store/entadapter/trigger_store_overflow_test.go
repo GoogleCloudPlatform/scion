@@ -141,14 +141,19 @@ func TestTriggerEventOverflowStore_SumExistingAndPurge(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(700*1024), sumB)
 
-	// ExistingTriggerEventPayloadRefs reports present refs and omits absent ones.
+	// ExistingTriggerEventPayloadRefs reports present refs scoped to projectID (uses (project_id, payload_ref) index, O3).
 	refOrphan := "trigger-events/" + projA + "/" + uuid.NewString() + ".json"
-	existing, err := cs.ExistingTriggerEventPayloadRefs(ctx, []string{refLiveA, refExpiredA, refLiveB, refOrphan})
+	existingA, err := cs.ExistingTriggerEventPayloadRefs(ctx, projA, []string{refLiveA, refExpiredA, refLiveB, refOrphan})
 	require.NoError(t, err)
-	assert.True(t, existing[refLiveA])
-	assert.True(t, existing[refExpiredA])
-	assert.True(t, existing[refLiveB])
-	assert.False(t, existing[refOrphan])
+	assert.True(t, existingA[refLiveA])
+	assert.True(t, existingA[refExpiredA])
+	assert.False(t, existingA[refLiveB], "projB ref must not match when querying projA")
+	assert.False(t, existingA[refOrphan])
+
+	existingB, err := cs.ExistingTriggerEventPayloadRefs(ctx, projB, []string{refLiveB, refLiveA})
+	require.NoError(t, err)
+	assert.True(t, existingB[refLiveB])
+	assert.False(t, existingB[refLiveA], "projA ref must not match when querying projB")
 
 	// PurgeOldTriggerHistoryWithPayloadRefs deletes evExpiredA and returns its payload_ref.
 	evDel, firesDel, purgedRefs, err := cs.PurgeOldTriggerHistoryWithPayloadRefs(ctx, now.Add(-7*24*time.Hour))
@@ -158,9 +163,11 @@ func TestTriggerEventOverflowStore_SumExistingAndPurge(t *testing.T) {
 	assert.Equal(t, []string{refExpiredA}, purgedRefs)
 
 	// After purge, refExpiredA is no longer in ExistingTriggerEventPayloadRefs; live refs remain.
-	existingAfter, err := cs.ExistingTriggerEventPayloadRefs(ctx, []string{refLiveA, refExpiredA, refLiveB})
+	existingAfterA, err := cs.ExistingTriggerEventPayloadRefs(ctx, projA, []string{refLiveA, refExpiredA})
 	require.NoError(t, err)
-	assert.True(t, existingAfter[refLiveA])
-	assert.False(t, existingAfter[refExpiredA])
-	assert.True(t, existingAfter[refLiveB])
+	assert.True(t, existingAfterA[refLiveA])
+	assert.False(t, existingAfterA[refExpiredA])
+	existingAfterB, err := cs.ExistingTriggerEventPayloadRefs(ctx, projB, []string{refLiveB})
+	require.NoError(t, err)
+	assert.True(t, existingAfterB[refLiveB])
 }
