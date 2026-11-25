@@ -401,13 +401,13 @@ func activateContainerScriptProvisioner(configData []byte) ([]byte, bool, error)
 }
 
 // syncHarnessConfigSupportFiles adds bundled support files that are missing
-// from targetDir and records them in plan. Build-only files in seedSkipFiles
-// are skipped (matching seeding) and left alone if already present. When
-// refreshScripts is set, it also refreshes provisioner-owned scripts
-// (provision.py, scion_harness.py, capture_auth.py) whose content differs from
-// the bundled copy, backing up each one first. A symlinked or non-regular
-// script is treated as user-managed and skipped. Other existing files are
-// preserved.
+// from targetDir and records them in plan. Build-only and test files matched by
+// shouldSkipSeedFile are skipped (matching seeding) and left alone if already
+// present. When refreshScripts is set, it also refreshes provisioner-owned
+// scripts (provision.py, scion_harness.py, capture_auth.py) whose content
+// differs from the bundled copy, backing up each one first. A symlinked or
+// non-regular script is treated as user-managed and skipped. Other existing
+// files are preserved.
 func syncHarnessConfigSupportFiles(plan *HarnessConfigUpgradePlan, targetDir string, embedsFS fs.FS, basePath, configDir string, refreshScripts bool, opts HarnessConfigUpgradeOptions) error {
 	homeDir := filepath.Join(targetDir, "home")
 	return fs.WalkDir(embedsFS, basePath, func(path string, d fs.DirEntry, err error) error {
@@ -425,7 +425,7 @@ func syncHarnessConfigSupportFiles(plan *HarnessConfigUpgradePlan, targetDir str
 		if relPath == "config.yaml" || relPath == "scion-agent.yaml" {
 			return nil
 		}
-		if seedSkipFiles[filepath.Base(relPath)] {
+		if shouldSkipSeedFile(relPath) {
 			return nil
 		}
 		targetPath := mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, relPath)

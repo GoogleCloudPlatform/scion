@@ -386,7 +386,7 @@ func TestUpgradeHarnessConfig_SkipsSeedSkipFiles(t *testing.T) {
 			t.Errorf("dryRun=%v: expected add_file home/.bashrc, got %+v", dryRun, plan.Actions)
 		}
 		for _, a := range plan.Actions {
-			if seedSkipFiles[filepath.Base(a.Path)] {
+			if shouldSkipSeedFile(a.Path) {
 				t.Errorf("dryRun=%v: unexpected action for skipped file: %+v", dryRun, a)
 			}
 		}
@@ -424,6 +424,91 @@ func TestUpgradeHarnessConfig_SkipsSeedSkipFiles(t *testing.T) {
 	})
 
 	// A second upgrade is a no-op.
+	plan, err := UpgradeHarnessConfig(hcDir, h, HarnessConfigUpgradeOptions{
+		Now:         fixedTime,
+		HarnessesFS: harnessesFS,
+	})
+	if err != nil {
+		t.Fatalf("second UpgradeHarnessConfig failed: %v", err)
+	}
+	if plan.Changed || len(plan.Actions) != 0 {
+		t.Errorf("second upgrade should be a no-op, got changed=%v actions=%+v", plan.Changed, plan.Actions)
+	}
+}
+
+// TestUpgradeHarnessConfig_SkipsPatternMatchedFiles verifies that a non-force
+// upgrade skips pattern-matched test files (*.test.mjs, *_test.py) and
+// __init__.py, still copies runtime support files, and leaves pre-existing
+// pattern-matched files in home/ untouched (ptone/scion#9200).
+func TestUpgradeHarnessConfig_SkipsPatternMatchedFiles(t *testing.T) {
+	configYAML := "harness: myh\nimage: img:latest\nuser: scion\nconfig_dir: .myh\n"
+	hcDir := filepath.Join(t.TempDir(), "myh")
+	existingPluginsDir := filepath.Join(hcDir, "home", ".myh", "plugins")
+	if err := os.MkdirAll(existingPluginsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(configYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	const existingTestContent = "// pre-existing user test file"
+	if err := os.WriteFile(filepath.Join(existingPluginsDir, "scion-bridge.test.mjs"), []byte(existingTestContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	harnessesFS := fstest.MapFS{
+		"myh/config.yaml":                             &fstest.MapFile{Data: []byte(configYAML)},
+		"myh/helper_test.py":                          &fstest.MapFile{Data: []byte("# helper test")},
+		"myh/__init__.py":                             &fstest.MapFile{Data: []byte("")},
+		"myh/root.test.mjs":                           &fstest.MapFile{Data: []byte("// root test")},
+		"myh/home/.myh/plugins/scion-bridge.js":       &fstest.MapFile{Data: []byte("// bundled bridge")},
+		"myh/home/.myh/plugins/scion-bridge.test.mjs": &fstest.MapFile{Data: []byte("// bundled test")},
+		"myh/home/.myh/plugins/other.test.mjs":        &fstest.MapFile{Data: []byte("// other bundled test")},
+	}
+
+	h := &MockHarness{NameVal: "myh"}
+	for _, dryRun := range []bool{true, false} {
+		plan, err := UpgradeHarnessConfig(hcDir, h, HarnessConfigUpgradeOptions{
+			DryRun:      dryRun,
+			Now:         fixedTime,
+			HarnessesFS: harnessesFS,
+		})
+		if err != nil {
+			t.Fatalf("UpgradeHarnessConfig (dryRun=%v) failed: %v", dryRun, err)
+		}
+		added := actionsOfType(plan, "add_file")
+		if _, ok := added["home/.myh/plugins/scion-bridge.js"]; !ok {
+			t.Errorf("dryRun=%v: expected add_file home/.myh/plugins/scion-bridge.js, got %+v", dryRun, plan.Actions)
+		}
+		for _, a := range plan.Actions {
+			base := filepath.Base(a.Path)
+			if base == "helper_test.py" || base == "__init__.py" || base == "root.test.mjs" || base == "scion-bridge.test.mjs" || base == "other.test.mjs" {
+				t.Errorf("dryRun=%v: unexpected action for skipped file: %+v", dryRun, a)
+			}
+		}
+	}
+
+	// Legitimate runtime file was copied; pre-existing test file is untouched.
+	assertFileContents(t, hcDir, map[string]string{
+		"home/.myh/plugins/scion-bridge.js":       "// bundled bridge",
+		"home/.myh/plugins/scion-bridge.test.mjs": existingTestContent,
+	})
+
+	// Pattern-matched and __init__.py files were not copied.
+	for _, rel := range []string{
+		"helper_test.py",
+		"home/.myh/helper_test.py",
+		"__init__.py",
+		"home/.myh/__init__.py",
+		"root.test.mjs",
+		"home/.myh/root.test.mjs",
+		"home/.myh/plugins/other.test.mjs",
+	} {
+		if _, err := os.Lstat(filepath.Join(hcDir, filepath.FromSlash(rel))); err == nil {
+			t.Errorf("expected skipped file %s not to be copied on upgrade", rel)
+		}
+	}
+
+	// Second upgrade is a no-op.
 	plan, err := UpgradeHarnessConfig(hcDir, h, HarnessConfigUpgradeOptions{
 		Now:         fixedTime,
 		HarnessesFS: harnessesFS,

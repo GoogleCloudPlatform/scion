@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -745,6 +746,29 @@ var seedSkipFiles = map[string]bool{
 	"init-firewall.sh":  true,
 	"package.json":      true,
 	"package-lock.json": true,
+	"__init__.py":       true,
+}
+
+var seedSkipPatterns = []string{
+	"*.test.mjs",
+	"*_test.py",
+}
+
+// shouldSkipSeedFile reports whether a bundled harness file should be omitted
+// when seeding or upgrading a harness-config directory. It checks the file's
+// basename against exact names in seedSkipFiles and glob patterns in
+// seedSkipPatterns.
+func shouldSkipSeedFile(relPath string) bool {
+	base := path.Base(filepath.ToSlash(relPath))
+	if seedSkipFiles[base] {
+		return true
+	}
+	for _, pattern := range seedSkipPatterns {
+		if matched, err := path.Match(pattern, base); err == nil && matched {
+			return true
+		}
+	}
+	return false
 }
 
 // SeedHarnessConfigFromDir populates a harness-config directory from an
@@ -807,7 +831,7 @@ func SeedHarnessConfigFromDir(targetDir string, sourceFS fs.FS, sourcePath strin
 			return nil
 		}
 
-		if seedSkipFiles[filepath.Base(relPath)] {
+		if shouldSkipSeedFile(relPath) {
 			return nil
 		}
 

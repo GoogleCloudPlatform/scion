@@ -759,17 +759,126 @@ func TestSeedHarnessConfigFromDir_PiSkipsBuildLockfiles(t *testing.T) {
 		t.Fatalf("SeedHarnessConfigFromDir(pi) failed: %v", err)
 	}
 
-	// Build-only npm manifest and lockfile must not be seeded into the
-	// harness-config root or the agent's ~/.pi/agent directory.
+	// Build-only npm manifest, lockfile, and test files must not be seeded into
+	// the harness-config root or the agent's ~/.pi/agent directory.
 	for _, forbidden := range []string{
 		"package.json",
 		"package-lock.json",
+		"scion-bridge.test.mjs",
 		"home/.pi/agent/package.json",
 		"home/.pi/agent/package-lock.json",
+		"home/.pi/agent/scion-bridge.test.mjs",
 	} {
 		path := filepath.Join(targetDir, filepath.FromSlash(forbidden))
 		if _, err := os.Stat(path); err == nil {
-			t.Errorf("expected build-only file %s to be skipped, but found at %s", forbidden, path)
+			t.Errorf("expected build/test-only file %s to be skipped, but found at %s", forbidden, path)
+		}
+	}
+
+	// Legitimate runtime extension is still seeded.
+	if _, err := os.Stat(filepath.Join(targetDir, "home", ".pi", "agent", "extensions", "scion-bridge.js")); err != nil {
+		t.Errorf("expected pi scion-bridge.js to be seeded, got: %v", err)
+	}
+}
+
+func TestSeedHarnessConfigFromDir_SkipsPatternMatchedFiles(t *testing.T) {
+	t.Run("synthetic patterns", func(t *testing.T) {
+		sourceFS := fstest.MapFS{
+			"myh/config.yaml":                  &fstest.MapFile{Data: []byte("harness: myh\nimage: img:latest\nuser: scion\nconfig_dir: .myh\n")},
+			"myh/provision.py":                 &fstest.MapFile{Data: []byte("# provision")},
+			"myh/helper_test.py":               &fstest.MapFile{Data: []byte("# helper test")},
+			"myh/__init__.py":                  &fstest.MapFile{Data: []byte("")},
+			"myh/bridge.test.mjs":              &fstest.MapFile{Data: []byte("// root test")},
+			"myh/home/.myh/plugins/bridge.js":  &fstest.MapFile{Data: []byte("// runtime plugin")},
+			"myh/home/.myh/plugins/b.test.mjs": &fstest.MapFile{Data: []byte("// plugin test")},
+		}
+
+		targetDir := filepath.Join(t.TempDir(), "myh")
+		if err := SeedHarnessConfigFromDir(targetDir, sourceFS, "myh", false); err != nil {
+			t.Fatalf("SeedHarnessConfigFromDir failed: %v", err)
+		}
+
+		for _, want := range []string{
+			"config.yaml",
+			"provision.py",
+			"home/.myh/plugins/bridge.js",
+		} {
+			if _, err := os.Stat(filepath.Join(targetDir, filepath.FromSlash(want))); err != nil {
+				t.Errorf("expected %s to be seeded, got: %v", want, err)
+			}
+		}
+
+		for _, forbidden := range []string{
+			"helper_test.py",
+			"home/.myh/helper_test.py",
+			"__init__.py",
+			"home/.myh/__init__.py",
+			"bridge.test.mjs",
+			"home/.myh/bridge.test.mjs",
+			"home/.myh/plugins/b.test.mjs",
+		} {
+			if _, err := os.Stat(filepath.Join(targetDir, filepath.FromSlash(forbidden))); err == nil {
+				t.Errorf("expected skipped file %s not to be seeded", forbidden)
+			}
+		}
+	})
+
+	t.Run("bundled opencode and antigravity", func(t *testing.T) {
+		opencodeDir := filepath.Join(t.TempDir(), "opencode")
+		if err := SeedHarnessConfigFromDir(opencodeDir, harnesses.FS, "opencode", false); err != nil {
+			t.Fatalf("SeedHarnessConfigFromDir(opencode) failed: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(opencodeDir, "home", ".config", "opencode", "plugins", "scion-bridge.test.mjs")); err == nil {
+			t.Error("expected opencode scion-bridge.test.mjs to be skipped")
+		}
+		if _, err := os.Stat(filepath.Join(opencodeDir, "home", ".config", "opencode", "plugins", "scion-bridge.js")); err != nil {
+			t.Errorf("expected opencode scion-bridge.js to be seeded, got: %v", err)
+		}
+
+		antigravityDir := filepath.Join(t.TempDir(), "antigravity")
+		if err := SeedHarnessConfigFromDir(antigravityDir, harnesses.FS, "antigravity", false); err != nil {
+			t.Fatalf("SeedHarnessConfigFromDir(antigravity) failed: %v", err)
+		}
+		for _, forbidden := range []string{
+			"__init__.py",
+			"home/.gemini/antigravity-cli/__init__.py",
+			"home/__init__.py",
+		} {
+			if _, err := os.Stat(filepath.Join(antigravityDir, filepath.FromSlash(forbidden))); err == nil {
+				t.Errorf("expected antigravity %s to be skipped", forbidden)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(antigravityDir, "provision.py")); err != nil {
+			t.Errorf("expected antigravity provision.py to be seeded, got: %v", err)
+		}
+	})
+}
+
+func TestShouldSkipSeedFile(t *testing.T) {
+	cases := []struct {
+		relPath string
+		want    bool
+	}{
+		{"Dockerfile", true},
+		{"nested/README.md", true},
+		{"__init__.py", true},
+		{"home/.gemini/antigravity-cli/__init__.py", true},
+		{"scion-bridge.test.mjs", true},
+		{"home/.config/opencode/plugins/scion-bridge.test.mjs", true},
+		{"provision_test.py", true},
+		{"sub/helper_test.py", true},
+		{"package.json", true},
+		{"package-lock.json", true},
+		{"provision.py", false},
+		{"scion_harness.py", false},
+		{"home/.config/opencode/plugins/scion-bridge.js", false},
+		{"home/.pi/agent/extensions/scion-bridge.js", false},
+		{"home/.myh/test.mjs.bak", false},
+		{"home/.myh/my_test_helper.py", false},
+	}
+	for _, tc := range cases {
+		if got := shouldSkipSeedFile(tc.relPath); got != tc.want {
+			t.Errorf("shouldSkipSeedFile(%q) = %v, want %v", tc.relPath, got, tc.want)
 		}
 	}
 }
