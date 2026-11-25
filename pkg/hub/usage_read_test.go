@@ -321,6 +321,20 @@ func TestAgentUsageRead_WindowFilteringAndMultiModel(t *testing.T) {
 
 	inverted := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage?since=2026-11-25&until=2026-11-20", owner)
 	assert.Equal(t, http.StatusBadRequest, inverted.Code)
+
+	// Overflow / over-cap relative day windows -> 400
+	overCap := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage?since=3651d", owner)
+	assert.Equal(t, http.StatusBadRequest, overCap.Code)
+	overflowDays := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage?since=200000d", owner)
+	assert.Equal(t, http.StatusBadRequest, overflowDays.Code)
+
+	// since=7d reports exactly 7 inclusive UTC calendar days: [untilDay - 6d 00:00:00Z, untilDay 23:59:59.999999Z].
+	read7d := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage?since=7d&until=2026-11-25", owner)
+	require.Equal(t, http.StatusOK, read7d.Code, read7d.Body.String())
+	var resp7d AgentUsageResponse
+	require.NoError(t, json.Unmarshal(read7d.Body.Bytes(), &resp7d))
+	assert.Equal(t, time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC), resp7d.Window.Since)
+	assert.Equal(t, time.Date(2026, 11, 25, 23, 59, 59, 999999000, time.UTC), resp7d.Window.Until)
 }
 
 func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
@@ -350,7 +364,7 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 	dbNow, err := s.DBNow(ctx)
 	require.NoError(t, err)
 
-	// Past startup grace (10m ago) and last receipt 4m ago (> 3 * 60s = 180s) -> stale.
+	// Last receipt 4m ago (> 3 * 60s = 180s) on an open meter -> stale.
 	assert.Equal(t, MeasurementStatusStale, deriveMeasurementStatus(measurementStatusInput{
 		RunAttribution: &store.RunAttribution{RunID: "r1", CreatedAt: dbNow.Add(-10 * time.Minute)},
 		MeterHealth: []*store.MeterHealth{{
@@ -362,12 +376,12 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 		DBNow:             dbNow,
 	}))
 
-	// Within 60s startup grace (30s ago) -> not stale yet, stays measured.
+	// Fresh receipt 30s ago on an open meter with events -> measured.
 	assert.Equal(t, MeasurementStatusMeasured, deriveMeasurementStatus(measurementStatusInput{
-		RunAttribution: &store.RunAttribution{RunID: "r1", CreatedAt: dbNow.Add(-30 * time.Second)},
+		RunAttribution: &store.RunAttribution{RunID: "r1", CreatedAt: dbNow.Add(-10 * time.Minute)},
 		MeterHealth: []*store.MeterHealth{{
 			RunID:         "r1",
-			LastReceiptAt: dbNow.Add(-4 * time.Minute),
+			LastReceiptAt: dbNow.Add(-30 * time.Second),
 			FinalState:    store.MeterHealthFinalStateOpen,
 		}},
 		HasRunUsageEvents: true,
@@ -489,8 +503,8 @@ func TestAgentUsageRead_DayAlignedWindowAndNoZeroFabrication(t *testing.T) {
 
 	dbNow, err := s.DBNow(ctx)
 	require.NoError(t, err)
-	// Place event at 01:00Z on day D = 30 days ago (first day of default 30d window).
-	dayD := time.Date(dbNow.Year(), dbNow.Month(), dbNow.Day(), 0, 0, 0, 0, time.UTC).Add(-30 * 24 * time.Hour)
+	// Place event at 01:00Z on day D = 29 days ago (first day of default 30-calendar-day window).
+	dayD := time.Date(dbNow.Year(), dbNow.Month(), dbNow.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(defaultUsageWindowDays - 1))
 	evTime := dayD.Add(1 * time.Hour)
 
 	ev1 := makeWireUsageEvent("hub-r2-test", ag.ID, proj.ID, "run-r2-1", "evt-r2-1", 1, evTime, 7, 3)

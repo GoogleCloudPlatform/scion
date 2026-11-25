@@ -37,10 +37,10 @@ const (
 	MeasurementStatusStale        = "stale"
 
 	defaultUsageWindowDays    = 30
+	maxUsageWindowDays        = 3650
 	defaultUsageRunSummaryCap = 20
 	defaultHeartbeatInterval  = time.Duration(telemetrycontract.DefaultUsageHeartbeatIntervalSec) * time.Second
 	staleHeartbeatMultiplier  = 3
-	meterStartupGrace         = 60 * time.Second
 )
 
 // AgentUsageBucketUnknownEvents reports per-bucket counts of events in the
@@ -179,10 +179,7 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		return
 	}
 
-	targetRunID := agent.RunID
-	if targetRunID == "" && len(runs) > 0 && runs[0] != nil {
-		targetRunID = runs[0].RunID
-	}
+	targetRunID, currentRunAttr := resolveCurrentRunForUsage(agent, runs)
 	var currentRunHasEvents bool
 	if targetRunID != "" {
 		currentRunHasEvents, err = s.store.HasUsageEventsForRun(ctx, agent.ID, targetRunID)
@@ -192,8 +189,28 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		}
 	}
 
-	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, presence, runs, meterRows, currentRunHasEvents)
+	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, presence, runs, targetRunID, currentRunAttr, meterRows, currentRunHasEvents)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// resolveCurrentRunForUsage resolves the agent's current run ID and matching
+// run_attribution row once. When agent.RunID is set, it never falls back to a
+// different run's attribution row.
+func resolveCurrentRunForUsage(agent *store.Agent, runs []*store.RunAttribution) (string, *store.RunAttribution) {
+	if agent != nil && agent.RunID != "" {
+		for _, ra := range runs {
+			if ra != nil && ra.RunID == agent.RunID {
+				return agent.RunID, ra
+			}
+		}
+		return agent.RunID, nil
+	}
+	for _, ra := range runs {
+		if ra != nil {
+			return ra.RunID, ra
+		}
+	}
+	return "", nil
 }
 
 // authorizeAgentUsageRead enforces agent-scoped read authz consistent with
@@ -237,6 +254,8 @@ func (s *Server) authorizeAgentUsageRead(w http.ResponseWriter, r *http.Request,
 // to now (UTC) and snaps the effective window to inclusive UTC day boundaries
 // ([00:00:00Z, 23:59:59.999999Z]) so daily rollups and event presence queries
 // cover the exact same time span and the response reports the effective window.
+// Relative day counts (since=Nd and the default 30d) span exactly N inclusive
+// UTC calendar days: [untilDay - (N-1)d 00:00:00Z, untilDay 23:59:59.999999Z].
 func parseUsageWindow(sinceRaw, untilRaw string, now time.Time) (time.Time, time.Time, error) {
 	now = now.UTC().Truncate(time.Microsecond)
 	until := now
@@ -247,9 +266,13 @@ func parseUsageWindow(sinceRaw, untilRaw string, now time.Time) (time.Time, time
 		}
 		until = parsed
 	}
+	untilDay := time.Date(until.Year(), until.Month(), until.Day(), 0, 0, 0, 0, time.UTC)
+	snappedUntil := untilDay.Add(24*time.Hour - time.Microsecond)
 
-	since := until.Add(-time.Duration(defaultUsageWindowDays) * 24 * time.Hour)
-	if strings.TrimSpace(sinceRaw) != "" {
+	var since time.Time
+	if strings.TrimSpace(sinceRaw) == "" {
+		since = untilDay.AddDate(0, 0, -(defaultUsageWindowDays - 1))
+	} else {
 		parsed, err := parseUsageTimeParam(sinceRaw, until, false)
 		if err != nil {
 			return time.Time{}, time.Time{}, fmt.Errorf("invalid since parameter: %w", err)
@@ -257,14 +280,15 @@ func parseUsageWindow(sinceRaw, untilRaw string, now time.Time) (time.Time, time
 		since = parsed
 	}
 
-	if since.After(until) {
+	if since.After(snappedUntil) {
 		return time.Time{}, time.Time{}, fmt.Errorf("since (%s) must not be after until (%s)", since.Format(time.RFC3339), until.Format(time.RFC3339))
 	}
 
 	// Snap to inclusive UTC day boundaries to match usage_rollups_daily grain.
 	snappedSince := time.Date(since.Year(), since.Month(), since.Day(), 0, 0, 0, 0, time.UTC)
-	snappedUntil := time.Date(until.Year(), until.Month(), until.Day(), 0, 0, 0, 0, time.UTC).
-		Add(24*time.Hour - time.Microsecond)
+	if snappedSince.After(snappedUntil) {
+		return time.Time{}, time.Time{}, fmt.Errorf("since (%s) must not be after until (%s)", snappedSince.Format(time.RFC3339), snappedUntil.Format(time.RFC3339))
+	}
 	return snappedSince, snappedUntil, nil
 }
 
@@ -281,14 +305,21 @@ func parseUsageTimeParam(raw string, ref time.Time, endOfDay bool) (time.Time, e
 		return d, nil
 	}
 	if !endOfDay {
-		// Support relative day durations like "7d", "30d" and Go durations like "24h".
+		// Support relative day counts like "7d", "30d" (inclusive UTC calendar days,
+		// capped at maxUsageWindowDays) and Go durations like "24h".
 		if strings.HasSuffix(s, "d") && len(s) > 1 {
 			days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
-			if err == nil && days > 0 {
-				return ref.Add(-time.Duration(days) * 24 * time.Hour).UTC().Truncate(time.Microsecond), nil
+			if err != nil || days <= 0 || days > maxUsageWindowDays {
+				return time.Time{}, fmt.Errorf("relative day window must be between 1d and %dd, got %q", maxUsageWindowDays, raw)
 			}
+			refDay := time.Date(ref.Year(), ref.Month(), ref.Day(), 0, 0, 0, 0, time.UTC)
+			return refDay.AddDate(0, 0, -(days - 1)), nil
 		}
 		if dur, err := time.ParseDuration(s); err == nil && dur > 0 {
+			maxDur := time.Duration(maxUsageWindowDays) * 24 * time.Hour
+			if dur > maxDur {
+				return time.Time{}, fmt.Errorf("relative duration must not exceed %dd, got %q", maxUsageWindowDays, raw)
+			}
 			return ref.Add(-dur).UTC().Truncate(time.Microsecond), nil
 		}
 	}
@@ -338,6 +369,8 @@ func buildAgentUsageResponse(
 	rollups []*store.UsageRollupDaily,
 	presence []*store.UsageTokenPresence,
 	runs []*store.RunAttribution,
+	targetRunID string,
+	currentRunAttr *store.RunAttribution,
 	meterRows []*store.MeterHealth,
 	currentRunHasEvents bool,
 ) AgentUsageResponse {
@@ -435,7 +468,7 @@ func buildAgentUsageResponse(
 			Tokens:          tokens,
 		})
 	}
-	sort.Slice(byModel, func(i, j int) bool {
+	sort.SliceStable(byModel, func(i, j int) bool {
 		si := int64(-1)
 		if byModel[i].Tokens.SummableTokens != nil {
 			si = *byModel[i].Tokens.SummableTokens
@@ -450,7 +483,13 @@ func buildAgentUsageResponse(
 		if byModel[i].Calls != byModel[j].Calls {
 			return byModel[i].Calls > byModel[j].Calls
 		}
-		return byModel[i].Model < byModel[j].Model
+		if byModel[i].Model != byModel[j].Model {
+			return byModel[i].Model < byModel[j].Model
+		}
+		if byModel[i].Harness != byModel[j].Harness {
+			return byModel[i].Harness < byModel[j].Harness
+		}
+		return byModel[i].UsageSource < byModel[j].UsageSource
 	})
 
 	totalTokens := resolveNullableTokens(
@@ -460,13 +499,9 @@ func buildAgentUsageResponse(
 	)
 
 	runSummaries := make([]AgentUsageRunSummary, 0, len(runs))
-	var currentRunAttr *store.RunAttribution
 	for _, ra := range runs {
 		if ra == nil {
 			continue
-		}
-		if agent.RunID != "" && ra.RunID == agent.RunID {
-			currentRunAttr = ra
 		}
 		runSummaries = append(runSummaries, AgentUsageRunSummary{
 			RunID:         ra.RunID,
@@ -477,18 +512,11 @@ func buildAgentUsageResponse(
 			CreatedAt:     ra.CreatedAt,
 		})
 	}
-	if currentRunAttr == nil && len(runs) > 0 {
-		currentRunAttr = runs[0]
-	}
 
 	// Select meter_health rows for the current run for status derivation,
 	// and compute the latest last_receipt_at across all rows.
 	var lastReceiptAt *time.Time
 	var currentRunMeterRows []*store.MeterHealth
-	targetRunID := agent.RunID
-	if targetRunID == "" && currentRunAttr != nil {
-		targetRunID = currentRunAttr.RunID
-	}
 	for _, mh := range meterRows {
 		if mh == nil {
 			continue
@@ -621,16 +649,17 @@ type measurementStatusInput struct {
 
 // deriveMeasurementStatus computes the P1 measurement_status for an agent's
 // current run:
-//   - "stale" when an open meter_health row for the run is past 3 heartbeat
-//     intervals (180s) after the 60s startup grace, evaluated at read time from
-//     DBNow (§4.2 item 7);
+//   - "stale" when an open meter_health row for the run has had no receipt for
+//     more than 3 heartbeat intervals (180s), evaluated at read time from DBNow
+//     (§4.2 item 7);
 //   - "measured" when the current run has received Track 1 usage events and its
 //     meter is fresh (or cleanly closed with final_state="final");
 //   - "unmeasured" when no Track 1 usage data has been received for the current
 //     run.
 //
 // P2 extends this function with usage.yaml capability metadata (partial,
-// calls_only, legacy_client).
+// calls_only, legacy_client, and no-receipt-past-grace staleness when a
+// harness is declared live-metered).
 func deriveMeasurementStatus(in measurementStatusInput) string {
 	var latest *store.MeterHealth
 	for _, mh := range in.MeterHealth {
@@ -643,13 +672,8 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 	}
 
 	if latest != nil {
-		pastGrace := true
-		if in.RunAttribution != nil && !in.RunAttribution.CreatedAt.IsZero() {
-			pastGrace = in.DBNow.Sub(in.RunAttribution.CreatedAt) > meterStartupGrace
-		}
 		staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
 		if latest.FinalState == store.MeterHealthFinalStateOpen &&
-			pastGrace &&
 			in.DBNow.Sub(latest.LastReceiptAt) > staleAfter {
 			return MeasurementStatusStale
 		}
