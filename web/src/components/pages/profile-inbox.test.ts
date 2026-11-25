@@ -1106,7 +1106,9 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
       lastMessageAt: '2026-11-23T17:45:00Z',
     };
     const breakdown = { dms: 1, mentions: 1, unreadConversations: 2 };
-    const makeChatCat = (previews: (typeof dmPreview | typeof mentionPreview)[]) => ({
+    const makeChatCat = (
+      previews: (typeof dmPreview | typeof mentionPreview)[]
+    ): InboxSummaryResponse['categories']['chat'] => ({
       state: 'ok' as const,
       count: 2,
       capped: false,

@@ -183,6 +183,7 @@ jobs:
           - test-identity-session
           - page-policy
           - chat-decisions
+          - inbox
           - port-proxy
           - iap-driver
     steps:
@@ -202,17 +203,17 @@ jobs:
         working-directory: ./web
         run: npm ci
 
-      # test-identity-session, page-policy, chat-decisions and port-proxy: the
+      # test-identity-session, page-policy, chat-decisions, inbox and port-proxy: the
       # suites start the real hub binary.
       - name: Setup Go (real hub suites)
-        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-decisions' || matrix.suite == 'port-proxy'
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-decisions' || matrix.suite == 'inbox' || matrix.suite == 'port-proxy'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Build hub binary and web assets (test-identity-session, page-policy, chat-decisions)
-        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-decisions'
+      - name: Build hub binary and web assets (test-identity-session, page-policy, chat-decisions, inbox)
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-decisions' || matrix.suite == 'inbox'
         run: |
           make build
           npm --prefix web run build

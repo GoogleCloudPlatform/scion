@@ -34,6 +34,7 @@
     "./iap-driver/*.ts",
     "./iap-journey/*.ts",
     "./harness-selftest/*.ts",
+    "./inbox/*.ts",
     "./async-create/*.ts",
     "./client-main-stub.ts",
     "./event-source-stub.ts",
