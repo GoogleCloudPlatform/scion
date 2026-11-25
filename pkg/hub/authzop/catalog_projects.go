@@ -926,7 +926,6 @@ var projectOperations = []OperationSpec{
 			// r.Method: PATCH, not PUT.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}", Method: "PATCH"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}/resume", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}/run", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -971,6 +970,53 @@ var projectOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestSchedulePause_AdmitsTokenWithUpdateSelector"}},
 		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "schedule.event.run",
+		Domain:      "schedule",
+		Description: "Trigger an immediate manual run of a recurring schedule of any event type. Inserts a manual scheduled event carrying the caller's live attribution and ceiling without changing the schedule row's cron timing, status, or stored attribution, and fires it (delivering a message, starting an exec run, or dispatching an agent). A user access token needs scheduled_event:update and passes the event type's target checks",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}/run", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "scheduled_event.update",
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority, EffectEmitExternal},
+		DelegationKind:   DelegationNonAmplification,
+		AuthorityEval:    AuthorityEvalNone,
+		ExternalPolicy: &ExternalEffectPolicy{
+			DeliveryMode:   DeliveryFireAndForget,
+			FailureMode:    FailureLogAndContinue,
+			IdempotencyKey: "manual scheduled event ID; per-replica manualScheduleRuns mutex rejects concurrent manual runs on the same schedule with 409 conflict, and exec runs additionally acquire a DB overlap lease",
+			RetryPolicy:    "no automatic retry — each manual run fires once (synchronously with context.WithoutCancel, or in a tracked detached goroutine for wake/exec) and records fired/failed status on the manual event row",
+			AuthBeforeEmit: true,
+		},
+		DelegationDescription: "Only the dispatch_agent event type grants authority. Triggering a manual run of any event type records the caller's live " +
+			"initiator attribution and frozen effect ceiling (revisionAuthorityCeiling) on the inserted manual scheduled event row, leaving the schedule " +
+			"row's stored attribution and authorization revision untouched. A dispatch_agent manual run immediately creates an agent with a delegation " +
+			"edge from the caller's recorded principal, after CanDelegate for that principal. A message or exec manual run grants no authority. " +
+			"Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation",
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_delegation",
+			ContextFields: []string{"actor_id"},
+			AfterFields:   []string{"agent_id", "can_delegate_result"},
+			Atomic:        false,
+			NonAtomicJustification: "The manual event insert records no mutation audit record: it stores the caller's initiator attribution and frozen " +
+				"effect ceiling on the manual event row (leaving the schedule row untouched). When a dispatch_agent manual run fires, the " +
+				"agent_delegation record is written in the agent-create transaction with the agent row and its delegation edge; message and exec " +
+				"manual runs record their outcome on the manual scheduled event row and write no agent_delegation audit record",
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestScheduleRunNow_UsesRunnerAttributionAndCeilingNotAuthor"},
+			{Package: "pkg/hub", Function: "TestScheduleRunNow_AuthoringCredentialGateRefused"},
+			{Package: "pkg/hub", Function: "TestScheduleRunNow_AuthzAndCrossProjectIsolation"},
+			{Package: "pkg/hub", Function: "TestScheduleRunNow_ExecCaptureOutputAndAuthz"},
+			{Package: "pkg/hub", Function: "TestScheduleRunNow_DispatchAgentAuthzDenied"},
+			{Package: "pkg/hub", Function: "TestScheduleRunNow_MessageAuthzDenied"},
+		},
+		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "schedule.event.delete",

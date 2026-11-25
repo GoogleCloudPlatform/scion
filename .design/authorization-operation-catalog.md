@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 439
+**Operations:** 440
 
 ## Table of Contents
 
@@ -70,6 +70,7 @@
 - [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule of any event type. A user access token needs scheduled_event:create and passes the event type's target checks
 - [schedule.event.update](#scheduleeventupdate) — Update or resume a recurring schedule of any event type. A user access token needs scheduled_event:update and passes the event type's target checks
 - [schedule.event.pause](#scheduleeventpause) — Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted
+- [schedule.event.run](#scheduleeventrun) — Trigger an immediate manual run of a recurring schedule of any event type. Inserts a manual scheduled event carrying the caller's live attribution and ceiling without changing the schedule row's cron timing, status, or stored attribution, and fires it (delivering a message, starting an exec run, or dispatching an agent). A user access token needs scheduled_event:update and passes the event type's target checks
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [schedule.event.fire](#scheduleeventfire) — Fire a scheduled message, dispatch_agent or exec event, one-shot or materialized from a recurring schedule, under the authority its revision recorded. An exec fire (ptone/scion#7883) re-checks agent.attach on the target under the revision's ceiling before its one exec-start; exec-start and exec-status are reached only from the scheduler's exec fire, run tracker and sweeper, never from a request
 - [webhookendpoint.list](#webhookendpointlist) — List webhook endpoints in a project. Agent callers see only webhook endpoints they own (scope=caller)
@@ -3036,7 +3037,6 @@
 |------|--------|---------|
 | http_route | PATCH | `/api/v1/projects/{projectId}/schedules/{id}` |
 | http_route | POST | `/api/v1/projects/{projectId}/schedules/{id}/resume` |
-| http_route | POST | `/api/v1/projects/{projectId}/schedules/{id}/run` |
 
 **Principals:** `user`, `agent`
 
@@ -3100,6 +3100,64 @@
 ### Tests
 
 - `pkg/hub:TestSchedulePause_AdmitsTokenWithUpdateSelector`
+
+---
+
+## schedule.event.run
+
+**Domain:** schedule
+
+**Description:** Trigger an immediate manual run of a recurring schedule of any event type. Inserts a manual scheduled event carrying the caller's live attribution and ceiling without changing the schedule row's cron timing, status, or stored attribution, and fires it (delivering a message, starting an exec run, or dispatching an agent). A user access token needs scheduled_event:update and passes the event type's target checks
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{projectId}/schedules/{id}/run` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `scheduled_event.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`, `grant-authority`, `emit-external-effect`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- Only the dispatch_agent event type grants authority. Triggering a manual run of any event type records the caller's live initiator attribution and frozen effect ceiling (revisionAuthorityCeiling) on the inserted manual scheduled event row, leaving the schedule row's stored attribution and authorization revision untouched. A dispatch_agent manual run immediately creates an agent with a delegation edge from the caller's recorded principal, after CanDelegate for that principal. A message or exec manual run grants no authority. Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** No
+- **Non-Atomic Justification:** The manual event insert records no mutation audit record: it stores the caller's initiator attribution and frozen effect ceiling on the manual event row (leaving the schedule row untouched). When a dispatch_agent manual run fires, the agent_delegation record is written in the agent-create transaction with the agent row and its delegation edge; message and exec manual runs record their outcome on the manual scheduled event row and write no agent_delegation audit record
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** manual scheduled event ID; per-replica manualScheduleRuns mutex rejects concurrent manual runs on the same schedule with 409 conflict, and exec runs additionally acquire a DB overlap lease
+- **Retry:** no automatic retry — each manual run fires once (synchronously with context.WithoutCancel, or in a tracked detached goroutine for wake/exec) and records fired/failed status on the manual event row
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestScheduleRunNow_UsesRunnerAttributionAndCeilingNotAuthor`
+- `pkg/hub:TestScheduleRunNow_AuthoringCredentialGateRefused`
+- `pkg/hub:TestScheduleRunNow_AuthzAndCrossProjectIsolation`
+- `pkg/hub:TestScheduleRunNow_ExecCaptureOutputAndAuthz`
+- `pkg/hub:TestScheduleRunNow_DispatchAgentAuthzDenied`
+- `pkg/hub:TestScheduleRunNow_MessageAuthzDenied`
 
 ---
 
