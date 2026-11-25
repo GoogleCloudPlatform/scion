@@ -72,6 +72,8 @@ type Trigger struct {
 	ActionType string `json:"action_type,omitempty"`
 	// ActionPayload holds the value of the "action_payload" field.
 	ActionPayload string `json:"action_payload,omitempty"`
+	// Actions holds the value of the "actions" field.
+	Actions string `json:"actions,omitempty"`
 	// SubjectDialect holds the value of the "subject_dialect" field.
 	SubjectDialect string `json:"subject_dialect,omitempty"`
 	// SubjectRule holds the value of the "subject_rule" field.
@@ -116,7 +118,7 @@ func (*Trigger) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case trigger.FieldAttributionVersion, trigger.FieldAuthorizationRevision, trigger.FieldAuthorityCeilingVersion, trigger.FieldCoalesceWindowSeconds, trigger.FieldMaxFiresPerMinute, trigger.FieldMaxConcurrentDispatches, trigger.FieldFireCount, trigger.FieldErrorCount:
 			values[i] = new(sql.NullInt64)
-		case trigger.FieldInitiatorPrincipalKind, trigger.FieldInitiatorPrincipalID, trigger.FieldInitiatorCredentialKind, trigger.FieldInitiatorCredentialID, trigger.FieldInitiatorCredentialSnapshot, trigger.FieldAuthorityCeilingKind, trigger.FieldAuthorityCeilingPermissionIds, trigger.FieldAuthorityCeilingBoundaryKind, trigger.FieldAuthorityCeilingBoundaryProjectID, trigger.FieldName, trigger.FieldDescription, trigger.FieldSourceKind, trigger.FieldSourceID, trigger.FieldMatchTypes, trigger.FieldMatchDialect, trigger.FieldMatchRule, trigger.FieldMatchRules, trigger.FieldMatchForm, trigger.FieldActionType, trigger.FieldActionPayload, trigger.FieldSubjectDialect, trigger.FieldSubjectRule, trigger.FieldSubjectMode, trigger.FieldStatus, trigger.FieldStatusReason, trigger.FieldLastFireStatus, trigger.FieldLastFireError, trigger.FieldCreatedBy:
+		case trigger.FieldInitiatorPrincipalKind, trigger.FieldInitiatorPrincipalID, trigger.FieldInitiatorCredentialKind, trigger.FieldInitiatorCredentialID, trigger.FieldInitiatorCredentialSnapshot, trigger.FieldAuthorityCeilingKind, trigger.FieldAuthorityCeilingPermissionIds, trigger.FieldAuthorityCeilingBoundaryKind, trigger.FieldAuthorityCeilingBoundaryProjectID, trigger.FieldName, trigger.FieldDescription, trigger.FieldSourceKind, trigger.FieldSourceID, trigger.FieldMatchTypes, trigger.FieldMatchDialect, trigger.FieldMatchRule, trigger.FieldMatchRules, trigger.FieldMatchForm, trigger.FieldActionType, trigger.FieldActionPayload, trigger.FieldActions, trigger.FieldSubjectDialect, trigger.FieldSubjectRule, trigger.FieldSubjectMode, trigger.FieldStatus, trigger.FieldStatusReason, trigger.FieldLastFireStatus, trigger.FieldLastFireError, trigger.FieldCreatedBy:
 			values[i] = new(sql.NullString)
 		case trigger.FieldAuthorityCeilingSourceExpiresAt, trigger.FieldLastFireAt, trigger.FieldCreated, trigger.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -315,6 +317,12 @@ func (_m *Trigger) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field action_payload", values[i])
 			} else if value.Valid {
 				_m.ActionPayload = value.String
+			}
+		case trigger.FieldActions:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field actions", values[i])
+			} else if value.Valid {
+				_m.Actions = value.String
 			}
 		case trigger.FieldSubjectDialect:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -551,6 +559,9 @@ func (_m *Trigger) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("action_payload=")
 	builder.WriteString(_m.ActionPayload)
+	builder.WriteString(", ")
+	builder.WriteString("actions=")
+	builder.WriteString(_m.Actions)
 	builder.WriteString(", ")
 	builder.WriteString("subject_dialect=")
 	builder.WriteString(_m.SubjectDialect)

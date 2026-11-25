@@ -133,11 +133,11 @@ var (
 	_ trigger.RetryTargetChecker   = serverTriggerCore{}
 )
 
-func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger, ev *hubfire.FireEvent) (string, string, bool) {
+func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger, actionType string, ev *hubfire.FireEvent) (string, string, bool) {
 	if c.srv == nil || tr == nil || ev == nil {
 		return "", "", false
 	}
-	if !trigger.ActionSubjectToPreFireGuards(tr.ActionType) {
+	if !trigger.ActionSubjectToPreFireGuards(actionType) {
 		return "", "", false
 	}
 	if refusal, auditReason := c.srv.githubBotSenderRefusal(ctx, ev); refusal != nil {

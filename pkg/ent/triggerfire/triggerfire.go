@@ -39,6 +39,8 @@ const (
 	FieldSubject = "subject"
 	// FieldActionType holds the string denoting the action_type field in the database.
 	FieldActionType = "action_type"
+	// FieldActionIndex holds the string denoting the action_index field in the database.
+	FieldActionIndex = "action_index"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldError holds the string denoting the error field in the database.
@@ -101,6 +103,7 @@ var Columns = []string{
 	FieldEventID,
 	FieldSubject,
 	FieldActionType,
+	FieldActionIndex,
 	FieldStatus,
 	FieldError,
 	FieldResultRef,
@@ -135,6 +138,8 @@ var (
 	SubjectValidator func(string) error
 	// ActionTypeValidator is a validator for the "action_type" field. It is called by the builders before save.
 	ActionTypeValidator func(string) error
+	// DefaultActionIndex holds the default value on creation for the "action_index" field.
+	DefaultActionIndex int
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// MatchedThroughValidator is a validator for the "matched_through" field. It is called by the builders before save.
@@ -221,6 +226,11 @@ func BySubject(opts ...sql.OrderTermOption) OrderOption {
 // ByActionType orders the results by the action_type field.
 func ByActionType(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldActionType, opts...).ToFunc()
+}
+
+// ByActionIndex orders the results by the action_index field.
+func ByActionIndex(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldActionIndex, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

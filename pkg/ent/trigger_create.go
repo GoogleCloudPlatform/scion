@@ -348,6 +348,14 @@ func (_c *TriggerCreate) SetActionType(v string) *TriggerCreate {
 	return _c
 }
 
+// SetNillableActionType sets the "action_type" field if the given value is not nil.
+func (_c *TriggerCreate) SetNillableActionType(v *string) *TriggerCreate {
+	if v != nil {
+		_c.SetActionType(*v)
+	}
+	return _c
+}
+
 // SetActionPayload sets the "action_payload" field.
 func (_c *TriggerCreate) SetActionPayload(v string) *TriggerCreate {
 	_c.mutation.SetActionPayload(v)
@@ -358,6 +366,20 @@ func (_c *TriggerCreate) SetActionPayload(v string) *TriggerCreate {
 func (_c *TriggerCreate) SetNillableActionPayload(v *string) *TriggerCreate {
 	if v != nil {
 		_c.SetActionPayload(*v)
+	}
+	return _c
+}
+
+// SetActions sets the "actions" field.
+func (_c *TriggerCreate) SetActions(v string) *TriggerCreate {
+	_c.mutation.SetActions(v)
+	return _c
+}
+
+// SetNillableActions sets the "actions" field if the given value is not nil.
+func (_c *TriggerCreate) SetNillableActions(v *string) *TriggerCreate {
+	if v != nil {
+		_c.SetActions(*v)
 	}
 	return _c
 }
@@ -667,9 +689,17 @@ func (_c *TriggerCreate) defaults() {
 		v := trigger.DefaultMatchRules
 		_c.mutation.SetMatchRules(v)
 	}
+	if _, ok := _c.mutation.ActionType(); !ok {
+		v := trigger.DefaultActionType
+		_c.mutation.SetActionType(v)
+	}
 	if _, ok := _c.mutation.ActionPayload(); !ok {
 		v := trigger.DefaultActionPayload
 		_c.mutation.SetActionPayload(v)
+	}
+	if _, ok := _c.mutation.Actions(); !ok {
+		v := trigger.DefaultActions
+		_c.mutation.SetActions(v)
 	}
 	if _, ok := _c.mutation.SubjectDialect(); !ok {
 		v := trigger.DefaultSubjectDialect
@@ -777,13 +807,11 @@ func (_c *TriggerCreate) check() error {
 	if _, ok := _c.mutation.ActionType(); !ok {
 		return &ValidationError{Name: "action_type", err: errors.New(`ent: missing required field "Trigger.action_type"`)}
 	}
-	if v, ok := _c.mutation.ActionType(); ok {
-		if err := trigger.ActionTypeValidator(v); err != nil {
-			return &ValidationError{Name: "action_type", err: fmt.Errorf(`ent: validator failed for field "Trigger.action_type": %w`, err)}
-		}
-	}
 	if _, ok := _c.mutation.ActionPayload(); !ok {
 		return &ValidationError{Name: "action_payload", err: errors.New(`ent: missing required field "Trigger.action_payload"`)}
+	}
+	if _, ok := _c.mutation.Actions(); !ok {
+		return &ValidationError{Name: "actions", err: errors.New(`ent: missing required field "Trigger.actions"`)}
 	}
 	if _, ok := _c.mutation.SubjectDialect(); !ok {
 		return &ValidationError{Name: "subject_dialect", err: errors.New(`ent: missing required field "Trigger.subject_dialect"`)}
@@ -961,6 +989,10 @@ func (_c *TriggerCreate) createSpec() (*Trigger, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ActionPayload(); ok {
 		_spec.SetField(trigger.FieldActionPayload, field.TypeString, value)
 		_node.ActionPayload = value
+	}
+	if value, ok := _c.mutation.Actions(); ok {
+		_spec.SetField(trigger.FieldActions, field.TypeString, value)
+		_node.Actions = value
 	}
 	if value, ok := _c.mutation.SubjectDialect(); ok {
 		_spec.SetField(trigger.FieldSubjectDialect, field.TypeString, value)
@@ -1459,6 +1491,18 @@ func (u *TriggerUpsert) SetActionPayload(v string) *TriggerUpsert {
 // UpdateActionPayload sets the "action_payload" field to the value that was provided on create.
 func (u *TriggerUpsert) UpdateActionPayload() *TriggerUpsert {
 	u.SetExcluded(trigger.FieldActionPayload)
+	return u
+}
+
+// SetActions sets the "actions" field.
+func (u *TriggerUpsert) SetActions(v string) *TriggerUpsert {
+	u.Set(trigger.FieldActions, v)
+	return u
+}
+
+// UpdateActions sets the "actions" field to the value that was provided on create.
+func (u *TriggerUpsert) UpdateActions() *TriggerUpsert {
+	u.SetExcluded(trigger.FieldActions)
 	return u
 }
 
@@ -2204,6 +2248,20 @@ func (u *TriggerUpsertOne) SetActionPayload(v string) *TriggerUpsertOne {
 func (u *TriggerUpsertOne) UpdateActionPayload() *TriggerUpsertOne {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateActionPayload()
+	})
+}
+
+// SetActions sets the "actions" field.
+func (u *TriggerUpsertOne) SetActions(v string) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetActions(v)
+	})
+}
+
+// UpdateActions sets the "actions" field to the value that was provided on create.
+func (u *TriggerUpsertOne) UpdateActions() *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateActions()
 	})
 }
 
@@ -3156,6 +3214,20 @@ func (u *TriggerUpsertBulk) SetActionPayload(v string) *TriggerUpsertBulk {
 func (u *TriggerUpsertBulk) UpdateActionPayload() *TriggerUpsertBulk {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateActionPayload()
+	})
+}
+
+// SetActions sets the "actions" field.
+func (u *TriggerUpsertBulk) SetActions(v string) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetActions(v)
+	})
+}
+
+// UpdateActions sets the "actions" field to the value that was provided on create.
+func (u *TriggerUpsertBulk) UpdateActions() *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateActions()
 	})
 }
 

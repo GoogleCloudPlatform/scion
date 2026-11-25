@@ -421,6 +421,10 @@ const (
 	// Details carry structured CompileError or UnsupportedDialectError fields.
 	ErrCodeInvalidRule = "invalid_rule"
 
+	// ErrCodeInvalidAction is returned (400) when a trigger's action or actions
+	// list fails validation (ambiguous_actions, empty, size, or corrupt storage).
+	ErrCodeInvalidAction = "invalid_action"
+
 	// ErrCodeInvalidRoleSet is returned by PUT …/members/principals/{type}/{id}
 	// when the desired role set contains an unknown role definition ID, a
 	// non-project-scoped role, or more than one built-in membership role

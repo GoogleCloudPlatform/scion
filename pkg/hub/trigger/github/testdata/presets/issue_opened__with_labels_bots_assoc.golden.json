@@ -55,5 +55,33 @@
       "event.subject",
       "event.attributes.action"
     ]
-  }
+  },
+  "suggested_actions": [
+    {
+      "type": "dispatch_agent",
+      "agentName": "issue-${event.attributes.number}-triage",
+      "template": "default",
+      "task": "Triage newly opened issue ${event.attributes.repo}#${event.attributes.number} (${event.attributes.title}) reported by @${event.attributes.sender}.\nIssue URL: ${event.attributes.html_url}\nIssue body:\n${event.attributes.body?}\nUse `gh` (authenticated as the GitHub App installation) to post results on the PR/issue, mention @${event.attributes.sender} when answering, and never include an `@<app> /<command>` slash-command mention in comments.",
+      "labels": {
+        "issue": "${event.attributes.repo}#${event.attributes.number}"
+      },
+      "ephemeral": false,
+      "githubToken": "installation",
+      "reuseMessage": "New ${event.type} on ${event.subject}: ${event.attributes.action} by @${event.attributes.sender}.",
+      "ackComment": {
+        "body": "Started **${result.agent_name}** for ${event.subject} — [open agent](${result.agent_url}). Triggered by @${event.attributes.sender}."
+      },
+      "untrustedVars": [
+        "event.attributes.repo",
+        "event.attributes.number",
+        "event.attributes.title",
+        "event.attributes.sender",
+        "event.attributes.html_url",
+        "event.attributes.body",
+        "event.type",
+        "event.subject",
+        "event.attributes.action"
+      ]
+    }
+  ]
 }

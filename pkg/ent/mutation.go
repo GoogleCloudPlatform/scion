@@ -128467,6 +128467,7 @@ type TriggerMutation struct {
 	match_form                            *string
 	action_type                           *string
 	action_payload                        *string
+	actions                               *string
 	subject_dialect                       *string
 	subject_rule                          *string
 	subject_mode                          *string
@@ -129801,6 +129802,42 @@ func (m *TriggerMutation) ResetActionPayload() {
 	m.action_payload = nil
 }
 
+// SetActions sets the "actions" field.
+func (m *TriggerMutation) SetActions(s string) {
+	m.actions = &s
+}
+
+// Actions returns the value of the "actions" field in the mutation.
+func (m *TriggerMutation) Actions() (r string, exists bool) {
+	v := m.actions
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActions returns the old "actions" field's value of the Trigger entity.
+// If the Trigger object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerMutation) OldActions(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActions is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActions requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActions: %w", err)
+	}
+	return oldValue.Actions, nil
+}
+
+// ResetActions resets all changes to the "actions" field.
+func (m *TriggerMutation) ResetActions() {
+	m.actions = nil
+}
+
 // SetSubjectDialect sets the "subject_dialect" field.
 func (m *TriggerMutation) SetSubjectDialect(s string) {
 	m.subject_dialect = &s
@@ -130576,7 +130613,7 @@ func (m *TriggerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerMutation) Fields() []string {
-	fields := make([]string, 0, 43)
+	fields := make([]string, 0, 44)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, trigger.FieldInitiatorPrincipalKind)
 	}
@@ -130657,6 +130694,9 @@ func (m *TriggerMutation) Fields() []string {
 	}
 	if m.action_payload != nil {
 		fields = append(fields, trigger.FieldActionPayload)
+	}
+	if m.actions != nil {
+		fields = append(fields, trigger.FieldActions)
 	}
 	if m.subject_dialect != nil {
 		fields = append(fields, trigger.FieldSubjectDialect)
@@ -130768,6 +130808,8 @@ func (m *TriggerMutation) Field(name string) (ent.Value, bool) {
 		return m.ActionType()
 	case trigger.FieldActionPayload:
 		return m.ActionPayload()
+	case trigger.FieldActions:
+		return m.Actions()
 	case trigger.FieldSubjectDialect:
 		return m.SubjectDialect()
 	case trigger.FieldSubjectRule:
@@ -130863,6 +130905,8 @@ func (m *TriggerMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldActionType(ctx)
 	case trigger.FieldActionPayload:
 		return m.OldActionPayload(ctx)
+	case trigger.FieldActions:
+		return m.OldActions(ctx)
 	case trigger.FieldSubjectDialect:
 		return m.OldSubjectDialect(ctx)
 	case trigger.FieldSubjectRule:
@@ -131092,6 +131136,13 @@ func (m *TriggerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetActionPayload(v)
+		return nil
+	case trigger.FieldActions:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActions(v)
 		return nil
 	case trigger.FieldSubjectDialect:
 		v, ok := value.(string)
@@ -131544,6 +131595,9 @@ func (m *TriggerMutation) ResetField(name string) error {
 		return nil
 	case trigger.FieldActionPayload:
 		m.ResetActionPayload()
+		return nil
+	case trigger.FieldActions:
+		m.ResetActions()
 		return nil
 	case trigger.FieldSubjectDialect:
 		m.ResetSubjectDialect()
@@ -133220,6 +133274,8 @@ type TriggerFireMutation struct {
 	event_id                      *uuid.UUID
 	subject                       *string
 	action_type                   *string
+	action_index                  *int
+	addaction_index               *int
 	status                        *string
 	error                         *string
 	result_ref                    *string
@@ -133913,6 +133969,62 @@ func (m *TriggerFireMutation) OldActionType(ctx context.Context) (v string, err 
 // ResetActionType resets all changes to the "action_type" field.
 func (m *TriggerFireMutation) ResetActionType() {
 	m.action_type = nil
+}
+
+// SetActionIndex sets the "action_index" field.
+func (m *TriggerFireMutation) SetActionIndex(i int) {
+	m.action_index = &i
+	m.addaction_index = nil
+}
+
+// ActionIndex returns the value of the "action_index" field in the mutation.
+func (m *TriggerFireMutation) ActionIndex() (r int, exists bool) {
+	v := m.action_index
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActionIndex returns the old "action_index" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldActionIndex(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActionIndex is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActionIndex requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActionIndex: %w", err)
+	}
+	return oldValue.ActionIndex, nil
+}
+
+// AddActionIndex adds i to the "action_index" field.
+func (m *TriggerFireMutation) AddActionIndex(i int) {
+	if m.addaction_index != nil {
+		*m.addaction_index += i
+	} else {
+		m.addaction_index = &i
+	}
+}
+
+// AddedActionIndex returns the value that was added to the "action_index" field in this mutation.
+func (m *TriggerFireMutation) AddedActionIndex() (r int, exists bool) {
+	v := m.addaction_index
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetActionIndex resets all changes to the "action_index" field.
+func (m *TriggerFireMutation) ResetActionIndex() {
+	m.action_index = nil
+	m.addaction_index = nil
 }
 
 // SetStatus sets the "status" field.
@@ -134750,7 +134862,7 @@ func (m *TriggerFireMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerFireMutation) Fields() []string {
-	fields := make([]string, 0, 29)
+	fields := make([]string, 0, 30)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, triggerfire.FieldInitiatorPrincipalKind)
 	}
@@ -134786,6 +134898,9 @@ func (m *TriggerFireMutation) Fields() []string {
 	}
 	if m.action_type != nil {
 		fields = append(fields, triggerfire.FieldActionType)
+	}
+	if m.action_index != nil {
+		fields = append(fields, triggerfire.FieldActionIndex)
 	}
 	if m.status != nil {
 		fields = append(fields, triggerfire.FieldStatus)
@@ -134870,6 +134985,8 @@ func (m *TriggerFireMutation) Field(name string) (ent.Value, bool) {
 		return m.Subject()
 	case triggerfire.FieldActionType:
 		return m.ActionType()
+	case triggerfire.FieldActionIndex:
+		return m.ActionIndex()
 	case triggerfire.FieldStatus:
 		return m.Status()
 	case triggerfire.FieldError:
@@ -134937,6 +135054,8 @@ func (m *TriggerFireMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldSubject(ctx)
 	case triggerfire.FieldActionType:
 		return m.OldActionType(ctx)
+	case triggerfire.FieldActionIndex:
+		return m.OldActionIndex(ctx)
 	case triggerfire.FieldStatus:
 		return m.OldStatus(ctx)
 	case triggerfire.FieldError:
@@ -135063,6 +135182,13 @@ func (m *TriggerFireMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetActionType(v)
+		return nil
+	case triggerfire.FieldActionIndex:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActionIndex(v)
 		return nil
 	case triggerfire.FieldStatus:
 		v, ok := value.(string)
@@ -135197,6 +135323,9 @@ func (m *TriggerFireMutation) AddedFields() []string {
 	if m.addauthorization_revision != nil {
 		fields = append(fields, triggerfire.FieldAuthorizationRevision)
 	}
+	if m.addaction_index != nil {
+		fields = append(fields, triggerfire.FieldActionIndex)
+	}
 	if m.addattempts != nil {
 		fields = append(fields, triggerfire.FieldAttempts)
 	}
@@ -135212,6 +135341,8 @@ func (m *TriggerFireMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedAttributionVersion()
 	case triggerfire.FieldAuthorizationRevision:
 		return m.AddedAuthorizationRevision()
+	case triggerfire.FieldActionIndex:
+		return m.AddedActionIndex()
 	case triggerfire.FieldAttempts:
 		return m.AddedAttempts()
 	}
@@ -135236,6 +135367,13 @@ func (m *TriggerFireMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddAuthorizationRevision(v)
+		return nil
+	case triggerfire.FieldActionIndex:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddActionIndex(v)
 		return nil
 	case triggerfire.FieldAttempts:
 		v, ok := value.(int)
@@ -135412,6 +135550,9 @@ func (m *TriggerFireMutation) ResetField(name string) error {
 	case triggerfire.FieldActionType:
 		m.ResetActionType()
 		return nil
+	case triggerfire.FieldActionIndex:
+		m.ResetActionIndex()
+		return nil
 	case triggerfire.FieldStatus:
 		m.ResetStatus()
 		return nil
@@ -135544,23 +135685,25 @@ func (m *TriggerFireMutation) ResetEdge(name string) error {
 // TriggerSubjectClaimMutation represents an operation that mutates the TriggerSubjectClaim nodes in the graph.
 type TriggerSubjectClaimMutation struct {
 	config
-	op             Op
-	typ            string
-	id             *uuid.UUID
-	trigger_id     *uuid.UUID
-	subject        *string
-	state          *string
-	agent_id       *uuid.UUID
-	event_id       *uuid.UUID
-	fire_id        *uuid.UUID
-	claimed_at     *time.Time
-	bound_at       *time.Time
-	released_at    *time.Time
-	release_reason *string
-	clearedFields  map[string]struct{}
-	done           bool
-	oldValue       func(context.Context) (*TriggerSubjectClaim, error)
-	predicates     []predicate.TriggerSubjectClaim
+	op              Op
+	typ             string
+	id              *uuid.UUID
+	trigger_id      *uuid.UUID
+	action_index    *int
+	addaction_index *int
+	subject         *string
+	state           *string
+	agent_id        *uuid.UUID
+	event_id        *uuid.UUID
+	fire_id         *uuid.UUID
+	claimed_at      *time.Time
+	bound_at        *time.Time
+	released_at     *time.Time
+	release_reason  *string
+	clearedFields   map[string]struct{}
+	done            bool
+	oldValue        func(context.Context) (*TriggerSubjectClaim, error)
+	predicates      []predicate.TriggerSubjectClaim
 }
 
 var _ ent.Mutation = (*TriggerSubjectClaimMutation)(nil)
@@ -135701,6 +135844,62 @@ func (m *TriggerSubjectClaimMutation) OldTriggerID(ctx context.Context) (v uuid.
 // ResetTriggerID resets all changes to the "trigger_id" field.
 func (m *TriggerSubjectClaimMutation) ResetTriggerID() {
 	m.trigger_id = nil
+}
+
+// SetActionIndex sets the "action_index" field.
+func (m *TriggerSubjectClaimMutation) SetActionIndex(i int) {
+	m.action_index = &i
+	m.addaction_index = nil
+}
+
+// ActionIndex returns the value of the "action_index" field in the mutation.
+func (m *TriggerSubjectClaimMutation) ActionIndex() (r int, exists bool) {
+	v := m.action_index
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActionIndex returns the old "action_index" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldActionIndex(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActionIndex is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActionIndex requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActionIndex: %w", err)
+	}
+	return oldValue.ActionIndex, nil
+}
+
+// AddActionIndex adds i to the "action_index" field.
+func (m *TriggerSubjectClaimMutation) AddActionIndex(i int) {
+	if m.addaction_index != nil {
+		*m.addaction_index += i
+	} else {
+		m.addaction_index = &i
+	}
+}
+
+// AddedActionIndex returns the value that was added to the "action_index" field in this mutation.
+func (m *TriggerSubjectClaimMutation) AddedActionIndex() (r int, exists bool) {
+	v := m.addaction_index
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetActionIndex resets all changes to the "action_index" field.
+func (m *TriggerSubjectClaimMutation) ResetActionIndex() {
+	m.action_index = nil
+	m.addaction_index = nil
 }
 
 // SetSubject sets the "subject" field.
@@ -136113,9 +136312,12 @@ func (m *TriggerSubjectClaimMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerSubjectClaimMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 11)
 	if m.trigger_id != nil {
 		fields = append(fields, triggersubjectclaim.FieldTriggerID)
+	}
+	if m.action_index != nil {
+		fields = append(fields, triggersubjectclaim.FieldActionIndex)
 	}
 	if m.subject != nil {
 		fields = append(fields, triggersubjectclaim.FieldSubject)
@@ -136154,6 +136356,8 @@ func (m *TriggerSubjectClaimMutation) Field(name string) (ent.Value, bool) {
 	switch name {
 	case triggersubjectclaim.FieldTriggerID:
 		return m.TriggerID()
+	case triggersubjectclaim.FieldActionIndex:
+		return m.ActionIndex()
 	case triggersubjectclaim.FieldSubject:
 		return m.Subject()
 	case triggersubjectclaim.FieldState:
@@ -136183,6 +136387,8 @@ func (m *TriggerSubjectClaimMutation) OldField(ctx context.Context, name string)
 	switch name {
 	case triggersubjectclaim.FieldTriggerID:
 		return m.OldTriggerID(ctx)
+	case triggersubjectclaim.FieldActionIndex:
+		return m.OldActionIndex(ctx)
 	case triggersubjectclaim.FieldSubject:
 		return m.OldSubject(ctx)
 	case triggersubjectclaim.FieldState:
@@ -136216,6 +136422,13 @@ func (m *TriggerSubjectClaimMutation) SetField(name string, value ent.Value) err
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetTriggerID(v)
+		return nil
+	case triggersubjectclaim.FieldActionIndex:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActionIndex(v)
 		return nil
 	case triggersubjectclaim.FieldSubject:
 		v, ok := value.(string)
@@ -136287,13 +136500,21 @@ func (m *TriggerSubjectClaimMutation) SetField(name string, value ent.Value) err
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *TriggerSubjectClaimMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addaction_index != nil {
+		fields = append(fields, triggersubjectclaim.FieldActionIndex)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *TriggerSubjectClaimMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case triggersubjectclaim.FieldActionIndex:
+		return m.AddedActionIndex()
+	}
 	return nil, false
 }
 
@@ -136302,6 +136523,13 @@ func (m *TriggerSubjectClaimMutation) AddedField(name string) (ent.Value, bool) 
 // type.
 func (m *TriggerSubjectClaimMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case triggersubjectclaim.FieldActionIndex:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddActionIndex(v)
+		return nil
 	}
 	return fmt.Errorf("unknown TriggerSubjectClaim numeric field %s", name)
 }
@@ -136358,6 +136586,9 @@ func (m *TriggerSubjectClaimMutation) ResetField(name string) error {
 	switch name {
 	case triggersubjectclaim.FieldTriggerID:
 		m.ResetTriggerID()
+		return nil
+	case triggersubjectclaim.FieldActionIndex:
+		m.ResetActionIndex()
 		return nil
 	case triggersubjectclaim.FieldSubject:
 		m.ResetSubject()

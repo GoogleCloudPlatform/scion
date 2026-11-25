@@ -47,21 +47,285 @@ var (
 	errTriggerSourceNotReplayProtected = errors.New("trigger source is not replay protected")
 )
 
+func triggerActions(tr store.Trigger) ([]store.TriggerAction, error) {
+	return trigger.Actions(tr)
+}
+
 func actionRequiresReplayProtection(actionType string) bool {
 	return actionType == store.TriggerActionDispatchAgent || actionType == store.TriggerActionExec
 }
 
-func validateTriggerLimits(actionType string, maxFiresPerMinute, maxConcurrentDispatches int) error {
+func actionsRequireReplayProtection(actions []store.TriggerAction) bool {
+	for _, a := range actions {
+		if actionRequiresReplayProtection(a.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+func actionsHasType(actions []store.TriggerAction, actionType string) bool {
+	for _, a := range actions {
+		if a.Type == actionType {
+			return true
+		}
+	}
+	return false
+}
+
+func isZeroTriggerActionSpec(s TriggerActionSpec) bool {
+	return s.Type == "" &&
+		s.AgentID == "" &&
+		s.AgentName == "" &&
+		s.Message == "" &&
+		!s.Interrupt &&
+		!s.Plain &&
+		!s.Wake &&
+		s.Offline == "" &&
+		s.QueueTTLSeconds == 0 &&
+		s.NameConflict == "" &&
+		s.Template == "" &&
+		s.Task == "" &&
+		s.Branch == "" &&
+		len(s.Labels) == 0 &&
+		!s.Ephemeral &&
+		s.GithubToken == "" &&
+		s.AgentRole == "" &&
+		s.ReuseMessage == "" &&
+		s.AckComment == nil &&
+		len(s.UntrustedVars) == 0 &&
+		!s.NoAuth &&
+		s.Body == "" &&
+		s.Target == "" &&
+		!s.ReplyInThread &&
+		len(s.Command) == 0 &&
+		s.TimeoutSeconds == 0 &&
+		len(s.ContextAttributes) == 0 &&
+		!s.CommandRedacted &&
+		s.Argc == 0 &&
+		s.CommandSHA256 == ""
+}
+
+func actionSpecsHasType(specs []TriggerActionSpec, actionType string) bool {
+	for _, s := range specs {
+		if strings.TrimSpace(s.Type) == actionType {
+			return true
+		}
+	}
+	return false
+}
+
+func validateTriggerLimits(hasDispatchAgent bool, maxFiresPerMinute, maxConcurrentDispatches int) error {
 	if maxFiresPerMinute < 0 || maxFiresPerMinute > store.MaxTriggerFiresPerMinute {
 		return fmt.Errorf("maxFiresPerMinute must be between 0 and %d", store.MaxTriggerFiresPerMinute)
 	}
 	if maxConcurrentDispatches < 0 || maxConcurrentDispatches > store.MaxTriggerConcurrentDispatches {
 		return fmt.Errorf("maxConcurrentDispatches must be between 0 and %d", store.MaxTriggerConcurrentDispatches)
 	}
-	if maxConcurrentDispatches > 0 && actionType != store.TriggerActionDispatchAgent {
+	if maxConcurrentDispatches > 0 && !hasDispatchAgent {
 		return errors.New("maxConcurrentDispatches is only supported for dispatch_agent triggers")
 	}
 	return nil
+}
+
+func writeAmbiguousTriggerActionsError(w http.ResponseWriter) {
+	writeError(
+		w,
+		http.StatusBadRequest,
+		ErrCodeInvalidAction,
+		"trigger cannot specify both action and actions",
+		map[string]any{
+			"field":    "actions",
+			"category": "ambiguous_actions",
+		},
+	)
+}
+
+func writeCorruptTriggerActionsError(w http.ResponseWriter) {
+	writeError(
+		w,
+		http.StatusBadRequest,
+		ErrCodeInvalidAction,
+		"stored trigger actions data is corrupt; replace actions before updating or resuming",
+		map[string]any{
+			"field":    "actions",
+			"category": "corrupt_storage",
+		},
+	)
+}
+
+func validateEncodedTriggerActionsSize(actions []store.TriggerAction) error {
+	type encodedElem struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	elems := make([]encodedElem, len(actions))
+	for i, a := range actions {
+		p := strings.TrimSpace(a.Payload)
+		if p == "" {
+			p = "{}"
+		}
+		elems[i] = encodedElem{Type: a.Type, Payload: json.RawMessage(p)}
+	}
+	raw, err := json.Marshal(elems)
+	if err != nil {
+		return fmt.Errorf("encoding actions: %w", err)
+	}
+	if len(raw) > store.MaxTriggerActionsBytes {
+		return fmt.Errorf("encoded actions exceeds %d byte limit", store.MaxTriggerActionsBytes)
+	}
+	return nil
+}
+
+// resolveRequestTriggerActions normalizes a create or update request's scalar
+// action and list actions fields into an ordered slice of TriggerActionSpec.
+// Mixing both returns 400 invalid_action {category: "ambiguous_actions"}.
+func resolveRequestTriggerActions(w http.ResponseWriter, scalar *TriggerActionSpec, list *[]TriggerActionSpec, required bool) ([]TriggerActionSpec, bool, bool) {
+	hasScalar := scalar != nil
+	hasList := list != nil
+	if hasScalar && hasList {
+		writeAmbiguousTriggerActionsError(w)
+		return nil, false, false
+	}
+	if !hasScalar && !hasList {
+		if required {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidAction, "at least one action is required", map[string]any{
+				"field": "actions",
+			})
+			return nil, false, false
+		}
+		return nil, false, true
+	}
+	if hasScalar {
+		return []TriggerActionSpec{*scalar}, true, true
+	}
+	specs := *list
+	if len(specs) == 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidAction, "actions must contain between 1 and 8 elements", map[string]any{
+			"field":    "actions",
+			"category": "size",
+		})
+		return nil, false, false
+	}
+	if len(specs) > store.MaxTriggerActions {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidAction,
+			fmt.Sprintf("actions exceeds maximum of %d elements", store.MaxTriggerActions),
+			map[string]any{
+				"field":    "actions",
+				"category": "size",
+			})
+		return nil, false, false
+	}
+	out := make([]TriggerActionSpec, len(specs))
+	copy(out, specs)
+	return out, true, true
+}
+
+// authorizeTriggerActionSpecs validates and authorizes every action element in
+// specs in order under the caller's identity, ceiling, and provenance.
+//
+// Security inventory (action-arrays-design §4, §6):
+//   - Authoring create (POST /triggers), update (PATCH /triggers/{id}), and
+//     resume (POST /triggers/{id}/resume) authorize EVERY element; agent-mode
+//     callers are refused if ANY element exceeds their rights.
+//   - Replay-protected-source rule applies if ANY action is dispatch_agent or
+//     exec (enforced here and re-verified inside WithTx via verifyActiveWebhookSourceInTx).
+//   - Encoded actions list is bounded to 1..8 elements and <= 64 KiB.
+//   - Per-element exec argv redaction is enforced in buildTriggerResponse.
+//   - Schedules refuse actions on POST/PATCH /schedules until Stage 4.
+func (s *Server) authorizeTriggerActionSpecs(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	sourceKind string,
+	ep *store.WebhookEndpoint,
+	matchTypes []string,
+	subjectMode string,
+	specs []TriggerActionSpec,
+	ceiling store.EffectCeiling,
+	prov store.AuthorityProvenance,
+) ([]store.TriggerAction, bool) {
+	out := make([]store.TriggerAction, 0, len(specs))
+	for i := range specs {
+		spec := specs[i]
+		actionType := strings.TrimSpace(spec.Type)
+		if !validateTriggerActionCrossFields(w, actionType, &spec) {
+			return nil, false
+		}
+		var (
+			actionPayload string
+			ok            bool
+		)
+		switch actionType {
+		case store.TriggerActionMessage:
+			actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &spec)
+		case store.TriggerActionDispatchAgent:
+			actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &spec, ceiling, prov)
+		case store.TriggerActionExec:
+			actionPayload, _, ok = s.authorizeTriggerExecAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &spec, ceiling, prov)
+		case store.TriggerActionGitHubComment:
+			actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &spec)
+		default:
+			ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s, %s)",
+				actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionExec, store.TriggerActionGitHubComment), nil)
+			return nil, false
+		}
+		if !ok {
+			return nil, false
+		}
+		out = append(out, store.TriggerAction{
+			Type:    actionType,
+			Payload: actionPayload,
+		})
+	}
+	if err := validateEncodedTriggerActionsSize(out); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidAction, err.Error(), map[string]any{
+			"field":    "actions",
+			"category": "size",
+		})
+		return nil, false
+	}
+	return out, true
+}
+
+func (s *Server) authorizeStoredTriggerActions(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	sourceKind string,
+	ep *store.WebhookEndpoint,
+	matchTypes []string,
+	subjectMode string,
+	stored []store.TriggerAction,
+	ceiling store.EffectCeiling,
+	prov store.AuthorityProvenance,
+) ([]store.TriggerAction, bool) {
+	if len(stored) == 0 || len(stored) > store.MaxTriggerActions {
+		writeCorruptTriggerActionsError(w)
+		return nil, false
+	}
+	out := make([]store.TriggerAction, 0, len(stored))
+	for _, act := range stored {
+		normalizedPayload, ok := s.authorizeStoredTriggerAction(
+			w, r, projectID, sourceKind, ep, matchTypes, subjectMode,
+			act.Type, act.Payload, ceiling, prov,
+		)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, store.TriggerAction{
+			Type:    act.Type,
+			Payload: normalizedPayload,
+		})
+	}
+	if err := validateEncodedTriggerActionsSize(out); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidAction, err.Error(), map[string]any{
+			"field":    "actions",
+			"category": "size",
+		})
+		return nil, false
+	}
+	return out, true
 }
 
 // verifyActiveWebhookSourceInTx re-reads the resolved webhook endpoint inside
@@ -87,14 +351,15 @@ func verifyActiveWebhookSourceInTx(ctx context.Context, tx store.Store, projectI
 
 // CreateTriggerRequest is the request body for POST /triggers.
 type CreateTriggerRequest struct {
-	Name                    string              `json:"name"`
-	Description             string              `json:"description,omitempty"`
-	Source                  TriggerSourceSpec   `json:"source"`
-	Match                   *TriggerMatchSpec   `json:"match,omitempty"`
-	Action                  TriggerActionSpec   `json:"action"`
-	Subject                 *TriggerSubjectSpec `json:"subject,omitempty"`
-	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
-	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
+	Name                    string               `json:"name"`
+	Description             string               `json:"description,omitempty"`
+	Source                  TriggerSourceSpec    `json:"source"`
+	Match                   *TriggerMatchSpec    `json:"match,omitempty"`
+	Action                  TriggerActionSpec    `json:"action,omitzero"`
+	Actions                 *[]TriggerActionSpec `json:"actions,omitempty"`
+	Subject                 *TriggerSubjectSpec  `json:"subject,omitempty"`
+	MaxFiresPerMinute       int                  `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches int                  `json:"maxConcurrentDispatches,omitempty"`
 }
 
 // TriggerMatchFormPatch tracks explicit presence of match.form in PATCH
@@ -168,6 +433,7 @@ type UpdateTriggerRequest struct {
 	Source                  *TriggerSourceSpec       `json:"source,omitempty"`
 	Match                   *TriggerMatchPatchSpec   `json:"match,omitempty"`
 	Action                  *TriggerActionSpec       `json:"action,omitempty"`
+	Actions                 *[]TriggerActionSpec     `json:"actions,omitempty"`
 	Subject                 *TriggerSubjectPatchSpec `json:"subject,omitempty"`
 	MaxFiresPerMinute       *int                     `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches *int                     `json:"maxConcurrentDispatches,omitempty"`
@@ -624,30 +890,19 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	actionType := strings.TrimSpace(req.Action.Type)
-	if !validateTriggerActionCrossFields(w, actionType, &req.Action) {
-		return
+	var scalarAction *TriggerActionSpec
+	if !isZeroTriggerActionSpec(req.Action) {
+		scalarAction = &req.Action
 	}
-	var actionPayload string
-	var execTargetID string
-	switch actionType {
-	case store.TriggerActionMessage:
-		actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &req.Action)
-	case store.TriggerActionDispatchAgent:
-		actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &req.Action, ceiling, prov)
-	case store.TriggerActionExec:
-		actionPayload, execTargetID, ok = s.authorizeTriggerExecAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &req.Action, ceiling, prov)
-	case store.TriggerActionGitHubComment:
-		actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &req.Action)
-	default:
-		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s, %s)",
-			actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionExec, store.TriggerActionGitHubComment), nil)
-		return
-	}
+	actionSpecs, _, ok := resolveRequestTriggerActions(w, scalarAction, req.Actions, true)
 	if !ok {
 		return
 	}
-	if err := validateTriggerLimits(actionType, req.MaxFiresPerMinute, req.MaxConcurrentDispatches); err != nil {
+	actions, ok := s.authorizeTriggerActionSpecs(w, r, projectID, sourceKind, ep, matchTypes, subjectMode, actionSpecs, ceiling, prov)
+	if !ok {
+		return
+	}
+	if err := validateTriggerLimits(actionsHasType(actions, store.TriggerActionDispatchAgent), req.MaxFiresPerMinute, req.MaxConcurrentDispatches); err != nil {
 		ValidationError(w, err.Error(), nil)
 		return
 	}
@@ -662,8 +917,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		MatchTypes:              matchTypes,
 		MatchRules:              matchRules,
 		MatchForm:               matchForm,
-		ActionType:              actionType,
-		ActionPayload:           actionPayload,
+		Actions:                 actions,
 		SubjectDialect:          subjectDialect,
 		SubjectRule:             subjectRule,
 		SubjectMode:             subjectMode,
@@ -682,7 +936,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 			return lErr
 		}
 		if tr.SourceKind == store.TriggerSourceKindWebhook {
-			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID, actionRequiresReplayProtection(tr.ActionType)); vErr != nil {
+			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID, actionsRequireReplayProtection(tr.Actions)); vErr != nil {
 				return vErr
 			}
 		}
@@ -708,8 +962,8 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if srcCount >= store.MaxActiveTriggersPerSource {
 			return errTriggerSourceLimitExceeded
 		}
-		if tr.ActionType == store.TriggerActionExec {
-			if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, execTargetID, false, false); capErr != nil {
+		if actionsHasType(tr.Actions, store.TriggerActionExec) {
+			if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, tr.Actions, ""); capErr != nil {
 				return capErr
 			}
 		}
@@ -885,9 +1139,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	oldSourceID := tr.SourceID
 	oldSourceKind := tr.SourceKind
-	oldActionType := tr.ActionType
-	oldActionPayload := tr.ActionPayload
-	oldStatus := tr.Status
+	oldActions, oldActionsErr := triggerActions(*tr)
 	prevRevision := tr.AuthorizationRevision
 	prevRevisionKnown := tr.AuthorizationRevision != 0
 
@@ -1089,17 +1341,23 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			changesFutureDispatch = true
 		}
 	}
-	if req.Action != nil {
-		actionType := strings.TrimSpace(req.Action.Type)
-		if actionType != store.TriggerActionMessage &&
-			actionType != store.TriggerActionDispatchAgent &&
-			actionType != store.TriggerActionExec &&
-			actionType != store.TriggerActionGitHubComment {
-			ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s, %s)",
-				actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionExec, store.TriggerActionGitHubComment), nil)
-			return
+	reqActionSpecs, updatingActions, ok := resolveRequestTriggerActions(w, req.Action, req.Actions, false)
+	if !ok {
+		return
+	}
+	if updatingActions {
+		for _, spec := range reqActionSpecs {
+			actionType := strings.TrimSpace(spec.Type)
+			if actionType != store.TriggerActionMessage &&
+				actionType != store.TriggerActionDispatchAgent &&
+				actionType != store.TriggerActionExec &&
+				actionType != store.TriggerActionGitHubComment {
+				ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s, %s)",
+					actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionExec, store.TriggerActionGitHubComment), nil)
+				return
+			}
 		}
-		tr.ActionType = actionType
+		fields.Actions = true
 		fields.ActionType = true
 		fields.ActionPayload = true
 		changesFutureDispatch = true
@@ -1113,8 +1371,14 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		tr.MaxConcurrentDispatches = *req.MaxConcurrentDispatches
 		fields.MaxConcurrentDispatches = true
 	}
-	if fields.MaxFiresPerMinute || fields.MaxConcurrentDispatches || req.Action != nil {
-		if err := validateTriggerLimits(tr.ActionType, tr.MaxFiresPerMinute, tr.MaxConcurrentDispatches); err != nil {
+	if fields.MaxFiresPerMinute || fields.MaxConcurrentDispatches || updatingActions {
+		hasDispatch := false
+		if updatingActions {
+			hasDispatch = actionSpecsHasType(reqActionSpecs, store.TriggerActionDispatchAgent)
+		} else if oldActionsErr == nil {
+			hasDispatch = actionsHasType(oldActions, store.TriggerActionDispatchAgent)
+		}
+		if err := validateTriggerLimits(hasDispatch, tr.MaxFiresPerMinute, tr.MaxConcurrentDispatches); err != nil {
 			ValidationError(w, err.Error(), nil)
 			return
 		}
@@ -1123,7 +1387,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	var newAttr *store.InitiatorAttribution
 	if changesFutureDispatch {
 		// Re-authorizing future dispatch requires the editor to hold access to
-		// both the source and the target action of the resulting trigger, and
+		// both the source and EVERY target action of the resulting trigger, and
 		// re-validates stored match/subject rules not already compiled above.
 		if req.Source == nil {
 			switch tr.SourceKind {
@@ -1184,49 +1448,61 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		}
 		if oldSourceKind != store.TriggerSourceKindGitHub &&
 			tr.SourceKind == store.TriggerSourceKindGitHub &&
-			oldActionType == store.TriggerActionDispatchAgent &&
-			tr.ActionType == store.TriggerActionDispatchAgent &&
-			req.Action == nil {
+			!updatingActions &&
+			oldActionsErr == nil &&
+			actionsHasType(oldActions, store.TriggerActionDispatchAgent) {
 			writeError(w, http.StatusBadRequest, "github_token_required",
 				"set action.githubToken explicitly to installation or user_preferred when changing a dispatch_agent trigger source to github without an action payload",
 				map[string]any{"field": "action.githubToken"})
 			return
 		}
-		if oldActionType == store.TriggerActionExec {
-			prevLive, ok := s.authorizeStoredExecTargetForUpdate(w, r, projectID, execPayloadTarget(oldActionPayload))
-			if !ok {
-				return
-			}
-			if !prevLive && tr.ActionType == store.TriggerActionExec && (req.Action == nil || len(req.Action.Command) == 0) {
-				ValidationError(w, "retargeting an exec trigger whose previous target was deleted requires command", nil)
-				return
+		if oldActionsErr == nil {
+			for _, oldAct := range oldActions {
+				if oldAct.Type != store.TriggerActionExec {
+					continue
+				}
+				prevLive, ok := s.authorizeStoredExecTargetForUpdate(w, r, projectID, execPayloadTarget(oldAct.Payload))
+				if !ok {
+					return
+				}
+				if !prevLive {
+					if !updatingActions {
+						ValidationError(w, "retargeting an exec trigger whose previous target was deleted requires command", nil)
+						return
+					}
+					for _, ns := range reqActionSpecs {
+						if strings.TrimSpace(ns.Type) == store.TriggerActionExec && len(ns.Command) == 0 {
+							ValidationError(w, "retargeting an exec trigger whose previous target was deleted requires command", nil)
+							return
+						}
+					}
+				}
 			}
 		}
-		if req.Action != nil {
-			if !validateTriggerActionCrossFields(w, tr.ActionType, req.Action) {
-				return
-			}
-			var actionPayload string
-			switch tr.ActionType {
-			case store.TriggerActionMessage:
-				actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, tr.SourceKind, req.Action)
-			case store.TriggerActionDispatchAgent:
-				actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, req.Action, ceiling, prov)
-			case store.TriggerActionExec:
-				actionPayload, _, ok = s.authorizeTriggerExecAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, req.Action, ceiling, prov)
-			case store.TriggerActionGitHubComment:
-				actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, tr.SourceKind, tr.MatchTypes, req.Action)
-			}
+		if updatingActions {
+			newActions, ok := s.authorizeTriggerActionSpecs(w, r, projectID, tr.SourceKind, resolvedEP, tr.MatchTypes, tr.SubjectMode, reqActionSpecs, ceiling, prov)
 			if !ok {
 				return
 			}
-			tr.ActionPayload = actionPayload
+			tr.Actions = newActions
+			tr.ActionsCorrupt = false
+			tr.ActionType = ""
+			tr.ActionPayload = ""
 		} else {
-			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.MatchTypes, tr.SubjectMode, tr.ActionType, tr.ActionPayload, ceiling, prov)
+			if oldActionsErr != nil {
+				writeCorruptTriggerActionsError(w)
+				return
+			}
+			normalizedActions, ok := s.authorizeStoredTriggerActions(w, r, projectID, tr.SourceKind, resolvedEP, tr.MatchTypes, tr.SubjectMode, oldActions, ceiling, prov)
 			if !ok {
 				return
 			}
-			tr.ActionPayload = normalizedPayload
+			tr.Actions = normalizedActions
+			tr.ActionsCorrupt = false
+			tr.ActionType = ""
+			tr.ActionPayload = ""
+			fields.Actions = true
+			fields.ActionType = true
 			fields.ActionPayload = true
 		}
 		attr := reattributeInitiator(ctx, tr.InitiatorAttribution)
@@ -1241,7 +1517,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 				return lErr
 			}
 			if tr.SourceKind == store.TriggerSourceKindWebhook {
-				if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID, actionRequiresReplayProtection(tr.ActionType)); vErr != nil {
+				if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID, actionsRequireReplayProtection(tr.Actions)); vErr != nil {
 					return vErr
 				}
 			}
@@ -1260,12 +1536,8 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 					return errTriggerSourceLimitExceeded
 				}
 			}
-			if tr.Status == store.TriggerStatusActive && tr.ActionType == store.TriggerActionExec {
-				newTarget := execPayloadTarget(tr.ActionPayload)
-				oldTarget := execPayloadTarget(oldActionPayload)
-				alreadyProj := oldStatus == store.TriggerStatusActive && oldActionType == store.TriggerActionExec
-				alreadyTarget := alreadyProj && oldTarget != "" && oldTarget == newTarget
-				if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, newTarget, alreadyProj, alreadyTarget); capErr != nil {
+			if tr.Status == store.TriggerStatusActive && actionsHasType(tr.Actions, store.TriggerActionExec) {
+				if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, tr.Actions, tr.ID); capErr != nil {
 					return capErr
 				}
 			}
@@ -1415,7 +1687,12 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling, prov) {
 		return
 	}
-	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.MatchTypes, tr.SubjectMode, tr.ActionType, tr.ActionPayload, ceiling, prov)
+	storedActions, actErr := triggerActions(*tr)
+	if actErr != nil {
+		writeCorruptTriggerActionsError(w)
+		return
+	}
+	normalizedActions, ok := s.authorizeStoredTriggerActions(w, r, projectID, tr.SourceKind, ep, tr.MatchTypes, tr.SubjectMode, storedActions, ceiling, prov)
 	if !ok {
 		return
 	}
@@ -1424,18 +1701,21 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	prevRevisionKnown := tr.AuthorizationRevision != 0
 	tr.Status = store.TriggerStatusActive
 	tr.StatusReason = store.TriggerStatusReasonNone
-	tr.ActionPayload = normalizedPayload
+	tr.Actions = normalizedActions
+	tr.ActionsCorrupt = false
+	tr.ActionType = ""
+	tr.ActionPayload = ""
 	newAttr := reattributeInitiator(ctx, tr.InitiatorAttribution)
 	tr.InitiatorAttribution = newAttr
 	tr.AuthorityCeiling = ceiling
 
-	fields := store.TriggerFieldMask{Status: true, ActionPayload: true}
+	fields := store.TriggerFieldMask{Status: true, Actions: true, ActionType: true, ActionPayload: true}
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 			return lErr
 		}
 		if tr.SourceKind == store.TriggerSourceKindWebhook {
-			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID, actionRequiresReplayProtection(tr.ActionType)); vErr != nil {
+			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID, actionsRequireReplayProtection(tr.Actions)); vErr != nil {
 				return vErr
 			}
 		}
@@ -1451,8 +1731,8 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if srcCount >= store.MaxActiveTriggersPerSource {
 			return errTriggerSourceLimitExceeded
 		}
-		if tr.ActionType == store.TriggerActionExec {
-			if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, execPayloadTarget(tr.ActionPayload), false, false); capErr != nil {
+		if actionsHasType(tr.Actions, store.TriggerActionExec) {
+			if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, tr.Actions, tr.ID); capErr != nil {
 				return capErr
 			}
 		}

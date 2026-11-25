@@ -149,12 +149,16 @@ type CompilePresetRequest struct {
 	Fields map[string]any `json:"fields,omitempty"`
 }
 
-// CompiledPreset is the compiled output of CompilePreset (§9.2 rev 1.4).
+// CompiledPreset is the compiled output of CompilePreset (§9.2 rev 1.4,
+// action-arrays §2). Presets keep emitting one action; SuggestedActions carries
+// it as a one-element list for shape consistency while SuggestedAction stays
+// mirrored for compatibility.
 type CompiledPreset struct {
-	Match           CompiledMatch    `json:"match"`
-	Subject         CompiledSubject  `json:"subject"`
-	Form            CompiledForm     `json:"form"`
-	SuggestedAction *SuggestedAction `json:"suggested_action,omitempty"`
+	Match            CompiledMatch     `json:"match"`
+	Subject          CompiledSubject   `json:"subject"`
+	Form             CompiledForm      `json:"form"`
+	SuggestedAction  *SuggestedAction  `json:"suggested_action,omitempty"`
+	SuggestedActions []SuggestedAction `json:"suggested_actions,omitempty"`
 }
 
 // CompiledMatch holds the event-type prefilter and ordered match rules (§9.2 rev 1.4).
@@ -645,6 +649,9 @@ func CompilePreset(req CompilePresetRequest) (*CompiledPreset, error) {
 			Message: "preset field validation failed",
 			Fields:  fieldErrs,
 		}
+	}
+	if compiled != nil && compiled.SuggestedAction != nil && len(compiled.SuggestedActions) == 0 {
+		compiled.SuggestedActions = []SuggestedAction{*compiled.SuggestedAction}
 	}
 	return compiled, nil
 }

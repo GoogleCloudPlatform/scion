@@ -4355,8 +4355,9 @@ var (
 		{Name: "match_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "match_rules", Type: field.TypeString, Size: 2147483647, Default: "[]"},
 		{Name: "match_form", Type: field.TypeString, Nullable: true, Size: 2147483647},
-		{Name: "action_type", Type: field.TypeString},
+		{Name: "action_type", Type: field.TypeString, Default: ""},
 		{Name: "action_payload", Type: field.TypeString, Size: 2147483647, Default: "{}"},
+		{Name: "actions", Type: field.TypeString, Size: 2147483647, Default: "[]"},
 		{Name: "subject_dialect", Type: field.TypeString, Default: "cel"},
 		{Name: "subject_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "subject_mode", Type: field.TypeString, Default: "new"},
@@ -4398,7 +4399,7 @@ var (
 			{
 				Name:    "trigger_project_id_source_kind_source_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[34]},
+				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[35]},
 			},
 			{
 				Name:    "trigger_initiator_principal_id",
@@ -4483,6 +4484,7 @@ var (
 		{Name: "event_id", Type: field.TypeUUID},
 		{Name: "subject", Type: field.TypeString, Size: 256},
 		{Name: "action_type", Type: field.TypeString},
+		{Name: "action_index", Type: field.TypeInt, Default: 0},
 		{Name: "status", Type: field.TypeString, Default: "firing"},
 		{Name: "error", Type: field.TypeString, Nullable: true},
 		{Name: "result_ref", Type: field.TypeString, Nullable: true},
@@ -4510,37 +4512,37 @@ var (
 			{
 				Name:    "triggerfire_trigger_id_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[29]},
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[30]},
 			},
 			{
-				Name:    "triggerfire_event_id_trigger_id",
+				Name:    "triggerfire_event_id_trigger_id_action_index",
 				Unique:  true,
-				Columns: []*schema.Column{TriggerFiresColumns[10], TriggerFiresColumns[9]},
+				Columns: []*schema.Column{TriggerFiresColumns[10], TriggerFiresColumns[9], TriggerFiresColumns[13]},
 			},
 			{
-				Name:    "triggerfire_trigger_id_subject_status",
+				Name:    "triggerfire_trigger_id_action_index_subject_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[11], TriggerFiresColumns[13]},
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[13], TriggerFiresColumns[11], TriggerFiresColumns[14]},
 			},
 			{
 				Name:    "triggerfire_status_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[13], TriggerFiresColumns[24]},
+				Columns: []*schema.Column{TriggerFiresColumns[14], TriggerFiresColumns[25]},
 			},
 			{
 				Name:    "triggerfire_target_agent_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[19], TriggerFiresColumns[13]},
+				Columns: []*schema.Column{TriggerFiresColumns[20], TriggerFiresColumns[14]},
 			},
 			{
 				Name:    "triggerfire_project_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[8], TriggerFiresColumns[13]},
+				Columns: []*schema.Column{TriggerFiresColumns[8], TriggerFiresColumns[14]},
 			},
 			{
 				Name:    "triggerfire_result_ref",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[15]},
+				Columns: []*schema.Column{TriggerFiresColumns[16]},
 			},
 		},
 	}
@@ -4548,6 +4550,7 @@ var (
 	TriggerSubjectClaimsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "trigger_id", Type: field.TypeUUID},
+		{Name: "action_index", Type: field.TypeInt, Default: 0},
 		{Name: "subject", Type: field.TypeString, Size: 256},
 		{Name: "state", Type: field.TypeString, Default: "active"},
 		{Name: "agent_id", Type: field.TypeUUID, Nullable: true},
@@ -4565,19 +4568,19 @@ var (
 		PrimaryKey: []*schema.Column{TriggerSubjectClaimsColumns[0]},
 		Indexes: []*schema.Index{
 			{
-				Name:    "triggersubjectclaim_trigger_id_subject",
+				Name:    "triggersubjectclaim_trigger_id_action_index_subject",
 				Unique:  true,
-				Columns: []*schema.Column{TriggerSubjectClaimsColumns[1], TriggerSubjectClaimsColumns[2]},
+				Columns: []*schema.Column{TriggerSubjectClaimsColumns[1], TriggerSubjectClaimsColumns[2], TriggerSubjectClaimsColumns[3]},
 			},
 			{
 				Name:    "triggersubjectclaim_agent_id",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerSubjectClaimsColumns[4]},
+				Columns: []*schema.Column{TriggerSubjectClaimsColumns[5]},
 			},
 			{
 				Name:    "triggersubjectclaim_state_released_at",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerSubjectClaimsColumns[3], TriggerSubjectClaimsColumns[9]},
+				Columns: []*schema.Column{TriggerSubjectClaimsColumns[4], TriggerSubjectClaimsColumns[10]},
 			},
 		},
 	}

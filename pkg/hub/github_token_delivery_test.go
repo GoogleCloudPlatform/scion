@@ -1197,7 +1197,7 @@ func TestTriggerDispatchAgent_GitHubSourceDefaultInstallationEndToEnd(t *testing
 	outcome := f.sched.srv.fireAction(ctx, hubfire.FireRequest{
 		ProjectID:  ghProj.ID,
 		ActionType: store.TriggerActionDispatchAgent,
-		Payload:    storedTrig.ActionPayload,
+		Payload:    firstTriggerAction(*storedTrig).Payload,
 		Authority: hubfire.RecordedAuthority{
 			DefinitionKind: hubfire.DefinitionKindTrigger,
 			DefinitionID:   storedTrig.ID,

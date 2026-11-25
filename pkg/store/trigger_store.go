@@ -27,6 +27,8 @@ const (
 	MaxActiveTriggersPerSource       = 50
 	MaxTriggersPerProject            = 200
 	MaxTriggerEventListsBytes        = 8 * 1024
+	MaxTriggerActions                = 8
+	MaxTriggerActionsBytes           = 64 * 1024
 )
 
 // WebhookEndpoint auth modes, signature modes, statuses, bound lifetimes,
@@ -242,6 +244,14 @@ type TriggerMatchRule struct {
 	Expr    string `json:"expr"`
 }
 
+// TriggerAction is one ordered action element of a trigger's actions list
+// (action-arrays-design §1). Payload holds the canonical JSON object string
+// for the action type.
+type TriggerAction struct {
+	Type    string `json:"type"`
+	Payload string `json:"payload"`
+}
+
 // Trigger represents a project-scoped event trigger definition (§4.2).
 type Trigger struct {
 	ID                      string             `json:"id"`
@@ -257,6 +267,7 @@ type Trigger struct {
 	MatchForm               string             `json:"matchForm,omitempty"`
 	ActionType              string             `json:"actionType"`
 	ActionPayload           string             `json:"actionPayload"`
+	Actions                 []TriggerAction    `json:"actions"`
 	SubjectDialect          string             `json:"subjectDialect"`
 	SubjectRule             string             `json:"subjectRule,omitempty"`
 	SubjectMode             string             `json:"subjectMode"`
@@ -281,6 +292,10 @@ type Trigger struct {
 	// unparseable JSON. Callers must fail closed rather than treating an empty
 	// MatchRules slice as a Types-only trigger.
 	MatchRulesCorrupt bool `json:"-"`
+	// ActionsCorrupt is true when the stored actions column contains
+	// unparseable or invalid JSON. Callers must fail closed rather than
+	// silently dropping actions or falling back to legacy scalar columns.
+	ActionsCorrupt bool `json:"-"`
 }
 
 // TriggerFilter selects triggers in ListTriggers and CountTriggers.
@@ -313,6 +328,7 @@ type TriggerFieldMask struct {
 	MatchForm               bool
 	ActionType              bool
 	ActionPayload           bool
+	Actions                 bool
 	SubjectDialect          bool
 	SubjectRule             bool
 	SubjectMode             bool
@@ -366,6 +382,7 @@ type TriggerFire struct {
 	EventID        string     `json:"eventId"`
 	Subject        string     `json:"subject"`
 	ActionType     string     `json:"actionType"`
+	ActionIndex    int        `json:"actionIndex"`
 	Status         string     `json:"status"`
 	Error          string     `json:"error,omitempty"`
 	ResultRef      string     `json:"resultRef,omitempty"`
@@ -397,11 +414,13 @@ type TriggerFireFilter struct {
 	VisibleToAgentID string
 }
 
-// TriggerSubjectClaim represents the per-(trigger, subject) live-subject claim
-// row used by dispatch_agent triggers in mode "skip" (Stage 2 §5.6) and Stage 3 "reuse".
+// TriggerSubjectClaim represents the per-(trigger, action_index, subject)
+// live-subject claim row used by dispatch_agent triggers in mode "skip"
+// (Stage 2 §5.6) and Stage 3 "reuse", and exec triggers in mode "skip" (P8).
 type TriggerSubjectClaim struct {
 	ID            string     `json:"id"`
 	TriggerID     string     `json:"triggerId"`
+	ActionIndex   int        `json:"actionIndex"`
 	Subject       string     `json:"subject"`
 	State         string     `json:"state"`
 	AgentID       string     `json:"agentId,omitempty"`
@@ -514,13 +533,15 @@ type TriggerStore interface {
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)
 	CountTriggerFiresSince(ctx context.Context, triggerID string, since time.Time, excludeStatuses ...string) (int, error)
-	// CountRecentTriggerFires counts trigger_fires rows for triggerID with
-	// created > since and status <> 'skipped', excluding excludeFireID when
-	// non-empty (so an in-flight firing row does not count against its own
-	// max_fires_per_minute budget, Stage 2 §7.4).
+	// CountRecentTriggerFires counts distinct matched events in trigger_fires
+	// for triggerID with created > since and status <> 'skipped', excluding
+	// the caller's own event (derived from excludeFireID when non-empty) so
+	// sibling actions of the same matched event never count against each other
+	// and an in-flight firing row does not count against its own
+	// max_fires_per_minute budget (Stage 2 §7.4, action-arrays §3.5).
 	CountRecentTriggerFires(ctx context.Context, triggerID string, since time.Time, excludeFireID string) (int, error)
-	HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error)
-	HasLiveTriggerFireForSubjectExcluding(ctx context.Context, triggerID, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error)
+	HasLiveTriggerFireForSubject(ctx context.Context, triggerID string, actionIndex int, subject string, now time.Time) (bool, error)
+	HasLiveTriggerFireForSubjectExcluding(ctx context.Context, triggerID string, actionIndex int, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error)
 	HasPendingTriggerFiresForEvent(ctx context.Context, eventID string) (bool, error)
 	AgentHasFiredTriggerForEvent(ctx context.Context, eventID, agentID string) (bool, error)
 	EventHasTriggerFireForResultRef(ctx context.Context, eventID, resultRef string) (bool, error)
@@ -531,11 +552,11 @@ type TriggerStore interface {
 	// values of the purged event rows so the caller can delete their overflow objects.
 	PurgeOldTriggerHistoryWithPayloadRefs(ctx context.Context, olderThan time.Time) (eventsDeleted int, firesDeleted int, payloadRefs []string, err error)
 
-	// Trigger subject claims (Stage 2 §5.6)
-	ClaimTriggerSubject(ctx context.Context, triggerID, subject, eventID, fireID string, now, abandonedBefore time.Time) (claimed *TriggerSubjectClaim, existing *TriggerSubjectClaim, err error)
+	// Trigger subject claims (Stage 2 §5.6, action-arrays §1)
+	ClaimTriggerSubject(ctx context.Context, triggerID string, actionIndex int, subject, eventID, fireID string, now, abandonedBefore time.Time) (claimed *TriggerSubjectClaim, existing *TriggerSubjectClaim, err error)
 	BindTriggerSubjectClaim(ctx context.Context, claimID, fireID, agentID string, boundAt time.Time) (bool, error)
 	ReleaseTriggerSubjectClaim(ctx context.Context, claimID, fireID string, releasedAt time.Time) (bool, error)
-	GetActiveTriggerSubjectClaim(ctx context.Context, triggerID, subject string) (*TriggerSubjectClaim, error)
+	GetActiveTriggerSubjectClaim(ctx context.Context, triggerID string, actionIndex int, subject string) (*TriggerSubjectClaim, error)
 	ReleaseTriggerSubjectClaimsForAgent(ctx context.Context, agentID string, releasedAt time.Time) (int, error)
 	ReleaseTriggerSubjectClaimsForProjectBySourceKind(ctx context.Context, projectID, sourceKind, reason string, releasedAt time.Time) (int, error)
 	ReleaseTerminalTriggerSubjectClaims(ctx context.Context, now time.Time) (int, error)

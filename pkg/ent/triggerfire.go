@@ -43,6 +43,8 @@ type TriggerFire struct {
 	Subject string `json:"subject,omitempty"`
 	// ActionType holds the value of the "action_type" field.
 	ActionType string `json:"action_type,omitempty"`
+	// ActionIndex holds the value of the "action_index" field.
+	ActionIndex int `json:"action_index,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
 	// Error holds the value of the "error" field.
@@ -110,7 +112,7 @@ func (*TriggerFire) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case triggerfire.FieldTargetAgentID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case triggerfire.FieldAttributionVersion, triggerfire.FieldAuthorizationRevision, triggerfire.FieldAttempts:
+		case triggerfire.FieldAttributionVersion, triggerfire.FieldAuthorizationRevision, triggerfire.FieldActionIndex, triggerfire.FieldAttempts:
 			values[i] = new(sql.NullInt64)
 		case triggerfire.FieldInitiatorPrincipalKind, triggerfire.FieldInitiatorPrincipalID, triggerfire.FieldInitiatorCredentialKind, triggerfire.FieldInitiatorCredentialID, triggerfire.FieldInitiatorCredentialSnapshot, triggerfire.FieldSubject, triggerfire.FieldActionType, triggerfire.FieldStatus, triggerfire.FieldError, triggerfire.FieldResultRef, triggerfire.FieldMatchedThrough, triggerfire.FieldDecidedDialect, triggerfire.FieldRuleTrace, triggerfire.FieldExecutorKind, triggerfire.FieldExecutorID:
 			values[i] = new(sql.NullString)
@@ -217,6 +219,12 @@ func (_m *TriggerFire) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field action_type", values[i])
 			} else if value.Valid {
 				_m.ActionType = value.String
+			}
+		case triggerfire.FieldActionIndex:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field action_index", values[i])
+			} else if value.Valid {
+				_m.ActionIndex = int(value.Int64)
 			}
 		case triggerfire.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -415,6 +423,9 @@ func (_m *TriggerFire) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("action_type=")
 	builder.WriteString(_m.ActionType)
+	builder.WriteString(", ")
+	builder.WriteString("action_index=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ActionIndex))
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)

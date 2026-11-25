@@ -317,6 +317,11 @@ type TriggerActionSpec struct {
 	Target        string `json:"target,omitempty"`
 	ReplyInThread bool   `json:"replyInThread,omitempty"`
 
+	// github.comment action fields (Stage 3 §7.1).
+	Body          string `json:"body,omitempty"`
+	Target        string `json:"target,omitempty"`
+	ReplyInThread bool   `json:"replyInThread,omitempty"`
+
 	// exec action fields (Stage 2 P8, ptone/scion#8241).
 	Command           []string `json:"command,omitempty"`
 	TimeoutSeconds    int      `json:"timeoutSeconds,omitempty"`
@@ -382,27 +387,29 @@ type TriggerSubjectPatchSpec struct {
 
 // Trigger represents a trigger definition returned by the Hub API.
 type Trigger struct {
-	ID                      string             `json:"id"`
-	ProjectID               string             `json:"projectId"`
-	Name                    string             `json:"name"`
-	Description             string             `json:"description,omitempty"`
-	Source                  TriggerSourceSpec  `json:"source"`
-	Match                   TriggerMatchSpec   `json:"match"`
-	Action                  TriggerActionSpec  `json:"action"`
-	Subject                 TriggerSubjectSpec `json:"subject"`
-	MaxFiresPerMinute       int                `json:"maxFiresPerMinute,omitempty"`
-	MaxConcurrentDispatches int                `json:"maxConcurrentDispatches,omitempty"`
-	Status                  string             `json:"status"`
-	StatusReason            string             `json:"statusReason,omitempty"`
-	AuthorizationRevision   int                `json:"authorizationRevision"`
-	LastFireAt              *time.Time         `json:"lastFireAt,omitempty"`
-	LastFireStatus          string             `json:"lastFireStatus,omitempty"`
-	LastFireError           string             `json:"lastFireError,omitempty"`
-	FireCount               int                `json:"fireCount"`
-	ErrorCount              int                `json:"errorCount"`
-	CreatedBy               string             `json:"createdBy,omitempty"`
-	CreatedAt               time.Time          `json:"createdAt"`
-	UpdatedAt               time.Time          `json:"updatedAt"`
+	ID                      string              `json:"id"`
+	ProjectID               string              `json:"projectId"`
+	Name                    string              `json:"name"`
+	Description             string              `json:"description,omitempty"`
+	Source                  TriggerSourceSpec   `json:"source"`
+	Match                   TriggerMatchSpec    `json:"match"`
+	Action                  TriggerActionSpec   `json:"action"`
+	Actions                 []TriggerActionSpec `json:"actions"`
+	ActionsBroken           bool                `json:"actionsBroken,omitempty"`
+	Subject                 TriggerSubjectSpec  `json:"subject"`
+	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
+	Status                  string              `json:"status"`
+	StatusReason            string              `json:"statusReason,omitempty"`
+	AuthorizationRevision   int                 `json:"authorizationRevision"`
+	LastFireAt              *time.Time          `json:"lastFireAt,omitempty"`
+	LastFireStatus          string              `json:"lastFireStatus,omitempty"`
+	LastFireError           string              `json:"lastFireError,omitempty"`
+	FireCount               int                 `json:"fireCount"`
+	ErrorCount              int                 `json:"errorCount"`
+	CreatedBy               string              `json:"createdBy,omitempty"`
+	CreatedAt               time.Time           `json:"createdAt"`
+	UpdatedAt               time.Time           `json:"updatedAt"`
 }
 
 // CreateTriggerRequest is the client-side request for creating a trigger.
@@ -411,7 +418,8 @@ type CreateTriggerRequest struct {
 	Description             string              `json:"description,omitempty"`
 	Source                  TriggerSourceSpec   `json:"source"`
 	Match                   *TriggerMatchSpec   `json:"match,omitempty"`
-	Action                  TriggerActionSpec   `json:"action"`
+	Action                  TriggerActionSpec   `json:"action,omitzero"`
+	Actions                 []TriggerActionSpec `json:"actions,omitempty"`
 	Subject                 *TriggerSubjectSpec `json:"subject,omitempty"`
 	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
@@ -424,6 +432,7 @@ type UpdateTriggerRequest struct {
 	Source                  *TriggerSourceSpec       `json:"source,omitempty"`
 	Match                   *TriggerMatchPatchSpec   `json:"match,omitempty"`
 	Action                  *TriggerActionSpec       `json:"action,omitempty"`
+	Actions                 *[]TriggerActionSpec     `json:"actions,omitempty"`
 	Subject                 *TriggerSubjectPatchSpec `json:"subject,omitempty"`
 	MaxFiresPerMinute       *int                     `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches *int                     `json:"maxConcurrentDispatches,omitempty"`
@@ -474,6 +483,8 @@ type TriggerFire struct {
 	TriggerID      string            `json:"triggerId"`
 	EventID        string            `json:"eventId"`
 	ProjectID      string            `json:"projectId"`
+	ActionIndex    int               `json:"actionIndex"`
+	ActionType     string            `json:"actionType,omitempty"`
 	Subject        string            `json:"subject,omitempty"`
 	Status         string            `json:"status"`
 	ResultRef      string            `json:"resultRef,omitempty"`

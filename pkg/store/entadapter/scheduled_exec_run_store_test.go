@@ -1309,7 +1309,7 @@ func TestScheduledExecRun_TriggerFireOwnerLifecycle(t *testing.T) {
 	}
 
 	ev1, f1 := newFire("sub-1")
-	claim1, existing, err := ts.ClaimTriggerSubject(ctx, tr.ID, "sub-1", ev1.ID, f1.ID, now, now.Add(-5*time.Minute))
+	claim1, existing, err := ts.ClaimTriggerSubject(ctx, tr.ID, 0, "sub-1", ev1.ID, f1.ID, now, now.Add(-5*time.Minute))
 	require.NoError(t, err)
 	require.Nil(t, existing)
 	require.NotNil(t, claim1)
@@ -1348,7 +1348,7 @@ func TestScheduledExecRun_TriggerFireOwnerLifecycle(t *testing.T) {
 	assert.Equal(t, f1.ID, gotF1.ResultRef)
 	assert.Equal(t, targetAgentID, gotF1.TargetAgentID)
 
-	activeClaim, err := ts.GetActiveTriggerSubjectClaim(ctx, tr.ID, "sub-1")
+	activeClaim, err := ts.GetActiveTriggerSubjectClaim(ctx, tr.ID, 0, "sub-1")
 	require.NoError(t, err)
 	assert.Equal(t, targetAgentID, activeClaim.AgentID, "admission must bind subject claim to target agent")
 
@@ -1431,7 +1431,7 @@ func TestScheduledExecRun_TriggerFireOwnerLifecycle(t *testing.T) {
 	assert.GreaterOrEqual(t, gotTr.FireCount, 1)
 	assert.GreaterOrEqual(t, gotTr.ErrorCount, 1)
 
-	_, err = ts.GetActiveTriggerSubjectClaim(ctx, tr.ID, "sub-1")
+	_, err = ts.GetActiveTriggerSubjectClaim(ctx, tr.ID, 0, "sub-1")
 	assert.ErrorIs(t, err, store.ErrNotFound, "FinishScheduledExecRun must release the subject claim")
 
 	// PurgeOldTriggerHistory deletes fire-owned scheduled_exec_runs first in the same tx.

@@ -73,10 +73,11 @@ type CompileTriggerPresetRequest struct {
 
 // CompiledTriggerPreset is the compiled output returned by TriggerPresetService.Compile.
 type CompiledTriggerPreset struct {
-	Match           CompiledTriggerMatch    `json:"match"`
-	Subject         CompiledTriggerSubject  `json:"subject"`
-	Form            CompiledTriggerForm     `json:"form"`
-	SuggestedAction *SuggestedTriggerAction `json:"suggested_action,omitempty"`
+	Match            CompiledTriggerMatch     `json:"match"`
+	Subject          CompiledTriggerSubject   `json:"subject"`
+	Form             CompiledTriggerForm      `json:"form"`
+	SuggestedAction  *SuggestedTriggerAction  `json:"suggested_action,omitempty"`
+	SuggestedActions []SuggestedTriggerAction `json:"suggested_actions,omitempty"`
 }
 
 // CompiledTriggerMatch holds the event-type filter and ordered match rule list.

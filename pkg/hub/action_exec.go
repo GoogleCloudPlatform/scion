@@ -393,6 +393,7 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 		claimed, existing, claimErr := s.store.ClaimTriggerSubject(
 			ctx,
 			req.Authority.DefinitionID,
+			req.Event.Trigger.ActionIndex,
 			fireSubject,
 			req.Event.ID,
 			fireID,

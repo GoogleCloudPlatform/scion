@@ -1051,7 +1051,7 @@ func TestG4aG4b_RepoRemovalReleasesClaimAndCancelsDeferredFire(t *testing.T) {
 	require.NoError(t, f.sched.store.CreateAgent(ctx, inFlightAgent))
 
 	const subject = "github:acme/widgets#77"
-	seedClaim, existing, err := claims.Claim(ctx, trigResp.ID, subject, uuid.NewString(), uuid.NewString())
+	seedClaim, existing, err := claims.Claim(ctx, trigResp.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.Nil(t, existing)
 	require.NoError(t, claims.Bind(ctx, seedClaim, inFlightAgent.ID))
@@ -1112,7 +1112,7 @@ func TestG4aG4b_RepoRemovalReleasesClaimAndCancelsDeferredFire(t *testing.T) {
 	f.sched.srv.checkProjectsForRemovedRepos(ctx, 8301, map[string]bool{"acme/widgets": true})
 
 	// Claim must be released (GetActiveTriggerSubjectClaim returns ErrNotFound).
-	activeClaim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subject)
+	activeClaim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subject)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	assert.Nil(t, activeClaim, "bound claim must be released on repo removal")
 
@@ -1249,7 +1249,7 @@ func TestG4aG4b_PreFireBotGuardCoversReuseDeferAndCoalesce(t *testing.T) {
 	}
 	require.NoError(t, f.sched.store.CreateAgent(ctx, liveAgent))
 	const liveSubject = "github:acme/widgets#101"
-	liveClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, liveSubject, uuid.NewString(), uuid.NewString())
+	liveClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, 0, liveSubject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.Nil(t, ex)
 	require.NoError(t, claims.Bind(ctx, liveClaim, liveAgent.ID))
@@ -1267,7 +1267,7 @@ func TestG4aG4b_PreFireBotGuardCoversReuseDeferAndCoalesce(t *testing.T) {
 	}
 	require.NoError(t, f.sched.store.CreateAgent(ctx, deferAgent))
 	const deferSubject = "github:acme/widgets#102"
-	deferClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, deferSubject, uuid.NewString(), uuid.NewString())
+	deferClaim, ex, err := claims.Claim(ctx, reuseTrig.ID, 0, deferSubject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.Nil(t, ex)
 	require.NoError(t, claims.Bind(ctx, deferClaim, deferAgent.ID))

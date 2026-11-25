@@ -116,6 +116,11 @@ func ActionType(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldActionType, v))
 }
 
+// ActionIndex applies equality check predicate on the "action_index" field. It's identical to ActionIndexEQ.
+func ActionIndex(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldActionIndex, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldStatus, v))
@@ -924,6 +929,46 @@ func ActionTypeEqualFold(v string) predicate.TriggerFire {
 // ActionTypeContainsFold applies the ContainsFold predicate on the "action_type" field.
 func ActionTypeContainsFold(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldContainsFold(FieldActionType, v))
+}
+
+// ActionIndexEQ applies the EQ predicate on the "action_index" field.
+func ActionIndexEQ(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldActionIndex, v))
+}
+
+// ActionIndexNEQ applies the NEQ predicate on the "action_index" field.
+func ActionIndexNEQ(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldActionIndex, v))
+}
+
+// ActionIndexIn applies the In predicate on the "action_index" field.
+func ActionIndexIn(vs ...int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIn(FieldActionIndex, vs...))
+}
+
+// ActionIndexNotIn applies the NotIn predicate on the "action_index" field.
+func ActionIndexNotIn(vs ...int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotIn(FieldActionIndex, vs...))
+}
+
+// ActionIndexGT applies the GT predicate on the "action_index" field.
+func ActionIndexGT(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGT(FieldActionIndex, v))
+}
+
+// ActionIndexGTE applies the GTE predicate on the "action_index" field.
+func ActionIndexGTE(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGTE(FieldActionIndex, v))
+}
+
+// ActionIndexLT applies the LT predicate on the "action_index" field.
+func ActionIndexLT(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLT(FieldActionIndex, v))
+}
+
+// ActionIndexLTE applies the LTE predicate on the "action_index" field.
+func ActionIndexLTE(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLTE(FieldActionIndex, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

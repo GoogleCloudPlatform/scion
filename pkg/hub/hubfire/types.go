@@ -65,7 +65,8 @@ type FireTracker interface {
 type FireTriggerRef struct {
 	ID                      string
 	Name                    string
-	SubjectMode             string // "new" | "skip" (Stage 2 §5.3, §5.6)
+	ActionIndex             int    // 0-based index of the firing action in triggers.actions (action-arrays §1)
+	SubjectMode             string // "new" | "skip" | "reuse" (Stage 2 §5.3, §5.6)
 	FireSubject             string // dispatcher-derived fire subject (subject_rule output or bounded event subject, Stage 1 §6.3 / Stage 2 §5.6)
 	MaxFiresPerMinute       int    // per-trigger fire rate cap (0 = unlimited, Stage 2 §7.4)
 	MaxConcurrentDispatches int    // per-trigger dispatch_agent concurrency cap (0 = default 5, Stage 2 §7.4)

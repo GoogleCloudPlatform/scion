@@ -61,5 +61,35 @@
       "event.subject",
       "event.attributes.action"
     ]
-  }
+  },
+  "suggested_actions": [
+    {
+      "type": "dispatch_agent",
+      "agentName": "pr-${event.attributes.number}-opened",
+      "template": "default",
+      "task": "Review pull request ${event.attributes.repo}#${event.attributes.number} (${event.attributes.title}) opened by @${event.attributes.sender} targeting `${event.attributes.base_ref}` at commit `${event.attributes.head_sha}`.\nPull request URL: ${event.attributes.html_url}\nThis rule admits fork pull requests (`is_fork=${event.attributes.is_fork}`); check out the PR head with `gh pr checkout ${event.attributes.number}`.\nUse `gh` (authenticated as the GitHub App installation) to post results on the PR/issue, mention @${event.attributes.sender} when answering, and never include an `@<app> /<command>` slash-command mention in comments.",
+      "labels": {
+        "issue": "${event.attributes.repo}#${event.attributes.number}"
+      },
+      "ephemeral": false,
+      "githubToken": "installation",
+      "reuseMessage": "New ${event.type} on ${event.subject}: ${event.attributes.action} by @${event.attributes.sender} at ${event.attributes.head_sha}.",
+      "ackComment": {
+        "body": "Started **${result.agent_name}** for ${event.subject} — [open agent](${result.agent_url}). Triggered by @${event.attributes.sender}."
+      },
+      "untrustedVars": [
+        "event.attributes.repo",
+        "event.attributes.number",
+        "event.attributes.title",
+        "event.attributes.sender",
+        "event.attributes.base_ref",
+        "event.attributes.head_sha",
+        "event.attributes.html_url",
+        "event.attributes.is_fork",
+        "event.type",
+        "event.subject",
+        "event.attributes.action"
+      ]
+    }
+  ]
 }

@@ -1043,8 +1043,102 @@ func unmarshalMatchRules(raw string) ([]store.TriggerMatchRule, bool) {
 	return out, false
 }
 
+type storedTriggerAction struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+func marshalTriggerActions(actions []store.TriggerAction) (string, error) {
+	if len(actions) == 0 {
+		return "[]", nil
+	}
+	if len(actions) > store.MaxTriggerActions {
+		return "", fmt.Errorf("%w: actions exceeds maximum of %d elements", store.ErrInvalidInput, store.MaxTriggerActions)
+	}
+	elems := make([]storedTriggerAction, len(actions))
+	for i, a := range actions {
+		t := strings.TrimSpace(a.Type)
+		if t == "" {
+			return "", fmt.Errorf("%w: action[%d].type is required", store.ErrInvalidInput, i)
+		}
+		trimmed := bytes.TrimSpace([]byte(a.Payload))
+		if len(trimmed) == 0 {
+			trimmed = []byte("{}")
+		}
+		if trimmed[0] != '{' || !json.Valid(trimmed) {
+			return "", fmt.Errorf("%w: action[%d].payload must be a valid JSON object", store.ErrInvalidInput, i)
+		}
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, trimmed); err != nil {
+			return "", fmt.Errorf("%w: action[%d].payload is invalid JSON: %v", store.ErrInvalidInput, i, err)
+		}
+		elems[i] = storedTriggerAction{
+			Type:    t,
+			Payload: json.RawMessage(compact.Bytes()),
+		}
+	}
+	b, err := json.Marshal(elems)
+	if err != nil {
+		return "", fmt.Errorf("marshaling trigger actions: %w", err)
+	}
+	if len(b) > store.MaxTriggerActionsBytes {
+		return "", fmt.Errorf("%w: encoded actions exceeds %d byte limit", store.ErrInvalidInput, store.MaxTriggerActionsBytes)
+	}
+	return string(b), nil
+}
+
+func unmarshalTriggerActions(raw string) ([]store.TriggerAction, bool) {
+	trimmed := bytes.TrimSpace([]byte(raw))
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[]")) {
+		return nil, false
+	}
+	if trimmed[0] != '[' {
+		return nil, true
+	}
+	var rawElems []json.RawMessage
+	if err := json.Unmarshal(trimmed, &rawElems); err != nil {
+		return nil, true
+	}
+	if len(rawElems) == 0 {
+		return nil, false
+	}
+	out := make([]store.TriggerAction, len(rawElems))
+	for i, elemRaw := range rawElems {
+		et := bytes.TrimSpace(elemRaw)
+		if len(et) == 0 || et[0] != '{' {
+			return nil, true
+		}
+		var parsed storedTriggerAction
+		dec := json.NewDecoder(bytes.NewReader(et))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&parsed); err != nil {
+			return nil, true
+		}
+		if dec.More() || dec.Decode(&struct{}{}) != io.EOF {
+			return nil, true
+		}
+		t := strings.TrimSpace(parsed.Type)
+		if t == "" {
+			return nil, true
+		}
+		pt := bytes.TrimSpace(parsed.Payload)
+		if len(pt) == 0 {
+			pt = []byte("{}")
+		}
+		if pt[0] != '{' || !json.Valid(pt) {
+			return nil, true
+		}
+		out[i] = store.TriggerAction{
+			Type:    t,
+			Payload: string(pt),
+		}
+	}
+	return out, false
+}
+
 func entTriggerToStore(e *ent.Trigger) *store.Trigger {
 	matchRules, matchRulesCorrupt := unmarshalMatchRules(e.MatchRules)
+	actions, actionsCorrupt := unmarshalTriggerActions(e.Actions)
 	tr := &store.Trigger{
 		ID:                      e.ID.String(),
 		ProjectID:               e.ProjectID.String(),
@@ -1060,6 +1154,8 @@ func entTriggerToStore(e *ent.Trigger) *store.Trigger {
 		MatchRulesCorrupt:       matchRulesCorrupt,
 		ActionType:              e.ActionType,
 		ActionPayload:           e.ActionPayload,
+		Actions:                 actions,
+		ActionsCorrupt:          actionsCorrupt,
 		SubjectDialect:          e.SubjectDialect,
 		SubjectRule:             e.SubjectRule,
 		SubjectMode:             e.SubjectMode,
@@ -1213,12 +1309,21 @@ func applyTriggerFilter(query *ent.TriggerQuery, filter store.TriggerFilter) err
 		query.Where(trigger.NameEQ(filter.Name))
 	}
 	if len(filter.ActionTypes) > 0 {
-		query.Where(trigger.ActionTypeIn(filter.ActionTypes...))
+		preds := make([]predicate.Trigger, 0, len(filter.ActionTypes)+1)
+		preds = append(preds, trigger.ActionTypeIn(filter.ActionTypes...))
+		for _, at := range filter.ActionTypes {
+			preds = append(preds, trigger.ActionsContains(`"type":"`+at+`"`))
+		}
+		query.Where(trigger.Or(preds...))
 	}
 	if filter.TargetAgentID != "" {
-		// Pre-filter in SQL on action_payload containing the target agent ID;
-		// callers still decode action_payload to confirm the exact agentId field.
-		query.Where(trigger.ActionPayloadContains(filter.TargetAgentID))
+		// Pre-filter in SQL on action_payload or actions containing the target
+		// agent ID; callers still decode action payloads to confirm the exact
+		// agentId field.
+		query.Where(trigger.Or(
+			trigger.ActionPayloadContains(filter.TargetAgentID),
+			trigger.ActionsContains(filter.TargetAgentID),
+		))
 	}
 	if filter.InitiatorAgentID != "" {
 		query.Where(triggerRecordedAuthorityIs(store.DelegationPrincipalAgent, filter.InitiatorAgentID))
@@ -1237,7 +1342,7 @@ func applyTriggerFilter(query *ent.TriggerQuery, filter store.TriggerFilter) err
 }
 
 func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) error {
-	if tr == nil || tr.ID == "" || tr.ProjectID == "" || tr.Name == "" || tr.SourceKind == "" || tr.ActionType == "" {
+	if tr == nil || tr.ID == "" || tr.ProjectID == "" || tr.Name == "" || tr.SourceKind == "" || (tr.ActionType == "" && len(tr.Actions) == 0) {
 		return store.ErrInvalidInput
 	}
 	uid, err := parseUUID(tr.ID)
@@ -1253,6 +1358,10 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 		return err
 	}
 	matchRulesJSON, err := marshalMatchRules(tr.MatchRules)
+	if err != nil {
+		return err
+	}
+	actionsJSON, err := marshalTriggerActions(tr.Actions)
 	if err != nil {
 		return err
 	}
@@ -1277,7 +1386,7 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 		status = store.TriggerStatusActive
 	}
 	payload := tr.ActionPayload
-	if payload == "" {
+	if tr.ActionType != "" && payload == "" {
 		payload = "{}"
 	}
 	now := time.Now().UTC()
@@ -1304,6 +1413,7 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 		SetMatchRules(matchRulesJSON).
 		SetActionType(tr.ActionType).
 		SetActionPayload(payload).
+		SetActions(actionsJSON).
 		SetSubjectDialect(subjectDialect).
 		SetSubjectRule(tr.SubjectRule).
 		SetSubjectMode(subjectMode).
@@ -1579,6 +1689,13 @@ func (s *TriggerStore) UpdateTrigger(
 	if fields.ActionPayload {
 		update = update.SetActionPayload(tr.ActionPayload)
 	}
+	if fields.Actions {
+		actionsJSON, mErr := marshalTriggerActions(tr.Actions)
+		if mErr != nil {
+			return mErr
+		}
+		update = update.SetActions(actionsJSON)
+	}
 	if fields.SubjectDialect {
 		update = update.SetSubjectDialect(tr.SubjectDialect)
 	}
@@ -1636,6 +1753,9 @@ func (s *TriggerStore) UpdateTrigger(
 	}
 	if fields.MatchForm {
 		tr.MatchForm = updated.MatchForm
+	}
+	if fields.Actions {
+		tr.Actions, tr.ActionsCorrupt = unmarshalTriggerActions(updated.Actions)
 	}
 	return nil
 }
@@ -2439,6 +2559,7 @@ func entTriggerFireToStore(e *ent.TriggerFire) *store.TriggerFire {
 		EventID:        e.EventID.String(),
 		Subject:        e.Subject,
 		ActionType:     e.ActionType,
+		ActionIndex:    e.ActionIndex,
 		Status:         e.Status,
 		Error:          e.Error,
 		ResultRef:      e.ResultRef,
@@ -2536,6 +2657,7 @@ func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fi
 		SetEventID(eid).
 		SetSubject(fire.Subject).
 		SetActionType(fire.ActionType).
+		SetActionIndex(fire.ActionIndex).
 		SetStatus(status).
 		SetExecutorKind(fire.ExecutorKind).
 		SetExecutorID(fire.ExecutorID).
@@ -2598,7 +2720,11 @@ func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.Trigger
 		mapped := mapError(err)
 		if errors.Is(mapped, store.ErrAlreadyExists) {
 			existing, qErr := s.client.TriggerFire.Query().
-				Where(triggerfire.EventIDEQ(eid), triggerfire.TriggerIDEQ(tid)).
+				Where(
+					triggerfire.EventIDEQ(eid),
+					triggerfire.TriggerIDEQ(tid),
+					triggerfire.ActionIndexEQ(fire.ActionIndex),
+				).
 				Only(ctx)
 			if qErr != nil {
 				return false, nil, mapError(qErr)
@@ -2630,7 +2756,7 @@ func (s *TriggerStore) ClaimTriggerFireSubjectSkip(ctx context.Context, fire *st
 	txErr := s.withClientTx(ctx, func(client *ent.Client) error {
 		if isPostgres(client) {
 			var res sql.Result
-			lockKey := fire.TriggerID + "\x00" + fire.Subject
+			lockKey := fmt.Sprintf("%s\x00%d\x00%s", fire.TriggerID, fire.ActionIndex, fire.Subject)
 			if lErr := client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
 				[]any{int32(store.LockTriggerSubjectOverlap), store.StableProjectHash(lockKey)}, &res); lErr != nil {
 				return fmt.Errorf("lock trigger subject overlap: %w", lErr)
@@ -2638,7 +2764,11 @@ func (s *TriggerStore) ClaimTriggerFireSubjectSkip(ctx context.Context, fire *st
 		}
 
 		ex, qErr := client.TriggerFire.Query().
-			Where(triggerfire.EventIDEQ(eid), triggerfire.TriggerIDEQ(tid)).
+			Where(
+				triggerfire.EventIDEQ(eid),
+				triggerfire.TriggerIDEQ(tid),
+				triggerfire.ActionIndexEQ(fire.ActionIndex),
+			).
 			Only(ctx)
 		if qErr == nil {
 			claimed = false
@@ -2650,7 +2780,7 @@ func (s *TriggerStore) ClaimTriggerFireSubjectSkip(ctx context.Context, fire *st
 			return mapError(qErr)
 		}
 
-		busy, bErr := hasLiveTriggerFireForSubjectClient(ctx, client, tid, fire.Subject, uuid.Nil, true, now)
+		busy, bErr := hasLiveTriggerFireForSubjectClient(ctx, client, tid, fire.ActionIndex, fire.Subject, uuid.Nil, true, now)
 		if bErr != nil {
 			return mapError(bErr)
 		}
@@ -2684,7 +2814,11 @@ func (s *TriggerStore) ClaimTriggerFireSubjectSkip(ctx context.Context, fire *st
 	if txErr != nil {
 		if !s.inTx && errors.Is(txErr, store.ErrAlreadyExists) {
 			ex, qErr := s.client.TriggerFire.Query().
-				Where(triggerfire.EventIDEQ(eid), triggerfire.TriggerIDEQ(tid)).
+				Where(
+					triggerfire.EventIDEQ(eid),
+					triggerfire.TriggerIDEQ(tid),
+					triggerfire.ActionIndexEQ(fire.ActionIndex),
+				).
 				Only(ctx)
 			if qErr != nil {
 				return false, false, nil, mapError(qErr)
@@ -2746,7 +2880,7 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 	txErr := s.withClientTx(ctx, func(client *ent.Client) error {
 		if isPostgres(client) {
 			var res sql.Result
-			lockKey := fire.TriggerID + "\x00" + fire.Subject
+			lockKey := fmt.Sprintf("%s\x00%d\x00%s", fire.TriggerID, fire.ActionIndex, fire.Subject)
 			if lErr := client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
 				[]any{int32(store.LockTriggerSubjectOverlap), store.StableProjectHash(lockKey)}, &res); lErr != nil {
 				return fmt.Errorf("lock trigger subject overlap: %w", lErr)
@@ -2754,7 +2888,11 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 		}
 
 		ex, qErr := client.TriggerFire.Query().
-			Where(triggerfire.EventIDEQ(eid), triggerfire.TriggerIDEQ(tid)).
+			Where(
+				triggerfire.EventIDEQ(eid),
+				triggerfire.TriggerIDEQ(tid),
+				triggerfire.ActionIndexEQ(fire.ActionIndex),
+			).
 			Only(ctx)
 		if qErr == nil {
 			// Existing row for (event_id, trigger_id).
@@ -2840,12 +2978,13 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 		}
 
 		// Supersede any unreleased coalescing, deferred, or reaped-pending rows for
-		// (trigger_id, subject) via CAS so an older event's retry cannot revive
-		// and double-dispatch alongside the newer event.
+		// (trigger_id, action_index, subject) via CAS so an older event's retry cannot
+		// revive and double-dispatch alongside the newer event.
 		coalesceOrReaped := pendingOrReapedFirePredicate()
 		prevRows, pErr := client.TriggerFire.Query().
 			Where(
 				triggerfire.TriggerIDEQ(tid),
+				triggerfire.ActionIndexEQ(fire.ActionIndex),
 				triggerfire.SubjectEQ(fire.Subject),
 				coalesceOrReaped,
 			).
@@ -2894,7 +3033,11 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 	if txErr != nil {
 		if !s.inTx && errors.Is(txErr, store.ErrAlreadyExists) {
 			ex, qErr := s.client.TriggerFire.Query().
-				Where(triggerfire.EventIDEQ(eid), triggerfire.TriggerIDEQ(tid)).
+				Where(
+					triggerfire.EventIDEQ(eid),
+					triggerfire.TriggerIDEQ(tid),
+					triggerfire.ActionIndexEQ(fire.ActionIndex),
+				).
 				Only(ctx)
 			if qErr != nil {
 				return false, false, nil, nil, mapError(qErr)
@@ -3339,7 +3482,7 @@ func (s *TriggerStore) ListTriggerFires(ctx context.Context, filter store.Trigge
 	return result, nil
 }
 
-func hasLiveTriggerFireForSubjectClient(ctx context.Context, client *ent.Client, tid uuid.UUID, subject string, excludeFireID uuid.UUID, includeFiring bool, now time.Time) (bool, error) {
+func hasLiveTriggerFireForSubjectClient(ctx context.Context, client *ent.Client, tid uuid.UUID, actionIndex int, subject string, excludeFireID uuid.UUID, includeFiring bool, now time.Time) (bool, error) {
 	statuses := []string{store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred}
 	if includeFiring {
 		statuses = append(statuses, store.TriggerFireStatusFiring)
@@ -3347,6 +3490,7 @@ func hasLiveTriggerFireForSubjectClient(ctx context.Context, client *ent.Client,
 	q := client.TriggerFire.Query().
 		Where(
 			triggerfire.TriggerIDEQ(tid),
+			triggerfire.ActionIndexEQ(actionIndex),
 			triggerfire.SubjectEQ(subject),
 			triggerfire.StatusIn(statuses...),
 			triggerfire.LeaseUntilGT(now.UTC()),
@@ -3376,12 +3520,15 @@ func (s *TriggerStore) CountTriggerFiresSince(ctx context.Context, triggerID str
 	return n, nil
 }
 
-// CountRecentTriggerFires counts non-skipped fires for triggerID created after
-// since. When excludeFireID names the caller's in-flight fire row, it excludes
-// that row AND any other in-flight ("firing") row ordered strictly after the
-// caller's (created, id) pair so concurrent claimants never mutually skip each
-// other (Stage 2 §7.4, P4a O1). Non-firing (completed/refused/failed) rows in
-// the window always count.
+// CountRecentTriggerFires counts distinct matched events in trigger_fires for
+// triggerID with created > since and status <> 'skipped' (Stage 2 §7.4,
+// action-arrays §3.5: the per-trigger rate limit counts matched events, not
+// actions). When excludeFireID names the caller's in-flight fire row, it
+// excludes the caller's own event_id (so sibling actions of the same matched
+// event never count against each other) AND any other in-flight ("firing") row
+// ordered strictly after the caller's (created, id) pair so concurrent
+// claimants never mutually skip each other (P4a O1). Non-firing
+// (completed/refused/failed) rows of other events in the window always count.
 func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID string, since time.Time, excludeFireID string) (int, error) {
 	tid, err := parseUUID(triggerID)
 	if err != nil {
@@ -3402,30 +3549,37 @@ func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID st
 		callerRow, getErr := s.client.TriggerFire.Get(ctx, exID)
 		if getErr == nil {
 			callerCreated := callerRow.Created.UTC()
-			q = q.Where(triggerfire.Or(
-				triggerfire.StatusNEQ(store.TriggerFireStatusFiring),
-				triggerfire.CreatedLT(callerCreated),
-				triggerfire.And(
-					triggerfire.CreatedEQ(callerCreated),
-					triggerfire.IDLT(exID),
+			q = q.Where(
+				triggerfire.EventIDNEQ(callerRow.EventID),
+				triggerfire.Or(
+					triggerfire.StatusNEQ(store.TriggerFireStatusFiring),
+					triggerfire.CreatedLT(callerCreated),
+					triggerfire.And(
+						triggerfire.CreatedEQ(callerCreated),
+						triggerfire.IDLT(exID),
+					),
 				),
-			))
+			)
 		} else if !ent.IsNotFound(getErr) {
 			return 0, getErr
 		}
 	}
-	return q.Count(ctx)
+	eventIDs, err := q.Unique(true).Select(triggerfire.FieldEventID).Strings(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return len(eventIDs), nil
 }
 
-func (s *TriggerStore) HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error) {
+func (s *TriggerStore) HasLiveTriggerFireForSubject(ctx context.Context, triggerID string, actionIndex int, subject string, now time.Time) (bool, error) {
 	tid, err := parseUUID(triggerID)
 	if err != nil {
 		return false, err
 	}
-	return hasLiveTriggerFireForSubjectClient(ctx, s.client, tid, subject, uuid.Nil, true, now)
+	return hasLiveTriggerFireForSubjectClient(ctx, s.client, tid, actionIndex, subject, uuid.Nil, true, now)
 }
 
-func (s *TriggerStore) HasLiveTriggerFireForSubjectExcluding(ctx context.Context, triggerID, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error) {
+func (s *TriggerStore) HasLiveTriggerFireForSubjectExcluding(ctx context.Context, triggerID string, actionIndex int, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error) {
 	tid, err := parseUUID(triggerID)
 	if err != nil {
 		return false, err
@@ -3437,7 +3591,7 @@ func (s *TriggerStore) HasLiveTriggerFireForSubjectExcluding(ctx context.Context
 			return false, err
 		}
 	}
-	return hasLiveTriggerFireForSubjectClient(ctx, s.client, tid, subject, exID, includeFiring, now)
+	return hasLiveTriggerFireForSubjectClient(ctx, s.client, tid, actionIndex, subject, exID, includeFiring, now)
 }
 
 func (s *TriggerStore) HasPendingTriggerFiresForEvent(ctx context.Context, eventID string) (bool, error) {

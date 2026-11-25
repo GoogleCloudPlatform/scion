@@ -466,6 +466,20 @@ func (_u *TriggerUpdate) SetNillableActionPayload(v *string) *TriggerUpdate {
 	return _u
 }
 
+// SetActions sets the "actions" field.
+func (_u *TriggerUpdate) SetActions(v string) *TriggerUpdate {
+	_u.mutation.SetActions(v)
+	return _u
+}
+
+// SetNillableActions sets the "actions" field if the given value is not nil.
+func (_u *TriggerUpdate) SetNillableActions(v *string) *TriggerUpdate {
+	if v != nil {
+		_u.SetActions(*v)
+	}
+	return _u
+}
+
 // SetSubjectDialect sets the "subject_dialect" field.
 func (_u *TriggerUpdate) SetSubjectDialect(v string) *TriggerUpdate {
 	_u.mutation.SetSubjectDialect(v)
@@ -791,11 +805,6 @@ func (_u *TriggerUpdate) check() error {
 			return &ValidationError{Name: "match_types", err: fmt.Errorf(`ent: validator failed for field "Trigger.match_types": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.ActionType(); ok {
-		if err := trigger.ActionTypeValidator(v); err != nil {
-			return &ValidationError{Name: "action_type", err: fmt.Errorf(`ent: validator failed for field "Trigger.action_type": %w`, err)}
-		}
-	}
 	return nil
 }
 
@@ -933,6 +942,9 @@ func (_u *TriggerUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.ActionPayload(); ok {
 		_spec.SetField(trigger.FieldActionPayload, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Actions(); ok {
+		_spec.SetField(trigger.FieldActions, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.SubjectDialect(); ok {
 		_spec.SetField(trigger.FieldSubjectDialect, field.TypeString, value)
@@ -1466,6 +1478,20 @@ func (_u *TriggerUpdateOne) SetNillableActionPayload(v *string) *TriggerUpdateOn
 	return _u
 }
 
+// SetActions sets the "actions" field.
+func (_u *TriggerUpdateOne) SetActions(v string) *TriggerUpdateOne {
+	_u.mutation.SetActions(v)
+	return _u
+}
+
+// SetNillableActions sets the "actions" field if the given value is not nil.
+func (_u *TriggerUpdateOne) SetNillableActions(v *string) *TriggerUpdateOne {
+	if v != nil {
+		_u.SetActions(*v)
+	}
+	return _u
+}
+
 // SetSubjectDialect sets the "subject_dialect" field.
 func (_u *TriggerUpdateOne) SetSubjectDialect(v string) *TriggerUpdateOne {
 	_u.mutation.SetSubjectDialect(v)
@@ -1804,11 +1830,6 @@ func (_u *TriggerUpdateOne) check() error {
 			return &ValidationError{Name: "match_types", err: fmt.Errorf(`ent: validator failed for field "Trigger.match_types": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.ActionType(); ok {
-		if err := trigger.ActionTypeValidator(v); err != nil {
-			return &ValidationError{Name: "action_type", err: fmt.Errorf(`ent: validator failed for field "Trigger.action_type": %w`, err)}
-		}
-	}
 	return nil
 }
 
@@ -1963,6 +1984,9 @@ func (_u *TriggerUpdateOne) sqlSave(ctx context.Context) (_node *Trigger, err er
 	}
 	if value, ok := _u.mutation.ActionPayload(); ok {
 		_spec.SetField(trigger.FieldActionPayload, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Actions(); ok {
+		_spec.SetField(trigger.FieldActions, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.SubjectDialect(); ok {
 		_spec.SetField(trigger.FieldSubjectDialect, field.TypeString, value)

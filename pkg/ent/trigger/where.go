@@ -190,6 +190,11 @@ func ActionPayload(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldActionPayload, v))
 }
 
+// Actions applies equality check predicate on the "actions" field. It's identical to ActionsEQ.
+func Actions(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldActions, v))
+}
+
 // SubjectDialect applies equality check predicate on the "subject_dialect" field. It's identical to SubjectDialectEQ.
 func SubjectDialect(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldSubjectDialect, v))
@@ -1978,6 +1983,71 @@ func ActionPayloadEqualFold(v string) predicate.Trigger {
 // ActionPayloadContainsFold applies the ContainsFold predicate on the "action_payload" field.
 func ActionPayloadContainsFold(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldContainsFold(FieldActionPayload, v))
+}
+
+// ActionsEQ applies the EQ predicate on the "actions" field.
+func ActionsEQ(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldActions, v))
+}
+
+// ActionsNEQ applies the NEQ predicate on the "actions" field.
+func ActionsNEQ(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNEQ(FieldActions, v))
+}
+
+// ActionsIn applies the In predicate on the "actions" field.
+func ActionsIn(vs ...string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldIn(FieldActions, vs...))
+}
+
+// ActionsNotIn applies the NotIn predicate on the "actions" field.
+func ActionsNotIn(vs ...string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNotIn(FieldActions, vs...))
+}
+
+// ActionsGT applies the GT predicate on the "actions" field.
+func ActionsGT(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGT(FieldActions, v))
+}
+
+// ActionsGTE applies the GTE predicate on the "actions" field.
+func ActionsGTE(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGTE(FieldActions, v))
+}
+
+// ActionsLT applies the LT predicate on the "actions" field.
+func ActionsLT(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLT(FieldActions, v))
+}
+
+// ActionsLTE applies the LTE predicate on the "actions" field.
+func ActionsLTE(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLTE(FieldActions, v))
+}
+
+// ActionsContains applies the Contains predicate on the "actions" field.
+func ActionsContains(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldContains(FieldActions, v))
+}
+
+// ActionsHasPrefix applies the HasPrefix predicate on the "actions" field.
+func ActionsHasPrefix(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldHasPrefix(FieldActions, v))
+}
+
+// ActionsHasSuffix applies the HasSuffix predicate on the "actions" field.
+func ActionsHasSuffix(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldHasSuffix(FieldActions, v))
+}
+
+// ActionsEqualFold applies the EqualFold predicate on the "actions" field.
+func ActionsEqualFold(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEqualFold(FieldActions, v))
+}
+
+// ActionsContainsFold applies the ContainsFold predicate on the "actions" field.
+func ActionsContainsFold(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldContainsFold(FieldActions, v))
 }
 
 // SubjectDialectEQ applies the EQ predicate on the "subject_dialect" field.

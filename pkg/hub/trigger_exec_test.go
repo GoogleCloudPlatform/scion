@@ -590,7 +590,7 @@ func TestTriggerExec_SkipHoldsClaimUntilRunEnds(t *testing.T) {
 				FireID:         tf.ID,
 			},
 			ActionType: store.TriggerActionExec,
-			Payload:    tr.ActionPayload,
+			Payload:    firstTriggerAction(*tr).Payload,
 			Event: &hubfire.FireEvent{
 				ID:         ev.ID,
 				ProjectID:  projectID,
@@ -744,7 +744,7 @@ func TestTriggerExec_MissingCapabilityRefusalAndContextBounds(t *testing.T) {
 				FireID:         tf.ID,
 			},
 			ActionType: store.TriggerActionExec,
-			Payload:    tr.ActionPayload,
+			Payload:    firstTriggerAction(*tr).Payload,
 			Event: &hubfire.FireEvent{
 				ID:         ev.ID,
 				ProjectID:  projectID,
@@ -939,7 +939,7 @@ func TestTriggerExec_FireTimeReplayAndDeliveryIDRefusals(t *testing.T) {
 				FireID:         tf.ID,
 			},
 			ActionType: store.TriggerActionExec,
-			Payload:    tr.ActionPayload,
+			Payload:    firstTriggerAction(*tr).Payload,
 			Event: &hubfire.FireEvent{
 				ID:         ev.ID,
 				ProjectID:  projectID,
@@ -1112,7 +1112,7 @@ func TestTriggerExec_SubjectOptIn_ClaimReleaseOnOverlap_AndFireRateCap(t *testin
 				FireID:         tf.ID,
 			},
 			ActionType: store.TriggerActionExec,
-			Payload:    tr.ActionPayload,
+			Payload:    firstTriggerAction(*tr).Payload,
 			Event: &hubfire.FireEvent{
 				ID:         ev.ID,
 				ProjectID:  projectID,
@@ -1157,7 +1157,7 @@ func TestTriggerExec_SubjectOptIn_ClaimReleaseOnOverlap_AndFireRateCap(t *testin
 	assert.Equal(t, hubfire.FireStatusSkipped, overlapOut.Status)
 	assert.Equal(t, execReasonOverlap, overlapOut.Error)
 	// The unbound claim MUST have been released (kills mutant m11).
-	_, claimErr := f.store.GetActiveTriggerSubjectClaim(ctx, tr.ID, "job-overlap")
+	_, claimErr := f.store.GetActiveTriggerSubjectClaim(ctx, tr.ID, 0, "job-overlap")
 	assert.ErrorIs(t, claimErr, store.ErrNotFound, "unbound skip claim must be released on pre-admission overlap failure")
 
 	// 3. O-d: per-trigger fire-rate cap (> triggerExecMaxFiresPerMinute recent non-skipped fires).
@@ -1244,7 +1244,7 @@ func TestTriggerExec_SubjectOptIn_ClaimReleaseOnOverlap_AndFireRateCap(t *testin
 			FireID:         tfOver.ID,
 		},
 		ActionType: store.TriggerActionExec,
-		Payload:    trCap.ActionPayload,
+		Payload:    firstTriggerAction(*trCap).Payload,
 		Event: &hubfire.FireEvent{
 			ID:         evOver.ID,
 			ProjectID:  projectID,

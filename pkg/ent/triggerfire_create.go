@@ -153,6 +153,20 @@ func (_c *TriggerFireCreate) SetActionType(v string) *TriggerFireCreate {
 	return _c
 }
 
+// SetActionIndex sets the "action_index" field.
+func (_c *TriggerFireCreate) SetActionIndex(v int) *TriggerFireCreate {
+	_c.mutation.SetActionIndex(v)
+	return _c
+}
+
+// SetNillableActionIndex sets the "action_index" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableActionIndex(v *int) *TriggerFireCreate {
+	if v != nil {
+		_c.SetActionIndex(*v)
+	}
+	return _c
+}
+
 // SetStatus sets the "status" field.
 func (_c *TriggerFireCreate) SetStatus(v string) *TriggerFireCreate {
 	_c.mutation.SetStatus(v)
@@ -443,6 +457,10 @@ func (_c *TriggerFireCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *TriggerFireCreate) defaults() {
+	if _, ok := _c.mutation.ActionIndex(); !ok {
+		v := triggerfire.DefaultActionIndex
+		_c.mutation.SetActionIndex(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := triggerfire.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -495,6 +513,9 @@ func (_c *TriggerFireCreate) check() error {
 		if err := triggerfire.ActionTypeValidator(v); err != nil {
 			return &ValidationError{Name: "action_type", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.action_type": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.ActionIndex(); !ok {
+		return &ValidationError{Name: "action_index", err: errors.New(`ent: missing required field "TriggerFire.action_index"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "TriggerFire.status"`)}
@@ -615,6 +636,10 @@ func (_c *TriggerFireCreate) createSpec() (*TriggerFire, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ActionType(); ok {
 		_spec.SetField(triggerfire.FieldActionType, field.TypeString, value)
 		_node.ActionType = value
+	}
+	if value, ok := _c.mutation.ActionIndex(); ok {
+		_spec.SetField(triggerfire.FieldActionIndex, field.TypeInt, value)
+		_node.ActionIndex = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(triggerfire.FieldStatus, field.TypeString, value)
@@ -1167,6 +1192,9 @@ func (u *TriggerFireUpsertOne) UpdateNewValues() *TriggerFireUpsertOne {
 		}
 		if _, exists := u.create.mutation.ActionType(); exists {
 			s.SetIgnore(triggerfire.FieldActionType)
+		}
+		if _, exists := u.create.mutation.ActionIndex(); exists {
+			s.SetIgnore(triggerfire.FieldActionIndex)
 		}
 		if _, exists := u.create.mutation.StartedAt(); exists {
 			s.SetIgnore(triggerfire.FieldStartedAt)
@@ -1850,6 +1878,9 @@ func (u *TriggerFireUpsertBulk) UpdateNewValues() *TriggerFireUpsertBulk {
 			}
 			if _, exists := b.mutation.ActionType(); exists {
 				s.SetIgnore(triggerfire.FieldActionType)
+			}
+			if _, exists := b.mutation.ActionIndex(); exists {
+				s.SetIgnore(triggerfire.FieldActionIndex)
 			}
 			if _, exists := b.mutation.StartedAt(); exists {
 				s.SetIgnore(triggerfire.FieldStartedAt)

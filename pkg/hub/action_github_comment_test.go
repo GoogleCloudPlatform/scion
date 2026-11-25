@@ -410,8 +410,8 @@ func TestGitHubCommentTrigger_E2E_PostRetryRefusalRateLimitStaleAndAudit(t *test
 				DefinitionID:   trRow.ID,
 				FireID:         fireID,
 			},
-			ActionType: trRow.ActionType,
-			Payload:    trRow.ActionPayload,
+			ActionType: firstTriggerAction(*trRow).Type,
+			Payload:    firstTriggerAction(*trRow).Payload,
 			Event: &hubfire.FireEvent{
 				ID:         uuid.NewString(),
 				ProjectID:  f.projectID,
@@ -482,7 +482,7 @@ func TestGitHubCommentTrigger_E2E_PostRetryRefusalRateLimitStaleAndAudit(t *test
 
 	threadReq := mkReq("fire-thread-1", 1, false)
 	threadReq.Authority.DefinitionID = threadRow.ID
-	threadReq.Payload = threadRow.ActionPayload
+	threadReq.Payload = firstTriggerAction(*threadRow).Payload
 	threadReq.Event.Type = "github.pull_request_review_comment.created"
 	threadReq.Event.Attributes["comment_id"] = "9001"
 	outThread := f.srv.fireAction(ctx, threadReq)

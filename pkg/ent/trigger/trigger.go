@@ -68,6 +68,8 @@ const (
 	FieldActionType = "action_type"
 	// FieldActionPayload holds the string denoting the action_payload field in the database.
 	FieldActionPayload = "action_payload"
+	// FieldActions holds the string denoting the actions field in the database.
+	FieldActions = "actions"
 	// FieldSubjectDialect holds the string denoting the subject_dialect field in the database.
 	FieldSubjectDialect = "subject_dialect"
 	// FieldSubjectRule holds the string denoting the subject_rule field in the database.
@@ -134,6 +136,7 @@ var Columns = []string{
 	FieldMatchForm,
 	FieldActionType,
 	FieldActionPayload,
+	FieldActions,
 	FieldSubjectDialect,
 	FieldSubjectRule,
 	FieldSubjectMode,
@@ -185,10 +188,12 @@ var (
 	DefaultMatchRule string
 	// DefaultMatchRules holds the default value on creation for the "match_rules" field.
 	DefaultMatchRules string
-	// ActionTypeValidator is a validator for the "action_type" field. It is called by the builders before save.
-	ActionTypeValidator func(string) error
+	// DefaultActionType holds the default value on creation for the "action_type" field.
+	DefaultActionType string
 	// DefaultActionPayload holds the default value on creation for the "action_payload" field.
 	DefaultActionPayload string
+	// DefaultActions holds the default value on creation for the "actions" field.
+	DefaultActions string
 	// DefaultSubjectDialect holds the default value on creation for the "subject_dialect" field.
 	DefaultSubjectDialect string
 	// DefaultSubjectRule holds the default value on creation for the "subject_rule" field.
@@ -358,6 +363,11 @@ func ByActionType(opts ...sql.OrderTermOption) OrderOption {
 // ByActionPayload orders the results by the action_payload field.
 func ByActionPayload(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldActionPayload, opts...).ToFunc()
+}
+
+// ByActions orders the results by the actions field.
+func ByActions(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldActions, opts...).ToFunc()
 }
 
 // BySubjectDialect orders the results by the subject_dialect field.

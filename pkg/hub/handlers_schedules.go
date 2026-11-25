@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -59,6 +60,9 @@ type CreateScheduleRequest struct {
 	Command        []string `json:"command,omitempty"`
 	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
 	CaptureOutput  string   `json:"captureOutput,omitempty"`
+
+	// Actions is refused on schedules until Stage 4 convergence (action-arrays §1).
+	Actions json.RawMessage `json:"actions,omitempty"`
 }
 
 // UpdateScheduleRequest is the API request for updating a recurring schedule.
@@ -78,6 +82,9 @@ type UpdateScheduleRequest struct {
 	Command        []string `json:"command,omitempty"`
 	TimeoutSeconds *int     `json:"timeoutSeconds,omitempty"`
 	CaptureOutput  *string  `json:"captureOutput,omitempty"`
+
+	// Actions is refused on schedules until Stage 4 convergence (action-arrays §1).
+	Actions json.RawMessage `json:"actions,omitempty"`
 }
 
 // ScheduleListScopeCaller indicates that a list response is filtered to rows
@@ -252,6 +259,10 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	r.Body = http.MaxBytesReader(w, r.Body, scheduleRequestBodyLimit)
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if len(bytes.TrimSpace(req.Actions)) > 0 && !bytes.Equal(bytes.TrimSpace(req.Actions), []byte("null")) {
+		ValidationError(w, "actions is not supported for schedules", map[string]any{"field": "actions"})
 		return
 	}
 
@@ -634,6 +645,10 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	r.Body = http.MaxBytesReader(w, r.Body, scheduleRequestBodyLimit)
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if len(bytes.TrimSpace(req.Actions)) > 0 && !bytes.Equal(bytes.TrimSpace(req.Actions), []byte("null")) {
+		ValidationError(w, "actions is not supported for schedules", map[string]any{"field": "actions"})
 		return
 	}
 	if req.EventType != "" && !s.scheduledEventTypeSupported(req.EventType) {

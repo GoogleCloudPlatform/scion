@@ -60,6 +60,11 @@ func TriggerID(v uuid.UUID) predicate.TriggerSubjectClaim {
 	return predicate.TriggerSubjectClaim(sql.FieldEQ(FieldTriggerID, v))
 }
 
+// ActionIndex applies equality check predicate on the "action_index" field. It's identical to ActionIndexEQ.
+func ActionIndex(v int) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldEQ(FieldActionIndex, v))
+}
+
 // Subject applies equality check predicate on the "subject" field. It's identical to SubjectEQ.
 func Subject(v string) predicate.TriggerSubjectClaim {
 	return predicate.TriggerSubjectClaim(sql.FieldEQ(FieldSubject, v))
@@ -143,6 +148,46 @@ func TriggerIDLT(v uuid.UUID) predicate.TriggerSubjectClaim {
 // TriggerIDLTE applies the LTE predicate on the "trigger_id" field.
 func TriggerIDLTE(v uuid.UUID) predicate.TriggerSubjectClaim {
 	return predicate.TriggerSubjectClaim(sql.FieldLTE(FieldTriggerID, v))
+}
+
+// ActionIndexEQ applies the EQ predicate on the "action_index" field.
+func ActionIndexEQ(v int) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldEQ(FieldActionIndex, v))
+}
+
+// ActionIndexNEQ applies the NEQ predicate on the "action_index" field.
+func ActionIndexNEQ(v int) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldNEQ(FieldActionIndex, v))
+}
+
+// ActionIndexIn applies the In predicate on the "action_index" field.
+func ActionIndexIn(vs ...int) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldIn(FieldActionIndex, vs...))
+}
+
+// ActionIndexNotIn applies the NotIn predicate on the "action_index" field.
+func ActionIndexNotIn(vs ...int) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldNotIn(FieldActionIndex, vs...))
+}
+
+// ActionIndexGT applies the GT predicate on the "action_index" field.
+func ActionIndexGT(v int) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldGT(FieldActionIndex, v))
+}
+
+// ActionIndexGTE applies the GTE predicate on the "action_index" field.
+func ActionIndexGTE(v int) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldGTE(FieldActionIndex, v))
+}
+
+// ActionIndexLT applies the LT predicate on the "action_index" field.
+func ActionIndexLT(v int) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldLT(FieldActionIndex, v))
+}
+
+// ActionIndexLTE applies the LTE predicate on the "action_index" field.
+func ActionIndexLTE(v int) predicate.TriggerSubjectClaim {
+	return predicate.TriggerSubjectClaim(sql.FieldLTE(FieldActionIndex, v))
 }
 
 // SubjectEQ applies the EQ predicate on the "subject" field.

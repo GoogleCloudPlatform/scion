@@ -77,6 +77,7 @@ const (
 	ErrCodeInvalidRequest                   = apierr.ErrCodeInvalidRequest
 	ErrCodeInvalidRoleSet                   = apierr.ErrCodeInvalidRoleSet
 	ErrCodeInvalidRule                      = apierr.ErrCodeInvalidRule
+	ErrCodeInvalidAction                    = apierr.ErrCodeInvalidAction
 	ErrCodeInvalidSignature                 = apierr.ErrCodeInvalidSignature
 	ErrCodeLastOwner                        = apierr.ErrCodeLastOwner
 	ErrCodeMembershipChanged                = apierr.ErrCodeMembershipChanged

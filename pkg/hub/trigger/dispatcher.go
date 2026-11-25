@@ -272,7 +272,25 @@ type ReuseMessageRenderer interface {
 // Returning refused == true records the fire as refused with the sanitized
 // reason (and optional auditReason) and skips claiming, coalescing, and reuse.
 type PreFireRefuser interface {
-	PreFireRefusal(ctx context.Context, tr *store.Trigger, ev *hubfire.FireEvent) (reason, auditReason string, refused bool)
+	PreFireRefusal(ctx context.Context, tr *store.Trigger, actionType string, ev *hubfire.FireEvent) (reason, auditReason string, refused bool)
+}
+
+type triggerActionKey struct {
+	triggerID   string
+	actionIndex int
+}
+
+func firstTriggerActionType(tr *store.Trigger) string {
+	if tr == nil {
+		return "unknown"
+	}
+	if actions, err := Actions(*tr); err == nil && len(actions) > 0 {
+		return actions[0].Type
+	}
+	if t := strings.TrimSpace(tr.ActionType); t != "" {
+		return t
+	}
+	return "unknown"
 }
 
 // DispatcherConfig configures a trigger event Dispatcher.
@@ -617,21 +635,21 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	}
 
 	var (
-		matchCount              int
-		fireCount               int
-		hadAnyFire              bool
-		sourceAuthChecked       bool
-		sourceAuthorized        bool
-		enrichmentChecked       bool
-		webhookEPChecked        bool
-		webhookEP               *store.WebhookEndpoint
-		earliestRetryAt         time.Time
-		stillCoalescingTriggers = make(map[string]bool)
-		baseActBuilt            bool
-		overflowPreviewLoaded   bool
-		overflowPreview         []byte
-		baseAct                 triggerrule.Activation
-		actErr                  error
+		matchCount            int
+		fireCount             int
+		hadAnyFire            bool
+		sourceAuthChecked     bool
+		sourceAuthorized      bool
+		enrichmentChecked     bool
+		webhookEPChecked      bool
+		webhookEP             *store.WebhookEndpoint
+		earliestRetryAt       time.Time
+		stillCoalescingFires  = make(map[triggerActionKey]bool)
+		baseActBuilt          bool
+		overflowPreviewLoaded bool
+		overflowPreview       []byte
+		baseAct               triggerrule.Activation
+		actErr                error
 	)
 
 	for i := range candidates {
@@ -933,168 +951,198 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		}
 		trigRef.FireSubject = fireSubject
 
-		// Stage 3 §4.4: refuse dispatch_agent and github.comment fires for stale
-		// events (attributes.stale == "true") from a replay-protected source.
-		// message rules still receive stale events. Checked before coalescing or
-		// subject reuse so stale deliveries never coalesce, wake, or dispatch.
-		if ActionSubjectToPreFireGuards(tr.ActionType) && ev.Attributes["stale"] == "true" {
-			replayProtected, rpErr := d.isEventSourceReplayProtected(ctx, ev, &webhookEPChecked, &webhookEP)
-			if rpErr != nil {
-				d.logger.Warn("trigger: failed to check source replay protection for stale event",
-					"eventID", ev.ID, "sourceKind", ev.SourceKind, "sourceID", ev.SourceID, "error", rpErr)
-				return durablequeue.Result{Err: errors.New("trigger: stale check failed")}
+		actions, actNormErr := Actions(*tr)
+		if actNormErr != nil {
+			if rErr := d.recordDirectFire(
+				ctx, tr, ev, fireSubject,
+				store.TriggerFireStatusSkipped, ErrFireRuleEvaluationFailed,
+				matchedThrough, decidedDialect, ruleTraceStr, "corrupt_actions",
+			); rErr != nil {
+				return durablequeue.Result{Err: errors.New("trigger: record skipped fire failed")}
 			}
-			if replayProtected {
-				if rErr := d.recordDirectFire(
-					ctx, tr, ev, fireSubject,
-					store.TriggerFireStatusRefused, ErrFireStaleEvent,
-					matchedThrough, decidedDialect, ruleTraceStr, "stale_event",
-				); rErr != nil {
-					return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
-				}
-				continue
-			}
-		}
-
-		// Source-specific pre-fire refusals (e.g. GitHub own-App / unknown-identity
-		// bot guard) run after stale refusal so refusal reasons stay deterministic,
-		// and before claiming, coalescing, deferral, or subject reuse so reuse
-		// deliveries, deferred re-handles, and coalescing promotes cannot bypass them.
-		if refuser, ok := d.core.(PreFireRefuser); ok {
-			if reason, auditReason, refused := refuser.PreFireRefusal(ctx, tr, &baseEvent); refused {
-				if rErr := d.recordDirectFire(
-					ctx, tr, ev, fireSubject,
-					store.TriggerFireStatusRefused, reason,
-					matchedThrough, decidedDialect, ruleTraceStr, auditReason,
-				); rErr != nil {
-					return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
-				}
-				continue
-			}
-		}
-
-		if lease != nil {
-			held, lErr := lease.Renew(ctx)
-			if lErr != nil {
-				return durablequeue.Result{Err: errors.New("trigger: renew queue lease failed")}
-			}
-			if !held {
-				return durablequeue.Result{Err: errors.New("trigger: queue lease lost")}
-			}
-		}
-		claimNow := d.now().UTC()
-		fire := store.TriggerFire{
-			ID:                   uuid.NewString(),
-			ProjectID:            tr.ProjectID,
-			TriggerID:            tr.ID,
-			EventID:              ev.ID,
-			Subject:              fireSubject,
-			ActionType:           tr.ActionType,
-			Status:               store.TriggerFireStatusFiring,
-			MatchedThrough:       matchedThrough,
-			DecidedDialect:       decidedDialect,
-			RuleTrace:            ruleTraceStr,
-			ExecutorKind:         ExecutorKindTriggerDrainer,
-			ExecutorID:           ExecutorIDPrefixTriggerEvent + ev.ID,
-			LeaseUntil:           claimNow.Add(FireLeaseHorizon),
-			StartedAt:            claimNow,
-			CreatedAt:            claimNow,
-			InitiatorAttribution: tr.InitiatorAttribution,
+			continue
 		}
 
 		var (
-			claimed     bool
-			promoted    bool
-			skippedBusy bool
-			existing    *store.TriggerFire
-			cErr        error
+			trigRecordedCount int
+			trigAggStatus     string
+			trigAggErr        string
+			trigAggTime       time.Time
 		)
-		if tr.CoalesceWindowSeconds > 0 {
-			notBefore := claimNow.Add(time.Duration(tr.CoalesceWindowSeconds) * time.Second)
-			var superseded []store.TriggerFire
-			claimed, promoted, superseded, existing, cErr = d.store.ClaimTriggerFireCoalescing(ctx, &fire, ErrFireCoalesced, claimNow, notBefore)
-			if len(superseded) > 0 {
-				writeCtx, cancelWrite := storeWriteContext(ctx)
-				for _, sf := range superseded {
-					d.recordFireMetric(tr.ActionType, store.TriggerFireStatusSkipped, ErrFireCoalesced)
-					if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, claimNow, store.TriggerFireStatusSkipped, ErrFireCoalesced); rErr != nil {
-						d.logger.Warn("trigger: failed to update superseded coalesced fire counters",
-							"triggerID", tr.ID, "fireID", sf.ID, "error", rErr)
-					}
-					if d.fireAudit != nil {
-						d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
-							ProjectID:      tr.ProjectID,
-							TriggerID:      tr.ID,
-							EventID:        sf.EventID,
-							FireID:         sf.ID,
-							ActionType:     tr.ActionType,
-							Status:         store.TriggerFireStatusSkipped,
-							MatchedThrough: sf.MatchedThrough,
-							DecidedDialect: sf.DecidedDialect,
-							Reason:         FireSkipReasonCoalesced,
-						})
-					}
+		recordTrigOutcome := func(status, errMsg string, at time.Time) {
+			trigRecordedCount++
+			if at.After(trigAggTime) {
+				trigAggTime = at
+			}
+			isErr := func(s string) bool {
+				return s == store.TriggerFireStatusFailed ||
+					s == store.TriggerFireStatusRefused ||
+					s == store.TriggerFireStatusExpired
+			}
+			switch {
+			case trigAggStatus == "":
+				trigAggStatus = status
+				trigAggErr = errMsg
+			case isErr(status):
+				if !isErr(trigAggStatus) {
+					trigAggStatus = status
+					trigAggErr = errMsg
 				}
-				cancelWrite()
+			case status == store.TriggerFireStatusFired && !isErr(trigAggStatus):
+				trigAggStatus = status
+				trigAggErr = ""
 			}
-			if cErr != nil {
-				d.logger.Warn("trigger: failed to claim coalescing trigger fire",
-					"eventID", ev.ID, "triggerID", tr.ID, "error", cErr)
-				return durablequeue.Result{Err: errors.New("trigger: claim fire failed")}
+		}
+		flushTrigCounters := func() {
+			if trigRecordedCount == 0 {
+				return
 			}
-			if !claimed {
-				if existing != nil && (existing.Status == store.TriggerFireStatusCoalescing || existing.Status == store.TriggerFireStatusDeferred) {
-					stillCoalescingTriggers[tr.ID] = true
-					retryAt := notBefore
-					if existing.NotBefore != nil && !existing.NotBefore.IsZero() {
-						retryAt = existing.NotBefore.UTC()
-					}
-					if earliestRetryAt.IsZero() || retryAt.Before(earliestRetryAt) {
-						earliestRetryAt = retryAt
-					}
-				} else if existing != nil && existing.Status == store.TriggerFireStatusFired {
-					fireCount++
+			writeCtx, cancelWrite := storeWriteContext(ctx)
+			if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, trigAggTime, trigAggStatus, trigAggErr); rErr != nil {
+				d.logger.Warn("trigger: failed to update trigger fire counters",
+					"triggerID", tr.ID, "eventID", ev.ID, "error", rErr)
+			}
+			cancelWrite()
+		}
+
+		for actionIdx, act := range actions {
+			if ctx.Err() != nil {
+				flushTrigCounters()
+				return durablequeue.Result{Err: errors.New("trigger: event handler canceled")}
+			}
+
+			actionTrigRef := trigRef
+			actionTrigRef.ActionIndex = actionIdx
+
+			// Stage 3 §4.4: refuse dispatch_agent and github.comment fires for stale
+			// events (attributes.stale == "true") from a replay-protected source.
+			// message actions still receive stale events. Checked per action before
+			// coalescing or subject reuse so stale deliveries never coalesce, wake,
+			// or dispatch, while passive sibling actions still run.
+			if ActionSubjectToPreFireGuards(act.Type) && ev.Attributes["stale"] == "true" {
+				replayProtected, rpErr := d.isEventSourceReplayProtected(ctx, ev, &webhookEPChecked, &webhookEP)
+				if rpErr != nil {
+					flushTrigCounters()
+					d.logger.Warn("trigger: failed to check source replay protection for stale event",
+						"eventID", ev.ID, "sourceKind", ev.SourceKind, "sourceID", ev.SourceID, "error", rpErr)
+					return durablequeue.Result{Err: errors.New("trigger: stale check failed")}
 				}
-				continue
-			}
-			if !promoted {
-				stillCoalescingTriggers[tr.ID] = true
-				if earliestRetryAt.IsZero() || notBefore.Before(earliestRetryAt) {
-					earliestRetryAt = notBefore
+				if replayProtected {
+					claimedDirect, rErr := d.recordActionDirectFire(
+						ctx, tr, ev, actionIdx, act.Type, fireSubject,
+						store.TriggerFireStatusRefused, ErrFireStaleEvent,
+						matchedThrough, decidedDialect, ruleTraceStr, "stale_event", false,
+					)
+					if rErr != nil {
+						flushTrigCounters()
+						return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
+					}
+					if claimedDirect {
+						recordTrigOutcome(store.TriggerFireStatusRefused, ErrFireStaleEvent, d.now().UTC())
+					}
+					continue
 				}
-				continue
 			}
-		} else {
-			// Stage 1 PR 4 fire-level skip applies to message/github.comment triggers;
-			// dispatch_agent and exec triggers with subject mode "skip" use
-			// persistent subject claims (§5.6, P8) inside their action Fire so the
-			// claim outlives the firing row for the lifetime of the agent or exec run.
-			if tr.SubjectMode == store.TriggerSubjectModeSkip &&
-				tr.ActionType != store.TriggerActionDispatchAgent &&
-				tr.ActionType != store.TriggerActionExec {
-				claimed, skippedBusy, existing, cErr = d.store.ClaimTriggerFireSubjectSkip(ctx, &fire, ErrFireSubjectBusy, claimNow)
-			} else {
-				claimed, existing, cErr = d.store.ClaimTriggerFire(ctx, &fire)
+
+			// Source-specific pre-fire refusals (e.g. GitHub own-App / unknown-identity
+			// bot guard) run per action after stale refusal so refusal reasons stay
+			// deterministic, and before claiming, coalescing, deferral, or subject reuse.
+			if refuser, ok := d.core.(PreFireRefuser); ok {
+				if reason, auditReason, refused := refuser.PreFireRefusal(ctx, tr, act.Type, &baseEvent); refused {
+					claimedDirect, rErr := d.recordActionDirectFire(
+						ctx, tr, ev, actionIdx, act.Type, fireSubject,
+						store.TriggerFireStatusRefused, reason,
+						matchedThrough, decidedDialect, ruleTraceStr, auditReason, false,
+					)
+					if rErr != nil {
+						flushTrigCounters()
+						return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
+					}
+					if claimedDirect {
+						recordTrigOutcome(store.TriggerFireStatusRefused, reason, d.now().UTC())
+					}
+					continue
+				}
 			}
-			if cErr != nil {
-				d.logger.Warn("trigger: failed to claim trigger fire",
-					"eventID", ev.ID, "triggerID", tr.ID, "error", cErr)
-				return durablequeue.Result{Err: errors.New("trigger: claim fire failed")}
+
+			if lease != nil {
+				held, lErr := lease.Renew(ctx)
+				if lErr != nil {
+					flushTrigCounters()
+					return durablequeue.Result{Err: errors.New("trigger: renew queue lease failed")}
+				}
+				if !held {
+					flushTrigCounters()
+					return durablequeue.Result{Err: errors.New("trigger: queue lease lost")}
+				}
 			}
-			if !claimed && isCoalescingOrReapedFire(existing) {
-				// Existing coalescing, deferred, or reaped-pending row while
-				// coalesce_window is 0 (e.g. edited to 0 mid-window or reuse
-				// deferral re-handle): route through the promote/revive path.
-				claimed, promoted, _, existing, cErr = d.store.ClaimTriggerFireCoalescing(ctx, &fire, ErrFireCoalesced, claimNow, claimNow)
+			claimNow := d.now().UTC()
+			fire := store.TriggerFire{
+				ID:                   uuid.NewString(),
+				ProjectID:            tr.ProjectID,
+				TriggerID:            tr.ID,
+				EventID:              ev.ID,
+				Subject:              fireSubject,
+				ActionType:           act.Type,
+				ActionIndex:          actionIdx,
+				Status:               store.TriggerFireStatusFiring,
+				MatchedThrough:       matchedThrough,
+				DecidedDialect:       decidedDialect,
+				RuleTrace:            ruleTraceStr,
+				ExecutorKind:         ExecutorKindTriggerDrainer,
+				ExecutorID:           ExecutorIDPrefixTriggerEvent + ev.ID,
+				LeaseUntil:           claimNow.Add(FireLeaseHorizon),
+				StartedAt:            claimNow,
+				CreatedAt:            claimNow,
+				InitiatorAttribution: tr.InitiatorAttribution,
+			}
+
+			var (
+				claimed     bool
+				promoted    bool
+				skippedBusy bool
+				existing    *store.TriggerFire
+				cErr        error
+			)
+			if tr.CoalesceWindowSeconds > 0 {
+				notBefore := claimNow.Add(time.Duration(tr.CoalesceWindowSeconds) * time.Second)
+				var superseded []store.TriggerFire
+				claimed, promoted, superseded, existing, cErr = d.store.ClaimTriggerFireCoalescing(ctx, &fire, ErrFireCoalesced, claimNow, notBefore)
+				if len(superseded) > 0 {
+					writeCtx, cancelWrite := storeWriteContext(ctx)
+					for _, sf := range superseded {
+						d.recordFireMetric(sf.ActionType, store.TriggerFireStatusSkipped, ErrFireCoalesced)
+						if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, claimNow, store.TriggerFireStatusSkipped, ErrFireCoalesced); rErr != nil {
+							d.logger.Warn("trigger: failed to update superseded coalesced fire counters",
+								"triggerID", tr.ID, "fireID", sf.ID, "error", rErr)
+						}
+						if d.fireAudit != nil {
+							d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
+								ProjectID:      tr.ProjectID,
+								TriggerID:      tr.ID,
+								EventID:        sf.EventID,
+								FireID:         sf.ID,
+								ActionIndex:    sf.ActionIndex,
+								ActionType:     sf.ActionType,
+								Status:         store.TriggerFireStatusSkipped,
+								MatchedThrough: sf.MatchedThrough,
+								DecidedDialect: sf.DecidedDialect,
+								Reason:         FireSkipReasonCoalesced,
+							})
+						}
+					}
+					cancelWrite()
+				}
 				if cErr != nil {
-					d.logger.Warn("trigger: failed to promote pending trigger fire",
-						"eventID", ev.ID, "triggerID", tr.ID, "error", cErr)
+					flushTrigCounters()
+					d.logger.Warn("trigger: failed to claim coalescing trigger fire",
+						"eventID", ev.ID, "triggerID", tr.ID, "actionIndex", actionIdx, "error", cErr)
 					return durablequeue.Result{Err: errors.New("trigger: claim fire failed")}
 				}
 				if !claimed {
 					if existing != nil && (existing.Status == store.TriggerFireStatusCoalescing || existing.Status == store.TriggerFireStatusDeferred) {
-						stillCoalescingTriggers[tr.ID] = true
-						retryAt := claimNow
+						stillCoalescingFires[triggerActionKey{tr.ID, actionIdx}] = true
+						retryAt := notBefore
 						if existing.NotBefore != nil && !existing.NotBefore.IsZero() {
 							retryAt = existing.NotBefore.UTC()
 						}
@@ -1107,27 +1155,268 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					continue
 				}
 				if !promoted {
-					stillCoalescingTriggers[tr.ID] = true
-					if earliestRetryAt.IsZero() || claimNow.Before(earliestRetryAt) {
-						earliestRetryAt = claimNow
+					stillCoalescingFires[triggerActionKey{tr.ID, actionIdx}] = true
+					if earliestRetryAt.IsZero() || notBefore.Before(earliestRetryAt) {
+						earliestRetryAt = notBefore
 					}
 					continue
 				}
-			} else if !claimed {
-				// Display-only counter: on a lost-lease re-handle, if an earlier
-				// attempt's claimed row is still in status "firing" (or transitions to
-				// "fired" after this check), fire_count on trigger_events can
-				// undercount; trigger_fires rows remain the authoritative fire log.
-				if existing != nil && existing.Status == store.TriggerFireStatusFired {
-					fireCount++
+			} else {
+				// Stage 1 PR 4 fire-level skip applies to message/github.comment actions;
+				// dispatch_agent and exec actions with subject mode "skip" use
+				// persistent subject claims (§5.6, P8) inside their action Fire so the
+				// claim outlives the firing row for the lifetime of the agent or exec run.
+				if tr.SubjectMode == store.TriggerSubjectModeSkip &&
+					act.Type != store.TriggerActionDispatchAgent &&
+					act.Type != store.TriggerActionExec {
+					claimed, skippedBusy, existing, cErr = d.store.ClaimTriggerFireSubjectSkip(ctx, &fire, ErrFireSubjectBusy, claimNow)
+				} else {
+					claimed, existing, cErr = d.store.ClaimTriggerFire(ctx, &fire)
+				}
+				if cErr != nil {
+					flushTrigCounters()
+					d.logger.Warn("trigger: failed to claim trigger fire",
+						"eventID", ev.ID, "triggerID", tr.ID, "actionIndex", actionIdx, "error", cErr)
+					return durablequeue.Result{Err: errors.New("trigger: claim fire failed")}
+				}
+				if !claimed && isCoalescingOrReapedFire(existing) {
+					// Existing coalescing, deferred, or reaped-pending row while
+					// coalesce_window is 0 (e.g. edited to 0 mid-window or reuse
+					// deferral re-handle): route through the promote/revive path.
+					claimed, promoted, _, existing, cErr = d.store.ClaimTriggerFireCoalescing(ctx, &fire, ErrFireCoalesced, claimNow, claimNow)
+					if cErr != nil {
+						flushTrigCounters()
+						d.logger.Warn("trigger: failed to promote pending trigger fire",
+							"eventID", ev.ID, "triggerID", tr.ID, "actionIndex", actionIdx, "error", cErr)
+						return durablequeue.Result{Err: errors.New("trigger: claim fire failed")}
+					}
+					if !claimed {
+						if existing != nil && (existing.Status == store.TriggerFireStatusCoalescing || existing.Status == store.TriggerFireStatusDeferred) {
+							stillCoalescingFires[triggerActionKey{tr.ID, actionIdx}] = true
+							retryAt := claimNow
+							if existing.NotBefore != nil && !existing.NotBefore.IsZero() {
+								retryAt = existing.NotBefore.UTC()
+							}
+							if earliestRetryAt.IsZero() || retryAt.Before(earliestRetryAt) {
+								earliestRetryAt = retryAt
+							}
+						} else if existing != nil && existing.Status == store.TriggerFireStatusFired {
+							fireCount++
+						}
+						continue
+					}
+					if !promoted {
+						stillCoalescingFires[triggerActionKey{tr.ID, actionIdx}] = true
+						if earliestRetryAt.IsZero() || claimNow.Before(earliestRetryAt) {
+							earliestRetryAt = claimNow
+						}
+						continue
+					}
+				} else if !claimed {
+					// Display-only counter: on a lost-lease re-handle, if an earlier
+					// attempt's claimed row is still in status "firing" (or transitions to
+					// "fired" after this check), fire_count on trigger_events can
+					// undercount; trigger_fires rows remain the authoritative fire log.
+					if existing != nil && existing.Status == store.TriggerFireStatusFired {
+						fireCount++
+					}
+					continue
+				}
+				if skippedBusy {
+					recordTrigOutcome(store.TriggerFireStatusSkipped, ErrFireSubjectBusy, claimNow)
+					if d.fireAudit != nil {
+						writeCtx, cancelWrite := storeWriteContext(ctx)
+						d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
+							ProjectID:      tr.ProjectID,
+							TriggerID:      tr.ID,
+							EventID:        ev.ID,
+							FireID:         fire.ID,
+							ActionIndex:    actionIdx,
+							ActionType:     act.Type,
+							Status:         store.TriggerFireStatusSkipped,
+							MatchedThrough: fire.MatchedThrough,
+							DecidedDialect: fire.DecidedDialect,
+						})
+						cancelWrite()
+					}
+					continue
+				}
+			}
+
+			if ev.PayloadRef != "" && !overflowPreviewLoaded {
+				overflowPreviewLoaded = true
+				if d.storageFn != nil {
+					if stor := d.storageFn(); stor != nil {
+						prev, pErr := ReadOverflowPayloadPreview(ctx, stor, ev.ProjectID, ev.PayloadRef, DefaultOverflowDownloadTimeout)
+						if pErr != nil {
+							d.logger.Warn("trigger: failed to read overflow payload preview for delivery",
+								"eventID", ev.ID, "payloadRef", ev.PayloadRef, "error", pErr)
+						} else {
+							overflowPreview = prev
+						}
+					}
+				}
+			}
+
+			tracker := newTriggerFireTracker(ctx, d.core)
+			req := hubfire.FireRequest{
+				ProjectID: tr.ProjectID,
+				Authority: hubfire.RecordedAuthority{
+					Attribution:    tr.InitiatorAttribution,
+					Ceiling:        tr.AuthorityCeiling,
+					DefinitionKind: hubfire.DefinitionKindTrigger,
+					DefinitionID:   tr.ID,
+					FireID:         fire.ID,
+				},
+				ActionType: act.Type,
+				Payload:    act.Payload,
+				Event: &hubfire.FireEvent{
+					ID:             ev.ID,
+					ProjectID:      ev.ProjectID,
+					SourceKind:     ev.SourceKind,
+					SourceID:       ev.SourceID,
+					Type:           ev.Type,
+					Subject:        ev.Subject,
+					OccurredAt:     ev.OccurredAt,
+					ReceivedAt:     ev.ReceivedAt,
+					Attributes:     maps.Clone(ev.Attributes),
+					Lists:          cloneStringListMap(ev.Lists),
+					Payload:        rawPayload,
+					PayloadPreview: overflowPreview,
+					PayloadBytes:   ev.PayloadBytes,
+					PayloadRef:     ev.PayloadRef,
+					Trigger:        &actionTrigRef,
+				},
+				Executor: hubfire.ExecutorContext{
+					Kind: ExecutorKindTriggerDrainer,
+					ID:   ExecutorIDPrefixTriggerEvent + ev.ID,
+				},
+				FireAt:   ev.ReceivedAt,
+				Attempts: item.Attempts,
+				Tracked:  tracker,
+			}
+
+			fireCtx, cancelFire := context.WithTimeout(ctx, d.perFireTimeout)
+			var out hubfire.FireOutcome
+			switch tr.SubjectMode {
+			case store.TriggerSubjectModeSkip:
+				// Stage 3 §6.5 & action-arrays §3.2: single liveness check across
+				// firing|coalescing rows and live subject claims per (trigger, actionIdx, subject);
+				// dispatch_agent's atomic Claim inside Fire remains the backstop
+				// for concurrent replicas.
+				if act.Type == store.TriggerActionDispatchAgent || promoted {
+					includeFiring := act.Type != store.TriggerActionDispatchAgent
+					live, _, lErr := d.subjectLive(fireCtx, tr.ID, actionIdx, fireSubject, fire.ID, includeFiring)
+					if lErr != nil {
+						d.logger.Warn("trigger: subjectLive check failed",
+							"triggerID", tr.ID, "actionIndex", actionIdx, "fireID", fire.ID, "error", lErr)
+						out = hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "fire failed"}
+					} else if live {
+						out = hubfire.FireOutcome{Status: hubfire.FireStatusSkipped, Error: ErrFireSubjectBusy}
+					} else {
+						out = d.core.Fire(fireCtx, req)
+					}
+				} else {
+					out = d.core.Fire(fireCtx, req)
+				}
+
+			case store.TriggerSubjectModeReuse:
+				// Stage 3 §6.2 (rev 1.16), §6.5 & action-arrays §3.2: reuse (claim
+				// lookup, deferral, wake delivery) applies only to dispatch_agent
+				// at its own action_index; a reuse on a dispatch action never blocks
+				// a message or other sibling action.
+				if act.Type != store.TriggerActionDispatchAgent {
+					out = d.core.Fire(fireCtx, req)
+					break
+				}
+				_, claim, lErr := d.subjectLive(fireCtx, tr.ID, actionIdx, fireSubject, fire.ID, false)
+				switch {
+				case lErr != nil:
+					d.logger.Warn("trigger: subjectLive check failed for reuse",
+						"triggerID", tr.ID, "actionIndex", actionIdx, "fireID", fire.ID, "error", lErr)
+					out = hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "fire failed"}
+				case claim != nil && claim.AgentID != "":
+					if reuseTargetLaunchInFlight(claim.Agent, claimNow) {
+						firstDeferred := claimNow
+						if fire.DeferredAt != nil && !fire.DeferredAt.IsZero() {
+							firstDeferred = fire.DeferredAt.UTC()
+							if claimNow.Sub(firstDeferred) >= ReuseDeferTimeout {
+								out = hubfire.FireOutcome{
+									Status: hubfire.FireStatusFailed,
+									Error:  ErrFireTargetAgentStillStarting,
+								}
+								break
+							}
+						}
+						retryAt := claimNow.Add(ReuseDeferBackoff)
+						if deadline := firstDeferred.Add(ReuseDeferTimeout); retryAt.After(deadline) {
+							retryAt = deadline
+						}
+						writeCtx, cancelWrite := storeWriteContext(ctx)
+						deferred, dErr := d.store.DeferTriggerFire(writeCtx, fire.ID, firstDeferred, retryAt, retryAt.Add(FireLeaseHorizon))
+						cancelWrite()
+						if dErr != nil {
+							cancelFire()
+							flushTrigCounters()
+							d.logger.Warn("trigger: failed to defer reuse fire for launching agent",
+								"triggerID", tr.ID, "actionIndex", actionIdx, "fireID", fire.ID, "agentID", claim.AgentID, "error", dErr)
+							return durablequeue.Result{Err: errors.New("trigger: defer fire failed")}
+						}
+						if deferred {
+							stillCoalescingFires[triggerActionKey{tr.ID, actionIdx}] = true
+							if earliestRetryAt.IsZero() || retryAt.Before(earliestRetryAt) {
+								earliestRetryAt = retryAt
+							}
+						}
+						cancelFire()
+						continue
+					}
+					out = d.fireReuseMessage(fireCtx, req, claim.AgentID)
+					if out.TargetAgentID == "" {
+						out.TargetAgentID = claim.AgentID
+					}
+				case claim != nil && claim.AgentID == "":
+					out = hubfire.FireOutcome{
+						Status: hubfire.FireStatusSkipped,
+						Error:  ErrFireSubjectDispatchInProgress,
+					}
+				default:
+					out = d.core.Fire(fireCtx, req)
+				}
+
+			default:
+				out = d.core.Fire(fireCtx, req)
+			}
+			cancelFire()
+
+			statusStr := normalizeFireStatus(out.Status, out.Error)
+			finishedAt := d.now().UTC()
+
+			if out.Status == hubfire.FireStatusWaiting {
+				writeCtx, cancelWrite := storeWriteContext(ctx)
+				parkErr := d.parkWaitingFire(writeCtx, tracker, tr, ev, &fire, act, out, finishedAt)
+				cancelWrite()
+				if parkErr != nil {
+					flushTrigCounters()
+					d.logger.Warn("trigger: failed to park waiting trigger fire",
+						"fireID", fire.ID, "eventID", ev.ID, "triggerID", tr.ID, "actionIndex", actionIdx, "error", parkErr)
+					return durablequeue.Result{Err: errors.New("trigger: park waiting fire failed")}
 				}
 				continue
 			}
-			if skippedBusy {
-				writeCtx, cancelWrite := storeWriteContext(ctx)
-				if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, claimNow, store.TriggerFireStatusSkipped, ErrFireSubjectBusy); rErr != nil {
-					d.logger.Warn("trigger: failed to update trigger fire counters",
-						"triggerID", tr.ID, "fireID", fire.ID, "error", rErr)
+
+			writeCtx, cancelWrite := storeWriteContext(ctx)
+			if out.Detached {
+				// Detached actions (such as admitted exec runs) own their
+				// trigger_fires outcome CAS and trigger counters in the same
+				// transaction as the run record (em-2 invariant (b)); never
+				// overwrite trigger_fires here, only start the tracker handoff.
+				d.recordFireMetric(act.Type, statusStr, out.Error)
+				if statusStr == store.TriggerFireStatusFired {
+					fireCount++
+				}
+				if out.AfterRecord != nil {
+					out.AfterRecord(writeCtx)
 				}
 				if d.fireAudit != nil {
 					d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
@@ -1135,8 +1424,9 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 						TriggerID:      tr.ID,
 						EventID:        ev.ID,
 						FireID:         fire.ID,
-						ActionType:     tr.ActionType,
-						Status:         store.TriggerFireStatusSkipped,
+						ActionIndex:    actionIdx,
+						ActionType:     act.Type,
+						Status:         statusStr,
 						MatchedThrough: fire.MatchedThrough,
 						DecidedDialect: fire.DecidedDialect,
 					})
@@ -1144,249 +1434,52 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				cancelWrite()
 				continue
 			}
-		}
-
-		if ev.PayloadRef != "" && !overflowPreviewLoaded {
-			overflowPreviewLoaded = true
-			if d.storageFn != nil {
-				if stor := d.storageFn(); stor != nil {
-					prev, pErr := ReadOverflowPayloadPreview(ctx, stor, ev.ProjectID, ev.PayloadRef, DefaultOverflowDownloadTimeout)
-					if pErr != nil {
-						d.logger.Warn("trigger: failed to read overflow payload preview for delivery",
-							"eventID", ev.ID, "payloadRef", ev.PayloadRef, "error", pErr)
-					} else {
-						overflowPreview = prev
-					}
+			var (
+				finished  bool
+				finishErr error
+			)
+			tracker.record(func() {
+				finished, finishErr = d.store.FinishTriggerFire(writeCtx, fire.ID, statusStr, out.ResultRef, out.TargetAgentID, out.Error, finishedAt)
+			})
+			if finishErr != nil {
+				cancelWrite()
+				flushTrigCounters()
+				d.logger.Warn("trigger: failed to finish trigger fire",
+					"fireID", fire.ID, "eventID", ev.ID, "triggerID", tr.ID, "actionIndex", actionIdx, "error", finishErr)
+				return durablequeue.Result{Err: errors.New("trigger: finish fire failed")}
+			}
+			if finished {
+				d.recordFireMetric(act.Type, statusStr, out.Error)
+				if statusStr == store.TriggerFireStatusFired {
+					fireCount++
 				}
-			}
-		}
-
-		tracker := newTriggerFireTracker(ctx, d.core)
-		req := hubfire.FireRequest{
-			ProjectID: tr.ProjectID,
-			Authority: hubfire.RecordedAuthority{
-				Attribution:    tr.InitiatorAttribution,
-				Ceiling:        tr.AuthorityCeiling,
-				DefinitionKind: hubfire.DefinitionKindTrigger,
-				DefinitionID:   tr.ID,
-				FireID:         fire.ID,
-			},
-			ActionType: tr.ActionType,
-			Payload:    tr.ActionPayload,
-			Event: &hubfire.FireEvent{
-				ID:             ev.ID,
-				ProjectID:      ev.ProjectID,
-				SourceKind:     ev.SourceKind,
-				SourceID:       ev.SourceID,
-				Type:           ev.Type,
-				Subject:        ev.Subject,
-				OccurredAt:     ev.OccurredAt,
-				ReceivedAt:     ev.ReceivedAt,
-				Attributes:     maps.Clone(ev.Attributes),
-				Lists:          cloneStringListMap(ev.Lists),
-				Payload:        rawPayload,
-				PayloadPreview: overflowPreview,
-				PayloadBytes:   ev.PayloadBytes,
-				PayloadRef:     ev.PayloadRef,
-				Trigger:        &trigRef,
-			},
-			Executor: hubfire.ExecutorContext{
-				Kind: ExecutorKindTriggerDrainer,
-				ID:   ExecutorIDPrefixTriggerEvent + ev.ID,
-			},
-			FireAt:   ev.ReceivedAt,
-			Attempts: item.Attempts,
-			Tracked:  tracker,
-		}
-
-		fireCtx, cancelFire := context.WithTimeout(ctx, d.perFireTimeout)
-		var out hubfire.FireOutcome
-		switch tr.SubjectMode {
-		case store.TriggerSubjectModeSkip:
-			// Stage 3 §6.5: single liveness check across firing|coalescing rows
-			// and live subject claims; dispatch_agent's atomic Claim inside Fire
-			// remains the backstop for concurrent replicas (so dispatch_agent
-			// excludes sibling firing rows here to avoid mutual skip).
-			if tr.ActionType == store.TriggerActionDispatchAgent || promoted {
-				includeFiring := tr.ActionType != store.TriggerActionDispatchAgent
-				live, _, lErr := d.subjectLive(fireCtx, tr.ID, fireSubject, fire.ID, includeFiring)
-				if lErr != nil {
-					d.logger.Warn("trigger: subjectLive check failed",
-						"triggerID", tr.ID, "fireID", fire.ID, "error", lErr)
-					out = hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "fire failed"}
-				} else if live {
-					out = hubfire.FireOutcome{Status: hubfire.FireStatusSkipped, Error: ErrFireSubjectBusy}
-				} else {
-					out = d.core.Fire(fireCtx, req)
+				if out.AfterRecord != nil {
+					out.AfterRecord(writeCtx)
 				}
-			} else {
-				out = d.core.Fire(fireCtx, req)
-			}
-
-		case store.TriggerSubjectModeReuse:
-			// Stage 3 §6.2 (rev 1.16) & §6.5: reuse (claim lookup, deferral, wake
-			// delivery) applies only to dispatch_agent; non-dispatch actions
-			// (message, github.comment) run their own action even when a live
-			// subject claim remains from an earlier dispatch_agent configuration.
-			if tr.ActionType != store.TriggerActionDispatchAgent {
-				out = d.core.Fire(fireCtx, req)
-				break
-			}
-			// Look up live subject claim via subjectLive.
-			_, claim, lErr := d.subjectLive(fireCtx, tr.ID, fireSubject, fire.ID, false)
-			switch {
-			case lErr != nil:
-				d.logger.Warn("trigger: subjectLive check failed for reuse",
-					"triggerID", tr.ID, "fireID", fire.ID, "error", lErr)
-				out = hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "fire failed"}
-			case claim != nil && claim.AgentID != "":
-				// Stage 3 §6.2 rev 1.16: if the claimed agent's launch is still
-				// in flight or incomplete (aligned with wake_dm.go / launchStartRefusal),
-				// wake delivery would be refused; defer the fire non-terminally via
-				// RetryAt, bounded at 10 min from the first deferral timestamp
-				// (fire.DeferredAt), not from StartedAt (which includes coalesce wait).
-				// claim.Agent is populated by SubjectClaims.Live from the GetAgent
-				// lookup it already performs (no second query or type assertion).
-				if reuseTargetLaunchInFlight(claim.Agent, claimNow) {
-					firstDeferred := claimNow
-					if fire.DeferredAt != nil && !fire.DeferredAt.IsZero() {
-						firstDeferred = fire.DeferredAt.UTC()
-						if claimNow.Sub(firstDeferred) >= ReuseDeferTimeout {
-							out = hubfire.FireOutcome{
-								Status: hubfire.FireStatusFailed,
-								Error:  ErrFireTargetAgentStillStarting,
-							}
-							break
-						}
-					}
-					retryAt := claimNow.Add(ReuseDeferBackoff)
-					if deadline := firstDeferred.Add(ReuseDeferTimeout); retryAt.After(deadline) {
-						retryAt = deadline
-					}
-					writeCtx, cancelWrite := storeWriteContext(ctx)
-					deferred, dErr := d.store.DeferTriggerFire(writeCtx, fire.ID, firstDeferred, retryAt, retryAt.Add(FireLeaseHorizon))
-					cancelWrite()
-					if dErr != nil {
-						cancelFire()
-						d.logger.Warn("trigger: failed to defer reuse fire for launching agent",
-							"triggerID", tr.ID, "fireID", fire.ID, "agentID", claim.AgentID, "error", dErr)
-						return durablequeue.Result{Err: errors.New("trigger: defer fire failed")}
-					}
-					if deferred {
-						stillCoalescingTriggers[tr.ID] = true
-						if earliestRetryAt.IsZero() || retryAt.Before(earliestRetryAt) {
-							earliestRetryAt = retryAt
-						}
-					}
-					cancelFire()
-					continue
+				recordTrigOutcome(statusStr, out.Error, finishedAt)
+				if d.fireAudit != nil {
+					d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
+						ProjectID:      tr.ProjectID,
+						TriggerID:      tr.ID,
+						EventID:        ev.ID,
+						FireID:         fire.ID,
+						ActionIndex:    actionIdx,
+						ActionType:     act.Type,
+						Status:         statusStr,
+						MatchedThrough: fire.MatchedThrough,
+						DecidedDialect: fire.DecidedDialect,
+					})
 				}
-				out = d.fireReuseMessage(fireCtx, req, claim.AgentID)
-				if out.TargetAgentID == "" {
-					out.TargetAgentID = claim.AgentID
-				}
-			case claim != nil && claim.AgentID == "":
-				out = hubfire.FireOutcome{
-					Status: hubfire.FireStatusSkipped,
-					Error:  ErrFireSubjectDispatchInProgress,
-				}
-			default:
-				out = d.core.Fire(fireCtx, req)
-			}
-
-		default:
-			out = d.core.Fire(fireCtx, req)
-		}
-		cancelFire()
-
-		statusStr := normalizeFireStatus(out.Status, out.Error)
-		finishedAt := d.now().UTC()
-
-		if out.Status == hubfire.FireStatusWaiting {
-			writeCtx, cancelWrite := storeWriteContext(ctx)
-			parkErr := d.parkWaitingFire(writeCtx, tracker, tr, ev, &fire, out, finishedAt)
-			cancelWrite()
-			if parkErr != nil {
-				d.logger.Warn("trigger: failed to park waiting trigger fire",
-					"fireID", fire.ID, "eventID", ev.ID, "triggerID", tr.ID, "error", parkErr)
-				return durablequeue.Result{Err: errors.New("trigger: park waiting fire failed")}
-			}
-			continue
-		}
-
-		writeCtx, cancelWrite := storeWriteContext(ctx)
-		if out.Detached {
-			// Detached actions (such as admitted exec runs) own their
-			// trigger_fires outcome CAS and trigger counters in the same
-			// transaction as the run record (em-2 invariant (b)); never
-			// overwrite trigger_fires here, only start the tracker handoff.
-			d.recordFireMetric(tr.ActionType, statusStr, out.Error)
-			if statusStr == store.TriggerFireStatusFired {
-				fireCount++
-			}
-			if out.AfterRecord != nil {
-				out.AfterRecord(writeCtx)
-			}
-			if d.fireAudit != nil {
-				d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
-					ProjectID:      tr.ProjectID,
-					TriggerID:      tr.ID,
-					EventID:        ev.ID,
-					FireID:         fire.ID,
-					ActionType:     tr.ActionType,
-					Status:         statusStr,
-					MatchedThrough: fire.MatchedThrough,
-					DecidedDialect: fire.DecidedDialect,
-				})
 			}
 			cancelWrite()
-			continue
 		}
-		var (
-			finished  bool
-			finishErr error
-		)
-		tracker.record(func() {
-			finished, finishErr = d.store.FinishTriggerFire(writeCtx, fire.ID, statusStr, out.ResultRef, out.TargetAgentID, out.Error, finishedAt)
-		})
-		if finishErr != nil {
-			cancelWrite()
-			d.logger.Warn("trigger: failed to finish trigger fire",
-				"fireID", fire.ID, "eventID", ev.ID, "triggerID", tr.ID, "error", finishErr)
-			return durablequeue.Result{Err: errors.New("trigger: finish fire failed")}
-		}
-		if finished {
-			d.recordFireMetric(tr.ActionType, statusStr, out.Error)
-			if statusStr == store.TriggerFireStatusFired {
-				fireCount++
-			}
-			if out.AfterRecord != nil {
-				out.AfterRecord(writeCtx)
-			}
-			if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, finishedAt, statusStr, out.Error); rErr != nil {
-				d.logger.Warn("trigger: failed to update trigger fire counters",
-					"triggerID", tr.ID, "fireID", fire.ID, "error", rErr)
-			}
-			if d.fireAudit != nil {
-				d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
-					ProjectID:      tr.ProjectID,
-					TriggerID:      tr.ID,
-					EventID:        ev.ID,
-					FireID:         fire.ID,
-					ActionType:     tr.ActionType,
-					Status:         statusStr,
-					MatchedThrough: fire.MatchedThrough,
-					DecidedDialect: fire.DecidedDialect,
-				})
-			}
-		}
-		cancelWrite()
+		flushTrigCounters()
 	}
 
 	if ctx.Err() != nil {
 		return durablequeue.Result{Err: errors.New("trigger: event handler canceled")}
 	}
-	if err := d.cancelStrandedCoalescingFires(ctx, ev, stillCoalescingTriggers); err != nil {
+	if err := d.cancelStrandedCoalescingFires(ctx, ev, stillCoalescingFires); err != nil {
 		d.logger.Warn("trigger: failed to cancel stranded coalescing fires",
 			"eventID", ev.ID, "error", err)
 		return durablequeue.Result{Err: errors.New("trigger: cancel stranded coalescing fires failed")}
@@ -1449,7 +1542,7 @@ func isCoalescingOrReapedFire(f *store.TriggerFire) bool {
 // in this pass (e.g., the trigger was paused/deleted or its match rules/types
 // were edited mid-window so it no longer matches). Without this, those rows
 // would stay live for skip/reuse until reaped as hub-restart failures.
-func (d *Dispatcher) cancelStrandedCoalescingFires(ctx context.Context, ev *store.TriggerEvent, stillCoalescing map[string]bool) error {
+func (d *Dispatcher) cancelStrandedCoalescingFires(ctx context.Context, ev *store.TriggerEvent, stillCoalescing map[triggerActionKey]bool) error {
 	hasPending, err := d.store.HasPendingTriggerFiresForEvent(ctx, ev.ID)
 	if err != nil {
 		return err
@@ -1475,7 +1568,7 @@ func (d *Dispatcher) cancelStrandedCoalescingFires(ctx context.Context, ev *stor
 		}
 		for i := range list.Items {
 			ef := &list.Items[i]
-			if !isCoalescingOrReapedFire(ef) || stillCoalescing[ef.TriggerID] {
+			if !isCoalescingOrReapedFire(ef) || stillCoalescing[triggerActionKey{ef.TriggerID, ef.ActionIndex}] {
 				continue
 			}
 			cancelErr := ErrFireCoalesceCancelled
@@ -1504,6 +1597,7 @@ func (d *Dispatcher) cancelStrandedCoalescingFires(ctx context.Context, ev *stor
 					TriggerID:      ef.TriggerID,
 					EventID:        ef.EventID,
 					FireID:         ef.ID,
+					ActionIndex:    ef.ActionIndex,
 					ActionType:     ef.ActionType,
 					Status:         store.TriggerFireStatusSkipped,
 					MatchedThrough: ef.MatchedThrough,
@@ -1551,17 +1645,17 @@ func (d *Dispatcher) isEventSourceReplayProtected(
 //     excludeFireID.
 //
 // Returns the active claim (if any) so reuse needs no second lookup.
-func (d *Dispatcher) subjectLive(ctx context.Context, triggerID, subject, excludeFireID string, includeFiring bool) (bool, *Claim, error) {
+func (d *Dispatcher) subjectLive(ctx context.Context, triggerID string, actionIndex int, subject, excludeFireID string, includeFiring bool) (bool, *Claim, error) {
 	now := d.now().UTC()
 	if d.claims != nil {
-		liveClaim, err := d.claims.Live(ctx, triggerID, subject)
+		liveClaim, err := d.claims.Live(ctx, triggerID, actionIndex, subject)
 		if err != nil {
 			return false, nil, err
 		}
 		if liveClaim != nil {
 			return true, liveClaim, nil
 		}
-		activeClaim, err := d.store.GetActiveTriggerSubjectClaim(ctx, triggerID, subject)
+		activeClaim, err := d.store.GetActiveTriggerSubjectClaim(ctx, triggerID, actionIndex, subject)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return false, nil, err
 		}
@@ -1569,7 +1663,7 @@ func (d *Dispatcher) subjectLive(ctx context.Context, triggerID, subject, exclud
 			return true, activeClaim, nil
 		}
 	}
-	liveFire, err := d.store.HasLiveTriggerFireForSubjectExcluding(ctx, triggerID, subject, excludeFireID, includeFiring, now)
+	liveFire, err := d.store.HasLiveTriggerFireForSubjectExcluding(ctx, triggerID, actionIndex, subject, excludeFireID, includeFiring, now)
 	if err != nil {
 		return false, nil, err
 	}
@@ -1682,6 +1776,22 @@ func (d *Dispatcher) recordDirectFire(
 	ev *store.TriggerEvent,
 	subject, status, errMsg, matchedThrough, decidedDialect, ruleTrace, auditReason string,
 ) error {
+	_, err := d.recordActionDirectFire(
+		ctx, tr, ev, 0, firstTriggerActionType(tr),
+		subject, status, errMsg, matchedThrough, decidedDialect, ruleTrace, auditReason, true,
+	)
+	return err
+}
+
+func (d *Dispatcher) recordActionDirectFire(
+	ctx context.Context,
+	tr *store.Trigger,
+	ev *store.TriggerEvent,
+	actionIndex int,
+	actionType string,
+	subject, status, errMsg, matchedThrough, decidedDialect, ruleTrace, auditReason string,
+	updateCounter bool,
+) (bool, error) {
 	now := d.now().UTC()
 	fire := store.TriggerFire{
 		ID:                   uuid.NewString(),
@@ -1689,7 +1799,8 @@ func (d *Dispatcher) recordDirectFire(
 		TriggerID:            tr.ID,
 		EventID:              ev.ID,
 		Subject:              subject,
-		ActionType:           tr.ActionType,
+		ActionType:           actionType,
+		ActionIndex:          actionIndex,
 		Status:               status,
 		Error:                errMsg,
 		MatchedThrough:       matchedThrough,
@@ -1705,7 +1816,7 @@ func (d *Dispatcher) recordDirectFire(
 	}
 	claimed, existing, err := d.store.ClaimTriggerFire(ctx, &fire)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !claimed && isCoalescingOrReapedFire(existing) {
 		// On a coalescing/deferred re-handle, preserve the real skip/refusal
@@ -1714,7 +1825,7 @@ func (d *Dispatcher) recordDirectFire(
 		// as "coalesce cancelled".
 		finished, fErr := d.store.FinishPendingTriggerFire(ctx, existing.ID, status, errMsg, matchedThrough, decidedDialect, ruleTrace, now)
 		if fErr != nil {
-			return fErr
+			return false, fErr
 		}
 		if finished {
 			claimed = true
@@ -1722,10 +1833,12 @@ func (d *Dispatcher) recordDirectFire(
 		}
 	}
 	if claimed {
-		d.recordFireMetric(tr.ActionType, status, errMsg)
-		if rErr := d.store.RecordTriggerFire(ctx, tr.ID, now, status, errMsg); rErr != nil {
-			d.logger.Warn("trigger: failed to record direct fire counter",
-				"triggerID", tr.ID, "fireID", fire.ID, "error", rErr)
+		d.recordFireMetric(actionType, status, errMsg)
+		if updateCounter {
+			if rErr := d.store.RecordTriggerFire(ctx, tr.ID, now, status, errMsg); rErr != nil {
+				d.logger.Warn("trigger: failed to record direct fire counter",
+					"triggerID", tr.ID, "fireID", fire.ID, "error", rErr)
+			}
 		}
 		if d.fireAudit != nil {
 			d.fireAudit.RecordFire(ctx, FireAuditRecord{
@@ -1733,7 +1846,8 @@ func (d *Dispatcher) recordDirectFire(
 				TriggerID:      tr.ID,
 				EventID:        ev.ID,
 				FireID:         fire.ID,
-				ActionType:     tr.ActionType,
+				ActionIndex:    actionIndex,
+				ActionType:     actionType,
 				Status:         status,
 				MatchedThrough: matchedThrough,
 				DecidedDialect: decidedDialect,
@@ -1741,7 +1855,7 @@ func (d *Dispatcher) recordDirectFire(
 			})
 		}
 	}
-	return nil
+	return claimed, nil
 }
 
 func normalizeFireStatus(st hubfire.FireStatus, errMsg string) string {

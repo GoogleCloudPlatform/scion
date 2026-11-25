@@ -40,6 +40,9 @@ func (TriggerSubjectClaim) Fields() []ent.Field {
 			Immutable(),
 		field.UUID("trigger_id", uuid.UUID{}).
 			Immutable(),
+		field.Int("action_index").
+			Default(0).
+			Immutable(),
 		field.String("subject").
 			MaxLen(256).
 			Immutable(),
@@ -66,7 +69,7 @@ func (TriggerSubjectClaim) Fields() []ent.Field {
 // Indexes of the TriggerSubjectClaim.
 func (TriggerSubjectClaim) Indexes() []ent.Index {
 	return []ent.Index{
-		index.Fields("trigger_id", "subject").
+		index.Fields("trigger_id", "action_index", "subject").
 			Unique(),
 		index.Fields("agent_id"),
 		index.Fields("state", "released_at"),

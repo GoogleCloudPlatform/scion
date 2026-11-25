@@ -16,6 +16,8 @@ const (
 	FieldID = "id"
 	// FieldTriggerID holds the string denoting the trigger_id field in the database.
 	FieldTriggerID = "trigger_id"
+	// FieldActionIndex holds the string denoting the action_index field in the database.
+	FieldActionIndex = "action_index"
 	// FieldSubject holds the string denoting the subject field in the database.
 	FieldSubject = "subject"
 	// FieldState holds the string denoting the state field in the database.
@@ -42,6 +44,7 @@ const (
 var Columns = []string{
 	FieldID,
 	FieldTriggerID,
+	FieldActionIndex,
 	FieldSubject,
 	FieldState,
 	FieldAgentID,
@@ -64,6 +67,8 @@ func ValidColumn(column string) bool {
 }
 
 var (
+	// DefaultActionIndex holds the default value on creation for the "action_index" field.
+	DefaultActionIndex int
 	// SubjectValidator is a validator for the "subject" field. It is called by the builders before save.
 	SubjectValidator func(string) error
 	// DefaultState holds the default value on creation for the "state" field.
@@ -85,6 +90,11 @@ func ByID(opts ...sql.OrderTermOption) OrderOption {
 // ByTriggerID orders the results by the trigger_id field.
 func ByTriggerID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTriggerID, opts...).ToFunc()
+}
+
+// ByActionIndex orders the results by the action_index field.
+func ByActionIndex(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldActionIndex, opts...).ToFunc()
 }
 
 // BySubject orders the results by the subject field.
