@@ -63,6 +63,8 @@ type ScheduledEvent struct {
 	Error string `json:"error,omitempty"`
 	// ScheduleID holds the value of the "schedule_id" field.
 	ScheduleID string `json:"schedule_id,omitempty"`
+	// Manual holds the value of the "manual" field.
+	Manual bool `json:"manual,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
@@ -96,6 +98,8 @@ func (*ScheduledEvent) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case scheduledevent.FieldManual:
+			values[i] = new(sql.NullBool)
 		case scheduledevent.FieldAttributionVersion, scheduledevent.FieldAuthorizationRevision, scheduledevent.FieldAuthorityCeilingVersion:
 			values[i] = new(sql.NullInt64)
 		case scheduledevent.FieldInitiatorPrincipalKind, scheduledevent.FieldInitiatorPrincipalID, scheduledevent.FieldInitiatorCredentialKind, scheduledevent.FieldInitiatorCredentialID, scheduledevent.FieldInitiatorCredentialSnapshot, scheduledevent.FieldAuthorityCeilingKind, scheduledevent.FieldAuthorityCeilingPermissionIds, scheduledevent.FieldAuthorityCeilingBoundaryKind, scheduledevent.FieldAuthorityCeilingBoundaryProjectID, scheduledevent.FieldEventType, scheduledevent.FieldPayload, scheduledevent.FieldStatus, scheduledevent.FieldCreatedBy, scheduledevent.FieldError, scheduledevent.FieldScheduleID:
@@ -267,6 +271,12 @@ func (_m *ScheduledEvent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ScheduleID = value.String
 			}
+		case scheduledevent.FieldManual:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field manual", values[i])
+			} else if value.Valid {
+				_m.Manual = value.Bool
+			}
 		case scheduledevent.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -399,6 +409,9 @@ func (_m *ScheduledEvent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("schedule_id=")
 	builder.WriteString(_m.ScheduleID)
+	builder.WriteString(", ")
+	builder.WriteString("manual=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Manual))
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

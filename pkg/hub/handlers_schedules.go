@@ -15,9 +15,11 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -152,13 +154,13 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 				MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 				return
 			}
-		case "pause", "resume":
+		case "pause", "resume", "run":
 			if r.Method != http.MethodPost {
 				MethodNotAllowed(w, http.MethodPost)
 				return
 			}
 			authzAction = ActionUpdate
-			authoring = subAction == "resume"
+			authoring = subAction == "resume" || subAction == "run"
 		case "history":
 			if r.Method != http.MethodGet {
 				MethodNotAllowed(w, http.MethodGet)
@@ -237,6 +239,8 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 		s.pauseSchedule(w, r, projectID, scheduleID, creatorRevision)
 	case "resume":
 		s.resumeSchedule(w, r, projectID, scheduleID)
+	case "run":
+		s.runScheduleNow(w, r, projectID, scheduleID)
 	case "history":
 		s.getScheduleHistory(w, r, projectID, scheduleID)
 	}
@@ -1135,6 +1139,170 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 		s.auditScheduledExec(r.Context(), newScheduleExecAuthoringAudit(r.Context(), ScheduledExecAuditResume, *schedule, execPayload))
 	}
 	writeJSON(w, http.StatusOK, scheduleResponse(s.newExecRevealer(r.Context()), *schedule))
+}
+
+// runScheduleNow handles POST /api/v1/projects/{projectId}/schedules/{id}/run.
+// It fires the recurring schedule once immediately under the caller's live
+// authority, records the materialized event with Manual=true, and leaves the
+// schedule's cron timing (NextRunAt), status, and stored attribution untouched.
+func (s *Server) runScheduleNow(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
+	schedule, ok := s.loadScheduleForProject(w, r, projectID, scheduleID)
+	if !ok {
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleRow(schedule)) {
+		return
+	}
+
+	// Re-authorize the caller live for the schedule's event type (same rules as
+	// resumeSchedule, minus active-schedule quota since a manual run does not
+	// add an active schedule). This prevents a caller with scheduled_event.update
+	// from triggering an exec/message/dispatch_agent run under another author's
+	// broader authority.
+	var execPayload *scheduledExecPayload
+	switch schedule.EventType {
+	case "dispatch_agent":
+		if !s.authorizeScheduledDispatchAgentAuthoring(w, r) {
+			return
+		}
+		if !s.authorizeAgentCreate(w, r, projectID) {
+			return
+		}
+	case "message":
+		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, schedule.Payload, "", "") {
+			return
+		}
+	case scheduledEventTypeExec:
+		if !s.execSchedulesEnabled() {
+			ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: %s)", schedule.EventType, s.supportedScheduledEventTypes()), nil)
+			return
+		}
+		var err error
+		execPayload, err = decodeScheduledExecPayload(schedule.Payload)
+		if err != nil {
+			BadRequest(w, err.Error())
+			return
+		}
+		if execPayload.AgentID != "" {
+			execPayload.AgentName = ""
+		}
+		if _, ok := s.authorizeScheduledExecAuthoringOpts(w, r, projectID, execPayload, schedule.ID, false); !ok {
+			return
+		}
+	default:
+		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: %s)", schedule.EventType, s.supportedScheduledEventTypes()), nil)
+		return
+	}
+
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionUpdate)
+	if !ok {
+		return
+	}
+
+	// Prevent concurrent manual runs on the same schedule from double-firing.
+	// For exec schedules, CreateScheduledExecRun also enforces a DB-level
+	// overlap lease across replicas and against concurrent cron ticks.
+	if !s.acquireManualScheduleRun(schedule.ID) {
+		Conflict(w, "a manual run is already in progress for this schedule")
+		return
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			s.releaseManualScheduleRun(schedule.ID)
+		}
+	}
+	defer release()
+
+	now := time.Now().UTC()
+	createdBy := ""
+	if identity := GetIdentityFromContext(r.Context()); identity != nil {
+		createdBy = identity.ID()
+	}
+
+	evt := store.ScheduledEvent{
+		ID:                   api.NewUUID(),
+		ProjectID:            schedule.ProjectID,
+		EventType:            schedule.EventType,
+		FireAt:               now,
+		Payload:              schedule.Payload,
+		Status:               store.ScheduledEventPending,
+		CreatedBy:            createdBy,
+		ScheduleID:           schedule.ID,
+		Manual:               true,
+		InitiatorAttribution: newInitiatorAttribution(r.Context()),
+		AuthorityCeiling:     ceiling,
+	}
+
+	detachedFire := s.scheduleFireDetaches(*schedule, evt)
+	execFire := schedule.EventType == scheduledEventTypeExec
+	if detachedFire {
+		if execFire {
+			evt.Status = store.ScheduledEventFired
+			firedAt := now
+			evt.FiredAt = &firedAt
+		} else {
+			evt.Status = store.ScheduledEventFiring
+			firedAt := now
+			evt.FiredAt = &firedAt
+		}
+	}
+
+	if err := s.store.CreateScheduledEvent(r.Context(), &evt); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	log := slog.With("subsystem", "scheduler",
+		"schedule_id", schedule.ID, "schedule_name", schedule.Name,
+		"project_id", schedule.ProjectID, "manual", true, "event_id", evt.ID)
+
+	if detachedFire {
+		run := &detachedFireRun{eventID: evt.ID, scheduleID: schedule.ID, ranAt: now, isExec: execFire}
+		s.runningDetachedFires.add(run)
+		schedCopy := *schedule
+		evtCopy := evt
+		if s.scheduledDetachedFires.goTracked(func(trackCtx context.Context) {
+			defer s.releaseManualScheduleRun(schedCopy.ID)
+			defer s.runningDetachedFires.remove(run)
+			fireCtx, cancelFire := context.WithCancel(context.Background())
+			defer cancelFire()
+			stop := context.AfterFunc(trackCtx, cancelFire)
+			defer stop()
+			s.runScheduleFire(withScheduledFireAbort(fireCtx, trackCtx), log, schedCopy, evtCopy, now, time.Time{}, run)
+		}) {
+			// Ownership of the manual-run slot passed to the detached goroutine.
+			released = true
+			writeJSON(w, http.StatusAccepted, s.scheduledEventResponse(r.Context(), s.newExecRevealer(r.Context()), evt))
+			return
+		}
+		s.runningDetachedFires.remove(run)
+		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(r.Context()), scheduledEventRecordTimeout)
+		defer cancelRecord()
+		if execFire {
+			log.Warn("manual schedule run: " + execReasonShuttingDown)
+			_, _ = s.store.CompleteUnadmittedExecEvent(recordCtx, evt.ID, store.ScheduledEventFailed, execReasonShuttingDown, schedule.ID, now)
+		} else {
+			msg := errScheduledWakeShuttingDown.Error()
+			log.Warn("manual schedule run: " + msg)
+			_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, store.ScheduledEventFailed, now, msg, schedule.ID, now)
+		}
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "hub is shutting down", nil)
+		return
+	}
+
+	// Detach from request cancellation so a client disconnect after the event
+	// is persisted or delivered cannot abort status/run-count recording and
+	// strand the manual event in "pending" (which loadPersistedTimers would
+	// replay on restart). Values on r.Context() are preserved.
+	fireCtx := context.WithoutCancel(r.Context())
+	s.runScheduleFire(fireCtx, log, *schedule, evt, now, time.Time{}, nil)
+	reloaded, err := s.store.GetScheduledEvent(fireCtx, evt.ID)
+	if err == nil && reloaded != nil {
+		evt = *reloaded
+	}
+	writeJSON(w, http.StatusOK, s.scheduledEventResponse(fireCtx, s.newExecRevealer(fireCtx), evt))
 }
 
 // getScheduleHistory handles GET /api/v1/projects/{projectId}/schedules/{id}/history

@@ -875,6 +875,7 @@ func entScheduledEventToStore(e *ent.ScheduledEvent) *store.ScheduledEvent {
 		FiredAt:    e.FiredAt,
 		Error:      e.Error,
 		ScheduleID: e.ScheduleID,
+		Manual:     e.Manual,
 	}
 	evt.InitiatorAttribution = initiatorAttributionFromColumns(
 		e.InitiatorPrincipalKind, e.InitiatorPrincipalID,
@@ -931,6 +932,9 @@ func (s *ScheduleStore) CreateScheduledEvent(ctx context.Context, event *store.S
 	}
 	if event.ScheduleID != "" {
 		create.SetScheduleID(event.ScheduleID)
+	}
+	if event.Manual {
+		create.SetManual(true)
 	}
 	if !event.CreatedAt.IsZero() {
 		create.SetCreated(event.CreatedAt)

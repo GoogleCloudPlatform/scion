@@ -3411,6 +3411,7 @@ var (
 		{Name: "fired_at", Type: field.TypeTime, Nullable: true},
 		{Name: "error", Type: field.TypeString, Nullable: true},
 		{Name: "schedule_id", Type: field.TypeString, Nullable: true},
+		{Name: "manual", Type: field.TypeBool, Default: false},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// ScheduledEventsTable holds the schema information for the "scheduled_events" table.

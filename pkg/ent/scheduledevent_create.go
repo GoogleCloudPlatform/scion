@@ -301,6 +301,20 @@ func (_c *ScheduledEventCreate) SetNillableScheduleID(v *string) *ScheduledEvent
 	return _c
 }
 
+// SetManual sets the "manual" field.
+func (_c *ScheduledEventCreate) SetManual(v bool) *ScheduledEventCreate {
+	_c.mutation.SetManual(v)
+	return _c
+}
+
+// SetNillableManual sets the "manual" field if the given value is not nil.
+func (_c *ScheduledEventCreate) SetNillableManual(v *bool) *ScheduledEventCreate {
+	if v != nil {
+		_c.SetManual(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *ScheduledEventCreate) SetCreated(v time.Time) *ScheduledEventCreate {
 	_c.mutation.SetCreated(v)
@@ -403,6 +417,10 @@ func (_c *ScheduledEventCreate) defaults() {
 		v := scheduledevent.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
+	if _, ok := _c.mutation.Manual(); !ok {
+		v := scheduledevent.DefaultManual
+		_c.mutation.SetManual(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := scheduledevent.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -451,6 +469,9 @@ func (_c *ScheduledEventCreate) check() error {
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "ScheduledEvent.status"`)}
+	}
+	if _, ok := _c.mutation.Manual(); !ok {
+		return &ValidationError{Name: "manual", err: errors.New(`ent: missing required field "ScheduledEvent.manual"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "ScheduledEvent.created"`)}
@@ -578,6 +599,10 @@ func (_c *ScheduledEventCreate) createSpec() (*ScheduledEvent, *sqlgraph.CreateS
 	if value, ok := _c.mutation.ScheduleID(); ok {
 		_spec.SetField(scheduledevent.FieldScheduleID, field.TypeString, value)
 		_node.ScheduleID = value
+	}
+	if value, ok := _c.mutation.Manual(); ok {
+		_spec.SetField(scheduledevent.FieldManual, field.TypeBool, value)
+		_node.Manual = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(scheduledevent.FieldCreated, field.TypeTime, value)
@@ -1008,6 +1033,18 @@ func (u *ScheduledEventUpsert) UpdateScheduleID() *ScheduledEventUpsert {
 // ClearScheduleID clears the value of the "schedule_id" field.
 func (u *ScheduledEventUpsert) ClearScheduleID() *ScheduledEventUpsert {
 	u.SetNull(scheduledevent.FieldScheduleID)
+	return u
+}
+
+// SetManual sets the "manual" field.
+func (u *ScheduledEventUpsert) SetManual(v bool) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldManual, v)
+	return u
+}
+
+// UpdateManual sets the "manual" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdateManual() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldManual)
 	return u
 }
 
@@ -1479,6 +1516,20 @@ func (u *ScheduledEventUpsertOne) UpdateScheduleID() *ScheduledEventUpsertOne {
 func (u *ScheduledEventUpsertOne) ClearScheduleID() *ScheduledEventUpsertOne {
 	return u.Update(func(s *ScheduledEventUpsert) {
 		s.ClearScheduleID()
+	})
+}
+
+// SetManual sets the "manual" field.
+func (u *ScheduledEventUpsertOne) SetManual(v bool) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetManual(v)
+	})
+}
+
+// UpdateManual sets the "manual" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdateManual() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateManual()
 	})
 }
 
@@ -2117,6 +2168,20 @@ func (u *ScheduledEventUpsertBulk) UpdateScheduleID() *ScheduledEventUpsertBulk 
 func (u *ScheduledEventUpsertBulk) ClearScheduleID() *ScheduledEventUpsertBulk {
 	return u.Update(func(s *ScheduledEventUpsert) {
 		s.ClearScheduleID()
+	})
+}
+
+// SetManual sets the "manual" field.
+func (u *ScheduledEventUpsertBulk) SetManual(v bool) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetManual(v)
+	})
+}
+
+// UpdateManual sets the "manual" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdateManual() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateManual()
 	})
 }
 

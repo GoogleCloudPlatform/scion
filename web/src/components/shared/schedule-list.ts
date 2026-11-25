@@ -33,9 +33,13 @@ import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, execSchedulesEnabled } from '../../utils/feature-flags.js';
 import {
   EXEC_HISTORY_LIMIT,
+  EXEC_NO_OUTPUT_NOTE,
   type ExecAgentOption,
   type ExecHistoryEvent,
   argvEqual,
+  formatCapturedExecOutput,
+  formatExecDuration,
+  isExecRunTerminal,
   loadProjectExecAgents,
   parseExecPayload,
   parseExecTimeoutValue,
@@ -327,6 +331,26 @@ export class ScionScheduleList extends LitElement {
   @state() private detailHistoryError: string | null = null;
   private detailHistoryGeneration = 0;
 
+  // Manual "Run now" state in detail dialog
+  @state() private runNowLoading = false;
+  @state() private runNowPolling = false;
+  @state() private runNowError: string | null = null;
+  @state() private runNowEvent: ExecHistoryEvent | null = null;
+  @state() private runNowOutputLoading = false;
+  @state() private runNowOutputError: string | null = null;
+  @state() private runNowOutputText: string | null = null;
+  @state() private runNowOutputFetched = false;
+  private runNowGeneration = 0;
+  private runNowPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // History row captured-output viewer
+  @state() private historyOutputEventId: string | null = null;
+  @state() private historyOutputLoading = false;
+  @state() private historyOutputError: string | null = null;
+  @state() private historyOutputText: string | null = null;
+  @state() private historyOutputFetched = false;
+  private historyOutputGeneration = 0;
+
   private readonly boundOnFlagsChanged = (): void => {
     if (!execSchedulesEnabled() && this.dialogEventType === 'exec') {
       this.dialogEventType = 'message';
@@ -383,16 +407,26 @@ export class ScionScheduleList extends LitElement {
 
   override disconnectedCallback(): void {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
+    this.clearRunNowPollTimer();
     super.disconnectedCallback();
+  }
+
+  private clearRunNowPollTimer(): void {
+    if (this.runNowPollTimer !== null) {
+      clearTimeout(this.runNowPollTimer);
+      this.runNowPollTimer = null;
+    }
   }
 
   /** Bumped on every load, so a slower, older walk never overwrites a newer result. */
   private loadGeneration = 0;
 
-  private async loadSchedules(): Promise<void> {
+  private async loadSchedules(silent = false): Promise<void> {
     if (!this.projectId) return;
     const generation = ++this.loadGeneration;
-    this.loading = true;
+    if (!silent) {
+      this.loading = true;
+    }
     this.error = null;
 
     try {
@@ -410,6 +444,12 @@ export class ScionScheduleList extends LitElement {
       });
       if (generation !== this.loadGeneration) return;
       this.schedules = schedules;
+      if (this.detailOpen && this.detailSchedule) {
+        const refreshed = schedules.find((s) => s.id === this.detailSchedule?.id);
+        if (refreshed) {
+          this.detailSchedule = refreshed;
+        }
+      }
       if (this.initialScheduleId && this.autoOpenedScheduleId !== this.initialScheduleId) {
         const match = schedules.find((s) => s.id === this.initialScheduleId);
         if (match) {
@@ -772,7 +812,27 @@ export class ScionScheduleList extends LitElement {
     }
   }
 
+  private resetRunNowState(): void {
+    this.runNowGeneration++;
+    this.clearRunNowPollTimer();
+    this.runNowLoading = false;
+    this.runNowPolling = false;
+    this.runNowError = null;
+    this.runNowEvent = null;
+    this.runNowOutputLoading = false;
+    this.runNowOutputError = null;
+    this.runNowOutputText = null;
+    this.runNowOutputFetched = false;
+    this.historyOutputGeneration++;
+    this.historyOutputEventId = null;
+    this.historyOutputLoading = false;
+    this.historyOutputError = null;
+    this.historyOutputText = null;
+    this.historyOutputFetched = false;
+  }
+
   private showDetail(sched: Schedule): void {
+    this.resetRunNowState();
     this.detailSchedule = sched;
     this.detailOpen = true;
     if (sched.eventType === 'exec') {
@@ -786,12 +846,207 @@ export class ScionScheduleList extends LitElement {
   }
 
   private closeDetail(): void {
+    this.resetRunNowState();
     this.detailHistoryGeneration++;
     this.detailOpen = false;
     this.detailSchedule = null;
     this.detailHistory = [];
     this.detailHistoryLoading = false;
     this.detailHistoryError = null;
+  }
+
+  private async handleRunNow(sched: Schedule): Promise<void> {
+    if (!this.projectId) return;
+    this.clearRunNowPollTimer();
+    const gen = ++this.runNowGeneration;
+    this.runNowLoading = true;
+    this.runNowPolling = false;
+    this.runNowError = null;
+    this.runNowEvent = null;
+    this.runNowOutputLoading = false;
+    this.runNowOutputError = null;
+    this.runNowOutputText = null;
+    this.runNowOutputFetched = false;
+
+    try {
+      const response = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules/${encodeURIComponent(sched.id)}/run`,
+        { method: 'POST' }
+      );
+      if (gen !== this.runNowGeneration) return;
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const evt = (await response.json()) as ExecHistoryEvent;
+      if (gen !== this.runNowGeneration) return;
+      this.runNowEvent = evt;
+
+      if (sched.eventType === 'exec') {
+        if (isExecRunTerminal(evt)) {
+          await this.finishExecRunNow(sched.id, evt, gen);
+        } else {
+          this.runNowPolling = true;
+          this.scheduleExecRunPoll(sched.id, evt.id, gen, 0);
+        }
+      } else {
+        await this.loadSchedules(true);
+      }
+    } catch (err) {
+      if (gen !== this.runNowGeneration) return;
+      this.runNowError = err instanceof Error ? err.message : 'Failed to run schedule';
+    } finally {
+      if (gen === this.runNowGeneration) {
+        this.runNowLoading = false;
+      }
+    }
+  }
+
+  private scheduleExecRunPoll(
+    scheduleId: string,
+    eventId: string,
+    gen: number,
+    attempt: number
+  ): void {
+    const maxAttempts = 120;
+    const delayMs = attempt === 0 ? 500 : 1000;
+    this.runNowPollTimer = setTimeout(() => {
+      this.runNowPollTimer = null;
+      void this.pollExecRunOnce(scheduleId, eventId, gen, attempt, maxAttempts);
+    }, delayMs);
+  }
+
+  private async pollExecRunOnce(
+    scheduleId: string,
+    eventId: string,
+    gen: number,
+    attempt: number,
+    maxAttempts: number
+  ): Promise<void> {
+    if (gen !== this.runNowGeneration || !this.projectId) return;
+    try {
+      const response = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events/${encodeURIComponent(eventId)}`
+      );
+      if (gen !== this.runNowGeneration) return;
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const evt = (await response.json()) as ExecHistoryEvent;
+      if (gen !== this.runNowGeneration) return;
+      this.runNowEvent = evt;
+
+      if (isExecRunTerminal(evt)) {
+        this.runNowPolling = false;
+        await this.finishExecRunNow(scheduleId, evt, gen);
+        return;
+      }
+      if (attempt + 1 >= maxAttempts) {
+        this.runNowPolling = false;
+        return;
+      }
+      this.scheduleExecRunPoll(scheduleId, eventId, gen, attempt + 1);
+    } catch (err) {
+      if (gen !== this.runNowGeneration) return;
+      this.runNowPolling = false;
+      this.runNowError = err instanceof Error ? err.message : 'Failed to check run status';
+    }
+  }
+
+  private async finishExecRunNow(
+    scheduleId: string,
+    evt: ExecHistoryEvent,
+    gen: number
+  ): Promise<void> {
+    await Promise.all([this.loadSchedules(true), this.loadScheduleHistory(scheduleId)]);
+    if (gen !== this.runNowGeneration) return;
+    if (evt.execSummary?.captureMode) {
+      await this.fetchRunNowOutput(evt.id, gen);
+    }
+  }
+
+  private async fetchRunNowOutput(eventId: string, gen: number): Promise<void> {
+    if (!this.projectId) return;
+    this.runNowOutputLoading = true;
+    this.runNowOutputError = null;
+    this.runNowOutputText = null;
+    this.runNowOutputFetched = false;
+    try {
+      const response = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events/${encodeURIComponent(eventId)}/output`
+      );
+      if (gen !== this.runNowGeneration) return;
+      if (response.status === 403) {
+        this.runNowOutputError = 'Output unavailable: requires attach on the agent.';
+        return;
+      }
+      if (!response.ok) {
+        this.runNowOutputError = await extractApiError(response, `HTTP ${response.status}`);
+        return;
+      }
+      const data = (await response.json()) as {
+        captureMode?: string;
+        outputStatus?: string;
+        output?: unknown;
+      };
+      if (gen !== this.runNowGeneration) return;
+      this.runNowOutputFetched = true;
+      this.runNowOutputText = formatCapturedExecOutput(data);
+    } catch (err) {
+      if (gen !== this.runNowGeneration) return;
+      this.runNowOutputError = err instanceof Error ? err.message : 'Failed to load output';
+    } finally {
+      if (gen === this.runNowGeneration) {
+        this.runNowOutputLoading = false;
+      }
+    }
+  }
+
+  private async handleToggleHistoryOutput(eventId: string): Promise<void> {
+    if (this.historyOutputEventId === eventId && this.historyOutputFetched) {
+      this.historyOutputGeneration++;
+      this.historyOutputEventId = null;
+      this.historyOutputLoading = false;
+      this.historyOutputError = null;
+      this.historyOutputText = null;
+      this.historyOutputFetched = false;
+      return;
+    }
+    if (!this.projectId) return;
+    const gen = ++this.historyOutputGeneration;
+    this.historyOutputEventId = eventId;
+    this.historyOutputLoading = true;
+    this.historyOutputError = null;
+    this.historyOutputText = null;
+    this.historyOutputFetched = false;
+    try {
+      const response = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events/${encodeURIComponent(eventId)}/output`
+      );
+      if (gen !== this.historyOutputGeneration) return;
+      if (response.status === 403) {
+        this.historyOutputError = 'Output unavailable: requires attach on the agent.';
+        return;
+      }
+      if (!response.ok) {
+        this.historyOutputError = await extractApiError(response, `HTTP ${response.status}`);
+        return;
+      }
+      const data = (await response.json()) as {
+        captureMode?: string;
+        outputStatus?: string;
+        output?: unknown;
+      };
+      if (gen !== this.historyOutputGeneration) return;
+      this.historyOutputFetched = true;
+      this.historyOutputText = formatCapturedExecOutput(data);
+    } catch (err) {
+      if (gen !== this.historyOutputGeneration) return;
+      this.historyOutputError = err instanceof Error ? err.message : 'Failed to load output';
+    } finally {
+      if (gen === this.historyOutputGeneration) {
+        this.historyOutputLoading = false;
+      }
+    }
   }
 
   private formatRelativeTime(dateString: string | undefined): string {
@@ -1522,20 +1777,105 @@ export class ScionScheduleList extends LitElement {
                 : ` by ${creator.label}`
               : ''}
           </div>
+          ${this.renderManualRunPanel(isExec)}
           ${isExec
             ? renderExecHistorySection({
                 loading: this.detailHistoryLoading,
                 error: this.detailHistoryError,
                 events: this.detailHistory,
+                onViewOutput: (eventId) => void this.handleToggleHistoryOutput(eventId),
+                expandedOutputEventId: this.historyOutputEventId,
+                outputLoading: this.historyOutputLoading,
+                outputError: this.historyOutputError,
+                outputText: this.historyOutputText,
+                outputFetched: this.historyOutputFetched,
               })
             : nothing}
         </div>
 
+        <sl-button
+          slot="footer"
+          variant="primary"
+          class="detail-run-now"
+          ?loading=${this.runNowLoading}
+          ?disabled=${this.runNowLoading ||
+          this.runNowPolling ||
+          (isExec && !execSchedulesEnabled())}
+          @click=${(): void => void this.handleRunNow(sched)}
+        >
+          <sl-icon slot="prefix" name="play-circle"></sl-icon>
+          Run now
+        </sl-button>
         <sl-button slot="footer" variant="default" @click=${(): void => this.openEditDialog(sched)}
           >Edit</sl-button
         >
         <sl-button slot="footer" variant="default" @click=${this.closeDetail}>Close</sl-button>
       </sl-dialog>
+    `;
+  }
+
+  private renderManualRunPanel(isExec: boolean): TemplateResult | typeof nothing {
+    if (!this.runNowError && !this.runNowEvent) return nothing;
+    if (this.runNowError) {
+      return html`
+        <div class="manual-run-panel" role="alert">
+          <div class="manual-run-header">Manual run failed</div>
+          <div class="exec-output-error">${this.runNowError}</div>
+        </div>
+      `;
+    }
+    const evt = this.runNowEvent;
+    if (!evt) return nothing;
+    const summary = evt.execSummary;
+    const statusLabel = this.runNowPolling
+      ? 'Running…'
+      : (summary?.outcome ?? evt.status ?? 'fired');
+    const terminal = !isExec || isExecRunTerminal(evt);
+
+    return html`
+      <div class="manual-run-panel" data-manual-event-id=${evt.id}>
+        <div class="manual-run-header">
+          <span>Manual run</span>
+          <code>${statusLabel}</code>
+        </div>
+        ${isExec
+          ? html`
+              <div class="manual-run-meta">
+                <span>
+                  Exit code:
+                  <strong>${summary?.exitCode !== undefined ? summary.exitCode : '-'}</strong>
+                </span>
+                <span>Duration: ${formatExecDuration(summary?.durationMs)}</span>
+                ${summary?.captureMode
+                  ? html`<span>Capture: <code>${summary.captureMode}</code></span>`
+                  : nothing}
+                ${summary?.outputStatus
+                  ? html`<span>Output: <code>${summary.outputStatus}</code></span>`
+                  : nothing}
+              </div>
+            `
+          : nothing}
+        ${evt.error ? html`<div class="exec-output-error">${evt.error}</div>` : nothing}
+        ${isExec && terminal
+          ? summary?.captureMode
+            ? html`
+                <div class="exec-output-section">
+                  ${this.runNowOutputLoading
+                    ? html`<div class="meta-text">Loading output…</div>`
+                    : this.runNowOutputError
+                      ? html`<div class="exec-output-error">${this.runNowOutputError}</div>`
+                      : this.runNowOutputFetched
+                        ? this.runNowOutputText !== null
+                          ? html`<pre class="exec-output-pre">${this.runNowOutputText}</pre>`
+                          : html`<div class="exec-no-output-note">
+                              No captured output (${summary.outputStatus ?? 'none'}).
+                            </div>`
+                        : nothing}
+                </div>
+              `
+            : html`<div class="exec-no-output-note">${EXEC_NO_OUTPUT_NOTE}</div>`
+          : nothing}
+      </div>
     `;
   }
 }

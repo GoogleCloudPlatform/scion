@@ -59,6 +59,8 @@ const (
 	FieldError = "error"
 	// FieldScheduleID holds the string denoting the schedule_id field in the database.
 	FieldScheduleID = "schedule_id"
+	// FieldManual holds the string denoting the manual field in the database.
+	FieldManual = "manual"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// EdgeExecRun holds the string denoting the exec_run edge name in mutations.
@@ -99,6 +101,7 @@ var Columns = []string{
 	FieldFiredAt,
 	FieldError,
 	FieldScheduleID,
+	FieldManual,
 	FieldCreated,
 }
 
@@ -127,6 +130,8 @@ var (
 	PayloadValidator func(string) error
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
+	// DefaultManual holds the default value on creation for the "manual" field.
+	DefaultManual bool
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -249,6 +254,11 @@ func ByError(opts ...sql.OrderTermOption) OrderOption {
 // ByScheduleID orders the results by the schedule_id field.
 func ByScheduleID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldScheduleID, opts...).ToFunc()
+}
+
+// ByManual orders the results by the manual field.
+func ByManual(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldManual, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

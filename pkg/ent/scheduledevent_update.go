@@ -437,6 +437,20 @@ func (_u *ScheduledEventUpdate) ClearScheduleID() *ScheduledEventUpdate {
 	return _u
 }
 
+// SetManual sets the "manual" field.
+func (_u *ScheduledEventUpdate) SetManual(v bool) *ScheduledEventUpdate {
+	_u.mutation.SetManual(v)
+	return _u
+}
+
+// SetNillableManual sets the "manual" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableManual(v *bool) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetManual(*v)
+	}
+	return _u
+}
+
 // SetExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID.
 func (_u *ScheduledEventUpdate) SetExecRunID(id uuid.UUID) *ScheduledEventUpdate {
 	_u.mutation.SetExecRunID(id)
@@ -634,6 +648,9 @@ func (_u *ScheduledEventUpdate) sqlSave(ctx context.Context) (_node int, err err
 	}
 	if _u.mutation.ScheduleIDCleared() {
 		_spec.ClearField(scheduledevent.FieldScheduleID, field.TypeString)
+	}
+	if value, ok := _u.mutation.Manual(); ok {
+		_spec.SetField(scheduledevent.FieldManual, field.TypeBool, value)
 	}
 	if _u.mutation.ExecRunCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -1091,6 +1108,20 @@ func (_u *ScheduledEventUpdateOne) ClearScheduleID() *ScheduledEventUpdateOne {
 	return _u
 }
 
+// SetManual sets the "manual" field.
+func (_u *ScheduledEventUpdateOne) SetManual(v bool) *ScheduledEventUpdateOne {
+	_u.mutation.SetManual(v)
+	return _u
+}
+
+// SetNillableManual sets the "manual" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableManual(v *bool) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetManual(*v)
+	}
+	return _u
+}
+
 // SetExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID.
 func (_u *ScheduledEventUpdateOne) SetExecRunID(id uuid.UUID) *ScheduledEventUpdateOne {
 	_u.mutation.SetExecRunID(id)
@@ -1318,6 +1349,9 @@ func (_u *ScheduledEventUpdateOne) sqlSave(ctx context.Context) (_node *Schedule
 	}
 	if _u.mutation.ScheduleIDCleared() {
 		_spec.ClearField(scheduledevent.FieldScheduleID, field.TypeString)
+	}
+	if value, ok := _u.mutation.Manual(); ok {
+		_spec.SetField(scheduledevent.FieldManual, field.TypeBool, value)
 	}
 	if _u.mutation.ExecRunCleared() {
 		edge := &sqlgraph.EdgeSpec{

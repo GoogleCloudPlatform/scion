@@ -182,6 +182,7 @@ var agentScopeScheduleActions = []agentScopeScheduleAction{
 	{"history", "/history", http.MethodGet, store.ScheduleStatusActive, http.StatusOK},
 	{"pause", "/pause", http.MethodPost, store.ScheduleStatusActive, http.StatusOK},
 	{"resume", "/resume", http.MethodPost, store.ScheduleStatusPaused, http.StatusOK},
+	{"run", "/run", http.MethodPost, store.ScheduleStatusActive, http.StatusOK},
 	{"delete", "", http.MethodDelete, store.ScheduleStatusActive, http.StatusNoContent},
 }
 

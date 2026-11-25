@@ -198,6 +198,11 @@ func guardCases() map[string]guardCase {
 				return base(f) + "/schedules/" + r.pausedSchedule + "/resume"
 			},
 		},
+		"POST /api/v1/projects/{projectId}/schedules/{id}/run": {
+			path: func(f *bypassAgentsFixture, r guardRows) string {
+				return base(f) + "/schedules/" + r.activeSchedule + "/run"
+			},
+		},
 		"DELETE /api/v1/projects/{projectId}/schedules/{id}": {
 			path: func(f *bypassAgentsFixture, r guardRows) string { return base(f) + "/schedules/" + r.pausedSchedule },
 		},
@@ -221,6 +226,7 @@ var guardOrder = []string{
 	"PATCH /api/v1/projects/{projectId}/schedules/{id}",
 	"POST /api/v1/projects/{projectId}/schedules/{id}/pause",
 	"POST /api/v1/projects/{projectId}/schedules/{id}/resume",
+	"POST /api/v1/projects/{projectId}/schedules/{id}/run",
 	"DELETE /api/v1/projects/{projectId}/scheduled-events/{id}",
 	"DELETE /api/v1/projects/{projectId}/schedules/{id}",
 }

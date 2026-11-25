@@ -676,10 +676,11 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"chat.conversation.send.dmagent":         {"agent:message"},
 	"chat.message.edit":                      {"project:read"},
 	"chat.message.delete":                    {"project:read"},
-	// Resuming a message schedule re-authorizes message delivery to the
-	// target agent (ptone/scion#8588); without agent:message (or agent:read),
-	// the target is masked as 404.
+	// Resuming or manually running a message schedule re-authorizes message
+	// delivery to the target agent (ptone/scion#8588); without agent:message
+	// (or agent:read), the target is masked as 404.
 	"schedule.event.update":              {"agent:message"},
+	"schedule.event.run":                 {"agent:message"},
 	"chat.conversation.readstate.dm":     {"agent:read"},
 	"chat.conversation.markread.topic":   {"project:read"},
 	"chat.conversation.markread.dm":      {"agent:read"},

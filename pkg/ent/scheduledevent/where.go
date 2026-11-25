@@ -166,6 +166,11 @@ func ScheduleID(v string) predicate.ScheduledEvent {
 	return predicate.ScheduledEvent(sql.FieldEQ(FieldScheduleID, v))
 }
 
+// Manual applies equality check predicate on the "manual" field. It's identical to ManualEQ.
+func Manual(v bool) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldManual, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.ScheduledEvent {
 	return predicate.ScheduledEvent(sql.FieldEQ(FieldCreated, v))
@@ -1554,6 +1559,16 @@ func ScheduleIDEqualFold(v string) predicate.ScheduledEvent {
 // ScheduleIDContainsFold applies the ContainsFold predicate on the "schedule_id" field.
 func ScheduleIDContainsFold(v string) predicate.ScheduledEvent {
 	return predicate.ScheduledEvent(sql.FieldContainsFold(FieldScheduleID, v))
+}
+
+// ManualEQ applies the EQ predicate on the "manual" field.
+func ManualEQ(v bool) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldEQ(FieldManual, v))
+}
+
+// ManualNEQ applies the NEQ predicate on the "manual" field.
+func ManualNEQ(v bool) predicate.ScheduledEvent {
+	return predicate.ScheduledEvent(sql.FieldNEQ(FieldManual, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.
