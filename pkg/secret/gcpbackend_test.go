@@ -100,10 +100,11 @@ func testResolveHostname() string {
 
 // mockSMClient implements SMClient for testing.
 type mockSMClient struct {
-	mu       sync.Mutex
-	secrets  map[string]*smpb.Secret // keyed by full name
-	versions map[string][]byte       // keyed by full name, latest value
-	closed   bool
+	mu            sync.Mutex
+	secrets       map[string]*smpb.Secret // keyed by full name
+	versions      map[string][]byte       // keyed by full name, latest value
+	accessedNames []string                // full secret names passed to AccessSecretVersion (without /versions/*)
+	closed        bool
 }
 
 func newMockSMClient() *mockSMClient {
@@ -158,6 +159,7 @@ func (m *mockSMClient) AccessSecretVersion(_ context.Context, req *smpb.AccessSe
 			break
 		}
 	}
+	m.accessedNames = append(m.accessedNames, name)
 
 	data, exists := m.versions[name]
 	if !exists {

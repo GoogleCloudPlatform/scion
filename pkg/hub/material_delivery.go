@@ -520,11 +520,6 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 			if m.SecretType == store.SecretTypeInternal {
 				continue
 			}
-			// An agent without credentials: only the git token candidates
-			// are considered, in every scope including the owner's.
-			if noAuth && !noAuthKeepsSecretCandidate(sc.scope, m.Name) {
-				continue
-			}
 			// The same hub-scope rule as the backends' Resolve, applied
 			// before authorization and before any value is read, so an
 			// excluded hub row never shadows a broker-scope row.
@@ -534,8 +529,17 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 					continue
 				}
 			}
+			// Record non-deliverable, non-internal rows (e.g. on_demand) in
+			// shadowed before the NoAuth candidate filter so an agent-scope
+			// on_demand GITHUB_TOKEN shadows lower-scope tokens on both start
+			// and create without reading any value.
 			if !secret.DeliverableType(m.SecretType) {
 				shadowed.Record(m.Name, scopeRank)
+				continue
+			}
+			// An agent without credentials: only the git token candidates
+			// are considered, in every scope including the owner's.
+			if noAuth && !noAuthKeepsSecretCandidate(sc.scope, m.Name) {
 				continue
 			}
 			if sc.scope != store.ScopeUser {

@@ -21,7 +21,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -424,10 +426,58 @@ func TestOnDemandSecret_P2_SecretRequestDefaultAndFulfill(t *testing.T) {
 		{Key: "BAD_REQ", Type: messages.SecretRequestTypeOnDemand, Target: "OTHER_TARGET"},
 	}, false)
 	assert.Equal(t, http.StatusBadRequest, rr.Code, "body=%s", rr.Body.String())
+
+	// 4. O3: a pre-existing on_demand secret_requests row carrying a legacy
+	// non-key target (e.g. migrated from variable) still fulfills cleanly and
+	// forces the stored secret's Target to row.Key.
+	origMsg, err := f.store.GetMessage(ctx, sendResp.MessageID)
+	require.NoError(t, err)
+	legacyMsgID := api.NewUUID()
+	now := time.Now().UTC()
+	promptRes, err := f.store.CreateSecretRequestPrompt(ctx, &store.SecretRequestPromptInput{
+		Message: &store.Message{
+			ID:             legacyMsgID,
+			ProjectID:      origMsg.ProjectID,
+			ConversationID: origMsg.ConversationID,
+			ThreadID:       origMsg.ThreadID,
+			Sender:         origMsg.Sender,
+			SenderID:       origMsg.SenderID,
+			Recipient:      origMsg.Recipient,
+			RecipientID:    origMsg.RecipientID,
+			Msg:            "Legacy migrated on_demand request",
+			Type:           messages.TypeSecretRequest,
+			DispatchState:  store.MessageDispatchDispatched,
+		},
+		AgentID:   f.agent.ID,
+		AgentName: f.agent.Name,
+		Requests: []messages.SecretRequest{
+			{
+				Key:        "LEGACY_TGT_OD",
+				KeyNorm:    messages.SecretRequestKeyNorm("LEGACY_TGT_OD"),
+				SecretType: messages.SecretRequestTypeOnDemand,
+				Target:     "LEGACY_CUSTOM_TARGET",
+			},
+		},
+		Now: now,
+		TTL: time.Hour,
+	})
+	require.NoError(t, err)
+	require.Len(t, promptRes.Requests, 1)
+	require.Equal(t, "LEGACY_CUSTOM_TARGET", promptRes.Requests[0].Row.Target)
+
+	rr = doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/secret-requests/"+legacyMsgID+"/fulfill", map[string]any{
+		"values": map[string]string{"LEGACY_TGT_OD": "legacy-fulfilled-val"},
+	})
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+
+	legacyMeta, err := f.srv.secretBackend.GetMeta(ctx, "LEGACY_TGT_OD", store.ScopeAgent, f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.SecretTypeOnDemand, legacyMeta.SecretType)
+	assert.Equal(t, "LEGACY_TGT_OD", legacyMeta.Target, "fulfillment must force target == key for on_demand rows")
 }
 
 func TestOnDemandSecret_P2_RuntimeReadAuthzAndList(t *testing.T) {
-	srv, _, owner, _, project, agentX, _ := setupAgentSecretsTestFixture(t, true)
+	srv, s, owner, _, project, agentX, _ := setupAgentSecretsTestFixture(t, true)
 	ctx := context.Background()
 
 	// Seed agent-scope and project-scope on_demand secrets.
@@ -502,6 +552,41 @@ func TestOnDemandSecret_P2_RuntimeReadAuthzAndList(t *testing.T) {
 	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rr.Code,
 		"project-scope on_demand must be refused without project:secret:read; got %d body=%s", rr.Code, rr.Body.String())
 
+	// 2b. O4: Agent WITH project:secret:read token scope but LACKING the
+	// project.secret_read permission (delegator holds project-member, which
+	// does not grant project.secret_read) is refused for project on_demand
+	// while still able to read its own agent-scope on_demand secret.
+	setBackfillCompleted(t, s)
+	memberDelegatorID := api.NewUUID()
+	createDCUser(t, s, memberDelegatorID, "member-delegator-od@example.com", project.ID, store.ProjectRoleMember)
+	agentNoPerm := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "agent-no-proj-perm",
+		Name:      "agent-no-proj-perm",
+		ProjectID: project.ID,
+		OwnerID:   memberDelegatorID,
+		CreatedBy: memberDelegatorID,
+		Ancestry:  []string{memberDelegatorID},
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agentNoPerm))
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, memberDelegatorID, store.DelegationPrincipalAgent, agentNoPerm.ID,
+		store.RoleScopeProject, project.ID, string(AgentRoleFull))
+	_, _, err = srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name: "OWN_OD_NO_PERM", Value: "own-od-val", SecretType: store.SecretTypeOnDemand,
+		Target: "OWN_OD_NO_PERM", InjectionMode: store.InjectionModeAsNeeded,
+		Scope: store.ScopeAgent, ScopeID: agentNoPerm.ID, ProjectID: project.ID, CreatedBy: owner.ID,
+	})
+	require.NoError(t, err)
+
+	rr = doAsAgentWithScopes(t, srv, agentNoPerm, withProjRead, http.MethodGet, "/api/v1/agents/"+agentNoPerm.ID+"/secrets/OWN_OD_NO_PERM", nil)
+	assert.Equal(t, http.StatusOK, rr.Code, "agent-scope on_demand must succeed even without project.secret_read")
+
+	rr = doAsAgentWithScopes(t, srv, agentNoPerm, withProjRead, http.MethodGet, "/api/v1/agents/"+agentNoPerm.ID+"/secrets/PROJ_OD_READ", nil)
+	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rr.Code,
+		"project-scope on_demand must be refused when token holds project:secret:read but agent lacks project.secret_read permission; got %d body=%s",
+		rr.Code, rr.Body.String())
+
 	// 3. Check 9 (fetchAuthorizedValue): rejects a secret whose SecretType
 	// changed between metadata inspection and value fetch.
 	meta, err := srv.secretBackend.GetMeta(ctx, "AGENT_OD_READ", store.ScopeAgent, agentX.ID)
@@ -519,4 +604,126 @@ func TestOnDemandSecret_P2_RuntimeReadAuthzAndList(t *testing.T) {
 	})
 	assert.Nil(t, sv)
 	assert.Equal(t, ReasonRecordChanged, reason)
+}
+
+type spyValueAccessBackend struct {
+	secret.SecretBackend
+	mu           sync.Mutex
+	getCalls     []string // "scope/name"
+	fetchedNames []string // "scope/name"
+}
+
+func (b *spyValueAccessBackend) Get(ctx context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	b.mu.Lock()
+	b.getCalls = append(b.getCalls, scope+"/"+name)
+	b.mu.Unlock()
+	return b.SecretBackend.Get(ctx, name, scope, scopeID)
+}
+
+func (b *spyValueAccessBackend) FetchValues(ctx context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	b.mu.Lock()
+	for _, m := range metas {
+		b.fetchedNames = append(b.fetchedNames, m.Scope+"/"+m.Name)
+	}
+	b.mu.Unlock()
+	return b.SecretBackend.FetchValues(ctx, metas)
+}
+
+func (b *spyValueAccessBackend) reset() {
+	b.mu.Lock()
+	b.getCalls = nil
+	b.fetchedNames = nil
+	b.mu.Unlock()
+}
+
+// TestOnDemandSecret_P2_NoAuthCreateAndStartShadowing verifies R1:
+// (a) A project on_demand GITHUB_TOKEN is never value-fetched (Get or
+//     FetchValues) on create for a NoAuth agent.
+// (b) An agent-scope on_demand GITHUB_TOKEN shadows a lower-scope project (and
+//     user) environment GITHUB_TOKEN on both create AND start/restart, with
+//     neither token delivered in ResolvedEnv and neither value fetched.
+// (c) Control: without the agent-scope on_demand row, project environment
+//     GITHUB_TOKEN is delivered on both create and start.
+func TestOnDemandSecret_P2_NoAuthCreateAndStartShadowing(t *testing.T) {
+	ctx := context.Background()
+	f := newChainFixture(t, "od-p2-noauth-r1")
+	enableAgentSecretsExperimentForTest(t, f.srv, f.store)
+	if f.srv.GetSecretBackend() == nil {
+		f.srv.SetSecretBackend(secret.NewLocalBackend(f.store, "test-hub", "test-signing-key-32-bytes-long!!"))
+	}
+	baseSB := f.srv.GetSecretBackend()
+	spy := &spyValueAccessBackend{SecretBackend: baseSB}
+
+	parent, _ := f.sessionParent(t, "noauth-r1-agent")
+	noAuthAgent := *parent
+	noAuthAgent.AppliedConfig = &store.AgentAppliedConfig{NoAuth: true}
+
+	d := NewHTTPAgentDispatcher(f.store, false, nil)
+	d.SetSecretBackend(spy)
+	d.SetAuthzService(f.srv.authzService)
+	d.SetAgentSecretsEnabledProvider(func() bool { return f.srv.experimentEnabled(experiments.AgentSecrets) })
+
+	startGitToken := func(t *testing.T) string {
+		t.Helper()
+		candidates, _, err := d.selectDeliverySecrets(ctx, newDeliverySelector(f.srv.authzService, &noAuthAgent, PurposeDispatch), &noAuthAgent)
+		require.NoError(t, err)
+		return pickNoAuthGitTokenFrom(candidates).value
+	}
+
+	// (a) Project on_demand GITHUB_TOKEN: never value-fetched on create or start.
+	_, _, err := baseSB.Set(ctx, &secret.SetSecretInput{
+		Name: noAuthGitTokenKey, Value: "proj-od-never-read", SecretType: store.SecretTypeOnDemand,
+		Target: noAuthGitTokenKey, InjectionMode: store.InjectionModeAsNeeded,
+		Scope: store.ScopeProject, ScopeID: f.proj.ID,
+	})
+	require.NoError(t, err)
+
+	spy.reset()
+	reqA, err := d.buildCreateRequestFor(ctx, &noAuthAgent, "test-r1-a", failOnSecretResolutionError)
+	require.NoError(t, err)
+	assert.NotContains(t, reqA.ResolvedEnv, noAuthGitTokenKey)
+	assert.NotContains(t, spy.getCalls, store.ScopeProject+"/"+noAuthGitTokenKey, "create must not call Get for project on_demand GITHUB_TOKEN")
+	assert.NotContains(t, spy.fetchedNames, store.ScopeProject+"/"+noAuthGitTokenKey, "create must not call FetchValues for project on_demand GITHUB_TOKEN")
+
+	// (b) Agent-scope on_demand GITHUB_TOKEN + project & user environment
+	// GITHUB_TOKEN -> no GITHUB_TOKEN in ResolvedEnv on create AND start/restart,
+	// and none of their values are fetched.
+	_, _, err = baseSB.Set(ctx, &secret.SetSecretInput{
+		Name: noAuthGitTokenKey, Value: "proj-env-shadowed", SecretType: store.SecretTypeEnvironment,
+		Target: noAuthGitTokenKey, InjectionMode: store.InjectionModeAlways,
+		Scope: store.ScopeProject, ScopeID: f.proj.ID,
+	})
+	require.NoError(t, err)
+	_, _, err = baseSB.Set(ctx, &secret.SetSecretInput{
+		Name: noAuthGitTokenKey, Value: "user-env-shadowed", SecretType: store.SecretTypeEnvironment,
+		Target: noAuthGitTokenKey, InjectionMode: store.InjectionModeAlways,
+		Scope: store.ScopeUser, ScopeID: f.creator.ID,
+	})
+	require.NoError(t, err)
+	_, _, err = baseSB.Set(ctx, &secret.SetSecretInput{
+		Name: noAuthGitTokenKey, Value: "agent-od-shadow", SecretType: store.SecretTypeOnDemand,
+		Target: noAuthGitTokenKey, InjectionMode: store.InjectionModeAsNeeded,
+		Scope: store.ScopeAgent, ScopeID: parent.ID, ProjectID: f.proj.ID,
+	})
+	require.NoError(t, err)
+
+	spy.reset()
+	reqB, err := d.buildCreateRequestFor(ctx, &noAuthAgent, "test-r1-b", failOnSecretResolutionError)
+	require.NoError(t, err)
+	assert.NotContains(t, reqB.ResolvedEnv, noAuthGitTokenKey, "agent on_demand GITHUB_TOKEN must shadow project/user tokens on create")
+	assert.Empty(t, spy.getCalls, "create must not read any shadowed GITHUB_TOKEN via Get")
+	assert.Empty(t, spy.fetchedNames, "create must not read any shadowed GITHUB_TOKEN via FetchValues")
+
+	spy.reset()
+	assert.Empty(t, startGitToken(t), "agent on_demand GITHUB_TOKEN must shadow project/user tokens on start/restart")
+	assert.Empty(t, spy.fetchedNames, "start must not fetch any shadowed GITHUB_TOKEN")
+
+	// (c) Control: removing agent-scope on_demand restores project env delivery
+	// on both create and start.
+	require.NoError(t, baseSB.Delete(ctx, noAuthGitTokenKey, store.ScopeAgent, parent.ID))
+
+	reqC, err := d.buildCreateRequestFor(ctx, &noAuthAgent, "test-r1-c", failOnSecretResolutionError)
+	require.NoError(t, err)
+	assert.Equal(t, "proj-env-shadowed", reqC.ResolvedEnv[noAuthGitTokenKey])
+	assert.Equal(t, "proj-env-shadowed", startGitToken(t))
 }

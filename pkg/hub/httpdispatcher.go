@@ -1322,23 +1322,32 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// GITHUB_TOKEN, causing git clone failures (#1165).
 		// Defense in depth: deliverGitHubToken also strips non-installation GitHub tokens downstream.
 		if !usesInstallationGitHubToken(agent) && agent.ProjectID != "" && d.secretBackend != nil {
-			projectValue := ""
-			if !isShellAgent(agent) {
-				projectValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
+			var tok noAuthGitToken
+			if d.authzService != nil {
+				// Use the same metadata-first selection route as start/restart
+				// so non-deliverable rows (e.g. on_demand) are never value-read
+				// and higher-precedence on_demand rows shadow lower scopes
+				// identically on create and start.
+				candidates, _, selErr := d.selectDeliverySecrets(ctx, newDeliverySelector(d.authzService, agent, PurposeDispatch), agent)
+				if selErr != nil {
+					if d.debug {
+						d.log.Debug("NoAuth: failed to select GITHUB_TOKEN", "agent_id", agent.ID, "error", selErr)
+					}
+				} else {
+					tok = pickNoAuthGitTokenFrom(candidates)
+				}
+			} else {
+				// Fallback when AuthzService is nil (unit tests without authz).
+				projectValue := ""
+				if !isShellAgent(agent) {
+					projectValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
+				}
+				userValue := ""
+				if projectValue == "" && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
+					userValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeUser, agent.OwnerID)
+				}
+				tok = pickNoAuthGitToken(projectValue, userValue)
 			}
-
-			// Fall back to the creating user's profile-level GITHUB_TOKEN,
-			// mirroring the cascade in resolveCloneToken. Users who store
-			// GITHUB_TOKEN at user/profile scope only (no project-scoped token)
-			// would otherwise still hit the NoAuth suppression bug (#1165).
-			// The owner's row is held to the same start-time user-scope
-			// checks as Resolve (ownerCloneTokenAllowed) before its value
-			// is read; a refused row is not used.
-			userValue := ""
-			if projectValue == "" && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
-				userValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeUser, agent.OwnerID)
-			}
-			tok := pickNoAuthGitToken(projectValue, userValue)
 			applyNoAuthGitToken(req.ResolvedEnv, &req.EnvClassifications, tok)
 			req.noAuthProjectToken = tok.projectBound()
 		}

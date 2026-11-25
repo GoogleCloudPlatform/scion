@@ -300,6 +300,11 @@ func applyNoAuthGitToken(env map[string]string, classifications *map[string]api.
 // when there is none, it is non-deliverable, or it cannot be read (logged at
 // debug, without the value).
 func (d *HTTPAgentDispatcher) noAuthCreateGitToken(ctx context.Context, agent *store.Agent, scope, scopeID string) string {
+	if meta, metaErr := d.secretBackend.GetMeta(ctx, noAuthGitTokenKey, scope, scopeID); metaErr == nil && meta != nil {
+		if !secret.DeliverableType(meta.SecretType) {
+			return ""
+		}
+	}
 	ghSecret, err := d.secretBackend.Get(ctx, noAuthGitTokenKey, scope, scopeID)
 	if err != nil {
 		if d.debug {

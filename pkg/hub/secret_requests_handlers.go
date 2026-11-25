@@ -668,7 +668,11 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 				map[string]interface{}{"field": "values"})
 			return
 		}
-		if !s.validateAgentSecretWriteConstraints(w, ctx, row.AgentID, row.Key, row.SecretType, row.Target) {
+		targetForCheck := row.Target
+		if row.SecretType == store.SecretTypeOnDemand {
+			targetForCheck = row.Key
+		}
+		if !s.validateAgentSecretWriteConstraints(w, ctx, row.AgentID, row.Key, row.SecretType, targetForCheck) {
 			return
 		}
 		claimRowIDs[i] = row.ID

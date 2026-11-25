@@ -186,7 +186,25 @@ func TestLocalBackend_ResolveOnDemandExcludesAndShadowsByTarget(t *testing.T) {
 
 func TestGCPBackend_ResolveOnDemandExcludesAndShadowsByTarget(t *testing.T) {
 	runOnDemandResolveShadowingCases(t, func(t *testing.T) (hubScopeResolveBackend, func(scope, key string) bool) {
-		b, _ := createTestGCPBackend(t)
-		return b, nil
+		b, mock := createTestGCPBackend(t)
+		scopeIDFor := map[string]string{
+			ScopeRuntimeBroker: "broker-shadow",
+			ScopeHub:           "test-hub-id",
+			ScopeProject:       "project-shadow",
+			ScopeUser:          "parent-user-shadow",
+			ScopeAgent:         "agent-shadow",
+		}
+		wasFetched := func(scope, key string) bool {
+			wantName := b.smSecretPath(b.gcpSecretName(key, scope, scopeIDFor[scope]))
+			mock.mu.Lock()
+			defer mock.mu.Unlock()
+			for _, accessed := range mock.accessedNames {
+				if accessed == wantName {
+					return true
+				}
+			}
+			return false
+		}
+		return b, wasFetched
 	})
 }

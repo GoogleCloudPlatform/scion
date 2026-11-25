@@ -242,7 +242,7 @@ func (s *Server) validateCreateAgentSecrets(inputs []AgentSecretInput) ([]valida
 			return nil, &secretValidationError{
 				status:  http.StatusBadRequest,
 				code:    ErrCodeValidationError,
-				message: "type \"variable\" was removed; use \"on_demand\" instead",
+				message: retiredVariableSecretTypeMessage,
 				details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].type", i), "key": in.Key, "value": secretType},
 			}
 		default:
@@ -268,24 +268,23 @@ func (s *Server) validateCreateAgentSecrets(inputs []AgentSecretInput) ([]valida
 			}
 		}
 		if secretType == store.SecretTypeOnDemand {
-			if in.Target != "" && in.Target != in.Key {
+			var fErr *onDemandFieldError
+			target, injectionMode, fErr = validateOnDemandFields(store.ScopeAgent, in.Key, in.Target, injectionMode, false)
+			if fErr != nil {
+				details := map[string]interface{}{
+					"field": fmt.Sprintf("secrets[%d].%s", i, fErr.field),
+					"key":   in.Key,
+				}
+				if v, ok := fErr.details["value"]; ok {
+					details["value"] = v
+				}
 				return nil, &secretValidationError{
 					status:  http.StatusBadRequest,
 					code:    ErrCodeValidationError,
-					message: "target is not supported for on_demand secrets",
-					details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].target", i), "key": in.Key, "value": in.Target},
+					message: fErr.message,
+					details: details,
 				}
 			}
-			if injectionMode == store.InjectionModeAlways {
-				return nil, &secretValidationError{
-					status:  http.StatusBadRequest,
-					code:    ErrCodeValidationError,
-					message: "injectionMode \"always\" is not supported for on_demand secrets",
-					details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].injectionMode", i), "key": in.Key, "value": injectionMode},
-				}
-			}
-			target = in.Key
-			injectionMode = store.InjectionModeAsNeeded
 		}
 		if secretType == store.SecretTypeEnvironment && secret.IsReservedEnvTarget(target) {
 			return nil, &secretValidationError{
