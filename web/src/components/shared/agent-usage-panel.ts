@@ -97,12 +97,16 @@ export function computeCacheHitRate(tokens: AgentUsageTokens): number | null {
 
 /**
  * Format a cache hit rate ratio [0, 1] as a percentage string (e.g. "23.1%"),
- * or "—" when unknown.
+ * prefixed with "≈ " when any of input, cache_read, or cache_write has
+ * partially unknown events, or "—" when unknown.
  */
 export function formatCacheHitRate(tokens: AgentUsageTokens): string {
   const rate = computeCacheHitRate(tokens);
   if (rate === null) return '—';
-  return `${(rate * 100).toFixed(1)}%`;
+  const u = tokens.unknown_events;
+  const approx = (u?.input ?? 0) > 0 || (u?.cache_read ?? 0) > 0 || (u?.cache_write ?? 0) > 0;
+  const pct = `${(rate * 100).toFixed(1)}%`;
+  return approx ? `≈ ${pct}` : pct;
 }
 
 /**
@@ -413,7 +417,13 @@ export class ScionAgentUsagePanel extends LitElement {
       return html`
         <div class="error-state" data-testid="usage-error">
           <span>${this.error}</span>
-          <sl-button size="small" @click=${() => void this.loadUsage()}>Retry</sl-button>
+          <sl-button
+            size="small"
+            @click=${(): void => {
+              void this.loadUsage();
+            }}
+            >Retry</sl-button
+          >
         </div>
       `;
     }
@@ -463,7 +473,9 @@ export class ScionAgentUsagePanel extends LitElement {
             size="small"
             variant="default"
             ?loading=${this.loading}
-            @click=${() => void this.loadUsage()}
+            @click=${(): void => {
+              void this.loadUsage();
+            }}
             data-testid="usage-refresh-btn"
           >
             <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>

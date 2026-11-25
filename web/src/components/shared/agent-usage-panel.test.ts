@@ -63,6 +63,14 @@ describe('agent-usage-panel helpers', () => {
     expect(computeCacheHitRate(canonical)).toBeCloseTo(3 / 13, 6);
     expect(formatCacheHitRate(canonical)).toBe('23.1%');
 
+    // Partially unknown input/cache_read/cache_write marks hit rate as approximate
+    expect(
+      formatCacheHitRate({
+        ...canonical,
+        unknown_events: { cache_write: 1 },
+      })
+    ).toBe('≈ 23.1%');
+
     // Measured zero cache_read with positive input -> 0.0%
     expect(
       formatCacheHitRate({
