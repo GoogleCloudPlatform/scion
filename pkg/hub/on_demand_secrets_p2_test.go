@@ -366,8 +366,8 @@ func TestOnDemandSecret_P2_Validators(t *testing.T) {
 		assert.Contains(t, vErr.message, "on_demand")
 	})
 
-	// 5. Pending-secret approval refuses non-environment/non-file types.
-	t.Run("pending_approval_refuses_non_env_file", func(t *testing.T) {
+	// 5. Agent user-scope on_demand PUT is rejected before creating a pending secret.
+	t.Run("agent_user_scope_on_demand_rejected_before_pending_secret", func(t *testing.T) {
 		// Agent attempting to write an on_demand secret at user scope (which
 		// routes to pending secrets) is rejected with 400 before creating any
 		// pending secret.

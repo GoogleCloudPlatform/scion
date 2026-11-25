@@ -1225,6 +1225,20 @@ func validateEnvSecretTarget(w http.ResponseWriter, secretType, target string) b
 
 const retiredVariableSecretTypeMessage = "type \"variable\" was removed; use \"on_demand\" instead"
 
+// validateSecretTypeInput validates a non-empty secret type supplied to a
+// secret-writing endpoint. It returns ("", true) when valid, or a validation
+// error message and false when rejected.
+func validateSecretTypeInput(secretType string) (string, bool) {
+	switch secretType {
+	case store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand:
+		return "", true
+	case "variable":
+		return retiredVariableSecretTypeMessage, false
+	default:
+		return "type must be one of: environment, file, on_demand", false
+	}
+}
+
 type onDemandFieldError struct {
 	field   string
 	message string
@@ -1316,17 +1330,8 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	if secretType == "" {
 		secretType = store.SecretTypeEnvironment
 	}
-	switch secretType {
-	case store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand:
-		// valid
-	case "variable":
-		ValidationError(w, retiredVariableSecretTypeMessage, map[string]interface{}{
-			"field": "type",
-			"value": secretType,
-		})
-		return
-	default:
-		ValidationError(w, "type must be one of: environment, file, on_demand", map[string]interface{}{
+	if msg, ok := validateSecretTypeInput(secretType); !ok {
+		ValidationError(w, msg, map[string]interface{}{
 			"field": "type",
 			"value": secretType,
 		})
@@ -1467,17 +1472,8 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 
 	// Validate type if provided
 	if req.Type != "" {
-		switch req.Type {
-		case store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand:
-			// valid
-		case "variable":
-			ValidationError(w, retiredVariableSecretTypeMessage, map[string]interface{}{
-				"field": "type",
-				"value": req.Type,
-			})
-			return
-		default:
-			ValidationError(w, "type must be one of: environment, file, on_demand", map[string]interface{}{
+		if msg, ok := validateSecretTypeInput(req.Type); !ok {
+			ValidationError(w, msg, map[string]interface{}{
 				"field": "type",
 				"value": req.Type,
 			})
@@ -1909,17 +1905,8 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	if secretType == "" {
 		secretType = store.SecretTypeEnvironment
 	}
-	switch secretType {
-	case store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand:
-		// valid
-	case "variable":
-		ValidationError(w, retiredVariableSecretTypeMessage, map[string]interface{}{
-			"field": "type",
-			"value": secretType,
-		})
-		return
-	default:
-		ValidationError(w, "type must be one of: environment, file, on_demand", map[string]interface{}{
+	if msg, ok := validateSecretTypeInput(secretType); !ok {
+		ValidationError(w, msg, map[string]interface{}{
 			"field": "type",
 			"value": secretType,
 		})
@@ -2962,13 +2949,8 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		if secretType == "" {
 			secretType = store.SecretTypeEnvironment
 		}
-		switch secretType {
-		case store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand:
-		case "variable":
-			ValidationError(w, retiredVariableSecretTypeMessage, map[string]interface{}{"field": "type", "value": secretType})
-			return
-		default:
-			ValidationError(w, "type must be one of: environment, file, on_demand", map[string]interface{}{"field": "type", "value": secretType})
+		if msg, ok := validateSecretTypeInput(secretType); !ok {
+			ValidationError(w, msg, map[string]interface{}{"field": "type", "value": secretType})
 			return
 		}
 		if req.InjectionMode != "" && req.InjectionMode != store.InjectionModeAlways && req.InjectionMode != store.InjectionModeAsNeeded {

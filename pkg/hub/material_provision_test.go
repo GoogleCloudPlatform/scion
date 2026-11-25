@@ -96,6 +96,56 @@ func TestProvisionCredentials_LimitedToSkillFetchKeys(t *testing.T) {
 	assert.Zero(t, rec.resolves, "Resolve is never called")
 }
 
+// TestProvisionCredentials_AllowsOnDemandExcludesUnknownType verifies that
+// resolveProvisionCredentials allows project on_demand secrets (broker-side
+// consumer, never forwarded to the agent container) while excluding unknown
+// and internal secret types before FetchValues.
+func TestProvisionCredentials_AllowsOnDemandExcludesUnknownType(t *testing.T) {
+	t.Run("on_demand_fetched_and_sent", func(t *testing.T) {
+		m, rec, _ := newProvisionCredsFixture(t, "pc-od-allow", ldOptions{})
+		m.secret(t, "GITHUB_TOKEN", "od-gh-token-val", store.SecretTypeOnDemand, store.ScopeProject, m.agent.ProjectID)
+
+		got := m.d.resolveProvisionCredentials(context.Background(), m.agent, "DispatchAgentStart")
+		assert.Equal(t, map[string]string{"GITHUB_TOKEN": "od-gh-token-val"}, got)
+		assert.Equal(t, []string{"GITHUB_TOKEN"}, fetchedNames(rec))
+	})
+
+	t.Run("unknown_type_not_fetched_or_sent", func(t *testing.T) {
+		m, rec, _ := newProvisionCredsFixture(t, "pc-unknown-excl", ldOptions{})
+		// Stub List to return an unknown-type project GITHUB_TOKEN metadata row
+		// (Ent schema prevents storing unknown enum values directly).
+		unknownMeta := secret.SecretMeta{
+			ID:         "unknown-type-gh-id",
+			Name:       "GITHUB_TOKEN",
+			SecretType: "unknown_future_type",
+			Scope:      store.ScopeProject,
+			ScopeID:    m.agent.ProjectID,
+		}
+		orig := m.d.secretBackend
+		m.d.SetSecretBackend(&unknownTypeListSecretBackend{SecretBackend: orig, extra: []secret.SecretMeta{unknownMeta}})
+
+		got := m.d.resolveProvisionCredentials(context.Background(), m.agent, "DispatchAgentStart")
+		assert.Nil(t, got)
+		assert.Empty(t, fetchedNames(rec), "unknown-type secret must never be passed to FetchValues")
+	})
+}
+
+type unknownTypeListSecretBackend struct {
+	secret.SecretBackend
+	extra []secret.SecretMeta
+}
+
+func (b *unknownTypeListSecretBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	metas, err := b.SecretBackend.List(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if filter.Scope == store.ScopeProject {
+		metas = append(metas, b.extra...)
+	}
+	return metas, nil
+}
+
 // TestProvisionCredentials_UserScopeTokenNotSent: only project scope is
 // sent. A matching user-scope (owner), hub-scope or broker-scope secret is
 // neither fetched nor sent, alone or beside a project secret of the same

@@ -236,20 +236,11 @@ func (s *Server) validateCreateAgentSecrets(inputs []AgentSecretInput) ([]valida
 		if secretType == "" {
 			secretType = store.SecretTypeEnvironment
 		}
-		switch secretType {
-		case store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand:
-		case "variable":
+		if msg, ok := validateSecretTypeInput(secretType); !ok {
 			return nil, &secretValidationError{
 				status:  http.StatusBadRequest,
 				code:    ErrCodeValidationError,
-				message: retiredVariableSecretTypeMessage,
-				details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].type", i), "key": in.Key, "value": secretType},
-			}
-		default:
-			return nil, &secretValidationError{
-				status:  http.StatusBadRequest,
-				code:    ErrCodeValidationError,
-				message: "type must be one of: environment, file, on_demand",
+				message: msg,
 				details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].type", i), "key": in.Key, "value": secretType},
 			}
 		}
