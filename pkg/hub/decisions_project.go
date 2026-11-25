@@ -28,6 +28,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -307,18 +309,37 @@ type projectDecisionsQuery struct {
 	cursor                 string
 	pendingCursor          *pendingPromptCursor
 	q                      string
+	parsedQuery            *filterquery.Query
 	conversation           string
 	agentID                string
 	madeFilter             store.ProjectDecisionAnswerFilter
 	onUnfilteredBellCounts func(total, projects int)
 }
 
-// filtered reports whether a filter that applies to tab=pending is set.
-func (q projectDecisionsQuery) filtered() bool {
-	return q.q != "" || q.conversation != "" || q.agentID != "" || q.projectID != ""
+// hasPendingStructuredFilter reports whether parsedQuery contains any term or
+// text clause that applies to tab=pending (ignoring Made-only keys by/provenance).
+func (q projectDecisionsQuery) hasPendingStructuredFilter() bool {
+	if q.parsedQuery == nil || q.parsedQuery.Mode != filterquery.ModeStructured {
+		return false
+	}
+	if q.parsedQuery.Text != "" || len(q.parsedQuery.ExcludeText) > 0 {
+		return true
+	}
+	for _, t := range q.parsedQuery.Terms {
+		switch strings.ToLower(t.Key) {
+		case "agent", "conversation", "project":
+			return true
+		}
+	}
+	return false
 }
 
-func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request) (projectDecisionsQuery, bool) {
+// filtered reports whether a filter that applies to tab=pending is set.
+func (q projectDecisionsQuery) filtered() bool {
+	return q.q != "" || q.conversation != "" || q.agentID != "" || q.projectID != "" || q.hasPendingStructuredFilter()
+}
+
+func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request, dialectEnabled bool) (projectDecisionsQuery, bool) {
 	q := r.URL.Query()
 	out := projectDecisionsQuery{
 		tab:   strings.TrimSpace(q.Get("tab")),
@@ -357,13 +378,39 @@ func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request) (project
 		out.pendingCursor = &cur
 	}
 
-	if search := strings.TrimSpace(q.Get("q")); search != "" {
-		if n := utf8.RuneCountInString(search); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
-			ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
-				map[string]interface{}{"field": "q"})
-			return projectDecisionsQuery{}, false
+	if rawQ := q.Get("q"); strings.TrimSpace(rawQ) != "" {
+		if dialectEnabled {
+			parsed, fqErr := filterquery.Parse(rawQ, schemas.Decisions.HasKey)
+			if fqErr != nil {
+				writeInvalidFilterQuery(w, fqErr)
+				return projectDecisionsQuery{}, false
+			}
+			if vErr := schemas.Decisions.Validate(parsed); vErr != nil {
+				writeInvalidFilterQuery(w, vErr)
+				return projectDecisionsQuery{}, false
+			}
+			if parsed.Mode == filterquery.ModeText {
+				if parsed.Text != "" {
+					if n := utf8.RuneCountInString(parsed.Text); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
+						ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
+							map[string]interface{}{"field": "q"})
+						return projectDecisionsQuery{}, false
+					}
+					out.q = parsed.Text
+				}
+			} else {
+				out.parsedQuery = &parsed
+				out.q = parsed.Text
+			}
+		} else {
+			search := strings.TrimSpace(rawQ)
+			if n := utf8.RuneCountInString(search); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
+				ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
+					map[string]interface{}{"field": "q"})
+				return projectDecisionsQuery{}, false
+			}
+			out.q = search
 		}
-		out.q = search
 	}
 	out.conversation = strings.TrimSpace(q.Get("conversation"))
 	if len(out.conversation) > maxProjectDecisionsConversationBytes {
@@ -574,7 +621,7 @@ func (s *Server) listProjectDecisions(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	pq, ok := parseProjectDecisionsQuery(w, r)
+	pq, ok := parseProjectDecisionsQuery(w, r, s.experimentEnabled(experiments.FiltersQueryDialect))
 	if !ok {
 		return
 	}
@@ -598,7 +645,7 @@ func (s *Server) listProjectDecisions(w http.ResponseWriter, r *http.Request, pr
 
 	// A search runs under the chat search time limit (design D9).
 	searchCtx := ctx
-	if pq.q != "" {
+	if pq.q != "" || pq.parsedQuery != nil {
 		var cancel context.CancelFunc
 		searchCtx, cancel = context.WithTimeout(ctx, s.chatSearchTimeout())
 		defer cancel()
@@ -751,20 +798,23 @@ func (s *Server) decisionsCore(
 ) (any, error) {
 	set := newDecisionScopeSet(scopes)
 
+	var (
+		facetAgents    []store.ProjectDecisionActor
+		facetAnswerers []store.ProjectDecisionActor
+		convKeys       []string
+	)
 	agentsFacet := []ProjectDecisionActorView{}
 	answerersFacet := []ProjectDecisionActorView{}
 	conversationsFacet := []ProjectDecisionConversationView{}
 	projectsFacet := []ProjectDecisionProjectRef{}
 	if len(set.chatKeys) > 0 && pq.limit > 0 {
-		facetAgents, facetAnswerers, convKeys, err := s.store.ListDecisionFacets(ctx, set.projectIDs, set.chatKeys)
+		var err error
+		facetAgents, facetAnswerers, convKeys, err = s.store.ListDecisionFacets(ctx, set.projectIDs, set.chatKeys)
 		if err != nil {
 			return nil, err
 		}
 		agentsFacet = decisionAgentFacetViews(set, facetAgents)
-		answerersFacet = make([]ProjectDecisionActorView, 0, len(facetAnswerers))
-		for _, a := range facetAnswerers {
-			answerersFacet = append(answerersFacet, ProjectDecisionActorView{ID: a.ID, Name: a.Name})
-		}
+		answerersFacet = decisionAnswererFacetViews(facetAnswerers)
 		conversationsFacet = decisionConversationFacetViews(set, convKeys)
 		if pq.profile {
 			projectsFacet = decisionProjectFacetViews(set, convKeys)
@@ -796,6 +846,11 @@ func (s *Server) decisionsCore(
 		listKeys = projKeys
 	}
 
+	resolved := resolveProjectDecisionsFilterQuery(set, user.ID(), pq, facetAgents, facetAnswerers, listKeys)
+	if pq.parsedQuery != nil {
+		listKeys = resolved.listKeys
+	}
+
 	// Live counts and classified prompt cards across all open prompts.
 	var openPrompts []*store.ProjectDecisionPrompt
 	if len(set.chatKeys) > 0 {
@@ -816,7 +871,11 @@ func (s *Server) decisionsCore(
 	if pq.tab == ProjectDecisionsTabPending {
 		var filteredCounts *ProjectDecisionCounts
 		if pq.filtered() {
-			classified = filterClassifiedPrompts(set, classified, listKeys, pq)
+			if resolved.impossible {
+				classified = nil
+			} else {
+				classified = filterClassifiedPrompts(set, classified, listKeys, pq, resolved)
+			}
 			fc := sumClassifiedCounts(classified)
 			filteredCounts = &fc
 		}
@@ -839,7 +898,45 @@ func (s *Server) decisionsCore(
 	}
 
 	// tab=made
+	if resolved.impossible {
+		if pq.profile {
+			return s.finishProfileMadeDecisions(ctx, wcs, set, pq, nil, nil, pq.madeFilter, counts, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
+		}
+		return ProjectMadeDecisionsResponse{
+			Counts:        counts,
+			Entries:       []ProjectDecisionLogEntryView{},
+			Agents:        agentsFacet,
+			Answerers:     answerersFacet,
+			Conversations: conversationsFacet,
+		}, nil
+	}
 	filter := pq.madeFilter
+	if pq.parsedQuery != nil {
+		if len(resolved.agentIDs) > 0 {
+			filter.AgentID = ""
+			filter.AgentIDs = resolved.agentIDs
+		}
+		filter.ExcludeAgentIDs = resolved.excludeAgentIDs
+		if len(resolved.userIDs) > 0 {
+			filter.UserID = ""
+			filter.UserIDs = resolved.userIDs
+		}
+		filter.ExcludeUserIDs = resolved.excludeUserIDs
+		if len(resolved.provenances) > 0 {
+			filter.Provenance = ""
+			filter.Provenances = resolved.provenances
+		}
+		filter.ExcludeProvenances = resolved.excludeProvenances
+		if len(resolved.excludeTexts) > 0 {
+			filter.ExcludeQueries = make([]store.ProjectDecisionExcludeQuery, 0, len(resolved.excludeTexts))
+			for _, ex := range resolved.excludeTexts {
+				filter.ExcludeQueries = append(filter.ExcludeQueries, store.ProjectDecisionExcludeQuery{
+					Text:     ex,
+					ChatKeys: set.labelMatchKeys(listKeys, strings.ToLower(ex)),
+				})
+			}
+		}
+	}
 	if pq.q != "" {
 		filter.Query = pq.q
 		filter.QueryChatKeys = set.labelMatchKeys(listKeys, strings.ToLower(pq.q))
@@ -983,12 +1080,41 @@ func decisionConversationFacetViews(set *decisionScopeSet, keys []string) []Proj
 // the prompt's conversation is in keys, its asker is pq.agentID, and q
 // matches the conversation label, the asker's name, or any row's question,
 // key or answer label.
-func filterClassifiedPrompts(set *decisionScopeSet, all []classifiedOpenPrompt, keys []string, pq projectDecisionsQuery) []classifiedOpenPrompt {
+func filterClassifiedPrompts(
+	set *decisionScopeSet,
+	all []classifiedOpenPrompt,
+	keys []string,
+	pq projectDecisionsQuery,
+	resolved resolvedDecisionsQuery,
+) []classifiedOpenPrompt {
 	inKeys := make(map[string]bool, len(keys))
 	for _, k := range keys {
 		inKeys[k] = true
 	}
+	var inAgents map[string]bool
+	if len(resolved.agentIDs) > 0 {
+		inAgents = make(map[string]bool, len(resolved.agentIDs))
+		for _, id := range resolved.agentIDs {
+			inAgents[id] = true
+		}
+	}
+	var excAgents map[string]bool
+	if len(resolved.excludeAgentIDs) > 0 {
+		excAgents = make(map[string]bool, len(resolved.excludeAgentIDs))
+		for _, id := range resolved.excludeAgentIDs {
+			excAgents[id] = true
+		}
+	}
 	qFold := strings.ToLower(pq.q)
+	var excFolds []string
+	if len(resolved.excludeTexts) > 0 {
+		excFolds = make([]string, 0, len(resolved.excludeTexts))
+		for _, ex := range resolved.excludeTexts {
+			if ex != "" {
+				excFolds = append(excFolds, strings.ToLower(ex))
+			}
+		}
+	}
 	out := make([]classifiedOpenPrompt, 0, len(all))
 	for _, c := range all {
 		p := c.raw
@@ -1001,7 +1127,23 @@ func filterClassifiedPrompts(set *decisionScopeSet, all []classifiedOpenPrompt, 
 		if pq.agentID != "" && p.AskerAgentID != pq.agentID {
 			continue
 		}
+		if inAgents != nil && !inAgents[p.AskerAgentID] {
+			continue
+		}
+		if excAgents != nil && excAgents[p.AskerAgentID] {
+			continue
+		}
 		if qFold != "" && !pendingPromptMatches(set, p, qFold) {
+			continue
+		}
+		excluded := false
+		for _, exFold := range excFolds {
+			if pendingPromptMatches(set, p, exFold) {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
 			continue
 		}
 		out = append(out, c)
