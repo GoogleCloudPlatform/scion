@@ -1941,14 +1941,14 @@ export class ScionPageProjectDetail extends LitElement {
   /**
    * A single place to react to any failed agents-load request, regardless
    * of *how* it failed (a network error or a non-OK response) or which
-   * request (fit or drain) hit it. A label commit reverts `committedLabel`
-   * to its pre-commit value, so a rejected label is not kept re-sent on
-   * the next request. A view-change clears the paged window's navigation,
-   * since the stored cursors were minted under the previous phase, dir or
-   * label and would 400 if replayed under the new, now-current params.
-   * A page-load additionally empties the page: there is no previous data
-   * to keep. Every other trigger keeps the previous data, with today's
-   * client label filter applied to it.
+   * request (fit or drain) hit it. A label commit reverts `committedServerQ`
+   * and `committedFilterQuery` to their pre-commit values, so a rejected
+   * query is not kept re-sent on the next request. A view-change clears the
+   * paged window's navigation, since the stored cursors were minted under the
+   * previous query or sort and would 400 if replayed under the new,
+   * now-current params. A page-load additionally empties the page: there is
+   * no previous data to keep. Every other trigger keeps the previous data,
+   * with the current client filter predicate applied to it.
    */
   private onAgentsLoadFailed(trigger: AgentsViewTrigger): void {
     if (trigger === 'page-load' || !this.hasAgentsResult) {

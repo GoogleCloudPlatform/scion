@@ -24,6 +24,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import * as featureFlags from './feature-flags.js';
+import * as filterQuery from '../shared/filter-query/index.js';
 import {
   DECISIONS_FLAG,
   decisionsEnabled,
@@ -195,16 +196,16 @@ describe('feature-flags: web.decisions consolidation', () => {
 // ---------------------------------------------------------------------------
 
 describe('feature-flags: unified filter query dialect flag removed', () => {
-  it('does not export FILTERS_QUERY_DIALECT_FLAG or filtersQueryDialectEnabled', () => {
-    // Type-level check: neither symbol is exported from feature-flags.ts.
-    type HasFlag = 'FILTERS_QUERY_DIALECT_FLAG' extends keyof typeof featureFlags ? true : false;
-    type HasHelper = 'filtersQueryDialectEnabled' extends keyof typeof featureFlags ? true : false;
+  it('does not export FILTERS_QUERY_DIALECT_FLAG or filtersQueryDialectEnabled from filter-query', () => {
+    // Type-level check: neither symbol is exported from shared/filter-query/index.ts.
+    type HasFlag = 'FILTERS_QUERY_DIALECT_FLAG' extends keyof typeof filterQuery ? true : false;
+    type HasHelper = 'filtersQueryDialectEnabled' extends keyof typeof filterQuery ? true : false;
     const hasFlag: HasFlag = false;
     const hasHelper: HasHelper = false;
     expect(hasFlag).toBe(false);
     expect(hasHelper).toBe(false);
-    expect((featureFlags as Record<string, unknown>).FILTERS_QUERY_DIALECT_FLAG).toBeUndefined();
-    expect((featureFlags as Record<string, unknown>).filtersQueryDialectEnabled).toBeUndefined();
+    expect((filterQuery as Record<string, unknown>).FILTERS_QUERY_DIALECT_FLAG).toBeUndefined();
+    expect((filterQuery as Record<string, unknown>).filtersQueryDialectEnabled).toBeUndefined();
   });
 
   // The one allowed reference to the retired name outside compiledRetired
