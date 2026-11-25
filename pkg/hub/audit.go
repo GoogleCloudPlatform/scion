@@ -360,10 +360,10 @@ type MaintenanceAutoUpdateEvent struct {
 	Kind       MaintenanceAutoUpdateEventKind `json:"kind"`
 	Actor      string                         `json:"actor"`
 	ActorID    string                         `json:"actorId,omitempty"`
-	OldEnabled bool                           `json:"oldEnabled,omitempty"`
-	NewEnabled bool                           `json:"newEnabled,omitempty"`
-	OldHourUTC int                            `json:"oldHourUtc,omitempty"`
-	NewHourUTC int                            `json:"newHourUtc,omitempty"`
+	OldEnabled bool                           `json:"oldEnabled"`
+	NewEnabled bool                           `json:"newEnabled"`
+	OldHourUTC int                            `json:"oldHourUtc"`
+	NewHourUTC int                            `json:"newHourUtc"`
 	From       string                         `json:"from,omitempty"`
 	Target     string                         `json:"target,omitempty"`
 	RunID      string                         `json:"runId,omitempty"`
