@@ -476,9 +476,9 @@ func DeliverEnabled(getenv func(string) string, hasTmux bool) bool {
 	}
 	// Harnesses with DeliverySpec.Disabled (e.g. the built-in shell execution
 	// container) never register the deliver-message control route (S5). Keyed
-	// on the broker-written signal rather than SCION_HARNESS so start env
-	// cannot switch it off.
-	if state.HarnessDeliveryDisabled(getenv) {
+	// on the broker-written signal OR SCION_HARNESS == "shell" so start env
+	// cannot turn it off while newer images under older brokers stay protected.
+	if state.HarnessDeliveryDisabled(getenv) || state.IsShellHarnessEnv(getenv) {
 		return false
 	}
 	for _, name := range strings.Split(getenv(EnvHubExperiments), ",") {

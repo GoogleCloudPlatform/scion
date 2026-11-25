@@ -97,7 +97,18 @@ func TestLivenessAttachedChecker_IdleReadySpecOnly(t *testing.T) {
 		t.Fatal("expected non-nil checker when SCION_HARNESS_READY has strategy idle")
 	}
 
-	// Non-idle strategies (and unset/malformed) return nil even if SCION_HARNESS=shell.
+	// Older broker without SCION_HARNESS_READY still enables the attached
+	// checker when SCION_HARNESS=shell (version-skew fallback).
+	if fn := livenessAttachedChecker(func(k string) string {
+		if k == "SCION_HARNESS" {
+			return "shell"
+		}
+		return ""
+	}, 1000, 1000); fn == nil {
+		t.Fatal("expected non-nil checker for SCION_HARNESS=shell fallback")
+	}
+
+	// Non-idle strategies (and unset/malformed) with non-shell SCION_HARNESS return nil.
 	for _, raw := range []string{
 		"",
 		"not-json",
@@ -109,7 +120,7 @@ func TestLivenessAttachedChecker_IdleReadySpecOnly(t *testing.T) {
 			case state.HarnessReadyEnv:
 				return raw
 			case "SCION_HARNESS":
-				return "shell"
+				return "claude"
 			default:
 				return ""
 			}

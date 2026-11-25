@@ -851,6 +851,12 @@ func TestNewHarnessWatchdogConfig_ShellSkipsPaneTail(t *testing.T) {
 	})
 	assert.Nil(t, deliveryDisabledCfg.PaneTail, "delivery-disabled container must not wire PaneTail capture")
 
+	legacyShellCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
+		Getenv:      func(k string) string { return map[string]string{"SCION_HARNESS": "shell"}[k] },
+		CapturePane: capture,
+	})
+	assert.Nil(t, legacyShellCfg.PaneTail, "SCION_HARNESS=shell fallback must not wire PaneTail capture")
+
 	llmCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
 		Getenv:      func(k string) string { return map[string]string{"SCION_HARNESS": "claude"}[k] },
 		CapturePane: capture,

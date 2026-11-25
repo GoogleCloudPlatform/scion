@@ -130,7 +130,13 @@ func TestReadHarnessTail_ShellHarnessReturnsEmpty(t *testing.T) {
 		t.Errorf("delivery disabled: readHarnessTail() = %q, want empty", got)
 	}
 
+	// Older broker without broker-written signals still suppresses tail when SCION_HARNESS=shell.
 	t.Setenv(state.HarnessDeliveryDisabledEnv, "")
+	t.Setenv("SCION_HARNESS", "shell")
+	if got := readHarnessTail(); got != "" {
+		t.Errorf("SCION_HARNESS=shell fallback: readHarnessTail() = %q, want empty", got)
+	}
+
 	t.Setenv("SCION_HARNESS", "claude")
 	if got, want := readHarnessTail(), "gh auth token | ghp_secret_value"; got != want {
 		t.Errorf("SCION_HARNESS=claude: readHarnessTail() = %q, want %q", got, want)

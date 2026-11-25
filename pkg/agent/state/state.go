@@ -138,6 +138,18 @@ func HarnessDeliveryDisabled(getenv func(string) string) bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
+// IsShellHarnessEnv reports whether SCION_HARNESS names the reserved "shell"
+// harness. Combined with the broker-written DeliverySpec / ReadySpec signals
+// via logical OR, it preserves defence-in-depth refusals when a newer image
+// runs under an older broker that predates HarnessDeliveryDisabledEnv without
+// allowing start env to weaken those refusals.
+func IsShellHarnessEnv(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	return strings.TrimSpace(getenv("SCION_HARNESS")) == ShellHarnessName
+}
+
 // ReadySpecIsIdle reports whether the broker-written HarnessReadyEnv signal
 // declares ReadyStrategyIdle (used by execution containers for attached-terminal
 // liveness and pane-tail suppression, so start env SCION_HARNESS cannot toggle

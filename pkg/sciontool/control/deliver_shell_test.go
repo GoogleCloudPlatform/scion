@@ -39,8 +39,9 @@ func TestDeliverEnabled_RefusesWhenDeliveryDisabledSignalSet(t *testing.T) {
 		t.Fatal("DeliverEnabled must return false when SCION_HARNESS_DELIVERY_DISABLED=1, even if SCION_HARNESS=claude")
 	}
 
-	// Without the broker-written signal, delivery is enabled even if SCION_HARNESS=shell.
-	getenvNoSignal := func(k string) string {
+	// Older broker without HarnessDeliveryDisabledEnv still refuses delivery
+	// when SCION_HARNESS=shell (version-skew defence in depth).
+	getenvLegacyShell := func(k string) string {
 		switch k {
 		case EnvHubExperiments:
 			return ExperimentConduitDeliver
@@ -50,7 +51,22 @@ func TestDeliverEnabled_RefusesWhenDeliveryDisabledSignalSet(t *testing.T) {
 			return ""
 		}
 	}
-	if !DeliverEnabled(getenvNoSignal, true) {
-		t.Fatal("DeliverEnabled must key on SCION_HARNESS_DELIVERY_DISABLED rather than SCION_HARNESS")
+	if DeliverEnabled(getenvLegacyShell, true) {
+		t.Fatal("DeliverEnabled must return false when SCION_HARNESS=shell (version-skew fallback)")
+	}
+
+	// Normal LLM harness without the broker-written signal enables delivery.
+	getenvLLM := func(k string) string {
+		switch k {
+		case EnvHubExperiments:
+			return ExperimentConduitDeliver
+		case "SCION_HARNESS":
+			return "claude"
+		default:
+			return ""
+		}
+	}
+	if !DeliverEnabled(getenvLLM, true) {
+		t.Fatal("DeliverEnabled must return true for non-shell harness without delivery-disabled signal")
 	}
 }

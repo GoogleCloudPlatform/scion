@@ -2151,7 +2151,7 @@ func livenessAgentGID(targetGID int) int {
 // signal (ReadyStrategyIdle) rather than SCION_HARNESS so start env cannot
 // switch it off.
 func livenessAttachedChecker(getenv func(string) string, uid, gid int) func() bool {
-	if !state.ReadySpecIsIdle(getenv) {
+	if !state.ReadySpecIsIdle(getenv) && !state.IsShellHarnessEnv(getenv) {
 		return nil
 	}
 	return liveness.TmuxAttachedChecker("scion", uid, gid)
@@ -2255,7 +2255,7 @@ const harnessTailLines = 5
 // credentials displayed in the interactive shell cannot leave the container
 // via crash/status reasons (ptone/scion#8812 §3.4 I1).
 func readHarnessTail() string {
-	if state.ReadySpecIsIdle(os.Getenv) || state.HarnessDeliveryDisabled(os.Getenv) {
+	if state.ReadySpecIsIdle(os.Getenv) || state.HarnessDeliveryDisabled(os.Getenv) || state.IsShellHarnessEnv(os.Getenv) {
 		return ""
 	}
 	data, err := dirfd.ReadFileNoFollow(harnessTailPath, harnessTailMaxBytes)
