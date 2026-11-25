@@ -163,42 +163,51 @@ func (s *Server) releaseAutoUpdateHandler() func(ctx context.Context) {
 // or rolled_back. On failed or rolled_back, state.SuppressedTag is set to
 // state.LastTarget so the same release is not retried automatically.
 // inFlight is true when the run is still pending, running, or restarting.
-func (s *Server) reconcileAutoUpdateState(ctx context.Context, state *AutoUpdateState) (changed bool, inFlight bool, err error) {
+// from is the pre-update version recorded in system.last_update when available.
+func (s *Server) reconcileAutoUpdateState(ctx context.Context, state *AutoUpdateState) (changed bool, inFlight bool, from string, err error) {
 	if state.LastRunID == "" || state.LastOutcome != AutoUpdateOutcomeStarted {
-		return false, false, nil
+		return false, false, "", nil
 	}
 
 	run, err := s.store.GetMaintenanceRun(ctx, state.LastRunID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			return false, false, err
+			return false, false, "", err
 		}
 		run = nil
 	}
 
+	if run != nil && (run.Status == store.MaintenanceStatusRunning ||
+		run.Status == store.MaintenanceStatusRestarting ||
+		run.Status == store.MaintenanceStatusPending) {
+		// Still in flight.
+		return false, true, "", nil
+	}
+
+	var last *LastUpdate
+	var lastVal LastUpdate
+	if found, lerr := s.readHubSettingJSON(ctx, HubSettingSectionLastUpdate, &lastVal); lerr == nil && found && lastVal.RunID == state.LastRunID {
+		last = &lastVal
+		from = last.From
+	}
+
 	var outcome string
 	switch {
-	case run != nil && (run.Status == store.MaintenanceStatusRunning ||
-		run.Status == store.MaintenanceStatusRestarting ||
-		run.Status == store.MaintenanceStatusPending):
-		// Still in flight.
-		return false, true, nil
 	case run != nil && run.Status == store.MaintenanceStatusCompleted:
 		outcome = AutoUpdateOutcomeVerified
 	default:
-		outcome = s.resolveFailedAutoUpdateOutcome(ctx, state.LastRunID, run)
+		outcome = resolveFailedAutoUpdateOutcome(last, run)
 	}
 
 	state.LastOutcome = outcome
 	if (outcome == AutoUpdateOutcomeFailed || outcome == AutoUpdateOutcomeRolledBack) && state.LastTarget != "" {
 		state.SuppressedTag = state.LastTarget
 	}
-	return true, false, nil
+	return true, false, from, nil
 }
 
-func (s *Server) resolveFailedAutoUpdateOutcome(ctx context.Context, runID string, run *store.MaintenanceOperationRun) string {
-	var last LastUpdate
-	if found, err := s.readHubSettingJSON(ctx, HubSettingSectionLastUpdate, &last); err == nil && found && last.RunID == runID {
+func resolveFailedAutoUpdateOutcome(last *LastUpdate, run *store.MaintenanceOperationRun) string {
+	if last != nil {
 		switch last.Status {
 		case LastUpdateVerified:
 			return AutoUpdateOutcomeVerified
@@ -251,9 +260,15 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 		return
 	}
 
+	nowFn := deps.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	now := nowFn().UTC()
+
 	// Step 2: reconcile the previous run before checking eligibility or window
 	// so outcomes and retry suppression are recorded promptly after restart.
-	reconciled, inFlight, err := s.reconcileAutoUpdateState(ctx, &state)
+	reconciled, inFlight, reconciledFrom, err := s.reconcileAutoUpdateState(ctx, &state)
 	if err != nil {
 		log.Error("Failed to reconcile previous auto-update run, skipping tick", "run_id", state.LastRunID, "error", err)
 		return
@@ -267,6 +282,18 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 			log.Error("Failed to persist reconciled auto_update_state", "run_id", state.LastRunID, "error", err)
 			return
 		}
+		if reconciledFrom == "" && state.LastOutcome != AutoUpdateOutcomeVerified && deps.running != state.LastTarget {
+			reconciledFrom = deps.running
+		}
+		s.emitMaintenanceAutoUpdateEvent(ctx, &MaintenanceAutoUpdateEvent{
+			Kind:      MaintenanceAutoUpdateKindRunOutcome,
+			Actor:     autoUpdateStartedBy,
+			From:      reconciledFrom,
+			Target:    state.LastTarget,
+			RunID:     state.LastRunID,
+			Outcome:   state.LastOutcome,
+			Timestamp: now,
+		})
 		log.Info("Reconciled previous auto-update run",
 			"run_id", state.LastRunID, "target", state.LastTarget,
 			"outcome", state.LastOutcome, "suppressed_tag", state.SuppressedTag)
@@ -297,11 +324,6 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 	}
 
 	// Step 4: daily window + once-per-UTC-day guard.
-	nowFn := deps.now
-	if nowFn == nil {
-		nowFn = time.Now
-	}
-	now := nowFn().UTC()
 	offset := autoUpdateWindowOffset(s.config.HubID)
 	inWindow, attemptDay := autoUpdateWindowFor(now, eff.WindowStartHourUTC, offset)
 	if !inWindow || state.LastAttemptDay == attemptDay {
@@ -386,6 +408,19 @@ func (s *Server) runReleaseAutoUpdate(ctx context.Context, deps autoUpdateJobDep
 		state.LastRunID = runID
 		state.LastTarget = result.LatestVersion
 		state.LastOutcome = AutoUpdateOutcomeStarted
+		fromVersion := result.CurrentVersion
+		if fromVersion == "" {
+			fromVersion = deps.running
+		}
+		s.emitMaintenanceAutoUpdateEvent(ctx, &MaintenanceAutoUpdateEvent{
+			Kind:      MaintenanceAutoUpdateKindRunStarted,
+			Actor:     autoUpdateStartedBy,
+			From:      fromVersion,
+			Target:    result.LatestVersion,
+			RunID:     runID,
+			Outcome:   AutoUpdateOutcomeStarted,
+			Timestamp: now,
+		})
 	} else {
 		state.LastOutcome = outcome
 	}

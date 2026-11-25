@@ -185,3 +185,7 @@ func (l *recordingAuditLogger) LogMessageActionEvent(context.Context, *MessageAc
 func (l *recordingAuditLogger) LogMaintenanceOverrideEvent(context.Context, *rebuildpreflight.MaintenanceOverrideEvent) error {
 	return nil
 }
+
+func (l *recordingAuditLogger) LogMaintenanceAutoUpdateEvent(context.Context, *MaintenanceAutoUpdateEvent) error {
+	return nil
+}

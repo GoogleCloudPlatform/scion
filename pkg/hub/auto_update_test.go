@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -440,4 +441,194 @@ func TestHandleAdminMaintenanceAutoUpdate_RoundTripAndStates(t *testing.T) {
 	assert.True(t, st.AutoUpdate.Enabled)
 	assert.True(t, st.AutoUpdate.Active)
 	assert.Empty(t, st.AutoUpdate.InactiveReason)
+}
+
+func TestHandleAdminMaintenanceAutoUpdate_AuditEvents(t *testing.T) {
+	t.Run("PUT emits setting_changed with old and new values", func(t *testing.T) {
+		mc := MaintenanceConfig{
+			DeploymentTier: "binary",
+			ReleaseChannel: "nightly",
+			UpdatePolicy:   "notify",
+			Installer:      newTestInstaller(maintenance.StrategySymlink),
+		}
+		srv, _, admin, _ := autoUpdateTestServer(t, mc)
+		audit := &mockAuditLogger{}
+		srv.SetAuditLogger(audit)
+
+		// First write: default (false, 4) -> (true, 6).
+		rec := doRequestAsUser(t, srv, admin, http.MethodPut, autoUpdateAdminPath, map[string]any{
+			"enabled":            true,
+			"windowStartHourUtc": 6,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Len(t, audit.maintenanceAutoUpdateEvents, 1)
+		ev := audit.maintenanceAutoUpdateEvents[0]
+		assert.Equal(t, MaintenanceAutoUpdateKindSettingChanged, ev.Kind)
+		assert.Equal(t, admin.Email, ev.Actor)
+		assert.Equal(t, admin.ID, ev.ActorID)
+		assert.False(t, ev.OldEnabled)
+		assert.True(t, ev.NewEnabled)
+		assert.Equal(t, DefaultAutoUpdateWindowStartHourUTC, ev.OldHourUTC)
+		assert.Equal(t, 6, ev.NewHourUTC)
+		assert.False(t, ev.Timestamp.IsZero())
+
+		// Second write: (true, 6) -> (false, 0).
+		rec = doRequestAsUser(t, srv, admin, http.MethodPut, autoUpdateAdminPath, map[string]any{
+			"enabled":            false,
+			"windowStartHourUtc": 0,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Len(t, audit.maintenanceAutoUpdateEvents, 2)
+		ev2 := audit.maintenanceAutoUpdateEvents[1]
+		assert.Equal(t, MaintenanceAutoUpdateKindSettingChanged, ev2.Kind)
+		assert.Equal(t, admin.Email, ev2.Actor)
+		assert.True(t, ev2.OldEnabled)
+		assert.False(t, ev2.NewEnabled)
+		assert.Equal(t, 6, ev2.OldHourUTC)
+		assert.Equal(t, 0, ev2.NewHourUTC)
+
+		// Validation error emits no audit event.
+		rec = doRequestAsUser(t, srv, admin, http.MethodPut, autoUpdateAdminPath, map[string]any{
+			"enabled":            true,
+			"windowStartHourUtc": 99,
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Len(t, audit.maintenanceAutoUpdateEvents, 2)
+	})
+
+	t.Run("first write from config auto reports oldEnabled true", func(t *testing.T) {
+		mc := MaintenanceConfig{
+			DeploymentTier: "binary",
+			ReleaseChannel: "nightly",
+			UpdatePolicy:   "auto",
+			Installer:      newTestInstaller(maintenance.StrategySymlink),
+		}
+		srv, _, admin, _ := autoUpdateTestServer(t, mc)
+		audit := &mockAuditLogger{}
+		srv.SetAuditLogger(audit)
+
+		rec := doRequestAsUser(t, srv, admin, http.MethodPut, autoUpdateAdminPath, map[string]any{
+			"enabled": false,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Len(t, audit.maintenanceAutoUpdateEvents, 1)
+		ev := audit.maintenanceAutoUpdateEvents[0]
+		assert.True(t, ev.OldEnabled)
+		assert.False(t, ev.NewEnabled)
+		assert.Equal(t, DefaultAutoUpdateWindowStartHourUTC, ev.OldHourUTC)
+		assert.Equal(t, DefaultAutoUpdateWindowStartHourUTC, ev.NewHourUTC)
+	})
+
+	t.Run("config-locked PUT emits no audit event", func(t *testing.T) {
+		mc := MaintenanceConfig{
+			DeploymentTier:       "binary",
+			ReleaseChannel:       "nightly",
+			UpdatePolicy:         "disabled",
+			UpdatePolicyExplicit: true,
+			Installer:            newTestInstaller(maintenance.StrategySymlink),
+		}
+		srv, _, admin, _ := autoUpdateTestServer(t, mc)
+		audit := &mockAuditLogger{}
+		srv.SetAuditLogger(audit)
+
+		rec := doRequestAsUser(t, srv, admin, http.MethodPut, autoUpdateAdminPath, map[string]any{"enabled": true})
+		require.Equal(t, http.StatusConflict, rec.Code)
+		assert.Empty(t, audit.maintenanceAutoUpdateEvents)
+	})
+}
+
+func TestLogAuditLogger_MaintenanceAutoUpdateEvent(t *testing.T) {
+	ts := time.Date(2026, 11, 24, 4, 15, 0, 0, time.UTC)
+
+	t.Run("setting_changed emits INFO with old and new fields", func(t *testing.T) {
+		buf := captureAuditLogs(t)
+		l := NewLogAuditLogger("[Test]", false)
+		err := l.LogMaintenanceAutoUpdateEvent(context.Background(), &MaintenanceAutoUpdateEvent{
+			Kind:       MaintenanceAutoUpdateKindSettingChanged,
+			Actor:      "admin@example.com",
+			ActorID:    "user-1",
+			OldEnabled: false,
+			NewEnabled: true,
+			OldHourUTC: 0,
+			NewHourUTC: 4,
+			Timestamp:  ts,
+		})
+		require.NoError(t, err)
+		rec := auditRecordWithMsg(t, buf, "maintenance auto-update audit event")
+		require.NotNil(t, rec, "missing audit record in:\n%s", buf.String())
+		assert.Equal(t, "INFO", rec["level"])
+		assert.Equal(t, "maintenance_auto_update", rec["event_type"])
+		assert.Equal(t, "setting_changed", rec["kind"])
+		assert.Equal(t, "admin@example.com", rec["actor"])
+		assert.Equal(t, "user-1", rec["actor_id"])
+		assert.Equal(t, false, rec["old_enabled"])
+		assert.Equal(t, true, rec["new_enabled"])
+		assert.Equal(t, float64(0), rec["old_hour_utc"])
+		assert.Equal(t, float64(4), rec["new_hour_utc"])
+		assert.Equal(t, "2026-11-24T04:15:00Z", rec["timestamp"])
+	})
+
+	t.Run("run_started emits INFO with run fields", func(t *testing.T) {
+		buf := captureAuditLogs(t)
+		l := NewLogAuditLogger("[Test]", false)
+		err := l.LogMaintenanceAutoUpdateEvent(context.Background(), &MaintenanceAutoUpdateEvent{
+			Kind:      MaintenanceAutoUpdateKindRunStarted,
+			Actor:     autoUpdateStartedBy,
+			From:      "nightly-20261120",
+			Target:    "nightly-20261124",
+			RunID:     "run-1",
+			Outcome:   AutoUpdateOutcomeStarted,
+			Timestamp: ts,
+		})
+		require.NoError(t, err)
+		rec := auditRecordWithMsg(t, buf, "maintenance auto-update audit event")
+		require.NotNil(t, rec)
+		assert.Equal(t, "INFO", rec["level"])
+		assert.Equal(t, "run_started", rec["kind"])
+		assert.Equal(t, autoUpdateStartedBy, rec["actor"])
+		assert.Equal(t, "run-1", rec["run_id"])
+		assert.Equal(t, "nightly-20261120", rec["from"])
+		assert.Equal(t, "nightly-20261124", rec["target"])
+		assert.Equal(t, AutoUpdateOutcomeStarted, rec["outcome"])
+	})
+
+	t.Run("run_outcome uses INFO for verified and WARN for failed/rolled_back", func(t *testing.T) {
+		for _, tc := range []struct {
+			outcome   string
+			wantLevel string
+		}{
+			{AutoUpdateOutcomeVerified, "INFO"},
+			{AutoUpdateOutcomeFailed, "WARN"},
+			{AutoUpdateOutcomeRolledBack, "WARN"},
+		} {
+			t.Run(tc.outcome, func(t *testing.T) {
+				buf := captureAuditLogs(t)
+				l := NewLogAuditLogger("[Test]", false)
+				err := l.LogMaintenanceAutoUpdateEvent(context.Background(), &MaintenanceAutoUpdateEvent{
+					Kind:      MaintenanceAutoUpdateKindRunOutcome,
+					Actor:     autoUpdateStartedBy,
+					From:      "nightly-20261120",
+					Target:    "nightly-20261124",
+					RunID:     "run-2",
+					Outcome:   tc.outcome,
+					Timestamp: ts,
+				})
+				require.NoError(t, err)
+				rec := auditRecordWithMsg(t, buf, "maintenance auto-update audit event")
+				require.NotNil(t, rec)
+				assert.Equal(t, tc.wantLevel, rec["level"])
+				assert.Equal(t, "run_outcome", rec["kind"])
+				assert.Equal(t, tc.outcome, rec["outcome"])
+				assert.Equal(t, "run-2", rec["run_id"])
+				assert.Equal(t, "nightly-20261120", rec["from"])
+				assert.Equal(t, "nightly-20261124", rec["target"])
+			})
+		}
+	})
+
+	t.Run("nil receiver and nil event are safe no-ops", func(t *testing.T) {
+		var nilLogger *LogAuditLogger
+		assert.NoError(t, nilLogger.LogMaintenanceAutoUpdateEvent(context.Background(), &MaintenanceAutoUpdateEvent{}))
+		assert.NoError(t, NewLogAuditLogger("[Test]", false).LogMaintenanceAutoUpdateEvent(context.Background(), nil))
+	})
 }

@@ -751,3 +751,137 @@ func TestRegisterSchedulerHandlers_ReleaseAutoUpdateAlwaysRegistered(t *testing.
 	assert.True(t, found.Singleton, "release-auto-update must be registered via RegisterRecurringSingleton")
 	assert.Equal(t, releaseAutoUpdateIntervalMinutes, found.Interval)
 }
+
+func TestRunReleaseAutoUpdate_AuditEvents(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("emits run_started on apply", func(t *testing.T) {
+		srv, s := newAutoUpdateJobTestServer(t, MaintenanceConfig{
+			DeploymentTier: "binary",
+			ReleaseChannel: "nightly",
+			UpdatePolicy:   "notify",
+			Installer:      newTestInstaller(maintenance.StrategySymlink),
+		})
+		audit := &mockAuditLogger{}
+		srv.SetAuditLogger(audit)
+		enableAutoUpdateSetting(t, srv, 4)
+
+		exec := newParamRecordingExecutor()
+		tickTime := time.Date(2026, 11, 24, 4, 10, 0, 0, time.UTC)
+		p := &autoUpdateJobProbe{
+			now:     tickTime,
+			running: "nightly-20261120",
+			checkResult: &maintenance.ReleaseUpdateCheckResult{
+				Tier:            "binary",
+				UpdateAvailable: true,
+				CurrentVersion:  "nightly-20261120",
+				LatestVersion:   "nightly-20261124",
+				Channel:         "nightly",
+				Class:           "upgrade",
+			},
+			executor: exec,
+		}
+		srv.runReleaseAutoUpdate(ctx, p.deps())
+		select {
+		case <-exec.ran:
+		case <-time.After(5 * time.Second):
+			t.Fatal("auto-update executor never ran")
+		}
+
+		state, err := srv.readAutoUpdateState(ctx)
+		require.NoError(t, err)
+		waitForRunTerminal(t, s, state.LastRunID)
+
+		require.Len(t, audit.maintenanceAutoUpdateEvents, 1)
+		ev := audit.maintenanceAutoUpdateEvents[0]
+		assert.Equal(t, MaintenanceAutoUpdateKindRunStarted, ev.Kind)
+		assert.Equal(t, autoUpdateStartedBy, ev.Actor)
+		assert.Equal(t, "nightly-20261120", ev.From)
+		assert.Equal(t, "nightly-20261124", ev.Target)
+		assert.Equal(t, state.LastRunID, ev.RunID)
+		assert.Equal(t, AutoUpdateOutcomeStarted, ev.Outcome)
+		assert.Equal(t, tickTime, ev.Timestamp)
+	})
+
+	t.Run("emits run_outcome on reconcile for verified, failed, and rolled_back", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			runStatus   string
+			lastStatus  string
+			wantOutcome string
+		}{
+			{"verified", store.MaintenanceStatusCompleted, LastUpdateVerified, AutoUpdateOutcomeVerified},
+			{"failed", store.MaintenanceStatusFailed, LastUpdateFailed, AutoUpdateOutcomeFailed},
+			{"rolled_back", store.MaintenanceStatusFailed, LastUpdateRolledBack, AutoUpdateOutcomeRolledBack},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				srv, s := newAutoUpdateJobTestServer(t, MaintenanceConfig{
+					DeploymentTier: "binary",
+					ReleaseChannel: "nightly",
+					UpdatePolicy:   "auto",
+					Installer:      newTestInstaller(maintenance.StrategySymlink),
+				})
+				audit := &mockAuditLogger{}
+				srv.SetAuditLogger(audit)
+
+				run := &store.MaintenanceOperationRun{
+					ID:           api.NewUUID(),
+					OperationKey: "update-binary",
+					Status:       tc.runStatus,
+					StartedAt:    time.Now(),
+					StartedBy:    autoUpdateStartedBy,
+				}
+				require.NoError(t, s.CreateMaintenanceRun(ctx, run))
+				require.NoError(t, srv.writeHubSettingJSON(ctx, HubSettingSectionLastUpdate, LastUpdate{
+					RunID:  run.ID,
+					From:   "nightly-20261120",
+					To:     "nightly-20261124",
+					Status: tc.lastStatus,
+				}))
+				require.NoError(t, srv.writeAutoUpdateState(ctx, AutoUpdateState{
+					LastAttemptDay: "2026-11-24",
+					LastRunID:      run.ID,
+					LastTarget:     "nightly-20261124",
+					LastOutcome:    AutoUpdateOutcomeStarted,
+				}))
+
+				reconcileTime := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+				p := &autoUpdateJobProbe{
+					now:     reconcileTime,
+					running: "nightly-20261120",
+				}
+				srv.runReleaseAutoUpdate(ctx, p.deps())
+
+				require.Len(t, audit.maintenanceAutoUpdateEvents, 1)
+				ev := audit.maintenanceAutoUpdateEvents[0]
+				assert.Equal(t, MaintenanceAutoUpdateKindRunOutcome, ev.Kind)
+				assert.Equal(t, autoUpdateStartedBy, ev.Actor)
+				assert.Equal(t, "nightly-20261120", ev.From)
+				assert.Equal(t, "nightly-20261124", ev.Target)
+				assert.Equal(t, run.ID, ev.RunID)
+				assert.Equal(t, tc.wantOutcome, ev.Outcome)
+				assert.Equal(t, reconcileTime, ev.Timestamp)
+			})
+		}
+	})
+
+	t.Run("no audit event emitted when skipped", func(t *testing.T) {
+		srv, _ := newAutoUpdateJobTestServer(t, MaintenanceConfig{
+			DeploymentTier: "binary",
+			ReleaseChannel: "nightly",
+			UpdatePolicy:   "auto",
+			Installer:      newTestInstaller(maintenance.StrategySymlink),
+		})
+		audit := &mockAuditLogger{}
+		srv.SetAuditLogger(audit)
+
+		p := &autoUpdateJobProbe{
+			now:         time.Date(2026, 11, 24, 4, 10, 0, 0, time.UTC),
+			running:     "nightly-20261120",
+			checkResult: releaseCheckResult(false),
+			executor:    newParamRecordingExecutor(),
+		}
+		srv.runReleaseAutoUpdate(ctx, p.deps())
+		assert.Empty(t, audit.maintenanceAutoUpdateEvents)
+	})
+}

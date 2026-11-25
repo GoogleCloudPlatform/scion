@@ -68,11 +68,17 @@ func auditRecordWithMsg(t *testing.T, buf *bytes.Buffer, msg string) map[string]
 
 // mockAuditLogger captures audit events for testing.
 type mockAuditLogger struct {
-	brokerEvents              []*BrokerAuthEvent
-	gcpEvents                 []*GCPTokenEvent
-	saEvents                  []*store.SAAssignmentEvent
-	maintenanceOverrideEvents []*rebuildpreflight.MaintenanceOverrideEvent
-	maintenanceOverrideErr    error
+	brokerEvents                []*BrokerAuthEvent
+	gcpEvents                   []*GCPTokenEvent
+	saEvents                    []*store.SAAssignmentEvent
+	maintenanceOverrideEvents   []*rebuildpreflight.MaintenanceOverrideEvent
+	maintenanceOverrideErr      error
+	maintenanceAutoUpdateEvents []*MaintenanceAutoUpdateEvent
+}
+
+func (m *mockAuditLogger) LogMaintenanceAutoUpdateEvent(_ context.Context, event *MaintenanceAutoUpdateEvent) error {
+	m.maintenanceAutoUpdateEvents = append(m.maintenanceAutoUpdateEvents, event)
+	return nil
 }
 
 func (m *mockAuditLogger) LogMaintenanceOverrideEvent(_ context.Context, event *rebuildpreflight.MaintenanceOverrideEvent) error {
