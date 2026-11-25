@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -36,16 +37,17 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/apierr"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Ingress payload, header, attribute, and queue bounds (§4.3, §6.1, §8.1, §8.2; Stage 2 §7.4).
 const (
 	MaxPayloadBytes = 64 * 1024
-	// MaxEndpointBodyBytes is the upper bound on per-endpoint max_body_bytes.
-	// Stage 2 P4a keeps it at MaxPayloadBytes (64 KiB); P5 raises this single
-	// constant to 1 MiB alongside out-of-line object storage (§8).
-	MaxEndpointBodyBytes       = MaxPayloadBytes
+	// MaxEndpointBodyBytes is the upper bound on per-endpoint max_body_bytes
+	// (1 MiB, Stage 2 §8). Bodies <= MaxPayloadBytes (64 KiB) are stored inline;
+	// bodies > MaxPayloadBytes are uploaded to hub-private object storage.
+	MaxEndpointBodyBytes       = 1024 * 1024
 	MaxAttributesBytes         = 8 * 1024
 	MaxDeliveryBytes           = 128
 	MaxEventBytes              = 64
@@ -83,6 +85,7 @@ var (
 
 	errQueueFull                    = errors.New("trigger event queue full for project")
 	errDuplicateDelivery            = errors.New("duplicate webhook delivery")
+	errStorageUpload                = errors.New("overflow payload storage upload failed")
 	errTxMissingQueuePendingCounter = errors.New("transaction store does not implement DurableQueuePendingCounter")
 )
 
@@ -154,6 +157,7 @@ type IngressAcceptedResponse struct {
 // onto one of these constants so metric label cardinality stays bounded.
 const (
 	IngressResultAccepted                  = "accepted"
+	IngressResultAcceptedOverflow          = "accepted_overflow"
 	IngressResultDuplicate                 = "duplicate"
 	IngressResultRejectedSignature         = "rejected_signature"
 	IngressResultRejectedAuth              = "rejected_auth"
@@ -174,9 +178,16 @@ type IngressMetrics interface {
 	RecordIngressEvent(sourceKind, result string)
 }
 
+// IngressPayloadMetrics is an optional extension of IngressMetrics that
+// observes accepted webhook payload sizes in bytes (Stage 2 §8).
+type IngressPayloadMetrics interface {
+	ObserveIngressPayloadBytes(sourceKind string, bytes int)
+}
+
 // IngressCounts snapshots running request outcome counters for tests and metrics.
 type IngressCounts struct {
 	Accepted          int64
+	AcceptedOverflow  int64
 	Duplicate         int64
 	RejectedRateLimit int64
 	RejectedNotFound  int64
@@ -188,6 +199,7 @@ type IngressCounts struct {
 	RejectedQueueFull int64
 	FailedSecret      int64
 	FailedStore       int64
+	FailedStorage     int64
 }
 
 // ClientIPFunc resolves the client IP address of r using the hub's trusted
@@ -207,9 +219,13 @@ type HubTokenAuthResult struct {
 type HubTokenAuthorizer func(r *http.Request, ep *store.WebhookEndpoint) HubTokenAuthResult
 
 // EffectiveMaxBodyBytes returns the bounded body-size limit for an endpoint's
-// configured max_body_bytes (0 -> MaxEndpointBodyBytes; clamped to <= MaxEndpointBodyBytes).
+// configured max_body_bytes (0 -> store.DefaultWebhookMaxBodyBytes (64 KiB);
+// clamped to <= MaxEndpointBodyBytes (1 MiB)).
 func EffectiveMaxBodyBytes(configured int) int {
-	if configured <= 0 || configured > MaxEndpointBodyBytes {
+	if configured <= 0 {
+		return store.DefaultWebhookMaxBodyBytes
+	}
+	if configured > MaxEndpointBodyBytes {
 		return MaxEndpointBodyBytes
 	}
 	return configured
@@ -224,43 +240,52 @@ type IngressTxStore interface {
 
 // IngressConfig configures the generic webhook ingress handler.
 type IngressConfig struct {
-	Store             IngressTxStore
-	QueueStore        store.DurableQueueStore
-	Queue             durablequeue.Queue
-	LoadSecret        SecretLoader
-	AuthorizeHubToken HubTokenAuthorizer
-	ClientIP          ClientIPFunc
-	Enabled           func() bool
-	Limiter           *IngressLimiter
-	Cache             *EndpointCache
-	Counters          *CounterAccumulator
-	Audit             AuditSink
-	Metrics           IngressMetrics
-	Logger            *slog.Logger
-	Now               func() time.Time
-	NewEventID        func() string
+	Store                      IngressTxStore
+	QueueStore                 store.DurableQueueStore
+	Queue                      durablequeue.Queue
+	Storage                    func() storage.Storage
+	OverflowBudget             *OverflowBudgetCache
+	MaxOverflowBytesPerProject int64
+	OverflowUploadTimeout      time.Duration
+	LoadSecret                 SecretLoader
+	AuthorizeHubToken          HubTokenAuthorizer
+	ClientIP                   ClientIPFunc
+	Enabled                    func() bool
+	Limiter                    *IngressLimiter
+	Cache                      *EndpointCache
+	Counters                   *CounterAccumulator
+	Audit                      AuditSink
+	Metrics                    IngressMetrics
+	Logger                     *slog.Logger
+	Now                        func() time.Time
+	NewEventID                 func() string
 }
 
 // Ingress handles dual-posture POST /api/v1/hooks/{id} requests per Stage 1
-// §8.1, §8.1a, §8.2, §6.1, §6.2 and Stage 2 §7.1, §7.3, §7.4.
+// §8.1, §8.1a, §8.2, §6.1, §6.2 and Stage 2 §7.1, §7.3, §7.4, §8.
 type Ingress struct {
-	store             IngressTxStore
-	queueStore        store.DurableQueueStore
-	queue             durablequeue.Queue
-	loadSecret        SecretLoader
-	authorizeHubToken HubTokenAuthorizer
-	clientIP          ClientIPFunc
-	enabled           func() bool
-	limiter           *IngressLimiter
-	cache             *EndpointCache
-	counters          *CounterAccumulator
-	audit             AuditSink
-	metrics           IngressMetrics
-	logger            *slog.Logger
-	now               func() time.Time
-	newEventID        func() string
+	store                 IngressTxStore
+	queueStore            store.DurableQueueStore
+	queue                 durablequeue.Queue
+	storageFn             func() storage.Storage
+	overflowBudget        *OverflowBudgetCache
+	maxOverflowBytes      int64
+	overflowUploadTimeout time.Duration
+	loadSecret            SecretLoader
+	authorizeHubToken     HubTokenAuthorizer
+	clientIP              ClientIPFunc
+	enabled               func() bool
+	limiter               *IngressLimiter
+	cache                 *EndpointCache
+	counters              *CounterAccumulator
+	audit                 AuditSink
+	metrics               IngressMetrics
+	logger                *slog.Logger
+	now                   func() time.Time
+	newEventID            func() string
 
 	accepted          atomic.Int64
+	acceptedOverflow  atomic.Int64
 	duplicate         atomic.Int64
 	rejectedRateLimit atomic.Int64
 	rejectedNotFound  atomic.Int64
@@ -272,6 +297,7 @@ type Ingress struct {
 	rejectedQueueFull atomic.Int64
 	failedSecret      atomic.Int64
 	failedStore       atomic.Int64
+	failedStorage     atomic.Int64
 }
 
 // NewIngress constructs an Ingress handler with Stage 1 defaults for any
@@ -309,28 +335,60 @@ func NewIngress(cfg IngressConfig) *Ingress {
 	if newEventID == nil {
 		newEventID = uuid.NewString
 	}
-	return &Ingress{
-		store:             cfg.Store,
-		queueStore:        cfg.QueueStore,
-		queue:             cfg.Queue,
-		loadSecret:        cfg.LoadSecret,
-		authorizeHubToken: cfg.AuthorizeHubToken,
-		clientIP:          clientIP,
-		enabled:           cfg.Enabled,
-		limiter:           limiter,
-		cache:             cache,
-		counters:          counters,
-		audit:             audit,
-		metrics:           cfg.Metrics,
-		logger:            logger,
-		now:               nowFn,
-		newEventID:        newEventID,
+	overflowBudget := cfg.OverflowBudget
+	if overflowBudget == nil {
+		overflowBudget = NewOverflowBudgetCache(DefaultOverflowBudgetCacheTTL)
 	}
+	maxOverflowBytes := cfg.MaxOverflowBytesPerProject
+	if maxOverflowBytes <= 0 {
+		maxOverflowBytes = MaxOverflowPayloadBytesPerProject
+	}
+	uploadTimeout := cfg.OverflowUploadTimeout
+	if uploadTimeout <= 0 {
+		uploadTimeout = DefaultOverflowUploadTimeout
+	}
+	return &Ingress{
+		store:                 cfg.Store,
+		queueStore:            cfg.QueueStore,
+		queue:                 cfg.Queue,
+		storageFn:             cfg.Storage,
+		overflowBudget:        overflowBudget,
+		maxOverflowBytes:      maxOverflowBytes,
+		overflowUploadTimeout: uploadTimeout,
+		loadSecret:            cfg.LoadSecret,
+		authorizeHubToken:     cfg.AuthorizeHubToken,
+		clientIP:              clientIP,
+		enabled:               cfg.Enabled,
+		limiter:               limiter,
+		cache:                 cache,
+		counters:              counters,
+		audit:                 audit,
+		metrics:               cfg.Metrics,
+		logger:                logger,
+		now:                   nowFn,
+		newEventID:            newEventID,
+	}
+}
+
+func (h *Ingress) getStorage() storage.Storage {
+	if h == nil || h.storageFn == nil {
+		return nil
+	}
+	return h.storageFn()
 }
 
 func (h *Ingress) recordMetric(result string) {
 	if h != nil && h.metrics != nil {
 		h.metrics.RecordIngressEvent(store.TriggerSourceKindWebhook, result)
+	}
+}
+
+func (h *Ingress) recordPayloadBytes(n int) {
+	if h == nil || h.metrics == nil {
+		return
+	}
+	if pm, ok := h.metrics.(IngressPayloadMetrics); ok {
+		pm.ObserveIngressPayloadBytes(store.TriggerSourceKindWebhook, n)
 	}
 }
 
@@ -352,6 +410,7 @@ func defaultClientIP(r *http.Request) string {
 func (h *Ingress) Counts() IngressCounts {
 	return IngressCounts{
 		Accepted:          h.accepted.Load(),
+		AcceptedOverflow:  h.acceptedOverflow.Load(),
 		Duplicate:         h.duplicate.Load(),
 		RejectedRateLimit: h.rejectedRateLimit.Load(),
 		RejectedNotFound:  h.rejectedNotFound.Load(),
@@ -363,6 +422,7 @@ func (h *Ingress) Counts() IngressCounts {
 		RejectedQueueFull: h.rejectedQueueFull.Load(),
 		FailedSecret:      h.failedSecret.Load(),
 		FailedStore:       h.failedStore.Load(),
+		FailedStorage:     h.failedStorage.Load(),
 	}
 }
 
@@ -677,16 +737,38 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 9: construct TriggerEvent (§8.2) and execute delivery-dedup check,
-	// pending-only cap check, and event + queue insert in one locked transaction (§6.2).
-	// P5 extension point: for bodies > MaxPayloadBytes, upload to pkg/storage
-	// inside the transaction, set ev.Payload = "", ev.PayloadRef = objectPath,
-	// and check the per-project overflow byte budget before enqueueing.
-	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, sigModeAttr, senderAttr, body, now, h.newEventID)
+	// pending-only cap check, overflow byte-budget + object upload (when
+	// len(body) > MaxPayloadBytes, Stage 2 §8), and event + queue insert in one
+	// locked transaction (§6.2).
+	isOverflow := len(body) > MaxPayloadBytes
+	var overflowStor storage.Storage
+	if isOverflow {
+		overflowStor = h.getStorage()
+		if overflowStor == nil {
+			h.failedStorage.Add(1)
+			h.recordMetric(IngressResultFailedStore)
+			h.logger.Error("Webhook overflow payload storage is not configured",
+				"endpoint_id", ep.ID,
+				"project_id", ep.ProjectID,
+				"payload_bytes", len(body),
+			)
+			apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook payload storage unavailable", nil)
+			return
+		}
+	}
+
+	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, sigModeAttr, senderAttr, body, isOverflow, now, h.newEventID)
 	if !attrOK {
 		h.rejectedBadHeader.Add(1)
 		h.recordMetric(IngressResultRejectedBadHeader)
 		h.counters.RecordRejected(ep.ID)
 		apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, "event attributes exceed maximum size", nil)
+		return
+	}
+	if isOverflow && ev.PayloadRef == "" {
+		h.failedStore.Add(1)
+		h.recordMetric(IngressResultFailedStore)
+		apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeInternalError, "failed to build overflow payload path", nil)
 		return
 	}
 
@@ -696,8 +778,9 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return lErr
 		}
 		// §6.2: duplicate redeliveries (when X-Scion-Delivery is present) are
-		// acknowledged with 202 "duplicate" BEFORE the pending-cap check so a
-		// redelivery at the cap never returns 429.
+		// acknowledged with 202 "duplicate" BEFORE the pending-cap, overflow
+		// budget, and upload checks so a redelivery at the cap never returns 429
+		// or re-uploads an object.
 		if delivery != "" {
 			existing, gErr := tx.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
 			if gErr == nil && existing != nil {
@@ -719,6 +802,32 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if pending >= MaxPendingEventsPerProject {
 			return errQueueFull
 		}
+		if isOverflow {
+			usedBytes, fresh := h.overflowBudget.Get(ep.ProjectID, now)
+			if !fresh {
+				sum, sumErr := tx.SumTriggerEventOverflowBytes(ctx, ep.ProjectID, now.Add(-HistoryRetention))
+				if sumErr != nil {
+					return sumErr
+				}
+				usedBytes = sum
+				h.overflowBudget.Set(ep.ProjectID, usedBytes, now)
+			}
+			if usedBytes+int64(len(body)) > h.maxOverflowBytes {
+				return errQueueFull
+			}
+			// Stage 2 §8 / S21: upload inside the ingress transaction with a
+			// bounded timeout; never issue signed URLs; failure rolls back tx
+			// and returns 503 so the sender retries.
+			uploadCtx, cancelUpload := context.WithTimeout(ctx, h.overflowUploadTimeout)
+			_, upErr := overflowStor.Upload(uploadCtx, ev.PayloadRef, bytes.NewReader(body), storage.UploadOptions{
+				ContentType: "application/json",
+				Idempotent:  true,
+			})
+			cancelUpload()
+			if upErr != nil {
+				return fmt.Errorf("%w: %w", errStorageUpload, upErr)
+			}
+		}
 		_, enqErr := EnqueueEvent(ctx, tx, tx, h.queue, &ev)
 		return enqErr
 	})
@@ -728,6 +837,19 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.rejectedQueueFull.Add(1)
 			h.recordMetric(IngressResultRejectedQueueFull)
 			writeRateLimited(w, "30", "queue full")
+			return
+		}
+		if errors.Is(txErr, errStorageUpload) {
+			h.failedStorage.Add(1)
+			h.recordMetric(IngressResultFailedStore)
+			h.logger.Error("Failed to upload webhook overflow payload to object storage",
+				"endpoint_id", ep.ID,
+				"project_id", ep.ProjectID,
+				"event_id", ev.ID,
+				"payload_bytes", len(body),
+				"error", txErr,
+			)
+			apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook payload storage unavailable", nil)
 			return
 		}
 		// Answer 202 "duplicate" strictly for X-Scion-Delivery deduplication:
@@ -786,8 +908,15 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Step 10: wake local drainer(s), update in-memory counters, emit receipt audit, answer 202.
 	h.queue.Wake(EventQueueKind)
-	h.accepted.Add(1)
-	h.recordMetric(IngressResultAccepted)
+	if isOverflow {
+		h.overflowBudget.Add(ep.ProjectID, int64(len(body)), now)
+		h.acceptedOverflow.Add(1)
+		h.recordMetric(IngressResultAcceptedOverflow)
+	} else {
+		h.accepted.Add(1)
+		h.recordMetric(IngressResultAccepted)
+	}
+	h.recordPayloadBytes(len(body))
 	h.counters.RecordAccepted(ep.ID, now)
 	h.audit.RecordReceipt(ctx, ReceiptAuditRecord{
 		ProjectID:    ep.ProjectID,
@@ -863,6 +992,7 @@ func buildWebhookTriggerEvent(
 	hdr http.Header,
 	delivery, eventHdr, subjectHdr, clientIP, sigModeAttr, senderAttr string,
 	body []byte,
+	isOverflow bool,
 	now time.Time,
 	newEventID func() string,
 ) (store.TriggerEvent, string, bool) {
@@ -882,6 +1012,28 @@ func buildWebhookTriggerEvent(
 		dedupKey = uuid.NewString()
 	}
 
+	eventID := ""
+	if newEventID != nil {
+		eventID = newEventID()
+	}
+	if eventID == "" {
+		eventID = uuid.NewString()
+	}
+
+	var (
+		payloadStr string
+		payloadRef string
+	)
+	if isOverflow {
+		ref, err := OverflowPayloadObjectPath(ep.ProjectID, eventID)
+		if err != nil {
+			return store.TriggerEvent{}, "", true
+		}
+		payloadRef = ref
+	} else {
+		payloadStr = string(body)
+	}
+
 	if sigModeAttr == "" {
 		sigModeAttr = ep.SignatureMode
 	}
@@ -898,6 +1050,9 @@ func buildWebhookTriggerEvent(
 	}
 	if senderAttr != "" {
 		attrs["sender"] = senderAttr
+	}
+	if payloadRef != "" {
+		attrs["payload_ref"] = payloadRef
 	}
 	attrBytes, err := json.Marshal(attrs)
 	if err != nil || len(attrBytes) > MaxAttributesBytes {
@@ -920,14 +1075,6 @@ func buildWebhookTriggerEvent(
 		storedHeaders[name] = sanitizeHeaderForStorage(v, maxLen)
 	}
 
-	eventID := ""
-	if newEventID != nil {
-		eventID = newEventID()
-	}
-	if eventID == "" {
-		eventID = uuid.NewString()
-	}
-
 	return store.TriggerEvent{
 		ID:           eventID,
 		ProjectID:    ep.ProjectID,
@@ -940,7 +1087,8 @@ func buildWebhookTriggerEvent(
 		ReceivedAt:   now,
 		Attributes:   attrs,
 		Headers:      storedHeaders,
-		Payload:      string(body),
+		Payload:      payloadStr,
+		PayloadRef:   payloadRef,
 		PayloadBytes: len(body),
 		Status:       store.TriggerEventStatusPending,
 	}, eventAttr, true

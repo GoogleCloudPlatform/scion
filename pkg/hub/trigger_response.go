@@ -274,6 +274,7 @@ type TriggerEventSummaryResponse struct {
 	ReceivedAt   time.Time           `json:"receivedAt"`
 	Attributes   map[string]string   `json:"attributes,omitempty"`
 	Lists        map[string][]string `json:"lists,omitempty"`
+	PayloadRef   string              `json:"payloadRef,omitempty"`
 	PayloadBytes int                 `json:"payloadBytes"`
 	Status       string              `json:"status"`
 	MatchCount   int                 `json:"matchCount"`
@@ -705,6 +706,7 @@ func buildTriggerEventSummaryResponse(ev store.TriggerEvent) TriggerEventSummary
 		ReceivedAt:   ev.ReceivedAt,
 		Attributes:   attrs,
 		Lists:        copyTriggerStringListMap(ev.Lists),
+		PayloadRef:   ev.PayloadRef,
 		PayloadBytes: ev.PayloadBytes,
 		Status:       ev.Status,
 		MatchCount:   ev.MatchCount,

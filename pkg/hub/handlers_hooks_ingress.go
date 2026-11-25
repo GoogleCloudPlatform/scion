@@ -96,6 +96,7 @@ func newWebhookIngress(srv *Server, trustedProxies []string) *trigger.Ingress {
 		Store:             srv.store,
 		QueueStore:        dqs,
 		Queue:             srv.durableQueue,
+		Storage:           srv.GetStorage,
 		LoadSecret:        srv.loadWebhookEndpointSecret,
 		AuthorizeHubToken: srv.authorizeWebhookIngressHubToken,
 		ClientIP: func(r *http.Request) string {

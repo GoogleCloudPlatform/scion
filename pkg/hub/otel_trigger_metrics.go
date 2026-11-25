@@ -33,11 +33,12 @@ const (
 	MetricDurableQueueLeased    = "scion.hub.durablequeue.leased"
 	MetricDurableQueueOldestAge = "scion.hub.durablequeue.oldest_age"
 
-	MetricTriggerEvents        = "scion.hub.trigger.events"
-	MetricTriggerFires         = "scion.hub.trigger.fires"
-	MetricTriggerReaperReaped  = "scion.hub.trigger.reaper.reaped"
-	MetricTriggerReaperRuns    = "scion.hub.trigger.reaper.runs"
-	MetricTriggerReaperLastRun = "scion.hub.trigger.reaper.last_run"
+	MetricTriggerEvents            = "scion.hub.trigger.events"
+	MetricTriggerEventPayloadBytes = "scion.hub.trigger.event.payload_bytes"
+	MetricTriggerFires             = "scion.hub.trigger.fires"
+	MetricTriggerReaperReaped      = "scion.hub.trigger.reaper.reaped"
+	MetricTriggerReaperRuns        = "scion.hub.trigger.reaper.runs"
+	MetricTriggerReaperLastRun     = "scion.hub.trigger.reaper.last_run"
 )
 
 // OTelTriggerMetrics implements TriggerMetricsRecorder using OpenTelemetry
@@ -49,8 +50,9 @@ type OTelTriggerMetrics struct {
 	queueLeased    metric.Int64Gauge
 	queueOldestAge metric.Float64Gauge
 
-	ingressEvents metric.Int64Counter
-	triggerFires  metric.Int64Counter
+	ingressEvents       metric.Int64Counter
+	ingressPayloadBytes metric.Int64Histogram
+	triggerFires        metric.Int64Counter
 
 	reaperReaped  metric.Int64Counter
 	reaperRuns    metric.Int64Counter
@@ -102,6 +104,12 @@ func NewOTelTriggerMetrics(mp metric.MeterProvider, snap *TriggerSnapshotMetrics
 		metric.WithDescription("Trigger ingress events by source_kind and result"),
 	); err != nil {
 		return nil, fmt.Errorf("creating %s counter: %w", MetricTriggerEvents, err)
+	}
+	if r.ingressPayloadBytes, err = m.Int64Histogram(MetricTriggerEventPayloadBytes,
+		metric.WithUnit("By"),
+		metric.WithDescription("Accepted trigger ingress payload size in bytes"),
+	); err != nil {
+		return nil, fmt.Errorf("creating %s histogram: %w", MetricTriggerEventPayloadBytes, err)
 	}
 	if r.triggerFires, err = m.Int64Counter(MetricTriggerFires,
 		metric.WithUnit("{fire}"),
@@ -215,6 +223,19 @@ func (r *OTelTriggerMetrics) RecordIngressEvent(sourceKind, result string) {
 	))
 	if r.snap != nil {
 		r.snap.RecordIngressEvent(sourceKind, result)
+	}
+}
+
+// ObserveIngressPayloadBytes implements trigger.IngressPayloadMetrics.
+func (r *OTelTriggerMetrics) ObserveIngressPayloadBytes(sourceKind string, bytes int) {
+	if bytes < 0 {
+		bytes = 0
+	}
+	r.ingressPayloadBytes.Record(context.Background(), int64(bytes), metric.WithAttributes(
+		attribute.String("source_kind", normalizeTriggerSourceKindLabel(sourceKind)),
+	))
+	if r.snap != nil {
+		r.snap.ObserveIngressPayloadBytes(sourceKind, bytes)
 	}
 }
 

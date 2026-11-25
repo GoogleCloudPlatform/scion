@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/source"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
@@ -278,6 +279,7 @@ type PreFireRefuser interface {
 type DispatcherConfig struct {
 	Core           Core
 	Store          store.TriggerStore
+	Storage        func() storage.Storage
 	SubjectClaims  SubjectClaims
 	Queue          durablequeue.Queue
 	TxRunner       func(ctx context.Context, fn func(ctx context.Context, tx store.Tx, ts store.TriggerStore) error) error
@@ -322,6 +324,7 @@ type DrainerOptions struct {
 type Dispatcher struct {
 	core           Core
 	store          store.TriggerStore
+	storageFn      func() storage.Storage
 	claims         SubjectClaims
 	queue          durablequeue.Queue
 	txRunner       func(ctx context.Context, fn func(ctx context.Context, tx store.Tx, ts store.TriggerStore) error) error
@@ -375,6 +378,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	return &Dispatcher{
 		core:           cfg.Core,
 		store:          cfg.Store,
+		storageFn:      cfg.Storage,
 		claims:         cfg.SubjectClaims,
 		queue:          cfg.Queue,
 		txRunner:       cfg.TxRunner,
@@ -624,6 +628,8 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		earliestRetryAt         time.Time
 		stillCoalescingTriggers = make(map[string]bool)
 		baseActBuilt            bool
+		overflowPreviewLoaded   bool
+		overflowPreview         []byte
 		baseAct                 triggerrule.Activation
 		actErr                  error
 	)
@@ -1140,6 +1146,25 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 		}
 
+		firePayload := rawPayload
+		if ev.PayloadRef != "" {
+			if !overflowPreviewLoaded {
+				overflowPreviewLoaded = true
+				if d.storageFn != nil {
+					if stor := d.storageFn(); stor != nil {
+						prev, pErr := ReadOverflowPayloadPreview(ctx, stor, ev.ProjectID, ev.PayloadRef, DefaultOverflowDownloadTimeout)
+						if pErr != nil {
+							d.logger.Warn("trigger: failed to read overflow payload preview for delivery",
+								"eventID", ev.ID, "payloadRef", ev.PayloadRef, "error", pErr)
+						} else {
+							overflowPreview = prev
+						}
+					}
+				}
+			}
+			firePayload = overflowPreview
+		}
+
 		tracker := newTriggerFireTracker(ctx, d.core)
 		req := hubfire.FireRequest{
 			ProjectID: tr.ProjectID,
@@ -1153,18 +1178,20 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			ActionType: tr.ActionType,
 			Payload:    tr.ActionPayload,
 			Event: &hubfire.FireEvent{
-				ID:         ev.ID,
-				ProjectID:  ev.ProjectID,
-				SourceKind: ev.SourceKind,
-				SourceID:   ev.SourceID,
-				Type:       ev.Type,
-				Subject:    ev.Subject,
-				OccurredAt: ev.OccurredAt,
-				ReceivedAt: ev.ReceivedAt,
-				Attributes: maps.Clone(ev.Attributes),
-				Lists:      cloneStringListMap(ev.Lists),
-				Payload:    rawPayload,
-				Trigger:    &trigRef,
+				ID:           ev.ID,
+				ProjectID:    ev.ProjectID,
+				SourceKind:   ev.SourceKind,
+				SourceID:     ev.SourceID,
+				Type:         ev.Type,
+				Subject:      ev.Subject,
+				OccurredAt:   ev.OccurredAt,
+				ReceivedAt:   ev.ReceivedAt,
+				Attributes:   maps.Clone(ev.Attributes),
+				Lists:        cloneStringListMap(ev.Lists),
+				Payload:      firePayload,
+				PayloadBytes: ev.PayloadBytes,
+				PayloadRef:   ev.PayloadRef,
+				Trigger:      &trigRef,
 			},
 			Executor: hubfire.ExecutorContext{
 				Kind: ExecutorKindTriggerDrainer,
@@ -1859,32 +1886,56 @@ func (t *triggerFireTracker) record(write func()) bool {
 
 // MaintenanceResult reports counts from one hourly trigger maintenance pass.
 type MaintenanceResult struct {
-	FiresReaped          int
-	EventsReconciled     int
-	EventsPurged         int
-	FiresPurged          int
-	ClaimsReleased       int
-	ClaimsPurged         int
-	RotatedSecretsPurged int
+	FiresReaped           int
+	EventsReconciled      int
+	EventsPurged          int
+	FiresPurged           int
+	OverflowObjectsPurged int
+	OverflowOrphansSwept  int
+	OverflowDeleteErrors  int
+	ClaimsReleased        int
+	ClaimsPurged          int
+	RotatedSecretsPurged  int
 }
 
-// RunMaintenance executes the hourly trigger maintenance pass (§4.3, §6.4,
-// rev 7.4; Stage 2 §4.4, §5.6):
+// MaintenanceOptions configures optional overflow-object maintenance behaviour.
+type MaintenanceOptions struct {
+	// OrphanMinAge overrides DefaultOverflowOrphanMinAge when positive.
+	// Set to a negative duration in tests to sweep immediately without a grace window.
+	OrphanMinAge time.Duration
+	Logger       *slog.Logger
+}
+
+// RunMaintenance executes the hourly trigger maintenance pass without object
+// storage (legacy entry point for callers/tests without overflow storage).
+func RunMaintenance(ctx context.Context, ts store.TriggerStore, now time.Time) (MaintenanceResult, error) {
+	return RunMaintenanceWithStorage(ctx, ts, nil, now, MaintenanceOptions{})
+}
+
+// RunMaintenanceWithStorage executes the hourly trigger maintenance pass (§4.3,
+// §6.4, rev 7.4; Stage 2 §4.4, §5.6, §8):
 //  1. Reaps expired firing rows (lease_until <= now) to failed "hub restarted during fire".
 //  2. Reconciles pending trigger_events older than DefaultMaxAge (72h) with no
 //     trigger.event queue item to failed "dropped by queue limits".
 //  3. Purges terminal trigger_fires and trigger_events older than
-//     HistoryRetention (7 days).
-//  4. Releases active trigger_subject_claims whose agent is terminal
+//     HistoryRetention (7 days), deleting any associated overflow payload objects
+//     from stor (failures logged and retried on the next hourly sweep).
+//  4. Sweeps orphan overflow payload objects under trigger-events/ that have no
+//     matching trigger_events row and are older than the orphan grace window.
+//  5. Releases active trigger_subject_claims whose agent is terminal
 //     (stopped|error|halted) or deleted.
-//  5. Deletes released trigger_subject_claims older than HistoryRetention (7 days).
-//  6. Purges retired webhook endpoint signing secret rows past the 24h rotation grace window.
-func RunMaintenance(ctx context.Context, ts store.TriggerStore, now time.Time) (MaintenanceResult, error) {
+//  6. Deletes released trigger_subject_claims older than HistoryRetention (7 days).
+//  7. Purges retired webhook endpoint signing secret rows past the 24h rotation grace window.
+func RunMaintenanceWithStorage(ctx context.Context, ts store.TriggerStore, stor storage.Storage, now time.Time, opts MaintenanceOptions) (MaintenanceResult, error) {
 	var out MaintenanceResult
 	if ts == nil {
 		return out, fmt.Errorf("%w: trigger store is nil", store.ErrInvalidInput)
 	}
 	now = now.UTC()
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 
 	var errs []error
 	reaped, err := ts.ReapExpiredTriggerFires(ctx, now, DefaultReapBatchLimit)
@@ -1906,11 +1957,30 @@ func RunMaintenance(ctx context.Context, ts store.TriggerStore, now time.Time) (
 		errs = append(errs, fmt.Errorf("reconcile orphaned pending trigger events: %w", err))
 	}
 
-	eventsPurged, firesPurged, err := ts.PurgeOldTriggerHistory(ctx, now.Add(-HistoryRetention))
+	eventsPurged, firesPurged, purgedRefs, err := ts.PurgeOldTriggerHistoryWithPayloadRefs(ctx, now.Add(-HistoryRetention))
 	out.EventsPurged = eventsPurged
 	out.FiresPurged = firesPurged
 	if err != nil {
 		errs = append(errs, fmt.Errorf("purge old trigger history: %w", err))
+	} else if stor != nil && len(purgedRefs) > 0 {
+		delCount, delErrs := PurgeOverflowObjects(ctx, stor, purgedRefs, logger)
+		out.OverflowObjectsPurged = delCount
+		out.OverflowDeleteErrors += delErrs
+	}
+
+	if stor != nil {
+		minAge := opts.OrphanMinAge
+		if minAge == 0 {
+			minAge = DefaultOverflowOrphanMinAge
+		} else if minAge < 0 {
+			minAge = 0
+		}
+		swept, sweepErrs, sErr := SweepOrphanOverflowObjects(ctx, ts, stor, now, minAge, logger)
+		out.OverflowOrphansSwept = swept
+		out.OverflowDeleteErrors += sweepErrs
+		if sErr != nil {
+			errs = append(errs, fmt.Errorf("sweep orphan overflow payload objects: %w", sErr))
+		}
 	}
 
 	claimsReleased, err := ts.ReleaseTerminalTriggerSubjectClaims(ctx, now)

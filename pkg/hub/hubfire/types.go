@@ -82,19 +82,21 @@ type FireScheduleRef struct {
 
 // FireEvent is the normalised event envelope as seen by the fire core.
 type FireEvent struct {
-	ID         string
-	ProjectID  string
-	SourceKind string
-	SourceID   string
-	Type       string
-	Subject    string
-	OccurredAt time.Time
-	ReceivedAt time.Time
-	Attributes map[string]string
-	Lists      map[string][]string
-	Payload    []byte           // bounded raw JSON or nil
-	Trigger    *FireTriggerRef  // populated when fired by a trigger
-	Schedule   *FireScheduleRef // populated when fired by a schedule (§8.4)
+	ID           string
+	ProjectID    string
+	SourceKind   string
+	SourceID     string
+	Type         string
+	Subject      string
+	OccurredAt   time.Time
+	ReceivedAt   time.Time
+	Attributes   map[string]string
+	Lists        map[string][]string
+	Payload      []byte           // bounded raw JSON (or first 16 KiB preview for overflow) or nil
+	PayloadBytes int              // full body size in bytes (used for overflow events where Payload is a preview)
+	PayloadRef   string           // non-empty when the full body is stored out of line in pkg/storage (§8)
+	Trigger      *FireTriggerRef  // populated when fired by a trigger
+	Schedule     *FireScheduleRef // populated when fired by a schedule (§8.4)
 }
 
 // FireRequest carries everything a fire-core Action needs from an adapter

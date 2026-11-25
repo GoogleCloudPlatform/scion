@@ -65,6 +65,7 @@ func triggerQueueOutcomes() []string {
 func triggerIngressResults() []string {
 	return []string{
 		trigger.IngressResultAccepted,
+		trigger.IngressResultAcceptedOverflow,
 		trigger.IngressResultDuplicate,
 		trigger.IngressResultRejectedSignature,
 		trigger.IngressResultRejectedAuth,
@@ -146,6 +147,7 @@ func normalizeTriggerSourceKindLabel(sourceKind string) string {
 func normalizeTriggerIngressResultLabel(result string) string {
 	switch result {
 	case trigger.IngressResultAccepted,
+		trigger.IngressResultAcceptedOverflow,
 		trigger.IngressResultDuplicate,
 		trigger.IngressResultRejectedSignature,
 		trigger.IngressResultRejectedAuth,
@@ -203,8 +205,30 @@ type TriggerMetricsRecorder interface {
 	durablequeue.QueueMetrics
 	durablequeue.Metrics
 	trigger.IngressMetrics
+	trigger.IngressPayloadMetrics
 	trigger.DispatcherMetrics
 	RecordReaperRun(reaped int, at time.Time, err error)
+}
+
+type payloadBytesBucketDef struct {
+	label string
+	upper int // <= 0 means +Inf
+}
+
+var triggerPayloadBytesBucketDefs = []payloadBytesBucketDef{
+	{label: "le_1024", upper: 1024},
+	{label: "le_16384", upper: 16 * 1024},
+	{label: "le_65536", upper: 64 * 1024},
+	{label: "le_262144", upper: 256 * 1024},
+	{label: "le_524288", upper: 512 * 1024},
+	{label: "le_1048576", upper: 1024 * 1024},
+	{label: "le_inf", upper: 0},
+}
+
+type payloadBytesHistogramState struct {
+	count   int64
+	sum     int64
+	buckets map[string]int64
 }
 
 type queueKindSnapshotState struct {
@@ -225,6 +249,7 @@ type TriggerSnapshotMetrics struct {
 
 	queues          map[string]*queueKindSnapshotState
 	ingress         map[string]map[string]int64
+	payloadBytes    map[string]*payloadBytesHistogramState
 	firesByStatus   map[string]int64
 	firesByAction   map[string]map[string]int64
 	skippedByReason map[string]int64
@@ -242,6 +267,7 @@ func NewTriggerSnapshotMetrics() *TriggerSnapshotMetrics {
 		since:           time.Now().UTC(),
 		queues:          make(map[string]*queueKindSnapshotState),
 		ingress:         make(map[string]map[string]int64),
+		payloadBytes:    make(map[string]*payloadBytesHistogramState),
 		firesByStatus:   make(map[string]int64),
 		firesByAction:   make(map[string]map[string]int64),
 		skippedByReason: make(map[string]int64),
@@ -335,6 +361,28 @@ func (m *TriggerSnapshotMetrics) RecordIngressEvent(sourceKind, result string) {
 	byResult[res]++
 }
 
+// ObserveIngressPayloadBytes implements trigger.IngressPayloadMetrics.
+func (m *TriggerSnapshotMetrics) ObserveIngressPayloadBytes(sourceKind string, bytes int) {
+	if bytes < 0 {
+		bytes = 0
+	}
+	sk := normalizeTriggerSourceKindLabel(sourceKind)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st, ok := m.payloadBytes[sk]
+	if !ok {
+		st = &payloadBytesHistogramState{buckets: make(map[string]int64, len(triggerPayloadBytesBucketDefs))}
+		m.payloadBytes[sk] = st
+	}
+	st.count++
+	st.sum += int64(bytes)
+	for _, b := range triggerPayloadBytesBucketDefs {
+		if b.upper <= 0 || bytes <= b.upper {
+			st.buckets[b.label]++
+		}
+	}
+}
+
 // RecordTriggerFire implements trigger.DispatcherMetrics.
 func (m *TriggerSnapshotMetrics) RecordTriggerFire(actionType, status, skipReason string) {
 	act := normalizeTriggerActionLabel(actionType)
@@ -394,14 +442,23 @@ type TriggerReaperMetricsSnapshot struct {
 	LastRunAt   *string          `json:"lastRunAt,omitempty"`
 }
 
+// TriggerPayloadBytesHistogramSnapshot is the cumulative histogram snapshot of
+// accepted trigger ingress payload sizes in bytes (Stage 2 §8).
+type TriggerPayloadBytesHistogramSnapshot struct {
+	Count   int64            `json:"count"`
+	Sum     int64            `json:"sum"`
+	Buckets map[string]int64 `json:"buckets"`
+}
+
 // TriggerMetricsSnapshot is the GET /metrics JSON section for triggers and the
 // durable queue (served as "triggers" when hub.triggers is enabled).
 type TriggerMetricsSnapshot struct {
-	Since   string                                 `json:"since"`
-	Queues  map[string]TriggerQueueMetricsSnapshot `json:"queues"`
-	Ingress map[string]map[string]int64            `json:"ingress"`
-	Fires   TriggerFiresMetricsSnapshot            `json:"fires"`
-	Reaper  TriggerReaperMetricsSnapshot           `json:"reaper"`
+	Since        string                                          `json:"since"`
+	Queues       map[string]TriggerQueueMetricsSnapshot          `json:"queues"`
+	Ingress      map[string]map[string]int64                     `json:"ingress"`
+	PayloadBytes map[string]TriggerPayloadBytesHistogramSnapshot `json:"payloadBytes"`
+	Fires        TriggerFiresMetricsSnapshot                     `json:"fires"`
+	Reaper       TriggerReaperMetricsSnapshot                    `json:"reaper"`
 }
 
 // GetSnapshot returns a point-in-time snapshot with deterministic closed-set keys.
@@ -410,9 +467,10 @@ func (m *TriggerSnapshotMetrics) GetSnapshot() *TriggerMetricsSnapshot {
 	defer m.mu.Unlock()
 
 	snap := &TriggerMetricsSnapshot{
-		Since:   m.since.UTC().Format(time.RFC3339),
-		Queues:  make(map[string]TriggerQueueMetricsSnapshot),
-		Ingress: make(map[string]map[string]int64),
+		Since:        m.since.UTC().Format(time.RFC3339),
+		Queues:       make(map[string]TriggerQueueMetricsSnapshot),
+		Ingress:      make(map[string]map[string]int64),
+		PayloadBytes: make(map[string]TriggerPayloadBytesHistogramSnapshot),
 		Fires: TriggerFiresMetricsSnapshot{
 			ByStatus:        make(map[string]int64, len(triggerFireStatuses())),
 			ByAction:        make(map[string]map[string]int64),
@@ -469,6 +527,25 @@ func (m *TriggerSnapshotMetrics) GetSnapshot() *TriggerMetricsSnapshot {
 			byRes[res] = srcMap[res]
 		}
 		snap.Ingress[sk] = byRes
+
+		buckets := make(map[string]int64, len(triggerPayloadBytesBucketDefs))
+		var count, sum int64
+		if hst := m.payloadBytes[sk]; hst != nil {
+			count = hst.count
+			sum = hst.sum
+			for _, b := range triggerPayloadBytesBucketDefs {
+				buckets[b.label] = hst.buckets[b.label]
+			}
+		} else {
+			for _, b := range triggerPayloadBytesBucketDefs {
+				buckets[b.label] = 0
+			}
+		}
+		snap.PayloadBytes[sk] = TriggerPayloadBytesHistogramSnapshot{
+			Count:   count,
+			Sum:     sum,
+			Buckets: buckets,
+		}
 	}
 
 	for _, st := range triggerFireStatuses() {
@@ -569,6 +646,12 @@ func (m serverTriggerMetrics) ObserveQueue(kind string, pending, leased int64, o
 func (m serverTriggerMetrics) RecordIngressEvent(sourceKind, result string) {
 	if rec := m.recorder(); rec != nil {
 		rec.RecordIngressEvent(sourceKind, result)
+	}
+}
+
+func (m serverTriggerMetrics) ObserveIngressPayloadBytes(sourceKind string, bytes int) {
+	if rec := m.recorder(); rec != nil {
+		rec.ObserveIngressPayloadBytes(sourceKind, bytes)
 	}
 }
 
