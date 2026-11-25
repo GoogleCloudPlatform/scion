@@ -225,7 +225,7 @@ func createReincarnationAt(t *testing.T, s store.Store, id, state string, update
 	ctx := context.Background()
 	rec := &store.AgentReincarnation{
 		ID:             id,
-		AgentID:        "agent-" + id,
+		AgentID:        tid("agent_" + id),
 		FromGeneration: 1,
 		ToGeneration:   2,
 		State:          store.AgentReincarnationStatePending,
@@ -258,56 +258,51 @@ func TestMoveBundleOrphanSweep_T10_EligibilityMatrix(t *testing.T) {
 	oldTime := now.Add(-defaultMoveBundleOrphanGrace - time.Minute)
 	youngTime := now.Add(-defaultMoveBundleOrphanGrace + 5*time.Minute)
 
+	ridMissing := tid("rid_missing")
+	ridOldCompleted := tid("rid_old_completed")
+	ridOldFailed := tid("rid_old_failed")
+	ridYoungCompleted := tid("rid_young_completed")
+	ridYoungFailed := tid("rid_young_failed")
+
 	// Missing record (no DB row at all) -> MUST delete.
-	stor.seedBundle(t, hubID, "rid-missing")
+	stor.seedBundle(t, hubID, ridMissing)
 
 	// Old terminal records -> MUST delete.
-	createReincarnationAt(t, s, "rid-old-completed", store.AgentReincarnationStateCompleted, oldTime)
-	stor.seedBundle(t, hubID, "rid-old-completed")
+	createReincarnationAt(t, s, ridOldCompleted, store.AgentReincarnationStateCompleted, oldTime)
+	stor.seedBundle(t, hubID, ridOldCompleted)
 
-	createReincarnationAt(t, s, "rid-old-failed", store.AgentReincarnationStateFailed, oldTime)
-	stor.seedBundle(t, hubID, "rid-old-failed")
+	createReincarnationAt(t, s, ridOldFailed, store.AgentReincarnationStateFailed, oldTime)
+	stor.seedBundle(t, hubID, ridOldFailed)
 
 	// Young terminal records (within grace) -> MUST skip.
-	createReincarnationAt(t, s, "rid-young-completed", store.AgentReincarnationStateCompleted, youngTime)
-	stor.seedBundle(t, hubID, "rid-young-completed")
+	createReincarnationAt(t, s, ridYoungCompleted, store.AgentReincarnationStateCompleted, youngTime)
+	stor.seedBundle(t, hubID, ridYoungCompleted)
 
-	createReincarnationAt(t, s, "rid-young-failed", store.AgentReincarnationStateFailed, youngTime)
-	stor.seedBundle(t, hubID, "rid-young-failed")
+	createReincarnationAt(t, s, ridYoungFailed, store.AgentReincarnationStateFailed, youngTime)
+	stor.seedBundle(t, hubID, ridYoungFailed)
 
 	// Non-terminal records (even if older than grace!) -> MUST skip.
+	var activeRIDs []string
 	for _, st := range store.AgentReincarnationNonTerminalStates {
-		rid := "rid-active-" + st
+		rid := tid("rid_active_" + st)
+		activeRIDs = append(activeRIDs, rid)
 		createReincarnationAt(t, s, rid, st, oldTime)
 		stor.seedBundle(t, hubID, rid)
 	}
 
-	// Sibling-prefix safety: "rid-sib" is missing (deleted), while "rid-sibx"
-	// is non-terminal (must remain completely untouched).
-	stor.seedBundle(t, hubID, "rid-sib")
-	createReincarnationAt(t, s, "rid-sibx", store.AgentReincarnationStateStopping, oldTime)
-	stor.seedBundle(t, hubID, "rid-sibx")
-
 	deleted, err := srv.sweepOrphanMoveBundlesAt(ctx, now, defaultMoveBundleOrphanGrace, moveBundleOrphanSweepLimit)
 	require.NoError(t, err)
-	assert.Equal(t, 4, deleted, "expected 4 deleted prefixes: missing, old-completed, old-failed, rid-sib")
+	assert.Equal(t, 3, deleted, "expected 3 deleted prefixes: missing, old-completed, old-failed")
 
 	// Verify deleted prefixes are gone.
-	for _, rid := range []string{"rid-missing", "rid-old-completed", "rid-old-failed", "rid-sib"} {
+	for _, rid := range []string{ridMissing, ridOldCompleted, ridOldFailed} {
 		base, err := storage.MoveBundlePath(hubID, rid)
 		require.NoError(t, err)
 		assert.False(t, stor.hasAnyUnder(storage.DirPrefix(base)), "expected %s to be deleted", rid)
 	}
 
-	// Verify kept prefixes are untouched (including sibling rid-sibx).
-	kept := []string{
-		"rid-young-completed",
-		"rid-young-failed",
-		"rid-sibx",
-	}
-	for _, st := range store.AgentReincarnationNonTerminalStates {
-		kept = append(kept, "rid-active-"+st)
-	}
+	// Verify kept prefixes are untouched.
+	kept := append([]string{ridYoungCompleted, ridYoungFailed}, activeRIDs...)
 	for _, rid := range kept {
 		base, err := storage.MoveBundlePath(hubID, rid)
 		require.NoError(t, err)
@@ -318,6 +313,31 @@ func TestMoveBundleOrphanSweep_T10_EligibilityMatrix(t *testing.T) {
 	for _, p := range stor.deleteCalls() {
 		assert.True(t, strings.HasSuffix(p, "/"), "DeletePrefix must use DirPrefix with trailing slash, got %q", p)
 	}
+
+	// Sibling-prefix safety: deleting <rid>/ must never match a sibling
+	// prefix <rid>x/ whose key shares <rid> as a string prefix.
+	t.Run("sibling-prefix safety", func(t *testing.T) {
+		sibSrv, _, sibStor := newOrphanSweepTestServer(t)
+		sibHubID := sibSrv.HubID()
+		ridSib := tid("rid_sib")
+		ridSibX := ridSib + "x"
+		sibStor.seedBundle(t, sibHubID, ridSib)
+		sibStor.seedBundle(t, sibHubID, ridSibX)
+
+		// Process only the first prefix (ridSib/, which sorts before ridSibX/).
+		n, err := sibSrv.sweepOrphanMoveBundlesAt(ctx, now, defaultMoveBundleOrphanGrace, 1)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+
+		baseSib, err := storage.MoveBundlePath(sibHubID, ridSib)
+		require.NoError(t, err)
+		baseSibX, err := storage.MoveBundlePath(sibHubID, ridSibX)
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{storage.DirPrefix(baseSib)}, sibStor.deleteCalls())
+		assert.False(t, sibStor.hasAnyUnder(storage.DirPrefix(baseSib)), "expected %s to be deleted", ridSib)
+		assert.True(t, sibStor.hasAnyUnder(storage.DirPrefix(baseSibX)), "sibling %s must not be matched by deleting %s", ridSibX, ridSib)
+	})
 }
 
 // TestMoveBundleOrphanSweep_T10_Bound100PerPass verifies that a single sweep
