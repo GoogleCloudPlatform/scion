@@ -51,6 +51,13 @@ type ScheduleResponse struct {
 	store.Schedule
 	// Payload shadows the stored payload as ScheduledEventResponse's does.
 	Payload string `json:"payload"`
+	// CreatedByName is the resolved human-readable identifier for CreatedBy
+	// (user display name or email, or agent slug), omitted when unresolvable
+	// or when the caller is not authorized to read the creator principal.
+	CreatedByName string `json:"createdByName,omitempty"`
+	// CreatedByType is the principal kind of CreatedBy ("user" or "agent")
+	// when CreatedByName is populated.
+	CreatedByType string `json:"createdByType,omitempty"`
 }
 
 // ExecSummary is an exec run's non-secret outcome metadata without its command
@@ -109,26 +116,197 @@ func execPayloadTarget(raw string) string {
 	return p.AgentID
 }
 
+type resolvedScheduleCreator struct {
+	name string
+	kind string
+}
+
 // execRevealer decides, once per target agent per request, whether the
 // request's caller may see exec argv: live agent.attach on the target
 // through authorizeAgentTargetAction with the caller's current credential.
+// It also memoizes schedule creator resolution across rows of one response.
 type execRevealer struct {
 	s        *Server
 	ctx      context.Context
 	identity Identity
 	never    bool
 	memo     map[string]bool
+	creators map[string]resolvedScheduleCreator
 }
 
 // newExecRevealer returns the revealer of the request in ctx. A revealer
 // for the admin view (never) reveals nothing.
 func (s *Server) newExecRevealer(ctx context.Context) *execRevealer {
-	return &execRevealer{s: s, ctx: ctx, identity: GetIdentityFromContext(ctx), memo: map[string]bool{}}
+	return &execRevealer{
+		s:        s,
+		ctx:      ctx,
+		identity: GetIdentityFromContext(ctx),
+		memo:     map[string]bool{},
+		creators: map[string]resolvedScheduleCreator{},
+	}
 }
 
-// noExecRevealer reveals nothing (/admin/scheduler).
+// noExecRevealer reveals no exec argv (/admin/scheduler), while still carrying
+// the caller's identity so schedule creator resolution is authorized per viewer.
 func (s *Server) noExecRevealer(ctx context.Context) *execRevealer {
-	return &execRevealer{s: s, ctx: ctx, never: true}
+	return &execRevealer{
+		s:        s,
+		ctx:      ctx,
+		identity: GetIdentityFromContext(ctx),
+		never:    true,
+		creators: map[string]resolvedScheduleCreator{},
+	}
+}
+
+// canReadCreatorUser mirrors getUser (handlers_users_core.go) so schedule
+// responses never widen who can see another user's display name or email.
+func (r *execRevealer) canReadCreatorUser(userID string) bool {
+	if r.identity == nil {
+		return false
+	}
+	if _, isAgent := r.identity.(AgentIdentity); isAgent {
+		return false
+	}
+	if token, isToken := r.identity.(*ScopedUserIdentity); isToken {
+		if r.s.authzService == nil {
+			return false
+		}
+		return r.s.authzService.Decide(r.ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(token),
+			Credential: credentialContextForIdentity(token),
+			Resource:   hubScopedResource("user", userID),
+			Action:     ActionRead,
+			Permission: "user.read",
+		}).Allowed
+	}
+	return true
+}
+
+// canReadCreatorAgent reports whether the caller may read agent's identity.
+func (r *execRevealer) canReadCreatorAgent(agent *store.Agent) bool {
+	if r.identity == nil {
+		return false
+	}
+	if agentIdent, isAgent := r.identity.(AgentIdentity); isAgent {
+		return agentIdent.ID() == agent.ID
+	}
+	if r.s.authzService == nil {
+		return false
+	}
+	return r.s.authzService.CheckAccess(r.ctx, r.identity, agentResource(agent), ActionRead).Allowed
+}
+
+// resolveCreatorUser formats a user creator if the caller is allowed to read it.
+func (r *execRevealer) resolveCreatorUser(user *store.User) resolvedScheduleCreator {
+	if user == nil || !r.canReadCreatorUser(user.ID) {
+		return resolvedScheduleCreator{}
+	}
+	name := user.DisplayName
+	if name == "" {
+		name = user.Email
+	}
+	if name == "" {
+		return resolvedScheduleCreator{}
+	}
+	return resolvedScheduleCreator{name: name, kind: "user"}
+}
+
+// resolveCreatorAgent formats an agent creator if active and readable by the caller.
+func (r *execRevealer) resolveCreatorAgent(agent *store.Agent) resolvedScheduleCreator {
+	if agent == nil || !agent.DeletedAt.IsZero() || !r.canReadCreatorAgent(agent) {
+		return resolvedScheduleCreator{}
+	}
+	name := agent.Slug
+	if name == "" {
+		name = agent.Name
+	}
+	if name == "" {
+		return resolvedScheduleCreator{}
+	}
+	return resolvedScheduleCreator{name: name, kind: "agent"}
+}
+
+// preloadCreators batch-resolves all unique schedule CreatedBy IDs in at most
+// two store lookups (GetUsersByIDs, then GetAgentsByIDs for remaining IDs) and
+// populates r.creators so scheduleResponse does not issue per-row queries.
+func (r *execRevealer) preloadCreators(schedules []store.Schedule) {
+	if r == nil || r.s == nil || r.s.store == nil || r.identity == nil || len(schedules) == 0 {
+		return
+	}
+	if r.creators == nil {
+		r.creators = make(map[string]resolvedScheduleCreator, len(schedules))
+	}
+	seen := make(map[string]struct{}, len(schedules))
+	ids := make([]string, 0, len(schedules))
+	for i := range schedules {
+		id := schedules[i].CreatedBy
+		if id == "" {
+			continue
+		}
+		if _, cached := r.creators[id]; cached {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return
+	}
+
+	users, err := r.s.store.GetUsersByIDs(r.ctx, ids)
+	if err != nil {
+		slog.WarnContext(r.ctx, "schedule response: batch user lookup failed", "error", err)
+	}
+
+	remaining := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if user, ok := users[id]; ok && user != nil {
+			r.creators[id] = r.resolveCreatorUser(user)
+		} else {
+			remaining = append(remaining, id)
+		}
+	}
+	if len(remaining) == 0 {
+		return
+	}
+
+	agents, err := r.s.store.GetAgentsByIDs(r.ctx, remaining)
+	if err != nil {
+		slog.WarnContext(r.ctx, "schedule response: batch agent lookup failed", "error", err)
+	}
+	for _, id := range remaining {
+		if agent, ok := agents[id]; ok && agent != nil {
+			r.creators[id] = r.resolveCreatorAgent(agent)
+		} else {
+			r.creators[id] = resolvedScheduleCreator{}
+		}
+	}
+}
+
+// resolveCreator resolves a schedule's CreatedBy UUID to a readable name and
+// principal kind ("user" or "agent") without widening caller visibility.
+func (r *execRevealer) resolveCreator(createdBy string) (string, string) {
+	if r == nil || r.s == nil || r.s.store == nil || r.identity == nil || createdBy == "" {
+		return "", ""
+	}
+	if r.creators != nil {
+		if cached, ok := r.creators[createdBy]; ok {
+			return cached.name, cached.kind
+		}
+	}
+	var resolved resolvedScheduleCreator
+	if user, err := r.s.store.GetUser(r.ctx, createdBy); err == nil && user != nil {
+		resolved = r.resolveCreatorUser(user)
+	} else if agent, err := r.s.store.GetAgent(r.ctx, createdBy); err == nil && agent != nil {
+		resolved = r.resolveCreatorAgent(agent)
+	}
+	if r.creators != nil {
+		r.creators[createdBy] = resolved
+	}
+	return resolved.name, resolved.kind
 }
 
 // reveals reports whether the caller may see the argv of an exec row
@@ -236,6 +414,7 @@ func buildScheduledEventResponse(rev *execRevealer, evt store.ScheduledEvent, ru
 
 // scheduleResponses serializes schedules for the caller of rev.
 func scheduleResponses(rev *execRevealer, schedules []store.Schedule) []ScheduleResponse {
+	rev.preloadCreators(schedules)
 	out := make([]ScheduleResponse, 0, len(schedules))
 	for i := range schedules {
 		out = append(out, scheduleResponse(rev, schedules[i]))
@@ -247,5 +426,11 @@ func scheduleResponses(rev *execRevealer, schedules []store.Schedule) []Schedule
 func scheduleResponse(rev *execRevealer, sc store.Schedule) ScheduleResponse {
 	payload := rev.payloadFor(sc.EventType, sc.Payload)
 	sc.Payload = ""
-	return ScheduleResponse{Schedule: sc, Payload: payload}
+	createdByName, createdByType := rev.resolveCreator(sc.CreatedBy)
+	return ScheduleResponse{
+		Schedule:      sc,
+		Payload:       payload,
+		CreatedByName: createdByName,
+		CreatedByType: createdByType,
+	}
 }

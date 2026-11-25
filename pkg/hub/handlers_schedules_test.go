@@ -20,11 +20,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -891,5 +895,543 @@ func TestSchedule_ListFilterByCreatedByAndTargetAgent(t *testing.T) {
 		require.NoError(t, json.NewDecoder(recTarget.Body).Decode(&respTarget))
 		assert.Equal(t, []string{"self-a"}, namesOf(respTarget))
 		assert.Equal(t, ScheduleListScopeCaller, respTarget.Scope)
+	})
+}
+
+func TestSchedule_CreatorNameResolution(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	// 1. User with display name
+	aliceID := tid("sched-creator-alice")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          aliceID,
+		Email:       "alice@example.com",
+		DisplayName: "Alice Example",
+		Role:        "member",
+		Status:      "active",
+	}))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, aliceID))
+
+	// 2. User without display name (falls back to email)
+	bobID := tid("sched-creator-bob")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          bobID,
+		Email:       "bob@example.com",
+		DisplayName: "",
+		Role:        "member",
+		Status:      "active",
+	}))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, bobID))
+
+	// 3. Agent in the same project
+	agentID := tid("sched-creator-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:        agentID,
+		Slug:      "ops-bot",
+		Name:      "Ops Bot",
+		ProjectID: projectID,
+		Phase:     "running",
+	}))
+
+	// 4. Agent in another project (viewer without access to that project must not see its slug)
+	otherProjID := tid("sched-creator-other-proj")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   otherProjID,
+		Name: "Secret Project",
+		Slug: "secret-project",
+	}))
+	otherAgentID := tid("sched-creator-other-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:        otherAgentID,
+		Slug:      "secret-bot",
+		Name:      "Secret Bot",
+		ProjectID: otherProjID,
+		Phase:     "running",
+	}))
+
+	// 5. Soft-deleted agent (must fall back to UUID; exercises DeletedAt guard)
+	deletedAgentID := tid("sched-creator-deleted-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:        deletedAgentID,
+		Slug:      "gone-bot",
+		Name:      "Gone Bot",
+		ProjectID: projectID,
+		Phase:     "stopped",
+	}))
+	deletedAgentRow, err := s.GetAgent(ctx, deletedAgentID)
+	require.NoError(t, err)
+	deletedAgentRow.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, deletedAgentRow))
+	reloadedDeleted, err := s.GetAgent(ctx, deletedAgentID)
+	require.NoError(t, err)
+	require.False(t, reloadedDeleted.DeletedAt.IsZero(), "agent must remain soft-deleted in store")
+
+	missingID := tid("sched-creator-missing")
+
+	mkSched := func(name, createdBy string) string {
+		id := tid("sched-row-" + name)
+		sc := &store.Schedule{
+			ID:        id,
+			ProjectID: projectID,
+			Name:      name,
+			CronExpr:  "0 9 * * *",
+			EventType: "message",
+			Payload:   `{"agentName":"worker","message":"hi"}`,
+			Status:    store.ScheduleStatusActive,
+			CreatedBy: createdBy,
+		}
+		require.NoError(t, s.CreateSchedule(ctx, sc))
+		return id
+	}
+
+	aliceSchedID := mkSched("by-alice", aliceID)
+	bobSchedID := mkSched("by-bob", bobID)
+	agentSchedID := mkSched("by-agent", agentID)
+	otherAgentSchedID := mkSched("by-other-agent", otherAgentID)
+	deletedAgentSchedID := mkSched("by-deleted-agent", deletedAgentID)
+	missingSchedID := mkSched("by-missing", missingID)
+
+	aliceUser := NewAuthenticatedUser(aliceID, "alice@example.com", "Alice Example", "member", "web")
+
+	t.Run("list resolves user display name, user email, agent slug, and omits unresolvable or unauthorized", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, aliceUser, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+
+		assert.Equal(t, "Alice Example", byID[aliceSchedID].CreatedByName)
+		assert.Equal(t, "user", byID[aliceSchedID].CreatedByType)
+
+		assert.Equal(t, "bob@example.com", byID[bobSchedID].CreatedByName)
+		assert.Equal(t, "user", byID[bobSchedID].CreatedByType)
+
+		assert.Equal(t, "ops-bot", byID[agentSchedID].CreatedByName)
+		assert.Equal(t, "agent", byID[agentSchedID].CreatedByType)
+
+		// Agent in another project that alice cannot read: omitted (falls back to UUID)
+		assert.Empty(t, byID[otherAgentSchedID].CreatedByName)
+		assert.Empty(t, byID[otherAgentSchedID].CreatedByType)
+		assert.Equal(t, otherAgentID, byID[otherAgentSchedID].CreatedBy)
+
+		// Deleted agent: omitted (falls back to UUID)
+		assert.Empty(t, byID[deletedAgentSchedID].CreatedByName)
+		assert.Empty(t, byID[deletedAgentSchedID].CreatedByType)
+		assert.Equal(t, deletedAgentID, byID[deletedAgentSchedID].CreatedBy)
+
+		// Non-existent creator: omitted (falls back to UUID)
+		assert.Empty(t, byID[missingSchedID].CreatedByName)
+		assert.Empty(t, byID[missingSchedID].CreatedByType)
+		assert.Equal(t, missingID, byID[missingSchedID].CreatedBy)
+	})
+
+	t.Run("get single schedule resolves creator and omits soft-deleted agent", func(t *testing.T) {
+		rec := doScheduleUserRequest(t, srv, aliceUser, http.MethodGet, projectID, agentSchedID, nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp ScheduleResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, "ops-bot", resp.CreatedByName)
+		assert.Equal(t, "agent", resp.CreatedByType)
+
+		// Single-row GET uses GetAgent (which returns soft-deleted rows), so this
+		// exercises the DeletedAt guard in resolveCreatorAgent.
+		delRec := doScheduleUserRequest(t, srv, aliceUser, http.MethodGet, projectID, deletedAgentSchedID, nil)
+		require.Equal(t, http.StatusOK, delRec.Code)
+
+		var delResp ScheduleResponse
+		require.NoError(t, json.NewDecoder(delRec.Body).Decode(&delResp))
+		assert.Empty(t, delResp.CreatedByName)
+		assert.Empty(t, delResp.CreatedByType)
+		assert.Equal(t, deletedAgentID, delResp.CreatedBy)
+	})
+
+	t.Run("scoped token without user.read does not resolve users", func(t *testing.T) {
+		scopedAlice := NewScopedUserIdentity(aliceUser, projectID, []string{"scheduled_event:read", "scheduled_event:list", "agent:read"})
+		rec := doScheduleUserRequest(t, srv, scopedAlice, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+
+		// Mirrors GET /api/v1/users/{id}: no user.read means no user names (self or other)
+		assert.Empty(t, byID[aliceSchedID].CreatedByName)
+		assert.Empty(t, byID[aliceSchedID].CreatedByType)
+		assert.Equal(t, aliceID, byID[aliceSchedID].CreatedBy)
+
+		assert.Empty(t, byID[bobSchedID].CreatedByName)
+		assert.Empty(t, byID[bobSchedID].CreatedByType)
+		assert.Equal(t, bobID, byID[bobSchedID].CreatedBy)
+
+		// Token has agent:read, so same-project agent still resolves
+		assert.Equal(t, "ops-bot", byID[agentSchedID].CreatedByName)
+		assert.Equal(t, "agent", byID[agentSchedID].CreatedByType)
+	})
+
+	t.Run("agent caller sees own slug only, never user names or other agents", func(t *testing.T) {
+		peerAgentID := tid("sched-creator-peer-agent")
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+			ID:        peerAgentID,
+			Slug:      "peer-bot",
+			Name:      "Peer Bot",
+			ProjectID: projectID,
+			Phase:     "running",
+		}))
+
+		mkAgentOwnedSched := func(name, createdBy string) string {
+			id := tid("sched-agent-owned-" + name)
+			sc := &store.Schedule{
+				ID:        id,
+				ProjectID: projectID,
+				Name:      name,
+				CronExpr:  "0 9 * * *",
+				EventType: "message",
+				Payload:   `{"agentName":"worker","message":"hi"}`,
+				Status:    store.ScheduleStatusActive,
+				CreatedBy: createdBy,
+				InitiatorAttribution: store.InitiatorAttribution{
+					InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+					InitiatorPrincipalID:    agentID,
+					InitiatorCredentialKind: "agent",
+					AttributionVersion:      1,
+				},
+			}
+			require.NoError(t, s.CreateSchedule(ctx, sc))
+			return id
+		}
+
+		selfOwnedID := mkAgentOwnedSched("owned-by-self", agentID)
+		userCreatedID := mkAgentOwnedSched("owned-created-by-user", aliceID)
+		peerCreatedID := mkAgentOwnedSched("owned-created-by-peer", peerAgentID)
+
+		agentIdent := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: agentID},
+			ProjectID: projectID,
+			Scopes:    []AgentTokenScope{ScopeProjectRead},
+		}}
+		rec := doScheduleAgentRequest(t, srv, agentIdent, projectID, "", http.MethodGet, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+		require.Contains(t, byID, selfOwnedID)
+		require.Contains(t, byID, userCreatedID)
+		require.Contains(t, byID, peerCreatedID)
+
+		// Self resolves to own slug
+		assert.Equal(t, "ops-bot", byID[selfOwnedID].CreatedByName)
+		assert.Equal(t, "agent", byID[selfOwnedID].CreatedByType)
+
+		// User creator is hidden from agent callers
+		assert.Empty(t, byID[userCreatedID].CreatedByName)
+		assert.Empty(t, byID[userCreatedID].CreatedByType)
+		assert.Equal(t, aliceID, byID[userCreatedID].CreatedBy)
+
+		// Another agent's slug is hidden from agent callers
+		assert.Empty(t, byID[peerCreatedID].CreatedByName)
+		assert.Empty(t, byID[peerCreatedID].CreatedByType)
+		assert.Equal(t, peerAgentID, byID[peerCreatedID].CreatedBy)
+	})
+
+	t.Run("admin scheduler authorizes creator visibility per viewer and keeps exec argv redacted", func(t *testing.T) {
+		execSentinel := "SUPER_SECRET_ADMIN_EXEC_ARGV"
+		execSchedID := tid("sched-row-admin-exec")
+		require.NoError(t, s.CreateSchedule(ctx, &store.Schedule{
+			ID:        execSchedID,
+			ProjectID: projectID,
+			Name:      "admin-exec-check",
+			CronExpr:  "0 9 * * *",
+			EventType: scheduledEventTypeExec,
+			Payload:   `{"agentId":"` + agentID + `","agentName":"ops-bot","command":["sh","-c","echo ` + execSentinel + `"]}`,
+			Status:    store.ScheduleStatusActive,
+			CreatedBy: aliceID,
+		}))
+
+		superID := hubConfigTokenUser(t, s, "sched-admin-viewer", store.SystemRoleSuperAdmin)
+
+		// 1. Hub token with hub_scheduler:read only (no user:read, no agent:read)
+		schedOnlyKey := mintHubConfigToken(t, srv, superID, hubBoundary(), "hub_scheduler:read")
+
+		userRec := doRequestWithToken(t, srv, schedOnlyKey, http.MethodGet, "/api/v1/users/"+aliceID, nil)
+		require.Equal(t, http.StatusForbidden, userRec.Code, "token without user:read must be denied GET /users/{id}")
+
+		adminRec := doRequestWithToken(t, srv, schedOnlyKey, http.MethodGet, "/api/v1/admin/scheduler", nil)
+		require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+		assert.NotContains(t, adminRec.Body.String(), execSentinel)
+
+		var adminResp struct {
+			RecurringSchedules []ScheduleResponse `json:"recurringSchedules"`
+		}
+		require.NoError(t, json.NewDecoder(adminRec.Body).Decode(&adminResp))
+		byID := make(map[string]ScheduleResponse, len(adminResp.RecurringSchedules))
+		for _, sc := range adminResp.RecurringSchedules {
+			byID[sc.ID] = sc
+		}
+		require.Contains(t, byID, aliceSchedID)
+		require.Contains(t, byID, agentSchedID)
+
+		// Must NOT expose user display name/email or agent slug without user:read / agent:read
+		assert.Empty(t, byID[aliceSchedID].CreatedByName)
+		assert.Empty(t, byID[aliceSchedID].CreatedByType)
+		assert.Equal(t, aliceID, byID[aliceSchedID].CreatedBy)
+
+		assert.Empty(t, byID[bobSchedID].CreatedByName)
+		assert.Empty(t, byID[bobSchedID].CreatedByType)
+
+		assert.Empty(t, byID[agentSchedID].CreatedByName)
+		assert.Empty(t, byID[agentSchedID].CreatedByType)
+		assert.Equal(t, agentID, byID[agentSchedID].CreatedBy)
+
+		// 2. Hub token with hub_scheduler:read + user:read + agent:read DOES resolve creators
+		fullReadKey := mintHubConfigToken(t, srv, superID, hubBoundary(), "hub_scheduler:read", "user:read", "agent:read")
+		fullRec := doRequestWithToken(t, srv, fullReadKey, http.MethodGet, "/api/v1/admin/scheduler", nil)
+		require.Equal(t, http.StatusOK, fullRec.Code, fullRec.Body.String())
+		assert.NotContains(t, fullRec.Body.String(), execSentinel)
+
+		var fullResp struct {
+			RecurringSchedules []ScheduleResponse `json:"recurringSchedules"`
+		}
+		require.NoError(t, json.NewDecoder(fullRec.Body).Decode(&fullResp))
+		fullByID := make(map[string]ScheduleResponse, len(fullResp.RecurringSchedules))
+		for _, sc := range fullResp.RecurringSchedules {
+			fullByID[sc.ID] = sc
+		}
+		assert.Equal(t, "Alice Example", fullByID[aliceSchedID].CreatedByName)
+		assert.Equal(t, "user", fullByID[aliceSchedID].CreatedByType)
+		assert.Equal(t, "ops-bot", fullByID[agentSchedID].CreatedByName)
+		assert.Equal(t, "agent", fullByID[agentSchedID].CreatedByType)
+		assert.Empty(t, fullByID[deletedAgentSchedID].CreatedByName)
+		assert.Empty(t, fullByID[deletedAgentSchedID].CreatedByType)
+
+		// 3. Interactive super-admin session resolves creators while still redacting exec argv
+		superUser := NewAuthenticatedUser(superID, superID+"@test.com", "Super Admin", store.UserRoleAdmin, "web")
+		sessRec := requestAsIdentity(t, srv, superUser, http.MethodGet, "/api/v1/admin/scheduler", nil)
+		require.Equal(t, http.StatusOK, sessRec.Code, sessRec.Body.String())
+		assert.NotContains(t, sessRec.Body.String(), execSentinel, "admin view must still redact exec argv")
+
+		var sessResp struct {
+			RecurringSchedules []ScheduleResponse `json:"recurringSchedules"`
+		}
+		require.NoError(t, json.NewDecoder(sessRec.Body).Decode(&sessResp))
+		sessByID := make(map[string]ScheduleResponse, len(sessResp.RecurringSchedules))
+		for _, sc := range sessResp.RecurringSchedules {
+			sessByID[sc.ID] = sc
+		}
+		assert.Equal(t, "Alice Example", sessByID[aliceSchedID].CreatedByName)
+		assert.Equal(t, "user", sessByID[aliceSchedID].CreatedByType)
+		assert.Equal(t, "ops-bot", sessByID[agentSchedID].CreatedByName)
+		assert.Equal(t, "agent", sessByID[agentSchedID].CreatedByType)
+	})
+}
+
+type scheduleCreatorLookupSpyStore struct {
+	store.Store
+	fault           *storeFaultSwitch
+	getUserCalls    atomic.Int64
+	getAgentCalls   atomic.Int64
+	getUsersByIDs   atomic.Int64
+	getAgentsByIDs  atomic.Int64
+	failUsersBatch  atomic.Bool
+	failAgentsBatch atomic.Bool
+}
+
+func (s *scheduleCreatorLookupSpyStore) reset() {
+	s.getUserCalls.Store(0)
+	s.getAgentCalls.Store(0)
+	s.getUsersByIDs.Store(0)
+	s.getAgentsByIDs.Store(0)
+	s.failUsersBatch.Store(false)
+	s.failAgentsBatch.Store(false)
+}
+
+func (s *scheduleCreatorLookupSpyStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.fault.Active() {
+		s.getUserCalls.Add(1)
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *scheduleCreatorLookupSpyStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.fault.Active() {
+		s.getAgentCalls.Add(1)
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+func (s *scheduleCreatorLookupSpyStore) GetUsersByIDs(ctx context.Context, ids []string) (map[string]*store.User, error) {
+	if s.fault.Active() {
+		s.getUsersByIDs.Add(1)
+		if s.failUsersBatch.Load() {
+			return nil, errors.New("injected batch user lookup failure")
+		}
+	}
+	return s.Store.GetUsersByIDs(ctx, ids)
+}
+
+func (s *scheduleCreatorLookupSpyStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
+	if s.fault.Active() {
+		s.getAgentsByIDs.Add(1)
+		if s.failAgentsBatch.Load() {
+			return nil, errors.New("injected batch agent lookup failure")
+		}
+	}
+	return s.Store.GetAgentsByIDs(ctx, ids)
+}
+
+func TestSchedule_CreatorNameResolutionBatchesLookups(t *testing.T) {
+	srv, s, spy, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *scheduleCreatorLookupSpyStore {
+		return &scheduleCreatorLookupSpyStore{Store: inner, fault: f}
+	})
+	srv, s, projectID := initScheduleTest(t, srv, s)
+	ctx := context.Background()
+
+	u1ID := tid("batch-creator-u1")
+	u2ID := tid("batch-creator-u2")
+	for _, u := range []*store.User{
+		{ID: u1ID, Email: "u1@example.com", DisplayName: "User One", Role: "member", Status: "active"},
+		{ID: u2ID, Email: "u2@example.com", DisplayName: "", Role: "member", Status: "active"},
+	} {
+		require.NoError(t, s.CreateUser(ctx, u))
+	}
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, u1ID))
+
+	a1ID := tid("batch-creator-a1")
+	a2ID := tid("batch-creator-a2")
+	for _, a := range []*store.Agent{
+		{ID: a1ID, Slug: "batch-bot-1", Name: "Batch Bot 1", ProjectID: projectID, Phase: "running"},
+		{ID: a2ID, Slug: "batch-bot-2", Name: "Batch Bot 2", ProjectID: projectID, Phase: "running"},
+	} {
+		require.NoError(t, s.CreateAgent(ctx, a))
+	}
+
+	missingID := tid("batch-creator-missing")
+	mkSched := func(projID, name, createdBy string) string {
+		id := tid("batch-sched-" + name)
+		require.NoError(t, s.CreateSchedule(ctx, &store.Schedule{
+			ID:        id,
+			ProjectID: projID,
+			Name:      name,
+			CronExpr:  "0 9 * * *",
+			EventType: "message",
+			Payload:   `{"agentName":"worker","message":"hi"}`,
+			Status:    store.ScheduleStatusActive,
+			CreatedBy: createdBy,
+		}))
+		return id
+	}
+
+	sU1 := mkSched(projectID, "u1", u1ID)
+	sU2 := mkSched(projectID, "u2", u2ID)
+	sA1 := mkSched(projectID, "a1", a1ID)
+	sA2 := mkSched(projectID, "a2", a2ID)
+	sMissing := mkSched(projectID, "missing", missingID)
+
+	// Separate project with only user-created schedules to verify agent batch is skipped.
+	userOnlyProjID := tid("batch-user-only-proj")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   userOnlyProjID,
+		Name: "User Only Schedules",
+		Slug: "user-only-schedules",
+	}))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, userOnlyProjID, u1ID))
+	mkSched(userOnlyProjID, "only-u1", u1ID)
+	mkSched(userOnlyProjID, "only-u2", u2ID)
+
+	viewer := NewAuthenticatedUser(u1ID, "u1@example.com", "User One", "member", "web")
+	fault.Arm()
+
+	t.Run("mixed creators resolved in one user batch and one agent batch", func(t *testing.T) {
+		spy.reset()
+		rec := doScheduleUserRequest(t, srv, viewer, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.Equal(t, int64(1), spy.getUsersByIDs.Load(), "expected one GetUsersByIDs batch call")
+		assert.Equal(t, int64(1), spy.getAgentsByIDs.Load(), "expected one GetAgentsByIDs batch call")
+		assert.Zero(t, spy.getUserCalls.Load(), "expected zero per-row GetUser calls")
+		assert.Zero(t, spy.getAgentCalls.Load(), "expected zero per-row GetAgent calls")
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+		assert.Equal(t, "User One", byID[sU1].CreatedByName)
+		assert.Equal(t, "user", byID[sU1].CreatedByType)
+		assert.Equal(t, "u2@example.com", byID[sU2].CreatedByName)
+		assert.Equal(t, "user", byID[sU2].CreatedByType)
+		assert.Equal(t, "batch-bot-1", byID[sA1].CreatedByName)
+		assert.Equal(t, "agent", byID[sA1].CreatedByType)
+		assert.Equal(t, "batch-bot-2", byID[sA2].CreatedByName)
+		assert.Equal(t, "agent", byID[sA2].CreatedByType)
+		assert.Empty(t, byID[sMissing].CreatedByName)
+		assert.Empty(t, byID[sMissing].CreatedByType)
+	})
+
+	t.Run("all user creators skips agent batch lookup", func(t *testing.T) {
+		spy.reset()
+		rec := doScheduleUserRequest(t, srv, viewer, http.MethodGet, userOnlyProjID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.Equal(t, int64(1), spy.getUsersByIDs.Load())
+		assert.Zero(t, spy.getAgentsByIDs.Load())
+		assert.Zero(t, spy.getUserCalls.Load())
+		assert.Zero(t, spy.getAgentCalls.Load())
+	})
+
+	t.Run("batch lookup error fails closed without per-row fallback", func(t *testing.T) {
+		spy.reset()
+		spy.failUsersBatch.Store(true)
+		rec := doScheduleUserRequest(t, srv, viewer, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.Equal(t, int64(1), spy.getUsersByIDs.Load())
+		assert.Equal(t, int64(1), spy.getAgentsByIDs.Load())
+		assert.Zero(t, spy.getUserCalls.Load())
+		assert.Zero(t, spy.getAgentCalls.Load())
+
+		var resp ListSchedulesResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		byID := make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+		assert.Empty(t, byID[sU1].CreatedByName)
+		assert.Equal(t, "batch-bot-1", byID[sA1].CreatedByName)
+
+		spy.reset()
+		spy.failAgentsBatch.Store(true)
+		rec = doScheduleUserRequest(t, srv, viewer, http.MethodGet, projectID, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.Equal(t, int64(1), spy.getUsersByIDs.Load())
+		assert.Equal(t, int64(1), spy.getAgentsByIDs.Load())
+		assert.Zero(t, spy.getUserCalls.Load())
+		assert.Zero(t, spy.getAgentCalls.Load())
+
+		resp = ListSchedulesResponse{}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		byID = make(map[string]ScheduleResponse, len(resp.Schedules))
+		for _, sc := range resp.Schedules {
+			byID[sc.ID] = sc
+		}
+		assert.Equal(t, "User One", byID[sU1].CreatedByName)
+		assert.Empty(t, byID[sA1].CreatedByName)
 	})
 }

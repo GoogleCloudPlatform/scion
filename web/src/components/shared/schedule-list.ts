@@ -69,6 +69,8 @@ interface Schedule {
   errorCount: number;
   createdAt: string;
   createdBy?: string;
+  createdByName?: string;
+  createdByType?: string;
 }
 
 interface HistoryListResponse {
@@ -224,6 +226,23 @@ interface ListResponse {
 export const SCHEDULE_PAGE_SIZE = 100;
 
 /**
+ * Resolves the display label and optional link href for a schedule's creator.
+ * Shows the resolved name (user display name/email or agent slug), linking
+ * to the agent detail page when the creator is a resolved agent, and falls
+ * back to the raw creator UUID when unresolvable.
+ */
+export function scheduleCreatorDisplay(
+  sched: Pick<Schedule, 'createdBy' | 'createdByName' | 'createdByType'>
+): { label: string; href?: string } | null {
+  const label = sched.createdByName || sched.createdBy;
+  if (!label) return null;
+  if (sched.createdByType === 'agent' && sched.createdByName && sched.createdBy) {
+    return { label, href: `/agents/${encodeURIComponent(sched.createdBy)}` };
+  }
+  return { label };
+}
+
+/**
  * Extracts whether wake is enabled for a schedule.
  * Returns true/false for `message` schedules, and null for other types
  * (`dispatch_agent`, `exec`) where wake does not apply.
@@ -343,6 +362,15 @@ export class ScionScheduleList extends LitElement {
         color: var(--scion-text-muted, #64748b);
         font-weight: 600;
         font-size: 0.8125rem;
+      }
+
+      .creator-link {
+        color: var(--scion-primary, #3b82f6);
+        text-decoration: none;
+      }
+
+      .creator-link:hover {
+        text-decoration: underline;
       }
     `,
   ];
@@ -1398,6 +1426,7 @@ export class ScionScheduleList extends LitElement {
     const agent = execPayload
       ? execPayload.agentName || execPayload.agentId || '-'
       : this.getPayloadAgent(sched.payload);
+    const creator = scheduleCreatorDisplay(sched);
 
     let payloadDetails: Record<string, unknown> = {};
     if (!isExec) {
@@ -1487,8 +1516,10 @@ export class ScionScheduleList extends LitElement {
               </div>`
             : nothing}
           <div class="detail-row">
-            <strong>Created:</strong> ${this.formatRelativeTime(sched.createdAt)}${sched.createdBy
-              ? ` by ${sched.createdBy}`
+            <strong>Created:</strong> ${this.formatRelativeTime(sched.createdAt)}${creator
+              ? creator.href
+                ? html` by <a class="creator-link" href=${creator.href}>${creator.label}</a>`
+                : ` by ${creator.label}`
               : ''}
           </div>
           ${isExec
