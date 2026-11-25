@@ -37,15 +37,9 @@ const (
 
 	// commandRunWakeBudget is the wake + readiness budget used to set the
 	// initial command_runs.lease_until at approval (§4.7 step 5, §4.8 step 3).
-	commandRunWakeBudget = 5 * time.Minute
-	commandRunLeaseGrace = 60 * time.Second
+	commandRunWakeBudget         = 5 * time.Minute
+	commandRunApprovalLeaseGrace = 60 * time.Second
 )
-
-// CommandRunLauncher receives newly approved command runs post-commit for
-// asynchronous execution (§4.7 step 7, §4.8).
-type CommandRunLauncher interface {
-	EnqueueCommandRun(req *store.CommandRequest, run *store.CommandRun)
-}
 
 // CommandRunLauncherFunc adapts a plain function to CommandRunLauncher.
 type CommandRunLauncherFunc func(req *store.CommandRequest, run *store.CommandRun)
@@ -440,7 +434,7 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 		ExecAgentID:    execRes.Agent.ID,
 		ExecProjectID:  execRes.Agent.ProjectID,
 		ShareOutput:    false,
-		LeaseUntil:     now.Add(commandRunWakeBudget + commandRunLeaseGrace),
+		LeaseUntil:     now.Add(commandRunWakeBudget + commandRunApprovalLeaseGrace),
 		Now:            now,
 	})
 	if err != nil {

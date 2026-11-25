@@ -2307,10 +2307,6 @@ type Server struct {
 	// uses the defaults (chat_member_fanout.go).
 	chatMemberFanout chatMemberFanoutLimits
 
-	// commandRunLauncher receives newly approved command runs post-commit
-	// (command_requests_handlers.go).
-	commandRunLauncher CommandRunLauncher
-
 	// decisionBell coalesces and reconciles per-user Decisions bell
 	// notifications (decisions_bell.go).
 	decisionBell decisionBellState
