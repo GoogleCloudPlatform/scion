@@ -546,10 +546,36 @@ class StaticBundleTest(unittest.TestCase):
 
     def test_dockerfile_pins_version_and_ignores_scripts(self) -> None:
         d = self._read("Dockerfile")
-        self.assertRegex(d, r"ARG PI_VERSION=\d+\.\d+\.\d+\n")
+        m = re.search(r"ARG PI_VERSION=(\d+\.\d+\.\d+)\n", d)
+        self.assertIsNotNone(m)
+        pi_version = m.group(1)
         self.assertIn("--ignore-scripts", d)
+        self.assertIn("npm ci", d)
         self.assertNotRegex(d, r"(?i)@latest|:latest|PI_VERSION=latest")
         self.assertIn("@earendil-works/pi-coding-agent@${PI_VERSION}", d)
+
+        pkg = json.loads(self._read("package.json"))
+        self.assertEqual(
+            pkg.get("dependencies", {}).get("@earendil-works/pi-coding-agent"),
+            pi_version,
+        )
+        lock = json.loads(self._read("package-lock.json"))
+        locked_pkg = lock.get("packages", {}).get(
+            "node_modules/@earendil-works/pi-coding-agent", {}
+        )
+        self.assertEqual(locked_pkg.get("version"), pi_version)
+        self.assertTrue(locked_pkg.get("integrity", "").startswith("sha512-"))
+        for path, entry in lock.get("packages", {}).items():
+            if not path:
+                continue
+            self.assertTrue(
+                entry.get("resolved", "").startswith("https://"),
+                f"{path} missing resolved tarball URL in package-lock.json",
+            )
+            self.assertTrue(
+                entry.get("integrity", "").startswith("sha"),
+                f"{path} missing integrity hash in package-lock.json",
+            )
 
     def test_config_declares_pi_and_safe_env(self) -> None:
         c = self._read("config.yaml")

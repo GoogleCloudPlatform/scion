@@ -280,6 +280,56 @@ check_contains "static: generated single-harness step records its :\$_TAG digest
   "args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '\\\$_REGISTRY/\${step_id}:\\\$_TAG', 'buildx', 'build'," \
   "$(cat "${SCRIPT_DIR}/builders/cloud-build.sh")"
 
+# BUILD_STEP_STATUS_DIR recording and verify-harness-builds.sh
+status_dir="${TMP}/step-status"
+meta_pretty "${TMP}/m.status" scion-claude "${DIG}"
+STUB_META="${TMP}/m.status"; export STUB_META
+BUILD_STEP_STATUS_DIR="${status_dir}" run_rec scion-claude --pull --push .
+check_eq "BUILD_STEP_STATUS_DIR: exits 0" 0 "${RC}"
+check_eq "BUILD_STEP_STATUS_DIR: writes per-image status file" \
+  "${REG}/scion-claude:v1.0.0 ${DIG}" "$(cat "${status_dir}/scion-claude")"
+
+fake_harnesses="${TMP}/fake-harnesses"
+mkdir -p "${fake_harnesses}/claude" "${fake_harnesses}/pi"
+touch "${fake_harnesses}/claude/Dockerfile" "${fake_harnesses}/pi/Dockerfile"
+VERIFY="${SCRIPT_DIR}/verify-harness-builds.sh"
+set +e
+OUT="$(bash "${VERIFY}" "${status_dir}" "${fake_harnesses}" 2>&1)"
+RC=$?
+set -e
+check_eq "verify-harness-builds: fails when a harness is missing" 1 "${RC}"
+check_contains "verify-harness-builds: names the missing harness" "scion-pi" "${OUT}"
+
+printf '%s %s\n' "${REG}/scion-pi:v1.0.0" "${DIG}" > "${status_dir}/scion-pi"
+set +e
+OUT="$(bash "${VERIFY}" "${status_dir}" "${fake_harnesses}" 2>&1)"
+RC=$?
+set -e
+check_eq "verify-harness-builds: succeeds when all harnesses recorded" 0 "${RC}"
+
+# Static check on cloudbuild-common.yaml: scion-hub runs right after
+# build-scion-base (not blocked by harnesses), every harness step sets
+# allowFailure: true and BUILD_STEP_STATUS_DIR, and verify-harness-builds
+# runs without allowFailure.
+common_yaml="${IMAGE_BUILD_DIR}/cloudbuild-common.yaml"
+common_check="$(awk '
+  /^  - name:/ {
+    if (id != "") print id "|" waitfor "|" allow "|" statusdir
+    id=""; waitfor=""; allow="false"; statusdir="false"
+  }
+  /^    id: / { id=$2; gsub(/\047/, "", id) }
+  /^    waitFor: \[/ { waitfor=$0; sub(/^    waitFor: /, "", waitfor) }
+  /^    allowFailure: true/ { allow="true" }
+  /BUILD_STEP_STATUS_DIR=/ { statusdir="true" }
+  END { if (id != "") print id "|" waitfor "|" allow "|" statusdir }
+' "${common_yaml}")"
+check_contains "static: cloudbuild-common.yaml: build-scion-hub waits only on build-scion-base without allowFailure" \
+  "build-scion-hub|['build-scion-base']|false|false" "${common_check}"
+check_contains "static: cloudbuild-common.yaml: build-scion-pi has allowFailure and BUILD_STEP_STATUS_DIR" \
+  "build-scion-pi|['build-scion-opencode']|true|true" "${common_check}"
+check_contains "static: cloudbuild-common.yaml: verify-harness-builds has no allowFailure" \
+  "verify-harness-builds||false|false" "${common_check}"
+
 echo ""
 echo "${PASSES} passed, ${FAILS} failed"
 [ "${FAILS}" -eq 0 ]

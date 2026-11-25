@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/GoogleCloudPlatform/scion/harnesses"
 )
 
 func TestLoadHarnessConfigDir(t *testing.T) {
@@ -747,6 +749,27 @@ func TestSeedHarnessConfigFromDir(t *testing.T) {
 		path := filepath.Join(targetDir, skip)
 		if _, err := os.Stat(path); err == nil {
 			t.Errorf("expected %s to be skipped, but found at %s", skip, path)
+		}
+	}
+}
+
+func TestSeedHarnessConfigFromDir_PiSkipsBuildLockfiles(t *testing.T) {
+	targetDir := filepath.Join(t.TempDir(), "pi")
+	if err := SeedHarnessConfigFromDir(targetDir, harnesses.FS, "pi", false); err != nil {
+		t.Fatalf("SeedHarnessConfigFromDir(pi) failed: %v", err)
+	}
+
+	// Build-only npm manifest and lockfile must not be seeded into the
+	// harness-config root or the agent's ~/.pi/agent directory.
+	for _, forbidden := range []string{
+		"package.json",
+		"package-lock.json",
+		"home/.pi/agent/package.json",
+		"home/.pi/agent/package-lock.json",
+	} {
+		path := filepath.Join(targetDir, filepath.FromSlash(forbidden))
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("expected build-only file %s to be skipped, but found at %s", forbidden, path)
 		}
 	}
 }

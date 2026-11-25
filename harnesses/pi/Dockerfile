@@ -16,7 +16,8 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# Exact pi release; bump deliberately. Never use a floating tag.
+# Exact pi release; bump deliberately together with package.json and
+# package-lock.json. Never use a floating tag.
 ARG PI_VERSION=1.3.0
 
 RUN mkdir -p /home/scion/.pi/agent/extensions /home/scion/.pi/agent/skills \
@@ -25,8 +26,20 @@ RUN mkdir -p /home/scion/.pi/agent/extensions /home/scion/.pi/agent/skills \
 
 # pi needs Node >= 22.19 (the scion base image ships a newer Node).
 # --ignore-scripts: install no lifecycle scripts from the dependency tree.
+# Default builds (matching package.json) install via `npm ci` from the committed
+# package-lock.json so every transitive dependency is pinned to a verified
+# tarball and integrity hash, avoiding npm publish-propagation 404 races and
+# transitive drift on both amd64 and arm64.
+COPY package.json package-lock.json /opt/scion-pi/
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
-    npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \
-  && npm cache clean --force
+    locked_ver="$(node -p "require('/opt/scion-pi/package.json').dependencies['@earendil-works/pi-coding-agent']")" \
+  && if [ "${PI_VERSION}" = "${locked_ver}" ]; then \
+       npm ci --prefix /opt/scion-pi --omit=dev --ignore-scripts --no-audit --no-fund \
+       && ln -sf /opt/scion-pi/node_modules/.bin/pi /usr/local/bin/pi; \
+     else \
+       npm install -g --ignore-scripts --no-audit --no-fund "@earendil-works/pi-coding-agent@${PI_VERSION}"; \
+     fi \
+  && npm cache clean --force \
+  && pi --version
 
 CMD ["pi"]
