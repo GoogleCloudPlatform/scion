@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
 
 const (
@@ -324,7 +324,7 @@ func inboxDisabledCategory(href string) inboxSourceFunc {
 			State:             InboxStateDisabled,
 			Count:             0,
 			Capped:            false,
-			CountsTowardTotal: true,
+			CountsTowardTotal: false,
 			Href:              href,
 			Previews:          []any{},
 		}
@@ -383,7 +383,7 @@ func (s *Server) inboxApprovalsCategory(ctx context.Context, v inboxViewer, prev
 			State:             InboxStateUnavailable,
 			Count:             0,
 			Capped:            false,
-			CountsTowardTotal: true,
+			CountsTowardTotal: false,
 			Href:              href,
 			Previews:          []any{},
 		}
@@ -400,7 +400,7 @@ func (s *Server) inboxApprovalsCategory(ctx context.Context, v inboxViewer, prev
 			State:             InboxStateError,
 			Count:             0,
 			Capped:            false,
-			CountsTowardTotal: true,
+			CountsTowardTotal: false,
 			Href:              href,
 			ErrorCode:         code,
 			Previews:          []any{},
@@ -476,8 +476,16 @@ func inboxAgentDetailHref(agentID string) string {
 	return "/agents/" + agentID
 }
 
+func (s *Server) waitingLimit() int {
+	if s.inboxWaitingLimitForTest > 0 {
+		return s.inboxWaitingLimitForTest
+	}
+	return inboxWaitingLimit
+}
+
 func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previews int, _ string) InboxCategory {
 	const href = "/agents"
+	limit := s.waitingLimit()
 
 	filter := store.AgentFilter{
 		OwnerID:  v.userID,
@@ -490,9 +498,14 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 		}
 	}
 
+	// Request oldest-updated (COALESCE(last_activity_event, updated) ASC) so
+	// when an owner has more than `limit` waiting agents, the window keeps the
+	// longest-waiting agents rather than dropping them under created DESC.
 	res, err := s.store.ListAgents(ctx, filter, store.ListOptions{
-		Limit:          inboxWaitingLimit,
+		Limit:          limit,
 		SkipTotalCount: true,
+		SortBy:         agentsort.Updated,
+		SortDir:        agentsort.Asc,
 	})
 	if err != nil {
 		code := inboxCategoryErrorCode(ctx, err)
@@ -504,14 +517,14 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 			State:             InboxStateError,
 			Count:             0,
 			Capped:            false,
-			CountsTowardTotal: true,
+			CountsTowardTotal: false,
 			Href:              href,
 			ErrorCode:         code,
 			Previews:          []any{},
 		}
 	}
 
-	capped := len(res.Items) >= inboxWaitingLimit
+	capped := len(res.Items) >= limit
 
 	var matched []store.Agent
 	if v.token != nil {
@@ -614,7 +627,7 @@ func inboxDecisionPromptHref(set *decisionScopeSet, item classifiedOpenPrompt) s
 		if item.promptAvail && p.MessageID != "" {
 			return starDMPermalink(p.ChatKey, p.MessageID)
 		}
-		return "/chat/dm/" + strings.ReplaceAll(url.PathEscape(p.ChatKey), ":", "%3A")
+		return chatDMWebPath(p.ChatKey)
 	}
 	if p.ProjectID == "" {
 		return fallback
@@ -622,7 +635,7 @@ func inboxDecisionPromptHref(set *decisionScopeSet, item classifiedOpenPrompt) s
 	if item.promptAvail && p.MessageID != "" {
 		return starPermalink(p.ProjectID, p.ChatKey, p.MessageID)
 	}
-	return "/chat/space/" + url.PathEscape(p.ProjectID) + "/thread/" + url.PathEscape(p.ChatKey)
+	return chatThreadWebPath(p.ProjectID, p.ChatKey)
 }
 
 func (s *Server) inboxDecisionsCategory(ctx context.Context, v inboxViewer, previews int, _ string) InboxCategory {
@@ -632,7 +645,7 @@ func (s *Server) inboxDecisionsCategory(ctx context.Context, v inboxViewer, prev
 			State:             InboxStateDisabled,
 			Count:             0,
 			Capped:            false,
-			CountsTowardTotal: true,
+			CountsTowardTotal: false,
 			Href:              href,
 			Previews:          []any{},
 		}
@@ -649,7 +662,7 @@ func (s *Server) inboxDecisionsCategory(ctx context.Context, v inboxViewer, prev
 			State:             InboxStateError,
 			Count:             0,
 			Capped:            false,
-			CountsTowardTotal: true,
+			CountsTowardTotal: false,
 			Href:              href,
 			ErrorCode:         code,
 			Previews:          []any{},

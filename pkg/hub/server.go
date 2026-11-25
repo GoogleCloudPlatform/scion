@@ -2263,6 +2263,13 @@ type Server struct {
 	// inboxSourcesForTest, when set (tests only), replaces the default
 	// inbox summary source list so tests can inject failing or timed-out sources.
 	inboxSourcesForTest []inboxSourceEntry
+	// inboxWaitingLimitForTest, when positive (tests only), overrides the
+	// default waiting-agent window limit (inboxWaitingLimit).
+	inboxWaitingLimitForTest int
+	// maxProfileDecisionProjectsForTest, when positive (tests only), overrides
+	// maxProfileDecisionProjects so truncation paths can be pinned without
+	// seeding >200 projects.
+	maxProfileDecisionProjectsForTest int
 
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.

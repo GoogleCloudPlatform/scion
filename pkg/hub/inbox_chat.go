@@ -126,7 +126,7 @@ func inboxChatError(ctx context.Context, err error) InboxCategory {
 		State:             InboxStateError,
 		Count:             0,
 		Capped:            false,
-		CountsTowardTotal: true,
+		CountsTowardTotal: false,
 		Href:              inboxChatHref,
 		ErrorCode:         code,
 		Previews:          []any{},
@@ -280,7 +280,7 @@ func inboxChatThreadHref(proj *store.Project, topic WebChatTopic) string {
 	if proj != nil && proj.Slug != "" {
 		return "/chat/" + url.PathEscape(proj.Slug) + "/" + url.PathEscape(topic.ID)
 	}
-	return "/chat/space/" + url.PathEscape(topic.ProjectID) + "/thread/" + url.PathEscape(topic.ID)
+	return chatThreadWebPath(topic.ProjectID, topic.ID)
 }
 
 func inboxChatThreadLabel(topic WebChatTopic) string {

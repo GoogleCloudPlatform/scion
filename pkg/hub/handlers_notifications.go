@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -543,6 +544,37 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 		if err := s.store.AcknowledgeNotification(r.Context(), id); err != nil {
 			writeErrorFromErr(w, err, "Notification")
 			return
+		}
+		if !caller.isAgent() &&
+			s.experimentEnabled(experiments.InboxDashboard) &&
+			notif.Status == store.NotificationStatusArtifactReviewRequested &&
+			notif.ResourceID != "" &&
+			(notif.ResourceType == "" || notif.ResourceType == store.NotificationResourceArtifact) {
+			// Inbox reviews deduplicates ARTIFACT_REVIEW_REQUESTED rows per
+			// artifact (keeping the newest). Best-effort ack any older unacked
+			// duplicates for the same user and artifact so Dismiss sticks and
+			// the bell list stays consistent.
+			siblings, sErr := s.store.GetNotifications(r.Context(), caller.Type, caller.ID, true)
+			if sErr != nil {
+				slog.Warn("Failed to list sibling review-request notifications for ack",
+					"notificationID", id, "resourceID", notif.ResourceID, "error", sErr)
+			} else {
+				if caller.Token != nil {
+					siblings = scopeNotificationsForToken(s.tokenRowCheck(r.Context(), caller, permInboxWrite), siblings)
+				}
+				for _, n := range siblings {
+					if n.ID == notif.ID || n.Status != store.NotificationStatusArtifactReviewRequested || n.ResourceID != notif.ResourceID {
+						continue
+					}
+					if n.ResourceType != "" && n.ResourceType != store.NotificationResourceArtifact {
+						continue
+					}
+					if aErr := s.store.AcknowledgeNotification(r.Context(), n.ID); aErr != nil {
+						slog.Warn("Failed to acknowledge sibling review-request notification",
+							"notificationID", id, "siblingID", n.ID, "resourceID", notif.ResourceID, "error", aErr)
+					}
+				}
+			}
 		}
 		if !caller.isAgent() {
 			s.publishInboxHint(r.Context(), caller.ID, InboxHint{Category: InboxCategoryNotifications})

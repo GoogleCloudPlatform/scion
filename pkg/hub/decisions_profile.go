@@ -563,14 +563,15 @@ func (s *Server) selectProfileDecisionProjects(
 		return nil, false, nil
 	}
 
-	truncated := len(readable) > maxProfileDecisionProjects
+	limit := s.profileDecisionProjectLimit()
+	truncated := len(readable) > limit
 	selected := readable
 	if truncated {
-		selected = make([]*store.Project, maxProfileDecisionProjects)
-		copy(selected, readable[:maxProfileDecisionProjects])
+		selected = make([]*store.Project, limit)
+		copy(selected, readable[:limit])
 		// When the caller explicitly picks a readable member project beyond
-		// the 200 cap ("pick a project to see others", design R3), swap it
-		// into the last slot so total scope resolutions stay <= 200.
+		// the cap ("pick a project to see others", design R3), swap it
+		// into the last slot so total scope resolutions stay <= limit.
 		if ensureProjectID != "" {
 			inTop := false
 			for _, p := range selected {
@@ -580,7 +581,7 @@ func (s *Server) selectProfileDecisionProjects(
 				}
 			}
 			if !inTop {
-				for _, p := range readable[maxProfileDecisionProjects:] {
+				for _, p := range readable[limit:] {
 					if p.ID == ensureProjectID {
 						selected[len(selected)-1] = p
 						break
@@ -591,6 +592,13 @@ func (s *Server) selectProfileDecisionProjects(
 	}
 
 	return selected, truncated, nil
+}
+
+func (s *Server) profileDecisionProjectLimit() int {
+	if s.maxProfileDecisionProjectsForTest > 0 {
+		return s.maxProfileDecisionProjectsForTest
+	}
+	return maxProfileDecisionProjects
 }
 
 // filterProjectsWithUnsettledDecisions narrows projects to the subset holding

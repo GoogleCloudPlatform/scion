@@ -650,6 +650,9 @@ func (Agent) Indexes() []ent.Index {
 		// the delegation descendant query).
 		index.Fields("project_id", "owner_id"),
 		index.Fields("project_id", "created_by"),
+		// Cross-project lookup of an owner's active agents by phase and
+		// activity (backs the inbox summary waiting-for-input query).
+		index.Fields("owner_id", "phase", "activity"),
 		// Partial index backing the T1 launch reaper's deadline scan (design
 		// §3.3): a range scan on launch_deadline restricted to in-flight
 		// launches, so it stays cheap regardless of table size. Same shape as
