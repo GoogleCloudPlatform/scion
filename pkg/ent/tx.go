@@ -146,6 +146,8 @@ type Tx struct {
 	MessagePolicy *MessagePolicyClient
 	// MessagePolicyDecision is the client for interacting with the MessagePolicyDecision builders.
 	MessagePolicyDecision *MessagePolicyDecisionClient
+	// MeterHealth is the client for interacting with the MeterHealth builders.
+	MeterHealth *MeterHealthClient
 	// MutationAudit is the client for interacting with the MutationAudit builders.
 	MutationAudit *MutationAuditClient
 	// NonceCache is the client for interacting with the NonceCache builders.
@@ -176,6 +178,8 @@ type Tx struct {
 	RoleBinding *RoleBindingClient
 	// RoleDefinition is the client for interacting with the RoleDefinition builders.
 	RoleDefinition *RoleDefinitionClient
+	// RunAttribution is the client for interacting with the RunAttribution builders.
+	RunAttribution *RunAttributionClient
 	// RuntimeBroker is the client for interacting with the RuntimeBroker builders.
 	RuntimeBroker *RuntimeBrokerClient
 	// RuntimeOrphan is the client for interacting with the RuntimeOrphan builders.
@@ -224,8 +228,14 @@ type Tx struct {
 	TriggerFire *TriggerFireClient
 	// TriggerSubjectClaim is the client for interacting with the TriggerSubjectClaim builders.
 	TriggerSubjectClaim *TriggerSubjectClaimClient
+	// UsageEvent is the client for interacting with the UsageEvent builders.
+	UsageEvent *UsageEventClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
+	// UsageRollupDaily is the client for interacting with the UsageRollupDaily builders.
+	UsageRollupDaily *UsageRollupDailyClient
+	// UsageScopeCounterDaily is the client for interacting with the UsageScopeCounterDaily builders.
+	UsageScopeCounterDaily *UsageScopeCounterDailyClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
 	// UserAccessToken is the client for interacting with the UserAccessToken builders.
@@ -438,6 +448,7 @@ func (tx *Tx) init() {
 	tx.MessageAddressee = NewMessageAddresseeClient(tx.config)
 	tx.MessagePolicy = NewMessagePolicyClient(tx.config)
 	tx.MessagePolicyDecision = NewMessagePolicyDecisionClient(tx.config)
+	tx.MeterHealth = NewMeterHealthClient(tx.config)
 	tx.MutationAudit = NewMutationAuditClient(tx.config)
 	tx.NonceCache = NewNonceCacheClient(tx.config)
 	tx.Notification = NewNotificationClient(tx.config)
@@ -453,6 +464,7 @@ func (tx *Tx) init() {
 	tx.RelayInstance = NewRelayInstanceClient(tx.config)
 	tx.RoleBinding = NewRoleBindingClient(tx.config)
 	tx.RoleDefinition = NewRoleDefinitionClient(tx.config)
+	tx.RunAttribution = NewRunAttributionClient(tx.config)
 	tx.RuntimeBroker = NewRuntimeBrokerClient(tx.config)
 	tx.RuntimeOrphan = NewRuntimeOrphanClient(tx.config)
 	tx.Schedule = NewScheduleClient(tx.config)
@@ -477,7 +489,10 @@ func (tx *Tx) init() {
 	tx.TriggerEvent = NewTriggerEventClient(tx.config)
 	tx.TriggerFire = NewTriggerFireClient(tx.config)
 	tx.TriggerSubjectClaim = NewTriggerSubjectClaimClient(tx.config)
+	tx.UsageEvent = NewUsageEventClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
+	tx.UsageRollupDaily = NewUsageRollupDailyClient(tx.config)
+	tx.UsageScopeCounterDaily = NewUsageScopeCounterDailyClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)
 	tx.UserDeletion = NewUserDeletionClient(tx.config)

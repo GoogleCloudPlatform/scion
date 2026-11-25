@@ -79,6 +79,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicydecision"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/meterhealth"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/mutationaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
@@ -94,6 +95,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runattribution"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
@@ -118,7 +120,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
@@ -253,6 +258,7 @@ func checkColumn(t, c string) error {
 			messageaddressee.Table:              messageaddressee.ValidColumn,
 			messagepolicy.Table:                 messagepolicy.ValidColumn,
 			messagepolicydecision.Table:         messagepolicydecision.ValidColumn,
+			meterhealth.Table:                   meterhealth.ValidColumn,
 			mutationaudit.Table:                 mutationaudit.ValidColumn,
 			noncecache.Table:                    noncecache.ValidColumn,
 			notification.Table:                  notification.ValidColumn,
@@ -268,6 +274,7 @@ func checkColumn(t, c string) error {
 			relayinstance.Table:                 relayinstance.ValidColumn,
 			rolebinding.Table:                   rolebinding.ValidColumn,
 			roledefinition.Table:                roledefinition.ValidColumn,
+			runattribution.Table:                runattribution.ValidColumn,
 			runtimebroker.Table:                 runtimebroker.ValidColumn,
 			runtimeorphan.Table:                 runtimeorphan.ValidColumn,
 			schedule.Table:                      schedule.ValidColumn,
@@ -292,7 +299,10 @@ func checkColumn(t, c string) error {
 			triggerevent.Table:                  triggerevent.ValidColumn,
 			triggerfire.Table:                   triggerfire.ValidColumn,
 			triggersubjectclaim.Table:           triggersubjectclaim.ValidColumn,
+			usageevent.Table:                    usageevent.ValidColumn,
 			usagereservation.Table:              usagereservation.ValidColumn,
+			usagerollupdaily.Table:              usagerollupdaily.ValidColumn,
+			usagescopecounterdaily.Table:        usagescopecounterdaily.ValidColumn,
 			user.Table:                          user.ValidColumn,
 			useraccesstoken.Table:               useraccesstoken.ValidColumn,
 			userdeletion.Table:                  userdeletion.ValidColumn,

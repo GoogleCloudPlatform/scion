@@ -618,6 +618,9 @@ type Store interface {
 	// Project-scoped message admission policies and decisions (ptone/scion#8047)
 	MessagePolicyStore
 
+	// Tokenomics Track 1 operational usage ledger (ptone/scion#9233)
+	UsageLedgerStore
+
 	// Pre-suspend terminal screen snapshots (ptone/scion#8530)
 	AgentSuspendScreenStore
 }

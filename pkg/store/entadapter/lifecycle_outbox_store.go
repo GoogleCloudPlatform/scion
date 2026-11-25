@@ -118,6 +118,7 @@ func (c *CompositeStore) AgentWriteObserverInstalled() bool {
 func (c *CompositeStore) newTxStore(tx *ent.Tx) *CompositeStore {
 	txStore := newTxCompositeStore(tx)
 	txStore.lifecycle = c.lifecycle
+	txStore.runAttribution = c.runAttribution
 	txStore.entTx = tx
 	return txStore
 }

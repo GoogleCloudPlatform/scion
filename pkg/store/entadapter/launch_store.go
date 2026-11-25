@@ -284,6 +284,11 @@ func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, time
 	if err != nil {
 		return "", mapError(err)
 	}
+	if s.runAttribution.load() != nil && updated.LaunchRunID != "" {
+		if err := fillRunAttributionLaunchIDTx(ctx, ltx.client, updated.LaunchRunID, newID); err != nil {
+			return "", err
+		}
+	}
 	// Observed for the fingerprint only: beginning a launch is not a
 	// transition (design 2.1).
 	var hooks commitHooks

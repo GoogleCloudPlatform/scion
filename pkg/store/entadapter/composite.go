@@ -135,6 +135,7 @@ type CompositeStore struct {
 	*TriggerStore
 	*MessagePolicyStore
 	*AgentSuspendScreenStore
+	*UsageLedgerStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -317,6 +318,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.ExternalStore.inTx = true
 	txStore.TriggerStore.inTx = true
 	txStore.MessagePolicyStore.inTx = true
+	txStore.UsageLedgerStore.inTx = true
 	return txStore
 }
 
@@ -375,6 +377,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		TriggerStore:                NewTriggerStore(client),
 		MessagePolicyStore:          NewMessagePolicyStore(client),
 		AgentSuspendScreenStore:     NewAgentSuspendScreenStore(client),
+		UsageLedgerStore:            NewUsageLedgerStore(client),
 		client:                      client,
 	}
 }

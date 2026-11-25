@@ -75,12 +75,20 @@ type AgentStore struct {
 	// transactional copies of this store; entTx is the ambient transaction
 	// when there is one (lifecycle_outbox_store.go).
 	lifecycle *lifecycleObserverSlot
-	entTx     *ent.Tx
+	// runAttribution is the optional atomic run_attribution writer config,
+	// shared with transactional copies of this store (usage_ledger_store.go).
+	// Nil when tokenomics.usage_ledger is off.
+	runAttribution *runAttributionConfigSlot
+	entTx          *ent.Tx
 }
 
 // NewAgentStore creates a new Ent-backed AgentStore.
 func NewAgentStore(client *ent.Client) *AgentStore {
-	return &AgentStore{client: client, lifecycle: newLifecycleObserverSlot()}
+	return &AgentStore{
+		client:         client,
+		lifecycle:      newLifecycleObserverSlot(),
+		runAttribution: newRunAttributionConfigSlot(),
+	}
 }
 
 // usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
@@ -4121,11 +4129,12 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		}
 		return upd.Save(ctx)
 	}
+	runAttrCfg := s.runAttribution.load()
 	var n int
 	switch obs := s.lifecycle.load(); {
 	case obs != nil:
-		// Observed: the swap (and the credential) commit together with the
-		// lifecycle cursor (design 2.4a step 0, run_mint).
+		// Observed: the swap (and the credential + run_attribution) commit
+		// together with the lifecycle cursor (design 2.4a step 0, run_mint).
 		// Errors keep the unobserved path's classes (review r1 O5): a swap
 		// error is returned as is; a credential failure, or any failure
 		// after the credential was created (the observer, the commit), rolls
@@ -4134,8 +4143,16 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		n, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteRunID,
 			store.AgentWriteHints{Kind: store.WriteKindRunMint}, func(c *ent.Client) (int, error) {
 				n, err := swap(c.Agent)
-				if err != nil || n == 0 || cred == nil {
+				if err != nil || n == 0 {
 					return n, mapError(err)
+				}
+				if runAttrCfg != nil {
+					if err := ensureRunAttributionForAgentTx(ctx, c, uid, runID, row.RunID, runAttrCfg.HubID); err != nil {
+						return 0, err
+					}
+				}
+				if cred == nil {
+					return n, nil
 				}
 				cred.RunID = runID
 				if err := createAgentCredential(ctx, c.AgentCredential, cred); err != nil {
@@ -4152,13 +4169,19 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 			}
 			return "", false, err
 		}
-	case cred == nil:
+	case cred == nil && runAttrCfg == nil:
 		n, err = swap(s.client.Agent)
 		if err != nil {
 			return "", false, mapError(err)
 		}
+	case cred == nil:
+		// runAttrCfg != nil: commit the run_id swap and run_attribution row atomically.
+		n, err = s.swapWithRunAttribution(ctx, swap, uid, runID, row.RunID, runAttrCfg.HubID)
+		if err != nil {
+			return "", false, err
+		}
 	default:
-		n, err = s.swapWithCredential(ctx, swap, runID, cred)
+		n, err = s.swapWithCredential(ctx, swap, uid, runID, row.RunID, cred, runAttrCfg)
 		if err != nil {
 			return "", false, err
 		}
@@ -4173,11 +4196,19 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 	return row.RunID, true, nil
 }
 
-// swapWithCredential runs swap and, when it updated the row, creates cred
-// (with RunID set to runID) in one transaction. On any failure, or when
-// the swap matched no row, nothing is committed and cred.ID is left empty.
-// A failure to create cred or to commit wraps store.ErrCredentialNotRecorded.
-func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.AgentClient) (int, error), runID string, cred *store.AgentCredential) (int, error) {
+// swapWithRunAttribution runs swap and, when it updated the row, inserts the
+// immutable run_attribution row for runID in the same transaction.
+func (s *AgentStore) swapWithRunAttribution(ctx context.Context, swap func(*ent.AgentClient) (int, error), uid uuid.UUID, runID, priorRunID, hubID string) (int, error) {
+	if s.inTx {
+		n, err := swap(s.client.Agent)
+		if err != nil || n == 0 {
+			return n, mapError(err)
+		}
+		if err := ensureRunAttributionForAgentTx(ctx, s.client, uid, runID, priorRunID, hubID); err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
 		return 0, mapError(err)
@@ -4190,6 +4221,41 @@ func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.Agen
 	if n == 0 {
 		_ = tx.Rollback()
 		return 0, nil
+	}
+	if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, hubID); err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// swapWithCredential runs swap and, when it updated the row, creates cred
+// (with RunID set to runID) and optional run_attribution in one transaction.
+// On any failure, or when the swap matched no row, nothing is committed and
+// cred.ID is left empty. A failure to create cred or to commit wraps
+// store.ErrCredentialNotRecorded.
+func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.AgentClient) (int, error), uid uuid.UUID, runID, priorRunID string, cred *store.AgentCredential, runAttrCfg *store.RunAttributionConfig) (int, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	n, err := swap(tx.Agent)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, mapError(err)
+	}
+	if n == 0 {
+		_ = tx.Rollback()
+		return 0, nil
+	}
+	if runAttrCfg != nil {
+		if err := ensureRunAttributionForAgentTx(ctx, tx.Client(), uid, runID, priorRunID, runAttrCfg.HubID); err != nil {
+			_ = tx.Rollback()
+			return 0, err
+		}
 	}
 	cred.RunID = runID
 	if err := createAgentCredential(ctx, tx.AgentCredential, cred); err != nil {
@@ -4346,11 +4412,25 @@ func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID,
 		n, err := upd.Save(ctx)
 		return n, mapError(err)
 	}
+	runAttrCfg := s.runAttribution.load()
+	needAttribution := runAttrCfg != nil && newRunID != ""
 	var n int
-	if obs := s.lifecycle.load(); obs != nil {
+	switch obs := s.lifecycle.load(); {
+	case obs != nil:
 		n, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteRunID, hints,
-			func(c *ent.Client) (int, error) { return write(c.Agent) })
-	} else {
+			func(c *ent.Client) (int, error) {
+				n, err := write(c.Agent)
+				if err != nil || n == 0 || !needAttribution {
+					return n, err
+				}
+				if err := ensureRunAttributionForAgentTx(ctx, c, uid, newRunID, expectedRunID, runAttrCfg.HubID); err != nil {
+					return 0, err
+				}
+				return n, nil
+			})
+	case needAttribution:
+		n, err = s.swapWithRunAttribution(ctx, write, uid, newRunID, expectedRunID, runAttrCfg.HubID)
+	default:
 		n, err = write(s.client.Agent)
 	}
 	if err != nil {

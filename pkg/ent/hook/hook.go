@@ -813,6 +813,18 @@ func (f MessagePolicyDecisionFunc) Mutate(ctx context.Context, m ent.Mutation) (
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MessagePolicyDecisionMutation", m)
 }
 
+// The MeterHealthFunc type is an adapter to allow the use of ordinary
+// function as MeterHealth mutator.
+type MeterHealthFunc func(context.Context, *ent.MeterHealthMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f MeterHealthFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.MeterHealthMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MeterHealthMutation", m)
+}
+
 // The MutationAuditFunc type is an adapter to allow the use of ordinary
 // function as MutationAudit mutator.
 type MutationAuditFunc func(context.Context, *ent.MutationAuditMutation) (ent.Value, error)
@@ -991,6 +1003,18 @@ func (f RoleDefinitionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Val
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RoleDefinitionMutation", m)
+}
+
+// The RunAttributionFunc type is an adapter to allow the use of ordinary
+// function as RunAttribution mutator.
+type RunAttributionFunc func(context.Context, *ent.RunAttributionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RunAttributionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RunAttributionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RunAttributionMutation", m)
 }
 
 // The RuntimeBrokerFunc type is an adapter to allow the use of ordinary
@@ -1281,6 +1305,18 @@ func (f TriggerSubjectClaimFunc) Mutate(ctx context.Context, m ent.Mutation) (en
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TriggerSubjectClaimMutation", m)
 }
 
+// The UsageEventFunc type is an adapter to allow the use of ordinary
+// function as UsageEvent mutator.
+type UsageEventFunc func(context.Context, *ent.UsageEventMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageEventFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageEventMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageEventMutation", m)
+}
+
 // The UsageReservationFunc type is an adapter to allow the use of ordinary
 // function as UsageReservation mutator.
 type UsageReservationFunc func(context.Context, *ent.UsageReservationMutation) (ent.Value, error)
@@ -1291,6 +1327,30 @@ func (f UsageReservationFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageReservationMutation", m)
+}
+
+// The UsageRollupDailyFunc type is an adapter to allow the use of ordinary
+// function as UsageRollupDaily mutator.
+type UsageRollupDailyFunc func(context.Context, *ent.UsageRollupDailyMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageRollupDailyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageRollupDailyMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageRollupDailyMutation", m)
+}
+
+// The UsageScopeCounterDailyFunc type is an adapter to allow the use of ordinary
+// function as UsageScopeCounterDaily mutator.
+type UsageScopeCounterDailyFunc func(context.Context, *ent.UsageScopeCounterDailyMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageScopeCounterDailyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageScopeCounterDailyMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageScopeCounterDailyMutation", m)
 }
 
 // The UserFunc type is an adapter to allow the use of ordinary
