@@ -33,7 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
-func bindProjectRole(t *testing.T, s store.Store, userID, projectID, roleName string) {
+func bindProjectRoleForUsageReadTest(t *testing.T, s store.Store, userID, projectID, roleName string) {
 	t.Helper()
 	ctx := context.Background()
 	role, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
@@ -107,8 +107,8 @@ func TestAgentUsageRead_Authz(t *testing.T) {
 	proj := &store.Project{ID: tid("usage-authz-proj"), Name: "usage-authz", Slug: "usage-authz"}
 	require.NoError(t, s.CreateProject(ctx, proj))
 
-	bindProjectRole(t, s, owner.ID, proj.ID, "project-owner")
-	bindProjectRole(t, s, member.ID, proj.ID, "project-member")
+	bindProjectRoleForUsageReadTest(t, s, owner.ID, proj.ID, "project-owner")
+	bindProjectRoleForUsageReadTest(t, s, member.ID, proj.ID, "project-member")
 
 	ag1 := &store.Agent{
 		ID:        tid("usage-authz-a1"),
@@ -171,7 +171,7 @@ func TestAgentUsageRead_NullVsZeroAndMixed(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, owner))
 	proj := &store.Project{ID: tid("nz-proj"), Name: "nz", Slug: "nz"}
 	require.NoError(t, s.CreateProject(ctx, proj))
-	bindProjectRole(t, s, owner.ID, proj.ID, "project-owner")
+	bindProjectRoleForUsageReadTest(t, s, owner.ID, proj.ID, "project-owner")
 
 	// Agent 1: calls-only (all token buckets NULL) -> every token bucket must serialize as JSON null, never 0.
 	agNull := &store.Agent{ID: tid("nz-agent-null"), Slug: "nz-null", Name: "nz-null", ProjectID: proj.ID, OwnerID: owner.ID, CreatedBy: owner.ID, Phase: string(state.PhaseRunning)}
@@ -263,7 +263,7 @@ func TestAgentUsageRead_WindowFilteringAndMultiModel(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, owner))
 	proj := &store.Project{ID: tid("wm-proj"), Name: "wm", Slug: "wm"}
 	require.NoError(t, s.CreateProject(ctx, proj))
-	bindProjectRole(t, s, owner.ID, proj.ID, "project-owner")
+	bindProjectRoleForUsageReadTest(t, s, owner.ID, proj.ID, "project-owner")
 	ag := &store.Agent{ID: tid("wm-agent"), Slug: "wm-agent", Name: "wm-agent", ProjectID: proj.ID, OwnerID: owner.ID, CreatedBy: owner.ID, Phase: string(state.PhaseRunning)}
 	require.NoError(t, s.CreateAgent(ctx, ag))
 	_, err := s.SetAgentRunID(ctx, ag.ID, "run-wm-1", nil)
@@ -334,7 +334,7 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, owner))
 	proj := &store.Project{ID: tid("st-proj"), Name: "st", Slug: "st"}
 	require.NoError(t, s.CreateProject(ctx, proj))
-	bindProjectRole(t, s, owner.ID, proj.ID, "project-owner")
+	bindProjectRoleForUsageReadTest(t, s, owner.ID, proj.ID, "project-owner")
 	ag := &store.Agent{ID: tid("st-agent"), Slug: "st-agent", Name: "st-agent", ProjectID: proj.ID, OwnerID: owner.ID, CreatedBy: owner.ID, Phase: string(state.PhaseRunning)}
 	require.NoError(t, s.CreateAgent(ctx, ag))
 
@@ -358,8 +358,8 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 			LastReceiptAt: dbNow.Add(-4 * time.Minute),
 			FinalState:    store.MeterHealthFinalStateOpen,
 		}},
-		HasUsageEvents: true,
-		DBNow:          dbNow,
+		HasRunUsageEvents: true,
+		DBNow:             dbNow,
 	}))
 
 	// Within 60s startup grace (30s ago) -> not stale yet, stays measured.
@@ -370,8 +370,8 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 			LastReceiptAt: dbNow.Add(-4 * time.Minute),
 			FinalState:    store.MeterHealthFinalStateOpen,
 		}},
-		HasUsageEvents: true,
-		DBNow:          dbNow,
+		HasRunUsageEvents: true,
+		DBNow:             dbNow,
 	}))
 
 	// Cleanly closed run (final_state="final") with old receipt -> stays measured, never stale.
@@ -382,21 +382,67 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 			LastReceiptAt: dbNow.Add(-10 * time.Minute),
 			FinalState:    store.MeterHealthFinalStateFinal,
 		}},
-		HasUsageEvents: true,
-		DBNow:          dbNow,
+		HasRunUsageEvents: true,
+		DBNow:             dbNow,
 	}))
 
-	// 3. End-to-end HTTP stale check using DB-stored old run_attribution + old open meter_health.
-	staleRunID := "run-stale-e2e"
+	// 3. R3: previous run ingested events, then current run switches to run-p2
+	// with no meter_health and no events -> must read "unmeasured" (both inside
+	// and past the 60s startup grace), never "measured".
+	_, err = s.SetAgentRunID(ctx, ag.ID, "run-p1", nil)
+	require.NoError(t, err)
+	tok := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	evP1 := makeWireUsageEvent("hub-status-test", ag.ID, proj.ID, "run-p1", "evt-st-p1", 1, dbNow, 20, 10)
+	ingRec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{evP1},
+		RunID:         "run-p1",
+		ProducerEpoch: "ep-p1",
+		ProducerSeq:   1,
+	})
+	require.Equal(t, http.StatusOK, ingRec.Code, ingRec.Body.String())
+
+	// Switch agent to a brand new run-p2 (inside grace, no meter row, no events).
+	_, err = s.SetAgentRunID(ctx, ag.ID, "run-p2", nil)
+	require.NoError(t, err)
+	recP2 := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage", owner)
+	require.Equal(t, http.StatusOK, recP2.Code)
+	var respP2 AgentUsageResponse
+	require.NoError(t, json.Unmarshal(recP2.Body.Bytes(), &respP2))
+	assert.Equal(t, MeasurementStatusUnmeasured, respP2.MeasurementStatus, "new run without events/meter_health must not inherit measured from prior run")
+
+	// Also verify current run past 60s startup grace with no meter row/events -> unmeasured.
+	oldRunID := "run-p3-old-unmeasured"
 	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
-		RunID:      staleRunID,
-		Generation: 1,
+		RunID:      oldRunID,
+		Generation: 3,
 		HubID:      "hub-status-test",
 		ProjectID:  proj.ID,
 		AgentID:    ag.ID,
 		Harness:    "claude",
 		CreatedAt:  dbNow.Add(-10 * time.Minute),
 	})
+	require.NoError(t, err)
+	_, err = s.SetAgentRunID(ctx, ag.ID, oldRunID, nil)
+	require.NoError(t, err)
+	recP3 := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage", owner)
+	require.Equal(t, http.StatusOK, recP3.Code)
+	var respP3 AgentUsageResponse
+	require.NoError(t, json.Unmarshal(recP3.Body.Bytes(), &respP3))
+	assert.Equal(t, MeasurementStatusUnmeasured, respP3.MeasurementStatus, "current run past grace with no meter row/events must be unmeasured")
+
+	// 4. End-to-end HTTP stale check using DB-stored old run_attribution + old open meter_health.
+	staleRunID := "run-stale-e2e"
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:      staleRunID,
+		Generation: 4,
+		HubID:      "hub-status-test",
+		ProjectID:  proj.ID,
+		AgentID:    ag.ID,
+		Harness:    "claude",
+		CreatedAt:  dbNow.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = s.SetAgentRunID(ctx, ag.ID, staleRunID, nil)
 	require.NoError(t, err)
 	require.NoError(t, s.UpsertMeterHealth(ctx, &store.MeterHealth{
 		AgentID:       ag.ID,
@@ -414,6 +460,115 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 	require.NotNil(t, respStale.LastReceiptAt)
 }
 
+// TestAgentUsageRead_DayAlignedWindowAndNoZeroFabrication verifies R2 and O1:
+//   - Sub-day since/until snaps to inclusive UTC day boundaries and reports the
+//     snapped effective window in response.window;
+//   - Events earlier on the first day of a sub-day since or default 30d window
+//     are covered by both rollups and presence so NULL buckets stay null (never 0);
+//   - Rollups with no presence coverage (past retention) return null for zero-sum
+//     buckets, never fabricated 0;
+//   - Mixed known+unknown per-bucket events surface in tokens.unknown_events (O1).
+func TestAgentUsageRead_DayAlignedWindowAndNoZeroFabrication(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-r2-test")
+	setUsageLedgerExperimentForTest(t, srv, true)
+	srv.reconcileUsageLedger(ctx)
+
+	owner := &store.User{ID: uuid.NewString(), Email: "r2-owner@example.com", DisplayName: "R2", Role: "member", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	proj := &store.Project{ID: tid("r2-proj"), Name: "r2", Slug: "r2"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	bindProjectRoleForUsageReadTest(t, s, owner.ID, proj.ID, "project-owner")
+
+	ag := &store.Agent{ID: tid("r2-agent"), Slug: "r2-agent", Name: "r2-agent", ProjectID: proj.ID, OwnerID: owner.ID, CreatedBy: owner.ID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-r2-1", nil)
+	require.NoError(t, err)
+	tok := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	dbNow, err := s.DBNow(ctx)
+	require.NoError(t, err)
+	// Place event at 01:00Z on day D = 30 days ago (first day of default 30d window).
+	dayD := time.Date(dbNow.Year(), dbNow.Month(), dbNow.Day(), 0, 0, 0, 0, time.UTC).Add(-30 * 24 * time.Hour)
+	evTime := dayD.Add(1 * time.Hour)
+
+	ev1 := makeWireUsageEvent("hub-r2-test", ag.ID, proj.ID, "run-r2-1", "evt-r2-1", 1, evTime, 7, 3)
+	ev1.CacheRead = nil
+	ev1.CacheWrite = nil
+	ev1.CacheWrite1h = nil
+	ev1.Reasoning = nil
+
+	rec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{ev1},
+		RunID:         "run-r2-1",
+		ProducerEpoch: "ep-r2",
+		ProducerSeq:   1,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 1. Sub-day since = D T12:00:00Z -> snaps to D T00:00:00Z, NULL buckets stay null (never 0).
+	subDaySince := dayD.Add(12 * time.Hour).Format(time.RFC3339)
+	readSub := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage?since="+subDaySince, owner)
+	require.Equal(t, http.StatusOK, readSub.Code, readSub.Body.String())
+	var respSub AgentUsageResponse
+	require.NoError(t, json.Unmarshal(readSub.Body.Bytes(), &respSub))
+	assert.Equal(t, dayD, respSub.Window.Since, "window.since must report snapped UTC day start")
+	require.NotNil(t, respSub.Tokens.Input)
+	assert.Equal(t, int64(7), *respSub.Tokens.Input)
+	require.NotNil(t, respSub.Tokens.Output)
+	assert.Equal(t, int64(3), *respSub.Tokens.Output)
+	assert.Nil(t, respSub.Tokens.CacheRead, "cache_read must stay null, never 0")
+	assert.Nil(t, respSub.Tokens.CacheWrite, "cache_write must stay null, never 0")
+	assert.Nil(t, respSub.Tokens.CacheWrite1h, "cache_write_1h must stay null, never 0")
+	assert.Nil(t, respSub.Tokens.Reasoning, "reasoning must stay null, never 0")
+	require.NotNil(t, respSub.Tokens.SummableTokens)
+	assert.Equal(t, int64(10), *respSub.Tokens.SummableTokens)
+
+	// 2. Default 30d window -> also snaps to dayD 00:00Z and keeps NULL buckets null.
+	readDef := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage", owner)
+	require.Equal(t, http.StatusOK, readDef.Code, readDef.Body.String())
+	var respDef AgentUsageResponse
+	require.NoError(t, json.Unmarshal(readDef.Body.Bytes(), &respDef))
+	assert.Equal(t, dayD, respDef.Window.Since)
+	assert.Nil(t, respDef.Tokens.CacheRead)
+	assert.Nil(t, respDef.Tokens.CacheWrite)
+	assert.Nil(t, respDef.Tokens.Reasoning)
+
+	// 3. Unit check for past-retention fallback (presence.eventCount == 0):
+	// zero-sum buckets MUST return nil (unknown), never 0.
+	pastRet := resolveNullableTokens(5, 0, 100, 40, 0, 0, 0, 0, usageBucketPresence{})
+	require.NotNil(t, pastRet.Input)
+	assert.Equal(t, int64(100), *pastRet.Input)
+	require.NotNil(t, pastRet.Output)
+	assert.Equal(t, int64(40), *pastRet.Output)
+	assert.Nil(t, pastRet.CacheRead, "past-retention zero-sum bucket must be nil, never 0")
+	assert.Nil(t, pastRet.CacheWrite, "past-retention zero-sum bucket must be nil, never 0")
+	assert.Nil(t, pastRet.CacheWrite1h, "past-retention zero-sum bucket must be nil, never 0")
+	assert.Nil(t, pastRet.Reasoning, "past-retention zero-sum bucket must be nil, never 0")
+
+	// 4. O1: Mixed known+unknown per-bucket (event 2 has cache_write=5, event 1 had cache_write=NULL).
+	ev2 := makeWireUsageEvent("hub-r2-test", ag.ID, proj.ID, "run-r2-1", "evt-r2-2", 2, evTime.Add(time.Minute), 10, 4)
+	ev2.CacheWrite = usageInt64p(5)
+	rec2 := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{ev2},
+		RunID:         "run-r2-1",
+		ProducerEpoch: "ep-r2",
+		ProducerSeq:   2,
+	})
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+
+	readMixed := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage", owner)
+	require.Equal(t, http.StatusOK, readMixed.Code, readMixed.Body.String())
+	var respMixed AgentUsageResponse
+	require.NoError(t, json.Unmarshal(readMixed.Body.Bytes(), &respMixed))
+	require.NotNil(t, respMixed.Tokens.CacheWrite)
+	assert.Equal(t, int64(5), *respMixed.Tokens.CacheWrite)
+	require.NotNil(t, respMixed.Tokens.UnknownEvents, "mixed known+unknown cache_write must populate unknown_events")
+	assert.Equal(t, int64(1), respMixed.Tokens.UnknownEvents.CacheWrite)
+	assert.Equal(t, int64(0), respMixed.Tokens.UnknownEvents.Input)
+}
+
 // TestAgentUsage_VerticalSliceIngestReplayAndRead is the Gate 1 workstation-SQLite
 // vertical-slice test: drives a canonical usage batch through POST /api/v1/agents/{id}/usage/events,
 // replays the exact same batch to verify idempotency, then reads GET /api/v1/agents/{id}/usage
@@ -429,7 +584,7 @@ func TestAgentUsage_VerticalSliceIngestReplayAndRead(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, owner))
 	proj := &store.Project{ID: tid("gate1-proj"), Name: "gate1", Slug: "gate1"}
 	require.NoError(t, s.CreateProject(ctx, proj))
-	bindProjectRole(t, s, owner.ID, proj.ID, "project-owner")
+	bindProjectRoleForUsageReadTest(t, s, owner.ID, proj.ID, "project-owner")
 	ag := &store.Agent{
 		ID:            tid("gate1-agent"),
 		Slug:          "gate1-claude",

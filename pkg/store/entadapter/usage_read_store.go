@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/meterhealth"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -140,6 +141,20 @@ WHERE agent_id = ?`
 		return nil, mapError(err)
 	}
 	return out, nil
+}
+
+// HasUsageEventsForRun implements store.UsageLedgerStore.HasUsageEventsForRun.
+func (s *UsageLedgerStore) HasUsageEventsForRun(ctx context.Context, agentID, runID string) (bool, error) {
+	if agentID == "" || runID == "" {
+		return false, nil
+	}
+	exists, err := s.client.UsageEvent.Query().
+		Where(usageevent.AgentIDEQ(agentID), usageevent.RunIDEQ(runID)).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return exists, nil
 }
 
 // DBNow implements store.UsageLedgerStore.DBNow, reading the current UTC

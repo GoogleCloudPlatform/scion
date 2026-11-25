@@ -43,18 +43,32 @@ const (
 	meterStartupGrace         = 60 * time.Second
 )
 
+// AgentUsageBucketUnknownEvents reports per-bucket counts of events in the
+// window where that bucket was NULL while other events in the same group
+// reported known values (mixed known+unknown). Omitted when all buckets are
+// uniformly known or uniformly unknown.
+type AgentUsageBucketUnknownEvents struct {
+	Input        int64 `json:"input,omitempty"`
+	Output       int64 `json:"output,omitempty"`
+	CacheRead    int64 `json:"cache_read,omitempty"`
+	CacheWrite   int64 `json:"cache_write,omitempty"`
+	CacheWrite1h int64 `json:"cache_write_1h,omitempty"`
+	Reasoning    int64 `json:"reasoning,omitempty"`
+}
+
 // AgentUsageTokens holds nullable canonical Track 1 token buckets (§3.1).
 // A nil pointer serializes as JSON null (unknown) and is never fabricated as 0.
 // SummableTokens is the sum of non-nil {Input, Output, CacheRead, CacheWrite},
 // or nil when all four summable buckets are unknown.
 type AgentUsageTokens struct {
-	Input          *int64 `json:"input"`
-	Output         *int64 `json:"output"`
-	CacheRead      *int64 `json:"cache_read"`
-	CacheWrite     *int64 `json:"cache_write"`
-	CacheWrite1h   *int64 `json:"cache_write_1h"`
-	Reasoning      *int64 `json:"reasoning"`
-	SummableTokens *int64 `json:"summable_tokens"`
+	Input          *int64                         `json:"input"`
+	Output         *int64                         `json:"output"`
+	CacheRead      *int64                         `json:"cache_read"`
+	CacheWrite     *int64                         `json:"cache_write"`
+	CacheWrite1h   *int64                         `json:"cache_write_1h"`
+	Reasoning      *int64                         `json:"reasoning"`
+	SummableTokens *int64                         `json:"summable_tokens"`
+	UnknownEvents  *AgentUsageBucketUnknownEvents `json:"unknown_events,omitempty"`
 }
 
 // AgentUsageModelBreakdown reports per-model usage totals over the query window.
@@ -79,8 +93,8 @@ type AgentUsageRunSummary struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
-// AgentUsageWindow describes the effective UTC [since, until] window evaluated
-// for a usage read response.
+// AgentUsageWindow describes the effective day-aligned UTC [since, until]
+// window evaluated for a usage read response.
 type AgentUsageWindow struct {
 	Since time.Time `json:"since"`
 	Until time.Time `json:"until"`
@@ -165,7 +179,20 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		return
 	}
 
-	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, presence, runs, meterRows)
+	targetRunID := agent.RunID
+	if targetRunID == "" && len(runs) > 0 && runs[0] != nil {
+		targetRunID = runs[0].RunID
+	}
+	var currentRunHasEvents bool
+	if targetRunID != "" {
+		currentRunHasEvents, err = s.store.HasUsageEventsForRun(ctx, agent.ID, targetRunID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+
+	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, presence, runs, meterRows, currentRunHasEvents)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -207,8 +234,9 @@ func (s *Server) authorizeAgentUsageRead(w http.ResponseWriter, r *http.Request,
 }
 
 // parseUsageWindow parses optional since and until query parameters relative
-// to now (UTC). Accepts RFC 3339 timestamps, YYYY-MM-DD dates, and (for since)
-// relative durations like "7d", "30d", or Go durations like "24h".
+// to now (UTC) and snaps the effective window to inclusive UTC day boundaries
+// ([00:00:00Z, 23:59:59.999999Z]) so daily rollups and event presence queries
+// cover the exact same time span and the response reports the effective window.
 func parseUsageWindow(sinceRaw, untilRaw string, now time.Time) (time.Time, time.Time, error) {
 	now = now.UTC().Truncate(time.Microsecond)
 	until := now
@@ -232,7 +260,12 @@ func parseUsageWindow(sinceRaw, untilRaw string, now time.Time) (time.Time, time
 	if since.After(until) {
 		return time.Time{}, time.Time{}, fmt.Errorf("since (%s) must not be after until (%s)", since.Format(time.RFC3339), until.Format(time.RFC3339))
 	}
-	return since, until, nil
+
+	// Snap to inclusive UTC day boundaries to match usage_rollups_daily grain.
+	snappedSince := time.Date(since.Year(), since.Month(), since.Day(), 0, 0, 0, 0, time.UTC)
+	snappedUntil := time.Date(until.Year(), until.Month(), until.Day(), 0, 0, 0, 0, time.UTC).
+		Add(24*time.Hour - time.Microsecond)
+	return snappedSince, snappedUntil, nil
 }
 
 func parseUsageTimeParam(raw string, ref time.Time, endOfDay bool) (time.Time, error) {
@@ -306,6 +339,7 @@ func buildAgentUsageResponse(
 	presence []*store.UsageTokenPresence,
 	runs []*store.RunAttribution,
 	meterRows []*store.MeterHealth,
+	currentRunHasEvents bool,
 ) AgentUsageResponse {
 	type modelKey struct {
 		model       string
@@ -447,7 +481,7 @@ func buildAgentUsageResponse(
 		currentRunAttr = runs[0]
 	}
 
-	// Select meter_health rows for the active/latest run for status derivation,
+	// Select meter_health rows for the current run for status derivation,
 	// and compute the latest last_receipt_at across all rows.
 	var lastReceiptAt *time.Time
 	var currentRunMeterRows []*store.MeterHealth
@@ -463,16 +497,24 @@ func buildAgentUsageResponse(
 			t := mh.LastReceiptAt.UTC()
 			lastReceiptAt = &t
 		}
-		if targetRunID == "" || mh.RunID == targetRunID {
+		if targetRunID != "" && mh.RunID == targetRunID {
 			currentRunMeterRows = append(currentRunMeterRows, mh)
 		}
 	}
 
+	// If no active/attributed run exists at all (e.g. legacy/backfill-free
+	// agent with historical rollups only), fall back to window events;
+	// otherwise strictly evaluate the current run's events and meter_health.
+	hasRunData := currentRunHasEvents
+	if targetRunID == "" {
+		hasRunData = totalEvents > 0
+	}
+
 	status := deriveMeasurementStatus(measurementStatusInput{
-		RunAttribution: currentRunAttr,
-		MeterHealth:    currentRunMeterRows,
-		HasUsageEvents: totalEvents > 0,
-		DBNow:          dbNow,
+		RunAttribution:    currentRunAttr,
+		MeterHealth:       currentRunMeterRows,
+		HasRunUsageEvents: hasRunData,
+		DBNow:             dbNow,
 	})
 
 	return AgentUsageResponse{
@@ -494,7 +536,8 @@ func buildAgentUsageResponse(
 
 // resolveNullableTokens converts non-nullable daily rollup sums into canonical
 // three-state nullable token buckets (§3.1). A bucket with zero non-null
-// contributions surfaces as nil (JSON null), never 0.
+// contributions — or whose presence cannot be verified (for example, events
+// past ledger retention) — surfaces as nil (JSON null), never 0.
 func resolveNullableTokens(
 	events, nullTokenEvents int64,
 	input, output, cacheRead, cacheWrite, cacheWrite1h, reasoning int64,
@@ -504,33 +547,50 @@ func resolveNullableTokens(
 		return AgentUsageTokens{}
 	}
 
-	resolveBucket := func(sum int64, nonNullCount int64) *int64 {
+	resolveBucket := func(sum int64, nonNullCount int64) (*int64, int64) {
+		var unknownCount int64
+		if presence.eventCount > 0 && nonNullCount > 0 && nonNullCount < presence.eventCount {
+			unknownCount = presence.eventCount - nonNullCount
+		}
 		if sum > 0 {
 			v := sum
-			return &v
+			return &v, unknownCount
 		}
-		// Sum is 0. If usage_events covers this window (presence.eventCount > 0),
-		// distinguish measured 0 (nonNullCount > 0) from all-NULL (nonNullCount == 0).
-		if presence.eventCount > 0 {
-			if nonNullCount > 0 {
-				var zero int64
-				return &zero
-			}
-			return nil
+		// Sum is 0. Only emit measured 0 when usage_events presence confirms at
+		// least one non-null event for this bucket; otherwise surface nil
+		// (unknown) — never fabricate 0 (§3.1).
+		if presence.eventCount > 0 && nonNullCount > 0 {
+			var zero int64
+			return &zero, unknownCount
 		}
-		// Historical fallback past usage_events retention: since events > nullTokenEvents,
-		// token values were reported and summed to 0.
-		var zero int64
-		return &zero
+		return nil, 0
 	}
 
+	inVal, inUnk := resolveBucket(input, presence.inputCount)
+	outVal, outUnk := resolveBucket(output, presence.outputCount)
+	crVal, crUnk := resolveBucket(cacheRead, presence.cacheReadCount)
+	cwVal, cwUnk := resolveBucket(cacheWrite, presence.cacheWriteCount)
+	cw1hVal, cw1hUnk := resolveBucket(cacheWrite1h, presence.cacheWrite1hCount)
+	reasVal, reasUnk := resolveBucket(reasoning, presence.reasoningCount)
+
 	out := AgentUsageTokens{
-		Input:        resolveBucket(input, presence.inputCount),
-		Output:       resolveBucket(output, presence.outputCount),
-		CacheRead:    resolveBucket(cacheRead, presence.cacheReadCount),
-		CacheWrite:   resolveBucket(cacheWrite, presence.cacheWriteCount),
-		CacheWrite1h: resolveBucket(cacheWrite1h, presence.cacheWrite1hCount),
-		Reasoning:    resolveBucket(reasoning, presence.reasoningCount),
+		Input:        inVal,
+		Output:       outVal,
+		CacheRead:    crVal,
+		CacheWrite:   cwVal,
+		CacheWrite1h: cw1hVal,
+		Reasoning:    reasVal,
+	}
+
+	if inUnk > 0 || outUnk > 0 || crUnk > 0 || cwUnk > 0 || cw1hUnk > 0 || reasUnk > 0 {
+		out.UnknownEvents = &AgentUsageBucketUnknownEvents{
+			Input:        inUnk,
+			Output:       outUnk,
+			CacheRead:    crUnk,
+			CacheWrite:   cwUnk,
+			CacheWrite1h: cw1hUnk,
+			Reasoning:    reasUnk,
+		}
 	}
 
 	// SummableTokens = sum of known {input, output, cache_read, cache_write} (§3.1).
@@ -549,22 +609,25 @@ func resolveNullableTokens(
 	return out
 }
 
-// measurementStatusInput holds the inputs to deriveMeasurementStatus.
+// measurementStatusInput holds the run-scoped inputs to deriveMeasurementStatus.
 // Kept in a single struct + single function so P2 can extend it with usage.yaml
 // harness capability metadata without changing call sites.
 type measurementStatusInput struct {
-	RunAttribution *store.RunAttribution
-	MeterHealth    []*store.MeterHealth
-	HasUsageEvents bool
-	DBNow          time.Time
+	RunAttribution    *store.RunAttribution
+	MeterHealth       []*store.MeterHealth
+	HasRunUsageEvents bool
+	DBNow             time.Time
 }
 
-// deriveMeasurementStatus computes the P1 measurement_status for an agent run:
-//   - "stale" when an open meter_health row is past 3 heartbeat intervals (180s)
-//     after the 60s startup grace, evaluated at read time from DBNow (§4.2 item 7);
-//   - "measured" when the run has received Track 1 usage events and the meter
-//     is fresh (or cleanly closed with final_state="final");
-//   - "unmeasured" when no Track 1 usage data has been received for the run.
+// deriveMeasurementStatus computes the P1 measurement_status for an agent's
+// current run:
+//   - "stale" when an open meter_health row for the run is past 3 heartbeat
+//     intervals (180s) after the 60s startup grace, evaluated at read time from
+//     DBNow (§4.2 item 7);
+//   - "measured" when the current run has received Track 1 usage events and its
+//     meter is fresh (or cleanly closed with final_state="final");
+//   - "unmeasured" when no Track 1 usage data has been received for the current
+//     run.
 //
 // P2 extends this function with usage.yaml capability metadata (partial,
 // calls_only, legacy_client).
@@ -590,9 +653,11 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 			in.DBNow.Sub(latest.LastReceiptAt) > staleAfter {
 			return MeasurementStatusStale
 		}
+		// TODO(P2): map latest.FinalState == store.MeterHealthFinalStateIncomplete
+		// to MeasurementStatusPartial once P2 adds partial-coverage handling.
 	}
 
-	if in.HasUsageEvents {
+	if in.HasRunUsageEvents {
 		return MeasurementStatusMeasured
 	}
 	return MeasurementStatusUnmeasured

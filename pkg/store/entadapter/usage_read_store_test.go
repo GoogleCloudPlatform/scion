@@ -170,6 +170,14 @@ func TestUsageRead_RollupsPresenceMeterHealthAndDBNow(t *testing.T) {
 	require.Len(t, mhs, 1)
 	assert.Equal(t, runID, mhs[0].RunID)
 
+	// HasUsageEventsForRun distinguishes runs with events from runs without.
+	hasEv, err := cs.HasUsageEventsForRun(ctx, agentID, runID)
+	require.NoError(t, err)
+	assert.True(t, hasEv)
+	hasEvNone, err := cs.HasUsageEventsForRun(ctx, agentID, "run-without-events")
+	require.NoError(t, err)
+	assert.False(t, hasEvNone)
+
 	// DBNow returns a recent UTC timestamp
 	dbNow, err := cs.DBNow(ctx)
 	require.NoError(t, err)

@@ -391,6 +391,10 @@ type UsageLedgerStore interface {
 	// agentID with event_ts in [since, until] (inclusive).
 	GetUsageTokenPresenceByAgent(ctx context.Context, agentID string, since, until time.Time) ([]*UsageTokenPresence, error)
 
+	// HasUsageEventsForRun reports whether at least one usage_events row exists
+	// for (agentID, runID).
+	HasUsageEventsForRun(ctx context.Context, agentID, runID string) (bool, error)
+
 	// DBNow returns the current UTC timestamp from the database clock
 	// (Tokenomics design §4.2 item 7).
 	DBNow(ctx context.Context) (time.Time, error)
