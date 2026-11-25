@@ -4164,6 +4164,7 @@ var (
 		{Name: "lists", Type: field.TypeString, Size: 2147483647, Default: "{}"},
 		{Name: "headers", Type: field.TypeString, Size: 2147483647, Default: "{}"},
 		{Name: "payload", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "payload_ref", Type: field.TypeString, Default: ""},
 		{Name: "payload_bytes", Type: field.TypeInt, Default: 0},
 		{Name: "status", Type: field.TypeString, Default: "pending"},
 		{Name: "match_count", Type: field.TypeInt, Default: 0},
@@ -4199,7 +4200,12 @@ var (
 			{
 				Name:    "triggerevent_status_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerEventsColumns[15], TriggerEventsColumns[20]},
+				Columns: []*schema.Column{TriggerEventsColumns[16], TriggerEventsColumns[21]},
+			},
+			{
+				Name:    "triggerevent_project_id_payload_ref",
+				Unique:  false,
+				Columns: []*schema.Column{TriggerEventsColumns[1], TriggerEventsColumns[14]},
 			},
 		},
 	}

@@ -72,6 +72,9 @@ func (TriggerEvent) Fields() []ent.Field {
 		field.Text("payload").
 			Default("").
 			Immutable(),
+		field.String("payload_ref").
+			Default("").
+			Immutable(),
 		field.Int("payload_bytes").
 			Default(0).
 			Immutable(),
@@ -107,6 +110,7 @@ func (TriggerEvent) Indexes() []ent.Index {
 				entsql.IndexWhere("body_sha256 <> ''"),
 			),
 		index.Fields("status", "created"),
+		index.Fields("project_id", "payload_ref"),
 	}
 }
 
