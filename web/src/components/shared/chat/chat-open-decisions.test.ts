@@ -293,6 +293,64 @@ describe('scion-chat-open-decisions', () => {
     expect(liveRegion()).toBe('');
   });
 
+  it('opens a modal bottom sheet dialog at the narrow-screen breakpoint', async () => {
+    const origMatchMedia = window.matchMedia;
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('max-width'),
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }));
+    const showModalSpy = vi.fn();
+    HTMLDialogElement.prototype.showModal = showModalSpy;
+
+    try {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(
+          jsonResponse({
+            counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+            prompts: [
+              {
+                promptMessageId: 'msg-m1',
+                promptAvailable: true,
+                createdAt: new Date().toISOString(),
+                askerAgentId: 'a1',
+                askerAgentName: 'deploy-lead',
+                answerMode: 'single',
+                openCount: 1,
+                totalCount: 1,
+                question: 'Deploy on mobile?',
+                waitingOnYou: true,
+                awaitingConfirmation: false,
+              },
+            ],
+            truncated: false,
+          } satisfies ConversationOpenDecisionsResponse)
+        )
+      );
+
+      el = document.createElement('scion-chat-open-decisions') as ScionChatOpenDecisions;
+      el.conversationKey = 'topic-mobile';
+      document.body.appendChild(el);
+      await flush(el);
+
+      el.shadowRoot!.querySelector<HTMLButtonElement>('.trigger')!.click();
+      await flush(el);
+
+      const sheet = el.shadowRoot!.querySelector<HTMLDialogElement>('dialog.sheet');
+      expect(sheet).toBeTruthy();
+      expect(showModalSpy).toHaveBeenCalledTimes(1);
+      expect(sheet!.querySelector('button.close')).toBeTruthy();
+      expect(sheet!.querySelector('.grab')).toBeTruthy();
+    } finally {
+      window.matchMedia = origMatchMedia;
+    }
+  });
+
   it('hides cleanly when the hub returns 404', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ error: 'not found' }, 404)));
 

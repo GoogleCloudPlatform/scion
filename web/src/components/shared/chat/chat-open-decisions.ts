@@ -34,6 +34,7 @@ import {
 } from '../../../client/conversation-open-decisions.js';
 import { formatInstantWithZone, formatRelative } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
+import { shouldUseMenuSheet } from './context-menu.js';
 import { withFocusMove } from '../focus-moved.js';
 
 /** Room kept between the desktop panel and the viewport edges, px. */
@@ -61,6 +62,7 @@ export class ScionChatOpenDecisions extends LitElement {
   @property() projectSlug = '';
 
   @state() private open = false;
+  @state() private sheet = false;
   @state() private hiddenBy404 = false;
   @state() private counts: ConversationDecisionCounts = { waitingOnYou: 0, waitingOnOthers: 0 };
   @state() private prompts: ConversationOpenPromptItem[] = [];
@@ -157,12 +159,111 @@ export class ScionChatOpenDecisions extends LitElement {
       outline: none;
     }
 
+    /* ---- Narrow screens: modal bottom sheet ---- */
+    dialog.sheet {
+      position: fixed;
+      inset: auto 0 0 0;
+      margin: 0;
+      width: 100%;
+      max-width: 100%;
+      max-height: 80vh;
+      max-height: 80dvh;
+      box-sizing: border-box;
+      padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
+        env(safe-area-inset-left, 0px);
+      border: none;
+      border-radius: calc(var(--scion-radius-xl) * 0.875) calc(var(--scion-radius-xl) * 0.875) 0 0;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text, #1e293b);
+      box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.18);
+      overflow: hidden;
+      flex-direction: column;
+      font-weight: 400;
+      text-align: left;
+      touch-action: pan-y pinch-zoom;
+    }
+
+    dialog.sheet[open] {
+      display: flex;
+      animation: sheet-in 0.18s ease-out;
+    }
+
+    dialog.sheet::backdrop {
+      background: rgba(15, 23, 42, 0.45);
+    }
+
+    @keyframes sheet-in {
+      from {
+        transform: translateY(100%);
+      }
+      to {
+        transform: translateY(0);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      dialog.sheet[open] {
+        animation: none;
+      }
+    }
+
+    .grab {
+      flex: none;
+      width: 2.25rem;
+      height: 0.25rem;
+      border-radius: var(--scion-radius-full, 9999px);
+      background: var(--scion-border, #e2e8f0);
+      margin: 0.4rem auto 0;
+    }
+
     .panel-header {
       flex: none;
       display: flex;
       align-items: center;
       gap: 0.5rem;
       padding: 0.5rem 0.5rem 0.375rem 0.75rem;
+    }
+
+    .sheet .panel-header {
+      padding: 0.5rem 0.25rem 0.5rem 1rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .close {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 44px;
+      border: none;
+      background: none;
+      border-radius: calc(var(--scion-radius) * 0.75);
+      color: var(--scion-text-muted, #64748b);
+      font-size: 1.125rem;
+      cursor: pointer;
+    }
+
+    .close:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    .sheet .scroll {
+      padding: 0.25rem 0.5rem 0.75rem;
+    }
+
+    .sheet .entry {
+      min-height: 52px;
+      padding: 0.5rem 0.55rem;
+    }
+
+    .sheet button.section-header {
+      min-height: 44px;
+    }
+
+    .sheet .status sl-button::part(base) {
+      min-height: 44px;
     }
 
     .panel-title {
@@ -426,7 +527,18 @@ export class ScionChatOpenDecisions extends LitElement {
 
   protected override updated(changed: PropertyValues): void {
     super.updated(changed);
-    if (this.open) this.fitPanel();
+    if (changed.has('open') || changed.has('sheet')) this.syncSheet();
+    if (this.open && !this.sheet) this.fitPanel();
+  }
+
+  private syncSheet(): void {
+    const dialog = this.renderRoot.querySelector<HTMLDialogElement>('dialog.sheet');
+    if (!dialog) return;
+    if (this.open && this.sheet && !dialog.open) {
+      withFocusMove(() => dialog.showModal());
+      const scroll = dialog.querySelector('.scroll');
+      if (scroll) scroll.scrollTop = 0;
+    }
   }
 
   /** Whether the panel is open (for the page and tests). */
@@ -458,15 +570,18 @@ export class ScionChatOpenDecisions extends LitElement {
       this.closePanel(true);
       return;
     }
+    this.sheet = shouldUseMenuSheet();
     this.open = true;
     this.liveAnnouncement = '';
-    document.addEventListener('pointerdown', this.handleOutsidePointer, true);
+    if (!this.sheet) document.addEventListener('pointerdown', this.handleOutsidePointer, true);
     window.addEventListener('resize', this.handleResize);
     window.addEventListener('popstate', this.handlePopState);
     void this.controller.refetchNow();
-    void this.updateComplete.then(() => {
-      this.renderRoot.querySelector<HTMLElement>('.panel')?.focus();
-    });
+    if (!this.sheet) {
+      void this.updateComplete.then(() => {
+        this.renderRoot.querySelector<HTMLElement>('.panel')?.focus();
+      });
+    }
   }
 
   private closePanel(restoreFocus: boolean): void {
@@ -508,7 +623,7 @@ export class ScionChatOpenDecisions extends LitElement {
   };
 
   private handleFocusOut = (e: FocusEvent): void => {
-    if (!this.open) return;
+    if (!this.open || this.sheet) return;
     const next = e.relatedTarget as Node | null;
     if (!next) return;
     if (this.contains(next) || this.renderRoot.contains(next)) return;
@@ -516,7 +631,36 @@ export class ScionChatOpenDecisions extends LitElement {
   };
 
   private handleResize = (): void => {
-    if (this.open) this.fitPanel();
+    if (!this.open) return;
+    if (shouldUseMenuSheet() !== this.sheet) {
+      this.closePanel(false);
+      return;
+    }
+    if (!this.sheet) this.fitPanel();
+  };
+
+  private handleSheetCancel = (e: Event): void => {
+    e.preventDefault();
+    this.closePanel(true);
+  };
+
+  private handleSheetClose = (): void => {
+    if (this.open && this.sheet) this.closePanel(true);
+  };
+
+  private handleSheetClick = (e: MouseEvent): void => {
+    e.stopPropagation();
+    const dialog = e.currentTarget as HTMLDialogElement;
+    if (e.target !== dialog) return;
+    const r = dialog.getBoundingClientRect();
+    const inside =
+      e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    if (!inside) this.closePanel(true);
+  };
+
+  private stopTouch = {
+    handleEvent: (e: TouchEvent): void => e.stopPropagation(),
+    passive: true,
   };
 
   private handlePopState = (): void => {
@@ -684,6 +828,74 @@ export class ScionChatOpenDecisions extends LitElement {
     `;
   }
 
+  private renderHeader(total: number): TemplateResult {
+    return html`<div class="panel-header">
+      <h2 class="panel-title" id=${this.headingId}>
+        Open decisions${total > 0 ? html`<span class="panel-count">${total}</span>` : nothing}
+      </h2>
+      ${total > 0 ? html`<span class="sort-label">Oldest first</span>` : nothing}
+      ${this.sheet
+        ? html`<button
+            type="button"
+            class="close"
+            aria-label="Close open decisions"
+            @click=${(): void => this.closePanel(true)}
+          >
+            <sl-icon name="x-lg" aria-hidden="true"></sl-icon>
+          </button>`
+        : nothing}
+    </div>`;
+  }
+
+  private renderFooter(total: number): TemplateResult | typeof nothing {
+    if (!this.truncated) return nothing;
+    return html`<div class="panel-footer">
+      <span>Showing the oldest ${this.prompts.length} of ${total}</span>
+      <a href=${this.decisionsPageUrl} @click=${(): void => this.closePanel(false)}
+        >Open all in Decisions</a
+      >
+    </div>`;
+  }
+
+  private renderPanel(total: number): TemplateResult | typeof nothing {
+    if (!this.open) return nothing;
+    if (this.sheet) {
+      return html`<dialog
+        class="sheet"
+        id=${this.panelId}
+        aria-labelledby=${this.headingId}
+        @cancel=${this.handleSheetCancel}
+        @close=${this.handleSheetClose}
+        @click=${this.handleSheetClick}
+        @touchstart=${this.stopTouch}
+        @touchmove=${this.stopTouch}
+        @touchend=${this.stopTouch}
+        @touchcancel=${this.stopTouch}
+      >
+        <div class="grab" aria-hidden="true"></div>
+        ${this.renderHeader(total)}
+        <div class="scroll">${this.renderBody()}</div>
+        ${this.renderFooter(total)}
+      </dialog>`;
+    }
+    return html`<div
+      class="panel"
+      id=${this.panelId}
+      role="dialog"
+      aria-modal="false"
+      aria-labelledby=${this.headingId}
+      tabindex="-1"
+      @touchstart=${this.stopTouch}
+      @touchmove=${this.stopTouch}
+      @touchend=${this.stopTouch}
+      @touchcancel=${this.stopTouch}
+    >
+      ${this.renderHeader(total)}
+      <div class="scroll">${this.renderBody()}</div>
+      ${this.renderFooter(total)}
+    </div>`;
+  }
+
   override render(): TemplateResult | typeof nothing {
     if (this.hiddenBy404) return nothing;
     const total = this.totalCount;
@@ -708,33 +920,7 @@ export class ScionChatOpenDecisions extends LitElement {
             <sl-icon name="signpost-split" aria-hidden="true"></sl-icon>
           </button>
         </sl-tooltip>
-        ${this.open
-          ? html`<div
-              class="panel"
-              id=${this.panelId}
-              role="dialog"
-              aria-modal="false"
-              aria-labelledby=${this.headingId}
-              tabindex="-1"
-            >
-              <div class="panel-header">
-                <h2 class="panel-title" id=${this.headingId}>
-                  Open
-                  decisions${total > 0 ? html`<span class="panel-count">${total}</span>` : nothing}
-                </h2>
-                ${total > 0 ? html`<span class="sort-label">Oldest first</span>` : nothing}
-              </div>
-              <div class="scroll">${this.renderBody()}</div>
-              ${this.truncated
-                ? html`<div class="panel-footer">
-                    <span>Showing the oldest ${this.prompts.length} of ${total}</span>
-                    <a href=${this.decisionsPageUrl} @click=${(): void => this.closePanel(false)}
-                      >Open all in Decisions</a
-                    >
-                  </div>`
-                : nothing}
-            </div>`
-          : nothing}
+        ${this.renderPanel(total)}
         <span class="sr-only" aria-live="polite" role="status">${this.liveAnnouncement}</span>
       </div>
     `;
