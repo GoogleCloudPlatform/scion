@@ -37,6 +37,7 @@
 - [agent.token.refresh](#agenttokenrefresh) — Refresh the calling agent's own hub token
 - [agent.outbound.message](#agentoutboundmessage) — Deliver an outbound message from the calling agent
 - [agent.metrics.report](#agentmetricsreport) — Report runtime metrics for the calling agent
+- [agent.usage.read](#agentusageread) — Read an agent's Track 1 token usage summary and meter health (behind tokenomics.usage_ledger)
 - [agent.usage.ingest](#agentusageingest) — Ingest canonical Track 1 usage events and meter health heartbeats for the calling agent (behind tokenomics.usage_ledger)
 - [agent.usage.capabilities](#agentusagecapabilities) — Probe Hub Track 1 usage ingest capabilities for the calling agent (behind tokenomics.usage_ledger)
 - [agent.secrets.access](#agentsecretsaccess) — List, read, write and delete the secrets available to the calling agent: its own agent-scoped secrets, its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)
@@ -1586,6 +1587,38 @@
 ### Exemptions
 
 - **internal_only:** The agent authenticates with its own agent JWT for its own record; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.usage.read
+
+**Domain:** agent
+
+**Description:** Read an agent's Track 1 token usage summary and meter health (behind tokenomics.usage_ledger)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/usage` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
