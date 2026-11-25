@@ -75,7 +75,7 @@ export const INBOX_CARDS: readonly InboxCardConfig[] = [
     key: 'waiting',
     icon: 'hourglass-split',
     title: 'Agents Waiting',
-    descriptor: 'Your agents waiting for input',
+    descriptor: 'Agents waiting for input in your projects',
     defaultHref: '/agents?q=activity%3Awaiting_for_input',
   },
   {

@@ -225,6 +225,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"chat_v2_no_recipient.go:projectHumanMembersStrict:ListProjectMembers":                      "routing: chat recipients of a project; grants nothing",
 	"decisions_bell.go:projectMemberCandidateUserIDs:ListRoleBindingsForScope":                  "routing: candidate project members for decisions bell recompute and conversation participant handle resolution; grants nothing (callers re-evaluate clamped membership per candidate)",
 	"handlers_chat_v2.go:resolveProjectHumanMembers:ListProjectMembers":                         "routing: chat recipients of a project; grants nothing",
+	"inbox_summary.go:inboxWaitingHintRecipients:ListProjectMembers":                            "routing: project members receiving content-free waiting inbox invalidation hints; grants nothing",
 
 	// Display: returns stored records to an authorized caller; grants nothing.
 	"handlers_admin_effective_access.go:handleAdminEffectiveAccess:GetEffectiveGroups":            "display: effective-access report (bindings read through the clamped authz store)",

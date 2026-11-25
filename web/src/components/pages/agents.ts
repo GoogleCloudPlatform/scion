@@ -713,44 +713,43 @@ export class ScionPageAgents extends LitElement {
       }
       this.applyInitialFilterQuery(this.filterQueryText);
     } else {
-      if (this.pageData?.user) {
-        const scope = localStorage.getItem('scion-scope-agents');
-        if (scope === 'mine' || scope === 'shared') {
-          this.agentScope = scope;
-        }
-      }
-      const storedPhase = localStorage.getItem('scion-filter-agents-phase');
-      if (
-        storedPhase === 'running' ||
-        storedPhase === 'stopping' ||
-        storedPhase === 'stopped' ||
-        storedPhase === 'suspended' ||
-        storedPhase === 'error'
-      ) {
-        this.phaseFilter = storedPhase;
-      }
-      // Read persisted mode filter (reset to All if a retired/unknown mode was persisted)
-      const storedMode = localStorage.getItem('scion-filter-agents-mode');
-      if (
-        storedMode &&
-        (storedMode === 'can_message' ||
-          storedMode === 'cannot_message' ||
-          Object.hasOwn(MESSAGE_MODE_DISPLAY, storedMode))
-      ) {
-        this.modeFilter = storedMode;
-      } else if (storedMode) {
-        localStorage.removeItem('scion-filter-agents-mode');
-        this.modeFilter = '';
-      }
       const urlParams = new URLSearchParams(window.location.search);
       const urlQ = urlParams.get('q')?.trim() ?? '';
       const qActivity = /^activity:([a-z0-9_]+)$/i.exec(urlQ);
       if (qActivity) {
+        // URL-hydrated activity filter takes precedence over persisted scope,
+        // phase, and mode filters for this load so pre-filtered links show the
+        // full matching set (ptone/scion#9300).
         this.activityFilter = qActivity[1].toLowerCase();
       } else {
-        const urlActivity = urlParams.get('activity')?.trim();
-        if (urlActivity) {
-          this.activityFilter = urlActivity.toLowerCase();
+        if (this.pageData?.user) {
+          const scope = localStorage.getItem('scion-scope-agents');
+          if (scope === 'mine' || scope === 'shared') {
+            this.agentScope = scope;
+          }
+        }
+        const storedPhase = localStorage.getItem('scion-filter-agents-phase');
+        if (
+          storedPhase === 'running' ||
+          storedPhase === 'stopping' ||
+          storedPhase === 'stopped' ||
+          storedPhase === 'suspended' ||
+          storedPhase === 'error'
+        ) {
+          this.phaseFilter = storedPhase;
+        }
+        // Read persisted mode filter (reset to All if a retired/unknown mode was persisted)
+        const storedMode = localStorage.getItem('scion-filter-agents-mode');
+        if (
+          storedMode &&
+          (storedMode === 'can_message' ||
+            storedMode === 'cannot_message' ||
+            Object.hasOwn(MESSAGE_MODE_DISPLAY, storedMode))
+        ) {
+          this.modeFilter = storedMode;
+        } else if (storedMode) {
+          localStorage.removeItem('scion-filter-agents-mode');
+          this.modeFilter = '';
         }
       }
     }
@@ -874,7 +873,6 @@ export class ScionPageAgents extends LitElement {
     this.activityFilter = '';
     const params = new URLSearchParams(window.location.search);
     params.delete('q');
-    params.delete('activity');
     replaceSearch(params);
     this.agentWindow.setViewState({ hasClientOnlyFilter: false, filterPredicate: null });
     this.onAgentViewStateChanged();

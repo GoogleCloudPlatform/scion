@@ -481,10 +481,14 @@ type eventBuilder struct {
 	// published counts scion.hub.events.published; the embedding
 	// publisher calls it once per event it publishes.
 	published eventstreams.PublishCounter
-	// inboxHintEnabled, when set, gates user.<ownerID>.inbox waiting hints
+	// inboxHintEnabled, when set, gates user.<userID>.inbox waiting hints
 	// emitted by PublishAgentStatus (design §5.2). Stored atomically so
 	// SetInboxHintEnabled is race-free with concurrent publishes.
 	inboxHintEnabled atomic.Pointer[func() bool]
+	// inboxWaitingRecipients, when set, resolves the user IDs that should
+	// receive waiting inbox hints for an agent in projectID owned by ownerID
+	// (owner plus project members, ptone/scion#9300).
+	inboxWaitingRecipients atomic.Pointer[func(ctx context.Context, projectID, ownerID string) []string]
 }
 
 // inboxHintEnabledSetter is implemented by event publishers backed by
@@ -493,8 +497,14 @@ type inboxHintEnabledSetter interface {
 	SetInboxHintEnabled(fn func() bool)
 }
 
+// inboxWaitingRecipientsSetter is implemented by event publishers backed by
+// eventBuilder so Server.SetEventPublisher can wire project-member hint fanout.
+type inboxWaitingRecipientsSetter interface {
+	SetInboxWaitingRecipients(fn func(ctx context.Context, projectID, ownerID string) []string)
+}
+
 // SetInboxHintEnabled sets the gate checked by PublishAgentStatus before
-// emitting a user.<ownerID>.inbox waiting hint. Passing nil disables hints.
+// emitting user.<userID>.inbox waiting hints. Passing nil disables hints.
 func (p *eventBuilder) SetInboxHintEnabled(fn func() bool) {
 	if fn == nil {
 		p.inboxHintEnabled.Store(nil)
@@ -503,9 +513,30 @@ func (p *eventBuilder) SetInboxHintEnabled(fn func() bool) {
 	p.inboxHintEnabled.Store(&fn)
 }
 
+// SetInboxWaitingRecipients sets the resolver used by PublishAgentStatus to
+// determine which users receive waiting inbox hints. Passing nil falls back to
+// owner-only delivery.
+func (p *eventBuilder) SetInboxWaitingRecipients(fn func(ctx context.Context, projectID, ownerID string) []string) {
+	if fn == nil {
+		p.inboxWaitingRecipients.Store(nil)
+		return
+	}
+	p.inboxWaitingRecipients.Store(&fn)
+}
+
 func (p *eventBuilder) shouldEmitInboxHint() bool {
 	fn := p.inboxHintEnabled.Load()
 	return fn != nil && (*fn)()
+}
+
+func (p *eventBuilder) resolveInboxWaitingRecipients(ctx context.Context, projectID, ownerID string) []string {
+	if fn := p.inboxWaitingRecipients.Load(); fn != nil {
+		return (*fn)(ctx, projectID, ownerID)
+	}
+	if ownerID == "" {
+		return nil
+	}
+	return []string{ownerID}
 }
 
 // SetPublishMetrics wires the scion.hub.events.published counter
@@ -749,12 +780,15 @@ func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agen
 	if agent.ProjectID != "" {
 		sink("project."+agent.ProjectID+".agent.status", evt)
 	}
-	if agent.OwnerID != "" && p.shouldEmitInboxHint() {
-		p.PublishUserInboxHint(ctx, agent.OwnerID, InboxHint{
+	if p.shouldEmitInboxHint() {
+		hint := InboxHint{
 			Category: InboxCategoryWaiting,
 			AgentID:  agent.ID,
 			Activity: agent.Activity,
-		})
+		}
+		for _, uid := range p.resolveInboxWaitingRecipients(ctx, agent.ProjectID, agent.OwnerID) {
+			p.PublishUserInboxHint(ctx, uid, hint)
+		}
 	}
 }
 

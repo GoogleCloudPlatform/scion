@@ -136,17 +136,29 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(elOn.shadowRoot?.textContent).not.toContain('Thinking Bot');
     elOn.remove();
 
-    // 2. Dialect OFF: hydrates activityFilter, renders removable tag, and filters client-side.
+    // 2. Dialect OFF: hydrates activityFilter, ignores persisted scope/phase/mode
+    // for this load, renders removable tag, and filters client-side.
     fetchUrls = [];
     setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
+    localStorage.setItem('scion-scope-agents', 'mine');
+    localStorage.setItem('scion-filter-agents-phase', 'error');
+    localStorage.setItem('scion-filter-agents-mode', 'lineage');
     window.history.replaceState(null, '', '/agents?q=activity%3Awaiting_for_input');
     const elOff = document.createElement('scion-page-agents') as ScionPageAgents;
+    elOff.pageData = {
+      path: '/agents',
+      title: 'Agents',
+      user: { id: 'u1', email: 'u1@example.com', name: 'U1', role: 'admin' },
+    };
     document.body.appendChild(elOff);
     await new Promise((r) => setTimeout(r, 15));
     await elOff.updateComplete;
 
     const tag = elOff.shadowRoot?.querySelector('[data-activity-filter-tag]');
     expect(tag?.textContent?.trim()).toBe('activity:waiting_for_input');
+    expect(fetchUrls.some((u) => u.includes('scope=mine') || u.includes('phase=error'))).toBe(
+      false
+    );
     expect(elOff.shadowRoot?.textContent).toContain('Waiting Bot');
     expect(elOff.shadowRoot?.textContent).not.toContain('Thinking Bot');
 

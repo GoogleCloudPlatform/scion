@@ -218,6 +218,38 @@ func (s *Server) publishInboxHint(ctx context.Context, userID string, hint Inbox
 	s.events.PublishUserInboxHint(ctx, userID, hint)
 }
 
+// inboxWaitingHintRecipients returns the deduplicated user IDs that should
+// receive waiting inbox invalidation hints for an agent: its owner (if set)
+// plus all members of projectID, so teammates whose Agents Waiting count
+// includes the agent refresh live (ptone/scion#9300).
+func (s *Server) inboxWaitingHintRecipients(ctx context.Context, projectID, ownerID string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(uid string) {
+		if uid == "" {
+			return
+		}
+		if _, ok := seen[uid]; ok {
+			return
+		}
+		seen[uid] = struct{}{}
+		out = append(out, uid)
+	}
+	add(ownerID)
+	if projectID != "" && s.store != nil {
+		lctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		if members, err := s.store.ListProjectMembers(lctx, projectID); err == nil {
+			for _, m := range members {
+				if m != nil {
+					add(m.UserID)
+				}
+			}
+		}
+	}
+	return out
+}
+
 // handleUserMeInboxSummary serves GET /api/v1/users/me/inbox/summary.
 // Non-GET methods return 405 before the experiment gate, which returns 404
 // while web.inbox_dashboard is off.
@@ -526,12 +558,7 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 	const href = "/agents?q=activity%3Awaiting_for_input"
 	limit := s.waitingLimit()
 
-	readIdentity := Identity(v.user)
-	if v.token != nil {
-		readIdentity = v.token.UserIdentity
-	}
-
-	scopeResult, err := s.authzService.ResolveListScopes(ctx, readIdentity, "agent.list")
+	scopeResult, err := s.authzService.ResolveListScopes(ctx, v.user, "agent.list")
 	if err != nil {
 		code := inboxCategoryErrorCode(ctx, err)
 		slog.Warn("inbox summary: category source failed",
@@ -619,53 +646,21 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 		candidates = res.Items
 	}
 
-	var matched []store.Agent
-	if v.token != nil {
-		principal := principalContextForIdentity(v.token.UserIdentity)
-		matched = make([]store.Agent, 0, len(candidates))
-		for i := range candidates {
-			if err := ctx.Err(); err != nil {
-				code := inboxCategoryErrorCode(ctx, err)
-				slog.Warn("inbox summary: category source failed",
-					"category", InboxCategoryWaiting,
-					"error_code", code,
-					"error", err)
-				return InboxCategory{
-					State:             InboxStateError,
-					Count:             0,
-					Capped:            false,
-					CountsTowardTotal: false,
-					Href:              href,
-					ErrorCode:         code,
-					Previews:          []any{},
-				}
-			}
-			if s.authzService.Decide(ctx, AuthzRequest{
-				Principal: principal,
-				Resource:  agentResource(&candidates[i]),
-				Action:    ActionRead,
-				ListRow:   true,
-			}).Allowed {
-				matched = append(matched, candidates[i])
-			}
-		}
-	} else {
-		matched, err = s.readableAgentRows(ctx, v.user, candidates)
-		if err != nil {
-			code := inboxCategoryErrorCode(ctx, err)
-			slog.Warn("inbox summary: category source failed",
-				"category", InboxCategoryWaiting,
-				"error_code", code,
-				"error", err)
-			return InboxCategory{
-				State:             InboxStateError,
-				Count:             0,
-				Capped:            false,
-				CountsTowardTotal: false,
-				Href:              href,
-				ErrorCode:         code,
-				Previews:          []any{},
-			}
+	matched, err := s.readableAgentRows(ctx, v.user, candidates)
+	if err != nil {
+		code := inboxCategoryErrorCode(ctx, err)
+		slog.Warn("inbox summary: category source failed",
+			"category", InboxCategoryWaiting,
+			"error_code", code,
+			"error", err)
+		return InboxCategory{
+			State:             InboxStateError,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: false,
+			Href:              href,
+			ErrorCode:         code,
+			Previews:          []any{},
 		}
 	}
 

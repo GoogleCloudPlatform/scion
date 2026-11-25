@@ -826,20 +826,74 @@ func TestUserMeInboxSummary_WaitingCategory(t *testing.T) {
 	assert.Equal(t, map[string]int{InboxBreakdownProjects: 2}, respZero.Categories[InboxCategoryWaiting].Breakdown)
 	assert.Empty(t, respZero.Categories[InboxCategoryWaiting].Previews)
 
-	// 3. Hub-bounded UAT with inbox:read sees all 5 readable waiting agents.
-	tokHub := f.mint(t, f.member, hubBoundary(), "inbox:read")
+	// 3. UAT with only inbox:read (no agent:list) sees 0 waiting agents, matching
+	// GET /api/v1/agents?q=activity:waiting_for_input (ptone/scion#9300).
+	tokInboxOnly := f.mint(t, f.member, hubBoundary(), "inbox:read")
+	inboxOnlyResp := decodeInboxSummary(t, f.call(t, tokInboxOnly, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, 0, inboxOnlyResp.Total)
+	assert.Equal(t, 0, inboxOnlyResp.Categories[InboxCategoryWaiting].Count)
+	assert.Empty(t, inboxOnlyResp.Categories[InboxCategoryWaiting].AgentIDs)
+	assert.Empty(t, inboxOnlyResp.Categories[InboxCategoryWaiting].Previews)
+
+	// 4. UAT with inbox:read + agent:read (still no agent:list) sees 0 waiting agents.
+	tokInboxAgentRead := f.mint(t, f.member, hubBoundary(), "inbox:read", "agent:read")
+	inboxReadResp := decodeInboxSummary(t, f.call(t, tokInboxAgentRead, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, 0, inboxReadResp.Total)
+	assert.Equal(t, 0, inboxReadResp.Categories[InboxCategoryWaiting].Count)
+	assert.Empty(t, inboxReadResp.Categories[InboxCategoryWaiting].AgentIDs)
+
+	// 5. Hub-bounded UAT with inbox:read + agent:list sees all 5 readable waiting agents,
+	// matching GET /api/v1/agents?q=activity:waiting_for_input for the same token.
+	tokHub := f.mint(t, f.member, hubBoundary(), "inbox:read", "agent:list")
 	hubResp := decodeInboxSummary(t, f.call(t, tokHub, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, 5, hubResp.Total)
 	assert.Equal(t, 5, hubResp.Categories[InboxCategoryWaiting].Count)
 	assert.Equal(t, []string{a1.ID, a2.ID, a3.ID, a4.ID, a5.ID}, hubResp.Categories[InboxCategoryWaiting].AgentIDs)
 
-	// 4. Project-bounded UAT for projA sees ONLY projA's 4 waiting agents (not a2 in projB).
-	tokProjA := f.mint(t, f.member, projectBoundary(f.projA), "inbox:read")
+	tokHubAgentsRec := f.call(t, tokHub, http.MethodGet, "/api/v1/agents?q=activity%3Awaiting_for_input", nil)
+	require.Equal(t, http.StatusOK, tokHubAgentsRec.Code, tokHubAgentsRec.Body.String())
+	var tokHubAgents ListAgentsResponse
+	require.NoError(t, json.Unmarshal(tokHubAgentsRec.Body.Bytes(), &tokHubAgents))
+	assert.Equal(t, len(tokHubAgents.Agents), hubResp.Categories[InboxCategoryWaiting].Count)
+
+	// 6. Project-bounded UAT for projA with inbox:read + agent:list sees ONLY projA's
+	// 4 waiting agents (not a2 in projB), matching GET /api/v1/agents for that token.
+	tokProjA := f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "agent:list")
 	projAResp := decodeInboxSummary(t, f.call(t, tokProjA, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, 4, projAResp.Total)
 	assert.Equal(t, 4, projAResp.Categories[InboxCategoryWaiting].Count)
 	assert.Equal(t, map[string]int{InboxBreakdownProjects: 1}, projAResp.Categories[InboxCategoryWaiting].Breakdown)
 	assert.Equal(t, []string{a1.ID, a3.ID, a4.ID, a5.ID}, projAResp.Categories[InboxCategoryWaiting].AgentIDs)
+
+	tokProjAAgentsRec := f.call(t, tokProjA, http.MethodGet, "/api/v1/agents?q=activity%3Awaiting_for_input", nil)
+	require.Equal(t, http.StatusOK, tokProjAAgentsRec.Code, tokProjAAgentsRec.Body.String())
+	var tokProjAAgents ListAgentsResponse
+	require.NoError(t, json.Unmarshal(tokProjAAgentsRec.Body.Bytes(), &tokProjAAgents))
+	assert.Equal(t, len(tokProjAAgents.Agents), projAResp.Categories[InboxCategoryWaiting].Count)
+
+	// 7. Per-row agent read denial inside an in-scope project: a user granted only
+	// agent.list (not agent.read) on projA sees only their own waiting agent, not
+	// other users' waiting agents in projA, for both session and token callers.
+	listOnlyUser := &store.User{
+		ID:          tid("inbox-list-only-user"),
+		Email:       "inbox-list-only@test.com",
+		DisplayName: "List Only",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, f.s.CreateUser(ctx, listOnlyUser))
+	ensureHubMembership(ctx, f.s, listOnlyUser.ID)
+	grantProjectListOnly(t, f.s, listOnlyUser.ID, f.projA, "inbox-wait-list-only")
+	ownWait := seedAgent(f.projA, listOnlyUser.ID, "list-only-own", "List Only Own", string(state.PhaseRunning), string(state.ActivityWaitingForInput), "my agent", false)
+
+	listOnlySessResp := decodeInboxSummary(t, doRequestAsUser(t, f.srv, listOnlyUser, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, 1, listOnlySessResp.Categories[InboxCategoryWaiting].Count)
+	assert.Equal(t, []string{ownWait.ID}, listOnlySessResp.Categories[InboxCategoryWaiting].AgentIDs)
+
+	tokListOnly := f.mint(t, listOnlyUser.ID, hubBoundary(), "inbox:read", "agent:list")
+	listOnlyTokResp := decodeInboxSummary(t, f.call(t, tokListOnly, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, 1, listOnlyTokResp.Categories[InboxCategoryWaiting].Count)
+	assert.Equal(t, []string{ownWait.ID}, listOnlyTokResp.Categories[InboxCategoryWaiting].AgentIDs)
 }
 
 type inboxStubAgentsStore struct {
@@ -914,16 +968,30 @@ func TestUserMeInboxSummary_WaitingCappedAndErrors(t *testing.T) {
 }
 
 func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, rawStore := testServer(t)
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 	srv.SetEventPublisher(pub)
 
+	ctx := context.Background()
+	projectID := api.NewUUID()
+	require.NoError(t, rawStore.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Slug: "inbox-wait-hint-proj",
+		Name: "Inbox Wait Hint Project",
+	}))
+
 	ownerID := tid("inbox-wait-hint-owner")
+	teammateID := tid("inbox-wait-hint-teammate")
 	otherID := tid("inbox-wait-hint-other")
+
+	createTestUserWithProjectRole(t, rawStore, ownerID, "hint-owner@test.com", projectID, store.ProjectRoleOwner)
+	createTestUserWithProjectRole(t, rawStore, teammateID, "hint-teammate@test.com", projectID, store.ProjectRoleMember)
 
 	ownerCh, unsubOwner := pub.Subscribe("user." + ownerID + ".inbox")
 	defer unsubOwner()
+	teammateCh, unsubTeammate := pub.Subscribe("user." + teammateID + ".inbox")
+	defer unsubTeammate()
 	otherCh, unsubOther := pub.Subscribe("user." + otherID + ".inbox")
 	defer unsubOther()
 
@@ -936,25 +1004,24 @@ func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 		}
 	}
 
-	expectWaitingHint := func(ch <-chan Event, wantAgentID, wantActivity string) {
+	expectWaitingHint := func(ch <-chan Event, wantUserID, wantAgentID, wantActivity string) {
 		t.Helper()
 		select {
 		case evt := <-ch:
-			assert.Equal(t, "user."+ownerID+".inbox", evt.Subject)
+			assert.Equal(t, "user."+wantUserID+".inbox", evt.Subject)
 			var hint InboxHint
 			require.NoError(t, json.Unmarshal(evt.Data, &hint))
 			assert.Equal(t, InboxCategoryWaiting, hint.Category)
 			assert.Equal(t, wantAgentID, hint.AgentID)
 			assert.Equal(t, wantActivity, hint.Activity)
 		case <-time.After(time.Second):
-			t.Fatalf("timed out waiting for waiting hint (%s, %s)", wantAgentID, wantActivity)
+			t.Fatalf("timed out waiting for waiting hint for %s (%s, %s)", wantUserID, wantAgentID, wantActivity)
 		}
 	}
 
-	ctx := context.Background()
 	agent := &store.Agent{
 		ID:        api.NewUUID(),
-		ProjectID: api.NewUUID(),
+		ProjectID: projectID,
 		OwnerID:   ownerID,
 		Phase:     string(state.PhaseRunning),
 		Activity:  string(state.ActivityWaitingForInput),
@@ -962,23 +1029,28 @@ func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 
 	// Flag OFF: PublishAgentStatus emits no inbox hint.
 	pub.PublishAgentStatus(ctx, agent)
-	drainNoEvent(ownerCh, "flag off enter waiting")
+	drainNoEvent(ownerCh, "flag off enter waiting owner")
+	drainNoEvent(teammateCh, "flag off enter waiting teammate")
 
-	// Flag ON: entering and leaving waiting_for_input emit hints to owner only.
+	// Flag ON: entering and leaving waiting_for_input emit hints to owner and project members,
+	// but never to non-members (ptone/scion#9300).
 	setInboxDashboardExperiment(t, srv, true)
 
 	pub.PublishAgentStatus(ctx, agent)
-	expectWaitingHint(ownerCh, agent.ID, string(state.ActivityWaitingForInput))
-	drainNoEvent(otherCh, "non-owner on enter")
+	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityWaitingForInput))
+	expectWaitingHint(teammateCh, teammateID, agent.ID, string(state.ActivityWaitingForInput))
+	drainNoEvent(otherCh, "non-member on enter")
 
 	agent.Activity = string(state.ActivityThinking)
 	pub.PublishAgentStatus(ctx, agent)
-	expectWaitingHint(ownerCh, agent.ID, string(state.ActivityThinking))
-	drainNoEvent(otherCh, "non-owner on leave")
+	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityThinking))
+	expectWaitingHint(teammateCh, teammateID, agent.ID, string(state.ActivityThinking))
+	drainNoEvent(otherCh, "non-member on leave")
 
 	// PublishAgentDeleted sends no inbox hint (§5.2).
 	pub.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
-	drainNoEvent(ownerCh, "agent deleted")
+	drainNoEvent(ownerCh, "agent deleted owner")
+	drainNoEvent(teammateCh, "agent deleted teammate")
 }
 
 func TestUserMeInboxSummary_WaitingOrderingByActivitySince(t *testing.T) {

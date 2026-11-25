@@ -5895,6 +5895,9 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 			return s.experimentEnabled(experiments.InboxDashboard)
 		})
 	}
+	if p, ok := ep.(inboxWaitingRecipientsSetter); ok {
+		p.SetInboxWaitingRecipients(s.inboxWaitingHintRecipients)
+	}
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()

@@ -735,9 +735,9 @@ scion decisions withdraw D234 --set --reason "Moving release to Monday"
 
 ### `scion inbox`
 
-Shows a read-only summary of items waiting on you across your Hub projects: decisions, agents waiting for input, pending approvals, artifact reviews, and unread chat conversations (`GET /api/v1/users/me/inbox/summary`). Runs outside a local project directory and is available on Windows. Human-mode only (absent in agent mode, since the endpoint refuses agent identities and agents already have `scion decisions` and `scion notifications`).
+Shows a read-only summary of items waiting on you across your Hub projects: decisions, agents waiting for input, pending secrets, reviews, and unread chat conversations (`GET /api/v1/users/me/inbox/summary`). Prints one summary-of-state prose line per category (with previews beneath it when `--previews > 0`). Runs outside a local project directory and is available on Windows. Human-mode only (absent in agent mode, since the endpoint refuses agent identities and agents already have `scion decisions` and `scion notifications`).
 
-Requires the `web.inbox_dashboard` [experiment](/scion/reference/experiments/) (off by default); while it is off, `scion inbox` fails with `Inbox is not enabled on this hub (experiment web.inbox_dashboard)`. Under user access token (UAT) authentication, the token must hold the `inbox:read` scope; pending secret approvals remain session-only and are shown as unavailable with a link to `/profile/secrets` in the browser. Exits `0` on success, including when an individual category reports an error (`!`).
+Requires the `web.inbox_dashboard` [experiment](/scion/reference/experiments/) (off by default); while it is off, `scion inbox` fails with `Inbox is not enabled on this hub (experiment web.inbox_dashboard)`. Under user access token (UAT) authentication, the token must hold the `inbox:read` scope; pending secrets remain session-only and are shown as unavailable with a link to `/profile/secrets` in the browser, and `waiting` requires `agent:list` (matching `GET /api/v1/agents`). Exits `0` on success, including when an individual category reports an error (`!`).
 
 **Usage:** `scion inbox [flags]`
 
