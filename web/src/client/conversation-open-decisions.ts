@@ -114,6 +114,8 @@ export interface ConversationOpenDecisionsSnapshot {
   error: string;
   hiddenBy404: boolean;
   loadedOnce: boolean;
+  /** Incremented only when a server response is applied (never on optimistic edits). */
+  serverSnapshotSeq: number;
 }
 
 export interface ConversationOpenDecisionsControllerOptions {
@@ -145,6 +147,8 @@ export class ConversationOpenDecisionsController {
   private conversationKey = '';
   private connected = false;
   private generation = 0;
+  /** Bumped on every optimistic edit so stale in-flight responses are discarded. */
+  private optimisticEpoch = 0;
   private abort: AbortController | null = null;
   private inFlight = false;
   private refetchOwed = false;
@@ -160,6 +164,7 @@ export class ConversationOpenDecisionsController {
     error: '',
     hiddenBy404: false,
     loadedOnce: false,
+    serverSnapshotSeq: 0,
   };
 
   constructor(opts: ConversationOpenDecisionsControllerOptions) {
@@ -221,6 +226,7 @@ export class ConversationOpenDecisionsController {
     this.conversationKey = key;
     this.clearCoalesceTimer();
     this.generation++;
+    this.optimisticEpoch = 0;
     this.abort?.abort();
     this.abort = null;
     this.inFlight = false;
@@ -233,6 +239,7 @@ export class ConversationOpenDecisionsController {
       error: '',
       hiddenBy404: false,
       loadedOnce: false,
+      serverSnapshotSeq: 0,
     };
     this.emit();
     if (this.connected && this.conversationKey) {
@@ -250,6 +257,7 @@ export class ConversationOpenDecisionsController {
     }
     const key = this.conversationKey;
     const generation = this.generation;
+    const startEpoch = this.optimisticEpoch;
     const abort = new AbortController();
     this.abort = abort;
     this.inFlight = true;
@@ -258,6 +266,13 @@ export class ConversationOpenDecisionsController {
     try {
       const resp = await this.fetchFn(key, abort.signal);
       if (generation !== this.generation || abort.signal.aborted) return;
+      // An optimistic edit happened while this request was in flight: discard
+      // this pre-edit response so it cannot flicker dropped rows back in, and
+      // ensure a fresh refetch runs immediately in finally.
+      if (startEpoch !== this.optimisticEpoch) {
+        this.refetchOwed = true;
+        return;
+      }
       if (resp === null) {
         this.state = {
           counts: { waitingOnYou: 0, waitingOnOthers: 0 },
@@ -267,6 +282,7 @@ export class ConversationOpenDecisionsController {
           error: '',
           hiddenBy404: true,
           loadedOnce: true,
+          serverSnapshotSeq: this.state.serverSnapshotSeq + 1,
         };
         this.emit();
         return;
@@ -279,6 +295,7 @@ export class ConversationOpenDecisionsController {
         error: '',
         hiddenBy404: false,
         loadedOnce: true,
+        serverSnapshotSeq: this.state.serverSnapshotSeq + 1,
       };
       this.emit();
     } catch (err) {
@@ -331,6 +348,7 @@ export class ConversationOpenDecisionsController {
     if (msgId && dec && !isOpenDecision(dec)) {
       const idx = this.state.prompts.findIndex((p) => p.promptMessageId === msgId);
       if (idx >= 0) {
+        this.optimisticEpoch++;
         const entry = this.state.prompts[idx];
         if (entry.openCount <= 1) {
           const nextPrompts = this.state.prompts.filter((p) => p.promptMessageId !== msgId);
@@ -365,12 +383,10 @@ export class ConversationOpenDecisionsController {
           data?: {
             threadId?: string;
             conversationKey?: string;
-            messageType?: string;
             type?: string;
           };
           threadId?: string;
           conversationKey?: string;
-          messageType?: string;
           type?: string;
         }
       | undefined;
@@ -378,8 +394,7 @@ export class ConversationOpenDecisionsController {
     if (!data) return;
     const key = data.threadId ?? data.conversationKey ?? '';
     if (key !== this.conversationKey) return;
-    const kind = data.messageType ?? data.type ?? '';
-    if (kind === 'decision-prompt') {
+    if (data.type === 'decision-prompt') {
       this.scheduleRefetch();
     }
   };
@@ -392,6 +407,7 @@ export class ConversationOpenDecisionsController {
     const messageId = raw?.data?.messageId ?? raw?.messageId;
     if (!messageId) return;
     if (this.state.prompts.some((p) => p.promptMessageId === messageId)) {
+      this.optimisticEpoch++;
       const nextPrompts = this.state.prompts.map((p) =>
         p.promptMessageId === messageId ? { ...p, promptAvailable: false } : p
       );

@@ -260,13 +260,13 @@ describe('scion-chat-open-decisions', () => {
     expect(el.shadowRoot!.activeElement).toBe(trigger);
   });
 
-  it('announces new decisions politely only when panel is closed and count increases', async () => {
-    let count = 0;
+  it('announces every consecutive new prompt while closed and does not announce restored optimistic drops', async () => {
+    let prompts: ConversationOpenDecisionsResponse['prompts'] = [];
     fetchMock.mockImplementation(() =>
       Promise.resolve(
         jsonResponse({
-          counts: { waitingOnYou: count, waitingOnOthers: 0 },
-          prompts: [],
+          counts: { waitingOnYou: prompts.length, waitingOnOthers: 0 },
+          prompts,
           truncated: false,
         } satisfies ConversationOpenDecisionsResponse)
       )
@@ -277,20 +277,146 @@ describe('scion-chat-open-decisions', () => {
     document.body.appendChild(el);
     await flush(el);
 
-    const liveRegion = (): string =>
-      el.shadowRoot!.querySelector('[aria-live="polite"]')?.textContent?.trim() ?? '';
-    expect(liveRegion()).toBe('');
+    const liveEl = el.shadowRoot!.querySelector<HTMLElement>('[aria-live="polite"]')!;
+    expect(liveEl.textContent?.trim() ?? '').toBe('');
 
-    // Count increases while closed via reconnect refetch -> announces.
-    count = 1;
-    stateManager.dispatchEvent(new Event('connected'));
+    const observedTexts: string[] = [];
+    const observer = new MutationObserver(() => {
+      observedTexts.push(liveEl.textContent?.trim() ?? '');
+    });
+    observer.observe(liveEl, { childList: true, characterData: true, subtree: true });
+
+    try {
+      // 1st new prompt while closed -> announces.
+      prompts = [
+        {
+          promptMessageId: 'msg-a',
+          promptAvailable: true,
+          createdAt: new Date().toISOString(),
+          askerAgentId: 'a1',
+          askerAgentName: 'bot',
+          answerMode: 'single',
+          openCount: 1,
+          totalCount: 1,
+          question: 'First?',
+          waitingOnYou: true,
+          awaitingConfirmation: false,
+        },
+      ];
+      stateManager.dispatchEvent(new Event('connected'));
+      await flush(el);
+      expect(liveEl.textContent?.trim()).toBe('New decision waiting');
+      const countAfterFirst = observedTexts.filter((t) => t === 'New decision waiting').length;
+      expect(countAfterFirst).toBe(1);
+
+      // 2nd consecutive new prompt while STILL closed -> clears and re-announces (DOM mutation).
+      prompts = [
+        ...prompts,
+        {
+          promptMessageId: 'msg-b',
+          promptAvailable: true,
+          createdAt: new Date().toISOString(),
+          askerAgentId: 'a1',
+          askerAgentName: 'bot',
+          answerMode: 'single',
+          openCount: 1,
+          totalCount: 1,
+          question: 'Second?',
+          waitingOnYou: true,
+          awaitingConfirmation: false,
+        },
+      ];
+      stateManager.dispatchEvent(new Event('connected'));
+      await flush(el);
+      expect(liveEl.textContent?.trim()).toBe('New decision waiting');
+      const countAfterSecond = observedTexts.filter((t) => t === 'New decision waiting').length;
+      expect(countAfterSecond).toBe(2);
+
+      // Optimistic drop of msg-a followed by server refetch restoring msg-a (mixed-section set):
+      // msg-a was already seen, so must NOT announce a 3rd time.
+      stateManager.dispatchEvent(
+        new CustomEvent('decision-updated', {
+          detail: {
+            data: {
+              messageId: 'msg-a',
+              threadId: 'topic-live',
+              decision: {
+                rowId: 'r-other',
+                messageId: 'msg-a',
+                askerAgentId: 'a1',
+                askerAgentName: 'bot',
+                key: 'k1',
+                ref: 'D1',
+                version: 1,
+                status: 'decided',
+                question: 'First?',
+                choices: [{ id: '1', label: 'Yes' }],
+                decision: {
+                  choiceId: '1',
+                  label: 'Yes',
+                  matchedDefault: false,
+                  answeredByUserId: 'u2',
+                  answeredByName: 'Bob',
+                  provenance: 'direct',
+                  surface: 'native',
+                  responseMessageId: 'resp-1',
+                  at: new Date().toISOString(),
+                },
+              },
+            },
+          },
+        })
+      );
+      stateManager.dispatchEvent(new Event('connected'));
+      await flush(el);
+      const countAfterRestore = observedTexts.filter((t) => t === 'New decision waiting').length;
+      expect(countAfterRestore).toBe(2);
+
+      // Opening the panel clears the announcement.
+      el.shadowRoot!.querySelector<HTMLButtonElement>('.trigger')!.click();
+      await flush(el);
+      expect(liveEl.textContent?.trim() ?? '').toBe('');
+    } finally {
+      observer.disconnect();
+    }
+  });
+
+  it('keeps the Waiting on others header when truncation hides its rows past the cap', async () => {
+    const payload: ConversationOpenDecisionsResponse = {
+      counts: { waitingOnYou: 100, waitingOnOthers: 5 },
+      prompts: [
+        {
+          promptMessageId: 'msg-you-1',
+          promptAvailable: true,
+          createdAt: new Date().toISOString(),
+          askerAgentId: 'a1',
+          askerAgentName: 'bulk-triage',
+          answerMode: 'single',
+          openCount: 1,
+          totalCount: 1,
+          question: 'Waiting on you item?',
+          waitingOnYou: true,
+          awaitingConfirmation: false,
+        },
+      ],
+      truncated: true,
+    };
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(payload)));
+
+    el = document.createElement('scion-chat-open-decisions') as ScionChatOpenDecisions;
+    el.conversationKey = 'topic-trunc-others';
+    el.projectSlug = 'demo';
+    document.body.appendChild(el);
     await flush(el);
-    expect(liveRegion()).toBe('New decision waiting');
 
-    // Opening the panel clears the announcement.
     el.shadowRoot!.querySelector<HTMLButtonElement>('.trigger')!.click();
     await flush(el);
-    expect(liveRegion()).toBe('');
+
+    const headers = [...el.shadowRoot!.querySelectorAll('.section-header')].map((h) =>
+      h.textContent?.replace(/\s+/g, ' ').trim()
+    );
+    expect(headers).toContain('Waiting on you 100');
+    expect(headers).toContain('Waiting on others 5');
   });
 
   it('opens a modal bottom sheet dialog at the narrow-screen breakpoint', async () => {

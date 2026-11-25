@@ -170,16 +170,23 @@ describe('ConversationOpenDecisionsController', () => {
     await flushMicrotasks();
     expect(fetchFn).toHaveBeenCalledTimes(1);
 
-    // New decision-prompt message in this conversation triggers coalesced refetch.
+    // New decision-prompt message in this conversation (real hub UserMessageEvent shape) triggers coalesced refetch.
     eventSource.dispatchEvent(
       new CustomEvent('chat-message-received', {
-        detail: { data: { threadId: 'topic-1', messageType: 'decision-prompt' } },
+        detail: {
+          data: {
+            threadId: 'topic-1',
+            type: 'decision-prompt',
+            id: 'msg-new',
+            decisions: [],
+          },
+        },
       })
     );
     // Ordinary message in this conversation does NOT trigger refetch.
     eventSource.dispatchEvent(
       new CustomEvent('chat-message-received', {
-        detail: { data: { threadId: 'topic-1', messageType: 'text' } },
+        detail: { data: { threadId: 'topic-1', type: 'text', id: 'msg-txt' } },
       })
     );
     await vi.advanceTimersByTimeAsync(250);
@@ -255,6 +262,78 @@ describe('ConversationOpenDecisionsController', () => {
 
     expect(ctrl.snapshot.prompts.map((p) => p.promptMessageId)).toEqual(['msg-topic-b']);
     expect(ctrl.snapshot.counts).toEqual({ waitingOnYou: 0, waitingOnOthers: 1 });
+
+    ctrl.disconnect();
+  });
+
+  it('discards stale in-flight response after optimistic drop so dropped entry does not flicker back', async () => {
+    let resolveInFlight!: (v: ConversationOpenDecisionsResponse | null) => void;
+    let call = 0;
+    const fetchFn = vi.fn((): Promise<ConversationOpenDecisionsResponse | null> => {
+      call++;
+      if (call === 1) {
+        return Promise.resolve({
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          prompts: [makePrompt({ promptMessageId: 'msg-1', openCount: 1 })],
+          truncated: false,
+        });
+      }
+      if (call === 2) {
+        return new Promise((r) => {
+          resolveInFlight = r;
+        });
+      }
+      return Promise.resolve({
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        truncated: false,
+      });
+    });
+
+    const ctrl = new ConversationOpenDecisionsController({
+      onChange: (s) => snapshots.push(s),
+      fetchFn,
+      eventSource,
+    });
+    ctrl.setConversation('topic-1');
+    ctrl.connect();
+    await flushMicrotasks();
+    expect(ctrl.snapshot.prompts).toHaveLength(1);
+
+    // Start a second fetch (e.g., reconnect / panel open) that is still in flight.
+    const inflightPromise = ctrl.refetchNow();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    // While call 2 is in flight, viewer's answer arrives and drops msg-1 optimistically.
+    eventSource.dispatchEvent(
+      new CustomEvent('decision-updated', {
+        detail: {
+          data: {
+            messageId: 'msg-1',
+            threadId: 'topic-1',
+            decision: makeDecidedView('r1'),
+          },
+        },
+      })
+    );
+    expect(ctrl.snapshot.prompts).toHaveLength(0);
+    const snapshotsBeforeStale = snapshots.length;
+
+    // Now the pre-answer in-flight response resolves with msg-1 still present.
+    resolveInFlight({
+      counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+      prompts: [makePrompt({ promptMessageId: 'msg-1', openCount: 1 })],
+      truncated: false,
+    });
+    await inflightPromise;
+    await flushMicrotasks();
+
+    // The stale response must NOT have re-inserted msg-1 at any point, and the
+    // owed 3rd fetch must have run to reconcile cleanly.
+    const postDropSnapshots = snapshots.slice(snapshotsBeforeStale);
+    expect(postDropSnapshots.every((s) => s.prompts.length === 0)).toBe(true);
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    expect(ctrl.snapshot.counts).toEqual({ waitingOnYou: 0, waitingOnOthers: 0 });
 
     ctrl.disconnect();
   });

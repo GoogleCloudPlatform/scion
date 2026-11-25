@@ -7327,6 +7327,7 @@ export class ScionPageChat extends LitElement {
       showToast('This starred message is no longer available', 'warning');
       return;
     }
+    this.v2SearchActive = false;
     if (item.conversationKey === this.v2Conversation?.conversationKey) {
       await this.jumpToMessage(item.messageId);
       return;

@@ -1454,7 +1454,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.decisions.dm",
 		Domain:      "chat",
-		Description: "List open decision prompts in one of the caller's DMs with per-viewer prompt counts (oldest first, capped at 100; user-to-user DMs return an empty list). Needs DM participation and a readable peer; a token also needs inbox:read under the DM rule. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off",
+		Description: "List open decision prompts in one of the caller's DMs with per-viewer prompt counts (oldest first, capped at 100; user-to-user DMs return an empty list). Needs DM participation; a token also needs inbox:read and agent:read on the peer agent under the DM rule. Agents and visitors get 403; unsupported methods get 405; unknown query parameters get 400; 404 while web.decisions is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/decisions", Method: "GET", Variant: "dm"},
 		},

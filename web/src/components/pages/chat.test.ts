@@ -4325,3 +4325,33 @@ describe('chat page — thread default agent resolution', () => {
     expect(el.resolveDefaultAgentName('helper')).toBe('Helper Prime');
   });
 });
+
+describe('chat page — cross-conversation star jump closes search', () => {
+  it('clears v2SearchActive before navigating to a starred message in another conversation', async () => {
+    vi.mocked(apiFetch).mockImplementation((path: string) => {
+      if (path === '/api/v1/chat/stars/msg-other') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              messageId: 'msg-other',
+              conversationKey: 'topic-2',
+              permalink: '/chat/alpha/topic-2?msg=msg-other',
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    vi.mocked(navigateTo).mockClear();
+
+    const el = createPage();
+    el.v2Conversation = { conversationKey: 'topic-1', projectId: 'p1', isDM: false };
+    el.v2SearchActive = true;
+
+    await el.openStarredMessage('msg-other', 'topic-1');
+
+    expect(el.v2SearchActive).toBe(false);
+    expect(navigateTo).toHaveBeenCalledWith('/chat/alpha/topic-2?msg=msg-other');
+  });
+});

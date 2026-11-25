@@ -72,8 +72,12 @@ export class ScionChatOpenDecisions extends LitElement {
   @state() private othersExpanded = false;
   @state() private liveAnnouncement = '';
 
-  private prevTotal = 0;
+  private prevServerTotal = 0;
   private prevLoadedOnce = false;
+  private lastServerSeq = 0;
+  private readonly seenServerPromptIds = new Set<string>();
+  private announcementSeq = 0;
+  private announcementClearTimer: ReturnType<typeof setTimeout> | null = null;
 
   private readonly panelId = `open-decisions-panel-${++panelSeq}`;
   private readonly headingId = `${this.panelId}-heading`;
@@ -488,6 +492,8 @@ export class ScionChatOpenDecisions extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopListening();
+    this.clearAnnouncementTimer();
+    this.announcementSeq++;
     this.controller.disconnect();
   }
 
@@ -495,9 +501,13 @@ export class ScionChatOpenDecisions extends LitElement {
     if (changed.has('conversationKey') && changed.get('conversationKey') !== undefined) {
       this.closePanel(false);
       this.othersExpanded = false;
+      this.clearAnnouncementTimer();
+      this.announcementSeq++;
       this.liveAnnouncement = '';
-      this.prevTotal = 0;
+      this.prevServerTotal = 0;
       this.prevLoadedOnce = false;
+      this.lastServerSeq = 0;
+      this.seenServerPromptIds.clear();
       this.controller.setConversation(this.conversationKey);
     }
     if (changed.has('hiddenBy404')) {
@@ -505,13 +515,46 @@ export class ScionChatOpenDecisions extends LitElement {
     }
   }
 
+  private clearAnnouncementTimer(): void {
+    if (this.announcementClearTimer !== null) {
+      clearTimeout(this.announcementClearTimer);
+      this.announcementClearTimer = null;
+    }
+  }
+
+  private announceNewDecision(): void {
+    this.clearAnnouncementTimer();
+    const seq = ++this.announcementSeq;
+    // Clear first so consecutive announcements always produce a real DOM text
+    // mutation that assistive technologies re-announce.
+    this.liveAnnouncement = '';
+    void this.updateComplete.then(() => {
+      if (seq !== this.announcementSeq || this.open) return;
+      this.liveAnnouncement = 'New decision waiting';
+      this.announcementClearTimer = setTimeout(() => {
+        this.announcementClearTimer = null;
+        if (seq === this.announcementSeq) {
+          this.liveAnnouncement = '';
+        }
+      }, 1500);
+    });
+  }
+
   private applySnapshot(snap: ConversationOpenDecisionsSnapshot): void {
     const nextTotal = snap.counts.waitingOnYou + snap.counts.waitingOnOthers;
-    if (snap.loadedOnce) {
-      if (this.prevLoadedOnce && !this.open && nextTotal > this.prevTotal) {
-        this.liveAnnouncement = 'New decision waiting';
+    if (snap.loadedOnce && snap.serverSnapshotSeq !== this.lastServerSeq) {
+      this.lastServerSeq = snap.serverSnapshotSeq;
+      const hasNewPromptId = snap.prompts.some(
+        (p) => !this.seenServerPromptIds.has(p.promptMessageId)
+      );
+      const truncatedIncrease = snap.truncated && nextTotal > this.prevServerTotal;
+      if (this.prevLoadedOnce && !this.open && (hasNewPromptId || truncatedIncrease)) {
+        this.announceNewDecision();
       }
-      this.prevTotal = nextTotal;
+      for (const p of snap.prompts) {
+        this.seenServerPromptIds.add(p.promptMessageId);
+      }
+      this.prevServerTotal = nextTotal;
       this.prevLoadedOnce = true;
     }
     this.counts = snap.counts;
@@ -572,6 +615,8 @@ export class ScionChatOpenDecisions extends LitElement {
     }
     this.sheet = shouldUseMenuSheet();
     this.open = true;
+    this.clearAnnouncementTimer();
+    this.announcementSeq++;
     this.liveAnnouncement = '';
     if (!this.sheet) document.addEventListener('pointerdown', this.handleOutsidePointer, true);
     window.addEventListener('resize', this.handleResize);
@@ -798,32 +843,38 @@ export class ScionChatOpenDecisions extends LitElement {
             </ul>
           `
         : nothing}
-      ${waitingOthers.length > 0
-        ? html`
-            <button
-              type="button"
-              class="section-header"
-              aria-expanded=${showOthersList ? 'true' : 'false'}
-              @click=${(): void => {
-                this.othersExpanded = !showOthersList;
-              }}
-            >
-              <sl-icon
-                name=${showOthersList ? 'chevron-down' : 'chevron-right'}
-                aria-hidden="true"
-              ></sl-icon>
-              Waiting on others <span class="section-count">${this.counts.waitingOnOthers}</span>
-            </button>
-            ${showOthersList
-              ? html`<ul aria-label="Decisions waiting on others">
-                  ${repeat(
-                    waitingOthers,
-                    (p) => p.promptMessageId,
-                    (p) => this.renderEntry(p)
-                  )}
-                </ul>`
-              : nothing}
-          `
+      ${this.counts.waitingOnOthers > 0
+        ? waitingOthers.length > 0
+          ? html`
+              <button
+                type="button"
+                class="section-header"
+                aria-expanded=${showOthersList ? 'true' : 'false'}
+                @click=${(): void => {
+                  this.othersExpanded = !showOthersList;
+                }}
+              >
+                <sl-icon
+                  name=${showOthersList ? 'chevron-down' : 'chevron-right'}
+                  aria-hidden="true"
+                ></sl-icon>
+                Waiting on others <span class="section-count">${this.counts.waitingOnOthers}</span>
+              </button>
+              ${showOthersList
+                ? html`<ul aria-label="Decisions waiting on others">
+                    ${repeat(
+                      waitingOthers,
+                      (p) => p.promptMessageId,
+                      (p) => this.renderEntry(p)
+                    )}
+                  </ul>`
+                : nothing}
+            `
+          : html`
+              <div class="section-header">
+                Waiting on others <span class="section-count">${this.counts.waitingOnOthers}</span>
+              </div>
+            `
         : nothing}
     `;
   }
