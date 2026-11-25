@@ -80,7 +80,7 @@ The Hub pauses a recurring schedule on its own in three cases, and records why i
 | :--- | :--- | :--- |
 | `creator_deleted` | The agent or user the schedule runs under was deleted, or that user is being deleted, so no fire could be authorized. | Resume it. Resuming records your authority, and the schedule then runs as you. |
 | `cron_zone_unsupported` | The cron expression carries a `CRON_TZ=` or `TZ=` prefix. | Remove the prefix and set the schedule's time zone instead, then resume it. |
-| `target_deleted` | The target agent of a recurring `exec` schedule was deleted (checked before `creator_deleted`, so a self-targeted `exec` schedule records `target_deleted`). | Edit the schedule via `PATCH` to name a live target agent together with a replacement `command` (or `payload`), then resume it (`scion schedule resume <id>` or `POST .../resume`, or include `"status": "active"` in the `PATCH`). Resuming without re-targeting first fails with `404` because the stored target no longer exists. |
+| `target_deleted` | The target agent of a recurring `exec` or message schedule was deleted, including a soft delete (checked before `creator_deleted`, so a self-targeted schedule records `target_deleted`). A message schedule that names its target by `agentId` is matched in any project, so a cross-project message schedule is paused too; one that names it by `agentName` is matched within its own project. Restoring a soft-deleted agent does not resume its schedules. | Edit the schedule via `PATCH` to name a live target agent: for an `exec` schedule, a new target together with a replacement `command` (or `payload`); for a message schedule, a replacement `payload`. Then resume it (`scion schedule resume <id>` or `POST .../resume`, or include `"status": "active"` in the `PATCH`). Resuming without re-targeting first fails with `404` because the stored target no longer exists. |
 
 A schedule you pause yourself has no status reason. Any pause, resume or status edit by a user clears the reason.
 
@@ -89,7 +89,7 @@ A schedule you pause yourself has no status reason. Any pause, resume or status 
 The Hub applies two limits to every recurring schedule (message, `dispatch_agent` and `exec`), whoever creates it. Your Hub administrator sets them under `server.hub.schedules` (see the [Server Configuration Reference](/scion/reference/server-config/)):
 
 - **Minimum interval** (`min_interval`, default 5 minutes): a cron expression whose minute and hour fields can fire more often than this is refused with `400`. For example, `*/2 * * * *` is refused at the default.
-- **Active schedules per project** (`max_active_per_project`, default 50): one more active recurring schedule in a project already at the limit is refused with `429` (`quota_exceeded`). Active schedules of every kind count together.
+- **Active schedules per project** (`max_active_per_project`, default 100): one more active recurring schedule in a project already at the limit is refused with `429` (`quota_exceeded`). Active schedules of every kind count together.
 
 The Hub checks both whenever a schedule is armed: on create, on a cron change to an active schedule, and on resume or enable. Changing the settings does not touch schedules that are already active. A paused schedule can still be edited, but if its expression fires more often than the current minimum interval, change the expression before you resume it, or the resume is refused with `400`.
 
