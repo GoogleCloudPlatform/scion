@@ -14,6 +14,14 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Daily automatic release updates and `update_policy: auto` cadence change
+
+Hubs running release binaries and following `latest` on a channel can now toggle daily automatic updates from the **Server Version & Updates** card on **Admin → Maintenance** (or via `PUT /api/v1/admin/maintenance/auto-update`), with a selectable UTC hour window (default `04:00` UTC).
+
+- **Behaviour change for existing `update_policy: auto` hubs:** Hubs configured with `server.maintenance.update_policy: auto` now install updates at most once per UTC day during the daily 2-hour window (default `04:00` UTC, with a stable per-Hub offset of `0`–`59` minutes) instead of applying on every scheduled check (~6 hours) and at boot. `server.maintenance.check_interval_hours` now controls only how often the update-available banner refreshes.
+- **No restart to toggle; explicit `disabled` locks it:** Saving the UI/API setting takes effect within ~10 minutes without restarting the Hub and overrides `notify`, `auto`, or default `update_policy` values. Setting `server.maintenance.update_policy: disabled` explicitly in `settings.yaml` locks automatic updates off in the UI and API (`409 auto_update_locked`). Enabling the control does not trigger an immediate update; use **Update** to apply immediately.
+- **Safety and observability:** Missed windows are skipped (no mid-day catch-up), failed or rolled-back targets are suppressed until a newer release appears (without blocking manual updates), automatic updates never downgrade, and setting changes and automatic runs emit `maintenance_auto_update` audit events (`setting_changed`, `run_started`, `run_outcome`). There is no database schema migration and no downgrade floor bump. See [Daily Automatic Release Updates](/scion/hosted/single-node/hub-server/#daily-automatic-release-updates) and [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance).
+
 ## Default `server.hub.schedules.max_active_per_project` cap raised to 100
 
 The default per-project cap on active recurring schedules (`server.hub.schedules.max_active_per_project`) has been raised from `50` to `100` so projects with routine per-agent schedules (such as nightly retrospectives, heartbeats, and sweeps) have more headroom before new schedule creates are refused with `429` (`quota_exceeded`). Setting `0` still disables the cap, and the maximum allowed value (`10000`) is unchanged. See [Server Configuration — Recurring schedules](/scion/reference/server-config/#recurring-schedules-serverhubschedules).
