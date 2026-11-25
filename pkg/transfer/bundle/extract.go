@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // ExtractFromManifest validates m (refusing unknown manifest versions) and
@@ -216,7 +217,7 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 				return &ErrLimitExceeded{Field: "bytes", Got: totalBytes + hdr.Size, Max: lim.MaxBytes}
 			}
 			perm := fs.FileMode(hdr.Mode) & 0o777
-			f, err := staging.OpenFile(osName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm|0o600)
+			f, err := rootopen.OpenFileForWrite(staging, name, uint32(perm|0o600), false)
 			if err != nil {
 				return fmt.Errorf("create file %s: %w", name, err)
 			}
