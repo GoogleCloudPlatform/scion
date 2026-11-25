@@ -154,6 +154,9 @@ func (l MoveBundleLimits) PartStallTimeout() time.Duration {
 // MoveBundlePrecheckRequest is the request body for
 // POST /api/v1/agents/{id}/move-bundle/precheck (hub → source broker).
 type MoveBundlePrecheckRequest struct {
+	// AgentID is the optional hub agent UUID (also carried via the agentId
+	// query parameter on hub-dispatched requests).
+	AgentID           string           `json:"agentId,omitempty"`
 	ProjectID         string           `json:"projectId,omitempty"`
 	ProjectPath       string           `json:"projectPath,omitempty"`
 	ProjectSlug       string           `json:"projectSlug,omitempty"`

@@ -187,15 +187,32 @@ func (s *Server) handleMoveBundle(w http.ResponseWriter, r *http.Request, id, pr
 	}
 }
 
+// moveBundleCapability reports whether this broker has at least one configured
+// runtime (default or registered auxiliary runtime) that supports move-bundle
+// transfers.
+func (s *Server) moveBundleCapability(defaultRT scionrt.Runtime) bool {
+	if moveBundleSupported(defaultRT) {
+		return true
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, entry := range s.auxiliaryRuntimes {
+		if moveBundleSupported(entry.Runtime) {
+			return true
+		}
+	}
+	return false
+}
+
 // moveBundleDirs holds the resolved host paths for an agent's bundle roots.
 type moveBundleDirs = agent.MoveBundleAgentDirs
 
-func (s *Server) resolveMoveBundleDirs(ctx context.Context, runtimeName, agentSlug, projectID, projectPath, projectSlug string) (moveBundleDirs, error) {
+func (s *Server) moveBundleRuntimeInput(runtimeName, agentSlug, agentID, projectID, projectPath, projectSlug string) (agent.MoveBundleRuntimeInput, error) {
 	if !isSingleCleanPathElement(agentSlug) {
-		return moveBundleDirs{}, fmt.Errorf("invalid agent id")
+		return agent.MoveBundleRuntimeInput{}, fmt.Errorf("invalid agent id")
 	}
 	if projectSlug != "" && !isSingleCleanPathElement(projectSlug) {
-		return moveBundleDirs{}, fmt.Errorf("invalid projectSlug")
+		return agent.MoveBundleRuntimeInput{}, fmt.Errorf("invalid projectSlug")
 	}
 
 	var rawProject string
@@ -205,23 +222,33 @@ func (s *Server) resolveMoveBundleDirs(ctx context.Context, runtimeName, agentSl
 	case projectSlug != "":
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
-			return moveBundleDirs{}, fmt.Errorf("resolve global dir: %w", err)
+			return agent.MoveBundleRuntimeInput{}, fmt.Errorf("resolve global dir: %w", err)
 		}
 		rawProject = filepath.Join(globalDir, "projects", projectSlug)
 	default:
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
-			return moveBundleDirs{}, fmt.Errorf("resolve global dir: %w", err)
+			return agent.MoveBundleRuntimeInput{}, fmt.Errorf("resolve global dir: %w", err)
 		}
 		rawProject = globalDir
 	}
 
-	return agent.ResolveMoveBundleAgentDirs(ctx, runtimeName, api.StartOptions{
-		Name:         agentSlug,
-		ProjectPath:  rawProject,
-		HubProjectID: projectID,
-		BrokerMode:   true,
-	})
+	return agent.MoveBundleRuntimeInput{
+		RuntimeName: runtimeName,
+		AgentSlug:   agentSlug,
+		AgentID:     agentID,
+		ProjectPath: rawProject,
+		ProjectID:   projectID,
+		BrokerMode:  true,
+	}, nil
+}
+
+func (s *Server) resolveMoveBundleDirs(ctx context.Context, runtimeName, agentSlug, agentID, projectID, projectPath, projectSlug string, forTarget bool) (moveBundleDirs, error) {
+	in, err := s.moveBundleRuntimeInput(runtimeName, agentSlug, agentID, projectID, projectPath, projectSlug)
+	if err != nil {
+		return moveBundleDirs{}, err
+	}
+	return agent.ResolveMoveBundleDirsForRuntime(ctx, in, forTarget)
 }
 
 // isMoveBundleAgentRunning reports whether the runtime currently lists the
@@ -420,10 +447,32 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 	}
 	effProjectID := firstNonEmpty(projectID, req.ProjectID)
 	rtName := s.resolveMoveBundleRuntimeName(r, id, effProjectID)
-	if !api.IsLocalDiskRuntime(rtName) {
+	agentUUID := firstNonEmpty(req.AgentID, r.URL.Query().Get(api.AgentIDQueryParam))
+	projectPath := firstNonEmpty(req.ProjectPath, r.URL.Query().Get("projectPath"))
+	projectSlug := firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug"))
+
+	rtIn, err := s.moveBundleRuntimeInput(rtName, id, agentUUID, effProjectID, projectPath, projectSlug)
+	if err != nil {
+		s.agentLifecycleLog.Warn("Move-bundle precheck: failed to resolve agent directories",
+			"agent_id", id, "error", err)
+		ValidationError(w, "cannot resolve agent directories", nil)
+		return
+	}
+	dur, durErr := agent.CheckMoveBundleSourceDurability(r.Context(), rtIn)
+	if durErr != nil {
+		if errors.Is(durErr, fs.ErrNotExist) {
+			NotFound(w, "Agent")
+			return
+		}
+		s.agentLifecycleLog.Warn("Move-bundle precheck: durability check failed",
+			"agent_id", id, "error", durErr)
+		ValidationError(w, "cannot resolve agent directories", nil)
+		return
+	}
+	if !dur.Durable {
 		writeJSON(w, http.StatusOK, api.MoveBundlePrecheckResponse{
 			Durable: false,
-			Reason:  "not yet supported",
+			Reason:  dur.Reason,
 		})
 		return
 	}
@@ -435,14 +484,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	dirs, err := s.resolveMoveBundleDirs(
-		r.Context(),
-		rtName,
-		id,
-		effProjectID,
-		firstNonEmpty(req.ProjectPath, r.URL.Query().Get("projectPath")),
-		firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug")),
-	)
+	dirs, err := agent.ResolveMoveBundleDirsForRuntime(r.Context(), rtIn, false)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Move-bundle precheck: failed to resolve agent directories",
 			"agent_id", id, "error", err)
@@ -594,8 +636,30 @@ func (s *Server) handleMoveBundleExportStart(w http.ResponseWriter, r *http.Requ
 	}
 	effProjectID := firstNonEmpty(projectID, req.ProjectID)
 	rtName := s.resolveMoveBundleRuntimeName(r, id, effProjectID)
-	if !api.IsLocalDiskRuntime(rtName) {
-		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveBundleUnsupported, "not yet supported", nil)
+	reqAgentID := firstNonEmpty(req.AgentID, r.URL.Query().Get(api.AgentIDQueryParam))
+	projectPath := firstNonEmpty(req.ProjectPath, r.URL.Query().Get("projectPath"))
+	projectSlug := firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug"))
+
+	rtIn, err := s.moveBundleRuntimeInput(rtName, id, reqAgentID, effProjectID, projectPath, projectSlug)
+	if err != nil {
+		s.agentLifecycleLog.Warn("Move-bundle export: failed to resolve agent directories",
+			"agent_id", id, "error", err)
+		ValidationError(w, "cannot resolve agent directories", nil)
+		return
+	}
+	dur, durErr := agent.CheckMoveBundleSourceDurability(r.Context(), rtIn)
+	if durErr != nil {
+		if errors.Is(durErr, fs.ErrNotExist) {
+			NotFound(w, "Agent")
+			return
+		}
+		s.agentLifecycleLog.Warn("Move-bundle export: durability check failed",
+			"agent_id", id, "error", durErr)
+		ValidationError(w, "cannot resolve agent directories", nil)
+		return
+	}
+	if !dur.Durable {
+		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveBundleUnsupported, dur.Reason, nil)
 		return
 	}
 
@@ -615,14 +679,7 @@ func (s *Server) handleMoveBundleExportStart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	dirs, err := s.resolveMoveBundleDirs(
-		r.Context(),
-		rtName,
-		id,
-		effProjectID,
-		firstNonEmpty(req.ProjectPath, r.URL.Query().Get("projectPath")),
-		firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug")),
-	)
+	dirs, err := agent.ResolveMoveBundleDirsForRuntime(r.Context(), rtIn, false)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Move-bundle export: failed to resolve agent directories",
 			"agent_id", id, "error", err)
@@ -937,13 +994,16 @@ func (s *Server) handleMoveBundleImportStart(w http.ResponseWriter, r *http.Requ
 	}
 	effProjectID := firstNonEmpty(projectID, req.ProjectID)
 	rtName := s.resolveMoveBundleRuntimeName(r, id, effProjectID)
+	reqAgentID := firstNonEmpty(req.AgentID, r.URL.Query().Get(api.AgentIDQueryParam))
 	dirs, err := s.resolveMoveBundleDirs(
 		r.Context(),
 		rtName,
 		id,
+		reqAgentID,
 		effProjectID,
 		firstNonEmpty(req.ProjectPath, r.URL.Query().Get("projectPath")),
 		firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug")),
+		true,
 	)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Move-bundle import: failed to resolve agent directories",
@@ -970,6 +1030,13 @@ func (s *Server) handleMoveBundleImportStart(w http.ResponseWriter, r *http.Requ
 	if moveMarker != req.ReincarnationID {
 		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveMarkerMismatch, "agent directory move marker does not match reincarnationId", nil)
 		return
+	}
+	if dirs.ExportAgentDir != "" {
+		exportMarker, exportMarkerErr := agent.ReadMoveMarker(dirs.ExportAgentDir)
+		if exportMarkerErr != nil || exportMarker != req.ReincarnationID {
+			writeError(w, http.StatusConflict, api.BrokerErrCodeMoveMarkerMismatch, "export agent directory move marker does not match reincarnationId", nil)
+			return
+		}
 	}
 
 	imported, markerErr := hasMoveBundleImportedMarker(dirs.AgentDir, req.ReincarnationID)

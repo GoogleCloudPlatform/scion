@@ -107,16 +107,49 @@ func waitForMoveBundleJob(t *testing.T, srv *Server, agentSlug, projectID, kind,
 }
 
 func TestBrokerCapabilities_AdvertiseAgentMoveBundle(t *testing.T) {
+	// Supported runtimes advertise AgentMoveBundle; unsupported/nil/degraded do not.
+	for _, tc := range []struct {
+		name string
+		rt   scionrt.Runtime
+		want bool
+	}{
+		{"docker", scionrt.NewDockerRuntime(), true},
+		{"podman", &scionrt.PodmanRuntime{}, true},
+		{"apple", scionrt.NewAppleContainerRuntime(), true},
+		{"kubernetes", &scionrt.KubernetesRuntime{}, true},
+		{"cloudrun", &scionrt.CloudRunRuntime{}, false},
+		{"cloudrun-sandbox", &scionrt.CloudRunSandboxRuntime{}, false},
+		{"nil", nil, false},
+		{"error-runtime", &scionrt.ErrorRuntime{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, StaticCapabilities(tc.rt, "").AgentMoveBundle)
+			if tc.want {
+				assert.Contains(t, StaticCapabilityNames(tc.rt), "agentMoveBundle")
+			} else {
+				assert.NotContains(t, StaticCapabilityNames(tc.rt), "agentMoveBundle")
+			}
+		})
+	}
+
+	// /api/v1/info advertises AgentMoveBundle when default or auxiliary runtime is supported.
 	srv := newTestServer(t)
+	srv.runtime = &scionrt.KubernetesRuntime{}
 	rec := doMoveBundleReq(t, srv, http.MethodGet, "/api/v1/info", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
-
 	var resp BrokerInfoResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.NotNil(t, resp.Capabilities)
-	assert.True(t, resp.Capabilities.AgentMoveBundle, "/api/v1/info must advertise AgentMoveBundle")
-	assert.True(t, StaticCapabilities(nil, "").AgentMoveBundle, "StaticCapabilities must advertise AgentMoveBundle")
-	assert.Contains(t, StaticCapabilityNames(nil), "agentMoveBundle")
+	assert.True(t, resp.Capabilities.AgentMoveBundle, "/api/v1/info must advertise AgentMoveBundle for Kubernetes broker")
+
+	srvUnsupported := newTestServer(t)
+	srvUnsupported.runtime = &scionrt.CloudRunRuntime{}
+	rec2 := doMoveBundleReq(t, srvUnsupported, http.MethodGet, "/api/v1/info", nil)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var resp2 BrokerInfoResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	require.NotNil(t, resp2.Capabilities)
+	assert.False(t, resp2.Capabilities.AgentMoveBundle, "/api/v1/info must not advertise AgentMoveBundle when only unsupported runtimes are configured")
 }
 
 func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
@@ -180,8 +213,20 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 		}
 	})
 
-	t.Run("kubernetes and cloudrun not yet supported", func(t *testing.T) {
-		for _, rt := range []string{"kubernetes", "cloudrun", "cloudrun-sandbox"} {
+	t.Run("plain kubernetes and cloudrun refused", func(t *testing.T) {
+		srvK8s := newTestServer(t)
+		srvK8s.moveBundle.durabilityRuntime = "kubernetes"
+		recK8s := doMoveBundleReq(t, srvK8s, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
+			ProjectPath: projectPath,
+			Limits:      api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusOK, recK8s.Code)
+		var respK8s api.MoveBundlePrecheckResponse
+		require.NoError(t, json.Unmarshal(recK8s.Body.Bytes(), &respK8s))
+		assert.False(t, respK8s.Durable, "plain kubernetes without NFS must not be durable")
+		assert.Equal(t, "workspace and home live only in the pod and are deleted on stop", respK8s.Reason)
+
+		for _, rt := range []string{"cloudrun", "cloudrun-sandbox"} {
 			srv := newTestServer(t)
 			srv.moveBundle.durabilityRuntime = rt
 			rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
@@ -191,7 +236,7 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code)
 			var resp api.MoveBundlePrecheckResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-			assert.False(t, resp.Durable, "runtime %s should not be durable in phase 1", rt)
+			assert.False(t, resp.Durable, "runtime %s should not be durable yet", rt)
 			assert.Equal(t, "not yet supported", resp.Reason)
 		}
 	})

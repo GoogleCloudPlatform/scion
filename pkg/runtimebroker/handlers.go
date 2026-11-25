@@ -448,8 +448,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			AgentMoveRecreate: true,
 			// This broker implements the portable workspace+$HOME bundle move
 			// endpoints (precheck, export, import) and WorkspaceSource="move-bundle"
-			// provision (ptone/scion#8960).
-			AgentMoveBundle: true,
+			// provision (ptone/scion#8960), advertised only when at least one
+			// configured runtime supports it.
+			AgentMoveBundle: s.moveBundleCapability(rt),
 			StartsInFlight:  s.startsInFlight != nil,
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
@@ -3829,7 +3830,8 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			// Each removal is audited with what it did: deleted, absent
 			// (nothing was there) or failed. A workspace moved aside is
 			// purged in the background, which audits its own result.
-			ds, rmErr := remover.RemoveNFSAgentFiles(agent.WithStorageAuditLogger(ctx, s.agentLifecycleLog), projectPath, agentProjectID, target.name)
+			rmCtx := agent.WithDeleteHubAgentID(agent.WithStorageAuditLogger(ctx, s.agentLifecycleLog), hubAgentID)
+			ds, rmErr := remover.RemoveNFSAgentFiles(rmCtx, projectPath, agentProjectID, target.name)
 			if rmErr != nil {
 				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",
 					"agent_id", id, "project_id", agentProjectID, "error", rmErr)

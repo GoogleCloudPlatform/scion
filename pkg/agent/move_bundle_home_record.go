@@ -250,6 +250,7 @@ type MoveBundleAgentDirs struct {
 	AgentDir        string
 	WorkspaceDir    string
 	HomeDir         string
+	ExportAgentDir  string
 	SharedWorkspace bool
 }
 

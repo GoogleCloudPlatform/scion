@@ -301,6 +301,12 @@ func (m *AgentManager) nfsAgentDirExportWorkspace(projectPath, projectID, agentN
 // Kubernetes condition: it resolves the project's workspace on the broker's
 // mount of the NFS export for any runtime.
 func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (resolvedHostBase, rel string, owner shareddirs.Owner, err error) {
+	return nfsExportWorkspaceOnAnyRuntimeCtx(context.Background(), projectPath, projectID, agentName)
+}
+
+// nfsExportWorkspaceOnAnyRuntimeCtx is nfsExportWorkspaceOnAnyRuntime using
+// ctx for LoadEffectiveSettingsFor (so hub settings overlays apply).
+func nfsExportWorkspaceOnAnyRuntimeCtx(ctx context.Context, projectPath, projectID, agentName string) (resolvedHostBase, rel string, owner shareddirs.Owner, err error) {
 	if !isNFSWorktreeName(agentName) {
 		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
 	}
@@ -311,7 +317,7 @@ func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (r
 	if err != nil {
 		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: resolve project directory: %w", err)
 	}
-	settings, _, err := config.LoadEffectiveSettings(projectDir)
+	settings, _, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	if err != nil {
 		return "", "", shareddirs.Owner{}, fmt.Errorf("workspace_storage nfs: load settings: %w", err)
 	}

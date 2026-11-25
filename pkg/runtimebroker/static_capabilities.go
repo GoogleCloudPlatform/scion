@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -52,8 +53,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		AgentMoveRecreate: true,
 		// This broker implements the portable workspace+$HOME bundle move
 		// endpoints (precheck, export, import) and WorkspaceSource="move-bundle"
-		// provision (ptone/scion#8960).
-		AgentMoveBundle: true,
+		// provision (ptone/scion#8960), advertised only when a supported
+		// runtime is configured.
+		AgentMoveBundle: moveBundleSupported(rt),
 		// This broker's reprovision reuses an empty-per-agent workspace in
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,
@@ -120,6 +122,37 @@ func webPTYSupported(rt scionrt.Runtime) bool {
 	default:
 		return false
 	}
+}
+
+// moveBundleSupported reports whether rt is a runtime for which this broker
+// supports portable workspace+$HOME bundle moves (ptone/scion#8960).
+//
+// Like webPTYSupported, it is an allow-list of concrete runtime
+// implementations (plus MockRuntime when its name maps to a supported
+// runtime) so degraded *ErrorRuntime placeholders, nil runtimes, and
+// unsupported runtimes (Cloud Run / Cloud Run Sandbox until Phase 2a part 2,
+// Substrate) do not advertise AgentMoveBundle.
+func moveBundleSupported(rt scionrt.Runtime) bool {
+	switch r := rt.(type) {
+	case *scionrt.DockerRuntime, *scionrt.PodmanRuntime, *scionrt.AppleContainerRuntime,
+		*scionrt.KubernetesRuntime:
+		return true
+	case *scionrt.MockRuntime:
+		return agent.MoveBundleRuntimeSupported(r.Name())
+	default:
+		return false
+	}
+}
+
+// moveBundleSupportedAny reports whether at least one runtime in rts supports
+// move-bundle transfers.
+func moveBundleSupportedAny(rts ...scionrt.Runtime) bool {
+	for _, rt := range rts {
+		if moveBundleSupported(rt) {
+			return true
+		}
+	}
+	return false
 }
 
 // StaticCapabilityNames is StaticCapabilities as the capability names the

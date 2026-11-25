@@ -20,10 +20,21 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
+
+// defaultCaseInsensitiveFS reports whether the host OS commonly mounts agent
+// directories on a case-insensitive filesystem (macOS APFS/HFS+ for Apple
+// Container / Docker Desktop, and Windows NTFS). On such hosts an in-container
+// tool can create or open `.Docker/config.json` through a case-insensitive
+// bind mount while the host directory walk yields `.Docker/config.json`, which
+// would bypass case-sensitive exclusion matching.
+func defaultCaseInsensitiveFS() bool {
+	return runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+}
 
 // Excluder reports whether a slash-separated root-relative path should be
 // omitted from a bundle. When isDir is true and Exclude returns true, the
@@ -107,6 +118,10 @@ type HomeExcluderOptions struct {
 	// AgentHomeAbs encountered while resolving an exclusion entry is rebased to
 	// a root-relative path and resolution continues.
 	AgentHomeAbs string
+	// CaseInsensitive enables case-insensitive exclusion prefix matching.
+	// Always enabled automatically on macOS (APFS/HFS+) and Windows; can be
+	// set explicitly in tests or for case-insensitive mounts on Linux.
+	CaseInsensitive bool
 }
 
 // WorkspaceExcluderOptions configures WorkspaceExcluderWithOptions.
@@ -122,6 +137,10 @@ type WorkspaceExcluderOptions struct {
 	// WorkspaceAbs encountered while resolving an exclusion entry is rebased to
 	// a root-relative path and resolution continues.
 	WorkspaceAbs string
+	// CaseInsensitive enables case-insensitive exclusion prefix matching for
+	// ExtraLiterals (root `.scion` is always matched case-insensitively).
+	// Automatically enabled on macOS and Windows.
+	CaseInsensitive bool
 }
 
 // WorkspaceExcluder returns the excluder for a workspace root: root `.scion`
@@ -154,13 +173,9 @@ func WorkspaceExcluderWithOptions(opts WorkspaceExcluderOptions) Excluder {
 		}
 		secretPrefixes = append(secretPrefixes, c)
 	}
+	ci := opts.CaseInsensitive || defaultCaseInsensitiveFS()
 	return &workspaceExcluder{
-		inner: &prefixExcluder{
-			prefixes:       secretPrefixes,
-			secretPrefixes: secretPrefixes,
-			agentHomeAbs:   cleanAbsHome(opts.WorkspaceAbs),
-			initErr:        initErr,
-		},
+		inner: newPrefixExcluder(secretPrefixes, secretPrefixes, nil, nil, cleanAbsHome(opts.WorkspaceAbs), ci, initErr),
 	}
 }
 
@@ -247,14 +262,8 @@ func HomeExcluder(opts HomeExcluderOptions) Excluder {
 	allPrefixes = append(allPrefixes, secretPrefixes...)
 	allPrefixes = append(allPrefixes, nonSecretPrefixes...)
 
-	return &prefixExcluder{
-		prefixes:          allPrefixes,
-		secretPrefixes:    secretPrefixes,
-		nonSecretPrefixes: nonSecretPrefixes,
-		tempNamePred:      opts.TempNamePred,
-		agentHomeAbs:      cleanAbsHome(opts.AgentHomeAbs),
-		initErr:           initErr,
-	}
+	ci := opts.CaseInsensitive || defaultCaseInsensitiveFS()
+	return newPrefixExcluder(allPrefixes, secretPrefixes, nonSecretPrefixes, opts.TempNamePred, cleanAbsHome(opts.AgentHomeAbs), ci, initErr)
 }
 
 // PatternExcluder builds an Excluder from slash-separated relative patterns.
@@ -324,16 +333,47 @@ func cleanAbsHome(homeAbs string) string {
 
 type prefixExcluder struct {
 	prefixes          []string
+	lowerPrefixes     []string
 	secretPrefixes    []string
 	nonSecretPrefixes []string
 	tempNamePred      func(base string) bool
 	agentHomeAbs      string
+	caseInsensitive   bool
 	initErr           error
+}
+
+func newPrefixExcluder(prefixes, secretPrefixes, nonSecretPrefixes []string, tempNamePred func(base string) bool, agentHomeAbs string, caseInsensitive bool, initErr error) *prefixExcluder {
+	var lower []string
+	if caseInsensitive && len(prefixes) > 0 {
+		lower = make([]string, len(prefixes))
+		for i, p := range prefixes {
+			lower[i] = strings.ToLower(p)
+		}
+	}
+	return &prefixExcluder{
+		prefixes:          prefixes,
+		lowerPrefixes:     lower,
+		secretPrefixes:    secretPrefixes,
+		nonSecretPrefixes: nonSecretPrefixes,
+		tempNamePred:      tempNamePred,
+		agentHomeAbs:      agentHomeAbs,
+		caseInsensitive:   caseInsensitive,
+		initErr:           initErr,
+	}
 }
 
 func (e *prefixExcluder) Exclude(relPath string, _ bool) bool {
 	if e.tempNamePred != nil && e.tempNamePred(path.Base(relPath)) {
 		return true
+	}
+	if e.caseInsensitive {
+		lp := strings.ToLower(relPath)
+		for _, p := range e.lowerPrefixes {
+			if lp == p || strings.HasPrefix(lp, p+"/") {
+				return true
+			}
+		}
+		return false
 	}
 	for _, p := range e.prefixes {
 		if relPath == p || strings.HasPrefix(relPath, p+"/") {
@@ -403,13 +443,7 @@ func (e *prefixExcluder) resolveInRoot(root *os.Root) (Excluder, excludedInodeSe
 		}
 	}
 
-	return &prefixExcluder{
-		prefixes:          all,
-		secretPrefixes:    resolvedSecrets,
-		nonSecretPrefixes: resolvedNonSecrets,
-		tempNamePred:      e.tempNamePred,
-		agentHomeAbs:      e.agentHomeAbs,
-	}, inodes, nil
+	return newPrefixExcluder(all, resolvedSecrets, resolvedNonSecrets, e.tempNamePred, e.agentHomeAbs, e.caseInsensitive, nil), inodes, nil
 }
 
 // resolveExclusionPathInRoot resolves exPath component by component through

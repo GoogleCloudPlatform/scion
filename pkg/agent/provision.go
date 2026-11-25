@@ -1446,6 +1446,12 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	if err := provisionFinish(m, opts, agentDir, agentHome, cfg); err != nil {
 		return cfg, err
 	}
+	if err := m.provisionK8sMoveBundleTarget(ctx, opts, projectDir, agentDir, agentHome); err != nil {
+		if opts.MoveReincarnationID != "" {
+			_ = removeAgentDirGuarded(projectAgentFilesGuard(ctx, projectDir, opts.Name, agentDir, agentHome), agentDir, "")
+		}
+		return cfg, err
+	}
 
 	// A provision-only create carries no run (the hub mints runs only for
 	// starts), yet it may reuse, or newly provision, files under a name an
@@ -2280,11 +2286,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if sharedWorkspace {
 			return "", "", nil, fmt.Errorf("move-bundle workspace cannot be combined with a shared workspace")
 		}
-		if sharedAgentWorkspace != "" {
+		if sharedAgentWorkspace != "" && !isKubernetesRuntime(agentRuntimeFromContext(ctx)) {
 			return "", "", nil, fmt.Errorf("move-bundle workspace is not supported on a shared project storage layout")
 		}
-		if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
-			return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
+		if sharedAgentWorkspace == "" {
+			if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
+			}
 		}
 	} else if emptyPerAgent {
 		// Empty-per-agent (design #2703): a private, initially empty, non-git

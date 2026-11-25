@@ -122,6 +122,12 @@ func (m *AgentManager) moveNFSOwnAgentDir(ctx context.Context, opts api.StartOpt
 	if emptyPerAgent {
 		dirName, mode = emptyDirName, store.SharingModeEmptyPerAgent
 	}
+	if dirName == "" && opts.WorkspaceSource == api.WorkspaceSourceMoveBundle && isKubernetesRuntime(runtimeName) && ws.Backend == "nfs" {
+		if !isNFSWorktreeName(opts.Name) {
+			return "", fmt.Errorf("%w: invalid agent slug %q", ErrMoveWorkspaceUnconfirmed, opts.Name)
+		}
+		dirName = opts.Name
+	}
 	if dirName == "" {
 		return "", nil
 	}
