@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // Target-side staging, commit, and imported marker logic for move-bundle
@@ -87,14 +88,14 @@ func hasMoveBundleImportedMarker(agentDir, rid string) (bool, error) {
 }
 
 // writeMoveBundleImportedMarker writes <agentDir>/.scion-move-bundle-<rid>
-// with "imported\n" using O_CREATE|O_EXCL through os.Root.
+// with "imported\n" using O_CREATE|O_EXCL through rootopen.OpenFileForWrite.
 func writeMoveBundleImportedMarker(agentDir, rid string) error {
 	root, err := os.OpenRoot(agentDir)
 	if err != nil {
 		return fmt.Errorf("open agent dir for imported marker: %w", err)
 	}
 	defer func() { _ = root.Close() }()
-	f, err := root.OpenFile(moveBundleImportedMarkerName(rid), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := rootopen.OpenFileForWrite(root, moveBundleImportedMarkerName(rid), 0o600, false)
 	if err != nil {
 		return fmt.Errorf("create imported marker: %w", err)
 	}

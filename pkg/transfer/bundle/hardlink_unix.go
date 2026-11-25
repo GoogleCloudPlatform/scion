@@ -22,6 +22,8 @@ import (
 	"path"
 	"path/filepath"
 	"syscall"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // maxExcludedHardlinkScanEntries caps the total number of directory entries
@@ -75,7 +77,7 @@ func collectExcludedInodes(root *os.Root, secretPrefixes []string) (excludedInod
 	remaining := maxExcludedHardlinkScanEntries
 	var walkDir func(rootPrefix, rel string) error
 	walkDir = func(rootPrefix, rel string) error {
-		f, err := root.OpenFile(filepath.FromSlash(rel)+string(filepath.Separator), os.O_RDONLY, 0)
+		f, err := rootopen.OpenDir(root, rel)
 		if err != nil {
 			return nil
 		}
@@ -104,7 +106,7 @@ func collectExcludedInodes(root *os.Root, secretPrefixes []string) (excludedInod
 				continue
 			}
 			if mt.IsRegular() {
-				if info, err := e.Info(); err == nil {
+				if info, err := root.Lstat(filepath.FromSlash(child)); err == nil {
 					record(info)
 				}
 			}
