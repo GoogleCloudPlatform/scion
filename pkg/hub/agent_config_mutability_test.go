@@ -33,11 +33,12 @@ import (
 // It is written out key by key, independently of agentEditFields, so a
 // change of tier fails here and has to be made deliberately.
 var wantEditTier = map[string]EditTier{
-	"name":        EditTierMetadata,
-	"labels":      EditTierMetadata,
-	"annotations": EditTierMetadata,
-	"taskSummary": EditTierMetadata,
-	"messageMode": EditTierMetadata,
+	"name":          EditTierMetadata,
+	"labels":        EditTierMetadata,
+	"annotations":   EditTierMetadata,
+	"taskSummary":   EditTierMetadata,
+	"messageMode":   EditTierMetadata,
+	"suspendPolicy": EditTierMetadata,
 
 	"config.model":             EditTierContainer,
 	"config.thinking_level":    EditTierContainer,
