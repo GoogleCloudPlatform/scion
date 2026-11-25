@@ -84,6 +84,9 @@ func (s *Server) listProjectAgentsDelegated(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	if !s.applyProjectAgentFilterQuery(ctx, w, query, d, &filter) {
+		return
+	}
 	binding := scopedCursorBinding(sortSuffix("project-agents:"+projectID, "", ""), filter, d)
 	result, err := listDelegated(ctx, s, d, query.Get("cursor"), limit, binding,
 		func(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.Agent], error) {

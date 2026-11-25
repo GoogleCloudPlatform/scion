@@ -165,6 +165,12 @@ export interface AgentListViewState {
    * `committedLabel` and `serverParamsKey` tracks `serverQuery` instead of `phaseFilter`.
    */
   serverQuery?: string;
+  /**
+   * True when the committed filter query contains a client-only key (e.g.
+   * `mode:`), which cannot be pushed down to the server and therefore forces a
+   * complete-set drain (making `isSortedEligible` return false).
+   */
+  hasClientOnlyFilter?: boolean;
 }
 
 /** Parameters of one paged-navigation request, passed to the host's `fetchPage`. */
@@ -386,9 +392,9 @@ export class AgentListWindow extends EventTarget {
    * complete set.
    */
   isSortedEligible(committedLabel: string): boolean {
-    const { view, sortField, modeFilter, serverQuery } = this.viewState;
+    const { view, sortField, modeFilter, serverQuery, hasClientOnlyFilter } = this.viewState;
     if (view !== 'grid' && view !== 'list') return false;
-    if (modeFilter) return false;
+    if (modeFilter || hasClientOnlyFilter) return false;
     if (sortField !== 'updated' && sortField !== 'created') return false;
     if (serverQuery !== undefined) return true;
     const label = committedLabel.trim();

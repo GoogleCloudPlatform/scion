@@ -22,11 +22,195 @@
         "multiValued": false
       },
       {
+        "name": "activity",
+        "help": "Agent runtime activity",
+        "kind": "enum",
+        "exec": "server",
+        "enum": [
+          "initializing",
+          "working",
+          "thinking",
+          "executing",
+          "waiting_for_input",
+          "blocked",
+          "idle",
+          "completed",
+          "limits_exceeded",
+          "stalled",
+          "offline",
+          "crashed",
+          "harness_error"
+        ],
+        "multiValued": false
+      },
+      {
         "name": "label",
         "help": "Label key or key=value pair",
         "kind": "label",
         "exec": "server",
         "multiValued": true
+      },
+      {
+        "name": "project",
+        "help": "Project slug or ID",
+        "kind": "ref",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "harness",
+        "help": "Harness configuration name",
+        "kind": "string",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "broker",
+        "help": "Runtime broker name or ID",
+        "kind": "ref",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "template",
+        "help": "Agent template name",
+        "kind": "string",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "owner",
+        "help": "Owner ID, email, or 'me'",
+        "kind": "ref",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "is",
+        "help": "Scope filter (mine or shared)",
+        "kind": "flag_set",
+        "exec": "server",
+        "enum": [
+          "mine",
+          "shared"
+        ],
+        "exclusive": [
+          [
+            "mine",
+            "shared"
+          ]
+        ],
+        "multiValued": false
+      },
+      {
+        "name": "mode",
+        "help": "Messaging mode or reachability (client-side)",
+        "kind": "enum",
+        "exec": "client",
+        "enum": [
+          "project",
+          "branch",
+          "lineage",
+          "none",
+          "can_message",
+          "cannot_message"
+        ],
+        "multiValued": false
+      }
+    ],
+    "textHelp": "Matches agent name or slug"
+  },
+  {
+    "view": "project_agents",
+    "keys": [
+      {
+        "name": "phase",
+        "help": "Agent lifecycle phase",
+        "kind": "enum",
+        "exec": "server",
+        "enum": [
+          "created",
+          "provisioning",
+          "cloning",
+          "starting",
+          "running",
+          "suspended",
+          "stopping",
+          "stopped",
+          "error",
+          "halted"
+        ],
+        "multiValued": false
+      },
+      {
+        "name": "activity",
+        "help": "Agent runtime activity",
+        "kind": "enum",
+        "exec": "server",
+        "enum": [
+          "initializing",
+          "working",
+          "thinking",
+          "executing",
+          "waiting_for_input",
+          "blocked",
+          "idle",
+          "completed",
+          "limits_exceeded",
+          "stalled",
+          "offline",
+          "crashed",
+          "harness_error"
+        ],
+        "multiValued": false
+      },
+      {
+        "name": "label",
+        "help": "Label key or key=value pair",
+        "kind": "label",
+        "exec": "server",
+        "multiValued": true
+      },
+      {
+        "name": "harness",
+        "help": "Harness configuration name",
+        "kind": "string",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "broker",
+        "help": "Runtime broker name or ID",
+        "kind": "ref",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "template",
+        "help": "Agent template name",
+        "kind": "string",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "owner",
+        "help": "Owner ID, email, or 'me'",
+        "kind": "ref",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "mode",
+        "help": "Messaging mode (client-side)",
+        "kind": "enum",
+        "exec": "client",
+        "enum": [
+          "project",
+          "branch",
+          "lineage",
+          "none"
+        ],
+        "multiValued": false
       }
     ],
     "textHelp": "Matches agent name or slug"

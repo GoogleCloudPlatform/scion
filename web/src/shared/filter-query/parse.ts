@@ -103,8 +103,10 @@ function hasKnownKeyTerm(input: string, known: (key: string) => boolean): boolea
   while (i < n) {
     while (i < n && isSpace(input[i])) i++;
     if (i >= n) break;
-    if (input[i] === '"') {
-      i++;
+    let start = i;
+    if (input[start] === '-') start++;
+    if (start < n && input[start] === '"') {
+      i = start + 1;
       while (i < n) {
         if (input[i] === '\\' && i + 1 < n) {
           i += 2;
@@ -118,8 +120,6 @@ function hasKnownKeyTerm(input: string, known: (key: string) => boolean): boolea
       }
       continue;
     }
-    let start = i;
-    if (input[start] === '-') start++;
     const prefix = scanKeyPrefix(input, start);
     if (prefix && known(prefix.key.toLowerCase())) {
       return true;

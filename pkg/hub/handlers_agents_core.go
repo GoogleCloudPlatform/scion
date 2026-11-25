@@ -447,7 +447,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filter, ok := s.agentListQueryFilter(ctx, w, query, scopeResult.Scopes.Contains)
+	filter, queryScope, ok := s.agentListQueryFilter(ctx, w, query, identity, scopeResult.Scopes.Contains)
 	if !ok {
 		return
 	}
@@ -463,9 +463,32 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
 	}
 
+	scopeParam := query.Get("scope")
+	legacyMine := query.Get("mine") == "true"
+	if queryScope != store.AgentQueryScopeNone {
+		effectiveLegacy := scopeParam
+		if effectiveLegacy != "mine" && effectiveLegacy != "shared" {
+			if legacyMine {
+				effectiveLegacy = "mine"
+			} else {
+				effectiveLegacy = ""
+			}
+		}
+		if queryScope == store.AgentQueryScopeConflict || (effectiveLegacy != "" && effectiveLegacy != string(queryScope)) {
+			// Contradictory scope terms (e.g. is:mine -is:mine, or is:mine with legacy scope=shared)
+			// intersect to empty.
+			filter.ProjectID = store.ImpossibleFilterUUID
+			scopeParam = ""
+			legacyMine = false
+		} else {
+			scopeParam = string(queryScope)
+			legacyMine = false
+		}
+	}
+
 	classifyDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
 	classification, err := s.resolveProjectListClassification(
-		ctx, identity, query.Get("scope"), query.Get("mine") == "true", scopeResult, "listAgents")
+		ctx, identity, scopeParam, legacyMine, scopeResult, "listAgents")
 	classifyDone()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -551,7 +574,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 // broker, phase, deleted, attribute, relationship and label filters. It
 // adds no authorization predicate. On a malformed filter it writes the 400
 // and reports false.
-func (s *Server) agentListQueryFilter(ctx context.Context, w http.ResponseWriter, query url.Values, projectInScope func(projectID string) bool) (store.AgentFilter, bool) {
+func (s *Server) agentListQueryFilter(ctx context.Context, w http.ResponseWriter, query url.Values, identity Identity, projectInScope func(projectID string) bool) (store.AgentFilter, store.AgentQueryScope, bool) {
 	// RS2: Slug-to-ID resolution for projectId filter.
 	// If projectId looks like a slug (not a UUID), resolve it to a project ID.
 	// The resolution must not reveal whether a project outside the caller's
@@ -581,7 +604,7 @@ func (s *Server) agentListQueryFilter(ctx context.Context, w http.ResponseWriter
 		if projectID == "" {
 			// Force empty result: filter to an impossible project ID so the
 			// caller cannot infer slug existence from result count changes.
-			projectID = "00000000-0000-0000-0000-000000000000"
+			projectID = store.ImpossibleFilterUUID
 		}
 	}
 
@@ -593,31 +616,98 @@ func (s *Server) agentListQueryFilter(ctx context.Context, w http.ResponseWriter
 	}
 	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
 		BadRequest(w, err.Error())
-		return store.AgentFilter{}, false
+		return store.AgentFilter{}, store.AgentQueryScopeNone, false
 	}
 
 	if labelParams := query["label"]; len(labelParams) > 0 {
 		parsed, err := parseLabelFilters(labelParams)
 		if err != nil {
 			BadRequest(w, err.Error())
-			return store.AgentFilter{}, false
+			return store.AgentFilter{}, store.AgentQueryScopeNone, false
 		}
 		filter.Labels = parsed
 	}
 
+	var queryScope store.AgentQueryScope
 	if rawQ := query.Get("q"); rawQ != "" && s.experimentEnabled(experiments.FiltersQueryDialect) {
 		parsed, fqErr := filterquery.Parse(rawQ, schemas.Agents.HasKey)
 		if fqErr != nil {
 			writeInvalidFilterQuery(w, fqErr)
-			return store.AgentFilter{}, false
+			return store.AgentFilter{}, store.AgentQueryScopeNone, false
 		}
 		if vErr := schemas.Agents.Validate(parsed); vErr != nil {
 			writeInvalidFilterQuery(w, vErr)
-			return store.AgentFilter{}, false
+			return store.AgentFilter{}, store.AgentQueryScopeNone, false
 		}
-		filter.Query = filterQueryToAgentStoreTerms(parsed)
+		translated := store.TranslateAgentQuery(parsed, s.buildAgentQueryResolver(ctx, identity, projectInScope))
+		filter.Query = translated.Terms
+		queryScope = translated.Scope
 	}
-	return filter, true
+	return filter, queryScope, true
+}
+
+func (s *Server) buildAgentQueryResolver(ctx context.Context, identity Identity, projectInScope func(projectID string) bool) store.AgentQueryResolver {
+	return store.AgentQueryResolver{
+		ResolveProject: func(raw string) (string, bool) {
+			if projectInScope == nil {
+				return "", false
+			}
+			lower := strings.ToLower(raw)
+			if gouuid.Validate(lower) == nil {
+				if projectInScope(lower) {
+					return lower, true
+				}
+				return "", false
+			}
+			project, err := s.store.GetProjectBySlugCaseInsensitive(ctx, lower)
+			if err != nil || project == nil || !projectInScope(project.ID) {
+				return "", false
+			}
+			return project.ID, true
+		},
+		ResolveBroker: func(raw string) ([]string, bool) {
+			if broker, err := s.store.GetRuntimeBroker(ctx, raw); err == nil && broker != nil {
+				return []string{broker.ID}, true
+			}
+			var ids []string
+			cursor := ""
+			for {
+				res, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{Name: raw}, store.ListOptions{Limit: 200, Cursor: cursor})
+				if err != nil || res == nil || len(res.Items) == 0 {
+					break
+				}
+				for _, b := range res.Items {
+					ids = append(ids, b.ID)
+				}
+				if res.NextCursor == "" {
+					break
+				}
+				cursor = res.NextCursor
+			}
+			if len(ids) > 0 {
+				sort.Strings(ids)
+				return ids, true
+			}
+			return nil, false
+		},
+		ResolveOwner: func(raw string) (string, bool) {
+			if strings.EqualFold(raw, "me") {
+				if identity != nil && gouuid.Validate(identity.ID()) == nil {
+					return identity.ID(), true
+				}
+				return "", false
+			}
+			if gouuid.Validate(raw) == nil {
+				return raw, true
+			}
+			if strings.Contains(raw, "@") {
+				if user, err := s.store.GetUserByEmail(ctx, raw); err == nil && user != nil && gouuid.Validate(user.ID) == nil {
+					return user.ID, true
+				}
+			}
+			return "", false
+		},
+	}
 }
 
 func writeInvalidFilterQuery(w http.ResponseWriter, fqErr *filterquery.Error) {
@@ -625,72 +715,6 @@ func writeInvalidFilterQuery(w http.ResponseWriter, fqErr *filterquery.Error) {
 		"offset": fqErr.Offset,
 		"length": fqErr.Length,
 	})
-}
-
-// filterQueryToAgentStoreTerms translates a validated agents filter query into
-// canonicalized store.QueryTerms so cursor bindings are deterministic.
-func filterQueryToAgentStoreTerms(q filterquery.Query) *store.QueryTerms {
-	if q.IsEmpty() {
-		return nil
-	}
-	qt := &store.QueryTerms{
-		Text: q.Text,
-	}
-	if len(q.ExcludeText) > 0 {
-		excl := append([]string(nil), q.ExcludeText...)
-		sort.Strings(excl)
-		qt.ExcludeText = slices.Compact(excl)
-	}
-	if len(q.Terms) > 0 {
-		terms := make([]store.QueryTerm, 0, len(q.Terms))
-		for _, t := range q.Terms {
-			vals := make([]string, len(t.Values))
-			for i, v := range t.Values {
-				if t.Key == "label" {
-					vals[i] = v
-				} else {
-					vals[i] = strings.ToLower(v)
-				}
-			}
-			sort.Strings(vals)
-			vals = slices.Compact(vals)
-
-			op := store.QueryOpEq
-			if t.Key == "label" {
-				allHasKey := true
-				allEq := true
-				for _, v := range vals {
-					if strings.Contains(v, "=") {
-						allHasKey = false
-					} else {
-						allEq = false
-					}
-				}
-				if allHasKey {
-					op = store.QueryOpHasKey
-				} else if allEq {
-					op = store.QueryOpLabelEq
-				}
-			}
-			terms = append(terms, store.QueryTerm{
-				Field:  t.Key,
-				Values: vals,
-				Negate: t.Negate,
-				Op:     op,
-			})
-		}
-		sort.Slice(terms, func(i, j int) bool {
-			if terms[i].Field != terms[j].Field {
-				return terms[i].Field < terms[j].Field
-			}
-			if terms[i].Negate != terms[j].Negate {
-				return !terms[i].Negate
-			}
-			return strings.Join(terms[i].Values, ",") < strings.Join(terms[j].Values, ",")
-		})
-		qt.Terms = terms
-	}
-	return qt
 }
 
 // addAgentCreateIfAnyProjectAllows adds "create" to the agents list's

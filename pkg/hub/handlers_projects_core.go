@@ -32,6 +32,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -3189,6 +3192,9 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	if !ok {
 		return
 	}
+	if !s.applyProjectAgentFilterQuery(ctx, w, query, GetIdentityFromContext(ctx), &filter) {
+		return
+	}
 
 	limit := 500
 	if l := query.Get("limit"); l != "" {
@@ -3300,6 +3306,28 @@ func projectAgentListFilter(w http.ResponseWriter, query url.Values, projectID s
 		filter.Labels = parsed
 	}
 	return filter, true
+}
+
+// applyProjectAgentFilterQuery parses and translates ?q= for project-scoped
+// agent lists (using schemas.ProjectAgents, which excludes project: and is:)
+// when the filters.query_dialect experiment is enabled.
+func (s *Server) applyProjectAgentFilterQuery(ctx context.Context, w http.ResponseWriter, query url.Values, identity Identity, filter *store.AgentFilter) bool {
+	rawQ := query.Get("q")
+	if rawQ == "" || !s.experimentEnabled(experiments.FiltersQueryDialect) {
+		return true
+	}
+	parsed, fqErr := filterquery.Parse(rawQ, schemas.ProjectAgents.HasKey)
+	if fqErr != nil {
+		writeInvalidFilterQuery(w, fqErr)
+		return false
+	}
+	if vErr := schemas.ProjectAgents.Validate(parsed); vErr != nil {
+		writeInvalidFilterQuery(w, vErr)
+		return false
+	}
+	translated := store.TranslateAgentQuery(parsed, s.buildAgentQueryResolver(ctx, identity, nil))
+	filter.Query = translated.Terms
+	return true
 }
 
 // createProjectAgent creates an agent within a specific project

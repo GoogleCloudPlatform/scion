@@ -27,10 +27,26 @@ export function filtersQueryDialectEnabled(): boolean {
 export * from './types.js';
 export { parse } from './parse.js';
 export { validate } from './validate.js';
-export { canonical, serverSubset, hasClientOnlyKeys } from './canonical.js';
+export {
+  canonical,
+  hasClientOnlyKeys,
+  renderQueryPreservingMeaning,
+  serverSubset,
+} from './canonical.js';
 export { match } from './match.js';
 export { getSuggestions, type Suggestion, type ValueSuggestionProvider } from './suggest.js';
 export { getActiveSingleKeyValue, setSingleKeyInQuery } from './query-edit.js';
+export {
+  agentToFilterRow,
+  buildAgentValueSuggestions,
+  canLiveAddAgent,
+  clientEvaluableAgentQuery,
+  hasScopeTermInQuery,
+  hasServerOnlyAgentTerms,
+  matchAgentQuery,
+  phasePredicateForQuery,
+  type AgentFilterContext,
+} from './agent-accessors.js';
 
 export const VIEW_SCHEMAS: readonly ViewSchema[] = rawSchemas as ViewSchema[];
 

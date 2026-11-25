@@ -546,8 +546,12 @@ func (s *Server) listAgentsDelegated(w http.ResponseWriter, r *http.Request, d *
 		return
 	}
 
-	filter, ok := s.agentListQueryFilter(ctx, w, query, scope.admitsProject)
+	filter, queryScope, ok := s.agentListQueryFilter(ctx, w, query, d, scope.admitsProject)
 	if !ok {
+		return
+	}
+	if queryScope != store.AgentQueryScopeNone {
+		writeEmpty()
 		return
 	}
 	if scope.Mode == delegatedListExplicit {

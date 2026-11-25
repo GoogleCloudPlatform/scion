@@ -14,11 +14,26 @@
  * limitations under the License.
  */
 
-import { html, type TemplateResult } from 'lit';
-import type { ViewSchema } from '../../../shared/filter-query/index.js';
+import { html, nothing, type TemplateResult } from 'lit';
+import type { KeySchema, ViewSchema } from '../../../shared/filter-query/index.js';
+
+function formatKeyValues(k: KeySchema): TemplateResult | typeof nothing {
+  if (k.enum?.length) {
+    return html`<div class="help-values">${k.enum.join(', ')}</div>`;
+  }
+  switch (k.kind) {
+    case 'label':
+      return html`<div class="help-values">key or key=value (exact case)</div>`;
+    case 'string':
+      return html`<div class="help-values">exact name (case-insensitive)</div>`;
+    default:
+      return nothing;
+  }
+}
 
 /**
- * Render the inline grammar cheat-sheet and key table for `schema`.
+ * Render the full inline grammar cheat-sheet and schema-generated key table
+ * for `schema`.
  */
 export function renderFilterHelp(schema: ViewSchema): TemplateResult {
   return html`
@@ -26,32 +41,38 @@ export function renderFilterHelp(schema: ViewSchema): TemplateResult {
       <div class="help-title">Filter syntax</div>
       <div class="help-cheat">
         <code>key:val</code> match &middot; <code>key:a,b</code> either &middot;
-        <code>-key:val</code> exclude &middot; <code>"a b"</code> quote spaces
+        <code>-key:val</code> exclude &middot; <code>"a b"</code> quote spaces &middot;
+        <code>/</code> focus
       </div>
-      ${schema.textHelp ? html`<div class="help-text">${schema.textHelp}.</div>` : null}
-      <table class="help-table">
-        <thead>
-          <tr>
-            <th>Key</th>
-            <th>Description</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${schema.keys.map(
-            (k) => html`
-              <tr>
-                <td><code>${k.name}:</code></td>
-                <td>
-                  ${k.help}
-                  ${k.enum?.length
-                    ? html`<div class="help-values">${k.enum.join(', ')}</div>`
-                    : null}
-                </td>
-              </tr>
-            `
-          )}
-        </tbody>
-      </table>
+      ${schema.textHelp
+        ? html`<div class="help-text">Plain text: ${schema.textHelp}.</div>`
+        : nothing}
+      <div class="help-table-wrap">
+        <table class="help-table">
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${schema.keys.map(
+              (k) => html`
+                <tr>
+                  <td>
+                    <code>${k.name}:</code>
+                    ${k.exec === 'client' ? html`<span class="help-exec">local</span>` : nothing}
+                  </td>
+                  <td>
+                    <div>${k.help}</div>
+                    ${formatKeyValues(k)}
+                  </td>
+                </tr>
+              `
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   `;
 }
