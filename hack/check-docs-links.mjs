@@ -148,6 +148,17 @@ function inspectSuppressions(line, lineNo, rel, inFrontmatter, suppressedLines, 
   }
 }
 
+function maskInlineCode(line, codeSpans) {
+  return line.replace(/`+[^`]*`+/g, (match) => {
+    codeSpans.push(match);
+    return `\u0000CODE${codeSpans.length - 1}\u0000`;
+  });
+}
+
+function restoreInlineCode(line, codeSpans) {
+  return line.replace(/\u0000CODE(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)]);
+}
+
 function stripDelimitedComments(line, openTok, closeTok, inComment) {
   if (inComment) {
     const endIdx = line.indexOf(closeTok);
@@ -155,18 +166,20 @@ function stripDelimitedComments(line, openTok, closeTok, inComment) {
     line = line.slice(endIdx + closeTok.length);
     inComment = false;
   }
+  const codeSpans = [];
+  let masked = maskInlineCode(line, codeSpans);
   while (true) {
-    const startIdx = line.indexOf(openTok);
+    const startIdx = masked.indexOf(openTok);
     if (startIdx === -1) break;
-    const endIdx = line.indexOf(closeTok, startIdx + openTok.length);
+    const endIdx = masked.indexOf(closeTok, startIdx + openTok.length);
     if (endIdx === -1) {
-      line = line.slice(0, startIdx);
+      masked = masked.slice(0, startIdx);
       inComment = true;
       break;
     }
-    line = line.slice(0, startIdx) + line.slice(endIdx + closeTok.length);
+    masked = masked.slice(0, startIdx) + masked.slice(endIdx + closeTok.length);
   }
-  return { line, inComment };
+  return { line: restoreInlineCode(masked, codeSpans), inComment };
 }
 
 function parseDocFile(filePath, docsRoot) {
@@ -534,6 +547,7 @@ function runSelfTest() {
     //    - legacy redirect target (must FAIL, not pass)
     //    - bare HTML suppression without a reason
     //    - bare JSX suppression without a reason
+    //    - inline code containing HTML/JSX comment delimiters must not swallow subsequent broken links
     fs.appendFileSync(
       path.join(docs, 'index.mdx'),
       [
@@ -545,17 +559,21 @@ function runSelfTest() {
         'Legacy redirect: [Old Route](/scion/old-route/)',
         'Bare HTML ignore: [SuppressedBad](/scion/missing-1/) <!-- check-docs-links-ignore -->',
         'Bare JSX ignore: [SuppressedBad2](/scion/missing-2/) {/* check-docs-links-ignore:   */}',
+        'HTML delimiter in code: use `<!--` to open a comment, then [AfterCodeHtml](/scion/after-code-html/)',
+        'JSX delimiter in code: use `{/*` to open a comment, then [AfterCodeJsx](/scion/after-code-jsx/)',
+        'Next line after code delimiters: [AfterCodeNextLine](/scion/after-code-next-line/)',
         '',
       ].join('\n')
     );
 
     const failRes = checkDocsTree({ docsRoot: docs, publicRoot: pub, astroConfigPath: astroCfg });
     assert.equal(failRes.scanError, undefined, `Unexpected scanError: ${failRes.scanError}`);
-    // 5 link violations + 2 bare suppression violations + 2 unsuppressed broken links on those bare-suppression lines = 9
+    // 5 link violations + 2 bare suppression violations + 2 unsuppressed broken links on those bare-suppression lines
+    // + 3 broken links after backticked comment delimiters = 12
     assert.equal(
       failRes.errors.length,
-      9,
-      `Expected 9 errors in failing fixture, got ${failRes.errors.length}:\n${failRes.errors.join('\n')}`
+      12,
+      `Expected 12 errors in failing fixture, got ${failRes.errors.length}:\n${failRes.errors.join('\n')}`
     );
     assert.ok(failRes.errors.some((e) => e.includes('broken internal route "/scion/no-such-page/"')));
     assert.ok(failRes.errors.some((e) => e.includes('broken anchor "#web-base-url"')));
@@ -573,6 +591,18 @@ function runSelfTest() {
       failRes.errors.filter((e) => e.includes('bare check-docs-links-ignore suppression requires a reason')).length,
       2,
       'Expected 2 bare suppression violations'
+    );
+    assert.ok(
+      failRes.errors.some((e) => e.includes('broken internal route "/scion/after-code-html/"')),
+      'Expected broken link after backticked HTML comment delimiter to be caught'
+    );
+    assert.ok(
+      failRes.errors.some((e) => e.includes('broken internal route "/scion/after-code-jsx/"')),
+      'Expected broken link after backticked JSX comment delimiter to be caught'
+    );
+    assert.ok(
+      failRes.errors.some((e) => e.includes('broken internal route "/scion/after-code-next-line/"')),
+      'Expected broken link on line following backticked comment delimiters to be caught'
     );
 
     // 3. Empty / missing scan root checks (exit 4 contract)
