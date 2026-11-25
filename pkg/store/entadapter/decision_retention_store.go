@@ -247,7 +247,6 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 	// 3. Re-check whole-message eligibility on the locked rows.
 	var eligibleDecs []*ent.Decision
 	var eligibleDecIDs []uuid.UUID
-	var eligibleAns []*ent.DecisionAnswer
 	var eligibleAnsIDs []uuid.UUID
 
 	for _, mid := range msgUUIDs {
@@ -284,7 +283,6 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 			c := res.ByProject[pid]
 			c.Decisions++
 			for _, a := range ansByDec[d.ID] {
-				eligibleAns = append(eligibleAns, a)
 				eligibleAnsIDs = append(eligibleAnsIDs, a.ID)
 				c.Answers++
 			}
