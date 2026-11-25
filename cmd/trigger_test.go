@@ -1700,6 +1700,10 @@ func TestTriggerEventCLI_ListGetPayloadAndJSON(t *testing.T) {
 				ServerTime: fixedNow,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+evID:
+			if r.URL.Query().Get("payload") == "1" {
+				_, _ = w.Write([]byte(`{"action":"created","comment":{"body":"@scion /ping hello-stage3"}}`))
+				return
+			}
 			_ = json.NewEncoder(w).Encode(hubclient.TriggerEventDetail{
 				TriggerEventSummary: summary,
 				Headers:             map[string]string{"x-github-event": "issue_comment"},
@@ -2363,6 +2367,10 @@ func TestTriggerEventAndHistoryCLI_SanitizesTerminalControlAndBidiCharacters(t *
 				ServerTime: fixedNow,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+evID:
+			if r.URL.Query().Get("payload") == "1" {
+				_, _ = w.Write(payloadBytes)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(hubclient.TriggerEventDetail{
 				TriggerEventSummary: evSummary,
 				Headers:             map[string]string{"x-scion-subject": hostileHeaderVal},
@@ -3103,4 +3111,87 @@ func TestTriggerWebhookUpdateP4aFlags(t *testing.T) {
 	_, err = parseUpdate("--max-body", "9999999999999MiB")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "overflow")
+
+	// 1MiB ceiling accepted locally.
+	req, err = parseUpdate("--max-body", "1MiB")
+	require.NoError(t, err)
+	require.NotNil(t, req.MaxBodyBytes)
+	assert.Equal(t, 1024*1024, *req.MaxBodyBytes)
+}
+
+func TestTriggerEventCLI_OverflowPayloadStreamAndOutFile(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+
+	origFormat := outputFormat
+	origEvPayload := triggerEventPayloadOnly
+	origEvOut := triggerEventPayloadOut
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerEventPayloadOnly = origEvPayload
+		triggerEventPayloadOut = origEvOut
+	})
+
+	evID := "99999999-9999-4999-8999-999999999999"
+	largePayload := `{"marker":"cli-overflow","blob":"` + strings.Repeat("z", 128*1024) + `"}`
+	payloadRef := "trigger-events/proj-1/" + evID + ".json"
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+evID {
+			if r.URL.Query().Get("payload") == "1" {
+				_, _ = w.Write([]byte(largePayload))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(hubclient.TriggerEventDetail{
+				TriggerEventSummary: hubclient.TriggerEventSummary{
+					ID:           evID,
+					ProjectID:    "proj-1",
+					Source:       hubclient.TriggerSourceSpec{Kind: "webhook", ID: "ep-1"},
+					Type:         "webhook.received",
+					Subject:      "webhook:ep-1",
+					DedupKey:     "d-overflow",
+					OccurredAt:   fixedNow,
+					ReceivedAt:   fixedNow,
+					PayloadRef:   payloadRef,
+					PayloadBytes: len(largePayload),
+					Status:       "processed",
+					CreatedAt:    fixedNow,
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}, hubsync.CredentialKindOAuth)
+
+	// 1. Default event get shows out-of-line hint.
+	outputFormat = ""
+	triggerEventPayloadOnly = false
+	triggerEventPayloadOut = ""
+	detailOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	})
+	assert.Contains(t, detailOut, "stored out of line")
+	assert.Contains(t, detailOut, "--payload")
+
+	// 2. --out without --payload fails with usage error.
+	triggerEventPayloadOnly = false
+	triggerEventPayloadOut = filepath.Join(t.TempDir(), "should-not-exist.json")
+	require.Error(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+
+	// 3. --payload --out streams exact bytes to disk.
+	outFile := filepath.Join(t.TempDir(), "payload.json")
+	triggerEventPayloadOnly = true
+	triggerEventPayloadOut = outFile
+	require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	diskBytes, err := os.ReadFile(outFile)
+	require.NoError(t, err)
+	assert.Equal(t, largePayload, string(diskBytes))
+
+	// 4. --payload to stdout streams exact valid JSON.
+	triggerEventPayloadOut = ""
+	stdoutPayload := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	})
+	assert.JSONEq(t, largePayload, stdoutPayload)
 }
