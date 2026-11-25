@@ -42,6 +42,40 @@ claude/
     .claude/settings.json       # Claude Code settings (hooks, permissions)
 ```
 
+## Permissions and Unattended Safety
+
+The Claude harness launches Claude Code with `--dangerously-skip-permissions`
+(`bypassPermissions` mode) and sets
+`CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` by default in the
+provisioner env overlay (`provision.py`, merged into the supervised `claude`
+process environment). Claude Code ignores this variable in `settings.json`, so
+it must be present in the launch process environment.
+
+This suppresses Claude Code's Layer 2 critical-path `rm`/`rmdir` confirmation
+prompts (for example, dynamic or globbed `/tmp` cleanup commands) that would
+otherwise still fire in `bypassPermissions` mode and stall unattended container
+agents in `WAITING_FOR_INPUT`.
+
+- **Shared-volume / worktree blast radius:** Enabling
+  `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` disables Claude Code's
+  final guardrail against destructive `rm`/`rmdir` commands (such as `rm -rf`
+  against `~`, `/workspace`, or mounted shared volumes like
+  `/scion-volumes/...`). Keep this trade-off in mind when mounting shared
+  volumes or running in `shared-plain` / `worktree-per-agent` workspace modes.
+- **Opting out:** Because container/runtime environment variables take
+  precedence over the provisioner's env overlay, operators or templates can opt
+  out by explicitly setting `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS`
+  to `"0"` or `""` in `profiles.<profile>.harness_overrides.claude.env`,
+  `harness_configs.claude.env`, or a template's `env:` block.
+- **`SHELL=/bin/zsh` and Layer 2 shell-expansion caveat:** `Dockerfile` sets
+  `ENV SHELL=/bin/zsh`, so Claude Code's `Bash` tool executes under `zsh` by
+  default. `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` specifically
+  targets critical-path `rm`/`rmdir` checks and may not suppress non-`rm`
+  Layer 2 prompts triggered by ambiguous or indirect shell parameter expansions
+  (such as zsh expansion flags like `${(P)...}` / `${(e)...}`). If those
+  prompts occur, you can switch Claude Code's shell to bash by setting
+  `CLAUDE_CODE_SHELL=/bin/bash` in harness-config or template `env:`.
+
 ## Egress Firewall
 
 `init-firewall.sh` restricts outbound traffic to GitHub, the npm registry,
