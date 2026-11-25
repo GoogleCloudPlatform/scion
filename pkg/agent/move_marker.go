@@ -79,6 +79,13 @@ func writeMoveMarker(dir, id string) error {
 	return f.Close()
 }
 
+// ReadMoveMarker returns the reincarnation ID recorded in dir's move marker
+// (MoveMarkerFile). The marker must be a regular file, never followed through
+// a symlink.
+func ReadMoveMarker(dir string) (string, error) {
+	return readMoveMarker(dir)
+}
+
 // readMoveMarker returns the reincarnation ID of dir's move marker. The
 // marker must be a regular file, never followed through a symlink.
 func readMoveMarker(dir string) (string, error) {

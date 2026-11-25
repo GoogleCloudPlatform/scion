@@ -3034,6 +3034,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		MaintenanceMessage:           maintenanceMessage,
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
 		SchedulerMaxConcurrency:      cfg.Scheduler.MaxConcurrency, // *int: nil = use default, *0 = unlimited
+		MoveBundle:                   cfg.Reincarnate.MoveBundle,
 		Workstation:                  !hostedMode,
 		ConfigPath:                   serverConfigPath,
 		StartClaim: hub.StartClaimSettings{

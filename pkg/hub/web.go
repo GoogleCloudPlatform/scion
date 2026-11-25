@@ -3506,6 +3506,11 @@ func isCompressBypassPath(path string) bool {
 					// (/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download)
 					// answers with signed object URLs.
 					return true
+				case "move-bundle":
+					// The broker-self move-bundle signed URL endpoints
+					// (/api/v1/runtime-brokers/{id}/agents/{agentId}/move-bundle/{rid}/{upload-url,download-urls})
+					// answer with signed object URLs.
+					return true
 				}
 			}
 		}

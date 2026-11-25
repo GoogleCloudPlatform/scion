@@ -176,6 +176,7 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		EphemeralPersistence:         c.EphemeralPersistence,
 		AgentMove:                    c.AgentMove,
 		AgentMoveRecreate:            c.AgentMoveRecreate,
+		AgentMoveBundle:              c.AgentMoveBundle,
 		ReprovisionEmptyPerAgent:     c.ReprovisionEmptyPerAgent,
 		ReprovisionResetHomeRuntimes: append([]string(nil), c.ReprovisionResetHomeRuntimes...),
 		RestartingRuntimes:           append([]string(nil), c.RestartingRuntimes...),

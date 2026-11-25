@@ -65,6 +65,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"auto_inject_gcloud_adc"},
 	{"server", "maintenance"},
 	{"server", "scheduler"},
+	// Cross-broker move-bundle limits (ptone/scion#8960): Layer 0, read at startup.
+	{"server", "reincarnate"},
 	{"server", "oidc_login"},
 	{"server", "oidc"},
 	{"server", "hub", "agent_endpoint"},

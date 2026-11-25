@@ -332,6 +332,10 @@ type ServerConfig struct {
 	// file (zero fields use defaults; out-of-range values are replaced by
 	// defaults with a warning). Hot-reloaded through ApplySnapshot.
 	StartClaim StartClaimSettings
+	// MoveBundle holds Hub-configured bounds and timeouts for cross-broker
+	// bundle moves (server.reincarnate.move_bundle, design §3.7). Zero fields
+	// fall back to the design §3.7 defaults.
+	MoveBundle config.MoveBundleConfig
 	// MissingAgentGrace is how long a running agent must be continuously
 	// absent from its runtime broker's complete heartbeat inventory before
 	// the Hub marks it phase=error with exit reason container_missing (an
@@ -1805,6 +1809,10 @@ type RemoteCreateAgentRequest struct {
 	// runtimebroker.CreateAgentRequest.MoveReincarnationID: a forced move's
 	// reincarnation ID, sent with the fresh-agent-dir expectation.
 	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
+	// WorkspaceSource mirrors
+	// runtimebroker.CreateAgentRequest.WorkspaceSource: "move-bundle" on a
+	// bundle move's target provision leaves the workspace directory empty.
+	WorkspaceSource string `json:"workspaceSource,omitempty"`
 	// ResetHome and ResetHomeID mirror runtimebroker.CreateAgentRequest's
 	// home reset fields: set only on a reprovision that resets the agent's
 	// home (ptone/scion#7757).
@@ -3181,6 +3189,16 @@ type Server struct {
 	// directly. Per-Server rather than a package var so a test can shorten
 	// it on its own Server instance without racing other tests' workers.
 	reincarnationRequesterResolveTimeout time.Duration
+
+	// moveBundlePollInterval, moveBundleTouchInterval, and
+	// moveBundleProgressInterval control the broker job-status poll,
+	// record-liveness touch, and agent progress-message throttle cadences for
+	// bundle moves (design §3.5, §3.7). Zero means use the production
+	// defaults; per-Server so tests can shorten them without shared mutable
+	// state.
+	moveBundlePollInterval     time.Duration
+	moveBundleTouchInterval    time.Duration
+	moveBundleProgressInterval time.Duration
 
 	// conduitAuthorizeActionTestHook, when non-nil, decides each action in
 	// authorizeConduitUserStream instead of authorizeConduitAction. Only

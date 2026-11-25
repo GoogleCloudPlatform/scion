@@ -20,7 +20,9 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -113,6 +115,13 @@ type GenerationDeleter interface {
 	DeleteIfGeneration(ctx context.Context, objectPath string, generation int64) error
 }
 
+// ContentLengthRange bounds the allowed byte length of a signed PUT upload.
+// When Min == Max, the object store enforces an exact body size.
+type ContentLengthRange struct {
+	Min int64
+	Max int64
+}
+
 // SignedURLOptions configures signed URL generation.
 type SignedURLOptions struct {
 	// Method is the HTTP method (GET, PUT).
@@ -123,6 +132,10 @@ type SignedURLOptions struct {
 	ContentType string
 	// ContentMD5 is the expected MD5 hash (for PUT).
 	ContentMD5 string
+	// ContentLengthRange, when set on a PUT URL, binds the upload body size
+	// via a signed header (x-goog-content-length-range on GCS) and returns
+	// that header in SignedURL.Headers.
+	ContentLengthRange *ContentLengthRange
 	// ResponseContentType, when set on a GET URL, overrides the
 	// Content-Type the object store answers with. Providers that cannot
 	// override response headers ignore it.
@@ -379,4 +392,65 @@ func WorkspaceStoragePath(hubID, projectID, agentID string) string {
 func WorkspaceStorageURI(hubID, bucket, projectID, agentID string) string {
 	path := WorkspaceStoragePath(hubID, projectID, agentID)
 	return "gs://" + bucket + "/" + path + "/"
+}
+
+// Move-bundle root names under a reincarnation's staging prefix.
+const (
+	MoveBundleRootWorkspace = "workspace"
+	MoveBundleRootHome      = "home"
+)
+
+// MoveBundlesRoot returns the storage directory holding all move-bundle
+// staging prefixes for hubID (without a trailing slash; pass to DirPrefix
+// for prefix listing or deletion).
+func MoveBundlesRoot(hubID string) string {
+	return hubNamespaced(hubID, "move-bundles")
+}
+
+// validMoveReincarnationIDRE allow-lists single path-safe reincarnation IDs
+// (including UUIDs). Leading dots, path separators, backslashes, whitespace,
+// and NUL bytes are all rejected.
+var validMoveReincarnationIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func validateMoveReincarnationID(reincarnationID string) error {
+	if !validMoveReincarnationIDRE.MatchString(reincarnationID) || strings.Contains(reincarnationID, "..") {
+		return fmt.Errorf("%w: invalid reincarnation ID", ErrInvalidPath)
+	}
+	return nil
+}
+
+// MoveBundlePath returns the storage directory for a single reincarnation's
+// move bundle (without a trailing slash; pass to DirPrefix for DeletePrefix).
+// It validates reincarnationID so a malformed or empty ID can never widen a
+// prefix delete to all of move-bundles/.
+func MoveBundlePath(hubID, reincarnationID string) (string, error) {
+	if err := validateMoveReincarnationID(reincarnationID); err != nil {
+		return "", err
+	}
+	return hubNamespaced(hubID, "move-bundles/"+reincarnationID), nil
+}
+
+// MoveBundleManifestPath returns the object key for a move bundle's manifest.
+func MoveBundleManifestPath(hubID, reincarnationID string) (string, error) {
+	base, err := MoveBundlePath(hubID, reincarnationID)
+	if err != nil {
+		return "", err
+	}
+	return base + "/manifest.json", nil
+}
+
+// MoveBundlePartPath returns the object key for one compressed tar part of a
+// move bundle root ("workspace" or "home") at zero-based partIndex.
+func MoveBundlePartPath(hubID, reincarnationID, root string, partIndex int) (string, error) {
+	base, err := MoveBundlePath(hubID, reincarnationID)
+	if err != nil {
+		return "", err
+	}
+	if root != MoveBundleRootWorkspace && root != MoveBundleRootHome {
+		return "", fmt.Errorf("%w: invalid move bundle root %q", ErrInvalidPath, root)
+	}
+	if partIndex < 0 {
+		return "", fmt.Errorf("%w: negative part index %d", ErrInvalidPath, partIndex)
+	}
+	return fmt.Sprintf("%s/%s/part-%05d.tgz", base, root, partIndex), nil
 }

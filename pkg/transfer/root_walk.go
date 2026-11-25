@@ -33,11 +33,11 @@ var ErrDirReplaced = errors.New("directory replaced during the walk")
 // subdirectory (rel is its slash-separated path).
 var walkRootBeforeOpenDir atomic.Pointer[func(rel string)]
 
-// walkRoot walks the tree of root depth-first in lexical order, calling fn
+// WalkRoot walks the tree of root depth-first in lexical order, calling fn
 // for every entry below the root (rel is slash-separated, never "."), in the
 // manner of fs.WalkDir: if fn returns fs.SkipDir for a directory, the walk
 // does not descend into it; fs.SkipDir for a non-directory skips the rest of
-// that entry's directory; fs.SkipAll stops the walk and walkRoot returns nil;
+// that entry's directory; fs.SkipAll stops the walk and WalkRoot returns nil;
 // any other error stops the walk and is returned.
 //
 // Each subdirectory is opened through root with a trailing path separator,
@@ -48,6 +48,10 @@ var walkRootBeforeOpenDir atomic.Pointer[func(rel string)]
 // directory swapped in fails with ErrDirReplaced. (fs.WalkDir over root.FS()
 // would open a subdirectory with a blocking open that follows a link inside
 // the root.)
+func WalkRoot(root *os.Root, fn func(rel string, d fs.DirEntry) error) error {
+	return walkRoot(root, fn)
+}
+
 func walkRoot(root *os.Root, fn func(rel string, d fs.DirEntry) error) error {
 	f, err := root.Open(".")
 	if err != nil {

@@ -86,10 +86,18 @@ const (
 // copied onto the share.
 var cloudRunTempNameRE = regexp.MustCompile(`^\..+\.tmp-([0-9a-f]{16}|[0-9]+-[0-9]+)$`)
 
+// IsHomeTempName reports whether base is a temporary filename left behind by
+// the broker's guarded writers (agenthome's ".<name>.tmp-<16 hex>" or dirfd's
+// ".<name>.tmp-<pid>-<nanoseconds>"). Such leftovers may hold a credential
+// being written and are excluded when copying or bundling an agent home.
+func IsHomeTempName(base string) bool {
+	return cloudRunTempNameRE.MatchString(base)
+}
+
 // cloudRunHomeCopyExcluded reports whether the home copy leaves out the
 // source entry rel (slash-separated, relative to the home).
 func cloudRunHomeCopyExcluded(rel string, excludes []string) bool {
-	return rel == cloudRunHomeResetMarker || homeRelExcluded(rel, excludes) || cloudRunTempNameRE.MatchString(path.Base(rel))
+	return rel == cloudRunHomeResetMarker || homeRelExcluded(rel, excludes) || IsHomeTempName(path.Base(rel))
 }
 
 // CloudRunHomesWarning is the warning a broker logs at start, and scion
@@ -134,13 +142,27 @@ func hasFlatCloudRunInstance(srv *config.V1ServerConfig) bool {
 	return false
 }
 
+// PortableHomeExcludes returns the home-relative paths that must never be
+// copied out of an agent's home onto shared storage or into a portable move
+// bundle: the shared home transfer set's excludes (homeTransferExcludes, with
+// secrets.json delivered), the hub credential file and its staging file,
+// secrets.json unconditionally, and the home reset marker. Callers copying or
+// bundling a home should also exclude temporary leftovers matched by
+// IsHomeTempName.
+func PortableHomeExcludes(cfg RunConfig) []string {
+	return append(homeTransferExcludes(cfg, true),
+		cloudRunHubTokenRel,
+		cloudRunHubTokenTmpHomeRel,
+		cloudRunSecretsJSONHomeRel,
+		cloudRunHomeResetMarker,
+	)
+}
+
 // cloudRunHomeExcludes returns what the Cloud Run home copy leaves out,
-// relative to the home: the shared home transfer set's excludes
-// (homeTransferExcludes, with secrets.json delivered), then the hub
-// credential file, its staging file and secrets.json whether or not they
-// are staged. Temporary leftovers are left out too (cloudRunTempNameRE).
+// relative to the home. It delegates to PortableHomeExcludes so Cloud Run
+// seeding and portable move bundles share one canonical list.
 func cloudRunHomeExcludes(cfg RunConfig) []string {
-	return append(homeTransferExcludes(cfg, true), cloudRunHubTokenRel, cloudRunHubTokenTmpHomeRel, cloudRunSecretsJSONHomeRel)
+	return PortableHomeExcludes(cfg)
 }
 
 // Fixed errors of the home copy. They name no path, secret or value.

@@ -103,8 +103,8 @@ type AgentReincarnation struct {
 	// SetAgentReincarnationSourceCleanup.
 	SourceCleanup string `json:"sourceCleanup,omitempty"`
 	// TransferMode is set, at creation, for a cross-broker move: how the
-	// workspace reaches the target, TransferModeExport or
-	// TransferModeRecreate. "" for a plain reincarnation, and for a move
+	// workspace reaches the target, TransferModeExport, TransferModeBundle,
+	// or TransferModeRecreate. "" for a plain reincarnation, and for a move
 	// recorded before the field existed, which was always an export move: a
 	// reader that branches on the mode reads "" on a move record as
 	// TransferModeExport.
@@ -121,6 +121,10 @@ const (
 	// TransferModeExport: the same workspace, through an NFS export both
 	// brokers mount.
 	TransferModeExport = "export"
+	// TransferModeBundle: workspace and $HOME are snapshotted into Hub object
+	// storage on the source broker after stop and hydrated on the target
+	// broker before start.
+	TransferModeBundle = "bundle"
 	// TransferModeRecreate: a fresh workspace provisioned on the target
 	// (a forced move); the source's local state is given up.
 	TransferModeRecreate = "recreate"

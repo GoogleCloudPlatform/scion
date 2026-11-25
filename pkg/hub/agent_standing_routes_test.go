@@ -678,6 +678,20 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 				return "/api/v1/runtime-brokers/" + f.brokerID + "/agents/" + f.agentA.ID + "/workspace-download"
 			},
 		},
+		"POST /api/v1/runtime-brokers/{id}/agents/{agentId}/move-bundle/{rid}/upload-url": {
+			reason: "broker-only move-bundle upload URL; refuses agent tokens",
+			method: http.MethodPost,
+			path: func(f *standingCoverageFixture) string {
+				return "/api/v1/runtime-brokers/" + f.brokerID + "/agents/" + f.agentA.ID + "/move-bundle/rid-test/upload-url"
+			},
+		},
+		"POST /api/v1/runtime-brokers/{id}/agents/{agentId}/move-bundle/{rid}/download-urls": {
+			reason: "broker-only move-bundle download URLs; refuses agent tokens",
+			method: http.MethodPost,
+			path: func(f *standingCoverageFixture) string {
+				return "/api/v1/runtime-brokers/" + f.brokerID + "/agents/" + f.agentA.ID + "/move-bundle/rid-test/download-urls"
+			},
+		},
 		"GET /api/v1/env [scope=user]": {
 			reason: "user-scoped env read; refuses agent tokens",
 			method: http.MethodGet,

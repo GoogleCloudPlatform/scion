@@ -118,6 +118,10 @@ type BrokerCapabilities struct {
 	// move: it provisions the agent with a fresh workspace after confirming
 	// it has no files for the agent.
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AgentMoveBundle indicates this broker implements the portable
+	// workspace+$HOME bundle move endpoints (precheck, export, import) and
+	// WorkspaceSource="move-bundle" provision (ptone/scion#8960).
+	AgentMoveBundle bool `json:"agentMoveBundle,omitempty"`
 	// ReprovisionEmptyPerAgent indicates this broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
@@ -397,6 +401,11 @@ type CreateAgentRequest struct {
 	// reincarnation ID: the provision writes it into the agent directory it
 	// creates as the move marker (agent.MoveMarkerFile).
 	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
+	// WorkspaceSource, when set to api.WorkspaceSourceMoveBundle
+	// ("move-bundle") on a ProvisionOnly fresh-agent-dir move provision,
+	// leaves the workspace directory empty (no clone, no empty-repo init)
+	// while rendering $HOME normally so move-bundle/import can populate it.
+	WorkspaceSource string `json:"workspaceSource,omitempty"`
 	// ProjectPath is the local filesystem path to the project on this runtime broker.
 	// This is provided by the Hub from the project provider record.
 	ProjectPath string `json:"projectPath,omitempty"`

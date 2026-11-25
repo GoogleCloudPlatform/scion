@@ -1531,6 +1531,10 @@ type BrokerCapabilities struct {
 	// with a fresh workspace after confirming it has no files for the agent.
 	// The hub refuses a forced move onto a broker without it (412).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AgentMoveBundle indicates the broker implements the portable
+	// workspace+$HOME bundle move endpoints (precheck, export, import) and
+	// WorkspaceSource="move-bundle" provision (ptone/scion#8960).
+	AgentMoveBundle bool `json:"agentMoveBundle,omitempty"`
 	// AttachmentDelivery indicates the broker can receive attachment
 	// deliveries: it redeems the capabilities of a message request's
 	// attachments field and writes the files into the agent's home before

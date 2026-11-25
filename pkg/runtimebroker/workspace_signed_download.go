@@ -17,25 +17,19 @@ package runtimebroker
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -53,22 +47,7 @@ import (
 // net/http (a *url.Error quotes the full URL, query included) and response
 // bodies never reach error text.
 
-// Signed download error classes (signedDownloadError.Class).
-const (
-	signedClassTimeout        = "timeout"
-	signedClassDial           = "dial"
-	signedClassTLS            = "tls"
-	signedClassReset          = "reset"
-	signedClassCanceled       = "canceled"
-	signedClassTransport      = "transport"
-	signedClassExpired        = "expired"
-	signedClassSizeMismatch   = "size_mismatch"
-	signedClassListingChanged = "listing_changed"
-	signedClassInvalidEntry   = "invalid_entry"
-	signedClassWrite          = "write"
-	signedClassNoHub          = "no_hub_connection"
-	signedClassDecode         = "decode"
-)
+// Signed download error classes are defined in signed_transport.go.
 
 // signedDownloadError is the only error the signed-URL workspace download
 // returns. It holds no URL, path, bucket or response text.
@@ -122,38 +101,7 @@ type signedDownloadSettings struct {
 const (
 	// signedDownloadConcurrency is the default number of concurrent GETs.
 	signedDownloadConcurrency = 4
-	// signedDownloadRefreshMargin: a page whose URLs expire sooner than
-	// this is fetched again before more of its files are started.
-	signedDownloadRefreshMargin = 60 * time.Second
-	// signedDownloadMaxIdleRefreshes is the most consecutive page refreshes
-	// with no file completed since the previous refresh.
-	signedDownloadMaxIdleRefreshes = 2
-	// signedDownloadStallTimeout ends an object GET whose body stalls.
-	signedDownloadStallTimeout = 2 * time.Minute
-	// signedDownloadHeaderTimeout bounds the wait for an object GET's
-	// response headers.
-	signedDownloadHeaderTimeout = time.Minute
 )
-
-var (
-	// defaultSignedPageBackoff: a page request is tried once and retried
-	// after 1, 2 and 4 seconds on a transport error or a 5xx.
-	defaultSignedPageBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-	// defaultSignedFileBackoff: an object GET is tried up to 3 times on a
-	// transport error or a 5xx.
-	defaultSignedFileBackoff = []time.Duration{time.Second, 2 * time.Second}
-	// defaultSignedDownloadClient is a plain client with no instrumentation
-	// and a bounded wait for response headers.
-	defaultSignedDownloadClient = newSignedDownloadClient()
-)
-
-// newSignedDownloadClient returns the plain object client: the default
-// transport with a response header timeout, and no instrumentation.
-func newSignedDownloadClient() *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.ResponseHeaderTimeout = signedDownloadHeaderTimeout
-	return &http.Client{Transport: tr}
-}
 
 // resolved returns the settings with defaults filled in.
 func (st signedDownloadSettings) resolved() signedDownloadSettings {
@@ -179,18 +127,6 @@ func (st signedDownloadSettings) resolved() signedDownloadSettings {
 		st.stallTimeout = signedDownloadStallTimeout
 	}
 	return st
-}
-
-// sleepCtx waits d or until ctx ends.
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
 }
 
 // signedDownloadResult is what a completed signed download wrote.
@@ -560,35 +496,6 @@ func (d *signedDownloader) getOnce(ctx context.Context, f api.WorkspaceDownloadF
 	return resp.StatusCode, "", false
 }
 
-// stallReader cancels a GET whose body delivers no bytes for the stall
-// timeout. Every read that returns bytes restarts the timer.
-type stallReader struct {
-	r       io.Reader
-	timeout time.Duration
-	timer   *time.Timer
-	fired   atomic.Bool
-}
-
-func newStallReader(r io.Reader, timeout time.Duration, cancel context.CancelFunc) *stallReader {
-	s := &stallReader{r: r, timeout: timeout}
-	s.timer = time.AfterFunc(timeout, func() {
-		s.fired.Store(true)
-		cancel()
-	})
-	return s
-}
-
-func (s *stallReader) Read(p []byte) (int, error) {
-	n, err := s.r.Read(p)
-	if n > 0 {
-		s.timer.Reset(s.timeout)
-	}
-	return n, err
-}
-
-func (s *stallReader) stop()         { s.timer.Stop() }
-func (s *stallReader) stalled() bool { return s.fired.Load() }
-
 // writeFile streams body into a temporary file next to f.Path inside the
 // root, checks its length against f.Size, and renames it into place. It
 // returns an error class, "" on success.
@@ -636,47 +543,4 @@ func (d *signedDownloader) writeFile(f api.WorkspaceDownloadFile, body io.Reader
 		_ = d.root.Remove(tmp)
 	}
 	return class
-}
-
-// contextClass is the class of a context error.
-func contextClass(err error) string {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return signedClassTimeout
-	}
-	return signedClassCanceled
-}
-
-// transportClass classifies a transport or body read error without keeping
-// any of its text: a *url.Error quotes the full request URL.
-func transportClass(err error) string {
-	var (
-		netErr     net.Error
-		opErr      *net.OpError
-		recErr     tls.RecordHeaderError
-		certErr    *tls.CertificateVerificationError
-		unknownCA  x509.UnknownAuthorityError
-		hostErr    x509.HostnameError
-		invalidErr x509.CertificateInvalidError
-	)
-	switch {
-	case errors.Is(err, hubclient.ErrWorkspaceDownloadDecode):
-		return signedClassDecode
-	case errors.Is(err, context.Canceled):
-		return signedClassCanceled
-	case errors.Is(err, context.DeadlineExceeded):
-		return signedClassTimeout
-	case errors.As(err, &netErr) && netErr.Timeout():
-		return signedClassTimeout
-	case errors.As(err, &recErr), errors.As(err, &certErr), errors.As(err, &unknownCA),
-		errors.As(err, &hostErr), errors.As(err, &invalidErr):
-		return signedClassTLS
-	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE),
-		errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
-		return signedClassReset
-	case errors.As(err, &opErr) && opErr.Op == "dial":
-		return signedClassDial
-	case errors.Is(err, syscall.ECONNREFUSED):
-		return signedClassDial
-	}
-	return signedClassTransport
 }

@@ -20,10 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 
 	agentpkg "github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 )
 
 // agentMoveDispatcher is the broker dispatch a cross-broker move needs
@@ -58,6 +60,26 @@ type agentMoveDispatcher interface {
 	// every one that exists carries that move's marker, and otherwise
 	// answers 409 api.BrokerErrCodeMoveMarkerMismatch and removes nothing.
 	DispatchAgentDeleteRecreated(ctx context.Context, agent *store.Agent, moveReincarnationID string) error
+	// DispatchAgentProvisionForBundleMove provisions the agent on
+	// agent.RuntimeBrokerID for a bundle move: fresh-agent-dir expectation,
+	// moveReincarnationID marker, and WorkspaceSource="move-bundle" (empty
+	// workspace directory, home rendered normally). Refuses brokers without
+	// AgentMove and AgentMoveBundle.
+	DispatchAgentProvisionForBundleMove(ctx context.Context, agent *store.Agent, moveReincarnationID string) error
+	// DispatchMoveBundlePrecheck probes source durability and stat-only
+	// workspace/$HOME estimates against hub-supplied limits and hub-resolved
+	// file-secret targets.
+	DispatchMoveBundlePrecheck(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundlePrecheckResponse, error)
+	// DispatchMoveBundleExport starts (or idempotently polls) a bundle export
+	// job on agent.RuntimeBrokerID with hub-resolved file-secret targets.
+	DispatchMoveBundleExport(ctx context.Context, agent *store.Agent, reincarnationID string, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundleJobStatus, error)
+	// DispatchMoveBundleExportStatus polls a running/finished export job.
+	DispatchMoveBundleExportStatus(ctx context.Context, agent *store.Agent, reincarnationID string) (*api.MoveBundleJobStatus, error)
+	// DispatchMoveBundleImport starts (or idempotently polls) a bundle import
+	// job on agent.RuntimeBrokerID.
+	DispatchMoveBundleImport(ctx context.Context, agent *store.Agent, reincarnationID string, manifest bundle.Manifest, manifestHash string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error)
+	// DispatchMoveBundleImportStatus polls a running/finished import job.
+	DispatchMoveBundleImportStatus(ctx context.Context, agent *store.Agent, reincarnationID string) (*api.MoveBundleJobStatus, error)
 }
 
 var _ agentMoveDispatcher = (*HTTPAgentDispatcher)(nil)
@@ -72,6 +94,11 @@ var errBrokerLacksAgentMove = errors.New("runtime broker does not advertise the 
 // does not advertise AgentMoveRecreate. An older broker that does not know
 // the fresh-agent-dir expectation must never be relied on to refuse it.
 var errBrokerLacksAgentMoveRecreate = errors.New("runtime broker does not advertise the forced agent move capability; refusing to send it a forced move request")
+
+// errBrokerLacksAgentMoveBundle is returned, before anything is sent, when a
+// bundle move operation targets a broker that does not advertise
+// AgentMoveBundle.
+var errBrokerLacksAgentMoveBundle = errors.New("runtime broker does not advertise the agent move bundle capability; refusing to send it a move-bundle request")
 
 // errProvisionSent marks a provision error returned after the request may
 // have reached the broker: dispatchProvision's send boundary and every step
@@ -113,6 +140,237 @@ func (d *HTTPAgentDispatcher) requireMoveCapability(ctx context.Context, agent *
 		return errBrokerLacksAgentMoveRecreate
 	}
 	return nil
+}
+
+// requireMoveFreshTargetCapability loads agent.RuntimeBrokerID and returns
+// errBrokerLacksAgentMove or errBrokerLacksAgentMoveRecreate unless the broker
+// advertises AgentMove and either AgentMoveRecreate or AgentMoveBundle (both
+// implement marker-guarded fresh-target rollback deletes).
+func (d *HTTPAgentDispatcher) requireMoveFreshTargetCapability(ctx context.Context, agent *store.Agent) error {
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return fmt.Errorf("load runtime broker %s: %w", agent.RuntimeBrokerID, err)
+	}
+	if broker.Capabilities == nil || !broker.Capabilities.AgentMove {
+		return errBrokerLacksAgentMove
+	}
+	if !broker.Capabilities.AgentMoveRecreate && !broker.Capabilities.AgentMoveBundle {
+		return errBrokerLacksAgentMoveRecreate
+	}
+	return nil
+}
+
+// requireMoveBundleCapability loads agent.RuntimeBrokerID and returns
+// errBrokerLacksAgentMove or errBrokerLacksAgentMoveBundle unless the broker
+// advertises both AgentMove and AgentMoveBundle.
+func (d *HTTPAgentDispatcher) requireMoveBundleCapability(ctx context.Context, agent *store.Agent) error {
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return fmt.Errorf("load runtime broker %s: %w", agent.RuntimeBrokerID, err)
+	}
+	if broker.Capabilities == nil || !broker.Capabilities.AgentMove {
+		return errBrokerLacksAgentMove
+	}
+	if !broker.Capabilities.AgentMoveBundle {
+		return errBrokerLacksAgentMoveBundle
+	}
+	return nil
+}
+
+// DispatchAgentProvisionForBundleMove implements agentMoveDispatcher.
+func (d *HTTPAgentDispatcher) DispatchAgentProvisionForBundleMove(ctx context.Context, agent *store.Agent, moveReincarnationID string) error {
+	if moveReincarnationID == "" {
+		return errors.New("DispatchAgentProvisionForBundleMove: moveReincarnationID is required")
+	}
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
+	if err := d.requireMoveBundleCapability(ctx, agent); err != nil {
+		return err
+	}
+	return d.dispatchProvisionWithWorkspaceSource(ctx, agent, "DispatchAgentProvisionForBundleMove", false, agentpkg.MoveWorkspaceFreshAgentDir, moveReincarnationID, api.WorkspaceSourceMoveBundle, ReprovisionOptions{})
+}
+
+func (d *HTTPAgentDispatcher) prepareMoveBundleCall(ctx context.Context, agent *store.Agent) (context.Context, moveBundleBrokerClient, string, projectDispatchInfo, error) {
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return ctx, nil, "", projectDispatchInfo{}, err
+	}
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return ctx, nil, "", projectDispatchInfo{}, err
+	}
+	if err := d.requireMoveBundleCapability(ctx, agent); err != nil {
+		return ctx, nil, "", projectDispatchInfo{}, err
+	}
+	mbClient, ok := d.client.(moveBundleBrokerClient)
+	if !ok {
+		return ctx, nil, "", projectDispatchInfo{}, errors.New("broker client does not support move-bundle dispatch")
+	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
+	ctx = withDispatchAgentID(ctx, agent.ID)
+	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return ctx, nil, "", projectDispatchInfo{}, err
+	}
+	info, err := d.resolveDispatchProjectInfo(ctx, agent)
+	if err != nil {
+		return ctx, nil, "", projectDispatchInfo{}, fmt.Errorf("resolve project dispatch info: %w", err)
+	}
+	if agent.ProjectID != "" && info.projectID == "" {
+		return ctx, nil, "", projectDispatchInfo{}, fmt.Errorf("resolve project dispatch info: project %s: %w", agent.ProjectID, store.ErrNotFound)
+	}
+	return ctx, mbClient, endpoint, info, nil
+}
+
+// ResolveMoveBundleSecretFileTargets returns the deduplicated, sorted list of
+// file-type secret targets for agent across all applicable scopes using
+// metadata-only store listing (ListSecrets). It never fetches or decrypts
+// secret values and never runs or flushes the start-time owner-material gate.
+// Always returns a non-nil slice on success (an explicit empty slice when no
+// file-type secrets apply) so callers can pass it directly to
+// DispatchMoveBundlePrecheck and DispatchMoveBundleExport.
+func (d *HTTPAgentDispatcher) ResolveMoveBundleSecretFileTargets(ctx context.Context, agent *store.Agent) ([]string, error) {
+	if d.store == nil || agent == nil {
+		return []string{}, nil
+	}
+	type scopeRef struct {
+		scope   string
+		scopeID string
+	}
+	var scopes []scopeRef
+	if isShellAgent(agent) {
+		if agent.OwnerID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeUser, agent.OwnerID})
+		}
+	} else {
+		scopes = append(scopes, scopeRef{store.ScopeHub, d.hubID})
+		if agent.RuntimeBrokerID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeRuntimeBroker, agent.RuntimeBrokerID})
+		}
+		if agent.ProjectID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeProject, agent.ProjectID})
+		}
+		if agent.OwnerID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeUser, agent.OwnerID})
+		}
+		if d.agentSecretsEnabled() && agent.ID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeAgent, agent.ID})
+		}
+	}
+	seen := make(map[string]struct{})
+	targets := make([]string, 0)
+	for _, sc := range scopes {
+		secrets, err := d.store.ListSecrets(ctx, store.SecretFilter{
+			Scope:   sc.scope,
+			ScopeID: sc.scopeID,
+			Type:    store.SecretTypeFile,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list %s file-type secret targets: %w", sc.scope, err)
+		}
+		for _, sec := range secrets {
+			if sec.Target == "" {
+				continue
+			}
+			if _, dup := seen[sec.Target]; !dup {
+				seen[sec.Target] = struct{}{}
+				targets = append(targets, sec.Target)
+			}
+		}
+	}
+	sort.Strings(targets)
+	return targets, nil
+}
+
+// DispatchMoveBundlePrecheck implements agentMoveDispatcher.
+func (d *HTTPAgentDispatcher) DispatchMoveBundlePrecheck(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundlePrecheckResponse, error) {
+	ctx, mbClient, endpoint, info, err := d.prepareMoveBundleCall(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	req := &api.MoveBundlePrecheckRequest{
+		ProjectID:         agent.ProjectID,
+		ProjectPath:       info.projectPath,
+		ProjectSlug:       info.projectSlug,
+		SecretFileTargets: secretFileTargets,
+		Limits:            limits,
+	}
+	return mbClient.PrecheckMoveBundle(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, req)
+}
+
+// DispatchMoveBundleExport implements agentMoveDispatcher.
+func (d *HTTPAgentDispatcher) DispatchMoveBundleExport(ctx context.Context, agent *store.Agent, reincarnationID string, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundleJobStatus, error) {
+	if reincarnationID == "" {
+		return nil, errors.New("DispatchMoveBundleExport: reincarnationID is required")
+	}
+	ctx, mbClient, endpoint, info, err := d.prepareMoveBundleCall(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	req := &api.MoveBundleExportRequest{
+		ReincarnationID:   reincarnationID,
+		AgentID:           agent.ID,
+		ProjectID:         agent.ProjectID,
+		ProjectPath:       info.projectPath,
+		ProjectSlug:       info.projectSlug,
+		SecretFileTargets: secretFileTargets,
+		Limits:            limits,
+	}
+	return mbClient.StartMoveBundleExport(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, req)
+}
+
+// DispatchMoveBundleExportStatus implements agentMoveDispatcher.
+func (d *HTTPAgentDispatcher) DispatchMoveBundleExportStatus(ctx context.Context, agent *store.Agent, reincarnationID string) (*api.MoveBundleJobStatus, error) {
+	if reincarnationID == "" {
+		return nil, errors.New("DispatchMoveBundleExportStatus: reincarnationID is required")
+	}
+	ctx, mbClient, endpoint, _, err := d.prepareMoveBundleCall(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	return mbClient.GetMoveBundleExportStatus(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, reincarnationID)
+}
+
+// DispatchMoveBundleImport implements agentMoveDispatcher.
+func (d *HTTPAgentDispatcher) DispatchMoveBundleImport(ctx context.Context, agent *store.Agent, reincarnationID string, manifest bundle.Manifest, manifestHash string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error) {
+	if reincarnationID == "" {
+		return nil, errors.New("DispatchMoveBundleImport: reincarnationID is required")
+	}
+	ctx, mbClient, endpoint, info, err := d.prepareMoveBundleCall(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	req := &api.MoveBundleImportRequest{
+		ReincarnationID: reincarnationID,
+		AgentID:         agent.ID,
+		ProjectID:       agent.ProjectID,
+		ProjectPath:     info.projectPath,
+		ProjectSlug:     info.projectSlug,
+		Manifest:        manifest,
+		ManifestHash:    manifestHash,
+		Limits:          limits,
+	}
+	return mbClient.StartMoveBundleImport(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, req)
+}
+
+// DispatchMoveBundleImportStatus implements agentMoveDispatcher.
+func (d *HTTPAgentDispatcher) DispatchMoveBundleImportStatus(ctx context.Context, agent *store.Agent, reincarnationID string) (*api.MoveBundleJobStatus, error) {
+	if reincarnationID == "" {
+		return nil, errors.New("DispatchMoveBundleImportStatus: reincarnationID is required")
+	}
+	ctx, mbClient, endpoint, _, err := d.prepareMoveBundleCall(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	return mbClient.GetMoveBundleImportStatus(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, reincarnationID)
 }
 
 // DispatchAgentProvisionForMove implements agentMoveDispatcher.
@@ -191,7 +449,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteRecreated(ctx context.Context, 
 	if err := d.placementBackstop(ctx, agent); err != nil {
 		return err
 	}
-	if err := d.requireMoveCapability(ctx, agent, true); err != nil {
+	if err := d.requireMoveFreshTargetCapability(ctx, agent); err != nil {
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)

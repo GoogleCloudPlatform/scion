@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 )
 
 // homeTransferParityConfigs covers the staged-file classification: file
@@ -85,9 +86,12 @@ func TestHomeTransferExcludes_ParityWithKubernetes(t *testing.T) {
 		}
 
 		cr := cloudRunHomeExcludes(cfg)
-		want := append(homeTransferExcludes(cfg, true), cloudRunHubTokenRel, cloudRunHubTokenTmpHomeRel, cloudRunSecretsJSONHomeRel)
+		want := append(homeTransferExcludes(cfg, true), cloudRunHubTokenRel, cloudRunHubTokenTmpHomeRel, cloudRunSecretsJSONHomeRel, cloudRunHomeResetMarker)
 		if !slices.Equal(cr, want) {
 			t.Errorf("%s: cloudrun excludes %v, want %v", name, cr, want)
+		}
+		if portable := PortableHomeExcludes(cfg); !slices.Equal(portable, cr) {
+			t.Errorf("%s: PortableHomeExcludes %v differs from cloudRunHomeExcludes %v", name, portable, cr)
 		}
 		// Everything Kubernetes leaves out (without the CSI path) Cloud Run
 		// leaves out too.
@@ -159,5 +163,17 @@ func TestCloudRunHomeCopyExcluded_TempNames(t *testing.T) {
 		if got := cloudRunHomeCopyExcluded(rel, ex); got != want {
 			t.Errorf("cloudRunHomeCopyExcluded(%q) = %v, want %v", rel, got, want)
 		}
+	}
+}
+
+// TestPortableHomeExcludes_ParityWithBundleBaseline pins bundle.HomeBaselineExcludes
+// to the static baseline of runtime.PortableHomeExcludes so the two cannot drift.
+func TestPortableHomeExcludes_ParityWithBundleBaseline(t *testing.T) {
+	rtBase := slices.Clone(PortableHomeExcludes(RunConfig{UnixUsername: "scion"}))
+	bundleBase := slices.Clone(bundle.HomeBaselineExcludes)
+	slices.Sort(rtBase)
+	slices.Sort(bundleBase)
+	if !slices.Equal(rtBase, bundleBase) {
+		t.Errorf("bundle.HomeBaselineExcludes %v != PortableHomeExcludes baseline %v", bundleBase, rtBase)
 	}
 }

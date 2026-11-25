@@ -185,6 +185,28 @@ type mockRuntimeBrokerClient struct {
 	failFirstStartWith error
 }
 
+var _ moveBundleBrokerClient = (*mockRuntimeBrokerClient)(nil)
+
+func (m *mockRuntimeBrokerClient) PrecheckMoveBundle(context.Context, string, string, string, string, *api.MoveBundlePrecheckRequest) (*api.MoveBundlePrecheckResponse, error) {
+	return &api.MoveBundlePrecheckResponse{Durable: true}, nil
+}
+
+func (m *mockRuntimeBrokerClient) StartMoveBundleExport(_ context.Context, _, _, _, _ string, req *api.MoveBundleExportRequest) (*api.MoveBundleJobStatus, error) {
+	return &api.MoveBundleJobStatus{ReincarnationID: req.ReincarnationID, Kind: api.MoveBundleJobKindExport, State: api.MoveBundleJobStateRunning}, nil
+}
+
+func (m *mockRuntimeBrokerClient) GetMoveBundleExportStatus(_ context.Context, _, _, _, _, rid string) (*api.MoveBundleJobStatus, error) {
+	return &api.MoveBundleJobStatus{ReincarnationID: rid, Kind: api.MoveBundleJobKindExport, State: api.MoveBundleJobStateSucceeded}, nil
+}
+
+func (m *mockRuntimeBrokerClient) StartMoveBundleImport(_ context.Context, _, _, _, _ string, req *api.MoveBundleImportRequest) (*api.MoveBundleJobStatus, error) {
+	return &api.MoveBundleJobStatus{ReincarnationID: req.ReincarnationID, Kind: api.MoveBundleJobKindImport, State: api.MoveBundleJobStateRunning}, nil
+}
+
+func (m *mockRuntimeBrokerClient) GetMoveBundleImportStatus(_ context.Context, _, _, _, _, rid string) (*api.MoveBundleJobStatus, error) {
+	return &api.MoveBundleJobStatus{ReincarnationID: rid, Kind: api.MoveBundleJobKindImport, State: api.MoveBundleJobStateSucceeded}, nil
+}
+
 // mockSecretBackend is a test implementation of secret.SecretBackend that
 // returns a fixed set of secrets from Resolve.
 type mockSecretBackend struct {

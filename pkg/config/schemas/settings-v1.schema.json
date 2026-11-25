@@ -127,6 +127,7 @@
           "x-since": "1"
         },
         "scheduler": { "$ref": "#/$defs/serverScheduler" },
+        "reincarnate": { "$ref": "#/$defs/serverReincarnate" },
         "mode": {
           "type": "string",
           "enum": ["", "workstation", "hosted", "production"],
@@ -2770,6 +2771,90 @@
           "default": 2,
           "description": "Maximum number of recurring handlers that may run simultaneously in a single tick. Default 2 to prevent DB connection pool saturation on small deployments. Set to 0 for unlimited (pre-fix behavior).",
           "x-env-var": "SCION_SERVER_SCHEDULER_MAXCONCURRENCY",
+          "x-since": "1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "serverReincarnate": {
+      "type": "object",
+      "description": "Hub-side reincarnation settings.",
+      "x-since": "1",
+      "properties": {
+        "move_bundle": { "$ref": "#/$defs/serverReincarnateMoveBundle" }
+      },
+      "additionalProperties": false
+    },
+    "serverReincarnateMoveBundle": {
+      "type": "object",
+      "description": "Hub-configured bounds and timeouts for cross-broker bundle moves (sent to Runtime Brokers on precheck, export, and import).",
+      "x-since": "1",
+      "properties": {
+        "workspace_max_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 4294967296,
+          "description": "Maximum uncompressed regular-file bytes allowed in a bundled workspace (default 4 GiB).",
+          "x-since": "1"
+        },
+        "workspace_max_entries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 250000,
+          "description": "Maximum entries (files, directories, symlinks) allowed in a bundled workspace (default 250000).",
+          "x-since": "1"
+        },
+        "home_max_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1073741824,
+          "description": "Maximum uncompressed regular-file bytes allowed in a bundled $HOME after exclusions (default 1 GiB).",
+          "x-since": "1"
+        },
+        "home_max_entries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 100000,
+          "description": "Maximum entries allowed in a bundled $HOME after exclusions (default 100000).",
+          "x-since": "1"
+        },
+        "max_depth": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 64,
+          "description": "Maximum directory depth allowed in a bundled root (default 64).",
+          "x-since": "1"
+        },
+        "max_path_len": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 4096,
+          "description": "Maximum relative path length allowed in a bundled root (default 4096).",
+          "x-since": "1"
+        },
+        "part_size": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 67108864,
+          "description": "Target compressed part size in bytes (default 64 MiB).",
+          "x-since": "1"
+        },
+        "export_timeout": {
+          "type": "string",
+          "default": "20m",
+          "description": "Go duration bounding the whole bundle export job on the source Runtime Broker (default 20m).",
+          "x-since": "1"
+        },
+        "import_timeout": {
+          "type": "string",
+          "default": "20m",
+          "description": "Go duration bounding the whole bundle import job on the target Runtime Broker (default 20m).",
+          "x-since": "1"
+        },
+        "part_stall_timeout": {
+          "type": "string",
+          "default": "2m",
+          "description": "Go duration bounding per-part transfer inactivity before aborting a part upload or download (default 2m).",
           "x-since": "1"
         }
       },

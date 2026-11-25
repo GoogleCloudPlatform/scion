@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 )
 
 // --- helpers -----------------------------------------------------------------
@@ -143,9 +144,35 @@ func (c *countingBrokerClient) ExecuteKeys(context.Context, string, string, stri
 	return agentkeys.BrokerResult{}, errCountingClient
 }
 
+func (c *countingBrokerClient) PrecheckMoveBundle(context.Context, string, string, string, string, *api.MoveBundlePrecheckRequest) (*api.MoveBundlePrecheckResponse, error) {
+	c.record("PrecheckMoveBundle")
+	return nil, errCountingClient
+}
+
+func (c *countingBrokerClient) StartMoveBundleExport(context.Context, string, string, string, string, *api.MoveBundleExportRequest) (*api.MoveBundleJobStatus, error) {
+	c.record("StartMoveBundleExport")
+	return nil, errCountingClient
+}
+
+func (c *countingBrokerClient) GetMoveBundleExportStatus(context.Context, string, string, string, string, string) (*api.MoveBundleJobStatus, error) {
+	c.record("GetMoveBundleExportStatus")
+	return nil, errCountingClient
+}
+
+func (c *countingBrokerClient) StartMoveBundleImport(context.Context, string, string, string, string, *api.MoveBundleImportRequest) (*api.MoveBundleJobStatus, error) {
+	c.record("StartMoveBundleImport")
+	return nil, errCountingClient
+}
+
+func (c *countingBrokerClient) GetMoveBundleImportStatus(context.Context, string, string, string, string, string) (*api.MoveBundleJobStatus, error) {
+	c.record("GetMoveBundleImportStatus")
+	return nil, errCountingClient
+}
+
 var (
 	_ RuntimeBrokerClient    = (*countingBrokerClient)(nil)
 	_ agentkeys.BrokerClient = (*countingBrokerClient)(nil)
+	_ moveBundleBrokerClient = (*countingBrokerClient)(nil)
 )
 
 // agentOverrideStore answers GetAgent for one agent ID with a copy of
@@ -473,6 +500,29 @@ var placementGuardClassification = map[string]placementGuardOp{
 	"DispatchAgentDeleteRecreated": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 		return d.DispatchAgentDeleteRecreated(ctx, a, "reincarnation-1")
 	}},
+	"DispatchAgentProvisionForBundleMove": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+		return d.DispatchAgentProvisionForBundleMove(ctx, a, "reincarnation-1")
+	}},
+	"DispatchMoveBundlePrecheck": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+		_, err := d.DispatchMoveBundlePrecheck(ctx, a, api.DefaultMoveBundleLimits(), nil)
+		return err
+	}},
+	"DispatchMoveBundleExport": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+		_, err := d.DispatchMoveBundleExport(ctx, a, "reincarnation-1", api.DefaultMoveBundleLimits(), nil)
+		return err
+	}},
+	"DispatchMoveBundleExportStatus": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+		_, err := d.DispatchMoveBundleExportStatus(ctx, a, "reincarnation-1")
+		return err
+	}},
+	"DispatchMoveBundleImport": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+		_, err := d.DispatchMoveBundleImport(ctx, a, "reincarnation-1", bundle.Manifest{}, "sha256:0", api.MoveBundleLimits{})
+		return err
+	}},
+	"DispatchMoveBundleImportStatus": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+		_, err := d.DispatchMoveBundleImportStatus(ctx, a, "reincarnation-1")
+		return err
+	}},
 }
 
 // classifiedDispatcherInterfaces are the interfaces whose every method
@@ -514,7 +564,7 @@ func TestPlacementGuard_EveryBrokerReachingOp(t *testing.T) {
 
 	// Runtime Broker rows of this test, both advertising AgentMove so the
 	// move legs reach their guard.
-	caps := &store.BrokerCapabilities{Reprovision: true, Sync: true, AgentMove: true}
+	caps := &store.BrokerCapabilities{Reprovision: true, Sync: true, AgentMove: true, AgentMoveBundle: true}
 	legacy := &store.RuntimeBroker{ID: tid("guard-legacy"), Name: "guard-legacy", Slug: "guard-legacy",
 		Status: store.BrokerStatusOnline, Endpoint: "http://guard-legacy.invalid", Capabilities: caps}
 	require.NoError(t, f.s.CreateRuntimeBroker(ctx, legacy))

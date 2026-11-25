@@ -24,7 +24,9 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -44,14 +46,26 @@ const (
 	// workspace can be provisioned fresh on the target. In an export move it
 	// passes without a message: the workspace is carried, not recreated.
 	moveCheckWorkspaceRecreatable = "workspace_recreatable"
-	moveCheckTargetProfile        = "target_profile"
-	moveCheckTargetHealth         = "target_health"
-	moveCheckAccess               = "access"
-	moveCheckCapability           = "capability"
-	moveCheckCapacity             = "capacity"
+	// moveCheckWorkspaceBundleable decides, for a bundle move, whether the
+	// workspace sharing mode is eligible (clone-per-agent or empty-per-agent).
+	moveCheckWorkspaceBundleable = "workspace_bundleable"
+	// moveCheckBundleExperiment checks that hub.agent_move_bundle is enabled.
+	moveCheckBundleExperiment = "bundle_experiment"
+	// moveCheckBundleStorage checks that Hub object storage is configured and
+	// issues HTTP(S) signed URLs usable by remote brokers (GCS).
+	moveCheckBundleStorage = "bundle_storage"
+	// moveCheckBundleSource probes the source broker for post-stop durability
+	// and stat-only workspace/$HOME estimates within Hub limits.
+	moveCheckBundleSource  = "bundle_source"
+	moveCheckTargetProfile = "target_profile"
+	moveCheckTargetHealth  = "target_health"
+	moveCheckAccess        = "access"
+	moveCheckCapability    = "capability"
+	moveCheckCapacity      = "capacity"
 )
 
-// moveCheckOrder lists every move eligibility check in evaluation order.
+// moveCheckOrder lists every move eligibility check in evaluation order for
+// export and recreate modes.
 var moveCheckOrder = []string{
 	moveCheckRuntimeTarget,
 	moveCheckWorkspaceMode,
@@ -65,6 +79,37 @@ var moveCheckOrder = []string{
 	moveCheckCapability,
 	moveCheckCapacity,
 }
+
+// moveBundleCheckOrder lists every move eligibility check in evaluation order
+// for bundle mode. bundle_experiment runs first among bundle-specific checks
+// so an off-experiment hub reports that cleanly before workspace_bundleable;
+// bundle_source runs after access and capability so no RPC is sent to an
+// unreachable/incapable broker or for an unauthorized caller.
+var moveBundleCheckOrder = []string{
+	moveCheckRuntimeTarget,
+	moveCheckWorkspaceMode,
+	moveCheckWorkspaceStorage,
+	moveCheckSameExport,
+	moveCheckWorkspaceOnExport,
+	moveCheckBundleExperiment,
+	moveCheckWorkspaceBundleable,
+	moveCheckBundleStorage,
+	moveCheckTargetProfile,
+	moveCheckTargetHealth,
+	moveCheckAccess,
+	moveCheckCapability,
+	moveCheckBundleSource,
+	moveCheckCapacity,
+}
+
+// moveEvalMode selects which transfer tier evaluateMoveChecks evaluates.
+type moveEvalMode int
+
+const (
+	moveEvalExport moveEvalMode = iota
+	moveEvalBundle
+	moveEvalRecreate
+)
 
 // Move check results.
 const (
@@ -81,6 +126,9 @@ const (
 	// MoveTransferModeExport carries the workspace: the target finds the
 	// same directory through a shared NFS export.
 	MoveTransferModeExport = store.TransferModeExport
+	// MoveTransferModeBundle copies workspace and $HOME through Hub object
+	// storage after the source broker stops the agent.
+	MoveTransferModeBundle = store.TransferModeBundle
 	// MoveTransferModeRecreate provisions the workspace fresh on the target
 	// (a forced move); the source's local state is given up.
 	MoveTransferModeRecreate = store.TransferModeRecreate
@@ -97,6 +145,10 @@ const (
 // moveForceWaivedMessage is the message of an export check waived by a
 // forced move.
 const moveForceWaivedMessage = "not needed: the workspace is recreated on the target (--force)"
+
+// moveBundleWaivedMessage is the message of an export check waived by a
+// bundle move.
+const moveBundleWaivedMessage = "not needed: workspace and home are copied through hub storage"
 
 // SurfacePassthroughMove labels the passthrough re-check run against the
 // target broker of a cross-broker move.
@@ -128,14 +180,30 @@ type MoveVerdict struct {
 	RuntimeType string      `json:"runtimeType,omitempty"`
 	Checks      []MoveCheck `json:"checks"`
 	// TransferMode is how the workspace reaches the target: "export" (the
-	// same directory through a shared NFS export) or "recreate" (provisioned
+	// same directory through a shared NFS export), "bundle" (workspace and
+	// $HOME copied through Hub object storage), or "recreate" (provisioned
 	// fresh; local state is lost). Empty when not eligible. A hub that
 	// predates --force never sets it.
 	TransferMode string `json:"transferMode,omitempty"`
 	// Consequences lists what the move keeps, carries, recreates and loses,
 	// one entry per item, for the CLI to print. Set for every eligible move
-	// in either mode.
+	// in any mode.
 	Consequences []MoveConsequence `json:"consequences,omitempty"`
+	// BundleUnavailable explains why transfer mode "bundle" did not apply when
+	// export failed on a waivable/placement check and bundle could not be used.
+	BundleUnavailable string `json:"bundleUnavailable,omitempty"`
+	// BundleEstimate carries the source broker's stat-only workspace and $HOME
+	// size/entry estimate when transfer mode "bundle" is selected.
+	BundleEstimate *MoveBundleEstimate `json:"bundleEstimate,omitempty"`
+}
+
+// MoveBundleEstimate is the stat-only size/entry estimate reported by the
+// source broker during move-bundle precheck.
+type MoveBundleEstimate struct {
+	WorkspaceBytes   int64 `json:"workspaceBytes"`
+	WorkspaceEntries int64 `json:"workspaceEntries"`
+	HomeBytes        int64 `json:"homeBytes"`
+	HomeEntries      int64 `json:"homeEntries"`
 }
 
 // MoveConsequence is one item a move keeps, carries, recreates or loses.
@@ -194,6 +262,9 @@ type moveProbes struct {
 	// a broker other than dst. Nil when the agent has no assign-mode
 	// identity.
 	HostSARecord func(dst *store.RuntimeBroker) string
+	// BundleSource probes the source broker for post-stop durability and
+	// stat-only workspace/$HOME estimates against the Hub's move-bundle limits.
+	BundleSource func(src *store.RuntimeBroker, agent *store.Agent) (*api.MoveBundlePrecheckResponse, error)
 }
 
 // moveEligibilityInput is everything evaluateMoveEligibility decides on.
@@ -215,14 +286,14 @@ type moveEligibilityInput struct {
 	Probes   moveProbes
 
 	// Force asks for a forced move: when the workspace cannot travel through
-	// a shared export, it is recreated on the target. It never changes a
-	// move the export checks allow.
+	// a shared export or bundle, it is recreated on the target. It never
+	// changes a move the export or bundle checks allow.
 	Force bool
 	// EmptyPerAgent is true for an empty-per-agent workspace (CloneMode is
 	// also true for it).
 	EmptyPerAgent bool
 	// WorkspaceMode is the project's workspace sharing mode, named in the
-	// refusal of a forced move it does not support.
+	// refusal of a bundle or forced move it does not support.
 	WorkspaceMode string
 	// GitRemote is the project's git remote, the source of a recreated
 	// clone-per-agent workspace.
@@ -232,6 +303,12 @@ type moveEligibilityInput struct {
 	// recreated workspace.
 	Branch        string
 	DefaultBranch string
+	// BundleExperimentEnabled reports whether the hub.agent_move_bundle
+	// experiment is enabled on the Hub.
+	BundleExperimentEnabled bool
+	// BundleStorageError is "" when the Hub has HTTP-signable object storage
+	// configured (GCS), or the failure message for the bundle_storage check.
+	BundleStorageError string
 }
 
 // evaluateMoveEligibility runs the move eligibility checks in order and
@@ -250,15 +327,21 @@ type moveEligibilityInput struct {
 // for any workspace a forced move supports, a recreated workspace would
 // need the same mount.
 func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal) {
-	v, ref := evaluateMoveChecks(in, false)
+	v, ref := evaluateMoveChecks(in, moveEvalExport)
 	if ref == nil {
 		v.TransferMode = MoveTransferModeExport
-		v.Consequences = buildMoveConsequences(MoveTransferModeExport, in)
+		v.Consequences = buildMoveConsequences(MoveTransferModeExport, in, nil)
 		return v, nil
 	}
 	failed := firstFailedMoveCheck(v)
 	if !moveCheckWaivableByForce(failed) && !ref.placementCaused {
 		return v, ref
+	}
+	vb, refb := evaluateMoveChecks(in, moveEvalBundle)
+	if refb == nil {
+		vb.TransferMode = MoveTransferModeBundle
+		vb.Consequences = buildMoveConsequences(MoveTransferModeBundle, in, vb.BundleEstimate)
+		return vb, nil
 	}
 	if !in.Force {
 		_, notRecreatable := moveWorkspaceRecreatable(in)
@@ -266,15 +349,18 @@ func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal
 		dstRecreates := in.Dst.Capabilities != nil && in.Dst.Capabilities.AgentMoveRecreate
 		ref.ForceWouldApply = (failed == moveCheckSameExport || failed == moveCheckWorkspaceOnExport || ref.placementCaused) &&
 			notRecreatable == "" && dstRecreates
+		v.BundleUnavailable = refb.Message
 		return v, ref
 	}
-	v, ref = evaluateMoveChecks(in, true)
-	if ref != nil {
-		return v, ref
+	vr, refr := evaluateMoveChecks(in, moveEvalRecreate)
+	if refr != nil {
+		vr.BundleUnavailable = refb.Message
+		return vr, refr
 	}
-	v.TransferMode = MoveTransferModeRecreate
-	v.Consequences = buildMoveConsequences(MoveTransferModeRecreate, in)
-	return v, nil
+	vr.TransferMode = MoveTransferModeRecreate
+	vr.BundleUnavailable = refb.Message
+	vr.Consequences = buildMoveConsequences(MoveTransferModeRecreate, in, nil)
+	return vr, nil
 }
 
 // moveCheckWaivableByForce reports whether a forced move may waive a failure
@@ -329,22 +415,97 @@ func valueOrUnknown(s string) string {
 	return s
 }
 
-// evaluateMoveChecks runs the checks for one transfer mode: recreate false
-// is the export mode, recreate true a forced move's recreated workspace.
-func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *moveRefusal) {
+// moveWorkspaceBundleable decides whether a bundle move can carry the agent's
+// workspace (clone-per-agent or empty-per-agent, regardless of git remote).
+func moveWorkspaceBundleable(in moveEligibilityInput) (passMsg, failMsg string) {
+	if in.CloneMode {
+		if in.EmptyPerAgent {
+			return "empty-per-agent workspace and home can be bundled", ""
+		}
+		return "clone-per-agent workspace and home can be bundled", ""
+	}
+	return "", fmt.Sprintf("bundle transfer supports clone-per-agent and empty-per-agent workspaces; this agent's workspace is %s",
+		valueOrUnknown(in.WorkspaceMode))
+}
+
+// isMoveBundleStorageSupported reports whether stor is configured and uses a
+// provider that issues HTTP(S) signed URLs usable by remote brokers (today: GCS).
+func isMoveBundleStorageSupported(stor storage.Storage) bool {
+	return stor != nil && stor.Provider() == storage.ProviderGCS
+}
+
+// moveBundleStorageCheck returns "" when stor supports move-bundle signed
+// URLs, or the refusal message for the bundle_storage check (design §3.1).
+func moveBundleStorageCheck(stor storage.Storage) string {
+	if stor == nil {
+		return "hub object storage is not configured"
+	}
+	if !isMoveBundleStorageSupported(stor) {
+		return fmt.Sprintf("hub object storage provider %q cannot issue signed URLs a remote broker can use", stor.Provider())
+	}
+	return ""
+}
+
+// formatMoveBundleOverLimit formats a precheck Over field into a human-readable
+// limit-exceeded message.
+func formatMoveBundleOverLimit(resp *api.MoveBundlePrecheckResponse) string {
+	switch resp.Over {
+	case "workspace.bytes":
+		return fmt.Sprintf("workspace bytes (%s) exceed configured limit", formatMoveBundleBytes(resp.Workspace.Bytes))
+	case "workspace.entries":
+		return fmt.Sprintf("workspace entries (%d) exceed configured limit", resp.Workspace.Entries)
+	case "home.bytes":
+		return fmt.Sprintf("home bytes (%s) exceed configured limit", formatMoveBundleBytes(resp.Home.Bytes))
+	case "home.entries":
+		return fmt.Sprintf("home entries (%d) exceed configured limit", resp.Home.Entries)
+	default:
+		return fmt.Sprintf("%s exceeds configured limit", strings.ReplaceAll(resp.Over, ".", " "))
+	}
+}
+
+// formatMoveBundleBytes renders a byte count in human-readable binary units.
+func formatMoveBundleBytes(b int64) string {
+	const (
+		kib = 1024
+		mib = 1024 * kib
+		gib = 1024 * mib
+	)
+	switch {
+	case b >= gib:
+		return fmt.Sprintf("%.1f GiB", float64(b)/float64(gib))
+	case b >= mib:
+		return fmt.Sprintf("%.1f MiB", float64(b)/float64(mib))
+	case b >= kib:
+		return fmt.Sprintf("%.1f KiB", float64(b)/float64(kib))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
+// evaluateMoveChecks runs the checks for one transfer mode (export, bundle, or
+// recreate).
+func evaluateMoveChecks(in moveEligibilityInput, mode moveEvalMode) (MoveVerdict, *moveRefusal) {
+	order := moveCheckOrder
+	if mode == moveEvalBundle {
+		order = moveBundleCheckOrder
+	}
 	v := MoveVerdict{
 		SourceBroker: MoveBrokerRef{ID: in.Src.ID, Name: in.Src.Name},
 		TargetBroker: MoveBrokerRef{ID: in.Dst.ID, Name: in.Dst.Name},
-		Checks:       make([]MoveCheck, 0, len(moveCheckOrder)),
+		Checks:       make([]MoveCheck, 0, len(order)),
 	}
-	for _, name := range moveCheckOrder {
+	for _, name := range order {
 		v.Checks = append(v.Checks, MoveCheck{Name: name, Result: MoveCheckNotEvaluated})
 	}
 	idx := 0
 	pass := func() { v.Checks[idx].Result = MoveCheckPassed; idx++ }
+	waiveMsg := moveForceWaivedMessage
+	if mode == moveEvalBundle {
+		waiveMsg = moveBundleWaivedMessage
+	}
 	waive := func() {
 		v.Checks[idx].Result = MoveCheckWaived
-		v.Checks[idx].Message = moveForceWaivedMessage
+		v.Checks[idx].Message = waiveMsg
 		idx++
 	}
 	fail := func(status int, code, msg string) (MoveVerdict, *moveRefusal) {
@@ -371,7 +532,8 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 	}
 	pass()
 
-	if recreate {
+	switch mode {
+	case moveEvalRecreate:
 		// 2-4. Waived: the workspace is not carried, so the brokers need not
 		// share an export and the workspace need not be on one.
 		waive()
@@ -384,7 +546,30 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 		}
 		v.Checks[idx].Message = msg
 		pass()
-	} else {
+	case moveEvalBundle:
+		// 2-4. Waived: workspace and home are copied through Hub object storage.
+		waive()
+		waive()
+		waive()
+		// 4a. bundle_experiment: hub.agent_move_bundle must be enabled.
+		if !in.BundleExperimentEnabled {
+			return fail(http.StatusPreconditionFailed, ErrCodeExperimentDisabled,
+				fmt.Sprintf("bundle transfer requires the %s experiment", experiments.AgentMoveBundle))
+		}
+		pass()
+		// 4b. workspace_bundleable: clone-per-agent and empty-per-agent only.
+		msg, failMsg := moveWorkspaceBundleable(in)
+		if failMsg != "" {
+			return fail(http.StatusConflict, ErrCodeConflict, failMsg)
+		}
+		v.Checks[idx].Message = msg
+		pass()
+		// 4c. bundle_storage: Hub object storage configured and HTTP-signable.
+		if in.BundleStorageError != "" {
+			return fail(http.StatusConflict, api.BrokerErrCodeMoveBundleUnsupported, in.BundleStorageError)
+		}
+		pass()
+	default:
 		// 2. Both brokers report a workspace storage descriptor.
 		for _, b := range []*store.RuntimeBroker{src, dst} {
 			if b.WorkspaceStorage == nil {
@@ -461,8 +646,8 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 			fmt.Sprintf("profile %q is not available on broker %s", profileName, dstName))
 	}
 	// The Kubernetes constraint only keeps the workspace on the export; a
-	// recreated workspace does not need it.
-	if !recreate && in.CloneMode && !isKubernetesRuntimeType(profileType) {
+	// bundled or recreated workspace does not need it.
+	if mode == moveEvalExport && in.CloneMode && !isKubernetesRuntimeType(profileType) {
 		v, ref := fail(http.StatusConflict, ErrCodeConflict, fmt.Sprintf(
 			"profile %q on broker %s has runtime type %q; clone-per-agent workspaces are on the NFS export only on Kubernetes",
 			profileName, dstName, profileType))
@@ -471,11 +656,9 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 	}
 	pass()
 
-	// 6. The target's export mount is healthy and the target is reachable.
-	// A recreated workspace depends on the export mount only when the target
-	// places the agent directory on it (an agent-directory workspace under a
-	// Kubernetes profile, on an nfs backend).
-	if moveNeedsTargetExportMount(dst, recreate, in.CloneMode, profileType) && !targetExportMountHealthy(dst) {
+	// 6. The target's export mount is healthy (when needed) and the target is
+	// reachable. Bundle mode requires only Probes.Reachable(dst).
+	if mode != moveEvalBundle && moveNeedsTargetExportMount(dst, mode == moveEvalRecreate, in.CloneMode, profileType) && !targetExportMountHealthy(dst) {
 		return fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
 			fmt.Sprintf("broker %s reports its NFS export mount unhealthy", dstName))
 	}
@@ -538,18 +721,26 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 	pass()
 
 	// 8. Both brokers support agent move, and the source is online so it
-	// can clean up its local state.
+	// can clean up its local state (or export the bundle).
 	for _, b := range []*store.RuntimeBroker{dst, src} {
 		if b.Capabilities == nil || !b.Capabilities.AgentMove {
 			return fail(http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
 				fmt.Sprintf("broker %s does not support agent move; upgrade it", brokerDisplayName(b)))
 		}
 	}
+	if mode == moveEvalBundle {
+		for _, b := range []*store.RuntimeBroker{dst, src} {
+			if b.Capabilities == nil || !b.Capabilities.AgentMoveBundle {
+				return fail(http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
+					fmt.Sprintf("broker %s does not support bundle move; upgrade it", brokerDisplayName(b)))
+			}
+		}
+	}
 	// A forced move needs a target that refuses to provision over files
 	// already there (source cleanup is a localOnly delete, which AgentMove
 	// covers).
 	// Unreachable defence in depth: the AgentMove check above refuses nil Capabilities.
-	if recreate && (dst.Capabilities == nil || !dst.Capabilities.AgentMoveRecreate) {
+	if mode == moveEvalRecreate && (dst.Capabilities == nil || !dst.Capabilities.AgentMoveRecreate) {
 		return fail(http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
 			fmt.Sprintf("broker %s does not support forced moves; upgrade it", dstName))
 	}
@@ -558,6 +749,44 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 			fmt.Sprintf("source broker %s is unavailable; a move needs it online to clean up", srcName))
 	}
 	pass()
+
+	// 8a. bundle_source: probe source broker for post-stop durability and
+	// stat-only size/entry estimates against Hub limits.
+	if mode == moveEvalBundle {
+		if in.Probes.BundleSource == nil {
+			return fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
+				"source bundle precheck is unavailable")
+		}
+		precheck, err := in.Probes.BundleSource(src, in.Agent)
+		if err != nil {
+			return fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
+				moveBundlePrecheckErrorMessage(err))
+		}
+		if precheck == nil {
+			return fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
+				"source bundle precheck returned no response")
+		}
+		if !precheck.Durable {
+			reason := precheck.Reason
+			if reason == "" {
+				reason = "source runtime does not preserve workspace and home across stop"
+			}
+			return fail(http.StatusConflict, ErrCodeConflict, reason)
+		}
+		if precheck.Over != "" {
+			return fail(http.StatusConflict, ErrCodeConflict,
+				fmt.Sprintf("bundle exceeds limit: %s", formatMoveBundleOverLimit(precheck)))
+		}
+		v.BundleEstimate = &MoveBundleEstimate{
+			WorkspaceBytes:   precheck.Workspace.Bytes,
+			WorkspaceEntries: precheck.Workspace.Entries,
+			HomeBytes:        precheck.Home.Bytes,
+			HomeEntries:      precheck.Home.Entries,
+		}
+		v.Checks[idx].Message = fmt.Sprintf("source runtime is durable (~%s total)",
+			formatMoveBundleBytes(precheck.Workspace.Bytes+precheck.Home.Bytes))
+		pass()
+	}
 
 	// 9. The target has room under its agent limit (read-only).
 	if msg := in.Probes.Capacity(dst); msg != "" {
@@ -598,7 +827,7 @@ func targetExportMountHealthy(dst *store.RuntimeBroker) bool {
 // buildMoveConsequences lists what an eligible move keeps, carries,
 // recreates and loses, grouped by kind in display order. Tests pin the item
 // keys; the text is for people.
-func buildMoveConsequences(mode string, in moveEligibilityInput) []MoveConsequence {
+func buildMoveConsequences(mode string, in moveEligibilityInput, est *MoveBundleEstimate) []MoveConsequence {
 	srcName, dstName := brokerDisplayName(in.Src), brokerDisplayName(in.Dst)
 	gen := in.Agent.Generation
 	c := func(kind, item, text string) MoveConsequence {
@@ -609,28 +838,52 @@ func buildMoveConsequences(mode string, in moveEligibilityInput) []MoveConsequen
 		c(MoveConsequenceKept, "relationships", "conversations, subscriptions, notification routes and messages addressed to the agent"),
 		c(MoveConsequenceKept, "config", "the applied configuration (template, harness, profile, env, labels), re-resolved as for any reincarnate"),
 	}
-	if mode == MoveTransferModeExport {
+	switch mode {
+	case MoveTransferModeExport:
 		out = append(out,
 			c(MoveConsequenceKept, "workspace", fmt.Sprintf("the workspace on the shared NFS export, found in place by %s", dstName)),
 			c(MoveConsequenceKept, "local-work", "uncommitted files and unpushed commits in the workspace"),
 		)
+	case MoveTransferModeBundle:
+		out = append(out,
+			c(MoveConsequenceCarried, "workspace", fmt.Sprintf("copied through hub storage to %s, including .git, uncommitted changes and unpushed commits", dstName)),
+			c(MoveConsequenceCarried, "home", fmt.Sprintf("copied through hub storage to %s, except secrets, credentials and caches, which are regenerated or reinjected on %s", dstName, dstName)),
+		)
+		if est != nil {
+			out = append(out, c(MoveConsequenceCarried, "bundle-size", fmt.Sprintf(
+				"estimated snapshot size: ~%s (workspace %s, %d entries; home %s, %d entries)",
+				formatMoveBundleBytes(est.WorkspaceBytes+est.HomeBytes),
+				formatMoveBundleBytes(est.WorkspaceBytes), est.WorkspaceEntries,
+				formatMoveBundleBytes(est.HomeBytes), est.HomeEntries,
+			)))
+		}
 	}
 	out = append(out, c(MoveConsequenceCarried, "handoff", "the handoff (if given) is delivered as the new generation's first task, with the reincarnation preamble"))
-	if mode == MoveTransferModeRecreate {
+	switch mode {
+	case MoveTransferModeBundle:
+		out = append(out,
+			c(MoveConsequenceRecreated, "harness-session", "a fresh harness session; conversation history files are kept in $HOME"),
+			c(MoveConsequenceRecreated, "credentials", fmt.Sprintf("agent token, secrets and harness auth issued fresh to the new container on %s", dstName)),
+		)
+	case MoveTransferModeRecreate:
 		ws := fmt.Sprintf("fresh clone of %s on %s", valueOrUnknown(displayGitRemote(in.GitRemote)), dstName)
 		if in.EmptyPerAgent {
 			ws = fmt.Sprintf("fresh empty directory on %s", dstName)
 		}
-		out = append(out, c(MoveConsequenceRecreated, "workspace", ws))
-	}
-	out = append(out,
-		c(MoveConsequenceRecreated, "home", fmt.Sprintf("regenerated from the template and harness config on %s", dstName)),
-		c(MoveConsequenceRecreated, "harness-session", "a new harness session; no conversation history"),
-		c(MoveConsequenceRecreated, "credentials", fmt.Sprintf("agent token, secrets and harness auth issued fresh to the new container on %s", dstName)),
-	)
-	if mode == MoveTransferModeRecreate {
-		out = append(out, c(MoveConsequenceLost, "local-work",
-			fmt.Sprintf("uncommitted files, unpushed commits and anything else in the workspace on %s", srcName)))
+		out = append(out,
+			c(MoveConsequenceRecreated, "workspace", ws),
+			c(MoveConsequenceRecreated, "home", fmt.Sprintf("regenerated from the template and harness config on %s", dstName)),
+			c(MoveConsequenceRecreated, "harness-session", "a new harness session; no conversation history"),
+			c(MoveConsequenceRecreated, "credentials", fmt.Sprintf("agent token, secrets and harness auth issued fresh to the new container on %s", dstName)),
+			c(MoveConsequenceLost, "local-work",
+				fmt.Sprintf("uncommitted files, unpushed commits and anything else in the workspace on %s", srcName)),
+		)
+	default:
+		out = append(out,
+			c(MoveConsequenceRecreated, "home", fmt.Sprintf("regenerated from the template and harness config on %s", dstName)),
+			c(MoveConsequenceRecreated, "harness-session", "a new harness session; no conversation history"),
+			c(MoveConsequenceRecreated, "credentials", fmt.Sprintf("agent token, secrets and harness auth issued fresh to the new container on %s", dstName)),
+		)
 	}
 	out = append(out, c(MoveConsequenceLost, "process-state", "running processes, open ports and in-container state"))
 	return out
@@ -852,6 +1105,7 @@ func (s *Server) moveProbesFor(r *http.Request, project *store.Project, ac *stor
 		},
 	}
 	p.HostSARecord = s.hostSARecordMoveProbe(ctx, ac)
+	p.BundleSource = s.moveBundleSourceProbe(ctx)
 	if ac != nil && ac.GCPIdentity != nil && ac.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough {
 		projectID := ""
 		if project != nil {
@@ -898,6 +1152,83 @@ func (s *Server) hostSARecordMoveProbe(ctx context.Context, ac *store.AgentAppli
 				sa.ScopeID, brokerDisplayName(dst))
 		}
 		return ""
+	}
+}
+
+// MoveBundleExportLimits returns the Hub-configured api.MoveBundleLimits for
+// precheck and export requests (with design §3.7 defaults for unset fields).
+func (s *Server) MoveBundleExportLimits() api.MoveBundleLimits {
+	return s.config.MoveBundle.ExportLimits()
+}
+
+// MoveBundleImportLimits returns the Hub-configured api.MoveBundleLimits for
+// import requests (with design §3.7 defaults for unset fields).
+func (s *Server) MoveBundleImportLimits() api.MoveBundleLimits {
+	return s.config.MoveBundle.ImportLimits()
+}
+
+// moveBundleSecretFileTargets resolves the file-type secret targets for agent
+// using the server's dispatcher (if it exposes ResolveMoveBundleSecretFileTargets).
+// Returns a non-nil empty slice when none apply. Part D reuses this helper for
+// DispatchMoveBundleExport.
+func (s *Server) moveBundleSecretFileTargets(ctx context.Context, agent *store.Agent) ([]string, error) {
+	type secretTargetResolver interface {
+		ResolveMoveBundleSecretFileTargets(ctx context.Context, agent *store.Agent) ([]string, error)
+	}
+	if r, ok := s.GetDispatcher().(secretTargetResolver); ok {
+		return r.ResolveMoveBundleSecretFileTargets(ctx, agent)
+	}
+	return []string{}, nil
+}
+
+// errMoveBundleSecretTargetsFailed marks a secret-target resolution error in
+// moveBundleSourceProbe so moveBundlePrecheckErrorMessage maps it to a fixed
+// client-safe message without leaking backend details.
+var errMoveBundleSecretTargetsFailed = errors.New("could not resolve the agent's secret targets")
+
+// moveBundlePrecheckErrorMessage returns a client-safe refusal message for a
+// failed bundle_source probe. Raw transport errors (which may contain internal
+// broker endpoint URLs), store errors, and secret-backend errors never reach
+// API responses; broker HTTP status errors are sanitized via dispatchFailureText.
+func moveBundlePrecheckErrorMessage(err error) string {
+	if errors.Is(err, errMoveBundleSecretTargetsFailed) {
+		return errMoveBundleSecretTargetsFailed.Error()
+	}
+	var se *brokerStatusError
+	if errors.As(err, &se) && se != nil {
+		return "source bundle precheck failed: " + dispatchFailureText(se)
+	}
+	return "source bundle precheck failed"
+}
+
+// moveBundleSourceProbe returns the moveProbes.BundleSource callback that
+// calls DispatchMoveBundlePrecheck on the source broker using the Hub's
+// configured move-bundle limits and hub-resolved file-type secret targets.
+func (s *Server) moveBundleSourceProbe(ctx context.Context) func(src *store.RuntimeBroker, agent *store.Agent) (*api.MoveBundlePrecheckResponse, error) {
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return nil
+	}
+	md, ok := dispatcher.(agentMoveDispatcher)
+	if !ok {
+		return nil
+	}
+	limits := s.MoveBundleExportLimits()
+	return func(src *store.RuntimeBroker, agent *store.Agent) (*api.MoveBundlePrecheckResponse, error) {
+		srcAgent := withBroker(agent, src.ID)
+		secretTargets, err := s.moveBundleSecretFileTargets(ctx, srcAgent)
+		if err != nil {
+			s.agentLifecycleLog.Warn("move bundle precheck: failed to resolve secret file targets",
+				"agent_id", agent.ID, "source_broker_id", src.ID, "error", err)
+			return nil, errMoveBundleSecretTargetsFailed
+		}
+		resp, err := md.DispatchMoveBundlePrecheck(ctx, srcAgent, limits, secretTargets)
+		if err != nil {
+			s.agentLifecycleLog.Warn("move bundle precheck: broker precheck failed",
+				"agent_id", agent.ID, "source_broker_id", src.ID, "error", err)
+			return nil, err
+		}
+		return resp, nil
 	}
 }
 

@@ -1509,6 +1509,9 @@ type GlobalConfig struct {
 	// Scheduler settings
 	Scheduler SchedulerConfig `json:"scheduler" yaml:"scheduler" koanf:"scheduler"`
 
+	// Reincarnate settings (server.reincarnate)
+	Reincarnate ReincarnateConfig `json:"reincarnate,omitempty" yaml:"reincarnate,omitempty" koanf:"reincarnate"`
+
 	// OIDC Identity Provider settings
 	OIDC OIDCProviderConfig `json:"oidc,omitempty" yaml:"oidc,omitempty" koanf:"oidc"`
 
@@ -1556,6 +1559,132 @@ type SchedulerConfig struct {
 	// When nil (unset), the scheduler uses its built-in default of 2.
 	// Set to 0 for unlimited (pre-fix behavior).
 	MaxConcurrency *int `json:"maxConcurrency,omitempty" yaml:"maxConcurrency,omitempty" koanf:"maxConcurrency"`
+}
+
+// ReincarnateConfig holds Hub-side reincarnation settings (server.reincarnate).
+type ReincarnateConfig struct {
+	MoveBundle MoveBundleConfig `json:"moveBundle,omitempty" yaml:"moveBundle,omitempty" koanf:"moveBundle"`
+}
+
+// MoveBundleConfig holds Hub-configured bounds and timeouts for cross-broker
+// bundle moves (server.reincarnate.move_bundle, design §3.7). Zero fields fall
+// back to the §3.7 defaults when converted to api.MoveBundleLimits.
+type MoveBundleConfig struct {
+	WorkspaceMaxBytes   int64         `json:"workspaceMaxBytes,omitempty" yaml:"workspaceMaxBytes,omitempty" koanf:"workspaceMaxBytes"`
+	WorkspaceMaxEntries int64         `json:"workspaceMaxEntries,omitempty" yaml:"workspaceMaxEntries,omitempty" koanf:"workspaceMaxEntries"`
+	HomeMaxBytes        int64         `json:"homeMaxBytes,omitempty" yaml:"homeMaxBytes,omitempty" koanf:"homeMaxBytes"`
+	HomeMaxEntries      int64         `json:"homeMaxEntries,omitempty" yaml:"homeMaxEntries,omitempty" koanf:"homeMaxEntries"`
+	MaxDepth            int           `json:"maxDepth,omitempty" yaml:"maxDepth,omitempty" koanf:"maxDepth"`
+	MaxPathLen          int           `json:"maxPathLen,omitempty" yaml:"maxPathLen,omitempty" koanf:"maxPathLen"`
+	PartSize            int64         `json:"partSize,omitempty" yaml:"partSize,omitempty" koanf:"partSize"`
+	ExportTimeout       time.Duration `json:"exportTimeout,omitempty" yaml:"exportTimeout,omitempty" koanf:"exportTimeout"`
+	ImportTimeout       time.Duration `json:"importTimeout,omitempty" yaml:"importTimeout,omitempty" koanf:"importTimeout"`
+	PartStallTimeout    time.Duration `json:"partStallTimeout,omitempty" yaml:"partStallTimeout,omitempty" koanf:"partStallTimeout"`
+}
+
+// Default MoveBundleConfig values from design §3.7 (decision D7).
+const (
+	DefaultMoveBundleWorkspaceMaxBytes   int64 = 4 << 30 // 4 GiB
+	DefaultMoveBundleWorkspaceMaxEntries int64 = 250_000
+	DefaultMoveBundleHomeMaxBytes        int64 = 1 << 30 // 1 GiB
+	DefaultMoveBundleHomeMaxEntries      int64 = 100_000
+	DefaultMoveBundleMaxDepth            int   = 64
+	DefaultMoveBundleMaxPathLen          int   = 4096
+	DefaultMoveBundlePartSize            int64 = 64 << 20 // 64 MiB
+	DefaultMoveBundleExportTimeout             = 20 * time.Minute
+	DefaultMoveBundleImportTimeout             = 20 * time.Minute
+	DefaultMoveBundlePartStallTimeout          = 2 * time.Minute
+)
+
+// DefaultMoveBundleConfig returns MoveBundleConfig populated with design §3.7 defaults.
+func DefaultMoveBundleConfig() MoveBundleConfig {
+	return MoveBundleConfig{
+		WorkspaceMaxBytes:   DefaultMoveBundleWorkspaceMaxBytes,
+		WorkspaceMaxEntries: DefaultMoveBundleWorkspaceMaxEntries,
+		HomeMaxBytes:        DefaultMoveBundleHomeMaxBytes,
+		HomeMaxEntries:      DefaultMoveBundleHomeMaxEntries,
+		MaxDepth:            DefaultMoveBundleMaxDepth,
+		MaxPathLen:          DefaultMoveBundleMaxPathLen,
+		PartSize:            DefaultMoveBundlePartSize,
+		ExportTimeout:       DefaultMoveBundleExportTimeout,
+		ImportTimeout:       DefaultMoveBundleImportTimeout,
+		PartStallTimeout:    DefaultMoveBundlePartStallTimeout,
+	}
+}
+
+// IsZero reports whether all fields of c are unset.
+func (c MoveBundleConfig) IsZero() bool {
+	return c == (MoveBundleConfig{})
+}
+
+// durationToPositiveSeconds converts a positive duration to whole seconds,
+// rounding sub-second remainders up to at least 1 so MoveBundleLimits.Validate
+// never rejects a positive sub-second config duration as 0.
+func durationToPositiveSeconds(d time.Duration) int {
+	secs := int((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		return 1
+	}
+	return secs
+}
+
+func (c MoveBundleConfig) toAPILimits(jobTimeout time.Duration) api.MoveBundleLimits {
+	lim := api.MoveBundleLimits{
+		WorkspaceMaxBytes:   DefaultMoveBundleWorkspaceMaxBytes,
+		WorkspaceMaxEntries: DefaultMoveBundleWorkspaceMaxEntries,
+		HomeMaxBytes:        DefaultMoveBundleHomeMaxBytes,
+		HomeMaxEntries:      DefaultMoveBundleHomeMaxEntries,
+		MaxDepth:            DefaultMoveBundleMaxDepth,
+		MaxPathLen:          DefaultMoveBundleMaxPathLen,
+		PartSize:            DefaultMoveBundlePartSize,
+		TimeoutSeconds:      durationToPositiveSeconds(jobTimeout),
+		PartStallSeconds:    durationToPositiveSeconds(DefaultMoveBundlePartStallTimeout),
+	}
+	if c.WorkspaceMaxBytes > 0 {
+		lim.WorkspaceMaxBytes = c.WorkspaceMaxBytes
+	}
+	if c.WorkspaceMaxEntries > 0 {
+		lim.WorkspaceMaxEntries = c.WorkspaceMaxEntries
+	}
+	if c.HomeMaxBytes > 0 {
+		lim.HomeMaxBytes = c.HomeMaxBytes
+	}
+	if c.HomeMaxEntries > 0 {
+		lim.HomeMaxEntries = c.HomeMaxEntries
+	}
+	if c.MaxDepth > 0 {
+		lim.MaxDepth = c.MaxDepth
+	}
+	if c.MaxPathLen > 0 {
+		lim.MaxPathLen = c.MaxPathLen
+	}
+	if c.PartSize > 0 {
+		lim.PartSize = c.PartSize
+	}
+	if c.PartStallTimeout > 0 {
+		lim.PartStallSeconds = durationToPositiveSeconds(c.PartStallTimeout)
+	}
+	return lim
+}
+
+// ExportLimits converts c into api.MoveBundleLimits for precheck and export
+// requests, applying design §3.7 defaults for any unset fields.
+func (c MoveBundleConfig) ExportLimits() api.MoveBundleLimits {
+	timeout := DefaultMoveBundleExportTimeout
+	if c.ExportTimeout > 0 {
+		timeout = c.ExportTimeout
+	}
+	return c.toAPILimits(timeout)
+}
+
+// ImportLimits converts c into api.MoveBundleLimits for import requests,
+// applying design §3.7 defaults for any unset fields.
+func (c MoveBundleConfig) ImportLimits() api.MoveBundleLimits {
+	timeout := DefaultMoveBundleImportTimeout
+	if c.ImportTimeout > 0 {
+		timeout = c.ImportTimeout
+	}
+	return c.toAPILimits(timeout)
 }
 
 // GitHubAppConfig holds configuration for the Hub's GitHub App integration.

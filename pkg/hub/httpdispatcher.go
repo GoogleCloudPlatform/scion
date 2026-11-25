@@ -2363,6 +2363,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agen
 // it with the GatherEnv two-pass mechanism, and merge any resolved storage env
 // back into AppliedConfig.
 func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace, moveReincarnationID string, reset ReprovisionOptions) (err error) {
+	return d.dispatchProvisionWithWorkspaceSource(ctx, agent, callerName, reprovision, expectNFSWorkspace, moveReincarnationID, "", reset)
+}
+
+func (d *HTTPAgentDispatcher) dispatchProvisionWithWorkspaceSource(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace, moveReincarnationID, workspaceSource string, reset ReprovisionOptions) (err error) {
 	// sent is set at the send boundary below. Every error returned once it
 	// is set is marked errProvisionSent (provisionSent), except a deferred
 	// route (ErrLifecycleDeferred), which sends nothing; an error returned
@@ -2438,6 +2442,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	}
 	req.ExpectExistingNFSWorkspace = expectNFSWorkspace
 	req.MoveReincarnationID = moveReincarnationID
+	req.WorkspaceSource = workspaceSource
 	if reprovision && reset.ResetHome {
 		req.ResetHome = true
 		req.ResetHomeID = reset.ResetID
