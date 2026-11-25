@@ -247,6 +247,55 @@ export interface GitHubTokenPermissions {
   actions?: string;
 }
 
+export interface GitHubInstallation {
+  installation_id: number;
+  account_login: string;
+  account_type: string;
+  app_id: number;
+  repositories?: string[];
+  status: string;
+}
+
+export interface ProjectGitHubInfo {
+  project_id: string;
+  app: {
+    configured: boolean;
+    slug: string;
+    web_host: string;
+  };
+  remote: {
+    owner: string;
+    repo: string;
+    on_app_host: boolean;
+  };
+  association: {
+    installation_id: number | null;
+    account_login: string;
+    basis: 'admin_binding' | 'creator_push' | 'creator_pull' | null;
+    write_allowed: boolean;
+    bound_by?: string;
+    bound_at?: string;
+    authorized: boolean;
+    error_code: string;
+    reason: string;
+  };
+  status: GitHubAppProjectStatus | null;
+  permissions: {
+    mode: 'default' | 'custom';
+    requested: Record<string, string>;
+    app_granted: Record<string, string>;
+    effective: Record<string, string>;
+    capped: string[];
+    cap_reasons: Record<string, string>;
+  };
+  can: {
+    bind: boolean;
+    edit_permissions: boolean;
+    edit_extra_repos: boolean;
+    discover: boolean;
+  };
+}
+
 export interface Project {
   id: string;
   name: string;
