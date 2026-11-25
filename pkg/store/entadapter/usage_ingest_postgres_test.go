@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -69,6 +70,9 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 			int64(i+1), ts.Add(time.Duration(i)*time.Second), 10, 5, 2, 3,
 		)
 	}
+	// Populate JSONB array fields on event 1 so we can assert jsonb_typeof = 'array' below (O4).
+	allEvents[0].MalformedFields = []string{"cache_read_tokens"}
+	allEvents[0].ChargedGroupIDs = []string{"group-1"}
 
 	const workers = 10
 	start := make(chan struct{})
@@ -166,6 +170,21 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 	assert.Equal(t, int64(totalEvents), mhs[0].LastContiguousSeq)
 	assert.Equal(t, int64(totalEvents), mhs[0].MaxSeqSeen)
 	assert.Empty(t, mhs[0].MissingRanges)
+
+	// O4: Verify JSONB array columns stored with jsonb_typeof = 'array' on Postgres.
+	rows := &entsql.Rows{}
+	require.NoError(t, cs.client.Driver().Query(
+		ctx,
+		"SELECT jsonb_typeof(malformed_fields), jsonb_typeof(charged_group_ids) FROM usage_events WHERE hub_id = $1 AND event_id = $2",
+		[]any{"hub-pg", "pg-conc-evt-01"},
+		rows,
+	))
+	defer func() { _ = rows.Close() }()
+	require.True(t, rows.Next())
+	var malformedType, chargedType string
+	require.NoError(t, rows.Scan(&malformedType, &chargedType))
+	assert.Equal(t, "array", malformedType)
+	assert.Equal(t, "array", chargedType)
 }
 
 func TestMeterHealth_FirstInsertRace_Postgres(t *testing.T) {

@@ -171,7 +171,11 @@ func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.C
 	dbDuplicates := 0
 
 	if len(uniqueEvents) > 0 {
-		insertSQL := usageRebindSQL(dialectName, `
+		jsonbParam := "?"
+		if dialectName == dialect.Postgres {
+			jsonbParam = "CAST(? AS jsonb)"
+		}
+		insertSQL := usageRebindSQL(dialectName, fmt.Sprintf(`
 INSERT INTO usage_events (
 	id, hub_id, event_id, run_id, project_id, agent_id, billing_user_id, broker_id,
 	harness, model, model_source, usage_source, source_kind, source_identity,
@@ -185,12 +189,12 @@ INSERT INTO usage_events (
 	?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?,
-	?, ?, ?, ?,
+	?, %s, ?, ?,
 	?, ?, ?, ?, ?,
-	?, ?, ?
+	?, %s, ?
 )
 ON CONFLICT (hub_id, event_id) DO NOTHING
-RETURNING event_id`)
+RETURNING event_id`, jsonbParam, jsonbParam))
 
 		for _, ev := range uniqueEvents {
 			inserted, err := insertUsageEventReturning(ctx, drv, insertSQL, ev)

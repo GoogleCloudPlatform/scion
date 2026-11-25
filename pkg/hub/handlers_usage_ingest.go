@@ -185,6 +185,11 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		ValidationError(w, fmt.Sprintf("invalid final_state %q", req.FinalState), nil)
 		return
 	}
+	if req.ProducerSeq < 0 || req.ProducerSeq > telemetrycontract.MaxSafeInteger {
+		ValidationError(w, fmt.Sprintf("producer_seq %d out of safe integer range [0, %d]",
+			req.ProducerSeq, int64(telemetrycontract.MaxSafeInteger)), nil)
+		return
+	}
 
 	receivedAt := time.Now().UTC().Truncate(time.Microsecond)
 	maxFuture := receivedAt.Add(telemetrycontract.UsageIngestMaxFutureSkew)

@@ -314,6 +314,15 @@ func TestUsageIngest_EndToEndIdempotentAntiSpoofingAndAnomalous(t *testing.T) {
 	recOver := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recOver, reqOver)
 	assert.Equal(t, http.StatusRequestEntityTooLarge, recOver.Code)
+
+	// 6. Verify out-of-range request-level producer_seq (1<<62 > MaxSafeInteger) returns 400 (O3).
+	recBadSeq := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{},
+		RunID:         "run-e2e-1",
+		ProducerEpoch: "ep-1",
+		ProducerSeq:   1 << 62,
+	})
+	assert.Equal(t, http.StatusBadRequest, recBadSeq.Code)
 }
 
 func TestUsageIngest_LazyAttributionAndUnknownRunRejection(t *testing.T) {

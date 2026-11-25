@@ -77,7 +77,6 @@ const (
 	UsageRejectRunAgentMismatch = "run_agent_mismatch"
 	UsageRejectValueOutOfRange  = "value_out_of_range"
 	UsageRejectInvalidTimestamp = "invalid_timestamp"
-	UsageRejectAgentDeleted     = "agent_deleted"
 )
 
 // UsageEnforcementAction values returned in UsageEnforcement.Action.
