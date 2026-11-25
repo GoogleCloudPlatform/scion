@@ -463,7 +463,7 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 // Non-member projects (even for hub admins) and visitor-only bindings are
 // excluded by chatMemberProjectIDs; member projects with no decisions are
 // skipped via ProjectsWithDecisions; and the scope count is capped at
-// maxProfileDecisionProjects (200), returning truncated == true beyond the cap.
+// profileDecisionProjectLimit() (default 200), returning truncated == true beyond the cap.
 func (s *Server) profileDecisionScopes(
 	ctx context.Context,
 	user UserIdentity,
@@ -482,7 +482,7 @@ func (s *Server) profileDecisionScopes(
 	return scopes, truncated, nil
 }
 
-// selectProfileDecisionProjects selects up to maxProfileDecisionProjects
+// selectProfileDecisionProjects selects up to profileDecisionProjectLimit()
 // readable member projects that have decisions, ordered by newest decision
 // (design R2, R3, 5.2). Shared by profileDecisionScopes and waitingOnYouTotal
 // so both use identical project selection.
@@ -1210,7 +1210,7 @@ func (s *Server) waitingOnYouSummary(
 
 // waitingOnYouTotal returns the total count of open decisions currently
 // waiting on userID across userID's readable member projects (capped at
-// maxProfileDecisionProjects), and the count of distinct projects that hold at
+// profileDecisionProjectLimit()), and the count of distinct projects that hold at
 // least one of those decisions (design 5.2, for P6's bell reconciler).
 //
 // Contract: roll-up evaluation across up to 200 member projects honors the D9
