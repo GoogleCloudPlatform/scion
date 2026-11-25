@@ -5660,6 +5660,15 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		force:        query.Get("force") == "true",
 		requestedBy:  identity.ID(),
 	}
+	// Execution containers hold human CLI credentials in $HOME (ptone/scion#8812
+	// §3.4 I1/S8): a caller holding agent.delete without attach (such as a
+	// project admin/owner) must not be able to preserve the container's files on
+	// delete and inherit $HOME by creating a same-named agent. Force
+	// deleteFiles=true unless the caller passes ActionAttach.
+	if isShellAgent(agent) && !params.deleteFiles &&
+		s.authorizeAgentTargetAction(ctx, identity, agent, ActionAttach) != nil {
+		params.deleteFiles = true
+	}
 
 	for attempt := 0; ; attempt++ {
 		// Idempotency: an already-deleted agent returns 204.

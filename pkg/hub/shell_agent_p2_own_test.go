@@ -38,6 +38,15 @@ import (
 
 type p2OwnShellTestDispatcher struct {
 	mockDispatcher
+	deletedFiles map[string]bool
+}
+
+func (d *p2OwnShellTestDispatcher) DispatchAgentDelete(_ context.Context, agent *store.Agent, deleteFiles, _, _ bool, _ time.Time) error {
+	if d.deletedFiles == nil {
+		d.deletedFiles = make(map[string]bool)
+	}
+	d.deletedFiles[agent.ID] = deleteFiles
+	return nil
 }
 
 func (p2OwnShellTestDispatcher) DispatchAgentLogs(_ context.Context, agent *store.Agent, _ int) (string, error) {
@@ -547,5 +556,57 @@ func TestShellAgentProjectAdminGovernance_S10(t *testing.T) {
 			var parsed map[string]any
 			assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &parsed))
 		}
+	})
+}
+
+// TestShellAgentDelete_ForcesDeleteFilesForNonOwner verifies H1 (ptone/scion#8818):
+// a caller holding agent.delete without ActionAttach (e.g. a project owner/admin)
+// cannot preserve an execution container's host files with deleteFiles=false,
+// preventing a delete+recreate $HOME credential takeover. The owning human may
+// still pass deleteFiles=false, and non-shell agents are unchanged.
+func TestShellAgentDelete_ForcesDeleteFilesForNonOwner(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	disp := &p2OwnShellTestDispatcher{}
+	srv.SetDispatcher(disp)
+	project, broker := p2OwnSeedProjectAndBroker(t, s)
+
+	owner := p2OwnSeedUser(t, s, "h1-owner@test.com", "H1 Owner")
+	projOwner := p2OwnSeedUser(t, s, "h1-proj-owner@test.com", "H1 Project Owner")
+	p2OwnBindProjectRole(t, s, project.ID, owner.ID, "project-member")
+	p2OwnBindProjectRole(t, s, project.ID, projOwner.ID, "project-owner")
+
+	t.Run("non-owner delete with force=true&deleteFiles=false forces deleteFiles=true", func(t *testing.T) {
+		a := p2OwnSeedAgent(t, s, project.ID, broker.ID, "shell-h1-admin-del", owner.ID, config.ShellHarnessConfigName, state.PhaseRunning, []string{owner.ID})
+		rec := doRequestAsUser(t, srv, projOwner, http.MethodDelete, "/api/v1/agents/"+a.ID+"?force=true&deleteFiles=false", nil)
+		require.True(t, rec.Code == http.StatusOK || rec.Code == http.StatusAccepted || rec.Code == http.StatusNoContent,
+			"expected 200/202/204, got %d: %s", rec.Code, rec.Body.String())
+
+		gotDeleteFiles, dispatched := disp.deletedFiles[a.ID]
+		require.True(t, dispatched, "DispatchAgentDelete must be called")
+		assert.True(t, gotDeleteFiles, "non-owner deleting execution container must force deleteFiles=true")
+	})
+
+	t.Run("owner delete with force=true&deleteFiles=false may keep files", func(t *testing.T) {
+		a := p2OwnSeedAgent(t, s, project.ID, broker.ID, "shell-h1-owner-del", owner.ID, config.ShellHarnessConfigName, state.PhaseRunning, []string{owner.ID})
+		rec := doRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/agents/"+a.ID+"?force=true&deleteFiles=false", nil)
+		require.True(t, rec.Code == http.StatusOK || rec.Code == http.StatusAccepted || rec.Code == http.StatusNoContent,
+			"expected 200/202/204, got %d: %s", rec.Code, rec.Body.String())
+
+		gotDeleteFiles, dispatched := disp.deletedFiles[a.ID]
+		require.True(t, dispatched, "DispatchAgentDelete must be called")
+		assert.False(t, gotDeleteFiles, "owning human deleting own execution container may keep files")
+	})
+
+	t.Run("control: non-owner delete with deleteFiles=false on LLM agent still keeps files", func(t *testing.T) {
+		a := p2OwnSeedAgent(t, s, project.ID, broker.ID, "llm-h1-admin-del", owner.ID, "claude", state.PhaseRunning, []string{owner.ID})
+		rec := doRequestAsUser(t, srv, projOwner, http.MethodDelete, "/api/v1/agents/"+a.ID+"?force=true&deleteFiles=false", nil)
+		require.True(t, rec.Code == http.StatusOK || rec.Code == http.StatusAccepted || rec.Code == http.StatusNoContent,
+			"expected 200/202/204, got %d: %s", rec.Code, rec.Body.String())
+
+		gotDeleteFiles, dispatched := disp.deletedFiles[a.ID]
+		require.True(t, dispatched, "DispatchAgentDelete must be called")
+		assert.False(t, gotDeleteFiles, "non-shell agent deleteFiles=false behaviour must remain unchanged")
+		_ = ctx
 	})
 }

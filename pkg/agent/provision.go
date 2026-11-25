@@ -4701,6 +4701,80 @@ func minimalAgentConfigFromRecord(info *api.AgentInfo) *api.ScionConfig {
 	return &api.ScionConfig{HarnessConfig: info.HarnessConfig}
 }
 
+// shellFreshProvisionConfig reports whether either the incoming create request
+// or the existing on-disk agent metadata names the reserved "shell" harness
+// config. Only regular scion-agent.json files are read (symlinks are left for
+// handleAgentDirWithoutConfigGuarded to refuse).
+func shellFreshProvisionConfig(agentDir, agentHome, harnessConfig string, inlineConfig []*api.ScionConfig) bool {
+	if harnessConfig == config.ShellHarnessConfigName {
+		return true
+	}
+	if len(inlineConfig) > 0 && inlineConfig[0] != nil {
+		ic := inlineConfig[0]
+		if ic.HarnessConfig == config.ShellHarnessConfigName ||
+			ic.Harness == config.ShellHarnessConfigName ||
+			ic.DefaultHarnessConfig == config.ShellHarnessConfigName {
+			return true
+		}
+	}
+	if config.AgentConfigEntryState(agentDir) == config.AgentConfigRegular {
+		if persisted, err := (&config.Template{Path: agentDir}).LoadConfig(); err == nil && persisted != nil {
+			if persisted.HarnessConfig == config.ShellHarnessConfigName ||
+				persisted.Harness == config.ShellHarnessConfigName ||
+				persisted.DefaultHarnessConfig == config.ShellHarnessConfigName {
+				return true
+			}
+		}
+	}
+	if info := readStoredAgentRecord(agentHome); info != nil {
+		if info.HarnessConfig == config.ShellHarnessConfigName || info.Harness == config.ShellHarnessConfigName {
+			return true
+		}
+	}
+	return false
+}
+
+// wipeShellHomeOnFreshProvisionGuarded clears any populated agent home when a
+// fresh-provision create targets an existing agent directory whose requested or
+// recorded harness config is "shell" (ptone/scion#8812 §3.4 I1/S8). This closes
+// the delete-and-recreate credential takeover path (including after an
+// offline-broker force-delete). Fails closed with config.ErrAgentStateConflict
+// if the home cannot be inspected or safely wiped.
+func wipeShellHomeOnFreshProvisionGuarded(g *agentFilesGuard, agentName, agentDir, agentHome string) error {
+	if _, err := os.Stat(agentDir); err != nil {
+		return nil
+	}
+	homes := []string{agentHome}
+	if inDir := filepath.Join(agentDir, "home"); filepath.Clean(inDir) != filepath.Clean(agentHome) {
+		homes = append(homes, inDir)
+	}
+	for _, h := range homes {
+		has, err := dirHasEntries(h)
+		if err != nil {
+			slog.Warn("GetAgent: execution container home could not be inspected on fresh provision; refusing create",
+				"agent", agentName, "agent_dir", agentDir, "home", h, "error", err)
+			return fmt.Errorf("%w: agent %q: refusing to reuse an execution container home that cannot be inspected", config.ErrAgentStateConflict, agentName)
+		}
+		if !has {
+			continue
+		}
+		target, err := g.check(h)
+		if err != nil {
+			return fmt.Errorf("%w: agent %q: refusing to reuse an execution container home: %w", config.ErrAgentStateConflict, agentName, err)
+		}
+		_ = util.MakeWritableRecursive(target)
+		if err := os.RemoveAll(target); err != nil {
+			return fmt.Errorf("%w: agent %q: failed to wipe execution container home: %w", config.ErrAgentStateConflict, agentName, err)
+		}
+		if err := os.MkdirAll(h, 0755); err != nil {
+			return fmt.Errorf("%w: agent %q: failed to recreate empty home: %w", config.ErrAgentStateConflict, agentName, err)
+		}
+		slog.Info("GetAgent: wiped leftover home on fresh provision for execution container",
+			"agent", agentName, "agent_dir", agentDir, "home", h)
+	}
+	return nil
+}
+
 func GetAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, string, *api.ScionConfig, error) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
@@ -4757,6 +4831,18 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	}, func(name string) *agentFilesGuard {
 		return projectAgentFilesGuard(ctx, projectDir, name, filepath.Join(filepath.Dir(agentDir), name))
 	})
+
+	// Execution containers hold human CLI credentials in $HOME (ptone/scion#8812
+	// §3.4 I1/S8): on a fresh-provision create, never reuse a populated home
+	// when either the requested or the recorded harness config is "shell".
+	// Runs before handleAgentDirWithoutConfigGuarded so leftover homes (with or
+	// without scion-agent.json, including after an offline-broker force-delete)
+	// are wiped cleanly.
+	if api.IsFreshProvisionFromContext(ctx) && shellFreshProvisionConfig(agentDir, agentHome, harnessConfig, inlineConfig) {
+		if err := wipeShellHomeOnFreshProvisionGuarded(projectAgentFilesGuard(ctx, projectDir, agentName, agentDir), agentName, agentDir, agentHome); err != nil {
+			return "", "", "", nil, err
+		}
+	}
 
 	// Handle an agent directory that exists but has no config file. See
 	// handleAgentDirWithoutConfigGuarded: a populated home is kept (adopted from
