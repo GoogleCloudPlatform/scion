@@ -17,10 +17,12 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -602,4 +604,146 @@ func TestGatherAndSubmitEnv_SlowSubmitOutlastsClientTimeout(t *testing.T) {
 	require.NotNil(t, result.Agent)
 	assert.Equal(t, tid("agent-1"), result.Agent.ID)
 	assert.Equal(t, int32(1), submits.Load(), "the submit is sent once")
+}
+
+// TestStartAgentViaHub_EnvGatherPreservesWarnings verifies that advisory
+// warnings returned on the initial 202 env-gather response (such as template
+// drift warnings) are carried forward into the finalized CLI text stderr and
+// --json output after env-submit completes, without duplication.
+func TestStartAgentViaHub_EnvGatherPreservesWarnings(t *testing.T) {
+	const driftWarning = `template "my-tmpl" may be out of date: it was imported from github.com/o/r/.scion/templates/my-tmpl at abc1234, and that folder has changed on "main" since. Run "scion templates update my-tmpl" (or Refresh from Source) to update.`
+
+	runCase := func(t *testing.T, jsonMode bool, submitWarnings []string) (stdout, stderr string) {
+		t.Helper()
+		origNonInteractive := nonInteractive
+		origAutoConfirm := autoConfirm
+		origOutputFormat := outputFormat
+		origTemplateName := templateName
+		origHarnessConfigFlag := harnessConfigFlag
+		origRuntimeBrokerID := runtimeBrokerID
+		t.Cleanup(func() {
+			nonInteractive = origNonInteractive
+			autoConfirm = origAutoConfirm
+			outputFormat = origOutputFormat
+			templateName = origTemplateName
+			harnessConfigFlag = origHarnessConfigFlag
+			runtimeBrokerID = origRuntimeBrokerID
+		})
+
+		nonInteractive = true
+		autoConfirm = true
+		if jsonMode {
+			outputFormat = "json"
+		} else {
+			outputFormat = ""
+		}
+		templateName = ""
+		harnessConfigFlag = "codex"
+		runtimeBrokerID = tid("broker-1")
+		allowEnvSend(t)
+		t.Setenv("TEST_DRIFT_ENV_KEY", "secret-val")
+
+		agentID := tid("agent-drift-1")
+		projectID := tid("project-drift")
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":   projectID,
+					"name": "drift-proj",
+				})
+			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
+				w.WriteHeader(http.StatusAccepted)
+				_ = json.NewEncoder(w).Encode(&hubclient.CreateAgentResponse{
+					Agent: &hubclient.Agent{
+						ID:     agentID,
+						Slug:   "drift-agent",
+						Name:   "drift-agent",
+						Status: "provisioning",
+						Phase:  "provisioning",
+					},
+					Warnings: []string{driftWarning},
+					EnvGather: &hubclient.EnvGatherResponse{
+						AgentID:  agentID,
+						Required: []string{"TEST_DRIFT_ENV_KEY"},
+						Needs:    []string{"TEST_DRIFT_ENV_KEY"},
+					},
+				})
+			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+agentID+"/env":
+				_ = json.NewEncoder(w).Encode(&hubclient.CreateAgentResponse{
+					Agent: &hubclient.Agent{
+						ID:                agentID,
+						Slug:              "drift-agent",
+						Name:              "drift-agent",
+						Status:            "running",
+						Phase:             "running",
+						RuntimeBrokerID:   tid("broker-1"),
+						RuntimeBrokerName: "scion",
+						Created:           time.Now().UTC(),
+					},
+					Warnings: submitWarnings,
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(server.Close)
+
+		client, err := hubclient.New(server.URL)
+		require.NoError(t, err)
+
+		globalDir := t.TempDir()
+		settingsPath := filepath.Join(globalDir, "settings.yaml")
+		require.NoError(t, os.WriteFile(settingsPath, []byte("hub:\n  enabled: true\n"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(globalDir, "state.yaml"), []byte("syncedAgents: []\n"), 0644))
+
+		hubCtx := &HubContext{
+			Client:      client,
+			Endpoint:    server.URL,
+			ProjectID:   projectID,
+			ProjectPath: settingsPath,
+			IsGlobal:    true,
+		}
+
+		// Capture stdout and stderr.
+		origStdout, origStderr := os.Stdout, os.Stderr
+		outR, outW, err := os.Pipe()
+		require.NoError(t, err)
+		errR, errW, err := os.Pipe()
+		require.NoError(t, err)
+		os.Stdout, os.Stderr = outW, errW
+		t.Cleanup(func() {
+			os.Stdout, os.Stderr = origStdout, origStderr
+		})
+
+		runErr := startAgentViaHub(nil, hubCtx, "drift-agent", "hello", false, nil)
+		_ = outW.Close()
+		_ = errW.Close()
+		os.Stdout, os.Stderr = origStdout, origStderr
+
+		outBytes, readOutErr := io.ReadAll(outR)
+		require.NoError(t, readOutErr)
+		errBytes, readErrErr := io.ReadAll(errR)
+		require.NoError(t, readErrErr)
+		_ = outR.Close()
+		_ = errR.Close()
+
+		require.NoError(t, runErr)
+		return string(outBytes), string(errBytes)
+	}
+
+	t.Run("text mode prints 202 warning once on stderr", func(t *testing.T) {
+		_, stderr := runCase(t, false, nil)
+		assert.Equal(t, 1, strings.Count(stderr, "Warning: "+driftWarning+"\n"),
+			"expected drift warning once on stderr, got: %q", stderr)
+	})
+
+	t.Run("json mode carries 202 warning once and deduplicates submit warnings", func(t *testing.T) {
+		stdout, _ := runCase(t, true, []string{driftWarning, "extra submit warning"})
+		var res ActionResult
+		require.NoError(t, json.Unmarshal([]byte(stdout), &res), "stdout: %s", stdout)
+		assert.Equal(t, []string{driftWarning, "extra submit warning"}, res.Warnings)
+	})
 }

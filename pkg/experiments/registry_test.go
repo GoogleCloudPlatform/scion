@@ -936,3 +936,24 @@ func TestAgentSecretsExperimentRegistered(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestTemplateDriftWarningExperimentRegistered pins hub.template_drift_warning
+// (ptone/scion#8495): server-only layer, alpha, default off, owned by templates.
+func TestTemplateDriftWarningExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(TemplateDriftWarning)
+	if !ok {
+		t.Fatalf("%s is not registered", TemplateDriftWarning)
+	}
+	if TemplateDriftWarning != "hub.template_drift_warning" {
+		t.Fatalf("frozen name changed: %q", TemplateDriftWarning)
+	}
+	if e.Default {
+		t.Fatal("hub.template_drift_warning must default to off")
+	}
+	if len(e.Layers) != 1 || !e.HasLayer(LayerServer) {
+		t.Fatalf("must be a server-only experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#8495" || e.Stage != StageAlpha || e.Owner != "templates" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}

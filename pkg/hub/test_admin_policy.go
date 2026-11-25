@@ -744,6 +744,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AdminManagedBrokers:          testAdminPolicyDeny,
 	experiments.CustomDefaultUserRole:        testAdminPolicyDeny,
 	experiments.TemplateConfigValidation:     testAdminPolicyDeny,
+	experiments.TemplateDriftWarning:         testAdminPolicyDeny,
 	experiments.AgentSecrets:                 testAdminPolicyDeny,
 	experiments.CodeSpanMentions:             testAdminPolicyDeny,
 	experiments.ViewAsMember:                 testAdminPolicyDeny,

@@ -432,6 +432,16 @@ const SkillContentHashV2 = "hub.skill_content_hash_v2"
 // refused with HTTP 422 (code invalid_agent_config).
 const TemplateConfigValidation = "hub.template_config_validation"
 
+// TemplateDriftWarning gates the Hub-side template drift check at agent
+// creation (ptone/scion#8495). While it is on, creating an agent from a
+// GitHub-sourced template whose source repository matches the project's
+// workspace repository compares the template folder's git tree SHA at the
+// template's recorded source_commit against its source branch (cached, 2s
+// budget, fail-open) and appends an advisory warning to CreateAgentResponse
+// when the folder has changed. While it is off, no outbound GitHub calls are
+// made from the agent-create path.
+const TemplateDriftWarning = "hub.template_drift_warning"
+
 // ArtifactReviewEditor gates the graphical review editor for Markdown
 // artifacts (ptone/scion#5913). It is web-only: every save goes through the
 // unchanged review publish, and the hub's review checks are the same
@@ -650,6 +660,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#9018",
 		Owner:       "ui",
 		ReviewBy:    "2027-05-23",
+	},
+	{
+		Name:        TemplateDriftWarning,
+		Title:       "Template drift warning",
+		Description: "Checks at agent creation whether a same-repo GitHub-sourced template's folder has changed on its source branch since its recorded source commit (cached, 2 s budget, fail-open) and returns an advisory warning without blocking or failing agent creation.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8495",
+		Owner:       "templates",
+		ReviewBy:    "2027-05-24",
 	},
 	{
 		Name:        AgentSecrets,

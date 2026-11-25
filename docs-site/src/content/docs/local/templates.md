@@ -437,6 +437,8 @@ Refreshing works only for sources in a GitHub repository: a folder on a branch (
 
 The Web UI offers the same action as **Refresh from Source** on a template's detail page, and **Refresh All from Source** on the templates list, which refreshes a few templates at a time. The detail page shows the stored source without any username or password; sources that are not web URLs are shown as "non-web source".
 
+When the `hub.template_drift_warning` experiment is enabled on the Hub, creating an agent from a GitHub-sourced template whose source repository matches the project's workspace repository checks whether the template folder has changed on its source branch since the template's recorded `source_commit` (cached, 2-second budget, fail-open). If it has changed, the Hub returns an advisory warning suggesting `scion templates update <name>` (or **Refresh from Source**) without blocking agent creation.
+
 For the condensed command list, see the [CLI reference](/scion/reference/cli/#template-management).
 
 ## Harness-configs

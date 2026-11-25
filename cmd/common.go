@@ -1547,8 +1547,13 @@ func startAgentViaHubWithSecrets(cmd *cobra.Command, hubCtx *HubContext, agentNa
 			cleanup.cleanupAfterFailure(err)
 			return fmt.Errorf("env-gather failed: %w", err)
 		}
-		// Replace response with the finalized one
+		// Replace response with the finalized one, carrying forward any
+		// advisory warnings from the initial 202 response (deduplicated).
+		initialWarnings := resp.Warnings
 		resp = submitResp
+		if len(initialWarnings) > 0 && resp != nil {
+			resp.Warnings = mergeUniqueWarnings(initialWarnings, resp.Warnings)
+		}
 	}
 
 	// Advance watermark to the hub-assigned creation time so this agent
@@ -2384,4 +2389,24 @@ func agentIsRunning(a *hubclient.Agent, phaseKnown bool) bool {
 	}
 	phase, _ := hubAgentPhaseActivity(a.Phase, a.Activity, a.Status)
 	return phase == string(state.PhaseRunning)
+}
+
+// mergeUniqueWarnings concatenates two warning slices while preserving order
+// and removing empty or duplicate entries.
+func mergeUniqueWarnings(first, second []string) []string {
+	seen := make(map[string]struct{}, len(first)+len(second))
+	merged := make([]string, 0, len(first)+len(second))
+	for _, list := range [][]string{first, second} {
+		for _, w := range list {
+			if w == "" {
+				continue
+			}
+			if _, ok := seen[w]; ok {
+				continue
+			}
+			seen[w] = struct{}{}
+			merged = append(merged, w)
+		}
+	}
+	return merged
 }

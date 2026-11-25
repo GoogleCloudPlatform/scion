@@ -2968,6 +2968,11 @@ func (s *Server) createAgentInProject(
 		req.WorkspaceFiles = nil
 	}
 
+	// Start the optional, fail-open template drift check concurrently so it
+	// overlaps with the remaining create/dispatch work under its 2s budget.
+	driftCh, driftCancel := s.startTemplateDriftCheck(ctx, project, resolvedTemplate, agent.ID)
+	defer driftCancel()
+
 	// Workspace bootstrap mode: if WorkspaceFiles are provided with a task,
 	// generate signed upload URLs instead of dispatching immediately.
 	// The CLI will upload files, then call finalize to trigger dispatch.
@@ -3039,6 +3044,10 @@ func (s *Server) createAgentInProject(
 
 			if len(existingFiles) > 0 {
 				s.agentLifecycleLog.Debug("Workspace bootstrap: files already in storage", "agent_id", agent.ID, "count", len(existingFiles))
+			}
+
+			if w := awaitTemplateDriftWarning(driftCh); w != "" {
+				warnings = append(warnings, w)
 			}
 
 			writeJSON(w, http.StatusCreated, CreateAgentResponse{
@@ -3162,8 +3171,13 @@ func (s *Server) createAgentInProject(
 		}
 		s.enrichAgent(ctx, agent, project, nil)
 
+		if w := awaitTemplateDriftWarning(driftCh); w != "" {
+			warnings = append(warnings, w)
+		}
+
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
-			Agent: redactedAgentCopy(ctx, s, agent),
+			Agent:    redactedAgentCopy(ctx, s, agent),
+			Warnings: warnings,
 		})
 		return
 	}
@@ -3289,6 +3303,10 @@ func (s *Server) createAgentInProject(
 
 					s.enrichAgent(ctx, agent, project, nil)
 					hubEnvGather := s.buildEnvGatherResponse(ctx, agent, envReqs)
+
+					if w := awaitTemplateDriftWarning(driftCh); w != "" {
+						warnings = append(warnings, w)
+					}
 
 					writeJSON(w, http.StatusAccepted, CreateAgentResponse{
 						Agent:     redactedAgentCopy(ctx, s, agent),
@@ -3477,6 +3495,10 @@ func (s *Server) createAgentInProject(
 
 	// Enrich agent with project and broker names for display
 	s.enrichAgent(ctx, agent, project, nil)
+
+	if w := awaitTemplateDriftWarning(driftCh); w != "" {
+		warnings = append(warnings, w)
+	}
 
 	writeJSON(w, http.StatusCreated, CreateAgentResponse{
 		Agent:    redactedAgentCopy(ctx, s, agent),
