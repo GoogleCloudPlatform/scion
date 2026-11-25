@@ -1031,7 +1031,7 @@ func TestSchedule_CreatorNameResolution(t *testing.T) {
 		assert.Equal(t, missingID, byID[missingSchedID].CreatedBy)
 	})
 
-	t.Run("get single schedule resolves creator", func(t *testing.T) {
+	t.Run("get single schedule resolves creator and omits soft-deleted agent", func(t *testing.T) {
 		rec := doScheduleUserRequest(t, srv, aliceUser, http.MethodGet, projectID, agentSchedID, nil)
 		require.Equal(t, http.StatusOK, rec.Code)
 
@@ -1039,6 +1039,17 @@ func TestSchedule_CreatorNameResolution(t *testing.T) {
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 		assert.Equal(t, "ops-bot", resp.CreatedByName)
 		assert.Equal(t, "agent", resp.CreatedByType)
+
+		// Single-row GET uses GetAgent (which returns soft-deleted rows), so this
+		// exercises the DeletedAt guard in resolveCreatorAgent.
+		delRec := doScheduleUserRequest(t, srv, aliceUser, http.MethodGet, projectID, deletedAgentSchedID, nil)
+		require.Equal(t, http.StatusOK, delRec.Code)
+
+		var delResp ScheduleResponse
+		require.NoError(t, json.NewDecoder(delRec.Body).Decode(&delResp))
+		assert.Empty(t, delResp.CreatedByName)
+		assert.Empty(t, delResp.CreatedByType)
+		assert.Equal(t, deletedAgentID, delResp.CreatedBy)
 	})
 
 	t.Run("scoped token without user.read does not resolve users", func(t *testing.T) {
