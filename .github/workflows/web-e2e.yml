@@ -67,7 +67,7 @@
 # Runtime and cost: about 23 minutes of test time per full run (most of it
 # terminal-workspace, chat-palette, terminal-entrypoints and
 # terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
-# 50-60 runner-minutes across the 15 mocked-hub jobs; retries of failing
+# 50-60 runner-minutes across the 16 mocked-hub jobs; retries of failing
 # tests add to that. The terminal-workspace job also runs a Vite production
 # build first, which adds about 1 minute (that job takes about 4 minutes in
 # total). The five real-hub jobs, test-identity-session, page-policy,
@@ -77,7 +77,7 @@
 # and runs a second suite (the page view journeys, ptone/scion#5569) on a
 # second hub, which adds a few minutes; its job timeout is 35 minutes, the
 # others' 20.
-# iap-driver is the 21st job (21 jobs in total).
+# iap-driver is the 22nd job (22 jobs in total).
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)

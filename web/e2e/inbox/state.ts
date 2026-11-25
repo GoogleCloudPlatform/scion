@@ -41,8 +41,15 @@ export function stateFile(): string {
   return file;
 }
 
-/** Removes the private state dir. */
+/** Removes the private state dir if it resolves inside `os.tmpdir()`. */
 export function removeStateDir(): void {
   const file = process.env[STATE_ENV];
-  if (file) fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  if (!file) return;
+  const dir = path.resolve(path.dirname(file));
+  const tmpRoot = path.resolve(os.tmpdir());
+  const realTmpRoot = fs.existsSync(tmpRoot) ? fs.realpathSync(tmpRoot) : tmpRoot;
+  const realDir = fs.existsSync(dir) ? fs.realpathSync(dir) : dir;
+  const tmpPrefix = realTmpRoot.endsWith(path.sep) ? realTmpRoot : `${realTmpRoot}${path.sep}`;
+  if (!realDir.startsWith(tmpPrefix)) return;
+  fs.rmSync(realDir, { recursive: true, force: true });
 }

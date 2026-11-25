@@ -20,7 +20,12 @@ import { removeStateDir, stateFile } from './state.js';
 
 // eslint-disable-next-line @typescript-eslint/require-await -- Playwright calls this as an async teardown hook
 async function globalTeardown(): Promise<void> {
-  stopHub(stateFile());
+  try {
+    stopHub(stateFile());
+  } catch {
+    // Global setup may have failed or been skipped before writing the state file;
+    // avoid masking the setup failure while still running remaining cleanup.
+  }
   removeStateDir();
   cleanupAuthState();
 }
