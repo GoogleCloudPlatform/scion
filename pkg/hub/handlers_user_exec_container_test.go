@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -400,19 +401,25 @@ func TestExecContainer_AC5_StateResolution(t *testing.T) {
 		assert.False(t, hasAgent, "%s: unavailable response must not expose agent metadata", label)
 	}
 
-	// Owner changed -> unavailable, no agent metadata
+	// Owner changed -> unavailable, no agent metadata.
+	// Store.UpdateAgent enforces S8 (execution container ownership is immutable),
+	// so simulate an out-of-band DB owner change directly to exercise the
+	// resolver's defence-in-depth eligibility recheck.
 	t.Run("owner changed", func(t *testing.T) {
 		a, err := s.GetAgent(ctx, agent.ID)
 		require.NoError(t, err)
 		a.Phase = string(state.PhaseRunning)
 		a.Activity = string(state.ActivityIdle)
-		a.OwnerID = other.ID
 		require.NoError(t, s.UpdateAgent(ctx, a))
+
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err = db.ExecContext(ctx, "UPDATE agents SET owner_id = ? WHERE id = ?", other.ID, agent.ID)
+		require.NoError(t, err)
 		assertUnavailable(t, "owner changed")
 
 		// Restore owner for next subtest.
-		a.OwnerID = u.ID
-		require.NoError(t, s.UpdateAgent(ctx, a))
+		_, err = db.ExecContext(ctx, "UPDATE agents SET owner_id = ? WHERE id = ?", u.ID, agent.ID)
+		require.NoError(t, err)
 	})
 
 	// Project membership removed -> unavailable, no agent metadata
