@@ -469,6 +469,65 @@ func TestListSkipLocate(t *testing.T) {
 	if _, err := runOut("-tags", "no_sqlite", "-locate", "TestB"); err == nil {
 		t.Error("-locate TestB under no_sqlite should fail")
 	}
+
+	// -match supports regexes, subtest filters, alternation, and build tags.
+	got, err = runOut("-match", "^TestA$/subtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("TestA %d\n", as["a_test.go"]); got != want {
+		t.Errorf("-match ^TestA$/subtest = %q, want %q", got, want)
+	}
+	got, err = runOut("-match", "TestA/sub1|TestCommon/sub2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("TestA %d\nTestCommon 1\n", as["a_test.go"]); got != want {
+		t.Errorf("-match alternation = %q, want %q", got, want)
+	}
+	got, err = runOut("-tags", "no_sqlite", "-match", "TestB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("-match TestB under no_sqlite = %q, want empty", got)
+	}
+	got, err = runOut("-match", "TestNoSuch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("-match TestNoSuch = %q, want empty", got)
+	}
+	if _, err := runOut("-match", "[invalid"); err == nil {
+		t.Error("-match with invalid regex should fail")
+	}
+
+	// Benchmarks are excluded from -match because go test -run does not run them.
+	if err := os.WriteFile(filepath.Join(dir, "bench_test.go"), []byte(header+"import \"testing\"\n\nfunc BenchmarkCommon(b *testing.B) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = runOut("-match", "BenchmarkCommon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("-match BenchmarkCommon = %q, want empty", got)
+	}
+}
+
+func TestTopLevelRunRegex(t *testing.T) {
+	for in, want := range map[string]string{
+		"^TestA$/subtest":              "^TestA$",
+		"TestA/sub1|TestB/sub2":        "(?:TestA)|(?:TestB)",
+		"Test[[:alpha:]/]lpha":         "Test[[:alpha:]/]lpha",
+		"Test[[:alpha:]/]lpha/subtest": "Test[[:alpha:]/]lpha",
+		`Test[\]]/sub`:                 `Test[\]]`,
+	} {
+		if got := topLevelRunRegex(in); got != want {
+			t.Errorf("topLevelRunRegex(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 func TestShards(t *testing.T) {

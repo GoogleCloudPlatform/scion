@@ -251,6 +251,121 @@ func (s *sharding) locate(w io.Writer, tags []string, names []string) error {
 	return err
 }
 
+// topLevelRunRegex extracts the top-level test-name regex from a go test -run
+// pattern. Go's testing package splits -run on top-level '/' (subtest levels)
+// and allows top-level '|' alternation across slash-separated paths, while
+// preserving '/' and '|' inside character classes, parentheses, or escapes.
+func topLevelRunRegex(pattern string) string {
+	var alts []string
+	var cur strings.Builder
+	parenDepth := 0
+	bracketDepth := 0
+	escaped := false
+	skipSub := false
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		if escaped {
+			if !skipSub {
+				cur.WriteByte(c)
+			}
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			if !skipSub {
+				cur.WriteByte(c)
+			}
+			escaped = true
+			continue
+		}
+		if c == '[' {
+			bracketDepth++
+			if !skipSub {
+				cur.WriteByte(c)
+			}
+			continue
+		}
+		if c == ']' {
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+			if !skipSub {
+				cur.WriteByte(c)
+			}
+			continue
+		}
+		if bracketDepth > 0 {
+			if !skipSub {
+				cur.WriteByte(c)
+			}
+			continue
+		}
+		switch c {
+		case '(':
+			parenDepth++
+			if !skipSub {
+				cur.WriteByte(c)
+			}
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+			if !skipSub {
+				cur.WriteByte(c)
+			}
+		case '|':
+			if parenDepth == 0 {
+				alts = append(alts, cur.String())
+				cur.Reset()
+				skipSub = false
+			} else if !skipSub {
+				cur.WriteByte(c)
+			}
+		case '/':
+			if parenDepth == 0 {
+				skipSub = true
+			} else if !skipSub {
+				cur.WriteByte(c)
+			}
+		default:
+			if !skipSub {
+				cur.WriteByte(c)
+			}
+		}
+	}
+	alts = append(alts, cur.String())
+	if len(alts) == 1 {
+		return alts[0]
+	}
+	return "(?:" + strings.Join(alts, ")|(?:") + ")"
+}
+
+// matchRun prints "<test> <K>" (sorted by test name) for every runnable test
+// (Test*, Fuzz*, Example*) compiled under tags whose top-level name matches the
+// go test -run pattern. Benchmarks are excluded because -run does not execute
+// them. Returns an error only if the pattern is an invalid regular expression.
+func (s *sharding) matchRun(w io.Writer, tags []string, pattern string) error {
+	re, err := regexp.Compile(topLevelRunRegex(pattern))
+	if err != nil {
+		return fmt.Errorf("invalid -run pattern %q: %w", pattern, err)
+	}
+	m, err := testsIn(s.genFiles, tags)
+	if err != nil {
+		return err
+	}
+	var b bytes.Buffer
+	for _, t := range sortedKeys(m) {
+		if strings.HasPrefix(t, "Benchmark") {
+			continue
+		}
+		if re.MatchString(t) {
+			fmt.Fprintf(&b, "%s %d\n", t, s.runShard(m[t][0]))
+		}
+	}
+	_, err = w.Write(b.Bytes())
+	return err
+}
+
 // writeOverlay writes the tagged files and the generated imports files to
 // out, plus out/overlay.json mapping each of them to its path in the
 // package directory, for go build -overlay. Nothing in the tree changes.

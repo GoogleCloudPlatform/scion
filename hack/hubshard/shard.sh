@@ -24,10 +24,14 @@
 # tree is never modified, and the temporary directory is removed on exit.
 #
 # Usage:
-#   shard.sh test K [--nosqlite] [--race]
+#   shard.sh test K [--nosqlite] [--race] [-run PATTERN]
 #       Compile shard K (go test -c), check that the binary's test list is
 #       exactly what hubshard -list K expects, then run that binary (no
 #       second compile), skipping the common files' tests outside shard 1.
+#       With -run PATTERN (or --run PATTERN / -run=PATTERN), passes
+#       -test.run=PATTERN to the binary; fails non-zero before compiling if
+#       PATTERN matches no tests in shard K, naming the shard(s) that hold
+#       matching tests (or reporting that no shard matches).
 #       The binary runs with -test.v; its stdout is rebuilt as without
 #       -test.v and followed by a sorted summary of the skipped top-level
 #       tests (run_skip_summary in lib.sh). Pass/fail and the exit status
@@ -131,11 +135,23 @@ with_tags() {
 
 nosqlite=
 race=
+run_pattern=
+has_run=
 parse_flags() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--nosqlite) nosqlite=no_sqlite ;;
 		--race) race=-race ;;
+		-run | --run)
+			[ $# -ge 2 ] || die "$1 requires a pattern"
+			run_pattern=$2
+			has_run=1
+			shift
+			;;
+		-run=* | --run=*)
+			run_pattern=${1#*=}
+			has_run=1
+			;;
 		*) die "unknown flag: $1" ;;
 		esac
 		shift
@@ -180,11 +196,36 @@ run_binary() {
 case "$cmd" in
 build)
 	parse_flags "$@"
+	[ -z "$has_run" ] || die "-run is only valid for test"
 	compile "$shard" "$nosqlite" "$tmp/bin"
 	;;
 
 test)
 	parse_flags "$@"
+	if [ -n "$run_pattern" ]; then
+		hubshard -tags "$nosqlite" -match "$run_pattern" >"$tmp/matched"
+		shard_matches=$(awk -v k="$shard" '$2 == k {print $1}' "$tmp/matched")
+		if [ -z "$shard_matches" ]; then
+			tag_label=${nosqlite:-default}
+			if [ -s "$tmp/matched" ]; then
+				other_shards=$(awk '{print $2}' "$tmp/matched" | sort -nu | paste -sd ',' -)
+				total_matches=$(wc -l <"$tmp/matched" | tr -d ' ')
+				echo "ERROR: -run '$run_pattern' matches no tests in pkg/hub shard $shard (tags: $tag_label); matching test(s) are in shard(s): $other_shards" >&2
+				awk 'NR <= 10 {printf "  %s (shard %s)\n", $1, $2}' "$tmp/matched" >&2
+				if [ "$total_matches" -gt 10 ]; then
+					echo "  ... ($total_matches matching tests total)" >&2
+				fi
+				exit 1
+			fi
+			die "-run '$run_pattern' matches no tests in any pkg/hub shard (tags: $tag_label)"
+		fi
+		other_matches=$(awk -v k="$shard" '$2 != k {print $2}' "$tmp/matched")
+		if [ -n "$other_matches" ]; then
+			other_count=$(printf '%s\n' "$other_matches" | wc -l | tr -d ' ')
+			other_shards=$(printf '%s\n' "$other_matches" | sort -nu | paste -sd ',' -)
+			echo "NOTE: -run '$run_pattern' also matches $other_count test(s) in other pkg/hub shard(s): $other_shards" >&2
+		fi
+	fi
 	compile "$shard" "$nosqlite" "$tmp/bin"
 
 	# The binary must hold exactly the tests the tool expects: a file
@@ -203,9 +244,16 @@ test)
 	echo "shard $shard compiles $(wc -l <"$tmp/got") tests, as expected"
 
 	skip=$(hubshard -tags "$nosqlite" -skip "$shard")
+	run_args=(-test.count=1 -test.timeout="$timeout")
+	if [ -n "$skip" ]; then
+		run_args+=(-test.skip="$skip")
+	fi
+	if [ -n "$run_pattern" ]; then
+		run_args+=(-test.run="$run_pattern")
+	fi
 	echo "== run pkg/hub shard $shard (the binary checked above)"
 	skip_summary=1 run_binary "$tmp/bin/hub.test" "pkg/hub shard $shard (tags: $(with_tags "$shard" "$nosqlite"))" \
-		-test.count=1 -test.timeout="$timeout" ${skip:+-test.skip="$skip"}
+		"${run_args[@]}"
 	;;
 
 vet)
