@@ -395,7 +395,11 @@ func (s *GCSStorage) List(ctx context.Context, opts ListOptions) (*ListResult, e
 			// Get next item to check if there are more
 			attrs, err := it.Next()
 			if err == nil {
-				result.NextOffset = attrs.Name
+				if attrs.Prefix != "" {
+					result.NextOffset = attrs.Prefix
+				} else {
+					result.NextOffset = attrs.Name
+				}
 			}
 			break
 		}
@@ -411,6 +415,7 @@ func (s *GCSStorage) List(ctx context.Context, opts ListOptions) (*ListResult, e
 		// Handle prefixes (directories)
 		if attrs.Prefix != "" {
 			result.Prefixes = append(result.Prefixes, attrs.Prefix)
+			count++
 			continue
 		}
 

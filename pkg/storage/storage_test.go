@@ -336,6 +336,65 @@ func TestLocalListPages(t *testing.T) {
 	}
 }
 
+// TestLocalListDelimiterPrefixes verifies that LocalStorage.List with
+// Delimiter="/" returns child directory prefixes, honors MaxResults, and
+// pages cleanly via StartOffset/NextOffset.
+func TestLocalListDelimiterPrefixes(t *testing.T) {
+	s, err := NewLocal(Config{Provider: ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, name := range []string{
+		"hubs/h1/move-bundles/rid-a/manifest.json",
+		"hubs/h1/move-bundles/rid-a/workspace/part-00000.tgz",
+		"hubs/h1/move-bundles/rid-b/manifest.json",
+		"hubs/h1/move-bundles/rid-c/home/part-00000.tgz",
+		"hubs/h1/move-bundles/rid-d/manifest.json",
+		"hubs/h1/other/x",
+	} {
+		if _, err := s.Upload(ctx, name, strings.NewReader(name), UploadOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	root := DirPrefix(MoveBundlesRoot("h1"))
+	var got []string
+	offset := ""
+	for range 10 {
+		res, err := s.List(ctx, ListOptions{
+			Prefix:      root,
+			Delimiter:   "/",
+			MaxResults:  2,
+			StartOffset: offset,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Objects) != 0 {
+			t.Fatalf("expected no direct objects, got %v", res.Objects)
+		}
+		if len(res.Prefixes) > 2 {
+			t.Fatalf("MaxResults=2 exceeded: got %d prefixes (%v)", len(res.Prefixes), res.Prefixes)
+		}
+		got = append(got, res.Prefixes...)
+		if res.NextOffset == "" {
+			break
+		}
+		offset = res.NextOffset
+	}
+
+	want := []string{
+		"hubs/h1/move-bundles/rid-a/",
+		"hubs/h1/move-bundles/rid-b/",
+		"hubs/h1/move-bundles/rid-c/",
+		"hubs/h1/move-bundles/rid-d/",
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("prefixes = %v, want %v", got, want)
+	}
+}
+
 // ResourceRootPaths covers every path ResourceStoragePath gives a template,
 // in every scope and with or without a hub namespace, and no workspace path.
 func TestResourceRootPaths(t *testing.T) {

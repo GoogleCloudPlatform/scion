@@ -2156,6 +2156,11 @@ func (s *Server) reincarnationSweepHandler() func(ctx context.Context) {
 		} else if n > 0 {
 			s.agentLifecycleLog.Info("periodic sweep: marked stale reincarnations failed", "count", n)
 		}
+		if n, err := s.sweepOrphanMoveBundles(ctx); err != nil {
+			s.agentLifecycleLog.Warn("periodic sweep: failed to sweep orphaned move bundles", "error", err)
+		} else if n > 0 {
+			s.agentLifecycleLog.Info("periodic sweep: deleted orphaned move-bundle prefixes", "count", n)
+		}
 	}
 }
 

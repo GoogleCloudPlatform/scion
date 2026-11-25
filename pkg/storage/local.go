@@ -237,7 +237,16 @@ func (s *LocalStorage) List(ctx context.Context, opts ListOptions) (*ListResult,
 
 		// Handle delimiter (directory listing)
 		if opts.Delimiter != "" && info.IsDir() {
-			result.Prefixes = append(result.Prefixes, relPath+"/")
+			prefix := relPath + "/"
+			if opts.StartOffset != "" && prefix < opts.StartOffset {
+				return filepath.SkipDir
+			}
+			if opts.MaxResults > 0 && count >= opts.MaxResults {
+				result.NextOffset = prefix
+				return filepath.SkipAll
+			}
+			result.Prefixes = append(result.Prefixes, prefix)
+			count++
 			return filepath.SkipDir
 		}
 
