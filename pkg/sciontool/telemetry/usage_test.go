@@ -22,6 +22,9 @@ import (
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -1000,4 +1003,67 @@ func describeSeries(series []*monitoringpb.TimeSeries) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestUsageDeriver_RecordOmitsHarnessWhenUnset verifies ptone/scion#5892:
+// when SCION_HARNESS is unset, UsageDeriver.record omits the harness label
+// from gen_ai.api.calls (and scion.usage.tokens), matching the hook path via
+// telemetrycontract.APICallsPointAttrs / UsageTokenPointAttrs.
+func TestUsageDeriver_RecordOmitsHarnessWhenUnset(t *testing.T) {
+	t.Setenv("SCION_HARNESS", "")
+	t.Setenv("SCION_MODEL", "fallback-model")
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = mp.Shutdown(context.Background()) }()
+
+	meter := mp.Meter(usageMetricScope)
+	calls, err := meter.Int64Counter(telemetrycontract.MetricAPICalls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := meter.Int64Counter(telemetrycontract.MetricUsageTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d := &UsageDeriver{calls: calls, tokens: tokens}
+	d.record(context.Background(), usageIncrement{
+		Model:  "test-model",
+		Status: telemetrycontract.StatusSuccess,
+		Calls:  1,
+		Tokens: map[string]int64{telemetrycontract.TokenTypeInput: 42},
+	})
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+
+	sawCalls, sawTokens := false, false
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			sum := m.Data.(metricdata.Sum[int64])
+			for _, pt := range sum.DataPoints {
+				if _, ok := pt.Attributes.Value(attribute.Key(telemetrycontract.HarnessLabel)); ok {
+					t.Errorf("%s should omit %q when SCION_HARNESS is unset, got attrs=%v", m.Name, telemetrycontract.HarnessLabel, pt.Attributes.ToSlice())
+				}
+				switch m.Name {
+				case telemetrycontract.MetricAPICalls:
+					sawCalls = true
+					if got := pt.Attributes.Len(); got != 2 {
+						t.Errorf("%s attr count = %d, want 2 (model, status): %v", m.Name, got, pt.Attributes.ToSlice())
+					}
+				case telemetrycontract.MetricUsageTokens:
+					sawTokens = true
+					if got := pt.Attributes.Len(); got != 2 {
+						t.Errorf("%s attr count = %d, want 2 (model, token_type): %v", m.Name, got, pt.Attributes.ToSlice())
+					}
+				}
+			}
+		}
+	}
+	if !sawCalls || !sawTokens {
+		t.Fatalf("expected both calls (%v) and tokens (%v) points", sawCalls, sawTokens)
+	}
 }

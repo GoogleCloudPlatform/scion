@@ -1083,26 +1083,30 @@ func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
 	harness := os.Getenv("SCION_HARNESS")
 
 	if increment.Calls != 0 && d.calls != nil {
-		attrs := []attribute.KeyValue{
-			attribute.String(telemetrycontract.HarnessLabel, harness),
-			attribute.String(telemetrycontract.ModelLabel, model),
-			attribute.String(telemetrycontract.StatusLabel, increment.Status),
-		}
+		attrs := contractLabelAttrs(telemetrycontract.APICallsPointAttrs(harness, model, increment.Status))
 		d.calls.Add(ctx, increment.Calls, otelmetric.WithAttributes(attrs...))
 	}
 	if d.tokens == nil {
 		return
 	}
+	baseTokenAttrs := contractLabelAttrs(telemetrycontract.UsageTokenPointAttrs(harness, model))
 	for tokenType, n := range increment.Tokens {
 		if n <= 0 {
 			continue
 		}
-		d.tokens.Add(ctx, n, otelmetric.WithAttributes(
-			attribute.String(telemetrycontract.HarnessLabel, harness),
-			attribute.String(telemetrycontract.ModelLabel, model),
-			attribute.String(telemetrycontract.TokenTypeLabel, tokenType),
-		))
+		pointAttrs := make([]attribute.KeyValue, len(baseTokenAttrs), len(baseTokenAttrs)+1)
+		copy(pointAttrs, baseTokenAttrs)
+		pointAttrs = append(pointAttrs, attribute.String(telemetrycontract.TokenTypeLabel, tokenType))
+		d.tokens.Add(ctx, n, otelmetric.WithAttributes(pointAttrs...))
 	}
+}
+
+func contractLabelAttrs(kvs []telemetrycontract.LabelKV) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, len(kvs))
+	for i, kv := range kvs {
+		attrs[i] = attribute.String(kv.Key, kv.Value)
+	}
+	return attrs
 }
 
 // Diagnostics returns the deriver's fixed-cardinality counters. Safe on a
