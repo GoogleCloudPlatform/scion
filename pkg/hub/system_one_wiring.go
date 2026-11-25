@@ -424,7 +424,7 @@ func isAllowedNamedSecretType(secretType string) bool {
 	switch secretType {
 	case "", // legacy => environment
 		store.SecretTypeEnvironment,
-		store.SecretTypeVariable:
+		store.SecretTypeOnDemand:
 		return true
 	default:
 		return false

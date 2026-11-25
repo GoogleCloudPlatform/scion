@@ -448,17 +448,19 @@ func TestPatchSecret_UserScope_TypeChangeToEnvironmentValidatesStoredTarget(t *t
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 
-	// Create a variable-type secret whose target happens to collide with a
-	// reserved control-plane name (allowed for variable-type secrets, since
-	// they are never projected into the container environment by name).
-	createBody := SetSecretRequest{
-		Value:  base64.StdEncoding.EncodeToString([]byte("secret-value")),
-		Type:   "variable",
-		Target: "SCION_METADATA_MODE",
-	}
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RETYPE_KEY", createBody)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	// Create a secret directly in the backend whose stored target happens to
+	// collide with a reserved control-plane env var name, then verify PATCHing
+	// its type to environment without overriding target is rejected.
+	_, _, err := localBackend.Set(context.Background(), &secret.SetSecretInput{
+		Name:       "RETYPE_KEY",
+		Value:      "secret-value",
+		SecretType: store.SecretTypeOnDemand,
+		Target:     "SCION_METADATA_MODE",
+		Scope:      store.ScopeUser,
+		ScopeID:    DevUserID,
+	})
+	if err != nil {
+		t.Fatalf("seed secret: %v", err)
 	}
 
 	// PATCH with type=environment but no target — the stored target is
@@ -466,7 +468,7 @@ func TestPatchSecret_UserScope_TypeChangeToEnvironmentValidatesStoredTarget(t *t
 	patchBody := PatchSecretRequest{
 		Type: "environment",
 	}
-	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/secrets/RETYPE_KEY", patchBody)
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/secrets/RETYPE_KEY", patchBody)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("PATCH type change to environment with reserved stored target: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}

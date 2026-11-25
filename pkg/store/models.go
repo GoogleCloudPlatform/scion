@@ -3109,8 +3109,8 @@ type Secret struct {
 	SecretRef string `json:"secretRef,omitempty"` // External secret reference
 
 	// Type and Target
-	SecretType string `json:"type"`             // environment, variable, file (default: environment)
-	Target     string `json:"target,omitempty"` // Projection target: env var name, json key, or file path
+	SecretType string `json:"type"`             // environment, file, on_demand (default: environment)
+	Target     string `json:"target,omitempty"` // Projection target: env var name or file path (omitted for on_demand)
 
 	// Scope
 	Scope   string `json:"scope"`   // user, project, runtime_broker
@@ -3145,8 +3145,8 @@ type SecretMetaUpdate struct {
 // SecretType constants define how a secret is projected into the agent container.
 const (
 	SecretTypeEnvironment = "environment" // Injected as environment variable (default)
-	SecretTypeVariable    = "variable"    // Written to ~/.scion/secrets.json for programmatic access
 	SecretTypeFile        = "file"        // Written to a file at the specified Target path
+	SecretTypeOnDemand    = "on_demand"   // Never injected at start; read explicitly by agents via CLI/runtime API
 	SecretTypeInternal    = "internal"    // Hub-internal infrastructure key; never projected into agent environments
 )
 

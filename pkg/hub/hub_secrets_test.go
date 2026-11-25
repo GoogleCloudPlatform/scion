@@ -34,6 +34,7 @@ func TestHubSecretWritersUseSharedBackendContract(t *testing.T) {
 		name      string
 		secretKey string
 		write     func(*Server) error
+		read      func(*Server) (string, error)
 	}{
 		{
 			name:      "chat integration",
@@ -41,12 +42,18 @@ func TestHubSecretWritersUseSharedBackendContract(t *testing.T) {
 			write: func(s *Server) error {
 				return s.SetChatIntegrationSecret(t.Context(), "CHAT_TEST_SECRET", "secret-value", "test description", "test-user")
 			},
+			read: func(s *Server) (string, error) {
+				return s.LoadChatIntegrationSecret(t.Context(), "CHAT_TEST_SECRET")
+			},
 		},
 		{
 			name:      "GitHub App",
 			secretKey: GitHubAppSecretPrivateKey,
 			write: func(s *Server) error {
 				return s.setGitHubAppSecret(t.Context(), GitHubAppSecretPrivateKey, "secret-value", "test description", "test-user")
+			},
+			read: func(s *Server) (string, error) {
+				return s.loadGitHubAppSecret(t.Context(), GitHubAppSecretPrivateKey)
 			},
 		},
 	}
@@ -61,11 +68,15 @@ func TestHubSecretWritersUseSharedBackendContract(t *testing.T) {
 			stored, err := backend.Get(t.Context(), tt.secretKey, store.ScopeHub, "test-hub")
 			require.NoError(t, err)
 			assert.Equal(t, "secret-value", stored.Value)
-			assert.Equal(t, secret.TypeVariable, stored.SecretType)
+			assert.Equal(t, store.SecretTypeInternal, stored.SecretType)
 			assert.Equal(t, "test description", stored.Description)
 			assert.Equal(t, "as_needed", stored.InjectionMode)
 			assert.Equal(t, "test-user", stored.CreatedBy)
 			assert.Equal(t, "test-user", stored.UpdatedBy)
+
+			loaded, err := tt.read(srv)
+			require.NoError(t, err)
+			assert.Equal(t, "secret-value", loaded)
 		})
 	}
 }
@@ -103,7 +114,7 @@ func TestHubSecretWritersUseValidFallbackIDs(t *testing.T) {
 			assert.NoError(t, uuid.Validate(stored.ID))
 			firstID := stored.ID
 			assert.Equal(t, "secret-value", stored.EncryptedValue)
-			assert.Equal(t, store.SecretTypeVariable, stored.SecretType)
+			assert.Equal(t, store.SecretTypeInternal, stored.SecretType)
 			assert.Equal(t, "test description", stored.Description)
 			assert.Equal(t, "test-user", stored.CreatedBy)
 			assert.Equal(t, "test-user", stored.UpdatedBy)
@@ -165,7 +176,7 @@ func seedHubSecretRow(t *testing.T, st store.Store, key, value string) {
 	t.Helper()
 	_, err := st.UpsertSecret(context.Background(), &store.Secret{
 		ID: uuid.NewString(), Key: key, EncryptedValue: value,
-		Scope: store.ScopeHub, ScopeID: encTestHubID, SecretType: store.SecretTypeVariable, Version: 1,
+		Scope: store.ScopeHub, ScopeID: encTestHubID, SecretType: store.SecretTypeInternal, Version: 1,
 	})
 	require.NoError(t, err)
 }
@@ -227,7 +238,7 @@ func TestHubSecretNoBackend_RingModeWriteSatisfiesPolicy(t *testing.T) {
 			// The fence itself still refuses a plaintext write.
 			_, err = st.UpsertSecret(context.Background(), &store.Secret{
 				ID: uuid.NewString(), Key: tt.key, EncryptedValue: "FAKE-plaintext",
-				Scope: store.ScopeHub, ScopeID: encTestHubID, SecretType: store.SecretTypeVariable, Version: 1,
+				Scope: store.ScopeHub, ScopeID: encTestHubID, SecretType: store.SecretTypeInternal, Version: 1,
 			})
 			assert.ErrorIs(t, err, store.ErrEncryptionPolicyMismatch)
 		})

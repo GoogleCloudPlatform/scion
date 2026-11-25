@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -296,8 +297,8 @@ func applyNoAuthGitToken(env map[string]string, classifications *map[string]api.
 
 // noAuthCreateGitToken reads the GITHUB_TOKEN record of scope (project or
 // the owner's user scope) by name for create, returning its value, or ""
-// when there is none or it cannot be read (logged at debug, without the
-// value).
+// when there is none, it is non-deliverable, or it cannot be read (logged at
+// debug, without the value).
 func (d *HTTPAgentDispatcher) noAuthCreateGitToken(ctx context.Context, agent *store.Agent, scope, scopeID string) string {
 	ghSecret, err := d.secretBackend.Get(ctx, noAuthGitTokenKey, scope, scopeID)
 	if err != nil {
@@ -306,7 +307,7 @@ func (d *HTTPAgentDispatcher) noAuthCreateGitToken(ctx context.Context, agent *s
 		}
 		return ""
 	}
-	if ghSecret == nil || ghSecret.Value == "" {
+	if ghSecret == nil || !secret.DeliverableType(ghSecret.SecretType) || ghSecret.Value == "" {
 		return ""
 	}
 	if d.debug {

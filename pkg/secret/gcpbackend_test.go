@@ -505,7 +505,7 @@ func TestGCPBackend_GetMeta(t *testing.T) {
 	_, _, err := backend.Set(ctx, &SetSecretInput{
 		Name:        "META_KEY",
 		Value:       "secret-value",
-		SecretType:  TypeVariable,
+		SecretType:  TypeOnDemand,
 		Target:      "config",
 		Scope:       ScopeProject,
 		ScopeID:     "project-1",
@@ -522,8 +522,8 @@ func TestGCPBackend_GetMeta(t *testing.T) {
 	if meta.Name != "META_KEY" {
 		t.Errorf("expected name %q, got %q", "META_KEY", meta.Name)
 	}
-	if meta.SecretType != TypeVariable {
-		t.Errorf("expected type %q, got %q", TypeVariable, meta.SecretType)
+	if meta.SecretType != TypeOnDemand {
+		t.Errorf("expected type %q, got %q", TypeOnDemand, meta.SecretType)
 	}
 }
 

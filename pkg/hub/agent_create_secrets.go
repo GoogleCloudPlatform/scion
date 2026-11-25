@@ -237,12 +237,12 @@ func (s *Server) validateCreateAgentSecrets(inputs []AgentSecretInput) ([]valida
 			secretType = store.SecretTypeEnvironment
 		}
 		switch secretType {
-		case store.SecretTypeEnvironment, store.SecretTypeVariable, store.SecretTypeFile:
+		case store.SecretTypeEnvironment, store.SecretTypeFile:
 		default:
 			return nil, &secretValidationError{
 				status:  http.StatusBadRequest,
 				code:    ErrCodeValidationError,
-				message: "type must be one of: environment, variable, file",
+				message: "type must be one of: environment, file",
 				details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].type", i), "key": in.Key, "value": secretType},
 			}
 		}

@@ -228,7 +228,7 @@ func TestAgentListSecrets_ReturnsMetadataNoValues(t *testing.T) {
 
 	// Seed multiple secrets.
 	seedSecret(t, srv.secretBackend, "LIST_KEY_1", "secret-1", "environment", "", projectID)
-	seedSecret(t, srv.secretBackend, "LIST_KEY_2", "secret-2", "variable", "LIST_KEY_2", projectID)
+	seedSecret(t, srv.secretBackend, "LIST_KEY_2", "secret-2", store.SecretTypeOnDemand, "LIST_KEY_2", projectID)
 	seedSecret(t, srv.secretBackend, "LIST_KEY_3", "secret-3", "file", "/tmp/file.txt", projectID)
 
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet,
@@ -277,7 +277,7 @@ func TestAgentListSecrets_ReturnsMetadataNoValues(t *testing.T) {
 	if s, ok := keyMap["LIST_KEY_1"]; !ok || s.Type != "environment" {
 		t.Errorf("expected LIST_KEY_1 with type environment, got %+v", keyMap["LIST_KEY_1"])
 	}
-	if s, ok := keyMap["LIST_KEY_2"]; !ok || s.Type != "variable" {
+	if s, ok := keyMap["LIST_KEY_2"]; !ok || s.Type != store.SecretTypeOnDemand {
 		t.Errorf("expected LIST_KEY_2 with type variable, got %+v", keyMap["LIST_KEY_2"])
 	}
 	if s, ok := keyMap["LIST_KEY_3"]; !ok || s.Type != "file" || s.Target != "/tmp/file.txt" {

@@ -769,11 +769,65 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 		}
 	}
 
-	t.Run("allowed_types_environment_variable_legacy_empty_succeed_and_internal_and_file_refused", func(t *testing.T) {
+	t.Run("project_scope_on_demand_resolves_and_file_and_internal_refused", func(t *testing.T) {
+		const projID = "proj-sysone-od"
+		ctxWithProj := systemoneruntime.WithEvalProjectID(context.Background(), projID)
+
+		srvOK := &Server{
+			hubID: hubID,
+			secretBackend: &stubSystemOneSecretBackend{
+				getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+					require.Equal(t, "GEMINI_API_KEY", name)
+					require.Equal(t, store.ScopeProject, scope)
+					require.Equal(t, projID, scopeID)
+					return &secret.SecretWithValue{
+						SecretMeta: secret.SecretMeta{
+							Name:       name,
+							SecretType: store.SecretTypeOnDemand,
+							Scope:      scope,
+							ScopeID:    scopeID,
+							Version:    2,
+						},
+						Value: "proj-on-demand-canary",
+					}, nil
+				},
+			},
+		}
+		srcOK := &hubSystemOneCredentialSource{srv: srvOK}
+		tok, err := srcOK.APIKeyToken(ctxWithProj, makeInst(systemoneprovider.SecretScopeProject))
+		require.NoError(t, err)
+		assert.Equal(t, "proj-on-demand-canary", tok)
+
+		for _, disallowedType := range []string{store.SecretTypeFile, store.SecretTypeInternal} {
+			srvBad := &Server{
+				hubID: hubID,
+				secretBackend: &stubSystemOneSecretBackend{
+					getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+						return &secret.SecretWithValue{
+							SecretMeta: secret.SecretMeta{
+								Name:       name,
+								SecretType: disallowedType,
+								Scope:      scope,
+								ScopeID:    scopeID,
+								Version:    1,
+							},
+							Value: "must-not-leak",
+						}, nil
+					},
+				},
+			}
+			srcBad := &hubSystemOneCredentialSource{srv: srvBad}
+			_, err := srcBad.APIKeyToken(ctxWithProj, makeInst(systemoneprovider.SecretScopeProject))
+			require.Error(t, err, "project-scope %q must be refused", disallowedType)
+			assert.ErrorIs(t, err, egress.ErrAuth)
+		}
+	})
+
+	t.Run("allowed_types_environment_on_demand_legacy_empty_succeed_and_internal_and_file_refused", func(t *testing.T) {
 		for _, secType := range []string{
 			"",
 			store.SecretTypeEnvironment,
-			store.SecretTypeVariable,
+			store.SecretTypeOnDemand,
 		} {
 			srv := &Server{
 				hubID: hubID,
@@ -885,7 +939,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 							hubLookups.Add(1)
 							require.Equal(t, hubID, scopeID)
 							return &secret.SecretWithValue{
-								SecretMeta: secret.SecretMeta{Name: name, SecretType: store.SecretTypeVariable, Version: 7},
+								SecretMeta: secret.SecretMeta{Name: name, SecretType: store.SecretTypeEnvironment, Version: 7},
 								Value:      hubCanary,
 							}, nil
 						default:
@@ -928,7 +982,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 			{
 				name: "project secret has empty/whitespace value",
 				projResp: &secret.SecretWithValue{
-					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeVariable, Version: 1},
+					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeEnvironment, Version: 1},
 					Value:      "   ",
 				},
 				wantErr: egress.ErrAuth,
@@ -936,7 +990,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 			{
 				name: "project secret has control-char value",
 				projResp: &secret.SecretWithValue{
-					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeVariable, Version: 1},
+					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeEnvironment, Version: 1},
 					Value:      projCanary + "\nline2",
 				},
 				wantErr: egress.ErrAuth,
@@ -966,7 +1020,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 							if scope == store.ScopeHub {
 								hubLookups.Add(1)
 								return &secret.SecretWithValue{
-									SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeVariable, Version: 9},
+									SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeEnvironment, Version: 9},
 									Value:      hubCanary,
 								}, nil
 							}
@@ -1056,7 +1110,7 @@ func TestSystemOneNamedSecret_ProviderPinnedSecretNamePolicyBeforeLookup(t *test
 				return &secret.SecretWithValue{
 					SecretMeta: secret.SecretMeta{
 						Name:       name,
-						SecretType: store.SecretTypeVariable,
+						SecretType: store.SecretTypeEnvironment,
 						Scope:      scope,
 						ScopeID:    scopeID,
 						Version:    1,
@@ -1163,7 +1217,7 @@ func TestSystemOneNamedSecret_EndpointPinAllowedNameBeforeLookup(t *testing.T) {
 	)
 	ctx := systemoneruntime.WithEvalProjectID(context.Background(), projID)
 
-	for _, secretType := range []string{store.SecretTypeEnvironment, store.SecretTypeVariable} {
+	for _, secretType := range []string{store.SecretTypeEnvironment, store.SecretTypeOnDemand} {
 		t.Run("type_"+secretType, func(t *testing.T) {
 			var backendGetCalls atomic.Int32
 			srv := &Server{

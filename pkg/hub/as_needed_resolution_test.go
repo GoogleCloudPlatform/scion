@@ -906,7 +906,7 @@ func TestResolveSecrets_FileTypePassesThroughAsNeeded(t *testing.T) {
 			{
 				SecretMeta: secret.SecretMeta{
 					Name:          "VAR_SECRET",
-					SecretType:    store.SecretTypeVariable,
+					SecretType:    store.SecretTypeOnDemand,
 					Target:        "MY_VAR",
 					Scope:         "project",
 					ScopeID:       "project-file-test",

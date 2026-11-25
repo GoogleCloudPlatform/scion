@@ -441,7 +441,7 @@ func TestAgentSecrets_DeliveryPrecedenceInjectionModesAndSkippedWarning(t *testi
 	})
 	require.NoError(t, err)
 	_, _, err = srv.secretBackend.Set(ctx, &secret.SetSecretInput{
-		Name: "CFG_VAR", Value: `{"a":1}`, SecretType: store.SecretTypeVariable, Target: "cfg_var", Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
+		Name: "CFG_VAR", Value: `{"a":1}`, SecretType: store.SecretTypeOnDemand, Target: "CFG_VAR", Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
 	})
 	require.NoError(t, err)
 
@@ -454,8 +454,9 @@ func TestAgentSecrets_DeliveryPrecedenceInjectionModesAndSkippedWarning(t *testi
 		keys: map[string]string{"DECLARED_ONLY": "DECLARED_ONLY"},
 	}
 
-	// With experiment ON: agent-scope SHARED overrides user/project, file/variable
-	// are always delivered, DECLARED_ONLY is in asNeededEnv, UNDECLARED is omitted.
+	// With experiment ON: agent-scope SHARED overrides user/project, file is
+	// always delivered, on_demand is excluded, DECLARED_ONLY is in asNeededEnv,
+	// UNDECLARED is omitted.
 	resolved, asNeeded, skipped, err := d.selectDeliverySecretsWith(ctx, sel, agentX, gathered)
 	require.NoError(t, err)
 	assert.Empty(t, skipped)
@@ -468,7 +469,8 @@ func TestAgentSecrets_DeliveryPrecedenceInjectionModesAndSkippedWarning(t *testi
 	assert.Equal(t, store.ScopeAgent, byName["SHARED"].Source)
 	assert.Equal(t, "pem-data", byName["SSH_KEY"].Value)
 	assert.Equal(t, "~/.ssh/id_test", byName["SSH_KEY"].Target)
-	assert.Equal(t, `{"a":1}`, byName["CFG_VAR"].Value)
+	_, hasOnDemand := byName["CFG_VAR"]
+	assert.False(t, hasOnDemand, "on_demand secret must not be delivered")
 	assert.Equal(t, "declared-val", asNeeded["DECLARED_ONLY"])
 	_, hasUndeclared := asNeeded["UNDECLARED"]
 	assert.False(t, hasUndeclared)

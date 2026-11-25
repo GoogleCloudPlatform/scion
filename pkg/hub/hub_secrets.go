@@ -29,7 +29,7 @@ func (s *Server) setHubSecret(ctx context.Context, name, value, description, use
 		_, _, err := s.secretBackend.Set(ctx, &secret.SetSecretInput{
 			Name:          name,
 			Value:         value,
-			SecretType:    secret.TypeVariable,
+			SecretType:    store.SecretTypeInternal,
 			Scope:         store.ScopeHub,
 			ScopeID:       s.hubID,
 			Description:   description,
@@ -59,7 +59,7 @@ func (s *Server) setHubSecret(ctx context.Context, name, value, description, use
 		EncryptedValue: stored,
 		Scope:          store.ScopeHub,
 		ScopeID:        s.hubID,
-		SecretType:     store.SecretTypeVariable,
+		SecretType:     store.SecretTypeInternal,
 		Description:    description,
 		Version:        1,
 		CreatedBy:      userID,

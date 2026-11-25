@@ -907,7 +907,7 @@ func TestAdminSystemOne_GeminiNamedSecretVerticalCLIProbeFallbackAndDeleteSafety
 	_, _, err = env.secretStore.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      hubCanaryKey,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeHub,
 		ScopeID:    inProcessSystemOneHubID,
@@ -919,7 +919,7 @@ func TestAdminSystemOne_GeminiNamedSecretVerticalCLIProbeFallbackAndDeleteSafety
 	_, _, err = env.secretStore.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      projCanaryKey,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeProject,
 		ScopeID:    createdProj.ID,
@@ -993,7 +993,7 @@ func TestAdminSystemOne_GeminiNamedSecretVerticalCLIProbeFallbackAndDeleteSafety
 	_, _, err = env.secretStore.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      projRotKey,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeProject,
 		ScopeID:    createdProj.ID,

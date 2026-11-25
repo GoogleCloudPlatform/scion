@@ -75,7 +75,7 @@ func TestResolveSecrets(t *testing.T) {
 		ID:             tid("s5"),
 		Key:            "CONFIG",
 		EncryptedValue: `{"key":"val"}`,
-		SecretType:     store.SecretTypeVariable,
+		SecretType:     store.SecretTypeOnDemand,
 		Target:         "config",
 		Scope:          store.ScopeUser,
 		ScopeID:        tid("user-1"),
@@ -154,8 +154,8 @@ func TestResolveSecrets(t *testing.T) {
 	if !ok {
 		t.Fatal("expected CONFIG in resolved secrets")
 	}
-	if config.Type != store.SecretTypeVariable {
-		t.Errorf("expected CONFIG type %q, got %q", store.SecretTypeVariable, config.Type)
+	if config.Type != store.SecretTypeOnDemand {
+		t.Errorf("expected CONFIG type %q, got %q", store.SecretTypeOnDemand, config.Type)
 	}
 
 	// Total count: API_KEY, DB_PASS, TLS_CERT, CONFIG = 4

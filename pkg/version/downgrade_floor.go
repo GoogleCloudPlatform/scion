@@ -35,9 +35,16 @@ package version
 // that contains it. Setting the floor a day late causes that nightly and any
 // preview or stable release published on the same day to sort below the floor
 // and be refused as downgrade targets (below_downgrade_floor).
-// Current floor (nightly-20261125): scheduled_exec_runs makes event_id nullable
-// and adds fire_id plus the scheduled_exec_runs_single_owner CHECK constraint
-// (Stage 2 P8, ptone/scion#8241); pre-P8 binaries fail AutoMigrate on Postgres
-// once any trigger-owned run row exists (SQLSTATE 23502 on SET NOT NULL) and on
-// SQLite table rebuild (SQLITE_CONSTRAINT_NOTNULL 1299).
-const DowngradeFloor = "nightly-20261125"
+// Current floor (nightly-20261126):
+//   - scheduled_exec_runs makes event_id nullable and adds fire_id plus the
+//     scheduled_exec_runs_single_owner CHECK constraint (Stage 2 P8,
+//     ptone/scion#8241); pre-P8 binaries fail AutoMigrate on Postgres once any
+//     trigger-owned run row exists (SQLSTATE 23502 on SET NOT NULL) and on
+//     SQLite table rebuild (SQLITE_CONSTRAINT_NOTNULL 1299).
+//   - Retiring the "variable" secret type and introducing "on_demand"
+//     (ptone/scion#9160): existing variable rows are rewritten to internal or
+//     on_demand or deleted, and the secret_type enums are narrowed; older
+//     binaries use a denylist delivery path that would fetch and send on_demand
+//     values to brokers, reject on_demand in validators, and return the stored
+//     target in runtime-read responses.
+const DowngradeFloor = "nightly-20261126"

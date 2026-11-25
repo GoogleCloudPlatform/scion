@@ -47,7 +47,10 @@ const (
 const (
 	SecretRequestTypeEnvironment = "environment"
 	SecretRequestTypeFile        = "file"
-	SecretRequestTypeVariable    = "variable"
+	SecretRequestTypeOnDemand    = "on_demand"
+	// SecretRequestTypeVariable is the retired legacy type accepted by
+	// NormalizeSecretRequests and mapped to SecretRequestTypeOnDemand.
+	SecretRequestTypeVariable = "variable"
 )
 
 // secretRequestKeyRe matches valid secret keys (uppercase/lowercase letters,
@@ -198,9 +201,11 @@ func NormalizeSecretRequests(root string, in []SecretRequestInput) ([]SecretRequ
 			secretType = SecretRequestTypeEnvironment
 		}
 		switch secretType {
-		case SecretRequestTypeEnvironment, SecretRequestTypeFile, SecretRequestTypeVariable:
+		case SecretRequestTypeEnvironment, SecretRequestTypeFile, SecretRequestTypeOnDemand:
+		case SecretRequestTypeVariable:
+			secretType = SecretRequestTypeOnDemand
 		default:
-			add(p+".type", DecisionErrInvalid, "type must be one of: environment, file, variable")
+			add(p+".type", DecisionErrInvalid, "type must be one of: environment, file, on_demand")
 		}
 
 		target := strings.TrimSpace(item.Target)

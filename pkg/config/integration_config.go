@@ -52,6 +52,10 @@ const (
 
 	// A2A Bridge
 	SecretA2AAPIKey = "A2A_API_KEY"
+
+	// GitHub App
+	SecretGitHubAppPrivateKey    = "GITHUB_APP_PRIVATE_KEY"
+	SecretGitHubAppWebhookSecret = "GITHUB_APP_WEBHOOK_SECRET"
 )
 
 // IntegrationConfigProvider defines the interface for reading and writing
@@ -222,6 +226,31 @@ func init() {
 // secret backend entry (e.g. "bot_token", "signing_secret").
 func IsSecretConfigKey(key string) bool {
 	return secretConfigKeys[key]
+}
+
+// HubProducerSecretKeys returns the sorted, deduplicated set of Hub-scoped
+// secret keys written by Hub internal producers (chat integrations, GitHub App,
+// and plugin secret auto-migration). Built from PluginSecretKeyMap and the
+// integration secret constants so any newly registered plugin secret key is
+// included automatically.
+func HubProducerSecretKeys() []string {
+	seen := map[string]struct{}{
+		SecretGitHubAppPrivateKey:    {},
+		SecretGitHubAppWebhookSecret: {},
+	}
+	for _, mappings := range PluginSecretKeyMap {
+		for _, m := range mappings {
+			if m.SecretKey != "" {
+				seen[m.SecretKey] = struct{}{}
+			}
+		}
+	}
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // backendSecretKeys lists the well-known secret backend key names

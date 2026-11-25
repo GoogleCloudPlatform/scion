@@ -800,7 +800,7 @@ func TestEnvVar_ProjectScope_AgentRequiresSecretReadScopeForSecretMetadata(t *te
 		t.Fatalf("expected underlying plain store.EnvVar for SHADOWED_KEY to remain shadowed in store, got %+v, err=%v", storedPlain, err)
 	}
 
-	// 5. Non-environment secret ("variable") sharing a name with a plain EnvVar:
+	// 5. Non-environment secret ("file") sharing a name with a plain EnvVar:
 	// non-environment secrets do not project into /env and must NOT shadow plain env vars.
 	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/VAR_SHARED_KEY", SetEnvVarRequest{
 		Value: "var-shared-plain-value",
@@ -808,10 +808,11 @@ func TestEnvVar_ProjectScope_AgentRequiresSecretReadScopeForSecretMetadata(t *te
 		t.Fatalf("seed plain VAR_SHARED_KEY: got %d: %s", rec.Code, rec.Body.String())
 	}
 	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/VAR_SHARED_KEY", SetSecretRequest{
-		Value: "dmFyLXNlY3JldA==",
-		Type:  store.SecretTypeVariable,
+		Value:  "dmFyLXNlY3JldA==",
+		Type:   store.SecretTypeFile,
+		Target: "/tmp/var-shared-secret",
 	}); rec.Code != http.StatusOK {
-		t.Fatalf("seed variable secret VAR_SHARED_KEY: got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("seed non-env secret VAR_SHARED_KEY: got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// 6. Legacy store.EnvVar row flagged Secret=true (defense-in-depth).
@@ -1526,7 +1527,7 @@ func TestEnvVar_NonEnvironmentSecrets_NotMerged(t *testing.T) {
 		ID:             tid("sec-var-1"),
 		Key:            "VARIABLE_SECRET",
 		EncryptedValue: "var-val",
-		SecretType:     store.SecretTypeVariable,
+		SecretType:     store.SecretTypeOnDemand,
 		Target:         "VARIABLE_SECRET",
 		Scope:          store.ScopeUser,
 		ScopeID:        DevUserID,

@@ -300,7 +300,7 @@ func TestLocalBackend_GetMeta(t *testing.T) {
 		ID:             tid("s1"),
 		Key:            "META_KEY",
 		EncryptedValue: "secret-value",
-		SecretType:     store.SecretTypeVariable,
+		SecretType:     store.SecretTypeOnDemand,
 		Target:         "config",
 		Scope:          store.ScopeProject,
 		ScopeID:        "project-1",
@@ -313,8 +313,8 @@ func TestLocalBackend_GetMeta(t *testing.T) {
 	if meta.Name != "META_KEY" {
 		t.Errorf("expected name %q, got %q", "META_KEY", meta.Name)
 	}
-	if meta.SecretType != TypeVariable {
-		t.Errorf("expected type %q, got %q", TypeVariable, meta.SecretType)
+	if meta.SecretType != TypeOnDemand {
+		t.Errorf("expected type %q, got %q", TypeOnDemand, meta.SecretType)
 	}
 }
 

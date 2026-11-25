@@ -76,6 +76,14 @@ func recordGenerationChanged(s *store.Secret, meta SecretMeta) bool {
 		s.SecretType == store.SecretTypeInternal
 }
 
+// DeliverableType reports whether a secret of type t may be delivered to an
+// agent container at start, restart, or harness credential gathering.
+// Only environment (including legacy "") and file secrets are deliverable;
+// every other type (including on_demand and internal) fails closed.
+func DeliverableType(t string) bool {
+	return t == store.SecretTypeEnvironment || t == "" || t == store.SecretTypeFile
+}
+
 // Well-known name and in-home path of the telemetry credential file secret.
 const (
 	telemetryCredentialFileName = "scion-telemetry-gcp-credentials"
