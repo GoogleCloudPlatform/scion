@@ -3609,7 +3609,7 @@ var compactItemAllowlist = []string{
 	"id", "slug", "name", "template", "projectId", "project", "projectSlug", "labels",
 	"phase", "activity", "suspendReason", "containerStatus", "message", "messageMode", "ancestry",
 	"createdBy", "creatorName", "created", "updated", "lastActivityEvent",
-	"_capabilities", "_messageability", "deletion", "harnessVendor", "modelSize",
+	"_capabilities", "_messageability", "deletion", "harnessConfig", "harnessVendor", "modelSize",
 }
 
 func rawKeys[V any](m map[string]V) []string {

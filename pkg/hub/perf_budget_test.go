@@ -149,7 +149,7 @@ var perfBudgets = []perfBudget{
 	{
 		name:     "global list, legacy compact",
 		path:     func(f *perfBudgetFixture) string { return "/api/v1/agents?view=compact" },
-		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 80430}, // was 77638: +2792 for harnessVendor (ptone/scion#5502), about 28 bytes per row
+		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 83734}, // was 80430: +3304 for harnessConfig (ptone/scion#9037), ~33 bytes per row
 	},
 	{
 		// Store calls: per-request sender standing (upstream #3101).

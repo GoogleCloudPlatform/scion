@@ -90,5 +90,96 @@
       }
     ],
     "textHelp": "Matches file path by regex, falling back to fuzzy match"
+  },
+  {
+    "view": "graph",
+    "keys": [
+      {
+        "name": "phase",
+        "help": "Agent lifecycle phase",
+        "kind": "enum",
+        "exec": "client",
+        "enum": [
+          "created",
+          "provisioning",
+          "cloning",
+          "starting",
+          "running",
+          "suspended",
+          "stopping",
+          "stopped",
+          "error",
+          "halted"
+        ],
+        "multiValued": false
+      },
+      {
+        "name": "activity",
+        "help": "Current agent activity",
+        "kind": "enum",
+        "exec": "client",
+        "enum": [
+          "initializing",
+          "working",
+          "thinking",
+          "executing",
+          "waiting_for_input",
+          "blocked",
+          "idle",
+          "completed",
+          "limits_exceeded",
+          "stalled",
+          "offline",
+          "crashed",
+          "harness_error"
+        ],
+        "multiValued": false
+      },
+      {
+        "name": "label",
+        "help": "Label key or key=value pair",
+        "kind": "label",
+        "exec": "client",
+        "multiValued": true
+      },
+      {
+        "name": "project",
+        "help": "Project slug, name, or ID",
+        "kind": "ref",
+        "exec": "client",
+        "multiValued": false
+      },
+      {
+        "name": "template",
+        "help": "Agent template name",
+        "kind": "string",
+        "exec": "client",
+        "multiValued": false
+      },
+      {
+        "name": "harness",
+        "help": "Harness config name",
+        "kind": "string",
+        "exec": "client",
+        "multiValued": false
+      },
+      {
+        "name": "mode",
+        "help": "Messaging mode or messageability",
+        "kind": "enum",
+        "exec": "client",
+        "enum": [
+          "hub",
+          "project",
+          "branch",
+          "lineage",
+          "none",
+          "can_message",
+          "cannot_message"
+        ],
+        "multiValued": false
+      }
+    ],
+    "textHelp": "Matches agent name or slug"
   }
 ]

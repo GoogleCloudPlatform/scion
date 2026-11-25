@@ -112,9 +112,10 @@ type AgentCompactItem struct {
 	// copied as is, so a graph loaded from the compact view shows the
 	// same deletion state as one loaded from the full view.
 	Deletion *store.DeletionInfo `json:"deletion"`
-	// HarnessVendor and ModelSize have the same types and tags as the full
-	// item's fields and are copied from it, so compact emits exactly what
-	// full emits, including omitting them when empty.
+	// HarnessConfig, HarnessVendor and ModelSize have the same types and tags
+	// as the full item's fields and are copied from it, so compact emits
+	// exactly what full emits, including omitting them when empty.
+	HarnessConfig string `json:"harnessConfig,omitempty"`
 	HarnessVendor string `json:"harnessVendor,omitempty"`
 	ModelSize     string `json:"modelSize,omitempty"`
 }
@@ -161,6 +162,7 @@ func toCompact(a AgentWithCapabilities) AgentCompactItem {
 		Cap:               a.Cap,
 		Messageability:    a.Messageability,
 		Deletion:          a.Deletion,
+		HarnessConfig:     a.HarnessConfig,
 		HarnessVendor:     a.HarnessVendor,
 		ModelSize:         a.ModelSize,
 	}

@@ -61,5 +61,6 @@ func All() []filterquery.Schema {
 		Artifacts,
 		ProjectArtifacts,
 		Files,
+		Graph,
 	}
 }
