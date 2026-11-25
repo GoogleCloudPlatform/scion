@@ -83,6 +83,7 @@ import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
+  drainServerQuery,
   getActiveSingleKeyValue,
   getViewSchema,
   hasClientOnlyKeys,
@@ -876,7 +877,12 @@ export class ScionPageAgents extends LitElement {
           serverQuery: nextQ,
           hasClientOnlyFilter: nextHasClientOnly,
         });
-        if (key === 'phase' && this.loadedServerQ === '' && !hasServerOnlyAgentTerms(fq, ctx)) {
+        const nextDrainQ = drainServerQuery(fq, AGENTS_FILTER_SCHEMA);
+        if (
+          key === 'phase' &&
+          this.loadedServerQ === nextDrainQ &&
+          !hasServerOnlyAgentTerms(fq, ctx)
+        ) {
           this.onAgentViewStateChanged();
         } else if (serverChanged) {
           void this.loadAgents('label-commit');
@@ -1121,13 +1127,14 @@ export class ScionPageAgents extends LitElement {
       // race an SSE `deleted`.
       if (complete) {
         const fq = this.committedFilterQuery;
-        this.loadedServerQ = serverQ;
+        const loadedQ = drainServerQuery(fq, AGENTS_FILTER_SCHEMA);
+        this.loadedServerQ = loadedQ;
         this.agents = epoch.seed(data.agents || [], {
           partial: false,
           isMember: (agent) => canLiveAddAgent(fq, agent, this.filterContext),
         }).agents;
         this.agentWindow.setSmall(epoch.sawResync);
-        this.markCompleteSet(serverQ);
+        this.markCompleteSet(loadedQ);
       } else {
         // Paged: `this.agents` stays empty; stats and Stop-all read the
         // member index through the window.
@@ -1151,18 +1158,17 @@ export class ScionPageAgents extends LitElement {
     carry?: { firstPage: DrainFirstPage; epoch: AgentSeedEpoch }
   ): Promise<boolean> {
     const gen = carriedGen ?? this.beginAgentsLoad().gen;
-    const serverQ = this.committedServerQ;
     const fq = this.committedFilterQuery;
+    const drainQ = drainServerQuery(fq, AGENTS_FILTER_SCHEMA);
     const params = new URLSearchParams();
-    if (serverQ) params.set('q', serverQ);
+    if (drainQ) params.set('q', drainQ);
     const qs = params.toString();
     const result = await this.drainRunner.run({
       url: qs ? `/api/v1/agents?${qs}` : '/api/v1/agents',
       view: 'full',
       ...(!hasServerOnlyAgentTerms(fq, this.filterContext)
         ? {
-            isMember: (agent: Agent): boolean =>
-              fq === null || matchAgentQuery(fq, agent, this.filterContext),
+            isMember: (agent: Agent): boolean => canLiveAddAgent(fq, agent, this.filterContext),
           }
         : {}),
       ...(carry ?? {}),
@@ -1171,12 +1177,12 @@ export class ScionPageAgents extends LitElement {
     if (result.firstPageFailed) {
       throw new Error(result.error?.message ?? 'Failed to load agents');
     }
-    this.loadedServerQ = serverQ;
+    this.loadedServerQ = drainQ;
     this.agents = result.agents;
     this.adoptScopeCapabilities(result.capabilities);
     this.agentWindow.adoptDrain(result);
     if (result.complete && !result.capped && !result.error) {
-      this.markCompleteSet(serverQ);
+      this.markCompleteSet(drainQ);
     }
     return true;
   }

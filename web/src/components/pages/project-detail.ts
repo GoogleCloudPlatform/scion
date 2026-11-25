@@ -121,6 +121,7 @@ import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
+  drainServerQuery,
   getActiveSingleKeyValue,
   getViewSchema,
   hasClientOnlyKeys,
@@ -2105,7 +2106,10 @@ export class ScionPageProjectDetail extends LitElement {
     // page's own copies (`this.agents`, the window).
     if (data.complete) {
       // The complete set: the response plus live creates it predates.
-      this.loadedServerQ = serverQ;
+      this.loadedServerQ = drainServerQuery(
+        this.committedFilterQuery,
+        PROJECT_AGENTS_FILTER_SCHEMA
+      );
       this.agents = epoch.seed(data.agents || [], {
         partial: false,
         isMember: (agent) => this.isProjectMember(agent),
@@ -2131,13 +2135,14 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private async drainProjectAgents(
     trigger: AgentsViewTrigger,
-    serverQ: string,
+    _serverQ: string,
     carriedGen?: number
   ): Promise<boolean> {
     const gen = carriedGen ?? this.beginAgentsLoad().gen;
+    const drainQ = drainServerQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA);
 
     const params = new URLSearchParams();
-    if (serverQ) params.set('q', serverQ);
+    if (drainQ) params.set('q', drainQ);
     params.set('include', 'authority');
     const qs = params.toString();
     const url = qs
@@ -2166,7 +2171,7 @@ export class ScionPageProjectDetail extends LitElement {
       return false;
     }
 
-    this.loadedServerQ = serverQ;
+    this.loadedServerQ = drainQ;
     this.agents = result.agents;
     this.agentScopeCapabilities =
       result.capabilities ?? this.agents.find((a) => a._capabilities)?._capabilities;
@@ -2713,7 +2718,8 @@ export class ScionPageProjectDetail extends LitElement {
           serverQuery: nextQ,
           hasClientOnlyFilter: nextHasClientOnly,
         });
-        if (this.loadedServerQ === '' && !hasServerOnlyAgentTerms(fq, ctx)) {
+        const nextDrainQ = drainServerQuery(fq, PROJECT_AGENTS_FILTER_SCHEMA);
+        if (this.loadedServerQ === nextDrainQ && !hasServerOnlyAgentTerms(fq, ctx)) {
           if (!this.agentWindow.isLocal || !this.hasAgentsResult) {
             this.onAgentViewStateChanged();
           }

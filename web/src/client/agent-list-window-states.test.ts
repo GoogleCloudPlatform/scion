@@ -459,6 +459,25 @@ describe('AgentListWindow states — sorted-mode refusal per committed label', (
     win.recordRefusal('a=b');
     expect(win.planRequest('page-load', '')).toBe('fit');
   });
+
+  it('keys 422 refusal on the phase-stripped server query so phase-chip switches do not retry fit', () => {
+    const { win } = setup();
+    win.recordRefusal('label:env=prod phase:running');
+    expect(win.isSortedRefused('label:env=prod phase:running')).toBe(true);
+    expect(win.isSortedRefused('label:env=prod phase:stopped')).toBe(true);
+    expect(win.isSortedRefused('label:env=prod -phase:error')).toBe(true);
+    expect(win.isSortedRefused('label:env=prod')).toBe(true);
+    expect(win.planRequest('label-commit', 'label:env=prod phase:stopped')).toBe('drain');
+
+    // Different non-phase terms are not refused and get a fresh fit attempt.
+    expect(win.isSortedRefused('label:env=staging phase:running')).toBe(false);
+    expect(win.planRequest('label-commit', 'label:env=staging phase:running')).toBe('fit');
+
+    // Phase-only refusal keys to empty string and covers all phase-only queries.
+    win.recordRefusal('phase:running');
+    expect(win.isSortedRefused('')).toBe(true);
+    expect(win.isSortedRefused('phase:stopped')).toBe(true);
+  });
 });
 
 describe('AgentListWindow states — capped', () => {

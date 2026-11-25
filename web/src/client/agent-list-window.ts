@@ -398,18 +398,33 @@ export class AgentListWindow extends EventTarget {
     return sortField === 'updated' || sortField === 'created';
   }
 
-  /** Whether the server refused sorted mode (422) for this server query. */
+  /**
+   * Normalize a server query for 422 refusal memory by stripping `phase:` /
+   * `-phase:` terms: the hub's project candidate ceiling is decided on the
+   * phase-independent filter (`unphasedAgentFilter`), so queries differing
+   * only in `phase:` always receive the same 422 decision.
+   */
+  private refusalKeyFor(serverQuery: string): string {
+    return serverQuery
+      .trim()
+      .split(/\s+/)
+      .filter((tok) => tok !== '' && !/^-?phase:/i.test(tok))
+      .join(' ');
+  }
+
+  /** Whether the server refused sorted mode (422) for this server query (ignoring `phase:` terms). */
   isSortedRefused(serverQuery: string): boolean {
-    return this.refusedQuery !== null && this.refusedQuery === serverQuery.trim();
+    return this.refusedQuery !== null && this.refusedQuery === this.refusalKeyFor(serverQuery);
   }
 
   /**
-   * Remember a 422 refusal of sorted mode for this server query. No sorted
-   * request is planned again until a different server query is committed;
-   * that query gets one sorted attempt of its own.
+   * Remember a 422 refusal of sorted mode for this server query (keyed on its
+   * phase-independent form). No sorted request is planned again until a query
+   * with different non-phase terms is committed; that query gets one sorted
+   * attempt of its own.
    */
   recordRefusal(serverQuery: string): void {
-    this.refusedQuery = serverQuery.trim();
+    this.refusedQuery = this.refusalKeyFor(serverQuery);
   }
 
   /**

@@ -15,9 +15,10 @@
  */
 
 import type { Agent } from '../types.js';
+import { serverSubset } from './canonical.js';
 import { match } from './match.js';
 import type { ValueSuggestionProvider } from './suggest.js';
-import type { FilterRow, Query, Term } from './types.js';
+import type { FilterRow, Query, Term, ViewSchema } from './types.js';
 
 export interface AgentFilterContext {
   currentUserId?: string | undefined;
@@ -174,6 +175,22 @@ export function nonPhasePredicateForQuery(
   if (nonPhaseTerms.length === 0 && !hasText) return null;
   const stripped: Query = { ...fq, terms: nonPhaseTerms };
   return (agent: Agent): boolean => matchAgentQuery(stripped, agent, ctx);
+}
+
+/**
+ * Canonical server `?q=` string for a complete-set drain (or complete fit
+ * `loadedServerQ`): strips `phase` terms before projecting to `serverSubset`,
+ * so drained held sets are phase-independent (matching fit and paged stats
+ * populations) and local rendering applies `phase:` on top.
+ */
+export function drainServerQuery(fq: Query | null, schema: ViewSchema): string {
+  if (!fq) return '';
+  if (fq.mode !== 'structured') return serverSubset(fq, schema);
+  const stripped: Query = {
+    ...fq,
+    terms: fq.terms.filter((t) => t.key.toLowerCase() !== 'phase'),
+  };
+  return serverSubset(stripped, schema);
 }
 
 /**

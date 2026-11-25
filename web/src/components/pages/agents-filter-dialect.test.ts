@@ -1132,4 +1132,285 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     );
     el2.remove();
   });
+
+  it('keeps phase-independent header counts across fit, drain, and live provisioning create on both global and project pages', async () => {
+    const seeded: Agent[] = [
+      {
+        id: 'a-run',
+        name: 'alpha-run',
+        slug: 'alpha-run',
+        projectId: 'proj-123',
+        template: 'developer',
+        phase: 'running',
+      },
+      {
+        id: 'a-stop',
+        name: 'beta-stop',
+        slug: 'beta-stop',
+        projectId: 'proj-123',
+        template: 'developer',
+        phase: 'stopped',
+      },
+    ];
+
+    const seenUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        seenUrls.push(rawUrl);
+        const parsed = new URL(rawUrl, 'http://localhost');
+        const isAgentsList =
+          parsed.pathname === '/api/v1/agents' ||
+          parsed.pathname === '/api/v1/projects/proj-123/agents';
+        if (isAgentsList) {
+          const isSorted = parsed.searchParams.has('sort');
+          const q = parsed.searchParams.get('q') ?? '';
+          // Realistic hub behavior:
+          // - sorted fit probe is phase-independent (returns all phases when complete=true)
+          // - unsorted drain endpoint applies full `q` (so sending phase:running would hide a-stop)
+          const rows =
+            !isSorted && q.includes('phase:running')
+              ? seeded.filter((a) => a.phase === 'running')
+              : seeded;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify(
+                isSorted
+                  ? {
+                      agents: rows,
+                      totalCount: rows.length,
+                      complete: true,
+                      stats: {
+                        total: rows.length,
+                        running: rows.filter((a) => a.phase === 'running').length,
+                        agents: rows.map((a) => [a.id, a.phase]),
+                      },
+                    }
+                  : { agents: rows }
+              ),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'proj-123', name: 'Proj 123', slug: 'proj-123' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+
+    const provisioningAgent: Agent = {
+      id: 'a-prov',
+      name: 'gamma-prov',
+      slug: 'gamma-prov',
+      projectId: 'proj-123',
+      template: 'developer',
+      phase: 'provisioning',
+    };
+
+    // 1. Global agents page: fit (updated sort) vs drain (name sort) + live provisioning create
+    window.history.replaceState(null, '', '/agents?q=' + encodeURIComponent('phase:running'));
+    localStorage.setItem('scion-sort-agents', JSON.stringify({ field: 'updated', dir: 'desc' }));
+    const globalFit = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(globalFit);
+    await new Promise((r) => setTimeout(r, 25));
+    await globalFit.updateComplete;
+    const globalFitWin = (globalFit as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(globalFitWin.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(globalFitWin.items.map((a) => a.id)).toEqual(['a-run']);
+    globalFit.remove();
+
+    seenUrls.length = 0;
+    localStorage.setItem('scion-sort-agents', JSON.stringify({ field: 'name', dir: 'asc' }));
+    const globalDrain = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(globalDrain);
+    await new Promise((r) => setTimeout(r, 25));
+    await globalDrain.updateComplete;
+    const globalDrainReq = seenUrls.find((u) => u.includes('/api/v1/agents'));
+    expect(globalDrainReq).toBeDefined();
+    expect(globalDrainReq).not.toContain('phase%3Arunning');
+    const globalDrainWin = (globalDrain as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(globalDrainWin.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(globalDrainWin.items.map((a) => a.id)).toEqual(['a-run']);
+
+    stateManager.seedAgents([...seeded, provisioningAgent]);
+    stateManager.dispatchEvent(
+      new CustomEvent('agents-changed', {
+        detail: {
+          data: {
+            upserted: [provisioningAgent.id],
+            deleted: [],
+            unknown: new Map(),
+            generation: stateManager.scopeGeneration,
+          },
+        },
+      })
+    );
+    await globalDrain.updateComplete;
+    expect(globalDrainWin.stats).toEqual({ total: 3, running: 1, incomplete: false });
+    expect(globalDrainWin.items.map((a) => a.id)).toEqual(['a-run']);
+    globalDrain.remove();
+
+    // 2. Project detail page: fit (updated sort) vs drain (name sort) + live provisioning create
+    window.history.replaceState(
+      null,
+      '',
+      '/projects/proj-123?q=' + encodeURIComponent('phase:running')
+    );
+    localStorage.setItem(
+      'scion-sort-project-agents-proj-123',
+      JSON.stringify({ field: 'updated', dir: 'desc' })
+    );
+    const projFit = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    projFit.projectId = 'proj-123';
+    document.body.appendChild(projFit);
+    await new Promise((r) => setTimeout(r, 25));
+    await projFit.updateComplete;
+    const projFitWin = (projFit as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(projFitWin.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(projFitWin.items.map((a) => a.id)).toEqual(['a-run']);
+    projFit.remove();
+
+    seenUrls.length = 0;
+    localStorage.setItem(
+      'scion-sort-project-agents-proj-123',
+      JSON.stringify({ field: 'name', dir: 'asc' })
+    );
+    const projDrain = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    projDrain.projectId = 'proj-123';
+    document.body.appendChild(projDrain);
+    await new Promise((r) => setTimeout(r, 25));
+    await projDrain.updateComplete;
+    const projDrainReq = seenUrls.find((u) => u.includes('/api/v1/projects/proj-123/agents'));
+    expect(projDrainReq).toBeDefined();
+    expect(projDrainReq).not.toContain('phase%3Arunning');
+    const projDrainWin = (projDrain as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(projDrainWin.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(projDrainWin.items.map((a) => a.id)).toEqual(['a-run']);
+
+    stateManager.seedAgents([...seeded, provisioningAgent]);
+    stateManager.dispatchEvent(
+      new CustomEvent('agents-changed', {
+        detail: {
+          data: {
+            upserted: [provisioningAgent.id],
+            deleted: [],
+            unknown: new Map(),
+            generation: stateManager.scopeGeneration,
+          },
+        },
+      })
+    );
+    await projDrain.updateComplete;
+    expect(projDrainWin.stats).toEqual({ total: 3, running: 1, incomplete: false });
+    expect(projDrainWin.items.map((a) => a.id)).toEqual(['a-run']);
+    projDrain.remove();
+  });
+
+  it('422-refused project drains unphased and does not retry fit when switching phase chips', async () => {
+    const seeded: Agent[] = [
+      {
+        id: 'p-run',
+        name: 'p-run',
+        slug: 'p-run',
+        projectId: 'proj-422',
+        template: 'developer',
+        phase: 'running',
+        labels: { env: 'x' },
+      },
+      {
+        id: 'p-stop',
+        name: 'p-stop',
+        slug: 'p-stop',
+        projectId: 'proj-422',
+        template: 'developer',
+        phase: 'stopped',
+        labels: { env: 'x' },
+      },
+    ];
+
+    const fitRequests: string[] = [];
+    const drainRequests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        const parsed = new URL(rawUrl, 'http://localhost');
+        if (parsed.pathname === '/api/v1/projects/proj-422/agents') {
+          if (parsed.searchParams.has('sort')) {
+            fitRequests.push(rawUrl);
+            return Promise.resolve(
+              new Response(JSON.stringify({ error: { code: 'sorted_view_unavailable' } }), {
+                status: 422,
+                headers: { 'Content-Type': 'application/json' },
+              })
+            );
+          }
+          drainRequests.push(rawUrl);
+          return Promise.resolve(
+            new Response(JSON.stringify({ agents: seeded }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'proj-422', name: 'Proj 422', slug: 'proj-422' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+
+    window.history.replaceState(
+      null,
+      '',
+      '/projects/proj-422?q=' + encodeURIComponent('label:env=x phase:stopped')
+    );
+    localStorage.setItem(
+      'scion-sort-project-agents-proj-422',
+      JSON.stringify({ field: 'updated', dir: 'desc' })
+    );
+    const el = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    el.projectId = 'proj-422';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+    await el.updateComplete;
+
+    expect(fitRequests).toHaveLength(1);
+    expect(drainRequests).toHaveLength(1);
+    expect(drainRequests[0]).not.toContain('phase%3A');
+    const win = (el as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(win.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(win.items.map((a) => a.id)).toEqual(['p-stop']);
+
+    // Click Running then Stopped phase chips: no additional fit request after the first 422.
+    const buttons = Array.from(el.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []);
+    const runningBtn = buttons.find(
+      (b) => b.textContent?.trim() === 'Running'
+    ) as HTMLButtonElement;
+    const stoppedBtn = buttons.find(
+      (b) => b.textContent?.trim() === 'Stopped'
+    ) as HTMLButtonElement;
+    runningBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+    expect(fitRequests).toHaveLength(1);
+    expect(win.items.map((a) => a.id)).toEqual(['p-run']);
+    expect(win.stats).toEqual({ total: 2, running: 1, incomplete: false });
+
+    stoppedBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+    expect(fitRequests).toHaveLength(1);
+    expect(win.items.map((a) => a.id)).toEqual(['p-stop']);
+    expect(win.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    el.remove();
+  });
 });
