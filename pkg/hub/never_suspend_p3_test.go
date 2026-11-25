@@ -666,6 +666,7 @@ func TestNeverSuspend_FilterQueryAndMetric(t *testing.T) {
 
 type failReleaseNeverSuspendStore struct {
 	store.Store
+	store.AdvisoryLocker
 	armed         atomic.Bool
 	targetLimitID string
 }
@@ -679,6 +680,7 @@ func (f *failReleaseNeverSuspendStore) ReleaseReservation(ctx context.Context, l
 
 type softDeleteOnReserveStore struct {
 	store.Store
+	store.AdvisoryLocker
 	armed   atomic.Bool
 	agentID string
 	onHook  func()
@@ -703,9 +705,9 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		setProjectNeverSuspendCeiling(t, s, 1)
 
 		wrapped, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *failReleaseNeverSuspendStore {
-			return &failReleaseNeverSuspendStore{Store: inner, targetLimitID: def.ID}
+			return &failReleaseNeverSuspendStore{Store: inner, AdvisoryLocker: inner.(store.AdvisoryLocker), targetLimitID: def.ID}
 		})
-		srv.quotaService = NewQuotaService(wrapped, srv.quotaService.logger)
+		srv.quotaService.store = wrapped
 
 		projectID := tid("ns-rec-project")
 		require.NoError(t, s.CreateProject(ctx, &store.Project{
@@ -777,9 +779,9 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		require.NoError(t, s.CreateAgent(ctx, a))
 
 		hook, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *softDeleteOnReserveStore {
-			return &softDeleteOnReserveStore{Store: inner, agentID: a.ID}
+			return &softDeleteOnReserveStore{Store: inner, AdvisoryLocker: inner.(store.AdvisoryLocker), agentID: a.ID}
 		})
-		srv.quotaService = NewQuotaService(hook, srv.quotaService.logger)
+		srv.quotaService.store = hook
 		hook.onHook = func() {
 			// Soft-delete the agent after PATCH reserved quota, before SetAgentSuspendPolicy runs.
 			softDeleteAgentRow(t, s, a.ID)
