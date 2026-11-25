@@ -69,6 +69,13 @@ func (c *cmdRunAuditCollector) snapshot() []*MessageActionEvent {
 	return out
 }
 
+func (t *commandRunTracker) owns(runID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, ok := t.owned[runID]
+	return ok
+}
+
 type cmdRunExecFixture struct {
 	*ptyConduitFixture
 	audit   *cmdRunAuditCollector

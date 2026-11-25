@@ -109,13 +109,6 @@ func (t *commandRunTracker) release(runID string) {
 	t.used--
 }
 
-func (t *commandRunTracker) owns(runID string) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	_, ok := t.owned[runID]
-	return ok
-}
-
 // stopCommandRuns cancels in-flight command-run trackers during hub shutdown
 // without recording outcomes; the sweeper resolves unfinished runs after restart.
 func (s *Server) stopCommandRuns(ctx context.Context) {
@@ -123,16 +116,6 @@ func (s *Server) stopCommandRuns(ctx context.Context) {
 		slog.Info("Command runs still tracked at shutdown; the sweeper resolves them after restart",
 			"running", n)
 	}
-}
-
-// launchCommandRun dispatches an approved command run through the configured
-// launcher (or s.EnqueueCommandRun when no test override is set).
-func (s *Server) launchCommandRun(req *store.CommandRequest, run *store.CommandRun) {
-	if s.commandRunLauncher != nil {
-		s.commandRunLauncher.EnqueueCommandRun(req, run)
-		return
-	}
-	s.EnqueueCommandRun(req, run)
 }
 
 // EnqueueCommandRun implements CommandRunLauncher. It schedules the run on this
