@@ -71,11 +71,12 @@ export class ScionChatOpenDecisions extends LitElement {
   @state() private error = '';
   @state() private othersExpanded = false;
   @state() private liveAnnouncement = '';
+  @state() private resolvedProjectSlug = '';
 
-  private prevServerTotal = 0;
+  private prevServerWaitingOnYou = 0;
   private prevLoadedOnce = false;
   private lastServerSeq = 0;
-  private readonly seenServerPromptIds = new Set<string>();
+  private readonly seenWaitingOnYouPromptIds = new Set<string>();
   private announcementSeq = 0;
   private announcementClearTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -504,10 +505,11 @@ export class ScionChatOpenDecisions extends LitElement {
       this.clearAnnouncementTimer();
       this.announcementSeq++;
       this.liveAnnouncement = '';
-      this.prevServerTotal = 0;
+      this.resolvedProjectSlug = '';
+      this.prevServerWaitingOnYou = 0;
       this.prevLoadedOnce = false;
       this.lastServerSeq = 0;
-      this.seenServerPromptIds.clear();
+      this.seenWaitingOnYouPromptIds.clear();
       this.controller.setConversation(this.conversationKey);
     }
     if (changed.has('hiddenBy404')) {
@@ -541,22 +543,35 @@ export class ScionChatOpenDecisions extends LitElement {
   }
 
   private applySnapshot(snap: ConversationOpenDecisionsSnapshot): void {
-    const nextTotal = snap.counts.waitingOnYou + snap.counts.waitingOnOthers;
     if (snap.loadedOnce && snap.serverSnapshotSeq !== this.lastServerSeq) {
       this.lastServerSeq = snap.serverSnapshotSeq;
-      const hasNewPromptId = snap.prompts.some(
-        (p) => !this.seenServerPromptIds.has(p.promptMessageId)
-      );
-      const truncatedIncrease = snap.truncated && nextTotal > this.prevServerTotal;
-      if (this.prevLoadedOnce && !this.open && (hasNewPromptId || truncatedIncrease)) {
+      const waitingOnYouIncreased = snap.counts.waitingOnYou > this.prevServerWaitingOnYou;
+      // Announce a new waiting-on-you prompt (including --update replacement or
+      // concurrent resolve+arrive within one coalesce window), but never when a
+      // truncated list shrinks and older prompts slide into the 100-item window
+      // or when a prompt arrives only in Waiting on others.
+      const hasNewWaitingOnYouPrompt =
+        !snap.truncated &&
+        snap.counts.waitingOnYou >= this.prevServerWaitingOnYou &&
+        snap.prompts.some(
+          (p) => p.waitingOnYou && !this.seenWaitingOnYouPromptIds.has(p.promptMessageId)
+        );
+      if (
+        this.prevLoadedOnce &&
+        !this.open &&
+        (waitingOnYouIncreased || hasNewWaitingOnYouPrompt)
+      ) {
         this.announceNewDecision();
       }
       for (const p of snap.prompts) {
-        this.seenServerPromptIds.add(p.promptMessageId);
+        if (p.waitingOnYou) {
+          this.seenWaitingOnYouPromptIds.add(p.promptMessageId);
+        }
       }
-      this.prevServerTotal = nextTotal;
+      this.prevServerWaitingOnYou = snap.counts.waitingOnYou;
       this.prevLoadedOnce = true;
     }
+    this.resolvedProjectSlug = snap.projectSlug || snap.projectId || '';
     this.counts = snap.counts;
     this.prompts = snap.prompts;
     this.truncated = snap.truncated;
@@ -746,8 +761,9 @@ export class ScionChatOpenDecisions extends LitElement {
 
   private get decisionsPageUrl(): string {
     const conv = encodeURIComponent(this.conversationKey);
-    if (this.projectSlug) {
-      return `/projects/${encodeURIComponent(this.projectSlug)}/decisions?conversation=${conv}`;
+    const slug = this.resolvedProjectSlug || this.projectSlug;
+    if (slug) {
+      return `/projects/${encodeURIComponent(slug)}/decisions?conversation=${conv}`;
     }
     return `/profile/decisions?conversation=${conv}`;
   }

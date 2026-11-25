@@ -139,18 +139,24 @@ func TestConversationDecisions_Authz(t *testing.T) {
 
 	// Topic: reader -> 200, non-reader -> 404, missing topic -> 404.
 	topicResp := decodeConversationDecisions(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, topicPath, nil))
+	assert.Equal(t, f.projA, topicResp.ProjectID)
+	assert.NotEmpty(t, topicResp.ProjectSlug)
 	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 1}, topicResp.Counts)
 	require.Len(t, topicResp.Prompts, 1)
 	assert.Equal(t, topicMsg.ID, topicResp.Prompts[0].PromptMessageID)
+	assert.Len(t, topicResp.Prompts[0].OpenRowIDs, 1)
 
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, outsiderUser, http.MethodGet, topicPath, nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, conversationDecisionsPath(uuid.NewString()), nil).Code)
 
 	// DM: participant -> 200; other user -> 404; admin non-participant -> 404.
 	dmResp := decodeConversationDecisions(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, dmPath, nil))
+	assert.Equal(t, f.projA, dmResp.ProjectID)
+	assert.NotEmpty(t, dmResp.ProjectSlug)
 	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 1}, dmResp.Counts)
 	require.Len(t, dmResp.Prompts, 1)
 	assert.Equal(t, dmMsg.ID, dmResp.Prompts[0].PromptMessageID)
+	assert.Len(t, dmResp.Prompts[0].OpenRowIDs, 1)
 
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, outsiderUser, http.MethodGet, dmPath, nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, adminUser, http.MethodGet, dmPath, nil).Code)
@@ -179,9 +185,41 @@ func TestConversationDecisions_Authz(t *testing.T) {
 	uatDM := decodeConversationDecisions(t, f.call(t, tokFull, http.MethodGet, dmPath, nil))
 	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 1}, uatDM.Counts)
 
-	// UAT bounded to wrong project (projB) -> 404.
+	// UAT bounded to wrong project (projB) -> 404 on topic.
 	tokWrongProj := f.mint(t, f.admin, projectBoundary(f.projB), "project:read", "inbox:read", "agent:read")
 	assert.Equal(t, http.StatusNotFound, f.call(t, tokWrongProj, http.MethodGet, topicPath, nil).Code)
+
+	// Pin the DM token-boundary & agent:read guard (authorizeChatTokenConversation on DM path):
+	// seed an agentA (projA) DM for f.admin so f.admin is a legitimate participant.
+	adminDMKey := f.dm(t, f.admin, "agent", f.agentA.ID)
+	decsAdminDM, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"ad1","question":"Admin DM choice?","choices":["yes","no"]}]`))
+	require.NoError(t, err)
+	adminDMMsg := &store.Message{
+		ID: api.NewUUID(), ProjectID: f.projA, Sender: "agent:" + f.agentA.Slug, SenderID: f.agentA.ID,
+		Recipient: "user:" + f.admin, ThreadID: adminDMKey, Channel: "web", CreatedAt: time.Now().UTC(),
+	}
+	_, err = f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+		Message: adminDMMsg, Intro: "Admin DM intro", AskerAgentID: f.agentA.ID, AskerAgentName: f.agentA.Slug, Decisions: decsAdminDM,
+	})
+	require.NoError(t, err)
+	adminDMPath := conversationDecisionsPath(adminDMKey)
+
+	// Control: session admin reads own DM -> 200 with peer agent's project.
+	adminDMResp := decodeConversationDecisions(t, doRequestAsUser(t, f.srv, adminUser, http.MethodGet, adminDMPath, nil))
+	assert.Equal(t, f.projA, adminDMResp.ProjectID)
+	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 1}, adminDMResp.Counts)
+
+	// (a) UAT bounded to another project (projB) -> 404 even though f.admin is a DM participant.
+	assert.Equal(t, http.StatusNotFound, f.call(t, tokWrongProj, http.MethodGet, adminDMPath, nil).Code)
+
+	// (b) Hub-bounded UAT with inbox:read but without agent:read -> 404.
+	tokHubNoAgentRead := f.mint(t, f.admin, TokenBoundary{Kind: BoundaryKindHub}, "inbox:read")
+	assert.Equal(t, http.StatusNotFound, f.call(t, tokHubNoAgentRead, http.MethodGet, adminDMPath, nil).Code)
+
+	// Control: hub-bounded UAT with inbox:read + agent:read -> 200.
+	tokHubWithAgentRead := f.mint(t, f.admin, TokenBoundary{Kind: BoundaryKindHub}, "inbox:read", "agent:read")
+	hubDMResp := decodeConversationDecisions(t, f.call(t, tokHubWithAgentRead, http.MethodGet, adminDMPath, nil))
+	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 1}, hubDMResp.Counts)
 }
 
 func TestConversationDecisions_ParityAndStates(t *testing.T) {

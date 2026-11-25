@@ -42,6 +42,8 @@ export interface ConversationOpenPromptItem {
   answerMode: DecisionAnswerMode;
   openCount: number;
   totalCount: number;
+  /** Decision row IDs counted in this entry's section (for safe optimistic edits). */
+  openRowIds?: string[];
   question: string;
   waitingOnYou: boolean;
   awaitingConfirmation: boolean;
@@ -50,6 +52,8 @@ export interface ConversationOpenPromptItem {
 
 /** Response of `GET /api/v1/chat/conversations/{key}/decisions`. */
 export interface ConversationOpenDecisionsResponse {
+  projectId?: string;
+  projectSlug?: string;
   counts: ConversationDecisionCounts;
   prompts: ConversationOpenPromptItem[];
   truncated: boolean;
@@ -86,6 +90,8 @@ export async function fetchConversationOpenDecisions(
   }
   const body = (await res.json()) as Partial<ConversationOpenDecisionsResponse> | null;
   return {
+    ...(typeof body?.projectId === 'string' ? { projectId: body.projectId } : {}),
+    ...(typeof body?.projectSlug === 'string' ? { projectSlug: body.projectSlug } : {}),
     counts: {
       waitingOnYou: body?.counts?.waitingOnYou ?? 0,
       waitingOnOthers: body?.counts?.waitingOnOthers ?? 0,
@@ -107,6 +113,8 @@ interface DecisionUpdatedPayload {
 
 /** Snapshot emitted to the component whenever state changes. */
 export interface ConversationOpenDecisionsSnapshot {
+  projectId: string;
+  projectSlug: string;
   counts: ConversationDecisionCounts;
   prompts: ConversationOpenPromptItem[];
   truncated: boolean;
@@ -157,6 +165,8 @@ export class ConversationOpenDecisionsController {
   private unsubscribeDecision: (() => void) | null = null;
 
   private state: ConversationOpenDecisionsSnapshot = {
+    projectId: '',
+    projectSlug: '',
     counts: { waitingOnYou: 0, waitingOnOthers: 0 },
     prompts: [],
     truncated: false,
@@ -232,6 +242,8 @@ export class ConversationOpenDecisionsController {
     this.inFlight = false;
     this.refetchOwed = false;
     this.state = {
+      projectId: '',
+      projectSlug: '',
       counts: { waitingOnYou: 0, waitingOnOthers: 0 },
       prompts: [],
       truncated: false,
@@ -275,6 +287,8 @@ export class ConversationOpenDecisionsController {
       }
       if (resp === null) {
         this.state = {
+          projectId: '',
+          projectSlug: '',
           counts: { waitingOnYou: 0, waitingOnOthers: 0 },
           prompts: [],
           truncated: false,
@@ -288,6 +302,8 @@ export class ConversationOpenDecisionsController {
         return;
       }
       this.state = {
+        projectId: resp.projectId ?? '',
+        projectSlug: resp.projectSlug ?? '',
         counts: resp.counts,
         prompts: resp.prompts,
         truncated: resp.truncated,
@@ -348,28 +364,45 @@ export class ConversationOpenDecisionsController {
     if (msgId && dec && !isOpenDecision(dec)) {
       const idx = this.state.prompts.findIndex((p) => p.promptMessageId === msgId);
       if (idx >= 0) {
-        this.optimisticEpoch++;
         const entry = this.state.prompts[idx];
-        if (entry.openCount <= 1) {
-          const nextPrompts = this.state.prompts.filter((p) => p.promptMessageId !== msgId);
-          const nextCounts = {
-            waitingOnYou: Math.max(
-              0,
-              this.state.counts.waitingOnYou - (entry.waitingOnYou ? 1 : 0)
-            ),
-            waitingOnOthers: Math.max(
-              0,
-              this.state.counts.waitingOnOthers - (entry.waitingOnYou ? 0 : 1)
-            ),
-          };
-          this.state = { ...this.state, prompts: nextPrompts, counts: nextCounts };
-          this.emit();
-        } else {
-          const nextPrompts = this.state.prompts.map((p) =>
-            p.promptMessageId === msgId ? { ...p, openCount: p.openCount - 1 } : p
-          );
-          this.state = { ...this.state, prompts: nextPrompts };
-          this.emit();
+        // Only optimistically decrement/drop when the resolved row belongs to
+        // this entry's section (openRowIds); if openRowIds is absent, skip the
+        // optimistic edit on mixed-section sets (totalCount > openCount) and
+        // let the 250 ms coalesced refetch reconcile.
+        const rowBelongsToSection = Array.isArray(entry.openRowIds)
+          ? Boolean(dec.rowId) && entry.openRowIds.includes(dec.rowId)
+          : entry.openCount >= entry.totalCount;
+        if (rowBelongsToSection) {
+          this.optimisticEpoch++;
+          if (entry.openCount <= 1) {
+            const nextPrompts = this.state.prompts.filter((p) => p.promptMessageId !== msgId);
+            const nextCounts = {
+              waitingOnYou: Math.max(
+                0,
+                this.state.counts.waitingOnYou - (entry.waitingOnYou ? 1 : 0)
+              ),
+              waitingOnOthers: Math.max(
+                0,
+                this.state.counts.waitingOnOthers - (entry.waitingOnYou ? 0 : 1)
+              ),
+            };
+            this.state = { ...this.state, prompts: nextPrompts, counts: nextCounts };
+            this.emit();
+          } else {
+            const nextPrompts = this.state.prompts.map((p) =>
+              p.promptMessageId === msgId
+                ? {
+                    ...p,
+                    openCount: p.openCount - 1,
+                    ...(Array.isArray(p.openRowIds)
+                      ? { openRowIds: p.openRowIds.filter((id) => id !== dec.rowId) }
+                      : {}),
+                  }
+                : p
+            );
+            this.state = { ...this.state, prompts: nextPrompts };
+            this.emit();
+          }
         }
       }
     }

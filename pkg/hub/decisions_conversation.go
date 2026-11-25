@@ -49,6 +49,7 @@ type ConversationOpenPromptItem struct {
 	AnswerMode           string    `json:"answerMode"`
 	OpenCount            int       `json:"openCount"`
 	TotalCount           int       `json:"totalCount"`
+	OpenRowIDs           []string  `json:"openRowIds,omitempty"`
 	Question             string    `json:"question"`
 	WaitingOnYou         bool      `json:"waitingOnYou"`
 	AwaitingConfirmation bool      `json:"awaitingConfirmation"`
@@ -59,9 +60,11 @@ type ConversationOpenPromptItem struct {
 // GET /api/v1/chat/conversations/{key}/decisions.
 // Counts count prompts (messages), not decision rows.
 type ConversationOpenDecisionsResponse struct {
-	Counts    ProjectDecisionCounts        `json:"counts"`
-	Prompts   []ConversationOpenPromptItem `json:"prompts"`
-	Truncated bool                         `json:"truncated"`
+	ProjectID   string                       `json:"projectId,omitempty"`
+	ProjectSlug string                       `json:"projectSlug,omitempty"`
+	Counts      ProjectDecisionCounts        `json:"counts"`
+	Prompts     []ConversationOpenPromptItem `json:"prompts"`
+	Truncated   bool                         `json:"truncated"`
 }
 
 // handleConversationDecisions serves GET /api/v1/chat/conversations/{key}/decisions.
@@ -108,7 +111,7 @@ func (s *Server) listConversationDecisions(w http.ResponseWriter, r *http.Reques
 		agentNames:            make(map[string]string),
 	}
 
-	var projectID string
+	var projectID, projectSlug string
 	if isDM {
 		if serr := authorizeDMKeyParticipant(ctx, user, key, logging.RequestPath(r)); serr != nil {
 			serr.write(w)
@@ -150,6 +153,9 @@ func (s *Server) listConversationDecisions(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		projectID = peerAgent.ProjectID
+		if proj, perr := s.store.GetProject(ctx, projectID); perr == nil && proj != nil {
+			projectSlug = proj.Slug
+		}
 		scope.userCanPost[key] = true
 		scope.queriedAgentIDs[peerID] = true
 		scope.agentsByID[peerID] = peerAgent
@@ -179,6 +185,7 @@ func (s *Server) listConversationDecisions(w http.ResponseWriter, r *http.Reques
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		projectSlug = project.Slug
 		scope.project = project
 		projectChatAccess := s.chatUserAccess(ctx, user, project,
 			[]string{ChatActionRead}, chatThreadWriteActions, nil, false, false)
@@ -239,7 +246,7 @@ func (s *Server) listConversationDecisions(w http.ResponseWriter, r *http.Reques
 		if item.waitingOnYou {
 			openCount = item.onYou
 		}
-		question, awaitingConfirmation := summarizeOpenPromptRows(p.Decisions, viewerID, item.waitingOnYou, item.waitingReasons)
+		question, awaitingConfirmation, openRowIDs := summarizeOpenPromptRows(p.Decisions, viewerID, item.waitingOnYou, item.waitingReasons)
 		items = append(items, ConversationOpenPromptItem{
 			PromptMessageID:      p.MessageID,
 			PromptAvailable:      item.promptAvail,
@@ -249,6 +256,7 @@ func (s *Server) listConversationDecisions(w http.ResponseWriter, r *http.Reques
 			AnswerMode:           decisionAnswerMode(len(p.Decisions)),
 			OpenCount:            openCount,
 			TotalCount:           len(p.Decisions),
+			OpenRowIDs:           openRowIDs,
 			Question:             truncateDecisionRunes(question, maxConversationOpenQuestionRunes),
 			WaitingOnYou:         item.waitingOnYou,
 			AwaitingConfirmation: awaitingConfirmation,
@@ -257,22 +265,25 @@ func (s *Server) listConversationDecisions(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, ConversationOpenDecisionsResponse{
-		Counts:    counts,
-		Prompts:   items,
-		Truncated: truncated,
+		ProjectID:   projectID,
+		ProjectSlug: projectSlug,
+		Counts:      counts,
+		Prompts:     items,
+		Truncated:   truncated,
 	})
 }
 
 // summarizeOpenPromptRows returns the first open row's question for the prompt's
-// section and whether any open row in that section is an agent-interpreted
-// answer awaiting confirmation.
+// section, whether any open row in that section is an agent-interpreted answer
+// awaiting confirmation, and the decision row IDs counted in that section.
 func summarizeOpenPromptRows(
 	decisions []*store.Decision,
 	viewerID string,
 	waitingOnYou bool,
 	waitingReasons map[string]string,
-) (string, bool) {
+) (string, bool, []string) {
 	var sectionQuestion, fallbackOpenQuestion, firstQuestion string
+	var openRowIDs []string
 	awaitingConfirm := false
 
 	for _, d := range decisions {
@@ -299,6 +310,7 @@ func summarizeOpenPromptRows(
 		if !inSection {
 			continue
 		}
+		openRowIDs = append(openRowIDs, d.ID)
 		if sectionQuestion == "" {
 			sectionQuestion = d.Question
 		}
@@ -310,12 +322,12 @@ func summarizeOpenPromptRows(
 	}
 
 	if sectionQuestion != "" {
-		return sectionQuestion, awaitingConfirm
+		return sectionQuestion, awaitingConfirm, openRowIDs
 	}
 	if fallbackOpenQuestion != "" {
-		return fallbackOpenQuestion, awaitingConfirm
+		return fallbackOpenQuestion, awaitingConfirm, openRowIDs
 	}
-	return firstQuestion, awaitingConfirm
+	return firstQuestion, awaitingConfirm, openRowIDs
 }
 
 func truncateDecisionRunes(s string, maxRunes int) string {

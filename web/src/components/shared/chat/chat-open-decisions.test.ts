@@ -488,4 +488,171 @@ describe('scion-chat-open-decisions', () => {
     expect(el.hasAttribute('data-hidden')).toBe(true);
     expect(el.shadowRoot!.querySelector('.trigger')).toBeNull();
   });
+
+  it('stays silent on new waiting-on-others prompts and truncated count drops, but announces --update replacements', async () => {
+    let payload: ConversationOpenDecisionsResponse = {
+      counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+      prompts: [
+        {
+          promptMessageId: 'msg-you-1',
+          promptAvailable: true,
+          createdAt: new Date().toISOString(),
+          askerAgentId: 'a1',
+          askerAgentName: 'deploy-lead',
+          answerMode: 'single',
+          openCount: 1,
+          totalCount: 1,
+          question: 'Initial?',
+          waitingOnYou: true,
+          awaitingConfirmation: false,
+        },
+      ],
+      truncated: false,
+    };
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(payload)));
+
+    el = document.createElement('scion-chat-open-decisions') as ScionChatOpenDecisions;
+    el.conversationKey = 'topic-announce-rules';
+    document.body.appendChild(el);
+    await flush(el);
+
+    const liveEl = el.shadowRoot!.querySelector<HTMLElement>('[aria-live="polite"]')!;
+    const observed: string[] = [];
+    const observer = new MutationObserver(() => {
+      const text = liveEl.textContent?.trim() ?? '';
+      if (text) observed.push(text);
+    });
+    observer.observe(liveEl, { childList: true, subtree: true, characterData: true });
+
+    try {
+      // 1. A new prompt arrives in Waiting on others only -> silent.
+      payload = {
+        counts: { waitingOnYou: 1, waitingOnOthers: 1 },
+        prompts: [
+          ...payload.prompts,
+          {
+            promptMessageId: 'msg-other-1',
+            promptAvailable: true,
+            createdAt: new Date().toISOString(),
+            askerAgentId: 'a1',
+            askerAgentName: 'deploy-lead',
+            answerMode: 'single',
+            openCount: 1,
+            totalCount: 1,
+            question: 'Waiting on Bob?',
+            waitingOnYou: false,
+            awaitingConfirmation: true,
+            disabledReason: 'Waiting for Bob to confirm',
+          },
+        ],
+        truncated: false,
+      };
+      stateManager.dispatchEvent(new Event('connected'));
+      await flush(el);
+      expect(observed).toEqual([]);
+
+      // 2. An --update replacement replaces msg-you-1 with msg-you-2 (count 1 -> 1) -> announces.
+      payload = {
+        counts: { waitingOnYou: 1, waitingOnOthers: 1 },
+        prompts: [
+          {
+            promptMessageId: 'msg-you-2',
+            promptAvailable: true,
+            createdAt: new Date().toISOString(),
+            askerAgentId: 'a1',
+            askerAgentName: 'deploy-lead',
+            answerMode: 'single',
+            openCount: 1,
+            totalCount: 1,
+            question: 'Updated question?',
+            waitingOnYou: true,
+            awaitingConfirmation: false,
+          },
+          payload.prompts[1],
+        ],
+        truncated: false,
+      };
+      stateManager.dispatchEvent(new Event('connected'));
+      await flush(el);
+      expect(observed).toEqual(['New decision waiting']);
+
+      // 3. Truncated list where count increases (1 -> 105) -> announces once,
+      // then count falls (105 -> 104) as prompt #101 slides into the window -> silent.
+      payload = {
+        counts: { waitingOnYou: 105, waitingOnOthers: 0 },
+        prompts: [payload.prompts[0]],
+        truncated: true,
+      };
+      stateManager.dispatchEvent(new Event('connected'));
+      await flush(el);
+      expect(observed).toEqual(['New decision waiting', 'New decision waiting']);
+
+      payload = {
+        counts: { waitingOnYou: 104, waitingOnOthers: 0 },
+        prompts: [
+          {
+            promptMessageId: 'msg-slid-in-101',
+            promptAvailable: true,
+            createdAt: new Date().toISOString(),
+            askerAgentId: 'a1',
+            askerAgentName: 'deploy-lead',
+            answerMode: 'single',
+            openCount: 1,
+            totalCount: 1,
+            question: 'Prompt #101 slid in after older resolved',
+            waitingOnYou: true,
+            awaitingConfirmation: false,
+          },
+        ],
+        truncated: true,
+      };
+      stateManager.dispatchEvent(new Event('connected'));
+      await flush(el);
+      expect(observed).toEqual(['New decision waiting', 'New decision waiting']);
+    } finally {
+      observer.disconnect();
+    }
+  });
+
+  it('uses the hub-resolved projectSlug for Open in Decisions links on agent DMs opened from another project', async () => {
+    const dmKey = 'dm:agent:a-proj-b:user:u1';
+    const payload: ConversationOpenDecisionsResponse = {
+      projectId: 'proj-b-id',
+      projectSlug: 'proj-b',
+      counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+      prompts: [
+        {
+          promptMessageId: 'msg-purged-dm',
+          promptAvailable: false,
+          createdAt: new Date().toISOString(),
+          askerAgentId: 'a-proj-b',
+          askerAgentName: 'agent-b',
+          answerMode: 'single',
+          openCount: 1,
+          totalCount: 1,
+          question: 'Purged DM prompt?',
+          waitingOnYou: true,
+          awaitingConfirmation: false,
+        },
+      ],
+      truncated: false,
+    };
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(payload)));
+
+    el = document.createElement('scion-chat-open-decisions') as ScionChatOpenDecisions;
+    el.conversationKey = dmKey;
+    // Inherited from project A's view when the user opened the DM.
+    el.projectSlug = 'proj-a';
+    document.body.appendChild(el);
+    await flush(el);
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('.trigger')!.click();
+    await flush(el);
+
+    const link = el.shadowRoot!.querySelector<HTMLAnchorElement>('.entry.gone a');
+    expect(link).toBeTruthy();
+    expect(link!.getAttribute('href')).toBe(
+      `/projects/proj-b/decisions?conversation=${encodeURIComponent(dmKey)}`
+    );
+  });
 });

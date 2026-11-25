@@ -337,4 +337,117 @@ describe('ConversationOpenDecisionsController', () => {
 
     ctrl.disconnect();
   });
+
+  it('skips optimistic drop when decision.updated is for a row outside entry.openRowIds (mixed-section set)', async () => {
+    vi.useFakeTimers();
+    const fetchFn = vi.fn().mockResolvedValue({
+      counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+      prompts: [
+        makePrompt({
+          promptMessageId: 'msg-set',
+          answerMode: 'set',
+          openCount: 1,
+          totalCount: 2,
+          openRowIds: ['row-mine'],
+        }),
+      ],
+      truncated: false,
+    } satisfies ConversationOpenDecisionsResponse);
+
+    const ctrl = new ConversationOpenDecisionsController({
+      onChange: (s) => snapshots.push(s),
+      fetchFn,
+      eventSource,
+      coalesceMs: 250,
+    });
+    ctrl.setConversation('topic-1');
+    ctrl.connect();
+    await flushMicrotasks();
+    expect(ctrl.snapshot.prompts).toHaveLength(1);
+
+    // Bob confirms his own row ('row-bobs') in the same set: viewer's row
+    // ('row-mine') is still open, so the entry must NOT drop or flicker.
+    eventSource.dispatchEvent(
+      new CustomEvent('decision-updated', {
+        detail: {
+          data: {
+            messageId: 'msg-set',
+            threadId: 'topic-1',
+            decision: makeDecidedView('row-bobs'),
+          },
+        },
+      })
+    );
+    expect(ctrl.snapshot.prompts).toHaveLength(1);
+    expect(ctrl.snapshot.prompts[0].openCount).toBe(1);
+    expect(ctrl.snapshot.counts.waitingOnYou).toBe(1);
+
+    // The coalesced refetch still runs after 250 ms.
+    await vi.advanceTimersByTimeAsync(250);
+    await flushMicrotasks();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    // Now the viewer's own row ('row-mine') is decided -> drops immediately.
+    eventSource.dispatchEvent(
+      new CustomEvent('decision-updated', {
+        detail: {
+          data: {
+            messageId: 'msg-set',
+            threadId: 'topic-1',
+            decision: makeDecidedView('row-mine'),
+          },
+        },
+      })
+    );
+    expect(ctrl.snapshot.prompts).toHaveLength(0);
+    expect(ctrl.snapshot.counts.waitingOnYou).toBe(0);
+
+    ctrl.disconnect();
+  });
+
+  it('skips optimistic drop when openRowIds is omitted and totalCount > openCount', async () => {
+    vi.useFakeTimers();
+    const fetchFn = vi.fn().mockResolvedValue({
+      counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+      prompts: [
+        makePrompt({
+          promptMessageId: 'msg-legacy-set',
+          answerMode: 'set',
+          openCount: 1,
+          totalCount: 2,
+        }),
+      ],
+      truncated: false,
+    } satisfies ConversationOpenDecisionsResponse);
+
+    const ctrl = new ConversationOpenDecisionsController({
+      onChange: (s) => snapshots.push(s),
+      fetchFn,
+      eventSource,
+      coalesceMs: 250,
+    });
+    ctrl.setConversation('topic-1');
+    ctrl.connect();
+    await flushMicrotasks();
+
+    eventSource.dispatchEvent(
+      new CustomEvent('decision-updated', {
+        detail: {
+          data: {
+            messageId: 'msg-legacy-set',
+            threadId: 'topic-1',
+            decision: makeDecidedView('row-any'),
+          },
+        },
+      })
+    );
+    expect(ctrl.snapshot.prompts).toHaveLength(1);
+    expect(ctrl.snapshot.counts.waitingOnYou).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(250);
+    await flushMicrotasks();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    ctrl.disconnect();
+  });
 });
