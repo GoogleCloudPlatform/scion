@@ -107,13 +107,6 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 	if permission == "" {
 		return fmt.Errorf("%w: no permission for action %q", errConduitForbidden, action)
 	}
-	// Execution containers hold human CLI credentials (ptone/scion#8812 §3.4 S4):
-	// port exposure and TCP port access are refused. Only ActionPortAccess
-	// (TCP streams via proxy or tunnel) is refused here; ActionAttach (PTY/SSH)
-	// routes through authorizeAgentTargetAction below.
-	if action == ActionPortAccess && isShellAgent(agent) {
-		return fmt.Errorf("%w: execution container: port access is not allowed", errConduitForbidden)
-	}
 	if authzAction == ActionAttach {
 		// The same decision every attach-gated route makes (PTY, keys).
 		if denial := s.authorizeAgentTargetAction(ctx, identity, agent, ActionAttach); denial != nil {
@@ -146,6 +139,9 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 			// ever grants agent.read.
 			return fmt.Errorf("%w: agents cannot read agent streams", errConduitForbidden)
 		case ActionPortAccess:
+			if action == ActionPortAccess && isShellAgent(agent) {
+				return fmt.Errorf("%w: execution container: port access is not allowed", errConduitForbidden)
+			}
 			return nil
 		default:
 			return fmt.Errorf("%w: no agent rule for action %q", errConduitForbidden, authzAction)
@@ -166,6 +162,15 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 			return fmt.Errorf("%w: %w: %s", errConduitForbidden, errConduitAuthzUnavailable, decision.Reason)
 		}
 		return fmt.Errorf("%w: %s", errConduitForbidden, decision.Reason)
+	}
+	// Execution containers hold human CLI credentials (ptone/scion#8812 §3.4 S4):
+	// port exposure and TCP port access are refused. Checked after Decide so
+	// unauthorized callers cannot learn that the target is an execution
+	// container. Only ActionPortAccess (TCP streams via proxy or tunnel) is
+	// refused here; ActionAttach (PTY/SSH) routes through
+	// authorizeAgentTargetAction above.
+	if action == ActionPortAccess && isShellAgent(agent) {
+		return fmt.Errorf("%w: execution container: port access is not allowed", errConduitForbidden)
 	}
 	return nil
 }

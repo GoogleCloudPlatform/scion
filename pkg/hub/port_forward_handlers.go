@@ -736,12 +736,8 @@ func (s *Server) authorizePortAccess(w http.ResponseWriter, r *http.Request, age
 		return agent, true
 	}
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		if !s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), action).Allowed {
+		if !s.userPortAccessAllowed(ctx, userIdent, agent, action) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-			return nil, false
-		}
-		if isShellAgent(agent) && action == ActionPortAccess {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "execution container: port exposure and port access are not allowed", nil)
 			return nil, false
 		}
 		return agent, true

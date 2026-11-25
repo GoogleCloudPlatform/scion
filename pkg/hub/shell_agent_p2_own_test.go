@@ -250,7 +250,6 @@ func TestShellAgentPortExposureAndAccessRefused_S4(t *testing.T) {
 
 		recOwner := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/ports", body)
 		assert.Equal(t, http.StatusForbidden, recOwner.Code, recOwner.Body.String())
-		assert.Contains(t, recOwner.Body.String(), "port exposure and port access are not allowed")
 
 		recHubAdmin := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/ports", body)
 		assert.Equal(t, http.StatusForbidden, recHubAdmin.Code, recHubAdmin.Body.String())
@@ -313,6 +312,15 @@ func TestShellAgentPortExposureAndAccessRefused_S4(t *testing.T) {
 		// Conduit TCP authorization and TCP target check must both refuse.
 		err = srv.authorizeConduitAction(ctx, ownerIdent, refreshed, ActionPortAccess)
 		require.ErrorIs(t, err, errConduitForbidden)
+		assert.Contains(t, err.Error(), "execution container: port access is not allowed")
+
+		// Unauthorized caller must be denied by Decide before learning it is an execution container.
+		outsider := p2OwnSeedUser(t, s, "s4-outsider@test.com", "S4 Outsider")
+		outsiderIdent := NewAuthenticatedUser(outsider.ID, outsider.Email, outsider.DisplayName, outsider.Role, "web")
+		err = srv.authorizeConduitAction(ctx, outsiderIdent, refreshed, ActionPortAccess)
+		require.ErrorIs(t, err, errConduitForbidden)
+		assert.NotContains(t, err.Error(), "execution container")
+
 		err = srv.authorizeConduitTCPTarget(refreshed, 8080)
 		require.ErrorIs(t, err, errConduitForbidden)
 
