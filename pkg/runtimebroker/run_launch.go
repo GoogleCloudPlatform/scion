@@ -1063,6 +1063,9 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 	if re, ok := hostedConfigRefusalFrom(err); ok {
 		return api.LaunchCodeHostedConfigRefused, re.Error()
 	}
+	if pe, ok := agentPolicyErrorFrom(err); ok {
+		return api.LaunchCodeAgentPolicyRefused, pe.PublicMessage()
+	}
 	if emptyGenericCommandFrom(err) {
 		return ErrCodeHarnessConfigUnusable, emptyGenericCommandMessage()
 	}

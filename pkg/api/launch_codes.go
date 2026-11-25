@@ -101,6 +101,10 @@ const (
 	// by project members (a harness config's volumes). The synchronous
 	// refusal uses the same value (pkg/hostedguard.ErrorCode).
 	LaunchCodeHostedConfigRefused = "hosted_config_refused"
+	// LaunchCodeAgentPolicyRefused: the broker's operator agent_policy
+	// refused the agent's configuration (for example an image outside
+	// allowed_image_prefixes or resources above max_resources).
+	LaunchCodeAgentPolicyRefused = "agent_policy_refused"
 
 	// LaunchCodeImagePullFailed: the agent image could not be pulled
 	// (Kubernetes ImagePullBackOff or ErrImagePull, or a failed local
