@@ -3939,6 +3939,14 @@ describe('conversation header More menu', () => {
     };
     try {
       expect(page.fullHeaderActionCount(conv)).toBe(9);
+      (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
+        'web.chat_starred_messages': false,
+        'web.decisions': true,
+      };
+      // Agent DM counts +1 when web.decisions is on.
+      expect(page.fullHeaderActionCount(conv)).toBe(10);
+      // User-to-user DM never renders open decisions (+0).
+      expect(page.fullHeaderActionCount({ ...conv, peerKind: 'user' })).toBe(6);
     } finally {
       delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
     }
@@ -4315,5 +4323,109 @@ describe('chat page — thread default agent resolution', () => {
     ];
     expect(el.resolveDefaultAgentId('helper')).toBe('agent-b');
     expect(el.resolveDefaultAgentName('helper')).toBe('Helper Prime');
+  });
+});
+
+describe('chat page — cross-conversation star jump closes search', () => {
+  it('clears v2SearchActive before navigating to a starred message in another conversation', async () => {
+    vi.mocked(apiFetch).mockImplementation((path: string) => {
+      if (path === '/api/v1/chat/stars/msg-other') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              messageId: 'msg-other',
+              conversationKey: 'topic-2',
+              permalink: '/chat/alpha/topic-2?msg=msg-other',
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    vi.mocked(navigateTo).mockClear();
+
+    const el = createPage();
+    el.v2Conversation = { conversationKey: 'topic-1', projectId: 'p1', isDM: false };
+    el.v2SearchActive = true;
+
+    await el.openStarredMessage('msg-other', 'topic-1');
+
+    expect(el.v2SearchActive).toBe(false);
+    expect(navigateTo).toHaveBeenCalledWith('/chat/alpha/topic-2?msg=msg-other');
+  });
+
+  it('routes handleOpenDecisionOpen through jumpToMessage (scrollToMessageById and openInFullContext)', async () => {
+    const scrollToMessageById = vi.fn().mockResolvedValue(undefined);
+    const openInFullContext = vi.fn();
+    const threadStub = { scrollToMessageById, openInFullContext, jumpSequence: 0 };
+
+    const el = createPage();
+    el.v2Conversation = { conversationKey: 'topic-1', projectId: 'p1', isDM: false };
+    el.v2SearchActive = true;
+    Object.defineProperty(el, 'updateComplete', { get: () => Promise.resolve(true) });
+    Object.defineProperty(el, 'shadowRoot', {
+      value: {
+        querySelector: (sel: string) => (sel === 'scion-chat-thread' ? threadStub : null),
+      },
+    });
+
+    // Normal full-context branch -> scrollToMessageById(id, true, true).
+    el.handleOpenDecisionOpen(
+      new CustomEvent('open-decision-open', { detail: { messageId: 'msg-dec-1' } })
+    );
+    await flush();
+    expect(el.v2SearchActive).toBe(false);
+    expect(scrollToMessageById).toHaveBeenCalledWith('msg-dec-1', true, true);
+    expect(openInFullContext).not.toHaveBeenCalled();
+
+    // Starred-only centre branch -> openInFullContext(id).
+    scrollToMessageById.mockClear();
+    el.centerMessageFilter = 'starred';
+    el.handleOpenDecisionOpen(
+      new CustomEvent('open-decision-open', { detail: { messageId: 'msg-dec-2' } })
+    );
+    await flush();
+    expect(openInFullContext).toHaveBeenCalledWith('msg-dec-2');
+    expect(scrollToMessageById).not.toHaveBeenCalled();
+  });
+
+  it('routes same-conversation openStarredMessage through jumpToMessage', async () => {
+    vi.mocked(apiFetch).mockImplementation((path: string) => {
+      if (path === '/api/v1/chat/stars/msg-same') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              messageId: 'msg-same',
+              conversationKey: 'topic-1',
+              permalink: '/chat/alpha/topic-1?msg=msg-same',
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    vi.mocked(navigateTo).mockClear();
+
+    const scrollToMessageById = vi.fn().mockResolvedValue(undefined);
+    const openInFullContext = vi.fn();
+    const threadStub = { scrollToMessageById, openInFullContext, jumpSequence: 0 };
+
+    const el = createPage();
+    el.v2Conversation = { conversationKey: 'topic-1', projectId: 'p1', isDM: false };
+    el.v2SearchActive = true;
+    Object.defineProperty(el, 'updateComplete', { get: () => Promise.resolve(true) });
+    Object.defineProperty(el, 'shadowRoot', {
+      value: {
+        querySelector: (sel: string) => (sel === 'scion-chat-thread' ? threadStub : null),
+      },
+    });
+
+    await el.openStarredMessage('msg-same', 'topic-1');
+
+    expect(el.v2SearchActive).toBe(false);
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(scrollToMessageById).toHaveBeenCalledWith('msg-same', true, true);
   });
 });

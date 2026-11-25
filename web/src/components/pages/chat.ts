@@ -120,6 +120,9 @@ import type { ScionQuickPalette } from '../shared/palette/quick-palette.js';
 import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-starred-list.js';
 import type { StarredMessageOpenDetail } from '../shared/chat/chat-starred-list.js';
+import '../shared/chat/chat-open-decisions.js';
+import type { OpenDecisionOpenDetail } from '../shared/chat/chat-open-decisions.js';
+import { decisionsEnabled } from '../../utils/feature-flags.js';
 import {
   conversationSupportsStars,
   fetchStarDetail,
@@ -7157,6 +7160,13 @@ export class ScionPageChat extends LitElement {
               </sl-menu>
             </sl-dropdown>
           </span>
+          ${this.headerShowsOpenDecisions(conv)
+            ? html`<scion-chat-open-decisions
+                conversationKey=${conv.conversationKey}
+                projectSlug=${conv.projectSlug || conv.projectId}
+                @open-decision-open=${this.handleOpenDecisionOpen}
+              ></scion-chat-open-decisions>`
+            : nothing}
           ${this.headerShowsStars(conv)
             ? html`<scion-chat-starred-list
                 conversationKey=${conv.conversationKey}
@@ -7224,6 +7234,16 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * Whether the header shows the open-decisions button: `web.decisions` is on
+   * and the conversation can hold decisions (topics and agent DMs; never
+   * user-to-user DMs). Always visible when shown, just before the star.
+   */
+  private headerShowsOpenDecisions(conv: V2ConversationState): boolean {
+    if (!decisionsEnabled() || !conv.conversationKey) return false;
+    return !conv.isDM || conv.peerKind === 'agent';
+  }
+
+  /**
    * Whether the header shows the starred-messages button: the experiment is
    * on and the conversation supports stars (threads and both DM kinds). It
    * sits in the always-visible action area, not the secondary span.
@@ -7231,6 +7251,27 @@ export class ScionPageChat extends LitElement {
   private headerShowsStars(conv: V2ConversationState): boolean {
     return starredMessagesEnabled() && conversationSupportsStars(conv.conversationKey);
   }
+
+  /**
+   * Jumps to `messageId` in the currently open conversation, exiting search
+   * and the starred-only filter if active. Shared by the starred-messages list
+   * and the open-decisions list.
+   */
+  private async jumpToMessage(messageId: string): Promise<void> {
+    this.v2SearchActive = false;
+    await this.updateComplete;
+    const thread = this.threadElement();
+    if (this.centerMessageFilter) thread?.openInFullContext(messageId);
+    else void thread?.scrollToMessageById(messageId, true, true);
+  }
+
+  /** An open-decisions header entry was chosen: jump to its prompt message. */
+  private handleOpenDecisionOpen = (e: CustomEvent<OpenDecisionOpenDetail>): void => {
+    const messageId = e.detail?.messageId;
+    if (!messageId) return;
+    ++this.starJumpSeq;
+    void this.jumpToMessage(messageId);
+  };
 
   /** Bumped by every header star jump; a newer jump supersedes older ones. */
   private starJumpSeq = 0;
@@ -7288,12 +7329,7 @@ export class ScionPageChat extends LitElement {
     }
     this.v2SearchActive = false;
     if (item.conversationKey === this.v2Conversation?.conversationKey) {
-      await this.updateComplete;
-      // A header entry always opens the message in the full conversation,
-      // also from the starred-only center.
-      const thread = this.threadElement();
-      if (this.centerMessageFilter) thread?.openInFullContext(item.messageId);
-      else void thread?.scrollToMessageById(item.messageId, true, true);
+      await this.jumpToMessage(item.messageId);
       return;
     }
     navigateTo(item.permalink);
@@ -7396,6 +7432,7 @@ export class ScionPageChat extends LitElement {
           ? this.resolveDefaultAgentId(conv.defaultAgent)
           : '';
     let count = 3; // export, search, members
+    if (this.headerShowsOpenDecisions(conv)) count += 1; // open decisions
     if (this.headerShowsStars(conv)) count += 1; // starred messages
     if (agentId) count += this.getAgentProjectId(agentId) ? 2 : 1; // terminal, graph
     if (!this.isMobileLayout) count += 1; // density
