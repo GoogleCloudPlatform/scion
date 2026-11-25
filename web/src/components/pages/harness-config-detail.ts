@@ -37,16 +37,17 @@ import {
 } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { projectLabelNow, resolveProjectLabel } from '../../client/project-label.js';
+import type { Crumb } from '../shared/breadcrumb.js';
 import '../shared/detail-header.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
 import { HarnessConfigFileBrowserDataSource } from '../shared/file-browser.js';
 import type { FileBrowserDataSource } from '../shared/file-browser.js';
 import { HarnessConfigFileEditorDataSource } from '../shared/file-editor.js';
-import type { FileEditorDataSource } from '../shared/file-editor.js';
+import type { FileEditorDataSource, ScionFileEditor } from '../shared/file-editor.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
-import { navigateTo } from '../../client/navigation.js';
+import { addLeaveGuard, navigateTo } from '../../client/navigation.js';
 import { describeSourceUrl } from '../../shared/source-url.js';
 
 /**
@@ -193,6 +194,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
   private fileBrowserDataSource: FileBrowserDataSource | null = null;
   private fileEditorDataSource: FileEditorDataSource | null = null;
+  private removeLeaveGuard: (() => void) | null = null;
   private buildPollTimer: ReturnType<typeof setTimeout> | null = null;
   private buildPollErrors = 0;
 
@@ -531,8 +533,18 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         }
       }
     }
+    this.removeLeaveGuard?.();
+    this.removeLeaveGuard = addLeaveGuard(
+      () => !this.editorDirty || window.confirm('You have unsaved changes. Leave anyway?')
+    );
     this.syncProjectLabel();
     void this.loadHarnessConfig();
+  }
+
+  private get editorDirty(): boolean {
+    if (this.editingFilePath === null) return false;
+    const editor = this.shadowRoot?.querySelector<ScionFileEditor>('scion-file-editor');
+    return editor?.dirty ?? false;
   }
 
   protected override willUpdate(changed: PropertyValues<this>): void {
@@ -631,7 +643,19 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     this.editorInitialPreview = false;
   }
 
-  private handleFileSaved(): void {
+  private async requestCloseEditor(): Promise<void> {
+    const editor = this.shadowRoot?.querySelector<ScionFileEditor>('scion-file-editor');
+    if (editor) {
+      await editor.requestClose();
+      return;
+    }
+    this.handleEditorClosed();
+  }
+
+  private handleFileSaved(e: CustomEvent<{ path: string }>): void {
+    if (this.editingFilePath === '' && e.detail?.path) {
+      this.editingFilePath = e.detail.path;
+    }
     this.refreshFileBrowser();
   }
 
@@ -669,18 +693,40 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     `;
   }
 
+  private selfPath(hc: HarnessConfig): string {
+    const id = encodeURIComponent((this.harnessConfigId || hc.id).trim());
+    if (this.projectId) {
+      return `/projects/${encodeURIComponent(this.projectId.trim())}/harness-configs/${id}`;
+    }
+    return `/settings/harness-configs/${id}`;
+  }
+
+  private headerCrumbs(hc: HarnessConfig): Crumb[] {
+    const entityLabel = hc.displayName || hc.name || this.harnessConfigId;
+    if (this.editingFilePath !== null) {
+      return [
+        ...this.parentCrumbs(true),
+        {
+          label: entityLabel,
+          href: this.selfPath(hc),
+          truncate: true,
+          onActivate: (e: MouseEvent) => {
+            e.preventDefault();
+            void this.requestCloseEditor();
+          },
+        },
+        current(this.editingFilePath || 'New file'),
+      ];
+    }
+    return [...this.parentCrumbs(true), current(entityLabel)];
+  }
+
   private renderHeader() {
     const hc = this.harnessConfig!;
     const canDelete = can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage');
     return html`
       <scion-detail-header heading=${hc.displayName || hc.name}>
-        <scion-breadcrumb
-          slot="back"
-          .crumbs=${[
-            ...this.parentCrumbs(true),
-            current(hc.displayName || hc.name || this.harnessConfigId),
-          ]}
-        ></scion-breadcrumb>
+        <scion-breadcrumb slot="back" .crumbs=${this.headerCrumbs(hc)}></scion-breadcrumb>
         <sl-icon slot="icon" name="sliders"></sl-icon>
         ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
         ${hc.description
@@ -766,7 +812,11 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         ${isEditorOpen
           ? html`
               <div class="editor-back-row">
-                <sl-button size="small" variant="text" @click=${this.handleEditorClosed}>
+                <sl-button
+                  size="small"
+                  variant="text"
+                  @click=${() => void this.requestCloseEditor()}
+                >
                   <sl-icon slot="prefix" name="arrow-left"></sl-icon>
                   Back to files
                 </sl-button>
@@ -1574,6 +1624,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         );
       }
       this.deleteDialogOpen = false;
+      this.editingFilePath = null;
       // Navigate back to the list view
       const listHref = this.parentCrumbs(false).at(-1)?.href ?? '/settings?tab=harness-configs';
       navigateTo(listHref);
@@ -1586,6 +1637,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.removeLeaveGuard?.();
+    this.removeLeaveGuard = null;
     this.stopBuildPolling();
   }
 }

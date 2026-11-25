@@ -488,17 +488,47 @@ export class ScionFileEditor extends LitElement {
     this.showPreview = !this.showPreview;
   }
 
-  private async handleClose(): Promise<void> {
-    if (this.dirty) {
-      if (!(await showConfirm('You have unsaved changes. Close anyway?'))) return;
+  private closePromise: Promise<boolean> | null = null;
+
+  /**
+   * Request closing the editor, confirming if there are unsaved changes.
+   * Dispatches `editor-closed` and resolves to `true` if closed, `false` if cancelled.
+   */
+  async requestClose(): Promise<boolean> {
+    if (this.closePromise) return this.closePromise;
+    if (!this.dirty) {
+      this.dispatchEvent(
+        new CustomEvent('editor-closed', {
+          bubbles: true,
+          composed: true,
+        })
+      );
+      return true;
     }
 
-    this.dispatchEvent(
-      new CustomEvent('editor-closed', {
-        bubbles: true,
-        composed: true,
-      })
-    );
+    const pending = (async () => {
+      if (!(await showConfirm('You have unsaved changes. Close anyway?'))) return false;
+
+      this.dispatchEvent(
+        new CustomEvent('editor-closed', {
+          bubbles: true,
+          composed: true,
+        })
+      );
+      return true;
+    })();
+    this.closePromise = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.closePromise === pending) {
+        this.closePromise = null;
+      }
+    }
+  }
+
+  private async handleClose(): Promise<void> {
+    await this.requestClose();
   }
 
   private handleNewFileNameInput(e: InputEvent): void {

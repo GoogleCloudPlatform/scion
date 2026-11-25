@@ -29,8 +29,16 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
+const showConfirmMock = vi.fn<(message: string, options?: unknown) => Promise<boolean>>();
+vi.mock('../shared/confirm-dialog.js', () => ({
+  showConfirm: (message: string, options?: unknown) => showConfirmMock(message, options),
+}));
+
 import type { PageData, UserRole } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
+import { mayLeave } from '../../client/navigation.js';
+import { crumbTuples } from '../../test-utils/crumbs.js';
+import type { ScionFileEditor } from '../shared/file-editor.js';
 
 /** happy-dom has no EventSource; setScope opens one. */
 class FakeEventSource extends EventTarget {
@@ -865,6 +873,140 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     expect(el.shadowRoot?.querySelector('scion-file-editor')).toBeNull();
     expect(fileBrowserFor(el, SHARED_DIR_B)).not.toBeNull();
     expect(fileBrowserFor(el, SHARED_DIR_A)).toBeNull();
+  });
+
+  // ── Phase 3a (#9024): dirty-check on Back to files, leave guard, and unchanged trail ──
+
+  it('keeps the project breadcrumb unchanged while the file editor is open', async () => {
+    const { el } = await createComponent();
+    element = el;
+
+    expect(crumbTuples(el.shadowRoot!)).toEqual([
+      ['Projects', '/projects'],
+      ['Project One', undefined],
+    ]);
+
+    fileBrowserFor(el, 'workspace')!.dispatchEvent(
+      new CustomEvent('file-edit-requested', {
+        detail: { path: 'workspace-file.txt' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('scion-file-editor')).not.toBeNull();
+    expect(crumbTuples(el.shadowRoot!)).toEqual([
+      ['Projects', '/projects'],
+      ['Project One', undefined],
+    ]);
+  });
+
+  it('prompts before closing via Back to files when the editor is dirty, and skips prompt when clean', async () => {
+    showConfirmMock.mockReset();
+    const { el } = await createComponent();
+    element = el;
+
+    fileBrowserFor(el, 'workspace')!.dispatchEvent(
+      new CustomEvent('file-edit-requested', {
+        detail: { path: 'workspace-file.txt' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    const editor = el.shadowRoot!.querySelector<ScionFileEditor>('scion-file-editor')!;
+    expect(editor).not.toBeNull();
+    await editor.updateComplete;
+
+    // Make the editor dirty.
+    const codeEditor = editor.shadowRoot!.querySelector('scion-code-editor')!;
+    codeEditor.dispatchEvent(
+      new CustomEvent('content-changed', {
+        detail: { content: 'modified workspace text' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await editor.updateComplete;
+    expect(editor.dirty).toBe(true);
+
+    const backButton = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).find((b) =>
+      (b.textContent ?? '').includes('Back to files')
+    )!;
+    expect(backButton).toBeTruthy();
+
+    // Declining confirm keeps the editor open.
+    showConfirmMock.mockResolvedValueOnce(false);
+    backButton.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    expect(showConfirmMock).toHaveBeenCalledTimes(1);
+    expect(el.shadowRoot?.querySelector('scion-file-editor')).not.toBeNull();
+
+    // Accepting confirm closes the editor and returns to the file browser.
+    showConfirmMock.mockResolvedValueOnce(true);
+    backButton.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    expect(showConfirmMock).toHaveBeenCalledTimes(2);
+    expect(el.shadowRoot?.querySelector('scion-file-editor')).toBeNull();
+    expect(fileBrowserFor(el, 'workspace')).not.toBeNull();
+  });
+
+  it('registers a leave guard that vetoes navigation only while the editor is dirty and unregisters on disconnect', async () => {
+    const confirmSpy = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmSpy);
+    const { el } = await createComponent();
+    element = el;
+
+    // Closed editor: mayLeave allows without prompting.
+    expect(mayLeave()).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    // Open clean editor: mayLeave allows without prompting.
+    fileBrowserFor(el, 'workspace')!.dispatchEvent(
+      new CustomEvent('file-edit-requested', {
+        detail: { path: 'workspace-file.txt' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    const editor = el.shadowRoot!.querySelector<ScionFileEditor>('scion-file-editor')!;
+    await editor.updateComplete;
+    expect(mayLeave()).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    // Dirty editor: mayLeave prompts and respects cancel/confirm.
+    editor.shadowRoot!.querySelector('scion-code-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', {
+        detail: { content: 'unsaved change' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await editor.updateComplete;
+
+    confirmSpy.mockReturnValueOnce(false);
+    expect(mayLeave()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledWith('You have unsaved changes. Leave anyway?');
+
+    confirmSpy.mockReturnValueOnce(true);
+    expect(mayLeave()).toBe(true);
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+
+    // Disconnect removes the guard.
+    el.remove();
+    element = null;
+    expect(mayLeave()).toBe(true);
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
   });
 });
 
