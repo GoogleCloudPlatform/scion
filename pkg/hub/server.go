@@ -2531,6 +2531,9 @@ type Server struct {
 	// commandRuns tracks human-approved command runs in flight on this replica
 	// (ptone/scion#9278): bounded slots and shutdown gate.
 	commandRuns commandRunTracker
+	// commandRunLauncher optionally overrides the post-commit approval handoff
+	// in tests; nil uses s.EnqueueCommandRun.
+	commandRunLauncher CommandRunLauncher
 	// scheduledExecLimiterOnce creates scheduledExecAuthoringLimiter, the
 	// per-principal exec authoring rate limiter.
 	scheduledExecLimiterOnce      sync.Once
