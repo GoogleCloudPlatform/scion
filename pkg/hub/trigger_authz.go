@@ -42,10 +42,13 @@ const (
 
 	webhookEndpointNotFoundMessage = "webhook endpoint not found"
 
-	mutationTypeWebhookEndpointCreate = "webhook_endpoint_create"
-	mutationTypeWebhookEndpointDelete = "webhook_endpoint_delete"
-	mutationTypeTriggerPause          = "trigger_pause"
-	mutationTypeTriggerDelete         = "trigger_delete"
+	mutationTypeWebhookEndpointCreate       = "webhook_endpoint_create"
+	mutationTypeWebhookEndpointUpdate       = "webhook_endpoint_update"
+	mutationTypeWebhookEndpointUnbind       = "webhook_endpoint_unbind"
+	mutationTypeWebhookEndpointRotateSecret = "webhook_endpoint_rotate_secret"
+	mutationTypeWebhookEndpointDelete       = "webhook_endpoint_delete"
+	mutationTypeTriggerPause                = "trigger_pause"
+	mutationTypeTriggerDelete               = "trigger_delete"
 )
 
 func newWebhookEndpointAudit(ctx context.Context, mutationType, endpointID string) *store.MutationAuditRecord {
@@ -169,15 +172,23 @@ type webhookEndpointAccess struct {
 	reason          string
 	byPolicy        bool
 	notOwnedByAgent bool
+	boundNotOwner   bool
 }
 
 // webhookEndpointAccessDecision decides whether the identity in ctx may
 // perform action on webhook endpoints in projectID (ep == nil for the
 // project-level router gate, non-nil for a specific endpoint row).
 //
-// Users are decided via webhook_endpoint.<action>. Agents are admitted on
-// ActionCreate (they become the endpoint owner) and on rows where
-// ep.OwnerPrincipalKind == "agent" && ep.OwnerPrincipalID == agent.ID().
+// Security inventory (Stage 2 §4.1, §4.3, §4.4, §11.2):
+//   - Users are decided via webhook_endpoint.<action>.
+//   - Agents are admitted on ActionCreate (they become the endpoint owner) and
+//     on rows where ep.OwnerPrincipalKind == "agent" && ep.OwnerPrincipalID == agent.ID().
+//   - A bound agent (ep.BoundAgentID == agent.ID()) that is not the owner is
+//     admitted ONLY for ActionRead (reading the endpoint and its events via
+//     triggerEventAccessDecision); update/rotate/delete are denied (403).
+//   - Unrelated agents receive 404 (notOwnedByAgent) so endpoint IDs cannot be probed.
+//   - Binding mutation via PATCH is additionally refused for all agent callers
+//     in updateWebhookEndpoint (users only); agent create binding is self-only.
 func (s *Server) webhookEndpointAccessDecision(ctx context.Context, projectID string, action Action, ep *store.WebhookEndpoint) webhookEndpointAccess {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -191,13 +202,26 @@ func (s *Server) webhookEndpointAccessDecision(ctx context.Context, projectID st
 		if ep == nil || action == ActionCreate {
 			return webhookEndpointAccess{allowed: true}
 		}
-		if ep.OwnerPrincipalKind != store.DelegationPrincipalAgent || ep.OwnerPrincipalID == "" || ep.OwnerPrincipalID != identity.ID() {
+		isOwner := ep.OwnerPrincipalKind == store.DelegationPrincipalAgent &&
+			ep.OwnerPrincipalID != "" &&
+			ep.OwnerPrincipalID == identity.ID()
+		if isOwner {
+			return webhookEndpointAccess{allowed: true}
+		}
+		isBound := ep.BoundAgentID != "" && ep.BoundAgentID == identity.ID()
+		if isBound {
+			if action == ActionRead {
+				return webhookEndpointAccess{allowed: true}
+			}
 			return webhookEndpointAccess{
-				reason:          "agent does not own this webhook endpoint",
-				notOwnedByAgent: true,
+				reason:        "bound agent may read but not modify this webhook endpoint",
+				boundNotOwner: true,
 			}
 		}
-		return webhookEndpointAccess{allowed: true}
+		return webhookEndpointAccess{
+			reason:          "agent does not own this webhook endpoint",
+			notOwnedByAgent: true,
+		}
 
 	case "user", "dev", "federated_user":
 		userIdent, ok := identity.(UserIdentity)
@@ -249,6 +273,8 @@ func (s *Server) authorizeWebhookEndpointRow(w http.ResponseWriter, r *http.Requ
 	logAuthzDenial(r, identity, webhookEndpointResource(projectID), action, d.reason)
 	if d.notOwnedByAgent {
 		writeWebhookEndpointNotFound(w)
+	} else if d.boundNotOwner {
+		writeForbidden(w, "Bound agents may read this webhook endpoint but cannot modify or delete it")
 	} else if d.byPolicy {
 		writeForbidden(w, "You don't have permission to access webhook endpoints in this project")
 	} else {

@@ -1990,21 +1990,25 @@ func TestTriggerWebhookCLI_GetAndOneCallCreate(t *testing.T) {
 
 		resetCreateFlags()
 		triggerWebhookToSelf = true
-		_, err = buildCreateWebhookEndpointRequest()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--message is required")
+		req, err := buildCreateWebhookEndpointRequest()
+		require.NoError(t, err)
+		assert.Equal(t, "self", req.BoundAgentID)
+		assert.Equal(t, "agent", req.BoundLifetime)
+		require.NotNil(t, req.DefaultTrigger)
+		assert.True(t, req.DefaultTrigger.ToSelf)
+		assert.Equal(t, defaultToSelfWebhookMessage, req.DefaultTrigger.Message)
 
 		resetCreateFlags()
 		triggerWebhookMessage = "orphan message"
 		_, err = buildCreateWebhookEndpointRequest()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--agent or --to-self is required")
+		assert.Contains(t, err.Error(), "--agent, --bind, or --to-self is required")
 
 		resetCreateFlags()
 		triggerWebhookWake = true
 		_, err = buildCreateWebhookEndpointRequest()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--agent or --to-self is required")
+		assert.Contains(t, err.Error(), "--agent, --bind, or --to-self is required")
 	})
 
 	// 2. --to-self resolves strictly via Hub identity (toSelf=true), NEVER reading SCION_AGENT_* env vars.

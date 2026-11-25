@@ -437,3 +437,90 @@ func TestTriggerEventService(t *testing.T) {
 	assert.Equal(t, []string{"bug", "triggers"}, detail.Lists["labels"])
 	assert.JSONEq(t, `{"action":"created","comment":{"body":"@scion /ping"}}`, string(detail.Payload))
 }
+
+func TestWebhookEndpointService_UpdateAndRotateSecret(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/proj-1/webhook-endpoints", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "ag-1", r.URL.Query().Get("boundAgentId"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ListWebhookEndpointsResponse{
+			Endpoints: []WebhookEndpoint{{
+				ID:            "ep-123",
+				ProjectID:     "proj-1",
+				Name:          "bound-ep",
+				BoundAgent:    &WebhookEndpointBoundAgent{ID: "ag-1", Name: "worker"},
+				BoundLifetime: "agent",
+				Status:        "active",
+				CreatedAt:     now,
+				UpdatedAt:     now,
+			}},
+			TotalCount: 1,
+			ServerTime: now,
+		})
+	})
+	mux.HandleFunc("/api/v1/projects/proj-1/webhook-endpoints/ep-123", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPatch, r.Method)
+		var req UpdateWebhookEndpointRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		require.NotNil(t, req.Status)
+		assert.Equal(t, "disabled", *req.Status)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(WebhookEndpoint{
+			ID:            "ep-123",
+			ProjectID:     "proj-1",
+			Name:          "bound-ep",
+			Status:        "disabled",
+			ConfigVersion: 2,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		})
+	})
+	mux.HandleFunc("/api/v1/projects/proj-1/webhook-endpoints/ep-123/rotate-secret", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(WebhookEndpointRotated{
+			WebhookEndpoint: WebhookEndpoint{
+				ID:              "ep-123",
+				ProjectID:       "proj-1",
+				Name:            "bound-ep",
+				SecretVersion:   2,
+				SecretRotatedAt: &now,
+				Status:          "active",
+				CreatedAt:       now,
+				UpdatedAt:       now,
+			},
+			Secret:             "rotated-v2-secret",
+			GraceWindowExpires: now.Add(24 * time.Hour),
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+	svc := c.WebhookEndpoints("proj-1")
+	ctx := context.Background()
+
+	listed, err := svc.List(ctx, &ListWebhookEndpointsOptions{BoundAgentID: "ag-1"})
+	require.NoError(t, err)
+	require.Len(t, listed.Endpoints, 1)
+	require.NotNil(t, listed.Endpoints[0].BoundAgent)
+	assert.Equal(t, "ag-1", listed.Endpoints[0].BoundAgent.ID)
+	assert.Equal(t, "worker", listed.Endpoints[0].BoundAgent.Name)
+
+	disabled := "disabled"
+	updated, err := svc.Update(ctx, "ep-123", &UpdateWebhookEndpointRequest{Status: &disabled})
+	require.NoError(t, err)
+	assert.Equal(t, "disabled", updated.Status)
+	assert.Equal(t, 2, updated.ConfigVersion)
+
+	rotated, err := svc.RotateSecret(ctx, "ep-123")
+	require.NoError(t, err)
+	assert.Equal(t, 2, rotated.SecretVersion)
+	assert.Equal(t, "rotated-v2-secret", rotated.Secret)
+	assert.True(t, rotated.GraceWindowExpires.After(now))
+}

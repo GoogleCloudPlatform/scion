@@ -20,21 +20,29 @@ import (
 	"time"
 )
 
-// Trigger and webhook endpoint resource caps (Stage 1 §4.1, §4.2, F5; Stage 3 §4.3).
+// Trigger and webhook endpoint resource caps (Stage 1 §4.1, §4.2, F5; Stage 2 §4.3; Stage 3 §4.3).
 const (
-	MaxWebhookEndpointsPerProject = 20
-	MaxActiveTriggersPerSource    = 50
-	MaxTriggersPerProject         = 200
-	MaxTriggerEventListsBytes     = 8 * 1024
+	MaxWebhookEndpointsPerProject    = 20
+	MaxBoundWebhookEndpointsPerAgent = 5
+	MaxActiveTriggersPerSource       = 50
+	MaxTriggersPerProject            = 200
+	MaxTriggerEventListsBytes        = 8 * 1024
 )
 
-// WebhookEndpoint signature modes and statuses (§4.1, §8.1a).
+// WebhookEndpoint signature modes, statuses, bound lifetimes, and rotation grace
+// window (Stage 1 §4.1, §8.1a; Stage 2 §4.1, §4.4).
 const (
 	WebhookSignatureModeScionV1  = "scion_v1"
 	WebhookSignatureModeBodyOnly = "body_only"
 
 	WebhookEndpointStatusActive   = "active"
 	WebhookEndpointStatusDisabled = "disabled"
+
+	WebhookBoundLifetimeNone       = ""
+	WebhookBoundLifetimeAgent      = "agent"
+	WebhookBoundLifetimePersistent = "persistent"
+
+	WebhookSecretRotationGraceWindow = 24 * time.Hour
 )
 
 // Trigger source kinds, rule dialects, action types, subject modes, statuses,
@@ -134,8 +142,12 @@ type WebhookEndpoint struct {
 	OwnerPrincipalID    string            `json:"ownerPrincipalId"`
 	OwnerCredentialKind string            `json:"ownerCredentialKind"`
 	SecretVersion       int               `json:"secretVersion"`
+	SecretRotatedAt     *time.Time        `json:"secretRotatedAt,omitempty"`
+	ConfigVersion       int               `json:"configVersion"`
 	SignatureMode       string            `json:"signatureMode"`
 	Status              string            `json:"status"`
+	BoundAgentID        string            `json:"boundAgentId,omitempty"`
+	BoundLifetime       string            `json:"boundLifetime,omitempty"`
 	CreatedBy           string            `json:"createdBy,omitempty"`
 	LastReceivedAt      *time.Time        `json:"lastReceivedAt,omitempty"`
 	ReceiveCount        int               `json:"receiveCount"`
@@ -152,6 +164,19 @@ type WebhookEndpointFilter struct {
 	Status             string
 	OwnerPrincipalKind string
 	OwnerPrincipalID   string
+	BoundAgentID       string
+	// VisibleToAgentID matches endpoints either owned by this agent OR bound
+	// to this agent (Stage 2 §4.1). Mutually exclusive with OwnerPrincipal* filters.
+	VisibleToAgentID string
+}
+
+// WebhookEndpointFieldMask names the mutable columns an UpdateWebhookEndpoint
+// call intends to write (Stage 2 §4.4).
+type WebhookEndpointFieldMask struct {
+	Description bool
+	Status      bool
+	// Binding writes both bound_agent_id and bound_lifetime together.
+	Binding bool
 }
 
 // TriggerMatchRule is one ordered element of a trigger's match_rules list (§4.2, mixed-rule-arrays §2.1).
@@ -342,11 +367,35 @@ type TriggerStore interface {
 	GetWebhookEndpointByName(ctx context.Context, projectID, name string) (*WebhookEndpoint, error)
 	ListWebhookEndpoints(ctx context.Context, filter WebhookEndpointFilter, opts ListOptions) (*ListResult[WebhookEndpoint], error)
 	CountWebhookEndpoints(ctx context.Context, projectID string) (int, error)
+	CountBoundWebhookEndpoints(ctx context.Context, projectID, agentID string) (int, error)
+	UpdateWebhookEndpoint(ctx context.Context, ep *WebhookEndpoint, fields WebhookEndpointFieldMask) error
+	RotateWebhookEndpointSecret(ctx context.Context, projectID, id string, nextVersion int, rotatedAt time.Time) (*WebhookEndpoint, error)
 	FlushWebhookEndpointCounters(ctx context.Context, id string, receiveDelta, rejectDelta int, lastReceivedAt *time.Time) error
 	// DeleteWebhookEndpoint pauses dependent triggers in projectID with
 	// status_reason = "source_deleted", deletes the endpoint's hub-scoped
 	// internal secret rows, and deletes the endpoint row in one transaction.
 	DeleteWebhookEndpoint(ctx context.Context, projectID, id string) (pausedTriggerIDs []string, deletedSecretKeys []string, err error)
+	// DeleteWebhookEndpointForBoundAgent atomically deletes an agent-lifetime
+	// endpoint bound to boundAgentID, its internal secret rows, and any triggers
+	// on it authored by boundAgentID; triggers on it authored by others are
+	// paused with status_reason = "source_deleted" (Stage 2 §4.2). Returns
+	// ErrNotFound if the endpoint is absent, no longer bound with lifetime
+	// "agent" to boundAgentID, or if a live (non-deleted) agent with
+	// id = boundAgentID still exists.
+	DeleteWebhookEndpointForBoundAgent(ctx context.Context, projectID, id, boundAgentID string) (deletedTriggerIDs []string, pausedTriggerIDs []string, deletedSecretKeys []string, err error)
+	// UnbindWebhookEndpointForAgent atomically clears bound_agent_id and
+	// bound_lifetime on a persistent endpoint currently bound to boundAgentID
+	// when no live (non-deleted) agent with id = boundAgentID exists (Stage 2 §4.2).
+	// Returns false when the endpoint is absent, no longer bound, or the agent is live.
+	UnbindWebhookEndpointForAgent(ctx context.Context, projectID, id, boundAgentID string) (unbound bool, err error)
+	// PurgeExpiredRotatedWebhookSecrets deletes hub-scoped internal secret rows
+	// for webhook endpoints whose secret version is retired and past graceWindow
+	// (or superseded by a newer rotation, Stage 2 §4.4).
+	PurgeExpiredRotatedWebhookSecrets(ctx context.Context, now time.Time, graceWindow time.Duration) (int, error)
+	// ListOrphanedBoundWebhookEndpoints returns up to limit webhook endpoints
+	// with bound_lifetime in ("agent", "persistent") whose bound_agent_id
+	// references a soft-deleted or missing agent row (hourly maintenance cascade backstop).
+	ListOrphanedBoundWebhookEndpoints(ctx context.Context, limit int) ([]WebhookEndpoint, error)
 
 	// Triggers
 	CreateTrigger(ctx context.Context, tr *Trigger) error

@@ -121,11 +121,32 @@ func (m *memTriggerStore) ListWebhookEndpoints(context.Context, store.WebhookEnd
 	return &store.ListResult[store.WebhookEndpoint]{}, nil
 }
 func (m *memTriggerStore) CountWebhookEndpoints(context.Context, string) (int, error) { return 0, nil }
+func (m *memTriggerStore) CountBoundWebhookEndpoints(context.Context, string, string) (int, error) {
+	return 0, nil
+}
+func (m *memTriggerStore) UpdateWebhookEndpoint(context.Context, *store.WebhookEndpoint, store.WebhookEndpointFieldMask) error {
+	return nil
+}
+func (m *memTriggerStore) RotateWebhookEndpointSecret(context.Context, string, string, int, time.Time) (*store.WebhookEndpoint, error) {
+	return nil, store.ErrNotFound
+}
 func (m *memTriggerStore) FlushWebhookEndpointCounters(context.Context, string, int, int, *time.Time) error {
 	return nil
 }
 func (m *memTriggerStore) DeleteWebhookEndpoint(context.Context, string, string) ([]string, []string, error) {
 	return nil, nil, nil
+}
+func (m *memTriggerStore) DeleteWebhookEndpointForBoundAgent(context.Context, string, string, string) ([]string, []string, []string, error) {
+	return nil, nil, nil, nil
+}
+func (m *memTriggerStore) UnbindWebhookEndpointForAgent(context.Context, string, string, string) (bool, error) {
+	return false, nil
+}
+func (m *memTriggerStore) PurgeExpiredRotatedWebhookSecrets(context.Context, time.Time, time.Duration) (int, error) {
+	return 0, nil
+}
+func (m *memTriggerStore) ListOrphanedBoundWebhookEndpoints(context.Context, int) ([]store.WebhookEndpoint, error) {
+	return nil, nil
 }
 func (m *memTriggerStore) CreateTrigger(_ context.Context, tr *store.Trigger) error {
 	m.mu.Lock()

@@ -1196,6 +1196,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     resource: 'webhook_endpoint',
     isAlias: false,
   },
+  {
+    value: 'webhook_endpoint:update',
+    label: 'webhook_endpoint:update',
+    description: 'Update webhook endpoints',
+    resource: 'webhook_endpoint',
+    isAlias: false,
+  },
 ];
 
 /** Groups scope options by resource type, preserving order. Returns [resourceType, scopes][] */

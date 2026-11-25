@@ -1301,16 +1301,17 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/schedules/{id}/resume":  {"projectId": f.project, "id": f.schedule},
 
 		// --- webhook endpoint & trigger families ---
-		"/api/v1/projects/{projectId}/webhook-endpoints":      {"projectId": f.project},
-		"/api/v1/projects/{projectId}/webhook-endpoints/{id}": {"projectId": f.project, "id": f.webhookEndpoint},
-		"/api/v1/projects/{projectId}/triggers":               {"projectId": f.project},
-		"/api/v1/projects/{projectId}/triggers/{id}":          {"projectId": f.project, "id": f.trigger},
-		"/api/v1/projects/{projectId}/triggers/{id}/history":  {"projectId": f.project, "id": f.trigger},
-		"/api/v1/projects/{projectId}/triggers/{id}/render":   {"projectId": f.project, "id": f.trigger},
-		"/api/v1/projects/{projectId}/triggers/{id}/pause":    {"projectId": f.project, "id": f.trigger},
-		"/api/v1/projects/{projectId}/triggers/{id}/resume":   {"projectId": f.project, "id": f.triggerPaused},
-		"/api/v1/projects/{projectId}/trigger-events":         {"projectId": f.project},
-		"/api/v1/projects/{projectId}/trigger-events/{id}":    {"projectId": f.project, "id": f.triggerEvent},
+		"/api/v1/projects/{projectId}/webhook-endpoints":                    {"projectId": f.project},
+		"/api/v1/projects/{projectId}/webhook-endpoints/{id}":               {"projectId": f.project, "id": f.webhookEndpoint},
+		"/api/v1/projects/{projectId}/webhook-endpoints/{id}/rotate-secret": {"projectId": f.project, "id": f.webhookEndpoint},
+		"/api/v1/projects/{projectId}/triggers":                             {"projectId": f.project},
+		"/api/v1/projects/{projectId}/triggers/{id}":                        {"projectId": f.project, "id": f.trigger},
+		"/api/v1/projects/{projectId}/triggers/{id}/history":                {"projectId": f.project, "id": f.trigger},
+		"/api/v1/projects/{projectId}/triggers/{id}/render":                 {"projectId": f.project, "id": f.trigger},
+		"/api/v1/projects/{projectId}/triggers/{id}/pause":                  {"projectId": f.project, "id": f.trigger},
+		"/api/v1/projects/{projectId}/triggers/{id}/resume":                 {"projectId": f.project, "id": f.triggerPaused},
+		"/api/v1/projects/{projectId}/trigger-events":                       {"projectId": f.project},
+		"/api/v1/projects/{projectId}/trigger-events/{id}":                  {"projectId": f.project, "id": f.triggerEvent},
 
 		// --- quota family (read defaults; quota.update/.delete are
 		// re-pointed at the disposable UD instances by opPatternOverrides) ---
@@ -1566,7 +1567,8 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		{"skill.resolve.github.public", "/api/v1/skills/resolve"}:       {"skills": []map[string]string{{"uri": "gh://li-invalid"}}},
 		// Webhook endpoint and trigger authoring writes: valid bodies so the
 		// positive probes exercise real creates and updates (201 / 200).
-		{"webhookendpoint.create", "/api/v1/projects/{projectId}/webhook-endpoints"}: {"name": "li-webhook-created"},
+		{"webhookendpoint.create", "/api/v1/projects/{projectId}/webhook-endpoints"}:      {"name": "li-webhook-created"},
+		{"webhookendpoint.update", "/api/v1/projects/{projectId}/webhook-endpoints/{id}"}: {"description": "li-webhook-updated"},
 		{"trigger.create", "/api/v1/projects/{projectId}/triggers"}: {
 			"name":   "li-trigger-created",
 			"source": map[string]interface{}{"kind": "webhook", "id": f.webhookEndpoint},

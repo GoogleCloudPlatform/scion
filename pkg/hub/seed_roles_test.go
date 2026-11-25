@@ -218,7 +218,7 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 // (ptone/scion#4603).
 func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
-	assert.Equal(t, 16, admin.Revision)
+	assert.Equal(t, 17, admin.Revision)
 	assert.Contains(t, admin.Permissions, "broker.manage")
 	assert.NotContains(t, admin.Permissions, "broker.update")
 	assert.NotContains(t, admin.Permissions, "broker.delete")
@@ -233,6 +233,7 @@ func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	assert.Contains(t, admin.Permissions, "webhook_endpoint.read")
 	assert.Contains(t, admin.Permissions, "webhook_endpoint.list")
 	assert.Contains(t, admin.Permissions, "webhook_endpoint.create")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.update")
 	assert.Contains(t, admin.Permissions, "webhook_endpoint.delete")
 	assert.Contains(t, admin.Permissions, "system_one_instance.read")
 	assert.Contains(t, admin.Permissions, "system_one_instance.create")
@@ -1108,6 +1109,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"trigger.read", "trigger.update",
 				"webhook_endpoint.create", "webhook_endpoint.delete",
 				"webhook_endpoint.list", "webhook_endpoint.read",
+				"webhook_endpoint.update",
 			},
 		},
 		{
@@ -1134,6 +1136,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"template.read", "template.update",
 				"trigger.create", "trigger.list", "trigger.read", "trigger.update",
 				"webhook_endpoint.create", "webhook_endpoint.list", "webhook_endpoint.read",
+				"webhook_endpoint.update",
 			},
 		},
 		{
@@ -1177,8 +1180,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   14,
-		store.ProjectRoleAdmin:   12,
+		store.ProjectRoleOwner:   15,
+		store.ProjectRoleAdmin:   13,
 		store.ProjectRoleMember:  9,
 		store.ProjectRoleVisitor: 1,
 		store.ProjectRoleViewer:  2,
@@ -1204,8 +1207,8 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 14, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 12, projectAdminPermissionIDs},
+		{store.ProjectRoleOwner, 15, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 13, projectAdminPermissionIDs},
 		{store.ProjectRoleMember, 9, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
 		{store.ProjectRoleViewer, 2, projectViewerPermissionIDs},

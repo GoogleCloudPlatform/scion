@@ -30,15 +30,26 @@ import (
 )
 
 var (
-	triggerWebhookName        string
-	triggerWebhookDescription string
-	triggerWebhookAgent       string
-	triggerWebhookToSelf      bool
-	triggerWebhookMessage     string
-	triggerWebhookInterrupt   bool
-	triggerWebhookWake        bool
-	triggerWebhookListStatus  string
+	triggerWebhookName              string
+	triggerWebhookDescription       string
+	triggerWebhookAgent             string
+	triggerWebhookToSelf            bool
+	triggerWebhookBind              string
+	triggerWebhookPersistent        bool
+	triggerWebhookMessage           string
+	triggerWebhookInterrupt         bool
+	triggerWebhookWake              bool
+	triggerWebhookListStatus        string
+	triggerWebhookListBound         string
+	triggerWebhookUpdateDescription string
+	triggerWebhookUpdateStatus      string
+	triggerWebhookUpdateBind        string
+	triggerWebhookUpdateUnbind      bool
+	triggerWebhookUpdatePersistent  bool
+	triggerWebhookUpdateAgentLife   bool
 )
+
+const defaultToSelfWebhookMessage = "Webhook event received."
 
 var triggerWebhookCmd = &cobra.Command{
 	Use:   "webhook",
@@ -120,6 +131,43 @@ var triggerWebhookDeleteCmd = &cobra.Command{
 	Long:  `Delete a webhook endpoint and pause any active triggers attached to it (status_reason=source_deleted).`,
 	Args:  cobra.ExactArgs(1),
 	RunE:  runTriggerWebhookDelete,
+}
+
+var triggerWebhookUpdateCmd = &cobra.Command{
+	Use:   "update <id|name>",
+	Short: "Update a webhook endpoint",
+	Long:  `Update a webhook endpoint's description, status (active or disabled), or agent binding.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTriggerWebhookUpdate,
+}
+
+var triggerWebhookDisableCmd = &cobra.Command{
+	Use:   "disable <id|name>",
+	Short: "Disable a webhook endpoint",
+	Long:  `Disable a webhook endpoint so incoming webhook deliveries return 404. Already-queued events continue processing.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTriggerWebhookDisable,
+}
+
+var triggerWebhookEnableCmd = &cobra.Command{
+	Use:   "enable <id|name>",
+	Short: "Enable a disabled webhook endpoint",
+	Long:  `Re-enable a disabled webhook endpoint so incoming webhook deliveries are accepted again.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTriggerWebhookEnable,
+}
+
+var triggerWebhookRotateSecretCmd = &cobra.Command{
+	Use:   "rotate-secret <id|name>",
+	Short: "Rotate a webhook endpoint's signing secret",
+	Long: `Generate and activate a new HMAC signing secret version for a webhook endpoint.
+
+The new secret is displayed ONCE in this command's output. The previous secret
+version remains accepted alongside the new secret for a 24-hour grace window,
+after which maintenance deletes the retired secret row. Rotating again within
+24h retires the older secret immediately.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runTriggerWebhookRotateSecret,
 }
 
 // listAllWebhookEndpoints drains every cursor page matching baseOpts and
@@ -223,39 +271,101 @@ func buildCreateWebhookEndpointRequest() (*hubclient.CreateWebhookEndpointReques
 	}
 
 	agentRef := strings.TrimSpace(triggerWebhookAgent)
+	bindRef := strings.TrimSpace(triggerWebhookBind)
 	if agentRef != "" && triggerWebhookToSelf {
 		return nil, newUsageError("--agent and --to-self cannot be used together")
 	}
-
-	hasTarget := agentRef != "" || triggerWebhookToSelf
-	hasTriggerOpts := strings.TrimSpace(triggerWebhookMessage) != "" || triggerWebhookInterrupt || triggerWebhookWake
-	if hasTarget && strings.TrimSpace(triggerWebhookMessage) == "" {
-		return nil, newUsageError("--message is required when --agent or --to-self is set")
+	if bindRef != "" && triggerWebhookToSelf {
+		return nil, newUsageError("--bind and --to-self cannot be used together")
 	}
-	if !hasTarget && hasTriggerOpts {
-		return nil, newUsageError("--agent or --to-self is required when --message, --interrupt, or --wake is set")
+	if triggerWebhookPersistent && !triggerWebhookToSelf && bindRef == "" {
+		return nil, newUsageError("--persistent requires --to-self or --bind")
+	}
+
+	hasTriggerOpts := strings.TrimSpace(triggerWebhookMessage) != "" || triggerWebhookInterrupt || triggerWebhookWake
+	if agentRef != "" && strings.TrimSpace(triggerWebhookMessage) == "" {
+		return nil, newUsageError("--message is required when --agent is set")
+	}
+	if bindRef != "" && agentRef == "" && hasTriggerOpts && strings.TrimSpace(triggerWebhookMessage) == "" {
+		return nil, newUsageError("--message is required when --interrupt or --wake is set")
+	}
+	if !triggerWebhookToSelf && agentRef == "" && bindRef == "" && hasTriggerOpts {
+		return nil, newUsageError("--agent, --bind, or --to-self is required when --message, --interrupt, or --wake is set")
 	}
 
 	req := &hubclient.CreateWebhookEndpointRequest{
 		Name:        name,
 		Description: triggerWebhookDescription,
 	}
-	if hasTarget {
+
+	if triggerWebhookToSelf {
+		req.BoundAgentID = "self"
+		req.BoundLifetime = "agent"
+		if triggerWebhookPersistent {
+			req.BoundLifetime = "persistent"
+		}
+		msg := triggerWebhookMessage
+		if strings.TrimSpace(msg) == "" {
+			msg = defaultToSelfWebhookMessage
+		}
+		req.DefaultTrigger = &hubclient.WebhookEndpointDefaultTriggerSpec{
+			ToSelf:    true,
+			Message:   msg,
+			Interrupt: triggerWebhookInterrupt,
+			Wake:      triggerWebhookWake,
+		}
+		return req, nil
+	}
+
+	if bindRef != "" {
+		req.BoundAgentID = bindRef
+		req.BoundLifetime = "agent"
+		if triggerWebhookPersistent {
+			req.BoundLifetime = "persistent"
+		}
+	}
+
+	if agentRef != "" || (bindRef != "" && strings.TrimSpace(triggerWebhookMessage) != "") {
 		dt := &hubclient.WebhookEndpointDefaultTriggerSpec{
 			Message:   triggerWebhookMessage,
 			Interrupt: triggerWebhookInterrupt,
 			Wake:      triggerWebhookWake,
 		}
-		if triggerWebhookToSelf {
-			dt.ToSelf = true
-		} else if uuid.Validate(agentRef) == nil {
-			dt.AgentID = agentRef
-		} else {
-			dt.AgentName = agentRef
+		if agentRef != "" {
+			if uuid.Validate(agentRef) == nil {
+				dt.AgentID = agentRef
+			} else {
+				dt.AgentName = agentRef
+			}
 		}
 		req.DefaultTrigger = dt
 	}
 	return req, nil
+}
+
+func webhookEndpointBoundLabel(ep *hubclient.WebhookEndpoint) string {
+	if ep == nil || ep.BoundAgent == nil {
+		return ""
+	}
+	if ep.BoundAgent.Name != "" {
+		return ep.BoundAgent.Name
+	}
+	return ep.BoundAgent.ID
+}
+
+func webhookEndpointLifetimeSummary(ep *hubclient.WebhookEndpoint) string {
+	label := webhookEndpointBoundLabel(ep)
+	if label == "" || ep.BoundLifetime == "" {
+		return ""
+	}
+	switch ep.BoundLifetime {
+	case "agent":
+		return fmt.Sprintf("deleted with agent %s", triggerTerminalText(label, false))
+	case "persistent":
+		return fmt.Sprintf("survives agent %s; unbound when deleted", triggerTerminalText(label, false))
+	default:
+		return triggerTerminalText(ep.BoundLifetime, false)
+	}
 }
 
 func runTriggerWebhookCreate(cmd *cobra.Command, args []string) error {
@@ -284,6 +394,9 @@ func runTriggerWebhookCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  URL:            %s\n", triggerTerminalText(created.URL, false))
 	fmt.Printf("  Signature Mode: %s\n", triggerTerminalText(created.SignatureMode, false))
 	fmt.Printf("  Secret:         %s\n", created.Secret)
+	if life := webhookEndpointLifetimeSummary(&created.WebhookEndpoint); life != "" {
+		fmt.Printf("  Lifetime:       %s\n", life)
+	}
 	if created.TriggerID != "" {
 		fmt.Printf("  Trigger:        %s\n", triggerTerminalText(created.TriggerID, false))
 		if created.Trigger != nil {
@@ -338,6 +451,13 @@ func printWebhookEndpointDetail(ep *hubclient.WebhookEndpoint) {
 	fmt.Printf("  URL:            %s\n", triggerTerminalText(ep.URL, false))
 	fmt.Printf("  Signature Mode: %s\n", triggerTerminalText(ep.SignatureMode, false))
 	fmt.Printf("  Secret Version: %d\n", ep.SecretVersion)
+	if ep.SecretRotatedAt != nil {
+		fmt.Printf("  Secret Rotated: %s\n", clitime.Format(*ep.SecretRotatedAt, clitime.Full))
+	}
+	if life := webhookEndpointLifetimeSummary(ep); life != "" {
+		fmt.Printf("  Bound Agent:    %s\n", triggerTerminalText(webhookEndpointBoundLabel(ep), false))
+		fmt.Printf("  Lifetime:       %s\n", life)
+	}
 	fmt.Printf("  Received:       %d (rejected: %d)\n", ep.ReceiveCount, ep.RejectCount)
 	lastRecv := "-"
 	if ep.LastReceivedAt != nil {
@@ -355,7 +475,8 @@ func runTriggerWebhookList(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	opts := &hubclient.ListWebhookEndpointsOptions{
-		Status: strings.TrimSpace(triggerWebhookListStatus),
+		Status:       strings.TrimSpace(triggerWebhookListStatus),
+		BoundAgentID: strings.TrimSpace(triggerWebhookListBound),
 	}
 	resp, err := listAllWebhookEndpoints(ctx, hubCtx.Client.WebhookEndpoints(projectID), opts)
 	if err != nil {
@@ -429,19 +550,177 @@ func runTriggerWebhookDelete(cmd *cobra.Command, args []string) error {
 	})
 }
 
+func runTriggerWebhookUpdate(cmd *cobra.Command, args []string) error {
+	req := &hubclient.UpdateWebhookEndpointRequest{}
+	changed := false
+
+	if cmd.Flags().Changed("description") {
+		d := triggerWebhookUpdateDescription
+		req.Description = &d
+		changed = true
+	}
+	if cmd.Flags().Changed("status") {
+		st := strings.TrimSpace(triggerWebhookUpdateStatus)
+		if st != "active" && st != "disabled" {
+			return newUsageError("--status must be 'active' or 'disabled'")
+		}
+		req.Status = &st
+		changed = true
+	}
+	if triggerWebhookUpdateUnbind && strings.TrimSpace(triggerWebhookUpdateBind) != "" {
+		return newUsageError("--bind and --unbind cannot be used together")
+	}
+	if triggerWebhookUpdatePersistent && triggerWebhookUpdateAgentLife {
+		return newUsageError("--persistent and --agent-lifetime cannot be used together")
+	}
+	if triggerWebhookUpdateUnbind {
+		empty := ""
+		req.BoundAgentID = &empty
+		req.BoundLifetime = &empty
+		changed = true
+	} else {
+		if cmd.Flags().Changed("bind") {
+			b := strings.TrimSpace(triggerWebhookUpdateBind)
+			if b != "" && !triggerWebhookUpdatePersistent && !triggerWebhookUpdateAgentLife {
+				return newUsageError("--bind requires --persistent or --agent-lifetime (specify the binding lifetime, e.g. --bind %s --persistent)", b)
+			}
+			req.BoundAgentID = &b
+			changed = true
+		}
+		if triggerWebhookUpdatePersistent {
+			l := "persistent"
+			req.BoundLifetime = &l
+			changed = true
+		} else if triggerWebhookUpdateAgentLife {
+			l := "agent"
+			req.BoundLifetime = &l
+			changed = true
+		}
+	}
+	if !changed {
+		return newUsageError("specify at least one field to update (--description, --status, --bind, --unbind, --persistent, --agent-lifetime)")
+	}
+
+	hubCtx, projectID, ctx, cancel, err := triggerHubContextFn()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
+	fullID, err := resolveWebhookEndpointIDOrName(ctx, hubCtx, projectID, args[0])
+	if err != nil {
+		return err
+	}
+
+	updated, err := hubCtx.Client.WebhookEndpoints(projectID).Update(ctx, fullID, req)
+	if err != nil {
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to update webhook endpoint: %w", err))
+	}
+
+	if isTriggerJSONOutput() {
+		return outputTriggerJSON(updated)
+	}
+	printWebhookEndpointDetail(updated)
+	return nil
+}
+
+func runTriggerWebhookSetStatus(cmd *cobra.Command, args []string, status, verb string) error {
+	hubCtx, projectID, ctx, cancel, err := triggerHubContextFn()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
+	fullID, err := resolveWebhookEndpointIDOrName(ctx, hubCtx, projectID, args[0])
+	if err != nil {
+		return err
+	}
+
+	updated, err := hubCtx.Client.WebhookEndpoints(projectID).Update(ctx, fullID, &hubclient.UpdateWebhookEndpointRequest{
+		Status: &status,
+	})
+	if err != nil {
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to %s webhook endpoint: %w", verb, err))
+	}
+
+	if isTriggerJSONOutput() {
+		return outputTriggerJSON(updated)
+	}
+	return outputTriggerActionResult(ActionResult{
+		Status:  "ok",
+		Command: "trigger webhook " + verb,
+		Message: fmt.Sprintf("Webhook endpoint %s %sd.", fullID, verb),
+	})
+}
+
+func runTriggerWebhookDisable(cmd *cobra.Command, args []string) error {
+	return runTriggerWebhookSetStatus(cmd, args, "disabled", "disable")
+}
+
+func runTriggerWebhookEnable(cmd *cobra.Command, args []string) error {
+	return runTriggerWebhookSetStatus(cmd, args, "active", "enable")
+}
+
+func runTriggerWebhookRotateSecret(cmd *cobra.Command, args []string) error {
+	hubCtx, projectID, ctx, cancel, err := triggerHubContextFn()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
+	fullID, err := resolveWebhookEndpointIDOrName(ctx, hubCtx, projectID, args[0])
+	if err != nil {
+		return err
+	}
+
+	rotated, err := hubCtx.Client.WebhookEndpoints(projectID).RotateSecret(ctx, fullID)
+	if err != nil {
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to rotate webhook endpoint secret: %w", err))
+	}
+
+	if isTriggerJSONOutput() {
+		return outputTriggerJSON(rotated)
+	}
+
+	fmt.Printf("Webhook endpoint secret rotated: %s\n", triggerTerminalText(rotated.ID, false))
+	fmt.Printf("  Name:           %s\n", triggerTerminalText(rotated.Name, false))
+	fmt.Printf("  Secret Version: %d\n", rotated.SecretVersion)
+	fmt.Printf("  Secret:         %s\n", rotated.Secret)
+	if !rotated.GraceWindowExpires.IsZero() {
+		fmt.Printf("  Grace Until:    %s (previous secret remains accepted until then)\n", clitime.Format(rotated.GraceWindowExpires, clitime.Full))
+	}
+	fmt.Println()
+	fmt.Println("Warning: save this signing secret now; it is shown only once and cannot be retrieved later.")
+	return nil
+}
+
 func init() {
 	triggerWebhookCmd.AddCommand(triggerWebhookCreateCmd)
 	triggerWebhookCmd.AddCommand(triggerWebhookGetCmd)
 	triggerWebhookCmd.AddCommand(triggerWebhookListCmd)
+	triggerWebhookCmd.AddCommand(triggerWebhookUpdateCmd)
+	triggerWebhookCmd.AddCommand(triggerWebhookDisableCmd)
+	triggerWebhookCmd.AddCommand(triggerWebhookEnableCmd)
+	triggerWebhookCmd.AddCommand(triggerWebhookRotateSecretCmd)
 	triggerWebhookCmd.AddCommand(triggerWebhookDeleteCmd)
 
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookName, "name", "", "Webhook endpoint name (required)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookDescription, "description", "", "Optional endpoint description")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookAgent, "agent", "", "Create a default message trigger targeting this agent name or ID (requires --message)")
-	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookToSelf, "to-self", false, "Create a default message trigger targeting the calling agent via its Hub identity (requires --message)")
-	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookMessage, "message", "", "Message delivered by the default trigger (requires --agent or --to-self)")
+	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookToSelf, "to-self", false, "Bind the endpoint to the calling agent via its Hub identity and create a default message trigger to self (deleted with the agent unless --persistent)")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookBind, "bind", "", "Bind the endpoint to an agent name or ID (user callers)")
+	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookPersistent, "persistent", false, "Keep the bound endpoint when its agent is deleted (unbind instead of deleting; requires --to-self or --bind)")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookMessage, "message", "", "Message delivered by the default trigger (defaults to 'Webhook event received.' for --to-self)")
 	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookInterrupt, "interrupt", false, "Interrupt the target agent when the default trigger fires")
 	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookWake, "wake", false, "Resume the target agent if suspended when the default trigger fires")
 
 	triggerWebhookListCmd.Flags().StringVar(&triggerWebhookListStatus, "status", "", "Filter by status (active or disabled)")
+	triggerWebhookListCmd.Flags().StringVar(&triggerWebhookListBound, "bound", "", "Filter by bound agent ID or name")
+
+	triggerWebhookUpdateCmd.Flags().StringVar(&triggerWebhookUpdateDescription, "description", "", "Updated endpoint description")
+	triggerWebhookUpdateCmd.Flags().StringVar(&triggerWebhookUpdateStatus, "status", "", "Updated endpoint status (active or disabled)")
+	triggerWebhookUpdateCmd.Flags().StringVar(&triggerWebhookUpdateBind, "bind", "", "Bind the endpoint to an agent name or ID (users only)")
+	triggerWebhookUpdateCmd.Flags().BoolVar(&triggerWebhookUpdateUnbind, "unbind", false, "Clear the endpoint's agent binding (users only)")
+	triggerWebhookUpdateCmd.Flags().BoolVar(&triggerWebhookUpdatePersistent, "persistent", false, "Set bound lifetime to persistent (users only)")
+	triggerWebhookUpdateCmd.Flags().BoolVar(&triggerWebhookUpdateAgentLife, "agent-lifetime", false, "Set bound lifetime to agent (users only)")
 }

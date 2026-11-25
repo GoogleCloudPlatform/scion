@@ -133796,8 +133796,13 @@ type WebhookEndpointMutation struct {
 	owner_credential_kind *string
 	secret_version        *int
 	addsecret_version     *int
+	secret_rotated_at     *time.Time
+	config_version        *int
+	addconfig_version     *int
 	signature_mode        *string
 	status                *string
+	bound_agent_id        *uuid.UUID
+	bound_lifetime        *string
 	created_by            *string
 	last_received_at      *time.Time
 	receive_count         *int
@@ -134299,6 +134304,111 @@ func (m *WebhookEndpointMutation) ResetSecretVersion() {
 	m.addsecret_version = nil
 }
 
+// SetSecretRotatedAt sets the "secret_rotated_at" field.
+func (m *WebhookEndpointMutation) SetSecretRotatedAt(t time.Time) {
+	m.secret_rotated_at = &t
+}
+
+// SecretRotatedAt returns the value of the "secret_rotated_at" field in the mutation.
+func (m *WebhookEndpointMutation) SecretRotatedAt() (r time.Time, exists bool) {
+	v := m.secret_rotated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSecretRotatedAt returns the old "secret_rotated_at" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldSecretRotatedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSecretRotatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSecretRotatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSecretRotatedAt: %w", err)
+	}
+	return oldValue.SecretRotatedAt, nil
+}
+
+// ClearSecretRotatedAt clears the value of the "secret_rotated_at" field.
+func (m *WebhookEndpointMutation) ClearSecretRotatedAt() {
+	m.secret_rotated_at = nil
+	m.clearedFields[webhookendpoint.FieldSecretRotatedAt] = struct{}{}
+}
+
+// SecretRotatedAtCleared returns if the "secret_rotated_at" field was cleared in this mutation.
+func (m *WebhookEndpointMutation) SecretRotatedAtCleared() bool {
+	_, ok := m.clearedFields[webhookendpoint.FieldSecretRotatedAt]
+	return ok
+}
+
+// ResetSecretRotatedAt resets all changes to the "secret_rotated_at" field.
+func (m *WebhookEndpointMutation) ResetSecretRotatedAt() {
+	m.secret_rotated_at = nil
+	delete(m.clearedFields, webhookendpoint.FieldSecretRotatedAt)
+}
+
+// SetConfigVersion sets the "config_version" field.
+func (m *WebhookEndpointMutation) SetConfigVersion(i int) {
+	m.config_version = &i
+	m.addconfig_version = nil
+}
+
+// ConfigVersion returns the value of the "config_version" field in the mutation.
+func (m *WebhookEndpointMutation) ConfigVersion() (r int, exists bool) {
+	v := m.config_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConfigVersion returns the old "config_version" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldConfigVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConfigVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConfigVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConfigVersion: %w", err)
+	}
+	return oldValue.ConfigVersion, nil
+}
+
+// AddConfigVersion adds i to the "config_version" field.
+func (m *WebhookEndpointMutation) AddConfigVersion(i int) {
+	if m.addconfig_version != nil {
+		*m.addconfig_version += i
+	} else {
+		m.addconfig_version = &i
+	}
+}
+
+// AddedConfigVersion returns the value that was added to the "config_version" field in this mutation.
+func (m *WebhookEndpointMutation) AddedConfigVersion() (r int, exists bool) {
+	v := m.addconfig_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetConfigVersion resets all changes to the "config_version" field.
+func (m *WebhookEndpointMutation) ResetConfigVersion() {
+	m.config_version = nil
+	m.addconfig_version = nil
+}
+
 // SetSignatureMode sets the "signature_mode" field.
 func (m *WebhookEndpointMutation) SetSignatureMode(s string) {
 	m.signature_mode = &s
@@ -134369,6 +134479,91 @@ func (m *WebhookEndpointMutation) OldStatus(ctx context.Context) (v string, err 
 // ResetStatus resets all changes to the "status" field.
 func (m *WebhookEndpointMutation) ResetStatus() {
 	m.status = nil
+}
+
+// SetBoundAgentID sets the "bound_agent_id" field.
+func (m *WebhookEndpointMutation) SetBoundAgentID(u uuid.UUID) {
+	m.bound_agent_id = &u
+}
+
+// BoundAgentID returns the value of the "bound_agent_id" field in the mutation.
+func (m *WebhookEndpointMutation) BoundAgentID() (r uuid.UUID, exists bool) {
+	v := m.bound_agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBoundAgentID returns the old "bound_agent_id" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldBoundAgentID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBoundAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBoundAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBoundAgentID: %w", err)
+	}
+	return oldValue.BoundAgentID, nil
+}
+
+// ClearBoundAgentID clears the value of the "bound_agent_id" field.
+func (m *WebhookEndpointMutation) ClearBoundAgentID() {
+	m.bound_agent_id = nil
+	m.clearedFields[webhookendpoint.FieldBoundAgentID] = struct{}{}
+}
+
+// BoundAgentIDCleared returns if the "bound_agent_id" field was cleared in this mutation.
+func (m *WebhookEndpointMutation) BoundAgentIDCleared() bool {
+	_, ok := m.clearedFields[webhookendpoint.FieldBoundAgentID]
+	return ok
+}
+
+// ResetBoundAgentID resets all changes to the "bound_agent_id" field.
+func (m *WebhookEndpointMutation) ResetBoundAgentID() {
+	m.bound_agent_id = nil
+	delete(m.clearedFields, webhookendpoint.FieldBoundAgentID)
+}
+
+// SetBoundLifetime sets the "bound_lifetime" field.
+func (m *WebhookEndpointMutation) SetBoundLifetime(s string) {
+	m.bound_lifetime = &s
+}
+
+// BoundLifetime returns the value of the "bound_lifetime" field in the mutation.
+func (m *WebhookEndpointMutation) BoundLifetime() (r string, exists bool) {
+	v := m.bound_lifetime
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBoundLifetime returns the old "bound_lifetime" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldBoundLifetime(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBoundLifetime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBoundLifetime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBoundLifetime: %w", err)
+	}
+	return oldValue.BoundLifetime, nil
+}
+
+// ResetBoundLifetime resets all changes to the "bound_lifetime" field.
+func (m *WebhookEndpointMutation) ResetBoundLifetime() {
+	m.bound_lifetime = nil
 }
 
 // SetCreatedBy sets the "created_by" field.
@@ -134687,7 +134882,7 @@ func (m *WebhookEndpointMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *WebhookEndpointMutation) Fields() []string {
-	fields := make([]string, 0, 17)
+	fields := make([]string, 0, 21)
 	if m.fixture_root_id != nil {
 		fields = append(fields, webhookendpoint.FieldFixtureRootID)
 	}
@@ -134715,11 +134910,23 @@ func (m *WebhookEndpointMutation) Fields() []string {
 	if m.secret_version != nil {
 		fields = append(fields, webhookendpoint.FieldSecretVersion)
 	}
+	if m.secret_rotated_at != nil {
+		fields = append(fields, webhookendpoint.FieldSecretRotatedAt)
+	}
+	if m.config_version != nil {
+		fields = append(fields, webhookendpoint.FieldConfigVersion)
+	}
 	if m.signature_mode != nil {
 		fields = append(fields, webhookendpoint.FieldSignatureMode)
 	}
 	if m.status != nil {
 		fields = append(fields, webhookendpoint.FieldStatus)
+	}
+	if m.bound_agent_id != nil {
+		fields = append(fields, webhookendpoint.FieldBoundAgentID)
+	}
+	if m.bound_lifetime != nil {
+		fields = append(fields, webhookendpoint.FieldBoundLifetime)
 	}
 	if m.created_by != nil {
 		fields = append(fields, webhookendpoint.FieldCreatedBy)
@@ -134765,10 +134972,18 @@ func (m *WebhookEndpointMutation) Field(name string) (ent.Value, bool) {
 		return m.OwnerCredentialKind()
 	case webhookendpoint.FieldSecretVersion:
 		return m.SecretVersion()
+	case webhookendpoint.FieldSecretRotatedAt:
+		return m.SecretRotatedAt()
+	case webhookendpoint.FieldConfigVersion:
+		return m.ConfigVersion()
 	case webhookendpoint.FieldSignatureMode:
 		return m.SignatureMode()
 	case webhookendpoint.FieldStatus:
 		return m.Status()
+	case webhookendpoint.FieldBoundAgentID:
+		return m.BoundAgentID()
+	case webhookendpoint.FieldBoundLifetime:
+		return m.BoundLifetime()
 	case webhookendpoint.FieldCreatedBy:
 		return m.CreatedBy()
 	case webhookendpoint.FieldLastReceivedAt:
@@ -134808,10 +135023,18 @@ func (m *WebhookEndpointMutation) OldField(ctx context.Context, name string) (en
 		return m.OldOwnerCredentialKind(ctx)
 	case webhookendpoint.FieldSecretVersion:
 		return m.OldSecretVersion(ctx)
+	case webhookendpoint.FieldSecretRotatedAt:
+		return m.OldSecretRotatedAt(ctx)
+	case webhookendpoint.FieldConfigVersion:
+		return m.OldConfigVersion(ctx)
 	case webhookendpoint.FieldSignatureMode:
 		return m.OldSignatureMode(ctx)
 	case webhookendpoint.FieldStatus:
 		return m.OldStatus(ctx)
+	case webhookendpoint.FieldBoundAgentID:
+		return m.OldBoundAgentID(ctx)
+	case webhookendpoint.FieldBoundLifetime:
+		return m.OldBoundLifetime(ctx)
 	case webhookendpoint.FieldCreatedBy:
 		return m.OldCreatedBy(ctx)
 	case webhookendpoint.FieldLastReceivedAt:
@@ -134896,6 +135119,20 @@ func (m *WebhookEndpointMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetSecretVersion(v)
 		return nil
+	case webhookendpoint.FieldSecretRotatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSecretRotatedAt(v)
+		return nil
+	case webhookendpoint.FieldConfigVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConfigVersion(v)
+		return nil
 	case webhookendpoint.FieldSignatureMode:
 		v, ok := value.(string)
 		if !ok {
@@ -134909,6 +135146,20 @@ func (m *WebhookEndpointMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetStatus(v)
+		return nil
+	case webhookendpoint.FieldBoundAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBoundAgentID(v)
+		return nil
+	case webhookendpoint.FieldBoundLifetime:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBoundLifetime(v)
 		return nil
 	case webhookendpoint.FieldCreatedBy:
 		v, ok := value.(string)
@@ -134963,6 +135214,9 @@ func (m *WebhookEndpointMutation) AddedFields() []string {
 	if m.addsecret_version != nil {
 		fields = append(fields, webhookendpoint.FieldSecretVersion)
 	}
+	if m.addconfig_version != nil {
+		fields = append(fields, webhookendpoint.FieldConfigVersion)
+	}
 	if m.addreceive_count != nil {
 		fields = append(fields, webhookendpoint.FieldReceiveCount)
 	}
@@ -134979,6 +135233,8 @@ func (m *WebhookEndpointMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
 	case webhookendpoint.FieldSecretVersion:
 		return m.AddedSecretVersion()
+	case webhookendpoint.FieldConfigVersion:
+		return m.AddedConfigVersion()
 	case webhookendpoint.FieldReceiveCount:
 		return m.AddedReceiveCount()
 	case webhookendpoint.FieldRejectCount:
@@ -134998,6 +135254,13 @@ func (m *WebhookEndpointMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddSecretVersion(v)
+		return nil
+	case webhookendpoint.FieldConfigVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddConfigVersion(v)
 		return nil
 	case webhookendpoint.FieldReceiveCount:
 		v, ok := value.(int)
@@ -135030,6 +135293,12 @@ func (m *WebhookEndpointMutation) ClearedFields() []string {
 	if m.FieldCleared(webhookendpoint.FieldDescription) {
 		fields = append(fields, webhookendpoint.FieldDescription)
 	}
+	if m.FieldCleared(webhookendpoint.FieldSecretRotatedAt) {
+		fields = append(fields, webhookendpoint.FieldSecretRotatedAt)
+	}
+	if m.FieldCleared(webhookendpoint.FieldBoundAgentID) {
+		fields = append(fields, webhookendpoint.FieldBoundAgentID)
+	}
 	if m.FieldCleared(webhookendpoint.FieldCreatedBy) {
 		fields = append(fields, webhookendpoint.FieldCreatedBy)
 	}
@@ -135058,6 +135327,12 @@ func (m *WebhookEndpointMutation) ClearField(name string) error {
 		return nil
 	case webhookendpoint.FieldDescription:
 		m.ClearDescription()
+		return nil
+	case webhookendpoint.FieldSecretRotatedAt:
+		m.ClearSecretRotatedAt()
+		return nil
+	case webhookendpoint.FieldBoundAgentID:
+		m.ClearBoundAgentID()
 		return nil
 	case webhookendpoint.FieldCreatedBy:
 		m.ClearCreatedBy()
@@ -135100,11 +135375,23 @@ func (m *WebhookEndpointMutation) ResetField(name string) error {
 	case webhookendpoint.FieldSecretVersion:
 		m.ResetSecretVersion()
 		return nil
+	case webhookendpoint.FieldSecretRotatedAt:
+		m.ResetSecretRotatedAt()
+		return nil
+	case webhookendpoint.FieldConfigVersion:
+		m.ResetConfigVersion()
+		return nil
 	case webhookendpoint.FieldSignatureMode:
 		m.ResetSignatureMode()
 		return nil
 	case webhookendpoint.FieldStatus:
 		m.ResetStatus()
+		return nil
+	case webhookendpoint.FieldBoundAgentID:
+		m.ResetBoundAgentID()
+		return nil
+	case webhookendpoint.FieldBoundLifetime:
+		m.ResetBoundLifetime()
 		return nil
 	case webhookendpoint.FieldCreatedBy:
 		m.ResetCreatedBy()

@@ -32,10 +32,18 @@ const (
 	FieldOwnerCredentialKind = "owner_credential_kind"
 	// FieldSecretVersion holds the string denoting the secret_version field in the database.
 	FieldSecretVersion = "secret_version"
+	// FieldSecretRotatedAt holds the string denoting the secret_rotated_at field in the database.
+	FieldSecretRotatedAt = "secret_rotated_at"
+	// FieldConfigVersion holds the string denoting the config_version field in the database.
+	FieldConfigVersion = "config_version"
 	// FieldSignatureMode holds the string denoting the signature_mode field in the database.
 	FieldSignatureMode = "signature_mode"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
+	// FieldBoundAgentID holds the string denoting the bound_agent_id field in the database.
+	FieldBoundAgentID = "bound_agent_id"
+	// FieldBoundLifetime holds the string denoting the bound_lifetime field in the database.
+	FieldBoundLifetime = "bound_lifetime"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
 	FieldCreatedBy = "created_by"
 	// FieldLastReceivedAt holds the string denoting the last_received_at field in the database.
@@ -64,8 +72,12 @@ var Columns = []string{
 	FieldOwnerPrincipalID,
 	FieldOwnerCredentialKind,
 	FieldSecretVersion,
+	FieldSecretRotatedAt,
+	FieldConfigVersion,
 	FieldSignatureMode,
 	FieldStatus,
+	FieldBoundAgentID,
+	FieldBoundLifetime,
 	FieldCreatedBy,
 	FieldLastReceivedAt,
 	FieldReceiveCount,
@@ -95,10 +107,14 @@ var (
 	OwnerCredentialKindValidator func(string) error
 	// DefaultSecretVersion holds the default value on creation for the "secret_version" field.
 	DefaultSecretVersion int
+	// DefaultConfigVersion holds the default value on creation for the "config_version" field.
+	DefaultConfigVersion int
 	// DefaultSignatureMode holds the default value on creation for the "signature_mode" field.
 	DefaultSignatureMode string
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
+	// DefaultBoundLifetime holds the default value on creation for the "bound_lifetime" field.
+	DefaultBoundLifetime string
 	// DefaultReceiveCount holds the default value on creation for the "receive_count" field.
 	DefaultReceiveCount int
 	// DefaultRejectCount holds the default value on creation for the "reject_count" field.
@@ -166,6 +182,16 @@ func BySecretVersion(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSecretVersion, opts...).ToFunc()
 }
 
+// BySecretRotatedAt orders the results by the secret_rotated_at field.
+func BySecretRotatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSecretRotatedAt, opts...).ToFunc()
+}
+
+// ByConfigVersion orders the results by the config_version field.
+func ByConfigVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConfigVersion, opts...).ToFunc()
+}
+
 // BySignatureMode orders the results by the signature_mode field.
 func BySignatureMode(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSignatureMode, opts...).ToFunc()
@@ -174,6 +200,16 @@ func BySignatureMode(opts ...sql.OrderTermOption) OrderOption {
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
+}
+
+// ByBoundAgentID orders the results by the bound_agent_id field.
+func ByBoundAgentID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBoundAgentID, opts...).ToFunc()
+}
+
+// ByBoundLifetime orders the results by the bound_lifetime field.
+func ByBoundLifetime(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBoundLifetime, opts...).ToFunc()
 }
 
 // ByCreatedBy orders the results by the created_by field.

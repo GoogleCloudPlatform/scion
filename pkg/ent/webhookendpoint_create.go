@@ -110,6 +110,34 @@ func (_c *WebhookEndpointCreate) SetNillableSecretVersion(v *int) *WebhookEndpoi
 	return _c
 }
 
+// SetSecretRotatedAt sets the "secret_rotated_at" field.
+func (_c *WebhookEndpointCreate) SetSecretRotatedAt(v time.Time) *WebhookEndpointCreate {
+	_c.mutation.SetSecretRotatedAt(v)
+	return _c
+}
+
+// SetNillableSecretRotatedAt sets the "secret_rotated_at" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableSecretRotatedAt(v *time.Time) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetSecretRotatedAt(*v)
+	}
+	return _c
+}
+
+// SetConfigVersion sets the "config_version" field.
+func (_c *WebhookEndpointCreate) SetConfigVersion(v int) *WebhookEndpointCreate {
+	_c.mutation.SetConfigVersion(v)
+	return _c
+}
+
+// SetNillableConfigVersion sets the "config_version" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableConfigVersion(v *int) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetConfigVersion(*v)
+	}
+	return _c
+}
+
 // SetSignatureMode sets the "signature_mode" field.
 func (_c *WebhookEndpointCreate) SetSignatureMode(v string) *WebhookEndpointCreate {
 	_c.mutation.SetSignatureMode(v)
@@ -134,6 +162,34 @@ func (_c *WebhookEndpointCreate) SetStatus(v string) *WebhookEndpointCreate {
 func (_c *WebhookEndpointCreate) SetNillableStatus(v *string) *WebhookEndpointCreate {
 	if v != nil {
 		_c.SetStatus(*v)
+	}
+	return _c
+}
+
+// SetBoundAgentID sets the "bound_agent_id" field.
+func (_c *WebhookEndpointCreate) SetBoundAgentID(v uuid.UUID) *WebhookEndpointCreate {
+	_c.mutation.SetBoundAgentID(v)
+	return _c
+}
+
+// SetNillableBoundAgentID sets the "bound_agent_id" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableBoundAgentID(v *uuid.UUID) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetBoundAgentID(*v)
+	}
+	return _c
+}
+
+// SetBoundLifetime sets the "bound_lifetime" field.
+func (_c *WebhookEndpointCreate) SetBoundLifetime(v string) *WebhookEndpointCreate {
+	_c.mutation.SetBoundLifetime(v)
+	return _c
+}
+
+// SetNillableBoundLifetime sets the "bound_lifetime" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableBoundLifetime(v *string) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetBoundLifetime(*v)
 	}
 	return _c
 }
@@ -275,6 +331,10 @@ func (_c *WebhookEndpointCreate) defaults() {
 		v := webhookendpoint.DefaultSecretVersion
 		_c.mutation.SetSecretVersion(v)
 	}
+	if _, ok := _c.mutation.ConfigVersion(); !ok {
+		v := webhookendpoint.DefaultConfigVersion
+		_c.mutation.SetConfigVersion(v)
+	}
 	if _, ok := _c.mutation.SignatureMode(); !ok {
 		v := webhookendpoint.DefaultSignatureMode
 		_c.mutation.SetSignatureMode(v)
@@ -282,6 +342,10 @@ func (_c *WebhookEndpointCreate) defaults() {
 	if _, ok := _c.mutation.Status(); !ok {
 		v := webhookendpoint.DefaultStatus
 		_c.mutation.SetStatus(v)
+	}
+	if _, ok := _c.mutation.BoundLifetime(); !ok {
+		v := webhookendpoint.DefaultBoundLifetime
+		_c.mutation.SetBoundLifetime(v)
 	}
 	if _, ok := _c.mutation.ReceiveCount(); !ok {
 		v := webhookendpoint.DefaultReceiveCount
@@ -345,11 +409,17 @@ func (_c *WebhookEndpointCreate) check() error {
 	if _, ok := _c.mutation.SecretVersion(); !ok {
 		return &ValidationError{Name: "secret_version", err: errors.New(`ent: missing required field "WebhookEndpoint.secret_version"`)}
 	}
+	if _, ok := _c.mutation.ConfigVersion(); !ok {
+		return &ValidationError{Name: "config_version", err: errors.New(`ent: missing required field "WebhookEndpoint.config_version"`)}
+	}
 	if _, ok := _c.mutation.SignatureMode(); !ok {
 		return &ValidationError{Name: "signature_mode", err: errors.New(`ent: missing required field "WebhookEndpoint.signature_mode"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "WebhookEndpoint.status"`)}
+	}
+	if _, ok := _c.mutation.BoundLifetime(); !ok {
+		return &ValidationError{Name: "bound_lifetime", err: errors.New(`ent: missing required field "WebhookEndpoint.bound_lifetime"`)}
 	}
 	if _, ok := _c.mutation.ReceiveCount(); !ok {
 		return &ValidationError{Name: "receive_count", err: errors.New(`ent: missing required field "WebhookEndpoint.receive_count"`)}
@@ -435,6 +505,14 @@ func (_c *WebhookEndpointCreate) createSpec() (*WebhookEndpoint, *sqlgraph.Creat
 		_spec.SetField(webhookendpoint.FieldSecretVersion, field.TypeInt, value)
 		_node.SecretVersion = value
 	}
+	if value, ok := _c.mutation.SecretRotatedAt(); ok {
+		_spec.SetField(webhookendpoint.FieldSecretRotatedAt, field.TypeTime, value)
+		_node.SecretRotatedAt = &value
+	}
+	if value, ok := _c.mutation.ConfigVersion(); ok {
+		_spec.SetField(webhookendpoint.FieldConfigVersion, field.TypeInt, value)
+		_node.ConfigVersion = value
+	}
 	if value, ok := _c.mutation.SignatureMode(); ok {
 		_spec.SetField(webhookendpoint.FieldSignatureMode, field.TypeString, value)
 		_node.SignatureMode = value
@@ -442,6 +520,14 @@ func (_c *WebhookEndpointCreate) createSpec() (*WebhookEndpoint, *sqlgraph.Creat
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(webhookendpoint.FieldStatus, field.TypeString, value)
 		_node.Status = value
+	}
+	if value, ok := _c.mutation.BoundAgentID(); ok {
+		_spec.SetField(webhookendpoint.FieldBoundAgentID, field.TypeUUID, value)
+		_node.BoundAgentID = &value
+	}
+	if value, ok := _c.mutation.BoundLifetime(); ok {
+		_spec.SetField(webhookendpoint.FieldBoundLifetime, field.TypeString, value)
+		_node.BoundLifetime = value
 	}
 	if value, ok := _c.mutation.CreatedBy(); ok {
 		_spec.SetField(webhookendpoint.FieldCreatedBy, field.TypeString, value)
@@ -579,6 +665,42 @@ func (u *WebhookEndpointUpsert) AddSecretVersion(v int) *WebhookEndpointUpsert {
 	return u
 }
 
+// SetSecretRotatedAt sets the "secret_rotated_at" field.
+func (u *WebhookEndpointUpsert) SetSecretRotatedAt(v time.Time) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldSecretRotatedAt, v)
+	return u
+}
+
+// UpdateSecretRotatedAt sets the "secret_rotated_at" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateSecretRotatedAt() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldSecretRotatedAt)
+	return u
+}
+
+// ClearSecretRotatedAt clears the value of the "secret_rotated_at" field.
+func (u *WebhookEndpointUpsert) ClearSecretRotatedAt() *WebhookEndpointUpsert {
+	u.SetNull(webhookendpoint.FieldSecretRotatedAt)
+	return u
+}
+
+// SetConfigVersion sets the "config_version" field.
+func (u *WebhookEndpointUpsert) SetConfigVersion(v int) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldConfigVersion, v)
+	return u
+}
+
+// UpdateConfigVersion sets the "config_version" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateConfigVersion() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldConfigVersion)
+	return u
+}
+
+// AddConfigVersion adds v to the "config_version" field.
+func (u *WebhookEndpointUpsert) AddConfigVersion(v int) *WebhookEndpointUpsert {
+	u.Add(webhookendpoint.FieldConfigVersion, v)
+	return u
+}
+
 // SetSignatureMode sets the "signature_mode" field.
 func (u *WebhookEndpointUpsert) SetSignatureMode(v string) *WebhookEndpointUpsert {
 	u.Set(webhookendpoint.FieldSignatureMode, v)
@@ -600,6 +722,36 @@ func (u *WebhookEndpointUpsert) SetStatus(v string) *WebhookEndpointUpsert {
 // UpdateStatus sets the "status" field to the value that was provided on create.
 func (u *WebhookEndpointUpsert) UpdateStatus() *WebhookEndpointUpsert {
 	u.SetExcluded(webhookendpoint.FieldStatus)
+	return u
+}
+
+// SetBoundAgentID sets the "bound_agent_id" field.
+func (u *WebhookEndpointUpsert) SetBoundAgentID(v uuid.UUID) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldBoundAgentID, v)
+	return u
+}
+
+// UpdateBoundAgentID sets the "bound_agent_id" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateBoundAgentID() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldBoundAgentID)
+	return u
+}
+
+// ClearBoundAgentID clears the value of the "bound_agent_id" field.
+func (u *WebhookEndpointUpsert) ClearBoundAgentID() *WebhookEndpointUpsert {
+	u.SetNull(webhookendpoint.FieldBoundAgentID)
+	return u
+}
+
+// SetBoundLifetime sets the "bound_lifetime" field.
+func (u *WebhookEndpointUpsert) SetBoundLifetime(v string) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldBoundLifetime, v)
+	return u
+}
+
+// UpdateBoundLifetime sets the "bound_lifetime" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateBoundLifetime() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldBoundLifetime)
 	return u
 }
 
@@ -823,6 +975,48 @@ func (u *WebhookEndpointUpsertOne) UpdateSecretVersion() *WebhookEndpointUpsertO
 	})
 }
 
+// SetSecretRotatedAt sets the "secret_rotated_at" field.
+func (u *WebhookEndpointUpsertOne) SetSecretRotatedAt(v time.Time) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetSecretRotatedAt(v)
+	})
+}
+
+// UpdateSecretRotatedAt sets the "secret_rotated_at" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateSecretRotatedAt() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateSecretRotatedAt()
+	})
+}
+
+// ClearSecretRotatedAt clears the value of the "secret_rotated_at" field.
+func (u *WebhookEndpointUpsertOne) ClearSecretRotatedAt() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.ClearSecretRotatedAt()
+	})
+}
+
+// SetConfigVersion sets the "config_version" field.
+func (u *WebhookEndpointUpsertOne) SetConfigVersion(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetConfigVersion(v)
+	})
+}
+
+// AddConfigVersion adds v to the "config_version" field.
+func (u *WebhookEndpointUpsertOne) AddConfigVersion(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddConfigVersion(v)
+	})
+}
+
+// UpdateConfigVersion sets the "config_version" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateConfigVersion() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateConfigVersion()
+	})
+}
+
 // SetSignatureMode sets the "signature_mode" field.
 func (u *WebhookEndpointUpsertOne) SetSignatureMode(v string) *WebhookEndpointUpsertOne {
 	return u.Update(func(s *WebhookEndpointUpsert) {
@@ -848,6 +1042,41 @@ func (u *WebhookEndpointUpsertOne) SetStatus(v string) *WebhookEndpointUpsertOne
 func (u *WebhookEndpointUpsertOne) UpdateStatus() *WebhookEndpointUpsertOne {
 	return u.Update(func(s *WebhookEndpointUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetBoundAgentID sets the "bound_agent_id" field.
+func (u *WebhookEndpointUpsertOne) SetBoundAgentID(v uuid.UUID) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetBoundAgentID(v)
+	})
+}
+
+// UpdateBoundAgentID sets the "bound_agent_id" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateBoundAgentID() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateBoundAgentID()
+	})
+}
+
+// ClearBoundAgentID clears the value of the "bound_agent_id" field.
+func (u *WebhookEndpointUpsertOne) ClearBoundAgentID() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.ClearBoundAgentID()
+	})
+}
+
+// SetBoundLifetime sets the "bound_lifetime" field.
+func (u *WebhookEndpointUpsertOne) SetBoundLifetime(v string) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetBoundLifetime(v)
+	})
+}
+
+// UpdateBoundLifetime sets the "bound_lifetime" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateBoundLifetime() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateBoundLifetime()
 	})
 }
 
@@ -1252,6 +1481,48 @@ func (u *WebhookEndpointUpsertBulk) UpdateSecretVersion() *WebhookEndpointUpsert
 	})
 }
 
+// SetSecretRotatedAt sets the "secret_rotated_at" field.
+func (u *WebhookEndpointUpsertBulk) SetSecretRotatedAt(v time.Time) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetSecretRotatedAt(v)
+	})
+}
+
+// UpdateSecretRotatedAt sets the "secret_rotated_at" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateSecretRotatedAt() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateSecretRotatedAt()
+	})
+}
+
+// ClearSecretRotatedAt clears the value of the "secret_rotated_at" field.
+func (u *WebhookEndpointUpsertBulk) ClearSecretRotatedAt() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.ClearSecretRotatedAt()
+	})
+}
+
+// SetConfigVersion sets the "config_version" field.
+func (u *WebhookEndpointUpsertBulk) SetConfigVersion(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetConfigVersion(v)
+	})
+}
+
+// AddConfigVersion adds v to the "config_version" field.
+func (u *WebhookEndpointUpsertBulk) AddConfigVersion(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddConfigVersion(v)
+	})
+}
+
+// UpdateConfigVersion sets the "config_version" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateConfigVersion() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateConfigVersion()
+	})
+}
+
 // SetSignatureMode sets the "signature_mode" field.
 func (u *WebhookEndpointUpsertBulk) SetSignatureMode(v string) *WebhookEndpointUpsertBulk {
 	return u.Update(func(s *WebhookEndpointUpsert) {
@@ -1277,6 +1548,41 @@ func (u *WebhookEndpointUpsertBulk) SetStatus(v string) *WebhookEndpointUpsertBu
 func (u *WebhookEndpointUpsertBulk) UpdateStatus() *WebhookEndpointUpsertBulk {
 	return u.Update(func(s *WebhookEndpointUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetBoundAgentID sets the "bound_agent_id" field.
+func (u *WebhookEndpointUpsertBulk) SetBoundAgentID(v uuid.UUID) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetBoundAgentID(v)
+	})
+}
+
+// UpdateBoundAgentID sets the "bound_agent_id" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateBoundAgentID() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateBoundAgentID()
+	})
+}
+
+// ClearBoundAgentID clears the value of the "bound_agent_id" field.
+func (u *WebhookEndpointUpsertBulk) ClearBoundAgentID() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.ClearBoundAgentID()
+	})
+}
+
+// SetBoundLifetime sets the "bound_lifetime" field.
+func (u *WebhookEndpointUpsertBulk) SetBoundLifetime(v string) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetBoundLifetime(v)
+	})
+}
+
+// UpdateBoundLifetime sets the "bound_lifetime" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateBoundLifetime() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateBoundLifetime()
 	})
 }
 
