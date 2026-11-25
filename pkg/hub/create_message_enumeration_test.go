@@ -82,6 +82,9 @@ func TestCreateMessageEnumeration(t *testing.T) {
 
 		// createInboxMessage: agent → user inbox notification (e.g. WAITING_FOR_INPUT).
 		"notifications.go:createInboxMessage": "Phase 5 dual-write: agent→user inbox notification DM conversation",
+
+		// deliverCommandRunOutcome: approved command-run outcome response to asking agent.
+		"command_run_exec.go:deliverCommandRunOutcome": "Approved command-run outcome response stamped with request ConversationID (ptone/scion#9281)",
 	}
 
 	// -------------------------------------------------------------------

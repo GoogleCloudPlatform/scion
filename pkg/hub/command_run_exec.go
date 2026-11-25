@@ -163,19 +163,6 @@ func commandRunArgv(script string) []string {
 	return []string{"/bin/bash", "--login", "-c", script, "scion-command"}
 }
 
-func commandRunWorkdirKind(workdir string) string {
-	switch {
-	case workdir == "" || workdir == "~":
-		return "home"
-	case workdir == "/workspace" || strings.HasPrefix(workdir, "/workspace/"):
-		return "workspace"
-	case strings.HasPrefix(workdir, "/scion-volumes/") || strings.HasPrefix(workdir, "/.scion-volumes/"):
-		return "shared_dir"
-	default:
-		return "explicit"
-	}
-}
-
 // executeCommandRun runs the P1 subset of design §4.8 (steps 1, 2, 4–7):
 // resolve container, refuse stopped/suspended (no wake in P1), re-resolve &
 // pin, CAS to dispatching before send, send exec-start once, and track to
@@ -303,10 +290,12 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 	}
 	run.CaptureMode = captureMode
 
-	s.emitCommandRunAudit(context.WithoutCancel(ctx), req, run, msgaction.EventCmdRunDispatched, "", map[string]string{
-		"exec_argv_sha256": agentcontrol.ExecArgvDigest(argv),
-		"workdir_kind":     commandRunWorkdirKind(workdir),
-	})
+	emitDispatched := func() {
+		s.emitCommandRunAudit(context.WithoutCancel(ctx), req, run, msgaction.EventCmdRunDispatched, "", map[string]string{
+			"exec_argv_sha256": agentcontrol.ExecArgvDigest(argv),
+			"workdir_kind":     commandWorkdirKind(workdir),
+		})
+	}
 
 	commandRunExecStage(commandRunStageDispatched, run.ID)
 	if ctx.Err() != nil {
@@ -354,12 +343,16 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 		default:
 			// Timeout, transport drop, or schema error after send: ambiguous.
 			// Never resend; track via exec-status only.
+			emitDispatched()
 			slog.Warn("Command run: exec-start result ambiguous; tracking via exec-status",
 				"run_id", run.ID, "exec_agent_id", run.ExecAgentID, "error", startErr)
 			s.pollCommandRun(ctx, req, run)
 			return
 		}
 	}
+
+	// Non-pre-send answer from the agent: audit run_dispatched now (O2).
+	emitDispatched()
 
 	// Documented exec-start answer.
 	switch res.Status {
@@ -598,7 +591,7 @@ func (s *Server) finishCommandRun(
 	// 1. Audit event with allow-listed details only (never script text or output).
 	auditDetails := map[string]string{
 		"outcome":      status,
-		"workdir_kind": commandRunWorkdirKind(run.Workdir),
+		"workdir_kind": commandWorkdirKind(run.Workdir),
 	}
 	if fin.ExitCode != nil {
 		auditDetails["exit_code"] = strconv.Itoa(*fin.ExitCode)
@@ -624,9 +617,9 @@ func (s *Server) finishCommandRun(
 		"reason", reason,
 		"output_status", fin.OutputStatus)
 
-	// 2. Publish live card update via SSE (no output bytes).
+	// 2. Publish live card update via SSE (uniform CommandRequestView shape, no output bytes; O1).
 	if req != nil {
-		s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRunViewFromStore(run))
+		s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestView(req, nil, run))
 	}
 
 	// 3. Deliver outcome-only command-response message to the asker agent (§4.9, P1).
@@ -688,28 +681,6 @@ func (s *Server) emitCommandRunAudit(ctx context.Context, req *store.CommandRequ
 		ev.Version = req.Version
 	}
 	s.emitMessageActionEvent(ctx, ev)
-}
-
-func commandRunViewFromStore(run *store.CommandRun) messages.CommandRequestRunView {
-	return messages.CommandRequestRunView{
-		RunID:         run.ID,
-		RequestID:     run.RequestID,
-		Status:        run.Status,
-		Reason:        run.Reason,
-		Wake:          run.Wake,
-		ExecAgentID:   run.ExecAgentID,
-		ExecProjectID: run.ExecProjectID,
-		ShareOutput:   run.ShareOutput,
-		TimeoutS:      run.TimeoutS,
-		Workdir:       run.Workdir,
-		ExitCode:      run.ExitCode,
-		DurationMS:    run.DurationMS,
-		OutputBytes:   run.OutputBytes,
-		OutputStatus:  run.OutputStatus,
-		CreatedAt:     run.CreatedAt,
-		DispatchedAt:  run.DispatchedAt,
-		FinishedAt:    run.FinishedAt,
-	}
 }
 
 // deliverCommandRunOutcome sends one outcome-only command-response message to

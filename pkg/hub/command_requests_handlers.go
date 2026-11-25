@@ -155,10 +155,12 @@ func normalizeCommandRequestSurface(raw string) (string, bool) {
 
 func commandWorkdirKind(workdir string) string {
 	switch {
-	case workdir == "":
+	case workdir == "" || workdir == "~":
 		return "home"
 	case workdir == "/workspace" || strings.HasPrefix(workdir, "/workspace/"):
 		return "workspace"
+	case strings.HasPrefix(workdir, "/scion-volumes/") || strings.HasPrefix(workdir, "/.scion-volumes/"):
+		return "shared_dir"
 	default:
 		return "explicit"
 	}
