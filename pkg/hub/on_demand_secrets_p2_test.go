@@ -638,12 +638,17 @@ func (b *spyValueAccessBackend) reset() {
 
 // TestOnDemandSecret_P2_NoAuthCreateAndStartShadowing verifies R1:
 // (a) A project on_demand GITHUB_TOKEN is never value-fetched (Get or
-//     FetchValues) on create for a NoAuth agent.
+//
+//	FetchValues) on create for a NoAuth agent.
+//
 // (b) An agent-scope on_demand GITHUB_TOKEN shadows a lower-scope project (and
-//     user) environment GITHUB_TOKEN on both create AND start/restart, with
-//     neither token delivered in ResolvedEnv and neither value fetched.
+//
+//	user) environment GITHUB_TOKEN on both create AND start/restart, with
+//	neither token delivered in ResolvedEnv and neither value fetched.
+//
 // (c) Control: without the agent-scope on_demand row, project environment
-//     GITHUB_TOKEN is delivered on both create and start.
+//
+//	GITHUB_TOKEN is delivered on both create and start.
 func TestOnDemandSecret_P2_NoAuthCreateAndStartShadowing(t *testing.T) {
 	ctx := context.Background()
 	f := newChainFixture(t, "od-p2-noauth-r1")
