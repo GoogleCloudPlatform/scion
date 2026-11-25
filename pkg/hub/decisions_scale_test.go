@@ -997,11 +997,11 @@ func TestDecisionsScale_BellTopicEventEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	stmtDec, err := tx.PrepareContext(ctx, rebindScaleSQL(d,
 		`INSERT INTO decisions (id, project_id, chat_key, message_id, position, asker_agent_id, asker_agent_name, key, key_norm, key_source, version, question, choices, allow_other, intro_length, status, settled, facet_indexed, created_at, decided_at)
-		 VALUES (?, ?, ?, ?, 0, ?, 'bot', ?, ?, 'agent', 1, 'Deploy?', ?, false, 0, 'decided', true, true, ?, ?)`))
+		 VALUES (?, ?, ?, ?, 0, ?, 'bot', ?, ?, 'agent', 1, 'Deploy', ?, false, 0, 'decided', true, true, ?, ?)`))
 	require.NoError(t, err)
 	stmtAns, err := tx.PrepareContext(ctx, rebindScaleSQL(d,
 		`INSERT INTO decision_answers (id, decision_row_id, project_id, asker_agent_id, key, version, question_text, choice_id, choice_label, answered_by_user_id, answered_by_name, answered_by_email, provenance, outcome, surface, response_message_id, matched_default, facet_indexed, created_at)
-		 VALUES (?, ?, ?, ?, ?, 1, 'Deploy?', 'yes', 'Yes', ?, 'Bob', 'bob@test.com', 'direct', 'answer', 'decisions_page', ?, false, true, ?)`))
+		 VALUES (?, ?, ?, ?, ?, 1, 'Deploy', 'yes', 'Yes', ?, 'Bob', 'bob@test.com', 'direct', 'answer', 'decisions_page', ?, false, true, ?)`))
 	require.NoError(t, err)
 	stmtFacet, err := tx.PrepareContext(ctx, rebindScaleSQL(d,
 		`INSERT INTO decision_facet_entries (id, project_id, chat_key, kind, actor_id, name, email, latest_at, ref_count)
