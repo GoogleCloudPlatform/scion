@@ -463,7 +463,7 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 // Non-member projects (even for hub admins) and visitor-only bindings are
 // excluded by chatMemberProjectIDs; member projects with no decisions are
 // skipped via ProjectsWithDecisions; and the scope count is capped at
-// maxProfileDecisionProjects (200), returning truncated == true beyond the cap.
+// profileDecisionProjectLimit() (default 200), returning truncated == true beyond the cap.
 func (s *Server) profileDecisionScopes(
 	ctx context.Context,
 	user UserIdentity,
@@ -482,7 +482,7 @@ func (s *Server) profileDecisionScopes(
 	return scopes, truncated, nil
 }
 
-// selectProfileDecisionProjects selects up to maxProfileDecisionProjects
+// selectProfileDecisionProjects selects up to profileDecisionProjectLimit()
 // readable member projects that have decisions, ordered by newest decision
 // (design R2, R3, 5.2). Shared by profileDecisionScopes and waitingOnYouTotal
 // so both use identical project selection.
@@ -673,13 +673,79 @@ func (s *Server) resolveProfileDecisionScopes(
 	token *ScopedUserIdentity,
 	wcs WebChatStore,
 ) ([]*projectReadableScope, error) {
-	scopes := make([]*projectReadableScope, 0, len(selected))
-	for _, p := range selected {
-		sc, err := s.resolveProjectReadableScope(ctx, p, user, token, wcs)
-		if err != nil {
-			return nil, err
+	if len(selected) == 0 {
+		return nil, nil
+	}
+
+	// Compute chat access per project (memoized principal inputs: 0 extra store
+	// queries after the first project) and collect readable-topic project IDs.
+	accessByIdx := make([]ChatAccess, len(selected))
+	allProjectIDs := make([]string, len(selected))
+	topicProjectIDs := make([]string, 0, len(selected))
+	for i, p := range selected {
+		allProjectIDs[i] = p.ID
+		acc := s.chatUserAccess(ctx, user, p,
+			[]string{ChatActionRead}, chatThreadWriteActions, nil, false, false)
+		accessByIdx[i] = acc
+		if acc.Can(ChatActionRead) {
+			topicProjectIDs = append(topicProjectIDs, p.ID)
 		}
-		scopes = append(scopes, sc)
+	}
+
+	// One batched topics lookup across all chat-readable projects (chunked at 500).
+	var topicsByProject map[string][]WebChatTopic
+	if wcs != nil && len(topicProjectIDs) > 0 {
+		var err error
+		topicsByProject, err = wcs.ListTopicsIncludingDeletedForProjects(ctx, topicProjectIDs)
+		if err != nil {
+			return nil, fmt.Errorf("list topics: %w", err)
+		}
+	}
+
+	// One batched asking-agent lookup across all selected projects.
+	decAgentsByProject, err := s.store.ListProjectDecisionAgentsForProjects(ctx, allProjectIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list project decision agents: %w", err)
+	}
+
+	// One batched agent-row lookup over the union of asking agent IDs.
+	seenAgentIDs := make(map[string]bool)
+	var unionAgentIDs []string
+	for _, p := range selected {
+		for _, da := range decAgentsByProject[p.ID] {
+			if !seenAgentIDs[da.ID] {
+				seenAgentIDs[da.ID] = true
+				unionAgentIDs = append(unionAgentIDs, da.ID)
+			}
+		}
+	}
+	var agentsByID map[string]*store.Agent
+	if len(unionAgentIDs) > 0 {
+		agentsByID, err = s.store.GetAgentsByIDsIncludingDeleted(ctx, unionAgentIDs)
+		if err != nil {
+			return nil, fmt.Errorf("batch get decision agents: %w", err)
+		}
+	}
+
+	viewerID := user.ID()
+	var dmTokenCheck *selfScopeCheck
+	if token != nil {
+		dmTokenCheck = s.newSelfScopeCheck(ctx, token, permInboxRead)
+	}
+
+	scopes := make([]*projectReadableScope, len(selected))
+	for i, p := range selected {
+		scopes[i] = s.buildProjectReadableScope(
+			ctx,
+			p,
+			viewerID,
+			token,
+			dmTokenCheck,
+			accessByIdx[i],
+			topicsByProject[p.ID],
+			decAgentsByProject[p.ID],
+			agentsByID,
+		)
 	}
 	return scopes, nil
 }
@@ -941,7 +1007,13 @@ func (s *Server) finishProfileMadeDecisions(
 		}, nil
 	}
 
-	rawEntries, rawNext, err := s.store.ListDecisionAnswers(ctx, targetProjectIDs, listKeys, filter, pq.cursor, pq.limit)
+	keysByProject := make(map[string][]string, len(targetProjectIDs))
+	for _, k := range listKeys {
+		if pid := set.keyProject[k]; pid != "" {
+			keysByProject[pid] = append(keysByProject[pid], k)
+		}
+	}
+	rawEntries, rawNext, err := s.store.ListDecisionAnswersForProjects(ctx, targetProjectIDs, keysByProject, filter, pq.cursor, pq.limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1138,7 +1210,7 @@ func (s *Server) waitingOnYouSummary(
 
 // waitingOnYouTotal returns the total count of open decisions currently
 // waiting on userID across userID's readable member projects (capped at
-// maxProfileDecisionProjects), and the count of distinct projects that hold at
+// profileDecisionProjectLimit()), and the count of distinct projects that hold at
 // least one of those decisions (design 5.2, for P6's bell reconciler).
 //
 // Contract: roll-up evaluation across up to 200 member projects honors the D9

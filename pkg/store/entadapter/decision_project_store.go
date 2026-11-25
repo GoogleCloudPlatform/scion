@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -34,9 +35,12 @@ import (
 )
 
 const (
-	maxProjectDecisionFacetItems   = 500
-	projectDecisionAgentsChunkSize = 500
-	facetProbeChunkSize            = 500
+	maxProjectDecisionFacetItems     = 500
+	projectDecisionAgentsChunkSize   = 500
+	facetProbeChunkSize              = 500
+	maxDecisionAnswerUnionArms       = 100
+	maxDecisionAnswerUnionParams     = 8000
+	maxDecisionAnswerLateralProjects = 500
 )
 
 type groupedProjectDecisionAgent struct {
@@ -223,7 +227,6 @@ func (c *CompositeStore) listProjectDecisionAgentsForProjectsLegacy(ctx context.
 		var rows []groupedProjectDecisionAgent
 		err := c.client.Decision.Query().
 			Where(decision.ProjectIDIn(projectUUIDs[start:end]...)).
-			Order(ent.Asc(decision.FieldProjectID), ent.Asc(decision.FieldAskerAgentID)).
 			GroupBy(decision.FieldProjectID, decision.FieldAskerAgentID).
 			Aggregate(ent.As(ent.Max(decision.FieldAskerAgentName), "name")).
 			Scan(ctx, &rows)
@@ -365,28 +368,143 @@ func (c *CompositeStore) ListDecisionAnswers(
 		return nil, "", nil
 	}
 
-	q := c.client.DecisionAnswer.Query().
-		Where(
-			decisionanswer.ProjectIDIn(projectUUIDs...),
-			decisionAnswerInChatKeys(keys),
-			notSupersededInterpretedAnswer(),
-		)
-	q = applyDecisionAnswerFilter(q, filter, agentUUID, provPred)
-	if cursor != "" {
-		q = q.Where(decisionanswer.Or(
-			decisionanswer.CreatedAtLT(cur.CreatedAt),
-			decisionanswer.And(
-				decisionanswer.CreatedAtEQ(cur.CreatedAt),
-				decisionanswer.IDLT(cur.ID),
-			),
-		))
+	var rows []*ent.DecisionAnswer
+	if len(projectUUIDs) == 1 {
+		// Single project keeps the direct query over (project_id, created_at).
+		q := c.client.DecisionAnswer.Query().
+			Where(
+				decisionanswer.ProjectIDEQ(projectUUIDs[0]),
+				decisionAnswerInChatKeysBounded(keys),
+				notSupersededInterpretedAnswer(),
+			)
+		q = applyDecisionAnswerFilter(q, filter, agentUUID, provPred)
+		if cursor != "" {
+			q = q.Where(decisionAnswerCursorPredicate(cur))
+		}
+		rows, err = q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
+			Limit(limit + 1).
+			All(ctx)
+		if err != nil {
+			return nil, "", mapError(err)
+		}
+	} else {
+		// Multi-project callers in production (such as the profile made/recent
+		// handler) use ListDecisionAnswersForProjects so each arm filters only
+		// its own project's readable chat keys. Keep this multi-project branch
+		// bounded per arm for direct store callers passing a shared key slice.
+		preds := decisionAnswerFilterPredicates(filter, agentUUID, provPred)
+		if cursor != "" {
+			preds = append(preds, decisionAnswerCursorPredicate(cur))
+		}
+		arms := make([]decisionAnswerUnionArm, len(projectUUIDs))
+		for i, pUUID := range projectUUIDs {
+			arms[i] = decisionAnswerUnionArm{
+				projectUUID: pUUID,
+				chatKeys:    keys,
+				preds:       preds,
+				limit:       limit + 1,
+			}
+		}
+		rows, err = c.listDecisionAnswersUnion(ctx, arms, limit+1, true)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 
-	rows, err := q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
-		Limit(limit + 1).
-		All(ctx)
+	var nextCursor string
+	if len(rows) > limit {
+		rows = rows[:limit]
+		last := rows[len(rows)-1]
+		nextCursor, err = encodeDecisionListCursor(last.CreatedAt, last.ID)
+		if err != nil {
+			return nil, "", fmt.Errorf("encode cursor: %w", err)
+		}
+	}
+	if len(rows) == 0 {
+		return nil, "", nil
+	}
+
+	entries, err := c.enrichDecisionAnswerRows(ctx, rows)
 	if err != nil {
-		return nil, "", mapError(err)
+		return nil, "", err
+	}
+	return entries, nextCursor, nil
+}
+
+// ListDecisionAnswersForProjects implements store.DecisionStore using per-project
+// readable chat keys so each UNION ALL arm checks only its own project's keys
+// via a bounded backward index walk on (project_id, created_at).
+func (c *CompositeStore) ListDecisionAnswersForProjects(
+	ctx context.Context,
+	projectIDs []string,
+	chatKeysByProject map[string][]string,
+	filter store.ProjectDecisionAnswerFilter,
+	cursor string,
+	limit int,
+) ([]*store.ProjectDecisionAnswerEntry, string, error) {
+	projectUUIDs, err := parseProjectIDs(projectIDs)
+	if err != nil {
+		return nil, "", err
+	}
+	if limit < 0 || limit > store.MaxDecisionListLimit {
+		return nil, "", fmt.Errorf("%w: limit must be between 0 and %d", store.ErrInvalidInput, store.MaxDecisionListLimit)
+	}
+	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
+	if err != nil {
+		return nil, "", err
+	}
+	var cur decisionListCursor
+	if cursor != "" {
+		cur, err = decodeDecisionListCursor(cursor)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	if limit == 0 || len(projectUUIDs) == 0 || len(chatKeysByProject) == 0 {
+		return nil, "", nil
+	}
+
+	cleanedQueryKeys := cleanChatKeys(filter.QueryChatKeys)
+	arms := make([]decisionAnswerUnionArm, 0, len(projectUUIDs))
+	for _, pUUID := range projectUUIDs {
+		pid := pUUID.String()
+		projKeys := cleanChatKeys(chatKeysByProject[pid])
+		if len(projKeys) == 0 {
+			continue
+		}
+		projFilter := filter
+		if filter.Query != "" && len(cleanedQueryKeys) > 0 {
+			projKeySet := make(map[string]bool, len(projKeys))
+			for _, k := range projKeys {
+				projKeySet[k] = true
+			}
+			var qKeys []string
+			for _, qk := range cleanedQueryKeys {
+				if projKeySet[qk] {
+					qKeys = append(qKeys, qk)
+				}
+			}
+			projFilter.QueryChatKeys = qKeys
+		}
+		preds := decisionAnswerFilterPredicates(projFilter, agentUUID, provPred)
+		if cursor != "" {
+			preds = append(preds, decisionAnswerCursorPredicate(cur))
+		}
+		arms = append(arms, decisionAnswerUnionArm{
+			projectUUID: pUUID,
+			chatKeys:    projKeys,
+			preds:       preds,
+			limit:       limit + 1,
+		})
+	}
+	if len(arms) == 0 {
+		return nil, "", nil
+	}
+
+	uniformPreds := filter.Query == "" || len(cleanedQueryKeys) == 0
+	rows, err := c.listDecisionAnswersUnion(ctx, arms, limit+1, uniformPreds)
+	if err != nil {
+		return nil, "", err
 	}
 
 	var nextCursor string
@@ -566,10 +684,11 @@ func (c *CompositeStore) ProjectsWithUnsettledDecisions(ctx context.Context, pro
 }
 
 // ListDecisionAnswersPerProject implements store.DecisionStore using the
-// design R5 shape: one bounded LIMIT perProject query per target project
-// scoped to that project's own readable keys (served by
-// INDEX(project_id, created_at)), followed by a single batched enrichment
-// pass over the union of returned rows.
+// design-scale §3.3 compound UNION ALL per-project merge: each project arm is
+// bounded by LIMIT perProject and scoped to that project's own readable keys
+// (served by INDEX(project_id, created_at)), chunked to <= 100 arms and
+// <= 8,000 bind parameters per statement, followed by a single batched
+// enrichment pass over the union of returned rows.
 func (c *CompositeStore) ListDecisionAnswersPerProject(
 	ctx context.Context,
 	projectIDs []string,
@@ -593,11 +712,8 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 	}
 
 	cleanedQueryKeys := cleanChatKeys(filter.QueryChatKeys)
-	allRows := make([]*ent.DecisionAnswer, 0, len(projectUUIDs)*perProject)
+	arms := make([]decisionAnswerUnionArm, 0, len(projectUUIDs))
 	for _, pUUID := range projectUUIDs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
 		pid := pUUID.String()
 		projKeys := cleanChatKeys(chatKeysByProject[pid])
 		if len(projKeys) == 0 {
@@ -617,21 +733,21 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 			}
 			projFilter.QueryChatKeys = qKeys
 		}
+		arms = append(arms, decisionAnswerUnionArm{
+			projectUUID: pUUID,
+			chatKeys:    projKeys,
+			preds:       decisionAnswerFilterPredicates(projFilter, agentUUID, provPred),
+			limit:       perProject,
+		})
+	}
+	if len(arms) == 0 {
+		return nil, nil
+	}
 
-		q := c.client.DecisionAnswer.Query().
-			Where(
-				decisionanswer.ProjectIDEQ(pUUID),
-				decisionAnswerInChatKeys(projKeys),
-				notSupersededInterpretedAnswer(),
-			)
-		q = applyDecisionAnswerFilter(q, projFilter, agentUUID, provPred)
-		rows, err := q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
-			Limit(perProject).
-			All(ctx)
-		if err != nil {
-			return nil, mapError(err)
-		}
-		allRows = append(allRows, rows...)
+	uniformPreds := filter.Query == "" || len(cleanedQueryKeys) == 0
+	allRows, err := c.listDecisionAnswersUnion(ctx, arms, 0, uniformPreds)
+	if err != nil {
+		return nil, err
 	}
 	if len(allRows) == 0 {
 		return nil, nil
@@ -646,7 +762,310 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 		pid := entry.Decision.ProjectID
 		out[pid] = append(out[pid], entry)
 	}
+	// Guarantee deterministic per-project ordering (created_at DESC, id DESC)
+	// regardless of how SQLite or Postgres orders UNION ALL arms.
+	for pid := range out {
+		sort.Slice(out[pid], func(i, j int) bool {
+			ai, aj := out[pid][i].Answer, out[pid][j].Answer
+			if !ai.CreatedAt.Equal(aj.CreatedAt) {
+				return ai.CreatedAt.After(aj.CreatedAt)
+			}
+			return ai.ID > aj.ID
+		})
+	}
 	return out, nil
+}
+
+type decisionAnswerUnionArm struct {
+	projectUUID uuid.UUID
+	chatKeys    []string
+	preds       []predicate.DecisionAnswer
+	limit       int
+}
+
+func decisionAnswerCursorPredicate(cur decisionListCursor) predicate.DecisionAnswer {
+	// Include CreatedAtLTE so both SQLite and Postgres push the cursor bound
+	// directly into the (project_id, created_at) index range seek instead of
+	// scanning from the newest row past earlier pages.
+	return decisionanswer.And(
+		decisionanswer.CreatedAtLTE(cur.CreatedAt),
+		decisionanswer.Or(
+			decisionanswer.CreatedAtLT(cur.CreatedAt),
+			decisionanswer.IDLT(cur.ID),
+		),
+	)
+}
+
+func sortDecisionAnswerRowsDesc(rows []*ent.DecisionAnswer) {
+	sort.Slice(rows, func(i, j int) bool {
+		if !rows[i].CreatedAt.Equal(rows[j].CreatedAt) {
+			return rows[i].CreatedAt.After(rows[j].CreatedAt)
+		}
+		return rows[i].ID.String() > rows[j].ID.String()
+	})
+}
+
+// execDecisionAnswerSelector runs finalSel against DecisionAnswer. On Postgres
+// when disableJIT is true, it sets two transaction-local GUCs in one round trip:
+//   - jit = off: even when every per-project arm uses an optimal bounded
+//     Index Scan Backward over (project_id, created_at) (~6-13 ms actual
+//     execution at 200 projects), Postgres's planner sums the correlated PK
+//     subplan cost across all N projects, exceeding jit_above_cost (100,000)
+//     and spending 200 ms (LATERAL) to 14.5 s (100-arm UNION ALL) in LLVM JIT.
+//   - plan_cache_mode = force_custom_plan: on cursor pages (page 2+), pgx's
+//     generic cached plan (call 6+) gives created_at <= $n a default range
+//     selectivity, switching each LATERAL arm to Bitmap Heap Scan + Sort over
+//     the project's entire history. Forcing custom plans keeps every cursor
+//     page on Index Scan Backward with an early LIMIT stop.
+func (c *CompositeStore) execDecisionAnswerSelector(
+	ctx context.Context,
+	finalSel *entsql.Selector,
+	disableJIT bool,
+) ([]*ent.DecisionAnswer, error) {
+	// Selector-swap invariant: Ent's sqlgraph builds the base Selector for
+	// decisionanswer.Columns and then applies Where predicates last. Replacing
+	// *s with *finalSel relies on sqlgraph applying this predicate last and on
+	// finalSel projecting decisionanswer.Columns in exact Ent schema order.
+	applySel := func(s *entsql.Selector) {
+		*s = *finalSel
+	}
+	const pgLocalConfigSQL = "SELECT set_config('jit','off',true), set_config('plan_cache_mode','force_custom_plan',true)"
+	if disableJIT && c.Dialect() == dialect.Postgres {
+		if c.inTx {
+			// Already inside a transaction (WithTx): transaction-local
+			// set_config applies to the active transaction without attempting
+			// a nested BeginTx (which Postgres rejects).
+			if err := c.client.Driver().Exec(ctx, pgLocalConfigSQL, []any{}, nil); err != nil {
+				return nil, mapError(err)
+			}
+			rows, err := c.client.DecisionAnswer.Query().Where(applySel).All(ctx)
+			if err != nil {
+				return nil, mapError(err)
+			}
+			return rows, nil
+		}
+		tx, err := c.client.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			return nil, mapError(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := tx.Client().Driver().Exec(ctx, pgLocalConfigSQL, []any{}, nil); err != nil {
+			return nil, mapError(err)
+		}
+		rows, err := tx.DecisionAnswer.Query().Where(applySel).All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return rows, nil
+	}
+	rows, err := c.client.DecisionAnswer.Query().Where(applySel).All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return rows, nil
+}
+
+// listDecisionAnswersPostgresLateral executes multi-project bounded answer
+// arms on Postgres via VALUES (pid, keys) CROSS JOIN LATERAL (SELECT ... LIMIT k).
+// Compared to a 100-arm UNION ALL, LATERAL compiles a single arm template
+// (~1.8 ms planning time vs ~25-45 ms), handles up to 500 projects per round
+// trip with 2 bind parameters per project, and walks
+// decisionanswer_project_id_created_at backward per project with an early LIMIT
+// stop and per-row PK lookup on decisions.
+func (c *CompositeStore) listDecisionAnswersPostgresLateral(
+	ctx context.Context,
+	arms []decisionAnswerUnionArm,
+	globalLimit int,
+) ([]*ent.DecisionAnswer, error) {
+	d := entsql.Dialect(dialect.Postgres)
+	tbl := d.Table(decisionanswer.Table)
+	inner := d.Select(tbl.Columns(decisionanswer.Columns...)...).From(tbl)
+	inner.Where(entsql.P(func(b *entsql.Builder) {
+		b.Ident(tbl.C(decisionanswer.FieldProjectID))
+		b.WriteString(` = "p"."pid"`)
+	}))
+	dt := entsql.Table(decision.Table)
+	chatSub := d.Select(dt.C(decision.FieldChatKey)).From(dt).
+		Where(entsql.ColumnsEQ(dt.C(decision.FieldID), tbl.C(decisionanswer.FieldDecisionRowID)))
+	inner.Where(entsql.P(func(b *entsql.Builder) {
+		b.WriteByte('(')
+		b.Join(chatSub)
+		b.WriteString(`) = ANY("p"."keys")`)
+	}))
+	notSupersededInterpretedAnswer()(inner)
+	for _, pred := range arms[0].preds {
+		pred(inner)
+	}
+	inner.OrderBy(
+		entsql.Desc(tbl.C(decisionanswer.FieldCreatedAt)),
+		entsql.Desc(tbl.C(decisionanswer.FieldID)),
+	).Limit(arms[0].limit)
+
+	daAlias := entsql.Table("da")
+	var allRows []*ent.DecisionAnswer
+	numChunks := 0
+	for start := 0; start < len(arms); start += maxDecisionAnswerLateralProjects {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := start + maxDecisionAnswerLateralProjects
+		if end > len(arms) {
+			end = len(arms)
+		}
+		chunk := arms[start:end]
+		numChunks++
+
+		outer := d.Select(daAlias.Columns(decisionanswer.Columns...)...).
+			FromExpr(entsql.ExprFunc(func(b *entsql.Builder) {
+				b.WriteString("(VALUES ")
+				for i, arm := range chunk {
+					if i > 0 {
+						b.WriteString(", ")
+					}
+					b.WriteByte('(')
+					b.Arg(arm.projectUUID)
+					b.WriteString("::uuid, ")
+					b.Arg(arm.chatKeys)
+					b.WriteString("::text[])")
+				}
+				b.WriteString(`) AS "p"("pid", "keys") CROSS JOIN LATERAL (`)
+				b.Join(inner)
+				b.WriteString(`) AS "da"`)
+			}))
+		if globalLimit > 0 {
+			outer.OrderBy(
+				entsql.Desc(daAlias.C(decisionanswer.FieldCreatedAt)),
+				entsql.Desc(daAlias.C(decisionanswer.FieldID)),
+			).Limit(globalLimit)
+		}
+
+		chunkRows, err := c.execDecisionAnswerSelector(ctx, outer, true)
+		if err != nil {
+			return nil, err
+		}
+		allRows = append(allRows, chunkRows...)
+	}
+
+	if globalLimit > 0 && numChunks > 1 {
+		sortDecisionAnswerRowsDesc(allRows)
+		if len(allRows) > globalLimit {
+			allRows = allRows[:globalLimit]
+		}
+	}
+	return allRows, nil
+}
+
+// listDecisionAnswersUnion executes per-project bounded decision_answers arms.
+// On Postgres with uniform arm predicates and >1 project it uses CROSS JOIN
+// LATERAL; otherwise (SQLite, single arm, or per-project query-key predicates)
+// it emits compound UNION ALL statements chunked to <= maxDecisionAnswerUnionArms
+// arms and <= maxDecisionAnswerUnionParams bind parameters per statement
+// (design-scale §3.3). Each arm walks (project_id, created_at) in DESC order
+// with an early LIMIT stop and checks chat_key via a per-row PK scalar
+// subquery on decisions. When globalLimit > 0 (made/recent), each compound
+// statement applies an outer ORDER BY created_at DESC, id DESC LIMIT
+// globalLimit, and multi-chunk results are merged in memory to at most
+// globalLimit rows. When globalLimit == 0 (made/project), every arm's rows
+// are preserved without a global limit.
+func (c *CompositeStore) listDecisionAnswersUnion(
+	ctx context.Context,
+	arms []decisionAnswerUnionArm,
+	globalLimit int,
+	uniformPreds bool,
+) ([]*ent.DecisionAnswer, error) {
+	if len(arms) == 0 {
+		return nil, nil
+	}
+	if uniformPreds && len(arms) > 1 && c.Dialect() == dialect.Postgres {
+		return c.listDecisionAnswersPostgresLateral(ctx, arms, globalLimit)
+	}
+
+	d := entsql.Dialect(c.Dialect())
+	type builtArm struct {
+		inner      *entsql.Selector
+		paramCount int
+	}
+	built := make([]builtArm, len(arms))
+	for i, arm := range arms {
+		tbl := d.Table(decisionanswer.Table)
+		inner := d.Select(tbl.Columns(decisionanswer.Columns...)...).From(tbl)
+		inner.Where(entsql.EQ(tbl.C(decisionanswer.FieldProjectID), arm.projectUUID))
+		decisionAnswerInChatKeysBounded(arm.chatKeys)(inner)
+		notSupersededInterpretedAnswer()(inner)
+		for _, pred := range arm.preds {
+			pred(inner)
+		}
+		inner.OrderBy(
+			entsql.Desc(tbl.C(decisionanswer.FieldCreatedAt)),
+			entsql.Desc(tbl.C(decisionanswer.FieldID)),
+		).Limit(arm.limit)
+		_, args := inner.Query()
+		built[i] = builtArm{inner: inner, paramCount: len(args)}
+	}
+
+	var allRows []*ent.DecisionAnswer
+	numChunks := 0
+	for start := 0; start < len(built); {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := start
+		params := 0
+		for end < len(built) && (end-start) < maxDecisionAnswerUnionArms {
+			// Always include at least one arm per chunk so a single arm with
+			// > maxDecisionAnswerUnionParams keys still makes progress.
+			if end > start && params+built[end].paramCount > maxDecisionAnswerUnionParams {
+				break
+			}
+			params += built[end].paramCount
+			end++
+		}
+		chunk := built[start:end]
+		start = end
+		numChunks++
+
+		var finalSel *entsql.Selector
+		if len(chunk) == 1 {
+			finalSel = chunk[0].inner
+		} else {
+			var combined *entsql.Selector
+			for i, ba := range chunk {
+				sub := ba.inner.As(fmt.Sprintf("a%d", i))
+				wrapped := d.Select(sub.Columns(decisionanswer.Columns...)...).From(sub)
+				if combined == nil {
+					combined = wrapped
+				} else {
+					combined.UnionAll(wrapped)
+				}
+			}
+			if globalLimit > 0 {
+				u := combined.As("u")
+				finalSel = d.Select(u.Columns(decisionanswer.Columns...)...).
+					From(u).
+					OrderBy(
+						entsql.Desc(u.C(decisionanswer.FieldCreatedAt)),
+						entsql.Desc(u.C(decisionanswer.FieldID)),
+					).
+					Limit(globalLimit)
+			} else {
+				finalSel = combined
+			}
+		}
+
+		chunkRows, err := c.execDecisionAnswerSelector(ctx, finalSel, len(chunk) > 1)
+		if err != nil {
+			return nil, err
+		}
+		allRows = append(allRows, chunkRows...)
+	}
+
+	if globalLimit > 0 && numChunks > 1 {
+		sortDecisionAnswerRowsDesc(allRows)
+		if len(allRows) > globalLimit {
+			allRows = allRows[:globalLimit]
+		}
+	}
+	return allRows, nil
 }
 
 func validateDecisionAnswerFilter(filter store.ProjectDecisionAnswerFilter) (uuid.UUID, predicate.DecisionAnswer, error) {
@@ -1060,6 +1479,7 @@ func notSupersededInterpretedAnswer() predicate.DecisionAnswer {
 					From(t).
 					Where(entsql.And(
 						entsql.ColumnsEQ(t.C(decisionanswer.FieldDecisionRowID), s.C(decisionanswer.FieldDecisionRowID)),
+						entsql.ColumnsEQ(t.C(decisionanswer.FieldProjectID), s.C(decisionanswer.FieldProjectID)),
 						entsql.EQ(t.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
 					)),
 			),
@@ -1096,6 +1516,11 @@ func decisionChatKeyIn(projectCount int, keys []string) predicate.Decision {
 	}
 }
 
+// decisionAnswerInChatKeys checks that the answer's parent decision row has
+// chat_key in keys via an EXISTS semi-join correlated on (id, project_id).
+// Used by unbounded callers such as ListDecisionFacets so Postgres can plan a
+// Hash Semi Join rather than running a correlated per-row PK lookup over the
+// entire answer history once pgx switches to a generic cached plan.
 func decisionAnswerInChatKeys(keys []string) predicate.DecisionAnswer {
 	vals := make([]any, len(keys))
 	for i, k := range keys {
@@ -1112,6 +1537,44 @@ func decisionAnswerInChatKeys(keys []string) predicate.DecisionAnswer {
 					entsql.In(t.C(decision.FieldChatKey), vals...),
 				)),
 		))
+	}
+}
+
+// decisionAnswerInChatKeysBounded checks that the answer's parent decision row
+// has chat_key in keys via a correlated PK scalar subquery on decisions.id.
+// Used ONLY inside bounded per-project arms (with LIMIT k): using a scalar
+// subquery instead of EXISTS prevents Postgres from pulling the check up into
+// a Hash Semi Join over all project rows, keeping each arm on a bounded
+// Index Scan Backward over decisionanswer_project_id_created_at with an early
+// LIMIT stop and per-row PK lookup on decisions.
+func decisionAnswerInChatKeysBounded(keys []string) predicate.DecisionAnswer {
+	return func(s *entsql.Selector) {
+		t := entsql.Table(decision.Table)
+		sub := entsql.Dialect(s.Dialect()).
+			Select(t.C(decision.FieldChatKey)).
+			From(t).
+			Where(entsql.ColumnsEQ(t.C(decision.FieldID), s.C(decisionanswer.FieldDecisionRowID)))
+		if s.Dialect() == dialect.Postgres {
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteByte('(')
+				b.Join(sub)
+				b.WriteString(") = ANY(")
+				b.Arg(keys)
+				b.WriteString("::text[])")
+			}))
+			return
+		}
+		vals := make([]any, len(keys))
+		for i, k := range keys {
+			vals[i] = k
+		}
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.WriteByte('(')
+			b.Join(sub)
+			b.WriteString(") IN (")
+			b.Args(vals...)
+			b.WriteByte(')')
+		}))
 	}
 }
 

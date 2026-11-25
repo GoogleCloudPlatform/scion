@@ -134,6 +134,9 @@ func (s *rsWebChatStore) ListTopics(context.Context, string) ([]WebChatTopic, er
 func (s *rsWebChatStore) ListTopicsIncludingDeleted(context.Context, string) ([]WebChatTopic, error) {
 	return nil, nil
 }
+func (s *rsWebChatStore) ListTopicsIncludingDeletedForProjects(context.Context, []string) (map[string][]WebChatTopic, error) {
+	return nil, nil
+}
 func (s *rsWebChatStore) ListTopicsByProjects(context.Context, []string) ([]WebChatTopic, error) {
 	return nil, nil
 }
