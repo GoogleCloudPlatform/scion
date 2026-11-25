@@ -1080,6 +1080,126 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     expect(chatCard?.querySelector('[data-chat-kind="dm"]')).toBeNull();
   });
 
+  it('does not render stale DM rows under Mentions while Mentions fetch is pending (guarded by chatOverrideMeta)', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const dmPreview = {
+      id: 'dm:u1:a1',
+      kind: 'dm' as const,
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:50:00Z',
+      href: '/chat/dm/dm%3Au1%3Aa1',
+      conversationKey: 'dm:u1:a1',
+      label: 'deploy-bot',
+      lastMessageAt: '2026-11-23T17:50:00Z',
+    };
+    const mentionPreview = {
+      id: 'topic-m',
+      kind: 'mention' as const,
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:45:00Z',
+      href: '/chat/core/topic-m',
+      conversationKey: 'topic-m',
+      label: '#alerts',
+      lastMessageAt: '2026-11-23T17:45:00Z',
+    };
+    const breakdown = { dms: 1, mentions: 1, unreadConversations: 2 };
+    const makeChatCat = (previews: (typeof dmPreview | typeof mentionPreview)[]) => ({
+      state: 'ok' as const,
+      count: 2,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/chat',
+      breakdown,
+      previews,
+    });
+    const chatResponse = (previews: (typeof dmPreview | typeof mentionPreview)[]): Response =>
+      new Response(
+        JSON.stringify(
+          makeSummaryResponse(
+            {
+              state: 'disabled',
+              count: 0,
+              capped: false,
+              countsTowardTotal: true,
+              href: '/profile/secrets',
+              previews: [],
+            },
+            { chat: makeChatCat(previews) }
+          )
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+
+    let resolveMentions: ((r: Response) => void) | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.includes('chat=dms')) {
+        return Promise.resolve(chatResponse([dmPreview]));
+      }
+      if (url.includes('chat=mentions')) {
+        return new Promise<Response>((resolve) => {
+          resolveMentions = resolve;
+        });
+      }
+      return Promise.resolve(chatResponse([dmPreview, mentionPreview]));
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const chatCard = page.shadowRoot?.querySelector('[data-inbox-card="chat"]');
+    const dmsChip = chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="dms"]');
+    const mentionsChip = chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="mentions"]');
+
+    // Step 1: Switch to DMs and let it resolve.
+    dmsChip!.click();
+    await flush();
+    await page.updateComplete;
+    expect(chatCard?.querySelector('[data-chat-row="dm:u1:a1"]')).not.toBeNull();
+    expect(chatCard?.querySelector('[data-chat-kind="dm"]')).not.toBeNull();
+
+    // Step 2: Switch to Mentions while the Mentions fetch stays pending.
+    mentionsChip!.click();
+    await page.updateComplete;
+    expect(mentionsChip?.getAttribute('aria-pressed')).toBe('true');
+    expect(chatCard?.querySelector('[data-chat-loading]')).not.toBeNull();
+    expect(chatCard?.querySelector('[data-chat-kind="dm"]')).toBeNull();
+    expect(chatCard?.querySelector('[data-chat-row="dm:u1:a1"]')).toBeNull();
+
+    // Step 3: Exercise the chatOverrideMeta guard directly — even if chatOverride
+    // holds the prior DMs payload tagged with filter:'dms', renderChatCard must
+    // reject it while chatFilter is 'mentions' and render no DM rows.
+    const internal = page as unknown as {
+      chatOverride: ReturnType<typeof makeChatCat> | null;
+      chatOverrideMeta: { filter: 'all' | 'dms' | 'mentions'; previews: number } | null;
+    };
+    internal.chatOverride = makeChatCat([dmPreview]);
+    internal.chatOverrideMeta = { filter: 'dms', previews: 3 };
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(chatCard?.querySelector('[data-chat-loading]')).not.toBeNull();
+    expect(chatCard?.querySelector('[data-chat-kind="dm"]')).toBeNull();
+    expect(chatCard?.querySelector('[data-chat-row="dm:u1:a1"]')).toBeNull();
+
+    // Step 4: Resolve Mentions -> mention row renders, still no DM rows.
+    resolveMentions!(chatResponse([mentionPreview]));
+    await flush();
+    await page.updateComplete;
+    expect(chatCard?.querySelectorAll('[data-chat-row]').length).toBe(1);
+    expect(chatCard?.querySelector('[data-chat-row="topic-m"]')).not.toBeNull();
+    expect(chatCard?.querySelector('[data-chat-kind="dm"]')).toBeNull();
+  });
+
   it('aborts an in-flight chat fetch on disconnect and ignores late responses', async () => {
     setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
     let dmsSignal: AbortSignal | undefined;
