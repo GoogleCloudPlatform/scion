@@ -116,9 +116,25 @@ func TestReadHarnessTail_ShellHarnessReturnsEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Broker-written ReadyStrategyIdle suppresses tail even if SCION_HARNESS=claude.
+	t.Setenv(state.HarnessReadyEnv, state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyIdle)))
+	t.Setenv("SCION_HARNESS", "claude")
+	if got := readHarnessTail(); got != "" {
+		t.Errorf("idle ready spec: readHarnessTail() = %q, want empty", got)
+	}
+
+	// Broker-written HarnessDeliveryDisabled suppresses tail even if SCION_HARNESS=claude.
+	t.Setenv(state.HarnessReadyEnv, "")
+	t.Setenv(state.HarnessDeliveryDisabledEnv, "1")
+	if got := readHarnessTail(); got != "" {
+		t.Errorf("delivery disabled: readHarnessTail() = %q, want empty", got)
+	}
+
+	// Older broker without broker-written signals still suppresses tail when SCION_HARNESS=shell.
+	t.Setenv(state.HarnessDeliveryDisabledEnv, "")
 	t.Setenv("SCION_HARNESS", "shell")
 	if got := readHarnessTail(); got != "" {
-		t.Errorf("SCION_HARNESS=shell: readHarnessTail() = %q, want empty", got)
+		t.Errorf("SCION_HARNESS=shell fallback: readHarnessTail() = %q, want empty", got)
 	}
 
 	t.Setenv("SCION_HARNESS", "claude")

@@ -15,14 +15,39 @@
 package hub
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// patchBodyHasOwnerField reports whether a raw JSON PATCH body contains an
+// ownerId or owner_id top-level key (case-insensitive, matching encoding/json).
+// Used by applyAgentUpdate as explicit HTTP-layer defence in depth to refuse
+// ownership transfer attempts on execution containers (ptone/scion#8812 §3.4
+// S8); the store guard in entadapter's buildAgentUpdate is the enforcement
+// point.
+func patchBodyHasOwnerField(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return false
+	}
+	for k := range raw {
+		if strings.EqualFold(k, "ownerId") || strings.EqualFold(k, "owner_id") {
+			return true
+		}
+	}
+	return false
+}
 
 // isShellAgent reports whether agent uses the reserved built-in "shell"
 // harness config (config.ShellHarnessConfigName).
@@ -243,4 +268,111 @@ func shellAgentNotMessageableError(agent *store.Agent) *AgentDMError {
 		Message:    fmt.Sprintf("agent %q is an execution container and cannot receive messages", agentTargetLabel(agent)),
 		HTTPStatus: http.StatusUnprocessableEntity,
 	}
+}
+
+const shellHarnessSwitchRefusalMessage = "cannot switch harness to or from execution container (shell)"
+
+// shellPatchHarnessSwitchError returns a refusal message if a PATCH config
+// payload attempts to switch an agent's harness to or from the reserved
+// built-in "shell" execution container (ptone/scion#8812 §3.4 S7).
+//
+// An unchanged echo of "shell" on an existing shell agent is allowed (and
+// later stripped by dropFixedConfigKeys). Any attempt to set harness_config,
+// harness, or default_harness_config to "shell" on a non-shell agent, or to
+// anything other than "shell" (including clearing it) on a shell agent, is
+// refused outright. Checks the decoded struct directly and uses
+// strings.EqualFold on rawFields so Unicode simple case-folding (e.g. U+017F)
+// matches encoding/json and cannot bypass the check.
+func shellPatchHarnessSwitchError(agent *store.Agent, cfg *api.ScionConfig, rawFields map[string]json.RawMessage) string {
+	if cfg == nil {
+		return ""
+	}
+	isShell := isShellAgent(agent)
+	if !isShell {
+		if strings.EqualFold(strings.TrimSpace(cfg.HarnessConfig), config.ShellHarnessConfigName) ||
+			strings.EqualFold(strings.TrimSpace(cfg.Harness), config.ShellHarnessConfigName) ||
+			strings.EqualFold(strings.TrimSpace(cfg.DefaultHarnessConfig), config.ShellHarnessConfigName) {
+			return shellHarnessSwitchRefusalMessage
+		}
+		return ""
+	}
+	if (cfg.HarnessConfig != "" && cfg.HarnessConfig != config.ShellHarnessConfigName) ||
+		(cfg.Harness != "" && cfg.Harness != config.ShellHarnessConfigName) ||
+		(cfg.DefaultHarnessConfig != "" && cfg.DefaultHarnessConfig != config.ShellHarnessConfigName) {
+		return shellHarnessSwitchRefusalMessage
+	}
+	for k := range rawFields {
+		switch {
+		case strings.EqualFold(k, "harness_config") && cfg.HarnessConfig != config.ShellHarnessConfigName:
+			return shellHarnessSwitchRefusalMessage
+		case strings.EqualFold(k, "harness") && cfg.Harness != config.ShellHarnessConfigName:
+			return shellHarnessSwitchRefusalMessage
+		case strings.EqualFold(k, "default_harness_config") && cfg.DefaultHarnessConfig != config.ShellHarnessConfigName:
+			return shellHarnessSwitchRefusalMessage
+		}
+	}
+	return ""
+}
+
+// shellReincarnateHarnessSwitchError returns a refusal message if a
+// reincarnate request attempts a harness switch on a shell execution container
+// or to the reserved "shell" harness config (ptone/scion#8812 §3.4 S7).
+func shellReincarnateHarnessSwitchError(agent *store.Agent, reqHarnessConfig string) string {
+	if reqHarnessConfig == "" {
+		return ""
+	}
+	if isShellAgent(agent) || strings.EqualFold(strings.TrimSpace(reqHarnessConfig), config.ShellHarnessConfigName) {
+		return shellHarnessSwitchRefusalMessage
+	}
+	return ""
+}
+
+// shellPatchMetadataKeys is the lower-cased allowlist of top-level PATCH
+// /agents/{id} keys that are pure non-launch metadata (or optimistic-lock
+// control) and keep agent.update on a shell execution container
+// (ptone/scion#8812 §3.4 S7). Any other top-level key — including any future
+// field added to the PATCH body — fails closed to owner-human ActionAttach.
+var shellPatchMetadataKeys = map[string]bool{
+	"name":         true,
+	"labels":       true,
+	"annotations":  true,
+	"tasksummary":  true,
+	"stateversion": true,
+}
+
+// shellPatchHasNonMetadataKeys reports whether raw PATCH body contains any
+// top-level JSON key outside shellPatchMetadataKeys. Fails closed (returns
+// true) on malformed JSON so unknown or unparseable payloads require attach.
+func shellPatchHasNonMetadataKeys(body []byte) bool {
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return false
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return true
+	}
+	for k := range top {
+		if !shellPatchMetadataKeys[strings.ToLower(k)] {
+			return true
+		}
+	}
+	return false
+}
+
+// reincarnateRequestHasNonGovernanceFields reports whether req sets any field
+// other than DryRun. Uses reflection over ReincarnateAgentRequest so any
+// future field added to the request struct fails closed to owner-human
+// ActionAttach on a shell execution container (ptone/scion#8812 §3.4 S7).
+func reincarnateRequestHasNonGovernanceFields(req ReincarnateAgentRequest) bool {
+	v := reflect.ValueOf(req)
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		if t.Field(i).Name == "DryRun" {
+			continue
+		}
+		if !v.Field(i).IsZero() {
+			return true
+		}
+	}
+	return false
 }

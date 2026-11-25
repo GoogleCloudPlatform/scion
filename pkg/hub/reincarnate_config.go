@@ -213,6 +213,13 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		CreateInputs: createInputs,
 	}
 
+	// Pin the existing profile for shell execution containers when no explicit
+	// profile was recorded so reincarnate does not re-derive a project active
+	// profile changed by a project admin (ptone/scion#8818).
+	if isShellAgent(agent) && fresh.Profile == "" && old.Profile != "" {
+		fresh.Profile = old.Profile
+	}
+
 	// Kept fields a reincarnate patch replaces. Set before NoAuth is
 	// derived below (role=none implies NoAuth) and before deriveAgentConfig
 	// (GCPIdentity feeds its auto-no-auth check).

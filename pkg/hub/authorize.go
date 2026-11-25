@@ -689,6 +689,12 @@ func (s *Server) agentFullHistoryDecision(ctx context.Context, identity Identity
 // agentFullHistoryDecide is agentFullHistoryDecision for callers that hold
 // an AuthzService but not a Server (the web events stream).
 func agentFullHistoryDecide(ctx context.Context, authz *AuthzService, identity Identity, agent *store.Agent) Decision {
+	// Execution containers hold human CLI credentials (ptone/scion#8812
+	// §3.4 S1/I1): agent principals and delegated agent credentials never
+	// receive full message or log history on an execution container.
+	if isShellAgent(agent) && identity != nil && (isDelegatedAgentIdentity(identity) || identity.Type() == "agent") {
+		return Decision{Allowed: false, Reason: "execution container: human principals only"}
+	}
 	return authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(identity),
 		Credential: credentialContextForIdentity(identity),

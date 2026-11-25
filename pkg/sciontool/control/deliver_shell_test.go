@@ -14,10 +14,34 @@
 
 package control
 
-import "testing"
+import (
+	"testing"
 
-func TestDeliverEnabled_RefusesShellHarness(t *testing.T) {
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+)
+
+func TestDeliverEnabled_RefusesWhenDeliveryDisabledSignalSet(t *testing.T) {
+	// Broker-written SCION_HARNESS_DELIVERY_DISABLED=1 disables delivery even
+	// if SCION_HARNESS in start env claims an LLM harness.
 	getenv := func(k string) string {
+		switch k {
+		case EnvHubExperiments:
+			return ExperimentConduitDeliver
+		case state.HarnessDeliveryDisabledEnv:
+			return "1"
+		case "SCION_HARNESS":
+			return "claude"
+		default:
+			return ""
+		}
+	}
+	if DeliverEnabled(getenv, true) {
+		t.Fatal("DeliverEnabled must return false when SCION_HARNESS_DELIVERY_DISABLED=1, even if SCION_HARNESS=claude")
+	}
+
+	// Older broker without HarnessDeliveryDisabledEnv still refuses delivery
+	// when SCION_HARNESS=shell (version-skew defence in depth).
+	getenvLegacyShell := func(k string) string {
 		switch k {
 		case EnvHubExperiments:
 			return ExperimentConduitDeliver
@@ -27,7 +51,22 @@ func TestDeliverEnabled_RefusesShellHarness(t *testing.T) {
 			return ""
 		}
 	}
-	if DeliverEnabled(getenv, true) {
-		t.Fatal("DeliverEnabled must return false for SCION_HARNESS=shell")
+	if DeliverEnabled(getenvLegacyShell, true) {
+		t.Fatal("DeliverEnabled must return false when SCION_HARNESS=shell (version-skew fallback)")
+	}
+
+	// Normal LLM harness without the broker-written signal enables delivery.
+	getenvLLM := func(k string) string {
+		switch k {
+		case EnvHubExperiments:
+			return ExperimentConduitDeliver
+		case "SCION_HARNESS":
+			return "claude"
+		default:
+			return ""
+		}
+	}
+	if !DeliverEnabled(getenvLLM, true) {
+		t.Fatal("DeliverEnabled must return true for non-shell harness without delivery-disabled signal")
 	}
 }

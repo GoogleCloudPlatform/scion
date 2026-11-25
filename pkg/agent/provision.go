@@ -1615,17 +1615,11 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 	}
 	harnessConfigName := hcResolution.Name
 
-	// If settings/profile resolved harnessConfigName to "shell" after a
-	// template chain was loaded, discard the template chain and rebuild
-	// finalScionCfg from inlineCfg only so no template job keys or paths reach
-	// a shell container.
-	if harnessConfigName == config.ShellHarnessConfigName && len(chain) > 0 {
-		chain = nil
-		templateWarnings = nil
-		finalScionCfg = &api.ScionConfig{}
-		if inlineCfg != nil {
-			finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
-		}
+	// The broker must never resolve "shell" from a template, settings, or
+	// profile default — only when the request explicitly names it
+	// (ptone/scion#8812 §3.2, §14).
+	if harnessConfigName == config.ShellHarnessConfigName && !isShellRequested {
+		return nil, fmt.Errorf("harness-config %q must be requested explicitly and cannot be resolved from %s", config.ShellHarnessConfigName, hcResolution.Source)
 	}
 
 	// Load harness-config from disk (check template dirs first)
@@ -2597,7 +2591,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// See docs-site/src/content/docs/reference/settings-precedence.md.
 	hcImage := hcDir.Config.Image
 	hcPullPolicy := hcDir.Config.ImagePullPolicy
-	if settings != nil {
+	if settings != nil && harnessConfigName != config.ShellHarnessConfigName {
 		if settingsHC, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil {
 			if settingsHC.Image != "" {
 				hcImage = settingsHC.Image
@@ -2854,12 +2848,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// 2e. Merge settings env, volumes and auth if available. The volumes,
 	// like the harness-config image, pull policy and volumes above, are
 	// environment values: kept in the returned config, not persisted
-	// (ptone/scion#4561).
-	if settings != nil {
+	// (ptone/scion#4561). Skipped entirely for the reserved "shell" harness
+	// config so broker settings/profile overlays cannot inject env, volumes,
+	// or auth into an execution container (ptone/scion#8812 §3.2, §14).
+	if settings != nil && harnessConfigName != config.ShellHarnessConfigName {
 		hConfig, err := settings.ResolveHarnessConfig(profileName, harnessConfigName)
 		if err == nil {
 			settingsCfg := &api.ScionConfig{}
-			if hConfig.Env != nil && harnessConfigName != config.ShellHarnessConfigName {
+			if hConfig.Env != nil {
 				settingsCfg.Env, _ = sanitizeHarnessConfigEnv(hConfig.Env, "settings", false)
 			}
 			if hConfig.Volumes != nil {
@@ -4725,6 +4721,77 @@ func minimalAgentConfigFromRecord(info *api.AgentInfo) *api.ScionConfig {
 	return &api.ScionConfig{HarnessConfig: info.HarnessConfig}
 }
 
+// shellFreshProvisionConfig reports whether either the incoming create request
+// or the existing on-disk agent metadata names the reserved "shell" harness
+// config. Only regular scion-agent.json files are read (symlinks are left for
+// handleAgentDirWithoutConfigGuarded to refuse).
+func shellFreshProvisionConfig(agentDir, agentHome, harnessConfig string, inlineConfig []*api.ScionConfig) bool {
+	if harnessConfig == config.ShellHarnessConfigName {
+		return true
+	}
+	if len(inlineConfig) > 0 && inlineConfig[0] != nil {
+		ic := inlineConfig[0]
+		if ic.HarnessConfig == config.ShellHarnessConfigName ||
+			ic.Harness == config.ShellHarnessConfigName ||
+			ic.DefaultHarnessConfig == config.ShellHarnessConfigName {
+			return true
+		}
+	}
+	if config.AgentConfigEntryState(agentDir) == config.AgentConfigRegular {
+		if persisted, err := (&config.Template{Path: agentDir}).LoadConfig(); err == nil && persisted != nil {
+			if persisted.HarnessConfig == config.ShellHarnessConfigName ||
+				persisted.Harness == config.ShellHarnessConfigName ||
+				persisted.DefaultHarnessConfig == config.ShellHarnessConfigName {
+				return true
+			}
+		}
+	}
+	if info := readStoredAgentRecord(agentHome); info != nil {
+		if info.HarnessConfig == config.ShellHarnessConfigName || info.Harness == config.ShellHarnessConfigName {
+			return true
+		}
+	}
+	return false
+}
+
+// wipeShellHomeOnFreshProvisionGuarded clears any populated agent home when a
+// fresh-provision create targets an existing agent directory whose requested or
+// recorded harness config is "shell" (ptone/scion#8812 §3.4 I1/S8). This closes
+// the delete-and-recreate credential takeover path (including after an
+// offline-broker force-delete). Fails closed with config.ErrAgentStateConflict
+// if the home cannot be inspected or safely wiped.
+func wipeShellHomeOnFreshProvisionGuarded(g *agentFilesGuard, agentName, agentDir, agentHome string) error {
+	homes := []string{agentHome}
+	if inDir := filepath.Join(agentDir, "home"); filepath.Clean(inDir) != filepath.Clean(agentHome) {
+		homes = append(homes, inDir)
+	}
+	for _, h := range homes {
+		has, err := dirHasEntries(h)
+		if err != nil {
+			slog.Warn("GetAgent: execution container home could not be inspected on fresh provision; refusing create",
+				"agent", agentName, "agent_dir", agentDir, "home", h, "error", err)
+			return fmt.Errorf("%w: agent %q: refusing to reuse an execution container home that cannot be inspected", config.ErrAgentStateConflict, agentName)
+		}
+		if !has {
+			continue
+		}
+		target, err := g.check(h)
+		if err != nil {
+			return fmt.Errorf("%w: agent %q: refusing to reuse an execution container home: %w", config.ErrAgentStateConflict, agentName, err)
+		}
+		_ = util.MakeWritableRecursive(target)
+		if err := os.RemoveAll(target); err != nil {
+			return fmt.Errorf("%w: agent %q: failed to wipe execution container home: %w", config.ErrAgentStateConflict, agentName, err)
+		}
+		if err := os.MkdirAll(h, 0755); err != nil {
+			return fmt.Errorf("%w: agent %q: failed to recreate empty home: %w", config.ErrAgentStateConflict, agentName, err)
+		}
+		slog.Info("GetAgent: wiped leftover home on fresh provision for execution container",
+			"agent", agentName, "agent_dir", agentDir, "home", h)
+	}
+	return nil
+}
+
 func GetAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, string, *api.ScionConfig, error) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
@@ -4781,6 +4848,18 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	}, func(name string) *agentFilesGuard {
 		return projectAgentFilesGuard(ctx, projectDir, name, filepath.Join(filepath.Dir(agentDir), name))
 	})
+
+	// Execution containers hold human CLI credentials in $HOME (ptone/scion#8812
+	// §3.4 I1/S8): on a fresh-provision create, never reuse a populated home
+	// when either the requested or the recorded harness config is "shell".
+	// Runs before handleAgentDirWithoutConfigGuarded so leftover homes (with or
+	// without scion-agent.json, including after an offline-broker force-delete)
+	// are wiped cleanly.
+	if api.IsFreshProvisionFromContext(ctx) && shellFreshProvisionConfig(agentDir, agentHome, harnessConfig, inlineConfig) {
+		if err := wipeShellHomeOnFreshProvisionGuarded(projectAgentFilesGuard(ctx, projectDir, agentName, agentDir), agentName, agentDir, agentHome); err != nil {
+			return "", "", "", nil, err
+		}
+	}
 
 	// Handle an agent directory that exists but has no config file. See
 	// handleAgentDirWithoutConfigGuarded: a populated home is kept (adopted from

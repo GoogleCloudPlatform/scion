@@ -463,27 +463,22 @@ func (s *deliverStore) put(key string, res deliverResult) {
 
 func (s *deliverStore) len() int { return s.order.Len() }
 
-// IsShellHarness reports whether the container's SCION_HARNESS environment
-// variable selects the reserved built-in "shell" execution container harness.
-func IsShellHarness(getenv func(string) string) bool {
-	if getenv == nil {
-		return false
-	}
-	return strings.TrimSpace(getenv("SCION_HARNESS")) == state.ShellHarnessName
-}
-
 // DeliverEnabled reports whether sciontool should register deliver-message:
 // the agent was launched with ExperimentConduitDeliver in
-// SCION_HUB_EXPERIMENTS (set by the hub at dispatch) and tmux is available
-// (hasTmux). Turning the experiment on later does not reach a running
+// SCION_HUB_EXPERIMENTS (set by the hub at dispatch), tmux is available
+// (hasTmux), and the broker did not disable delivery via the
+// SCION_HARNESS_DELIVERY_DISABLED signal derived from the harness's
+// DeliverySpec. Turning the experiment on later does not reach a running
 // agent: it registers the route only after a restart.
 func DeliverEnabled(getenv func(string) string, hasTmux bool) bool {
 	if !hasTmux {
 		return false
 	}
-	// Harnesses with Delivery: none (e.g. the built-in shell execution
-	// container) never register the deliver-message control route (S5).
-	if IsShellHarness(getenv) {
+	// Harnesses with DeliverySpec.Disabled (e.g. the built-in shell execution
+	// container) never register the deliver-message control route (S5). Keyed
+	// on the broker-written signal OR SCION_HARNESS == "shell" so start env
+	// cannot turn it off while newer images under older brokers stay protected.
+	if state.HarnessDeliveryDisabled(getenv) || state.IsShellHarnessEnv(getenv) {
 		return false
 	}
 	for _, name := range strings.Split(getenv(EnvHubExperiments), ",") {

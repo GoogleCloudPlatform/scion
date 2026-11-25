@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -503,7 +502,7 @@ func newHarnessWatchdogConfig(d harnessWatchdogDeps) harnessWatchdogConfig {
 		cfg.RestoreFromHarnessError = d.StatusHandler.RestoreFromHarnessErrorIf
 		cfg.LastStatusChangeAt = func() (time.Time, bool) { return fileModTime(statusPath) }
 	}
-	if d.CapturePane != nil && !control.IsShellHarness(getenv) {
+	if d.CapturePane != nil && !state.ReadySpecIsIdle(getenv) && !state.HarnessDeliveryDisabled(getenv) && !state.IsShellHarnessEnv(getenv) {
 		uid, gid, capture := d.TargetUID, d.TargetGID, d.CapturePane
 		cfg.PaneTail = func(ctx context.Context) string { return harnessPaneTail(ctx, capture, uid, gid) }
 	}

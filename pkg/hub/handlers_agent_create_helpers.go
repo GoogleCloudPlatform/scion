@@ -1503,6 +1503,26 @@ func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWri
 // when a delete holds the row (409 delete_in_progress).
 // existingAgentNone is returned only when existingAgent is nil, and the
 // caller proceeds with a normal create.
+// adoptExistingAgentBroker assigns runtimeBrokerID to a brokerless existing
+// agent when resuming or starting it. For a shell execution container (L4,
+// ptone/scion#8818), choosing its first broker placement is launch-shaping and
+// requires owner-human ActionAttach via authorizeAgentTargetAction; on denial
+// it writes the error response and returns false.
+func (s *Server) adoptExistingAgentBroker(ctx context.Context, w http.ResponseWriter, existingAgent *store.Agent, runtimeBrokerID string) bool {
+	if existingAgent.RuntimeBrokerID != "" || runtimeBrokerID == "" {
+		return true
+	}
+	if isShellAgent(existingAgent) {
+		identity := GetIdentityFromContext(ctx)
+		if denial := s.authorizeAgentTargetAction(ctx, identity, existingAgent, ActionAttach); denial != nil {
+			writeAgentTargetDenial(w, nil, identity, existingAgent, ActionAttach, denial)
+			return false
+		}
+	}
+	existingAgent.RuntimeBrokerID = runtimeBrokerID
+	return true
+}
+
 func (s *Server) handleExistingAgent(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -1613,8 +1633,8 @@ func (s *Server) handleExistingAgent(
 	// Branch 1: Suspended agents (or agents mid-idle-suspend claim that have not yet settled)
 	// with Resume=true are restarted in-place (not deleted), preserving harness state.
 	if !req.ProvisionOnly && req.Resume && (rest == string(state.PhaseSuspended) || existingAgent.IdleSuspendClaimActive) {
-		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
-			existingAgent.RuntimeBrokerID = runtimeBrokerID
+		if !s.adoptExistingAgentBroker(ctx, w, existingAgent, runtimeBrokerID) {
+			return existingAgentErrored
 		}
 
 		dispatcher := s.GetDispatcher()
@@ -1777,8 +1797,8 @@ func (s *Server) handleExistingAgent(
 
 		resumeInPlace, forcedRecovery := resumeInPlaceDecision(rest, req.Resume, req.ForceResume)
 		if resumeInPlace {
-			if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
-				existingAgent.RuntimeBrokerID = runtimeBrokerID
+			if !s.adoptExistingAgentBroker(ctx, w, existingAgent, runtimeBrokerID) {
+				return existingAgentErrored
 			}
 
 			dispatcher := s.GetDispatcher()
@@ -2062,8 +2082,8 @@ func (s *Server) handleExistingAgent(
 			rest == string(state.PhaseProvisioning)) {
 
 		// Recover RuntimeBrokerID from the freshly-resolved value if the stored one is empty.
-		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
-			existingAgent.RuntimeBrokerID = runtimeBrokerID
+		if !s.adoptExistingAgentBroker(ctx, w, existingAgent, runtimeBrokerID) {
+			return existingAgentErrored
 		}
 
 		dispatcher := s.GetDispatcher()

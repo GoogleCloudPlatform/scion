@@ -103,6 +103,12 @@ func (s *Server) crossAgentEnvViewAllowed(ctx context.Context, identity Identity
 	if isDelegatedAgentIdentity(identity) {
 		return false, false
 	}
+	// Execution containers hold human CLI credentials (ptone/scion#8812
+	// §3.4 S1/I1): no agent principal may reveal an execution container's
+	// persisted environment, even an ancestor or same-project agent.
+	if isShellAgent(agent) && identity.Type() == "agent" {
+		return false, false
+	}
 	if s != nil {
 		if denied, indet, _ := s.installationAgentCrossAgentDenied(ctx, identity, agent); denied {
 			return false, indet

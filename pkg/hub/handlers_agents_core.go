@@ -4908,6 +4908,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
+	// Execution containers hold human CLI credentials (ptone/scion#8812 §3.4 S8):
+	// ownership cannot be changed. Refuse any PATCH that attempts to set or
+	// clear ownerId/owner_id on an execution container.
+	if isShellAgent(agent) && patchBodyHasOwnerField(body) {
+		writeForbidden(w, "execution container: ownership cannot be changed")
+		return
+	}
+
 	// presentConfigKeys mirrors the keys present in the request's raw
 	// "config" JSON object, for recordExplicitEdits' "present keys only"
 	// rule (see its doc comment). Left nil (and therefore inert) when
@@ -4934,6 +4942,26 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 					presentConfigKeys[strings.ToLower(k)] = true
 				}
 			}
+		}
+	}
+
+	// S7 (ptone/scion#8812 §3.4): refuse any harness switch to or from the
+	// reserved built-in "shell" execution container outright, before any
+	// optimistic-lock, phase, or state mutation.
+	if msg := shellPatchHarnessSwitchError(agent, updates.Config, rawFields); msg != "" {
+		ValidationError(w, msg, nil)
+		return
+	}
+
+	// S7 (ptone/scion#8812 §3.4): on a shell execution container, every
+	// top-level PATCH key outside the non-launch metadata allowlist (name,
+	// labels, annotations, taskSummary, stateVersion) requires owner-human
+	// authorization via authorizeAgentTargetAction (ActionAttach), blocking
+	// project admins without attach and all agent principals. Unknown or
+	// future top-level keys fail closed to ActionAttach by default.
+	if isShellAgent(agent) && shellPatchHasNonMetadataKeys(body) {
+		if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
+			return
 		}
 	}
 
@@ -5677,6 +5705,23 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		removeBranch: query.Get("removeBranch") != "false",
 		force:        query.Get("force") == "true",
 		requestedBy:  identity.ID(),
+	}
+	// Execution containers hold human CLI credentials in $HOME (ptone/scion#8812
+	// §3.4 I1/S8): a caller holding agent.delete without attach (such as a
+	// project admin/owner) must not be able to preserve the container's files on
+	// delete and inherit $HOME by creating a same-named agent. Force
+	// deleteFiles=true unless the caller passes ActionAttach; if the attach
+	// decision is indeterminate, fail closed with 503 rather than silently
+	// overwriting the caller's deleteFiles=false choice.
+	if isShellAgent(agent) && !params.deleteFiles {
+		if denial := s.authorizeAgentTargetAction(ctx, identity, agent, ActionAttach); denial != nil {
+			if denial.indeterminate {
+				writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+					"Could not verify execution container attach authorization; retry", nil)
+				return
+			}
+			params.deleteFiles = true
+		}
 	}
 
 	for attempt := 0; ; attempt++ {

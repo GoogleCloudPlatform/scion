@@ -1215,6 +1215,11 @@ func (s *Server) discardAgentPendingConfig(w http.ResponseWriter, r *http.Reques
 	if !s.authorize(w, r, agentResource(agent), ActionUpdate) {
 		return
 	}
+	// S7 (ptone/scion#8812 §3.4): discarding pending launch-config edits on a
+	// shell execution container requires owner-human ActionAttach.
+	if isShellAgent(agent) && !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
+		return
+	}
 	if !agent.DeletedAt.IsZero() {
 		Conflict(w, "The agent is deleted and cannot be edited")
 		return

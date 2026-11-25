@@ -79,13 +79,54 @@ func TestWatchHarnessReady_IdleStrategy(t *testing.T) {
 	}
 }
 
-func TestLivenessAttachedChecker_ShellOnly(t *testing.T) {
-	if fn := livenessAttachedChecker(func(string) string { return "shell" }, 1000, 1000); fn == nil {
-		t.Fatal("expected non-nil checker for SCION_HARNESS=shell")
+func TestLivenessAttachedChecker_IdleReadySpecOnly(t *testing.T) {
+	idleEnv := state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyIdle))
+	// Broker-written ReadyStrategyIdle enables the attached checker even if
+	// SCION_HARNESS in start env claims a different harness.
+	getenvIdle := func(k string) string {
+		switch k {
+		case state.HarnessReadyEnv:
+			return idleEnv
+		case "SCION_HARNESS":
+			return "claude"
+		default:
+			return ""
+		}
 	}
-	for _, h := range []string{"", "claude", "gemini", "generic"} {
-		if fn := livenessAttachedChecker(func(string) string { return h }, 1000, 1000); fn != nil {
-			t.Errorf("expected nil checker for SCION_HARNESS=%q", h)
+	if fn := livenessAttachedChecker(getenvIdle, 1000, 1000); fn == nil {
+		t.Fatal("expected non-nil checker when SCION_HARNESS_READY has strategy idle")
+	}
+
+	// Older broker without SCION_HARNESS_READY still enables the attached
+	// checker when SCION_HARNESS=shell (version-skew fallback).
+	if fn := livenessAttachedChecker(func(k string) string {
+		if k == "SCION_HARNESS" {
+			return "shell"
+		}
+		return ""
+	}, 1000, 1000); fn == nil {
+		t.Fatal("expected non-nil checker for SCION_HARNESS=shell fallback")
+	}
+
+	// Non-idle strategies (and unset/malformed) with non-shell SCION_HARNESS return nil.
+	for _, raw := range []string{
+		"",
+		"not-json",
+		state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyDelay)),
+		state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyHook)),
+	} {
+		getenv := func(k string) string {
+			switch k {
+			case state.HarnessReadyEnv:
+				return raw
+			case "SCION_HARNESS":
+				return "claude"
+			default:
+				return ""
+			}
+		}
+		if fn := livenessAttachedChecker(getenv, 1000, 1000); fn != nil {
+			t.Errorf("expected nil checker for SCION_HARNESS_READY=%q", raw)
 		}
 	}
 }

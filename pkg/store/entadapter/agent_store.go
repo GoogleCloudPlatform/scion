@@ -1024,6 +1024,19 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 	} else {
 		update.SetDeletedAt(a.DeletedAt)
 	}
+	// Execution containers hold human CLI credentials (ptone/scion#8812 §3.4 S8):
+	// changing or clearing owner_id of an execution container is refused at the
+	// store choke point regardless of which handler or internal flow called
+	// UpdateAgent.
+	if prior != nil && (prior.HarnessConfig == config.ShellHarnessConfigName || a.HarnessConfig == config.ShellHarnessConfigName || harnessConfigOf(a.AppliedConfig) == config.ShellHarnessConfigName) {
+		priorOwnerID := ""
+		if prior.OwnerID != nil {
+			priorOwnerID = prior.OwnerID.String()
+		}
+		if a.OwnerID != priorOwnerID {
+			return nil, store.ErrShellAgentOwnerImmutable
+		}
+	}
 	if a.OwnerID == "" {
 		update.ClearOwnerID()
 	} else {

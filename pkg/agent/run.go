@@ -636,7 +636,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	var rawSettingsHCEnv map[string]string
-	if settings != nil && harnessConfigName != "" {
+	if settings != nil && harnessConfigName != "" && harnessConfigName != config.ShellHarnessConfigName {
 		// Settings are resolved against startProfile (see above).
 		settingsProfile := startProfile
 		// The image and pull-policy lookups use the profile recorded in
@@ -1671,12 +1671,16 @@ authDone:
 	if v, set := containerHarnessEnv(ctx, opts.Env, launchedHarnessName(h)); set {
 		opts.Env["SCION_HARNESS"] = v
 	}
-	// The resolved ready spec for sciontool init, which records it in the
-	// init-run file for the host's readiness wait. Always written: the
-	// resolved harness config is the source of truth, and a template value
-	// must not override it.
+	// The resolved ready spec and delivery-disabled signal for sciontool init.
+	// Always written: the resolved harness config is the source of truth, and
+	// a template or start env value must not override them.
 	if h != nil {
 		opts.Env[state.HarnessReadyEnv] = state.FormatReadySpecEnv(h.ReadySpec())
+		if h.DeliverySpec().Disabled {
+			opts.Env[state.HarnessDeliveryDisabledEnv] = "1"
+		} else {
+			delete(opts.Env, state.HarnessDeliveryDisabledEnv)
+		}
 	}
 	// One model channel (ptone/scion#3914): the agent's model is resolved
 	// once, here, and both SCION_MODEL and the harness argv --model
@@ -5004,6 +5008,13 @@ func launchedHarnessName(h api.Harness) string {
 // this value.
 func containerHarnessEnv(ctx context.Context, env map[string]string, launched string) (string, bool) {
 	if override, ok := env["SCION_HARNESS"]; ok {
+		if launched == config.ShellHarnessConfigName {
+			if override != launched {
+				slog.WarnContext(ctx, "Start: ignoring SCION_HARNESS override for reserved shell harness",
+					"override", override, "launched", launched)
+			}
+			return launched, true
+		}
 		if override != launched {
 			slog.WarnContext(ctx, "Start: SCION_HARNESS override differs from the launched harness",
 				"override", override, "launched", launched)
