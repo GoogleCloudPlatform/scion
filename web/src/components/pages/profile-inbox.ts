@@ -164,6 +164,10 @@ export class ScionPageProfileInbox extends LitElement {
   @state()
   private chatOverride: InboxCategory<InboxChatPreview> | null = null;
 
+  /** Filter and preview cap that `chatOverride` was fetched for. */
+  @state()
+  private chatOverrideMeta: { filter: InboxChatFilter; previews: number } | null = null;
+
   @state()
   private chatLoading = false;
 
@@ -656,9 +660,10 @@ export class ScionPageProfileInbox extends LitElement {
     if (filter === this.chatFilter && !this.chatError) return;
     this.chatFilter = filter;
     this.syncChatFilterToUrl(filter);
+    this.chatOverride = null;
+    this.chatOverrideMeta = null;
     if (filter === 'all' && !this.chatExpanded) {
       this.abortChatFetch();
-      this.chatOverride = null;
       this.chatLoading = false;
       this.chatError = false;
       return;
@@ -669,9 +674,10 @@ export class ScionPageProfileInbox extends LitElement {
   private toggleChatExpanded(expanded: boolean): void {
     if (expanded === this.chatExpanded) return;
     this.chatExpanded = expanded;
+    this.chatOverride = null;
+    this.chatOverrideMeta = null;
     if (!expanded && this.chatFilter === 'all') {
       this.abortChatFetch();
-      this.chatOverride = null;
       this.chatLoading = false;
       this.chatError = false;
       return;
@@ -713,6 +719,7 @@ export class ScionPageProfileInbox extends LitElement {
       if (seq !== this.chatFetchSeq || !this.isConnected) return;
       if (data?.categories?.chat) {
         this.chatOverride = data.categories.chat;
+        this.chatOverrideMeta = { filter, previews };
       }
     } catch (err) {
       if (seq !== this.chatFetchSeq || !this.isConnected) return;
@@ -720,7 +727,9 @@ export class ScionPageProfileInbox extends LitElement {
       this.chatError = true;
     } finally {
       if (seq === this.chatFetchSeq) {
-        this.chatLoading = false;
+        if (this.isConnected) {
+          this.chatLoading = false;
+        }
         if (this.chatAbortController === controller) {
           this.chatAbortController = null;
         }
@@ -930,7 +939,12 @@ export class ScionPageProfileInbox extends LitElement {
         </div>
         ${inline
           ? html`
-              <div class="decision-choices" data-decision-inline=${item.id}>
+              <div
+                class="decision-choices"
+                role="group"
+                aria-label=${item.question || 'Pending decision'}
+                data-decision-inline=${item.id}
+              >
                 ${inline.choices.map((choice) => {
                   const key = `${item.id}:${choice.id}`;
                   return html`
@@ -1038,11 +1052,19 @@ export class ScionPageProfileInbox extends LitElement {
     baseCat: InboxCategory<InboxChatPreview>
   ): TemplateResult | typeof nothing {
     const usingPageLocal = this.chatFilter !== 'all' || this.chatExpanded;
+    const desiredPreviews = this.chatExpanded ? INBOX_CHAT_EXPANDED_PREVIEWS : INBOX_PAGE_PREVIEWS;
+    const hasMatchingOverride =
+      this.chatOverride !== null &&
+      this.chatOverrideMeta?.filter === this.chatFilter &&
+      this.chatOverrideMeta?.previews === desiredPreviews;
+
     const effectiveCat: InboxCategory<InboxChatPreview> =
       usingPageLocal && this.chatError
         ? { ...baseCat, state: 'error', previews: [] }
-        : usingPageLocal && this.chatOverride
-          ? this.chatOverride
+        : usingPageLocal
+          ? hasMatchingOverride
+            ? this.chatOverride!
+            : { ...baseCat, previews: [] }
           : baseCat;
 
     const breakdown = effectiveCat.breakdown ?? baseCat.breakdown;
@@ -1061,7 +1083,7 @@ export class ScionPageProfileInbox extends LitElement {
           : allCount;
 
     const chips =
-      baseCat.state === 'ok' && effectiveCat.state === 'ok' && effectiveCat.count > 0
+      baseCat.state === 'ok' && baseCat.count > 0
         ? html`
             <div class="card-subbar" role="group" aria-label="Filter unread chat" data-chat-chips>
               ${(
@@ -1088,6 +1110,37 @@ export class ScionPageProfileInbox extends LitElement {
           `
         : nothing;
 
+    const expandFooter =
+      activeFilterCount > INBOX_PAGE_PREVIEWS || this.chatExpanded
+        ? html`
+            <div class="card-footer-action">
+              ${this.chatExpanded
+                ? html`
+                    <sl-button
+                      size="small"
+                      variant="text"
+                      ?loading=${this.chatLoading}
+                      data-chat-collapse-btn
+                      @click=${(): void => this.toggleChatExpanded(false)}
+                    >
+                      Show fewer
+                    </sl-button>
+                  `
+                : html`
+                    <sl-button
+                      size="small"
+                      variant="text"
+                      ?loading=${this.chatLoading}
+                      data-chat-expand-btn
+                      @click=${(): void => this.toggleChatExpanded(true)}
+                    >
+                      Show more
+                    </sl-button>
+                  `}
+            </div>
+          `
+        : nothing;
+
     return this.renderInboxCard({
       key: 'chat',
       icon: 'chat-dots',
@@ -1109,6 +1162,7 @@ export class ScionPageProfileInbox extends LitElement {
               <sl-spinner></sl-spinner>
               <span>Loading conversations…</span>
             </div>
+            ${this.chatExpanded ? expandFooter : nothing}
           `;
         }
         if (c.previews.length === 0) {
@@ -1118,41 +1172,16 @@ export class ScionPageProfileInbox extends LitElement {
               : this.chatFilter === 'mentions'
                 ? 'No unread mentions'
                 : 'Nothing waiting';
-          return html`<p class="card-empty" data-chat-filter-empty>${emptyText}</p>`;
+          return html`
+            <p class="card-empty" data-chat-filter-empty>${emptyText}</p>
+            ${this.chatExpanded ? expandFooter : nothing}
+          `;
         }
         return html`
           <ul class="preview-list">
             ${c.previews.map((item) => this.renderChatRow(item))}
           </ul>
-          ${activeFilterCount > INBOX_PAGE_PREVIEWS
-            ? html`
-                <div class="card-footer-action">
-                  ${this.chatExpanded
-                    ? html`
-                        <sl-button
-                          size="small"
-                          variant="text"
-                          ?loading=${this.chatLoading}
-                          data-chat-collapse-btn
-                          @click=${(): void => this.toggleChatExpanded(false)}
-                        >
-                          Show fewer
-                        </sl-button>
-                      `
-                    : html`
-                        <sl-button
-                          size="small"
-                          variant="text"
-                          ?loading=${this.chatLoading}
-                          data-chat-expand-btn
-                          @click=${(): void => this.toggleChatExpanded(true)}
-                        >
-                          Show more
-                        </sl-button>
-                      `}
-                </div>
-              `
-            : nothing}
+          ${expandFooter}
         `;
       },
     });

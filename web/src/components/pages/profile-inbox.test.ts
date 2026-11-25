@@ -35,6 +35,7 @@ import {
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
+import { showToast } from '../../utils/toast.js';
 
 function makeSummaryResponse(
   approvals: InboxSummaryResponse['categories']['approvals'],
@@ -113,6 +114,7 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     resetProfileDecisionProbeCacheForTests();
     inboxSummaryStore.resetForTests();
     window.history.replaceState({}, '', '/profile/inbox');
+    vi.mocked(showToast).mockClear();
     fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal('fetch', fetchMock);
   });
@@ -657,7 +659,10 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
       await flush();
       await page.updateComplete;
 
-      // allowsOther renders an "Other…" drill-in link to the preview href.
+      // allowsOther renders an "Other…" drill-in link to the preview href, and choice group is labelled for a11y.
+      const inlineGroup = page.shadowRoot?.querySelector('[data-decision-inline="msg-single"]');
+      expect(inlineGroup?.getAttribute('role')).toBe('group');
+      expect(inlineGroup?.getAttribute('aria-label')).toBe('Deploy v2?');
       const otherLink = page.shadowRoot?.querySelector('[data-decision-other-link="msg-single"]');
       expect(otherLink?.getAttribute('href')).toBe('/chat/space/p-1/thread/t-1#msg-msg-single');
 
@@ -922,5 +927,484 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     );
     const mentionsChip = page.shadowRoot?.querySelector('[data-chat-chip="mentions"]');
     expect(mentionsChip?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('aborts superseded chat filter fetches and drops out-of-order responses without showing stale rows', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const dmPreview = {
+      id: 'dm:u1:a1',
+      kind: 'dm' as const,
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:50:00Z',
+      href: '/chat/dm/dm%3Au1%3Aa1',
+      conversationKey: 'dm:u1:a1',
+      label: 'deploy-bot',
+      lastMessageAt: '2026-11-23T17:50:00Z',
+    };
+    const mentionPreview = {
+      id: 'topic-m',
+      kind: 'mention' as const,
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:45:00Z',
+      href: '/chat/core/topic-m',
+      conversationKey: 'topic-m',
+      label: '#alerts',
+      lastMessageAt: '2026-11-23T17:45:00Z',
+    };
+    const breakdown = { dms: 1, mentions: 1, unreadConversations: 2 };
+    const chatResponse = (previews: (typeof dmPreview | typeof mentionPreview)[]): Response =>
+      new Response(
+        JSON.stringify(
+          makeSummaryResponse(
+            {
+              state: 'disabled',
+              count: 0,
+              capped: false,
+              countsTowardTotal: true,
+              href: '/profile/secrets',
+              previews: [],
+            },
+            {
+              chat: {
+                state: 'ok',
+                count: 2,
+                capped: false,
+                countsTowardTotal: true,
+                href: '/chat',
+                breakdown,
+                previews,
+              },
+            }
+          )
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+
+    let dmsSignal: AbortSignal | undefined;
+    let resolveDms: ((r: Response) => void) | null = null;
+    let resolveMentions: ((r: Response) => void) | null = null;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.includes('chat=dms')) {
+        dmsSignal = init?.signal ?? undefined;
+        return new Promise<Response>((resolve) => {
+          resolveDms = resolve;
+        });
+      }
+      if (url.includes('chat=mentions')) {
+        return new Promise<Response>((resolve) => {
+          resolveMentions = resolve;
+        });
+      }
+      return Promise.resolve(chatResponse([dmPreview, mentionPreview]));
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const chatCard = page.shadowRoot?.querySelector('[data-inbox-card="chat"]');
+    const dmsChip = chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="dms"]');
+    const mentionsChip = chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="mentions"]');
+
+    // Click DMs -> loading placeholder shown, no stale rows from All.
+    dmsChip!.click();
+    await page.updateComplete;
+    expect(chatCard?.querySelector('[data-chat-loading]')).not.toBeNull();
+    expect(chatCard?.querySelector('[data-chat-kind="dm"]')).toBeNull();
+    expect(dmsSignal).toBeDefined();
+    expect(dmsSignal?.aborted).toBe(false);
+
+    // Click Mentions before DMs resolves -> DMs request is aborted, loading shown with no DM rows.
+    mentionsChip!.click();
+    await page.updateComplete;
+    expect(dmsSignal?.aborted).toBe(true);
+    expect(chatCard?.querySelector('[data-chat-loading]')).not.toBeNull();
+    expect(chatCard?.querySelector('[data-chat-kind="dm"]')).toBeNull();
+
+    // Resolve Mentions first, then resolve the stale DMs response second.
+    resolveMentions!(chatResponse([mentionPreview]));
+    await flush();
+    await page.updateComplete;
+    expect(chatCard?.querySelectorAll('[data-chat-row]').length).toBe(1);
+    expect(chatCard?.querySelector('[data-chat-row="topic-m"]')).not.toBeNull();
+
+    resolveDms!(chatResponse([dmPreview]));
+    await flush();
+    await page.updateComplete;
+    expect(chatCard?.querySelectorAll('[data-chat-row]').length).toBe(1);
+    expect(chatCard?.querySelector('[data-chat-row="topic-m"]')).not.toBeNull();
+    expect(chatCard?.querySelector('[data-chat-kind="dm"]')).toBeNull();
+  });
+
+  it('aborts an in-flight chat fetch on disconnect and ignores late responses', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    let dmsSignal: AbortSignal | undefined;
+    let resolveDms: ((r: Response) => void) | null = null;
+    const baseSummary = makeSummaryResponse(
+      {
+        state: 'disabled',
+        count: 0,
+        capped: false,
+        countsTowardTotal: true,
+        href: '/profile/secrets',
+        previews: [],
+      },
+      {
+        chat: {
+          state: 'ok',
+          count: 1,
+          capped: false,
+          countsTowardTotal: true,
+          href: '/chat',
+          breakdown: { dms: 1, mentions: 0, unreadConversations: 1 },
+          previews: [
+            {
+              id: 'dm:u1:a1',
+              kind: 'dm',
+              projectId: 'p-1',
+              projectName: 'Core',
+              createdAt: '2026-11-23T17:50:00Z',
+              href: '/chat/dm/dm%3Au1%3Aa1',
+              conversationKey: 'dm:u1:a1',
+              label: 'deploy-bot',
+              lastMessageAt: '2026-11-23T17:50:00Z',
+            },
+          ],
+        },
+      }
+    );
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.includes('chat=dms')) {
+        dmsSignal = init?.signal ?? undefined;
+        return new Promise<Response>((resolve) => {
+          resolveDms = resolve;
+        });
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(baseSummary), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    page.shadowRoot?.querySelector<HTMLButtonElement>('[data-chat-chip="dms"]')?.click();
+    await page.updateComplete;
+    expect(dmsSignal?.aborted).toBe(false);
+
+    // Disconnect mid-fetch -> signal is aborted; late resolution does not trigger state updates.
+    const requestUpdateSpy = vi.spyOn(page, 'requestUpdate');
+    page.remove();
+    expect(dmsSignal?.aborted).toBe(true);
+
+    resolveDms!(
+      new Response(JSON.stringify(baseSummary), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    await flush();
+    expect(requestUpdateSpy).not.toHaveBeenCalled();
+  });
+
+  it('refetches filtered chat view when store summary updates, keeps chips on error, and always allows collapsing', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const makePreview = (
+      id: string,
+      kind: 'dm' | 'mention' | 'thread',
+      label: string
+    ): InboxSummaryResponse['categories']['chat']['previews'][number] => ({
+      id,
+      kind,
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:50:00Z',
+      href: kind === 'dm' ? `/chat/dm/${id}` : `/chat/core/${id}`,
+      conversationKey: id,
+      label,
+      lastMessageAt: '2026-11-23T17:50:00Z',
+    });
+
+    let unreadCount = 5;
+    let failMentions = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.includes('chat=mentions') && failMentions) {
+        return Promise.resolve(new Response('boom', { status: 500 }));
+      }
+      const previews =
+        unreadCount <= 2
+          ? [makePreview('dm:1', 'dm', 'bot-1'), makePreview('t:1', 'thread', '#general')]
+          : [
+              makePreview('dm:1', 'dm', 'bot-1'),
+              makePreview('t:1', 'mention', '#alerts'),
+              makePreview('t:2', 'thread', '#general'),
+            ];
+      return Promise.resolve(
+        new Response(
+          JSON.stringify(
+            makeSummaryResponse(
+              {
+                state: 'disabled',
+                count: 0,
+                capped: false,
+                countsTowardTotal: true,
+                href: '/profile/secrets',
+                previews: [],
+              },
+              {
+                chat: {
+                  state: 'ok',
+                  count: unreadCount,
+                  capped: false,
+                  countsTowardTotal: true,
+                  href: '/chat',
+                  breakdown: { dms: 1, mentions: 1, unreadConversations: unreadCount },
+                  previews,
+                },
+              }
+            )
+          ),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const chatCard = page.shadowRoot?.querySelector('[data-inbox-card="chat"]');
+
+    // Item 3: a failed filtered fetch keeps chips visible so the user can switch back to All.
+    failMentions = true;
+    chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="mentions"]')?.click();
+    await flush();
+    await page.updateComplete;
+
+    expect(chatCard?.querySelector('[data-card-error]')).not.toBeNull();
+    expect(chatCard?.querySelector('[data-chat-chips]')).not.toBeNull();
+
+    // Switching back to All recovers cleanly from the error state.
+    chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="all"]')?.click();
+    await page.updateComplete;
+    expect(chatCard?.querySelector('[data-card-error]')).toBeNull();
+    expect(chatCard?.querySelectorAll('[data-chat-row]').length).toBe(3);
+
+    // Item 1: store-change refetch while filtered.
+    chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="dms"]')?.click();
+    await flush();
+    await page.updateComplete;
+    const dmsCallsBefore = fetchMock.mock.calls.filter((c) =>
+      urlOf(c[0]).includes('chat=dms')
+    ).length;
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await page.updateComplete;
+    const dmsCallsAfter = fetchMock.mock.calls.filter((c) =>
+      urlOf(c[0]).includes('chat=dms')
+    ).length;
+    expect(dmsCallsAfter).toBeGreaterThan(dmsCallsBefore);
+
+    // Item 4: expand while count > 3, then drop count to 2 -> "Show fewer" stays visible.
+    chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="all"]')?.click();
+    await page.updateComplete;
+    chatCard?.querySelector<HTMLElement>('[data-chat-expand-btn]')?.click();
+    await flush();
+    await page.updateComplete;
+    expect(chatCard?.querySelector('[data-chat-collapse-btn]')).not.toBeNull();
+
+    unreadCount = 2;
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await page.updateComplete;
+    const collapseBtn = chatCard?.querySelector<HTMLElement>('[data-chat-collapse-btn]');
+    expect(collapseBtn).not.toBeNull();
+
+    collapseBtn!.click();
+    await page.updateComplete;
+    expect(chatCard?.querySelector('[data-chat-collapse-btn]')).toBeNull();
+  });
+
+  it('guards inline decision answers against double-clicks and shows error toasts for 0, 403, and 409', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const decision = {
+      id: 'msg-err',
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:00:00Z',
+      href: '/chat/space/p-1/thread/t-1#msg-msg-err',
+      promptMessageId: 'msg-err',
+      conversationLabel: '#release',
+      askerAgentName: 'release-bot',
+      question: 'Proceed?',
+      decisionCount: 1,
+      answerMode: 'single',
+      canAnswer: true,
+      inline: {
+        decisionRowId: 'row-err',
+        choices: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+        allowsOther: false,
+      },
+    };
+    const summary = makeSummaryResponse(
+      {
+        state: 'disabled',
+        count: 0,
+        capped: false,
+        countsTowardTotal: true,
+        href: '/profile/secrets',
+        previews: [],
+      },
+      {
+        decisions: {
+          state: 'ok',
+          count: 1,
+          capped: false,
+          countsTowardTotal: true,
+          href: '/profile/decisions?tab=pending',
+          previews: [decision],
+        },
+      }
+    );
+
+    let answerMode: 'defer' | 'network' | '403' | 'already_answered' | 'replaced' = 'defer';
+    let resolveDeferredAnswer: ((r: Response) => void) | null = null;
+    let answerPosts = 0;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(summary), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      if (url.endsWith('/api/v1/decisions/row-err/answer') && init?.method === 'POST') {
+        answerPosts += 1;
+        if (answerMode === 'defer') {
+          return new Promise<Response>((resolve) => {
+            resolveDeferredAnswer = resolve;
+          });
+        }
+        if (answerMode === 'network') {
+          return Promise.reject(new TypeError('offline'));
+        }
+        if (answerMode === '403') {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ error: { code: 'message_denied', message: 'Not allowed' } }),
+              { status: 403, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: { code: answerMode, message: `Decision was ${answerMode}` },
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const yesBtn = page.shadowRoot?.querySelector<HTMLElement>(
+      '[data-decision-row="msg-err"] [data-decision-choice-btn="yes"]'
+    );
+    const noBtn = page.shadowRoot?.querySelector<HTMLElement>(
+      '[data-decision-row="msg-err"] [data-decision-choice-btn="no"]'
+    );
+
+    // Double-click guard: clicking twice (and another choice) while in flight sends only 1 POST.
+    yesBtn!.click();
+    yesBtn!.click();
+    noBtn!.click();
+    await page.updateComplete;
+    expect(answerPosts).toBe(1);
+
+    resolveDeferredAnswer!(
+      new Response(
+        JSON.stringify({ error: { code: 'already_answered', message: 'Already done' } }),
+        {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      )
+    );
+    await flush();
+    expect(showToast).toHaveBeenLastCalledWith('Already done', 'neutral');
+
+    // Status 0 (network error) -> danger toast.
+    answerMode = 'network';
+    yesBtn!.click();
+    await flush();
+    expect(showToast).toHaveBeenLastCalledWith(expect.stringContaining('Network error'), 'danger');
+
+    // 403 -> danger toast.
+    answerMode = '403';
+    yesBtn!.click();
+    await flush();
+    expect(showToast).toHaveBeenLastCalledWith('Not allowed', 'danger');
+
+    // 409 replaced -> neutral toast and store refresh.
+    const summaryCallsBefore = fetchMock.mock.calls.filter((c) =>
+      urlOf(c[0]).includes('/api/v1/users/me/inbox/summary')
+    ).length;
+    answerMode = 'replaced';
+    yesBtn!.click();
+    await flush();
+    expect(showToast).toHaveBeenLastCalledWith('Decision was replaced', 'neutral');
+    const summaryCallsAfter = fetchMock.mock.calls.filter((c) =>
+      urlOf(c[0]).includes('/api/v1/users/me/inbox/summary')
+    ).length;
+    expect(summaryCallsAfter).toBeGreaterThan(summaryCallsBefore);
   });
 });
