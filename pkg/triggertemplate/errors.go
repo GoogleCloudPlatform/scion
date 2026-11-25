@@ -42,6 +42,12 @@ var (
 	ErrUnknownSlot = errors.New("unknown template slot")
 	// ErrSlotExists is returned by Register when a slot name is already registered.
 	ErrSlotExists = errors.New("template slot already registered")
+	// ErrPayloadOutOfLine is returned by a Vars.Lookup implementation for
+	// event.payload.* paths when the event body is stored out of line (§8):
+	// optional placeholders (${event.payload.x?}) render empty while required
+	// placeholders (${event.payload.x}) fail with KindValueMissing and reason
+	// "payload stored out of line".
+	ErrPayloadOutOfLine = errors.New("payload stored out of line")
 )
 
 // ParseError represents an authoring-time syntax, phase, or placeholder-cap

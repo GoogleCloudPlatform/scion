@@ -543,6 +543,9 @@ func buildGitHubCommentTemplateVars(ev *hubfire.FireEvent, project *store.Projec
 		fixed["event.attributes."+k] = v
 	}
 
+	if ev.PayloadRef != "" {
+		return triggertemplate.ChainVars(fixed, payloadErrorVars{err: triggertemplate.ErrPayloadOutOfLine})
+	}
 	if len(ev.Payload) > 0 {
 		if pv, err := triggertemplate.NewPayloadVars(ev.Payload); err == nil {
 			return triggertemplate.ChainVars(fixed, pv)

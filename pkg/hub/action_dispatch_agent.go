@@ -987,7 +987,9 @@ func buildDispatchTemplateVars(req hubfire.FireRequest, da *dispatchAgentAuthori
 	}
 
 	var payloadVars triggertemplate.Vars
-	if len(ev.Payload) > 0 && len(ev.Payload) <= trigger.MaxPayloadBytes {
+	if ev.PayloadRef != "" {
+		payloadVars = payloadErrorVars{err: triggertemplate.ErrPayloadOutOfLine}
+	} else if len(ev.Payload) > 0 && len(ev.Payload) <= trigger.MaxPayloadBytes {
 		pv, err := triggertemplate.NewPayloadVars(ev.Payload)
 		if err != nil {
 			payloadVars = payloadErrorVars{err: err}
@@ -1109,7 +1111,9 @@ func (a *dispatchAgentAction) refuseTemplateRender(ctx context.Context, req hubf
 			slot = re.Slot
 		}
 		path = re.Path
-		if re.Kind != "" {
+		if re.Reason == triggertemplate.ErrPayloadOutOfLine.Error() {
+			reason = triggertemplate.ErrPayloadOutOfLine.Error()
+		} else if re.Kind != "" {
 			reason = string(re.Kind)
 		}
 	case errors.As(err, &ue):

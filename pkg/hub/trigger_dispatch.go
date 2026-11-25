@@ -1156,11 +1156,12 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 		body.Lists = copyTriggerStringListMap(ev.Lists)
 	}
 	if ev.PayloadRef != "" {
+		preview := ev.PayloadPreview
 		totalBytes := ev.PayloadBytes
 		if totalBytes <= 0 {
-			totalBytes = len(ev.Payload)
+			totalBytes = len(preview)
 		}
-		body.External = messaging.NewTruncatedExternalPayload(verified, ev.Payload, totalBytes)
+		body.External = messaging.NewTruncatedExternalPayload(verified, preview, totalBytes)
 	} else if len(ev.Payload) > 0 {
 		body.External = messaging.NewExternalPayload(verified, ev.Payload)
 	}

@@ -360,10 +360,208 @@ func TestTriggerOverflow_AcceptanceItem10_EndToEnd(t *testing.T) {
 			Status:       store.TriggerEventStatusProcessed,
 		}))
 	}
-	// Fresh ingress instance (empty 1m cache) queries DB and enforces 256 MiB cap -> 429 queue full.
+	// Fresh ingress instance queries DB and enforces 256 MiB cap -> 429 queue full.
 	f.srv.webhookIngress = newWebhookIngress(f.srv, nil)
 	rec429 := postSigned("deliv-over-budget", "big_build", body900K)
 	assert.Equal(t, http.StatusTooManyRequests, rec429.Code, rec429.Body.String())
 	assert.Equal(t, "30", rec429.Header().Get("Retry-After"))
 	assert.Contains(t, rec429.Body.String(), "queue full")
+}
+
+// TestTriggerOverflow_TemplatingOptionalAndRequired_FireAndRenderParity verifies O2:
+// for overflow events, ${event.payload.x?} renders empty and required ${event.payload.x}
+// refuses with "payload stored out of line", identically at fire time and in POST /render.
+func TestTriggerOverflow_TemplatingOptionalAndRequired_FireAndRenderParity(t *testing.T) {
+	ctx := context.Background()
+	f := newSchedFire(t, "s2-p5-o2")
+	enableTriggersExperimentForTest(t, f.srv, true)
+
+	localStor, err := storage.NewLocal(storage.Config{
+		Provider:  storage.ProviderLocal,
+		Bucket:    "hub-o2-test",
+		LocalPath: t.TempDir(),
+	})
+	require.NoError(t, err)
+	f.srv.SetStorage(localStor)
+
+	fakeBroker := &overflowFakeBrokerClient{}
+	f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.store, fakeBroker, false, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	broker, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
+	require.NoError(t, err)
+	broker.Capabilities = &store.BrokerCapabilities{HomeFiles: true}
+	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, broker))
+
+	ownerIdent := NewAuthenticatedUser(f.creator.ID, f.creator.Email, f.creator.DisplayName, f.creator.Role, "web")
+	ownerCtx := contextWithCredentialContext(contextWithIdentity(ctx, ownerIdent), credentialContextForIdentity(ownerIdent))
+
+	doJSON := func(method, path string, body any) *httptest.ResponseRecorder {
+		var buf bytes.Buffer
+		if body != nil {
+			require.NoError(t, json.NewEncoder(&buf).Encode(body))
+		}
+		req := httptest.NewRequest(method, path, &buf)
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(ownerCtx)
+		rec := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	epRec := doJSON(http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/webhook-endpoints", f.proj.ID),
+		map[string]any{"name": "o2-ep", "maxBodyBytes": 1024 * 1024})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// Trigger A: optional ${event.payload.repo?} -> must succeed with empty expansion.
+	recOpt := doJSON(http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/triggers", f.proj.ID), CreateTriggerRequest{
+		Name:   "o2-optional-payload",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Types: []string{"webhook.o2"}},
+		Action: TriggerActionSpec{
+			Type:          store.TriggerActionDispatchAgent,
+			Template:      "default",
+			Task:          "Repo=[${event.payload.repo?}] Event=${event.id}",
+			UntrustedVars: []string{"event.payload.repo"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, recOpt.Code, recOpt.Body.String())
+	var trOpt TriggerResponse
+	require.NoError(t, json.Unmarshal(recOpt.Body.Bytes(), &trOpt))
+
+	// Trigger B: required ${event.payload.repo} -> must refuse with "payload stored out of line".
+	recReq := doJSON(http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/triggers", f.proj.ID), CreateTriggerRequest{
+		Name:   "o2-required-payload",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Types: []string{"webhook.o2"}},
+		Action: TriggerActionSpec{
+			Type:          store.TriggerActionDispatchAgent,
+			Template:      "default",
+			Task:          "Repo=${event.payload.repo}",
+			UntrustedVars: []string{"event.payload.repo"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, recReq.Code, recReq.Body.String())
+	var trReq TriggerResponse
+	require.NoError(t, json.Unmarshal(recReq.Body.Bytes(), &trReq))
+
+	// Send a 900 KiB overflow event.
+	body900K := makeOverflowTestJSON(900 * 1024)
+	now := time.Now().UTC()
+	reqHook := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ep.ID, bytes.NewReader(body900K))
+	reqHook.Header.Set("Content-Type", "application/json")
+	reqHook.Header.Set(trigger.HeaderDelivery, "o2-deliv-1")
+	reqHook.Header.Set(trigger.HeaderEvent, "o2")
+	reqHook.Header.Set(trigger.HeaderSignature, trigger.SignScionV1(ep.Secret, now.Unix(), "o2-deliv-1", "o2", "", body900K))
+	hookRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(hookRec, reqHook)
+	require.Equal(t, http.StatusAccepted, hookRec.Code, hookRec.Body.String())
+	var ingResp trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(hookRec.Body.Bytes(), &ingResp))
+	evID := ingResp.EventID
+
+	// 1. Render preview parity:
+	//    - Optional trigger renders cleanly with "Repo=[] Event=<evID>".
+	rOpt := doJSON(http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/triggers/%s/render?eventId=%s", f.proj.ID, trOpt.ID, evID), nil)
+	require.Equal(t, http.StatusOK, rOpt.Code, rOpt.Body.String())
+	var renderOpt TriggerRenderResponse
+	require.NoError(t, json.Unmarshal(rOpt.Body.Bytes(), &renderOpt))
+	assert.Empty(t, renderOpt.Errors)
+	require.NotNil(t, renderOpt.Slots.Task)
+	assert.Contains(t, renderOpt.Slots.Task.Rendered, "Repo=[] Event="+evID)
+
+	//    - Required trigger reports "payload stored out of line".
+	rReq := doJSON(http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/triggers/%s/render?eventId=%s", f.proj.ID, trReq.ID, evID), nil)
+	require.Equal(t, http.StatusOK, rReq.Code, rReq.Body.String())
+	var renderReq TriggerRenderResponse
+	require.NoError(t, json.Unmarshal(rReq.Body.Bytes(), &renderReq))
+	require.NotEmpty(t, renderReq.Errors)
+	assert.Contains(t, renderReq.Errors[0].Message, "payload stored out of line")
+
+	// 2. Drain / Fire parity:
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Store:         f.store,
+		Core:          serverTriggerCore{srv: f.srv},
+		Storage:       f.srv.GetStorage,
+		SubjectClaims: trigger.NewSubjectClaims(f.store, f.store, nil),
+		Rules:         f.srv.TriggerRules(),
+	})
+	require.NoError(t, err)
+	dqStore, ok := f.store.(store.DurableQueueStore)
+	require.True(t, ok)
+	claimNow := time.Now().UTC().Add(time.Second)
+	rows, err := dqStore.ClaimDurableItems(ctx, trigger.EventQueueKind, "o2-test", claimNow, claimNow.Add(time.Minute), 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	it := durablequeue.Item{Seq: rows[0].Seq, Kind: rows[0].Kind, DedupKey: rows[0].DedupKey, Payload: rows[0].Payload, Attempts: rows[0].Attempts}
+	res := disp.HandleItem(ctx, it, nil)
+	require.True(t, res.Done)
+
+	// Optional trigger fired and expanded ${event.payload.repo?} to empty.
+	optFires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: f.proj.ID, TriggerID: trOpt.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, optFires.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, optFires.Items[0].Status)
+	fakeBroker.mu.Lock()
+	require.Len(t, fakeBroker.createdReqs, 1)
+	assert.Contains(t, fakeBroker.createdReqs[0].Config.Task, "Repo=[] Event="+evID)
+	fakeBroker.mu.Unlock()
+
+	// Required trigger was refused with "payload stored out of line".
+	reqFires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: f.proj.ID, TriggerID: trReq.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, reqFires.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusRefused, reqFires.Items[0].Status)
+	assert.Contains(t, reqFires.Items[0].Error, "payload stored out of line")
+}
+
+// TestTriggerOverflow_StreamPayload_RejectsCrossProjectRef pins O5:
+// even if a trigger_events row in projA carries a tampered payload_ref pointing
+// to an object belonging to another project, GET ?payload=1 must fail closed.
+func TestTriggerOverflow_StreamPayload_RejectsCrossProjectRef(t *testing.T) {
+	ctx := context.Background()
+	f := newSchedFire(t, "s2-p5-o5")
+	enableTriggersExperimentForTest(t, f.srv, true)
+
+	localStor, err := storage.NewLocal(storage.Config{
+		Provider:  storage.ProviderLocal,
+		Bucket:    "hub-o5-test",
+		LocalPath: t.TempDir(),
+	})
+	require.NoError(t, err)
+	f.srv.SetStorage(localStor)
+
+	otherProjectID := uuid.NewString()
+	evID := uuid.NewString()
+	crossRef, err := trigger.OverflowPayloadObjectPath(otherProjectID, evID)
+	require.NoError(t, err)
+	_, err = localStor.Upload(ctx, crossRef, strings.NewReader(`{"secret":"other-project"}`), storage.UploadOptions{ContentType: "application/json"})
+	require.NoError(t, err)
+
+	// Plant a row in f.proj.ID with PayloadRef pointing to otherProjectID's object.
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:           evID,
+		ProjectID:    f.proj.ID,
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     uuid.NewString(),
+		Type:         "webhook.received",
+		Subject:      "webhook:test",
+		DedupKey:     "o5-cross-ref",
+		OccurredAt:   time.Now().UTC(),
+		ReceivedAt:   time.Now().UTC(),
+		PayloadRef:   crossRef,
+		PayloadBytes: 26,
+		Status:       store.TriggerEventStatusProcessed,
+	}))
+
+	ownerIdent := NewAuthenticatedUser(f.creator.ID, f.creator.Email, f.creator.DisplayName, f.creator.Role, "web")
+	ownerCtx := contextWithCredentialContext(contextWithIdentity(ctx, ownerIdent), credentialContextForIdentity(ownerIdent))
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/trigger-events/%s?payload=1", f.proj.ID, evID), nil)
+	req = req.WithContext(ownerCtx)
+	rec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "other-project", "cross-project object bytes must never be streamed")
 }
