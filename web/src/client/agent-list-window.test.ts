@@ -1088,20 +1088,18 @@ describe('AgentListWindow — stopping phase filter', () => {
       }),
       getAgent: (id) => live.get(id),
     });
-    win.setPaged(
-      {
-        agents: [agent('a', { phase: 'stopping' })],
-        totalCount: 1,
-        stats: {
-          total: 2,
-          running: 1,
-          agents: [
-            ['a', 'stopping'],
-            ['z', 'running'],
-          ],
-        },
-      }
-    );
+    win.setPaged({
+      agents: [agent('a', { phase: 'stopping' })],
+      totalCount: 1,
+      stats: {
+        total: 2,
+        running: 1,
+        agents: [
+          ['a', 'stopping'],
+          ['z', 'running'],
+        ],
+      },
+    });
     expect(win.items.map((a) => a.id)).toEqual(['a']);
     live.set('z', agent('z', { phase: 'stopping' }));
     win.applyChanges({ upserted: ['z'], deleted: [], unknown: new Map(), generation: 1 });
@@ -1123,20 +1121,18 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
       getAgent: (id) => live.get(id),
     });
 
-    win.setPaged(
-      {
-        agents: [agent('a1', { phase: 'error', labels: { team: 'ui' } })],
-        totalCount: 2,
-        stats: {
-          total: 2,
-          running: 0,
-          agents: [
-            ['a1', 'error'],
-            ['a2', 'error'],
-          ],
-        },
-      }
-    );
+    win.setPaged({
+      agents: [agent('a1', { phase: 'error', labels: { team: 'ui' } })],
+      totalCount: 2,
+      stats: {
+        total: 2,
+        running: 0,
+        agents: [
+          ['a1', 'error'],
+          ['a2', 'error'],
+        ],
+      },
+    });
 
     // Brand-new agent outside the committed query arrives via SSE.
     live.set('new-other', agent('new-other', { phase: 'running', labels: { team: 'backend' } }));
@@ -1164,20 +1160,18 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
       getAgent: (id) => live.get(id),
     });
 
-    win.setPaged(
-      {
-        agents: [agent('a1', { phase: 'running' })],
-        totalCount: 2,
-        stats: {
-          total: 2,
-          running: 2,
-          agents: [
-            ['a1', 'running'],
-            ['off-1', 'running'],
-          ],
-        },
-      }
-    );
+    win.setPaged({
+      agents: [agent('a1', { phase: 'running' })],
+      totalCount: 2,
+      stats: {
+        total: 2,
+        running: 2,
+        agents: [
+          ['a1', 'running'],
+          ['off-1', 'running'],
+        ],
+      },
+    });
 
     // Existing off-page member stops running -> leaves the committed query population.
     live.set('off-1', agent('off-1', { phase: 'stopped' }));
@@ -1200,20 +1194,18 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
       getAgent: (id) => live.get(id),
     });
 
-    win.setPaged(
-      {
-        agents: [agent('a1', { phase: 'running' })],
-        totalCount: 2,
-        stats: {
-          total: 2,
-          running: 2,
-          agents: [
-            ['a1', 'running'],
-            ['off-1', 'running'],
-          ],
-        },
-      }
-    );
+    win.setPaged({
+      agents: [agent('a1', { phase: 'running' })],
+      totalCount: 2,
+      stats: {
+        total: 2,
+        running: 2,
+        agents: [
+          ['a1', 'running'],
+          ['off-1', 'running'],
+        ],
+      },
+    });
 
     live.set('a1', agent('a1', { phase: 'stopped' }));
     win.applyChanges({ upserted: ['a1'], deleted: [], unknown: new Map(), generation: 1 });
@@ -1236,20 +1228,18 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
       }),
     });
 
-    win.setPaged(
-      {
-        agents: [agent('a1', { phase: 'running', labels: { team: 'ui' } })],
-        totalCount: 2,
-        stats: {
-          total: 2,
-          running: 2,
-          agents: [
-            ['a1', 'running'],
-            ['off-1', 'running'],
-          ],
-        },
-      }
-    );
+    win.setPaged({
+      agents: [agent('a1', { phase: 'running', labels: { team: 'ui' } })],
+      totalCount: 2,
+      stats: {
+        total: 2,
+        running: 2,
+        agents: [
+          ['a1', 'running'],
+          ['off-1', 'running'],
+        ],
+      },
+    });
 
     // Phase-only delta keeping phase=running must NOT falsely evict even though delta lacks labels.
     win.applyChanges({

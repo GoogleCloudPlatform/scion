@@ -165,7 +165,7 @@ func TestStoreListCandidates(t *testing.T) {
 			"nothing": {},
 		} {
 			sq := q
-			sq.Search = search
+			sq.Query = &QueryTerms{Text: search}
 			if got := candidateTitles(t, st, sq); !slices.Equal(got, want) {
 				t.Errorf("search %q = %q, want %q", search, got, want)
 			}
@@ -246,7 +246,7 @@ func TestStoreListCandidatesSearchCase(t *testing.T) {
 		q := CandidateQuery{PrincipalKind: PrincipalKindUser, PrincipalRef: "alice"}
 		for _, search := range []string{"Été", "Été REPORT", "REPORT", "rEpOrT", "Größe", "größe-plan", "PLAN"} {
 			sq := q
-			sq.Search = search
+			sq.Query = &QueryTerms{Text: search}
 			if got := candidateTitles(t, st, sq); !slices.Equal(got, []string{"Été report"}) {
 				t.Errorf("search %q = %q, want the artifact", search, got)
 			}

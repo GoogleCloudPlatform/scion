@@ -548,7 +548,10 @@ describe('AgentListWindow states — capped', () => {
     setHeld([agent('a')]);
     win.adoptDrain({ complete: false, capped: true, error: null, requests: 4 });
     setHeld([agent('a'), agent('b')]);
-    win.setViewState({ serverQuery: 'phase:running', filterPredicate: (a) => a.phase === 'running' });
+    win.setViewState({
+      serverQuery: 'phase:running',
+      filterPredicate: (a) => a.phase === 'running',
+    });
     win.markResync();
     expect(win.state).toBe('capped');
     expect(win.total).toEqual({ loaded: 2, capped: true });
@@ -943,9 +946,7 @@ describe('AgentListWindow states — live changes during a paged request', () =>
     const created = agent('new', { updated: '2026-02-01T00:00:00Z' });
     const store = new Map([[created.id, created]]);
     const { win } = setupWithStore(store);
-    win.setPaged(
-      pagedResult([agent('a'), agent('b')], { totalCount: 2, liveChanged: ['new'] })
-    );
+    win.setPaged(pagedResult([agent('a'), agent('b')], { totalCount: 2, liveChanged: ['new'] }));
     expect(win.memberIndex.has('new')).toBe(true);
     expect(win.stats.total).toBe(3);
     expect(win.updatesAvailable).toBe(true);

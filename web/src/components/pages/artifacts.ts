@@ -61,12 +61,10 @@ import {
   knownKeysFor,
   parse as parseFilterQuery,
   serverSubset,
-  toggleIsFlagInQuery,
   toggleIsFlagInQueryWithNotice,
   validate as validateFilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
-export { hasIsFlagInQuery, toggleIsFlagInQuery };
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
 import '../shared/filter-box/filter-box.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';

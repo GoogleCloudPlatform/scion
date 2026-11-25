@@ -1260,7 +1260,10 @@ export class AgentListWindow extends EventTarget {
     const wasMember = this.memberIndex.has(id);
 
     if (wasMember) {
-      if (this.viewState.committedFilterPredicate && !this.viewState.committedFilterPredicate(agent)) {
+      if (
+        this.viewState.committedFilterPredicate &&
+        !this.viewState.committedFilterPredicate(agent)
+      ) {
         // Existing member stopped matching the committed server query: remove from population.
         this.memberIndex.delete(id);
         return false;

@@ -946,9 +946,9 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     await agentsEl.updateComplete;
 
     const globalFetchesBefore = globalFetch.mock.calls.length;
-    const runningBtn = Array.from(agentsEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
-      (b) => b.textContent?.trim() === 'Running'
-    ) as HTMLButtonElement;
+    const runningBtn = Array.from(
+      agentsEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []
+    ).find((b) => b.textContent?.trim() === 'Running') as HTMLButtonElement;
     runningBtn.click();
     await agentsEl.updateComplete;
     expect(globalFetch.mock.calls.length).toBe(globalFetchesBefore);
@@ -965,9 +965,9 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     const globalWin = (agentsEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
     expect(globalWin.display.map((a) => a.id)).toEqual(['g-run']);
 
-    const allPhaseBtn = Array.from(agentsEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
-      (b) => b.textContent?.trim() === 'All'
-    ) as HTMLButtonElement;
+    const allPhaseBtn = Array.from(
+      agentsEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []
+    ).find((b) => b.textContent?.trim() === 'All') as HTMLButtonElement;
     allPhaseBtn.click();
     await agentsEl.updateComplete;
     expect(globalFetch.mock.calls.length).toBe(globalFetchesBefore);
@@ -1014,9 +1014,9 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     await projEl.updateComplete;
 
     const projFetchesBefore = projFetch.mock.calls.length;
-    const projRunBtn = Array.from(projEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
-      (b) => b.textContent?.trim() === 'Running'
-    ) as HTMLButtonElement;
+    const projRunBtn = Array.from(
+      projEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []
+    ).find((b) => b.textContent?.trim() === 'Running') as HTMLButtonElement;
     projRunBtn.click();
     await projEl.updateComplete;
     expect(projFetch.mock.calls.length).toBe(projFetchesBefore);
@@ -1033,9 +1033,9 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     const projWin = (projEl as unknown as { agentWindow: AgentListWindow }).agentWindow;
     expect(projWin.display.map((a) => a.id)).toEqual(['p-run']);
 
-    const projAllBtn = Array.from(projEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
-      (b) => b.textContent?.trim() === 'All'
-    ) as HTMLButtonElement;
+    const projAllBtn = Array.from(
+      projEl.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []
+    ).find((b) => b.textContent?.trim() === 'All') as HTMLButtonElement;
     projAllBtn.click();
     await projEl.updateComplete;
     expect(projFetch.mock.calls.length).toBe(projFetchesBefore);
@@ -1078,9 +1078,9 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     await new Promise((r) => setTimeout(r, 20));
     await el1.updateComplete;
 
-    const allPhaseBtn = Array.from(el1.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []).find(
-      (b) => b.textContent?.trim() === 'All'
-    ) as HTMLButtonElement;
+    const allPhaseBtn = Array.from(
+      el1.shadowRoot?.querySelectorAll('.scope-toggle button') ?? []
+    ).find((b) => b.textContent?.trim() === 'All') as HTMLButtonElement;
     allPhaseBtn.click();
     await new Promise((r) => setTimeout(r, 20));
     await el1.updateComplete;

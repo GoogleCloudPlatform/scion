@@ -594,8 +594,8 @@ describe('artifactListUrl and artifactPagePath', () => {
 
   it('builds the list URL with mine=1 and only the set filters', () => {
     expect(artifactListUrl({})).toBe('/api/v1/artifacts?mine=1');
-    expect(artifactListUrl({ q: '  design ', ownedOnly: true, reviewPending: true }, 'c1')).toBe(
-      '/api/v1/artifacts?mine=1&q=design&review_pending=1&owner=me&cursor=c1'
+    expect(artifactListUrl({ q: '  design ', ownedOnly: true }, 'c1')).toBe(
+      '/api/v1/artifacts?mine=1&q=design&owner=me&cursor=c1'
     );
   });
 
@@ -615,11 +615,6 @@ describe('sharing helpers', () => {
     vi.unstubAllGlobals();
   });
 
-  it('asks for shared artifacts only when the filter is on', () => {
-    expect(artifactListUrl({ sharedOnly: true })).toBe('/api/v1/artifacts?mine=1&shared=1');
-    expect(artifactListUrl({ sharedOnly: false })).toBe('/api/v1/artifacts?mine=1');
-  });
-
   it('narrows to a project with the scope filter only when one is given', () => {
     expect(artifactListUrl({ scope: 'proj-1' }, 'c1')).toBe(
       '/api/v1/artifacts?mine=1&scope=proj-1&cursor=c1'
@@ -627,7 +622,7 @@ describe('sharing helpers', () => {
     expect(artifactListUrl({ scope: '' })).toBe('/api/v1/artifacts?mine=1');
   });
 
-  it('asks a project list for the artifacts shared with it', async () => {
+  it('passes q= to a project list when filtering shared artifacts', async () => {
     const urls: string[] = [];
     vi.stubGlobal(
       'fetch',
@@ -636,8 +631,8 @@ describe('sharing helpers', () => {
         return Promise.resolve(new Response('{"artifacts":[]}', { status: 200 }));
       })
     );
-    await listProjectArtifacts('p-1', { sharedOnly: true });
-    expect(urls).toEqual(['/api/v1/artifacts?mine=1&scope=p-1&shared=1']);
+    await listProjectArtifacts('p-1', { q: 'is:shared' });
+    expect(urls).toEqual(['/api/v1/artifacts?mine=1&scope=p-1&q=is%3Ashared']);
   });
 
   it('makes the hub-relative link absolute', () => {

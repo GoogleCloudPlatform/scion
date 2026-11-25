@@ -1127,9 +1127,6 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 	b.WriteString(" AND " + notAttachmentScope("a.scope_kind"))
 	b.WriteString(" AND a.deleted_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > ?)")
 	*args = append(*args, now)
-	if q.Search != "" {
-		s.writeSearchLike(b, args, q.Search, false)
-	}
 	if q.ReviewPending {
 		b.WriteString(" AND v.kind = ?")
 		*args = append(*args, VersionKindReview)

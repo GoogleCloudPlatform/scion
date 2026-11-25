@@ -784,9 +784,6 @@ type CandidateQuery struct {
 	ScopeRefs []string
 	// OwnedOnly keeps only rows the principal owns; grants are ignored.
 	OwnedOnly bool
-	// Search, when set, keeps rows whose title or key contains it,
-	// case-insensitively. It is matched literally (no wildcards).
-	Search string
 	// ReviewPending keeps only rows whose current version is a review.
 	ReviewPending bool
 	// HomeScope, when set, keeps only rows homed in this project, and

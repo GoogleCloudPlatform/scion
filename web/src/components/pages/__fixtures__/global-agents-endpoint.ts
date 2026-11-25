@@ -178,7 +178,10 @@ export function fakeFetch(fake: Fake) {
       const parsed = parseFilterQuery(rawQ, KNOWN_AGENT_KEYS);
       if (parsed.error || !parsed.query) {
         return Promise.resolve(
-          jsonResponse({ error: { code: 'invalid_filter_query', message: parsed.error?.message } }, 400)
+          jsonResponse(
+            { error: { code: 'invalid_filter_query', message: parsed.error?.message } },
+            400
+          )
         );
       }
       parsedQ = parsed.query;
@@ -190,7 +193,8 @@ export function fakeFetch(fake: Fake) {
           if (t.key === 'is') {
             for (const v of t.values) {
               if (v === 'mine') list = list.filter((a) => (t.negate ? !isMine(a) : isMine(a)));
-              if (v === 'shared') list = list.filter((a) => (t.negate ? !isShared(a) : isShared(a)));
+              if (v === 'shared')
+                list = list.filter((a) => (t.negate ? !isShared(a) : isShared(a)));
             }
           }
         }
