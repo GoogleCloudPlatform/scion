@@ -479,7 +479,7 @@ Every listed artifact passes the same check as `GET /api/v1/artifacts/{id}` for 
 
 | Parameter | Effect |
 | :--- | :--- |
-| `q` | Unified [filter query](/scion/reference/filter-queries/) (`artifacts` view keys `is:review`, `is:mine`, `is:shared`, `project:`, `-` negation; with `scope=`, `artifacts-project` view keys `is:review`, `is:shared`) or plain text matching title or key (case is ignored for ASCII letters; for other letters it depends on the database). Limits: 512 bytes raw, 200 runes of free text, and at most 20 distinct `project:` values. Malformed, unknown-key, or over-limit queries return `400 invalid_filter_query`. |
+| `q` | Unified [filter query](/scion/reference/filter-queries/) (`artifacts` view keys `is:review`, `is:mine`, `is:shared`, `project:`, `-` negation; with `scope=`, the `artifacts-project` key `is:shared`) or plain text matching title or key (case is ignored for ASCII letters; for other letters it depends on the database). Limits: 512 bytes raw, 200 runes of free text, and at most 20 distinct `project:` values. Malformed, invalid-value, or over-limit queries return `400 invalid_filter_query`; unknown `key:` terms are searched as text. |
 | `review_pending=1` | Keep artifacts whose current version is a review awaiting the owner. |
 | `owner=me` | Keep only artifacts the caller owns. |
 | `scope` | Keep only artifacts homed in this project (a project ID) or shared with it; shared ones carry `sharedWithScope: true`. Artifacts shared with the project are included only when the caller may read in that project; otherwise only those homed there are kept. It narrows the list and never adds an artifact the list would not show without it. The project's Artifacts view in the web UI uses it. |
