@@ -945,8 +945,8 @@ type AgentStore interface {
 	// returned: an abandoned idle suspend leaves its stamp (run_intent back to
 	// running) as the backoff marker. A zero backoffCutoff disables that skip.
 	// Offline agents and rows with a NULL activity_since are never returned. When
-	// excludeNeverSuspend is true (lifecycle.never_suspend is on), only rows with
-	// suspend_policy = 'auto' are returned. A positive limit bounds the number of
+	// excludeNeverSuspend is true (lifecycle.never_suspend is on), rows with
+	// suspend_policy = 'never' are excluded. A positive limit bounds the number of
 	// rows returned.
 	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *IdleSuspendCursor, limit int, excludeNeverSuspend bool) ([]Agent, error)
 
@@ -1237,8 +1237,8 @@ type AgentStore interface {
 
 	// SwapAutoSuspendRunIntent is SwapSystemRunIntent for stalled auto-suspend:
 	// when requireSuspendPolicyAuto is true (lifecycle.never_suspend is on), it
-	// additionally checks under the same row lock that suspend_policy == "auto"
-	// and yields with ErrAgentNeverSuspend otherwise.
+	// additionally checks under the same row lock whether suspend_policy == "never"
+	// and yields with ErrAgentNeverSuspend if so.
 	SwapAutoSuspendRunIntent(ctx context.Context, agentID string, intent RunIntent, requireSuspendPolicyAuto bool) (prior RunIntent, at time.Time, err error)
 
 	// RevertRunIntent sets run_intent to `to` only if the row still holds

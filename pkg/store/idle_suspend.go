@@ -29,7 +29,7 @@ var ErrIdleSuspendPrecondition = fmt.Errorf("agent no longer eligible for idle s
 
 // ErrAgentNeverSuspend is returned by SwapAutoSuspendRunIntent when
 // requireSuspendPolicyAuto is true and the locked agent row has
-// suspend_policy != "auto".
+// suspend_policy == "never".
 var ErrAgentNeverSuspend = fmt.Errorf("agent has never-suspend policy: %w", ErrVersionConflict)
 
 // IdleSuspendCursor positions a keyset page strictly after (ActivitySince, ID)
@@ -53,7 +53,7 @@ type IdleSuspendCondition struct {
 	// marker an abandoned idle suspend leaves).
 	ClaimBackoff time.Duration
 	// RequireSuspendPolicyAuto, when true (lifecycle.never_suspend is on),
-	// makes ClaimIdleSuspend refuse a row whose suspend_policy is not "auto".
+	// makes ClaimIdleSuspend exempt a row whose suspend_policy is "never".
 	RequireSuspendPolicyAuto bool
 }
 

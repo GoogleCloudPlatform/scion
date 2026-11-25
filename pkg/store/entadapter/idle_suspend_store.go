@@ -90,7 +90,7 @@ func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now ti
 	if row.Phase != string(state.PhaseRunning) {
 		return false
 	}
-	if cond.RequireSuspendPolicyAuto && row.SuspendPolicy != agent.SuspendPolicyAuto {
+	if cond.RequireSuspendPolicyAuto && row.SuspendPolicy == agent.SuspendPolicyNever {
 		return false
 	}
 	if row.RunIntent != nil && *row.RunIntent != string(store.RunIntentRunning) {

@@ -111,7 +111,7 @@ func (s *AgentStore) swapRunIntent(ctx context.Context, agentID string, intent s
 	if !preemptIdleClaim && current.IdleSuspendClaimUntil != nil && claimTime(now).Before(*current.IdleSuspendClaimUntil) {
 		return "", time.Time{}, store.ErrIdleSuspendPrecondition
 	}
-	if requireSuspendPolicyAuto && current.SuspendPolicy != agent.SuspendPolicyAuto {
+	if requireSuspendPolicyAuto && current.SuspendPolicy == agent.SuspendPolicyNever {
 		return "", time.Time{}, store.ErrAgentNeverSuspend
 	}
 	at := nextRunIntentAt(now, current.RunIntentAt)

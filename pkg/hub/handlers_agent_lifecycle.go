@@ -776,7 +776,7 @@ func (s *Server) swapSystemRunIntent(ctx context.Context, agent *store.Agent, in
 // swapAutoSuspendRunIntent records the stalled auto-suspend run-intent
 // transition, yielding with store.ErrIdleSuspendPrecondition when an active
 // idle-suspend claim owns shutdown and with store.ErrAgentNeverSuspend when
-// requireSuspendPolicyAuto is true and suspend_policy != "auto".
+// requireSuspendPolicyAuto is true and suspend_policy == "never".
 func (s *Server) swapAutoSuspendRunIntent(ctx context.Context, agent *store.Agent, intent store.RunIntent, requireSuspendPolicyAuto bool) (store.RunIntent, time.Time, error) {
 	prior, at, err := s.store.SwapAutoSuspendRunIntent(ctx, agent.ID, intent, requireSuspendPolicyAuto)
 	if err != nil {

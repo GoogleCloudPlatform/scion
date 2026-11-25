@@ -18,9 +18,11 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -241,6 +243,50 @@ func TestAgentStore_ClaimIdleSuspend_AndSwapAutoSuspend_SuspendPolicy(t *testing
 		// SwapSystemRunIntent (membership-loss hold) always succeeds on never-suspend agents.
 		b, _ := makeEligible("sp-swap-hold", store.SuspendPolicyNever)
 		_, _, err = s.SwapSystemRunIntent(ctx, b.ID, store.RunIntentStopped)
+		require.NoError(t, err)
+		gotB, err := s.GetAgent(ctx, b.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.RunIntentStopped, gotB.RunIntent)
+	})
+
+	t.Run("non-enum suspend_policy value is not exempt (only explicit never is exempt)", func(t *testing.T) {
+		forceEmptyPolicy := func(id string) {
+			query, args := entsql.Dialect(s.dialect()).
+				Update(agent.Table).
+				Set(agent.FieldSuspendPolicy, "").
+				Where(entsql.EQ(agent.FieldID, id)).
+				Query()
+			var res sql.Result
+			require.NoError(t, s.client.Driver().Exec(ctx, query, args, &res))
+		}
+
+		// 1. Idle candidate query includes non-enum row when excludeNeverSuspend=true.
+		a, cond := makeEligible("sp-nonenum-idle", store.SuspendPolicyAuto)
+		forceEmptyPolicy(a.ID)
+
+		cutoff := now.Add(-15 * time.Minute)
+		heartbeatRecency := now.Add(-2 * time.Minute)
+		liveWorkCutoff := now.Add(-store.LiveWorkFreshness)
+		cands, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0, true)
+		require.NoError(t, err)
+		var found bool
+		for _, c := range cands {
+			if c.ID == a.ID {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "non-enum suspend_policy row must remain an idle candidate")
+
+		// 2. ClaimIdleSuspend succeeds on non-enum row when RequireSuspendPolicyAuto=true.
+		_, _, claimUntil, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
+		require.NoError(t, err)
+		assert.False(t, claimUntil.IsZero())
+
+		// 3. SwapAutoSuspendRunIntent succeeds on non-enum row when requireSuspendPolicyAuto=true.
+		b, _ := makeEligible("sp-nonenum-stalled", store.SuspendPolicyAuto)
+		forceEmptyPolicy(b.ID)
+		_, _, err = s.SwapAutoSuspendRunIntent(ctx, b.ID, store.RunIntentStopped, true)
 		require.NoError(t, err)
 		gotB, err := s.GetAgent(ctx, b.ID)
 		require.NoError(t, err)

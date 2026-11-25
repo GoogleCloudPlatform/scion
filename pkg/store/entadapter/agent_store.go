@@ -3593,7 +3593,7 @@ func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, hear
 		),
 	)
 	if excludeNeverSuspend {
-		q = q.Where(agent.SuspendPolicyEQ(agent.SuspendPolicyAuto))
+		q = q.Where(agent.SuspendPolicyNEQ(agent.SuspendPolicyNever))
 	}
 	if !backoffCutoff.IsZero() {
 		q = q.Where(agent.Or(
