@@ -506,7 +506,7 @@ func TestInboxCmd_ExperimentDisabled404(t *testing.T) {
 }
 
 func TestInboxCmd_Forbidden403HintAndUnauthorized401NoHint(t *testing.T) {
-	t.Run("403 appends inbox:read scope hint", func(t *testing.T) {
+	t.Run("403 appends neutral inbox:read / caller-kind hint", func(t *testing.T) {
 		withInboxFakeHub(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -517,6 +517,8 @@ func TestInboxCmd_Forbidden403HintAndUnauthorized401NoHint(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "missing required scope")
 		assert.Contains(t, err.Error(), errHintInboxForbiddenScope)
+		assert.Contains(t, err.Error(), "a user access token needs the inbox:read scope")
+		assert.Contains(t, err.Error(), "agents, visitors and federated users cannot read the inbox")
 	})
 
 	t.Run("401 does not append 403 scope hint", func(t *testing.T) {

@@ -35,7 +35,7 @@ import (
 
 const (
 	errMsgInboxExperimentRequired = "Inbox is not enabled on this hub (experiment web.inbox_dashboard)"
-	errHintInboxForbiddenScope    = "this token needs the inbox:read scope (or log in with a session)"
+	errHintInboxForbiddenScope    = "a user access token needs the inbox:read scope; agents, visitors and federated users cannot read the inbox"
 	inboxPreviewQuestionMaxRunes  = 100
 )
 

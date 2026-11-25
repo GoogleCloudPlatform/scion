@@ -819,3 +819,126 @@ func TestUserMeInboxSummary_DismissReviewRequestAcksDuplicateNotifications(t *te
 	require.Len(t, otherUnacked, 1)
 	assert.Equal(t, otherUserNotifID, otherUnacked[0].ID)
 }
+
+// TestNotificationAck_ReviewRequestSiblingsGatedByInboxExperiment pins R1:
+// when web.inbox_dashboard is OFF, acknowledging one ARTIFACT_REVIEW_REQUESTED
+// notification leaves any other unacked review-request rows for the same
+// artifact untouched.
+func TestNotificationAck_ReviewRequestSiblingsGatedByInboxExperiment(t *testing.T) {
+	srv, s := testServer(t)
+	setExperimentOverrides(t, srv, map[string]bool{experiments.InboxDashboard: false})
+	require.False(t, srv.experimentEnabled(experiments.InboxDashboard))
+	ctx := context.Background()
+
+	p1 := artifactProject(t, s, "rev-gate-p1")
+	reviewerID := tid("rev-gate-reviewer")
+	createTestUserWithProjectRole(t, s, reviewerID, "gate@test.com", p1.ID, store.ProjectRoleMember)
+	reviewer, err := s.GetUser(ctx, reviewerID)
+	require.NoError(t, err)
+
+	artID := uuid.NewString()
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	oldNotifID := seedReviewRequestNotification(t, s, reviewerID, p1.ID, artID, "Author", base.Add(1*time.Minute), false)
+	newNotifID := seedReviewRequestNotification(t, s, reviewerID, p1.ID, artID, "Author", base.Add(5*time.Minute), false)
+
+	rec := doRequestAsUser(t, srv, reviewer, http.MethodPost, "/api/v1/notifications/"+newNotifID+"/ack", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	unacked, err := s.GetNotifications(ctx, store.SubscriberTypeUser, reviewerID, true)
+	require.NoError(t, err)
+	require.Len(t, unacked, 1, "with web.inbox_dashboard off, sibling review-request row must remain unacked")
+	assert.Equal(t, oldNotifID, unacked[0].ID)
+}
+
+// TestNotificationAck_ReviewRequestSiblingsRespectTokenBoundary pins O1:
+// a project-bounded UAT (inbox:write on P2) acking a review-request row in P2
+// acks a sibling for the same artifact in P2, but leaves a sibling for the same
+// artifact with ProjectID=P1 unacked.
+func TestNotificationAck_ReviewRequestSiblingsRespectTokenBoundary(t *testing.T) {
+	f := newChatFixture(t)
+	setExperimentOverrides(t, f.srv, map[string]bool{experiments.InboxDashboard: true})
+	ctx := context.Background()
+
+	bindProjectMember(t, f.s, f.projB, f.member)
+
+	artID := uuid.NewString()
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	p1SiblingID := seedReviewRequestNotification(t, f.s, f.member, f.projA, artID, "Author", base.Add(1*time.Minute), false)
+	p2SiblingID := seedReviewRequestNotification(t, f.s, f.member, f.projB, artID, "Author", base.Add(2*time.Minute), false)
+	p2PrimaryID := seedReviewRequestNotification(t, f.s, f.member, f.projB, artID, "Author", base.Add(5*time.Minute), false)
+
+	tokProjB := f.mint(t, f.member, projectBoundary(f.projB), "inbox:write")
+	rec := f.call(t, tokProjB, http.MethodPost, "/api/v1/notifications/"+p2PrimaryID+"/ack", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	unacked, err := f.s.GetNotifications(ctx, store.SubscriberTypeUser, f.member, true)
+	require.NoError(t, err)
+	unackedIDs := make([]string, 0, len(unacked))
+	for _, n := range unacked {
+		unackedIDs = append(unackedIDs, n.ID)
+	}
+	assert.NotContains(t, unackedIDs, p2PrimaryID, "primary P2 notification must be acked")
+	assert.NotContains(t, unackedIDs, p2SiblingID, "sibling P2 notification inside token boundary must be acked")
+	assert.Contains(t, unackedIDs, p1SiblingID, "sibling P1 notification outside token boundary must stay unacked")
+}
+
+type inboxSiblingAckFaultStore struct {
+	store.Store
+	failID string
+}
+
+func (s *inboxSiblingAckFaultStore) AcknowledgeNotification(ctx context.Context, id string) error {
+	if id == s.failID {
+		return store.ErrNotFound
+	}
+	return s.Store.AcknowledgeNotification(ctx, id)
+}
+
+// TestNotificationAck_ReviewRequestSiblingErrBestEffort pins O2: once the
+// primary ack succeeds, a sibling AcknowledgeNotification returning ErrNotFound
+// is logged and ignored, returning 200 and publishing exactly one notifications
+// inbox hint.
+func TestNotificationAck_ReviewRequestSiblingErrBestEffort(t *testing.T) {
+	srv, s := testServer(t)
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+	srv.SetEventPublisher(pub)
+	setExperimentOverrides(t, srv, map[string]bool{experiments.InboxDashboard: true})
+	ctx := context.Background()
+
+	p1 := artifactProject(t, s, "rev-besteffort-p1")
+	reviewerID := tid("rev-besteffort-reviewer")
+	createTestUserWithProjectRole(t, s, reviewerID, "besteffort@test.com", p1.ID, store.ProjectRoleMember)
+	reviewer, err := s.GetUser(ctx, reviewerID)
+	require.NoError(t, err)
+
+	artID := uuid.NewString()
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	siblingID := seedReviewRequestNotification(t, s, reviewerID, p1.ID, artID, "Author", base.Add(1*time.Minute), false)
+	primaryID := seedReviewRequestNotification(t, s, reviewerID, p1.ID, artID, "Author", base.Add(5*time.Minute), false)
+
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *inboxSiblingAckFaultStore {
+		return &inboxSiblingAckFaultStore{Store: inner, failID: siblingID}
+	})
+
+	hintCh, unsub := pub.Subscribe("user." + reviewerID + ".inbox")
+	defer unsub()
+
+	rec := doRequestAsUser(t, srv, reviewer, http.MethodPost, "/api/v1/notifications/"+primaryID+"/ack", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Expect exactly one notifications inbox hint.
+	select {
+	case evt := <-hintCh:
+		var hint InboxHint
+		require.NoError(t, json.Unmarshal(evt.Data, &hint))
+		assert.Equal(t, InboxCategoryNotifications, hint.Category)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for notifications inbox hint")
+	}
+	select {
+	case extra := <-hintCh:
+		t.Fatalf("unexpected second inbox hint: %s", string(extra.Data))
+	case <-time.After(50 * time.Millisecond):
+	}
+}

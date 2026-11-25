@@ -1092,7 +1092,7 @@ func TestUserMeInboxSummary_WaitingWindowKeepsOldestWhenCapped(t *testing.T) {
 		return a
 	}
 
-	// Create 5 waiting agents in newest-to-oldest creation order, with explicit
+	// Create 5 waiting agents in oldest-to-newest creation order, with explicit
 	// LastActivityEvent timestamps spanning oldest (t+0m) to newest (t+40m).
 	// A created DESC window would drop the oldest-waiting agents; ascending
 	// updated order must keep the 3 longest-waiting (w1, w2, w3).
