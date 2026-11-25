@@ -406,6 +406,10 @@ export class ScionDecisionsFilterPanel extends LitElement {
       gap: 0.5rem;
     }
 
+    .dates-disclosure .date-pair {
+      flex: 0 0 auto;
+    }
+
     .dates-toggle {
       align-self: flex-start;
       display: inline-flex;
