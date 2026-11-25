@@ -25,6 +25,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -234,11 +235,12 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if !commandRequestsWantJSON(cmd) {
+	wantJSON := commandRequestsWantJSON(cmd)
+	if !wantJSON {
 		printCommandRequestConfirmationSummary(out, detail, containerLabel)
 	}
 
-	if commandApproveIsTerminal() {
+	if commandApproveIsTerminal() && !wantJSON {
 		if confirmHash != "" {
 			if confirmHash != strings.ToLower(detail.Request.CommandSHA256) {
 				return fmt.Errorf("--confirm-sha256 does not match command request hash %s", detail.Request.CommandSHA256)
@@ -257,6 +259,9 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		if confirmHash == "" {
+			if wantJSON {
+				return newUsageError("--json approval requires --confirm-sha256 %s", detail.Request.CommandSHA256)
+			}
 			return newUsageError("non-interactive approval requires --confirm-sha256 %s", detail.Request.CommandSHA256)
 		}
 		if confirmHash != strings.ToLower(detail.Request.CommandSHA256) {
@@ -304,12 +309,54 @@ func printCommandRequestConfirmationSummary(out io.Writer, detail *messages.Comm
 	}
 	_, _ = fmt.Fprintln(out)
 	_, _ = fmt.Fprintf(out, "SHA-256:         %s\n", safeText(req.CommandSHA256))
+	escapedScript, nonASCIICount := formatCommandScriptForDisplay(req.Script)
+	if nonASCIICount > 0 {
+		_, _ = fmt.Fprintf(out, "WARNING:         script contains %d non-ASCII character(s), shown as \\u{XXXX}\n", nonASCIICount)
+	}
 	_, _ = fmt.Fprintln(out, "--- script ---")
-	_, _ = fmt.Fprint(out, req.Script)
-	if !strings.HasSuffix(req.Script, "\n") {
+	_, _ = fmt.Fprint(out, escapedScript)
+	if !strings.HasSuffix(escapedScript, "\n") {
 		_, _ = fmt.Fprintln(out)
 	}
 	_, _ = fmt.Fprintln(out, "--- end script ---")
+}
+
+// formatCommandScriptForDisplay renders an agent-authored script safely for
+// terminal review (ptone/scion#9281 R2): preserves '\n' line breaks, shows
+// '\t' and trailing spaces visibly, escapes every non-printable-ASCII rune and
+// every unicode Control/Cf/Zl/Zp rune as \u{XXXX}, and returns the count of
+// non-ASCII runes encountered.
+func formatCommandScriptForDisplay(script string) (string, int) {
+	var b strings.Builder
+	nonASCII := 0
+	lines := strings.Split(script, "\n")
+	for li, line := range lines {
+		runes := []rune(line)
+		// Locate trailing ASCII spaces so they are rendered visibly.
+		trailingStart := len(runes)
+		for trailingStart > 0 && runes[trailingStart-1] == ' ' {
+			trailingStart--
+		}
+		for i, r := range runes {
+			switch {
+			case r == '\t':
+				b.WriteString(`\t`)
+			case i >= trailingStart && r == ' ':
+				b.WriteString(`\u{0020}`)
+			case r >= 0x20 && r <= 0x7e && !unicode.IsControl(r) && !unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
+				b.WriteRune(r)
+			default:
+				if r > 0x7e {
+					nonASCII++
+				}
+				_, _ = fmt.Fprintf(&b, `\u{%04X}`, r)
+			}
+		}
+		if li < len(lines)-1 {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), nonASCII
 }
 
 func formatCommandRequestAPIError(err error) error {

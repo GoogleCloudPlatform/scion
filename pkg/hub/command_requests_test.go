@@ -19,6 +19,8 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -298,43 +300,135 @@ func TestCommandRequests_EndToEnd(t *testing.T) {
 	v2ID := sendResp2.CommandRequest.RowID
 	v2Hash := sendResp2.CommandRequest.CommandSHA256
 
-	// 6. Security S1 + S8: agent, UAT, visitor, and non-approver all get 403 + refused audit event.
+	// 6. Security S1 + S8 (R3): real agent JWT through Handler(), real PAT
+	// through Handler(), visitor identity, federated identity, and non-approver
+	// on BOTH GET and POST /approve -> 403 + refused audit event with expected reason.
+	assertRefusedReason := func(t *testing.T, label, wantReason string) {
+		t.Helper()
+		found := false
+		for _, ev := range f.audit.snapshot() {
+			if ev.Kind == msgaction.KindCommandRequest && ev.EventType == MessageActionEventRefused && ev.Reason == wantReason {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "%s: expected refused audit event with reason %q", label, wantReason)
+	}
+
+	// 6a. Real agent JWT through Handler() on GET and POST /approve.
+	agentJWT, err := f.srv.GenerateAgentToken(f.agent.ID, f.project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodGet, "/api/v1/command-requests/" + v2ID, nil},
+		{http.MethodPost, "/api/v1/command-requests/" + v2ID + "/approve", messages.ApproveCommandRequestBody{CommandSHA256: v2Hash}},
+	} {
+		f.audit.reset()
+		rr := f.doBearerJSON(t, tc.method, tc.path, agentJWT, tc.body)
+		assert.Equal(t, http.StatusForbidden, rr.Code, "agent JWT %s %s: %s", tc.method, tc.path, rr.Body.String())
+		assertRefusedReason(t, "agent JWT "+tc.method, ErrCodeUsersOnly)
+	}
+
+	// 6b. Real UAT/PAT through Handler() on GET and POST /approve.
+	patPresented := "scion_pat_cmdreq-s1-test-token"
+	patHash := sha256.Sum256([]byte(patPresented))
+	patExpiry := time.Now().Add(time.Hour)
+	require.NoError(t, f.store.CreateUserAccessToken(ctx, &store.UserAccessToken{
+		ID:        api.NewUUID(),
+		UserID:    f.alice.ID,
+		Name:      "cmdreq-s1-pat",
+		Prefix:    "scion_pat_cmd1",
+		KeyHash:   hex.EncodeToString(patHash[:]),
+		ProjectID: f.project.ID,
+		Scopes:    []string{"project:read", "agent:attach"},
+		ExpiresAt: &patExpiry,
+		Created:   time.Now(),
+	}))
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodGet, "/api/v1/command-requests/" + v2ID, nil},
+		{http.MethodPost, "/api/v1/command-requests/" + v2ID + "/approve", messages.ApproveCommandRequestBody{CommandSHA256: v2Hash}},
+	} {
+		f.audit.reset()
+		rr := f.doBearerJSON(t, tc.method, tc.path, patPresented, tc.body)
+		assert.Equal(t, http.StatusForbidden, rr.Code, "real PAT %s %s: %s", tc.method, tc.path, rr.Body.String())
+		assertRefusedReason(t, "real PAT "+tc.method, "session_required")
+	}
+
+	// 6c. Visitor identity on GET and POST /approve: refused with 403 by the
+	// route guard (mux) and, directly on the handler, by messageActionHumanSessionCaller
+	// with a refused audit event (reason: visitor_refused).
+	visitorIdent := NewVisitorIdentity(api.NewUUID(), "https://issuer.cmdreq.test", "cmdreq-visitor", "visitor@cmdreq.test", "Visitor")
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/v1/command-requests/" + v2ID, ""},
+		{http.MethodPost, "/api/v1/command-requests/" + v2ID + "/approve", `{"command_sha256":"` + v2Hash + `"}`},
+	} {
+		reqMux := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		reqMux = reqMux.WithContext(contextWithCredentialContext(
+			contextWithIdentity(reqMux.Context(), visitorIdent),
+			CredentialContext{Kind: CredentialKindInteractive, ID: visitorIdent.ID()},
+		))
+		rrMux := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rrMux, reqMux)
+		assert.Equal(t, http.StatusForbidden, rrMux.Code, "visitor mux %s %s: %s", tc.method, tc.path, rrMux.Body.String())
+
+		f.audit.reset()
+		reqDirect := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		reqDirect = reqDirect.WithContext(contextWithCredentialContext(
+			contextWithIdentity(reqDirect.Context(), visitorIdent),
+			CredentialContext{Kind: CredentialKindInteractive, ID: visitorIdent.ID()},
+		))
+		rrDirect := httptest.NewRecorder()
+		f.srv.handleCommandRequestRoutes(rrDirect, reqDirect)
+		assert.Equal(t, http.StatusForbidden, rrDirect.Code, "visitor direct %s %s: %s", tc.method, tc.path, rrDirect.Body.String())
+		assertRefusedReason(t, "visitor "+tc.method, "visitor_refused")
+	}
+
+	// 6d. Federated user identity on GET and POST /approve.
+	fedIdent := NewFederatedUserIdentity("https://issuer.cmdreq.test", "cmdreq-fed", f.alice.Email, "Fed Alice", store.UserRoleMember, nil)
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/v1/command-requests/" + v2ID, ""},
+		{http.MethodPost, "/api/v1/command-requests/" + v2ID + "/approve", `{"command_sha256":"` + v2Hash + `"}`},
+	} {
+		f.audit.reset()
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req = req.WithContext(contextWithCredentialContext(
+			contextWithIdentity(req.Context(), fedIdent),
+			CredentialContext{Kind: CredentialKindFederation, ID: fedIdent.ID()},
+		))
+		rr := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusForbidden, rr.Code, "federated %s %s: %s", tc.method, tc.path, rr.Body.String())
+		assertRefusedReason(t, "federated "+tc.method, "session_required")
+	}
+
+	// 6e. Non-recipient / non-approver (bob) on GET (403 forbidden) and POST /approve (403 not_approver).
 	f.audit.reset()
-	rrAgentApprove := f.doAgentJSON(t, http.MethodPost, "/api/v1/command-requests/"+v2ID+"/approve", messages.ApproveCommandRequestBody{
-		CommandSHA256: v2Hash,
-	})
-	assert.Equal(t, http.StatusForbidden, rrAgentApprove.Code)
+	rrBobGet := f.doUserJSON(t, http.MethodGet, "/api/v1/command-requests/"+v2ID, f.bob, nil)
+	assert.Equal(t, http.StatusForbidden, rrBobGet.Code)
+	assertRefusedReason(t, "non-recipient GET", ErrCodeForbidden)
 
-	// UAT caller -> 403 INTERACTIVE_STATE + refused audit event.
-	uatReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/"+v2ID+"/approve",
-		strings.NewReader(`{"command_sha256":"`+v2Hash+`"}`))
-	uatIdent := NewScopedUserIdentity(
-		NewAuthenticatedUser(f.alice.ID, f.alice.Email, f.alice.DisplayName, f.alice.Role, "uat"),
-		f.project.ID, []string{"agent:attach"},
-	)
-	uatCtx := contextWithCredentialContext(
-		contextWithIdentity(uatReq.Context(), uatIdent),
-		CredentialContext{Kind: CredentialKindUAT, ID: "uat-1"},
-	)
-	rrUAT := httptest.NewRecorder()
-	f.srv.mux.ServeHTTP(rrUAT, uatReq.WithContext(uatCtx))
-	assert.Equal(t, http.StatusForbidden, rrUAT.Code)
-
-	// Non-approver (bob) -> 403 not_approver.
+	f.audit.reset()
 	rrBob := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/"+v2ID+"/approve", f.bob, messages.ApproveCommandRequestBody{
 		CommandSHA256: v2Hash,
 	})
 	assert.Equal(t, http.StatusForbidden, rrBob.Code)
 	assert.Contains(t, rrBob.Body.String(), msgaction.ConflictCmdNotApprover)
-
-	// Verify refused audit events were emitted (S8).
-	refusedCount := 0
-	for _, ev := range f.audit.snapshot() {
-		if ev.Kind == msgaction.KindCommandRequest && ev.EventType == MessageActionEventRefused {
-			refusedCount++
-		}
-	}
-	assert.GreaterOrEqual(t, refusedCount, 3, "expected refused audit events for agent, UAT, and non-approver")
+	assertRefusedReason(t, "non-approver approve", msgaction.ConflictCmdNotApprover)
 
 	// 7. Unconfigured exec container -> 409 exec_container_unconfigured.
 	rrUnconf := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/"+v2ID+"/approve", f.alice, messages.ApproveCommandRequestBody{
@@ -344,7 +438,7 @@ func TestCommandRequests_EndToEnd(t *testing.T) {
 	assert.Contains(t, rrUnconf.Body.String(), msgaction.ConflictCmdExecUnconfigured)
 
 	// Register alice's execution container.
-	_, err := f.store.PutUserExecContainer(ctx, f.alice.ID, f.execAgent.ID)
+	_, err = f.store.PutUserExecContainer(ctx, f.alice.ID, f.execAgent.ID)
 	require.NoError(t, err)
 
 	// 8. Stopped execution container -> 409 exec_container_stopped, row stays pending (D5).
@@ -445,6 +539,9 @@ func TestCommandRequests_EndToEnd(t *testing.T) {
 	assert.Equal(t, v2ID, listResp.Items[0].RowID)
 	require.NotNil(t, listResp.Items[0].Run)
 	assert.Equal(t, store.CommandRunStatusQueued, listResp.Items[0].Run.Status)
+	// N2: agent view omits the human's execution container IDs.
+	assert.Empty(t, listResp.Items[0].Run.ExecAgentID)
+	assert.Empty(t, listResp.Items[0].Run.ExecProjectID)
 
 	rrUserList := f.doUserJSON(t, http.MethodGet, "/api/v1/agent/command-requests", f.alice, nil)
 	assert.Equal(t, http.StatusForbidden, rrUserList.Code)
@@ -472,7 +569,4 @@ func TestCommandRequests_EndToEnd(t *testing.T) {
 	rrCSRF := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(rrCSRF, csrfReq)
 	assert.Equal(t, http.StatusForbidden, rrCSRF.Code)
-
-	// Avoid unused time import warning.
-	_ = time.Second
 }

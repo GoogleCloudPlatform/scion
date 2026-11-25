@@ -380,11 +380,11 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Pin:    "TestSecretRequests_EndToEnd",
 	},
 	{OperationID: "chat.commandrequest.read", Method: "GET", Pattern: "/api/v1/command-requests/{id}"}: {
-		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with interactive web/CLI sessions, user access tokens, agent tokens, visitors, and non-recipients",
+		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestCommandRequests_EndToEnd enables the experiment and drives GET with a real CLI session token, real PAT through Handler(), real agent JWT through Handler(), visitor identity, federated identity, and non-recipient",
 		Pin:    "TestCommandRequests_EndToEnd",
 	},
 	{OperationID: "chat.commandrequest.approve", Method: "POST", Pattern: "/api/v1/command-requests/{id}/approve"}: {
-		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with interactive web/CLI sessions, user access tokens, agent tokens, visitors, and non-approvers",
+		Reason: "the route answers 404 while the hub.command_requests experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. TestCommandRequests_EndToEnd enables the experiment and drives POST with a real CLI session token, real PAT through Handler(), real agent JWT through Handler(), visitor identity, federated identity, and non-approver",
 		Pin:    "TestCommandRequests_EndToEnd",
 	},
 	{OperationID: "chat.decision.answer", Method: "POST", Pattern: "/api/v1/decisions/{rowId}/answer"}: {

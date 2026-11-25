@@ -531,7 +531,13 @@ func (s *Server) handleAgentCommandRequestList(w http.ResponseWriter, r *http.Re
 	}
 	items := make([]messages.CommandRequestView, len(res.Items))
 	for i, row := range res.Items {
-		items[i] = commandRequestView(row, nil, res.Runs[row.ID])
+		view := commandRequestView(row, nil, res.Runs[row.ID])
+		if view.Run != nil {
+			// Omit the human's execution container IDs from the agent view (N2).
+			view.Run.ExecAgentID = ""
+			view.Run.ExecProjectID = ""
+		}
+		items[i] = view
 	}
 	writeJSON(w, http.StatusOK, messages.AgentCommandRequestListResponse{
 		Items:      items,

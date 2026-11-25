@@ -74,7 +74,7 @@ func isBidiControl(r rune) bool {
 
 // ValidateCommandRequestScript validates a command script per §4.5:
 // valid UTF-8, 1..4096 bytes, no NUL, no C0 controls other than \n and \t,
-// no DEL (0x7f), and no bidi controls.
+// no DEL (0x7f), no C1 controls (U+0080–U+009F), and no bidi controls.
 func ValidateCommandRequestScript(script string) error {
 	if len(script) == 0 {
 		return fmt.Errorf("script is required")
@@ -92,8 +92,8 @@ func ValidateCommandRequestScript(script string) error {
 		if r < 0x20 && r != '\n' && r != '\t' {
 			return fmt.Errorf("script must not contain control character U+%04X (only newline and tab are allowed)", r)
 		}
-		if r == 0x7f {
-			return fmt.Errorf("script must not contain DEL (U+007F)")
+		if r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return fmt.Errorf("script must not contain control character U+%04X", r)
 		}
 		if isBidiControl(r) {
 			return fmt.Errorf("script must not contain bidirectional control character U+%04X", r)
@@ -104,7 +104,7 @@ func ValidateCommandRequestScript(script string) error {
 
 // ValidateCommandRequestWorkdir validates an optional command working directory
 // per §4.5: "" means $HOME; otherwise an absolute, clean POSIX path <= 512 bytes
-// with no control or bidi characters.
+// with no control (C0, DEL, C1) or bidi characters.
 func ValidateCommandRequestWorkdir(workdir string) error {
 	if workdir == "" {
 		return nil
@@ -116,7 +116,7 @@ func ValidateCommandRequestWorkdir(workdir string) error {
 		return fmt.Errorf("workdir must be valid UTF-8")
 	}
 	for _, r := range workdir {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			return fmt.Errorf("workdir must not contain control characters")
 		}
 		if isBidiControl(r) {
@@ -298,8 +298,8 @@ type CommandRequestRunView struct {
 	Status        string     `json:"status"`
 	Reason        string     `json:"reason,omitempty"`
 	Wake          string     `json:"wake,omitempty"`
-	ExecAgentID   string     `json:"execAgentId"`
-	ExecProjectID string     `json:"execProjectId"`
+	ExecAgentID   string     `json:"execAgentId,omitempty"`
+	ExecProjectID string     `json:"execProjectId,omitempty"`
 	ShareOutput   bool       `json:"shareOutput"`
 	TimeoutS      int        `json:"timeoutS"`
 	Workdir       string     `json:"workdir,omitempty"`
