@@ -20,8 +20,9 @@
  * Gated on `web.inbox_dashboard`: when off (or when the hub answers 404),
  * renders `<scion-page-404>`.
  *
- * Phase 1 renders the Approvals card (pending user-scope secrets with inline
- * approve/reject) and hides disabled categories.
+ * Renders the responsive category card grid in the fixed order Decisions,
+ * Agents waiting (6b), Approvals, Reviews (6b), Chat. Disabled and unavailable
+ * categories are hidden.
  */
 
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
@@ -29,20 +30,30 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
+import { answerDecision } from '../../client/decision-prompts.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import {
+  INBOX_CHAT_EXPANDED_PREVIEWS,
+  INBOX_PAGE_PREVIEWS,
+  INBOX_SUMMARY_API,
   INBOX_SUMMARY_CHANGED_EVENT,
   inboxSummaryStore,
   type InboxApprovalPreview,
   type InboxCategory,
+  type InboxCategoryKey,
+  type InboxChatFilter,
+  type InboxChatPreview,
+  type InboxDecisionPreview,
   type InboxSummaryResponse,
 } from '../../client/inbox-summary.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import {
   PENDING_SECRETS_API,
   PENDING_SECRETS_CHANGED_EVENT,
 } from '../../client/pending-secrets.js';
 import {
   PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+  dispatchProfileDecisionsCountChanged,
   fetchProfileDecisionProbe,
   getInitialProfileDecisionVisibility,
   resolveProfileDecisionVisibility,
@@ -54,9 +65,32 @@ import {
   decisionsEnabled,
   isInboxDashboardEnabled,
 } from '../../utils/feature-flags.js';
+import { formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { inboxTabStripStyles, renderInboxTabStrip } from '../shared/inbox-tabs.js';
 import './not-found.js';
+
+/** Fixed display order for category cards on `/profile/inbox` (design §6.3). */
+const INBOX_CARD_ORDER: readonly InboxCategoryKey[] = [
+  'decisions',
+  'waiting',
+  'approvals',
+  'reviews',
+  'chat',
+];
+
+function parseChatFilterFromSearch(search: string): InboxChatFilter {
+  const raw = new URLSearchParams(search).get('chat')?.trim();
+  if (raw === 'dms' || raw === 'mentions') return raw;
+  return 'all';
+}
+
+function createIdempotencyKey(prefix: string): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function formatRelativeExpiry(iso: string): string {
   const ms = Date.parse(iso) - Date.now();
@@ -68,6 +102,25 @@ function formatRelativeExpiry(iso: string): string {
   if (hours < 48) return `expires in ${hours}h`;
   const days = Math.round(hours / 24);
   return `expires in ${days}d`;
+}
+
+function formatRelativeAge(iso: string): string {
+  if (!iso) return '';
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return '';
+  return formatRelative(iso, { style: 'narrow' });
+}
+
+interface InboxCardOptions<T> {
+  key: InboxCategoryKey;
+  icon: string;
+  title: string;
+  category: InboxCategory<T>;
+  defaultHref: string;
+  countLabel?: string;
+  headerExtra?: TemplateResult | typeof nothing;
+  onRetry?: () => void;
+  renderBody: (category: InboxCategory<T>) => TemplateResult | typeof nothing;
 }
 
 @customElement('scion-page-profile-inbox')
@@ -94,16 +147,47 @@ export class ScionPageProfileInbox extends LitElement {
   private busyIds = new Set<string>();
 
   @state()
+  private busyChoiceKey: string | null = null;
+
+  @state()
   private confirmApproval: InboxApprovalPreview | null = null;
+
+  /** Page-local chat filter (`?chat=all|dms|mentions`). */
+  @state()
+  private chatFilter: InboxChatFilter = 'all';
+
+  /** Whether the chat card is expanded to show up to 10 previews. */
+  @state()
+  private chatExpanded = false;
+
+  /** Page-local chat category payload when filtered (`chat !== 'all'`) or expanded (`previews=10`). */
+  @state()
+  private chatOverride: InboxCategory<InboxChatPreview> | null = null;
+
+  @state()
+  private chatLoading = false;
+
+  @state()
+  private chatError = false;
 
   /** Mirrors `<scion-profile-nav>`'s 404 probe state for the Decisions sub-tab. */
   @state()
   private decisionsNavVisibility: ProfileDecisionVisibility = 'unknown';
 
   private unmountPage: (() => void) | null = null;
+  private chatAbortController: AbortController | null = null;
+  private chatFetchSeq = 0;
 
   private boundOnSummaryChanged = (): void => {
+    const prevSummary = this.summary;
     this.syncFromStore();
+    if (
+      this.summary &&
+      this.summary !== prevSummary &&
+      (this.chatFilter !== 'all' || this.chatExpanded)
+    ) {
+      void this.fetchChatView();
+    }
   };
 
   private boundOnFeatureFlagsChanged = (): void => {
@@ -181,6 +265,7 @@ export class ScionPageProfileInbox extends LitElement {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
         gap: 1rem;
+        align-items: start;
       }
 
       .inbox-card {
@@ -190,6 +275,10 @@ export class ScionPageProfileInbox extends LitElement {
         border: 1px solid var(--scion-border, #e2e8f0);
         border-radius: var(--scion-radius, 0.5rem);
         overflow: hidden;
+      }
+
+      .inbox-card--compact .card-body {
+        padding: 0.625rem 1rem;
       }
 
       .card-header {
@@ -236,6 +325,52 @@ export class ScionPageProfileInbox extends LitElement {
         text-decoration: underline;
       }
 
+      .card-subbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.375rem;
+        padding: 0.5rem 1rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .chat-chip {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0.25rem 0.625rem;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-full, 9999px);
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text-muted, #64748b);
+        font-family: inherit;
+        font-size: 0.75rem;
+        font-weight: 500;
+        line-height: 1.25;
+        cursor: pointer;
+        transition:
+          background-color 0.12s ease,
+          border-color 0.12s ease,
+          color 0.12s ease;
+      }
+
+      .chat-chip:hover {
+        color: var(--scion-text, #1e293b);
+        border-color: var(--scion-primary, #3b82f6);
+      }
+
+      .chat-chip--active {
+        background: var(--scion-primary, #3b82f6);
+        border-color: var(--scion-primary, #3b82f6);
+        color: var(--sl-color-neutral-0, #ffffff);
+      }
+
+      .chat-chip--active:hover {
+        color: var(--sl-color-neutral-0, #ffffff);
+      }
+
       .card-body {
         padding: 0.75rem 1rem;
       }
@@ -253,6 +388,21 @@ export class ScionPageProfileInbox extends LitElement {
         gap: 0.75rem;
         font-size: 0.875rem;
         color: var(--sl-color-danger-600, #dc2626);
+      }
+
+      .card-loading-inline {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.25rem 0;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .card-footer-action {
+        margin-top: 0.5rem;
+        display: flex;
+        justify-content: flex-start;
       }
 
       .preview-list {
@@ -275,9 +425,36 @@ export class ScionPageProfileInbox extends LitElement {
         background: var(--scion-bg-subtle, #f1f5f9);
       }
 
+      .preview-row--stacked {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.5rem;
+      }
+
       .preview-info {
         min-width: 0;
         flex: 1;
+      }
+
+      .preview-title-line {
+        display: flex;
+        align-items: center;
+        gap: 0.375rem;
+        min-width: 0;
+      }
+
+      .preview-title {
+        display: inline-block;
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: var(--scion-text, #1e293b);
+        text-decoration: none;
+        word-break: break-word;
+      }
+
+      .preview-title:hover {
+        color: var(--scion-primary, #3b82f6);
+        text-decoration: underline;
       }
 
       .preview-key {
@@ -305,11 +482,36 @@ export class ScionPageProfileInbox extends LitElement {
         color: var(--scion-text-muted, #64748b);
       }
 
+      .preview-note {
+        margin-top: 0.25rem;
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
       .preview-actions {
         display: flex;
         align-items: center;
         gap: 0.375rem;
         flex-shrink: 0;
+      }
+
+      .decision-choices {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.375rem;
+      }
+
+      .decision-drill-link {
+        font-size: 0.75rem;
+        font-weight: 500;
+        color: var(--scion-primary, #3b82f6);
+        text-decoration: none;
+        padding: 0.125rem 0.25rem;
+      }
+
+      .decision-drill-link:hover {
+        text-decoration: underline;
       }
 
       .loading-state {
@@ -354,6 +556,7 @@ export class ScionPageProfileInbox extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     this.enabled = isInboxDashboardEnabled();
+    this.chatFilter = parseChatFilterFromSearch(window.location.search);
     window.addEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.boundOnSummaryChanged);
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     window.addEventListener(
@@ -410,11 +613,22 @@ export class ScionPageProfileInbox extends LitElement {
     this.unmountPage?.();
     this.unmountPage = inboxSummaryStore.mountPage(uid || undefined);
     this.syncFromStore();
+    if (this.chatFilter !== 'all' || this.chatExpanded) {
+      void this.fetchChatView();
+    }
   }
 
   private stopStore(): void {
+    this.abortChatFetch();
     this.unmountPage?.();
     this.unmountPage = null;
+  }
+
+  private abortChatFetch(): void {
+    if (this.chatAbortController) {
+      this.chatAbortController.abort();
+      this.chatAbortController = null;
+    }
   }
 
   private syncFromStore(): void {
@@ -429,6 +643,137 @@ export class ScionPageProfileInbox extends LitElement {
     if (busy) next.add(id);
     else next.delete(id);
     this.busyIds = next;
+  }
+
+  private handleRefreshClick(): void {
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    if (this.chatFilter !== 'all' || this.chatExpanded) {
+      void this.fetchChatView();
+    }
+  }
+
+  private selectChatFilter(filter: InboxChatFilter): void {
+    if (filter === this.chatFilter && !this.chatError) return;
+    this.chatFilter = filter;
+    this.syncChatFilterToUrl(filter);
+    if (filter === 'all' && !this.chatExpanded) {
+      this.abortChatFetch();
+      this.chatOverride = null;
+      this.chatLoading = false;
+      this.chatError = false;
+      return;
+    }
+    void this.fetchChatView();
+  }
+
+  private toggleChatExpanded(expanded: boolean): void {
+    if (expanded === this.chatExpanded) return;
+    this.chatExpanded = expanded;
+    if (!expanded && this.chatFilter === 'all') {
+      this.abortChatFetch();
+      this.chatOverride = null;
+      this.chatLoading = false;
+      this.chatError = false;
+      return;
+    }
+    void this.fetchChatView();
+  }
+
+  private syncChatFilterToUrl(filter: InboxChatFilter): void {
+    const params = new URLSearchParams(window.location.search);
+    if (filter === 'all') {
+      params.delete('chat');
+    } else {
+      params.set('chat', filter);
+    }
+    replaceSearch(params);
+  }
+
+  private async fetchChatView(): Promise<void> {
+    if (!this.enabled) return;
+    this.abortChatFetch();
+    const controller = new AbortController();
+    this.chatAbortController = controller;
+    const seq = ++this.chatFetchSeq;
+    const previews = this.chatExpanded ? INBOX_CHAT_EXPANDED_PREVIEWS : INBOX_PAGE_PREVIEWS;
+    const filter = this.chatFilter;
+
+    this.chatLoading = true;
+    this.chatError = false;
+
+    try {
+      const url = `${INBOX_SUMMARY_API}?previews=${previews}&chat=${encodeURIComponent(filter)}`;
+      const res = await apiFetch(url, { signal: controller.signal });
+      if (seq !== this.chatFetchSeq || !this.isConnected) return;
+      if (!res.ok) {
+        this.chatError = true;
+        return;
+      }
+      const data = (await res.json()) as InboxSummaryResponse;
+      if (seq !== this.chatFetchSeq || !this.isConnected) return;
+      if (data?.categories?.chat) {
+        this.chatOverride = data.categories.chat;
+      }
+    } catch (err) {
+      if (seq !== this.chatFetchSeq || !this.isConnected) return;
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      this.chatError = true;
+    } finally {
+      if (seq === this.chatFetchSeq) {
+        this.chatLoading = false;
+        if (this.chatAbortController === controller) {
+          this.chatAbortController = null;
+        }
+      }
+    }
+  }
+
+  private async answerDecisionInline(
+    item: InboxDecisionPreview,
+    choiceId: string,
+    choiceLabel: string
+  ): Promise<void> {
+    const inline = item.inline;
+    if (!inline || this.busyIds.has(item.id)) return;
+    const choiceKey = `${item.id}:${choiceId}`;
+    this.setBusy(item.id, true);
+    this.busyChoiceKey = choiceKey;
+    try {
+      const result = await answerDecision(
+        inline.decisionRowId,
+        choiceId,
+        createIdempotencyKey('inbox-decision'),
+        'inbox'
+      );
+      if (result.ok) {
+        const nextCount = inboxSummaryStore.optimisticRemoveDecision(item.id);
+        if (nextCount !== null) {
+          dispatchProfileDecisionsCountChanged(nextCount);
+        }
+        showToast(`Answered "${choiceLabel}"`, 'success');
+        return;
+      }
+      if (result.status === 409 && result.code === 'batch_required') {
+        showToast('This prompt requires answering all decisions together.', 'neutral');
+        inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+        navigateTo(item.href || '/profile/decisions?tab=pending');
+        return;
+      }
+      if (
+        result.status === 409 &&
+        (result.code === 'already_answered' || result.code === 'replaced')
+      ) {
+        showToast(result.message, 'neutral');
+        inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+        return;
+      }
+      showToast(result.message, 'danger');
+    } finally {
+      this.setBusy(item.id, false);
+      if (this.busyChoiceKey === choiceKey) {
+        this.busyChoiceKey = null;
+      }
+    }
   }
 
   private async approveSecret(item: InboxApprovalPreview): Promise<void> {
@@ -492,53 +837,155 @@ export class ScionPageProfileInbox extends LitElement {
     }
   }
 
-  private renderApprovalsCard(
-    cat: InboxCategory<InboxApprovalPreview>
-  ): TemplateResult | typeof nothing {
+  private renderInboxCard<T>(opts: InboxCardOptions<T>): TemplateResult | typeof nothing {
+    const cat = opts.category;
     if (cat.state === 'disabled' || cat.state === 'unavailable') return nothing;
-    const countLabel = cat.capped ? `${cat.count}+` : String(cat.count);
+
+    const countText = opts.countLabel ?? (cat.capped ? `${cat.count}+` : String(cat.count));
+    const isCompact = cat.state === 'ok' && cat.count === 0;
+    const onRetry =
+      opts.onRetry ??
+      ((): void => inboxSummaryStore.requestRefresh({ immediate: true, force: true }));
 
     return html`
-      <section class="inbox-card" data-inbox-card="approvals">
+      <section
+        class="inbox-card ${isCompact ? 'inbox-card--compact' : ''}"
+        data-inbox-card=${opts.key}
+      >
         <header class="card-header">
           <div class="card-title-group">
-            <sl-icon name="shield-check"></sl-icon>
-            <h2 class="card-title">Approvals</h2>
+            <sl-icon name=${opts.icon}></sl-icon>
+            <h2 class="card-title">${opts.title}</h2>
             ${cat.state === 'ok'
               ? html`<sl-badge variant=${cat.count > 0 ? 'primary' : 'neutral'} pill data-card-count
-                  >${countLabel}</sl-badge
+                  >${countText}</sl-badge
                 >`
               : nothing}
           </div>
-          <a href=${cat.href || '/profile/secrets'} class="card-view-all" data-card-view-all>
+          <a href=${cat.href || opts.defaultHref} class="card-view-all" data-card-view-all>
             View all
             <sl-icon name="arrow-right"></sl-icon>
           </a>
         </header>
+        ${opts.headerExtra ?? nothing}
         <div class="card-body">
           ${cat.state === 'error'
             ? html`
                 <div class="card-error" data-card-error>
                   <span>Couldn't load</span>
-                  <sl-button
-                    size="small"
-                    variant="default"
-                    @click=${(): void => inboxSummaryStore.requestRefresh({ immediate: true })}
-                  >
-                    Retry
-                  </sl-button>
+                  <sl-button size="small" variant="default" @click=${onRetry}>Retry</sl-button>
                 </div>
               `
             : cat.count === 0
               ? html`<p class="card-empty" data-card-empty>Nothing waiting</p>`
-              : html`
-                  <ul class="preview-list">
-                    ${cat.previews.map((item) => this.renderApprovalRow(item))}
-                  </ul>
-                `}
+              : opts.renderBody(cat)}
         </div>
       </section>
     `;
+  }
+
+  private renderDecisionsCard(
+    cat: InboxCategory<InboxDecisionPreview>
+  ): TemplateResult | typeof nothing {
+    return this.renderInboxCard({
+      key: 'decisions',
+      icon: 'signpost-split',
+      title: 'Decisions',
+      category: cat,
+      defaultHref: '/profile/decisions?tab=pending',
+      renderBody: (c) => html`
+        <ul class="preview-list">
+          ${c.previews.map((item) => this.renderDecisionRow(item))}
+        </ul>
+      `,
+    });
+  }
+
+  private renderDecisionRow(item: InboxDecisionPreview): TemplateResult {
+    const busy = this.busyIds.has(item.id);
+    const href = item.href || '/profile/decisions?tab=pending';
+    const age = formatRelativeAge(item.createdAt);
+    const inline = item.inline;
+
+    return html`
+      <li class="preview-row preview-row--stacked" data-decision-row=${item.id}>
+        <div class="preview-info">
+          <a href=${href} class="preview-title" data-decision-link>
+            ${item.question || 'Pending decision'}
+          </a>
+          <div class="preview-meta">
+            ${item.askerAgentName ? html`<span>by ${item.askerAgentName}</span>` : nothing}
+            ${item.projectName ? html`<span>· ${item.projectName}</span>` : nothing}
+            ${item.conversationLabel ? html`<span>· ${item.conversationLabel}</span>` : nothing}
+            ${age ? html`<span>· ${age}</span>` : nothing}
+            ${item.decisionCount > 1
+              ? html`<sl-badge variant="neutral">${item.decisionCount} decisions</sl-badge>`
+              : nothing}
+          </div>
+          ${!item.canAnswer && item.disabledReason
+            ? html`<div class="preview-note" data-decision-disabled-reason>
+                ${item.disabledReason}
+              </div>`
+            : nothing}
+        </div>
+        ${inline
+          ? html`
+              <div class="decision-choices" data-decision-inline=${item.id}>
+                ${inline.choices.map((choice) => {
+                  const key = `${item.id}:${choice.id}`;
+                  return html`
+                    <sl-button
+                      size="small"
+                      variant="default"
+                      ?loading=${this.busyChoiceKey === key}
+                      ?disabled=${busy}
+                      data-decision-choice-btn=${choice.id}
+                      @click=${(): void =>
+                        void this.answerDecisionInline(item, choice.id, choice.label)}
+                    >
+                      ${choice.label}
+                    </sl-button>
+                  `;
+                })}
+                ${inline.allowsOther
+                  ? html`
+                      <a
+                        href=${href}
+                        class="decision-drill-link"
+                        data-decision-other-link=${item.id}
+                      >
+                        Other…
+                      </a>
+                    `
+                  : nothing}
+              </div>
+            `
+          : html`
+              <div class="decision-choices">
+                <a href=${href} class="decision-drill-link" data-decision-open-link=${item.id}>
+                  ${item.canAnswer ? 'Review & answer' : 'View in chat'}
+                </a>
+              </div>
+            `}
+      </li>
+    `;
+  }
+
+  private renderApprovalsCard(
+    cat: InboxCategory<InboxApprovalPreview>
+  ): TemplateResult | typeof nothing {
+    return this.renderInboxCard({
+      key: 'approvals',
+      icon: 'shield-check',
+      title: 'Approvals',
+      category: cat,
+      defaultHref: '/profile/secrets',
+      renderBody: (c) => html`
+        <ul class="preview-list">
+          ${c.previews.map((item) => this.renderApprovalRow(item))}
+        </ul>
+      `,
+    });
   }
 
   private renderApprovalRow(item: InboxApprovalPreview): TemplateResult {
@@ -585,6 +1032,177 @@ export class ScionPageProfileInbox extends LitElement {
         </div>
       </li>
     `;
+  }
+
+  private renderChatCard(
+    baseCat: InboxCategory<InboxChatPreview>
+  ): TemplateResult | typeof nothing {
+    const usingPageLocal = this.chatFilter !== 'all' || this.chatExpanded;
+    const effectiveCat: InboxCategory<InboxChatPreview> =
+      usingPageLocal && this.chatError
+        ? { ...baseCat, state: 'error', previews: [] }
+        : usingPageLocal && this.chatOverride
+          ? this.chatOverride
+          : baseCat;
+
+    const breakdown = effectiveCat.breakdown ?? baseCat.breakdown;
+    const allCount = breakdown?.unreadConversations ?? effectiveCat.count;
+    const dmsCount = breakdown?.dms ?? 0;
+    const mentionsCount = breakdown?.mentions ?? 0;
+    const countLabel = effectiveCat.capped
+      ? `${effectiveCat.count}+ unread`
+      : `${effectiveCat.count} unread`;
+
+    const activeFilterCount =
+      this.chatFilter === 'dms'
+        ? dmsCount
+        : this.chatFilter === 'mentions'
+          ? mentionsCount
+          : allCount;
+
+    const chips =
+      baseCat.state === 'ok' && effectiveCat.state === 'ok' && effectiveCat.count > 0
+        ? html`
+            <div class="card-subbar" role="group" aria-label="Filter unread chat" data-chat-chips>
+              ${(
+                [
+                  { id: 'all', label: `All (${allCount})` },
+                  { id: 'dms', label: `DMs (${dmsCount})` },
+                  { id: 'mentions', label: `Mentions (${mentionsCount})` },
+                ] as const
+              ).map((chip) => {
+                const active = this.chatFilter === chip.id;
+                return html`
+                  <button
+                    type="button"
+                    class="chat-chip ${active ? 'chat-chip--active' : ''}"
+                    aria-pressed=${active ? 'true' : 'false'}
+                    data-chat-chip=${chip.id}
+                    @click=${(): void => this.selectChatFilter(chip.id)}
+                  >
+                    ${chip.label}
+                  </button>
+                `;
+              })}
+            </div>
+          `
+        : nothing;
+
+    return this.renderInboxCard({
+      key: 'chat',
+      icon: 'chat-dots',
+      title: 'Chat',
+      category: effectiveCat,
+      defaultHref: '/chat',
+      countLabel,
+      headerExtra: chips,
+      onRetry: (): void => {
+        if (usingPageLocal) {
+          void this.fetchChatView();
+        }
+        inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+      },
+      renderBody: (c) => {
+        if (this.chatLoading && c.previews.length === 0) {
+          return html`
+            <div class="card-loading-inline" data-chat-loading>
+              <sl-spinner></sl-spinner>
+              <span>Loading conversations…</span>
+            </div>
+          `;
+        }
+        if (c.previews.length === 0) {
+          const emptyText =
+            this.chatFilter === 'dms'
+              ? 'No unread DMs'
+              : this.chatFilter === 'mentions'
+                ? 'No unread mentions'
+                : 'Nothing waiting';
+          return html`<p class="card-empty" data-chat-filter-empty>${emptyText}</p>`;
+        }
+        return html`
+          <ul class="preview-list">
+            ${c.previews.map((item) => this.renderChatRow(item))}
+          </ul>
+          ${activeFilterCount > INBOX_PAGE_PREVIEWS
+            ? html`
+                <div class="card-footer-action">
+                  ${this.chatExpanded
+                    ? html`
+                        <sl-button
+                          size="small"
+                          variant="text"
+                          ?loading=${this.chatLoading}
+                          data-chat-collapse-btn
+                          @click=${(): void => this.toggleChatExpanded(false)}
+                        >
+                          Show fewer
+                        </sl-button>
+                      `
+                    : html`
+                        <sl-button
+                          size="small"
+                          variant="text"
+                          ?loading=${this.chatLoading}
+                          data-chat-expand-btn
+                          @click=${(): void => this.toggleChatExpanded(true)}
+                        >
+                          Show more
+                        </sl-button>
+                      `}
+                </div>
+              `
+            : nothing}
+        `;
+      },
+    });
+  }
+
+  private renderChatRow(item: InboxChatPreview): TemplateResult {
+    const href = item.href || '/chat';
+    const age = formatRelativeAge(item.lastMessageAt || item.createdAt);
+    const kindBadge =
+      item.kind === 'dm'
+        ? html`<sl-badge variant="primary" data-chat-kind="dm">DM</sl-badge>`
+        : item.kind === 'mention'
+          ? html`<sl-badge variant="warning" data-chat-kind="mention">@mention</sl-badge>`
+          : html`<sl-badge variant="neutral" data-chat-kind="thread">Thread</sl-badge>`;
+
+    return html`
+      <li class="preview-row" data-chat-row=${item.id}>
+        <div class="preview-info">
+          <div class="preview-title-line">
+            ${kindBadge}
+            <a href=${href} class="preview-title" data-chat-link>${item.label}</a>
+          </div>
+          <div class="preview-meta">
+            ${item.projectName ? html`<span>${item.projectName}</span>` : nothing}
+            ${item.projectName && age ? html`<span>·</span>` : nothing}
+            ${age ? html`<span>${age}</span>` : nothing}
+          </div>
+        </div>
+      </li>
+    `;
+  }
+
+  private renderCategoryCard(
+    key: InboxCategoryKey,
+    categories: InboxSummaryResponse['categories']
+  ): TemplateResult | typeof nothing {
+    switch (key) {
+      case 'decisions':
+        return categories.decisions ? this.renderDecisionsCard(categories.decisions) : nothing;
+      case 'waiting':
+        // Rendered in Phase 6b.
+        return nothing;
+      case 'approvals':
+        return categories.approvals ? this.renderApprovalsCard(categories.approvals) : nothing;
+      case 'reviews':
+        // Rendered in Phase 6b.
+        return nothing;
+      case 'chat':
+        return categories.chat ? this.renderChatCard(categories.chat) : nothing;
+    }
   }
 
   private renderConfirmDialog(): TemplateResult {
@@ -656,13 +1274,9 @@ export class ScionPageProfileInbox extends LitElement {
 
     const categories = this.summary?.categories;
     const enabledCategories = categories
-      ? [
-          categories.decisions,
-          categories.waiting,
-          categories.approvals,
-          categories.reviews,
-          categories.chat,
-        ].filter((c) => c && c.state !== 'disabled' && c.state !== 'unavailable')
+      ? INBOX_CARD_ORDER.map((k) => categories[k]).filter(
+          (c) => c && c.state !== 'disabled' && c.state !== 'unavailable'
+        )
       : [];
     const allCaughtUp =
       this.summary !== null &&
@@ -676,7 +1290,7 @@ export class ScionPageProfileInbox extends LitElement {
           size="small"
           variant="default"
           ?loading=${this.loading}
-          @click=${(): void => inboxSummaryStore.requestRefresh({ immediate: true })}
+          @click=${(): void => this.handleRefreshClick()}
         >
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Refresh
@@ -702,7 +1316,7 @@ export class ScionPageProfileInbox extends LitElement {
                   size="small"
                   variant="default"
                   style="margin-left: 0.75rem;"
-                  @click=${(): void => inboxSummaryStore.requestRefresh({ immediate: true })}
+                  @click=${(): void => this.handleRefreshClick()}
                 >
                   Retry
                 </sl-button>
@@ -718,7 +1332,9 @@ export class ScionPageProfileInbox extends LitElement {
                   `
                 : nothing}
               <div class="card-grid" data-inbox-grid>
-                ${categories?.approvals ? this.renderApprovalsCard(categories.approvals) : nothing}
+                ${categories
+                  ? INBOX_CARD_ORDER.map((key) => this.renderCategoryCard(key, categories))
+                  : nothing}
               </div>
             `}
       ${this.renderConfirmDialog()}

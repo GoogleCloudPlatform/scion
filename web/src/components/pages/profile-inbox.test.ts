@@ -27,54 +27,68 @@ import type { ScionProfileNav } from '../profile/profile-nav.js';
 import { inboxSummaryStore, type InboxSummaryResponse } from '../../client/inbox-summary.js';
 import { PENDING_SECRETS_CHANGED_EVENT } from '../../client/pending-secrets.js';
 import {
+  PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+  resetProfileDecisionProbeCacheForTests,
+} from '../../client/profile-decisions.js';
+import {
   INBOX_DASHBOARD_FLAG,
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
 
 function makeSummaryResponse(
-  approvals: InboxSummaryResponse['categories']['approvals']
+  approvals: InboxSummaryResponse['categories']['approvals'],
+  overrides: Partial<InboxSummaryResponse['categories']> = {}
 ): InboxSummaryResponse {
-  const total = approvals.state === 'ok' ? approvals.count : 0;
+  const categories: InboxSummaryResponse['categories'] = {
+    decisions: {
+      state: 'disabled',
+      count: 0,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/profile/decisions?tab=pending',
+      previews: [],
+    },
+    waiting: {
+      state: 'disabled',
+      count: 0,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/agents',
+      previews: [],
+    },
+    reviews: {
+      state: 'disabled',
+      count: 0,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/artifacts?review_pending=1&owner=me',
+      previews: [],
+    },
+    approvals,
+    chat: {
+      state: 'disabled',
+      count: 0,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/chat',
+      previews: [],
+    },
+    ...overrides,
+  };
+  let total = 0;
+  let totalCapped = false;
+  for (const c of Object.values(categories)) {
+    if (c.state === 'ok' && c.countsTowardTotal) {
+      total += c.count;
+      if (c.capped) totalCapped = true;
+    }
+  }
   return {
     generatedAt: '2026-11-23T18:00:00Z',
     total,
-    totalCapped: approvals.capped,
-    categories: {
-      decisions: {
-        state: 'disabled',
-        count: 0,
-        capped: false,
-        countsTowardTotal: true,
-        href: '/profile/decisions?tab=pending',
-        previews: [],
-      },
-      waiting: {
-        state: 'disabled',
-        count: 0,
-        capped: false,
-        countsTowardTotal: true,
-        href: '/agents',
-        previews: [],
-      },
-      reviews: {
-        state: 'disabled',
-        count: 0,
-        capped: false,
-        countsTowardTotal: true,
-        href: '/artifacts?review_pending=1&owner=me',
-        previews: [],
-      },
-      approvals,
-      chat: {
-        state: 'disabled',
-        count: 0,
-        capped: false,
-        countsTowardTotal: true,
-        href: '/chat?filter=unread',
-        previews: [],
-      },
-    },
+    totalCapped,
+    categories,
   };
 }
 
@@ -96,7 +110,9 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     localStorage.clear();
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
+    resetProfileDecisionProbeCacheForTests();
     inboxSummaryStore.resetForTests();
+    window.history.replaceState({}, '', '/profile/inbox');
     fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal('fetch', fetchMock);
   });
@@ -104,10 +120,12 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     inboxSummaryStore.resetForTests();
+    resetProfileDecisionProbeCacheForTests();
     vi.unstubAllGlobals();
     localStorage.clear();
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
+    window.history.replaceState({}, '', '/profile/inbox');
   });
 
   it('renders 404 when web.inbox_dashboard is off', async () => {
@@ -374,5 +392,535 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     await flush();
     await page.updateComplete;
     expect(dialog!.hasAttribute('open')).toBe(false);
+  });
+
+  it('renders Decisions, Approvals, and Chat cards in fixed order and hides waiting/reviews until 6b', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const summary = makeSummaryResponse(
+      {
+        state: 'ok',
+        count: 0,
+        capped: false,
+        countsTowardTotal: true,
+        href: '/profile/secrets',
+        previews: [],
+      },
+      {
+        decisions: {
+          state: 'ok',
+          count: 2,
+          capped: true,
+          countsTowardTotal: true,
+          href: '/profile/decisions?tab=pending',
+          previews: [
+            {
+              id: 'm-1',
+              projectId: 'p-1',
+              projectName: 'Core API',
+              createdAt: '2026-11-23T17:00:00Z',
+              href: '/chat/space/p-1/thread/t-1#msg-m-1',
+              promptMessageId: 'm-1',
+              conversationLabel: '#deploys',
+              askerAgentName: 'deploy-bot',
+              question: 'Pick migration strategy?',
+              decisionCount: 2,
+              answerMode: 'set',
+              canAnswer: true,
+            },
+          ],
+        },
+        waiting: {
+          state: 'ok',
+          count: 1,
+          capped: false,
+          countsTowardTotal: true,
+          href: '/agents',
+          previews: [],
+        },
+        reviews: {
+          state: 'ok',
+          count: 1,
+          capped: false,
+          countsTowardTotal: true,
+          href: '/artifacts?review_pending=1&owner=me',
+          previews: [],
+        },
+        chat: {
+          state: 'error',
+          count: 0,
+          capped: false,
+          countsTowardTotal: true,
+          href: '/chat',
+          errorCode: 'timeout',
+          previews: [],
+        },
+      }
+    );
+
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(summary), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const cards = Array.from(page.shadowRoot?.querySelectorAll('[data-inbox-card]') ?? []).map(
+      (el) => el.getAttribute('data-inbox-card')
+    );
+    expect(cards).toEqual(['decisions', 'approvals', 'chat']);
+
+    // Capped decisions card shows "2+" and "View all" links to /profile/decisions?tab=pending.
+    const decCard = page.shadowRoot?.querySelector('[data-inbox-card="decisions"]');
+    expect(decCard?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('2+');
+    expect(decCard?.querySelector('[data-card-view-all]')?.getAttribute('href')).toBe(
+      '/profile/decisions?tab=pending'
+    );
+    expect(decCard?.querySelector('[data-decision-link]')?.getAttribute('href')).toBe(
+      '/chat/space/p-1/thread/t-1#msg-m-1'
+    );
+    expect(decCard?.querySelector('[data-decision-inline]')).toBeNull();
+
+    // Approvals card with 0 count renders compact "Nothing waiting".
+    const appCard = page.shadowRoot?.querySelector('[data-inbox-card="approvals"]');
+    expect(appCard?.classList.contains('inbox-card--compact')).toBe(true);
+    expect(appCard?.querySelector('[data-card-empty]')?.textContent?.trim()).toBe(
+      'Nothing waiting'
+    );
+
+    // Error chat card shows "Couldn't load" and Retry button triggers a refetch.
+    const chatCard = page.shadowRoot?.querySelector('[data-inbox-card="chat"]');
+    const chatErr = chatCard?.querySelector('[data-card-error]');
+    expect(chatErr?.textContent).toContain("Couldn't load");
+    const callsBeforeRetry = fetchMock.mock.calls.length;
+    chatErr?.querySelector<HTMLElement>('sl-button')?.click();
+    await flush();
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBeforeRetry);
+  });
+
+  it('answers single-decision previews inline with surface:"inbox" and handles 409 batch_required + allowsOther', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    let answered = false;
+
+    const decisionSingle = {
+      id: 'msg-single',
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:00:00Z',
+      href: '/chat/space/p-1/thread/t-1#msg-msg-single',
+      promptMessageId: 'msg-single',
+      conversationLabel: '#release',
+      askerAgentName: 'release-bot',
+      question: 'Deploy v2?',
+      decisionCount: 1,
+      answerMode: 'single',
+      canAnswer: true,
+      inline: {
+        decisionRowId: 'row-single',
+        choices: [
+          { id: 'yes', label: 'Yes, deploy' },
+          { id: 'no', label: 'Hold' },
+        ],
+        allowsOther: true,
+      },
+    };
+    const decisionBatch = {
+      id: 'msg-batch',
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:05:00Z',
+      href: '/chat/space/p-1/thread/t-2#msg-msg-batch',
+      promptMessageId: 'msg-batch',
+      conversationLabel: '#ops',
+      askerAgentName: 'ops-bot',
+      question: 'Run backfill?',
+      decisionCount: 1,
+      answerMode: 'single',
+      canAnswer: true,
+      inline: {
+        decisionRowId: 'row-batch',
+        choices: [{ id: 'run', label: 'Run now' }],
+        allowsOther: false,
+      },
+    };
+
+    const summaryBefore = makeSummaryResponse(
+      {
+        state: 'disabled',
+        count: 0,
+        capped: false,
+        countsTowardTotal: true,
+        href: '/profile/secrets',
+        previews: [],
+      },
+      {
+        decisions: {
+          state: 'ok',
+          count: 2,
+          capped: false,
+          countsTowardTotal: true,
+          href: '/profile/decisions?tab=pending',
+          previews: [decisionSingle, decisionBatch],
+        },
+      }
+    );
+    const summaryAfter = makeSummaryResponse(
+      {
+        state: 'disabled',
+        count: 0,
+        capped: false,
+        countsTowardTotal: true,
+        href: '/profile/secrets',
+        previews: [],
+      },
+      {
+        decisions: {
+          state: 'ok',
+          count: 1,
+          capped: false,
+          countsTowardTotal: true,
+          href: '/profile/decisions?tab=pending',
+          previews: [decisionBatch],
+        },
+      }
+    );
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(answered ? summaryAfter : summaryBefore), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      if (url.endsWith('/api/v1/decisions/row-single/answer') && init?.method === 'POST') {
+        answered = true;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              decision: {
+                rowId: 'row-single',
+                status: 'decided',
+              },
+              responseMessageId: 'resp-1',
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (url.endsWith('/api/v1/decisions/row-batch/answer') && init?.method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 'batch_required',
+                message: 'must answer as a batch',
+              },
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const decisionsCountChanged = vi.fn();
+    const navClicks: string[] = [];
+    const onNavClick = (e: Event): void => {
+      const detail = (e as CustomEvent<{ path?: string }>).detail;
+      if (detail?.path) navClicks.push(detail.path);
+    };
+    window.addEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, decisionsCountChanged);
+    document.addEventListener('nav-click', onNavClick);
+
+    try {
+      const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+      page.pageData = {
+        path: '/profile/inbox',
+        title: 'Inbox',
+        user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+      };
+      document.body.appendChild(page);
+      await flush();
+      await page.updateComplete;
+
+      // allowsOther renders an "Other…" drill-in link to the preview href.
+      const otherLink = page.shadowRoot?.querySelector('[data-decision-other-link="msg-single"]');
+      expect(otherLink?.getAttribute('href')).toBe('/chat/space/p-1/thread/t-1#msg-msg-single');
+
+      // Click choice "yes" -> POST /api/v1/decisions/row-single/answer with surface: "inbox".
+      const yesBtn = page.shadowRoot?.querySelector<HTMLElement>(
+        '[data-decision-row="msg-single"] [data-decision-choice-btn="yes"]'
+      );
+      expect(yesBtn).not.toBeNull();
+      yesBtn!.click();
+      await flush();
+      await page.updateComplete;
+
+      const answerCall = fetchMock.mock.calls.find((c) =>
+        urlOf(c[0]).endsWith('/api/v1/decisions/row-single/answer')
+      );
+      expect(answerCall).toBeTruthy();
+      const answerInit = answerCall?.[1] as RequestInit | undefined;
+      expect(answerInit?.method).toBe('POST');
+      expect((answerInit?.headers as Record<string, string>)?.['Content-Type']).toBe(
+        'application/json'
+      );
+      const answerBody = JSON.parse(answerInit?.body as string) as Record<string, unknown>;
+      expect(answerBody.choice_id).toBe('yes');
+      expect(answerBody.surface).toBe('inbox');
+      expect(typeof answerBody.idempotency_key).toBe('string');
+
+      // Optimistically removed and synced to /profile/decisions count listeners.
+      expect(page.shadowRoot?.querySelector('[data-decision-row="msg-single"]')).toBeNull();
+      expect(decisionsCountChanged).toHaveBeenCalled();
+
+      // 409 batch_required falls back to drill-in navigation via item.href.
+      const batchBtn = page.shadowRoot?.querySelector<HTMLElement>(
+        '[data-decision-row="msg-batch"] [data-decision-choice-btn="run"]'
+      );
+      expect(batchBtn).not.toBeNull();
+      batchBtn!.click();
+      await flush();
+      await page.updateComplete;
+
+      expect(navClicks).toContain('/chat/space/p-1/thread/t-2#msg-msg-batch');
+    } finally {
+      window.removeEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, decisionsCountChanged);
+      document.removeEventListener('nav-click', onNavClick);
+    }
+  });
+
+  it('renders Chat card with breakdown chips, ?chat= URL persistence, and expand to 10 previews', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+
+    const dmPreview = {
+      id: 'dm:u1:a1',
+      kind: 'dm' as const,
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:50:00Z',
+      href: '/chat/dm/dm%3Au1%3Aa1',
+      conversationKey: 'dm:u1:a1',
+      label: 'deploy-bot',
+      lastMessageAt: '2026-11-23T17:50:00Z',
+    };
+    const mentionPreview = {
+      id: 'topic-1',
+      kind: 'mention' as const,
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:45:00Z',
+      href: '/chat/core/topic-1',
+      conversationKey: 'topic-1',
+      label: '#incidents',
+      lastMessageAt: '2026-11-23T17:45:00Z',
+    };
+    const threadPreview = {
+      id: 'topic-2',
+      kind: 'thread' as const,
+      projectId: 'p-1',
+      projectName: 'Core',
+      createdAt: '2026-11-23T17:40:00Z',
+      href: '/chat/core/topic-2',
+      conversationKey: 'topic-2',
+      label: '#general',
+      lastMessageAt: '2026-11-23T17:40:00Z',
+    };
+    const breakdown = { dms: 2, mentions: 1, unreadConversations: 5 };
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        const parsed = new URL(url, 'http://localhost');
+        const chatParam = parsed.searchParams.get('chat') ?? 'all';
+        const previewsParam = Number(parsed.searchParams.get('previews') ?? '3');
+        const previews =
+          chatParam === 'dms'
+            ? [dmPreview]
+            : chatParam === 'mentions'
+              ? [mentionPreview]
+              : previewsParam >= 10
+                ? [
+                    dmPreview,
+                    mentionPreview,
+                    threadPreview,
+                    { ...threadPreview, id: 'topic-3', conversationKey: 'topic-3', label: '#ops' },
+                  ]
+                : [dmPreview, mentionPreview, threadPreview];
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              makeSummaryResponse(
+                {
+                  state: 'disabled',
+                  count: 0,
+                  capped: false,
+                  countsTowardTotal: true,
+                  href: '/profile/secrets',
+                  previews: [],
+                },
+                {
+                  chat: {
+                    state: 'ok',
+                    count: 5,
+                    capped: false,
+                    countsTowardTotal: true,
+                    href: '/chat',
+                    breakdown,
+                    previews,
+                  },
+                }
+              )
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const chatCard = page.shadowRoot?.querySelector('[data-inbox-card="chat"]');
+    expect(chatCard).not.toBeNull();
+    expect(chatCard?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('5 unread');
+    expect(chatCard?.querySelector('[data-card-view-all]')?.getAttribute('href')).toBe('/chat');
+
+    // Chips reflect breakdown counts.
+    const allChip = chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="all"]');
+    const dmsChip = chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="dms"]');
+    const mentionsChip = chatCard?.querySelector<HTMLButtonElement>('[data-chat-chip="mentions"]');
+    expect(allChip?.textContent?.trim()).toBe('All (5)');
+    expect(dmsChip?.textContent?.trim()).toBe('DMs (2)');
+    expect(mentionsChip?.textContent?.trim()).toBe('Mentions (1)');
+    expect(allChip?.getAttribute('aria-pressed')).toBe('true');
+
+    // DM and thread links use preview hrefs.
+    expect(
+      chatCard?.querySelector('[data-chat-row="dm:u1:a1"] [data-chat-link]')?.getAttribute('href')
+    ).toBe('/chat/dm/dm%3Au1%3Aa1');
+    expect(
+      chatCard?.querySelector('[data-chat-row="topic-1"] [data-chat-link]')?.getAttribute('href')
+    ).toBe('/chat/core/topic-1');
+
+    // Clicking DMs chip updates ?chat=dms and fetches chat=dms.
+    dmsChip!.click();
+    await flush();
+    await page.updateComplete;
+
+    expect(window.location.search).toBe('?chat=dms');
+    expect(dmsChip?.getAttribute('aria-pressed')).toBe('true');
+    expect(fetchMock.mock.calls.some((c) => urlOf(c[0]).includes('previews=3&chat=dms'))).toBe(
+      true
+    );
+    expect(chatCard?.querySelectorAll('[data-chat-row]').length).toBe(1);
+    expect(chatCard?.querySelector('[data-chat-row="dm:u1:a1"]')).not.toBeNull();
+
+    // Clicking All chip clears ?chat= from URL and shows all 3 previews again.
+    allChip!.click();
+    await flush();
+    await page.updateComplete;
+
+    expect(window.location.search).toBe('');
+    expect(chatCard?.querySelectorAll('[data-chat-row]').length).toBe(3);
+
+    // Expanding requests previews=10.
+    const expandBtn = chatCard?.querySelector<HTMLElement>('[data-chat-expand-btn]');
+    expect(expandBtn).not.toBeNull();
+    expandBtn!.click();
+    await flush();
+    await page.updateComplete;
+
+    expect(fetchMock.mock.calls.some((c) => urlOf(c[0]).includes('previews=10&chat=all'))).toBe(
+      true
+    );
+    expect(chatCard?.querySelectorAll('[data-chat-row]').length).toBe(4);
+    expect(chatCard?.querySelector('[data-chat-collapse-btn]')).not.toBeNull();
+  });
+
+  it('hydrates ?chat=mentions from URL on mount', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    window.history.replaceState({}, '', '/profile/inbox?chat=mentions');
+
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify(
+            makeSummaryResponse(
+              {
+                state: 'disabled',
+                count: 0,
+                capped: false,
+                countsTowardTotal: true,
+                href: '/profile/secrets',
+                previews: [],
+              },
+              {
+                chat: {
+                  state: 'ok',
+                  count: 3,
+                  capped: false,
+                  countsTowardTotal: true,
+                  href: '/chat',
+                  breakdown: { dms: 1, mentions: 1, unreadConversations: 3 },
+                  previews: [
+                    {
+                      id: 'topic-m',
+                      kind: 'mention',
+                      projectId: 'p-1',
+                      projectName: 'Core',
+                      createdAt: '2026-11-23T17:45:00Z',
+                      href: '/chat/core/topic-m',
+                      conversationKey: 'topic-m',
+                      label: '#alerts',
+                      lastMessageAt: '2026-11-23T17:45:00Z',
+                    },
+                  ],
+                },
+              }
+            )
+          ),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
+    );
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    expect(fetchMock.mock.calls.some((c) => urlOf(c[0]).includes('previews=3&chat=mentions'))).toBe(
+      true
+    );
+    const mentionsChip = page.shadowRoot?.querySelector('[data-chat-chip="mentions"]');
+    expect(mentionsChip?.getAttribute('aria-pressed')).toBe('true');
   });
 });
