@@ -187,23 +187,6 @@ func (s *Server) handleMoveBundle(w http.ResponseWriter, r *http.Request, id, pr
 	}
 }
 
-// moveBundleCapability reports whether this broker has at least one configured
-// runtime (default or registered auxiliary runtime) that supports move-bundle
-// transfers.
-func (s *Server) moveBundleCapability(defaultRT scionrt.Runtime) bool {
-	if moveBundleSupported(defaultRT) {
-		return true
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, entry := range s.auxiliaryRuntimes {
-		if moveBundleSupported(entry.Runtime) {
-			return true
-		}
-	}
-	return false
-}
-
 // moveBundleDirs holds the resolved host paths for an agent's bundle roots.
 type moveBundleDirs = agent.MoveBundleAgentDirs
 
@@ -1209,6 +1192,15 @@ func (s *Server) runMoveBundleImport(
 		job.markFailed(formatMoveBundleError("bundle import failed", err), "", st.now())
 		return
 	}
+	if dirs.WorkspaceOwner.UID > 0 || dirs.WorkspaceOwner.GID > 0 {
+		if err := chownMoveBundleTree(dirs.WorkspaceDir, dirs.WorkspaceOwner.UID, dirs.WorkspaceOwner.GID); err != nil {
+			s.agentLifecycleLog.Warn("Move-bundle import workspace chown failed",
+				"agent_id", agentID, "reincarnation_id", req.ReincarnationID,
+				"uid", dirs.WorkspaceOwner.UID, "gid", dirs.WorkspaceOwner.GID, "error", err)
+			job.markFailed(formatMoveBundleError("bundle import failed", err), "", st.now())
+			return
+		}
+	}
 
 	// Commit home (provision-rendered files win; skip and count).
 	skipped, err := commitMoveBundleHome(dirs.HomeDir, homeStageName)
@@ -1220,6 +1212,15 @@ func (s *Server) runMoveBundleImport(
 			"agent_id", agentID, "reincarnation_id", req.ReincarnationID, "error", err)
 		job.markFailed(formatMoveBundleError("bundle import failed", err), "", st.now())
 		return
+	}
+	if dirs.HomeOwner.UID > 0 || dirs.HomeOwner.GID > 0 {
+		if err := chownMoveBundleTree(dirs.HomeDir, dirs.HomeOwner.UID, dirs.HomeOwner.GID); err != nil {
+			s.agentLifecycleLog.Warn("Move-bundle import home chown failed",
+				"agent_id", agentID, "reincarnation_id", req.ReincarnationID,
+				"uid", dirs.HomeOwner.UID, "gid", dirs.HomeOwner.GID, "error", err)
+			job.markFailed(formatMoveBundleError("bundle import failed", err), "", st.now())
+			return
+		}
 	}
 
 	if err := moveBundleCommitHook("before_marker"); err != nil {

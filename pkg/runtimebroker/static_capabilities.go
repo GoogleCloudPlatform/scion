@@ -134,11 +134,18 @@ func webPTYSupported(rt scionrt.Runtime) bool {
 // Substrate) do not advertise AgentMoveBundle.
 func moveBundleSupported(rt scionrt.Runtime) bool {
 	switch r := rt.(type) {
-	case *scionrt.DockerRuntime, *scionrt.PodmanRuntime, *scionrt.AppleContainerRuntime,
-		*scionrt.KubernetesRuntime:
+	case *scionrt.DockerRuntime, *scionrt.PodmanRuntime, *scionrt.AppleContainerRuntime:
 		return true
+	case *scionrt.KubernetesRuntime:
+		return agent.K8sMoveBundleConfigured()
 	case *scionrt.MockRuntime:
-		return agent.MoveBundleRuntimeSupported(r.Name())
+		if !agent.MoveBundleRuntimeSupported(r.Name()) {
+			return false
+		}
+		if r.Name() == "kubernetes" || r.Name() == "k8s" {
+			return agent.K8sMoveBundleConfigured()
+		}
+		return true
 	default:
 		return false
 	}

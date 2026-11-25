@@ -209,15 +209,42 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 	if err != nil {
 		return dirs, fmt.Errorf("%w: resolve the NFS export: %v", ErrMoveMarkerMismatch, err)
 	}
+	var wsExportAgentDir string
 	if hostBase != "" {
 		agentRel, err := runtime.NFSAgentDirSubPath(rel, agentName)
 		if err != nil {
 			return dirs, fmt.Errorf("%w: workspace_storage nfs: %v", ErrMoveMarkerMismatch, err)
 		}
-		dirs = append(dirs, filepath.Join(hostBase, agentRel))
+		wsExportAgentDir = filepath.Join(hostBase, agentRel)
+		dirs = append(dirs, wsExportAgentDir)
 		// RemoveNFSAgentFiles also removes the agent's worktree under the
 		// project's shared checkout on the export.
 		worktrees = append(worktrees, filepath.Join(hostBase, nfsWorktreeSubPath(rel, agentName)))
+	}
+	// On Kubernetes with NFS home storage, a rollback delete also removes
+	// home-<agentID> on the home share. When the home share's agent directory
+	// differs from wsExportAgentDir (or when the home leaf exists independently),
+	// verify that either the home leaf itself or its parent carries moveID (R3).
+	if m.Runtime != nil && isKubernetesRuntime(m.Runtime.Name()) {
+		if hubAgentID := deleteHubAgentIDFrom(ctx); validHomeAgentID(hubAgentID, agentName) {
+			homeParent, homeLeaf, ok, hErr := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
+			if hErr != nil {
+				return dirs, fmt.Errorf("%w: resolve NFS home share: %v", ErrMoveMarkerMismatch, hErr)
+			}
+			if ok {
+				if homeParent != wsExportAgentDir {
+					if _, lstatErr := os.Lstat(homeLeaf); lstatErr == nil {
+						// Home leaf exists on a distinct home share: require moveID on
+						// either homeLeaf or homeParent (fail closed if neither matches).
+						if checkMoveMarker(homeLeaf, moveID) != nil && checkMoveMarker(homeParent, moveID) != nil {
+							return append(dirs, homeLeaf), fmt.Errorf("%w: %s has no matching move marker", ErrMoveMarkerMismatch, homeLeaf)
+						}
+					} else if !errors.Is(lstatErr, fs.ErrNotExist) {
+						return append(dirs, homeLeaf), fmt.Errorf("%w: stat %s: %v", ErrMoveMarkerMismatch, homeLeaf, lstatErr)
+					}
+				}
+			}
+		}
 	}
 	checked := append(append([]string(nil), dirs...), worktrees...)
 	for _, dir := range dirs {

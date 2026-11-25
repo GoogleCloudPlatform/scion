@@ -107,7 +107,12 @@ func waitForMoveBundleJob(t *testing.T, srv *Server, agentSlug, projectID, kind,
 }
 
 func TestBrokerCapabilities_AdvertiseAgentMoveBundle(t *testing.T) {
-	// Supported runtimes advertise AgentMoveBundle; unsupported/nil/degraded do not.
+	// Plain environment without K8s NFS storage: local container runtimes advertise
+	// AgentMoveBundle, while plain K8s and unsupported/nil/degraded runtimes do not.
+	plainHome := t.TempDir()
+	t.Setenv("HOME", plainHome)
+	t.Setenv("SCION_CONFIG_DIR", filepath.Join(plainHome, ".scion"))
+
 	for _, tc := range []struct {
 		name string
 		rt   scionrt.Runtime
@@ -116,7 +121,7 @@ func TestBrokerCapabilities_AdvertiseAgentMoveBundle(t *testing.T) {
 		{"docker", scionrt.NewDockerRuntime(), true},
 		{"podman", &scionrt.PodmanRuntime{}, true},
 		{"apple", scionrt.NewAppleContainerRuntime(), true},
-		{"kubernetes", &scionrt.KubernetesRuntime{}, true},
+		{"kubernetes-without-nfs", &scionrt.KubernetesRuntime{}, false},
 		{"cloudrun", &scionrt.CloudRunRuntime{}, false},
 		{"cloudrun-sandbox", &scionrt.CloudRunSandboxRuntime{}, false},
 		{"nil", nil, false},
@@ -132,16 +137,32 @@ func TestBrokerCapabilities_AdvertiseAgentMoveBundle(t *testing.T) {
 		})
 	}
 
-	// /api/v1/info advertises AgentMoveBundle when default or auxiliary runtime is supported.
-	srv := newTestServer(t)
-	srv.runtime = &scionrt.KubernetesRuntime{}
-	rec := doMoveBundleReq(t, srv, http.MethodGet, "/api/v1/info", nil)
-	require.Equal(t, http.StatusOK, rec.Code)
-	var resp BrokerInfoResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Capabilities)
-	assert.True(t, resp.Capabilities.AgentMoveBundle, "/api/v1/info must advertise AgentMoveBundle for Kubernetes broker")
+	// /api/v1/info uses the exact same rule as StaticCapabilities / heartbeat.
+	srvPlainK8s := newTestServer(t)
+	srvPlainK8s.runtime = &scionrt.KubernetesRuntime{}
+	recPlain := doMoveBundleReq(t, srvPlainK8s, http.MethodGet, "/api/v1/info", nil)
+	require.Equal(t, http.StatusOK, recPlain.Code)
+	var respPlain BrokerInfoResponse
+	require.NoError(t, json.Unmarshal(recPlain.Body.Bytes(), &respPlain))
+	require.NotNil(t, respPlain.Capabilities)
+	assert.False(t, respPlain.Capabilities.AgentMoveBundle, "/api/v1/info must not advertise AgentMoveBundle for plain Kubernetes without NFS workspace+home")
+	assert.Equal(t, StaticCapabilities(srvPlainK8s.runtime, "").AgentMoveBundle, respPlain.Capabilities.AgentMoveBundle)
 
+	// With K8s NFS workspace + NFS home configured, both StaticCapabilities and /api/v1/info advertise AgentMoveBundle.
+	srvK8sNFS, _, _, _ := setupK8sBrokerNFSFixture(t)
+	srvK8sNFS.runtime = &scionrt.KubernetesRuntime{}
+	assert.True(t, StaticCapabilities(srvK8sNFS.runtime, "").AgentMoveBundle)
+	assert.Contains(t, StaticCapabilityNames(srvK8sNFS.runtime), "agentMoveBundle")
+
+	recNFS := doMoveBundleReq(t, srvK8sNFS, http.MethodGet, "/api/v1/info", nil)
+	require.Equal(t, http.StatusOK, recNFS.Code)
+	var respNFS BrokerInfoResponse
+	require.NoError(t, json.Unmarshal(recNFS.Body.Bytes(), &respNFS))
+	require.NotNil(t, respNFS.Capabilities)
+	assert.True(t, respNFS.Capabilities.AgentMoveBundle, "/api/v1/info must advertise AgentMoveBundle for K8s NFS broker")
+	assert.Equal(t, StaticCapabilities(srvK8sNFS.runtime, "").AgentMoveBundle, respNFS.Capabilities.AgentMoveBundle)
+
+	// Unsupported default runtime never advertises AgentMoveBundle even if an auxiliary runtime is registered.
 	srvUnsupported := newTestServer(t)
 	srvUnsupported.runtime = &scionrt.CloudRunRuntime{}
 	rec2 := doMoveBundleReq(t, srvUnsupported, http.MethodGet, "/api/v1/info", nil)
@@ -149,7 +170,8 @@ func TestBrokerCapabilities_AdvertiseAgentMoveBundle(t *testing.T) {
 	var resp2 BrokerInfoResponse
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
 	require.NotNil(t, resp2.Capabilities)
-	assert.False(t, resp2.Capabilities.AgentMoveBundle, "/api/v1/info must not advertise AgentMoveBundle when only unsupported runtimes are configured")
+	assert.False(t, resp2.Capabilities.AgentMoveBundle, "/api/v1/info must not advertise AgentMoveBundle when default runtime is unsupported")
+	assert.Equal(t, StaticCapabilities(srvUnsupported.runtime, "").AgentMoveBundle, resp2.Capabilities.AgentMoveBundle)
 }
 
 func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {

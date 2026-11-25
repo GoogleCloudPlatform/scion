@@ -166,9 +166,20 @@ func TestMoveBundle_K8sNFS_SourcePrecheckExportAndSymlinks(t *testing.T) {
 	// Another absolute symlink to /scion-staging/... (outside home) is skipped as an escaping symlink, not failed.
 	require.NoError(t, os.Symlink("/scion-staging/other/file", filepath.Join(homeDir, "extra-staged-link")))
 
-	// 1. Precheck reports durable=true and counts only non-excluded files.
-	prePath := fmt.Sprintf("/api/v1/agents/%s/move-bundle/precheck?projectId=%s&agentId=%s", slug, k8sBrokerTestProjectID, k8sBrokerTestAgentID)
+	// 1a. Precheck without agentId in URL or body is refused (cannot resolve home-<agentID>).
+	prePath := fmt.Sprintf("/api/v1/agents/%s/move-bundle/precheck?projectId=%s", slug, k8sBrokerTestProjectID)
+	recNoID := doMoveBundleReq(t, srv, http.MethodPost, prePath, api.MoveBundlePrecheckRequest{
+		ProjectPath: projectPath,
+		Limits:      api.DefaultMoveBundleLimits(),
+	})
+	require.Equal(t, http.StatusOK, recNoID.Code, recNoID.Body.String())
+	var preRespNoID api.MoveBundlePrecheckResponse
+	require.NoError(t, json.Unmarshal(recNoID.Body.Bytes(), &preRespNoID))
+	assert.False(t, preRespNoID.Durable, "K8s precheck without agentId must fail closed")
+
+	// 1b. Precheck with AgentID in JSON body (no agentId URL query param, matching Hub dispatch) reports durable=true.
 	rec := doMoveBundleReq(t, srv, http.MethodPost, prePath, api.MoveBundlePrecheckRequest{
+		AgentID:     k8sBrokerTestAgentID,
 		ProjectPath: projectPath,
 		Limits:      api.DefaultMoveBundleLimits(),
 	})
@@ -228,6 +239,7 @@ func TestMoveBundle_K8sNFS_SourcePrecheckExportAndSymlinks(t *testing.T) {
 	require.NoError(t, os.RemoveAll(filepath.Join(homeDir, ".claude")))
 	require.NoError(t, os.Symlink("/scion-staging/auth-dir", filepath.Join(homeDir, ".claude")))
 	recAnc := doMoveBundleReq(t, srv, http.MethodPost, prePath, api.MoveBundlePrecheckRequest{
+		AgentID:     k8sBrokerTestAgentID,
 		ProjectPath: projectPath,
 		Limits:      api.DefaultMoveBundleLimits(),
 	})
@@ -252,8 +264,9 @@ func TestMoveBundle_K8sWithoutNFSHome_Refused(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dirs.AgentDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dirs.AgentDir, "home-storage.json"), []byte(`{"backend":"local"}`), 0o600))
 
-	prePath := fmt.Sprintf("/api/v1/agents/%s/move-bundle/precheck?projectId=%s&agentId=%s", slug, k8sBrokerTestProjectID, k8sBrokerTestAgentID)
+	prePath := fmt.Sprintf("/api/v1/agents/%s/move-bundle/precheck?projectId=%s", slug, k8sBrokerTestProjectID)
 	rec := doMoveBundleReq(t, srv, http.MethodPost, prePath, api.MoveBundlePrecheckRequest{
+		AgentID:     k8sBrokerTestAgentID,
 		ProjectPath: projectPath,
 		Limits:      api.DefaultMoveBundleLimits(),
 	})
@@ -381,6 +394,23 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 	})
 	require.NoError(t, err)
 
+	// Record post-commit chown calls so we can verify target NFS ownership
+	// without needing root privileges in unit tests.
+	type commitChown struct {
+		uid int
+		gid int
+	}
+	var chownMu sync.Mutex
+	chowned := map[string]commitChown{}
+	origCommitLchown := moveBundleCommitLchown
+	moveBundleCommitLchown = func(name string, uid, gid int) error {
+		chownMu.Lock()
+		chowned[name] = commitChown{uid: uid, gid: gid}
+		chownMu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { moveBundleCommitLchown = origCommitLchown })
+
 	// 2. Import bundle into K8s NFS target layout.
 	impPath := fmt.Sprintf("/api/v1/agents/%s/move-bundle/import?projectId=%s&agentId=%s", slug, k8sBrokerTestProjectID, k8sBrokerTestAgentID)
 	impRec := doMoveBundleReq(t, srv, http.MethodPost, impPath, api.MoveBundleImportRequest{
@@ -411,6 +441,15 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, "cmd1\ncmd2\n", string(histData))
 
+	// Post-commit chown must have run on imported workspace and home entries.
+	wantOwner := commitChown{uid: int(scionrt.K8sContainerUID), gid: 1000}
+	chownMu.Lock()
+	assert.Equal(t, wantOwner, chowned[exportWS], "committed workspace dir must be chowned")
+	assert.Equal(t, wantOwner, chowned[filepath.Join(exportWS, "README.md")], "committed workspace file must be chowned")
+	assert.Equal(t, wantOwner, chowned[exportHome], "committed home dir must be chowned")
+	assert.Equal(t, wantOwner, chowned[filepath.Join(exportHome, "history.txt")], "committed home file must be chowned")
+	chownMu.Unlock()
+
 	// Sentinel written by provision must survive import.
 	assert.FileExists(t, filepath.Join(exportHome, homeprep.SentinelName))
 
@@ -426,6 +465,45 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 	assert.NoDirExists(t, exportWS, "rollback delete must remove NFS workspace")
 	assert.NoDirExists(t, exportHome, "rollback delete must remove NFS home leaf")
 	assert.NoDirExists(t, leftoverStage, "rollback delete must remove .bundle-* staging siblings")
+}
+
+func TestMoveBundle_K8sNFS_NormalDeletePreservesHomeLeaf(t *testing.T) {
+	srv, _, hostBase, projectPath := setupK8sBrokerNFSFixture(t)
+	slug := "k8s-normal-del"
+	rid := "rid-k8s-normal-del-1"
+
+	provCtx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
+		Experiments: []string{experiments.K8sNFSHome},
+	})
+	_, err := srv.manager.Provision(provCtx, api.StartOptions{
+		Name:                slug,
+		ProjectPath:         projectPath,
+		HubProjectID:        k8sBrokerTestProjectID,
+		BrokerMode:          true,
+		NoAuth:              true,
+		FreshProvision:      true,
+		MoveReincarnationID: rid,
+		WorkspaceSource:     api.WorkspaceSourceMoveBundle,
+		Env: map[string]string{
+			"SCION_PROJECT_ID": k8sBrokerTestProjectID,
+			"SCION_AGENT_ID":   k8sBrokerTestAgentID,
+		},
+	})
+	require.NoError(t, err)
+
+	realHostBase, err := filepath.EvalSymlinks(hostBase)
+	require.NoError(t, err)
+	exportAgentDir := filepath.Join(realHostBase, "projects", k8sBrokerTestProjectID, "agents", slug)
+	exportHome := filepath.Join(exportAgentDir, "home-"+k8sBrokerTestAgentID)
+	require.DirExists(t, exportHome)
+
+	// Normal delete (no moveReincarnationId) must NOT remove NFS home leaf (Hub owns RemoveAgentStorage).
+	delPath := fmt.Sprintf("/api/v1/agents/%s?deleteFiles=true&projectId=%s&agentId=%s&projectPath=%s",
+		slug, k8sBrokerTestProjectID, k8sBrokerTestAgentID, projectPath)
+	delRec := doMoveBundleReq(t, srv, http.MethodDelete, delPath, nil)
+	require.Equal(t, http.StatusNoContent, delRec.Code, delRec.Body.String())
+
+	assert.DirExists(t, exportHome, "normal delete without moveReincarnationId must leave NFS home leaf intact")
 }
 
 type mapPartSink struct {

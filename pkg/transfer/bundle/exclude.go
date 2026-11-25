@@ -367,6 +367,10 @@ func (e *prefixExcluder) Exclude(relPath string, _ bool) bool {
 		return true
 	}
 	if e.caseInsensitive {
+		// Note: strings.ToLower performs ASCII/simple Unicode case folding, not
+		// full APFS Unicode case-folding + NFD normalization. All built-in
+		// exclusion prefixes are ASCII, so this covers every standard credential
+		// and cache path; non-ASCII user secret targets remain best-effort.
 		lp := strings.ToLower(relPath)
 		for _, p := range e.lowerPrefixes {
 			if lp == p || strings.HasPrefix(lp, p+"/") {

@@ -448,9 +448,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			AgentMoveRecreate: true,
 			// This broker implements the portable workspace+$HOME bundle move
 			// endpoints (precheck, export, import) and WorkspaceSource="move-bundle"
-			// provision (ptone/scion#8960), advertised only when at least one
-			// configured runtime supports it.
-			AgentMoveBundle: s.moveBundleCapability(rt),
+			// provision (ptone/scion#8960), using the same single rule as
+			// StaticCapabilities / heartbeat / registration.
+			AgentMoveBundle: moveBundleSupported(rt),
 			StartsInFlight:  s.startsInFlight != nil,
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
@@ -3534,6 +3534,15 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// check below uses the same one.
 	deleteHubProjectID := projectID
 
+	// Capture any recorded NFS home subPath root before DeleteTarget removes
+	// the agent's local state directory (including home-storage.json). Only
+	// needed for move rollback deletes, which are the only deletes that remove
+	// broker-side NFS home leaves.
+	var moveHomeSubPathRoot string
+	if moveReincarnationID != "" && projectPath != "" {
+		moveHomeSubPathRoot = agent.ReadHomeStorageSubPathRoot(ctx, projectPath, deleteHubProjectID, target.name)
+	}
+
 	// A forced move's rollback delete removes nothing unless every agent
 	// directory it would remove that exists carries that move's marker,
 	// checked under the files lock taken above. Anything else was not
@@ -3546,7 +3555,8 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		var paths []string
 		chkErr := errors.New("this broker cannot check move markers")
 		if ok && projectPath != "" {
-			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, deleteHubProjectID, target.name, sharerKey, moveReincarnationID)
+			checkCtx := agent.WithDeleteHomeSubPathRoot(agent.WithDeleteHubAgentID(ctx, hubAgentID), moveHomeSubPathRoot)
+			paths, chkErr = checker.CheckMoveMarkers(checkCtx, projectPath, agentProjectID, deleteHubProjectID, target.name, sharerKey, moveReincarnationID)
 		} else if ok {
 			chkErr = errors.New("no project path to check the move markers in")
 		}
@@ -3830,7 +3840,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			// Each removal is audited with what it did: deleted, absent
 			// (nothing was there) or failed. A workspace moved aside is
 			// purged in the background, which audits its own result.
-			rmCtx := agent.WithDeleteHubAgentID(agent.WithStorageAuditLogger(ctx, s.agentLifecycleLog), hubAgentID)
+			rmCtx := agent.WithStorageAuditLogger(ctx, s.agentLifecycleLog)
+			if moveReincarnationID != "" {
+				rmCtx = agent.WithDeleteMoveReincarnationID(
+					agent.WithDeleteHomeSubPathRoot(
+						agent.WithDeleteHubAgentID(rmCtx, hubAgentID),
+						moveHomeSubPathRoot,
+					),
+					moveReincarnationID,
+				)
+			}
 			ds, rmErr := remover.RemoveNFSAgentFiles(rmCtx, projectPath, agentProjectID, target.name)
 			if rmErr != nil {
 				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",

@@ -127,13 +127,17 @@ var purgeRemovedAgentWorkspaces = func(agentDir, projectID, agentName string, lo
 	}()
 }
 
-// deleteHubAgentIDKey carries the hub agent UUID for RemoveNFSAgentFiles so
-// it can also remove the agent's Kubernetes NFS home leaf (home-<agentID>)
-// and its move-bundle staging siblings without changing the RemoveNFSAgentFiles
-// signature.
-type deleteHubAgentIDKey struct{}
+// deleteHubAgentIDKey, deleteMoveReincarnationIDKey, and
+// deleteHomeSubPathRootKey carry optional rollback-delete metadata for
+// CheckMoveMarkers and RemoveNFSAgentFiles without changing their signatures.
+type (
+	deleteHubAgentIDKey          struct{}
+	deleteMoveReincarnationIDKey struct{}
+	deleteHomeSubPathRootKey     struct{}
+)
 
-// WithDeleteHubAgentID attaches hubAgentID to ctx for RemoveNFSAgentFiles.
+// WithDeleteHubAgentID attaches hubAgentID to ctx for CheckMoveMarkers and
+// RemoveNFSAgentFiles.
 func WithDeleteHubAgentID(ctx context.Context, hubAgentID string) context.Context {
 	if hubAgentID == "" {
 		return ctx
@@ -146,6 +150,36 @@ func deleteHubAgentIDFrom(ctx context.Context) string {
 	return v
 }
 
+// WithDeleteMoveReincarnationID attaches moveReincarnationID to ctx so
+// RemoveNFSAgentFiles scopes move-bundle staging purge, K8s NFS home-leaf
+// removal, and empty-agent-dir cleanup strictly to move rollback deletes (R4).
+func WithDeleteMoveReincarnationID(ctx context.Context, moveReincarnationID string) context.Context {
+	if moveReincarnationID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, deleteMoveReincarnationIDKey{}, moveReincarnationID)
+}
+
+func deleteMoveReincarnationIDFrom(ctx context.Context) string {
+	v, _ := ctx.Value(deleteMoveReincarnationIDKey{}).(string)
+	return v
+}
+
+// WithDeleteHomeSubPathRoot attaches the SubPathRoot recorded in the agent's
+// home-storage.json (read before DeleteTarget removes agentDir) so
+// removeK8sNFSAgentHome targets the recorded subpath root (N4).
+func WithDeleteHomeSubPathRoot(ctx context.Context, subPathRoot string) context.Context {
+	if subPathRoot == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, deleteHomeSubPathRootKey{}, subPathRoot)
+}
+
+func deleteHomeSubPathRootFrom(ctx context.Context) string {
+	v, _ := ctx.Value(deleteHomeSubPathRootKey{}).(string)
+	return v
+}
+
 // RemoveNFSAgentFiles removes what the agent named agentName has on the NFS
 // workspace export, through the broker's own mount of the export. The
 // broker calls it when it deletes an agent with its files. It removes,
@@ -154,10 +188,12 @@ func deleteHubAgentIDFrom(ctx context.Context) string {
 //     (RemoveNFSWorktree);
 //   - the agent's own workspace in its agent directory
 //     (<subpath_root>/<projectID>/agents/<agentName>/workspace), with the
-//     branch record next to it, plus any move-bundle staging siblings;
-//   - on Kubernetes, the agent's NFS home leaf (home-<agentID>) and its
-//     move-bundle staging siblings when the hub agent ID is supplied via
-//     WithDeleteHubAgentID.
+//     branch record next to it;
+//   - on move rollback deletes only (WithDeleteMoveReincarnationID set):
+//     any move-bundle .bundle-* staging siblings, the marker-guarded K8s NFS
+//     home leaf (home-<agentID>, when WithDeleteHubAgentID is set), and the
+//     empty marked export agent dir. Normal deletes leave home-<agentID> to
+//     Hub-owned projectfs.Layout.RemoveAgentStorage (R4).
 //
 // The project's workspace mode is not consulted: it can change after an
 // agent was created, so each removal acts on what is on the export.
@@ -171,22 +207,42 @@ func deleteHubAgentIDFrom(ctx context.Context) string {
 // broker.
 func (m *AgentManager) RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) (ds []projectfs.Deletion, err error) {
 	var errs []error
+	var rollbackDirs []string
 	if d, ok := m.removeNFSWorktreeOutcome(ctx, projectPath, projectID, agentName); ok {
 		ds = append(ds, d)
 		if d.Err != nil {
 			errs = append(errs, d.Err)
 		}
 	}
-	if d, ok := m.removeNFSAgentWorkspace(ctx, projectPath, projectID, agentName); ok {
+	if d, wsDir, ok := m.removeNFSAgentWorkspace(ctx, projectPath, projectID, agentName); ok {
 		ds = append(ds, d)
 		if d.Err != nil {
 			errs = append(errs, d.Err)
 		}
+		if wsDir != "" {
+			rollbackDirs = append(rollbackDirs, wsDir)
+		}
 	}
-	if d, ok := m.removeK8sNFSAgentHome(ctx, projectID, agentName, deleteHubAgentIDFrom(ctx)); ok {
-		ds = append(ds, d)
-		if d.Err != nil {
-			errs = append(errs, d.Err)
+	if moveID := deleteMoveReincarnationIDFrom(ctx); moveID != "" {
+		if d, homeParent, ok := m.removeK8sNFSAgentHome(ctx, projectID, agentName, deleteHubAgentIDFrom(ctx), moveID); ok {
+			ds = append(ds, d)
+			if d.Err != nil {
+				errs = append(errs, d.Err)
+			}
+			if homeParent != "" {
+				rollbackDirs = append(rollbackDirs, homeParent)
+			}
+		}
+		// Single final cleanup pass (N3): remove .scion-move and empty export
+		// agent dirs after both workspace and home removals finish, regardless
+		// of whether the home share equals the workspace share.
+		seen := make(map[string]struct{}, len(rollbackDirs))
+		for _, dir := range rollbackDirs {
+			if _, dup := seen[dir]; dup {
+				continue
+			}
+			seen[dir] = struct{}{}
+			cleanupEmptyMarkedExportAgentDir(dir)
 		}
 	}
 	return ds, errors.Join(errs...)
@@ -202,18 +258,18 @@ func (m *AgentManager) RemoveNFSAgentFiles(ctx context.Context, projectPath, pro
 // project's workspace is not on an NFS export this broker has mounted.
 // Every component from the export down to the agent directory must be a
 // real directory, not a symlink.
-func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath, projectID, agentName string) (d projectfs.Deletion, ok bool) {
+func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath, projectID, agentName string) (d projectfs.Deletion, exportAgentDir string, ok bool) {
 	d = projectfs.Deletion{Tree: projectfs.TreeAgentWorkspace}
-	fail := func(err error) (projectfs.Deletion, bool) {
+	fail := func(err error) (projectfs.Deletion, string, bool) {
 		d.Outcome, d.Err = projectfs.OutcomeFailed, err
-		return d, true
+		return d, "", true
 	}
 	resolvedHostBase, rel, err := m.nfsAgentDirExportWorkspace(projectPath, projectID, agentName)
 	if err != nil {
 		return fail(err)
 	}
 	if resolvedHostBase == "" {
-		return d, false
+		return d, "", false
 	}
 	agentRel, err := runtime.NFSAgentDirSubPath(rel, agentName)
 	if err != nil {
@@ -223,7 +279,7 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 	d.Path = filepath.Join(agentDir, provision.AgentWorkspaceDir)
 	if _, err := os.Lstat(agentDir); errors.Is(err, fs.ErrNotExist) {
 		d.Outcome = projectfs.OutcomeAbsent
-		return d, true
+		return d, "", true
 	}
 	if real, err := filepath.EvalSymlinks(agentDir); err != nil || real != agentDir {
 		return fail(fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", agentDir))
@@ -239,65 +295,87 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 	if err != nil {
 		return fail(err)
 	}
-	if stageErr := purgeMoveBundleStagingEntries(checkedDir); stageErr != nil {
-		return fail(fmt.Errorf("purge move-bundle staging in %s: %w", checkedDir, stageErr))
+	isRollback := deleteMoveReincarnationIDFrom(ctx) != ""
+	if isRollback {
+		if stageErr := purgeMoveBundleStagingEntries(checkedDir); stageErr != nil {
+			return fail(fmt.Errorf("purge move-bundle staging in %s: %w", checkedDir, stageErr))
+		}
 	}
 	if !removed {
-		cleanupEmptyMarkedExportAgentDir(checkedDir)
 		d.Outcome = projectfs.OutcomeAbsent
-		return d, true
+		return d, checkedDir, true
 	}
 	purgeRemovedAgentWorkspaces(checkedDir, projectID, agentName, storageAuditLogger(ctx))
-	cleanupEmptyMarkedExportAgentDir(checkedDir)
 	slog.Info("workspace_storage nfs: removed the agent's workspace", "path", d.Path)
 	d.Outcome = projectfs.OutcomeDeleted
-	return d, true
+	return d, checkedDir, true
 }
 
-// removeK8sNFSAgentHome removes the Kubernetes NFS home leaf (home-<agentID>)
-// and any move-bundle staging siblings from the home share's agent directory.
-// If the export agent directory only holds the move marker afterwards, both
-// the marker and the empty directory are removed so a retry sees it absent.
-func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, agentName, hubAgentID string) (d projectfs.Deletion, ok bool) {
-	if m.Runtime == nil || !isKubernetesRuntime(m.Runtime.Name()) {
-		return d, false
-	}
+// resolveK8sNFSHomeRollbackPaths resolves the home share's agent directory and
+// home-<agentID> leaf path for K8s rollback marker checks and removal,
+// preferring the SubPathRoot recorded in home-storage.json when available (N4).
+func resolveK8sNFSHomeRollbackPaths(ctx context.Context, projectID, agentName, hubAgentID string) (exportAgentDir, homeLeafPath string, ok bool, err error) {
 	if !shareddirs.ValidProjectID(projectID) || !validHomeAgentID(hubAgentID, agentName) {
-		return d, false
+		return "", "", false, nil
 	}
 	gs, err := loadHomeStorageSettings(ctx)
 	if err != nil {
-		return d, false
+		return "", "", false, nil
 	}
 	hl, err := homeShareLayout(gs, "")
 	if err != nil {
-		return d, false
+		return "", "", false, nil
 	}
 	info, err := os.Stat(hl.HostBase)
 	if err != nil || !info.IsDir() {
-		return d, false
+		return "", "", false, nil
 	}
 	resolvedHostBase, err := filepath.EvalSymlinks(hl.HostBase)
 	if err != nil {
-		return d, false
+		return "", "", false, err
 	}
-	agentDirRel, homeRel, err := runtime.NFSHomeSubPaths(hl.SubPathRoot, projectID, agentName, hubAgentID)
+	subPathRoot := deleteHomeSubPathRootFrom(ctx)
+	if subPathRoot == "" {
+		subPathRoot = hl.SubPathRoot
+	}
+	agentDirRel, homeRel, err := runtime.NFSHomeSubPaths(subPathRoot, projectID, agentName, hubAgentID)
 	if err != nil {
-		return d, false
+		return "", "", false, err
 	}
-	exportAgentDir := filepath.Join(resolvedHostBase, agentDirRel)
-	homeLeafPath := filepath.Join(resolvedHostBase, homeRel)
+	return filepath.Join(resolvedHostBase, agentDirRel), filepath.Join(resolvedHostBase, homeRel), true, nil
+}
+
+// removeK8sNFSAgentHome removes the Kubernetes NFS home leaf (home-<agentID>)
+// and any move-bundle staging siblings from the home share's agent directory
+// during a move rollback delete (moveID != ""). Refuses to remove home-<agentID>
+// unless either the leaf itself or its parent carries MoveMarkerFile == moveID
+// (R3). Normal deletes never call this function (R4).
+func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, agentName, hubAgentID, moveID string) (d projectfs.Deletion, homeParent string, ok bool) {
+	if moveID == "" || m.Runtime == nil || !isKubernetesRuntime(m.Runtime.Name()) {
+		return d, "", false
+	}
+	exportAgentDir, homeLeafPath, resolved, err := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
+	if err != nil || !resolved {
+		return d, "", false
+	}
 	d = projectfs.Deletion{Tree: projectfs.TreeAgentHome, Path: homeLeafPath}
-	fail := func(err error) (projectfs.Deletion, bool) {
+	fail := func(err error) (projectfs.Deletion, string, bool) {
 		d.Outcome, d.Err = projectfs.OutcomeFailed, err
-		return d, true
+		return d, "", true
 	}
 	if _, err := os.Lstat(exportAgentDir); errors.Is(err, fs.ErrNotExist) {
 		d.Outcome = projectfs.OutcomeAbsent
-		return d, true
+		return d, "", true
 	}
 	if real, err := filepath.EvalSymlinks(exportAgentDir); err != nil || real != exportAgentDir {
 		return fail(fmt.Errorf("home storage nfs: %s is not a plain directory on the export; left in place", exportAgentDir))
+	}
+	// Resolve the hostBase root for agentFilesGuard.
+	gs, _ := loadHomeStorageSettings(ctx)
+	hl, _ := homeShareLayout(gs, "")
+	resolvedHostBase, err := filepath.EvalSymlinks(hl.HostBase)
+	if err != nil {
+		return fail(fmt.Errorf("home storage nfs: resolve host base: %w", err))
 	}
 	checkedDir, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{exportAgentDir}, nil).check(exportAgentDir)
 	if err != nil {
@@ -311,21 +389,24 @@ func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, age
 		return fail(fmt.Errorf("home storage nfs: open export agent dir: %w", err))
 	}
 	defer func() { _ = root.Close() }()
-	homeBase := filepath.Base(homeRel)
+	homeBase := filepath.Base(homeLeafPath)
 	if _, err := root.Lstat(homeBase); errors.Is(err, fs.ErrNotExist) {
-		cleanupEmptyMarkedExportAgentDir(checkedDir)
 		d.Outcome = projectfs.OutcomeAbsent
-		return d, true
+		return d, checkedDir, true
 	} else if err != nil {
 		return fail(fmt.Errorf("home storage nfs: stat %s: %w", homeBase, err))
+	}
+	// Marker guard (R3): never delete home-<agentID> unless either the leaf
+	// itself or its parent carries this move's reincarnation ID.
+	if checkMoveMarker(homeLeafPath, moveID) != nil && checkMoveMarker(checkedDir, moveID) != nil {
+		return fail(fmt.Errorf("home storage nfs: %w: %s has no matching move marker", ErrMoveMarkerMismatch, homeLeafPath))
 	}
 	if err := root.RemoveAll(homeBase); err != nil {
 		return fail(fmt.Errorf("home storage nfs: remove %s: %w", homeBase, err))
 	}
-	cleanupEmptyMarkedExportAgentDir(checkedDir)
 	slog.Info("home storage nfs: removed the agent's home leaf", "path", d.Path)
 	d.Outcome = projectfs.OutcomeDeleted
-	return d, true
+	return d, checkedDir, true
 }
 
 // cleanupEmptyMarkedExportAgentDir removes MoveMarkerFile and the export agent

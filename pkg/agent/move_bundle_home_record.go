@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
@@ -251,6 +252,8 @@ type MoveBundleAgentDirs struct {
 	WorkspaceDir    string
 	HomeDir         string
 	ExportAgentDir  string
+	WorkspaceOwner  shareddirs.Owner
+	HomeOwner       shareddirs.Owner
 	SharedWorkspace bool
 }
 
