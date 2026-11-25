@@ -59,3 +59,20 @@ var Decisions = filterquery.Schema{
 		},
 	},
 }
+
+// ProfileDecisions is the filter query schema for the profile Decisions page
+// (covers both Pending and Made tabs; adds project: to Decisions).
+var ProfileDecisions = filterquery.Schema{
+	View:     "profile-decisions",
+	TextHelp: "Matches question, answer, conversation label, or agent name",
+	Keys: append(
+		append([]filterquery.Key(nil), Decisions.Keys...),
+		filterquery.Key{
+			Name:        "project",
+			Help:        "Project slug or ID",
+			Kind:        filterquery.KindRef,
+			Exec:        filterquery.ExecServer,
+			MultiValued: false,
+		},
+	),
+}
