@@ -19,6 +19,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -672,4 +673,59 @@ func TestMeterHealth_EmittedVsReceivedContiguousScenarios(t *testing.T) {
 	assert.Equal(t, int64(10), mhsB[0].LastContiguousSeq)
 	assert.Equal(t, int64(10), mhsB[0].MaxSeqSeen)
 	assert.Empty(t, mhsB[0].MissingRanges)
+}
+
+func TestUsageIngest_RollupInt64OverflowSaturates(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "ingest-overflow")
+	userID := createTestUser(t, cs, "overflow-user@example.com")
+	agentID := uuid.NewString()
+	runID := "run-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runID, &userID)
+
+	ts := time.Date(2026, 11, 25, 18, 0, 0, 0, time.UTC)
+	dayUTC := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+
+	makeBatch := func(prefix string, startSeq int64, count int) []*store.UsageEvent {
+		batch := make([]*store.UsageEvent, count)
+		for i := 0; i < count; i++ {
+			seq := startSeq + int64(i)
+			ev := makeStoreUsageEvent(
+				"hub-test", fmt.Sprintf("%s-%04d", prefix, seq), runID, projectID, agentID, &userID,
+				seq, ts, telemetrycontract.MaxSafeInteger, 0, 0, 0,
+			)
+			ev.Anomalous = true
+			batch[i] = ev
+		}
+		return batch
+	}
+
+	// Two batches of 600 anomalous MaxSafeInteger-input events for the same
+	// rollup key: 600 * (2^53-1) fits in int64, 1200 * (2^53-1) exceeds
+	// math.MaxInt64 and must saturate cleanly on both SQLite and Postgres.
+	res1, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  makeBatch("ovf-b1", 1, 600),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 600, res1.Accepted)
+
+	res2, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  makeBatch("ovf-b2", 601, 600),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 600, res2.Accepted)
+
+	rollup, err := client.UsageRollupDaily.Query().
+		Where(usagerollupdaily.BucketStartEQ(dayUTC), usagerollupdaily.AgentIDEQ(agentID)).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(math.MaxInt64), rollup.Input, "rollup input must saturate at math.MaxInt64")
+	assert.Equal(t, int64(1200), rollup.Events)
+	assert.Equal(t, int64(1200), rollup.Calls)
 }

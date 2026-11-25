@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -386,34 +387,34 @@ func upsertDailyRollupsTx(ctx context.Context, drv dialect.Driver, dialectName s
 			}
 			aggs[k] = agg
 		}
-		agg.calls += ev.Calls
+		agg.calls = saturatingAddInt64(agg.calls, ev.Calls)
 		if ev.Status == telemetrycontract.StatusError {
-			agg.errorCalls += ev.Calls
+			agg.errorCalls = saturatingAddInt64(agg.errorCalls, ev.Calls)
 		}
 		if ev.Input != nil {
-			agg.input += *ev.Input
+			agg.input = saturatingAddInt64(agg.input, *ev.Input)
 		}
 		if ev.Output != nil {
-			agg.output += *ev.Output
+			agg.output = saturatingAddInt64(agg.output, *ev.Output)
 		}
 		if ev.CacheRead != nil {
-			agg.cacheRead += *ev.CacheRead
+			agg.cacheRead = saturatingAddInt64(agg.cacheRead, *ev.CacheRead)
 		}
 		if ev.CacheWrite != nil {
-			agg.cacheWrite += *ev.CacheWrite
+			agg.cacheWrite = saturatingAddInt64(agg.cacheWrite, *ev.CacheWrite)
 		}
 		if ev.CacheWrite1h != nil {
-			agg.cacheWrite1h += *ev.CacheWrite1h
+			agg.cacheWrite1h = saturatingAddInt64(agg.cacheWrite1h, *ev.CacheWrite1h)
 		}
 		if ev.Reasoning != nil {
-			agg.reasoning += *ev.Reasoning
+			agg.reasoning = saturatingAddInt64(agg.reasoning, *ev.Reasoning)
 		}
 		if ev.ReportedCostMicros != nil {
-			agg.reportedCostMicros += *ev.ReportedCostMicros
+			agg.reportedCostMicros = saturatingAddInt64(agg.reportedCostMicros, *ev.ReportedCostMicros)
 		}
-		agg.events++
+		agg.events = saturatingAddInt64(agg.events, 1)
 		if ev.Input == nil && ev.Output == nil && ev.CacheRead == nil && ev.CacheWrite == nil && ev.CacheWrite1h == nil && ev.Reasoning == nil {
-			agg.nullTokenEvents++
+			agg.nullTokenEvents = saturatingAddInt64(agg.nullTokenEvents, 1)
 		}
 		if eventTS.Before(agg.firstEventTS) {
 			agg.firstEventTS = eventTS
@@ -463,17 +464,17 @@ INSERT INTO usage_rollups_daily (
 )
 ON CONFLICT (bucket_start, project_id, billing_user_id, agent_id, harness, model, usage_source)
 DO UPDATE SET
-	calls = usage_rollups_daily.calls + EXCLUDED.calls,
-	error_calls = usage_rollups_daily.error_calls + EXCLUDED.error_calls,
-	input = usage_rollups_daily.input + EXCLUDED.input,
-	output = usage_rollups_daily.output + EXCLUDED.output,
-	cache_read = usage_rollups_daily.cache_read + EXCLUDED.cache_read,
-	cache_write = usage_rollups_daily.cache_write + EXCLUDED.cache_write,
-	cache_write_1h = usage_rollups_daily.cache_write_1h + EXCLUDED.cache_write_1h,
-	reasoning = usage_rollups_daily.reasoning + EXCLUDED.reasoning,
-	reported_cost_micros = usage_rollups_daily.reported_cost_micros + EXCLUDED.reported_cost_micros,
-	events = usage_rollups_daily.events + EXCLUDED.events,
-	null_token_events = usage_rollups_daily.null_token_events + EXCLUDED.null_token_events,
+	calls = CASE WHEN EXCLUDED.calls > 9223372036854775807 - usage_rollups_daily.calls THEN 9223372036854775807 ELSE usage_rollups_daily.calls + EXCLUDED.calls END,
+	error_calls = CASE WHEN EXCLUDED.error_calls > 9223372036854775807 - usage_rollups_daily.error_calls THEN 9223372036854775807 ELSE usage_rollups_daily.error_calls + EXCLUDED.error_calls END,
+	input = CASE WHEN EXCLUDED.input > 9223372036854775807 - usage_rollups_daily.input THEN 9223372036854775807 ELSE usage_rollups_daily.input + EXCLUDED.input END,
+	output = CASE WHEN EXCLUDED.output > 9223372036854775807 - usage_rollups_daily.output THEN 9223372036854775807 ELSE usage_rollups_daily.output + EXCLUDED.output END,
+	cache_read = CASE WHEN EXCLUDED.cache_read > 9223372036854775807 - usage_rollups_daily.cache_read THEN 9223372036854775807 ELSE usage_rollups_daily.cache_read + EXCLUDED.cache_read END,
+	cache_write = CASE WHEN EXCLUDED.cache_write > 9223372036854775807 - usage_rollups_daily.cache_write THEN 9223372036854775807 ELSE usage_rollups_daily.cache_write + EXCLUDED.cache_write END,
+	cache_write_1h = CASE WHEN EXCLUDED.cache_write_1h > 9223372036854775807 - usage_rollups_daily.cache_write_1h THEN 9223372036854775807 ELSE usage_rollups_daily.cache_write_1h + EXCLUDED.cache_write_1h END,
+	reasoning = CASE WHEN EXCLUDED.reasoning > 9223372036854775807 - usage_rollups_daily.reasoning THEN 9223372036854775807 ELSE usage_rollups_daily.reasoning + EXCLUDED.reasoning END,
+	reported_cost_micros = CASE WHEN EXCLUDED.reported_cost_micros > 9223372036854775807 - usage_rollups_daily.reported_cost_micros THEN 9223372036854775807 ELSE usage_rollups_daily.reported_cost_micros + EXCLUDED.reported_cost_micros END,
+	events = CASE WHEN EXCLUDED.events > 9223372036854775807 - usage_rollups_daily.events THEN 9223372036854775807 ELSE usage_rollups_daily.events + EXCLUDED.events END,
+	null_token_events = CASE WHEN EXCLUDED.null_token_events > 9223372036854775807 - usage_rollups_daily.null_token_events THEN 9223372036854775807 ELSE usage_rollups_daily.null_token_events + EXCLUDED.null_token_events END,
 	first_event_ts = CASE WHEN EXCLUDED.first_event_ts < usage_rollups_daily.first_event_ts THEN EXCLUDED.first_event_ts ELSE usage_rollups_daily.first_event_ts END,
 	last_event_ts = CASE WHEN EXCLUDED.last_event_ts > usage_rollups_daily.last_event_ts THEN EXCLUDED.last_event_ts ELSE usage_rollups_daily.last_event_ts END`)
 
@@ -531,9 +532,9 @@ func upsertScopeCountersDailyTx(ctx context.Context, drv dialect.Driver, dialect
 			agg = &scopeCounterAgg{key: k}
 			aggs[k] = agg
 		}
-		agg.tokensSummable += tokens
-		agg.calls += calls
-		agg.unmeasuredCalls += unmeasured
+		agg.tokensSummable = saturatingAddInt64(agg.tokensSummable, tokens)
+		agg.calls = saturatingAddInt64(agg.calls, calls)
+		agg.unmeasuredCalls = saturatingAddInt64(agg.unmeasuredCalls, unmeasured)
 	}
 
 	for _, ev := range events {
@@ -545,16 +546,16 @@ func upsertScopeCountersDailyTx(ctx context.Context, drv dialect.Driver, dialect
 		var tokens int64
 		if !ev.Anomalous {
 			if ev.Input != nil {
-				tokens += *ev.Input
+				tokens = saturatingAddInt64(tokens, *ev.Input)
 			}
 			if ev.Output != nil {
-				tokens += *ev.Output
+				tokens = saturatingAddInt64(tokens, *ev.Output)
 			}
 			if ev.CacheRead != nil {
-				tokens += *ev.CacheRead
+				tokens = saturatingAddInt64(tokens, *ev.CacheRead)
 			}
 			if ev.CacheWrite != nil {
-				tokens += *ev.CacheWrite
+				tokens = saturatingAddInt64(tokens, *ev.CacheWrite)
 			}
 		}
 		var unmeasured int64
@@ -596,9 +597,9 @@ INSERT INTO usage_scope_counters_daily (
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (scope_kind, scope_id, day_utc)
 DO UPDATE SET
-	tokens_summable = usage_scope_counters_daily.tokens_summable + EXCLUDED.tokens_summable,
-	calls = usage_scope_counters_daily.calls + EXCLUDED.calls,
-	unmeasured_calls = usage_scope_counters_daily.unmeasured_calls + EXCLUDED.unmeasured_calls`)
+	tokens_summable = CASE WHEN EXCLUDED.tokens_summable > 9223372036854775807 - usage_scope_counters_daily.tokens_summable THEN 9223372036854775807 ELSE usage_scope_counters_daily.tokens_summable + EXCLUDED.tokens_summable END,
+	calls = CASE WHEN EXCLUDED.calls > 9223372036854775807 - usage_scope_counters_daily.calls THEN 9223372036854775807 ELSE usage_scope_counters_daily.calls + EXCLUDED.calls END,
+	unmeasured_calls = CASE WHEN EXCLUDED.unmeasured_calls > 9223372036854775807 - usage_scope_counters_daily.unmeasured_calls THEN 9223372036854775807 ELSE usage_scope_counters_daily.unmeasured_calls + EXCLUDED.unmeasured_calls END`)
 
 	for _, agg := range ordered {
 		var res sql.Result
@@ -832,6 +833,16 @@ func pruneRangesAtOrBelow(ranges []store.SeqRange, cutoff int64) []store.SeqRang
 		out = append(out, r)
 	}
 	return out
+}
+
+func saturatingAddInt64(a, b int64) int64 {
+	if b <= 0 {
+		return a
+	}
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 func utcDayStart(t time.Time) time.Time {
