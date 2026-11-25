@@ -580,7 +580,7 @@ func TestAdmission_WaitNeverExceedsAttemptDeadlineOrCallerCancel(t *testing.T) {
 	}
 
 	// 1. Short attempt budget (50ms << 2s admissionWait) must return within budget
-	// and classify as FailTimeout (runtime deadline reached during admission).
+	// and classify as FailTimeout.
 	t0 := time.Now()
 	_, err := rt.Evaluate(context.Background(), compiled, ProbeInput("short-budget"), EvalOptions{
 		Budget: 50 * time.Millisecond,
@@ -590,9 +590,43 @@ func TestAdmission_WaitNeverExceedsAttemptDeadlineOrCallerCancel(t *testing.T) {
 	eval, ok := EvaluationFrom(err)
 	require.True(t, ok)
 	assert.Equal(t, string(provider.FailTimeout), eval.Reason)
-	require.Len(t, eval.Attempts, 1)
-	assert.Equal(t, 0, eval.Attempts[0].Requests)
+	switch len(eval.Attempts) {
+	case 0:
+		// Legitimate pre-admission timeout path when the 50ms Budget expires
+		// before Step 5b admission begins under heavy CPU contention.
+	case 1:
+		assert.Equal(t, 0, eval.Attempts[0].Requests)
+		assert.Equal(t, string(provider.FailTimeout), eval.Attempts[0].Reason)
+	default:
+		t.Fatalf("expected 0 (pre-admission timeout) or 1 (admission-bounded timeout) attempts, got %d", len(eval.Attempts))
+	}
 	assert.Less(t, elapsed, 1500*time.Millisecond, "admission wait must never exceed attempt deadline")
+
+	// 1b. Deterministic admission-bounded runtime timeout via nowFn/withWaitCtxFn:
+	// guarantees Step 5b admission is reached with Budget (500ms) < AdmissionWait (2s),
+	// recording exactly 1 admission-bounded attempt with 0 provider requests.
+	tDet := time.Now()
+	rt.admission.nowFn = func() time.Time { return tDet }
+	rt.admission.withWaitCtxFn = func(parent context.Context, _ time.Time) (context.Context, context.CancelFunc) {
+		wctx, cancel := context.WithCancel(parent)
+		cancel()
+		return wctx, cancel
+	}
+	tDetStart := time.Now()
+	_, errDet := rt.Evaluate(context.Background(), compiled, ProbeInput("det-budget"), EvalOptions{
+		Budget: 500 * time.Millisecond,
+	})
+	detElapsed := time.Since(tDetStart)
+	rt.admission.nowFn = nil
+	rt.admission.withWaitCtxFn = nil
+	require.Error(t, errDet)
+	evalDet, ok := EvaluationFrom(errDet)
+	require.True(t, ok)
+	assert.Equal(t, string(provider.FailTimeout), evalDet.Reason)
+	require.Len(t, evalDet.Attempts, 1)
+	assert.Equal(t, 0, evalDet.Attempts[0].Requests)
+	assert.Equal(t, string(provider.FailTimeout), evalDet.Attempts[0].Reason)
+	assert.Less(t, detElapsed, 1500*time.Millisecond, "admission wait must never exceed attempt deadline")
 
 	// 2. Caller cancel during admission wait returns FailCanceled immediately.
 	cancelCtx, cancel := context.WithCancel(context.Background())
