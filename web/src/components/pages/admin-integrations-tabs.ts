@@ -57,6 +57,14 @@ export function isIntegrationTabId(segment: string): boolean {
   return INTEGRATION_TAB_IDS.has(segment);
 }
 
+function safeDecodeURIComponent(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Legacy redirect helper: an old /admin/integrations/{name} URL where {name}
  * is not a registered tab id redirects to /admin/integrations/chat/{name}.
@@ -64,14 +72,26 @@ export function isIntegrationTabId(segment: string): boolean {
 export function legacyIntegrationRedirect(pathname: string): string | null {
   const match = pathname.match(/^\/admin\/integrations\/([^/]+)$/);
   if (!match) return null;
-  const segment = decodeURIComponent(match[1]);
-  if (isIntegrationTabId(segment)) return null;
+  const segment = safeDecodeURIComponent(match[1]);
+  if (segment === null || isIntegrationTabId(segment)) return null;
   return `/admin/integrations/chat/${match[1]}`;
+}
+
+/**
+ * Legacy deep-link redirect for /admin/server-config?tab=github-app.
+ */
+export function legacyServerConfigGitHubRedirect(pathname: string, search: string): string | null {
+  if (pathname !== '/admin/server-config') return null;
+  if (new URLSearchParams(search).get('tab') === 'github-app') {
+    return '/admin/integrations/github';
+  }
+  return null;
 }
 
 /**
  * Parses an /admin/integrations route into its tab id and optional sub-path
  * (e.g. /admin/integrations/chat/telegram -> { tabId: 'chat', subPath: 'telegram' }).
+ * Only the chat tab supports detail sub-paths.
  */
 export function parseIntegrationsRoute(pathname: string): {
   tabId: string | null;
@@ -79,14 +99,22 @@ export function parseIntegrationsRoute(pathname: string): {
 } {
   const subMatch = pathname.match(/^\/admin\/integrations\/([^/]+)\/([^/]+)$/);
   if (subMatch) {
+    const tabId = safeDecodeURIComponent(subMatch[1]);
+    const subPath = safeDecodeURIComponent(subMatch[2]);
+    if (tabId === null || subPath === null) {
+      return { tabId: null, subPath: null };
+    }
     return {
-      tabId: decodeURIComponent(subMatch[1]),
-      subPath: decodeURIComponent(subMatch[2]),
+      tabId,
+      subPath: tabId === 'chat' ? subPath : null,
     };
   }
   const tabMatch = pathname.match(/^\/admin\/integrations\/([^/]+)$/);
   if (tabMatch) {
-    const seg = decodeURIComponent(tabMatch[1]);
+    const seg = safeDecodeURIComponent(tabMatch[1]);
+    if (seg === null) {
+      return { tabId: null, subPath: null };
+    }
     if (isIntegrationTabId(seg)) {
       return { tabId: seg, subPath: null };
     }

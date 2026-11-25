@@ -18,6 +18,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 import {
   fallbackFieldKey,
   fieldErrorMessages,
@@ -32,6 +33,20 @@ import {
   renderSectionErrorSummary,
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
+import {
+  envBadgeStyles,
+  readOnlyFieldStyles,
+  renderEnvBadge,
+  renderEnvLockBadge,
+  renderEnvValueLine,
+  renderKeysEnvBadge,
+} from '../shared/env-badge-views.js';
+import {
+  type EnvKeyValue,
+  envValueFor,
+  formatEnvValue,
+  hasInEffect,
+} from '../pages/admin-server-config-env-values.js';
 
 interface RateLimitInfo {
   remaining: number;
@@ -51,6 +66,31 @@ interface GitHubAppConfigData {
   installation_url?: string;
   rate_limit?: RateLimitInfo;
 }
+
+interface SectionMeta {
+  source: 'db' | 'file' | 'default';
+  origin?: 'seeded' | 'managed';
+  revision?: number;
+  updated_at?: string;
+  updated_by?: string;
+}
+
+interface ServerConfigMetaResponse {
+  settings_tier?: 'db' | 'file';
+  layer1_only?: boolean;
+  env_overrides?: string[];
+  env_values?: Record<string, EnvKeyValue>;
+  section_metadata?: Record<string, SectionMeta>;
+}
+
+const GITHUB_APP_LAYER1_KEYS = new Set([
+  'server.github_app.app_id',
+  'server.github_app.api_base_url',
+  'server.github_app.webhooks_enabled',
+  'server.github_app.installation_url',
+]);
+
+type ReadOnlyReason = 'env' | 'bootstrap';
 
 @customElement('scion-admin-github-app-config')
 export class ScionAdminGitHubAppConfig extends LitElement {
@@ -78,8 +118,19 @@ export class ScionAdminGitHubAppConfig extends LitElement {
   @state() private githubAppSuccess: string | null = null;
   @state() private githubAppRateLimit: RateLimitInfo | null = null;
 
+  // Server-config metadata for env overrides, section origin/revision, and Reset to bootstrap
+  @state() private settingsTier: 'db' | 'file' | null = null;
+  @state() private layer1Only = false;
+  @state() private envOverrides: string[] = [];
+  @state() private envValues: Record<string, EnvKeyValue> = {};
+  @state() private sectionMeta: SectionMeta | null = null;
+  @state() private resetConfirmOpen = false;
+  @state() private resetting = false;
+
   static override styles = css`
     ${settingsErrorStyles}
+    ${envBadgeStyles}
+    ${readOnlyFieldStyles}
 
     :host {
       display: block;
@@ -97,9 +148,16 @@ export class ScionAdminGitHubAppConfig extends LitElement {
       align-items: center;
       justify-content: space-between;
       gap: 0.75rem;
+      flex-wrap: wrap;
       margin: 0 0 1rem 0;
       padding-bottom: 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .section-header-left {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
     }
 
     .section-title {
@@ -107,6 +165,29 @@ export class ScionAdminGitHubAppConfig extends LitElement {
       font-weight: 600;
       color: var(--scion-text, #1e293b);
       margin: 0;
+    }
+
+    .section-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-bottom: 1rem;
+    }
+
+    .section-meta-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .seeded-caption {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      font-style: italic;
+      margin-bottom: 1rem;
     }
 
     .form-grid {
@@ -201,11 +282,35 @@ export class ScionAdminGitHubAppConfig extends LitElement {
       font-size: 0.75rem;
       color: var(--scion-success-text, #166534);
     }
+
+    .reset-confirm-text {
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+      line-height: 1.5;
+    }
   `;
 
   override connectedCallback(): void {
     super.connectedCallback();
-    void this.loadGitHubAppConfig();
+    void Promise.all([this.loadGitHubAppConfig(false), this.loadServerConfigMeta()]);
+  }
+
+  private get envKeys(): Set<string> {
+    return new Set(this.envOverrides);
+  }
+
+  private readOnlyReason(koanfKey: string): ReadOnlyReason | null {
+    if (this.layer1Only && !GITHUB_APP_LAYER1_KEYS.has(koanfKey)) {
+      return 'bootstrap';
+    }
+    if (this.envKeys.has(koanfKey)) {
+      return 'env';
+    }
+    return null;
+  }
+
+  private get canResetSection(): boolean {
+    return this.settingsTier === 'db' && this.sectionMeta?.origin === 'managed';
   }
 
   private get githubAppFieldErrors(): SettingsFieldError[] {
@@ -230,6 +335,90 @@ export class ScionAdminGitHubAppConfig extends LitElement {
       : nothing}`;
   }
 
+  private renderFieldValue(
+    koanfKey: string,
+    displayValue: string,
+    editableTemplate: ReturnType<typeof html>
+  ) {
+    const reason = this.readOnlyReason(koanfKey);
+    const found = reason ? envValueFor(this.envValues, [koanfKey]) : null;
+    const env = found && hasInEffect(found.ev) ? found : null;
+
+    if (reason && env && env.ev.in_effect) {
+      return html`${reason === 'bootstrap'
+          ? html`<span class="read-only-badge">🔒 Managed via deployment configuration</span>`
+          : renderEnvLockBadge()}${renderEnvBadge(true)}<span
+          class="read-only-value env-value-primary"
+          >${formatEnvValue(env.ev) || '—'}</span
+        >${env.ev.saved_differs
+          ? html`<span class="hint env-value-saved"
+              >Saved value (not in effect on this node): <code>${displayValue || '—'}</code></span
+            >`
+          : nothing}${this.renderFieldErrors(koanfKey)}`;
+    }
+
+    if (reason && env) {
+      const cause =
+        this.settingsTier === 'db' && GITHUB_APP_LAYER1_KEYS.has(koanfKey) ? 'saved' : 'startup';
+      return html`${reason === 'bootstrap'
+          ? html`<span class="read-only-badge">🔒 Managed via deployment configuration</span>`
+          : nothing}${renderEnvBadge(false, cause)}<span class="read-only-value"
+          >${displayValue || '—'}</span
+        >${renderEnvValueLine(env.ev, cause)}${this.renderFieldErrors(koanfKey)}`;
+    }
+
+    if (reason) {
+      return html`${reason === 'bootstrap'
+          ? html`<span class="read-only-badge">🔒 Managed via deployment configuration</span>`
+          : renderEnvLockBadge()}${reason === 'env' ? renderEnvBadge(true) : nothing}<span
+          class="read-only-value"
+          >${displayValue || '—'}</span
+        >${this.renderFieldErrors(koanfKey)}`;
+    }
+
+    return html`${renderKeysEnvBadge(this.envOverrides, this.envValues, [
+      koanfKey,
+      'server.github_app',
+    ])}${editableTemplate}${this.renderFieldErrors(koanfKey)}`;
+  }
+
+  private renderSectionMeta() {
+    const meta = this.sectionMeta;
+    if (!meta) return nothing;
+
+    if (this.settingsTier === 'db' && meta.origin === 'seeded') {
+      return html`<div class="seeded-caption">
+        Tracking deployment configuration — will re-sync on restart until edited
+      </div>`;
+    }
+
+    const sourceLabel =
+      meta.source === 'db' ? 'Database' : meta.source === 'file' ? 'File' : 'Default';
+    const sourceIcon =
+      meta.source === 'db' ? 'database' : meta.source === 'file' ? 'file-earmark' : 'gear';
+
+    return html`
+      <div class="section-meta">
+        <span class="section-meta-item">
+          <sl-icon name=${sourceIcon}></sl-icon>
+          Source: ${sourceLabel}${meta.revision ? html` (rev ${meta.revision})` : nothing}
+        </span>
+        ${meta.updated_by
+          ? html`<span class="section-meta-item">
+              <sl-icon name="person"></sl-icon>
+              ${meta.updated_by}
+            </span>`
+          : nothing}
+        ${meta.updated_at
+          ? html`<span class="section-meta-item">
+              <sl-icon name="clock"></sl-icon>
+              ${formatInstantWithZone(meta.updated_at) || meta.updated_at}
+            </span>`
+          : nothing}
+      </div>
+    `;
+  }
+
   private renderSaveError() {
     const err = this.githubAppSaveError;
     if (!err) return nothing;
@@ -240,24 +429,41 @@ export class ScionAdminGitHubAppConfig extends LitElement {
         this.githubAppSuccess = null;
         this.githubAppPrivateKey = '';
         this.githubAppWebhookSecret = '';
-        void this.loadGitHubAppConfig();
+        void this.loadGitHubAppConfig(false);
       });
     }
     if (err.kind === 'layer0') return renderLayer0Notice(err);
     return renderSectionErrorSummary(this.githubAppFieldErrors, 'github_app_card');
   }
 
-  private notifyConfigChanged(): void {
+  private notifyConfigChanged(saved: boolean): void {
     this.dispatchEvent(
       new CustomEvent('github-app-config-changed', {
-        detail: { configured: this.githubAppConfigured },
+        detail: { configured: this.githubAppConfigured, saved },
         bubbles: true,
         composed: true,
       })
     );
   }
 
-  async loadGitHubAppConfig(): Promise<void> {
+  private async loadServerConfigMeta(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/server-config', {
+        suppressAccessDeniedToast: true,
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as ServerConfigMetaResponse;
+      this.settingsTier = data.settings_tier ?? null;
+      this.layer1Only = Boolean(data.layer1_only);
+      this.envOverrides = Array.isArray(data.env_overrides) ? data.env_overrides : [];
+      this.envValues = data.env_values ?? {};
+      this.sectionMeta = data.section_metadata?.github_app ?? null;
+    } catch {
+      // Non-fatal: caller may only have hub.github_app.read without hub.config.read
+    }
+  }
+
+  async loadGitHubAppConfig(saved = false): Promise<void> {
     try {
       const res = await apiFetch('/api/v1/github-app');
       if (res.ok) {
@@ -276,7 +482,7 @@ export class ScionAdminGitHubAppConfig extends LitElement {
         this.githubAppPrivateKey = '';
         this.githubAppWebhookSecret = '';
         this.githubAppLoaded = true;
-        this.notifyConfigChanged();
+        this.notifyConfigChanged(saved);
       } else {
         this.githubAppLoaded = false;
         this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
@@ -295,14 +501,22 @@ export class ScionAdminGitHubAppConfig extends LitElement {
     this.githubAppSuccess = null;
 
     try {
-      // Every non-secret field is sent so a cleared one goes as an explicit
-      // clear (0 or ""). PUT /api/v1/github-app reads null as "keep".
-      const payload: Record<string, unknown> = {
-        app_id: this.githubAppId || 0,
-        api_base_url: this.githubAppApiBaseUrl,
-        webhooks_enabled: this.githubAppWebhooksEnabled,
-        installation_url: this.githubAppInstallationUrl,
-      };
+      // Every unlocked non-secret field is sent so a cleared one goes as an
+      // explicit clear (0 or ""). Locked (env/bootstrap) keys are omitted so
+      // saving unlocked fields does not overwrite them.
+      const payload: Record<string, unknown> = {};
+      if (!this.readOnlyReason('server.github_app.app_id')) {
+        payload.app_id = this.githubAppId || 0;
+      }
+      if (!this.readOnlyReason('server.github_app.api_base_url')) {
+        payload.api_base_url = this.githubAppApiBaseUrl;
+      }
+      if (!this.readOnlyReason('server.github_app.webhooks_enabled')) {
+        payload.webhooks_enabled = this.githubAppWebhooksEnabled;
+      }
+      if (!this.readOnlyReason('server.github_app.installation_url')) {
+        payload.installation_url = this.githubAppInstallationUrl;
+      }
 
       if (this.githubAppPrivateKey.trim()) {
         payload.private_key = this.githubAppPrivateKey.trim();
@@ -333,7 +547,7 @@ export class ScionAdminGitHubAppConfig extends LitElement {
       }
 
       this.githubAppSuccess = 'GitHub App configuration saved successfully.';
-      await this.loadGitHubAppConfig();
+      await Promise.all([this.loadGitHubAppConfig(true), this.loadServerConfigMeta()]);
     } catch {
       this.githubAppError = 'Failed to save GitHub App configuration';
     } finally {
@@ -341,8 +555,70 @@ export class ScionAdminGitHubAppConfig extends LitElement {
     }
   }
 
+  private async handleResetSection(): Promise<void> {
+    this.resetting = true;
+    this.githubAppError = null;
+    this.githubAppSuccess = null;
+    try {
+      const resp = await apiFetch('/api/v1/admin/server-config/sections/github_app', {
+        method: 'DELETE',
+      });
+      if (!resp.ok) {
+        this.githubAppError = await extractApiError(resp, 'Failed to reset GitHub App section');
+        return;
+      }
+      this.resetConfirmOpen = false;
+      await Promise.all([this.loadGitHubAppConfig(true), this.loadServerConfigMeta()]);
+      this.githubAppSuccess = 'Section "github_app" has been reset to deployment configuration.';
+    } catch (e) {
+      this.githubAppError = `Reset failed: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      this.resetting = false;
+    }
+  }
+
+  private renderResetConfirmDialog() {
+    if (!this.resetConfirmOpen) return nothing;
+    return html`
+      <sl-dialog
+        label="Reset to Bootstrap"
+        ?open=${this.resetConfirmOpen}
+        @sl-request-close=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
+          this.resetConfirmOpen = false;
+        }}
+      >
+        <div class="reset-confirm-text">
+          This will revert the <strong>github_app</strong> section to its deployment-provided
+          values. Any admin-set values in this section will be lost. Continue?
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.resetConfirmOpen = false;
+          }}
+        >
+          Cancel
+        </sl-button>
+        <sl-button
+          slot="footer"
+          variant="danger"
+          data-action="confirm-reset-github-app"
+          ?loading=${this.resetting}
+          @click=${() => {
+            void this.handleResetSection();
+          }}
+        >
+          Reset
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
   override render() {
     return html`
+      ${this.renderResetConfirmDialog()}
       ${this.githubAppError
         ? html`<div class="status-message error">${this.githubAppError}</div>`
         : nothing}
@@ -352,41 +628,65 @@ export class ScionAdminGitHubAppConfig extends LitElement {
 
       <div class="section">
         <div class="section-header">
-          <h3 class="section-title">GitHub App Configuration</h3>
-          ${this.githubAppLoaded
-            ? this.githubAppConfigured
-              ? html`<sl-badge variant="success">Configured</sl-badge>`
-              : html`<sl-badge variant="neutral">Not configured</sl-badge>`
+          <div class="section-header-left">
+            <h3 class="section-title">GitHub App Configuration</h3>
+            ${this.githubAppLoaded
+              ? this.githubAppConfigured
+                ? html`<sl-badge variant="success">Configured</sl-badge>`
+                : html`<sl-badge variant="neutral">Not configured</sl-badge>`
+              : nothing}
+          </div>
+          ${this.canResetSection
+            ? html`
+                <sl-button
+                  size="small"
+                  variant="default"
+                  data-action="reset-github-app"
+                  ?loading=${this.resetting}
+                  @click=${() => {
+                    this.resetConfirmOpen = true;
+                  }}
+                >
+                  <sl-icon slot="prefix" name="arrow-counterclockwise"></sl-icon>
+                  Reset to bootstrap
+                </sl-button>
+              `
             : nothing}
         </div>
-        ${this.renderSaveError()}
+        ${this.renderSaveError()} ${this.renderSectionMeta()}
         <div class="form-grid">
           <div class="form-field">
             <label>App ID</label>
             <span class="hint">The numeric ID of your registered GitHub App</span>
-            <sl-input
-              .value=${this.githubAppId ? String(this.githubAppId) : ''}
-              placeholder="e.g. 123456"
-              inputmode="numeric"
-              @sl-input=${(e: Event) => {
-                this.githubAppId = parseInt((e.target as HTMLInputElement).value, 10) || 0;
-              }}
-            ></sl-input>
-            ${this.renderFieldErrors('server.github_app.app_id')}
+            ${this.renderFieldValue(
+              'server.github_app.app_id',
+              this.githubAppId ? String(this.githubAppId) : '—',
+              html`<sl-input
+                .value=${this.githubAppId ? String(this.githubAppId) : ''}
+                placeholder="e.g. 123456"
+                inputmode="numeric"
+                @sl-input=${(e: Event) => {
+                  this.githubAppId = parseInt((e.target as HTMLInputElement).value, 10) || 0;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>API Base URL</label>
             <span class="hint"
               >Override for GitHub Enterprise Server (leave empty for github.com)</span
             >
-            <sl-input
-              .value=${this.githubAppApiBaseUrl}
-              placeholder="https://api.github.com"
-              @sl-input=${(e: Event) => {
-                this.githubAppApiBaseUrl = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
-            ${this.renderFieldErrors('server.github_app.api_base_url')}
+            ${this.renderFieldValue(
+              'server.github_app.api_base_url',
+              this.githubAppApiBaseUrl || '—',
+              html`<sl-input
+                .value=${this.githubAppApiBaseUrl}
+                placeholder="https://api.github.com"
+                @sl-input=${(e: Event) => {
+                  this.githubAppApiBaseUrl = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Private Key (PEM)</label>
@@ -458,29 +758,35 @@ export class ScionAdminGitHubAppConfig extends LitElement {
               checks from every 6 hours to every 24 hours. Incoming webhooks are accepted whenever a
               webhook secret is configured.</span
             >
-            <sl-switch
-              .checked=${this.githubAppWebhooksEnabled}
-              @sl-change=${(e: Event) => {
-                this.githubAppWebhooksEnabled = (e.target as HTMLInputElement).checked;
-              }}
-            >
-              ${this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled'}
-            </sl-switch>
-            ${this.renderFieldErrors('server.github_app.webhooks_enabled')}
+            ${this.renderFieldValue(
+              'server.github_app.webhooks_enabled',
+              this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled',
+              html`<sl-switch
+                .checked=${this.githubAppWebhooksEnabled}
+                @sl-change=${(e: Event) => {
+                  this.githubAppWebhooksEnabled = (e.target as HTMLInputElement).checked;
+                }}
+              >
+                ${this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled'}
+              </sl-switch>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Public Installation URL</label>
             <span class="hint"
               >The public link where users can install this GitHub App on their org or account</span
             >
-            <sl-input
-              .value=${this.githubAppInstallationUrl}
-              placeholder="https://github.com/apps/your-app-name/installations/new"
-              @sl-input=${(e: Event) => {
-                this.githubAppInstallationUrl = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
-            ${this.renderFieldErrors('server.github_app.installation_url')}
+            ${this.renderFieldValue(
+              'server.github_app.installation_url',
+              this.githubAppInstallationUrl || '—',
+              html`<sl-input
+                .value=${this.githubAppInstallationUrl}
+                placeholder="https://github.com/apps/your-app-name/installations/new"
+                @sl-input=${(e: Event) => {
+                  this.githubAppInstallationUrl = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
 

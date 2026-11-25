@@ -29,6 +29,7 @@ export class ScionAdminIntegrationsGitHub extends LitElement {
   @state() private loadedSections = new Set<string>();
   @state() private loadErrors = new Map<string, string>();
   @state() private appConfigured = false;
+  @state() private configSaveCounter = 0;
 
   private sectionElements = new Map<string, HTMLElement>();
 
@@ -81,15 +82,20 @@ export class ScionAdminIntegrationsGitHub extends LitElement {
     );
   }
 
-  private handleAppConfigChanged(e: CustomEvent<{ configured: boolean }>): void {
+  private handleAppConfigChanged(e: CustomEvent<{ configured: boolean; saved?: boolean }>): void {
     this.appConfigured = Boolean(e.detail?.configured);
+    if (e.detail?.saved) {
+      this.configSaveCounter += 1;
+    }
     for (const el of this.sectionElements.values()) {
       this.syncSectionContext(el);
     }
   }
 
   private syncSectionContext(el: HTMLElement): void {
-    (el as HTMLElement & { appConfigured?: boolean }).appConfigured = this.appConfigured;
+    const target = el as HTMLElement & { appConfigured?: boolean; configSaveCounter?: number };
+    target.appConfigured = this.appConfigured;
+    target.configSaveCounter = this.configSaveCounter;
   }
 
   private getOrCreateSectionElement(section: GitHubAdminSection): HTMLElement {

@@ -2131,10 +2131,6 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    if (new URLSearchParams(window.location.search).get('tab') === 'github-app') {
-      navigateTo('/admin/integrations/github');
-      return;
-    }
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
     void this.loadConfig();
     void this.loadHarnessConfigs();

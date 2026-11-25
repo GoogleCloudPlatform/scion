@@ -1052,12 +1052,80 @@ describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () =>
   });
 
   it('legacyIntegrationRedirect redirects unknown segments and leaves tab ids untouched', async () => {
-    const { legacyIntegrationRedirect } = await import('./admin-integrations-tabs.js');
+    const { legacyIntegrationRedirect, legacyServerConfigGitHubRedirect, parseIntegrationsRoute } =
+      await import('./admin-integrations-tabs.js');
     expect(legacyIntegrationRedirect('/admin/integrations/telegram')).toBe(
       '/admin/integrations/chat/telegram'
     );
     expect(legacyIntegrationRedirect('/admin/integrations/chat')).toBeNull();
     expect(legacyIntegrationRedirect('/admin/integrations/github')).toBeNull();
     expect(legacyIntegrationRedirect('/admin/integrations')).toBeNull();
+    // Malformed percent-encoding does not throw and does not match.
+    expect(legacyIntegrationRedirect('/admin/integrations/%E0')).toBeNull();
+    expect(parseIntegrationsRoute('/admin/integrations/%E0')).toEqual({
+      tabId: null,
+      subPath: null,
+    });
+    // Sub-paths under github do not enter detail view.
+    expect(parseIntegrationsRoute('/admin/integrations/github/extra')).toEqual({
+      tabId: 'github',
+      subPath: null,
+    });
+    // Server Config ?tab=github-app deep link redirects to Integrations -> GitHub.
+    expect(legacyServerConfigGitHubRedirect('/admin/server-config', '?tab=github-app')).toBe(
+      '/admin/integrations/github'
+    );
+    expect(legacyServerConfigGitHubRedirect('/admin/server-config', '?tab=general')).toBeNull();
+  });
+
+  it('403 on /admin/integrations/github falls back to /admin/integrations/chat using replaceState without adding history', async () => {
+    stubLocation('/admin/integrations/github');
+    const historyLengthBefore = window.history.length;
+    const base = createFetchHandler(makeDiscordDetail());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/github-app')) {
+          return Promise.resolve(new Response('forbidden', { status: 403 }));
+        }
+        return base(url, init);
+      })
+    );
+
+    element = document.createElement('scion-page-admin-integrations');
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      expect(window.location.pathname).toBe('/admin/integrations/chat');
+    });
+    expect(window.history.length).toBe(historyLengthBefore);
+    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(window.history.replaceState).toHaveBeenCalled();
+  });
+
+  it('keeps the GitHub tab visible on transient 500 so the card can show its own load error', async () => {
+    stubLocation('/admin/integrations');
+    const base = createFetchHandler(makeDiscordDetail());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/github-app')) {
+          return Promise.resolve(new Response('boom', { status: 500 }));
+        }
+        return base(url, init);
+      })
+    );
+
+    element = document.createElement('scion-page-admin-integrations');
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      expect(queryAll(element!, 'sl-tab').map((t) => t.getAttribute('panel'))).toEqual([
+        'chat',
+        'github',
+      ]);
+    });
   });
 });

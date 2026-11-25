@@ -52,7 +52,7 @@ describe('legacyAgentRedirect', () => {
     // The redirect rewrites the URL, so it records the shown entry like
     // every other router URL write (for a vetoed Back/Forward).
     expect(main).toMatch(
-      /const redirected = legacyAgentRedirect\(pathname\);[\s\S]{0,240}replaceState\([^)]*\)\);\s*noteShownEntry\(\);/
+      /const redirected = legacyAgentRedirect\(pathname\)[^;\n]*;[\s\S]{0,240}replaceState\([^)]*\)\);\s*noteShownEntry\(\);/
     );
     expect(main).not.toContain('agent-configure');
     expect(main).not.toContain('scion-page-agent-configure');

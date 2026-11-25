@@ -18,7 +18,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
-import { pushUrl } from '../../client/navigation.js';
+import { pushUrl, replaceUrl } from '../../client/navigation.js';
 import {
   INTEGRATION_TABS,
   legacyIntegrationRedirect,
@@ -132,10 +132,10 @@ export class ScionPageAdminIntegrations extends LitElement {
     const pathname = window.location.pathname;
     const redirected = legacyIntegrationRedirect(pathname);
     if (redirected) {
-      pushUrl(redirected);
+      replaceUrl(redirected);
     }
     const { tabId, subPath } = parseIntegrationsRoute(window.location.pathname);
-    this.subPath = subPath;
+    this.subPath = tabId === 'chat' ? subPath : null;
     if (tabId) {
       this.activeTabId = tabId;
     } else {
@@ -148,9 +148,12 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.probing = true;
     try {
       const res = await apiFetch('/api/v1/github-app', { suppressAccessDeniedToast: true });
-      this.canReadGitHubApp = res.ok;
+      // Hide the GitHub tab only when the caller is unauthorized (401/403).
+      // Transient 5xx or network errors keep the tab visible so the card can
+      // render its own load error and save guard.
+      this.canReadGitHubApp = res.status !== 401 && res.status !== 403;
     } catch {
-      this.canReadGitHubApp = false;
+      this.canReadGitHubApp = true;
     } finally {
       this.probing = false;
     }
@@ -166,7 +169,7 @@ export class ScionPageAdminIntegrations extends LitElement {
           window.location.pathname !== `/admin/integrations/${first.id}` &&
           window.location.pathname !== '/admin/integrations'
         ) {
-          pushUrl(`/admin/integrations/${first.id}`);
+          replaceUrl(`/admin/integrations/${first.id}`);
         }
       }
     }
@@ -256,9 +259,9 @@ export class ScionPageAdminIntegrations extends LitElement {
     const tabs = this.visibleTabs;
     const activeTab = tabs.find((t) => t.id === this.activeTabId) ?? tabs[0];
 
-    // Detail sub-route (e.g. /admin/integrations/chat/{name}): render the tab's
+    // Detail sub-route (e.g. /admin/integrations/chat/{name}): render the Chat
     // detail view directly so its breadcrumb sits at the top of the page.
-    if (this.subPath !== null && activeTab) {
+    if (this.subPath !== null && activeTab?.id === 'chat') {
       return this.renderTabContent(activeTab);
     }
 

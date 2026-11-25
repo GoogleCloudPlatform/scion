@@ -31,6 +31,7 @@ interface GitHubInstallationInfo {
 @customElement('scion-admin-github-installations')
 export class ScionAdminGitHubInstallations extends LitElement {
   @property({ type: Boolean }) appConfigured = false;
+  @property({ type: Number }) configSaveCounter = 0;
 
   @state() private installations: GitHubInstallationInfo[] = [];
   @state() private loading = false;
@@ -38,6 +39,8 @@ export class ScionAdminGitHubInstallations extends LitElement {
   @state() private syncLoading = false;
   @state() private syncResult: string | null = null;
   @state() private syncError = false;
+
+  private loadedOnce = false;
 
   static override styles = css`
     :host {
@@ -150,12 +153,19 @@ export class ScionAdminGitHubInstallations extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    void this.loadInstallations();
+    if (!this.loadedOnce) {
+      this.loadedOnce = true;
+      void this.loadInstallations();
+    }
   }
 
   override updated(changed: Map<string, unknown>): void {
     super.updated(changed);
-    if (changed.has('appConfigured') && this.appConfigured) {
+    const savedWhileConfigured =
+      changed.has('configSaveCounter') &&
+      changed.get('configSaveCounter') !== undefined &&
+      this.appConfigured;
+    if (savedWhileConfigured) {
       void this.loadInstallations();
     }
   }
