@@ -1012,7 +1012,9 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 	// becomes visible (ctx.Err() is still nil when acquire returns), with
 	// callerDL <= now+admissionWait -> FailCanceled.
 	t.Run("g_waitCtx_expires_before_parent_ctx_err_visible", func(t *testing.T) {
-		rt, _, compiled, rel := newTestRuntime(30 * time.Second)
+		// Caller deadline (2s) is strictly less than both AdmissionWait (4s) and the
+		// compiled rule's default timeout (5s), so caller deadline is the limiting bound.
+		rt, _, compiled, rel := newTestRuntime(4 * time.Second)
 		defer rel()
 
 		t0 := time.Now()
@@ -1023,7 +1025,7 @@ func TestAdmission_DeterministicStopCauseAndBoundaryMatrix(t *testing.T) {
 			return wctx, cancel
 		}
 
-		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(10*time.Second))
+		callerCtx, cancelCaller := context.WithDeadline(context.Background(), t0.Add(2*time.Second))
 		defer cancelCaller()
 		require.NoError(t, callerCtx.Err(), "precondition: parent ctx.Err() must still be nil")
 
