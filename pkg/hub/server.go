@@ -2093,7 +2093,7 @@ type RemoteAgentResponse struct {
 type SecretKeyInfo struct {
 	Description string `json:"description,omitempty"`
 	Source      string `json:"source"`         // "harness", "template", "settings"
-	Type        string `json:"type,omitempty"` // "environment" (default), "variable", "file"
+	Type        string `json:"type,omitempty"` // "environment" (default), "file", "on_demand"
 }
 
 type RemoteEnvRequirementsResponse struct {
