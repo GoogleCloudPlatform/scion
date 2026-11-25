@@ -41,6 +41,7 @@ import {
   buildDecisionsUrlSearch,
   hasDecisionsSearchCapability,
   isDecisionsSearchTimeoutError,
+  normalizeDecisionsFilterQuery,
   normalizeDecisionsSearchQuery,
   parseDecisionsUrlState,
   type MadeDecisionsProvenanceFilter,
@@ -52,6 +53,12 @@ import {
   type ProjectMadeDecisionsResponse,
   type ProjectPendingDecisionsResponse,
 } from '../../client/project-decisions.js';
+import {
+  filtersQueryDialectEnabled,
+  getViewSchema,
+  knownKeysFor,
+  parse as parseFilterQuery,
+} from '../../shared/filter-query/index.js';
 import {
   buildProfileDecisionsUrlSearch,
   cleanProfileProjectValue,
@@ -141,6 +148,7 @@ export class DecisionsPageController implements ReactiveController {
   private readonly adapter: DecisionsPageAdapter;
 
   enabled = false;
+  queryDialect = false;
   hubNotFound = false;
   currentUserId = '';
   activeTab: 'pending' | 'made' = 'pending';
@@ -262,7 +270,15 @@ export class DecisionsPageController implements ReactiveController {
 
   private readonly boundOnFlagsChanged = (): void => {
     const next = decisionsEnabled();
-    if (next === this.enabled) return;
+    const nextDialect = this.adapter.scope === 'project' && filtersQueryDialectEnabled();
+    const dialectChanged = nextDialect !== this.queryDialect;
+    this.queryDialect = nextDialect;
+    if (next === this.enabled) {
+      if (dialectChanged) {
+        this.notify();
+      }
+      return;
+    }
     this.enabled = next;
     this.notify();
     if (!next) {
@@ -339,6 +355,7 @@ export class DecisionsPageController implements ReactiveController {
   };
 
   hostConnected(): void {
+    this.queryDialect = this.adapter.scope === 'project' && filtersQueryDialectEnabled();
     this.extractRouteState();
     this.enabled = decisionsEnabled();
     this.notify();
@@ -438,7 +455,7 @@ export class DecisionsPageController implements ReactiveController {
       this.filterFrom = parsed.from;
       this.filterTo = parsed.to;
     } else {
-      const parsed = parseDecisionsUrlState(search);
+      const parsed = parseDecisionsUrlState(search, { dialect: this.queryDialect });
       this.activeTab = parsed.tab;
       this.sort = 'recent';
       this.filterProject = '';
@@ -469,16 +486,19 @@ export class DecisionsPageController implements ReactiveController {
             from: this.filterFrom,
             to: this.filterTo,
           })
-        : buildDecisionsUrlSearch({
-            tab: this.activeTab,
-            q: this.filterQ,
-            conversation: this.filterConversation,
-            agent: this.filterAgent,
-            user: this.filterUser,
-            provenance: this.filterProvenance,
-            from: this.filterFrom,
-            to: this.filterTo,
-          });
+        : buildDecisionsUrlSearch(
+            {
+              tab: this.activeTab,
+              q: this.filterQ,
+              conversation: this.filterConversation,
+              agent: this.filterAgent,
+              user: this.filterUser,
+              provenance: this.filterProvenance,
+              from: this.filterFrom,
+              to: this.filterTo,
+            },
+            { dialect: this.queryDialect }
+          );
     const curQs = window.location.search.replace(/^\?/, '');
     if (nextQs !== curQs) {
       replaceSearch(nextQs);
@@ -656,20 +676,42 @@ export class DecisionsPageController implements ReactiveController {
     };
   }
 
+  private hasPendingDialectFilter(): boolean {
+    if (!this.queryDialect) return false;
+    const raw = normalizeDecisionsFilterQuery(this.filterQ);
+    if (!raw) return false;
+    const schema = getViewSchema('decisions');
+    if (!schema) return Boolean(normalizeDecisionsSearchQuery(raw));
+    const parsed = parseFilterQuery(raw, knownKeysFor(schema));
+    if (parsed.error || !parsed.query) return false;
+    if (parsed.query.mode === 'text') {
+      return Boolean(normalizeDecisionsSearchQuery(parsed.query.text));
+    }
+    if (parsed.query.text || (parsed.query.excludeText?.length ?? 0) > 0) return true;
+    return parsed.query.terms.some((t) => {
+      const k = t.key.toLowerCase();
+      return k === 'agent' || k === 'conversation' || k === 'project';
+    });
+  }
+
   get isPendingFiltered(): boolean {
     if (this.adapter.scope === 'project' && !this.supportsSearch) return false;
+    const qActive = this.queryDialect
+      ? this.hasPendingDialectFilter()
+      : Boolean(normalizeDecisionsSearchQuery(this.filterQ));
     return Boolean(
-      (this.supportsSearch &&
-        (normalizeDecisionsSearchQuery(this.filterQ) || this.filterConversation)) ||
+      (this.supportsSearch && (qActive || this.filterConversation)) ||
       this.filterAgent ||
       this.filterProject
     );
   }
 
   get isMadeFiltered(): boolean {
+    const qActive = this.queryDialect
+      ? Boolean(normalizeDecisionsFilterQuery(this.filterQ))
+      : Boolean(normalizeDecisionsSearchQuery(this.filterQ));
     return Boolean(
-      (this.supportsSearch &&
-        (normalizeDecisionsSearchQuery(this.filterQ) || this.filterConversation)) ||
+      (this.supportsSearch && (qActive || this.filterConversation)) ||
       this.filterAgent ||
       this.filterProject ||
       this.filterUser ||
@@ -1429,6 +1471,28 @@ export class DecisionsPageController implements ReactiveController {
       this.searchDebounceTimer = null;
       commitSearch();
     }, SEARCH_DEBOUNCE_MS);
+  }
+
+  applyDialectQueryCommit(rawQ: string): void {
+    if (this.searchDebounceTimer !== null) {
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = null;
+    }
+    const nextQ = normalizeDecisionsFilterQuery(rawQ);
+    const hadLegacy = Boolean(
+      this.filterConversation || this.filterAgent || this.filterUser || this.filterProvenance
+    );
+    const changed = nextQ !== this.filterQ || hadLegacy;
+    this.filterQ = nextQ;
+    this.searchDraft = nextQ;
+    this.filterConversation = '';
+    this.filterAgent = '';
+    this.filterUser = '';
+    this.filterProvenance = '';
+    this.notify();
+    if (changed || this.pendingSearchTimeout || this.madeSearchTimeout) {
+      this.onFiltersUpdated({ sharedChanged: true });
+    }
   }
 
   applyFilterPatch(patch: DecisionsFilterPatch): void {

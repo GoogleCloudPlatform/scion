@@ -116,12 +116,14 @@ export class ScionPageProjectDecisions extends LitElement {
         limit,
         filter,
         signal,
+        dialect: this.ctrl.queryDialect,
       }),
     fetchMade: ({ cursor, limit, filter, signal }): Promise<ProjectMadeDecisionsResponse> =>
       fetchProjectMadeDecisions(this.projectId, filter, {
         cursor,
         limit,
         signal,
+        dialect: this.ctrl.queryDialect,
       }),
   });
 
@@ -148,6 +150,7 @@ export class ScionPageProjectDecisions extends LitElement {
       <scion-decisions-filter-panel
         scope="project"
         .supportsSearch=${this.ctrl.supportsSearch}
+        .queryDialect=${this.ctrl.queryDialect}
         .tab=${this.ctrl.activeTab}
         .q=${this.ctrl.filterQ}
         .searchText=${this.ctrl.searchDraft}
@@ -163,6 +166,8 @@ export class ScionPageProjectDecisions extends LitElement {
         .answerers=${this.ctrl.facetsAnswerers}
         @decisions-search-input=${(e: CustomEvent<DecisionsSearchInputDetail>): void =>
           this.ctrl.onSearchInput(e.detail)}
+        @decisions-query-commit=${(e: CustomEvent<{ q: string }>): void =>
+          this.ctrl.applyDialectQueryCommit(e.detail.q)}
         @decisions-filter-change=${(e: CustomEvent<DecisionsFilterPatch>): void =>
           this.ctrl.applyFilterPatch(e.detail)}
         @decisions-filters-clear=${this.ctrl.clearFilters}

@@ -35,6 +35,8 @@ export const DECISIONS_SEARCH_TIMEOUT_CODE = 'SEARCH_TIMEOUT';
 /** Minimum and maximum rune counts accepted for `q` by `pkg/hub/decisions_project.go` (D1). */
 export const MIN_DECISIONS_SEARCH_RUNES = 2;
 export const MAX_DECISIONS_SEARCH_RUNES = 256;
+/** Maximum UTF-8 byte length accepted for structured filter queries (`filterquery.MaxInputBytes`). */
+export const MAX_DECISIONS_FILTER_QUERY_BYTES = 512;
 
 /** Maximum UTF-8 byte length accepted for `conversation` by `pkg/hub/decisions_project.go`. */
 export const MAX_DECISIONS_CONVERSATION_BYTES = 256;
@@ -212,6 +214,7 @@ export interface ProjectDecisionsQueryOptions {
   cursor?: string | undefined;
   limit?: number | undefined;
   filter?: MadeDecisionsFilter | undefined;
+  dialect?: boolean | undefined;
 }
 
 /** Validated URL filter/tab state for the project Decisions page (D10, D11). */
@@ -276,6 +279,20 @@ export function normalizeDecisionsSearchQuery(raw: string | undefined | null): s
   return trimmed;
 }
 
+/**
+ * Normalizes a `q` parameter when `filters.query_dialect` is enabled: trims
+ * edge whitespace, rejects control characters, and enforces the 512-byte
+ * `filterquery.MaxInputBytes` bound.
+ */
+export function normalizeDecisionsFilterQuery(raw: string | undefined | null): string {
+  const trimmed = trimEdgeSpace(raw);
+  if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return '';
+  if (new TextEncoder().encode(trimmed).length > MAX_DECISIONS_FILTER_QUERY_BYTES) {
+    return '';
+  }
+  return trimmed;
+}
+
 export function isValidDecisionAgentId(raw: string | undefined | null): boolean {
   const trimmed = trimEdgeSpace(raw);
   return trimmed.length > 0 && AGENT_UUID_RE.test(trimmed);
@@ -334,12 +351,17 @@ function cleanProvenanceValue(raw: string | undefined | null): MadeDecisionsProv
  * Parses URL query parameters on load for `/projects/{id}/decisions`, silently
  * dropping invalid values so malformed or stale links never fail with HTTP 400 (D10, D11).
  */
-export function parseDecisionsUrlState(search: string | URLSearchParams): DecisionsUrlState {
+export function parseDecisionsUrlState(
+  search: string | URLSearchParams,
+  opts?: { dialect?: boolean }
+): DecisionsUrlState {
   const params = typeof search === 'string' ? new URLSearchParams(search) : search;
   const rawTab = (params.get('tab') ?? '').trim();
   const tab: 'pending' | 'made' = rawTab === 'made' ? 'made' : 'pending';
 
-  const q = normalizeDecisionsSearchQuery(params.get('q'));
+  const q = opts?.dialect
+    ? normalizeDecisionsFilterQuery(params.get('q'))
+    : normalizeDecisionsSearchQuery(params.get('q'));
   const conversation = cleanConversationValue(params.get('conversation'));
   const rawAgent = cleanFilterValue(params.get('agent'));
   const agent = isValidDecisionAgentId(rawAgent) ? rawAgent : '';
@@ -385,14 +407,19 @@ export function parseDecisionsUrlState(search: string | URLSearchParams): Decisi
  * leading `?`) suitable for `replaceSearch()` (`history.replaceState`, D10).
  * Default `tab=pending` and empty filters are omitted.
  */
-export function buildDecisionsUrlSearch(state: Partial<DecisionsUrlState>): string {
+export function buildDecisionsUrlSearch(
+  state: Partial<DecisionsUrlState>,
+  opts?: { dialect?: boolean }
+): string {
   const params = new URLSearchParams();
   const tab = state.tab === 'made' ? 'made' : 'pending';
   if (tab === 'made') {
     params.set('tab', 'made');
   }
 
-  const q = normalizeDecisionsSearchQuery(state.q);
+  const q = opts?.dialect
+    ? normalizeDecisionsFilterQuery(state.q)
+    : normalizeDecisionsSearchQuery(state.q);
   if (q) params.set('q', q);
 
   const conversation = cleanConversationValue(state.conversation);
@@ -436,7 +463,9 @@ export function buildProjectDecisionsQuery(options: ProjectDecisionsQueryOptions
   }
 
   if (options.filter) {
-    const q = normalizeDecisionsSearchQuery(options.filter.q);
+    const q = options.dialect
+      ? normalizeDecisionsFilterQuery(options.filter.q)
+      : normalizeDecisionsSearchQuery(options.filter.q);
     if (q) params.set('q', q);
 
     const conversation = cleanConversationValue(options.filter.conversation);
@@ -480,6 +509,7 @@ export async function fetchProjectPendingDecisions(
     limit?: number | undefined;
     filter?: SharedDecisionsFilter | undefined;
     signal?: AbortSignal | undefined;
+    dialect?: boolean | undefined;
   } = {}
 ): Promise<ProjectPendingDecisionsResponse> {
   const url = projectDecisionsUrl(projectId, {
@@ -487,6 +517,7 @@ export async function fetchProjectPendingDecisions(
     cursor: options.cursor,
     limit: options.limit,
     filter: options.filter,
+    dialect: options.dialect,
   });
   const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
   if (!res.ok) {
@@ -522,6 +553,7 @@ export async function fetchProjectMadeDecisions(
     cursor?: string | undefined;
     limit?: number | undefined;
     signal?: AbortSignal | undefined;
+    dialect?: boolean | undefined;
   } = {}
 ): Promise<ProjectMadeDecisionsResponse> {
   const url = projectDecisionsUrl(projectId, {
@@ -529,6 +561,7 @@ export async function fetchProjectMadeDecisions(
     cursor: options.cursor,
     limit: options.limit,
     filter,
+    dialect: options.dialect,
   });
   const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
   if (!res.ok) {

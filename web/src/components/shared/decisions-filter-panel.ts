@@ -41,8 +41,17 @@ import {
   type ProjectDecisionActorView,
   type ProjectDecisionConversationView,
 } from '../../client/project-decisions.js';
+import {
+  getViewSchema,
+  knownKeysFor,
+  parse,
+  type ValueSuggestion,
+} from '../../shared/filter-query/index.js';
+import { formatValue } from '../../shared/filter-query/canonical.js';
 import type { FacetChangeDetail, FacetComboboxOption } from './facet-combobox.js';
 import './facet-combobox.js';
+import type { FilterCommitDetail, ScionFilterBox } from './filter-box/filter-box.js';
+import './filter-box/filter-box.js';
 
 /** `localStorage` key storing expanded/collapsed preference for Decisions filter panels (D13). */
 export const DECISIONS_FILTERS_OPEN_STORAGE_KEY = 'scion:decisions:filters-open';
@@ -173,7 +182,13 @@ export class ScionDecisionsFilterPanel extends LitElement {
   /** Optional extra tags (reserved for `scope="profile"` in P5). */
   @property({ attribute: false }) extraTags: DecisionsFilterTag[] = [];
 
+  /** When true on the project page, renders `<scion-filter-box view="decisions">` (ptone/scion#8985). */
+  @property({ type: Boolean }) queryDialect = false;
+
   @state() private open = false;
+  @state() private datesOpen = false;
+  @state() private dialectDraft = '';
+  @state() private dialectUserEdited = false;
 
   static override styles = css`
     :host {
@@ -363,6 +378,69 @@ export class ScionDecisionsFilterPanel extends LitElement {
         min-width: 0;
       }
     }
+
+    .dialect-panel {
+      padding: 0.75rem 0.85rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.55rem;
+    }
+
+    .dialect-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      flex-wrap: nowrap;
+    }
+
+    .dialect-row scion-filter-box {
+      flex: 1 1 auto;
+      max-width: none;
+      width: 100%;
+      min-width: 0;
+    }
+
+    .dates-disclosure {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .dates-toggle {
+      align-self: flex-start;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      background: transparent;
+      border: none;
+      padding: 0.15rem 0.2rem;
+      margin: 0;
+      font: inherit;
+      font-size: 0.8125rem;
+      color: var(--scion-text-secondary, #475569);
+      cursor: pointer;
+      border-radius: var(--scion-radius-sm, 0.25rem);
+    }
+
+    .dates-toggle:hover {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .dates-toggle:focus-visible {
+      outline: 2px solid var(--scion-primary, #2563eb);
+      outline-offset: 2px;
+    }
+
+    .dates-active-hint {
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.75rem;
+    }
+
+    @media (max-width: 760px) {
+      .dialect-row {
+        flex-wrap: wrap;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -378,6 +456,12 @@ export class ScionDecisionsFilterPanel extends LitElement {
   /** Expands the panel (persisting the preference) and focuses the search input (`/` shortcut, D13). */
   async expandAndFocusSearch(): Promise<void> {
     if (!this.supportsSearch) return;
+    if (this.useFilterBox) {
+      await this.updateComplete;
+      const box = this.shadowRoot?.querySelector<ScionFilterBox>('scion-filter-box');
+      box?.focusInput();
+      return;
+    }
     if (!this.open) {
       this.setOpen(true);
     }
@@ -389,6 +473,267 @@ export class ScionDecisionsFilterPanel extends LitElement {
     slInput.focus?.();
     const inner = slInput.shadowRoot?.querySelector<HTMLInputElement>('input');
     inner?.focus();
+  }
+
+  private get useFilterBox(): boolean {
+    return this.queryDialect && this.scope === 'project' && this.supportsSearch;
+  }
+
+  override willUpdate(changed: Map<string, unknown>): void {
+    super.willUpdate(changed);
+    if (
+      changed.has('q') ||
+      changed.has('conversation') ||
+      changed.has('agent') ||
+      changed.has('user') ||
+      changed.has('provenance') ||
+      changed.has('queryDialect')
+    ) {
+      if (
+        changed.has('q') ||
+        changed.has('conversation') ||
+        changed.has('agent') ||
+        changed.has('user') ||
+        changed.has('provenance')
+      ) {
+        this.dialectUserEdited = false;
+      }
+      if (!this.dialectUserEdited) {
+        this.dialectDraft = this.synthesizeDialectQuery();
+      }
+    } else if (
+      !this.dialectUserEdited &&
+      (changed.has('agents') ||
+        changed.has('conversations') ||
+        changed.has('answerers') ||
+        changed.has('currentUserId')) &&
+      (this.conversation || this.agent || this.user || this.provenance)
+    ) {
+      this.dialectDraft = this.synthesizeDialectQuery();
+    }
+    if ((changed.has('from') || changed.has('to')) && (this.from || this.to)) {
+      this.datesOpen = true;
+    }
+  }
+
+  /**
+   * Formats legacy separate URL params (`agent=`, `conversation=`, `user=`,
+   * `provenance=`) as filter query terms alongside `q` so old links show their
+   * equivalent terms in `<scion-filter-box>` on load (design-8985 §3.4).
+   */
+  private synthesizeDialectQuery(): string {
+    const parts: string[] = [];
+    if (this.conversation) {
+      const conv = this.conversations.find((c) => c.key === this.conversation);
+      parts.push(`conversation:${formatValue(conv?.label || this.conversation)}`);
+    }
+    if (this.agent) {
+      const actor = this.agents.find((a) => a.id === this.agent);
+      parts.push(`agent:${formatValue(actor?.name || this.agent)}`);
+    }
+    if (this.user) {
+      if (this.currentUserId && this.user === this.currentUserId) {
+        parts.push('by:me');
+      } else {
+        const answerer = this.answerers.find((u) => u.id === this.user);
+        const dup =
+          answerer !== undefined &&
+          this.answerers.filter((u) => u.name.toLowerCase() === answerer.name.toLowerCase())
+            .length > 1;
+        const val = answerer ? (dup && answerer.hint ? answerer.hint : answerer.name) : this.user;
+        parts.push(`by:${formatValue(val)}`);
+      }
+    }
+    if (this.provenance) {
+      parts.push(`provenance:${formatValue(this.provenance)}`);
+    }
+    const baseQ = this.q.trim();
+    if (baseQ) {
+      parts.push(baseQ);
+    }
+    return parts.join(' ');
+  }
+
+  private readonly provideDialectValueSuggestions = (
+    key: string,
+    _prefix: string
+  ): ValueSuggestion[] => {
+    switch (key) {
+      case 'agent':
+        return this.agents.map((a) => ({
+          value: a.name || a.id,
+          ...(a.hint ? { help: a.hint } : {}),
+        }));
+      case 'conversation':
+        return this.conversations.map((c) => ({
+          value: c.label || c.key,
+          ...(c.hint ? { help: c.hint } : {}),
+        }));
+      case 'by': {
+        const out: ValueSuggestion[] = [];
+        const nameCounts = new Map<string, number>();
+        let selfName = '';
+        for (const u of this.answerers) {
+          if (this.currentUserId && u.id === this.currentUserId) {
+            selfName = u.name;
+          }
+          const lower = (u.name || '').toLowerCase();
+          if (lower) {
+            nameCounts.set(lower, (nameCounts.get(lower) ?? 0) + 1);
+          }
+        }
+        if (this.currentUserId) {
+          out.push({ value: 'me', help: selfName ? `You · ${selfName}` : 'You' });
+        }
+        for (const u of this.answerers) {
+          if (this.currentUserId && u.id === this.currentUserId) continue;
+          const lower = (u.name || '').toLowerCase();
+          const collides = lower !== '' && (nameCounts.get(lower) ?? 0) > 1;
+          if (collides && u.hint) {
+            out.push({ value: u.hint, help: u.name });
+          } else {
+            out.push({
+              value: u.name || u.id,
+              ...(u.hint ? { help: u.hint } : {}),
+            });
+          }
+        }
+        return out;
+      }
+      default:
+        return [];
+    }
+  };
+
+  private madeOnlyPendingWarning(raw: string): string {
+    if (this.tab !== 'pending' || !raw.trim()) return '';
+    const schema = getViewSchema('decisions');
+    if (!schema) return '';
+    const parsed = parse(raw, knownKeysFor(schema));
+    if (parsed.error || !parsed.query || parsed.query.mode !== 'structured') return '';
+    const ignored = new Set<string>();
+    for (const term of parsed.query.terms) {
+      const k = term.key.toLowerCase();
+      if (k === 'by' || k === 'provenance') {
+        ignored.add(`${k}:`);
+      }
+    }
+    if (ignored.size === 0) return '';
+    const list = Array.from(ignored);
+    return list.length === 1
+      ? `${list[0]} applies to the Made tab only`
+      : `${list.join(' and ')} apply to the Made tab only`;
+  }
+
+  private handleDialectFilterInput(e: CustomEvent<{ value: string }>): void {
+    this.dialectUserEdited = true;
+    this.dialectDraft = e.detail.value;
+  }
+
+  private handleDialectFilterCommit(e: CustomEvent<FilterCommitDetail>): void {
+    const { query, serverQ, value } = e.detail;
+    const committedQ =
+      query.mode === 'text' ? normalizeDecisionsSearchQuery(value) : serverQ.trim();
+    this.dialectUserEdited = false;
+    this.dialectDraft = value;
+    this.dispatchEvent(
+      new CustomEvent<{ q: string }>('decisions-query-commit', {
+        detail: { q: committedQ },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  private renderDialectPanel(): TemplateResult {
+    const hasDates = Boolean(this.from || this.to);
+    const datesExpanded = this.datesOpen || hasDates;
+    const dateRangeSummary =
+      this.from && this.to
+        ? `${this.from} – ${this.to}`
+        : this.from
+          ? `from ${this.from}`
+          : this.to
+            ? `to ${this.to}`
+            : '';
+
+    return html`
+      <div class="fpanel dialect-panel" data-decisions-filter-panel data-scope=${this.scope}>
+        <div class="dialect-row">
+          <scion-filter-box
+            view="decisions"
+            placeholder="Filter decisions… (try agent:deploy by:me)"
+            .value=${this.dialectDraft}
+            .valueSuggestions=${this.provideDialectValueSuggestions}
+            .externalWarning=${this.madeOnlyPendingWarning(this.dialectDraft)}
+            @filter-input=${(e: CustomEvent<{ value: string }>): void =>
+              this.handleDialectFilterInput(e)}
+            @filter-commit=${(e: CustomEvent<FilterCommitDetail>): void =>
+              this.handleDialectFilterCommit(e)}
+          ></scion-filter-box>
+        </div>
+
+        ${this.tab === 'made'
+          ? html`
+              <div class="dates-disclosure">
+                <button
+                  type="button"
+                  class="dates-toggle"
+                  data-date-range-toggle
+                  aria-expanded=${datesExpanded ? 'true' : 'false'}
+                  aria-controls="decisions-date-range"
+                  @click=${(): void => {
+                    this.datesOpen = !datesExpanded;
+                  }}
+                >
+                  <sl-icon
+                    class="chev"
+                    name=${datesExpanded ? 'chevron-down' : 'chevron-right'}
+                    aria-hidden="true"
+                  ></sl-icon>
+                  <span>Date range (Made)</span>
+                  ${dateRangeSummary
+                    ? html`<span class="dates-active-hint">· ${dateRangeSummary}</span>`
+                    : nothing}
+                </button>
+                ${datesExpanded
+                  ? html`
+                      <div id="decisions-date-range" class="date-pair">
+                        <sl-input
+                          size="small"
+                          type="date"
+                          label="From"
+                          data-filter="from"
+                          .value=${this.from}
+                          @sl-change=${(e: Event): void => {
+                            const val = (
+                              (e.currentTarget as { value?: string } | null)?.value ?? ''
+                            ).trim();
+                            this.emitPatch({ from: val });
+                          }}
+                        ></sl-input>
+
+                        <sl-input
+                          size="small"
+                          type="date"
+                          label="To"
+                          data-filter="to"
+                          .value=${this.to}
+                          @sl-change=${(e: Event): void => {
+                            const val = (
+                              (e.currentTarget as { value?: string } | null)?.value ?? ''
+                            ).trim();
+                            this.emitPatch({ to: val });
+                          }}
+                        ></sl-input>
+                      </div>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
   }
 
   setOpen(next: boolean): void {
@@ -554,6 +899,10 @@ export class ScionDecisionsFilterPanel extends LitElement {
   }
 
   override render(): TemplateResult {
+    if (this.useFilterBox) {
+      return this.renderDialectPanel();
+    }
+
     const tags = this.activeTags;
     const activeCount = tags.length;
     const displayedSearch = this.searchText ?? this.q;
