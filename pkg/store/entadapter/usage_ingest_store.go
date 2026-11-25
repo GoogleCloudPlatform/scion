@@ -47,7 +47,7 @@ func (s *UsageLedgerStore) EnsureRunAttributionForAgent(ctx context.Context, age
 		return nil, store.ErrNotFound
 	}
 	run := func(client *ent.Client) error {
-		return ensureRunAttributionForAgentTx(ctx, client, uid, runID, "", hubID)
+		return ensureRunAttributionForAgentTx(ctx, client, uid, runID, "", hubID, "", nil)
 	}
 	if s.inTx {
 		if err := run(s.client); err != nil {

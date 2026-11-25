@@ -37,6 +37,8 @@
 - [agent.token.refresh](#agenttokenrefresh) — Refresh the calling agent's own hub token
 - [agent.outbound.message](#agentoutboundmessage) — Deliver an outbound message from the calling agent
 - [agent.metrics.report](#agentmetricsreport) — Report runtime metrics for the calling agent
+- [agent.usage.ingest](#agentusageingest) — Ingest canonical Track 1 usage events and meter health heartbeats for the calling agent (behind tokenomics.usage_ledger)
+- [agent.usage.capabilities](#agentusagecapabilities) — Probe Hub Track 1 usage ingest capabilities for the calling agent (behind tokenomics.usage_ledger)
 - [agent.secrets.access](#agentsecretsaccess) — List, read, write and delete the secrets available to the calling agent: its own agent-scoped secrets, its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)
 - [agent.stopall](#agentstopall) — Stop all running agents on the hub
 - [agent.stopall.project](#agentstopallproject) — Stop all running agents in a project
@@ -410,6 +412,7 @@
 - [broker.agent.movebundle.uploadurl](#brokeragentmovebundleuploadurl) — Issue a signed PUT URL for one compressed part of an agent's move bundle
 - [broker.agent.movebundle.downloadurls](#brokeragentmovebundledownloadurls) — Issue signed GET URLs for the manifest parts of an agent's move bundle
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
+- [broker.agent.usage.ingest](#brokeragentusageingest) — Ingest harvested Track 1 usage events and meter health updates for an agent owned by the calling broker (behind tokenomics.usage_ledger)
 - [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
 - [gcp.identity.create](#gcpidentitycreate) — Create a GCP service account binding
@@ -1583,6 +1586,74 @@
 ### Exemptions
 
 - **internal_only:** The agent authenticates with its own agent JWT for its own record; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.usage.ingest
+
+**Domain:** agent
+
+**Description:** Ingest canonical Track 1 usage events and meter health heartbeats for the calling agent (behind tokenomics.usage_ledger)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/usage/events` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT for its own usage ledger; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.usage.capabilities
+
+**Domain:** agent
+
+**Description:** Probe Hub Track 1 usage ingest capabilities for the calling agent (behind tokenomics.usage_ledger)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/usage/capabilities` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT for its own usage capability probe; no user permission applies (scope: agent self access) — waives: `base_permission`
 
 ---
 
@@ -15398,6 +15469,41 @@
 ### Exemptions
 
 - **internal_only:** The broker authenticates with its own HMAC credential for its own record; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
+## broker.agent.usage.ingest
+
+**Domain:** broker
+
+**Description:** Ingest harvested Track 1 usage events and meter health updates for an agent owned by the calling broker (behind tokenomics.usage_ledger)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/brokers/{id}/agents/{agentId}/usage/events` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+- `pkg/hub:TestUsageIngest_BrokerHarvestRoute`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential and must own the target agent; no user permission applies (scope: broker self access) — waives: `base_permission`
 
 ---
 

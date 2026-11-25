@@ -184,15 +184,18 @@ func TestUsageIngest_EndToEndIdempotentAntiSpoofingAndAnomalous(t *testing.T) {
 	proj := &store.Project{ID: tid("usage-e2e-proj"), Name: "usage-e2e", Slug: "usage-e2e"}
 	require.NoError(t, s.CreateProject(ctx, proj))
 	ag := &store.Agent{
-		ID:            tid("usage-e2e-agent"),
-		Slug:          "usage-e2e-agent",
-		Name:          "usage-e2e-agent",
-		ProjectID:     proj.ID,
-		OwnerID:       owner.ID,
-		CreatedBy:     owner.ID,
-		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
-		Template:      "default",
-		Phase:         string(state.PhaseRunning),
+		ID:        tid("usage-e2e-agent"),
+		Slug:      "usage-e2e-agent",
+		Name:      "usage-e2e-agent",
+		ProjectID: proj.ID,
+		OwnerID:   owner.ID,
+		CreatedBy: owner.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			Harness:       "claude",
+			HarnessConfig: "claude",
+		},
+		Template: "default",
+		Phase:    string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, ag))
 	_, err := s.SetAgentRunID(ctx, ag.ID, "run-e2e-1", nil)
