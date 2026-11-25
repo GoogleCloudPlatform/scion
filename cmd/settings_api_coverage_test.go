@@ -52,6 +52,7 @@ var settingsAPIFamilies = []string{
 	"/api/v1/admin/messaging",
 	"/api/v1/admin/profiling",
 	"/api/v1/admin/chat-retention",
+	"/api/v1/admin/decision-retention",
 	"/api/v1/admin/maintenance",
 	"/api/v1/hub/settings",
 	"/api/v1/projects/{id}/settings",
@@ -157,6 +158,8 @@ var settingsAPICoverage = map[string]settingsAPIUse{
 	"GET /api/v1/profiling":                    {op: "hub.profiling.read", webOnly: "the resolved readiness-marks switch; the browser takes the same value from the page's initial data, and no command acts on it"},
 	"GET /api/v1/admin/chat-retention":         {op: "hub.chatretention.update", webOnly: settingsNoCLIYet},
 	"PUT /api/v1/admin/chat-retention":         {op: "hub.chatretention.update", webOnly: settingsNoCLIYet},
+	"GET /api/v1/admin/decision-retention":     {op: "hub.decisionretention.update", webOnly: settingsNoCLIYet},
+	"PUT /api/v1/admin/decision-retention":     {op: "hub.decisionretention.update", webOnly: settingsNoCLIYet},
 }
 
 // settingsAPIEntryPoints returns the settings API entry points of ops, keyed

@@ -2629,6 +2629,9 @@ type Server struct {
 	// chatRetention is the chat message retention wiring (chat_retention.go).
 	chatRetention chatRetentionState
 
+	// decisionRetention is the settled-decision retention wiring (decision_retention.go).
+	decisionRetention decisionRetentionState
+
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	// artifactStoreState tracks whether startup is still initializing the store
 	// (ExpectArtifactStore) or failed to initialize it (ArtifactStoreInitFailed),
@@ -7623,6 +7626,11 @@ func (s *Server) registerSchedulerHandlers() {
 	// the handler runs a tick only while the sweep is active and once
 	// tick_interval_minutes have passed since the last one.
 	s.scheduler.RegisterRecurringSingleton("chat-retention", 1, store.LockChatRetention, s.chatRetentionHandler())
+	// Settled-decision retention (hub.decision_retention, ptone/scion#8984):
+	// checked every minute; the handler runs a tick only while experiment,
+	// enabled, and a retention window are all active and tick_interval_minutes
+	// have elapsed.
+	s.scheduler.RegisterRecurringSingleton("decision-retention", 1, store.LockDecisionRetention, s.decisionRetentionHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
@@ -8596,6 +8604,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/profiling", s.guarded("/api/v1/admin/profiling", s.handleAdminProfiling))
 	// Chat message retention settings (hub.chat_retention; 404 while off).
 	s.mux.HandleFunc("/api/v1/admin/chat-retention", s.guarded("/api/v1/admin/chat-retention", s.handleAdminChatRetention))
+	// Decision retention settings (hub.decision_retention; 404 while off).
+	s.mux.HandleFunc("/api/v1/admin/decision-retention", s.guarded("/api/v1/admin/decision-retention", s.handleAdminDecisionRetention))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/revoke", s.guarded("/api/v1/admin/conduit/grant-keys/revoke", s.handleAdminConduitGrantKeyRevoke))
 	s.mux.HandleFunc("/api/v1/admin/keys/status", s.guarded("/api/v1/admin/keys/status", s.adminKeyStatusHandler()))

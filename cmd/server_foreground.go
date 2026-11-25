@@ -879,6 +879,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					// would otherwise stay "running" forever.
 					hubSrv.ReconcileInterruptedChatRetentionRuns(context.Background())
 				}
+				if drp, ok := s.(interface {
+					DecisionRetention() store.DecisionRetentionStore
+				}); ok {
+					hubSrv.SetDecisionRetentionStore(drp.DecisionRetention())
+				}
 
 				// W7: Initialize local-disk attachment store.
 				globalDir, err := config.GetGlobalDir()

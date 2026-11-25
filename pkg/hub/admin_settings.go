@@ -336,6 +336,11 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 			"use PUT /api/v1/admin/chat-retention with explicit nulls to reset its fields", nil)
 		return
 	}
+	if sectionName == opsettings.DecisionRetentionSectionName {
+		writeError(w, http.StatusBadRequest, "validation_failed",
+			"use PUT /api/v1/admin/decision-retention with explicit nulls to reset its fields", nil)
+		return
+	}
 	// While the test admin tier is on, federation settings are refused on
 	// every write path, resets included (G8).
 	if sectionName == "federation" && s.testAdminTierOn() {

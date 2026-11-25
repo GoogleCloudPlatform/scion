@@ -1012,6 +1012,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 		SessionOnly: authzop.ReasonIrreversibleCascade,
 	},
+	// Settled-decision retention settings (DB-only "decision_retention" section,
+	// behind hub.decision_retention). Session only: the window decides what is
+	// deleted, irreversibly, across every project's settled decision log.
+	"/api/v1/admin/decision-retention": {
+		Pattern: "/api/v1/admin/decision-retention", RouteID: "admin.decisionRetention",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonIrreversibleCascade,
+	},
 	// Conduit grant key rotation, behind hub.conduit. Returns kids and
 	// timestamps only.
 	"/api/v1/admin/conduit/grant-keys/rotate": {
