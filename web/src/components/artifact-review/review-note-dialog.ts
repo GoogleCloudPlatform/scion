@@ -35,6 +35,7 @@ export class ScionReviewNoteDialog extends LitElement {
   @query('textarea') private textarea?: HTMLTextAreaElement;
 
   private resolve: ((note: string | null) => void) | null = null;
+  private trackingViewport = false;
 
   static override styles = css`
     sl-dialog::part(panel) {
@@ -77,6 +78,33 @@ export class ScionReviewNoteDialog extends LitElement {
         font-size: max(16px, 0.875rem);
       }
     }
+    /* On phones and touch screens, size and position the dialog against the
+       visual viewport (tracking window.visualViewport height and offsetTop
+       while open, with 100dvh as fallback) so the on-screen keyboard on
+       iOS Safari and Android Chrome never covers the textarea, hint row,
+       or action buttons. Desktop layout is unaffected. */
+    @media (max-width: 768px), (pointer: coarse) {
+      sl-dialog {
+        --header-spacing: 0.875rem 1rem;
+        --body-spacing: 0.75rem 1rem;
+        --footer-spacing: 0.75rem 1rem;
+      }
+      sl-dialog::part(base) {
+        top: var(--note-dialog-vv-top, 0px);
+        bottom: auto;
+        height: var(--note-dialog-vv-height, 100dvh);
+        padding: max(env(safe-area-inset-top), 0.5rem) 0.75rem
+          max(0.5rem, calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0))));
+        box-sizing: border-box;
+      }
+      sl-dialog::part(panel) {
+        max-width: 100%;
+        max-height: 100%;
+      }
+      sl-dialog::part(body) {
+        min-height: 0;
+      }
+    }
     textarea:focus {
       outline: none;
       border-color: var(--sl-color-primary-600, #0284c7);
@@ -112,12 +140,25 @@ export class ScionReviewNoteDialog extends LitElement {
     }
   `;
 
+  override connectedCallback(): void {
+    super.connectedCallback();
+    if (this.open) {
+      this.startVisualViewportTracking();
+    }
+  }
+
+  override disconnectedCallback(): void {
+    this.stopVisualViewportTracking();
+    super.disconnectedCallback();
+  }
+
   /** Opens the dialog for req; resolves with the note, or null when cancelled. */
   ask(req: NoteRequest): Promise<string | null> {
     this.finish(null);
     this.req = req;
     this.value = req.note;
     this.open = true;
+    this.startVisualViewportTracking();
     return new Promise((resolve) => {
       this.resolve = resolve;
     });
@@ -127,7 +168,52 @@ export class ScionReviewNoteDialog extends LitElement {
     const r = this.resolve;
     this.resolve = null;
     this.open = false;
+    this.stopVisualViewportTracking();
     r?.(note);
+  }
+
+  private syncVisualViewport(): void {
+    if (!this.open) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+    this.style.setProperty('--note-dialog-vv-height', `${vv.height}px`);
+    this.style.setProperty('--note-dialog-vv-top', `${vv.offsetTop}px`);
+  }
+
+  private scrollTextareaIntoView(): void {
+    if (!this.open || !this.textarea) return;
+    if (typeof this.textarea.scrollIntoView === 'function') {
+      this.textarea.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }
+
+  private readonly onVisualViewportChange = (): void => {
+    if (!this.open) return;
+    this.syncVisualViewport();
+    if (this.shadowRoot?.activeElement === this.textarea) {
+      this.scrollTextareaIntoView();
+    }
+  };
+
+  private startVisualViewportTracking(): void {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    this.syncVisualViewport();
+    if (this.trackingViewport) return;
+    this.trackingViewport = true;
+    vv.addEventListener('resize', this.onVisualViewportChange);
+    vv.addEventListener('scroll', this.onVisualViewportChange);
+  }
+
+  private stopVisualViewportTracking(): void {
+    const vv = window.visualViewport;
+    if (vv && this.trackingViewport) {
+      vv.removeEventListener('resize', this.onVisualViewportChange);
+      vv.removeEventListener('scroll', this.onVisualViewportChange);
+    }
+    this.trackingViewport = false;
+    this.style.removeProperty('--note-dialog-vv-height');
+    this.style.removeProperty('--note-dialog-vv-top');
   }
 
   private onKeydown(e: KeyboardEvent): void {
@@ -136,6 +222,12 @@ export class ScionReviewNoteDialog extends LitElement {
       this.finish(this.value);
     }
   }
+
+  private onTextareaFocus = (): void => {
+    if (!this.open) return;
+    this.syncVisualViewport();
+    this.scrollTextareaIntoView();
+  };
 
   private focusTextarea(): void {
     if (!this.open || !this.textarea) return;
@@ -152,8 +244,14 @@ export class ScionReviewNoteDialog extends LitElement {
   };
 
   private onAfterShow = (e: Event): void => {
-    if (e.target !== e.currentTarget) return;
+    if (e.target !== e.currentTarget || !this.open) return;
+    this.syncVisualViewport();
     this.focusTextarea();
+  };
+
+  private onAfterHide = (e: Event): void => {
+    if (e.target !== e.currentTarget || this.open) return;
+    this.stopVisualViewportTracking();
   };
 
   override render(): TemplateResult {
@@ -165,6 +263,7 @@ export class ScionReviewNoteDialog extends LitElement {
       ?open=${this.open}
       @sl-initial-focus=${this.onInitialFocus}
       @sl-after-show=${this.onAfterShow}
+      @sl-after-hide=${this.onAfterHide}
       @sl-request-close=${(): void => this.finish(null)}
     >
       ${req?.quote
@@ -175,6 +274,7 @@ export class ScionReviewNoteDialog extends LitElement {
       <textarea
         aria-label="Note"
         .value=${this.value}
+        @focus=${this.onTextareaFocus}
         @input=${(e: Event): void => {
           this.value = (e.target as HTMLTextAreaElement).value;
         }}

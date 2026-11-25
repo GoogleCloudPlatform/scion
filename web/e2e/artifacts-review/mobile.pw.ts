@@ -449,6 +449,146 @@ async function pinnedJourney(page: Page, title: string, touch: boolean): Promise
   await expect(toolbar(page)).toBeInViewport();
 }
 
+type VisualViewportWindow = Window & {
+  __setReviewVisualViewport?: (height: number | null, offsetTop?: number) => void;
+};
+
+/**
+ * Installs a controllable `window.visualViewport` before the page loads so
+ * mobile-keyboard resize and offsetTop panning can be exercised in Chromium.
+ */
+async function installControllableVisualViewport(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const vv = Object.assign(new EventTarget(), {
+      scale: 1,
+      offsetTop: 0,
+      offsetLeft: 0,
+      pageTop: 0,
+      pageLeft: 0,
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+    Object.defineProperty(window, 'visualViewport', { configurable: true, get: () => vv });
+    (window as unknown as VisualViewportWindow).__setReviewVisualViewport = (
+      height,
+      offsetTop = 0
+    ): void => {
+      vv.height = height ?? window.innerHeight;
+      vv.offsetTop = offsetTop;
+      vv.dispatchEvent(new Event('resize'));
+      vv.dispatchEvent(new Event('scroll'));
+    };
+  });
+}
+
+/**
+ * Opens the Add comment dialog on a mobile viewport, simulates an on-screen
+ * keyboard reducing `window.visualViewport.height` (and shifting `offsetTop`),
+ * and verifies that the entire dialog (panel, textarea, hint row, actions)
+ * stays inside the visual viewport above the keyboard.
+ */
+async function noteDialogKeyboardJourney(page: Page, title: string): Promise<void> {
+  await installControllableVisualViewport(page);
+  const a = await publish({
+    project,
+    title,
+    entry: 'index.md',
+    files: { 'index.md': Buffer.from(DOC) },
+  });
+  await openArtifact(page, project, a.id);
+  await startGraphicalReview(page);
+
+  await scrollUnderToolbar(page, 10);
+  const target = await firstClear(page, 11);
+  const word = await textBox(page, `Paragraph ${target} line.`);
+  await page.touchscreen.tap(word.x, word.y);
+  await expect(editor(page)).toBeFocused();
+  await settleAfterFocus(page);
+  await page.keyboard.press('Home');
+  for (let i = 0; i < 'Paragraph'.length; i++) await page.keyboard.press('Shift+ArrowRight');
+  await toolbar(page).locator('sl-button.comment').tap();
+
+  const dialog = page.locator('scion-review-note-dialog sl-dialog');
+  await expect(dialog).toHaveAttribute('open', '');
+  const note = page.locator('scion-review-note-dialog textarea');
+  await expect(note).toBeFocused();
+  await note.fill('Mobile keyboard comment');
+
+  const measureDialog = (): Promise<{
+    panelTop: number;
+    panelBottom: number;
+    bodyTop: number;
+    bodyBottom: number;
+    textareaTop: number;
+    textareaBottom: number;
+    helpTop: number;
+    helpBottom: number;
+    footerTop: number;
+    footerBottom: number;
+  }> =>
+    page.locator('scion-review-note-dialog').evaluate((host) => {
+      const slDialog = host.shadowRoot!.querySelector('sl-dialog')!;
+      const panel = slDialog.shadowRoot!.querySelector('[part="panel"]')!.getBoundingClientRect();
+      const body = slDialog.shadowRoot!.querySelector('[part="body"]')!.getBoundingClientRect();
+      const textarea = host.shadowRoot!.querySelector('textarea')!.getBoundingClientRect();
+      const help = host.shadowRoot!.querySelector('.help')!.getBoundingClientRect();
+      const footer = host.shadowRoot!.querySelector('.footer')!.getBoundingClientRect();
+      return {
+        panelTop: panel.top,
+        panelBottom: panel.bottom,
+        bodyTop: body.top,
+        bodyBottom: body.bottom,
+        textareaTop: textarea.top,
+        textareaBottom: textarea.bottom,
+        helpTop: help.top,
+        helpBottom: help.bottom,
+        footerTop: footer.top,
+        footerBottom: footer.bottom,
+      };
+    });
+
+  // 1. Typical iOS/Android keyboard open (370px visual viewport above keyboard).
+  await page.evaluate(() =>
+    (window as unknown as VisualViewportWindow).__setReviewVisualViewport?.(370, 0)
+  );
+  const normalKb = await measureDialog();
+  expect(normalKb.panelTop).toBeGreaterThanOrEqual(0);
+  expect(normalKb.panelBottom).toBeLessThanOrEqual(370);
+  expect(normalKb.textareaBottom).toBeLessThanOrEqual(370);
+  expect(normalKb.helpBottom).toBeLessThanOrEqual(370);
+  expect(normalKb.footerBottom).toBeLessThanOrEqual(370);
+
+  // 2. Visual viewport panned down by Safari (non-zero offsetTop).
+  await page.evaluate(() =>
+    (window as unknown as VisualViewportWindow).__setReviewVisualViewport?.(350, 44)
+  );
+  const pannedKb = await measureDialog();
+  expect(pannedKb.panelTop).toBeGreaterThanOrEqual(44);
+  expect(pannedKb.panelBottom).toBeLessThanOrEqual(394);
+  expect(pannedKb.footerBottom).toBeLessThanOrEqual(394);
+
+  // 3. Very short visual viewport (e.g. landscape / small phone): panel clamps,
+  //    footer remains above keyboard, and focused textarea is scrolled into view.
+  await page.evaluate(() =>
+    (window as unknown as VisualViewportWindow).__setReviewVisualViewport?.(240, 0)
+  );
+  const shortKb = await measureDialog();
+  expect(shortKb.panelTop).toBeGreaterThanOrEqual(0);
+  expect(shortKb.panelBottom).toBeLessThanOrEqual(240);
+  expect(shortKb.footerBottom).toBeLessThanOrEqual(240);
+  expect(shortKb.textareaTop).toBeGreaterThanOrEqual(shortKb.bodyTop - 1);
+  expect(shortKb.textareaBottom).toBeLessThanOrEqual(shortKb.bodyBottom + 1);
+
+  // Closing clears inline visual-viewport CSS properties.
+  await page.keyboard.press('Escape');
+  await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
+  const clearedVars = await page.locator('scion-review-note-dialog').evaluate((host) => ({
+    h: (host as HTMLElement).style.getPropertyValue('--note-dialog-vv-height'),
+    t: (host as HTMLElement).style.getPropertyValue('--note-dialog-vv-top'),
+  }));
+  expect(clearedVars).toEqual({ h: '', t: '' });
+}
+
 for (const device of ['Pixel 7', 'iPhone 13']) {
   test.describe(device, () => {
     const emulated = phone(device);
@@ -472,11 +612,61 @@ for (const device of ['Pixel 7', 'iPhone 13']) {
     }) => {
       await keyboardHideJourney(page, `Keyboard ${device}`, browserName);
     });
+
+    test('the Add comment dialog stays above the simulated mobile keyboard', async ({ page }) => {
+      await noteDialogKeyboardJourney(page, `NoteDialogKeyboard ${device}`);
+    });
   });
 }
 
 test.describe('desktop width', () => {
   test('the review toolbar stays pinned flush with the top', async ({ page }) => {
     await pinnedJourney(page, 'Desktop', false);
+  });
+
+  test('the Add comment dialog keeps standard centered desktop layout', async ({ page }) => {
+    await installControllableVisualViewport(page);
+    const a = await publish({
+      project,
+      title: 'Desktop NoteDialog',
+      entry: 'index.md',
+      files: { 'index.md': Buffer.from(DOC) },
+    });
+    await openArtifact(page, project, a.id);
+    await startGraphicalReview(page);
+
+    const word = await textBox(page, 'Paragraph 1 line.');
+    await page.mouse.click(word.x, word.y);
+    await expect(editor(page)).toBeFocused();
+    await settleAfterFocus(page);
+    await page.keyboard.press('Home');
+    for (let i = 0; i < 'Paragraph'.length; i++) await page.keyboard.press('Shift+ArrowRight');
+    await toolbar(page).locator('sl-button.comment').click();
+
+    const dialog = page.locator('scion-review-note-dialog sl-dialog');
+    await expect(dialog).toHaveAttribute('open', '');
+
+    // Even if visualViewport shrinks on desktop, desktop CSS ignores mobile
+    // --note-dialog-vv-* rules so sl-dialog::part(base) stays full-viewport centered.
+    await page.evaluate(() =>
+      (window as unknown as VisualViewportWindow).__setReviewVisualViewport?.(400, 50)
+    );
+    const desktopMetrics = await page.locator('scion-review-note-dialog').evaluate((host) => {
+      const slDialog = host.shadowRoot!.querySelector('sl-dialog')!;
+      const base = slDialog.shadowRoot!.querySelector('[part="base"]')!.getBoundingClientRect();
+      const panel = slDialog.shadowRoot!.querySelector('[part="panel"]')!.getBoundingClientRect();
+      return {
+        innerHeight: window.innerHeight,
+        baseTop: Math.round(base.top),
+        baseHeight: Math.round(base.height),
+        panelCenterY: Math.round((panel.top + panel.bottom) / 2),
+      };
+    });
+    expect(desktopMetrics.baseTop).toBe(0);
+    expect(desktopMetrics.baseHeight).toBe(desktopMetrics.innerHeight);
+    expect(Math.abs(desktopMetrics.panelCenterY - desktopMetrics.innerHeight / 2)).toBeLessThan(20);
+
+    await page.keyboard.press('Escape');
+    await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
   });
 });
