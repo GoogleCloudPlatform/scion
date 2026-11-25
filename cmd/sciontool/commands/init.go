@@ -1185,6 +1185,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// can recover the full SCION environment. The file is sourced by .bashrc/.zshrc.
 	writeEnvFile(agentHome, targetUID, targetGID)
 
+	// For execution containers (SCION_HARNESS=shell), write a one-screen MOTD
+	// and login-shell profile snippet so first attach displays usage, S9
+	// credential guidance, registration command, and home-persistence status.
+	writeExecContainerMOTD()
+
 	// Seed system ffmpeg symlinks from the base image into Playwright's default
 	// persistent home registry (~/.cache/ms-playwright) when the seed directory
 	// is present, keeping runtime browser downloads persistent across restarts.

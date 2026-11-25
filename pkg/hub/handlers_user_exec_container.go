@@ -55,15 +55,14 @@ const (
 )
 
 type execContainerAgentResponse struct {
-	ID          string `json:"id"`
-	Slug        string `json:"slug"`
-	Name        string `json:"name"`
-	ProjectID   string `json:"projectId"`
-	ProjectName string `json:"projectName"`
-	Phase       string `json:"phase"`
-	Activity    string `json:"activity"`
-	// TODO(ptone/scion#8820): populate homePersistent in P4 once the broker
-	// records home persistence on the agent.
+	ID             string `json:"id"`
+	Slug           string `json:"slug"`
+	Name           string `json:"name"`
+	ProjectID      string `json:"projectId"`
+	ProjectName    string `json:"projectName"`
+	Phase          string `json:"phase"`
+	Activity       string `json:"activity"`
+	HomePersistent *bool  `json:"homePersistent,omitempty"`
 }
 
 type execContainerResponse struct {
@@ -180,9 +179,10 @@ func (s *Server) putUserExecContainer(w http.ResponseWriter, r *http.Request, ac
 	s.emitMutationAuditSync(ctx, auditRec)
 
 	res := ExecContainerResolution{
-		State: mapExecContainerState(agent),
-		Agent: agent,
-		RunID: agent.RunID,
+		State:          mapExecContainerState(agent),
+		Agent:          agent,
+		RunID:          agent.RunID,
+		HomePersistent: resolveAgentHomePersistent(agent),
 	}
 	writeJSON(w, http.StatusOK, s.buildExecContainerResponse(ctx, res))
 }
@@ -243,13 +243,14 @@ func (s *Server) buildExecContainerResponse(ctx context.Context, res ExecContain
 			Configured: true,
 			State:      res.State,
 			Agent: &execContainerAgentResponse{
-				ID:          res.Agent.ID,
-				Slug:        res.Agent.Slug,
-				Name:        res.Agent.Name,
-				ProjectID:   res.Agent.ProjectID,
-				ProjectName: projectName,
-				Phase:       res.Agent.Phase,
-				Activity:    res.Agent.Activity,
+				ID:             res.Agent.ID,
+				Slug:           res.Agent.Slug,
+				Name:           res.Agent.Name,
+				ProjectID:      res.Agent.ProjectID,
+				ProjectName:    projectName,
+				Phase:          res.Agent.Phase,
+				Activity:       res.Agent.Activity,
+				HomePersistent: res.HomePersistent,
 			},
 		}
 	}

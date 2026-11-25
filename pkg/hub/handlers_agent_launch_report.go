@@ -167,6 +167,9 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		// synchronous dispatch (ptone/scion#4818), so a report the launch
 		// fencing rejects writes none of it.
 		sr.AgentConfig = brokerAgentConfigOf(req.Agent)
+		if merged, ok := mergeBrokerRuntimeState(req.Agent.ID, req.Agent.RuntimeState); ok {
+			sr.RuntimeState = merged
+		}
 	}
 
 	answer, updated, err := s.store.ApplyLaunchReport(ctx, agentID, brokerID, sr)

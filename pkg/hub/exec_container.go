@@ -19,6 +19,7 @@ import (
 	"errors"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -40,9 +41,10 @@ const (
 // (design §5.1). Agent is nil unless State is one of ready, starting, stopped,
 // or suspended.
 type ExecContainerResolution struct {
-	State ExecContainerState
-	Agent *store.Agent
-	RunID string
+	State          ExecContainerState
+	Agent          *store.Agent
+	RunID          string
+	HomePersistent *bool
 }
 
 // ResolveExecContainer resolves userID's registered execution container
@@ -108,10 +110,24 @@ func (s *Server) resolveExecContainerRow(ctx context.Context, actor UserIdentity
 	}
 
 	return ExecContainerResolution{
-		State: mapExecContainerState(agent),
-		Agent: agent,
-		RunID: agent.RunID,
+		State:          mapExecContainerState(agent),
+		Agent:          agent,
+		RunID:          agent.RunID,
+		HomePersistent: resolveAgentHomePersistent(agent),
 	}, nil
+}
+
+// resolveAgentHomePersistent reads the broker-recorded home persistence flag
+// from agent.RuntimeState (design §3.6, ptone/scion#8820). Returns nil when
+// the broker has not reported home persistence for this agent.
+func resolveAgentHomePersistent(agent *store.Agent) *bool {
+	if agent == nil {
+		return nil
+	}
+	if p, ok := api.ParseHomePersistentRuntimeState(agent.RuntimeState); ok {
+		return &p
+	}
+	return nil
 }
 
 // isExecContainerEligible evaluates the single eligibility predicate from

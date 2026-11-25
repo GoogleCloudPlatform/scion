@@ -260,6 +260,13 @@ func printExecContainerStatus(out io.Writer, status *hubclient.ExecContainerStat
 		if status.Agent.Activity != "" {
 			_, _ = fmt.Fprintf(tw, "ACTIVITY\t%s\n", status.Agent.Activity)
 		}
+		if status.Agent.HomePersistent != nil {
+			if *status.Agent.HomePersistent {
+				_, _ = fmt.Fprintf(tw, "HOME PERSISTENT\tyes\n")
+			} else {
+				_, _ = fmt.Fprintf(tw, "HOME PERSISTENT\tno (logins will not survive a restart on this runtime)\n")
+			}
+		}
 	}
 	_ = tw.Flush()
 }

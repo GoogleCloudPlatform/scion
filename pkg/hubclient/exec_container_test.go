@@ -103,3 +103,33 @@ func TestUserService_ExecContainer(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, got3.Configured)
 }
+
+func TestUserService_ExecContainer_HomePersistent(t *testing.T) {
+	persistentFalse := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ExecContainerStatus{
+			Configured: true,
+			State:      "ready",
+			Agent: &ExecContainerAgent{
+				ID:             "11111111-2222-3333-4444-555555555555",
+				Slug:           "ops",
+				Name:           "ops",
+				ProjectID:      "proj-1",
+				ProjectName:    "My Project",
+				Phase:          "running",
+				Activity:       "idle",
+				HomePersistent: &persistentFalse,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+	got, err := c.Users().GetExecContainer(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, got.Agent)
+	require.NotNil(t, got.Agent.HomePersistent)
+	assert.False(t, *got.Agent.HomePersistent)
+}
