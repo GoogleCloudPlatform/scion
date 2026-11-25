@@ -957,3 +957,37 @@ func TestTemplateDriftWarningExperimentRegistered(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestTokenomicsExperimentsRegistered pins the three tokenomics experiments
+// (ptone/scion#9141, ptone/scion#9230): server+web layers, alpha, default off,
+// owned by tokenomics.
+func TestTokenomicsExperimentsRegistered(t *testing.T) {
+	tests := []struct {
+		constant string
+		wantName string
+	}{
+		{TokenomicsUsageLedger, "tokenomics.usage_ledger"},
+		{TokenomicsTokenBudgets, "tokenomics.token_budgets"},
+		{TokenomicsTrajectoryCapture, "tokenomics.trajectory_capture"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.wantName, func(t *testing.T) {
+			if tt.constant != tt.wantName {
+				t.Fatalf("frozen name changed: got %q, want %q", tt.constant, tt.wantName)
+			}
+			e, ok := Default().Lookup(tt.constant)
+			if !ok {
+				t.Fatalf("%s is not registered", tt.constant)
+			}
+			if e.Default {
+				t.Fatalf("%s must default to off", tt.constant)
+			}
+			if len(e.Layers) != 2 || !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+				t.Fatalf("%s must have both LayerServer and LayerWeb, got %v", tt.constant, e.Layers)
+			}
+			if e.Stage != StageAlpha || e.Issue != "ptone/scion#9141" || e.Owner != "tokenomics" {
+				t.Fatalf("unexpected registration for %s: %+v", tt.constant, e)
+			}
+		})
+	}
+}

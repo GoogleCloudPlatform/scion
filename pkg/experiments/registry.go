@@ -663,6 +663,25 @@ const FiltersQueryDialect = "filters.query_dialect"
 // dot-separated snake_case name with no hyphens.
 const AgentMoveBundle = "hub.agent_move_bundle"
 
+// TokenomicsUsageLedger gates the Track 1 operational usage ledger
+// (ptone/scion#9141, ptone/scion#9230): Hub usage event ingest, per-run
+// attribution snapshots, meter health tracking, hourly/daily rollups, Hub
+// OTel re-emission, the HubRollupSource metrics dashboard backend, and
+// `scion usage`. Default off.
+const TokenomicsUsageLedger = "tokenomics.usage_ledger"
+
+// TokenomicsTokenBudgets gates raw-token quota and budget enforcement
+// (ptone/scion#9141, ptone/scion#9230): raw-token LimitDefinition enforcement,
+// pooled user-group budgets, admission gating (429), soft threshold alerts,
+// and configurable breach actions. Default off.
+const TokenomicsTokenBudgets = "tokenomics.token_budgets"
+
+// TokenomicsTrajectoryCapture gates Track 2 harness trajectory capture
+// (ptone/scion#9141, ptone/scion#9230): segment prepare/commit routes, shipper
+// and bundle normalize.py execution, capture notices, broker harvest and
+// deletion custody holds, project.trajectory.read, and ATIF export. Default off.
+const TokenomicsTrajectoryCapture = "tokenomics.trajectory_capture"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -677,6 +696,39 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#9178",
 		Owner:       "lifecycle",
 		ReviewBy:    "2027-05-24",
+	},
+	{
+		Name:        TokenomicsUsageLedger,
+		Title:       "Tokenomics usage ledger",
+		Description: "Enables the Track 1 operational usage ledger: Hub usage event ingest, per-run attribution snapshots, meter health tracking, hourly and daily rollups, Hub OTel re-emission, the HubRollupSource metrics dashboard backend, and `scion usage`.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9141",
+		Owner:       "tokenomics",
+		ReviewBy:    "2027-05-25",
+	},
+	{
+		Name:        TokenomicsTokenBudgets,
+		Title:       "Tokenomics token budgets",
+		Description: "Enables raw-token budget enforcement: per-project, per-user, and pooled user-group token limits, admission gating (429), soft threshold alerts, and configurable breach actions.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9141",
+		Owner:       "tokenomics",
+		ReviewBy:    "2027-05-25",
+	},
+	{
+		Name:        TokenomicsTrajectoryCapture,
+		Title:       "Tokenomics trajectory capture",
+		Description: "Enables Track 2 harness trajectory capture: segment prepare and commit routes, shipper and bundle normalize.py execution, capture notices, broker harvest and deletion custody holds, project.trajectory.read, and ATIF export.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9141",
+		Owner:       "tokenomics",
+		ReviewBy:    "2027-05-25",
 	},
 	{
 		Name:        FiltersQueryDialect,
