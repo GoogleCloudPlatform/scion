@@ -22,6 +22,7 @@ import {
 } from '../../utils/feature-flags.js';
 import { stateManager } from '../../client/state.js';
 import type { SecretRequestCardResponse } from '../../client/secret-requests.js';
+import { crumbTuples } from '../../test-utils/crumbs.js';
 import './secret-request.js';
 import type { ScionPageSecretRequest } from './secret-request.js';
 
@@ -119,6 +120,63 @@ describe('scion-page-secret-request', () => {
     const card = page.shadowRoot?.querySelector('scion-chat-secret-request');
     expect(card).not.toBeNull();
     expect(card?.getAttribute('surface')).toBe('standalone_page');
+
+    expect(crumbTuples(page.shadowRoot)).toEqual([
+      ['Projects', '/projects'],
+      ['alpha-project', '/projects/proj-1'],
+      ['Secret Request', undefined],
+    ]);
+    expect(page.shadowRoot?.querySelector('a.back-link')).toBeNull();
+  });
+
+  it('renders ancestor-only Dashboard breadcrumb in loading and error states and falls back when projectId is absent', async () => {
+    // Loading state: pending fetch keeps page in loading=true
+    let resolveFetch!: (res: Response) => void;
+    const pendingFetch = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(pendingFetch));
+
+    const loadingPage = document.createElement(
+      'scion-page-secret-request'
+    ) as ScionPageSecretRequest;
+    loadingPage.pageData = { path: '/secret-requests/msg-100', title: 'Scion' };
+    document.body.appendChild(loadingPage);
+    await loadingPage.updateComplete;
+
+    expect(crumbTuples(loadingPage.shadowRoot)).toEqual([['Dashboard', '/']]);
+    expect(loadingPage.shadowRoot?.querySelector('a.back-link')).toBeNull();
+
+    // Error state: 404 response
+    resolveFetch(jsonResponse({ error: { code: 'not_found', message: 'Not found' } }, 404));
+    await vi.waitFor(() => {
+      expect(loadingPage.shadowRoot?.querySelector('.state-card.error')).not.toBeNull();
+    });
+    await loadingPage.updateComplete;
+
+    expect(crumbTuples(loadingPage.shadowRoot)).toEqual([['Dashboard', '/']]);
+    expect(loadingPage.shadowRoot?.querySelector('a.back-link')).toBeNull();
+
+    // Loaded state with no projectId falls back to Dashboard / Secret Request
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(makeCard({ projectId: '', projectName: '' })))
+    );
+    const noProjectPage = document.createElement(
+      'scion-page-secret-request'
+    ) as ScionPageSecretRequest;
+    noProjectPage.pageData = { path: '/secret-requests/msg-100', title: 'Scion' };
+    document.body.appendChild(noProjectPage);
+
+    await vi.waitFor(() => {
+      expect(noProjectPage.shadowRoot?.querySelector('scion-chat-secret-request')).not.toBeNull();
+    });
+    await noProjectPage.updateComplete;
+
+    expect(crumbTuples(noProjectPage.shadowRoot)).toEqual([
+      ['Dashboard', '/'],
+      ['Secret Request', undefined],
+    ]);
   });
 
   it('shows replacement banner with link to the current version for an old replaced link', async () => {

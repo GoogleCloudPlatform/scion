@@ -30,6 +30,7 @@ import { LitElement, css, html, nothing } from 'lit';
 import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData } from '../../shared/types.js';
+import { current, projectTrail } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo } from '../../client/navigation.js';
 import { stateManager } from '../../client/state.js';
@@ -39,6 +40,8 @@ import {
   type SecretRequestCardResponse,
   type SecretRequestReplacedBy,
 } from '../../client/secret-requests.js';
+import type { Crumb } from '../shared/breadcrumb.js';
+import '../shared/breadcrumb.js';
 import type {
   SecretRequestDismissedDetail,
   SecretRequestFulfilledDetail,
@@ -92,20 +95,6 @@ export class ScionPageSecretRequest extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 1rem;
-    }
-
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      color: var(--scion-text-secondary);
-      text-decoration: none;
-      font-size: 0.875rem;
-      width: fit-content;
-    }
-
-    .back-link:hover {
-      color: var(--scion-primary);
     }
 
     .context-bar {
@@ -362,6 +351,16 @@ export class ScionPageSecretRequest extends LitElement {
     `;
   }
 
+  private pageCrumbs(includeCurrent: boolean): Crumb[] {
+    const ancestors: Crumb[] = this.card?.projectId
+      ? projectTrail({
+          id: this.card.projectId,
+          label: this.card.projectName || this.card.projectId,
+        })
+      : [{ label: 'Dashboard', href: '/' }];
+    return includeCurrent ? [...ancestors, current('Secret Request', false)] : ancestors;
+  }
+
   override render(): TemplateResult {
     if (!agentSecretsEnabled()) {
       return html`<scion-page-404></scion-page-404>`;
@@ -370,6 +369,7 @@ export class ScionPageSecretRequest extends LitElement {
     if (this.loading) {
       return html`
         <div class="page">
+          <scion-breadcrumb .crumbs=${this.pageCrumbs(false)}></scion-breadcrumb>
           <div class="state-card" role="status">
             <sl-spinner></sl-spinner>
             <span>Loading secret request…</span>
@@ -387,10 +387,7 @@ export class ScionPageSecretRequest extends LitElement {
             : 'Unable to Load Secret Request';
       return html`
         <div class="page">
-          <a class="back-link" href="/">
-            <sl-icon name="arrow-left" aria-hidden="true"></sl-icon>
-            Back to Dashboard
-          </a>
+          <scion-breadcrumb .crumbs=${this.pageCrumbs(false)}></scion-breadcrumb>
           <div class="state-card error" role="alert">
             <sl-icon name="exclamation-circle" aria-hidden="true"></sl-icon>
             <h2>${heading}</h2>
@@ -407,10 +404,7 @@ export class ScionPageSecretRequest extends LitElement {
 
     return html`
       <div class="page">
-        <a class="back-link" href="/">
-          <sl-icon name="arrow-left" aria-hidden="true"></sl-icon>
-          Back to Dashboard
-        </a>
+        <scion-breadcrumb .crumbs=${this.pageCrumbs(true)}></scion-breadcrumb>
 
         <div class="context-bar">
           <span class="context-item">

@@ -632,6 +632,7 @@ describe.each([
     'scion-page-admin-access-boundary-editor',
   ],
   ['admin-integrations', './admin-integrations.js', 'scion-page-admin-integrations'],
+  ['secret-request', './secret-request.js', 'scion-page-secret-request'],
 ])('%s page navigation CSS guard', (_label, module, tag) => {
   it('keeps no copy of the back-link or ad-hoc breadcrumb CSS', async () => {
     await import(/* @vite-ignore */ module);
