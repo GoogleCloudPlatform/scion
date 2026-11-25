@@ -296,6 +296,82 @@ func TestDecisionsQueryCount_ProfileReadsConstantInHistory(t *testing.T) {
 	assert.Equal(t, sp10, sp300, "single-project decisions query count must be constant in history depth")
 }
 
+// TestSelectProfileDecisionProjects_UnsettledOnlyRespectsEffectiveCap pins that
+// selectProfileDecisionProjects(..., unsettledOnly=true) compares candidate
+// count against profileDecisionProjectLimit() (the effective cap) rather than
+// the package constant maxProfileDecisionProjects, so lowered caps preserve
+// truncated=true whether or not any project has unsettled decisions, and both
+// the limit=0 HTTP probe and waitingOnYouSummary/waitingOnYouTotal agree.
+func TestSelectProfileDecisionProjects_UnsettledOnlyRespectsEffectiveCap(t *testing.T) {
+	cases := []struct {
+		name         string
+		openProjects int
+	}{
+		{name: "zero_unsettled", openProjects: 0},
+		{name: "partial_unsettled", openProjects: 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, cs, _ := newCountingDecisionsFixture(t)
+			seedSettledAndOpenHistoryForQueryCount(t, f, cs, 3, 2, tc.openProjects)
+			ctx := context.Background()
+			viewer := NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, string(ClientTypeWeb))
+
+			// Effective cap (2) < candidate count (3): must fall back to the
+			// exact select-then-filter path and report truncated=true.
+			f.srv.maxProfileDecisionProjectsForTest = 2
+
+			selected, truncated, err := f.srv.selectProfileDecisionProjects(ctx, viewer, nil, "", true)
+			require.NoError(t, err)
+			assert.Len(t, selected, tc.openProjects)
+			assert.True(t, truncated, "truncated must be true when readable candidates exceed effective cap")
+
+			rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+			resp := decodeProfilePendingDecisions(t, rr)
+			assert.True(t, resp.TruncatedProjects, "limit=0 probe must report truncatedProjects=true")
+			assert.Equal(t, tc.openProjects, resp.Counts.WaitingOnYou)
+			assert.Empty(t, resp.Prompts)
+
+			summary, err := f.srv.waitingOnYouSummary(withAuthzInputMemo(ctx), viewer, nil, 0)
+			require.NoError(t, err)
+			assert.True(t, summary.truncatedProjects, "waitingOnYouSummary must report truncatedProjects=true")
+			assert.Equal(t, tc.openProjects, summary.total)
+			assert.Equal(t, tc.openProjects, summary.projects)
+
+			wTotal, wProjects, err := f.srv.waitingOnYouTotal(ctx, f.bob.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.openProjects, wTotal)
+			assert.Equal(t, tc.openProjects, wProjects)
+
+			// Effective cap (3) == candidate count (3): pre-filter path is safe
+			// and truncated must be false.
+			f.srv.maxProfileDecisionProjectsForTest = 3
+
+			selected, truncated, err = f.srv.selectProfileDecisionProjects(ctx, viewer, nil, "", true)
+			require.NoError(t, err)
+			assert.Len(t, selected, tc.openProjects)
+			assert.False(t, truncated, "truncated must be false when candidates do not exceed effective cap")
+
+			rr = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
+			resp = decodeProfilePendingDecisions(t, rr)
+			assert.False(t, resp.TruncatedProjects, "limit=0 probe must report truncatedProjects=false")
+			assert.Equal(t, tc.openProjects, resp.Counts.WaitingOnYou)
+
+			summary, err = f.srv.waitingOnYouSummary(withAuthzInputMemo(ctx), viewer, nil, 0)
+			require.NoError(t, err)
+			assert.False(t, summary.truncatedProjects, "waitingOnYouSummary must report truncatedProjects=false")
+			assert.Equal(t, tc.openProjects, summary.total)
+			assert.Equal(t, tc.openProjects, summary.projects)
+
+			wTotal, wProjects, err = f.srv.waitingOnYouTotal(ctx, f.bob.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.openProjects, wTotal)
+			assert.Equal(t, tc.openProjects, wProjects)
+		})
+	}
+}
+
 // TestDecisionsScale is the opt-in hub-level scale test (design-scale §7),
 // skipped unless SCION_DECISIONS_SCALE=1.
 func TestDecisionsScale(t *testing.T) {
