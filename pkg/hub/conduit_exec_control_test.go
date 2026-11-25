@@ -398,6 +398,19 @@ func TestDispatchExperiments_ExecSchedules(t *testing.T) {
 	assert.False(t, has(), "conduit off")
 }
 
+// TestDispatchExperiments_CommandRequests: hub.command_requests reaches the
+// broker and the agent only while conduit is served (design §4.8, §7).
+func TestDispatchExperiments_CommandRequests(t *testing.T) {
+	f := newPTYConduitFixture(t)
+	has := func() bool { return slices.Contains(f.srv.dispatchExperiments(), experiments.CommandRequests) }
+	setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: true, experiments.CommandRequests: true})
+	assert.True(t, has(), "both on")
+	setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: true, experiments.CommandRequests: false})
+	assert.False(t, has(), "command_requests off")
+	setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: false, experiments.CommandRequests: true})
+	assert.False(t, has(), "conduit off")
+}
+
 // TestApplyAgentExperiments_ExecSchedules: the launch flag is sent to the
 // agent in SCION_HUB_EXPERIMENTS.
 func TestApplyAgentExperiments_ExecSchedules(t *testing.T) {

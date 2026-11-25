@@ -760,6 +760,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.CodeSpanMentions:             testAdminPolicyDeny,
 	experiments.ViewAsMember:                 testAdminPolicyDeny,
 	experiments.ExecContainers:               testAdminPolicyDeny,
+	experiments.CommandRequests:              testAdminPolicyDeny,
 	experiments.SuspendScreen:                testAdminPolicyDeny,
 	experiments.FiltersQueryDialect:          testAdminPolicyDeny,
 	experiments.AgentMoveBundle:              testAdminPolicyDeny,

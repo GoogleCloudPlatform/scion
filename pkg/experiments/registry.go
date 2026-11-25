@@ -195,6 +195,16 @@ const ExecSchedules = "hub.exec_schedules"
 // config name and shell-agent security protections apply unconditionally.
 const ExecContainers = "hub.exec_containers"
 
+// CommandRequests gates human-approved command execution on a user's execution
+// container (ptone/scion#9278). Requires hub.exec_containers and hub.conduit:
+// the hub sends it to agents at launch only while conduit is served, and
+// shell-harness containers launched with it register the exec-start and
+// exec-status control routes (LLM agents never gain exec routes from this
+// flag). While it is off, command-request send, card, approval, and agent
+// routes are refused or answer 404, and new command-run dispatches are
+// refused; in-flight runs and the sweeper continue recording outcomes.
+const CommandRequests = "hub.command_requests"
+
 // ViewAsMember gates the "View as member" session toggle for hub admins
 // (ptone/scion#8648). The hub checks it when a session enters the mode;
 // existing sessions in the mode remain honoured and exit stays available
@@ -1421,6 +1431,17 @@ var compiled = []Experiment{
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#8812",
+		Owner:       "@ptone",
+		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        CommandRequests,
+		Title:       "Approved command execution",
+		Description: "Lets agents propose commands for a named human to approve and run once in that human's execution container over Conduit. Requires hub.exec_containers and hub.conduit. While off, command-request routes answer 404 and new command-run dispatches are refused.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9278",
 		Owner:       "@ptone",
 		ReviewBy:    "2027-03-31",
 	},
