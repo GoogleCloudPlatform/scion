@@ -136,3 +136,46 @@ func TestNormalizeCommandRequest(t *testing.T) {
 		}
 	})
 }
+
+func TestStructuredMessage_LogAttrs_OmitsCommandRequestContent(t *testing.T) {
+	marker := "SCRIPT_BODY_NEVER_IN_SLOG"
+	cmdMsg := &StructuredMessage{
+		Sender:    "agent:builder",
+		Recipient: "user:alice@example.com",
+		Type:      TypeCommandRequest,
+		Msg:       "```sh\necho " + marker + "\n```",
+	}
+	attrs := cmdMsg.LogAttrs()
+	kv := make(map[string]any, len(attrs)/2)
+	for i := 0; i+1 < len(attrs); i += 2 {
+		if k, ok := attrs[i].(string); ok {
+			kv[k] = attrs[i+1]
+		}
+	}
+	if _, hasContent := kv["message_content"]; hasContent {
+		t.Fatalf("TypeCommandRequest LogAttrs must omit message_content, got %v", kv["message_content"])
+	}
+	if kv["message_content_omitted"] != true {
+		t.Errorf("message_content_omitted = %v, want true", kv["message_content_omitted"])
+	}
+	if kv["message_content_len"] != len(cmdMsg.Msg) {
+		t.Errorf("message_content_len = %v, want %d", kv["message_content_len"], len(cmdMsg.Msg))
+	}
+
+	plainMsg := &StructuredMessage{
+		Sender:    "agent:builder",
+		Recipient: "user:alice@example.com",
+		Type:      TypeChat,
+		Msg:       "hello world",
+	}
+	plainAttrs := plainMsg.LogAttrs()
+	foundPlain := false
+	for i := 0; i+1 < len(plainAttrs); i += 2 {
+		if plainAttrs[i] == "message_content" && plainAttrs[i+1] == "hello world" {
+			foundPlain = true
+		}
+	}
+	if !foundPlain {
+		t.Errorf("non-command-request message should still emit message_content")
+	}
+}

@@ -420,11 +420,22 @@ func (m *StructuredMessage) LogAttrs() []any {
 		"sender", m.Sender,
 		"recipient", m.Recipient,
 		"msg_type", m.Type,
-		"message_content", m.Msg,
+	}
+	if m.Type == TypeCommandRequest {
+		// Command request messages embed the proposed script in their Markdown
+		// fallback body; never emit script text to slog (ptone/scion#9278 G7/S12).
+		attrs = append(attrs,
+			"message_content_omitted", true,
+			"message_content_len", len(m.Msg),
+		)
+	} else {
+		attrs = append(attrs, "message_content", m.Msg)
+	}
+	attrs = append(attrs,
 		"urgent", m.Urgent,
 		"broadcasted", m.Broadcasted,
 		"plain", m.Plain,
-	}
+	)
 	if m.SenderID != "" {
 		attrs = append(attrs, "sender_id", m.SenderID)
 	}

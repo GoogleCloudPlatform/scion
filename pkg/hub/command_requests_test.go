@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -569,4 +570,118 @@ func TestCommandRequests_EndToEnd(t *testing.T) {
 	rrCSRF := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(rrCSRF, csrfReq)
 	assert.Equal(t, http.StatusForbidden, rrCSRF.Code)
+}
+
+// TestCommandRequests_S12_NoScriptInLogsAcrossDeliveryPaths verifies Review 2
+// R1 (G7, T15, AC-S12): script text never appears in slog.Default() or the
+// dedicated message log across the broker stored-first path, the broker
+// early-return/persist-failure path, and the direct path, while the stored
+// message retains the Markdown fallback body.
+func TestCommandRequests_S12_NoScriptInLogsAcrossDeliveryPaths(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("broker stored-first path", func(t *testing.T) {
+		f := newCommandRequestsFixture(t, true)
+		var msgLogBuf bytes.Buffer
+		msgLogger := slog.New(slog.NewJSONHandler(&msgLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		f.srv.messageLog = msgLogger
+
+		bus := eventbus.NewInProcessEventBus(slog.Default())
+		t.Cleanup(func() { _ = bus.Close() })
+		events := NewChannelEventPublisher()
+		bp := NewMessageBrokerProxy(bus, f.store, events, func() AgentDispatcher { return f.srv.GetDispatcher() }, slog.Default())
+		bp.messageLog = msgLogger
+		f.srv.SetMessageBrokerProxy(bp)
+
+		marker := "BROKER_STORED_FIRST_SCRIPT_MARKER_9281"
+		rr := f.doAgentJSON(t, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/outbound-message", OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Broker path intro",
+			CommandRequest: &messages.CommandRequestInput{
+				Key:         "broker-s12",
+				Description: "Broker path script check",
+				Script:      "echo " + marker,
+			},
+		})
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var sendResp struct {
+			MessageID string `json:"message_id"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sendResp))
+		require.NotEmpty(t, sendResp.MessageID)
+
+		// Wait briefly for the async in-process broker subscriber to log delivery.
+		require.Eventually(t, func() bool {
+			return strings.Contains(msgLogBuf.String(), "user message delivered via broker")
+		}, 2*time.Second, 10*time.Millisecond, "expected broker delivery log line; got: %s", msgLogBuf.String())
+
+		assert.NotContains(t, f.logBuf.String(), marker, "script text must never appear in slog.Default() on broker path")
+		assert.NotContains(t, msgLogBuf.String(), marker, "script text must never appear in message log on broker path")
+		assert.Contains(t, msgLogBuf.String(), `"message_content_omitted":true`)
+
+		// Stored message keeps the Markdown fallback body with the script.
+		stored, err := f.store.GetMessage(ctx, sendResp.MessageID)
+		require.NoError(t, err)
+		assert.Contains(t, stored.Msg, marker)
+	})
+
+	t.Run("broker early-return persist-failure path", func(t *testing.T) {
+		f := newCommandRequestsFixture(t, true)
+		var msgLogBuf bytes.Buffer
+		msgLogger := slog.New(slog.NewJSONHandler(&msgLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		bus := eventbus.NewInProcessEventBus(slog.Default())
+		t.Cleanup(func() { _ = bus.Close() })
+		events := NewChannelEventPublisher()
+		// Real store with a canceled context forces deliverToUser through the
+		// early-return/persist-failure log path (messagebroker.go:705).
+		bp := NewMessageBrokerProxy(bus, f.store, events, func() AgentDispatcher { return nil }, slog.Default())
+		bp.messageLog = msgLogger
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		marker := "BROKER_EARLY_RETURN_SCRIPT_MARKER_9281"
+		bp.deliverToUser(canceledCtx, f.project.ID, f.alice.ID, &messages.StructuredMessage{
+			Version:     messages.Version,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			Sender:      "agent:" + f.agent.Slug,
+			SenderID:    f.agent.ID,
+			Recipient:   "user:" + f.alice.Email,
+			RecipientID: f.alice.ID,
+			Type:        messages.TypeCommandRequest,
+			Msg:         "```sh\necho " + marker + "\n```",
+		})
+
+		assert.Contains(t, msgLogBuf.String(), "user message handed to delivery")
+		assert.Contains(t, msgLogBuf.String(), `"message_content_omitted":true`)
+		assert.NotContains(t, f.logBuf.String(), marker, "script text must never appear in slog.Default() on early-return path")
+		assert.NotContains(t, msgLogBuf.String(), marker, "script text must never appear in message log on early-return path")
+	})
+
+	t.Run("direct path", func(t *testing.T) {
+		f := newCommandRequestsFixture(t, true)
+		var msgLogBuf bytes.Buffer
+		f.srv.messageLog = slog.New(slog.NewJSONHandler(&msgLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+		marker := "DIRECT_PATH_SCRIPT_MARKER_9281"
+		rr := f.doAgentJSON(t, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/outbound-message", OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			CommandRequest: &messages.CommandRequestInput{
+				Key:    "direct-s12",
+				Script: "echo " + marker,
+			},
+		})
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var sendResp struct {
+			MessageID string `json:"message_id"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sendResp))
+
+		assert.NotContains(t, f.logBuf.String(), marker, "script text must never appear in slog.Default() on direct path")
+		assert.NotContains(t, msgLogBuf.String(), marker, "script text must never appear in message log on direct path")
+
+		stored, err := f.store.GetMessage(ctx, sendResp.MessageID)
+		require.NoError(t, err)
+		assert.Contains(t, stored.Msg, marker)
+	})
 }
