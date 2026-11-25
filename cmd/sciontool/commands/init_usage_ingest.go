@@ -29,46 +29,19 @@ import (
 
 const usageCapabilitiesProbeTimeout = 5 * time.Second
 
-// probeAndConfigureUsageIngest probes GET /api/v1/agents/{id}/usage/capabilities
-// at sciontool init. When the Hub reports usage_ingest_enabled=true, it wires
-// the Hub usage sink onto pipeline (enabling the analytics outbox even without
-// a GCP exporter) and sets SCION_USAGE_HUB_INGEST=1 so hook subprocesses also
-// record to the outbox. On 404, disabled, or error, it leaves legacy behavior
-// unchanged and sets SCION_USAGE_HUB_INGEST=0.
-func probeAndConfigureUsageIngest(ctx context.Context, pipeline *telemetry.Pipeline, newClient func() *hub.Client) bool {
-	if pipeline == nil || newClient == nil {
-		_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
-		return false
-	}
-	c := newClient()
-	if c == nil || !c.IsConfigured() {
-		_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
-		return false
-	}
+// Bounded init-time retry settings for transient capability probe failures
+// (e.g. Hub restarting or returning 503). Vars rather than consts so unit
+// tests can run without multi-second sleeps.
+var (
+	usageCapabilitiesProbeMaxAttempts = 3
+	usageCapabilitiesProbeBaseBackoff = 500 * time.Millisecond
+)
 
-	probeCtx, cancel := context.WithTimeout(ctx, usageCapabilitiesProbeTimeout)
-	caps, err := c.ProbeUsageCapabilities(probeCtx)
-	cancel()
-	if err != nil {
-		if errors.Is(err, hub.ErrUsageIngestUnsupported) {
-			log.Debug("Hub usage ingest capabilities not supported (404); keeping legacy telemetry behavior")
-		} else {
-			log.Debug("Hub usage capabilities probe failed (%v); keeping legacy telemetry behavior", err)
-		}
-		_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
-		return false
-	}
-	if caps == nil || !caps.UsageIngestEnabled {
-		log.Debug("Hub usage ingest disabled by capabilities probe; keeping legacy telemetry behavior")
-		_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
-		return false
-	}
-
+func buildHubUsageSinkConfig(caps *telemetrycontract.UsageCapabilitiesResponse, newClient func() *hub.Client) telemetry.HubUsageSinkConfig {
 	runID := caps.RunID
 	if runID == "" {
 		runID = os.Getenv(hub.EnvLaunchID)
 	}
-
 	var drainInterval time.Duration
 	if caps.DrainIntervalSec > 0 {
 		drainInterval = time.Duration(caps.DrainIntervalSec) * time.Second
@@ -77,8 +50,7 @@ func probeAndConfigureUsageIngest(ctx context.Context, pipeline *telemetry.Pipel
 	if caps.HeartbeatIntervalSec > 0 {
 		heartbeatInterval = time.Duration(caps.HeartbeatIntervalSec) * time.Second
 	}
-
-	pipeline.SetHubUsageSink(telemetry.HubUsageSinkConfig{
+	return telemetry.HubUsageSinkConfig{
 		Post: func(postCtx context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
 			client := newClient()
 			if client == nil || !client.IsConfigured() {
@@ -108,8 +80,95 @@ func probeAndConfigureUsageIngest(ctx context.Context, pipeline *telemetry.Pipel
 		MaxBatchBytes:     caps.MaxBatchBytes,
 		DrainInterval:     drainInterval,
 		HeartbeatInterval: heartbeatInterval,
+	}
+}
+
+// probeUsageOnce performs a single capability probe attempt against the Hub.
+// Returns (cfg, false, nil) on definitive negative (404 or disabled),
+// (nil, true, err) on transient failure, or (cfg, false, nil) when enabled.
+func probeUsageOnce(ctx context.Context, newClient func() *hub.Client) (cfg *telemetry.HubUsageSinkConfig, transient bool, err error) {
+	c := newClient()
+	if c == nil || !c.IsConfigured() {
+		return nil, false, nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, usageCapabilitiesProbeTimeout)
+	caps, err := c.ProbeUsageCapabilities(probeCtx)
+	cancel()
+	if err != nil {
+		if errors.Is(err, hub.ErrUsageIngestUnsupported) {
+			log.Debug("Hub usage ingest capabilities not supported (404); keeping legacy telemetry behavior")
+			return nil, false, nil
+		}
+		log.Debug("Hub usage capabilities probe failed transiently (%v)", err)
+		return nil, true, err
+	}
+	if caps == nil || !caps.UsageIngestEnabled {
+		log.Debug("Hub usage ingest disabled by capabilities probe; keeping legacy telemetry behavior")
+		return nil, false, nil
+	}
+	built := buildHubUsageSinkConfig(caps, newClient)
+	return &built, false, nil
+}
+
+// probeAndConfigureUsageIngest probes GET /api/v1/agents/{id}/usage/capabilities
+// at sciontool init with bounded retry and exponential backoff on transient
+// errors (e.g. 503 while Hub restarts). When the Hub reports
+// usage_ingest_enabled=true, it wires the Hub usage sink onto pipeline
+// (enabling the analytics outbox even without a GCP exporter) and sets
+// SCION_USAGE_HUB_INGEST=1 so hook subprocesses also record to the outbox.
+// When the init probe ends negative (404, disabled, or transient retries
+// exhausted), it leaves legacy behavior unchanged, sets
+// SCION_USAGE_HUB_INGEST=0, and registers a periodic re-probe on pipeline so
+// the Hub sink activates automatically if capabilities turn positive later.
+func probeAndConfigureUsageIngest(ctx context.Context, pipeline *telemetry.Pipeline, newClient func() *hub.Client) bool {
+	if pipeline == nil || newClient == nil {
+		_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
+		return false
+	}
+	c := newClient()
+	if c == nil || !c.IsConfigured() {
+		_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
+		return false
+	}
+
+	attempts := usageCapabilitiesProbeMaxAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	backoff := usageCapabilitiesProbeBaseBackoff
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
+				return false
+			case <-timer.C:
+			}
+			backoff *= 2
+		}
+		cfg, transient, _ := probeUsageOnce(ctx, newClient)
+		if cfg != nil {
+			pipeline.SetHubUsageSink(*cfg)
+			_ = os.Setenv(telemetry.EnvUsageHubIngest, "1")
+			log.Info("Hub usage ingest sink enabled (run_id=%s, max_events=%d, max_bytes=%d)", cfg.RunID, cfg.MaxBatchEvents, cfg.MaxBatchBytes)
+			return true
+		}
+		if !transient {
+			break
+		}
+	}
+
+	// Probe ended negative: keep legacy behavior and register periodic re-probe
+	// so the Hub sink activates if the Hub recovers or enables the experiment.
+	_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
+	pipeline.SetHubUsageProbe(func(pctx context.Context) (*telemetry.HubUsageSinkConfig, error) {
+		cfg, _, err := probeUsageOnce(pctx, newClient)
+		if cfg != nil {
+			_ = os.Setenv(telemetry.EnvUsageHubIngest, "1")
+		}
+		return cfg, err
 	})
-	_ = os.Setenv(telemetry.EnvUsageHubIngest, "1")
-	log.Info("Hub usage ingest sink enabled (run_id=%s, max_events=%d, max_bytes=%d)", runID, caps.MaxBatchEvents, caps.MaxBatchBytes)
-	return true
+	return false
 }

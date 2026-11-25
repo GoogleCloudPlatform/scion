@@ -100,6 +100,17 @@ const AnalyticsOutboxDirName = "analytics-outbox"
 // sink when running alongside the GCP Cloud Logging drain (dual-run fan-out).
 const HubAnalyticsCursorName = "cursor.hub"
 
+// analyticsCursorsFile persists the active primary and secondary cursor names
+// under the outbox lock so every process opening the outbox (including hook
+// subprocesses) computes the same activeCursors(), retainedBytes(), and
+// dual-run lag reclamation.
+const analyticsCursorsFile = "cursors.json"
+
+type outboxCursorRegistry struct {
+	Primary   string   `json:"primary"`
+	Secondary []string `json:"secondary,omitempty"`
+}
+
 // AnalyticsOutboxDirFor returns the outbox directory for the AGENT home
 // (<home>/.scion/analytics-outbox), or "" if home is empty. Both producers
 // must pass the agent home: sciontool init (which runs as root with
@@ -286,7 +297,9 @@ func (o *AnalyticsOutbox) inFlightFileFor(cursorName string) int64 {
 }
 
 // SetPrimaryCursor switches the primary cursor file (e.g. to
-// HubAnalyticsCursorName in Hub-only mode). When upgrading an existing
+// HubAnalyticsCursorName in Hub-only mode) and persists the cursor registry to
+// cursors.json under the outbox lock so other processes (such as hook
+// subprocesses) see the same active cursor set. When upgrading an existing
 // legacy outbox that has "cursor" on disk but no cursor.hub yet, it seeds
 // cursor.hub from "cursor" (clamped to the oldest remaining ready file so
 // undelivered ready files are never skipped).
@@ -296,32 +309,39 @@ func (o *AnalyticsOutbox) SetPrimaryCursor(name string) {
 	}
 	o.cursorMu.Lock()
 	o.primaryCursor = name
+	o.secondaryCursors = nil
 	o.cursorMu.Unlock()
-	if name == "cursor" {
-		return
-	}
-	if _, err := os.Stat(o.path(name)); errors.Is(err, os.ErrNotExist) {
-		if unlock, lerr := o.lock(); lerr == nil {
-			defer unlock()
-			if _, serr := os.Stat(o.path(name)); errors.Is(serr, os.ErrNotExist) {
-				if cf, co, rerr := o.readCursorNamed("cursor"); rerr == nil && (cf > 0 || co > 0) {
-					if files, ferr := o.readyFiles(); ferr == nil && len(files) > 0 && files[0] < cf {
-						// Ready files older than "cursor" still exist (e.g. from a
-						// prior dual-run where the primary cursor moved ahead while
-						// the Hub cursor had not yet ACKed): start at the oldest
-						// remaining ready file so nothing is skipped.
-						cf, co = files[0], 0
-					}
-					_ = o.writeCursorNamed(name, cf, co)
+
+	if unlock, lerr := o.lock(); lerr == nil {
+		defer unlock()
+		if name == "cursor" {
+			// Reset to default GCP-only layout: remove cursors.json if present
+			// so legacy/GCP-only outboxes keep their original file layout.
+			if err := os.Remove(o.path(analyticsCursorsFile)); err == nil {
+				_ = o.fsyncDir(o.dir)
+			}
+			return
+		}
+		if _, serr := os.Stat(o.path(name)); errors.Is(serr, os.ErrNotExist) {
+			if cf, co, rerr := o.readCursorNamed("cursor"); rerr == nil && (cf > 0 || co > 0) {
+				if files, ferr := o.readyFiles(); ferr == nil && len(files) > 0 && files[0] < cf {
+					// Ready files older than "cursor" still exist (e.g. from a
+					// prior dual-run where the primary cursor moved ahead while
+					// the Hub cursor had not yet ACKed): start at the oldest
+					// remaining ready file so nothing is skipped.
+					cf, co = files[0], 0
 				}
+				_ = o.writeCursorNamed(name, cf, co)
 			}
 		}
+		_ = o.writeCursorRegistryLocked(outboxCursorRegistry{Primary: name})
 	}
 }
 
 // EnableSecondaryCursor registers an independent cursor file (such as
-// HubAnalyticsCursorName) so ready files are retained until both the primary
-// cursor and the named secondary cursor have advanced past them.
+// HubAnalyticsCursorName) and persists the cursor registry to cursors.json
+// under the outbox lock so every process retains ready files until all active
+// cursors advance past them and enforces dual-run lag reclamation.
 func (o *AnalyticsOutbox) EnableSecondaryCursor(name string) {
 	if o == nil || name == "" {
 		return
@@ -345,28 +365,33 @@ func (o *AnalyticsOutbox) EnableSecondaryCursor(name string) {
 	if !exists {
 		o.secondaryCursors = append(o.secondaryCursors, name)
 	}
+	secCopy := append([]string(nil), o.secondaryCursors...)
 	o.cursorMu.Unlock()
 
-	// Ensure the secondary cursor file exists on disk so a restart into
-	// Hub-only mode knows dual-run already initialized it.
-	if _, err := os.Stat(o.path(name)); errors.Is(err, os.ErrNotExist) {
-		if unlock, lerr := o.lock(); lerr == nil {
-			defer unlock()
-			if _, serr := os.Stat(o.path(name)); errors.Is(serr, os.ErrNotExist) {
-				_ = o.writeCursorNamed(name, 0, 0)
-			}
+	// Ensure the secondary cursor file and cursors.json exist on disk under
+	// the outbox lock so hook subprocesses and restarts observe dual-run state.
+	if unlock, lerr := o.lock(); lerr == nil {
+		defer unlock()
+		if _, serr := os.Stat(o.path(name)); errors.Is(serr, os.ErrNotExist) {
+			_ = o.writeCursorNamed(name, 0, 0)
 		}
+		_ = o.writeCursorRegistryLocked(outboxCursorRegistry{Primary: prim, Secondary: secCopy})
 	}
 }
 
 // DisableSecondaryCursor unregisters a secondary cursor (e.g. when the Hub
-// usage capability is revoked mid-run with 404) and deletes any ready files
-// that the primary cursor has already advanced past.
+// usage capability is revoked mid-run with 404), updates cursors.json under
+// the outbox lock, and deletes any ready files that the remaining active
+// cursors have already advanced past.
 func (o *AnalyticsOutbox) DisableSecondaryCursor(name string) {
 	if o == nil || name == "" {
 		return
 	}
 	o.cursorMu.Lock()
+	prim := o.primaryCursor
+	if prim == "" {
+		prim = "cursor"
+	}
 	filtered := o.secondaryCursors[:0]
 	for _, existing := range o.secondaryCursors {
 		if existing != name {
@@ -374,7 +399,13 @@ func (o *AnalyticsOutbox) DisableSecondaryCursor(name string) {
 		}
 	}
 	o.secondaryCursors = filtered
+	secCopy := append([]string(nil), o.secondaryCursors...)
 	o.cursorMu.Unlock()
+
+	if unlock, lerr := o.lock(); lerr == nil {
+		_ = o.writeCursorRegistryLocked(outboxCursorRegistry{Primary: prim, Secondary: secCopy})
+		unlock()
+	}
 
 	// Clean up ready files already passed by all remaining active cursors.
 	if files, err := o.readyFiles(); err == nil {
@@ -392,7 +423,39 @@ func (o *AnalyticsOutbox) DisableSecondaryCursor(name string) {
 	}
 }
 
+func (o *AnalyticsOutbox) writeCursorRegistryLocked(reg outboxCursorRegistry) error {
+	if reg.Primary == "" {
+		reg.Primary = "cursor"
+	}
+	b, err := json.Marshal(reg)
+	if err != nil {
+		return err
+	}
+	return o.writeFileAtomic(analyticsCursorsFile, b)
+}
+
+func (o *AnalyticsOutbox) readCursorRegistry() (outboxCursorRegistry, bool) {
+	if o == nil || o.dir == "" {
+		return outboxCursorRegistry{}, false
+	}
+	b, err := os.ReadFile(o.path(analyticsCursorsFile))
+	if err != nil {
+		return outboxCursorRegistry{}, false
+	}
+	var reg outboxCursorRegistry
+	if json.Unmarshal(b, &reg) != nil {
+		return outboxCursorRegistry{}, false
+	}
+	if reg.Primary == "" {
+		reg.Primary = "cursor"
+	}
+	return reg, true
+}
+
 func (o *AnalyticsOutbox) getPrimaryCursor() string {
+	if reg, ok := o.readCursorRegistry(); ok {
+		return reg.Primary
+	}
 	o.cursorMu.Lock()
 	defer o.cursorMu.Unlock()
 	if o.primaryCursor == "" {
@@ -402,6 +465,12 @@ func (o *AnalyticsOutbox) getPrimaryCursor() string {
 }
 
 func (o *AnalyticsOutbox) getSecondaryCursors() []string {
+	if reg, ok := o.readCursorRegistry(); ok {
+		if len(reg.Secondary) == 0 {
+			return nil
+		}
+		return append([]string(nil), reg.Secondary...)
+	}
 	o.cursorMu.Lock()
 	defer o.cursorMu.Unlock()
 	if len(o.secondaryCursors) == 0 {
@@ -411,6 +480,12 @@ func (o *AnalyticsOutbox) getSecondaryCursors() []string {
 }
 
 func (o *AnalyticsOutbox) activeCursors() []string {
+	if reg, ok := o.readCursorRegistry(); ok {
+		out := make([]string, 0, 1+len(reg.Secondary))
+		out = append(out, reg.Primary)
+		out = append(out, reg.Secondary...)
+		return out
+	}
 	o.cursorMu.Lock()
 	defer o.cursorMu.Unlock()
 	prim := o.primaryCursor

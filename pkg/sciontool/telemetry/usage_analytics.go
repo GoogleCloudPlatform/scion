@@ -74,6 +74,7 @@ type UsageAnalytics struct {
 	open      func() (*AnalyticsOutbox, error)
 	failDir   string
 	failOwner *OutboxOwner
+	metaMu    sync.RWMutex
 	runID     string
 	onRecord  func(time.Time)
 
@@ -182,17 +183,30 @@ func AnalyticsEnabledForHooks(cfg *Config) bool {
 // would have no stable producer namespace, so it is not written.
 var errNoAgentIdentity = errors.New("analytics: SCION_AGENT_ID is unset; usage event not written")
 
+func (a *UsageAnalytics) setRunAndActivity(runID string, onRecord func(time.Time)) {
+	if a == nil {
+		return
+	}
+	a.metaMu.Lock()
+	a.runID = runID
+	a.onRecord = onRecord
+	a.metaMu.Unlock()
+}
+
 // Record builds the event for obs and appends it. Safe on nil.
 func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 	if a == nil {
 		return 0, nil
 	}
-	if a.onRecord != nil {
+	a.metaMu.RLock()
+	onRecord := a.onRecord
+	a.metaMu.RUnlock()
+	if onRecord != nil {
 		t := obs.EventTime
 		if t.IsZero() {
 			t = a.now()
 		}
-		a.onRecord(t)
+		onRecord(t)
 	}
 	ev, err := a.build(obs)
 	if err != nil {
@@ -262,7 +276,9 @@ func (a *UsageAnalytics) build(obs UsageObservation) (*telemetrycontract.UsageEv
 	env.ProducerBuild = version.Short()
 	env.HarnessVersion = obs.HarnessVersion
 
+	a.metaMu.RLock()
 	runID := strings.TrimSpace(a.runID)
+	a.metaMu.RUnlock()
 	if runID == "" {
 		runID = strings.TrimSpace(os.Getenv("SCION_LAUNCH_ID"))
 	}

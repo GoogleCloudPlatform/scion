@@ -210,3 +210,129 @@ func TestProbeAndConfigureUsageIngest_PositiveWithoutGCPExporter(t *testing.T) {
 		t.Errorf("expected final_state=%q on shutdown, got requests: %+v", telemetrycontract.MeterFinalStateFinal, gotIngestReqs)
 	}
 }
+
+// O1: transient 503 on first probe recovers via bounded init retry (503 -> 200)
+// and via periodic re-probe when init retries are exhausted.
+func TestProbeAndConfigureUsageIngest_Transient503Then200(t *testing.T) {
+	origMax := usageCapabilitiesProbeMaxAttempts
+	origBackoff := usageCapabilitiesProbeBaseBackoff
+	usageCapabilitiesProbeMaxAttempts = 3
+	usageCapabilitiesProbeBaseBackoff = 5 * time.Millisecond
+	t.Cleanup(func() {
+		usageCapabilitiesProbeMaxAttempts = origMax
+		usageCapabilitiesProbeBaseBackoff = origBackoff
+	})
+
+	t.Run("init retry recovers from 503 then 200", func(t *testing.T) {
+		var calls int
+		var mu sync.Mutex
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			calls++
+			c := calls
+			mu.Unlock()
+			if c == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("restarting"))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageCapabilitiesResponse{
+				UsageIngestEnabled: true,
+				MaxBatchEvents:     500,
+				MaxBatchBytes:      262144,
+				HubID:              "hub-1",
+				RunID:              "run-retry-ok",
+			})
+		}))
+		defer srv.Close()
+
+		p := telemetry.NewWithConfig(&telemetry.Config{Enabled: true, CloudEnabled: false, GRPCPort: 0, HTTPPort: 0})
+		p.SetAnalyticsOutbox(t.TempDir(), 0, 0)
+		newClient := func() *hub.Client { return hub.NewClientWithConfig(srv.URL, "tok-1", "agent-1") }
+
+		if ok := probeAndConfigureUsageIngest(context.Background(), p, newClient); !ok {
+			t.Fatal("probeAndConfigureUsageIngest = false after 503 -> 200, want true")
+		}
+		if got := os.Getenv(telemetry.EnvUsageHubIngest); got != "1" {
+			t.Errorf("%s = %q, want \"1\"", telemetry.EnvUsageHubIngest, got)
+		}
+		mu.Lock()
+		gotCalls := calls
+		mu.Unlock()
+		if gotCalls != 2 {
+			t.Errorf("probe calls = %d, want 2", gotCalls)
+		}
+	})
+
+	t.Run("periodic re-probe activates Hub-only sink after init 503s exhaust", func(t *testing.T) {
+		var mu sync.Mutex
+		var probeCalls int
+		var ingestCalls int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/v1/agents/agent-1/usage/capabilities":
+				mu.Lock()
+				probeCalls++
+				c := probeCalls
+				mu.Unlock()
+				if c <= 3 {
+					// All 3 init attempts return 503.
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(telemetrycontract.UsageCapabilitiesResponse{
+					UsageIngestEnabled: true,
+					MaxBatchEvents:     500,
+					MaxBatchBytes:      262144,
+					HubID:              "hub-1",
+					RunID:              "run-reprobe-hubonly",
+				})
+			case "/api/v1/agents/agent-1/usage/events":
+				mu.Lock()
+				ingestCalls++
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer srv.Close()
+
+		p := telemetry.NewWithConfig(&telemetry.Config{Enabled: true, CloudEnabled: false, GRPCPort: 0, HTTPPort: 0})
+		p.SetAnalyticsOutbox(t.TempDir(), 0, 0)
+		p.SetHubUsageProbeInterval(15 * time.Millisecond)
+		newClient := func() *hub.Client { return hub.NewClientWithConfig(srv.URL, "tok-1", "agent-1") }
+
+		if ok := probeAndConfigureUsageIngest(context.Background(), p, newClient); ok {
+			t.Fatal("probeAndConfigureUsageIngest = true while all 3 init probes returned 503, want false")
+		}
+		if err := p.Start(context.Background()); err != nil {
+			t.Fatalf("Pipeline.Start: %v", err)
+		}
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = p.Stop(stopCtx)
+		}()
+
+		// Wait for periodic re-probe to succeed and activate the Hub sink.
+		deadline := time.Now().Add(3 * time.Second)
+		activated := false
+		for time.Now().Before(deadline) {
+			if _, ok, reason := p.AnalyticsDiagnostics(); ok && reason == "" {
+				activated = true
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		if !activated {
+			t.Fatal("expected periodic re-probe to activate Hub sink when Hub returned 200")
+		}
+		if got := os.Getenv(telemetry.EnvUsageHubIngest); got != "1" {
+			t.Errorf("%s = %q after re-probe activation, want \"1\"", telemetry.EnvUsageHubIngest, got)
+		}
+	})
+}

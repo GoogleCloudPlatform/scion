@@ -50,7 +50,15 @@ const (
 	// takes more than half of the caller's remaining budget, so the
 	// exporter flush that follows keeps its share.
 	analyticsStopBudget = 5 * time.Second
+	// analyticsHubProbeInterval is the periodic re-probe cadence while the Hub
+	// usage capabilities probe is negative (O1).
+	analyticsHubProbeInterval = 60 * time.Second
 )
+
+// HubUsageProbeFunc probes the Hub's usage capabilities endpoint and returns a
+// HubUsageSinkConfig when usage ingest is enabled, (nil, nil) when disabled or
+// unsupported, or a non-nil error on transient failure.
+type HubUsageProbeFunc func(ctx context.Context) (*HubUsageSinkConfig, error)
 
 // HubIDResolver returns the hub's own ID, or an error if it cannot be
 // determined now.
@@ -121,6 +129,15 @@ type AnalyticsDrainer struct {
 	heartbeatInterval time.Duration
 	lastHubContact    time.Time
 
+	// hubProbe, when set on a GCP-only drainer whose initial probe was
+	// negative, periodically re-probes the Hub and activates dual-run when
+	// capabilities turn positive without disrupting the GCP drain.
+	hubProbe         HubUsageProbeFunc
+	probeInterval    time.Duration
+	lastProbe        time.Time
+	supportedSignals func() []string
+	onHubActivated   func(HubUsageSinkConfig, *HubUsageSink)
+
 	interval time.Duration
 	now      func() time.Time
 
@@ -162,6 +179,7 @@ type AnalyticsDrainer struct {
 // drainer never verifies a hub, so it finalizes nothing (provisional lines
 // are held); already-final ready lines still drain.
 func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
+	outbox.SetPrimaryCursor("cursor")
 	bounded := func(ctx context.Context, line []byte) error {
 		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
 		defer cancel()
@@ -174,6 +192,25 @@ func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolv
 		interval: analyticsDrainInterval,
 		now:      time.Now,
 	}
+}
+
+// SetHubProbe configures periodic capability re-probing on a drainer whose
+// initial probe was negative. When probe returns a non-nil config, the Hub
+// sink is activated in dual-run mode (with cursor.hub) alongside any existing
+// GCP drain without interrupting GCP delivery.
+func (d *AnalyticsDrainer) SetHubProbe(probe HubUsageProbeFunc, interval time.Duration, supportedSignals func() []string, onActivated func(HubUsageSinkConfig, *HubUsageSink)) {
+	if d == nil || probe == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = analyticsHubProbeInterval
+	}
+	d.mu.Lock()
+	d.hubProbe = probe
+	d.probeInterval = interval
+	d.supportedSignals = supportedSignals
+	d.onHubActivated = onActivated
+	d.mu.Unlock()
 }
 
 // NewHubAnalyticsDrainer builds a drainer that ships finalized usage batches
@@ -412,6 +449,54 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 		}
 	}
 
+	// Periodic re-probe while Hub sink is inactive (O1). Run before the GCP
+	// drain so that if capabilities turn positive on this tick, cursor.hub is
+	// registered before GCP deletes the ready files it drains.
+	if !final && d.hubSink == nil && ctx.Err() == nil {
+		d.mu.Lock()
+		probe := d.hubProbe
+		revoked := d.hubRevoked
+		pInterval := d.probeInterval
+		due := probe != nil && !revoked && (d.lastProbe.IsZero() || d.now().Sub(d.lastProbe) >= pInterval)
+		if due {
+			d.lastProbe = d.now()
+		}
+		supSigs := d.supportedSignals
+		onAct := d.onHubActivated
+		d.mu.Unlock()
+		if due {
+			pctx, cancel := context.WithTimeout(ctx, analyticsHubIDTimeout)
+			cfg, perr := probe(pctx)
+			cancel()
+			if perr == nil && cfg != nil && cfg.Post != nil {
+				c := *cfg
+				if c.SupportedSignals == nil && supSigs != nil {
+					c.SupportedSignals = supSigs
+				}
+				sink := NewHubUsageSink(d.outbox, c)
+				if sink != nil {
+					if d.send != nil {
+						d.outbox.EnableSecondaryCursor(HubAnalyticsCursorName)
+					} else {
+						d.outbox.SetPrimaryCursor(HubAnalyticsCursorName)
+					}
+					d.hubSink = sink
+					d.batchSend = func(bctx context.Context, lines [][]byte) (BatchSendOutcome, error) {
+						sctx, scancel := context.WithTimeout(bctx, analyticsSendTimeout)
+						defer scancel()
+						return sink.SendBatch(sctx, lines)
+					}
+					d.hubCursorName = HubAnalyticsCursorName
+					d.heartbeatInterval = sink.cfg.heartbeatInterval()
+					if onAct != nil {
+						onAct(c, sink)
+					}
+					log.Info("Analytics drainer: Hub usage ingest activated after re-probe")
+				}
+			}
+		}
+	}
+
 	sent := 0
 	if d.send != nil {
 		d.mu.Lock()
@@ -577,6 +662,9 @@ func analyticsHubEndpoint() string {
 // native producer handed to the UsageDeriver, and the drainer. Its zero
 // value is "disabled"; only start enables it.
 type analyticsState struct {
+	// mu is allocated before starting any background re-probe goroutine so
+	// analyticsState remains value-copyable for existing unit tests.
+	mu             *sync.Mutex
 	native         *UsageAnalytics
 	drainer        *AnalyticsDrainer
 	disabledReason string
@@ -590,7 +678,13 @@ type analyticsState struct {
 	owner            *OutboxOwner
 	resolver         HubIDResolver
 	hubSinkCfg       *HubUsageSinkConfig
+	hubProbe         HubUsageProbeFunc
+	hubProbeInterval time.Duration
 	supportedSignals func() []string
+	onHubActivated   func(*UsageAnalytics)
+
+	probeCancel context.CancelFunc
+	probeDone   chan struct{}
 }
 
 // SetHubUsageSink configures the pipeline's analytics outbox to drain usage
@@ -602,6 +696,26 @@ func (p *Pipeline) SetHubUsageSink(cfg HubUsageSinkConfig) {
 	}
 	c := cfg
 	p.analytics.hubSinkCfg = &c
+}
+
+// SetHubUsageProbe registers a periodic capability re-probe used when the
+// initial probe at init was negative (O1). If a later re-probe succeeds, the
+// Hub sink activates dynamically (dual-run with cursor.hub when GCP is active,
+// or Hub-only with cursor.hub otherwise). Must be called before Start.
+func (p *Pipeline) SetHubUsageProbe(probe HubUsageProbeFunc) {
+	if p == nil || probe == nil {
+		return
+	}
+	p.analytics.hubProbe = probe
+}
+
+// SetHubUsageProbeInterval overrides the periodic Hub capability re-probe
+// interval (defaults to 60s). Intended for tests.
+func (p *Pipeline) SetHubUsageProbeInterval(d time.Duration) {
+	if p == nil {
+		return
+	}
+	p.analytics.hubProbeInterval = d
 }
 
 // SetAnalyticsOutbox points the pipeline's analytics outbox at the agent
@@ -636,17 +750,91 @@ func (p *Pipeline) AnalyticsOutboxDir() string {
 	return p.analytics.native.Dir() // nil-safe; the evidence dir when failed
 }
 
+func (a *analyticsState) lock() func() {
+	if a.mu == nil {
+		return func() {}
+	}
+	a.mu.Lock()
+	return a.mu.Unlock
+}
+
 // start enables analytics when either the Hub usage sink or the GCP exporter
 // is active. Any failure leaves analytics disabled with a reason; it never
 // fails the pipeline.
 func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
+	if a.mu == nil {
+		a.mu = &sync.Mutex{}
+	}
+	unlock := a.lock()
+	defer unlock()
 	if a.drainer != nil {
 		return
 	}
 	if a.hubSinkCfg == nil && gcp == nil {
 		a.disabledReason = AnalyticsDisabledNoGCPExporter
+		if a.hubProbe != nil && a.probeCancel == nil {
+			a.startHubReprobeLoopLocked(ctx)
+		}
 		return
 	}
+	a.startDrainerLocked(ctx, gcp)
+}
+
+func (a *analyticsState) probeInterval() time.Duration {
+	if a.hubProbeInterval > 0 {
+		return a.hubProbeInterval
+	}
+	return analyticsHubProbeInterval
+}
+
+// startHubReprobeLoopLocked runs a lightweight background re-probe when
+// neither the Hub sink nor a GCP exporter is active at startup. While negative,
+// the outbox is not created and AnalyticsDisabledNoGCPExporter stays in effect.
+// When a re-probe succeeds, the outbox and Hub-only drainer start dynamically.
+func (a *analyticsState) startHubReprobeLoopLocked(ctx context.Context) {
+	pctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	a.probeCancel = cancel
+	a.probeDone = done
+	probe := a.hubProbe
+	interval := a.probeInterval()
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pctx.Done():
+				return
+			case <-ticker.C:
+			}
+			callCtx, callCancel := context.WithTimeout(pctx, analyticsHubIDTimeout)
+			cfg, err := probe(callCtx)
+			callCancel()
+			if err != nil || cfg == nil || cfg.Post == nil {
+				continue
+			}
+			a.mu.Lock()
+			if pctx.Err() != nil || a.drainer != nil {
+				a.mu.Unlock()
+				return
+			}
+			c := *cfg
+			a.hubSinkCfg = &c
+			a.startDrainerLocked(ctx, nil)
+			native := a.native
+			onAct := a.onHubActivated
+			a.mu.Unlock()
+			if onAct != nil && native != nil {
+				onAct(native)
+			}
+			log.Info("Usage analytics Hub sink activated after periodic re-probe")
+			return
+		}
+	}()
+}
+
+func (a *analyticsState) startDrainerLocked(ctx context.Context, gcp *GCPExporter) {
 	dir := a.outboxDir
 	if dir == "" {
 		// Not set by init (tests, or a pipeline run as the agent user):
@@ -700,16 +888,39 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 	default:
 		a.send = newCountingSend(gcp.SendAnalytics)
 		a.drainer = NewAnalyticsDrainer(outbox, a.send.Send, resolver)
+		if a.hubProbe != nil {
+			native := a.native
+			a.drainer.SetHubProbe(a.hubProbe, a.probeInterval(), a.supportedSignals, func(cfg HubUsageSinkConfig, sink *HubUsageSink) {
+				if native != nil {
+					native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
+				}
+			})
+		}
 	}
 	a.drainer.Start(ctx)
 	a.disabledReason = ""
 }
 
-// stop ends the drainer after one final drain bounded by its own
-// sub-deadline: at most analyticsStopBudget and at most half of ctx's
-// remaining time, so the exporter shutdown that follows keeps its share.
+// stop ends any background re-probe loop and the drainer after one final drain
+// bounded by its own sub-deadline: at most analyticsStopBudget and at most half
+// of ctx's remaining time, so the exporter shutdown that follows keeps its share.
 func (a *analyticsState) stop(ctx context.Context) {
-	if a.drainer == nil {
+	unlock := a.lock()
+	probeCancel := a.probeCancel
+	probeDone := a.probeDone
+	a.probeCancel = nil
+	a.probeDone = nil
+	unlock()
+	if probeCancel != nil {
+		probeCancel()
+		<-probeDone
+	}
+
+	unlock = a.lock()
+	drainer := a.drainer
+	a.drainer = nil
+	unlock()
+	if drainer == nil {
 		return
 	}
 	budget := analyticsStopBudget
@@ -723,8 +934,7 @@ func (a *analyticsState) stop(ctx context.Context) {
 	}
 	sctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	a.drainer.Stop(sctx)
-	a.drainer = nil
+	drainer.Stop(sctx)
 }
 
 // AnalyticsLedger returns the analytics outbox's on-disk ledger snapshot
