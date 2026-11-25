@@ -1,0 +1,160 @@
+{
+  "cases": [
+    {
+      "name": "empty query matches everything at tier 0",
+      "query": "",
+      "field": "deploy-frontend",
+      "tier": 0
+    },
+    {
+      "name": "whitespace-only query normalizes to empty tier 0",
+      "query": "   \t  ",
+      "field": "deploy-frontend",
+      "tier": 0
+    },
+    {
+      "name": "exact single-word match",
+      "query": "deploy",
+      "field": "deploy",
+      "tier": 0
+    },
+    {
+      "name": "exact case-insensitive match",
+      "query": "Deploy-Frontend",
+      "field": "deploy-frontend",
+      "tier": 0
+    },
+    {
+      "name": "prefix match",
+      "query": "dep",
+      "field": "deploy-frontend",
+      "tier": 1
+    },
+    {
+      "name": "substring match",
+      "query": "front",
+      "field": "deploy-frontend",
+      "tier": 2
+    },
+    {
+      "name": "subsequence match",
+      "query": "df",
+      "field": "deploy-frontend",
+      "tier": 3
+    },
+    {
+      "name": "subsequence across separators",
+      "query": "dpe",
+      "field": "deploy-frontend",
+      "tier": 3
+    },
+    {
+      "name": "no match",
+      "query": "xyz",
+      "field": "deploy-frontend",
+      "tier": null
+    },
+    {
+      "name": "longer query than field does not match",
+      "query": "deploy-frontend-extra",
+      "field": "deploy-frontend",
+      "tier": null
+    },
+    {
+      "name": "multi-word exact match against hyphen",
+      "query": "deploy frontend",
+      "field": "deploy-frontend",
+      "tier": 0
+    },
+    {
+      "name": "multi-word exact match against underscore",
+      "query": "deploy frontend",
+      "field": "deploy_frontend",
+      "tier": 0
+    },
+    {
+      "name": "multi-word prefix match against hyphen",
+      "query": "deploy front",
+      "field": "deploy-frontend",
+      "tier": 1
+    },
+    {
+      "name": "multi-word substring match against hyphen",
+      "query": "hub canary",
+      "field": "deploy-hub-canary",
+      "tier": 2
+    },
+    {
+      "name": "multi-word out-of-order words match at tier 3",
+      "query": "frontend deploy",
+      "field": "deploy-frontend",
+      "tier": 3
+    },
+    {
+      "name": "multi-word subsequence match at tier 3",
+      "query": "dep end",
+      "field": "deploy-frontend",
+      "tier": 3
+    },
+    {
+      "name": "multi-word missing one word is no match",
+      "query": "deploy backend",
+      "field": "deploy-frontend",
+      "tier": null
+    },
+    {
+      "name": "multi-word collapsed internal spaces",
+      "query": "  deploy   frontend  ",
+      "field": "deploy-frontend",
+      "tier": 0
+    },
+    {
+      "name": "email dot and at are not word separators",
+      "query": "priya example",
+      "field": "priya@example.com",
+      "tier": 3
+    },
+    {
+      "name": "email exact match",
+      "query": "priya@example.com",
+      "field": "Priya@Example.COM",
+      "tier": 0
+    },
+    {
+      "name": "conversation label with hash prefix",
+      "query": "#ops",
+      "field": "#ops-alerts",
+      "tier": 1
+    },
+    {
+      "name": "conversation label substring without hash",
+      "query": "ops",
+      "field": "#ops-alerts",
+      "tier": 2
+    },
+    {
+      "name": "DM conversation label multi-word prefix",
+      "query": "dm with",
+      "field": "DM with deploy-frontend",
+      "tier": 1
+    },
+    {
+      "name": "unicode NFC precomposed vs decomposed exact",
+      "query": "cafe\u0301",
+      "field": "Caf\u00e9",
+      "tier": 0
+    },
+    {
+      "name": "unicode uppercase combining mark recomposes after lowercase",
+      "query": "\u01f0",
+      "field": "J\u030c",
+      "tier": 0
+    },
+    {
+      "name": "unicode prefix match",
+      "query": "caf\u00e9",
+      "field": "Cafe\u0301-bot",
+      "tier": 1
+    }
+  ]
+}

@@ -48,10 +48,15 @@ import {
   type ViewSchema,
 } from './index.js';
 import type { Agent } from '../types.js';
+import { classifyMatch, normalizeQuery } from '../../utils/palette-match.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..');
 const CONFORMANCE_PATH = resolve(REPO_ROOT, 'pkg/filterquery/testdata/conformance.json');
+const CLASSIFY_VECTORS_PATH = resolve(
+  REPO_ROOT,
+  'pkg/filterquery/testdata/classify_match_vectors.json'
+);
 const DOCS_PATH = resolve(REPO_ROOT, 'docs-site/src/content/docs/reference/filter-queries.md');
 
 interface ConformanceFile {
@@ -531,4 +536,20 @@ describe('schema-to-docs completeness', () => {
       }
     }
   });
+});
+
+describe('classifyMatch shared parity vectors', () => {
+  const vectors = JSON.parse(readFileSync(CLASSIFY_VECTORS_PATH, 'utf8')) as {
+    cases: Array<{ name: string; query: string; field: string; tier: number | null }>;
+  };
+
+  it('has non-empty shared vectors', () => {
+    expect(vectors.cases.length).toBeGreaterThan(0);
+  });
+
+  for (const tc of vectors.cases) {
+    it(tc.name, () => {
+      expect(classifyMatch(normalizeQuery(tc.query), tc.field)).toBe(tc.tier);
+    });
+  }
 });
