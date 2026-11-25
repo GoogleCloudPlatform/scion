@@ -665,6 +665,43 @@ func TestScheduleRunNow_MessageAuthzDenied(t *testing.T) {
 	assert.Equal(t, 0, after.RunCount, "denied manual run must not fire or increment RunCount")
 }
 
+// TestScheduleRunNow_DispatchAgentAuthzDenied verifies that a caller holding
+// scheduled_event.update but lacking agent.create is refused on /run for a
+// dispatch_agent schedule without writing a manual event or mutating counters.
+func TestScheduleRunNow_DispatchAgentAuthzDenied(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+		Name:      "dispatch-authz-check",
+		CronExpr:  "0 9 * * *",
+		EventType: "dispatch_agent",
+		AgentName: "scheduled-worker",
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var sched store.Schedule
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&sched))
+
+	// Caller has scheduled_event.update and project/agent read, but NOT agent.create.
+	noCreateUser := setupNonAdminUser(t, s, []string{
+		"scheduled_event.read", "scheduled_event.update", "project.read", "agent.read",
+	})
+	rec := requestAsSession(t, srv, noCreateUser, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+sched.ID+"/run", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	after, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, after.RunCount, "denied manual run must not increment RunCount")
+	assert.Equal(t, 0, after.ErrorCount, "denied manual run must not increment ErrorCount")
+
+	evts, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{
+		ProjectID:  projectID,
+		ScheduleID: sched.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, evts.Items, "denied manual run must not write a manual event")
+}
+
 // TestScheduleRunNow_AuthoringCredentialGateRefused verifies that /run enforces
 // the schedule authoring credential gate before permission checks and rejects
 // disallowed credential kinds even for a fully-permitted caller.
