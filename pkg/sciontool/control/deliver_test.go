@@ -734,6 +734,39 @@ func TestDeliverHardStopAfterInterrupt(t *testing.T) {
 	// Control: expiry before anything visible stays 408 (TestDeliverReadinessPastHardStop).
 }
 
+// TestDeliverCopyModeRunsPostPasteAfterHardStop: once the paste has
+// succeeded, extra-submit send-keys are still allowed after the hard stop,
+// so the copy-mode exit before each extra-submit pass must still run.
+func TestDeliverCopyModeRunsPostPasteAfterHardStop(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	f := &fakeTmux{}
+	f.onVerb = func(verb string) {
+		if verb == "paste-buffer" {
+			clk.Advance(93 * time.Second)
+		}
+	}
+	h := newDeliverHandler(f, clk)
+	r := baseReq(clk.Now())
+	code, resp := post(t, h, r)
+	if code != http.StatusOK || resp.Outcome != agentcontrol.OutcomeDelivered {
+		t.Fatalf("= %d %+v, want 200 delivered", code, resp)
+	}
+	want := []string{
+		"has-session",
+		"load-buffer",
+		"copy-mode",
+		"paste-buffer",
+		"send-keys",
+		"copy-mode",
+		"send-keys",
+		"copy-mode",
+		"send-keys",
+	}
+	if got := f.verbs(); !slices.Equal(got, want) {
+		t.Fatalf("verbs = %v, want %v", got, want)
+	}
+}
+
 // TestDeliverSizeLimits (review R3): over a size limit is 413 too_large,
 // which the hub and broker treat as "use exec", not the permanent 400 of a
 // malformed request; nothing runs.

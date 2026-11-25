@@ -335,9 +335,11 @@ func (t *trackingRunner) Run(ctx context.Context, argv []string, stdin io.Reader
 	}
 	shows := verb == "send-keys" || verb == "paste-buffer"
 	// The step that leaves copy-mode takes an operator out of scrollback,
-	// so it does not run for a paste or keys the hard stop will refuse.
+	// so before the paste it does not run for a paste or keys the hard
+	// stop will refuse. Once pasted, extra-submit send-keys still run
+	// after the hard stop, so their copy-mode exit must run too.
 	// Deliver ignores this step's error.
-	if verb == "copy-mode" && !t.now().Before(t.stop) {
+	if verb == "copy-mode" && !t.pasted && !t.now().Before(t.stop) {
 		return "", errExpired
 	}
 	// No paste starts after the hard stop, even when interrupt keys were

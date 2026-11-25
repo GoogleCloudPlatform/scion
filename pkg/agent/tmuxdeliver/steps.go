@@ -171,15 +171,15 @@ type Request struct {
 type StepKind int
 
 const (
-	// StepExitMode leaves copy-mode. Its failure is ignored (ExitModeArgv).
-	StepExitMode StepKind = iota
 	// StepSendKeys sends one key.
-	StepSendKeys
+	StepSendKeys StepKind = iota
 	// StepLoadBuffer streams the text into the buffer on stdin.
 	StepLoadBuffer
 	// StepPasteBuffer pastes the buffer. Its success means the text is in
 	// the harness's input: any later failure is a partial delivery.
 	StepPasteBuffer
+	// StepExitMode leaves copy-mode. Its failure is ignored (ExitModeArgv).
+	StepExitMode
 )
 
 // Step is one command of a delivery.

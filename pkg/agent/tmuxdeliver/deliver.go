@@ -51,12 +51,13 @@ const (
 //
 // It returns the pane to the live screen (ExitModeArgv, best effort) before
 // the first keys, before the paste and before each extra submit pass, so the
-// paste is bracketed and the keys reach the harness. A paste op's text is sanitised first (Sanitize) and
-// loaded on load-buffer's stdin. A failure before the paste returns the error
-// as is; nothing is in the harness's input, so the caller may retry. If the
-// paste itself fails, the buffer is deleted (best effort, on a context
-// detached from ctx so a cancelled ctx does not skip it). A failure after the
-// paste returns a *PartialError. The extra submits run only after a paste.
+// paste is bracketed and the keys reach the harness. A paste op's text is
+// sanitised first (Sanitize) and loaded on load-buffer's stdin. A failure
+// before the paste returns the error as is; nothing is in the harness's
+// input, so the caller may retry. If the paste itself fails, the buffer is
+// deleted (best effort, on a context detached from ctx so a cancelled ctx
+// does not skip it). A failure after the paste returns a *PartialError. The
+// extra submits run only after a paste.
 func Deliver(ctx context.Context, r Runner, req Request) error {
 	text := ""
 	if req.Op.pastes() {
