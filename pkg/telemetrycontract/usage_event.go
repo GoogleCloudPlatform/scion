@@ -32,9 +32,22 @@ import (
 
 // Usage source selection values (SCION_USAGE_SOURCE).
 const (
-	UsageSourceNative = "native"
-	UsageSourceHooks  = "hooks"
+	UsageSourceNative               = "native"
+	UsageSourceHooks                = "hooks"
+	UsageSourceSQLiteNative         = "sqlite_native"
+	UsageSourceFileTailer           = "file_tailer"
+	UsageSourceLegacySessionMetrics = "legacy_session_metrics"
 )
+
+// ValidUsageSource reports whether v is a known usage_source value.
+func ValidUsageSource(v string) bool {
+	switch v {
+	case UsageSourceNative, UsageSourceHooks, UsageSourceSQLiteNative, UsageSourceFileTailer, UsageSourceLegacySessionMetrics:
+		return true
+	default:
+		return false
+	}
+}
 
 // Source identity kinds: how source_event_id was derived.
 const (
@@ -107,6 +120,11 @@ type UsageEvent struct {
 	// up to nanoseconds), kept apart from the microsecond event_ts.
 	SourceTime string `json:"source_time,omitempty"`
 
+	// RunID is the optional Hub-minted run identifier for this event. When
+	// omitted on the wire, Hub ingest falls back to the batch run_id or the
+	// authenticated agent token's run_id claim.
+	RunID string `json:"run_id,omitempty"`
+
 	Harness     string `json:"harness"`
 	Model       string `json:"model"`
 	ModelSource string `json:"model_source"`
@@ -114,11 +132,12 @@ type UsageEvent struct {
 	Status      string `json:"status"`
 	Calls       int64  `json:"calls"`
 
-	Input      *int64 `json:"input,omitempty"`
-	Output     *int64 `json:"output,omitempty"`
-	CacheRead  *int64 `json:"cache_read,omitempty"`
-	CacheWrite *int64 `json:"cache_write,omitempty"`
-	Reasoning  *int64 `json:"reasoning,omitempty"`
+	Input        *int64 `json:"input,omitempty"`
+	Output       *int64 `json:"output,omitempty"`
+	CacheRead    *int64 `json:"cache_read,omitempty"`
+	CacheWrite   *int64 `json:"cache_write,omitempty"`
+	CacheWrite1h *int64 `json:"cache_write_1h,omitempty"`
+	Reasoning    *int64 `json:"reasoning,omitempty"`
 	// ReasoningOverlapsOutput is set (true) only with Reasoning, and only
 	// where adapter evidence shows Output already includes reasoning.
 	ReasoningOverlapsOutput *bool  `json:"reasoning_overlaps_output,omitempty"`
@@ -151,8 +170,8 @@ func (e *UsageEvent) Validate() error {
 	if e.EventType != EventTypeUsage {
 		errs = append(errs, fmt.Errorf("event_type = %q, want %q", e.EventType, EventTypeUsage))
 	}
-	if e.UsageSource != UsageSourceNative && e.UsageSource != UsageSourceHooks {
-		errs = append(errs, fmt.Errorf("usage_source %q is not native or hooks", e.UsageSource))
+	if !ValidUsageSource(e.UsageSource) {
+		errs = append(errs, fmt.Errorf("usage_source %q is not known", e.UsageSource))
 	}
 	if e.SourceKind == "" || e.SourceSchemaVersion == "" || e.Harness == "" || e.Model == "" {
 		errs = append(errs, errors.New("source_kind, source_schema_version, harness and model are required"))
@@ -192,7 +211,7 @@ func (e *UsageEvent) Validate() error {
 	if e.Calls < 0 {
 		errs = append(errs, fmt.Errorf("calls = %d is negative", e.Calls))
 	}
-	for name, p := range map[string]*int64{"input": e.Input, "output": e.Output, "cache_read": e.CacheRead, "cache_write": e.CacheWrite, "reasoning": e.Reasoning, "reported_cost_micros": e.ReportedCostMicros} {
+	for name, p := range map[string]*int64{"input": e.Input, "output": e.Output, "cache_read": e.CacheRead, "cache_write": e.CacheWrite, "cache_write_1h": e.CacheWrite1h, "reasoning": e.Reasoning, "reported_cost_micros": e.ReportedCostMicros} {
 		if p != nil && *p < 0 {
 			errs = append(errs, fmt.Errorf("%s = %d is negative", name, *p))
 		}
@@ -248,5 +267,25 @@ func (e *UsageEvent) Validate() error {
 }
 
 func (e *UsageEvent) hasTokens() bool {
-	return e.Input != nil || e.Output != nil || e.CacheRead != nil || e.CacheWrite != nil || e.Reasoning != nil
+	return e.Input != nil || e.Output != nil || e.CacheRead != nil || e.CacheWrite != nil || e.CacheWrite1h != nil || e.Reasoning != nil
+}
+
+// SummableTokens returns input + output + cache_read + cache_write (treating
+// nil fields as 0; reasoning and cache_write_1h are subsets and never added).
+// Returns (0, true) if the sum would overflow int64.
+func (e *UsageEvent) SummableTokens() (int64, bool) {
+	if e == nil {
+		return 0, false
+	}
+	var total int64
+	for _, p := range []*int64{e.Input, e.Output, e.CacheRead, e.CacheWrite} {
+		if p == nil || *p <= 0 {
+			continue
+		}
+		if total > (1<<63-1)-*p {
+			return 0, true
+		}
+		total += *p
+	}
+	return total, false
 }
