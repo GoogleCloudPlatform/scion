@@ -613,6 +613,84 @@ func (s *AgentStore) SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID s
 	return nil
 }
 
+// SetAgentSuspendPolicy sets suspend_policy to "auto" or "never". It is the
+// single-purpose post-create writer for the column and neither checks nor
+// bumps state_version.
+func (s *AgentStore) SetAgentSuspendPolicy(ctx context.Context, agentID, policy string) error {
+	if !store.IsValidSuspendPolicy(policy) {
+		return fmt.Errorf("%w: invalid suspend policy %q", store.ErrInvalidInput, policy)
+	}
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	if err := s.client.Agent.UpdateOneID(uid).
+		SetSuspendPolicy(agent.SuspendPolicy(policy)).
+		Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// ListNeverSuspendAgentIDsInProject returns the IDs of all non-deleted agents
+// in projectID with suspend_policy = "never", regardless of phase.
+func (s *AgentStore) ListNeverSuspendAgentIDsInProject(ctx context.Context, projectID string) ([]string, error) {
+	projectUID, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := s.client.Agent.Query().
+		Where(
+			agent.ProjectIDEQ(projectUID),
+			agent.DeletedAtIsNil(),
+			agent.SuspendPolicyEQ(agent.SuspendPolicyNever),
+		).
+		IDs(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out, nil
+}
+
+// CountRunningNeverSuspendAgents returns counts of non-deleted running agents
+// with suspend_policy = "never", grouped by project and runtime broker.
+func (s *AgentStore) CountRunningNeverSuspendAgents(ctx context.Context) ([]store.RunningNeverSuspendCount, error) {
+	var rows []struct {
+		ProjectID       uuid.UUID `json:"project_id"`
+		RuntimeBrokerID *string   `json:"runtime_broker_id"`
+		Count           int64     `json:"count"`
+	}
+	err := s.client.Agent.Query().
+		Where(
+			agent.DeletedAtIsNil(),
+			agent.SuspendPolicyEQ(agent.SuspendPolicyNever),
+			agent.PhaseEQ(string(state.PhaseRunning)),
+		).
+		GroupBy(agent.FieldProjectID, agent.FieldRuntimeBrokerID).
+		Aggregate(ent.Count()).
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.RunningNeverSuspendCount, 0, len(rows))
+	for _, r := range rows {
+		brokerID := ""
+		if r.RuntimeBrokerID != nil {
+			brokerID = *r.RuntimeBrokerID
+		}
+		out = append(out, store.RunningNeverSuspendCount{
+			ProjectID:       r.ProjectID.String(),
+			RuntimeBrokerID: brokerID,
+			Count:           r.Count,
+		})
+	}
+	return out, nil
+}
+
 // UpdateAgent updates an existing agent using optimistic locking on
 // state_version. The mutable field set mirrors the legacy SQLite store:
 // identity-adjacent operational fields are updated, while immutable lineage
@@ -1868,6 +1946,16 @@ func agentQueryTermsPredicates(qt *store.QueryTerms) ([]predicate.Agent, error) 
 				preds = append(preds, agent.Or(agent.OwnerIDIsNil(), agent.OwnerIDNotIn(uids...)))
 			} else {
 				preds = append(preds, agent.OwnerIDIn(uids...))
+			}
+		case "suspendpolicy":
+			policies := make([]agent.SuspendPolicy, 0, len(term.Values))
+			for _, v := range term.Values {
+				policies = append(policies, agent.SuspendPolicy(v))
+			}
+			if term.Negate {
+				preds = append(preds, agent.SuspendPolicyNotIn(policies...))
+			} else {
+				preds = append(preds, agent.SuspendPolicyIn(policies...))
 			}
 		case "label":
 			if term.Negate {

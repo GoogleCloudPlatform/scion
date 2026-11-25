@@ -141,6 +141,7 @@ var agentEditFields = []agentEditField{
 	{Key: "annotations", Tier: EditTierMetadata},
 	{Key: "taskSummary", Tier: EditTierMetadata},
 	{Key: "messageMode", Tier: EditTierMetadata},
+	{Key: "suspendPolicy", Tier: EditTierMetadata},
 
 	// T1: applied at any container creation.
 	{Key: "config.model", Tier: EditTierContainer, SessionSensitive: true},

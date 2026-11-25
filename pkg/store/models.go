@@ -2552,6 +2552,15 @@ func IsValidSuspendPolicy(policy string) bool {
 	}
 }
 
+// RunningNeverSuspendCount is the per-(project, runtime broker) count of
+// non-deleted running agents with suspend_policy = "never", reported by the
+// scion.hub.never_suspend_agents gauge.
+type RunningNeverSuspendCount struct {
+	ProjectID       string
+	RuntimeBrokerID string
+	Count           int64
+}
+
 // CrossProjectInbound policy values define which external agents may deliver
 // messages to agents in this project. Default is "none".
 const (
@@ -5933,9 +5942,10 @@ const (
 
 // System limit definition names
 const (
-	LimitMaxAgentsPerProject = "max_agents_per_project"
-	LimitMaxProjectsPerUser  = "max_projects_per_user"
-	LimitMaxMembersPerGroup  = "max_members_per_group"
+	LimitMaxAgentsPerProject             = "max_agents_per_project"
+	LimitMaxNeverSuspendAgentsPerProject = "max_never_suspend_agents_per_project"
+	LimitMaxProjectsPerUser              = "max_projects_per_user"
+	LimitMaxMembersPerGroup              = "max_members_per_group"
 	// LimitMaxAgentsPerBroker is the per-runtime-broker ceiling on
 	// concurrently live agents (ptone/scion#1303). Unlike the other system
 	// limits, which are opt-in fairness quotas seeded unlimited and scoped to

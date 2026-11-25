@@ -730,7 +730,7 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 		switch def.Name {
 		case store.LimitMaxAgentsPerBroker:
 			count, listErr = s.countBrokerScopedActiveReservations(ctx, def.ID)
-		case store.LimitMaxAgentsPerProject:
+		case store.LimitMaxAgentsPerProject, store.LimitMaxNeverSuspendAgentsPerProject:
 			// Project reservations are stored at store.QuotaScopeProject,
 			// one scope per project, never at store.QuotaScopeSystem: sum
 			// every project's with one aggregate query, never one per
@@ -794,7 +794,7 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 	switch def.Name {
 	case store.LimitMaxAgentsPerBroker:
 		reservations, unlisted, err = s.brokerScopedActiveReservations(ctx, def.ID)
-	case store.LimitMaxAgentsPerProject:
+	case store.LimitMaxAgentsPerProject, store.LimitMaxNeverSuspendAgentsPerProject:
 		// Every project's reservations, as getUsageSummary counts them
 		// (ptone/scion#6033).
 		reservations, err = s.store.ListActiveReservationsByScopeType(ctx, def.ID, store.QuotaScopeProject)

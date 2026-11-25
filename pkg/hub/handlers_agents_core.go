@@ -1077,6 +1077,11 @@ func quotaRefusal(limitName string, err error) (string, map[string]interface{}) 
 				quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
 			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
 	}
+	if exceeded.Limit == store.LimitMaxNeverSuspendAgentsPerProject && exceeded.ScopeType == store.QuotaScopeProject {
+		return fmt.Sprintf("%s (project %s: %d of %d never-suspend agents in use); clear never-suspend or delete a flagged agent in this project to free a slot",
+				quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
+			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
+	}
 	if exceeded.Limit == store.LimitMaxAgentsPerBroker && exceeded.ScopeType == store.QuotaScopeBroker {
 		if exceeded.Max > 0 {
 			details := map[string]interface{}{"count": exceeded.Count, "limit": exceeded.Max}
@@ -1162,6 +1167,7 @@ func (s *Server) releaseAgentQuotas(ctx context.Context, resourceID, runtimeBrok
 		s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, resourceID)
 	}
 	s.quotaService.Release(ctx, store.LimitMaxAgentsPerProject, resourceID)
+	s.quotaService.Release(ctx, store.LimitMaxNeverSuspendAgentsPerProject, resourceID)
 }
 
 // Budgets for best-effort cleanup that must outlive the request that
@@ -2874,6 +2880,12 @@ func (s *Server) createAgentInProject(
 	if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerProject, createdBy, store.QuotaScopeProject, projectID, agent.ID) {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		return
+	}
+	if agent.SuspendPolicy == store.SuspendPolicyNever {
+		if !s.checkAndReserveQuota(ctx, w, store.LimitMaxNeverSuspendAgentsPerProject, createdBy, store.QuotaScopeProject, projectID, agent.ID) {
+			s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
+			return
+		}
 	}
 
 	// The agent row, identity keys, delegation edge (with the frozen
@@ -4987,6 +4999,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// through reincarnate; held role edits are not stored yet).
 		// Without them it is ignored, as before.
 		AgentRole *string `json:"agentRole,omitempty"`
+		// SuspendPolicy sets the agent's automatic suspension policy
+		// ("auto" or "never"). Tier-T0 immediate metadata, gated by the
+		// lifecycle.never_suspend experiment.
+		SuspendPolicy *string `json:"suspendPolicy,omitempty"`
 	}
 
 	// The body is read into a buffer, rather than decoded straight off
@@ -5101,6 +5117,19 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
+	if updates.SuspendPolicy != nil {
+		if !s.experimentEnabled(experiments.NeverSuspend) {
+			writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+				"experiment_disabled: "+experiments.NeverSuspend+" is off; suspendPolicy cannot be set on this hub",
+				map[string]interface{}{"experiment": experiments.NeverSuspend})
+			return
+		}
+		if !store.IsValidSuspendPolicy(*updates.SuspendPolicy) {
+			ValidationError(w, "invalid suspend policy: "+*updates.SuspendPolicy, map[string]interface{}{"field": "suspendPolicy"})
+			return
+		}
+	}
+
 	// Refuse, before anything is written, a request that names a key the
 	// mutability table locks for this agent (agent_config_mutability.go):
 	// the same rule GET editability reports.
@@ -5109,7 +5138,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		resolvedHarness, _ := s.resolveAgentHarnessCapabilities(ctx, agent)
 		appliedFixed = appliedFixedValues(agent, resolvedHarness)
 	}
-	if ref := lockedPatchKeysFor(agent, heldEdits, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil), rawFields, updates.Config, appliedFixed); ref != nil {
+	if ref := lockedPatchKeysFor(agent, heldEdits, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil, updates.SuspendPolicy != nil), rawFields, updates.Config, appliedFixed); ref != nil {
 		writePatchRefusal(w, agent, ref, updates.Config != nil)
 		return
 	}
@@ -5423,7 +5452,116 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		timezoneSource = &tz.Source
 	}
 
-	if updates.Name != "" {
+	// SuspendPolicy update: reserve quota on auto->never, warn if the harness
+	// cannot resume (design §4.6), persist via SetAgentSuspendPolicy with
+	// agent.suspend_policy.set audit, and report suspensionInFlight if an idle
+	// claim or auto-suspend intent swap was already taken (design §4.2 point 3).
+	currentPolicy := agent.SuspendPolicy
+	if currentPolicy == "" {
+		currentPolicy = store.SuspendPolicyAuto
+	}
+	suspendPolicyChanged := updates.SuspendPolicy != nil && *updates.SuspendPolicy != currentPolicy
+	if updates.SuspendPolicy != nil && *updates.SuspendPolicy == store.SuspendPolicyNever {
+		if ok, harnessType, _ := s.harnessSupportsResume(ctx, agent); !ok {
+			if harnessType != "" {
+				warnings = append(warnings, fmt.Sprintf("harness %q does not support resume; this agent is never auto-suspended so suspendPolicy=%q has no effect", harnessType, store.SuspendPolicyNever))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("this agent's harness does not support resume; it is never auto-suspended so suspendPolicy=%q has no effect", store.SuspendPolicyNever))
+			}
+		}
+	}
+
+	var neverSuspendReserved bool
+	if suspendPolicyChanged && *updates.SuspendPolicy == store.SuspendPolicyNever && s.quotaService != nil && agent.ProjectID != "" {
+		ok, created := s.reserveQuotaHTTP(ctx, w, store.LimitMaxNeverSuspendAgentsPerProject,
+			projectQuotaSubject(agent), store.QuotaScopeProject, agent.ProjectID, agent.ID)
+		if !ok {
+			return
+		}
+		neverSuspendReserved = created
+	}
+	rollbackNeverSuspend := func() {
+		if neverSuspendReserved {
+			relCtx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
+			s.quotaService.Release(relCtx, store.LimitMaxNeverSuspendAgentsPerProject, agent.ID)
+			cancel()
+		}
+	}
+
+	needsRowUpdate := updates.Name != "" ||
+		updates.Labels != nil ||
+		updates.Annotations != nil ||
+		updates.TaskSummary != "" ||
+		updates.Config != nil ||
+		updates.GCPIdentity != nil ||
+		updates.ExplicitTimezone != nil ||
+		len(pendingExperimentOff) > 0
+
+	var suspensionInFlight bool
+	writeSuspendPolicyTx := func(tx store.Store) error {
+		if err := tx.SetAgentSuspendPolicy(ctx, agent.ID, *updates.SuspendPolicy); err != nil {
+			return err
+		}
+		policyAudit := &store.MutationAuditRecord{
+			MutationType:  mutationTypeAgentSuspendPolicySet,
+			TargetType:    "agent",
+			TargetID:      agent.ID,
+			BeforeSummary: currentPolicy,
+			AfterSummary:  *updates.SuspendPolicy,
+			Timestamp:     time.Now(),
+		}
+		auditActorFromContext(ctx).ApplyActor(policyAudit)
+		applyHubActorFallback(policyAudit)
+		if err := tx.CreateMutationAudit(ctx, policyAudit); err != nil {
+			return fmt.Errorf("agent update suspend policy audit: %w", err)
+		}
+		if *updates.SuspendPolicy == store.SuspendPolicyNever {
+			fresh, err := tx.GetAgent(ctx, agent.ID)
+			if err != nil {
+				return err
+			}
+			suspensionInFlight = isAutoSuspendInFlight(fresh)
+		}
+		return nil
+	}
+
+	if suspendPolicyChanged {
+		err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if needsRowUpdate {
+				if err := tx.UpdateAgent(ctx, agent); err != nil {
+					return err
+				}
+				if updates.Name != "" {
+					keys := api.IdentityKeysFor(agent.Slug, agent.Name)
+					if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys); err != nil {
+						return err
+					}
+				}
+				if saWrite != nil {
+					if err := saWrite.apply(r, tx, agent.ID); err != nil {
+						return err
+					}
+				}
+			}
+			return writeSuspendPolicyTx(tx)
+		})
+		if err != nil {
+			rollbackNeverSuspend()
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		agent.SuspendPolicy = *updates.SuspendPolicy
+		if *updates.SuspendPolicy == store.SuspendPolicyAuto && s.quotaService != nil {
+			relCtx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
+			s.quotaService.Release(relCtx, store.LimitMaxNeverSuspendAgentsPerProject, agent.ID)
+			cancel()
+		}
+	} else if updates.SuspendPolicy != nil && !needsRowUpdate {
+		// No-op echo of suspendPolicy with no other fields: avoid bumping state_version.
+		if *updates.SuspendPolicy == store.SuspendPolicyNever {
+			suspensionInFlight = isAutoSuspendInFlight(agent)
+		}
+	} else if updates.Name != "" {
 		// Name and its identity key are written in the same transaction:
 		// the key row is what makes the key's per-project uniqueness a
 		// database invariant, so it must never be able to drift from the
@@ -5483,22 +5621,35 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingExperimentOff, pendingDiscardTriggerExperimentOff)
 	}
 
-	disposition := agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil)
+	disposition := agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil, suspendPolicyChanged)
 	if len(configHeld) > 0 {
 		disposition.Held = configHeld
 	}
 	writeJSON(w, http.StatusOK, agentUpdateResponse{
-		Agent:            redactedAgentCopy(ctx, s, agent),
-		ResolvedTimezone: resolvedTimezone,
-		TimezoneSource:   timezoneSource,
-		Warnings:         warnings,
-		Disposition:      disposition,
+		Agent:              redactedAgentCopy(ctx, s, agent),
+		ResolvedTimezone:   resolvedTimezone,
+		TimezoneSource:     timezoneSource,
+		Warnings:           warnings,
+		Disposition:        disposition,
+		SuspensionInFlight: suspensionInFlight,
 	})
+}
+
+// isAutoSuspendInFlight reports whether an idle-suspend claim or an
+// auto-suspend run-intent swap (stalled path) is already in flight on a.
+func isAutoSuspendInFlight(a *store.Agent) bool {
+	if a == nil {
+		return false
+	}
+	if a.IdleSuspendClaimActive {
+		return true
+	}
+	return a.Phase == string(state.PhaseRunning) && a.RunIntent == store.RunIntentStopped
 }
 
 // presentAgentPatchKeys lists the top-level wire keys an agent PATCH names,
 // by the same presence rules applyAgentUpdate writes them with.
-func presentAgentPatchKeys(name string, lbls, annotations map[string]string, taskSummary string, hasGCPIdentity, hasTimezone bool) []string {
+func presentAgentPatchKeys(name string, lbls, annotations map[string]string, taskSummary string, hasGCPIdentity, hasTimezone, hasSuspendPolicy bool) []string {
 	var keys []string
 	if name != "" {
 		keys = append(keys, "name")
@@ -5517,6 +5668,9 @@ func presentAgentPatchKeys(name string, lbls, annotations map[string]string, tas
 	}
 	if hasTimezone {
 		keys = append(keys, "explicitTimezone")
+	}
+	if hasSuspendPolicy {
+		keys = append(keys, "suspendPolicy")
 	}
 	return keys
 }
@@ -5671,7 +5825,7 @@ func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
 // a service-account assignment row; gcp_identity is then listed under
 // applied even when the request names the current account, because the
 // row records this caller as its source.
-func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged, saAssignmentRecorded bool) AgentUpdateDisposition {
+func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged, saAssignmentRecorded, suspendPolicyChanged bool) AgentUpdateDisposition {
 	applied := append([]string{}, configApplied...)
 	if after.Name != before.name {
 		applied = append(applied, "name")
@@ -5695,6 +5849,9 @@ func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, confi
 	if timezoneChanged {
 		applied = append(applied, "explicitTimezone")
 	}
+	if suspendPolicyChanged {
+		applied = append(applied, "suspendPolicy")
+	}
 	sort.Strings(applied)
 	return AgentUpdateDisposition{
 		Applied:            applied,
@@ -5717,6 +5874,10 @@ type agentUpdateResponse struct {
 	// Disposition names the keys the request changed, by when each takes
 	// effect.
 	Disposition AgentUpdateDisposition `json:"disposition"`
+	// SuspensionInFlight is true when a PATCH setting suspendPolicy="never"
+	// committed after an idle-suspend claim or auto-suspend intent swap was
+	// already taken; the in-flight suspend is not canceled.
+	SuspensionInFlight bool `json:"suspensionInFlight,omitempty"`
 }
 
 // checkBrokerAvailability verifies the agent's runtime broker is reachable.

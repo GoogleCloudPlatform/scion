@@ -2114,7 +2114,31 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// normally a deleted user but possibly a purged legacy root agent
 	// (ptone/scion#2769; errAgentOwnerUserMissing, see
 	// lockAgentGuardUserTx).
+	// Re-reserve the per-project never-suspend quota when restoring a flagged
+	// agent (design §4.1, §4.5, §9 item 8). Over-cap returns 409 Conflict so
+	// callers can distinguish a restore quota conflict from a rate limit.
+	var neverSuspendReserved bool
+	if agent.SuspendPolicy == store.SuspendPolicyNever && s.quotaService != nil && agent.ProjectID != "" {
+		created, qErr := s.quotaService.Reserve(ctx, store.LimitMaxNeverSuspendAgentsPerProject,
+			projectQuotaSubject(agent), store.QuotaScopeProject, agent.ProjectID, agent.ID)
+		if qErr != nil {
+			if errors.Is(qErr, store.ErrQuotaExceeded) {
+				message, details := quotaRefusal(store.LimitMaxNeverSuspendAgentsPerProject, qErr)
+				writeError(w, http.StatusConflict, ErrCodeQuotaExceeded, message, details)
+				return
+			}
+			writeQuotaReserveError(w, store.LimitMaxNeverSuspendAgentsPerProject, qErr)
+			return
+		}
+		neverSuspendReserved = created
+	}
+
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
+		if neverSuspendReserved {
+			relCtx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
+			s.quotaService.Release(relCtx, store.LimitMaxNeverSuspendAgentsPerProject, agent.ID)
+			cancel()
+		}
 		if errors.Is(err, errAgentNotSoftDeleted) {
 			BadRequest(w, "Agent is not in deleted state")
 			return

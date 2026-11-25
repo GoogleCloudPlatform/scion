@@ -363,7 +363,14 @@ var agentOperations = []OperationSpec{
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		AuditObligation: &AuditObligation{
+			EventType:     "agent.suspend_policy.set",
+			ContextFields: []string{"actor_id"},
+			BeforeFields:  []string{"suspend_policy"},
+			AfterFields:   []string{"suspend_policy"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAgentUpdateToken_PassthroughGateStillApplies"},

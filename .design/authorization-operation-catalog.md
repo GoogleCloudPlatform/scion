@@ -952,6 +952,14 @@
 
 **Effects:** `update-resource`
 
+### Audit
+
+- **Event Type:** `agent.suspend_policy.set`
+- **Context Fields:** actor_id
+- **Before Fields:** suspend_policy
+- **After Fields:** suspend_policy
+- **Atomic:** Yes
+
 **Denial Codes:** `forbidden`, `conflict`
 
 ### Tests

@@ -417,13 +417,39 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 // The broker and group limits use subject == scope, and
 // max_projects_per_user is per user, so they keep the per-subject count.
 func countsAcrossSubjects(limitName string) bool {
-	return limitName == store.LimitMaxAgentsPerProject
+	return limitName == store.LimitMaxAgentsPerProject || limitName == store.LimitMaxNeverSuspendAgentsPerProject
 }
 
 // countActive is Reserve's count of active reservations: the scope-wide
 // total for a limit counted across subjects, through the grouped per-scope
 // count, else the subject's own count in the scope.
+//
+// For max_never_suspend_agents_per_project, usage is computed as the union of
+// active reservation resource IDs and non-deleted agents with
+// suspend_policy="never" in the project so agents flagged while Phase 1 was
+// deployed (without reservations) are included without double-counting agents
+// that hold both a row and a reservation (ptone/scion#9183).
 func (qs *QuotaService) countActive(ctx context.Context, limitName, limitDefID, subjectID, scopeType, scopeID string) (int64, error) {
+	if limitName == store.LimitMaxNeverSuspendAgentsPerProject && scopeType == store.QuotaScopeProject {
+		reservations, err := qs.store.ListActiveReservations(ctx, limitDefID, scopeType, scopeID)
+		if err != nil {
+			return 0, err
+		}
+		flaggedIDs, err := qs.store.ListNeverSuspendAgentIDsInProject(ctx, scopeID)
+		if err != nil {
+			return 0, err
+		}
+		seen := make(map[string]struct{}, len(reservations)+len(flaggedIDs))
+		for _, r := range reservations {
+			if r != nil && r.ResourceID != "" {
+				seen[r.ResourceID] = struct{}{}
+			}
+		}
+		for _, id := range flaggedIDs {
+			seen[id] = struct{}{}
+		}
+		return int64(len(seen)), nil
+	}
 	if !countsAcrossSubjects(limitName) {
 		return qs.store.CountActiveReservations(ctx, limitDefID, subjectID, scopeType, scopeID)
 	}

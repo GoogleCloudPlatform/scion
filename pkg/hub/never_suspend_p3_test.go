@@ -1,0 +1,623 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+func setProjectNeverSuspendCeiling(t *testing.T, s store.Store, ceiling int64) {
+	t.Helper()
+	ctx := context.Background()
+	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxNeverSuspendAgentsPerProject)
+	require.NoError(t, err, "max_never_suspend_agents_per_project must be seeded by New()/seedLimitDefinitions")
+	def.DefaultValue = ceiling
+	require.NoError(t, s.UpdateLimitDefinition(ctx, def))
+}
+
+func TestNeverSuspend_PatchPolicy_AuthzAuditExperimentAndWarning(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	ownerID := tid("ns-p3-owner")
+	viewerID := tid("ns-p3-viewer")
+	createTestUserWithRole(t, s, ownerID, "ns-p3-owner@test.com", store.UserRoleMember, store.SystemRoleHubMember)
+	createTestUserWithRole(t, s, viewerID, "ns-p3-viewer@test.com", store.UserRoleViewer, store.SystemRoleHubMember)
+	owner, err := s.GetUser(ctx, ownerID)
+	require.NoError(t, err)
+	viewer, err := s.GetUser(ctx, viewerID)
+	require.NoError(t, err)
+
+	projectID := tid("ns-p3-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "NS P3 Project", Slug: "ns-p3-project",
+		GitRemote: "https://github.com/example/ns-p3.git",
+		OwnerID:   ownerID, CreatedBy: ownerID,
+	}))
+	createTestUserWithProjectRole(t, s, ownerID, owner.Email, projectID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, viewerID, viewer.Email, projectID, store.ProjectRoleViewer)
+
+	brokerID := tid("ns-p3-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "NS P3 Broker", Slug: "ns-p3-broker", Status: store.BrokerStatusOnline,
+		CreatedBy: ownerID,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS P3 Broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	srv.SetDispatcher(&createAgentDispatcher{})
+
+	// Create an agent while experiment is off (defaults to auto).
+	createRec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+		"name":          "ns-p3-agent",
+		"projectId":     projectID,
+		"provisionOnly": true,
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, "body: %s", createRec.Body.String())
+	var created CreateAgentResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	agentID := created.Agent.ID
+
+	t.Run("experiment off returns 400 experiment_disabled", func(t *testing.T) {
+		setNeverSuspendExperiment(t, srv, false)
+		rec := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeExperimentDisabled, errResp.Error.Code)
+
+		got, err := s.GetAgent(ctx, agentID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyAuto, got.SuspendPolicy)
+	})
+
+	setNeverSuspendExperiment(t, srv, true)
+
+	t.Run("viewer without agent.update gets 403", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, viewer, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("invalid value returns 400", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]any{
+			"suspendPolicy": "bogus",
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("owner toggles auto->never->auto without bumping state_version and writes audit", func(t *testing.T) {
+		before, err := s.GetAgent(ctx, agentID)
+		require.NoError(t, err)
+
+		rec := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp agentUpdateResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, store.SuspendPolicyNever, resp.SuspendPolicy)
+		assert.False(t, resp.SuspensionInFlight)
+		assert.Contains(t, resp.Disposition.Applied, "suspendPolicy")
+
+		afterNever, err := s.GetAgent(ctx, agentID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyNever, afterNever.SuspendPolicy)
+		assert.Equal(t, before.StateVersion, afterNever.StateVersion, "PATCH of only suspendPolicy must not bump state_version")
+
+		// Clear back to auto.
+		recAuto := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyAuto,
+		})
+		require.Equal(t, http.StatusOK, recAuto.Code, "body: %s", recAuto.Body.String())
+		var respAuto agentUpdateResponse
+		require.NoError(t, json.Unmarshal(recAuto.Body.Bytes(), &respAuto))
+		assert.Equal(t, store.SuspendPolicyAuto, respAuto.SuspendPolicy)
+		assert.Contains(t, respAuto.Disposition.Applied, "suspendPolicy")
+
+		audits, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			MutationType: mutationTypeAgentSuspendPolicySet,
+			TargetID:     agentID,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, audits.Items, 2)
+		transitions := map[string]string{}
+		for _, a := range audits.Items {
+			transitions[a.BeforeSummary+"->"+a.AfterSummary] = a.ActorID
+		}
+		assert.Equal(t, ownerID, transitions[store.SuspendPolicyAuto+"->"+store.SuspendPolicyNever])
+		assert.Equal(t, ownerID, transitions[store.SuspendPolicyNever+"->"+store.SuspendPolicyAuto])
+	})
+
+	t.Run("agent principal with agent.update succeeds and records agent actor", func(t *testing.T) {
+		// Create a parent agent owned by owner, then let parent create a child agent.
+		parentRec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-p3-parent",
+			"projectId":     projectID,
+			"provisionOnly": true,
+		})
+		require.Equal(t, http.StatusCreated, parentRec.Code)
+		var parentResp CreateAgentResponse
+		require.NoError(t, json.Unmarshal(parentRec.Body.Bytes(), &parentResp))
+		parentID := parentResp.Agent.ID
+
+		token, err := srv.agentTokenService.GenerateAgentToken(parentID, projectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+		require.NoError(t, err)
+
+		// Parent creates a child agent (grants parent resource-owner rights incl. agent.update on child).
+		childRec := doRequestWithAgentToken(t, srv, token, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-p3-child",
+			"projectId":     projectID,
+			"provisionOnly": true,
+		})
+		require.Equal(t, http.StatusCreated, childRec.Code, "body: %s", childRec.Body.String())
+		var childResp CreateAgentResponse
+		require.NoError(t, json.Unmarshal(childRec.Body.Bytes(), &childResp))
+		childID := childResp.Agent.ID
+
+		patchRec := doRequestWithAgentToken(t, srv, token, http.MethodPatch, "/api/v1/agents/"+childID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, patchRec.Code, "body: %s", patchRec.Body.String())
+
+		got, err := s.GetAgent(ctx, childID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyNever, got.SuspendPolicy)
+
+		audits, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			MutationType: mutationTypeAgentSuspendPolicySet,
+			TargetID:     childID,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, audits.Items, 1)
+		assert.Equal(t, parentID, audits.Items[0].ActorID)
+	})
+
+	t.Run("non-resumable harness is allowed and returns a warning", func(t *testing.T) {
+		nonRes := &store.Agent{
+			ID:            tid("ns-p3-nonresumable"),
+			Slug:          "ns-p3-nonresumable",
+			Name:          "ns-p3-nonresumable",
+			ProjectID:     projectID,
+			OwnerID:       ownerID,
+			CreatedBy:     ownerID,
+			Phase:         string(state.PhaseRunning),
+			SuspendPolicy: store.SuspendPolicyAuto,
+			AppliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: "generic",
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, nonRes))
+
+		rec := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+nonRes.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp agentUpdateResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, store.SuspendPolicyNever, resp.SuspendPolicy)
+		require.NotEmpty(t, resp.Warnings, "non-resumable harness must return a warning")
+		assert.Contains(t, resp.Warnings[0], "does not support resume")
+	})
+}
+
+func TestNeverSuspend_PatchSuspensionInFlight(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	setNeverSuspendExperiment(t, srv, true)
+
+	now := time.Now().UTC()
+	idleSince := now.Add(-30 * time.Minute)
+	lastSeen := now.Add(-15 * time.Second)
+
+	t.Run("idle claim already taken reports suspensionInFlight=true", func(t *testing.T) {
+		agent := newIdleCandidateBrokerAgent(t, s, "ns-p3-inflight-idle", string(state.ActivityIdle), &idleSince, lastSeen)
+		// Grant owner role so DevUser (default test user) can PATCH.
+		agent.OwnerID = DevUserID
+		require.NoError(t, s.UpdateAgent(ctx, agent))
+
+		loaded, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		_, _, _, err = s.ClaimIdleSuspend(ctx, agent.ID, store.IdleSuspendCondition{
+			RunID:                    loaded.RunID,
+			Activity:                 loaded.Activity,
+			ActivitySince:            *loaded.ActivitySince,
+			IdleSuspendAfter:         15 * time.Minute,
+			HeartbeatRecency:         2 * time.Minute,
+			ClaimTTL:                 30 * time.Second,
+			RequireSuspendPolicyAuto: true,
+		})
+		require.NoError(t, err)
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp agentUpdateResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, store.SuspendPolicyNever, resp.SuspendPolicy)
+		assert.True(t, resp.SuspensionInFlight, "PATCH after idle claim must report suspensionInFlight=true")
+	})
+
+	t.Run("stalled auto-suspend intent swap reports suspensionInFlight=true", func(t *testing.T) {
+		agent := newIdleCandidateBrokerAgent(t, s, "ns-p3-inflight-stalled", string(state.ActivityStalled), &idleSince, lastSeen)
+		agent.OwnerID = DevUserID
+		require.NoError(t, s.UpdateAgent(ctx, agent))
+
+		_, _, err := s.SwapAutoSuspendRunIntent(ctx, agent.ID, store.RunIntentStopped, true)
+		require.NoError(t, err)
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp agentUpdateResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, store.SuspendPolicyNever, resp.SuspendPolicy)
+		assert.True(t, resp.SuspensionInFlight, "PATCH after auto-suspend intent swap must report suspensionInFlight=true")
+	})
+}
+
+func TestNeverSuspend_QuotaLifecycleAndP1Backfill(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	setNeverSuspendExperiment(t, srv, true)
+
+	// Verify seeded unlimited limit definition.
+	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxNeverSuspendAgentsPerProject)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), def.DefaultValue, "max_never_suspend_agents_per_project must be seeded unlimited (0)")
+
+	ownerID := tid("ns-quota-owner")
+	createTestUserWithRole(t, s, ownerID, "ns-quota-owner@test.com", store.UserRoleMember, store.SystemRoleHubMember)
+	owner, err := s.GetUser(ctx, ownerID)
+	require.NoError(t, err)
+
+	projectID := tid("ns-quota-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "NS Quota Project", Slug: "ns-quota-project",
+		GitRemote: "https://github.com/example/ns-quota.git",
+		OwnerID:   ownerID, CreatedBy: ownerID,
+	}))
+	createTestUserWithProjectRole(t, s, ownerID, owner.Email, projectID, store.ProjectRoleOwner)
+
+	brokerID := tid("ns-quota-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "NS Quota Broker", Slug: "ns-quota-broker", Status: store.BrokerStatusOnline,
+		CreatedBy: ownerID,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS Quota Broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	srv.SetDispatcher(&createAgentDispatcher{})
+
+	// Set cap to 2.
+	setProjectNeverSuspendCeiling(t, s, 2)
+
+	// 1. Seed a P1-style flagged row directly (no usage_reservation row) — Security L1.
+	p1Agent := &store.Agent{
+		ID:            tid("ns-quota-p1-row"),
+		Slug:          "ns-quota-p1-row",
+		Name:          "ns-quota-p1-row",
+		ProjectID:     projectID,
+		OwnerID:       ownerID,
+		CreatedBy:     ownerID,
+		Phase:         string(state.PhaseStopped), // non-running phase must still count
+		SuspendPolicy: store.SuspendPolicyNever,
+	}
+	require.NoError(t, s.CreateAgent(ctx, p1Agent))
+
+	// 2. Create agent 2 via API with suspendPolicy=never -> 201 (usage now 2/2: P1 row + agent 2).
+	rec2 := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+		"name":          "ns-quota-a2",
+		"projectId":     projectID,
+		"provisionOnly": true,
+		"suspendPolicy": store.SuspendPolicyNever,
+	})
+	require.Equal(t, http.StatusCreated, rec2.Code, "body: %s", rec2.Body.String())
+	var resp2 CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	agent2ID := resp2.Agent.ID
+
+	// Acceptance §9 item 10: flagged agent also holds broker + project reservations.
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, agent2ID))
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, agent2ID))
+	assert.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, agent2ID))
+
+	// 3. Create agent 3 with suspendPolicy=never -> 429 quota_exceeded (P1 row + agent 2 = 2/2).
+	rec3Fail := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+		"name":          "ns-quota-a3-fail",
+		"projectId":     projectID,
+		"provisionOnly": true,
+		"suspendPolicy": store.SuspendPolicyNever,
+	})
+	require.Equal(t, http.StatusTooManyRequests, rec3Fail.Code, "body: %s", rec3Fail.Body.String())
+	assert.Contains(t, rec3Fail.Body.String(), store.LimitMaxNeverSuspendAgentsPerProject)
+
+	// 4. Create agent 3 as auto -> 201, then PATCH auto->never -> 429 quota_exceeded.
+	rec3Auto := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+		"name":          "ns-quota-a3",
+		"projectId":     projectID,
+		"provisionOnly": true,
+	})
+	require.Equal(t, http.StatusCreated, rec3Auto.Code, "body: %s", rec3Auto.Body.String())
+	var resp3 CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec3Auto.Body.Bytes(), &resp3))
+	agent3ID := resp3.Agent.ID
+
+	patch3Fail := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent3ID, map[string]any{
+		"suspendPolicy": store.SuspendPolicyNever,
+	})
+	require.Equal(t, http.StatusTooManyRequests, patch3Fail.Code, "body: %s", patch3Fail.Body.String())
+
+	// 5. Clear flag on P1 row via PATCH never->auto -> frees slot (1/2) -> PATCH agent 3 succeeds!
+	patchP1Clear := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+p1Agent.ID, map[string]any{
+		"suspendPolicy": store.SuspendPolicyAuto,
+	})
+	require.Equal(t, http.StatusOK, patchP1Clear.Code, "body: %s", patchP1Clear.Body.String())
+
+	patch3OK := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent3ID, map[string]any{
+		"suspendPolicy": store.SuspendPolicyNever,
+	})
+	require.Equal(t, http.StatusOK, patch3OK.Code, "body: %s", patch3OK.Body.String())
+	assert.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, agent3ID))
+
+	// 6. Soft-delete agent 3 -> releases never-suspend slot (1/2).
+	del3 := doRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/agents/"+agent3ID, nil)
+	require.Equal(t, http.StatusNoContent, del3.Code, "body: %s", del3.Body.String())
+	assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, agent3ID))
+
+	// Re-flag p1Agent to fill the cap back to 2/2.
+	patchP1Set := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+p1Agent.ID, map[string]any{
+		"suspendPolicy": store.SuspendPolicyNever,
+	})
+	require.Equal(t, http.StatusOK, patchP1Set.Code, "body: %s", patchP1Set.Body.String())
+
+	// 7. Restore soft-deleted flagged agent 3 while at cap (2/2) -> 409 Conflict!
+	restoreFail := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+agent3ID+"/restore", nil)
+	require.Equal(t, http.StatusConflict, restoreFail.Code, "body: %s", restoreFail.Body.String())
+	assert.Contains(t, restoreFail.Body.String(), store.LimitMaxNeverSuspendAgentsPerProject)
+
+	// 8. Clear flag on agent 2 (1/2) -> restore agent 3 now succeeds (200) and re-reserves!
+	patch2Clear := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent2ID, map[string]any{
+		"suspendPolicy": store.SuspendPolicyAuto,
+	})
+	require.Equal(t, http.StatusOK, patch2Clear.Code, "body: %s", patch2Clear.Body.String())
+	assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, agent2ID))
+
+	restoreOK := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+agent3ID+"/restore", nil)
+	require.Equal(t, http.StatusOK, restoreOK.Code, "body: %s", restoreOK.Body.String())
+	assert.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, agent3ID))
+}
+
+func TestNeverSuspend_ExistingAgentEnvGatherRecreate(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	setNeverSuspendExperiment(t, srv, true)
+
+	ownerID := tid("ns-eg-owner")
+	createTestUserWithRole(t, s, ownerID, "ns-eg-owner@test.com", store.UserRoleMember, store.SystemRoleHubMember)
+	owner, err := s.GetUser(ctx, ownerID)
+	require.NoError(t, err)
+
+	projectID := tid("ns-eg-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "NS EG Project", Slug: "ns-eg-project",
+		GitRemote: "https://github.com/example/ns-eg.git",
+		OwnerID:   ownerID, CreatedBy: ownerID,
+	}))
+	createTestUserWithProjectRole(t, s, ownerID, owner.Email, projectID, store.ProjectRoleMember)
+
+	brokerID := tid("ns-eg-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "NS EG Broker", Slug: "ns-eg-broker", Status: store.BrokerStatusOnline,
+		CreatedBy: ownerID,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS EG Broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	srv.SetDispatcher(&createAgentDispatcher{})
+
+	t.Run("non-env-gather mismatch message points at PATCH", func(t *testing.T) {
+		rec1 := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-eg-msg",
+			"projectId":     projectID,
+			"provisionOnly": true,
+		})
+		require.Equal(t, http.StatusCreated, rec1.Code)
+
+		rec2 := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-eg-msg",
+			"projectId":     projectID,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusConflict, rec2.Code)
+		assert.Contains(t, rec2.Body.String(), "PATCH")
+	})
+
+	t.Run("provisioning + GatherEnv honors auto->never and reserves quota", func(t *testing.T) {
+		rec1 := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-eg-a2n",
+			"projectId":     projectID,
+			"provisionOnly": true,
+		})
+		require.Equal(t, http.StatusCreated, rec1.Code)
+		var resp1 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		// Move to provisioning phase (the env-gather recreate precondition).
+		require.NoError(t, s.UpdateAgentStatus(ctx, resp1.Agent.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseProvisioning),
+		}))
+
+		rec2 := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-eg-a2n",
+			"projectId":     projectID,
+			"gatherEnv":     true,
+			"provisionOnly": true,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusCreated, rec2.Code, "body: %s", rec2.Body.String())
+		var resp2 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.NotEqual(t, resp1.Agent.ID, resp2.Agent.ID, "env-gather recreate creates a fresh row")
+		assert.Equal(t, store.SuspendPolicyNever, resp2.Agent.SuspendPolicy)
+		assert.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp2.Agent.ID))
+	})
+
+	t.Run("provisioning + GatherEnv honors never->(omitted) and releases old quota", func(t *testing.T) {
+		rec1 := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-eg-n2a",
+			"projectId":     projectID,
+			"provisionOnly": true,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusCreated, rec1.Code)
+		var resp1 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		require.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID))
+		require.NoError(t, s.UpdateAgentStatus(ctx, resp1.Agent.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseProvisioning),
+		}))
+
+		rec2 := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-eg-n2a",
+			"projectId":     projectID,
+			"gatherEnv":     true,
+			"provisionOnly": true,
+		})
+		require.Equal(t, http.StatusCreated, rec2.Code, "body: %s", rec2.Body.String())
+		var resp2 CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.Equal(t, store.SuspendPolicyAuto, resp2.Agent.SuspendPolicy)
+		assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID))
+		assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp2.Agent.ID))
+	})
+}
+
+func TestNeverSuspend_FilterQueryAndMetric(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("ns-fm-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "NS FM Project", Slug: "ns-fm-project",
+		GitRemote: "https://github.com/example/ns-fm.git",
+		OwnerID:   DevUserID, CreatedBy: DevUserID,
+	}))
+
+	aRunningNever := &store.Agent{
+		ID: tid("ns-fm-run-never"), Slug: "ns-fm-run-never", Name: "ns-fm-run-never",
+		ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+		RuntimeBrokerID: "broker-1", Phase: string(state.PhaseRunning), SuspendPolicy: store.SuspendPolicyNever,
+	}
+	aStoppedNever := &store.Agent{
+		ID: tid("ns-fm-stop-never"), Slug: "ns-fm-stop-never", Name: "ns-fm-stop-never",
+		ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+		RuntimeBrokerID: "broker-1", Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+	}
+	aRunningAuto := &store.Agent{
+		ID: tid("ns-fm-run-auto"), Slug: "ns-fm-run-auto", Name: "ns-fm-run-auto",
+		ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+		RuntimeBrokerID: "broker-1", Phase: string(state.PhaseRunning), SuspendPolicy: store.SuspendPolicyAuto,
+	}
+	require.NoError(t, s.CreateAgent(ctx, aRunningNever))
+	require.NoError(t, s.CreateAgent(ctx, aStoppedNever))
+	require.NoError(t, s.CreateAgent(ctx, aRunningAuto))
+
+	t.Run("filter query suspendPolicy:never and -suspendPolicy:never on global and project endpoints", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q=suspendPolicy:never", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var listResp struct {
+			Agents []store.Agent `json:"agents"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listResp))
+		gotIDs := make([]string, len(listResp.Agents))
+		for i, a := range listResp.Agents {
+			gotIDs[i] = a.ID
+		}
+		assert.ElementsMatch(t, []string{aRunningNever.ID, aStoppedNever.ID}, gotIDs)
+
+		recProj := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/agents?q=-suspendPolicy:never", nil)
+		require.Equal(t, http.StatusOK, recProj.Code, "body: %s", recProj.Body.String())
+		var projList struct {
+			Agents []store.Agent `json:"agents"`
+		}
+		require.NoError(t, json.Unmarshal(recProj.Body.Bytes(), &projList))
+		require.Len(t, projList.Agents, 1)
+		assert.Equal(t, aRunningAuto.ID, projList.Agents[0].ID)
+
+		recInvalid := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q=suspendPolicy:bogus", nil)
+		assert.Equal(t, http.StatusBadRequest, recInvalid.Code)
+	})
+
+	t.Run("metric scion.hub.never_suspend_agents observes running flagged agents when experiment is on", func(t *testing.T) {
+		reader := sdkmetric.NewManualReader()
+		mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+		require.NoError(t, srv.RegisterNeverSuspendMetrics(mp))
+
+		collect := func() []metricdata.DataPoint[int64] {
+			var rm metricdata.ResourceMetrics
+			require.NoError(t, reader.Collect(ctx, &rm))
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					if m.Name == "scion.hub.never_suspend_agents" {
+						if g, ok := m.Data.(metricdata.Gauge[int64]); ok {
+							return g.DataPoints
+						}
+					}
+				}
+			}
+			return nil
+		}
+
+		// Experiment off -> no observations.
+		setNeverSuspendExperiment(t, srv, false)
+		assert.Empty(t, collect())
+
+		// Experiment on -> observes only the 1 running flagged agent.
+		setNeverSuspendExperiment(t, srv, true)
+		_ = experiments.NeverSuspend
+		pts := collect()
+		require.Len(t, pts, 1)
+		assert.Equal(t, int64(1), pts[0].Value)
+		pVal, pOK := pts[0].Attributes.Value("project")
+		bVal, bOK := pts[0].Attributes.Value("runtime_broker")
+		assert.True(t, pOK)
+		assert.True(t, bOK)
+		assert.Equal(t, projectID, pVal.AsString())
+		assert.Equal(t, "broker-1", bVal.AsString())
+	})
+}
