@@ -1403,6 +1403,9 @@ func reprovisionEmptyPerAgentPreflight(ctx context.Context, projectDir, agentNam
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	if opts.WorkspaceSource == api.WorkspaceSourceMoveBundle && !MoveBundleRuntimeSupported(m.runtimeName()) {
+		return nil, fmt.Errorf("move-bundle workspace is not supported on runtime %q", m.runtimeName())
+	}
 	// A create over a legacy agent directory no agent owns is refused
 	// before anything runs. A project dir that does not resolve fails here
 	// too (fail closed), as GetAgent would.
@@ -2280,6 +2283,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// Bundle move target provision (design §3.5 step 7): create an empty
 		// workspace directory (no clone, no worktree, no empty-repo init) so
 		// move-bundle/import can populate it before the container starts.
+		if rtName := agentRuntimeFromContext(ctx); !MoveBundleRuntimeSupported(rtName) {
+			return "", "", nil, fmt.Errorf("move-bundle workspace is not supported on runtime %q", rtName)
+		}
 		if workspace != "" {
 			return "", "", nil, fmt.Errorf("move-bundle workspace does not take a workspace path (got %q)", workspace)
 		}

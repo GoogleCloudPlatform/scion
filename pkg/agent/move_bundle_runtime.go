@@ -19,13 +19,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
-	"path"
 	"path/filepath"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -35,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/homeprep"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
@@ -84,7 +82,7 @@ type MoveBundleRuntime interface {
 
 	// ResolveDirs resolves the host-side agent state dir, workspace dir, and
 	// home dir for precheck, export, import, and commit.
-	ResolveDirs(ctx context.Context, in MoveBundleRuntimeInput, forTarget bool) (MoveBundleAgentDirs, error)
+	ResolveDirs(ctx context.Context, in MoveBundleRuntimeInput) (MoveBundleAgentDirs, error)
 }
 
 // MoveBundleRuntimeSupported reports whether runtimeName has a registered
@@ -169,20 +167,15 @@ func CheckMoveBundleSourceDurability(ctx context.Context, in MoveBundleRuntimeIn
 }
 
 // ResolveMoveBundleDirsForRuntime resolves the host-side agent state dir,
-// workspace dir, and $HOME dir for in.RuntimeName.
-func ResolveMoveBundleDirsForRuntime(ctx context.Context, in MoveBundleRuntimeInput, forTarget bool) (MoveBundleAgentDirs, error) {
+// workspace dir, and $HOME dir for in.RuntimeName. Fails closed with an error
+// when no MoveBundleRuntime is registered for in.RuntimeName so an unsupported
+// runtime never silently falls back to broker-local directories.
+func ResolveMoveBundleDirsForRuntime(ctx context.Context, in MoveBundleRuntimeInput) (MoveBundleAgentDirs, error) {
 	rt, ok := lookupMoveBundleRuntime(in.RuntimeName)
 	if !ok {
-		// Fall back to broker-local resolution for unknown runtimes (preserving
-		// Phase 1 behavior for tests/callers that resolve dirs without durability).
-		return ResolveMoveBundleAgentDirs(ctx, in.RuntimeName, api.StartOptions{
-			Name:         in.AgentSlug,
-			ProjectPath:  in.ProjectPath,
-			HubProjectID: in.ProjectID,
-			BrokerMode:   in.BrokerMode,
-		})
+		return MoveBundleAgentDirs{}, fmt.Errorf("move-bundle runtime %q is not supported", in.RuntimeName)
 	}
-	return rt.ResolveDirs(ctx, in, forTarget)
+	return rt.ResolveDirs(ctx, in)
 }
 
 // --- Local-disk runtimes (Docker, Podman, Apple Container) ---
@@ -193,7 +186,7 @@ func (localDiskMoveBundleRuntime) CheckSourceDurability(_ context.Context, _ Mov
 	return MoveBundleDurability{Durable: true}, nil
 }
 
-func (localDiskMoveBundleRuntime) ResolveDirs(ctx context.Context, in MoveBundleRuntimeInput, _ bool) (MoveBundleAgentDirs, error) {
+func (localDiskMoveBundleRuntime) ResolveDirs(ctx context.Context, in MoveBundleRuntimeInput) (MoveBundleAgentDirs, error) {
 	return ResolveMoveBundleAgentDirs(ctx, in.RuntimeName, api.StartOptions{
 		Name:         in.AgentSlug,
 		ProjectPath:  in.ProjectPath,
@@ -213,7 +206,6 @@ const (
 	k8sMissingIdentityReason     = "agent ID and project ID are required for Kubernetes NFS bundle moves"
 	k8sHomeShareMismatchReason   = "recorded NFS home share is not configured on this broker"
 	k8sHomeRecordCorruptedReason = "agent home storage record is unreadable"
-	k8sHomeUnreadableReason      = "broker lacks read permission on source NFS home"
 )
 
 func (kubernetesMoveBundleRuntime) CheckSourceDurability(ctx context.Context, in MoveBundleRuntimeInput) (MoveBundleDurability, error) {
@@ -255,31 +247,23 @@ func (kubernetesMoveBundleRuntime) CheckSourceDurability(ctx context.Context, in
 	}
 
 	// 4. Verify agentID/projectID and that the recorded NFS home share is
-	//    configured and mounted on this broker.
+	//    configured and mounted on this broker. Readability of individual
+	//    files is checked during the bounded, excluder-filtered Estimate walk
+	//    so excluded caches are skipped and entry/byte limits are enforced.
 	if !shareddirs.ValidProjectID(in.ProjectID) || !validHomeAgentID(in.AgentID, in.AgentSlug) {
 		return MoveBundleDurability{Durable: false, Reason: k8sMissingIdentityReason}, nil
 	}
-	homeDir, _, err := resolveK8sNFSHomeDir(ctx, rec, in.ProjectID, in.AgentSlug, in.AgentID)
-	if err != nil {
+	if _, _, _, err := resolveK8sNFSHomeDir(ctx, rec, in.ProjectID, in.AgentSlug, in.AgentID); err != nil {
 		if errors.Is(err, errK8sNFSHomeNotMounted) {
 			return MoveBundleDurability{Durable: false, Reason: k8sNFSNotMountedReason}, nil
 		}
 		return MoveBundleDurability{Durable: false, Reason: k8sHomeShareMismatchReason}, nil
 	}
 
-	// 5. Verify the broker can actually open and read non-excluded regular
-	//    files in the NFS home leaf (detects root-squash / uid mismatch on
-	//    pod-owned 0600 files before Stop).
-	if readErr := checkK8sNFSHomeReadable(homeDir); readErr != nil {
-		if errors.Is(readErr, errK8sNFSHomeUnreadable) {
-			return MoveBundleDurability{Durable: false, Reason: k8sHomeUnreadableReason}, nil
-		}
-	}
-
 	return MoveBundleDurability{Durable: true}, nil
 }
 
-func (kubernetesMoveBundleRuntime) ResolveDirs(ctx context.Context, in MoveBundleRuntimeInput, _ bool) (MoveBundleAgentDirs, error) {
+func (kubernetesMoveBundleRuntime) ResolveDirs(ctx context.Context, in MoveBundleRuntimeInput) (MoveBundleAgentDirs, error) {
 	agentDir, err := resolveK8sBrokerAgentDir(ctx, in)
 	if err != nil {
 		return MoveBundleAgentDirs{}, err
@@ -309,7 +293,7 @@ func (kubernetesMoveBundleRuntime) ResolveDirs(ctx context.Context, in MoveBundl
 	if rec == nil || rec.Backend != config.HomeStorageBackendNFS {
 		return MoveBundleAgentDirs{}, fmt.Errorf("kubernetes move-bundle requires HomeStorageBackend=%q", config.HomeStorageBackendNFS)
 	}
-	homeDir, _, err := resolveK8sNFSHomeDir(ctx, rec, in.ProjectID, in.AgentSlug, in.AgentID)
+	_, homeDir, _, err := resolveK8sNFSHomeDir(ctx, rec, in.ProjectID, in.AgentSlug, in.AgentID)
 	if err != nil {
 		return MoveBundleAgentDirs{}, err
 	}
@@ -331,71 +315,7 @@ func (kubernetesMoveBundleRuntime) ResolveDirs(ctx context.Context, in MoveBundl
 	}, nil
 }
 
-var (
-	errK8sNFSHomeNotMounted = errors.New("NFS home export is not mounted on this broker")
-	errK8sNFSHomeUnreadable = errors.New("NFS home contains files unreadable by this broker")
-)
-
-// checkK8sNFSHomeReadable probes whether the broker process can open homeDir
-// and read its non-excluded regular files. Because bundle.Estimate is
-// stat-only, this check catches root-squash or uid-mismatch EACCES on
-// pod-owned 0600 files before Stop. A missing homeDir returns nil so precheck
-// still answers 404.
-func checkK8sNFSHomeReadable(homeDir string) error {
-	root, err := os.OpenRoot(homeDir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		if errors.Is(err, fs.ErrPermission) {
-			return errK8sNFSHomeUnreadable
-		}
-		return err
-	}
-	defer func() { _ = root.Close() }()
-
-	excludes := runtime.PortableHomeExcludes(runtime.RunConfig{})
-	return fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			if errors.Is(walkErr, fs.ErrPermission) {
-				return errK8sNFSHomeUnreadable
-			}
-			return nil
-		}
-		if rel == "." {
-			return nil
-		}
-		if k8sHomeRelExcluded(rel, excludes) {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if d.Type().IsRegular() {
-			f, _, openErr := rootopen.OpenRegularForRead(root, rel, nil)
-			if openErr != nil {
-				if errors.Is(openErr, fs.ErrPermission) {
-					return errK8sNFSHomeUnreadable
-				}
-				return nil
-			}
-			_ = f.Close()
-		}
-		return nil
-	})
-}
-
-func k8sHomeRelExcluded(rel string, excludes []string) bool {
-	if runtime.IsHomeTempName(path.Base(rel)) {
-		return true
-	}
-	for _, ex := range excludes {
-		if rel == ex || strings.HasPrefix(rel, ex+"/") {
-			return true
-		}
-	}
-	return false
-}
+var errK8sNFSHomeNotMounted = errors.New("NFS home export is not mounted on this broker")
 
 func resolveK8sBrokerAgentDir(ctx context.Context, in MoveBundleRuntimeInput) (string, error) {
 	projectDir, err := config.GetResolvedProjectDir(in.ProjectPath)
@@ -456,43 +376,43 @@ func k8sResolveNFSWorkspaceBackend(ctx context.Context, projectPath, projectID, 
 	return "nfs", resolvedHostBase, rel, owner, nil
 }
 
-// resolveK8sNFSHomeDir resolves the host-side NFS home leaf directory
-// (<homeHostBase>/<subPathRoot>/<projectID>/agents/<slug>/home-<agentID>) and
-// its parent export agent dir using the exact same homeShareLayout and
+// resolveK8sNFSHomeDir resolves the host-side NFS home export base, the NFS
+// home leaf directory (<resolvedHomeBase>/<subPathRoot>/<projectID>/agents/<slug>/home-<agentID>),
+// and its parent export agent dir using the exact same homeShareLayout and
 // runtime.NFSHomeSubPaths helpers that resolveHomeStorage and
 // prepareHomeStorage use.
-func resolveK8sNFSHomeDir(ctx context.Context, rec *homeStorageRecord, projectID, agentSlug, agentID string) (homeDir, homeExportAgentDir string, err error) {
+func resolveK8sNFSHomeDir(ctx context.Context, rec *homeStorageRecord, projectID, agentSlug, agentID string) (resolvedHomeBase, homeDir, homeExportAgentDir string, err error) {
 	gs, err := loadHomeStorageSettings(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("load global settings for NFS home: %w", err)
+		return "", "", "", fmt.Errorf("load global settings for NFS home: %w", err)
 	}
 	hl, err := homeShareLayout(gs, "")
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if hl.Share.ID != rec.ShareID || hl.Share.PVName != rec.PVClaimName {
-		return "", "", fmt.Errorf("recorded home share %s (%s) does not match configured share %s (%s)",
+		return "", "", "", fmt.Errorf("recorded home share %s (%s) does not match configured share %s (%s)",
 			rec.ShareID, rec.PVClaimName, hl.Share.ID, hl.Share.PVName)
 	}
 	info, err := os.Stat(hl.HostBase)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", "", fmt.Errorf("%w: %s", errK8sNFSHomeNotMounted, hl.HostBase)
+			return "", "", "", fmt.Errorf("%w: %s", errK8sNFSHomeNotMounted, hl.HostBase)
 		}
-		return "", "", fmt.Errorf("stat NFS home export %s: %w", hl.HostBase, err)
+		return "", "", "", fmt.Errorf("stat NFS home export %s: %w", hl.HostBase, err)
 	}
 	if !info.IsDir() {
-		return "", "", fmt.Errorf("%w: %s is not a directory", errK8sNFSHomeNotMounted, hl.HostBase)
+		return "", "", "", fmt.Errorf("%w: %s is not a directory", errK8sNFSHomeNotMounted, hl.HostBase)
 	}
-	resolvedHomeBase, err := filepath.EvalSymlinks(hl.HostBase)
+	resolvedHomeBase, err = filepath.EvalSymlinks(hl.HostBase)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve NFS home export %s: %w", hl.HostBase, err)
+		return "", "", "", fmt.Errorf("resolve NFS home export %s: %w", hl.HostBase, err)
 	}
 	agentDirRel, homeRel, err := runtime.NFSHomeSubPaths(rec.SubPathRoot, projectID, agentSlug, agentID)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return filepath.Join(resolvedHomeBase, homeRel), filepath.Join(resolvedHomeBase, agentDirRel), nil
+	return resolvedHomeBase, filepath.Join(resolvedHomeBase, homeRel), filepath.Join(resolvedHomeBase, agentDirRel), nil
 }
 
 // provisionK8sMoveBundleTarget prepares the NFS workspace agent dir, empty
@@ -503,7 +423,7 @@ func resolveK8sNFSHomeDir(ctx context.Context, rec *homeStorageRecord, projectID
 // Uses the canonical NFS leaf helpers (ensureNFSLeafClaim for agent dir and
 // workspace; homeLeafOps.EnsureHome for home-<agentID>) so directory modes,
 // setgid bits, ACLs, and group ownership match Start.
-func (m *AgentManager) provisionK8sMoveBundleTarget(ctx context.Context, opts api.StartOptions, _, agentDir, agentHome string) (retErr error) {
+func (m *AgentManager) provisionK8sMoveBundleTarget(ctx context.Context, opts api.StartOptions, _, agentDir, _ string) (retErr error) {
 	if !isKubernetesRuntime(m.runtimeName()) || opts.WorkspaceSource != api.WorkspaceSourceMoveBundle {
 		return nil
 	}
@@ -592,7 +512,7 @@ func (m *AgentManager) provisionK8sMoveBundleTarget(ctx context.Context, opts ap
 	if err != nil || rec == nil {
 		return fmt.Errorf("move-bundle target provision: read recorded home storage: %w", err)
 	}
-	nfsHomeDir, nfsHomeParent, err := resolveK8sNFSHomeDir(ctx, rec, projectID, slug, agentID)
+	resolvedHomeBase, nfsHomeDir, nfsHomeParent, err := resolveK8sNFSHomeDir(ctx, rec, projectID, slug, agentID)
 	if err != nil {
 		return fmt.Errorf("move-bundle target provision: %w", err)
 	}
@@ -612,15 +532,11 @@ func (m *AgentManager) provisionK8sMoveBundleTarget(ctx context.Context, opts ap
 	}
 
 	// Create the home leaf using canonical homeLeafOps.EnsureHome (2771, ACLs
-	// cleared, export gid set).
+	// cleared, export gid set), reusing resolvedHomeBase directly from
+	// resolveK8sNFSHomeDir (C2).
 	homeAgentDirRel, homeRel, err := runtime.NFSHomeSubPaths(rec.SubPathRoot, projectID, slug, agentID)
 	if err != nil {
 		return fmt.Errorf("move-bundle target provision: %w", err)
-	}
-	resolvedHomeBase := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(nfsHomeParent))))
-	// Compute resolvedHomeBase cleanly from nfsHomeParent and homeAgentDirRel.
-	if trimmed, ok := strings.CutSuffix(nfsHomeParent, string(filepath.Separator)+homeAgentDirRel); ok {
-		resolvedHomeBase = trimmed
 	}
 	if err := homeLeafOps.EnsureHome(resolvedHomeBase, homeAgentDirRel, filepath.Base(homeRel), homeStorageGID); err != nil {
 		return fmt.Errorf("move-bundle target provision: create NFS home leaf: %w", err)
@@ -643,107 +559,15 @@ func (m *AgentManager) provisionK8sMoveBundleTarget(ctx context.Context, opts ap
 		}
 	}
 
-	// 3. Copy the provision-rendered home files into the NFS home leaf (applying
-	//    home-transfer exclusions, N6) and chown to K8sContainerUID:homeStorageGID.
-	if err := copyProvisionedHomeToNFSLeaf(agentHome, nfsHomeDir); err != nil {
-		return fmt.Errorf("move-bundle target provision: render NFS home leaf: %w", err)
-	}
-
-	// 4. Write the homeprep seeded sentinel so the target pod's home-prepare
-	//    init container chooses "seed-over" and keeps the imported home files.
+	// 3. Write the homeprep seeded sentinel so the target pod's home-prepare
+	//    init container chooses "seed-over" and transfers the broker's
+	//    rendered home over the imported source files at Start (single
+	//    canonical home-seeding path, C1).
 	if err := writeMoveBundleNFSHomeSentinel(nfsHomeDir, agentID); err != nil {
 		return fmt.Errorf("move-bundle target provision: write NFS home sentinel: %w", err)
 	}
 
 	return nil
-}
-
-// copyProvisionedHomeToNFSLeaf copies regular files, directories, and internal
-// symlinks rendered by ProvisionAgent in srcHome into dstHome using os.Root
-// and pkg/util/rootopen so writes stay strictly inside dstHome. Applies the
-// shared PortableHomeExcludes + IsHomeTempName filter (N6) so no secret can
-// ever reach NFS, and chowns created entries to K8sContainerUID:homeStorageGID.
-func copyProvisionedHomeToNFSLeaf(srcHome, dstHome string) error {
-	srcRoot, err := os.OpenRoot(srcHome)
-	if err != nil {
-		return fmt.Errorf("open provisioned home: %w", err)
-	}
-	defer func() { _ = srcRoot.Close() }()
-
-	dstRoot, err := os.OpenRoot(dstHome)
-	if err != nil {
-		return fmt.Errorf("open NFS home leaf: %w", err)
-	}
-	defer func() { _ = dstRoot.Close() }()
-
-	excludes := runtime.PortableHomeExcludes(runtime.RunConfig{})
-	uid := int(runtime.K8sContainerUID)
-	gid := homeStorageGID
-
-	return fs.WalkDir(srcRoot.FS(), ".", func(rel string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if rel == "." {
-			return nil
-		}
-		if k8sHomeRelExcluded(rel, excludes) {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		mode := info.Mode()
-		dstPath := filepath.Join(dstHome, filepath.FromSlash(rel))
-		switch {
-		case mode.IsDir():
-			perm := mode.Perm() & 0o777
-			if perm == 0 {
-				perm = 0o755
-			}
-			if err := dstRoot.Mkdir(rel, perm); err != nil && !errors.Is(err, fs.ErrExist) {
-				return err
-			}
-			lchownBestEffort(dstPath, uid, gid)
-		case mode&fs.ModeSymlink != 0:
-			target, err := srcRoot.Readlink(rel)
-			if err != nil {
-				return err
-			}
-			if err := dstRoot.Symlink(target, rel); err != nil {
-				return err
-			}
-			lchownBestEffort(dstPath, uid, gid)
-		case mode.IsRegular():
-			in, _, err := rootopen.OpenRegularForRead(srcRoot, rel, info)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = in.Close() }()
-			perm := mode.Perm() & 0o777
-			if perm == 0 {
-				perm = 0o644
-			}
-			out, err := rootopen.OpenFileForWrite(dstRoot, rel, uint32(perm), false)
-			if err != nil {
-				return err
-			}
-			_, copyErr := io.Copy(out, in)
-			closeErr := out.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-			lchownBestEffort(dstPath, uid, gid)
-		}
-		return nil
-	})
 }
 
 func lchownBestEffort(path string, uid, gid int) {
@@ -797,28 +621,6 @@ func writeMoveBundleNFSHomeSentinel(nfsHomeDir, agentID string) error {
 	return nil
 }
 
-// isMoveBundleStagingEntry reports whether name is a move-bundle sibling
-// staging directory ".<base>.bundle-<32hex>".
-func isMoveBundleStagingEntry(name string) bool {
-	if !strings.HasPrefix(name, ".") {
-		return false
-	}
-	idx := strings.LastIndex(name, ".bundle-")
-	if idx <= 1 {
-		return false
-	}
-	suffix := name[idx+len(".bundle-"):]
-	if len(suffix) != 32 {
-		return false
-	}
-	for _, c := range suffix {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
 // purgeMoveBundleStagingEntries removes any move-bundle sibling staging
 // directories (.<base>.bundle-<32hex>) inside dir using os.Root.
 func purgeMoveBundleStagingEntries(dir string) error {
@@ -836,7 +638,7 @@ func purgeMoveBundleStagingEntries(dir string) error {
 	}
 	var errs []error
 	for _, e := range entries {
-		if isMoveBundleStagingEntry(e.Name()) {
+		if bundle.IsAnyStageName(e.Name()) {
 			if rmErr := root.RemoveAll(e.Name()); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 				errs = append(errs, rmErr)
 			}

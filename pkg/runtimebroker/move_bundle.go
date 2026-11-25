@@ -226,12 +226,12 @@ func (s *Server) moveBundleRuntimeInput(runtimeName, agentSlug, agentID, project
 	}, nil
 }
 
-func (s *Server) resolveMoveBundleDirs(ctx context.Context, runtimeName, agentSlug, agentID, projectID, projectPath, projectSlug string, forTarget bool) (moveBundleDirs, error) {
+func (s *Server) resolveMoveBundleDirs(ctx context.Context, runtimeName, agentSlug, agentID, projectID, projectPath, projectSlug string) (moveBundleDirs, error) {
 	in, err := s.moveBundleRuntimeInput(runtimeName, agentSlug, agentID, projectID, projectPath, projectSlug)
 	if err != nil {
 		return moveBundleDirs{}, err
 	}
-	return agent.ResolveMoveBundleDirsForRuntime(ctx, in, forTarget)
+	return agent.ResolveMoveBundleDirsForRuntime(ctx, in)
 }
 
 // isMoveBundleAgentRunning reports whether the runtime currently lists the
@@ -386,6 +386,9 @@ func precheckUnportableReason(rootName string, err error) string {
 	if errors.As(err, &unportableHome) {
 		return fmt.Sprintf("source %s contains an unportable symlink or hardlink", rootName)
 	}
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Sprintf("broker lacks read permission on source %s", rootName)
+	}
 	return fmt.Sprintf("source %s cannot be bundled", rootName)
 }
 
@@ -467,7 +470,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	dirs, err := agent.ResolveMoveBundleDirsForRuntime(r.Context(), rtIn, false)
+	dirs, err := agent.ResolveMoveBundleDirsForRuntime(r.Context(), rtIn)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Move-bundle precheck: failed to resolve agent directories",
 			"agent_id", id, "error", err)
@@ -504,7 +507,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	wsEst, wsErr := estimateMoveBundleRoot(r.Context(), dirs.WorkspaceDir, wsEx, req.Limits.WorkspaceLimits())
+	wsEst, wsErr := estimateMoveBundleRoot(r.Context(), dirs.WorkspaceDir, wsEx, req.Limits.WorkspaceLimits(), false)
 	if wsErr != nil {
 		if errors.Is(wsErr, fs.ErrNotExist) {
 			NotFound(w, "Agent workspace")
@@ -533,7 +536,12 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.HomeDir, homeEx, req.Limits.HomeLimits())
+	// Probe readability during the bounded, excluder-filtered Estimate walk
+	// when home lives on a shared/NFS export with a distinct pod owner (e.g.
+	// Kubernetes NFS home, R2), so excluded caches are skipped and entry/byte
+	// limits bound the walk.
+	checkHomeReadable := dirs.HomeOwner.UID > 0
+	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.HomeDir, homeEx, req.Limits.HomeLimits(), checkHomeReadable)
 	if homeErr != nil {
 		if errors.Is(homeErr, fs.ErrNotExist) {
 			NotFound(w, "Agent home")
@@ -559,14 +567,16 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func estimateMoveBundleRoot(ctx context.Context, dir string, ex bundle.Excluder, lim bundle.Limits) (api.MoveBundleRootEstimate, error) {
+func estimateMoveBundleRoot(ctx context.Context, dir string, ex bundle.Excluder, lim bundle.Limits, checkReadable bool) (api.MoveBundleRootEstimate, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return api.MoveBundleRootEstimate{}, err
 	}
 	defer func() { _ = root.Close() }()
 
-	res, err := bundle.Estimate(ctx, root, ex, lim)
+	res, err := bundle.EstimateWithOptions(ctx, root, ex, lim, bundle.EstimateOptions{
+		CheckReadable: checkReadable,
+	})
 	est := api.MoveBundleRootEstimate{
 		Bytes:   res.Bytes,
 		Entries: res.Entries,
@@ -662,7 +672,7 @@ func (s *Server) handleMoveBundleExportStart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	dirs, err := agent.ResolveMoveBundleDirsForRuntime(r.Context(), rtIn, false)
+	dirs, err := agent.ResolveMoveBundleDirsForRuntime(r.Context(), rtIn)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Move-bundle export: failed to resolve agent directories",
 			"agent_id", id, "error", err)
@@ -986,7 +996,6 @@ func (s *Server) handleMoveBundleImportStart(w http.ResponseWriter, r *http.Requ
 		effProjectID,
 		firstNonEmpty(req.ProjectPath, r.URL.Query().Get("projectPath")),
 		firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug")),
-		true,
 	)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Move-bundle import: failed to resolve agent directories",

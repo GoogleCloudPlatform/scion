@@ -23,20 +23,16 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // Target-side staging, commit, and imported marker logic for move-bundle
 // imports (design §3.5 "Target commit", §3.8).
 
-const (
-	moveBundleStageInfix     = ".bundle-"
-	moveBundleStageSuffixLen = 32
-	moveBundleMarkerPrefix   = ".scion-move-bundle-"
-)
+const moveBundleMarkerPrefix = ".scion-move-bundle-"
 
 // errMoveBundleCommitCrash is returned by a test crash hook to simulate a
 // process abort mid-commit (skipping cleanup so .bundle-* siblings remain).
@@ -57,11 +53,11 @@ func moveBundleCommitHook(step string) error {
 // newMoveBundleStageName returns a fresh sibling staging directory name
 // ".<base>.bundle-<32hex>" for target directory base name base.
 func newMoveBundleStageName(base string) (string, error) {
-	var b [moveBundleStageSuffixLen / 2]byte
+	var b [bundle.StageSuffixLen / 2]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	return "." + base + moveBundleStageInfix + hex.EncodeToString(b[:]), nil
+	return "." + base + bundle.StageInfix + hex.EncodeToString(b[:]), nil
 }
 
 // moveBundleImportedMarkerName returns ".scion-move-bundle-<rid>".
@@ -319,14 +315,5 @@ func chownMoveBundleTree(rootDir string, uid, gid int) error {
 
 // isMoveBundleStageName reports whether name is ".<base>.bundle-<32hex>".
 func isMoveBundleStageName(name, base string) bool {
-	suffix, ok := strings.CutPrefix(name, "."+base+moveBundleStageInfix)
-	if !ok || len(suffix) != moveBundleStageSuffixLen {
-		return false
-	}
-	for _, c := range suffix {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
+	return bundle.IsStageName(name, base)
 }

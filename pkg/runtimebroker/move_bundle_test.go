@@ -526,7 +526,8 @@ server:
 		require.NoError(t, err)
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchDownloadURLs: func(_ context.Context, _, _, rid string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
 				var parts []api.MoveBundleDownloadPartURL
 				for rootName, rm := range st.Manifest.Roots {
@@ -681,7 +682,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchDownloadURLs: func(_ context.Context, _, _, rid string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
 				var parts []api.MoveBundleDownloadPartURL
 				for rootName, rm := range st.Manifest.Roots {
@@ -928,7 +930,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		writeTestMoveMarker(t, dstAgentDir, "rid-refresh")
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchDownloadURLs: func(_ context.Context, _, _, _ string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
 				gen := fetchCount.Add(1)
 				expSec := int64(900)

@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // Write streams root into a gzip-compressed tar archive split into parts of at
@@ -183,10 +184,26 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 	}, nil
 }
 
+// EstimateOptions configures optional checks performed during EstimateWithOptions.
+type EstimateOptions struct {
+	// CheckReadable, when true, verifies that every non-excluded regular file
+	// encountered within limits can be opened for reading via rootopen, failing
+	// closed with fs.ErrPermission on unreadable files (e.g. pod-owned 0600
+	// files on root-squash NFS exports) without exceeding Limits or walking
+	// excluded subtrees.
+	CheckReadable bool
+}
+
 // Estimate performs a stat-only walk of root using the same excluder, symlink
 // rules, and limits as Write, stopping early with *ErrLimitExceeded if any
 // bound is crossed.
 func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (EstimateResult, error) {
+	return EstimateWithOptions(ctx, root, ex, lim, EstimateOptions{})
+}
+
+// EstimateWithOptions performs a bounded walk of root using the same excluder,
+// symlink rules, and limits as Write, with optional extra checks from opts.
+func EstimateWithOptions(ctx context.Context, root *os.Root, ex Excluder, lim Limits, opts EstimateOptions) (EstimateResult, error) {
 	if root == nil {
 		return EstimateResult{}, errors.New("bundle estimate: root is nil")
 	}
@@ -232,6 +249,13 @@ func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (Esti
 			}
 			if res.Bytes+info.Size() > lim.MaxBytes {
 				return &ErrLimitExceeded{Field: "bytes", Got: res.Bytes + info.Size(), Max: lim.MaxBytes}
+			}
+			if opts.CheckReadable {
+				f, _, openErr := rootopen.OpenRegularForRead(root, filepath.FromSlash(rel), nil)
+				if openErr != nil {
+					return fmt.Errorf("read %s: %w", rel, openErr)
+				}
+				_ = f.Close()
 			}
 			res.Entries++
 			res.Bytes += info.Size()

@@ -300,39 +300,54 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 		if stageErr := purgeMoveBundleStagingEntries(checkedDir); stageErr != nil {
 			return fail(fmt.Errorf("purge move-bundle staging in %s: %w", checkedDir, stageErr))
 		}
+		// Purge moved-aside workspaces synchronously during move rollback so
+		// the single final cleanupEmptyMarkedExportAgentDir pass can remove
+		// agents/<slug> deterministically for a clean retry.
+		if purgeErr := provision.PurgeRemovedAgentWorkspaces(checkedDir); purgeErr != nil {
+			return fail(fmt.Errorf("purge removed workspace in %s: %w", checkedDir, purgeErr))
+		}
 	}
 	if !removed {
 		d.Outcome = projectfs.OutcomeAbsent
 		return d, checkedDir, true
 	}
-	purgeRemovedAgentWorkspaces(checkedDir, projectID, agentName, storageAuditLogger(ctx))
+	if !isRollback {
+		purgeRemovedAgentWorkspaces(checkedDir, projectID, agentName, storageAuditLogger(ctx))
+	}
 	slog.Info("workspace_storage nfs: removed the agent's workspace", "path", d.Path)
 	d.Outcome = projectfs.OutcomeDeleted
 	return d, checkedDir, true
 }
 
-// resolveK8sNFSHomeRollbackPaths resolves the home share's agent directory and
-// home-<agentID> leaf path for K8s rollback marker checks and removal,
-// preferring the SubPathRoot recorded in home-storage.json when available (N4).
-func resolveK8sNFSHomeRollbackPaths(ctx context.Context, projectID, agentName, hubAgentID string) (exportAgentDir, homeLeafPath string, ok bool, err error) {
+// resolveK8sNFSHomeRollbackPaths resolves the home share's host base, agent
+// directory, and home-<agentID> leaf path for K8s rollback marker checks and
+// removal, preferring the SubPathRoot recorded in home-storage.json when
+// available (N4).
+func resolveK8sNFSHomeRollbackPaths(ctx context.Context, projectID, agentName, hubAgentID string) (resolvedHostBase, exportAgentDir, homeLeafPath string, ok bool, err error) {
 	if !shareddirs.ValidProjectID(projectID) || !validHomeAgentID(hubAgentID, agentName) {
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	gs, err := loadHomeStorageSettings(ctx)
 	if err != nil {
-		return "", "", false, nil
+		slog.Warn("home storage nfs rollback: could not load global settings; skipping NFS home rollback check",
+			"project_id", projectID, "agent", agentName, "error", err)
+		return "", "", "", false, nil
 	}
 	hl, err := homeShareLayout(gs, "")
 	if err != nil {
-		return "", "", false, nil
+		slog.Warn("home storage nfs rollback: could not resolve home share layout; skipping NFS home rollback check",
+			"project_id", projectID, "agent", agentName, "error", err)
+		return "", "", "", false, nil
 	}
 	info, err := os.Stat(hl.HostBase)
 	if err != nil || !info.IsDir() {
-		return "", "", false, nil
+		slog.Warn("home storage nfs rollback: home share mount root unavailable; skipping NFS home rollback check",
+			"project_id", projectID, "agent", agentName, "host_base", hl.HostBase, "error", err)
+		return "", "", "", false, nil
 	}
-	resolvedHostBase, err := filepath.EvalSymlinks(hl.HostBase)
+	resolvedHostBase, err = filepath.EvalSymlinks(hl.HostBase)
 	if err != nil {
-		return "", "", false, err
+		return "", "", "", false, err
 	}
 	subPathRoot := deleteHomeSubPathRootFrom(ctx)
 	if subPathRoot == "" {
@@ -340,9 +355,9 @@ func resolveK8sNFSHomeRollbackPaths(ctx context.Context, projectID, agentName, h
 	}
 	agentDirRel, homeRel, err := runtime.NFSHomeSubPaths(subPathRoot, projectID, agentName, hubAgentID)
 	if err != nil {
-		return "", "", false, err
+		return "", "", "", false, err
 	}
-	return filepath.Join(resolvedHostBase, agentDirRel), filepath.Join(resolvedHostBase, homeRel), true, nil
+	return resolvedHostBase, filepath.Join(resolvedHostBase, agentDirRel), filepath.Join(resolvedHostBase, homeRel), true, nil
 }
 
 // removeK8sNFSAgentHome removes the Kubernetes NFS home leaf (home-<agentID>)
@@ -354,7 +369,7 @@ func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, age
 	if moveID == "" || m.Runtime == nil || !isKubernetesRuntime(m.Runtime.Name()) {
 		return d, "", false
 	}
-	exportAgentDir, homeLeafPath, resolved, err := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
+	resolvedHostBase, exportAgentDir, homeLeafPath, resolved, err := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
 	if err != nil || !resolved {
 		return d, "", false
 	}
@@ -369,13 +384,6 @@ func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, age
 	}
 	if real, err := filepath.EvalSymlinks(exportAgentDir); err != nil || real != exportAgentDir {
 		return fail(fmt.Errorf("home storage nfs: %s is not a plain directory on the export; left in place", exportAgentDir))
-	}
-	// Resolve the hostBase root for agentFilesGuard.
-	gs, _ := loadHomeStorageSettings(ctx)
-	hl, _ := homeShareLayout(gs, "")
-	resolvedHostBase, err := filepath.EvalSymlinks(hl.HostBase)
-	if err != nil {
-		return fail(fmt.Errorf("home storage nfs: resolve host base: %w", err))
 	}
 	checkedDir, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{exportAgentDir}, nil).check(exportAgentDir)
 	if err != nil {
@@ -409,7 +417,8 @@ func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, age
 	return d, checkedDir, true
 }
 
-// cleanupEmptyMarkedExportAgentDir removes MoveMarkerFile and the export agent
+// cleanupEmptyMarkedExportAgentDir removes MoveMarkerFile, lock-release
+// eviction litter (.scion-provision.lock.evict-*), and the export agent
 // directory itself when nothing else remains inside dir, so a rollback delete
 // leaves agents/<slug> absent for a clean retry.
 func cleanupEmptyMarkedExportAgentDir(dir string) {
@@ -423,13 +432,14 @@ func cleanupEmptyMarkedExportAgentDir(dir string) {
 		return
 	}
 	for _, e := range entries {
-		if e.Name() != MoveMarkerFile {
+		name := e.Name()
+		if name != MoveMarkerFile && !strings.HasPrefix(name, ".scion-provision.lock.evict-") {
 			_ = root.Close()
 			return
 		}
 	}
-	if len(entries) == 1 {
-		_ = root.Remove(MoveMarkerFile)
+	for _, e := range entries {
+		_ = root.RemoveAll(e.Name())
 	}
 	_ = root.Close()
 	_ = os.Remove(dir)

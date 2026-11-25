@@ -167,6 +167,7 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		manifest, manifestHash, _ := buildTestBundleParts(t, "rid-expect", "x", "y")
 		dstProject, dstAgentDir, _, _ := newMoveBundleTestAgentDir(t, "dev")
 		dstSrv := newTestServer(t)
+		dstSrv.moveBundle.durabilityRuntime = "docker"
 
 		impReq := api.MoveBundleImportRequest{
 			ReincarnationID: "rid-expect",
@@ -202,7 +203,8 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		writeTestMoveMarker(t, dstAgentDir, "rid-marker")
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchDownloadURLs: func(_ context.Context, _, _, _ string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
 				var parts []api.MoveBundleDownloadPartURL
 				for rootName, rm := range manifest.Roots {
@@ -238,6 +240,7 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 
 		// Repeat import on a fresh server (simulating restart) must be refused with 409.
 		dstSrv2 := newTestServer(t)
+		dstSrv2.moveBundle.durabilityRuntime = "docker"
 		rec2 := doMoveBundleReq(t, dstSrv2, http.MethodPost, "/api/v1/agents/dev/move-bundle/import?projectId=p1", impReq)
 		assert.Equal(t, http.StatusConflict, rec2.Code)
 		assert.Contains(t, rec2.Body.String(), api.BrokerErrCodeMoveBundleAlreadyImported)
@@ -266,7 +269,8 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchDownloadURLs: func(_ context.Context, _, _, _ string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
 				var parts []api.MoveBundleDownloadPartURL
 				for rootName, rm := range manifest.Roots {
@@ -323,6 +327,7 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		canceled := make(chan struct{}, 2)
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
+			durabilityRuntime: "docker",
 			fetchDownloadURLs: func(ctx context.Context, _, _, _ string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
 				select {
 				case entered <- struct{}{}:

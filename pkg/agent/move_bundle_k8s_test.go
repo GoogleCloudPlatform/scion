@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/homeprep"
 	"github.com/stretchr/testify/assert"
@@ -143,7 +144,7 @@ func TestMoveBundle_K8sDurabilityAndResolveDirs(t *testing.T) {
 		assert.True(t, dur.Durable)
 		assert.Empty(t, dur.Reason)
 
-		dirs, err := ResolveMoveBundleDirsForRuntime(context.Background(), in, false)
+		dirs, err := ResolveMoveBundleDirsForRuntime(context.Background(), in)
 		require.NoError(t, err)
 		realHostBase, err := filepath.EvalSymlinks(hostBase)
 		require.NoError(t, err)
@@ -185,50 +186,35 @@ func TestMoveBundle_K8sDurabilityAndResolveDirs(t *testing.T) {
 		assert.Equal(t, k8sNonDurableHomeOnlyReason, dur.Reason)
 	})
 
-	t.Run("K8s NFS source with unreadable 0000 home file fails closed with class-only reason", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("root bypasses 0000 read permissions")
-		}
-		_, hostBase, projectPath := setupK8sNFSFixture(t)
-		slug := "k8s-unreadable"
-		opts := api.StartOptions{
-			Name:         slug,
-			ProjectPath:  projectPath,
-			HubProjectID: k8sTestProjectUUID,
-			BrokerMode:   true,
-		}
-		agentDir, err := provisionAgentStateDir(contextWithAgentRuntime(context.Background(), "kubernetes"), opts)
-		require.NoError(t, err)
-		require.NoError(t, os.MkdirAll(agentDir, 0o755))
-		require.NoError(t, writeHomeStorageRecord(agentDir, homeStorageRecord{
-			Backend:     config.HomeStorageBackendNFS,
-			Leaf:        config.HomeStorageLeafPod,
-			ShareID:     "share-1",
-			PVClaimName: "pv-1",
-			SubPathRoot: "projects",
-		}))
-
-		realHostBase, err := filepath.EvalSymlinks(hostBase)
-		require.NoError(t, err)
-		homeDir := filepath.Join(realHostBase, "projects", k8sTestProjectUUID, "agents", slug, "home-"+k8sTestAgentUUID)
-		require.NoError(t, os.MkdirAll(homeDir, 0o755))
-		unreadableFile := filepath.Join(homeDir, "pod-private.txt")
-		require.NoError(t, os.WriteFile(unreadableFile, []byte("secret"), 0o000))
-		t.Cleanup(func() { _ = os.Chmod(unreadableFile, 0o600) })
-
+	t.Run("unregistered runtime fails closed in ResolveMoveBundleDirsForRuntime and Provision (R1)", func(t *testing.T) {
+		_, _, projectPath := setupK8sNFSFixture(t)
 		in := MoveBundleRuntimeInput{
-			RuntimeName: "kubernetes",
-			AgentSlug:   slug,
+			RuntimeName: "cloudrun",
+			AgentSlug:   "cr-agent",
 			AgentID:     k8sTestAgentUUID,
 			ProjectPath: projectPath,
 			ProjectID:   k8sTestProjectUUID,
 			BrokerMode:  true,
 		}
-		dur, err := CheckMoveBundleSourceDurability(context.Background(), in)
-		require.NoError(t, err)
-		assert.False(t, dur.Durable)
-		assert.Equal(t, "broker lacks read permission on source NFS home", dur.Reason)
-		assert.NotContains(t, dur.Reason, homeDir, "reason must be class-only and never leak host paths")
+		_, err := ResolveMoveBundleDirsForRuntime(context.Background(), in)
+		require.Error(t, err, "unregistered runtime must not fall back to broker-local dirs")
+		assert.Contains(t, err.Error(), "not supported")
+
+		crMgr := NewManager(&runtime.MockRuntime{
+			NameFunc: func() string { return "cloudrun" },
+		}).(*AgentManager)
+		_, err = crMgr.Provision(context.Background(), api.StartOptions{
+			Name:                "cr-agent",
+			ProjectPath:         projectPath,
+			HubProjectID:        k8sTestProjectUUID,
+			BrokerMode:          true,
+			NoAuth:              true,
+			FreshProvision:      true,
+			MoveReincarnationID: "rid-cr-1",
+			WorkspaceSource:     api.WorkspaceSourceMoveBundle,
+		})
+		require.Error(t, err, "move-bundle provision must fail closed on unsupported runtime")
+		assert.Contains(t, err.Error(), "not supported")
 	})
 
 	t.Run("plain K8s without NFS workspace is refused", func(t *testing.T) {
@@ -372,78 +358,39 @@ func TestProvision_K8sNFSMoveBundleTargetAndRollback(t *testing.T) {
 	assert.NoDirExists(t, exportHome, "NFS home leaf must be removed on rollback")
 	assert.NoDirExists(t, wsStage, "workspace .bundle-* staging sibling must be removed on rollback")
 	assert.NoDirExists(t, homeStage, "home .bundle-* staging sibling must be removed on rollback")
+	assert.NoDirExists(t, exportAgentDir, "empty marked export agent dir must be removed in the single final cleanup pass (N3)")
 }
 
 func TestProvision_K8sNFSMoveBundle_DistinctHomeShareUnmarkedLeafSurvivesRollback(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	t.Setenv("SCION_CONFIG_DIR", filepath.Join(tmp, ".scion"))
-
-	mountRoot := filepath.Join(tmp, "nfs-mounts")
-	wsHostBase := filepath.Join(mountRoot, "ws-share")
-	homeHostBase := filepath.Join(mountRoot, "home-share")
-	require.NoError(t, os.MkdirAll(wsHostBase, 0o755))
-	require.NoError(t, os.MkdirAll(homeHostBase, 0o755))
-
-	globalDir := filepath.Join(tmp, ".scion")
-	require.NoError(t, os.MkdirAll(globalDir, 0o755))
-	// Configure workspace storage on ws-share and home storage (project_storage) on distinct home-share.
-	settingsYAML := `schema_version: "1"
-active_profile: gke
-runtimes:
-  kubernetes:
-    type: kubernetes
-profiles:
-  gke:
-    runtime: kubernetes
-server:
-  workspace_storage:
-    backend: nfs
-    nfs:
-      mount_root: ` + mountRoot + `
-      subpath_root: ws-projects
-      shares:
-        - id: ws-share
-          server: 10.0.0.10
-          export: /ws-export
-          pv_name: pv-ws
-  project_storage:
-    backend: nfs
-    homes: nfs
-    homes_options:
-      leaf: pod
-      allow_incomplete_phases: true
-    nfs:
-      mount_root: ` + mountRoot + `
-      subpath_root: homes
-      shares:
-        - id: home-share
-          server: 10.0.0.11
-          export: /home-export
-          pv_name: pv-home
-`
-	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsYAML), 0o644))
-	projectPath := filepath.Join(globalDir, "projects", "demo", ".scion")
-	require.NoError(t, os.MkdirAll(projectPath, 0o755))
-	require.NoError(t, config.InitGlobal(getTestHarnesses()))
-	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsYAML), 0o644))
-
-	realHomeBase, err := filepath.EvalSymlinks(homeHostBase)
+	_, hostBase, projectPath := setupK8sNFSFixture(t)
+	realHostBase, err := filepath.EvalSymlinks(hostBase)
 	require.NoError(t, err)
 	slug := "k8s-distinct"
 	rid := "rid-k8s-distinct-1"
 
-	// Pre-populate an UNMARKED home-<agentID> on the distinct home share.
-	preExistingHome := filepath.Join(realHomeBase, "homes", k8sTestProjectUUID, "agents", slug, "home-"+k8sTestAgentUUID)
+	// Pre-populate an UNMARKED home-<agentID> on a distinct home subpath_root
+	// ("legacy-homes") while workspace uses "projects" (a valid config where
+	// homeParent != wsExportAgentDir).
+	preExistingHomeParent := filepath.Join(realHostBase, "legacy-homes", k8sTestProjectUUID, "agents", slug)
+	preExistingHome := filepath.Join(preExistingHomeParent, "home-"+k8sTestAgentUUID)
 	require.NoError(t, os.MkdirAll(preExistingHome, 0o755))
 	preciousFile := filepath.Join(preExistingHome, "precious.txt")
 	require.NoError(t, os.WriteFile(preciousFile, []byte("do not delete"), 0o600))
+
+	// Also mark the workspace export agent dir with rid so that ONLY the
+	// unmarked distinct home leaf triggers the marker guards in CheckMoveMarkers
+	// and removeK8sNFSAgentHome.
+	wsExportAgentDir := filepath.Join(realHostBase, "projects", k8sTestProjectUUID, "agents", slug)
+	require.NoError(t, os.MkdirAll(wsExportAgentDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(wsExportAgentDir, MoveMarkerFile), []byte(rid+"\n"), 0o600))
 
 	mgr := NewManager(&runtime.MockRuntime{
 		NameFunc: func() string { return "kubernetes" },
 	}).(*AgentManager)
 
-	opts := api.StartOptions{
+	// 1. Provision must fail with ErrMoveWorkspacePresent when a pre-existing
+	//    home-<agentID> or agent dir is present on the export.
+	_, err = mgr.Provision(withNFSHomeExperiment(context.Background()), api.StartOptions{
 		Name:                slug,
 		ProjectPath:         projectPath,
 		HubProjectID:        k8sTestProjectUUID,
@@ -456,41 +403,116 @@ server:
 			"SCION_PROJECT_ID": k8sTestProjectUUID,
 			"SCION_AGENT_ID":   k8sTestAgentUUID,
 		},
-	}
-
-	// Provision must fail because pre-existing home-<agentID> is present.
-	_, err = mgr.Provision(withNFSHomeExperiment(context.Background()), opts)
+	})
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrMoveWorkspacePresent, "provision must fail with ErrMoveWorkspacePresent: %v", err)
 
-	// CheckMoveMarkers must detect the unmarked home leaf and return ErrMoveMarkerMismatch.
-	checkCtx := WithDeleteHubAgentID(context.Background(), k8sTestAgentUUID)
-	_, err = mgr.CheckMoveMarkers(checkCtx, projectPath, k8sTestProjectUUID, k8sTestProjectUUID, slug, slug, rid)
+	// 2. CheckMoveMarkers must inspect the distinct home leaf (homeParent != wsExportAgentDir)
+	//    and return ErrMoveMarkerMismatch naming preExistingHome.
+	checkCtx := WithDeleteHomeSubPathRoot(WithDeleteHubAgentID(context.Background(), k8sTestAgentUUID), "legacy-homes")
+	checkedPaths, err := mgr.CheckMoveMarkers(checkCtx, projectPath, k8sTestProjectUUID, k8sTestProjectUUID, slug, slug, rid)
 	assert.ErrorIs(t, err, ErrMoveMarkerMismatch)
+	assert.Contains(t, checkedPaths, preExistingHome, "CheckMoveMarkers must have checked the distinct home leaf")
 
-	// Even if RemoveNFSAgentFiles is invoked directly for rollback, the unmarked home leaf MUST survive.
+	// 3. RemoveNFSAgentFiles invoked for rollback MUST enter removeK8sNFSAgentHome,
+	//    hit the marker guard, return a TreeAgentHome deletion with ErrMoveMarkerMismatch,
+	//    and leave pre-existing unmarked home-<agentID> intact.
 	rbCtx := WithDeleteMoveReincarnationID(checkCtx, rid)
-	_, err = mgr.RemoveNFSAgentFiles(rbCtx, projectPath, k8sTestProjectUUID, slug)
-	require.NoError(t, err)
+	ds, rmErr := mgr.RemoveNFSAgentFiles(rbCtx, projectPath, k8sTestProjectUUID, slug)
+	assert.ErrorIs(t, rmErr, ErrMoveMarkerMismatch, "rollback must fail on unmarked home leaf")
+
+	var homeDel *projectfs.Deletion
+	for i := range ds {
+		if ds[i].Tree == projectfs.TreeAgentHome {
+			homeDel = &ds[i]
+			break
+		}
+	}
+	require.NotNil(t, homeDel, "RemoveNFSAgentFiles must return a TreeAgentHome deletion record")
+	assert.Equal(t, preExistingHome, homeDel.Path)
+	assert.Equal(t, projectfs.OutcomeFailed, homeDel.Outcome)
+	assert.ErrorIs(t, homeDel.Err, ErrMoveMarkerMismatch)
+
 	data, err := os.ReadFile(preciousFile)
 	require.NoError(t, err, "pre-existing unmarked home leaf on distinct share must survive rollback")
 	assert.Equal(t, "do not delete", string(data))
 }
 
-func TestCopyProvisionedHomeToNFSLeaf_AppliesPortableHomeExcludes(t *testing.T) {
-	src := t.TempDir()
-	dst := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(src, ".scion"), 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(src, ".scion", "secrets.json"), []byte(`{"k":"v"}`), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(src, ".gitconfig"), []byte("[user]\nname=test\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(src, ".state.tmp-0123456789abcdef"), []byte("tmp"), 0o644))
+func TestRollback_K8sNFSHomePrefersRecordedSubPathRoot(t *testing.T) {
+	_, hostBase, projectPath := setupK8sNFSFixture(t)
+	slug := "k8s-subpath"
+	rid := "rid-k8s-subpath-1"
 
-	origLchown := moveBundleTargetLchown
-	moveBundleTargetLchown = func(string, int, int) error { return nil }
-	t.Cleanup(func() { moveBundleTargetLchown = origLchown })
+	realHostBase, err := filepath.EvalSymlinks(hostBase)
+	require.NoError(t, err)
 
-	require.NoError(t, copyProvisionedHomeToNFSLeaf(src, dst))
+	// Agent's home-storage.json recorded legacy subpath_root "legacy-homes"
+	// before global settings changed to "projects".
+	agentDir, err := provisionAgentStateDir(contextWithAgentRuntime(context.Background(), "kubernetes"), api.StartOptions{
+		Name:         slug,
+		ProjectPath:  projectPath,
+		HubProjectID: k8sTestProjectUUID,
+		BrokerMode:   true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(agentDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, MoveMarkerFile), []byte(rid+"\n"), 0o600))
+	require.NoError(t, writeHomeStorageRecord(agentDir, homeStorageRecord{
+		Backend:     config.HomeStorageBackendNFS,
+		Leaf:        config.HomeStorageLeafPod,
+		ShareID:     "share-1",
+		PVClaimName: "pv-1",
+		SubPathRoot: "legacy-homes",
+	}))
 
-	assert.FileExists(t, filepath.Join(dst, ".gitconfig"))
-	assert.NoFileExists(t, filepath.Join(dst, ".scion", "secrets.json"), "portable home exclude (.scion/secrets.json) must not be copied")
-	assert.NoFileExists(t, filepath.Join(dst, ".state.tmp-0123456789abcdef"), "temp files matching IsHomeTempName must not be copied")
+	// Create the marked home leaf under "legacy-homes" AND an unmarked decoy
+	// under the current default "projects".
+	legacyHomeParent := filepath.Join(realHostBase, "legacy-homes", k8sTestProjectUUID, "agents", slug)
+	legacyHome := filepath.Join(legacyHomeParent, "home-"+k8sTestAgentUUID)
+	require.NoError(t, os.MkdirAll(legacyHome, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(legacyHome, MoveMarkerFile), []byte(rid+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(legacyHomeParent, MoveMarkerFile), []byte(rid+"\n"), 0o600))
+
+	decoyParent := filepath.Join(realHostBase, "projects", k8sTestProjectUUID, "agents", slug)
+	decoyHome := filepath.Join(decoyParent, "home-"+k8sTestAgentUUID)
+	require.NoError(t, os.MkdirAll(decoyHome, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(decoyParent, MoveMarkerFile), []byte(rid+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(decoyHome, "keep.txt"), []byte("keep"), 0o600))
+
+	// ReadHomeStorageSubPathRoot recovers "legacy-homes" from home-storage.json.
+	recordedRoot := ReadHomeStorageSubPathRoot(context.Background(), projectPath, k8sTestProjectUUID, slug)
+	assert.Equal(t, "legacy-homes", recordedRoot)
+
+	mgr := NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+	}).(*AgentManager)
+
+	rbCtx := WithDeleteMoveReincarnationID(
+		WithDeleteHomeSubPathRoot(
+			WithDeleteHubAgentID(context.Background(), k8sTestAgentUUID),
+			recordedRoot,
+		),
+		rid,
+	)
+
+	// CheckMoveMarkers succeeds against the marked legacy-homes leaf (not failing on the projects decoy).
+	_, err = mgr.CheckMoveMarkers(rbCtx, projectPath, k8sTestProjectUUID, k8sTestProjectUUID, slug, slug, rid)
+	require.NoError(t, err)
+
+	// RemoveNFSAgentFiles removes the recorded legacy-homes leaf and its empty parent, leaving the decoy untouched.
+	ds, err := mgr.RemoveNFSAgentFiles(rbCtx, projectPath, k8sTestProjectUUID, slug)
+	require.NoError(t, err)
+	var homeDel *projectfs.Deletion
+	for i := range ds {
+		if ds[i].Tree == projectfs.TreeAgentHome {
+			homeDel = &ds[i]
+			break
+		}
+	}
+	require.NotNil(t, homeDel)
+	assert.Equal(t, legacyHome, homeDel.Path)
+	assert.Equal(t, projectfs.OutcomeDeleted, homeDel.Outcome)
+	assert.NoDirExists(t, legacyHome)
+	assert.NoDirExists(t, legacyHomeParent)
+	assert.FileExists(t, filepath.Join(decoyHome, "keep.txt"), "decoy under current default subpath_root must remain untouched")
 }

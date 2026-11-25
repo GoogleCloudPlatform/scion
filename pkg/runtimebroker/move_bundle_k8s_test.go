@@ -450,10 +450,43 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 	assert.Equal(t, wantOwner, chowned[filepath.Join(exportHome, "history.txt")], "committed home file must be chowned")
 	chownMu.Unlock()
 
-	// Sentinel written by provision must survive import.
-	assert.FileExists(t, filepath.Join(exportHome, homeprep.SentinelName))
+	// Sentinel written by provision must survive import, and homeprep.Decide
+	// must choose ActionSeedOver so target Start transfers broker-rendered
+	// files (e.g. .scion/agent-info.json) over source files while keeping
+	// imported source files like history.txt (C1).
+	sentinelPath := filepath.Join(exportHome, homeprep.SentinelName)
+	assert.FileExists(t, sentinelPath)
+	sentinelBytes, err := os.ReadFile(sentinelPath)
+	require.NoError(t, err)
+	var sent homeprep.Sentinel
+	require.NoError(t, json.Unmarshal(sentinelBytes, &sent))
+	homeEntries, err := os.ReadDir(exportHome)
+	require.NoError(t, err)
+	names := make([]string, 0, len(homeEntries))
+	for _, e := range homeEntries {
+		names = append(names, e.Name())
+	}
+	decision, err := homeprep.Decide(homeprep.SentinelRead{Sentinel: &sent}, k8sBrokerTestAgentID, int(scionrt.K8sContainerUID), names, "")
+	require.NoError(t, err)
+	assert.Equal(t, homeprep.ModeSeedOver, decision.Mode, "imported K8s NFS home must trigger homeprep seed-over on target Start")
 
-	// 3. Rollback delete (marker-guarded) removes NFS workspace, NFS home leaf, and .bundle-* staging siblings.
+	// Verify seed-over precedence: target-rendered agent-info.json from
+	// broker-local agentHome differs from source's {"from":"source"} and
+	// would overwrite it on seed-over while history.txt remains intact.
+	targetDirs, err := agent.ResolveMoveBundleAgentDirs(context.Background(), "kubernetes", api.StartOptions{
+		Name:         slug,
+		ProjectPath:  projectPath,
+		HubProjectID: k8sBrokerTestProjectID,
+		BrokerMode:   true,
+	})
+	require.NoError(t, err)
+	targetAgentInfo := filepath.Join(targetDirs.AgentDir, "home", ".scion", "agent-info.json")
+	if targetInfoBytes, readErr := os.ReadFile(targetAgentInfo); readErr == nil {
+		assert.NotEqual(t, `{"from":"source"}`, string(targetInfoBytes), "target-rendered agent-info.json must be distinct from source")
+	}
+
+	// 3. Rollback delete (marker-guarded) removes NFS workspace, NFS home leaf,
+	//    .bundle-* staging siblings, and the now-empty export agent dir (N3).
 	leftoverStage := filepath.Join(exportAgentDir, ".home-"+k8sBrokerTestAgentID+".bundle-0123456789abcdef0123456789abcdef")
 	require.NoError(t, os.MkdirAll(leftoverStage, 0o755))
 
@@ -465,6 +498,148 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 	assert.NoDirExists(t, exportWS, "rollback delete must remove NFS workspace")
 	assert.NoDirExists(t, exportHome, "rollback delete must remove NFS home leaf")
 	assert.NoDirExists(t, leftoverStage, "rollback delete must remove .bundle-* staging siblings")
+	assert.NoDirExists(t, exportAgentDir, "rollback delete must remove empty marked export agent dir (N3)")
+}
+
+func TestMoveBundle_DockerDefaultWithCloudRunAgentFailsClosed(t *testing.T) {
+	projectPath, _, _, _ := newMoveBundleTestAgentDir(t, "cr-agent")
+	srv := newTestServer(t)
+	srv.runtime = scionrt.NewDockerRuntime()
+	// Broker advertises AgentMoveBundle from its Docker default runtime.
+	require.True(t, StaticCapabilities(srv.runtime, "").AgentMoveBundle)
+
+	// Register cloudrun as an auxiliary runtime (matching a multi-runtime broker).
+	crRT := &scionrt.MockRuntime{NameFunc: func() string { return "cloudrun" }}
+	crMgr := agent.NewManager(crRT)
+
+	// 1. Move-bundle provision for a cloudrun agent must fail closed.
+	_, err := crMgr.Provision(context.Background(), api.StartOptions{
+		Name:                "cr-agent",
+		ProjectPath:         projectPath,
+		BrokerMode:          true,
+		NoAuth:              true,
+		FreshProvision:      true,
+		MoveReincarnationID: "rid-cr-fail",
+		WorkspaceSource:     api.WorkspaceSourceMoveBundle,
+	})
+	require.Error(t, err, "move-bundle provision on cloudrun must fail closed")
+	assert.Contains(t, err.Error(), "not supported")
+
+	// 2. Move-bundle import resolving to cloudrun must return an error (400),
+	//    never 202 followed by silently writing broker-local dirs.
+	dummyPart := bundle.Part{
+		Index: 0,
+		Size:  1,
+		Hash:  "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	}
+	manifest := bundle.Manifest{
+		Version:         bundle.ManifestVersion,
+		ReincarnationID: "rid-cr-fail",
+		Roots: map[string]bundle.RootManifest{
+			bundle.RootWorkspace: {PartSize: 1, Parts: []bundle.Part{dummyPart}},
+			bundle.RootHome:      {PartSize: 1, Parts: []bundle.Part{dummyPart}},
+		},
+	}
+	_, manifestHash, err := bundle.CanonicalManifest(manifest)
+	require.NoError(t, err)
+
+	impPath := fmt.Sprintf("/api/v1/agents/cr-agent/move-bundle/import?%s=cloudrun", api.RecordedRuntimeQueryParam)
+	rec := doMoveBundleReq(t, srv, http.MethodPost, impPath, api.MoveBundleImportRequest{
+		ReincarnationID: "rid-cr-fail",
+		ProjectPath:     projectPath,
+		Manifest:        manifest,
+		ManifestHash:    manifestHash,
+		Limits:          api.DefaultMoveBundleLimits(),
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "import for unregistered runtime must return 400, not 202: %s", rec.Body.String())
+}
+
+func TestMoveBundle_K8sNFS_PrecheckReadabilityAndBounds(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses 0000 read permissions")
+	}
+	srv, _, hostBase, projectPath := setupK8sBrokerNFSFixture(t)
+	slug := "k8s-bounds"
+
+	dirs, err := agent.ResolveMoveBundleAgentDirs(context.Background(), "kubernetes", api.StartOptions{
+		Name:         slug,
+		ProjectPath:  projectPath,
+		HubProjectID: k8sBrokerTestProjectID,
+		BrokerMode:   true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dirs.AgentDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dirs.AgentDir, "home-storage.json"), []byte(`{
+  "backend": "nfs",
+  "leaf": "pod",
+  "share_id": "share-1",
+  "pv_claim_name": "pv-1",
+  "subpath_root": "projects"
+}
+`), 0o600))
+	writeTestHomeRecord(t, dirs.AgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+
+	realHostBase, err := filepath.EvalSymlinks(hostBase)
+	require.NoError(t, err)
+	exportAgentDir := filepath.Join(realHostBase, "projects", k8sBrokerTestProjectID, "agents", slug)
+	wsDir := filepath.Join(exportAgentDir, "workspace")
+	homeDir := filepath.Join(exportAgentDir, "home-"+k8sBrokerTestAgentID)
+	require.NoError(t, os.MkdirAll(wsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(wsDir, "main.go"), []byte("package main\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(homeDir, ".cache", "pip"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(homeDir, "ok.txt"), []byte("hello"), 0o644))
+
+	// 1. Unreadable 0000 file inside excluded .cache/ must NOT refuse the move.
+	cachedFile := filepath.Join(homeDir, ".cache", "pip", "wheel.bin")
+	require.NoError(t, os.WriteFile(cachedFile, []byte("cached"), 0o000))
+	t.Cleanup(func() { _ = os.Chmod(cachedFile, 0o600) })
+
+	prePath := fmt.Sprintf("/api/v1/agents/%s/move-bundle/precheck?projectId=%s", slug, k8sBrokerTestProjectID)
+	recCache := doMoveBundleReq(t, srv, http.MethodPost, prePath, api.MoveBundlePrecheckRequest{
+		AgentID:     k8sBrokerTestAgentID,
+		ProjectPath: projectPath,
+		Limits:      api.DefaultMoveBundleLimits(),
+	})
+	require.Equal(t, http.StatusOK, recCache.Code, recCache.Body.String())
+	var respCache api.MoveBundlePrecheckResponse
+	require.NoError(t, json.Unmarshal(recCache.Body.Bytes(), &respCache))
+	assert.True(t, respCache.Durable, "unreadable file under excluded .cache/ must not refuse precheck")
+	assert.Empty(t, respCache.Over)
+
+	// 2. Non-excluded unreadable 0000 file refuses precheck with class-only reason.
+	privFile := filepath.Join(homeDir, "zz-private.txt")
+	require.NoError(t, os.WriteFile(privFile, []byte("secret"), 0o000))
+	t.Cleanup(func() { _ = os.Chmod(privFile, 0o600) })
+
+	recPriv := doMoveBundleReq(t, srv, http.MethodPost, prePath, api.MoveBundlePrecheckRequest{
+		AgentID:     k8sBrokerTestAgentID,
+		ProjectPath: projectPath,
+		Limits:      api.DefaultMoveBundleLimits(),
+	})
+	require.Equal(t, http.StatusOK, recPriv.Code)
+	var respPriv api.MoveBundlePrecheckResponse
+	require.NoError(t, json.Unmarshal(recPriv.Body.Bytes(), &respPriv))
+	assert.False(t, respPriv.Durable, "unreadable non-excluded file must refuse precheck")
+	assert.Equal(t, "broker lacks read permission on source home", respPriv.Reason)
+	assert.NotContains(t, respPriv.Reason, homeDir, "reason must be class-only")
+
+	// 3. Home over home_max_entries stops early and returns over="home.entries"
+	//    without visiting entries past the limit (including zz-private.txt).
+	for i := 0; i < 6; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, fmt.Sprintf("a-%02d.txt", i)), []byte("x"), 0o644))
+	}
+	lim := api.DefaultMoveBundleLimits()
+	lim.HomeMaxEntries = 3
+	recOver := doMoveBundleReq(t, srv, http.MethodPost, prePath, api.MoveBundlePrecheckRequest{
+		AgentID:     k8sBrokerTestAgentID,
+		ProjectPath: projectPath,
+		Limits:      lim,
+	})
+	require.Equal(t, http.StatusOK, recOver.Code)
+	var respOver api.MoveBundlePrecheckResponse
+	require.NoError(t, json.Unmarshal(recOver.Body.Bytes(), &respOver))
+	assert.True(t, respOver.Durable, "over-limit home should report over=home.entries rather than visiting unreadable entries past the bound")
+	assert.Equal(t, "home.entries", respOver.Over)
 }
 
 func TestMoveBundle_K8sNFS_NormalDeletePreservesHomeLeaf(t *testing.T) {

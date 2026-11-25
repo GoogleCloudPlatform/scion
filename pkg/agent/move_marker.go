@@ -227,7 +227,7 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 	// verify that either the home leaf itself or its parent carries moveID (R3).
 	if m.Runtime != nil && isKubernetesRuntime(m.Runtime.Name()) {
 		if hubAgentID := deleteHubAgentIDFrom(ctx); validHomeAgentID(hubAgentID, agentName) {
-			homeParent, homeLeaf, ok, hErr := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
+			_, homeParent, homeLeaf, ok, hErr := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
 			if hErr != nil {
 				return dirs, fmt.Errorf("%w: resolve NFS home share: %v", ErrMoveMarkerMismatch, hErr)
 			}
