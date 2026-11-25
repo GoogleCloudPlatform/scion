@@ -651,7 +651,12 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 		}
 	}
 
-	if code, msg, refused := s.gcpServiceAccountEmailRefusal(req.Email); refused {
+	code, msg, refused, err := s.gcpServiceAccountEmailRefusal(r.Context(), req.Email)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if refused {
 		writeError(w, http.StatusBadRequest, code, msg, nil)
 		return
 	}

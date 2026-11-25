@@ -815,10 +815,15 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 		}
 	})
 
+	brokerHostEmails, err := s.brokerHostServiceAccountEmailSet(ctx)
+	if err != nil {
+		return fmt.Errorf("load broker host service accounts: %w", err)
+	}
+
 	srcToClonedID := make(map[string]string, len(accounts))
 	skippedIDs := make(map[string]bool)
 	for _, sa := range accounts {
-		if s.isHubOwnServiceAccountEmail(sa.Email) {
+		if s.isHubOwnServiceAccountEmail(sa.Email) || isEmailInSet(brokerHostEmails, sa.Email) {
 			slog.Warn("project clone skipped reserved GCP service account",
 				"src_project_id", srcProjectID, "clone_id", clone.ID, "sa_id", sa.ID, "email", sa.Email)
 			skippedIDs[sa.ID] = true

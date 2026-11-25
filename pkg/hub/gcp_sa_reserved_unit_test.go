@@ -92,12 +92,14 @@ func TestGCPServiceAccountEmailsEqual(t *testing.T) {
 }
 
 func TestServer_IsHubOwnServiceAccountEmail_UnknownIdentity(t *testing.T) {
+	ctx := context.Background()
 	// When no GCP token generator is configured (e.g. non-GCP deployment),
 	// the Hub identity is unknown; the helper returns false without erroring.
 	srvNoGen := &Server{}
 	assert.False(t, srvNoGen.isHubOwnServiceAccountEmail("hub@proj.iam.gserviceaccount.com"))
 	assert.False(t, srvNoGen.isHubOwnServiceAccountEmail(""))
-	_, _, refused := srvNoGen.gcpServiceAccountEmailRefusal("hub@proj.iam.gserviceaccount.com")
+	_, _, refused, err := srvNoGen.gcpServiceAccountEmailRefusal(ctx, "hub@proj.iam.gserviceaccount.com")
+	assert.NoError(t, err)
 	assert.False(t, refused)
 
 	// When a GCP token generator is configured but its email is empty
@@ -106,7 +108,8 @@ func TestServer_IsHubOwnServiceAccountEmail_UnknownIdentity(t *testing.T) {
 	srvEmptyEmail := &Server{gcpTokenGenerator: &stubHubEmailGenerator{email: ""}}
 	assert.False(t, srvEmptyEmail.isHubOwnServiceAccountEmail("hub@proj.iam.gserviceaccount.com"))
 	assert.False(t, srvEmptyEmail.isHubOwnServiceAccountEmail(""))
-	_, _, refused = srvEmptyEmail.gcpServiceAccountEmailRefusal("hub@proj.iam.gserviceaccount.com")
+	_, _, refused, err = srvEmptyEmail.gcpServiceAccountEmailRefusal(ctx, "hub@proj.iam.gserviceaccount.com")
+	assert.NoError(t, err)
 	assert.False(t, refused)
 
 	// When the Hub identity is known, matching emails (including mixed-case
@@ -116,7 +119,8 @@ func TestServer_IsHubOwnServiceAccountEmail_UnknownIdentity(t *testing.T) {
 	assert.True(t, srvKnown.isHubOwnServiceAccountEmail("  Hub-SA@My-Proj.IAM.GServiceAccount.COM "))
 	assert.False(t, srvKnown.isHubOwnServiceAccountEmail("worker@my-proj.iam.gserviceaccount.com"))
 
-	code, msg, refused := srvKnown.gcpServiceAccountEmailRefusal("HUB-SA@MY-PROJ.IAM.GSERVICEACCOUNT.COM")
+	code, msg, refused, err := srvKnown.gcpServiceAccountEmailRefusal(ctx, "HUB-SA@MY-PROJ.IAM.GSERVICEACCOUNT.COM")
+	assert.NoError(t, err)
 	assert.True(t, refused)
 	assert.Equal(t, ErrCodeIdentityReserved, code)
 	assert.NotEmpty(t, msg)

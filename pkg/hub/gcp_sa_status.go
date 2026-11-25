@@ -291,6 +291,19 @@ func (s *Server) buildGCPServiceAccountStatus(ctx context.Context, project *stor
 			Message: "This account matches the Hub's own GCP service account identity and cannot be used by agents. " +
 				"Remove this service account registration and assign agents a dedicated service account.",
 		}
+	} else if !store.IsHostSATranslationRecord(sa) {
+		if isBrokerHost, err := s.isBrokerHostServiceAccountEmail(ctx, sa.Email); err == nil && isBrokerHost {
+			st.Verification.Verified = false
+			st.Verification.Status = store.GCPVerificationFailed
+			if st.Verification.Error == "" {
+				st.Verification.Error = gcpSABrokerHostIdentityFlagError
+			}
+			st.NextStep = GCPServiceAccountNextStep{
+				Code: GCPSANextStepNotVerified,
+				Message: "This account matches a Runtime Broker's host GCP service account identity and cannot be used by agents. " +
+					"Remove this service account registration and assign agents a dedicated service account.",
+			}
+		}
 	}
 	return st
 }
