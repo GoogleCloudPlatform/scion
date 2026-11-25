@@ -293,6 +293,11 @@ type HubServerConfig struct {
 	// its parent agent sets one. Empty means "project", the built-in
 	// default. See ValidateDefaultMessageMode for the accepted values.
 	DefaultMessageMode string `json:"defaultMessageMode,omitempty" yaml:"defaultMessageMode,omitempty" koanf:"defaultMessageMode"`
+
+	// InitFirewall configures the hub-wide operator-authoritative egress
+	// firewall policy sent on every broker dispatch and unioned with the
+	// broker's own policy when an agent opts into SCION_INIT_FIREWALL.
+	InitFirewall *InitFirewallConfig `json:"initFirewall,omitempty" yaml:"initFirewall,omitempty" koanf:"initFirewall"`
 }
 
 // defaultMessageModeValues are the values server.hub.default_message_mode
@@ -1848,7 +1853,7 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 		return nil, err
 	}
 	if ok {
-		if err := validateBrokerInitFirewall(gc); err != nil {
+		if err := validateInitFirewallConfigs(gc); err != nil {
 			return nil, err
 		}
 		markTrustedProxiesSet(gc, nil)
@@ -1863,23 +1868,33 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateBrokerInitFirewall(gc); err != nil {
+	if err := validateInitFirewallConfigs(gc); err != nil {
 		return nil, err
 	}
 	markTrustedProxiesSet(gc, nil)
 	return gc, nil
 }
 
-func validateBrokerInitFirewall(gc *GlobalConfig) error {
-	if gc == nil || gc.RuntimeBroker.InitFirewall == nil {
+func validateInitFirewallConfigs(gc *GlobalConfig) error {
+	if gc == nil {
 		return nil
 	}
-	policy, err := gc.RuntimeBroker.InitFirewall.Normalize()
-	if err != nil {
-		return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
+	if gc.RuntimeBroker.InitFirewall != nil {
+		policy, err := gc.RuntimeBroker.InitFirewall.Normalize()
+		if err != nil {
+			return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
+		}
+		gc.RuntimeBroker.InitFirewall.AllowDomains = policy.AllowDomains
+		gc.RuntimeBroker.InitFirewall.AllowSSH = policy.AllowSSH
 	}
-	gc.RuntimeBroker.InitFirewall.AllowDomains = policy.AllowDomains
-	gc.RuntimeBroker.InitFirewall.AllowSSH = policy.AllowSSH
+	if gc.Hub.InitFirewall != nil {
+		policy, err := gc.Hub.InitFirewall.Normalize()
+		if err != nil {
+			return fmt.Errorf("invalid server.hub.init_firewall: %w", err)
+		}
+		gc.Hub.InitFirewall.AllowDomains = policy.AllowDomains
+		gc.Hub.InitFirewall.AllowSSH = policy.AllowSSH
+	}
 	return nil
 }
 
@@ -2805,6 +2820,7 @@ var envListConfigKeys = []string{
 	"hub.conduit.peerServiceAccounts",
 	"hub.conduit.tcpAllowedPorts",
 	"hub.conduit.denyPorts",
+	"hub.initFirewall.allowDomains",
 	"runtimeBroker.initFirewall.allowDomains",
 }
 

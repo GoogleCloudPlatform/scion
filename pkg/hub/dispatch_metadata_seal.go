@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -106,7 +107,50 @@ func clearMergedMetadataEnv(env map[string]string, cls *map[string]api.EnvKind) 
 	}
 }
 
-// sendCreate seals req's resolved env and sends the create.
+// SetInitFirewall sets the provider of the hub's egress firewall policy.
+// The send wrappers unconditionally overwrite the wire initFirewall field
+// from this provider immediately before every broker transport call.
+func (d *HTTPAgentDispatcher) SetInitFirewall(fn func() firewallpolicy.Policy) {
+	d.initFirewall = fn
+}
+
+// sealedInitFirewall returns a fresh wire copy of the hub's egress firewall
+// policy, or nil when no hub policy is configured.
+func (d *HTTPAgentDispatcher) sealedInitFirewall() *RemoteInitFirewall {
+	if d == nil || d.initFirewall == nil {
+		return nil
+	}
+	p := d.initFirewall()
+	if p.IsEmpty() {
+		return nil
+	}
+	return &RemoteInitFirewall{
+		AllowDomains: append([]string(nil), p.AllowDomains...),
+		AllowSSH:     p.AllowSSH,
+	}
+}
+
+// sealCreateInitFirewall unconditionally overwrites req.InitFirewall from the
+// hub's operator-authoritative policy so no earlier code path or caller can
+// set or widen it.
+func (d *HTTPAgentDispatcher) sealCreateInitFirewall(req *RemoteCreateAgentRequest) {
+	if req == nil {
+		return
+	}
+	req.InitFirewall = d.sealedInitFirewall()
+}
+
+// sealStartInitFirewall unconditionally overwrites extras.InitFirewall from
+// the hub's operator-authoritative policy so no earlier code path or caller
+// can set or widen it.
+func (d *HTTPAgentDispatcher) sealStartInitFirewall(extras *StartExtras) {
+	if extras == nil {
+		return
+	}
+	extras.InitFirewall = d.sealedInitFirewall()
+}
+
+// sendCreate seals req's resolved env and initFirewall policy and sends the create.
 func (d *HTTPAgentDispatcher) sendCreate(ctx context.Context, agent *store.Agent, endpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	if req != nil {
 		if err := d.gateCreateHomeFiles(ctx, agent, req.HomeFiles, req.Reprovision); err != nil {
@@ -114,11 +158,12 @@ func (d *HTTPAgentDispatcher) sendCreate(ctx context.Context, agent *store.Agent
 		}
 	}
 	sealCreateRequest(ctx, req)
+	d.sealCreateInitFirewall(req)
 	return d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
 }
 
-// sendCreateWithGather seals req's resolved env and sends the create with
-// env gathering.
+// sendCreateWithGather seals req's resolved env and initFirewall policy and
+// sends the create with env gathering.
 func (d *HTTPAgentDispatcher) sendCreateWithGather(ctx context.Context, agent *store.Agent, endpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 	if req != nil {
 		if err := d.gateCreateHomeFiles(ctx, agent, req.HomeFiles, req.Reprovision); err != nil {
@@ -126,18 +171,21 @@ func (d *HTTPAgentDispatcher) sendCreateWithGather(ctx context.Context, agent *s
 		}
 	}
 	sealCreateRequest(ctx, req)
+	d.sealCreateInitFirewall(req)
 	return d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
 }
 
-// sendStart seals resolvedEnv and sends the start.
+// sendStart seals resolvedEnv and initFirewall policy and sends the start.
 func (d *HTTPAgentDispatcher) sendStart(ctx context.Context, agent *store.Agent, endpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	sealDispatchMetadataEnv(ctx, agent, resolvedEnv, &extras.EnvClassifications)
+	d.sealStartInitFirewall(&extras)
 	return d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras)
 }
 
-// sendRestart seals resolvedEnv and sends the restart.
+// sendRestart seals resolvedEnv and initFirewall policy and sends the restart.
 func (d *HTTPAgentDispatcher) sendRestart(ctx context.Context, agent *store.Agent, endpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	sealDispatchMetadataEnv(ctx, agent, resolvedEnv, &extras.EnvClassifications)
+	d.sealStartInitFirewall(&extras)
 	return d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agentID, projectID, resolvedEnv, extras)
 }
 

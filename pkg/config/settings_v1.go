@@ -2040,6 +2040,11 @@ type V1ServerHubConfig struct {
 	// create request, its template nor its parent agent sets one ("" =
 	// "project"; one of none, lineage, branch, project). Read at startup.
 	DefaultMessageMode string `json:"default_message_mode,omitempty" yaml:"default_message_mode,omitempty" koanf:"default_message_mode"`
+	// InitFirewall configures the hub-wide operator-authoritative egress
+	// firewall policy sent on every broker dispatch and unioned with the
+	// broker's own policy when an agent opts into SCION_INIT_FIREWALL. Read
+	// at startup.
+	InitFirewall *V1InitFirewallConfig `json:"init_firewall,omitempty" yaml:"init_firewall,omitempty" koanf:"init_firewall"`
 }
 
 // V1ServerHubSchedulesConfig holds the limits on recurring schedules
@@ -2323,8 +2328,8 @@ type V1BrokerConfig struct {
 	Instances []V1RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
 }
 
-// V1InitFirewallConfig holds the operator-authoritative egress firewall
-// policy (server.broker.init_firewall).
+// V1InitFirewallConfig holds an operator-authoritative egress firewall
+// policy (server.broker.init_firewall and server.hub.init_firewall).
 type V1InitFirewallConfig struct {
 	AllowDomains []string `json:"allow_domains,omitempty" yaml:"allow_domains,omitempty" koanf:"allow_domains"`
 	AllowSSH     bool     `json:"allow_ssh,omitempty" yaml:"allow_ssh,omitempty" koanf:"allow_ssh"`
@@ -4948,6 +4953,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			}
 		}
 		gc.Hub.DefaultMessageMode = v1.Hub.DefaultMessageMode
+		if v1.Hub.InitFirewall != nil {
+			gc.Hub.InitFirewall = &InitFirewallConfig{
+				AllowDomains: append([]string(nil), v1.Hub.InitFirewall.AllowDomains...),
+				AllowSSH:     v1.Hub.InitFirewall.AllowSSH,
+			}
+		}
 	}
 
 	if r := v1.Relay; r != nil {
@@ -5438,6 +5449,12 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		}
 	}
 	v1Hub.DefaultMessageMode = gc.Hub.DefaultMessageMode
+	if gc.Hub.InitFirewall != nil {
+		v1Hub.InitFirewall = &V1InitFirewallConfig{
+			AllowDomains: append([]string(nil), gc.Hub.InitFirewall.AllowDomains...),
+			AllowSSH:     gc.Hub.InitFirewall.AllowSSH,
+		}
+	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
 	}

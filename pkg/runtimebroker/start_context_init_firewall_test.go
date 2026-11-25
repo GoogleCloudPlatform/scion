@@ -16,6 +16,9 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"reflect"
 	"testing"
 
@@ -75,5 +78,68 @@ func TestBuildStartContext_InitFirewallPolicyAndEnvStrip(t *testing.T) {
 		if v, exists := sc.Opts.Env[k]; exists {
 			t.Errorf("StartOptions.Env[%q] = %q, want key deleted", k, v)
 		}
+	}
+}
+
+func TestBuildStartContext_InitFirewallUnionWithHub(t *testing.T) {
+	brokerPolicy, err := firewallpolicy.Normalize([]string{"pypi.org", "shared.example.com"}, false)
+	if err != nil {
+		t.Fatalf("Normalize broker: %v", err)
+	}
+	hubPolicy, err := firewallpolicy.Normalize([]string{"artifactory.corp.example", "shared.example.com"}, true)
+	if err != nil {
+		t.Fatalf("Normalize hub: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	cfg.InitFirewall = brokerPolicy
+	srv := newTestServerForStartContext(t, cfg)
+
+	sc, scErr := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:         "agent-fw-union",
+		Operation:    opCreate,
+		InitFirewall: hubPolicy,
+	})
+	if scErr != nil {
+		t.Fatalf("buildStartContext: %v", scErr)
+	}
+
+	want := firewallpolicy.Policy{
+		AllowDomains: []string{"artifactory.corp.example", "pypi.org", "shared.example.com"},
+		AllowSSH:     true,
+	}
+	if !reflect.DeepEqual(sc.Opts.InitFirewall, want) {
+		t.Fatalf("StartOptions.InitFirewall = %#v, want %#v", sc.Opts.InitFirewall, want)
+	}
+}
+
+func TestBuildStartContext_InitFirewallUnionCapExceeded(t *testing.T) {
+	// Directly construct policies whose combined unique domains exceed 128.
+	brokerDomains := make([]string, 65)
+	for i := range brokerDomains {
+		brokerDomains[i] = fmt.Sprintf("b-%03d.example.com", i)
+	}
+	hubDomains := make([]string, 64)
+	for i := range hubDomains {
+		hubDomains[i] = fmt.Sprintf("h-%03d.example.com", i)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	cfg.InitFirewall = firewallpolicy.Policy{AllowDomains: brokerDomains}
+	srv := newTestServerForStartContext(t, cfg)
+
+	_, scErr := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:         "agent-fw-cap",
+		Operation:    opCreate,
+		InitFirewall: firewallpolicy.Policy{AllowDomains: hubDomains},
+	})
+	if scErr == nil {
+		t.Fatal("expected buildStartContext error when union exceeds 128 domains")
+	}
+	var sce *startContextError
+	if !errors.As(scErr, &sce) || sce.Status != http.StatusBadRequest {
+		t.Errorf("err = %v, want *startContextError with status 400", scErr)
 	}
 }

@@ -1982,7 +1982,8 @@
           "description": "Message mode of a new agent when neither the create request, its template nor its parent agent sets one. Unset means 'project'. 'hub' is not accepted. Read at startup.",
           "x-env-var": "SCION_SERVER_HUB_DEFAULTMESSAGEMODE",
           "x-since": "1"
-        }
+        },
+        "init_firewall": { "$ref": "#/$defs/initFirewallConfig" }
       }
     },
     "serverBroker": {

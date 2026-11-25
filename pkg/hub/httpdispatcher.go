@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -246,6 +247,10 @@ type HTTPAgentDispatcher struct {
 	// storageLayout is the hub's projectfs Layout source for
 	// storageLayoutPrecheck (SetStorageLayout); nil disables the check.
 	storageLayout func() (projectfs.Layout, error)
+	// initFirewall returns the hub's operator-authoritative egress firewall
+	// policy sealed onto every broker dispatch (SetInitFirewall); nil means
+	// no hub policy.
+	initFirewall func() firewallpolicy.Policy
 	// workspaceStorage returns the hub's current storage backend
 	// (SetWorkspaceStorage); buildCreateRequestFor asks for the signed-URL
 	// workspace download only when it is GCS. Nil means no storage.

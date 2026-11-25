@@ -72,6 +72,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	cloudrunruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/secretmigration"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -341,6 +342,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 	if _, err := cfg.RuntimeBroker.InitFirewall.Normalize(); err != nil {
 		return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
+	}
+	if _, err := cfg.Hub.InitFirewall.Normalize(); err != nil {
+		return fmt.Errorf("invalid server.hub.init_firewall: %w", err)
 	}
 
 	// 5b. The convert host lock (convert-apply design section 4.7): a
@@ -2966,6 +2970,25 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 	}
 }
 
+// hubInitFirewallSetting returns the hub's normalized egress firewall policy
+// from GlobalConfig, or an empty policy when unset. Startup preflight
+// (runServerStart) and hub.New both reject invalid entries fatally.
+func hubInitFirewallSetting(cfg *config.GlobalConfig) firewallpolicy.Policy {
+	if cfg == nil || cfg.Hub.InitFirewall == nil {
+		return firewallpolicy.Policy{}
+	}
+	pol, err := cfg.Hub.InitFirewall.Normalize()
+	if err != nil {
+		// Preserve the unvalidated values so hub.New also rejects them if
+		// buildHubServerConfig is called without runServerStart preflight.
+		return firewallpolicy.Policy{
+			AllowDomains: append([]string(nil), cfg.Hub.InitFirewall.AllowDomains...),
+			AllowSSH:     cfg.Hub.InitFirewall.AllowSSH,
+		}
+	}
+	return pol
+}
+
 // initHubServer creates and configures the Hub server.
 // buildHubServerConfig builds the static portion of hub.ServerConfig from
 // GlobalConfig and the caller's already-resolved values. It is a pure,
@@ -3030,6 +3053,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		ConduitProxySessionMaxAge:    conduitProxySessionMaxAgeSetting(cfg),
 		ConduitTargetStreamDeadlines: cfg.Hub.Conduit.TargetStreamDeadlinesValue(),
 		AgentRunScope:                agentRunScopeSetting(cfg),
+		InitFirewall:                 hubInitFirewallSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,

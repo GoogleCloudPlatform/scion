@@ -673,6 +673,16 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 		}
 		req.Server.Broker.InitFirewall.AllowDomains = policy.AllowDomains
 	}
+	if under("server.hub.init_firewall") && req.Server != nil && req.Server.Hub != nil && req.Server.Hub.InitFirewall != nil {
+		// LoadGlobalConfig refuses an invalid server.hub.init_firewall at
+		// startup; validate and canonicalize before writing to settings.yaml.
+		policy, err := firewallpolicy.Normalize(req.Server.Hub.InitFirewall.AllowDomains, req.Server.Hub.InitFirewall.AllowSSH)
+		if err != nil {
+			return &serverConfigFileValidationError{msg: err.Error(),
+				entries: []settingsFieldError{{Field: "server.hub.init_firewall.allow_domains", Message: err.Error()}}}
+		}
+		req.Server.Hub.InitFirewall.AllowDomains = policy.AllowDomains
+	}
 	if req.Server != nil && (under("server.project_storage") || under("server.workspace_storage") ||
 		under("server.shared_dir_storage") || under("server.home_storage")) {
 		// Same check as the file-mode handler: the storage blocks must

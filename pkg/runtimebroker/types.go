@@ -302,6 +302,15 @@ type ListAgentsResponse struct {
 }
 
 // CreateAgentRequest is the request body for creating an agent.
+// RemoteInitFirewall carries the hub's operator-authoritative egress firewall
+// policy on create, start, and restart dispatches. It is read only from the
+// top-level request field (never from Config, InlineConfig, or env),
+// re-validated on receipt, and unioned with the broker's own policy.
+type RemoteInitFirewall struct {
+	AllowDomains []string `json:"allowDomains,omitempty"`
+	AllowSSH     bool     `json:"allowSsh,omitempty"`
+}
+
 type CreateAgentRequest struct {
 	// workspaceAbsentAtAdmission is set by createAgent when the hub-managed
 	// project path ~/.scion/projects/<slug> did not exist when the request
@@ -428,6 +437,11 @@ type CreateAgentRequest struct {
 	// When set, the broker creates the workspace at ~/.scion.projects/<slug>/
 	// instead of the default worktree-based path.
 	ProjectSlug string `json:"projectSlug,omitempty"`
+
+	// InitFirewall carries the hub's operator-authoritative egress firewall
+	// policy. Re-validated and unioned with the broker's own init_firewall
+	// policy before rendering into netns-setup argv.
+	InitFirewall *RemoteInitFirewall `json:"initFirewall,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
 	// If required keys are missing, the broker returns HTTP 202 with EnvRequirementsResponse

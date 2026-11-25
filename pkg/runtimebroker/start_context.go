@@ -166,6 +166,12 @@ type startContextInputs struct {
 	// See resolveTelemetryOverride.
 	TelemetryPolicy *bool
 
+	// InitFirewall is the hub's operator-authoritative egress firewall policy
+	// parsed and normalized from the top-level initFirewall wire field (never
+	// from Config, InlineConfig, or env). buildStartContext unions it with
+	// s.config.InitFirewall before placing it on StartOptions.InitFirewall.
+	InitFirewall firewallpolicy.Policy
+
 	// InlineConfig for provisioning
 	InlineConfig *api.ScionConfig
 
@@ -1075,6 +1081,15 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	effectiveInitFirewall, fwErr := firewallpolicy.Union(in.InitFirewall, s.config.InitFirewall)
+	if fwErr != nil {
+		return nil, &startContextError{
+			Status:  http.StatusBadRequest,
+			Code:    ErrCodeValidationError,
+			Message: "invalid initFirewall: " + fwErr.Error(),
+		}
+	}
+
 	// --- Build StartOptions ---
 	opts := api.StartOptions{
 		Name:               in.Name,
@@ -1084,7 +1099,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,
 		TrustedHubEndpoint: trustedHubEndpoint,
-		InitFirewall:       s.config.InitFirewall,
+		InitFirewall:       effectiveInitFirewall,
 		HubIssuedToken:     hubIssuedToken,
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
