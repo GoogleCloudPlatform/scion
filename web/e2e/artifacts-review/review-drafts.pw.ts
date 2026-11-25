@@ -33,6 +33,7 @@ import { createSession } from '../harness/auth.js';
 import {
   admin,
   artifactPage,
+  collectPageErrors,
   createProject,
   currentText,
   currentVersion,
@@ -104,8 +105,14 @@ let reviewerState = '';
 let reviewerId = '';
 let otherReviewerState = '';
 let otherReviewerId = '';
+const errors: string[] = [];
 
 test.describe.configure({ mode: 'serial' });
+
+test.afterEach(() => {
+  const found = errors.splice(0);
+  expect(found, 'no page errors or console errors').toEqual([]);
+});
 
 test.beforeAll(async () => {
   await setExperiments(true);
@@ -173,6 +180,7 @@ test('save draft in context A, close, resume byte-exact and submit in context B'
   const ctxA = await browser.newContext({ baseURL: hub().baseURL, storageState: reviewerState });
   try {
     const pageA = await ctxA.newPage();
+    collectPageErrors(pageA, errors);
     await pageA.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
     await startGraphicalReview(pageA);
 
@@ -242,6 +250,7 @@ test('save draft in context A, close, resume byte-exact and submit in context B'
   const ctxB = await browser.newContext({ baseURL: hub().baseURL, storageState: reviewerState });
   try {
     const pageB = await ctxB.newPage();
+    collectPageErrors(pageB, errors);
     await pageB.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
 
     const resumeBtn = pageB.locator('scion-page-artifact-detail .header-actions sl-button', {
@@ -326,6 +335,7 @@ test('two-context: Draft badge is private to the author and Discard from History
   });
   try {
     const page = await ctxAuthorSave.newPage();
+    collectPageErrors(page, errors);
     await page.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
     await startGraphicalReview(page);
 
@@ -355,6 +365,7 @@ test('two-context: Draft badge is private to the author and Discard from History
   });
   try {
     const otherPage = await ctxOther.newPage();
+    collectPageErrors(otherPage, errors);
     const otherDraftGet = otherPage.waitForResponse(
       (r) => r.request().method() === 'GET' && r.url().includes('/review-draft'),
       { timeout: 30_000 }
@@ -393,6 +404,7 @@ test('two-context: Draft badge is private to the author and Discard from History
   });
   try {
     const page = await ctxAuthor.newPage();
+    collectPageErrors(page, errors);
     await page.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
 
     await expect(
@@ -461,6 +473,7 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
   const ctxA = await browser.newContext({ baseURL: hub().baseURL, storageState: reviewerState });
   try {
     const pageA = await ctxA.newPage();
+    collectPageErrors(pageA, errors);
     await pageA.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
     await startGraphicalReview(pageA);
 
@@ -500,6 +513,7 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
   const ctxB = await browser.newContext({ baseURL: hub().baseURL, storageState: reviewerState });
   try {
     const pageB = await ctxB.newPage();
+    collectPageErrors(pageB, errors);
     await pageB.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
 
     const resumeBtn = pageB.locator('scion-page-artifact-detail .header-actions sl-button', {
@@ -550,6 +564,7 @@ test('stale-version move flow: newer publish triggers move with read-only carrie
   const ctxC = await browser.newContext({ baseURL: hub().baseURL, storageState: reviewerState });
   try {
     const pageC = await ctxC.newPage();
+    collectPageErrors(pageC, errors);
     await pageC.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
 
     const resumeBtn = pageC.locator('scion-page-artifact-detail .header-actions sl-button', {

@@ -234,6 +234,21 @@ export async function editorText(page: Page): Promise<string> {
 }
 
 /**
+ * Records uncaught page errors and review-editor console errors into errors.
+ * Matches journey.pw.ts and mobile.pw.ts so report-only CSP reports (#6367)
+ * and expected HTTP conflict console logs are not treated as editor errors.
+ */
+export function collectPageErrors(page: Page, errors: string[]): void {
+  page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+  page.on('console', (m) => {
+    if (m.type() !== 'error') return;
+    if (m.text().includes('review editor') || m.location().url.includes('review-editor')) {
+      errors.push(`console: ${m.text()}`);
+    }
+  });
+}
+
+/**
  * The entries of a zip, by name, read from its central directory: enough
  * for the archives the hub writes (stored or deflated, no zip64).
  */

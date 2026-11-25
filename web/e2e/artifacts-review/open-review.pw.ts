@@ -29,6 +29,7 @@ import { createSession } from '../harness/auth.js';
 import {
   admin,
   artifactPage,
+  collectPageErrors,
   createProject,
   currentVersion,
   hub,
@@ -55,8 +56,18 @@ async function setOpenReviewCheck(value: boolean | null): Promise<void> {
 let project = '';
 let reviewerState = '';
 let reviewerId = '';
+const errors: string[] = [];
 
 test.describe.configure({ mode: 'serial' });
+
+test.beforeEach(({ page }) => {
+  collectPageErrors(page, errors);
+});
+
+test.afterEach(() => {
+  const found = errors.splice(0);
+  expect(found, 'no page errors or console errors').toEqual([]);
+});
 
 test.beforeAll(async () => {
   await setExperiments(true);
@@ -109,6 +120,7 @@ test('a publisher is told about an open review and may wait or publish anyway', 
   const ctxA = await browser.newContext({ baseURL: hub().baseURL, storageState: reviewerState });
   try {
     const pageA = await ctxA.newPage();
+    collectPageErrors(pageA, errors);
     await pageA.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
     const review = pageA.locator('scion-page-artifact-detail .header-actions sl-button', {
       hasText: 'Review',
