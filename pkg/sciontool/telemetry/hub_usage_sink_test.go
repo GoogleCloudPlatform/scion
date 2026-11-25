@@ -1503,7 +1503,9 @@ func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
 			t.Errorf("overflow = %d (persisted %d), want 0", stats.Overflow, stats.PersistedOverflow)
 		}
 
-		// When Hub recovers, it receives the recorded missing_ranges for the reclaimed gap.
+		// When Hub recovers, client does NOT send MissingRanges (Hub is sole
+		// authority for meter_health gaps via emitted-vs-received sequences),
+		// and delivered events begin past seq 1 after reclamation.
 		hubDown.Store(false)
 		clock = clock.Add(10 * time.Minute)
 		d.RunOnce(context.Background())
@@ -1513,17 +1515,119 @@ func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
 		if len(recoveredReqs) == 0 {
 			t.Fatal("expected Hub request after recovery")
 		}
-		sawGap := false
+		var minDeliveredSeq int64
 		for _, req := range recoveredReqs {
-			if len(req.MissingRanges) > 0 && req.MissingRanges[0].Start == 1 {
-				sawGap = true
-				break
+			if len(req.MissingRanges) != 0 {
+				t.Errorf("client must not send MissingRanges (Hub is sole gap authority), got %+v", req.MissingRanges)
+			}
+			for _, ev := range req.Events {
+				if minDeliveredSeq == 0 || ev.ProducerSeq < minDeliveredSeq {
+					minDeliveredSeq = ev.ProducerSeq
+				}
 			}
 		}
-		if !sawGap {
-			t.Errorf("expected MissingRanges starting at 1 after Hub lag reclamation, got %+v", recoveredReqs)
+		if minDeliveredSeq <= 1 {
+			t.Errorf("minDeliveredSeq = %d, want > 1 after lag reclamation", minDeliveredSeq)
 		}
 	})
+}
+
+// RV1 concurrency test (-race): reclaimSecondaryLagLocked running concurrently
+// under the outbox lock must never advance cursor.hub past lines that
+// DrainBatchCursor currently has in flight, and advanceCursorNamed must never
+// race with reclaim.
+func TestDualAnalyticsDrainer_ReclaimDuringInFlightDrainRace(t *testing.T) {
+	inFlightStarted := make(chan struct{})
+	releaseHub := make(chan struct{})
+	var startOnce sync.Once
+	var mu sync.Mutex
+	var deliveredSeqs []int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req telemetrycontract.UsageIngestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.Events) > 0 {
+			startOnce.Do(func() {
+				close(inFlightStarted)
+				<-releaseHub
+			})
+			mu.Lock()
+			for _, ev := range req.Events {
+				deliveredSeqs = append(deliveredSeqs, ev.ProducerSeq)
+			}
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+	}))
+	defer srv.Close()
+
+	o := testOutbox(t)
+	o.maxPending = 8 << 10 // 8 KiB cap to force reclaim attempts
+	o.lockWait = contentionLockWait
+	gcp := &capture{}
+	sink := NewHubUsageSink(o, HubUsageSinkConfig{
+		Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+		RunID: "run-race",
+	})
+	d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+
+	// Seed ready-1.jsonl with 2 events and let GCP drain it (primFile = 2)
+	// while keeping Hub blocked mid-POST on ready-1.jsonl.
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:race-1", 1), AppendWritten)
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:race-2", 2), AppendWritten)
+
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		d.RunOnce(context.Background())
+	}()
+
+	<-inFlightStarted
+
+	// While DrainBatchCursor has ready-1.jsonl in flight, concurrently hammer
+	// AppendUsage to push retainedBytes past maxPending and trigger reclaim.
+	appendDone := make(chan struct{})
+	go func() {
+		defer close(appendDone)
+		for i := 3; i <= 40; i++ {
+			_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:race-%d", i), int64(i)))
+		}
+	}()
+	<-appendDone
+
+	// Verify cursor.hub was NOT advanced past ready-1.jsonl while it was in flight.
+	hubFile, _, err := o.readCursorNamed(HubAnalyticsCursorName)
+	if err != nil {
+		t.Fatalf("readCursorNamed: %v", err)
+	}
+	if hubFile > 1 {
+		t.Fatalf("cursor.hub advanced to file %d while ready-1.jsonl was still in flight", hubFile)
+	}
+	if _, err := os.Stat(filepath.Join(o.Dir(), readyName(1))); err != nil {
+		t.Fatalf("ready-1.jsonl was deleted while still in flight: %v", err)
+	}
+
+	// Release the in-flight Hub POST and verify clean completion with no race.
+	close(releaseHub)
+	<-drainDone
+
+	hubFileAfter, _, err := o.readCursorNamed(HubAnalyticsCursorName)
+	if err != nil {
+		t.Fatalf("readCursorNamed after drain: %v", err)
+	}
+	if hubFileAfter < 2 {
+		t.Errorf("cursor.hub = %d after ready-1.jsonl ACK, want >= 2", hubFileAfter)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deliveredSeqs) < 2 || deliveredSeqs[0] != 1 || deliveredSeqs[1] != 2 {
+		t.Errorf("deliveredSeqs = %v, want [1, 2, ...]", deliveredSeqs)
+	}
 }
 
 // O4: Hub sink always uses cursor.hub in both dual-run and Hub-only modes.

@@ -287,7 +287,6 @@ func (s *HubUsageSink) sendGroup(
 		RunID:                runID,
 		ProducerEpoch:        epoch,
 		ProducerSeq:          seq,
-		MissingRanges:        s.outbox.SkippedRangesForEpoch(epoch),
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
 	}
@@ -354,7 +353,6 @@ func (s *HubUsageSink) SendHeartbeat(ctx context.Context, finalState string) err
 		RunID:                s.cfg.RunID,
 		ProducerEpoch:        epoch,
 		ProducerSeq:          seq,
-		MissingRanges:        s.outbox.SkippedRangesForEpoch(epoch),
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
 		FinalState:           finalState,
