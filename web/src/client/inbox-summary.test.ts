@@ -567,4 +567,162 @@ describe('InboxSummaryStore', () => {
     await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it('optimistically removes a review and supports targeted rollback without clobbering concurrent removals', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const rev1 = {
+      id: 'notif-1',
+      kind: 'requested' as const,
+      projectId: 'proj-1',
+      projectName: 'Alpha',
+      createdAt: '2026-11-23T17:10:00Z',
+      href: '/projects/proj-1/artifacts/art-1',
+      artifactId: 'art-1',
+      title: 'Design Doc A',
+      scopeRef: 'proj-1',
+      requestedBy: 'alice',
+      notificationId: 'notif-1',
+    };
+    const rev2 = {
+      id: 'notif-2',
+      kind: 'requested' as const,
+      projectId: 'proj-1',
+      projectName: 'Alpha',
+      createdAt: '2026-11-23T17:05:00Z',
+      href: '/projects/proj-1/artifacts/art-2',
+      artifactId: 'art-2',
+      title: 'Design Doc B',
+      scopeRef: 'proj-1',
+      requestedBy: 'bob',
+      notificationId: 'notif-2',
+    };
+    const withReviews = makeSummary(0);
+    withReviews.total = 3;
+    withReviews.categories.reviews = {
+      state: 'ok',
+      count: 3,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/artifacts?review_pending=1&owner=me',
+      breakdown: { toAddress: 1, requested: 2 },
+      previews: [rev1, rev2],
+    };
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(withReviews), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const unmount = store.mountPage('user-1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(store.total).toBe(3);
+    expect(store.summary?.categories.reviews.previews).toHaveLength(2);
+
+    // Remove both concurrently; no immediate refetch before caller's POST settles.
+    const rollback1 = store.optimisticRemoveReview('notif-1');
+    const rollback2 = store.optimisticRemoveReview('notif-2');
+    expect(rollback1).not.toBeNull();
+    expect(rollback2).not.toBeNull();
+    expect(store.total).toBe(1);
+    expect(store.summary?.categories.reviews.count).toBe(1);
+    expect(store.summary?.categories.reviews.breakdown).toEqual({ toAddress: 1, requested: 0 });
+    expect(store.summary?.categories.reviews.previews).toHaveLength(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Roll back only rev1 -> rev1 is restored while rev2 stays removed.
+    rollback1!();
+    expect(store.total).toBe(2);
+    expect(store.summary?.categories.reviews.count).toBe(2);
+    expect(store.summary?.categories.reviews.breakdown).toEqual({ toAddress: 1, requested: 1 });
+    expect(store.summary?.categories.reviews.previews.map((p) => p.id)).toEqual(['notif-1']);
+
+    // Calling rollback1 a second time is a no-op.
+    rollback1!();
+    expect(store.total).toBe(2);
+    expect(store.summary?.categories.reviews.previews).toHaveLength(1);
+    unmount();
+  });
+
+  it('does not duplicate a review row or inflate count when rollback runs after a refresh that still includes the row', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const rev1 = {
+      id: 'notif-1',
+      kind: 'requested' as const,
+      projectId: 'proj-1',
+      projectName: 'Alpha',
+      createdAt: '2026-11-23T17:10:00Z',
+      href: '/projects/proj-1/artifacts/art-1',
+      artifactId: 'art-1',
+      title: 'Design Doc A',
+      scopeRef: 'proj-1',
+      requestedBy: 'alice',
+      notificationId: 'notif-1',
+    };
+    const rev2 = {
+      id: 'notif-2',
+      kind: 'requested' as const,
+      projectId: 'proj-1',
+      projectName: 'Alpha',
+      createdAt: '2026-11-23T17:05:00Z',
+      href: '/projects/proj-1/artifacts/art-2',
+      artifactId: 'art-2',
+      title: 'Design Doc B',
+      scopeRef: 'proj-1',
+      requestedBy: 'bob',
+      notificationId: 'notif-2',
+    };
+    const withReviews = makeSummary(0);
+    withReviews.total = 3;
+    withReviews.categories.reviews = {
+      state: 'ok',
+      count: 3,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/artifacts?review_pending=1&owner=me',
+      breakdown: { toAddress: 1, requested: 2 },
+      previews: [rev1, rev2],
+    };
+
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(withReviews), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    const unmount = store.mountPage('user-1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(store.summary?.categories.reviews.previews.map((p) => p.id)).toEqual([
+      'notif-1',
+      'notif-2',
+    ]);
+
+    // Optimistically remove notif-1, then a summary fetch arrives that still contains notif-1.
+    const rollback = store.optimisticRemoveReview('notif-1');
+    expect(rollback).not.toBeNull();
+    expect(store.summary?.categories.reviews.count).toBe(2);
+
+    store.requestRefresh({ immediate: true, force: true });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(store.summary?.categories.reviews.previews.map((p) => p.id)).toEqual([
+      'notif-1',
+      'notif-2',
+    ]);
+    expect(store.summary?.categories.reviews.count).toBe(3);
+
+    // Rolling back after the refresh must be a no-op (no duplicate row, unchanged count/total).
+    rollback!();
+    expect(store.summary?.categories.reviews.previews.map((p) => p.id)).toEqual([
+      'notif-1',
+      'notif-2',
+    ]);
+    expect(store.summary?.categories.reviews.count).toBe(3);
+    expect(store.summary?.categories.reviews.breakdown).toEqual({ toAddress: 1, requested: 2 });
+    expect(store.total).toBe(3);
+    unmount();
+  });
 });

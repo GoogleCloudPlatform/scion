@@ -21,7 +21,7 @@
  * renders `<scion-page-404>`.
  *
  * Renders the responsive category card grid in the fixed order Decisions,
- * Agents waiting (6b), Approvals, Reviews (6b), Chat. Disabled and unavailable
+ * Agents waiting, Approvals, Reviews, Chat. Disabled and unavailable
  * categories are hidden.
  */
 
@@ -44,7 +44,9 @@ import {
   type InboxChatFilter,
   type InboxChatPreview,
   type InboxDecisionPreview,
+  type InboxReviewPreview,
   type InboxSummaryResponse,
+  type InboxWaitingAgentPreview,
 } from '../../client/inbox-summary.js';
 import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import {
@@ -68,6 +70,7 @@ import {
 import { formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { inboxTabStripStyles, renderInboxTabStrip } from '../shared/inbox-tabs.js';
+import { NOTIFICATION_ACKED_EVENT } from '../shared/notification-tray.js';
 import './not-found.js';
 
 /** Fixed display order for category cards on `/profile/inbox` (design §6.3). */
@@ -189,6 +192,7 @@ export class ScionPageProfileInbox extends LitElement {
 
   private unmountPage: (() => void) | null = null;
   private chatAbortController: AbortController | null = null;
+  private dismissAbortControllers = new Map<string, AbortController>();
   private chatFetchSeq = 0;
 
   private boundOnSummaryChanged = (): void => {
@@ -501,6 +505,53 @@ export class ScionPageProfileInbox extends LitElement {
         color: var(--scion-text-muted, #64748b);
       }
 
+      .preview-question {
+        margin-top: 0.25rem;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        word-break: break-word;
+      }
+
+      .review-groups {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .review-group + .review-group {
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .review-group-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .review-group-title {
+        margin: 0;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
       .preview-actions {
         display: flex;
         align-items: center;
@@ -633,6 +684,7 @@ export class ScionPageProfileInbox extends LitElement {
 
   private stopStore(): void {
     this.abortChatFetch();
+    this.abortDismissFetches();
     this.unmountPage?.();
     this.unmountPage = null;
   }
@@ -642,6 +694,13 @@ export class ScionPageProfileInbox extends LitElement {
       this.chatAbortController.abort();
       this.chatAbortController = null;
     }
+  }
+
+  private abortDismissFetches(): void {
+    for (const controller of this.dismissAbortControllers.values()) {
+      controller.abort();
+    }
+    this.dismissAbortControllers.clear();
   }
 
   private syncFromStore(): void {
@@ -856,6 +915,54 @@ export class ScionPageProfileInbox extends LitElement {
     } catch {
       showToast(`Could not reject ${item.key}`, 'danger');
     } finally {
+      this.setBusy(item.id, false);
+    }
+  }
+
+  private async dismissReviewRequest(item: InboxReviewPreview): Promise<void> {
+    const notifId = item.notificationId;
+    if (!notifId || this.busyIds.has(item.id)) return;
+    this.setBusy(item.id, true);
+    const controller = new AbortController();
+    this.dismissAbortControllers.set(item.id, controller);
+    const rollback = inboxSummaryStore.optimisticRemoveReview(item.id);
+    try {
+      const res = await apiFetch(`/api/v1/notifications/${encodeURIComponent(notifId)}/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        rollback?.();
+        inboxSummaryStore.requestRefresh();
+        let msg = `Could not dismiss review request (${res.status})`;
+        try {
+          const data = (await res.json()) as { error?: { message?: string } };
+          if (data.error?.message) msg = data.error.message;
+        } catch {
+          // Use status fallback.
+        }
+        if (this.isConnected) {
+          showToast(msg, 'danger');
+        }
+        return;
+      }
+      inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+      window.dispatchEvent(new CustomEvent(NOTIFICATION_ACKED_EVENT, { detail: { id: notifId } }));
+      if (this.isConnected) {
+        showToast('Dismissed review request', 'neutral');
+      }
+    } catch (err) {
+      rollback?.();
+      inboxSummaryStore.requestRefresh();
+      if (!isAbortError(err) && this.isConnected) {
+        showToast('Could not dismiss review request', 'danger');
+      }
+    } finally {
+      if (this.dismissAbortControllers.get(item.id) === controller) {
+        this.dismissAbortControllers.delete(item.id);
+      }
       this.setBusy(item.id, false);
     }
   }
@@ -1228,6 +1335,157 @@ export class ScionPageProfileInbox extends LitElement {
     `;
   }
 
+  private renderWaitingCard(
+    cat: InboxCategory<InboxWaitingAgentPreview>
+  ): TemplateResult | typeof nothing {
+    return this.renderInboxCard({
+      key: 'waiting',
+      icon: 'hourglass-split',
+      title: 'Agents waiting',
+      category: cat,
+      defaultHref: '/agents',
+      renderBody: (c) => html`
+        <ul class="preview-list">
+          ${c.previews.map((item) => this.renderWaitingRow(item))}
+        </ul>
+      `,
+    });
+  }
+
+  private renderWaitingRow(item: InboxWaitingAgentPreview): TemplateResult {
+    const href = item.href || '/agents';
+    const displayName = item.agentName || item.agentSlug || 'Agent';
+    const showSlug = Boolean(item.agentName && item.agentSlug && item.agentSlug !== item.agentName);
+    const sinceAge = formatRelativeAge(item.since || item.createdAt);
+
+    return html`
+      <li class="preview-row" data-waiting-row=${item.id}>
+        <div class="preview-info">
+          <a href=${href} class="preview-title" data-waiting-link>${displayName}</a>
+          ${item.question
+            ? html`<div class="preview-question" data-waiting-question>${item.question}</div>`
+            : nothing}
+          <div class="preview-meta">
+            ${showSlug ? html`<span data-waiting-slug>${item.agentSlug}</span>` : nothing}
+            ${showSlug && item.projectName ? html`<span>·</span>` : nothing}
+            ${item.projectName ? html`<span>${item.projectName}</span>` : nothing}
+            ${(showSlug || item.projectName) && sinceAge ? html`<span>·</span>` : nothing}
+            ${sinceAge ? html`<span data-waiting-since>${sinceAge}</span>` : nothing}
+          </div>
+        </div>
+      </li>
+    `;
+  }
+
+  private renderReviewsCard(
+    cat: InboxCategory<InboxReviewPreview>
+  ): TemplateResult | typeof nothing {
+    return this.renderInboxCard({
+      key: 'reviews',
+      icon: 'clipboard-check',
+      title: 'Reviews',
+      category: cat,
+      defaultHref: '/artifacts?review_pending=1&owner=me',
+      renderBody: (c) => {
+        const toAddressItems = c.previews.filter((item) => item.kind === 'to_address');
+        const requestedItems = c.previews.filter((item) => item.kind === 'requested');
+        const toAddressCount = c.breakdown?.toAddress ?? toAddressItems.length;
+        const requestedCount = c.breakdown?.requested ?? requestedItems.length;
+
+        const showToAddress = toAddressCount > 0 || toAddressItems.length > 0;
+        const showRequested = requestedCount > 0 || requestedItems.length > 0;
+
+        if (!showToAddress && !showRequested) {
+          return html`<p class="card-empty" data-card-empty>Nothing waiting</p>`;
+        }
+
+        return html`
+          <div class="review-groups" data-reviews-groups>
+            ${showToAddress
+              ? this.renderReviewGroup('to_address', 'To address', toAddressCount, toAddressItems)
+              : nothing}
+            ${showRequested
+              ? this.renderReviewGroup('requested', 'Requested', requestedCount, requestedItems)
+              : nothing}
+          </div>
+        `;
+      },
+    });
+  }
+
+  private renderReviewGroup(
+    kind: 'to_address' | 'requested',
+    heading: string,
+    count: number,
+    items: InboxReviewPreview[]
+  ): TemplateResult {
+    return html`
+      <div class="review-group" data-reviews-group=${kind}>
+        <div class="review-group-header">
+          <h3 class="review-group-title">${heading}</h3>
+          <sl-badge variant="neutral" pill data-reviews-group-count=${kind}>${count}</sl-badge>
+        </div>
+        ${items.length > 0
+          ? html`
+              <ul class="preview-list">
+                ${items.map((item) => this.renderReviewRow(item))}
+              </ul>
+            `
+          : html`<p class="card-empty" data-reviews-group-overflow=${kind}>
+              ${count} more · View all
+            </p>`}
+      </div>
+    `;
+  }
+
+  private renderReviewRow(item: InboxReviewPreview): TemplateResult {
+    const busy = this.busyIds.has(item.id);
+    const href = item.href || '/artifacts?review_pending=1&owner=me';
+    const title = item.title || 'Untitled artifact';
+    const age = formatRelativeAge(item.createdAt);
+    const showProjectName = Boolean(item.projectName && item.projectName !== item.scopeRef);
+    const canDismiss = item.kind === 'requested' && Boolean(item.notificationId);
+
+    return html`
+      <li class="preview-row" data-review-row=${item.id} data-review-kind=${item.kind}>
+        <div class="preview-info">
+          <a href=${href} class="preview-title" data-review-link>${title}</a>
+          <div class="preview-meta">
+            ${item.requestedBy
+              ? html`<span data-review-requested-by>requested by ${item.requestedBy}</span>`
+              : nothing}
+            ${item.requestedBy && (showProjectName || item.scopeRef)
+              ? html`<span>·</span>`
+              : nothing}
+            ${showProjectName ? html`<span>${item.projectName}</span>` : nothing}
+            ${showProjectName && item.scopeRef ? html`<span>·</span>` : nothing}
+            ${item.scopeRef ? html`<span data-review-scope>${item.scopeRef}</span>` : nothing}
+            ${(item.requestedBy || showProjectName || item.scopeRef) && age
+              ? html`<span>·</span>`
+              : nothing}
+            ${age ? html`<span>${age}</span>` : nothing}
+          </div>
+        </div>
+        ${canDismiss
+          ? html`
+              <div class="preview-actions">
+                <sl-button
+                  size="small"
+                  variant="default"
+                  ?loading=${busy}
+                  ?disabled=${busy}
+                  data-review-dismiss-btn=${item.id}
+                  @click=${(): void => void this.dismissReviewRequest(item)}
+                >
+                  Dismiss<span class="sr-only"> review request for ${title}</span>
+                </sl-button>
+              </div>
+            `
+          : nothing}
+      </li>
+    `;
+  }
+
   private renderCategoryCard(
     key: InboxCategoryKey,
     categories: InboxSummaryResponse['categories']
@@ -1236,13 +1494,11 @@ export class ScionPageProfileInbox extends LitElement {
       case 'decisions':
         return categories.decisions ? this.renderDecisionsCard(categories.decisions) : nothing;
       case 'waiting':
-        // Rendered in Phase 6b.
-        return nothing;
+        return categories.waiting ? this.renderWaitingCard(categories.waiting) : nothing;
       case 'approvals':
         return categories.approvals ? this.renderApprovalsCard(categories.approvals) : nothing;
       case 'reviews':
-        // Rendered in Phase 6b.
-        return nothing;
+        return categories.reviews ? this.renderReviewsCard(categories.reviews) : nothing;
       case 'chat':
         return categories.chat ? this.renderChatCard(categories.chat) : nothing;
     }

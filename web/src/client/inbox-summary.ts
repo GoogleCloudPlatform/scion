@@ -117,6 +117,35 @@ export interface InboxChatPreview {
   lastMessageAt: string;
 }
 
+export interface InboxWaitingAgentPreview {
+  id: string;
+  projectId: string;
+  projectName: string;
+  createdAt: string;
+  href: string;
+  agentId: string;
+  agentName: string;
+  agentSlug: string;
+  question: string;
+  since: string;
+}
+
+export type InboxReviewKind = 'to_address' | 'requested';
+
+export interface InboxReviewPreview {
+  id: string;
+  kind: InboxReviewKind;
+  projectId: string;
+  projectName: string;
+  createdAt: string;
+  href: string;
+  artifactId: string;
+  title: string;
+  scopeRef: string;
+  requestedBy?: string;
+  notificationId?: string;
+}
+
 export interface InboxCategory<TPreview = unknown> {
   state: InboxCategoryState;
   count: number;
@@ -135,8 +164,8 @@ export interface InboxSummaryResponse {
   totalCapped: boolean;
   categories: {
     decisions: InboxCategory<InboxDecisionPreview>;
-    waiting: InboxCategory;
-    reviews: InboxCategory;
+    waiting: InboxCategory<InboxWaitingAgentPreview>;
+    reviews: InboxCategory<InboxReviewPreview>;
     approvals: InboxCategory<InboxApprovalPreview>;
     chat: InboxCategory<InboxChatPreview>;
   };
@@ -552,6 +581,106 @@ export class InboxSummaryStore {
     }
     this.requestRefresh({ immediate: true, force: true });
     return nextCount;
+  }
+
+  /**
+   * Optimistically removes a review preview and decrements the reviews
+   * count/breakdown/total before the ack POST settles. Returns a targeted
+   * rollback function to restore the removed row if the request fails or is
+   * aborted. Callers trigger `requestRefresh` after the POST succeeds.
+   */
+  optimisticRemoveReview(id: string): (() => void) | null {
+    if (!this._summary) return null;
+    const reviews = this._summary.categories.reviews;
+    if (reviews.state !== 'ok') return null;
+
+    const prevIndex = reviews.previews.findIndex((p) => p.id === id);
+    if (prevIndex === -1) return null;
+    const removed = reviews.previews[prevIndex];
+
+    const nextPreviews = reviews.previews.filter((p) => p.id !== id);
+    const nextCount = Math.max(0, reviews.count - 1);
+    const delta = reviews.count - nextCount;
+
+    const breakdownKey = removed.kind === 'requested' ? 'requested' : 'toAddress';
+    const nextBreakdown = reviews.breakdown ? { ...reviews.breakdown } : undefined;
+    let breakdownDelta = 0;
+    if (nextBreakdown && typeof nextBreakdown[breakdownKey] === 'number') {
+      const prevVal = nextBreakdown[breakdownKey];
+      const nextVal = Math.max(0, prevVal - 1);
+      breakdownDelta = prevVal - nextVal;
+      nextBreakdown[breakdownKey] = nextVal;
+    }
+
+    const nextSummary: InboxSummaryResponse = {
+      ...this._summary,
+      total: Math.max(0, this._summary.total - delta),
+      categories: {
+        ...this._summary.categories,
+        reviews: {
+          ...reviews,
+          count: nextCount,
+          previews: nextPreviews,
+          ...(nextBreakdown ? { breakdown: nextBreakdown } : {}),
+        },
+      },
+    };
+    this.applySummary(nextSummary, this._summaryPreviews);
+    if (this.userId) {
+      writeSharedPayload({
+        userId: this.userId,
+        previews: this._summaryPreviews,
+        fetchedAt: Date.now(),
+        summary: nextSummary,
+      });
+    }
+
+    let rolledBack = false;
+    return () => {
+      if (rolledBack) return;
+      rolledBack = true;
+      if (!this._summary) return;
+      const currentReviews = this._summary.categories.reviews;
+      if (currentReviews.state !== 'ok') return;
+      if (currentReviews.previews.some((p) => p.id === removed.id)) return;
+
+      const restoredPreviews = [...currentReviews.previews];
+      restoredPreviews.splice(Math.min(prevIndex, restoredPreviews.length), 0, removed);
+
+      const restoredBreakdown = currentReviews.breakdown
+        ? { ...currentReviews.breakdown }
+        : undefined;
+      if (
+        restoredBreakdown &&
+        breakdownDelta > 0 &&
+        typeof restoredBreakdown[breakdownKey] === 'number'
+      ) {
+        restoredBreakdown[breakdownKey] += breakdownDelta;
+      }
+
+      const restoredSummary: InboxSummaryResponse = {
+        ...this._summary,
+        total: this._summary.total + delta,
+        categories: {
+          ...this._summary.categories,
+          reviews: {
+            ...currentReviews,
+            count: currentReviews.count + delta,
+            previews: restoredPreviews,
+            ...(restoredBreakdown ? { breakdown: restoredBreakdown } : {}),
+          },
+        },
+      };
+      this.applySummary(restoredSummary, this._summaryPreviews);
+      if (this.userId) {
+        writeSharedPayload({
+          userId: this.userId,
+          previews: this._summaryPreviews,
+          fetchedAt: Date.now(),
+          summary: restoredSummary,
+        });
+      }
+    };
   }
 
   /** @internal test-only reset. */
