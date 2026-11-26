@@ -590,6 +590,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			(sd.wroteStarting() || opts.Kind == store.StartClaimRestart) &&
 			s.asyncStartAllowed()
 		var res *StartDispatchResult
+		wakeForMessage := opts.Kind == store.StartClaimWake
 		dispatch := func(c context.Context) error {
 			if async {
 				kind := store.LaunchKindStart
@@ -598,7 +599,14 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 				}
 				var err error
 				res, err = od.DispatchAgentStartWithOptions(c, agent, opts.Task, opts.Resume, StartDispatchOptions{
-					Async: true, Kind: kind, PriorPhase: sd.restingPhase(),
+					Async: true, Kind: kind, PriorPhase: sd.restingPhase(), WakeForMessage: wakeForMessage,
+				})
+				return err
+			}
+			if wakeForMessage && hasOptions {
+				var err error
+				res, err = od.DispatchAgentStartWithOptions(c, agent, opts.Task, opts.Resume, StartDispatchOptions{
+					WakeForMessage: true,
 				})
 				return err
 			}

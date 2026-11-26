@@ -113,6 +113,12 @@ func (d *DeclarativeGenericHarness) AdvancedCapabilities() api.HarnessAdvancedCa
 	return caps
 }
 
+// HasTaskFlag reports whether this harness declares a task_flag in its command
+// spec.
+func (d *DeclarativeGenericHarness) HasTaskFlag() bool {
+	return d.entry.Command != nil && d.entry.Command.TaskFlag != ""
+}
+
 func (d *DeclarativeGenericHarness) GetCommand(task string, resume bool, baseArgs []string) []string {
 	if d.entry.Command == nil {
 		args := append([]string{}, baseArgs...)

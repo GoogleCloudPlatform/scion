@@ -164,6 +164,10 @@ type agentBuffer struct {
 	// messageIDs holds the hub message id of each message ("" when it has
 	// none), aligned with messages.
 	messageIDs []string
+
+	// suffix holds an optional wake-on-message resume instruction to append
+	// after the coalesced messages in this flush (first non-empty suffix wins).
+	suffix string
 }
 
 // bufferedFlush is one coalesced delivery handed to deliverFlush.
@@ -349,6 +353,13 @@ func (mb *MessageBuffer) sendWithID(agentID, projectID string, message, messageI
 
 // sendWithIDAndSuccess is sendWithID with an optional success callback.
 func (mb *MessageBuffer) sendWithIDAndSuccess(agentID, projectID string, message, messageID string, onFailure DeliveryFailureHandler, onSuccess DeliverySuccessHandler, pre PreDelivery) {
+	mb.sendWithSuffix(agentID, projectID, message, messageID, "", onFailure, onSuccess, pre)
+}
+
+// sendWithSuffix is sendWithIDAndSuccess with an optional wake-resume suffix
+// appended after the coalesced messages in the same flush (first non-empty
+// suffix wins).
+func (mb *MessageBuffer) sendWithSuffix(agentID, projectID string, message, messageID, suffix string, onFailure DeliveryFailureHandler, onSuccess DeliverySuccessHandler, pre PreDelivery) {
 	mb.mu.Lock()
 	if mb.closed {
 		mb.mu.Unlock()
@@ -379,6 +390,9 @@ func (mb *MessageBuffer) sendWithIDAndSuccess(agentID, projectID string, message
 	buf.onSuccess = append(buf.onSuccess, onSuccess)
 	buf.pre = append(buf.pre, pre)
 	buf.messageIDs = append(buf.messageIDs, messageID)
+	if suffix != "" && buf.suffix == "" {
+		buf.suffix = suffix
+	}
 	util.Debugf("msgbuffer: queued message for agent %s project %s (%d pending)", agentID, projectID, len(buf.messages))
 
 	// Reset or start the debounce timer. If a timer is already running,
@@ -454,6 +468,7 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 	successHandlers := buf.onSuccess
 	pres := buf.pre
 	ids := buf.messageIDs
+	suffix := buf.suffix
 	projectID := buf.projectID
 	delete(mb.buffers, key)
 	mb.mu.Unlock()
@@ -466,6 +481,20 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 			if i < len(pres) && pres[i] != nil {
 				pending[i] += mb.preDeliver(context.Background(), agentID, projectID, pres[i])
 			}
+		}
+	}
+
+	// Append any deferred wake-resume instruction to the last message's text
+	// rather than as a separate part, so messageIDs and parts stay aligned
+	// (keeping partialIDs false for conduit delivery). If an oversize conduit
+	// flush splits along message boundaries, the suffix travels with the last
+	// message's group.
+	if suffix != "" {
+		last := len(pending) - 1
+		if pending[last] != "" {
+			pending[last] += "\n\n" + suffix
+		} else {
+			pending[last] = suffix
 		}
 	}
 

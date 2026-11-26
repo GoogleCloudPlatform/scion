@@ -3293,6 +3293,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	)
 
 	query := r.URL.Query()
+	s.pendingResume.drop(pendingResumeKey(id, projectID))
 
 	deleteFiles := query.Get("deleteFiles") == "true"
 	removeBranch := query.Get("removeBranch") == "true"
@@ -4096,6 +4097,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		LaunchTimeoutSeconds   int                 `json:"launchTimeoutSeconds,omitempty"`
 		LaunchKeepaliveSeconds int                 `json:"launchKeepaliveSeconds,omitempty"`
 		PriorStatus            *api.PriorStatus    `json:"priorStatus,omitempty"`
+		WakeForMessage         bool                `json:"wakeForMessage,omitempty"`
 		InitFirewall           *RemoteInitFirewall `json:"initFirewall,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
@@ -4518,6 +4520,25 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 	opts.PriorStatus = startReq.PriorStatus
+	opts.WakeForMessage = startReq.WakeForMessage
+
+	// Clear any stale deferred resume instruction from an earlier run before
+	// starting. When WakeForMessage is set, AgentManager.Start calls
+	// OnDeferredResume if it suppresses the harness's CLI resume prompt.
+	prKey := pendingResumeKey(id, projectID)
+	s.pendingResume.drop(prKey)
+	if opts.WakeForMessage {
+		runID := opts.RunID
+		opts.OnDeferredResume = func(wake, standalone string) {
+			s.pendingResume.put(prKey, pendingResume{
+				agentID:    id,
+				projectID:  projectID,
+				wake:       wake,
+				standalone: standalone,
+				runID:      runID,
+			}, s.effectivePendingResumeTTL(), s.deliverStandaloneResume)
+		}
+	}
 
 	ctx = s.withHarnessConfigPolicy(ctx)
 	if ss != nil {
@@ -4553,6 +4574,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	agentInfo, err := mgr.Start(ctx, opts)
 	err = s.completeOwnedStart(ctx, mgr, opts.RunID, err, true)
 	if err != nil {
+		s.pendingResume.dropIfRun(prKey, opts.RunID)
 		span.SetStatus(codes.Error, spanErrorText(err))
 		if d, ok := harnessPolicyRefusalFrom(err); ok {
 			// Raised from inside Manager.Start, which may already have
@@ -4992,6 +5014,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// recreated under the same name. Without it, behaviour is as before.
 	runID := r.URL.Query().Get("runId")
 	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
+	s.pendingResume.dropIfRun(pendingResumeKey(id, projectID), runID)
 	// agentId, when the hub sends it, keeps the launch cancels below from
 	// waking the start of a newer agent of the same name; see deleteAgent
 	// (ptone/scion#2632).
@@ -5547,6 +5570,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// Record the run this restart starts on the tracked start, so a
 	// run-scoped stop for another run leaves it alone (ptone/scion#2550).
 	s.startsInFlight.setRunID(ctx, s.trackedStartRunID(id, projectID, queryRunID, restartReq.RunID))
+	s.pendingResume.drop(pendingResumeKey(id, projectID))
 
 	// Inject skill resolver from Hub connection for skill provisioning, same
 	// as createAgent/startAgent (#1960).
@@ -6048,6 +6072,9 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	inbox := s.startInboxDelivery(r.Header.Get("X-Scion-Hub-Connection"), id, req.MessageID, req.AttachmentRetentionDays, req.Attachments)
 	if inbox != nil {
 		msgCtx = agent.WithPreDelivery(msgCtx, inbox)
+	}
+	if p, ok := s.pendingResume.take(pendingResumeKey(id, projectID)); ok {
+		msgCtx = agent.WithResumeSuffix(msgCtx, p.wake)
 	}
 	if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
 		if inbox != nil {

@@ -199,23 +199,24 @@ func (c *ContainerScriptHarness) HasTaskFlag() bool {
 	return c.entry.Command != nil && c.entry.Command.TaskFlag != ""
 }
 
-// ResumePromptForPriorStatus returns a status-aware resume prompt for a
-// task_flag harness when resuming with no explicit task (ptone/scion#8900).
-// When prior is nil or has no activity, it returns DefaultResumePrompt.
-func ResumePromptForPriorStatus(prior *api.PriorStatus) string {
+// formatPriorStatusClause formats the "Last reported status: ..." clause shared
+// by standalone and wake-on-message resume instructions. It returns the clause
+// and whether the prior activity was "completed", or ("", false) when prior is
+// nil or has no activity.
+func formatPriorStatusClause(prior *api.PriorStatus) (string, bool) {
 	if prior == nil {
-		return DefaultResumePrompt
+		return "", false
 	}
 	activity := strings.ToLower(strings.TrimSpace(prior.Activity))
 	if activity == "" {
-		return DefaultResumePrompt
+		return "", false
 	}
 	statusLabel := activity
 	if activity == "completed" {
 		statusLabel = "task_completed"
 	}
 	var b strings.Builder
-	b.WriteString("Resumed session. Last reported status: ")
+	b.WriteString("Last reported status: ")
 	b.WriteString(statusLabel)
 	if !prior.At.IsZero() {
 		b.WriteString(" at ")
@@ -226,16 +227,42 @@ func ResumePromptForPriorStatus(prior *api.PriorStatus) string {
 		b.WriteString(summary)
 		b.WriteString(")")
 	}
-	if activity == "completed" {
-		b.WriteString(". Check for new messages; do not repeat completed work.")
-	} else {
-		b.WriteString(". Check for pending work or new messages.")
+	return b.String(), activity == "completed"
+}
+
+// ResumePromptForPriorStatus returns a status-aware standalone resume prompt
+// for a task_flag harness when resuming with no explicit task (ptone/scion#8900).
+// When prior is nil or has no activity, it returns DefaultResumePrompt.
+func ResumePromptForPriorStatus(prior *api.PriorStatus) string {
+	clause, completed := formatPriorStatusClause(prior)
+	if clause == "" {
+		return DefaultResumePrompt
 	}
-	return b.String()
+	if completed {
+		return "Resumed session. " + clause + ". Check for new messages; do not repeat completed work."
+	}
+	return "Resumed session. " + clause + ". Check for pending work or new messages."
+}
+
+// WakeResumeInstruction returns the resume instruction appended after the
+// waking message(s) when a suspended agent is woken by an incoming message.
+func WakeResumeInstruction(prior *api.PriorStatus) string {
+	clause, completed := formatPriorStatusClause(prior)
+	if clause == "" {
+		return "Resumed session after suspension to handle the message above. Respond to the message first, then check for other pending work."
+	}
+	if completed {
+		return "Resumed session after suspension to handle the message above. " + clause + ". Respond to the message first; do not repeat completed work."
+	}
+	return "Resumed session after suspension to handle the message above. " + clause + ". Respond to the message first, then check for other pending work."
 }
 
 // GetCommand builds the harness CLI invocation from the declarative
 // command spec. Falls back to baseArgs alone if no command is declared.
+//
+// AgentManager.Start owns resume-prompt selection (including deferring the
+// instruction on message-triggered wakes), so GetCommand does not inject a
+// synthetic prompt when resume is true and task is empty.
 //
 // The resume_flag string is split on whitespace, so a multi-token flag like
 // "resume --last" becomes two argv entries. Single-token flags like "--continue"
@@ -248,14 +275,6 @@ func (c *ContainerScriptHarness) GetCommand(task string, resume bool, baseArgs [
 			args = append(args, task)
 		}
 		return args
-	}
-
-	// When resuming without a new task, inject a synthetic prompt for
-	// harnesses that use task_flag (e.g. opencode's --prompt). Without
-	// this, TUI-based harnesses exit immediately on resume because the
-	// session is already idle and there is no new work to process.
-	if resume && task == "" && cmd.TaskFlag != "" {
-		task = DefaultResumePrompt
 	}
 
 	resumeTokens := []string{}

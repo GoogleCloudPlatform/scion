@@ -44,6 +44,9 @@ type StartDispatchArgs struct {
 	// before deferring, which clears any retained activity on the row, so the
 	// owner cannot re-read it from the store.
 	PriorStatus *api.PriorStatus `json:"priorStatus,omitempty"`
+	// WakeForMessage is true when the start was triggered by an incoming
+	// message waking a suspended agent (StartDispatchOptions.WakeForMessage).
+	WakeForMessage bool `json:"wakeForMessage,omitempty"`
 }
 
 // RestartDispatchArgs carries parameters for a cross-node agent restart that

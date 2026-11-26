@@ -43,6 +43,11 @@ type StartDispatchOptions struct {
 	// execDispatchStart because the requester wrote starting before deferring,
 	// clearing any retained activity on the row.
 	PriorStatus *api.PriorStatus
+	// WakeForMessage is true only when the start was triggered by an incoming
+	// message waking a suspended agent (store.StartClaimWake). It tells the
+	// broker to defer any synthetic CLI resume prompt so the waking message
+	// and resume instruction arrive together as one input.
+	WakeForMessage bool
 }
 
 // launchKind returns o.Kind, defaulting to store.LaunchKindStart.
