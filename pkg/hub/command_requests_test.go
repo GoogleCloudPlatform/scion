@@ -743,6 +743,74 @@ func TestCommandRequestGet_MessageIDFallbackAndDetailEnrichment(t *testing.T) {
 	assert.Equal(t, "Command Project", detail1.ProjectName)
 	assert.Equal(t, "Alice", detail1.ApproverName)
 	assert.Nil(t, detail1.PreviousVersionUnknown)
+	require.NotNil(t, detail1.ExecContainer)
+	assert.False(t, detail1.ExecContainer.CanWake, "R2: canWake must be false before P2 wake lands")
+
+	// O3: negative authorization checks on the message-ID lookup path.
+	// 1. Non-recipient (bob) GET by messageId -> 403 with no request/script/exec_container fields.
+	rrNonRecip := f.doUserJSON(t, http.MethodGet, "/api/v1/command-requests/"+send1.MessageID, f.bob, nil)
+	assert.Equal(t, http.StatusForbidden, rrNonRecip.Code)
+	assert.NotContains(t, rrNonRecip.Body.String(), "echo v1")
+	assert.NotContains(t, rrNonRecip.Body.String(), "exec_container")
+	assert.NotContains(t, rrNonRecip.Body.String(), send1.CommandRequest.RowID)
+
+	// 2. POST approve with messageId (not rowId) -> 404 (approve never falls back to messageId).
+	rrApproveByMsg := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/"+send1.MessageID+"/approve", f.alice, messages.ApproveCommandRequestBody{
+		CommandSHA256:  send1.CommandRequest.CommandSHA256,
+		Surface:        msgaction.CommandRequestSurfaceNative,
+		IdempotencyKey: "p3-o3-msg-approve",
+	})
+	assert.Equal(t, http.StatusNotFound, rrApproveByMsg.Code)
+
+	// 3. Recipient non-approver GET by messageId -> 200 with canApprove=false, reason=not_approver, no exec_container.
+	projID := f.project.ID
+	conv := &store.Conversation{
+		ID:         api.NewUUID(),
+		ProjectID:  &projID,
+		Kind:       "group",
+		Surface:    "native",
+		DriftState: "active",
+	}
+	require.NoError(t, f.store.CreateConversation(ctx, conv))
+	for _, p := range []*store.ConversationParticipant{
+		{ID: api.NewUUID(), ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: f.alice.ID, Role: "member", JoinedAt: time.Now().UTC()},
+		{ID: api.NewUUID(), ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: f.bob.ID, Role: "member", JoinedAt: time.Now().UTC()},
+		{ID: api.NewUUID(), ConversationID: conv.ID, PrincipalKind: "agent", PrincipalID: f.agent.ID, Role: "member", JoinedAt: time.Now().UTC()},
+	} {
+		require.NoError(t, f.store.AddParticipant(ctx, p))
+	}
+	groupMsg := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: conv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + conv.ID,
+		Type:           messages.TypeCommandRequest,
+		CreatedAt:      time.Now().UTC(),
+	}
+	normReq, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+		Key:    "group-o3",
+		Script: "echo group\n",
+	})
+	require.NoError(t, err)
+	groupPrompt, err := f.store.CreateCommandRequestPrompt(ctx, &store.CommandRequestPromptInput{
+		Message:     groupMsg,
+		ProjectName: f.project.Name,
+		AgentID:     f.agent.ID,
+		AgentName:   f.agent.Name,
+		ApproverID:  f.alice.ID,
+		Request:     normReq,
+	})
+	require.NoError(t, err)
+	rrRecipNonApprover := f.doUserJSON(t, http.MethodGet, "/api/v1/command-requests/"+groupPrompt.Message.ID, f.bob, nil)
+	require.Equal(t, http.StatusOK, rrRecipNonApprover.Code, rrRecipNonApprover.Body.String())
+	var detailBob messages.CommandRequestDetailResponse
+	require.NoError(t, json.Unmarshal(rrRecipNonApprover.Body.Bytes(), &detailBob))
+	assert.Equal(t, groupPrompt.Request.ID, detailBob.Request.RowID)
+	assert.False(t, detailBob.CanApprove)
+	assert.Equal(t, msgaction.ConflictCmdNotApprover, detailBob.Reason)
+	assert.Nil(t, detailBob.ExecContainer, "O3: recipient non-approver must never receive exec_container")
 
 	// Approve v1 and mark its run as unknown, then re-propose v2 -> D7 banner field populated.
 	rrApprove := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/"+send1.CommandRequest.RowID+"/approve", f.alice, messages.ApproveCommandRequestBody{

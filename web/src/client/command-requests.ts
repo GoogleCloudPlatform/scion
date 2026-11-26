@@ -104,6 +104,7 @@ export interface CommandRequestExecContainerView {
   projectId?: string;
   projectName?: string;
   homePersistent?: boolean | null;
+  canWake?: boolean;
   reason?: string;
 }
 
@@ -274,6 +275,54 @@ export interface CommandScriptDisplayToken {
 export interface CommandScriptDisplayLine {
   lineNumber: number;
   tokens: CommandScriptDisplayToken[];
+}
+
+/** Formatted single-line hashed field (e.g. workdir) with M1.2/O1 per-code-point escaping. */
+export interface FormattedCommandInline {
+  tokens: CommandScriptDisplayToken[];
+  nonAsciiCount: number;
+}
+
+/**
+ * Formats a single-line hashed field (such as `workdir`) with the same
+ * per-code-point escape rule as `formatCommandScriptForDisplay` (O1):
+ * printable ASCII (`0x20..0x7E`) is kept verbatim; every non-ASCII (`> 0x7E`)
+ * or control (`< 0x20`, `0x7F`) code point becomes a visible `\u{XXXX}` token.
+ */
+export function formatCommandInlineForDisplay(value: string): FormattedCommandInline {
+  const tokens: CommandScriptDisplayToken[] = [];
+  let asciiBuf = '';
+  let nonAsciiCount = 0;
+
+  const flushAscii = (): void => {
+    if (asciiBuf.length > 0) {
+      tokens.push({ kind: 'ascii', text: asciiBuf });
+      asciiBuf = '';
+    }
+  };
+
+  for (const ch of value) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp >= 0x20 && cp <= 0x7e) {
+      asciiBuf += ch;
+    } else {
+      flushAscii();
+      const nonAscii = cp > 0x7e;
+      if (nonAscii) {
+        nonAsciiCount++;
+      }
+      const hex = cp.toString(16).toUpperCase().padStart(4, '0');
+      tokens.push({
+        kind: 'escape',
+        text: `\\u{${hex}}`,
+        codePoint: cp,
+        nonAscii,
+      });
+    }
+  }
+  flushAscii();
+
+  return { tokens, nonAsciiCount };
 }
 
 /** Formatted script representation for approval surfaces (M1.2). */

@@ -22,14 +22,14 @@ import {
 } from '../../../utils/feature-flags.js';
 import { stateManager } from '../../../client/state.js';
 import {
+  formatCommandInlineForDisplay,
   formatCommandScriptForDisplay,
   newerCommandRequestView,
   type CommandRequestDetailResponse,
   type CommandRequestRunView,
   type CommandRequestView,
 } from '../../../client/command-requests.js';
-import './chat-command-request.js';
-import type { ScionChatCommandRequest } from './chat-command-request.js';
+import { ScionChatCommandRequest } from './chat-command-request.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -217,6 +217,7 @@ describe('<scion-chat-command-request>', () => {
         agentName: 'alice-shell',
         projectName: 'alpha',
         homePersistent: false,
+        canWake: true,
       },
     });
     document.body.appendChild(el);
@@ -239,14 +240,161 @@ describe('<scion-chat-command-request>', () => {
       '/workspace'
     );
 
-    // Suspended container wake note + non-persistent home note
+    // Suspended container with canWake=true shows wake note + non-persistent home note + Approve enabled
     const ecLine = el.shadowRoot?.querySelector('[data-testid="exec-container-line"]');
     expect(ecLine?.textContent).toContain('alice-shell');
     expect(ecLine?.textContent).toContain('Will be resumed when you approve.');
     expect(el.shadowRoot?.querySelector('[data-testid="exec-home-nonpersistent"]')).not.toBeNull();
+    const approveBtn = el.shadowRoot?.querySelector(
+      '[data-testid="approve-btn"]'
+    ) as HTMLElement & {
+      disabled?: boolean;
+    };
+    expect(Boolean(approveBtn.hasAttribute('disabled') || approveBtn.disabled)).toBe(false);
 
     // Dismiss hidden until P5 sets canDismiss: true
     expect(el.shadowRoot?.querySelector('[data-testid="dismiss-btn"]')).toBeNull();
+  });
+
+  it('disables Approve for suspended container when canWake is false (R2)', async () => {
+    const el = document.createElement('scion-chat-command-request') as ScionChatCommandRequest;
+    el.detail = makeDetail({
+      exec_container: {
+        state: 'suspended',
+        agentId: 'exec-1',
+        agentName: 'alice-shell',
+        projectName: 'alpha',
+        canWake: false,
+      },
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const approveBtn = el.shadowRoot?.querySelector(
+      '[data-testid="approve-btn"]'
+    ) as HTMLElement & {
+      disabled?: boolean;
+    };
+    expect(approveBtn.hasAttribute('disabled') || approveBtn.disabled).toBe(true);
+    expect(
+      el.shadowRoot?.querySelector('[data-testid="exec-suspended-no-wake-note"]')?.textContent
+    ).toContain('Resume your execution container to approve.');
+    expect(el.shadowRoot?.querySelector('[data-testid="exec-suspended-wake-note"]')).toBeNull();
+    expect(el.shadowRoot?.textContent).not.toContain('Will be resumed when you approve.');
+  });
+
+  it('wraps long script lines with internal spaces so payload is never hidden behind horizontal scroll (R1)', async () => {
+    const stylesText = ScionChatCommandRequest.styles.cssText;
+    expect(stylesText).toMatch(/\.script-code\s*\{[^}]*white-space:\s*pre-wrap/);
+    expect(stylesText).toMatch(/\.script-code\s*\{[^}]*overflow-wrap:\s*anywhere/);
+    expect(stylesText).not.toMatch(/\.script-line\s*\{[^}]*min-width:\s*max-content/);
+
+    const paddedScript = `gcloud config list${' '.repeat(150)}; echo PAYLOAD\n`;
+    const el = document.createElement('scion-chat-command-request') as ScionChatCommandRequest;
+    el.detail = makeDetail({
+      request: makeRequest({ script: paddedScript }),
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-testid="approve-btn"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    const dialogBody = el.shadowRoot?.querySelector('[data-testid="confirm-dialog-body"]');
+    const dialogCode = dialogBody?.querySelector('.script-code');
+    expect(dialogCode?.textContent).toContain('; echo PAYLOAD');
+  });
+
+  it('renders escaped script tokens, homoglyph workdir, SHA-256, and container details inside the confirm dialog (R3, O1)', async () => {
+    const trickyScript = '\techo "é\u2800\u{E0100}"  \n';
+    const homoglyphWorkdir = '/w\u043Erkspace/app';
+    const expectedHash = 'f'.repeat(64);
+    const queuedRun: CommandRequestRunView = {
+      runId: 'run-r3',
+      requestId: 'row-cmd-1',
+      status: 'queued',
+      shareOutput: false,
+      timeoutS: 600,
+      createdAt: '2026-11-26T10:01:00Z',
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(
+        {
+          request: makeRequest({
+            script: trickyScript,
+            workdir: homoglyphWorkdir,
+            workdirKind: 'explicit',
+            commandSha256: expectedHash,
+            status: 'approved',
+            run: queuedRun,
+          }),
+          run: queuedRun,
+        },
+        202
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Also unit-check formatCommandInlineForDisplay directly (O1).
+    const inline = formatCommandInlineForDisplay(homoglyphWorkdir);
+    expect(inline.nonAsciiCount).toBe(1);
+    expect(inline.tokens.filter((t) => t.kind === 'escape').map((t) => t.text)).toEqual([
+      '\\u{043E}',
+    ]);
+
+    const el = document.createElement('scion-chat-command-request') as ScionChatCommandRequest;
+    el.currentUserId = 'user-1';
+    el.detail = makeDetail({
+      request: makeRequest({
+        script: trickyScript,
+        workdir: homoglyphWorkdir,
+        workdirKind: 'explicit',
+        commandSha256: expectedHash,
+      }),
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // O1 on card: homoglyph workdir escaped, raw Cyrillic 'о' absent
+    const cardWorkdir = el.shadowRoot?.querySelector('[data-testid="command-workdir"]');
+    expect(cardWorkdir?.textContent).toContain('\\u{043E}');
+    expect(cardWorkdir?.textContent).not.toContain('\u043E');
+
+    // Open confirm dialog and verify every M1.2/R3/O1 invariant inside it
+    (el.shadowRoot?.querySelector('[data-testid="approve-btn"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    const dialogBody = el.shadowRoot?.querySelector('[data-testid="confirm-dialog-body"]');
+    expect(dialogBody).not.toBeNull();
+
+    const dialogScriptBlock = dialogBody?.querySelector('[data-testid="command-script-block"]');
+    const dialogEscapes = [
+      ...(dialogScriptBlock?.querySelectorAll('[data-testid="escape-token"]') ?? []),
+    ].map((n) => n.textContent);
+    expect(dialogEscapes).toEqual(['\\u{00E9}', '\\u{2800}', '\\u{E0100}']);
+    expect(dialogScriptBlock?.querySelector('.ws-token.tab')?.textContent).toBe('\\t');
+    expect(dialogScriptBlock?.querySelectorAll('.ws-token.trailing-space')).toHaveLength(2);
+    expect(dialogScriptBlock?.textContent).not.toContain('é');
+    expect(dialogScriptBlock?.textContent).not.toContain('\u2800');
+    expect(dialogScriptBlock?.textContent).not.toContain('\u{E0100}');
+
+    // O1 on confirm dialog workdir
+    const dialogWorkdir = dialogBody?.querySelector('[data-testid="confirm-workdir"]');
+    expect(dialogWorkdir?.textContent).toContain('\\u{043E}');
+    expect(dialogWorkdir?.textContent).not.toContain('\u043E');
+
+    // Dialog displays timeout, container, and exact SHA-256 matching what gets POSTed
+    expect(dialogBody?.textContent).toContain('Timeout: 10m');
+    expect(dialogBody?.textContent).toContain('alice-shell');
+    expect(dialogBody?.textContent).toContain(`SHA-256: ${expectedHash}`);
+
+    (el.shadowRoot?.querySelector('[data-testid="confirm-approve-btn"]') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { command_sha256: string };
+    expect(body.command_sha256).toBe(expectedHash);
   });
 
   it('shows shared_dir warning when workdirKind is shared_dir', async () => {

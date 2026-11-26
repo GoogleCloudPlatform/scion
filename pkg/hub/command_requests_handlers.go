@@ -315,6 +315,8 @@ func (s *Server) buildExecContainerView(ctx context.Context, res ExecContainerRe
 	v := &messages.CommandRequestExecContainerView{
 		State:          string(res.State),
 		HomePersistent: res.HomePersistent,
+		// Wake-on-approve lands in P2; false until then (R2).
+		CanWake: false,
 	}
 	if res.Agent != nil {
 		v.AgentID = res.Agent.ID

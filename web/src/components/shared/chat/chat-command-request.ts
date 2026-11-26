@@ -43,6 +43,7 @@ import {
   dismissCommandRequest,
   fetchCommandRequestOutput,
   formatCommandDurationMs,
+  formatCommandInlineForDisplay,
   formatCommandScriptForDisplay,
   formatCommandTimeout,
   generateCommandRequestIdempotencyKey,
@@ -359,7 +360,7 @@ export class ScionChatCommandRequest extends LitElement {
     }
 
     .script-scroll {
-      overflow-x: auto;
+      overflow-x: hidden;
       padding: 0.5rem 0;
       font-family: var(--scion-font-mono);
       font-size: 0.8125rem;
@@ -371,7 +372,6 @@ export class ScionChatCommandRequest extends LitElement {
       display: flex;
       align-items: baseline;
       padding: 0 0.65rem 0 0;
-      min-width: max-content;
     }
 
     .script-lineno {
@@ -385,7 +385,9 @@ export class ScionChatCommandRequest extends LitElement {
     }
 
     .script-code {
-      white-space: pre;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      min-width: 0;
     }
 
     .ws-token {
@@ -760,13 +762,18 @@ export class ScionChatCommandRequest extends LitElement {
   private get execContainerAllowsApprove(): boolean {
     const ec = this.execContainer;
     if (!ec) return true;
-    return ec.state === 'ready' || ec.state === 'starting' || ec.state === 'suspended';
+    if (ec.state === 'ready' || ec.state === 'starting') return true;
+    if (ec.state === 'suspended') return Boolean(ec.canWake);
+    return false;
   }
 
   private get approveDisabledHint(): string {
     const ec = this.execContainer;
     if (!ec) return '';
     if (ec.state === 'stopped') return 'Start your execution container to approve';
+    if (ec.state === 'suspended' && !ec.canWake) {
+      return 'Resume your execution container to approve.';
+    }
     if (ec.state === 'unconfigured') return 'Set up an execution container in Profile Settings';
     if (ec.state === 'unavailable') return 'Your execution container is unavailable';
     return '';
@@ -971,6 +978,19 @@ export class ScionChatCommandRequest extends LitElement {
     this.outputText = res.output;
   }
 
+  private renderEscapedInline(value: string): TemplateResult {
+    const formatted = formatCommandInlineForDisplay(value);
+    return html`${formatted.tokens.map((tok) => {
+      if (tok.kind === 'ascii') return tok.text;
+      return html`<span
+        class="escape-token"
+        data-testid="escape-token"
+        title=${`U+${(tok.codePoint ?? 0).toString(16).toUpperCase().padStart(4, '0')}`}
+        >${tok.text}</span
+      >`;
+    })}`;
+  }
+
   private renderScriptBlock(formatted: FormattedCommandScript): TemplateResult {
     return html`
       <div class="script-wrap" data-testid="command-script-block">
@@ -1094,8 +1114,15 @@ export class ScionChatCommandRequest extends LitElement {
         <span class="exec-state-chip ${stateClass}" data-testid="exec-container-state"
           >${ec.state}</span
         >
-        ${ec.state === 'suspended'
-          ? html`<span class="exec-container-note">Will be resumed when you approve.</span>`
+        ${ec.state === 'suspended' && ec.canWake
+          ? html`<span class="exec-container-note" data-testid="exec-suspended-wake-note"
+              >Will be resumed when you approve.</span
+            >`
+          : nothing}
+        ${ec.state === 'suspended' && !ec.canWake
+          ? html`<span class="exec-container-note" data-testid="exec-suspended-no-wake-note"
+              >Resume your execution container to approve.</span
+            >`
           : nothing}
         ${ec.state === 'stopped'
           ? html`<span class="exec-container-note" data-testid="exec-stopped-note">
@@ -1270,7 +1297,8 @@ ${this.outputText || '(no output)'}</pre
                 class="workdir-badge${workdirKind === 'workspace' || workdirKind === 'shared_dir'
                   ? ' warn'
                   : ''}"
-                >${workdirLabel}</span
+                data-testid="confirm-workdir"
+                >${this.renderEscapedInline(workdirLabel)}</span
               >
             </span>
             <span class="meta-item">
@@ -1441,7 +1469,7 @@ ${this.outputText || '(no output)'}</pre
                   ? ' warn'
                   : ''}"
                 data-testid="command-workdir"
-                >${workdirLabel}</span
+                >${this.renderEscapedInline(workdirLabel)}</span
               >
             </span>
             <span class="meta-item" data-testid="command-timeout">

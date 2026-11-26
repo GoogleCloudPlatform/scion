@@ -369,7 +369,10 @@ type CommandRequestExecContainerView struct {
 	ProjectID      string `json:"projectId,omitempty"`
 	ProjectName    string `json:"projectName,omitempty"`
 	HomePersistent *bool  `json:"homePersistent,omitempty"`
-	Reason         string `json:"reason,omitempty"`
+	// CanWake reports whether this hub supports waking a suspended execution
+	// container on approval. Always false until P2 (wake-on-approve) lands.
+	CanWake bool   `json:"canWake"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // CommandRequestPreviousUnknown identifies a prior version of the same key
@@ -419,9 +422,11 @@ type CommandRequestDetailResponse struct {
 	ApproverEmail          string                           `json:"approverEmail,omitempty"`
 	PreviousVersionUnknown *CommandRequestPreviousUnknown   `json:"previousVersionUnknown,omitempty"`
 	CanApprove             bool                             `json:"canApprove"`
-	CanDismiss             bool                             `json:"canDismiss,omitempty"`
-	OutputAvailable        bool                             `json:"outputAvailable,omitempty"`
-	Reason                 string                           `json:"reason,omitempty"`
+	// CanDismiss is a P5 feature-detect hook; false until the dismiss API lands in P5.
+	CanDismiss bool `json:"canDismiss,omitempty"`
+	// OutputAvailable is a P4 feature-detect hook; false until the output API lands in P4.
+	OutputAvailable bool   `json:"outputAvailable,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 // ApproveCommandRequestBody is the request body of POST /api/v1/command-requests/{id}/approve.
