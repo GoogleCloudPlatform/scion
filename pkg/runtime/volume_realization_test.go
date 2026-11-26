@@ -60,7 +60,7 @@ func TestRealizeVolume_Matrix(t *testing.T) {
 		})
 	}
 
-	for _, rt := range []string{"kubernetes", "k8s", "Kubernetes"} {
+	for _, rt := range []string{"kubernetes", "k8s", "remote", "Kubernetes"} {
 		t.Run("k8s/"+rt, func(t *testing.T) {
 			cases := []struct {
 				vol  api.VolumeMount
@@ -259,6 +259,20 @@ func TestVolumeRealization_KubernetesAndCloudRun(t *testing.T) {
 		}
 		if len(csiBuckets) != 2 || csiBuckets[0] != "b1" || csiBuckets[1] != "b2" {
 			t.Fatalf("CSI buckets = %v, want [b1 b2]", csiBuckets)
+		}
+	})
+
+	t.Run("kubernetes remote alias config", func(t *testing.T) {
+		nonWS := []api.VolumeMount{{Type: "gke-shared-volume", VolumeName: "v", Target: "/mnt/gke"}}
+		ws := []api.VolumeMount{{Type: "gke-shared-volume", VolumeName: "v", Target: "/workspace"}}
+		if err := CheckVolumeSourcesForRuntime(nonWS, "remote"); err != nil {
+			t.Fatalf("CheckVolumeSourcesForRuntime(remote, gke-shared-volume) = %v, want nil", err)
+		}
+		if err := CheckWorkspaceVolumeSourcesForRuntime(ws, "remote"); err != nil {
+			t.Fatalf("CheckWorkspaceVolumeSourcesForRuntime(remote, gke-shared-volume) = %v, want nil", err)
+		}
+		if got := RealizeVolume(api.VolumeMount{Type: "GCS", Bucket: "b", Target: "/mnt/g"}, "remote"); got != RealizeCSI {
+			t.Fatalf("RealizeVolume(GCS, remote) = %s, want RealizeCSI", got)
 		}
 	})
 

@@ -109,18 +109,36 @@ func unsupportedVolumeTypeError(index int, v api.VolumeMount, runtimeKind string
 	}
 }
 
-// isNonBindRuntime reports whether runtimeKind belongs to the non-bind runtime
-// families (kubernetes, cloudrun, substrate) that do not realize configured
-// host-bind volumes. Every other runtimeKind (including "", "local", "auto",
-// "docker", "podman", "container", "apple-container") uses bind-runtime
-// semantics, failing closed.
-func isNonBindRuntime(runtimeKind string) bool {
-	switch strings.ToLower(strings.TrimSpace(runtimeKind)) {
-	case "kubernetes", "k8s", "cloudrun", "cloudrun-instances", "cloudrun-sandbox", "substrate":
+// isKubernetesRuntimeKind reports whether rt (lowercased, trimmed) is a
+// recognized Kubernetes runtime spelling, including the legacy "k8s" and
+// "remote" aliases.
+func isKubernetesRuntimeKind(rt string) bool {
+	switch rt {
+	case "kubernetes", "k8s", "remote":
 		return true
 	default:
 		return false
 	}
+}
+
+// isCloudRunOrSubstrateRuntimeKind reports whether rt (lowercased, trimmed)
+// is a Cloud Run or Substrate runtime kind.
+func isCloudRunOrSubstrateRuntimeKind(rt string) bool {
+	switch rt {
+	case "cloudrun", "cloudrun-instances", "cloudrun-sandbox", "substrate":
+		return true
+	default:
+		return false
+	}
+}
+
+// isNonBindRuntime reports whether runtimeKind belongs to the non-bind runtime
+// families (kubernetes, cloudrun, substrate) that do not realize configured
+// host-bind volumes. Derived from the same family helpers RealizeVolume
+// switches on so the two cannot drift.
+func isNonBindRuntime(runtimeKind string) bool {
+	rt := strings.ToLower(strings.TrimSpace(runtimeKind))
+	return isKubernetesRuntimeKind(rt) || isCloudRunOrSubstrateRuntimeKind(rt)
 }
 
 // RealizeVolume returns how runtimeKind realizes v.
@@ -136,7 +154,7 @@ func isNonBindRuntime(runtimeKind string) bool {
 //   - "gcs" → RealizeFUSE (gcsfuse inside the container)
 //   - "cloudrun-volume", "gke-shared-volume", and unknown types → RealizeUnsupported
 //
-// On kubernetes (or k8s):
+// On kubernetes ("kubernetes", "k8s", "remote"):
 //   - "gcs" → RealizeCSI
 //   - all other types → RealizeUnsupported
 //
@@ -146,15 +164,15 @@ func RealizeVolume(v api.VolumeMount, runtimeKind string) VolumeRealization {
 	volType := strings.ToLower(strings.TrimSpace(v.Type))
 	rt := strings.ToLower(strings.TrimSpace(runtimeKind))
 
-	switch rt {
-	case "kubernetes", "k8s":
+	switch {
+	case isKubernetesRuntimeKind(rt):
 		switch volType {
 		case "gcs":
 			return RealizeCSI
 		default:
 			return RealizeUnsupported
 		}
-	case "cloudrun", "cloudrun-instances", "cloudrun-sandbox", "substrate":
+	case isCloudRunOrSubstrateRuntimeKind(rt):
 		return RealizeUnsupported
 	default:
 		switch volType {

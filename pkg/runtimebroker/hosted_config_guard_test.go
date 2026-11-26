@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -112,6 +114,86 @@ func TestCreateAgent_RefusesUnsupportedVolumeTypeOnDocker(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCreateAgent_AllowsGKESharedVolumeOnRemoteK8sAndCloudRunOverride verifies:
+//   - a Kubernetes broker configured with legacy alias "remote" accepts
+//     gke-shared-volume at create;
+//   - a Cloud Run broker overriding a docker profile accepts cloudrun-volume
+//     at create (keeping Cloud Run behavior unchanged).
+func TestCreateAgent_AllowsGKESharedVolumeOnRemoteK8sAndCloudRunOverride(t *testing.T) {
+	t.Run("remote k8s alias allows gke-shared-volume", func(t *testing.T) {
+		setupTestScionEnv(t)
+		mgr := &mockManager{}
+		cfg := testServerConfig()
+		cfg.BrokerID = "test-broker-id"
+		cfg.WorkstationMode = true
+		cfg.ForceRuntime = "remote"
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "remote" }}
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+		endAsyncLaunchesAtCleanup(t, srv)
+
+		body := `{"name": "a1", "inlineConfig": {"volumes": [{"type": "gke-shared-volume", "volume_name": "v", "target": "/mnt/gke"}]}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code >= 400 {
+			t.Fatalf("status = %d, want success: %s", w.Code, w.Body.String())
+		}
+		if mgr.startCalls != 1 {
+			t.Fatalf("Start was called %d times, want 1", mgr.startCalls)
+		}
+	})
+
+	t.Run("cloudrun broker overriding docker profile allows cloudrun-volume", func(t *testing.T) {
+		setupTestScionEnv(t)
+		settingsYAML := `schema_version: "1"
+active_profile: docker-prof
+runtimes:
+    docker:
+        type: docker
+profiles:
+    docker-prof:
+        runtime: docker
+`
+		if err := os.WriteFile(filepath.Join(".scion", "settings.yaml"), []byte(settingsYAML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mgr := &mockManager{}
+		cfg := testServerConfig()
+		cfg.BrokerID = "test-broker-id"
+		cfg.WorkstationMode = true
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+		endAsyncLaunchesAtCleanup(t, srv)
+
+		// Verify resolveRuntimeNameForOpts returns raw "docker" from settings,
+		// while volumeCheckRuntimeName classifies it by the Cloud Run broker.
+		rawRT, err := srv.resolveRuntimeNameForOpts(api.StartOptions{Name: "a1", Profile: "docker-prof"})
+		if err != nil || rawRT != "docker" {
+			t.Fatalf("resolveRuntimeNameForOpts = (%q, %v), want (\"docker\", nil)", rawRT, err)
+		}
+		if got := srv.volumeCheckRuntimeName(rawRT); got != "cloudrun" {
+			t.Fatalf("volumeCheckRuntimeName(%q) = %q, want \"cloudrun\"", rawRT, got)
+		}
+
+		// Handler-level: POST /api/v1/agents with cloudrun-volume must not be
+		// refused with 400 unsupported_volume_type.
+		body := `{"name": "a1", "profile": "docker-prof", "inlineConfig": {"volumes": [{"type": "cloudrun-volume", "volume_name": "v", "target": "/mnt/cr"}]}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code == http.StatusBadRequest {
+			code, _ := decodeError(t, w)
+			if code == api.LaunchCodeUnsupportedVolumeType {
+				t.Fatalf("cloudrun broker refused cloudrun-volume with 400 %s: %s", code, w.Body.String())
+			}
+		}
+	})
 }
 
 // A gcs volume is let through on a hosted broker whose agents run on
