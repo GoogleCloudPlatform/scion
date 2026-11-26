@@ -533,6 +533,9 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "invalid slug: name cannot be slugified")
 		return
 	}
+	if s.refuseGlobalTemplateName(ctx, w, createScope, req.Name, slug) {
+		return
+	}
 
 	if err := validateUploadFilePaths(req.Files); err != nil {
 		if !writeInvalidFilePathError(w, err) {
@@ -758,6 +761,10 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
+	if (template.Slug != existing.Slug || template.Name != existing.Name) &&
+		s.refuseGlobalTemplateName(ctx, w, template.Scope, template.Name, template.Slug) {
+		return
+	}
 
 	if err := s.store.UpdateTemplate(ctx, &template); err != nil {
 		writeErrorFromErr(w, err, "")
@@ -785,12 +792,17 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	priorSlug, priorName := existing.Slug, existing.Name
 	if !applyResourceMetadataPatch(w, r, resourceMetadataFields{
 		Name:        &existing.Name,
 		Slug:        &existing.Slug,
 		DisplayName: &existing.DisplayName,
 		Description: &existing.Description,
 	}) {
+		return
+	}
+	if (existing.Slug != priorSlug || existing.Name != priorName) &&
+		s.refuseGlobalTemplateName(ctx, w, existing.Scope, existing.Name, existing.Slug) {
 		return
 	}
 
@@ -1309,6 +1321,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		return
 	} else if existing != nil {
 		writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
+		return
+	}
+	if s.refuseGlobalTemplateName(ctx, w, clone.Scope, clone.Name, clone.Slug) {
 		return
 	}
 

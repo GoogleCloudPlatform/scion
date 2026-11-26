@@ -545,6 +545,11 @@ func (p *templatePersistence) GetBySlug(ctx context.Context, slug, scope, scopeI
 }
 
 func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, _ *collectedDir) error {
+	// Import and sync may not create a project template that shadows a
+	// global or built-in template (checkTemplateNotGlobal).
+	if err := p.s.checkTemplateNotGlobal(ctx, rec.Scope, rec.Name, rec.Slug); err != nil {
+		return err
+	}
 	t := &store.Template{
 		ID:            rec.ID,
 		Name:          rec.Name,
@@ -940,13 +945,13 @@ func (p *harnessConfigPersistence) GetBySlug(ctx context.Context, slug, scope, s
 }
 
 // Create writes the pending row. On a hosted hub a project-scope row cannot
-// take the slug of a global harness config (checkHarnessConfigSlugNotGlobal).
+// take the slug or name of a global harness config (checkHarnessConfigNotGlobal).
 // It carries no files and no derived Config:
 // the Update that follows the upload commits both through
 // commitHarnessConfigFiles. Harness is set because the column is non-empty;
 // the commit replaces it with the derived value.
 func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceRecord, cd *collectedDir) error {
-	if err := p.s.checkHarnessConfigSlugNotGlobal(ctx, rec.Scope, rec.Slug); err != nil {
+	if err := p.s.checkHarnessConfigNotGlobal(ctx, rec.Scope, rec.Name, rec.Slug); err != nil {
 		return err
 	}
 	harnessType := p.harness

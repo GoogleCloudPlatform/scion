@@ -287,6 +287,14 @@ User Templates  >  Project Templates  >  Global Templates
 ```
 Visual separators clearly segment these categories, ensuring your personal, customized templates are always at the top of the dropdown for fast access.
 
+Hosted Hub template resolution stays **project-first** (matching the CLI's resolution order): when a bare template name is resolved for an agent, the Hub searches the agent's project before global templates. Because a project-scoped template with the same name or slug as a global one would shadow it for every agent in the project—and because the CLI also matches templates and harness configs by name as well as by slug—a hosted Hub refuses to create, rename (`PUT`/`PATCH`), clone, or import a project-scoped template or harness config whose slug or name (as written or slugified) matches:
+
+- an existing global template or harness config's slug or name,
+- a built-in template or harness-config name (even if its global row has been deleted), or
+- for harness configs, an entry in the Hub's global `harness_configs` settings.
+
+Refusals return `409 Conflict` with error code `global_name_reserved` and `details` `{"field": "slug" | "name", "reason": "shadows_global"}`; choose a different name. User-scoped records (which resolve only for their own user) and workstation Hubs are not checked. A rename is checked whenever the name or slug changes; updating other metadata on an existing legacy row is allowed. When cloning a project on a hosted Hub, any legacy project-scoped template or harness config that shadows a global one is skipped with a warning rather than copied into the clone. A global record created later with the name of an existing project record is not refused.
+
 ## The `scion templates` CLI
 
 The command group is `scion templates` (singular `scion template` is an accepted alias).

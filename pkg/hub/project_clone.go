@@ -334,15 +334,6 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	// ── Step 8: Deep-copy project-scoped harness configs ─────────────────
 
 	if err := s.cloneProjectHarnessConfigs(ctx, src.ID, clone, &rollback); err != nil {
-		var reserved *harnessConfigSlugReservedError
-		if errors.As(err, &reserved) {
-			slog.Info("project clone: source harness config uses a reserved global slug",
-				"source_id", src.ID, "slug", reserved.slug)
-			writeError(w, http.StatusConflict, ErrCodeHarnessConfigSlugReserved,
-				fmt.Sprintf("the source project's harness config %q uses a name reserved by a global harness config; rename it in the source project before cloning", reserved.slug),
-				map[string]interface{}{"field": "slug"})
-			return
-		}
 		slog.Error("project clone: harness config copy failed",
 			"source_id", src.ID, "clone_id", clone.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -577,8 +568,15 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 	})
 
 	for _, srcHC := range result.Items {
-		if err := s.checkHarnessConfigSlugNotGlobal(ctx, store.HarnessConfigScopeProject, srcHC.Slug); err != nil {
-			return err
+		// A source config that shadows a global one (created before such
+		// slugs and names were refused) is not carried into the clone.
+		if err := s.checkHarnessConfigNotGlobal(ctx, store.HarnessConfigScopeProject, srcHC.Name, srcHC.Slug); err != nil {
+			if !errors.Is(err, errGlobalNameReserved) {
+				return err
+			}
+			slog.Warn("project clone: skipping harness config that shadows a global one",
+				"source_project_id", srcProjectID, "clone_id", clone.ID, "name", srcHC.Name, "slug", srcHC.Slug)
+			continue
 		}
 		// Harness is the fallback for a config.yaml that sets none; Config
 		// is never copied: the commit below re-derives Harness and Config
@@ -669,6 +667,16 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 	})
 
 	for _, srcTmpl := range result.Items {
+		// A source template that shadows a global one (created before such
+		// slugs and names were refused) is not carried into the clone.
+		if err := s.checkTemplateNotGlobal(ctx, store.TemplateScopeProject, srcTmpl.Name, srcTmpl.Slug); err != nil {
+			if !errors.Is(err, errGlobalNameReserved) {
+				return err
+			}
+			slog.Warn("project clone: skipping template that shadows a global one",
+				"source_project_id", srcProjectID, "clone_id", clone.ID, "name", srcTmpl.Name, "slug", srcTmpl.Slug)
+			continue
+		}
 		newTmpl := &store.Template{
 			ID:           api.NewUUID(),
 			Name:         srcTmpl.Name,

@@ -51,13 +51,49 @@ func seedHarnessConfigRow(t *testing.T, s store.Store, slug, scope, scopeID stri
 	return hc
 }
 
-// assertSlugReserved checks a 409 harness_config_slug_reserved answer.
+// assertSlugReserved checks a 409 global_name_reserved answer.
 func assertSlugReserved(t *testing.T, rec *httptest.ResponseRecorder, slug string) {
+	t.Helper()
+	assertGlobalNameReserved(t, rec, "slug", slug)
+}
+
+// assertGlobalNameReserved checks a 409 global_name_reserved answer for field and value.
+func assertGlobalNameReserved(t *testing.T, rec *httptest.ResponseRecorder, field, value string) {
 	t.Helper()
 	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
 	code, _ := errorBody(t, rec)
-	assert.Equal(t, ErrCodeHarnessConfigSlugReserved, code, "body: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), slug)
+	assert.Equal(t, ErrCodeGlobalNameReserved, code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), value)
+	assert.Contains(t, rec.Body.String(), `"reason":"shadows_global"`)
+	assert.Contains(t, rec.Body.String(), `"field":"`+field+`"`)
+}
+
+// seedTemplateRow writes a template row directly to the store, bypassing
+// handlers (and so the global-name check).
+func seedTemplateRow(t *testing.T, s store.Store, name, slug, scope, scopeID string) *store.Template {
+	t.Helper()
+	tmpl := &store.Template{
+		ID:      api.NewUUID(),
+		Name:    name,
+		Slug:    slug,
+		Harness: "claude",
+		Scope:   scope,
+		ScopeID: scopeID,
+		Status:  store.TemplateStatusActive,
+	}
+	require.NoError(t, s.CreateTemplate(context.Background(), tmpl))
+	return tmpl
+}
+
+// projectTemplateExists reports whether a project-scope template row with slug exists.
+func projectTemplateExists(t *testing.T, s store.Store, slug, projectID string) bool {
+	t.Helper()
+	_, err := s.GetTemplateBySlug(context.Background(), slug, store.TemplateScopeProject, projectID)
+	if err == nil {
+		return true
+	}
+	require.ErrorIs(t, err, store.ErrNotFound)
+	return false
 }
 
 // projectHarnessConfigExists reports whether a project-scope row with slug exists.
@@ -300,25 +336,37 @@ func TestHarnessConfigImport_GlobalSlug(t *testing.T) {
 }
 
 // TestProjectClone_GlobalSlug covers a project clone whose source project
-// holds a harness config under a global slug (stored before the check):
-// a hosted hub refuses the clone and rolls it back.
+// holds a legacy harness config and template shadowing global ones (stored
+// before the check): a hosted hub skips the shadowing resources with a
+// warning and still copies non-shadowing ones into the cloned project.
 func TestProjectClone_GlobalSlug(t *testing.T) {
 	srv, s := testServer(t)
 	srv.workstation = false
 	src := createSourceProject(t, srv, s)
 	seedHarnessConfigRow(t, s, "shared-name", store.HarnessConfigScopeGlobal, "")
 	seedHarnessConfigRow(t, s, "shared-name", store.HarnessConfigScopeProject, src.ID)
+	seedHarnessConfigRow(t, s, "own-hc", store.HarnessConfigScopeProject, src.ID)
+
+	seedTemplateRow(t, s, "shared-tmpl", "shared-tmpl", store.TemplateScopeGlobal, "")
+	seedTemplateRow(t, s, "shared-tmpl", "shared-tmpl", store.TemplateScopeProject, src.ID)
+	seedTemplateRow(t, s, "own-tmpl", "own-tmpl", store.TemplateScopeProject, src.ID)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
 		map[string]string{"name": "Cloned Shadow"})
-	assertSlugReserved(t, rec, "shared-name")
-	assert.Contains(t, rec.Body.String(), "source project", "the refusal must name the source project's config")
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	projects, err := s.ListProjects(context.Background(), store.ProjectFilter{}, store.ListOptions{Limit: 100})
-	require.NoError(t, err)
-	for _, p := range projects.Items {
-		assert.NotEqual(t, "Cloned Shadow", p.Name, "a refused clone must be rolled back")
-	}
+	var cloned store.Project
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &cloned))
+	require.NotEmpty(t, cloned.ID)
+
+	assert.False(t, projectHarnessConfigExists(t, s, "shared-name", cloned.ID),
+		"shadowing harness config must be skipped during project clone")
+	assert.True(t, projectHarnessConfigExists(t, s, "own-hc", cloned.ID),
+		"non-shadowing harness config must be copied during project clone")
+	assert.False(t, projectTemplateExists(t, s, "shared-tmpl", cloned.ID),
+		"shadowing template must be skipped during project clone")
+	assert.True(t, projectTemplateExists(t, s, "own-tmpl", cloned.ID),
+		"non-shadowing template must be copied during project clone")
 }
 
 // TestImportTemplate_BundledHarnessConfigGlobalSlug covers a template that
@@ -355,8 +403,8 @@ func TestImportTemplate_BundledHarnessConfigGlobalSlug(t *testing.T) {
 // its switch is armed.
 var errGlobalSlugLookupFault = errors.New("injected global harness config lookup fault")
 
-// globalSlugLookupFaultStore fails the global-scope harness config lookup
-// while armed.
+// globalSlugLookupFaultStore fails global-scope harness config and template
+// lookups while armed.
 type globalSlugLookupFaultStore struct {
 	store.Store
 	fault *storeFaultSwitch
@@ -369,6 +417,20 @@ func (f *globalSlugLookupFaultStore) GetHarnessConfigBySlug(ctx context.Context,
 	return f.Store.GetHarnessConfigBySlug(ctx, slug, scope, scopeID)
 }
 
+func (f *globalSlugLookupFaultStore) ListHarnessConfigs(ctx context.Context, filter store.HarnessConfigFilter, opts store.ListOptions) (*store.ListResult[store.HarnessConfig], error) {
+	if f.fault.Active() && filter.Scope == store.HarnessConfigScopeGlobal {
+		return nil, errGlobalSlugLookupFault
+	}
+	return f.Store.ListHarnessConfigs(ctx, filter, opts)
+}
+
+func (f *globalSlugLookupFaultStore) ListTemplates(ctx context.Context, filter store.TemplateFilter, opts store.ListOptions) (*store.ListResult[store.Template], error) {
+	if f.fault.Active() && filter.Scope == store.TemplateScopeGlobal {
+		return nil, errGlobalSlugLookupFault
+	}
+	return f.Store.ListTemplates(ctx, filter, opts)
+}
+
 // TestCreateHarnessConfig_GlobalSlugLookupFailsClosed covers a store
 // failure of the global lookup: a hosted hub refuses the project-scope
 // create instead of allowing it, and writes no row.
@@ -379,11 +441,11 @@ func TestCreateHarnessConfig_GlobalSlugLookupFailsClosed(t *testing.T) {
 	srv.workstation = false
 	projectID := tid("hc-global-slug-fault-project")
 
-	err := srv.checkHarnessConfigSlugNotGlobal(context.Background(), store.HarnessConfigScopeProject, "any-name")
+	err := srv.checkHarnessConfigNotGlobal(context.Background(), store.HarnessConfigScopeProject, "any-name", "any-name")
 	require.NoError(t, err, "unarmed lookup finds no global config")
 
 	fault.Arm()
-	err = srv.checkHarnessConfigSlugNotGlobal(context.Background(), store.HarnessConfigScopeProject, "any-name")
+	err = srv.checkHarnessConfigNotGlobal(context.Background(), store.HarnessConfigScopeProject, "any-name", "any-name")
 	assert.ErrorIs(t, err, errGlobalSlugLookupFault)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", CreateHarnessConfigRequest{
@@ -391,6 +453,29 @@ func TestCreateHarnessConfig_GlobalSlugLookupFailsClosed(t *testing.T) {
 	})
 	assert.GreaterOrEqual(t, rec.Code, http.StatusInternalServerError, "body: %s", rec.Body.String())
 	assert.False(t, projectHarnessConfigExists(t, s, "any-name", projectID))
+}
+
+// TestCreateTemplate_GlobalLookupFailsClosed covers a store failure of the
+// global template lookup: a hosted hub fails closed and writes no row.
+func TestCreateTemplate_GlobalLookupFailsClosed(t *testing.T) {
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *globalSlugLookupFaultStore {
+		return &globalSlugLookupFaultStore{Store: inner, fault: fault}
+	})
+	srv.workstation = false
+	projectID := tid("tmpl-global-slug-fault-project")
+
+	err := srv.checkTemplateNotGlobal(context.Background(), store.TemplateScopeProject, "any-tmpl", "any-tmpl")
+	require.NoError(t, err, "unarmed lookup finds no global template")
+
+	fault.Arm()
+	err = srv.checkTemplateNotGlobal(context.Background(), store.TemplateScopeProject, "any-tmpl", "any-tmpl")
+	assert.ErrorIs(t, err, errGlobalSlugLookupFault)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+		Name: "any-tmpl", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID,
+	})
+	assert.GreaterOrEqual(t, rec.Code, http.StatusInternalServerError, "body: %s", rec.Body.String())
+	assert.False(t, projectTemplateExists(t, s, "any-tmpl", projectID))
 }
 
 // seedHarnessConfigRowWithHarness is seedHarnessConfigRow with a harness type.
@@ -549,4 +634,258 @@ func TestCreateHarnessConfig_DeletedBuiltinSlug(t *testing.T) {
 			assert.False(t, projectHarnessConfigExists(t, s, builtin, projectID))
 		})
 	}
+}
+
+// TestCreateTemplate_GlobalNameShadow covers creating a project-scope template
+// whose slug or name (raw or slugified) matches a global template or built-in
+// template name: refused on a hosted hub, accepted on a workstation hub and
+// for user scope.
+func TestCreateTemplate_GlobalNameShadow(t *testing.T) {
+	projectID := tid("tmpl-global-shadow-project")
+
+	t.Run("hosted refuses slug and name shadowing", func(t *testing.T) {
+		srv, s := testServer(t)
+		srv.workstation = false
+		seedTemplateRow(t, s, "global-tmpl", "global-tmpl", store.TemplateScopeGlobal, "")
+		seedTemplateRow(t, s, "Global Display", "global-display-v2", store.TemplateScopeGlobal, "")
+
+		cases := []struct {
+			desc  string
+			req   CreateTemplateRequest
+			field string
+			value string
+		}{
+			{
+				desc:  "slug matches global slug",
+				req:   CreateTemplateRequest{Name: "global-tmpl", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID},
+				field: "slug", value: "global-tmpl",
+			},
+			{
+				desc:  "slugified name matches global slug",
+				req:   CreateTemplateRequest{Name: "Global Tmpl", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID},
+				field: "slug", value: "global-tmpl",
+			},
+			{
+				desc:  "distinct slug with name matching global slug",
+				req:   CreateTemplateRequest{Name: "global-tmpl", Slug: "x-global-tmpl", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID},
+				field: "name", value: "global-tmpl",
+			},
+			{
+				desc:  "distinct slug with slugified name matching global slug",
+				req:   CreateTemplateRequest{Name: "Global-Tmpl", Slug: "y-global-tmpl", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID},
+				field: "name", value: "global-tmpl",
+			},
+			{
+				desc:  "distinct slug with name matching global display name",
+				req:   CreateTemplateRequest{Name: "Global Display", Slug: "z-global-display", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID},
+				field: "name", value: "Global Display",
+			},
+		}
+		for _, tc := range cases {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates", tc.req)
+			assertGlobalNameReserved(t, rec, tc.field, tc.value)
+		}
+		assert.False(t, projectTemplateExists(t, s, "global-tmpl", projectID))
+		assert.False(t, projectTemplateExists(t, s, "x-global-tmpl", projectID))
+	})
+
+	t.Run("hosted refuses deleted built-in template name", func(t *testing.T) {
+		builtins := resources.BuiltinTemplates()
+		require.NotEmpty(t, builtins)
+		builtin := api.Slugify(builtins[0].Name)
+
+		srv, s := testServer(t)
+		srv.workstation = false
+		_, err := s.GetTemplateBySlug(context.Background(), builtin, store.TemplateScopeGlobal, "")
+		require.ErrorIs(t, err, store.ErrNotFound, "precondition: no global row for the built-in template")
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+			Name: builtin, Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID,
+		})
+		assertGlobalNameReserved(t, rec, "slug", builtin)
+
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+			Name: builtin, Slug: "custom-alias", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID,
+		})
+		assertGlobalNameReserved(t, rec, "name", builtin)
+		assert.False(t, projectTemplateExists(t, s, builtin, projectID))
+		assert.False(t, projectTemplateExists(t, s, "custom-alias", projectID))
+	})
+
+	t.Run("hosted accepts user scope and distinct project names", func(t *testing.T) {
+		srv, s := testServer(t)
+		srv.workstation = false
+		seedTemplateRow(t, s, "global-tmpl", "global-tmpl", store.TemplateScopeGlobal, "")
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+			Name: "global-tmpl", Harness: "claude", Scope: store.TemplateScopeUser,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+			Name: "project-own-tmpl", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	})
+
+	t.Run("workstation accepts project scope", func(t *testing.T) {
+		srv, s := testServer(t)
+		srv.workstation = true
+		seedTemplateRow(t, s, "global-tmpl", "global-tmpl", store.TemplateScopeGlobal, "")
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+			Name: "global-tmpl", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: projectID,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		assert.True(t, projectTemplateExists(t, s, "global-tmpl", projectID))
+	})
+}
+
+// TestRenameTemplate_GlobalNameShadow covers PUT and PATCH renaming a
+// project-scope template's slug or name onto a global template.
+func TestRenameTemplate_GlobalNameShadow(t *testing.T) {
+	projectID := tid("tmpl-rename-global-shadow-project")
+
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		t.Run(method+"/hosted refuses slug rename", func(t *testing.T) {
+			srv, s := testServer(t)
+			srv.workstation = false
+			seedTemplateRow(t, s, "global-tmpl", "global-tmpl", store.TemplateScopeGlobal, "")
+			own := seedTemplateRow(t, s, "project-own", "project-own", store.TemplateScopeProject, projectID)
+
+			rec := doRequest(t, srv, method, "/api/v1/templates/"+own.ID,
+				map[string]string{"name": "project-own", "slug": "global-tmpl"})
+			assertGlobalNameReserved(t, rec, "slug", "global-tmpl")
+
+			got, err := s.GetTemplate(context.Background(), own.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "project-own", got.Slug)
+		})
+
+		t.Run(method+"/hosted refuses name rename", func(t *testing.T) {
+			srv, s := testServer(t)
+			srv.workstation = false
+			seedTemplateRow(t, s, "Global Display", "global-display-v2", store.TemplateScopeGlobal, "")
+			own := seedTemplateRow(t, s, "project-own", "project-own", store.TemplateScopeProject, projectID)
+
+			rec := doRequest(t, srv, method, "/api/v1/templates/"+own.ID,
+				map[string]string{"name": "Global Display", "slug": "project-own"})
+			assertGlobalNameReserved(t, rec, "name", "Global Display")
+
+			got, err := s.GetTemplate(context.Background(), own.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "project-own", got.Name)
+		})
+
+		t.Run(method+"/hosted keeps unchanged legacy row on metadata edit", func(t *testing.T) {
+			srv, s := testServer(t)
+			srv.workstation = false
+			seedTemplateRow(t, s, "global-tmpl", "global-tmpl", store.TemplateScopeGlobal, "")
+			legacy := seedTemplateRow(t, s, "global-tmpl", "global-tmpl", store.TemplateScopeProject, projectID)
+
+			rec := doRequest(t, srv, method, "/api/v1/templates/"+legacy.ID,
+				map[string]string{"name": "global-tmpl", "slug": "global-tmpl", "description": "updated"})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+// TestHandleTemplateClone_GlobalNameShadow covers cloning a template into a
+// project under a global template's slug or name.
+func TestHandleTemplateClone_GlobalNameShadow(t *testing.T) {
+	projectID := tid("tmpl-clone-global-shadow-project")
+	for _, workstation := range []bool{false, true} {
+		name := "hosted refuses"
+		if workstation {
+			name = "workstation accepts"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, s := testServer(t)
+			srv.workstation = workstation
+			global := seedTemplateRow(t, s, "global-tmpl", "global-tmpl", store.TemplateScopeGlobal, "")
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates/"+global.ID+"/clone",
+				map[string]string{"name": "global-tmpl", "scope": store.TemplateScopeProject, "scopeId": projectID})
+			if workstation {
+				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+				assert.True(t, projectTemplateExists(t, s, "global-tmpl", projectID))
+				return
+			}
+			assertGlobalNameReserved(t, rec, "slug", "global-tmpl")
+			assert.False(t, projectTemplateExists(t, s, "global-tmpl", projectID))
+		})
+	}
+}
+
+// TestHarnessConfig_NameShadowingGlobalRefused covers harness-config name
+// shadowing when the slug itself is distinct (create, PUT, PATCH, import).
+func TestHarnessConfig_NameShadowingGlobalRefused(t *testing.T) {
+	projectID := tid("hc-name-shadow-project")
+	srv, s := testServer(t)
+	srv.workstation = false
+	ctx := context.Background()
+	seedHarnessConfigRow(t, s, "shared-hc", store.HarnessConfigScopeGlobal, "")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", CreateHarnessConfigRequest{
+		Name: "shared-hc", Slug: "x-shared-hc", Harness: "claude", Scope: store.HarnessConfigScopeProject, ScopeID: projectID,
+	})
+	assertGlobalNameReserved(t, rec, "name", "shared-hc")
+
+	own := seedHarnessConfigRow(t, s, "hc-own", store.HarnessConfigScopeProject, projectID)
+	// PATCH with name only re-derives slug from name, so slug matches first.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/harness-configs/"+own.ID, map[string]string{"name": "shared-hc"})
+	assertGlobalNameReserved(t, rec, "slug", "shared-hc")
+
+	// PATCH with an explicit distinct slug still catches the shadowing name.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/harness-configs/"+own.ID, map[string]string{"name": "shared-hc", "slug": "hc-own"})
+	assertGlobalNameReserved(t, rec, "name", "shared-hc")
+
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/harness-configs/"+own.ID, UpdateHarnessConfigRequest{
+		Name: "shared-hc", Slug: "hc-own",
+	})
+	assertGlobalNameReserved(t, rec, "name", "shared-hc")
+
+	err := (&harnessConfigPersistence{s: srv}).Create(ctx, &ResourceRecord{
+		Name: "shared-hc", Slug: "imp-hc", Scope: store.HarnessConfigScopeProject, ScopeID: projectID,
+	}, nil)
+	assert.ErrorIs(t, err, errGlobalNameReserved)
+}
+
+// TestResourceImport_TemplateGlobalShadow covers template import/sync via
+// templatePersistence.Create for global, built-in, user-scope, and workstation.
+func TestResourceImport_TemplateGlobalShadow(t *testing.T) {
+	srv, s := testServer(t)
+	srv.workstation = false
+	ctx := context.Background()
+	projectID := tid("tmpl-import-shadow-project")
+	seedTemplateRow(t, s, "imp-global", "imp-global", store.TemplateScopeGlobal, "")
+
+	err := (&templatePersistence{s: srv}).Create(ctx, &ResourceRecord{
+		Name: "imp-global", Slug: "imp-global", Scope: store.TemplateScopeProject, ScopeID: projectID,
+	}, nil)
+	assert.ErrorIs(t, err, errGlobalNameReserved)
+
+	err = (&templatePersistence{s: srv}).Create(ctx, &ResourceRecord{
+		Name: "imp-global", Slug: "imp-own", Scope: store.TemplateScopeProject, ScopeID: projectID,
+	}, nil)
+	assert.ErrorIs(t, err, errGlobalNameReserved)
+
+	builtins := resources.BuiltinTemplates()
+	require.NotEmpty(t, builtins)
+	builtin := api.Slugify(builtins[0].Name)
+	err = (&templatePersistence{s: srv}).Create(ctx, &ResourceRecord{
+		Name: builtin, Slug: builtin, Scope: store.TemplateScopeProject, ScopeID: projectID,
+	}, nil)
+	assert.ErrorIs(t, err, errGlobalNameReserved)
+
+	assert.NoError(t, (&templatePersistence{s: srv}).Create(ctx, &ResourceRecord{
+		ID: tid("tmpl-imp-user"), Name: "imp-global", Slug: "imp-global",
+		Scope: store.TemplateScopeUser, ScopeID: tid("tmpl-imp-user-id"), Status: store.TemplateStatusActive,
+	}, nil))
+
+	srv.workstation = true
+	assert.NoError(t, (&templatePersistence{s: srv}).Create(ctx, &ResourceRecord{
+		ID: tid("tmpl-imp-ws"), Name: "imp-global", Slug: "imp-global",
+		Scope: store.TemplateScopeProject, ScopeID: projectID, Status: store.TemplateStatusActive,
+	}, nil))
 }
