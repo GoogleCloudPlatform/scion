@@ -59,16 +59,18 @@ const LOADED_APP = {
 };
 
 describe('GITHUB_ADMIN_SECTIONS registry', () => {
-  it('registers app, installations, and associations in order', () => {
+  it('registers app, installations, associations, and routing in order', () => {
     expect(GITHUB_ADMIN_SECTIONS.map((s) => s.id)).toEqual([
       'app',
       'installations',
       'associations',
+      'routing',
     ]);
     expect(GITHUB_ADMIN_SECTIONS.map((s) => s.tag)).toEqual([
       'scion-admin-github-app-config',
       'scion-admin-github-installations',
       'scion-admin-github-associations',
+      'scion-admin-github-routing',
     ]);
   });
 
@@ -107,6 +109,7 @@ describe('GITHUB_ADMIN_SECTIONS registry', () => {
       'app',
       'installations',
       'associations',
+      'routing',
     ]);
 
     // Initial mount loads installations once (no duplicate fetch when appConfigured flips true).
