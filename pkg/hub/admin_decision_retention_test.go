@@ -214,15 +214,43 @@ func TestAdminDecisionRetention_ProjectOverridesAndDeletedPruning(t *testing.T) 
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "bad payload %v: %s", bad, rec.Body.String())
 	}
 
-	// Valid save with two live projects + one nonexistent project UUID (pruned).
+	// Ghost UUID mapped to keep_forever in THIS request must return 400 with a
+	// field error on project_overrides.<id> and save nothing.
 	ghostID := "33333333-3333-3333-3333-333333333333"
-	got := decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
+	rec = doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
 		"enabled":        true,
 		"retention_days": 30,
 		"project_overrides": map[string]any{
 			p1.ID:   map[string]any{"mode": "keep_forever"},
-			p2.ID:   map[string]any{"mode": "days", "days": 90},
-			ghostID: map[string]any{"mode": "days", "days": 45},
+			ghostID: map[string]any{"mode": "keep_forever"},
+		},
+		"expected_revision": 0,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "ghost project override must return 400: %s", rec.Body.String())
+	var valErr struct {
+		Error  string `json:"error"`
+		Errors []struct {
+			Path    string `json:"path"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &valErr))
+	assert.Equal(t, "validation_failed", valErr.Error)
+	require.Len(t, valErr.Errors, 1)
+	assert.Equal(t, "project_overrides."+ghostID, valErr.Errors[0].Path)
+	// Confirm nothing was saved.
+	unchanged := decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodGet, decisionRetentionAdminPath, nil))
+	assert.Equal(t, int64(0), unchanged.Revision)
+	assert.False(t, unchanged.Enabled)
+	assert.Empty(t, unchanged.ProjectOverrides)
+
+	// Valid save with two live projects succeeds.
+	got := decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
+		"enabled":        true,
+		"retention_days": 30,
+		"project_overrides": map[string]any{
+			p1.ID: map[string]any{"mode": "keep_forever"},
+			p2.ID: map[string]any{"mode": "days", "days": 90},
 		},
 		"expected_revision": 0,
 	}))
@@ -232,8 +260,6 @@ func TestAdminDecisionRetention_ProjectOverridesAndDeletedPruning(t *testing.T) 
 	assert.Equal(t, opsettings.DecisionRetentionOverrideModeDays, got.ProjectOverrides[p2.ID].Mode)
 	require.NotNil(t, got.ProjectOverrides[p2.ID].Days)
 	assert.Equal(t, 90, *got.ProjectOverrides[p2.ID].Days)
-	_, hasGhost := got.ProjectOverrides[ghostID]
-	assert.False(t, hasGhost, "override for nonexistent project must be dropped on save")
 
 	// Mutation audit recorded the override summary.
 	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{

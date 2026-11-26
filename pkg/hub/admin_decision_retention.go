@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -273,6 +274,36 @@ func (s *Server) handlePutDecisionRetention(w http.ResponseWriter, r *http.Reque
 			slog.Error("PUT decision retention: failed to verify projects for overrides", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to verify projects for retention overrides", nil)
 			return
+		}
+		// Reject unknown project IDs newly submitted in this request so a
+		// mistyped keep_forever hold fails visibly instead of vanishing, while
+		// still silently pruning previously stored keys for deleted projects.
+		if fp.has("project_overrides") {
+			missing := make([]string, 0)
+			for pid := range next.ProjectOverrides {
+				if _, isLive := pruned[pid]; isLive {
+					continue
+				}
+				if _, wasStored := cur.ProjectOverrides[pid]; wasStored {
+					continue
+				}
+				missing = append(missing, pid)
+			}
+			if len(missing) > 0 {
+				sort.Strings(missing)
+				fieldErrs := make([]config.ValidationError, len(missing))
+				for i, pid := range missing {
+					fieldErrs[i] = config.ValidationError{
+						Path:    "project_overrides." + pid,
+						Message: "project not found",
+					}
+				}
+				writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+					"error":  "validation_failed",
+					"errors": fieldErrs,
+				})
+				return
+			}
 		}
 		next.ProjectOverrides = pruned
 		settings = next.Settings()
