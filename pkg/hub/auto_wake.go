@@ -177,7 +177,7 @@ func (s *Server) syncWakeForDM(wakeCtx context.Context, agent *store.Agent, allo
 		if denial := s.wakeResumeDenial(wakeCtx, senderIdentity, agent); denial != nil {
 			return &errAutoWakeRefused{dmErr: denial}
 		}
-		wakeRes, wakeErr := s.wakeAgentForDM(wakeCtx, agent)
+		wakeRes, wakeErr := s.wakeAgentForDMAuthorized(wakeCtx, agent, s.explicitWakeAuthorize(wakeCtx, senderIdentity))
 		if wakeErr != nil {
 			return &errAutoWakeRefused{dmErr: wakeErr}
 		}

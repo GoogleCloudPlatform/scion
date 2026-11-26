@@ -2110,7 +2110,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				wakeRes = &WakeResult{Outcome: WakeDeferred}
 			}
 		} else {
-			wakeRes, wakeErr = s.wakeAgentForDM(wakeCtx, primaryAgent)
+			wakeRes, wakeErr = s.wakeAgentForDMAuthorized(wakeCtx, primaryAgent, s.explicitWakeAuthorize(wakeCtx, user))
 		}
 		cancelWake()
 		if wakeErr != nil {
@@ -2403,7 +2403,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 						dmErr, awaitErr = s.wakeOrAwaitStart(wakeCtx, target)
 					} else {
 						var wakeRes *WakeResult
-						wakeRes, dmErr = s.wakeAgentForDM(wakeCtx, target)
+						wakeRes, dmErr = s.wakeAgentForDMAuthorized(wakeCtx, target, s.explicitWakeAuthorize(wakeCtx, user))
 						if dmErr == nil && wakeRes != nil && wakeRes.Outcome == WakeDeferred {
 							awaitErr = s.awaitStartInProgress(wakeCtx, target)
 						}

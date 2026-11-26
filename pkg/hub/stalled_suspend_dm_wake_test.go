@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -1277,4 +1278,616 @@ func TestStalledAutoSuspend_ArtifactReviewAndTransfer_UserStoppingNotAutoWaking(
 		srv.waitAutoWakeIdle()
 		assert.Len(t, disp.getStartCalls(), 1)
 	})
+}
+
+type holdInterceptStore struct {
+	store.Store
+	fault       *storeFaultSwitch
+	onHoldCheck func(agentID string)
+	fired       atomic.Bool
+}
+
+func (h *holdInterceptStore) HasActiveAgentHold(ctx context.Context, agentID string) (bool, error) {
+	if h.fault.Active() && h.onHoldCheck != nil && h.fired.CompareAndSwap(false, true) {
+		h.onHoldCheck(agentID)
+	}
+	return h.Store.HasActiveAgentHold(ctx, agentID)
+}
+
+type countingRecordHandler struct {
+	mu    sync.Mutex
+	count int
+	msgs  []string
+}
+
+func (h *countingRecordHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *countingRecordHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if r.Message == "message handed to delivery" {
+		h.count++
+	}
+	h.msgs = append(h.msgs, r.Message)
+	return nil
+}
+func (h *countingRecordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingRecordHandler) WithGroup(string) slog.Handler      { return h }
+func (h *countingRecordHandler) deliveryCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.count
+}
+
+type alwaysContainerNotRunningDispatcher struct {
+	wakeTrackingDispatcher
+	msgCalls atomic.Int32
+}
+
+func (d *alwaysContainerNotRunningDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
+	d.msgCalls.Add(1)
+	return fmt.Errorf("Error response from daemon: container %s is not running", agent.ID)
+}
+
+func placeTestHold(t *testing.T, s store.Store, target *store.Agent) {
+	t.Helper()
+	_, err := s.CreateAgentHolds(context.Background(), []*store.AgentHold{{
+		AgentID:           target.ID,
+		ProjectID:         target.ProjectID,
+		Cause:             store.AgentHoldCauseOwnerAccessEnded,
+		RootPrincipalType: store.AgentHoldRootUser,
+		RootPrincipalID:   DevUserID,
+		Trigger:           store.MembershipLossTriggerMemberRemove,
+	}})
+	require.NoError(t, err)
+}
+
+// TestStalledAutoSuspend_ExplicitWake_PostSettleAuthzAndHold verifies that
+// every explicit --wake caller re-checks lifecycle authorization, holds, and
+// deletion on the freshly settled row after waitForHubAutoSuspendToSettle
+// inside wakeAgentForDMAuthorized, refusing with 0 starts and truthful row
+// state if any check now fails.
+func TestStalledAutoSuspend_ExplicitWake_PostSettleAuthzAndHold(t *testing.T) {
+	t.Run("ExecuteAgentDM unauthorized --wake TOCTOU across settle returns 403 and 0 starts", func(t *testing.T) {
+		srv, s, sender, target, disp := setupStalledDMFixtures(t, false) // experiment OFF
+
+		suspendDone := make(chan bool, 1)
+		input := awAgentDMInput(sender, target, "explicit wake TOCTOU")
+		input.Wake = true // sender lacks ScopeAgentLifecycle
+		input.BeforeWake = func() {
+			go func() {
+				suspendDone <- srv.autoSuspendAgent(context.Background(), disp, target, state.SuspendReasonStalled)
+			}()
+			select {
+			case <-disp.stopEntered:
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for DispatchAgentStop")
+				return
+			}
+			go func() {
+				time.Sleep(150 * time.Millisecond)
+				close(disp.releaseStop)
+			}()
+		}
+
+		res, dmErr := srv.ExecuteAgentDM(context.Background(), input)
+		<-suspendDone
+		assert.Nil(t, res)
+		require.NotNil(t, dmErr, "unauthorized --wake must be refused after settle")
+		assert.Equal(t, ErrCodeForbidden, dmErr.Code)
+		assert.Equal(t, http.StatusForbidden, dmErr.HTTPStatus)
+		assert.Empty(t, disp.getStartCalls(), "unauthorized --wake must never resume target")
+		msgs, err := s.ListMessages(context.Background(), store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		assert.Empty(t, msgs.Items, "pre-persistence refusal must not persist a message row")
+	})
+
+	t.Run("ExecuteAgentDM hold placed during settle refuses with 409 and 0 starts", func(t *testing.T) {
+		srv, s, sender, target, disp := setupStalledDMFixtures(t, false) // experiment OFF
+
+		suspendDone := make(chan bool, 1)
+		go func() {
+			suspendDone <- srv.autoSuspendAgent(context.Background(), disp, target, state.SuspendReasonStalled)
+		}()
+		select {
+		case <-disp.stopEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for DispatchAgentStop")
+		}
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			placeTestHold(t, s, target)
+			close(disp.releaseStop)
+		}()
+
+		input := awAgentDMInput(sender, target, "explicit wake hold during settle")
+		input.Wake = true
+		input.SenderIdentity = wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle)
+		res, dmErr := srv.ExecuteAgentDM(context.Background(), input)
+		<-suspendDone
+		assert.Nil(t, res)
+		require.NotNil(t, dmErr, "hold placed during settle must refuse explicit wake")
+		assert.Equal(t, ErrCodeAgentNotRunning, dmErr.Code)
+		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+		assert.Contains(t, strings.ToLower(dmErr.Message), "hold")
+		assert.Empty(t, disp.getStartCalls())
+		msgs, err := s.ListMessages(context.Background(), store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		assert.Empty(t, msgs.Items)
+	})
+
+	t.Run("ExecuteAgentDM soft-delete during settle refuses with 409 and 0 starts", func(t *testing.T) {
+		srv, s, sender, target, disp := setupStalledDMFixtures(t, false) // experiment OFF
+
+		end := srv.autoSuspending.begin(target.ID, state.SuspendReasonStalled)
+		db := s.(*entadapter.CompositeStore).DB()
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			_, _ = db.ExecContext(context.Background(),
+				"UPDATE agents SET deleted_at = ?, phase = ? WHERE id = ?",
+				time.Now().UTC(), string(state.PhaseRunning), target.ID,
+			)
+			end()
+		}()
+
+		input := awAgentDMInput(sender, target, "explicit wake delete during settle")
+		input.Wake = true
+		input.SenderIdentity = wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle)
+		res, dmErr := srv.ExecuteAgentDM(context.Background(), input)
+		assert.Nil(t, res)
+		require.NotNil(t, dmErr, "soft-delete during settle must refuse explicit wake")
+		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+		assert.Empty(t, disp.getStartCalls())
+	})
+
+	t.Run("handleAgentMessage unauthorized --wake TOCTOU across settle returns 403 and 0 starts", func(t *testing.T) {
+		srv, s, hookStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *holdInterceptStore {
+			return &holdInterceptStore{Store: inner, fault: f}
+		})
+		setIdleSuspendExperiment(t, srv, false)
+		ctx := context.Background()
+
+		proj := &store.Project{ID: tid("hm-toctou-proj"), Name: "HM TOCTOU", Slug: "hm-toctou-proj"}
+		require.NoError(t, s.CreateProject(ctx, proj))
+		srv.seedProjectCreatorMembership(ctx, proj)
+
+		broker := &store.RuntimeBroker{ID: tid("hm-toctou-broker"), Name: "HM Broker", Slug: "hm-toctou-broker", Status: store.BrokerStatusOnline}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: proj.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+		}))
+
+		target := &store.Agent{
+			ID: tid("hm-toctou-target"), ProjectID: proj.ID, Name: "HMTarget", Slug: "hm-toctou-target",
+			Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID,
+			OwnerID: DevUserID, CreatedBy: DevUserID, MessageMode: store.MessageModeProject,
+		}
+		require.NoError(t, s.CreateAgent(ctx, target))
+		_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+		require.NoError(t, err)
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err = db.ExecContext(ctx, "UPDATE agents SET run_id = ?, activity = ?, last_seen = ? WHERE id = ?",
+			"run-hm-"+target.ID, string(state.ActivityStalled), time.Now().UTC(), target.ID)
+		require.NoError(t, err)
+		fresh, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		*target = *fresh
+
+		disp := newStalledRaceDispatcher()
+		srv.SetDispatcher(disp)
+		awReadyOnStart(t, s, target.ID)
+
+		member := &store.User{
+			ID: tid("hm-toctou-member"), Email: "hm-toctou-member@example.com",
+			DisplayName: "Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, member))
+		msgAuthzAddProjectMember(t, s, member.ID, proj.ID, proj.Slug, store.GroupMemberRoleMember)
+		msgAuthzGrantAgentMessage(t, s, member.ID, proj.ID)
+		require.False(t, srv.agentLifecycleAllowed(ctx, userIdentityFor(member), target))
+
+		suspendDone := make(chan bool, 1)
+		hookStore.onHoldCheck = func(_ string) {
+			// Fires at handleAgentMessage's heldTargetRefusal, strictly after
+			// wakeResumeDenial (which passed while running) and before wakeAgentForDM.
+			go func() {
+				suspendDone <- srv.autoSuspendAgent(context.Background(), disp, target, state.SuspendReasonStalled)
+			}()
+			select {
+			case <-disp.stopEntered:
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for DispatchAgentStop")
+				return
+			}
+			go func() {
+				time.Sleep(150 * time.Millisecond)
+				close(disp.releaseStop)
+			}()
+		}
+		fault.Arm()
+
+		rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/agents/"+target.ID+"/message", map[string]any{
+			"message": "user explicit wake TOCTOU",
+			"wake":    true,
+		})
+		<-suspendDone
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Empty(t, disp.getStartCalls(), "unauthorized user --wake must never resume target")
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		assert.Empty(t, msgs.Items)
+	})
+
+	t.Run("handleAgentMessage hold placed during settle returns 409 and 0 starts", func(t *testing.T) {
+		srv, s, _, target, disp := setupStalledDMFixtures(t, false) // experiment OFF
+
+		suspendDone := make(chan bool, 1)
+		go func() {
+			suspendDone <- srv.autoSuspendAgent(context.Background(), disp, target, state.SuspendReasonStalled)
+		}()
+		select {
+		case <-disp.stopEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for DispatchAgentStop")
+		}
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			placeTestHold(t, s, target)
+			close(disp.releaseStop)
+		}()
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+target.ID+"/message", map[string]any{
+			"message": "user wake hold during settle",
+			"wake":    true,
+		})
+		<-suspendDone
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, strings.ToLower(rec.Body.String()), "hold")
+		assert.Empty(t, disp.getStartCalls())
+	})
+
+	t.Run("syncWakeForDM hold placed during settle refuses and 0 starts", func(t *testing.T) {
+		srv, s, sender, target, disp := setupStalledDMFixtures(t, false) // experiment OFF
+
+		suspendDone := make(chan bool, 1)
+		go func() {
+			suspendDone <- srv.autoSuspendAgent(context.Background(), disp, target, state.SuspendReasonStalled)
+		}()
+		select {
+		case <-disp.stopEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for DispatchAgentStop")
+		}
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			placeTestHold(t, s, target)
+			close(disp.releaseStop)
+		}()
+
+		err := srv.syncWakeForDM(context.Background(), target, true, wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle))
+		<-suspendDone
+		require.Error(t, err)
+		var refused *errAutoWakeRefused
+		require.True(t, errors.As(err, &refused))
+		require.NotNil(t, refused.dmErr)
+		assert.Equal(t, ErrCodeAgentNotRunning, refused.dmErr.Code)
+		assert.Contains(t, strings.ToLower(refused.dmErr.Message), "hold")
+		assert.Empty(t, disp.getStartCalls())
+	})
+
+	t.Run("chat v2 pre-persist and mid-dispatch explicit wake hold during settle refuses and 0 starts", func(t *testing.T) {
+		setupChat := func(t *testing.T) (*Server, store.Store, string, *store.Agent, *stalledRaceDispatcher) {
+			t.Helper()
+			srv, s, wcs, proj, db := setupSendTest(t)
+			setIdleSuspendExperiment(t, srv, false)
+			ctx := t.Context()
+
+			broker := &store.RuntimeBroker{ID: tid("cv2-hold-broker"), Name: "CV2 Hold Broker", Slug: "cv2-hold-broker", Status: store.BrokerStatusOnline}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+				ProjectID: proj.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+			}))
+			target := &store.Agent{
+				ID: tid("cv2-hold-target"), ProjectID: proj.ID, Name: "CV2HoldTarget", Slug: "cv2-hold-target",
+				Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID,
+				OwnerID: DevUserID, CreatedBy: DevUserID, MessageMode: store.MessageModeProject,
+			}
+			require.NoError(t, s.CreateAgent(ctx, target))
+			_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+			require.NoError(t, err)
+			storeDB := s.(*entadapter.CompositeStore).DB()
+			_, err = storeDB.ExecContext(ctx, "UPDATE agents SET run_id = ?, activity = ?, last_seen = ? WHERE id = ?",
+				"run-cv2-"+target.ID, string(state.ActivityStalled), time.Now().UTC(), target.ID)
+			require.NoError(t, err)
+			fresh, err := s.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			*target = *fresh
+			awReadyOnStart(t, s, target.ID)
+
+			topicID := tid("cv2-hold-topic")
+			require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+				ID: topicID, ProjectID: proj.ID, Name: "cv2-hold-topic",
+				CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: target.Slug,
+			}))
+			setTopicConversationID(t, db, s, topicID, proj.ID)
+
+			disp := newStalledRaceDispatcher()
+			srv.SetDispatcher(disp)
+			return srv, s, topicID, target, disp
+		}
+
+		t.Run("pre-persist explicit wake", func(t *testing.T) {
+			srv, s, topicID, target, disp := setupChat(t)
+			suspendDone := make(chan bool, 1)
+			go func() {
+				suspendDone <- srv.autoSuspendAgent(context.Background(), disp, target, state.SuspendReasonStalled)
+			}()
+			select {
+			case <-disp.stopEntered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for DispatchAgentStop")
+			}
+			go func() {
+				time.Sleep(150 * time.Millisecond)
+				placeTestHold(t, s, target)
+				close(disp.releaseStop)
+			}()
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", map[string]any{
+				"content": "chat pre-persist hold during settle",
+				"wake":    true,
+			})
+			<-suspendDone
+			assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			assert.Contains(t, strings.ToLower(rec.Body.String()), "hold")
+			assert.Empty(t, disp.getStartCalls())
+		})
+
+		t.Run("mid-dispatch sync wake hook", func(t *testing.T) {
+			srv, s, topicID, target, disp := setupChat(t)
+			suspendDone := make(chan bool, 1)
+			transitioning := &stalledTransitionOnFirstMsgDispatcher{
+				stalledRaceDispatcher: disp,
+				onFirstMsg: func() {
+					go func() {
+						suspendDone <- srv.autoSuspendAgent(context.Background(), disp, target, state.SuspendReasonStalled)
+					}()
+					select {
+					case <-disp.stopEntered:
+					case <-time.After(5 * time.Second):
+						t.Error("timed out waiting for DispatchAgentStop")
+						return
+					}
+					go func() {
+						time.Sleep(150 * time.Millisecond)
+						placeTestHold(t, s, target)
+						close(disp.releaseStop)
+					}()
+				},
+				firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+			}
+			srv.SetDispatcher(transitioning)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", map[string]any{
+				"content": "chat mid-dispatch hold during settle",
+				"wake":    true,
+			})
+			<-suspendDone
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, store.MessageDispatchFailed, resp["dispatchState"])
+			assert.Empty(t, disp.getStartCalls())
+		})
+	})
+
+	t.Run("artifacts review explicit wake hold during settle refuses and 0 starts", func(t *testing.T) {
+		srv, s, _, target, disp := setupStalledDMFixtures(t, false) // experiment OFF
+		awSuspendFor(t, s, target, state.SuspendReasonStalled)
+		end := srv.autoSuspending.begin(target.ID, state.SuspendReasonStalled)
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			placeTestHold(t, s, target)
+			end()
+		}()
+
+		ctx := contextWithIdentity(context.Background(), userIdentityFor(&store.User{
+			ID: DevUserID, Email: "dev@example.com", Role: store.UserRoleAdmin, Status: "active",
+		}))
+		info := srv.notifyArtifactReviewWithDelivery(ctx, nil, artifacts.ReviewNotice{
+			ArtifactID:   "art-explicit-hold-settle",
+			Seq:          1,
+			ScopeKind:    artifacts.ScopeKindProject,
+			ScopeRef:     target.ProjectID,
+			OwnerKind:    artifacts.PrincipalKindAgent,
+			OwnerRef:     target.ID,
+			ReviewerKind: artifacts.PrincipalKindUser,
+			ReviewerRef:  DevUserID,
+			Wake:         true,
+		})
+		require.NotNil(t, info)
+		assert.Contains(t, []string{artifacts.ReviewDeliveryWakeFailed, artifacts.ReviewDeliveryWakeRefused}, info.Status)
+		assert.Contains(t, strings.ToLower(info.Message), "hold")
+		assert.Empty(t, disp.getStartCalls())
+	})
+}
+
+// TestStalledAutoSuspend_ContainerNotRunningRetry_NoDuplicateRecordLog verifies
+// that a container-not-running wake retry does not log a duplicate
+// "message handed to delivery" record.
+func TestStalledAutoSuspend_ContainerNotRunningRetry_NoDuplicateRecordLog(t *testing.T) {
+	srv, s, _, target, disp := setupStalledDMFixtures(t, true)
+	transitioning := &stalledTransitionOnFirstMsgDispatcher{
+		stalledRaceDispatcher: disp,
+		onFirstMsg: func() {
+			awSuspendFor(t, s, target, state.SuspendReasonStalled)
+		},
+		firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+	}
+	srv.SetDispatcher(transitioning)
+
+	recHandler := &countingRecordHandler{}
+	recLog := slog.New(recHandler)
+	msg := messages.NewInstruction("user:dev", "agent:"+target.Slug, "no duplicate log")
+
+	dctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	err := dispatchWithBrokerRetry(
+		dctx,
+		srv.deliveryMarker(),
+		recLog,
+		transitioning,
+		target,
+		"no duplicate log",
+		false,
+		msg,
+		withSyncAutoWakeHook(func(wctx context.Context, a *store.Agent) (context.Context, context.CancelFunc, error) {
+			if err := srv.syncWakeForDM(wctx, a, false, nil); err != nil {
+				return nil, nil, err
+			}
+			return nil, nil, nil
+		}),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), transitioning.calls.Load(), "expected initial failed attempt plus one retry")
+	assert.Equal(t, 1, recHandler.deliveryCount(), "must log 'message handed to delivery' only once across retry")
+}
+
+// TestStalledAutoSuspend_ChatV2_MidDispatchExplicitWake_HeldTargetSkipsWake
+// kills sec2 M3: removing !agentHeldOrUnknown from chat v2 canExplicitWake.
+func TestStalledAutoSuspend_ChatV2_MidDispatchExplicitWake_HeldTargetSkipsWake(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	setIdleSuspendExperiment(t, srv, false)
+	ctx := t.Context()
+
+	broker := &store.RuntimeBroker{ID: tid("m3-broker"), Name: "M3 Broker", Slug: "m3-broker", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: proj.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+	}))
+	target := &store.Agent{
+		ID: tid("m3-target"), ProjectID: proj.ID, Name: "M3Target", Slug: "m3-target",
+		Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID,
+		OwnerID: DevUserID, CreatedBy: DevUserID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, target))
+	_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	storeDB := s.(*entadapter.CompositeStore).DB()
+	_, err = storeDB.ExecContext(ctx, "UPDATE agents SET run_id = ?, activity = ?, last_seen = ? WHERE id = ?",
+		"run-m3-"+target.ID, string(state.ActivityStalled), time.Now().UTC(), target.ID)
+	require.NoError(t, err)
+	fresh, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	*target = *fresh
+	awReadyOnStart(t, s, target.ID)
+
+	topicID := tid("m3-topic")
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: proj.ID, Name: "m3-topic",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: target.Slug,
+	}))
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+
+	baseDisp := newStalledRaceDispatcher()
+	endSuspend := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-endSuspend:
+		default:
+			close(endSuspend)
+		}
+	})
+	var endTracker func()
+	transitioning := &stalledTransitionOnFirstMsgDispatcher{
+		stalledRaceDispatcher: baseDisp,
+		onFirstMsg: func() {
+			placeTestHold(t, s, target)
+			endTracker = srv.autoSuspending.begin(target.ID, state.SuspendReasonStalled)
+			go func() {
+				<-endSuspend
+				endTracker()
+			}()
+		},
+		firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+	}
+	srv.SetDispatcher(transitioning)
+
+	// Without !agentHeldOrUnknown in canExplicitWake, the hook would enter
+	// wakeAgentForDM and block on the open autoSuspending tracker until timeout.
+	done := make(chan int, 1)
+	go func() {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", map[string]any{
+			"content": "held mid-dispatch must skip wake immediately",
+			"wake":    true,
+		})
+		var resp map[string]any
+		if json.Unmarshal(rec.Body.Bytes(), &resp) == nil && resp["dispatchState"] == store.MessageDispatchFailed {
+			done <- rec.Code
+			return
+		}
+		done <- -1
+	}()
+
+	select {
+	case code := <-done:
+		assert.Equal(t, http.StatusCreated, code)
+	case <-time.After(2 * time.Second):
+		close(endSuspend)
+		t.Fatal("chat v2 mid-dispatch wake blocked on settle for an already-held target (canExplicitWake must reject held targets before entering wakeAgentForDM)")
+	}
+	assert.Empty(t, baseDisp.getStartCalls())
+	assert.Equal(t, int32(1), transitioning.calls.Load())
+}
+
+// TestStalledAutoSuspend_SyncWakeForDM_HeldTargetFailsFastBeforeSettle kills
+// sec2 M4: removing heldTargetRefusal at the top of syncWakeForDM.
+func TestStalledAutoSuspend_SyncWakeForDM_HeldTargetFailsFastBeforeSettle(t *testing.T) {
+	srv, s, sender, target, disp := setupStalledDMFixtures(t, false) // experiment OFF
+	placeTestHold(t, s, target)
+	end := srv.autoSuspending.begin(target.ID, state.SuspendReasonStalled)
+	defer end()
+
+	wctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := srv.syncWakeForDM(wctx, target, true, wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle))
+	require.Error(t, err)
+	var refused *errAutoWakeRefused
+	require.True(t, errors.As(err, &refused))
+	require.NotNil(t, refused.dmErr)
+	assert.Equal(t, ErrCodeAgentNotRunning, refused.dmErr.Code)
+	assert.Contains(t, strings.ToLower(refused.dmErr.Message), "hold")
+	assert.Empty(t, disp.getStartCalls())
+}
+
+// TestStalledAutoSuspend_ContainerNotRunningRetry_WakesAtMostOnce kills sec2
+// M11: removing !wokeOnce from the container-not-running retry branch.
+func TestStalledAutoSuspend_ContainerNotRunningRetry_WakesAtMostOnce(t *testing.T) {
+	srv, _, _, target, _ := setupStalledDMFixtures(t, true)
+	alwaysFail := &alwaysContainerNotRunningDispatcher{}
+	srv.SetDispatcher(alwaysFail)
+
+	var wakeCalls atomic.Int32
+	msg := messages.NewInstruction("user:dev", "agent:"+target.Slug, "wake at most once")
+	dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := dispatchWithBrokerRetry(
+		dctx,
+		srv.deliveryMarker(),
+		nil,
+		alwaysFail,
+		target,
+		"wake at most once",
+		false,
+		msg,
+		withSyncAutoWakeHook(func(_ context.Context, _ *store.Agent) (context.Context, context.CancelFunc, error) {
+			if wakeCalls.Add(1) > 3 {
+				cancel()
+			}
+			return nil, nil, nil
+		}),
+	)
+	require.Error(t, err)
+	assert.Equal(t, int32(1), wakeCalls.Load(), "container-not-running retry must invoke syncAutoWake at most once")
+	assert.Equal(t, int32(2), alwaysFail.msgCalls.Load(), "expected initial attempt plus exactly one retry")
 }

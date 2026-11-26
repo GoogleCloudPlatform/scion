@@ -2757,7 +2757,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// The response waits on the resume and the readiness wait: extend
 		// this request's write deadline to cover them (ptone/scion#4178).
 		s.extendWriteDeadlineForDMWake(ctx, w)
-		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
+		wakeResult, wakeErr := s.wakeAgentForDMAuthorized(ctx, agent, s.explicitWakeAuthorize(ctx, GetIdentityFromContext(ctx)))
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
 			return

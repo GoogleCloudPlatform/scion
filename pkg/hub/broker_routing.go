@@ -497,6 +497,7 @@ func dispatchWithBrokerRetry(
 		}
 		if isContainerNotRunningDispatchError(err) && cfg.syncAutoWake != nil && !wokeOnce {
 			wokeOnce = true
+			nextLog = nil
 			newCtx, cancelNew, wakeErr := cfg.syncAutoWake(attemptCtx, agent)
 			if cancelNew != nil {
 				defer cancelNew()

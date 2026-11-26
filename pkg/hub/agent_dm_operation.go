@@ -498,8 +498,11 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				}
 				break
 			}
-			wakeResult, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
+			wakeResult, wakeErr := s.wakeAgentForDMAuthorized(ctx, input.TargetAgent, s.explicitWakeAuthorize(ctx, input.SenderIdentity))
 			if wakeErr != nil {
+				if wakeErr.Code == ErrCodeForbidden {
+					LogDMAdmission(DMAuditEntryForDenial(input, wakeErr.Code, wakeErr.Message))
+				}
 				return nil, wakeErr
 			}
 			if wakeResult != nil && wakeResult.Outcome == WakeDeferred {

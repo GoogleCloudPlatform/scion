@@ -94,12 +94,53 @@ func wakeDeleteWonError(agentID string) *AgentDMError {
 // Returns (*WakeResult, nil) on success or (nil, *AgentDMError) on failure.
 // On failure, no message should be dispatched (AC-4).
 func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeResult, *AgentDMError) {
+	return s.wakeAgentForDMAuthorized(ctx, agent, nil)
+}
+
+// explicitWakeAuthorize returns a post-settle authorization callback for
+// wakeAgentForDMAuthorized on explicit --wake paths. After waiting for an
+// in-flight hub auto-suspend to settle and refreshing the target row, it
+// re-checks deletion, holds, and lifecycle permission on the freshly settled
+// row so a sender who could not wake the settled target cannot bypass those
+// checks across the settle window.
+func (s *Server) explicitWakeAuthorize(ctx context.Context, identity Identity) func(*store.Agent) *AgentDMError {
+	return func(settled *store.Agent) *AgentDMError {
+		if settled == nil {
+			return nil
+		}
+		if !settled.DeletedAt.IsZero() {
+			return agentDeletedRefusal(settled.ID).dmError()
+		}
+		if deletionActive(settled) {
+			return deleteInProgressRefusal(settled.ID).dmError()
+		}
+		if dmErr := s.heldTargetRefusal(ctx, settled); dmErr != nil {
+			return dmErr
+		}
+		if denial := s.wakeResumeDenial(ctx, identity, settled); denial != nil {
+			return denial
+		}
+		return nil
+	}
+}
+
+// wakeAgentForDMAuthorized is wakeAgentForDM with an optional post-settle
+// authorize callback invoked on the freshly re-read row whenever
+// waitForHubAutoSuspendToSettle runs. Explicit --wake callers pass
+// s.explicitWakeAuthorize so lifecycle permission, holds, and deletions are
+// enforced after any settle wait.
+func (s *Server) wakeAgentForDMAuthorized(ctx context.Context, agent *store.Agent, authorize func(*store.Agent) *AgentDMError) (*WakeResult, *AgentDMError) {
 	if isShellAgent(agent) {
 		return nil, shellAgentNotMessageableError(agent)
 	}
 	if s.isHubAutoSuspending(agent) || (agent != nil && agent.IdleSuspendClaimUntil != nil && !deletionActive(agent) && !reincarnationInFlight(agent)) {
 		if err := s.waitForHubAutoSuspendToSettle(ctx, agent); err != nil {
 			return nil, startInProgressDMError(agent, err)
+		}
+		if authorize != nil {
+			if dmErr := authorize(agent); dmErr != nil {
+				return nil, dmErr
+			}
 		}
 	}
 	// The effective resting phase (ptone/scion#4669): an error row that
