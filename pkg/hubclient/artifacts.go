@@ -109,6 +109,14 @@ type ArtifactService interface {
 
 	// DeleteGrant removes a grant (DELETE /api/v1/artifacts/{id}/grants/{grantId}).
 	DeleteGrant(ctx context.Context, id, grantID string) error
+
+	// Transfer transfers ownership of an agent-owned artifact to another
+	// eligible agent in the same project (POST /api/v1/artifacts/{id}/transfer).
+	Transfer(ctx context.Context, id string, req *ArtifactTransferRequest) (*ArtifactTransferResponse, error)
+
+	// TransferTargets lists eligible target agents for ownership transfer
+	// (GET /api/v1/artifacts/{id}/transfer-targets).
+	TransferTargets(ctx context.Context, id string) (*ArtifactTransferTargetsResponse, error)
 }
 
 // ArtifactLink describes a share link. It never carries the token.
@@ -282,9 +290,46 @@ type ArtifactGrantResult struct {
 
 // ArtifactResponse mirrors the hub's artifact response body.
 type ArtifactResponse struct {
-	Artifact Artifact         `json:"artifact"`
-	Version  *ArtifactVersion `json:"version,omitempty"`
-	Warnings []string         `json:"warnings,omitempty"`
+	Artifact    Artifact         `json:"artifact"`
+	Version     *ArtifactVersion `json:"version,omitempty"`
+	Warnings    []string         `json:"warnings,omitempty"`
+	CanTransfer bool             `json:"canTransfer,omitempty"`
+}
+
+// ArtifactTransferRequest is the body of POST /api/v1/artifacts/{id}/transfer.
+type ArtifactTransferRequest struct {
+	To          string `json:"to"`
+	ExpectOwner string `json:"expectOwner"`
+	ClearKey    bool   `json:"clearKey,omitempty"`
+}
+
+// ArtifactTransferNoticeResult reports whether best-effort transfer notices
+// were delivered.
+type ArtifactTransferNoticeResult struct {
+	NewOwner    bool `json:"newOwner"`
+	FormerOwner bool `json:"formerOwner"`
+}
+
+// ArtifactTransferResponse is the body of POST /api/v1/artifacts/{id}/transfer.
+type ArtifactTransferResponse struct {
+	Artifact ArtifactResponse             `json:"artifact"`
+	Notified ArtifactTransferNoticeResult `json:"notified"`
+}
+
+// ArtifactTransferCandidate is one eligible target agent returned by
+// GET /api/v1/artifacts/{id}/transfer-targets.
+type ArtifactTransferCandidate struct {
+	ID    string `json:"id"`
+	Slug  string `json:"slug"`
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
+}
+
+// ArtifactTransferTargetsResponse is the body of
+// GET /api/v1/artifacts/{id}/transfer-targets.
+type ArtifactTransferTargetsResponse struct {
+	Agents    []ArtifactTransferCandidate `json:"agents"`
+	Truncated bool                        `json:"truncated"`
 }
 
 // Artifact describes an artifact.
@@ -302,7 +347,10 @@ type Artifact struct {
 	CreatedAt  time.Time  `json:"createdAt"`
 	UpdatedAt  time.Time  `json:"updatedAt"`
 	// OwnerDeleted is true when the hub found the artifact's owner gone.
-	OwnerDeleted bool `json:"ownerDeleted,omitempty"`
+	OwnerDeleted    bool       `json:"ownerDeleted,omitempty"`
+	FormerOwnerKind string     `json:"formerOwnerKind,omitempty"`
+	FormerOwnerRef  string     `json:"formerOwnerRef,omitempty"`
+	TransferredAt   *time.Time `json:"transferredAt,omitempty"`
 }
 
 // ArtifactVersion describes one version of an artifact.
@@ -706,4 +754,22 @@ func (s *artifactService) DeleteGrant(ctx context.Context, id, grantID string) e
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// Transfer implements ArtifactService. Sent once without retries.
+func (s *artifactService) Transfer(ctx context.Context, id string, req *ArtifactTransferRequest) (*ArtifactTransferResponse, error) {
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/transfer", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactTransferResponse](resp)
+}
+
+// TransferTargets implements ArtifactService.
+func (s *artifactService) TransferTargets(ctx context.Context, id string) (*ArtifactTransferTargetsResponse, error) {
+	resp, err := s.c.get(ctx, artifactPath(id)+"/transfer-targets", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactTransferTargetsResponse](resp)
 }

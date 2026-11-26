@@ -736,23 +736,25 @@ func (s *sqlStore) GetArtifact(ctx context.Context, id string) (*Artifact, error
 // getArtifact returns the live artifact matching where.
 // artifactColumns is the artifact column list scanArtifact reads.
 const artifactColumns = `id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at,
-		orphaned_at, message_project_id, sponsor_ref
+		orphaned_at, message_project_id, sponsor_ref, former_owner_kind, former_owner_ref, transferred_at, former_key
 		`
 
 func scanArtifact(r rowScanner) (Artifact, error) {
 	var (
-		a                    Artifact
-		key                  sql.NullString
-		seq                  sql.NullInt64
-		expires, created     dbTime
-		updated, deletedTime dbTime
-		orphaned             dbTime
-		messageProject       sql.NullString
-		sponsor              sql.NullString
+		a                              Artifact
+		key                            sql.NullString
+		seq                            sql.NullInt64
+		expires, created               dbTime
+		updated, deletedTime           dbTime
+		orphaned, transferred          dbTime
+		messageProject                 sql.NullString
+		sponsor                        sql.NullString
+		formerKind, formerRef, prevKey sql.NullString
 	)
 	err := r.Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
-		&expires, &created, &updated, &deletedTime, &orphaned, &messageProject, &sponsor)
+		&expires, &created, &updated, &deletedTime, &orphaned, &messageProject, &sponsor,
+		&formerKind, &formerRef, &transferred, &prevKey)
 	if err != nil {
 		return Artifact{}, err
 	}
@@ -765,6 +767,10 @@ func scanArtifact(r rowScanner) (Artifact, error) {
 	a.OrphanedAt = orphaned.ptr()
 	a.MessageProjectID = nullStringPtr(messageProject)
 	a.SponsorRef = sponsor.String
+	a.FormerOwnerKind = formerKind.String
+	a.FormerOwnerRef = formerRef.String
+	a.TransferredAt = transferred.ptr()
+	a.FormerKey = prevKey.String
 	return a, nil
 }
 
@@ -989,14 +995,15 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 	var out []Candidate
 	for rows.Next() {
 		var (
-			c                         Candidate
-			key, kind, sponsor        sql.NullString
-			seq                       sql.NullInt64
-			expires, created, updated dbTime
-			orphaned                  dbTime
+			c                              Candidate
+			key, kind, sponsor             sql.NullString
+			formerKind, formerRef, prevKey sql.NullString
+			seq                            sql.NullInt64
+			expires, created, updated      dbTime
+			orphaned, transferred          dbTime
 		)
 		if err := rows.Scan(&c.ID, &c.ScopeKind, &c.ScopeRef, &c.OwnerKind, &c.OwnerRef, &key, &c.Title,
-			&seq, &expires, &created, &updated, &orphaned, &sponsor, &kind); err != nil {
+			&seq, &expires, &created, &updated, &orphaned, &sponsor, &formerKind, &formerRef, &transferred, &prevKey, &kind); err != nil {
 			return nil, fmt.Errorf("artifacts: scan candidate: %w", err)
 		}
 		c.Key = key.String
@@ -1006,6 +1013,10 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 		c.UpdatedAt = updated.Time
 		c.OrphanedAt = orphaned.ptr()
 		c.SponsorRef = sponsor.String
+		c.FormerOwnerKind = formerKind.String
+		c.FormerOwnerRef = formerRef.String
+		c.TransferredAt = transferred.ptr()
+		c.FormerKey = prevKey.String
 		c.CurrentKind = kind.String
 		out = append(out, c)
 	}
@@ -1094,7 +1105,8 @@ func readGrantFilter(alias string) (string, []any) {
 // candidateColumns is the column list every arm of the candidate query
 // selects; the union and its outer ORDER BY rely on the names.
 const candidateColumns = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner_ref, a."key", a.title,
-		a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, a.sponsor_ref, v.kind AS current_kind`
+		a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, a.sponsor_ref,
+		a.former_owner_kind, a.former_owner_ref, a.transferred_at, a.former_key, v.kind AS current_kind`
 
 // writeCandidateFilters appends the conditions every candidate arm shares:
 // live, not expired, the search, the review filter, the home scope and the

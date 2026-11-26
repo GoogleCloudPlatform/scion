@@ -744,6 +744,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.RuntimeOrphanReconcile:       testAdminPolicyDeny,
 	experiments.ArtifactsOpenReviewCheck:     testAdminPolicyDeny,
 	experiments.ArtifactsReviewDrafts:        testAdminPolicyDeny,
+	experiments.ArtifactsTransfer:            testAdminPolicyDeny,
 	experiments.ProjectSelfLeave:             testAdminPolicyDeny,
 	experiments.WelcomeProject:               testAdminPolicyDeny,
 	experiments.SystemOne:                    testAdminPolicyDeny,

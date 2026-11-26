@@ -486,6 +486,13 @@ const ArtifactsOpenReviewCheck = "hub.artifacts_open_review_check"
 // still run.
 const ArtifactsReviewDrafts = "hub.artifacts_review_drafts"
 
+// ArtifactsTransfer gates steward transfer of artifact ownership to another
+// agent (ptone/scion#9337): POST /api/v1/artifacts/{id}/transfer,
+// GET /api/v1/artifacts/{id}/transfer-targets, and ArtifactResponse.canTransfer.
+// Requires hub.artifacts. While it is off, both routes answer 404 and
+// canTransfer is false.
+const ArtifactsTransfer = "hub.artifacts_transfer"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -1227,6 +1234,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#7116",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-02-19",
+	},
+	{
+		Name:        ArtifactsTransfer,
+		Title:       "Artifact ownership transfer",
+		Description: "Lets a steward transfer ownership of an agent-owned artifact to another agent they control in the same project so the new agent can publish versions and receive review notices. Needs hub.artifacts. While off, the transfer routes answer 404 and canTransfer is false.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9337",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-03-01",
 	},
 	{
 		Name:        UserDeleteForceCascade,

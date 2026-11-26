@@ -86,6 +86,9 @@ type Service struct {
 	// reviewWakeOfferer, when set, checks before finalizing a review whether
 	// a user-suspended owning agent should trigger a wake-confirm offer.
 	reviewWakeOfferer func(context.Context, *Artifact) *ReviewWakeOffer
+	// transferNotifier, when set, sends best-effort system messages to the
+	// new owner (and a live former owner) after an ownership transfer.
+	transferNotifier func(context.Context, TransferNotice) TransferNoticeResult
 
 	// htmlNotice remembers, by entry digest, whether an HTML entry
 	// references remote images (see entryHasRemoteImages).
@@ -624,6 +627,18 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleReviewSession(w, r, id, segs[2])
 	case len(segs) == 2 && segs[1] == reviewDraftSegment:
 		s.handleReviewDraft(w, r, id)
+	case len(segs) == 2 && segs[1] == transferSegment:
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.handleTransfer(w, r, id)
+	case len(segs) == 2 && segs[1] == transferTargetsSegment:
+		if !isRead(r.Method) {
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+			return
+		}
+		s.handleTransferTargets(w, r, id)
 	case len(segs) == 2 && segs[1] == "versions":
 		switch {
 		case isRead(r.Method):

@@ -24,7 +24,7 @@ Each artifact has numbered **versions**. A version is an immutable snapshot of t
 
 ## `scion artifact`
 
-`publish`, `get`, `versions`, `comments`, `list` and `view` are available in every CLI mode, including agent mode. `share`, `grants` and `delete` are available in human mode only.
+`publish`, `get`, `versions`, `comments`, `list` and `view` are available in every CLI mode, including agent mode. `share`, `grants`, `transfer` and `delete` are available in human mode only.
 
 ### `scion artifact publish <file|folder>`
 
@@ -258,6 +258,17 @@ A share link lets anyone who holds it open an artifact's current version in a br
 ## Grants
 
 From the CLI, `scion artifact grants <ref>` lists an artifact's grants and adds, changes or removes one (see the [CLI reference](/scion/reference/cli/#scion-artifact)).
+
+## Ownership transfer
+
+Behind the `hub.artifacts_transfer` experiment (alpha, off by default; requires `hub.artifacts`), a steward of an agent-owned artifact can transfer ownership to another agent they control in the same project.
+
+- **Who may transfer.** A user with an interactive session or dev credential (user access tokens and agents are refused) holding a steward clause on the artifact: a home-project owner (`artifact.steward`, held by `project-owner` and `super-admin`) or the owning agent's delegating user (`sponsor_ref`). Admin grantees and custodians cannot transfer ownership.
+- **Live-owner rule.** When the current owning agent is deleted, any steward may transfer. When the current owning agent is still live, the caller must also control it.
+- **Target eligibility.** The target agent must be live, belong to the artifact's current home project, be controlled by the caller, be in good standing (not held or reincarnating), and have a resolvable provenance root (which becomes the artifact's new `sponsor_ref`). Suspended targets are allowed.
+- **Preservation and keys.** Version history, authorship, grants (except any redundant principal grant on the new owner), share links, and review state are preserved. `orphaned_at` is cleared immediately. If the target agent already owns a live artifact with the same `--key` in the same project, the transfer returns `409 key_conflict` unless `clearKey` (`--clear-key`) is set, which moves the old key to `former_key` and clears `key`.
+- **CLI.** `scion artifact transfer <ref> --to <agent> [--clear-key] [--yes] [--format json]` (human mode only). `--to` resolves only against `GET /api/v1/artifacts/{id}/transfer-targets`.
+- **Routes.** `POST /api/v1/artifacts/{id}/transfer` and `GET /api/v1/artifacts/{id}/transfer-targets`. Both answer `404` while `hub.artifacts_transfer` is off or when the caller cannot read the artifact.
 
 A grant gives someone else access to one artifact. The subject is a person or an agent (`user:<id>`, `agent:<id>`) or a project (its members and agents), with one of three permissions: **read** (open the artifact and its versions), **write** (also publish new versions) and **admin** (also manage its grants and share links, change its expiry and move it). The owner holds admin implicitly.
 

@@ -368,6 +368,7 @@ func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend
 	resp.CanShare = authority != ""
 	resp.ShareAuthority = shareAuthorityOf(authority)
 	resp.CanRetire = s.retireAuthorityFrom(r.Context(), a, authority) != ""
+	resp.CanTransfer = s.canTransfer(r.Context(), a, authority)
 	access, err := s.canWriteErr(r.Context(), b, a)
 	if err != nil {
 		writeGrantsReadFailed(w, r, err)

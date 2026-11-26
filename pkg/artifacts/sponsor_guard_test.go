@@ -60,10 +60,13 @@ var sponsorRefSites = []struct{ file, line, role string }{
 	{"pkg/artifacts/store.go", "SponsorRef string", "read"},
 	{"pkg/artifacts/store_sql.go", "(id, scope_kind, scope_ref, owner_kind, owner_ref, \"key\", title, current_seq, expires_at, created_at, updated_at, sponsor_ref)", "write"},
 	{"pkg/artifacts/store_sql.go", "a.SponsorRef = sponsor.String", "read"},
-	{"pkg/artifacts/store_sql.go", "a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, a.sponsor_ref, v.kind AS current_kind`", "read"},
+	{"pkg/artifacts/store_sql.go", "a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, a.sponsor_ref,", "read"},
 	{"pkg/artifacts/store_sql.go", "c.SponsorRef = sponsor.String", "read"},
-	{"pkg/artifacts/store_sql.go", "orphaned_at, message_project_id, sponsor_ref", "read"},
+	{"pkg/artifacts/store_sql.go", "orphaned_at, message_project_id, sponsor_ref, former_owner_kind, former_owner_ref, transferred_at, former_key", "read"},
 	{"pkg/artifacts/store_sql.go", "s.nullTimeArg(a.ExpiresAt), s.timeArg(a.CreatedAt), s.timeArg(a.UpdatedAt), nullString(a.SponsorRef)); err != nil {", "write"},
+	{"pkg/artifacts/store_transfer.go", "`sponsor_ref = ?`,", "write"},
+	{"pkg/artifacts/store_transfer.go", "if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_kind, scope_ref, owner_kind, owner_ref, \"key\", sponsor_ref, expiry_source", "read"},
+	{"pkg/artifacts/transfer.go", "if sponsor != a.SponsorRef {", "subject"},
 	{"pkg/artifacts/versions.go", "a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)", "write"},
 }
 

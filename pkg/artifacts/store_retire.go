@@ -40,9 +40,10 @@ const (
 	// EventGrantCreated, EventGrantChanged and EventLinkCreated record who
 	// gave access, and by what authority (ptone/scion#4882). A link_created
 	// event carries the link id and expiry, never the token or its hash.
-	EventGrantCreated = "grant_created"
-	EventGrantChanged = "grant_changed"
-	EventLinkCreated  = "link_created"
+	EventGrantCreated     = "grant_created"
+	EventGrantChanged     = "grant_changed"
+	EventLinkCreated      = "link_created"
+	EventOwnerTransferred = "owner_transferred"
 )
 
 // Event actor kinds: the principal kinds, and system for the hub's own
@@ -441,10 +442,12 @@ func (s *sqlStore) setOwnerOrphaned(ctx context.Context, owner Owner, orphaned b
 	}
 	n := 0
 	for _, id := range ids {
-		// The condition is checked again so a concurrent pass cannot mark
-		// one artifact twice.
+		// The owner and condition are checked again so a concurrent pass cannot
+		// mark one artifact twice, and a concurrent ownership transfer cannot
+		// be re-marked orphaned under the old owner.
 		r, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET orphaned_at = ?
-			WHERE id = ? AND deleted_at IS NULL AND `+notAttachmentScope("scope_kind")+` AND `+cond), value, id)
+			WHERE id = ? AND owner_kind = ? AND owner_ref = ? AND deleted_at IS NULL AND `+notAttachmentScope("scope_kind")+` AND `+cond),
+			value, id, owner.Kind, owner.Ref)
 		if err != nil {
 			return 0, fmt.Errorf("artifacts: mark orphan: %w", err)
 		}

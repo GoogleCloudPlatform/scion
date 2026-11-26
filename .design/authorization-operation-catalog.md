@@ -92,6 +92,8 @@
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
 - [artifact.update](#artifactupdate) — Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant); a steward may change the expiry but a move from it is refused with 403 steward_action_not_allowed
+- [artifact.transfer](#artifacttransfer) — Transfer ownership of an agent-owned artifact to another agent controlled by the caller in the same project (POST /{id}/transfer; ptone/scion#9337); 404 while hub.artifacts_transfer is off or caller cannot read; requires a user principal with an interactive session or dev credential holding a steward clause (project-owner via artifact.steward, or delegator); live owners require caller control; target must be live, same project, controlled by caller, in good standing, and have a resolvable provenance root
+- [artifact.transfer.targets](#artifacttransfertargets) — List eligible target agents for ownership transfer of an agent-owned artifact (GET /{id}/transfer-targets; ptone/scion#9337); 404 while hub.artifacts_transfer is off or caller cannot read; same session-only steward and live-owner gates as POST /{id}/transfer
 - [artifact.grant.list](#artifactgrantlist) — List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
 - [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; every other caller that can read the artifact is refused with the same 403 before its body is read, and an accepted request can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile; with notify, may write one hub notification (artifact.grant.notify)
 - [artifact.grant.notify](#artifactgrantnotify) — Ask for review: with notify on an artifact grant to a user (POST, body notify true), write one hub notification to that user after the grant commits, naming the granter and the level, never the artifact's title or any request text; only an artifact manager or steward on an interactive, unscoped user session (the scheduled-send gate) sends it, only to an active user the caller may read, only when the grant raises the user's level; at most 30 per hour per requester (burst 10) and 600 per hour in all (burst 60); a refusal never blocks the grant and answers notifySkipped (self, not_permitted, unavailable, not_raised, rate_limited)
@@ -3971,6 +3973,87 @@
 - `pkg/artifacts:TestPatchRehome`
 - `pkg/artifacts:TestStewardBoundedTable`
 - `pkg/artifacts:TestStewardRaceAnswersNotFound`
+
+---
+
+## artifact.transfer
+
+**Domain:** artifact
+
+**Description:** Transfer ownership of an agent-owned artifact to another agent controlled by the caller in the same project (POST /{id}/transfer; ptone/scion#9337); 404 while hub.artifacts_transfer is off or caller cannot read; requires a user principal with an interactive session or dev credential holding a steward clause (project-owner via artifact.steward, or delegator); live owners require caller control; target must be live, same project, controlled by caller, in good standing, and have a resolvable provenance root
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/transfer` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`, `change-authority`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- Steward transfers agent-owned artifact to another agent the caller controls in the same project; target agent gains owner write authority and its provenance root becomes the recorded sponsor
+
+**Authority Evaluation:** `before_and_after`
+
+### Audit
+
+- **Event Type:** `artifact_event (owner_transferred)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** from, formerSponsor
+- **After Fields:** to, sponsor, keyCleared
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`, `transfer_not_allowed`, `owner_live`, `target_ineligible`, `owner_changed`, `key_conflict`
+
+### Tests
+
+- `pkg/artifacts:TestTransferAuthorizationMatrix`
+- `pkg/hub:TestArtifactTransferRoutes`
+
+---
+
+## artifact.transfer.targets
+
+**Domain:** artifact
+
+**Description:** List eligible target agents for ownership transfer of an agent-owned artifact (GET /{id}/transfer-targets; ptone/scion#9337); 404 while hub.artifacts_transfer is off or caller cannot read; same session-only steward and live-owner gates as POST /{id}/transfer
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/transfer-targets` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`, `forbidden`, `transfer_not_allowed`, `owner_live`
+
+### Tests
+
+- `pkg/artifacts:TestTransferTargetsRoute`
+- `pkg/hub:TestArtifactTransferRoutes`
 
 ---
 
