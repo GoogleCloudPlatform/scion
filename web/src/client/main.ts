@@ -794,6 +794,12 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/project-schedules.js'),
   },
   {
+    // Project Triggers page (experiment hub.triggers; renders 404 when off).
+    pattern: /^\/projects\/[^/]+\/triggers$/,
+    tag: 'scion-page-project-triggers',
+    load: () => import('../components/pages/project-triggers.js'),
+  },
+  {
     // Project Decisions page (experiment web.decisions; renders 404 when off).
     pattern: /^\/projects\/[^/]+\/decisions$/,
     tag: 'scion-page-project-decisions',

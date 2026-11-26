@@ -151,6 +151,7 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   decisionsEnabled,
   isFeatureEnabled,
+  triggersEnabled,
 } from '../../utils/feature-flags.js';
 import { fetchProjectDecisionCounts } from '../../client/project-decisions.js';
 import { agentBadges } from '../shared/agent-badges.js';
@@ -542,12 +543,16 @@ export class ScionPageProjectDetail extends LitElement {
   private decisionsEnabled = false;
 
   @state()
+  private triggersEnabled = false;
+
+  @state()
   private waitingOnYouDecisionsCount = 0;
 
   private decisionsCountAbort: AbortController | null = null;
   private decisionsCountTimer: ReturnType<typeof setTimeout> | null = null;
 
   private boundOnFeatureFlagsChanged = (): void => {
+    this.triggersEnabled = triggersEnabled();
     const next = decisionsEnabled();
     if (next === this.decisionsEnabled) return;
     this.decisionsEnabled = next;
@@ -1441,6 +1446,7 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     this.decisionsEnabled = decisionsEnabled();
+    this.triggersEnabled = triggersEnabled();
 
     // Set SSE scope to this project (receives all agent events within
     // project) before the first load: a drain belongs to the scope
@@ -3227,6 +3233,20 @@ export class ScionPageProjectDetail extends LitElement {
                           >${this.waitingOnYouDecisionsCount}</sl-badge
                         >`
                       : nothing}
+                  </sl-button>
+                </a>
+              `
+            : nothing}
+          ${this.triggersEnabled
+            ? html`
+                <a
+                  href="/projects/${encodeURIComponent(this.projectId)}/triggers"
+                  style="text-decoration: none;"
+                  data-triggers-link
+                >
+                  <sl-button size="small" data-triggers-button>
+                    <sl-icon slot="prefix" name="lightning-charge"></sl-icon>
+                    Triggers
                   </sl-button>
                 </a>
               `
