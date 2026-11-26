@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -368,36 +367,6 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		return false, fmt.Errorf("quota: check existing reservation for %q: %w", limitName, err)
 	}
 
-	// 4.6. Live never-suspend row idempotency (ptone/scion#9183): a live
-	// (non-deleted) agent already flagged suspend_policy="never" in this
-	// project holds its slot via neverSuspendQuotaUsage even if it has no
-	// usage_reservations row (e.g. flagged while Phase 1 was deployed, or
-	// restored while lifecycle.never_suspend was off). Decided under the
-	// quota lock so a concurrent never->auto PATCH cannot bypass the cap.
-	// Backfill its reservation unchecked so future calls hit step 4.5;
-	// created stays false so a caller rolling back a failed PATCH does not
-	// release a slot the live row already owns.
-	if limitName == store.LimitMaxNeverSuspendAgentsPerProject && scopeType == store.QuotaScopeProject {
-		agents, err := qs.store.GetAgentsByIDs(ctx, []string{resourceID})
-		if err != nil {
-			return false, fmt.Errorf("quota: check existing never-suspend agent for %q: %w", limitName, err)
-		}
-		if a, ok := agents[resourceID]; ok && a.ProjectID == scopeID && a.SuspendPolicy == store.SuspendPolicyNever {
-			if _, recErr := qs.recordUnchecked(ctx, limitName, &store.UsageReservation{
-				LimitDefinitionID: limitDef.ID,
-				SubjectID:         subjectID,
-				ScopeType:         scopeType,
-				ScopeID:           scopeID,
-				ResourceID:        resourceID,
-				Reserved:          1,
-			}); recErr != nil {
-				qs.logger.Warn("quota: failed to backfill reservation for existing never-suspend agent",
-					"limit", limitName, "resource_id", resourceID, "error", recErr)
-			}
-			return false, nil
-		}
-	}
-
 	// 5. Count active reservations: across every subject in the scope for a
 	// limit counted that way (countsAcrossSubjects), else the subject's own.
 	count, err := qs.countActive(ctx, limitName, limitDef.ID, subjectID, scopeType, scopeID)
@@ -448,122 +417,13 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 // The broker and group limits use subject == scope, and
 // max_projects_per_user is per user, so they keep the per-subject count.
 func countsAcrossSubjects(limitName string) bool {
-	return limitName == store.LimitMaxAgentsPerProject || limitName == store.LimitMaxNeverSuspendAgentsPerProject
-}
-
-// neverSuspendQuotaUsage is the single source of truth for
-// max_never_suspend_agents_per_project usage, used by both quota enforcement
-// (Reserve / 429 details) and the admin usage endpoints (getUsageSummary /
-// getUsageByLimit). When projectID is non-empty, results are scoped to that
-// project; when empty, all projects are included.
-//
-// State model for (agent row × active reservation), where "young" means
-// age < reconcileMinReservationAge and "old" means age >= reconcileMinReservationAge:
-//
-//	| Agent row    | Reservation | Counted?          | Reconcile action | Reason                                                        |
-//	|--------------|-------------|-------------------|------------------|---------------------------------------------------------------|
-//	| missing      | none        | no                | n/a              | No agent and no reservation.                                  |
-//	| missing      | young       | yes               | keep             | In-flight create before row commit (or recent failed release).|
-//	| missing      | old         | no                | release          | Stale orphan from failed create or failed hard-delete release.|
-//	| soft-deleted | none        | no                | n/a              | Soft-delete explicitly releases; row no longer holds a slot.  |
-//	| soft-deleted | young       | yes               | keep             | In-flight restore before tx commit (or recent failed release).|
-//	| soft-deleted | old         | no                | release          | Stale orphan from failed restore or failed soft-delete release.|
-//	| live auto    | none        | no                | n/a              | Ordinary auto-suspend agent.                                  |
-//	| live auto    | young       | yes               | keep             | In-flight PATCH auto->never before tx commit.                 |
-//	| live auto    | old         | no                | release          | Stale reservation from failed PATCH or failed clear release.  |
-//	| live never   | none        | yes (synthesized) | n/a              | Flagged without reservation (Phase 1 or experiment-off restore).|
-//	| live never   | young       | yes               | keep             | Active never-suspend agent.                                   |
-//	| live never   | old         | yes               | keep             | Active never-suspend agent.                                   |
-//
-// Invariant: an active reservation counts iff the agent is a live "never" row
-// OR the reservation is younger than reconcileMinReservationAge;
-// ReconcileStaleNeverSuspendQuotaReservations releases the exact complement
-// (any active reservation that is not counted).
-func neverSuspendQuotaUsage(ctx context.Context, st store.Store, limitDefID, projectID string, now time.Time) ([]*store.UsageReservation, error) {
-	var reservations []*store.UsageReservation
-	var err error
-	if projectID != "" {
-		reservations, err = st.ListActiveReservations(ctx, limitDefID, store.QuotaScopeProject, projectID)
-	} else {
-		reservations, err = st.ListActiveReservationsByScopeType(ctx, limitDefID, store.QuotaScopeProject)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	resIDs := make([]string, 0, len(reservations))
-	for _, r := range reservations {
-		if r != nil && r.ResourceID != "" {
-			resIDs = append(resIDs, r.ResourceID)
-		}
-	}
-	agentsByID, err := st.GetAgentsByIDs(ctx, resIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	out := make([]*store.UsageReservation, 0, len(reservations))
-	seen := make(map[string]struct{}, len(reservations))
-	for _, r := range reservations {
-		if r == nil || r.ResourceID == "" {
-			continue
-		}
-		a, ok := agentsByID[r.ResourceID]
-		if ok && a.SuspendPolicy == store.SuspendPolicyNever {
-			out = append(out, r)
-			seen[r.ResourceID] = struct{}{}
-			continue
-		}
-		// Non-live row (missing or soft-deleted) or live auto row: count only
-		// while younger than reconcileMinReservationAge to protect in-flight
-		// creates, restores, and auto->never PATCHes against concurrent
-		// overshoot; older reservations are stale and released by reconcile.
-		if now.Sub(r.CreatedAt) < reconcileMinReservationAge {
-			out = append(out, r)
-			seen[r.ResourceID] = struct{}{}
-		}
-	}
-
-	flagged, err := st.ListNeverSuspendAgents(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	for _, a := range flagged {
-		if a == nil || a.ID == "" {
-			continue
-		}
-		if _, exists := seen[a.ID]; exists {
-			continue
-		}
-		seen[a.ID] = struct{}{}
-		out = append(out, &store.UsageReservation{
-			LimitDefinitionID: limitDefID,
-			SubjectID:         projectQuotaSubject(a),
-			ScopeType:         store.QuotaScopeProject,
-			ScopeID:           a.ProjectID,
-			ResourceID:        a.ID,
-			Reserved:          1,
-			CreatedAt:         a.Created,
-		})
-	}
-	return out, nil
+	return limitName == store.LimitMaxAgentsPerProject
 }
 
 // countActive is Reserve's count of active reservations: the scope-wide
 // total for a limit counted across subjects, through the grouped per-scope
 // count, else the subject's own count in the scope.
-//
-// For max_never_suspend_agents_per_project, usage is delegated to
-// neverSuspendQuotaUsage so enforcement and admin usage views agree
-// (ptone/scion#9183).
 func (qs *QuotaService) countActive(ctx context.Context, limitName, limitDefID, subjectID, scopeType, scopeID string) (int64, error) {
-	if limitName == store.LimitMaxNeverSuspendAgentsPerProject && scopeType == store.QuotaScopeProject {
-		usage, err := neverSuspendQuotaUsage(ctx, qs.store, limitDefID, scopeID, time.Now())
-		if err != nil {
-			return 0, err
-		}
-		return int64(len(usage)), nil
-	}
 	if !countsAcrossSubjects(limitName) {
 		return qs.store.CountActiveReservations(ctx, limitDefID, subjectID, scopeType, scopeID)
 	}

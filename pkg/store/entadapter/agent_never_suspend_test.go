@@ -294,7 +294,7 @@ func TestAgentStore_ClaimIdleSuspend_AndSwapAutoSuspend_SuspendPolicy(t *testing
 	})
 }
 
-func TestAgentStore_SetAgentSuspendPolicy_QuotaCountsAndFilter(t *testing.T) {
+func TestAgentStore_SetAgentSuspendPolicy_RunningCountsAndFilter(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 
@@ -332,7 +332,7 @@ func TestAgentStore_SetAgentSuspendPolicy_QuotaCountsAndFilter(t *testing.T) {
 		assert.Equal(t, store.SuspendPolicyAuto, afterDeleted.SuspendPolicy, "soft-deleted row policy must remain unchanged")
 	})
 
-	t.Run("ListNeverSuspendAgents counts all non-deleted phases and excludes auto/deleted", func(t *testing.T) {
+	t.Run("CountRunningNeverSuspendAgents and QueryTerms filter", func(t *testing.T) {
 		running := makeAgent(projectID, "sp-cnt-running")
 		running.Phase = string(state.PhaseRunning)
 		running.SuspendPolicy = store.SuspendPolicyNever
@@ -360,22 +360,6 @@ func TestAgentStore_SetAgentSuspendPolicy_QuotaCountsAndFilter(t *testing.T) {
 			SetDeletedAt(time.Now().UTC()).
 			Save(ctx)
 		require.NoError(t, err)
-
-		flaggedProj, err := s.ListNeverSuspendAgents(ctx, projectID)
-		require.NoError(t, err)
-		projIDs := make([]string, len(flaggedProj))
-		for i, a := range flaggedProj {
-			projIDs[i] = a.ID
-		}
-		assert.ElementsMatch(t, []string{running.ID, stopped.ID}, projIDs)
-
-		flaggedAll, err := s.ListNeverSuspendAgents(ctx, "")
-		require.NoError(t, err)
-		allIDs := make([]string, len(flaggedAll))
-		for i, a := range flaggedAll {
-			allIDs[i] = a.ID
-		}
-		assert.ElementsMatch(t, []string{running.ID, stopped.ID}, allIDs)
 
 		// CountRunningNeverSuspendAgents counts only non-deleted running flagged agents.
 		runningCounts, err := s.CountRunningNeverSuspendAgents(ctx)

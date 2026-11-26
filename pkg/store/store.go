@@ -710,11 +710,6 @@ type AgentStore interface {
 	// policy, or ErrNotFound if the agent does not exist or is soft-deleted.
 	SetAgentSuspendPolicy(ctx context.Context, agentID, policy string) error
 
-	// ListNeverSuspendAgents returns all non-deleted agents whose
-	// suspend_policy is "never", across all phases. When projectID is non-empty,
-	// results are restricted to that project; when empty, all projects are included.
-	ListNeverSuspendAgents(ctx context.Context, projectID string) ([]*Agent, error)
-
 	// CountRunningNeverSuspendAgents returns the number of non-deleted agents
 	// in the running phase with suspend_policy = "never", grouped by project
 	// and runtime broker.

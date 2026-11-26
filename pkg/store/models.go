@@ -5942,10 +5942,9 @@ const (
 
 // System limit definition names
 const (
-	LimitMaxAgentsPerProject             = "max_agents_per_project"
-	LimitMaxNeverSuspendAgentsPerProject = "max_never_suspend_agents_per_project"
-	LimitMaxProjectsPerUser              = "max_projects_per_user"
-	LimitMaxMembersPerGroup              = "max_members_per_group"
+	LimitMaxAgentsPerProject = "max_agents_per_project"
+	LimitMaxProjectsPerUser  = "max_projects_per_user"
+	LimitMaxMembersPerGroup  = "max_members_per_group"
 	// LimitMaxAgentsPerBroker is the per-runtime-broker ceiling on
 	// concurrently live agents (ptone/scion#1303). Unlike the other system
 	// limits, which are opt-in fairness quotas seeded unlimited and scoped to

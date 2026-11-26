@@ -637,33 +637,6 @@ func (s *AgentStore) SetAgentSuspendPolicy(ctx context.Context, agentID, policy 
 	return nil
 }
 
-// ListNeverSuspendAgents returns all non-deleted agents with
-// suspend_policy = "never", regardless of phase. When projectID is non-empty,
-// only agents in that project are returned.
-func (s *AgentStore) ListNeverSuspendAgents(ctx context.Context, projectID string) ([]*store.Agent, error) {
-	q := s.client.Agent.Query().
-		Where(
-			agent.DeletedAtIsNil(),
-			agent.SuspendPolicyEQ(agent.SuspendPolicyNever),
-		)
-	if projectID != "" {
-		projectUID, err := parseUUID(projectID)
-		if err != nil {
-			return nil, err
-		}
-		q = q.Where(agent.ProjectIDEQ(projectUID))
-	}
-	rows, err := q.All(ctx)
-	if err != nil {
-		return nil, mapError(err)
-	}
-	out := make([]*store.Agent, len(rows))
-	for i, r := range rows {
-		out[i] = entAgentToStore(r)
-	}
-	return out, nil
-}
-
 // CountRunningNeverSuspendAgents returns counts of non-deleted running agents
 // with suspend_policy = "never", grouped by project and runtime broker.
 func (s *AgentStore) CountRunningNeverSuspendAgents(ctx context.Context) ([]store.RunningNeverSuspendCount, error) {

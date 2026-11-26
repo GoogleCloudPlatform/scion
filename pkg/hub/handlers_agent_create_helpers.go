@@ -1557,10 +1557,10 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
-	// Changing suspendPolicy on an existing agent requires PATCH with quota
-	// and audit. Refuse a mismatched non-empty suspendPolicy with 409 before
-	// startGate or existingAgentFlatChecks can answer 200 (in-flight create)
-	// or persist a broker pin; empty or matching values pass through.
+	// Changing suspendPolicy on an existing agent requires PATCH with audit.
+	// Refuse a mismatched non-empty suspendPolicy with 409 before startGate or
+	// existingAgentFlatChecks can answer 200 (in-flight create) or persist a
+	// broker pin; empty or matching values pass through.
 	// Exception: the env-gather recreate branch (existingBranchRecreate)
 	// hard-deletes the existing row and creates a fresh agent from req, so it
 	// honors req.SuspendPolicy like any other create-time field.

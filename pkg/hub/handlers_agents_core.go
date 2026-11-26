@@ -1077,11 +1077,6 @@ func quotaRefusal(limitName string, err error) (string, map[string]interface{}) 
 				quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
 			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
 	}
-	if exceeded.Limit == store.LimitMaxNeverSuspendAgentsPerProject && exceeded.ScopeType == store.QuotaScopeProject {
-		return fmt.Sprintf("%s (project %s: %d of %d never-suspend agents in use); clear never-suspend or delete a flagged agent in this project to free a slot",
-				quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
-			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
-	}
 	if exceeded.Limit == store.LimitMaxAgentsPerBroker && exceeded.ScopeType == store.QuotaScopeBroker {
 		if exceeded.Max > 0 {
 			details := map[string]interface{}{"count": exceeded.Count, "limit": exceeded.Max}
@@ -1167,7 +1162,6 @@ func (s *Server) releaseAgentQuotas(ctx context.Context, resourceID, runtimeBrok
 		s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, resourceID)
 	}
 	s.quotaService.Release(ctx, store.LimitMaxAgentsPerProject, resourceID)
-	s.quotaService.Release(ctx, store.LimitMaxNeverSuspendAgentsPerProject, resourceID)
 }
 
 // Budgets for best-effort cleanup that must outlive the request that
@@ -2880,12 +2874,6 @@ func (s *Server) createAgentInProject(
 	if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerProject, createdBy, store.QuotaScopeProject, projectID, agent.ID) {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		return
-	}
-	if agent.SuspendPolicy == store.SuspendPolicyNever {
-		if !s.checkAndReserveQuota(ctx, w, store.LimitMaxNeverSuspendAgentsPerProject, createdBy, store.QuotaScopeProject, projectID, agent.ID) {
-			s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
-			return
-		}
 	}
 
 	// The agent row, identity keys, delegation edge (with the frozen
@@ -5452,13 +5440,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		timezoneSource = &tz.Source
 	}
 
-	// SuspendPolicy update: reserve quota when targeting "never" (idempotent),
-	// warn if the harness cannot resume (design §4.6), persist via
-	// SetAgentSuspendPolicy with in-transaction before/after audit, and report
-	// suspensionInFlight if a stop or suspend is already in flight (design §4.2
-	// point 3). Always run writeSuspendPolicyTx when updates.SuspendPolicy != nil
-	// rather than trusting the handler-entry snapshot, so a concurrent clear
-	// cannot turn a "never" PATCH into a stale echo.
+	// SuspendPolicy update: warn if the harness cannot resume (design §4.6),
+	// persist via SetAgentSuspendPolicy with in-transaction before/after audit,
+	// and report suspensionInFlight if a stop or suspend is already in flight
+	// (design §4.2 point 3). Always run writeSuspendPolicyTx when
+	// updates.SuspendPolicy != nil rather than trusting the handler-entry
+	// snapshot, so a concurrent clear cannot turn a "never" PATCH into a stale
+	// echo.
 	if updates.SuspendPolicy != nil && *updates.SuspendPolicy == store.SuspendPolicyNever {
 		if ok, harnessType, _ := s.harnessSupportsResume(ctx, agent); !ok {
 			if harnessType != "" {
@@ -5466,23 +5454,6 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			} else {
 				warnings = append(warnings, fmt.Sprintf("this agent's harness does not support resume; it is never auto-suspended so suspendPolicy=%q has no effect", store.SuspendPolicyNever))
 			}
-		}
-	}
-
-	var neverSuspendReserved bool
-	if updates.SuspendPolicy != nil && *updates.SuspendPolicy == store.SuspendPolicyNever && s.quotaService != nil && agent.ProjectID != "" {
-		ok, created := s.reserveQuotaHTTP(ctx, w, store.LimitMaxNeverSuspendAgentsPerProject,
-			projectQuotaSubject(agent), store.QuotaScopeProject, agent.ProjectID, agent.ID)
-		if !ok {
-			return
-		}
-		neverSuspendReserved = created
-	}
-	rollbackNeverSuspend := func() {
-		if neverSuspendReserved {
-			relCtx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
-			s.quotaService.Release(relCtx, store.LimitMaxNeverSuspendAgentsPerProject, agent.ID)
-			cancel()
 		}
 	}
 
@@ -5554,16 +5525,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			return writeSuspendPolicyTx(tx)
 		})
 		if err != nil {
-			rollbackNeverSuspend()
 			writeErrorFromErr(w, err, "")
 			return
 		}
 		agent.SuspendPolicy = *updates.SuspendPolicy
-		if *updates.SuspendPolicy == store.SuspendPolicyAuto && s.quotaService != nil {
-			relCtx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
-			s.quotaService.Release(relCtx, store.LimitMaxNeverSuspendAgentsPerProject, agent.ID)
-			cancel()
-		}
 	} else if updates.Name != "" {
 		// Name and its identity key are written in the same transaction:
 		// the key row is what makes the key's per-project uniqueness a

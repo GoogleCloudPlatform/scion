@@ -2173,7 +2173,6 @@ func seedLimitDefinitions(ctx context.Context, s store.Store) {
 		defaultValue int64
 	}{
 		{store.LimitMaxAgentsPerProject, "agent", "count", "Maximum agents per project", 0},
-		{store.LimitMaxNeverSuspendAgentsPerProject, "agent", "count", "Maximum never-suspend agents per project", 0},
 		{store.LimitMaxProjectsPerUser, "project", "count", "Maximum projects per user", 0},
 		{store.LimitMaxMembersPerGroup, "group", "count", "Maximum members per group", 0},
 		{store.LimitMaxAgentsPerBroker, "agent", "count", "Maximum concurrently live agents per runtime broker (crash-prevention ceiling, ptone/scion#1303)", 100},

@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -2095,26 +2094,6 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	// Re-reserve the per-project never-suspend quota when restoring a flagged
-	// agent while the experiment is enabled (design §4.1, §4.2 point 7, §4.5,
-	// §9 item 8). Over-cap returns 409 Conflict so callers can distinguish a
-	// restore quota conflict from a rate limit.
-	var neverSuspendReserved bool
-	if s.experimentEnabled(experiments.NeverSuspend) && agent.SuspendPolicy == store.SuspendPolicyNever && s.quotaService != nil && agent.ProjectID != "" {
-		created, qErr := s.quotaService.Reserve(ctx, store.LimitMaxNeverSuspendAgentsPerProject,
-			projectQuotaSubject(agent), store.QuotaScopeProject, agent.ProjectID, agent.ID)
-		if qErr != nil {
-			if errors.Is(qErr, store.ErrQuotaExceeded) {
-				message, details := quotaRefusal(store.LimitMaxNeverSuspendAgentsPerProject, qErr)
-				writeError(w, http.StatusConflict, ErrCodeQuotaExceeded, message, details)
-				return
-			}
-			writeQuotaReserveError(w, store.LimitMaxNeverSuspendAgentsPerProject, qErr)
-			return
-		}
-		neverSuspendReserved = created
-	}
-
 	// Identity-key rows persist through soft-delete (only a hard delete or
 	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
 	// PurgeDeletedAgents), so restoring an agent should normally find its own
@@ -2136,11 +2115,6 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// (ptone/scion#2769; errAgentOwnerUserMissing, see
 	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
-		if neverSuspendReserved {
-			relCtx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
-			s.quotaService.Release(relCtx, store.LimitMaxNeverSuspendAgentsPerProject, agent.ID)
-			cancel()
-		}
 		if errors.Is(err, errAgentNotSoftDeleted) {
 			BadRequest(w, "Agent is not in deleted state")
 			return

@@ -736,13 +736,6 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 			// every project's with one aggregate query, never one per
 			// project (ptone/scion#6033).
 			count, listErr = s.countScopedActiveReservations(ctx, def.ID, store.QuotaScopeProject)
-		case store.LimitMaxNeverSuspendAgentsPerProject:
-			// Use the same usage calculation as quota enforcement so admin
-			// usage and 429 details agree (including Phase-1-flagged rows and
-			// excluding stale/soft-deleted reservations).
-			var usage []*store.UsageReservation
-			usage, listErr = neverSuspendQuotaUsage(ctx, s.store, def.ID, "", time.Now())
-			count = len(usage)
 		case store.LimitMaxMembersPerGroup:
 			// Group member reservations are stored at store.QuotaScopeGroup,
 			// one scope per group (handlers_groups.go), never at
@@ -805,9 +798,6 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 		// Every project's reservations, as getUsageSummary counts them
 		// (ptone/scion#6033).
 		reservations, err = s.store.ListActiveReservationsByScopeType(ctx, def.ID, store.QuotaScopeProject)
-	case store.LimitMaxNeverSuspendAgentsPerProject:
-		// Same unified usage function as enforcement and getUsageSummary.
-		reservations, err = neverSuspendQuotaUsage(ctx, s.store, def.ID, "", time.Now())
 	case store.LimitMaxMembersPerGroup:
 		// Every group's reservations, as getUsageSummary counts them
 		// (ptone/scion#6036).
