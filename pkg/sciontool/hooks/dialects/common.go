@@ -19,8 +19,9 @@ func getString(data map[string]interface{}, key string) string {
 // extractTokens populates token usage fields on EventData from raw event data.
 // It checks top-level fields first, then falls back to a nested "usage" object.
 // Supports field names: input_tokens, output_tokens, cached_tokens,
-// cache_read_input_tokens, cache_write_tokens, cache_creation_input_tokens,
-// reasoning_tokens, thinking_tokens, prompt_tokens, completion_tokens.
+// cache_read_tokens, cache_read_input_tokens, cache_write_tokens,
+// cache_creation_input_tokens, reasoning_tokens, thinking_tokens,
+// prompt_tokens, completion_tokens.
 func extractTokens(data map[string]interface{}, ed *hooks.EventData) {
 	// Try top-level fields first
 	if v := getInt64(data, "input_tokens"); v > 0 {

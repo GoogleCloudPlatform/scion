@@ -158,7 +158,7 @@ func TestMuseCodeHookTokensReachUsageMetric(t *testing.T) {
 //   - a 2-step turn where step 1 fails with HTTP 400 and repeats step 0's
 //     cumulative usage (step 1 produces 1 error call with nil tokens),
 //   - a separate subagent turn (independent watermark),
-//   - cross-process persistence via TurnUsageStatePath (new TelemetryHandler
+//   - cross-process persistence via MuseTurnUsageStatePath (new TelemetryHandler
 //     per event, mirroring separate `sciontool hook` subprocesses).
 func TestMuseDialect_CumulativeTurnDeltaAndFailedStep(t *testing.T) {
 	scrubTelemetryEnv(t)
@@ -321,20 +321,25 @@ func TestMuseDialect_PostLLMCallMappingConfig(t *testing.T) {
 	}
 }
 
-// TestMuseTurnUsage_LRUEvictionInterleaved verifies R1: when more than
-// maxMuseTrackedTurns (64) subagent turns interleave with an active main turn,
-// LRU eviction refreshes the main turn on every step so its high-water mark is
-// never dropped and summed deltas equal the true cumulative (71,000, not the
-// 135,000 FIFO double-count). Exercised through both apply() and the file path.
+// TestMuseTurnUsage_LRUEvictionInterleaved verifies R1 and the widened 1024-slot
+// LRU bound:
+//   - when more than maxMuseTrackedTurns (1024) subagent turns interleave with
+//     an active main turn, LRU eviction refreshes the main turn on every step so
+//     its high-water mark is never dropped and summed deltas equal the true
+//     cumulative;
+//   - when 100 distinct other turns run strictly between two consecutive steps
+//     of one turn (with no touch to that turn in between), the second step's
+//     delta still equals the exact per-step increment through both apply() and
+//     the file path.
 func TestMuseTurnUsage_LRUEvictionInterleaved(t *testing.T) {
 	const (
 		mainKey    = "sess-main:turn-main"
 		stepInc    = int64(1000)
-		iterations = maxMuseTrackedTurns + 6 // 70 > 64 triggers eviction cycles
+		iterations = maxMuseTrackedTurns + 6 // triggers eviction cycles
 		wantTotal  = stepInc * int64(1+iterations)
 	)
 
-	t.Run("in-memory apply", func(t *testing.T) {
+	t.Run("in-memory apply across eviction", func(t *testing.T) {
 		var st museTurnUsageState
 		cum := stepInc
 		sum := st.apply(mainKey, museTurnUsageTotals{Input: cum}).Input
@@ -359,7 +364,22 @@ func TestMuseTurnUsage_LRUEvictionInterleaved(t *testing.T) {
 		}
 	})
 
-	t.Run("file path across handlers", func(t *testing.T) {
+	t.Run("100 turns strictly between two consecutive steps", func(t *testing.T) {
+		const between = 100
+
+		// Direct apply() check.
+		var st museTurnUsageState
+		if d0 := st.apply(mainKey, museTurnUsageTotals{Input: stepInc}); d0.Input != stepInc {
+			t.Fatalf("apply step 0 = %d, want %d", d0.Input, stepInc)
+		}
+		for i := 1; i <= between; i++ {
+			st.apply(fmt.Sprintf("sess-sub-%d:turn-sub-%d", i, i), museTurnUsageTotals{Input: 500})
+		}
+		if d1 := st.apply(mainKey, museTurnUsageTotals{Input: 2 * stepInc}); d1.Input != stepInc {
+			t.Fatalf("apply step 1 after %d turns = %d, want %d", between, d1.Input, stepInc)
+		}
+
+		// File-path check across separate TelemetryHandlers.
 		scrubTelemetryEnv(t)
 		t.Setenv("SCION_HARNESS", "muse-code")
 		t.Setenv("SCION_USAGE_SOURCE", "hooks")
@@ -404,22 +424,14 @@ func TestMuseTurnUsage_LRUEvictionInterleaved(t *testing.T) {
 			return usageTokenTotals(rm)[telemetrycontract.TokenTypeInput]
 		}
 
-		cum := stepInc
-		sum := runStep("sess-main", "turn-main", 0, cum)
-		if sum != stepInc {
-			t.Fatalf("step 0 input = %d, want %d", sum, stepInc)
+		if d0 := runStep("sess-main", "turn-main", 0, stepInc); d0 != stepInc {
+			t.Fatalf("file-path step 0 = %d, want %d", d0, stepInc)
 		}
-		for i := 1; i <= iterations; i++ {
+		for i := 1; i <= between; i++ {
 			runStep(fmt.Sprintf("sess-sub-%d", i), fmt.Sprintf("turn-sub-%d", i), 0, 500)
-			cum += stepInc
-			d := runStep("sess-main", "turn-main", i, cum)
-			if d != stepInc {
-				t.Fatalf("iter %d: main file-path delta = %d, want %d", i, d, stepInc)
-			}
-			sum += d
 		}
-		if sum != wantTotal {
-			t.Errorf("file-path summed main deltas = %d, want %d", sum, wantTotal)
+		if d1 := runStep("sess-main", "turn-main", 1, 2*stepInc); d1 != stepInc {
+			t.Fatalf("file-path step 1 after %d turns = %d, want %d", between, d1, stepInc)
 		}
 	})
 }

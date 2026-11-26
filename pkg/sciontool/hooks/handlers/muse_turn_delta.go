@@ -18,10 +18,15 @@ import (
 
 // maxMuseTrackedTurns bounds the number of (session_id, turn_id) high-water
 // marks retained for Muse Code's cumulative PostLLMCall.usage delta tracking.
-// Eviction is LRU (least-recently-touched), so an active main turn stays
-// resident even when more than maxMuseTrackedTurns subagent/reminder turns
-// interleave with it.
-const maxMuseTrackedTurns = 64
+// Each UUID-keyed entry is ~220 bytes across Order and Turns, so 1024 entries
+// cap the state file at ~225 KiB (well under the 1 MiB read limit). Eviction
+// is LRU (least-recently-touched), so an active main turn stays resident even
+// when more than maxMuseTrackedTurns subagent/reminder turns interleave with
+// it. Eviction trades a bounded state file for a possible over-count (if more
+// than maxMuseTrackedTurns other turns run between two consecutive steps of
+// one idle turn, its next step re-emits its cumulative total), never an
+// under-count.
+const maxMuseTrackedTurns = 1024
 
 type museTurnUsageTotals struct {
 	Input      int64 `json:"input,omitempty"`
