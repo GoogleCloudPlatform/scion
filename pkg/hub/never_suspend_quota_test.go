@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,8 +39,9 @@ func setNeverSuspendProjectCap(t *testing.T, s store.Store, capVal int64) *store
 	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxNeverSuspendAgentsPerProject)
 	require.NoError(t, err, "max_never_suspend_agents_per_project must be seeded")
 	def.DefaultValue = capVal
-	require.NoError(t, s.UpdateLimitDefinition(ctx, def))
-	return def
+	updated, err := s.UpdateLimitDefinition(ctx, def)
+	require.NoError(t, err)
+	return updated
 }
 
 type nsQuotaFixture struct {
@@ -84,6 +86,7 @@ func initNSQuotaFixture(t *testing.T, srv *Server, s store.Store, prefix string)
 	}))
 	disp := &createAgentDispatcher{}
 	srv.SetDispatcher(disp)
+	srv.config.SoftDeleteRetention = time.Hour
 	setNeverSuspendExperiment(t, srv, true)
 
 	return &nsQuotaFixture{
@@ -270,9 +273,12 @@ func TestNeverSuspend_QuotaEnforcementLifecycleAndAdminUsage(t *testing.T) {
 		})
 		require.Equal(t, http.StatusOK, recPatch.Code, "body: %s", recPatch.Body.String())
 
-		// 3. Hard-delete pre1 (via force/permanent delete) frees 1 slot -> create with never succeeds (2/2).
-		recHardDel := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, "/api/v1/agents/"+pre1.ID+"?deleteFiles=true&force=true", nil)
+		// 3. Hard-delete pre1 frees 1 slot -> create with never succeeds (2/2).
+		f.srv.config.SoftDeleteRetention = 0
+		recHardDel := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, "/api/v1/agents/"+pre1.ID, nil)
 		require.Equal(t, http.StatusNoContent, recHardDel.Code, "body: %s", recHardDel.Body.String())
+		_, err := f.s.GetAgent(ctx, pre1.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "pre1 must be hard-deleted")
 
 		recCreate := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]any{
 			"name":          "ns-q-after-hard-del",
@@ -559,7 +565,6 @@ func TestNeverSuspend_QuotaExperimentOffAndUnlimitedShortCircuit(t *testing.T) {
 		setNeverSuspendExperiment(t, f.srv, true)
 		setNeverSuspendProjectCap(t, f.s, 0) // unlimited
 		fault.Arm()
-		defer fault.Disarm()
 		calls.Store(0)
 
 		// Create with never.
@@ -628,7 +633,6 @@ func TestNeverSuspend_QuotaExperimentOffAndUnlimitedShortCircuit(t *testing.T) {
 		setNeverSuspendExperiment(t, f.srv, false)
 
 		fault.Arm()
-		defer fault.Disarm()
 		calls.Store(0)
 
 		recRes := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+created.Agent.ID+"/restore", nil)
