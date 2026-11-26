@@ -365,6 +365,27 @@ Jumping to a message that was purged (`GET /api/v1/chat/conversations/:key/messa
 
 SQLite does not shrink its database file after deletes: the freed pages are reused by new data, but the file keeps its size. Reclaiming the space needs an offline `VACUUM` of the database while the Hub is stopped (with free disk space of about the database's size), after a backup.
 
+## Decision Retention
+
+The `decision_retention` section bounds how long the Hub keeps settled decisions and their answers (`pkg/config/opsettings/decision_retention.go`). Like `chat_retention`, it is stored only in the Hub database: it has no `settings.yaml` key and no environment variable, and it is not seeded. An absent row resolves to the compiled defaults (`enabled: false`, `retention_days: null`, default sweep tuning), and a stored document that fails to parse or validate fails closed (`enabled: false`, no window). It is gated by the [`hub.decision_retention`](/scion/reference/experiments/#server-experiments-with-notes) experiment (off by default). The background `"decision-retention"` singleton purges decisions only while `hub.decision_retention` is on, `enabled` is `true` (`enabled: false` doubles as a hub-wide legal hold), and a retention window is set.
+
+:::caution[Back up the database before enabling]
+Decision retention irreversibly purges settled decisions (answered, dismissed, withdrawn, or replaced) and their answers once every decision on a prompt has had no activity for `retention_days`. Open decisions (pending or interpreted answers awaiting confirmation), chat messages, and `decision_key_counters` are never deleted by decision retention. Take a verified database backup before enabling `hub.decision_retention` and `decision_retention.enabled`.
+:::
+
+| Key | Type | Default | Constraints | Effect |
+|-----|------|---------|-------------|--------|
+| `enabled` | boolean | `false` | — | Turns the decision retention sweep on while `hub.decision_retention` is on. While `false`, nothing is purged. |
+| `retention_days` | integer or `null` | `null` (keep forever) | `30`–`36500` when set | Hub default age window in days (`DecisionRetentionMinDays = 30`, `DecisionRetentionMaxDays = 36500`). When `null` (absent in the stored document), settled decisions are kept forever. |
+| `sweep.page_size` | integer | `200` | `50`–`1000` | Largest number of candidate decision rows scanned per page. |
+| `sweep.tick_budget_seconds` | integer | `30` | `1`–`40` | Wall time one sweep tick may run, in seconds. |
+| `sweep.tick_interval_minutes` | integer | `60` | `1`–`1440` | Time between sweep ticks, in minutes. |
+
+- **Permissions and credentials:** `GET /api/v1/admin/decision-retention` and `PUT /api/v1/admin/decision-retention` are both Hub-admin routes (`RouteID: "admin.decisionRetention"`, `Classification: RouteHubAdmin`, permission `hub.config.update` on `hub`) restricted to interactive sessions (`SessionOnly: ReasonIrreversibleCascade`); user access tokens and test-admin identities are refused. While the `hub.decision_retention` experiment is off, both `GET` and `PUT` return `404 not_found` (`Route not found`); unsupported HTTP methods return `405` whether or not the experiment is on.
+- **Response (`GET` and `PUT`):** Returns `enabled`, `retention_days` (`null` when no window is set), `sweep` (`page_size`, `tick_budget_seconds`, `tick_interval_minutes`), `revision` (the section revision for `expected_revision`), and `runs` (the 10 most recent `decision_retention_runs` rows, newest first: `id`, `trigger`, `dry_run`, `started_at`, `finished_at`, `status`, `actor`, `error`, `projects`, `totals` with `decisions` and `answers`, and `retention_days`). Run rows hold counts only, never decision IDs or content, and are kept for 365 days.
+- **`PUT` semantics and error codes:** Omitted fields are unchanged; explicit `null` resets a field to its compiled default (`enabled: false`, `retention_days: null`, or default sweep tuning; `"sweep": null` resets all three sweep fields). Changing `enabled` or `retention_days` requires `expected_revision` (`400 invalid_request` if missing); a stale `expected_revision` or concurrent modification returns `409 revision_conflict`. Unknown JSON fields, malformed JSON, or out-of-range values return `400 invalid_request` (or `400 validation_failed` on schema validation). Without database-backed operational settings, `PUT` returns `501 not_implemented`. Every change is written with compare-and-set on the section revision and recorded in the mutation audit (`hub_setting_update` on `decision_retention`, executor `admin-decision-retention`) before the write; if the audit record cannot be written, the save is refused with `500 internal_error` and settings are not changed (`hub_setting_update_not_applied` is recorded if the settings write itself fails).
+- **Admin UI:** While the `hub.decision_retention` web flag is on, **Admin → Server Config** renders the **Decision retention** panel (`<scion-admin-decision-retention>`) below Chat retention. It exposes the enable switch, the hub default window in days (empty keeps decisions forever; 30–36500 days), the most recent run summary, and collapsed sweep tuning fields. A save that enables retention with a window, sets a first window while enabled, or shortens the window asks for confirmation first.
+
 ## HA Bootstrap Guidance
 
 For high-availability deployments with multiple hub replicas:
