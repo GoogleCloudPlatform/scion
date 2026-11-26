@@ -15,8 +15,10 @@
 package agydecode
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
@@ -45,13 +47,22 @@ type DedupeState struct {
 	// Emitted maps each canonical root key to the highest per-channel token
 	// counts emitted so far for that equivalence class.
 	Emitted map[string]TokenUsage `json:"emitted,omitempty"`
+	// LearnedModels persists concrete numeric model_id -> model_name mappings
+	// discovered across polls so later steps-only polls resolve the same model
+	// names as a single full pass.
+	LearnedModels map[int64]string `json:"learned_models,omitempty"`
+	// AmbiguousModels tracks numeric model_ids observed with conflicting
+	// concrete names across polls so they are not guessed.
+	AmbiguousModels map[int64]bool `json:"ambiguous_models,omitempty"`
 }
 
 // NewDedupeState returns an initialized, empty DedupeState.
 func NewDedupeState() *DedupeState {
 	return &DedupeState{
-		Parent:  make(map[string]string),
-		Emitted: make(map[string]TokenUsage),
+		Parent:          make(map[string]string),
+		Emitted:         make(map[string]TokenUsage),
+		LearnedModels:   make(map[int64]string),
+		AmbiguousModels: make(map[int64]bool),
 	}
 }
 
@@ -61,6 +72,12 @@ func (d *DedupeState) ensureInit() {
 	}
 	if d.Emitted == nil {
 		d.Emitted = make(map[string]TokenUsage)
+	}
+	if d.LearnedModels == nil {
+		d.LearnedModels = make(map[int64]string)
+	}
+	if d.AmbiguousModels == nil {
+		d.AmbiguousModels = make(map[int64]bool)
 	}
 }
 
@@ -145,28 +162,55 @@ func (d *DedupeState) Add(keys ...string) (canonical string, isNew bool) {
 
 // RecordDelta unions keys into DedupeState and compares tokens against the
 // canonical root's persisted per-channel high-water mark:
-//   - If the identity is new, stores tokens and returns (canonical, tokens, isDelta=false, emit=true).
+//   - If the identity is new, stores tokens and returns
+//     (canonical, emissionKey, tokens, isDelta=false, emit=true).
 //   - If the identity was already seen and at least one channel increased, updates
-//     the high-water mark and returns (canonical, positiveDelta, isDelta=true, emit=true).
-//   - If no channel increased, returns (canonical, zero, isDelta=false, emit=false).
-func (d *DedupeState) RecordDelta(tokens TokenUsage, keys ...string) (canonical string, out TokenUsage, isDelta bool, emit bool) {
+//     the high-water mark and returns
+//     (canonical, emissionKey, positiveDelta, isDelta=true, emit=true).
+//   - If no channel increased, returns (canonical, "", zero, isDelta=false, emit=false).
+//
+// emissionKey is deterministically derived from canonical plus the cumulative
+// high-water mark after this emission, so full and delta emissions get distinct
+// keys and replaying a delta after a crash reproduces the exact same key.
+func (d *DedupeState) RecordDelta(tokens TokenUsage, keys ...string) (canonical, emissionKey string, out TokenUsage, isDelta, emit bool) {
 	canonical, isNew := d.Add(keys...)
 	if canonical == "" {
-		return "", TokenUsage{}, false, false
+		return "", "", TokenUsage{}, false, false
 	}
 
 	prev, hasPrev := d.Emitted[canonical]
 	if isNew || !hasPrev {
-		d.Emitted[canonical] = cloneTokenUsage(tokens)
-		return canonical, cloneTokenUsage(tokens), false, true
+		hw := cloneTokenUsage(tokens)
+		d.Emitted[canonical] = hw
+		return canonical, computeEmissionKey(canonical, hw), cloneTokenUsage(tokens), false, true
 	}
 
 	delta, nextHW, changed := computeTokenDelta(prev, tokens)
 	if !changed {
-		return canonical, TokenUsage{}, false, false
+		return canonical, "", TokenUsage{}, false, false
 	}
 	d.Emitted[canonical] = nextHW
-	return canonical, delta, true, true
+	return canonical, computeEmissionKey(canonical, nextHW), delta, true, true
+}
+
+func formatOptInt64(p *int64) string {
+	if p == nil {
+		return "-"
+	}
+	return strconv.FormatInt(*p, 10)
+}
+
+func computeEmissionKey(identity string, highWater TokenUsage) string {
+	payload := fmt.Sprintf("%s|in=%s|out=%s|cr=%s|cw=%s|reas=%s",
+		identity,
+		formatOptInt64(highWater.Input),
+		formatOptInt64(highWater.Output),
+		formatOptInt64(highWater.CacheRead),
+		formatOptInt64(highWater.CacheWrite),
+		formatOptInt64(highWater.Reasoning),
+	)
+	sum := sha256.Sum256([]byte(payload))
+	return fmt.Sprintf("%s#%x", identity, sum[:16])
 }
 
 // unionRoots merges two root keys, preferring the higher-priority key

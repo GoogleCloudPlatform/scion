@@ -99,6 +99,13 @@ type Record struct {
 
 	// Identity is the stable canonical dedupe key for this call.
 	Identity string `json:"identity"`
+	// EmissionKey is a deterministic, replay-safe key unique to each emission
+	// of a call (derived from Identity plus the cumulative per-channel high-water
+	// mark after this emission). Full and subsequent delta emissions for the same
+	// call have distinct EmissionKeys, while replaying the same delta after a
+	// crash before persisting DedupeState reproduces the exact same EmissionKey.
+	// Omitted on StatusMalformed sentinel records.
+	EmissionKey string `json:"emission_key,omitempty"`
 	// SourceIdentity is telemetrycontract.SourceIdentityRequestID when derived
 	// from protobuf IDs [11, 12, 7], or telemetrycontract.SourceIdentityComposite
 	// when falling back to positional identity.
@@ -132,12 +139,25 @@ type DecodeError struct {
 	Error  string      `json:"error"`
 }
 
-// Cursor tracks the highest SQLite rowid processed per table so callers can
-// resume incrementally on subsequent polls. Nil pointers mean "start from the
-// beginning" (important because agy's idx/rowid starts at 0).
+// MaxPendingRowIDs bounds the number of NULL/empty-blob rowids retained per
+// table in Cursor so permanently-NULL rows (such as non-LLM user steps) cannot
+// cause unbounded cursor growth or O(N) rescans. When more than MaxPendingRowIDs
+// gaps exist, the most recent (highest) rowids are kept.
+const MaxPendingRowIDs = 256
+
+// Cursor tracks the highest SQLite rowid processed per table plus a bounded
+// set of pending NULL/empty-blob rowids to re-check on subsequent polls.
+// Nil high-water pointers mean "start from the beginning" (important because
+// agy's idx/rowid starts at 0).
+//
+// Cursor without Dedupe prevents re-reading already-populated rows within each
+// table, but callers that want cross-poll deduplication across steps and
+// gen_metadata must also pass a persistent DedupeState.
 type Cursor struct {
-	GenMetadataRowID *int64 `json:"gen_metadata_rowid,omitempty"`
-	StepsRowID       *int64 `json:"steps_rowid,omitempty"`
+	GenMetadataRowID         *int64  `json:"gen_metadata_rowid,omitempty"`
+	StepsRowID               *int64  `json:"steps_rowid,omitempty"`
+	PendingGenMetadataRowIDs []int64 `json:"pending_gen_metadata_rowids,omitempty"`
+	PendingStepsRowIDs       []int64 `json:"pending_steps_rowids,omitempty"`
 }
 
 // Clone returns a deep copy of the cursor.
@@ -150,6 +170,12 @@ func (c Cursor) Clone() Cursor {
 	if c.StepsRowID != nil {
 		v := *c.StepsRowID
 		out.StepsRowID = &v
+	}
+	if len(c.PendingGenMetadataRowIDs) > 0 {
+		out.PendingGenMetadataRowIDs = append([]int64(nil), c.PendingGenMetadataRowIDs...)
+	}
+	if len(c.PendingStepsRowIDs) > 0 {
+		out.PendingStepsRowIDs = append([]int64(nil), c.PendingStepsRowIDs...)
 	}
 	return out
 }

@@ -4,7 +4,11 @@
   "version_verified": true,
   "session_id": "fixture-multi-call",
   "cursor": {
-    "gen_metadata_rowid": 2
+    "gen_metadata_rowid": 2,
+    "steps_rowid": 7,
+    "pending_steps_rowids": [
+      0
+    ]
   },
   "records": [
     {
@@ -15,6 +19,7 @@
       "idx": 1,
       "usage_index": 0,
       "identity": "antigravity:11:req-call-1",
+      "emission_key": "antigravity:11:req-call-1#ede27460fea0acf911c7d1a1bad1986c",
       "source_identity": "request_id",
       "identity_keys": [
         "antigravity:11:req-call-1",
@@ -41,6 +46,7 @@
       "idx": 4,
       "usage_index": 0,
       "identity": "antigravity:11:req-call-2",
+      "emission_key": "antigravity:11:req-call-2#bd7fa4031663489e1b13e385c788a7b1",
       "source_identity": "request_id",
       "identity_keys": [
         "antigravity:11:req-call-2",
@@ -63,38 +69,12 @@
     {
       "status": "verified",
       "session_id": "fixture-multi-call",
-      "source": "gen_metadata",
-      "rowid": 1,
-      "idx": 1,
-      "usage_index": 1,
-      "is_retry": true,
-      "identity": "antigravity:11:req-call-2-retry",
-      "source_identity": "request_id",
-      "identity_keys": [
-        "antigravity:11:req-call-2-retry"
-      ],
-      "timestamp": "2026-11-26T13:33:20Z",
-      "model": "claude-sonnet-4-5",
-      "model_id": 333,
-      "model_source": "event",
-      "tokens": {
-        "input": 500,
-        "output": 80,
-        "cache_read": 300,
-        "cache_write": 1200,
-        "reasoning": 20,
-        "reasoning_overlaps_output": true,
-        "input_derivation": "reported"
-      }
-    },
-    {
-      "status": "verified",
-      "session_id": "fixture-multi-call",
       "source": "steps",
       "rowid": 7,
       "idx": 7,
       "usage_index": 0,
       "identity": "antigravity:11:req-call-3-a",
+      "emission_key": "antigravity:11:req-call-3-a#5acfe6dc9e37917f3f6c4302292d7eae",
       "source_identity": "request_id",
       "identity_keys": [
         "antigravity:11:req-call-3-a",
@@ -109,6 +89,34 @@
         "input": 1000,
         "output": 90,
         "reasoning": 30,
+        "reasoning_overlaps_output": true,
+        "input_derivation": "reported"
+      }
+    },
+    {
+      "status": "verified",
+      "session_id": "fixture-multi-call",
+      "source": "gen_metadata",
+      "rowid": 1,
+      "idx": 1,
+      "usage_index": 1,
+      "is_retry": true,
+      "identity": "antigravity:11:req-call-2-retry",
+      "emission_key": "antigravity:11:req-call-2-retry#4f34e24a9b771405e531ad4686908203",
+      "source_identity": "request_id",
+      "identity_keys": [
+        "antigravity:11:req-call-2-retry"
+      ],
+      "timestamp": "2026-11-26T13:33:20Z",
+      "model": "claude-sonnet-4-5",
+      "model_id": 333,
+      "model_source": "event",
+      "tokens": {
+        "input": 500,
+        "output": 80,
+        "cache_read": 300,
+        "cache_write": 1200,
+        "reasoning": 20,
         "reasoning_overlaps_output": true,
         "input_derivation": "reported"
       }

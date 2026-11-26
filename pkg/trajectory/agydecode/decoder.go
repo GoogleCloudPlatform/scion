@@ -21,6 +21,7 @@ import (
 	"math"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -120,11 +121,13 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 	var genRows []scannedRow
 	if tables["gen_metadata"] {
 		var maxRowID *int64
+		var pending []int64
 		var rowErrs []DecodeError
-		genRows, maxRowID, rowErrs, err = readMetadataTable(
+		genRows, maxRowID, pending, rowErrs, err = readMetadataTable(
 			ctx, tx, SourceGenMetadata,
+			"SELECT rowid, idx, data FROM gen_metadata WHERE rowid = ?",
 			"SELECT rowid, idx, data FROM gen_metadata WHERE rowid > ? ORDER BY rowid LIMIT ?",
-			genMetadataPageRows, opts.Cursor.GenMetadataRowID, false,
+			genMetadataPageRows, opts.Cursor.GenMetadataRowID, opts.Cursor.PendingGenMetadataRowIDs, false,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("read gen_metadata %s: %w", dbPath, err)
@@ -132,6 +135,7 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 		if maxRowID != nil {
 			res.Cursor.GenMetadataRowID = maxRowID
 		}
+		res.Cursor.PendingGenMetadataRowIDs = pending
 		res.Errors = append(res.Errors, rowErrs...)
 	}
 
@@ -148,11 +152,13 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 	var stepRows []scannedRow
 	if tables["steps"] && !opts.SkipSteps {
 		var maxRowID *int64
+		var pending []int64
 		var rowErrs []DecodeError
-		stepRows, maxRowID, rowErrs, err = readMetadataTable(
+		stepRows, maxRowID, pending, rowErrs, err = readMetadataTable(
 			ctx, tx, SourceSteps,
+			"SELECT rowid, idx, metadata FROM steps WHERE rowid = ?",
 			"SELECT rowid, idx, metadata FROM steps WHERE rowid > ? ORDER BY rowid LIMIT ?",
-			stepsPageRows, opts.Cursor.StepsRowID, true,
+			stepsPageRows, opts.Cursor.StepsRowID, opts.Cursor.PendingStepsRowIDs, true,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("read steps %s: %w", dbPath, err)
@@ -160,14 +166,25 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 		if maxRowID != nil {
 			res.Cursor.StepsRowID = maxRowID
 		}
+		res.Cursor.PendingStepsRowIDs = pending
 		res.Errors = append(res.Errors, rowErrs...)
 	}
 
-	// Learn concrete model_id -> model_name mappings across all decoded rows.
-	// Ambiguous mappings (same model_id mapped to two different concrete names)
-	// are marked ambiguous (empty string) so we do not guess.
+	// Learn concrete model_id -> model_name mappings across all decoded rows
+	// (seeded from DedupeState when verified so later incremental polls keep
+	// consistent model attribution). Ambiguous mappings are discarded.
 	learnedModels := make(map[int64]string)
 	ambiguousModels := make(map[int64]bool)
+	if opts.Dedupe != nil && verVerified {
+		for id, name := range opts.Dedupe.LearnedModels {
+			learnedModels[id] = name
+		}
+		for id, amb := range opts.Dedupe.AmbiguousModels {
+			if amb {
+				ambiguousModels[id] = true
+			}
+		}
+	}
 	recordLearned := func(id int64, model string) {
 		if id <= 0 || !IsConcreteModel(model) || ambiguousModels[id] {
 			return
@@ -184,6 +201,18 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 	}
 	for _, r := range stepRows {
 		recordLearned(r.meta.modelID, r.meta.model)
+	}
+	if opts.Dedupe != nil && verVerified && (len(learnedModels) > 0 || len(ambiguousModels) > 0) {
+		opts.Dedupe.ensureInit()
+		for id, name := range learnedModels {
+			opts.Dedupe.LearnedModels[id] = name
+		}
+		for id, amb := range ambiguousModels {
+			if amb {
+				delete(opts.Dedupe.LearnedModels, id)
+				opts.Dedupe.AmbiguousModels[id] = true
+			}
+		}
 	}
 
 	// Build raw usage candidates.
@@ -206,12 +235,12 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 			sourceIdentity = telemetrycontract.SourceIdentityComposite
 		}
 
-		var canonicalID string
+		var canonicalID, emissionKey string
 		tok := c.tokens
 		var isDelta bool
 		if opts.Dedupe != nil && verVerified {
 			var emit bool
-			canonicalID, tok, isDelta, emit = opts.Dedupe.RecordDelta(c.tokens, allKeys...)
+			canonicalID, emissionKey, tok, isDelta, emit = opts.Dedupe.RecordDelta(c.tokens, allKeys...)
 			if !emit {
 				// Already emitted at or above these per-channel counts in an earlier poll.
 				continue
@@ -219,6 +248,7 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 		} else {
 			// Deterministic canonical key from sorted keys (unverified decodes never mutate Dedupe).
 			canonicalID = allKeys[0]
+			emissionKey = computeEmissionKey(canonicalID, c.tokens)
 		}
 
 		model := c.model
@@ -243,6 +273,7 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 			IsRetry:        c.isRetry,
 			IsDelta:        isDelta,
 			Identity:       canonicalID,
+			EmissionKey:    emissionKey,
 			SourceIdentity: sourceIdentity,
 			IdentityKeys:   c.keys,
 			Timestamp:      c.timestamp,
@@ -328,16 +359,92 @@ func readMetadataTable(
 	ctx context.Context,
 	q sqlQuerier,
 	source SourceTable,
-	query string,
+	byRowIDQuery string,
+	pageQuery string,
 	pageRows int,
 	afterRowID *int64,
+	pendingRowIDs []int64,
 	step bool,
-) ([]scannedRow, *int64, []DecodeError, error) {
+) ([]scannedRow, *int64, []int64, []DecodeError, error) {
 	var results []scannedRow
 	var decodeErrs []DecodeError
-	var persistMaxRowID *int64
-	sawEmptyGap := false
+	var nextPending []int64
+	var maxRowID *int64
+	if afterRowID != nil {
+		v := *afterRowID
+		maxRowID = &v
+	}
 
+	processRow := func(rowID int64, idx sql.NullInt64, blob []byte) {
+		// Track NULL/empty-blob rows in the bounded pending set rather than
+		// freezing maxRowID: permanently-NULL rows (e.g. non-LLM user steps)
+		// must not pin the cursor, while in-place NULL -> populated UPDATEs
+		// are picked up on the next poll.
+		if (step && len(blob) == 0) || (!step && blob == nil) {
+			nextPending = append(nextPending, rowID)
+			return
+		}
+		if !idx.Valid {
+			decodeErrs = append(decodeErrs, DecodeError{
+				Source: source,
+				RowID:  rowID,
+				Error:  "null idx column",
+			})
+			return
+		}
+		meta, err := decodeRowMetadata(blob, step)
+		if err != nil {
+			decodeErrs = append(decodeErrs, DecodeError{
+				Source: source,
+				RowID:  rowID,
+				Idx:    idx.Int64,
+				Error:  err.Error(),
+			})
+			return
+		}
+		results = append(results, scannedRow{
+			rowID: rowID,
+			idx:   idx.Int64,
+			meta:  meta,
+		})
+	}
+
+	// 1. Re-check explicitly tracked pending rowids (one row per query to keep memory bounded).
+	seenPending := make(map[int64]bool, len(pendingRowIDs))
+	for _, pid := range pendingRowIDs {
+		if afterRowID != nil && pid > *afterRowID {
+			// Will be covered by the range scan below.
+			continue
+		}
+		if seenPending[pid] {
+			continue
+		}
+		seenPending[pid] = true
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, nil, err
+		}
+		rows, err := q.QueryContext(ctx, byRowIDQuery, pid)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		for rows.Next() {
+			var rowID int64
+			var idx sql.NullInt64
+			var blob []byte
+			if err := rows.Scan(&rowID, &idx, &blob); err != nil {
+				_ = rows.Close()
+				return nil, nil, nil, nil, err
+			}
+			processRow(rowID, idx, blob)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, nil, nil, nil, err
+		}
+		_ = rows.Close()
+	}
+
+	// 2. Paginate newly appended rows strictly after afterRowID.
 	// When afterRowID is nil, start from math.MinInt64 so rowid=0 is included.
 	var scanCursor int64 = math.MinInt64
 	if afterRowID != nil {
@@ -346,11 +453,11 @@ func readMetadataTable(
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		rows, err := q.QueryContext(ctx, query, scanCursor, pageRows)
+		rows, err := q.QueryContext(ctx, pageQuery, scanCursor, pageRows)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 
 		count := 0
@@ -362,50 +469,16 @@ func readMetadataTable(
 			var blob []byte
 			if err := rows.Scan(&rowID, &idx, &blob); err != nil {
 				_ = rows.Close()
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			lastRowID = rowID
-
-			// Do not advance the persisted cursor past a row whose metadata/data
-			// is still NULL (or empty for steps): agy can UPDATE that row in place
-			// later without changing rowid, so holding the cursor before the first
-			// gap ensures later polls see the populated row while Dedupe absorbs
-			// any re-read rows.
-			if (step && len(blob) == 0) || (!step && blob == nil) {
-				sawEmptyGap = true
-				continue
-			}
-			if !sawEmptyGap {
-				v := rowID
-				persistMaxRowID = &v
-			}
-			if !idx.Valid {
-				decodeErrs = append(decodeErrs, DecodeError{
-					Source: source,
-					RowID:  rowID,
-					Error:  "null idx column",
-				})
-				continue
-			}
-			meta, err := decodeRowMetadata(blob, step)
-			if err != nil {
-				decodeErrs = append(decodeErrs, DecodeError{
-					Source: source,
-					RowID:  rowID,
-					Idx:    idx.Int64,
-					Error:  err.Error(),
-				})
-				continue
-			}
-			results = append(results, scannedRow{
-				rowID: rowID,
-				idx:   idx.Int64,
-				meta:  meta,
-			})
+			v := rowID
+			maxRowID = &v
+			processRow(rowID, idx, blob)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		_ = rows.Close()
 
@@ -415,7 +488,27 @@ func readMetadataTable(
 		scanCursor = lastRowID
 	}
 
-	return results, persistMaxRowID, decodeErrs, nil
+	nextPending = boundPendingRowIDs(nextPending, MaxPendingRowIDs)
+	return results, maxRowID, nextPending, decodeErrs, nil
+}
+
+// boundPendingRowIDs deduplicates, sorts ascending, and trims rowids to at most
+// limit entries, keeping the most recent (highest) rowids.
+func boundPendingRowIDs(ids []int64, limit int) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := ids[:0]
+	for _, id := range ids {
+		if len(out) == 0 || out[len(out)-1] != id {
+			out = append(out, id)
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = append([]int64(nil), out[len(out)-limit:]...)
+	}
+	return out
 }
 
 func readTrajectoryTimestamp(ctx context.Context, q sqlQuerier) (*time.Time, []string, error) {
@@ -642,12 +735,19 @@ func mergeCandidates(candidates []usageCandidate) []usageCandidate {
 		}
 	}
 
-	// Collect roots in stable owner order.
-	out := make([]usageCandidate, 0, len(candidates))
+	// Collect roots sorted by lowest owner index for deterministic output order.
+	var rootIndices []int
 	for i := range groups {
 		if groups[i].parent == i {
-			out = append(out, groups[i].cand)
+			rootIndices = append(rootIndices, i)
 		}
+	}
+	sort.Slice(rootIndices, func(i, j int) bool {
+		return groups[rootIndices[i]].owner < groups[rootIndices[j]].owner
+	})
+	out := make([]usageCandidate, 0, len(rootIndices))
+	for _, i := range rootIndices {
+		out = append(out, groups[i].cand)
 	}
 	return out
 }

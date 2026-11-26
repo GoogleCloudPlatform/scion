@@ -15,6 +15,7 @@
       "idx": 0,
       "usage_index": 0,
       "identity": "antigravity:11:req-valid-1",
+      "emission_key": "antigravity:11:req-valid-1#4f51fe0c9857ef6771da64a378816490",
       "source_identity": "request_id",
       "identity_keys": [
         "antigravity:11:req-valid-1"

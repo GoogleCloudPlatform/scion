@@ -479,8 +479,11 @@ func TestDecodeFile_R1_NullMetadataUpdateNotSkipped(t *testing.T) {
 		if len(res1.Records) != 0 {
 			t.Fatalf("poll 1 records = %d, want 0", len(res1.Records))
 		}
-		if res1.Cursor.StepsRowID != nil {
-			t.Fatalf("poll 1 Cursor.StepsRowID = %v, want nil (must not advance past NULL metadata)", *res1.Cursor.StepsRowID)
+		if res1.Cursor.StepsRowID == nil || *res1.Cursor.StepsRowID != 0 {
+			t.Fatalf("poll 1 Cursor.StepsRowID = %v, want 0", res1.Cursor.StepsRowID)
+		}
+		if len(res1.Cursor.PendingStepsRowIDs) != 1 || res1.Cursor.PendingStepsRowIDs[0] != 0 {
+			t.Fatalf("poll 1 PendingStepsRowIDs = %v, want [0]", res1.Cursor.PendingStepsRowIDs)
 		}
 
 		// Simulate agy updating the step row in place with usage metadata.
@@ -518,6 +521,9 @@ func TestDecodeFile_R1_NullMetadataUpdateNotSkipped(t *testing.T) {
 		if res2.Cursor.StepsRowID == nil || *res2.Cursor.StepsRowID != 0 {
 			t.Fatalf("poll 2 Cursor.StepsRowID = %v, want 0", res2.Cursor.StepsRowID)
 		}
+		if len(res2.Cursor.PendingStepsRowIDs) != 0 {
+			t.Fatalf("poll 2 PendingStepsRowIDs = %v, want empty once populated", res2.Cursor.PendingStepsRowIDs)
+		}
 	})
 
 	t.Run("gen_metadata_null_then_update", func(t *testing.T) {
@@ -540,8 +546,11 @@ func TestDecodeFile_R1_NullMetadataUpdateNotSkipped(t *testing.T) {
 		if len(res1.Records) != 0 || res1.Status != StatusVerified {
 			t.Fatalf("poll 1 got status=%q records=%d, want verified and 0 records", res1.Status, len(res1.Records))
 		}
-		if res1.Cursor.GenMetadataRowID != nil {
-			t.Fatalf("poll 1 Cursor.GenMetadataRowID = %v, want nil", *res1.Cursor.GenMetadataRowID)
+		if res1.Cursor.GenMetadataRowID == nil || *res1.Cursor.GenMetadataRowID != 0 {
+			t.Fatalf("poll 1 Cursor.GenMetadataRowID = %v, want 0", res1.Cursor.GenMetadataRowID)
+		}
+		if len(res1.Cursor.PendingGenMetadataRowIDs) != 1 || res1.Cursor.PendingGenMetadataRowIDs[0] != 0 {
+			t.Fatalf("poll 1 PendingGenMetadataRowIDs = %v, want [0]", res1.Cursor.PendingGenMetadataRowIDs)
 		}
 
 		gen0 := encodeGenMetadataPB(pbGenMetaSpec{
@@ -571,6 +580,9 @@ func TestDecodeFile_R1_NullMetadataUpdateNotSkipped(t *testing.T) {
 		}
 		if len(res2.Records) != 1 || res2.Records[0].Identity != "antigravity:11:r1-gen-call" {
 			t.Fatalf("poll 2 got %+v, want 1 record for r1-gen-call", res2.Records)
+		}
+		if len(res2.Cursor.PendingGenMetadataRowIDs) != 0 {
+			t.Fatalf("poll 2 PendingGenMetadataRowIDs = %v, want empty", res2.Cursor.PendingGenMetadataRowIDs)
 		}
 	})
 }
@@ -858,6 +870,12 @@ func TestDecodeFile_R2_CrossPollDeltaParity(t *testing.T) {
 		copyRows("trajectory_metadata_blob", "")
 		copyRows("steps", "")
 		poll("poll 1 (steps)")
+		if cur.StepsRowID == nil || *cur.StepsRowID != 7 {
+			t.Fatalf("poll 1 Cursor.StepsRowID = %v, want 7 (cursor must advance past permanent NULL step 0)", cur.StepsRowID)
+		}
+		if len(cur.PendingStepsRowIDs) != 1 || cur.PendingStepsRowIDs[0] != 0 {
+			t.Fatalf("poll 1 PendingStepsRowIDs = %v, want [0]", cur.PendingStepsRowIDs)
+		}
 
 		copyRows("gen_metadata", "WHERE idx IN (0, 1)")
 		poll("poll 2 (gen 0,1)")
@@ -989,5 +1007,268 @@ func TestDecodeError_ZeroRowIDAndIdxPreservedInJSON(t *testing.T) {
 	}
 	if _, ok := m["idx"]; !ok {
 		t.Fatalf("expected idx=0 in JSON, got %s", b)
+	}
+}
+
+func TestDecodeFile_R1_PermanentNullAdvancesCursorAndBoundsPending(t *testing.T) {
+	t.Run("permanent_null_step0_advances_cursor_even_without_dedupe", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "r1-advance.db")
+		db := createAgySchemaDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		// Permanent NULL step at idx=0 followed by 10 populated steps idx=1..10.
+		if _, err := db.Exec(`INSERT INTO steps(idx, step_type, metadata) VALUES (0, 1, NULL)`); err != nil {
+			t.Fatalf("insert null step 0: %v", err)
+		}
+		for i := int64(1); i <= 10; i++ {
+			blob := encodeStepMetadataPB(pbStepMetaSpec{
+				modelID:   1466,
+				modelName: "gemini-4-neon",
+				endSecs:   uint64(1795706000 + i),
+				primary: &pbUsageSpec{
+					modelID:   1466,
+					hasInput:  true,
+					input:     uint64(100 + i),
+					hasOutput: true,
+					output:    20,
+					id11:      "perm-step-" + string(rune('a'+i)),
+				},
+			})
+			if _, err := db.Exec(`INSERT INTO steps(idx, step_type, metadata) VALUES (?, 15, ?)`, i, blob); err != nil {
+				t.Fatalf("insert step %d: %v", i, err)
+			}
+		}
+
+		res1, err := DecodeFile(context.Background(), dbPath, Options{AgyVersion: "1.5.18"})
+		if err != nil {
+			t.Fatalf("poll 1: %v", err)
+		}
+		if len(res1.Records) != 10 {
+			t.Fatalf("poll 1 records = %d, want 10", len(res1.Records))
+		}
+		if res1.Cursor.StepsRowID == nil || *res1.Cursor.StepsRowID != 10 {
+			t.Fatalf("poll 1 Cursor.StepsRowID = %v, want 10", res1.Cursor.StepsRowID)
+		}
+		if len(res1.Cursor.PendingStepsRowIDs) != 1 || res1.Cursor.PendingStepsRowIDs[0] != 0 {
+			t.Fatalf("poll 1 PendingStepsRowIDs = %v, want [0]", res1.Cursor.PendingStepsRowIDs)
+		}
+
+		// Insert one new step at idx=20 and poll with cursor ONLY (no Dedupe):
+		// only the new step must be returned (previous steps 1..10 are not rescanned).
+		step20 := encodeStepMetadataPB(pbStepMetaSpec{
+			modelID:   1466,
+			modelName: "gemini-4-neon",
+			endSecs:   1795706020,
+			primary: &pbUsageSpec{
+				modelID:   1466,
+				hasInput:  true,
+				input:     999,
+				hasOutput: true,
+				output:    88,
+				id11:      "perm-step-new-20",
+			},
+		})
+		if _, err := db.Exec(`INSERT INTO steps(idx, step_type, metadata) VALUES (20, 15, ?)`, step20); err != nil {
+			t.Fatalf("insert step 20: %v", err)
+		}
+
+		res2, err := DecodeFile(context.Background(), dbPath, Options{
+			AgyVersion: "1.5.18",
+			Cursor:     res1.Cursor,
+		})
+		if err != nil {
+			t.Fatalf("poll 2: %v", err)
+		}
+		if len(res2.Records) != 1 || res2.Records[0].Identity != "antigravity:11:perm-step-new-20" {
+			t.Fatalf("poll 2 records = %+v, want exactly 1 new record (idx=20)", res2.Records)
+		}
+		if res2.Cursor.StepsRowID == nil || *res2.Cursor.StepsRowID != 20 {
+			t.Fatalf("poll 2 Cursor.StepsRowID = %v, want 20", res2.Cursor.StepsRowID)
+		}
+		if len(res2.Cursor.PendingStepsRowIDs) != 1 || res2.Cursor.PendingStepsRowIDs[0] != 0 {
+			t.Fatalf("poll 2 PendingStepsRowIDs = %v, want [0]", res2.Cursor.PendingStepsRowIDs)
+		}
+	})
+
+	t.Run("pending_set_bounded_to_max_newest", func(t *testing.T) {
+		var ids []int64
+		for i := int64(0); i < MaxPendingRowIDs+50; i++ {
+			ids = append(ids, i)
+		}
+		bounded := boundPendingRowIDs(ids, MaxPendingRowIDs)
+		if len(bounded) != MaxPendingRowIDs {
+			t.Fatalf("len(bounded) = %d, want %d", len(bounded), MaxPendingRowIDs)
+		}
+		if bounded[0] != 50 || bounded[len(bounded)-1] != MaxPendingRowIDs+49 {
+			t.Fatalf("bounded range = [%d..%d], want [50..%d]", bounded[0], bounded[len(bounded)-1], MaxPendingRowIDs+49)
+		}
+	})
+}
+
+func TestDecodeFile_O1_ReplaySafeEmissionKey(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "o1-emission-key.db")
+	db := createAgySchemaDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+
+	// Poll 1: initial partial emission.
+	step0 := encodeStepMetadataPB(pbStepMetaSpec{
+		modelID:   1466,
+		modelName: "gemini-4-neon",
+		endSecs:   1795707000,
+		primary: &pbUsageSpec{
+			modelID:   1466,
+			hasInput:  true,
+			input:     100,
+			hasOutput: true,
+			output:    20,
+			id11:      "o1-call-1",
+		},
+	})
+	if _, err := db.Exec(`INSERT INTO steps(idx, step_type, metadata) VALUES (0, 15, ?)`, step0); err != nil {
+		t.Fatalf("insert step0: %v", err)
+	}
+
+	dedupe1 := NewDedupeState()
+	res1, err := DecodeFile(context.Background(), dbPath, Options{
+		AgyVersion: "1.5.18",
+		Dedupe:     dedupe1,
+	})
+	if err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if len(res1.Records) != 1 || res1.Records[0].EmissionKey == "" {
+		t.Fatalf("poll 1 got %+v, want 1 record with non-empty EmissionKey", res1.Records)
+	}
+	fullKey := res1.Records[0].EmissionKey
+
+	// Snapshot pre-delta DedupeState to simulate a crash before persisting state after poll 2.
+	preDeltaBytes, err := json.Marshal(dedupe1)
+	if err != nil {
+		t.Fatalf("marshal pre-delta dedupe: %v", err)
+	}
+
+	// Poll 2: fuller gen_metadata row arrives -> emits delta.
+	gen0 := encodeGenMetadataPB(pbGenMetaSpec{
+		modelID:   1466,
+		modelName: "gemini-4-neon",
+		tsSecs:    1795707005,
+		primary: &pbUsageSpec{
+			modelID:   1466,
+			hasInput:  true,
+			input:     1000,
+			hasOutput: true,
+			output:    250,
+			id11:      "o1-call-1",
+		},
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+		t.Fatalf("insert gen0: %v", err)
+	}
+
+	res2, err := DecodeFile(context.Background(), dbPath, Options{
+		AgyVersion: "1.5.18",
+		Cursor:     res1.Cursor,
+		Dedupe:     dedupe1,
+	})
+	if err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if len(res2.Records) != 1 || !res2.Records[0].IsDelta {
+		t.Fatalf("poll 2 got %+v, want 1 delta record", res2.Records)
+	}
+	deltaKey := res2.Records[0].EmissionKey
+	if deltaKey == "" || deltaKey == fullKey {
+		t.Fatalf("delta EmissionKey %q must be non-empty and distinct from full EmissionKey %q", deltaKey, fullKey)
+	}
+
+	// Replay poll 2 after simulated crash (using pre-delta persisted DedupeState & Cursor).
+	var replayedDedupe DedupeState
+	if err := json.Unmarshal(preDeltaBytes, &replayedDedupe); err != nil {
+		t.Fatalf("unmarshal pre-delta dedupe: %v", err)
+	}
+	resReplay, err := DecodeFile(context.Background(), dbPath, Options{
+		AgyVersion: "1.5.18",
+		Cursor:     res1.Cursor,
+		Dedupe:     &replayedDedupe,
+	})
+	if err != nil {
+		t.Fatalf("replay poll 2: %v", err)
+	}
+	if len(resReplay.Records) != 1 || resReplay.Records[0].EmissionKey != deltaKey {
+		t.Fatalf("replayed delta EmissionKey = %q, want %q", resReplay.Records[0].EmissionKey, deltaKey)
+	}
+}
+
+func TestDecodeFile_O2_PersistedLearnedModelsAcrossPolls(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "o2-learned-models.db")
+	db := createAgySchemaDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+
+	// Poll 1: gen_metadata teaches a custom model_id 9999 -> "gemini-9-custom".
+	gen0 := encodeGenMetadataPB(pbGenMetaSpec{
+		modelID:   9999,
+		modelName: "gemini-9-custom",
+		tsSecs:    1795708000,
+		primary: &pbUsageSpec{
+			modelID:   9999,
+			hasInput:  true,
+			input:     100,
+			hasOutput: true,
+			output:    20,
+			id11:      "o2-learn-1",
+		},
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+		t.Fatalf("insert gen0: %v", err)
+	}
+
+	dedupe := NewDedupeState()
+	res1, err := DecodeFile(context.Background(), dbPath, Options{
+		AgyVersion: "1.5.18",
+		Dedupe:     dedupe,
+	})
+	if err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if len(res1.Records) != 1 || res1.Records[0].Model != "gemini-9-custom" {
+		t.Fatalf("poll 1 got %+v, want model gemini-9-custom", res1.Records)
+	}
+
+	// Persist DedupeState across JSON round-trip.
+	dBytes, err := json.Marshal(dedupe)
+	if err != nil {
+		t.Fatalf("marshal dedupe: %v", err)
+	}
+	var restored DedupeState
+	if err := json.Unmarshal(dBytes, &restored); err != nil {
+		t.Fatalf("unmarshal dedupe: %v", err)
+	}
+
+	// Poll 2: a steps-only row arrives with model_id 9999 and NO inline model name.
+	step0 := encodeStepMetadataPB(pbStepMetaSpec{
+		endSecs: 1795708010,
+		primary: &pbUsageSpec{
+			modelID:   9999,
+			hasInput:  true,
+			input:     300,
+			hasOutput: true,
+			output:    40,
+			id11:      "o2-learn-2",
+		},
+	})
+	if _, err := db.Exec(`INSERT INTO steps(idx, step_type, metadata) VALUES (0, 15, ?)`, step0); err != nil {
+		t.Fatalf("insert step0: %v", err)
+	}
+
+	res2, err := DecodeFile(context.Background(), dbPath, Options{
+		AgyVersion: "1.5.18",
+		Cursor:     res1.Cursor,
+		Dedupe:     &restored,
+	})
+	if err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if len(res2.Records) != 1 || res2.Records[0].Model != "gemini-9-custom" {
+		t.Fatalf("poll 2 got %+v, want model gemini-9-custom resolved from persisted LearnedModels", res2.Records)
 	}
 }
