@@ -18,6 +18,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -494,4 +495,156 @@ func TestProvision_CloudRunNFSMoveBundle_UnmarkedPreExistingLeafSurvivesRollback
 	require.NoError(t, readErr, "unmarked pre-existing Cloud Run home leaf must survive rollback")
 	assert.Equal(t, "keep-me", string(got))
 	assert.DirExists(t, stagingSibling, "staging sibling in unmarked dir must survive rollback")
+}
+
+// TestCheckMoveMarkers_CloudRunUnmarkedWorkspaceRefused pins both the Cloud Run
+// export-dir branch in CheckMoveMarkers (R1) and the pre-removal marker check
+// in removeNFSAgentWorkspace (S1). The fixture intentionally has NO home-<agentID>
+// leaf so the home-leaf check cannot mask the workspace export-dir guard.
+func TestCheckMoveMarkers_CloudRunUnmarkedWorkspaceRefused(t *testing.T) {
+	_, hostBase, projectPath := setupCloudRunNFSFixture(t, 2000, 3000)
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
+	mgr := NewManager(rt).(*AgentManager)
+
+	slug := "cr-unmarked-ws"
+	rid := "rid-cr-ws-guard-1"
+	resolvedBase, err := filepath.EvalSymlinks(hostBase)
+	require.NoError(t, err)
+
+	exportAgentDir := filepath.Join(resolvedBase, "projects", crTestProjectUUID, "agents", slug)
+	wsDir := filepath.Join(exportAgentDir, "workspace")
+	require.NoError(t, os.MkdirAll(wsDir, 0o755))
+	precious := filepath.Join(wsDir, "precious.txt")
+	require.NoError(t, os.WriteFile(precious, []byte("do-not-delete"), 0o644))
+
+	ctx := WithDeleteMoveReincarnationID(WithDeleteHubAgentID(context.Background(), crTestAgentUUID), rid)
+
+	// 1. CheckMoveMarkers must fail closed with ErrMoveMarkerMismatch on the
+	//    unmarked Cloud Run export agent dir (even with no home leaf present).
+	_, err = mgr.CheckMoveMarkers(ctx, projectPath, crTestProjectUUID, crTestProjectUUID, slug, "", rid)
+	require.ErrorIs(t, err, ErrMoveMarkerMismatch)
+
+	// 2. S1 defense-in-depth: RemoveNFSAgentFiles invoked directly for rollback
+	//    must refuse BEFORE moving workspace aside (ErrMoveMarkerMismatch),
+	//    leaving precious.txt intact at its original path.
+	ds, err := mgr.RemoveNFSAgentFiles(ctx, projectPath, crTestProjectUUID, slug)
+	require.ErrorIs(t, err, ErrMoveMarkerMismatch)
+	var wsDel *projectfs.Deletion
+	for i := range ds {
+		if ds[i].Tree == projectfs.TreeAgentWorkspace {
+			wsDel = &ds[i]
+			break
+		}
+	}
+	require.NotNil(t, wsDel, "expected TreeAgentWorkspace deletion audit entry")
+	assert.Equal(t, projectfs.OutcomeFailed, wsDel.Outcome)
+	require.ErrorIs(t, wsDel.Err, ErrMoveMarkerMismatch)
+
+	got, readErr := os.ReadFile(precious)
+	require.NoError(t, readErr, "unmarked workspace file must survive rollback untouched")
+	assert.Equal(t, "do-not-delete", string(got))
+}
+
+// TestCloudRunRecreateMove_StartFailureRollsBackAndAllowsRetry verifies R2:
+// on a Cloud Run recreate move (no WorkspaceSource=move-bundle), Start claims
+// and marks agents/<slug> before Runtime.Run creates workspace/ and
+// home-<agentID>. If Start then fails definitively, CheckMoveMarkers passes,
+// rollback removes both the NFS dirs and broker-local agentDir, and a retry
+// to the same broker succeeds.
+func TestCloudRunRecreateMove_StartFailureRollsBackAndAllowsRetry(t *testing.T) {
+	_, hostBase, projectPath := setupCloudRunNFSFixture(t, 2000, 3000)
+
+	resolvedBase, err := filepath.EvalSymlinks(hostBase)
+	require.NoError(t, err)
+
+	slug := "cr-recreate"
+	rid := "rid-cr-recreate-1"
+	exportAgentDir := filepath.Join(resolvedBase, "projects", crTestProjectUUID, "agents", slug)
+	wsDir := filepath.Join(exportAgentDir, "workspace")
+	homeDir := filepath.Join(exportAgentDir, "home-"+crTestAgentUUID)
+
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "cloudrun" },
+		RunFunc: func(_ context.Context, _ runtime.RunConfig) (string, error) {
+			// Simulate CloudRunRuntime.Run creating workspace/ and home-<agentID>
+			// before failing definitively (e.g. errCloudRunHomeTooLarge or
+			// instance-create failure).
+			if err := os.MkdirAll(wsDir, 0o770); err != nil {
+				return "", err
+			}
+			if err := os.MkdirAll(homeDir, 0o770); err != nil {
+				return "", err
+			}
+			return "", errors.New("cloudrun: simulated definitive start failure")
+		},
+	}
+	mgr := NewManager(rt).(*AgentManager)
+
+	provOpts := api.StartOptions{
+		Name:                slug,
+		ProjectPath:         projectPath,
+		HubProjectID:        crTestProjectUUID,
+		Profile:             "cr",
+		BrokerMode:          true,
+		NoAuth:              true,
+		FreshProvision:      true,
+		MoveReincarnationID: rid,
+		GitClone:            &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+		Env: map[string]string{
+			"SCION_PROJECT_ID":     crTestProjectUUID,
+			"SCION_AGENT_ID":       crTestAgentUUID,
+			"SCION_WORKSPACE_MODE": "clone-per-agent",
+		},
+	}
+
+	// 1. Pre-provision absence check passes and Provision writes the broker-local move marker.
+	_, err = mgr.CheckMoveWorkspaceAbsent(context.Background(), provOpts)
+	require.NoError(t, err)
+	_, err = mgr.Provision(context.Background(), provOpts)
+	require.NoError(t, err)
+
+	agentDir, err := provisionAgentStateDir(contextWithAgentRuntime(context.Background(), "cloudrun"), provOpts)
+	require.NoError(t, err)
+	gotLocalMarker, err := ReadMoveMarker(agentDir)
+	require.NoError(t, err)
+	assert.Equal(t, rid, gotLocalMarker)
+
+	// 2. Start claims & marks agents/<slug>, then Runtime.Run creates workspace/
+	//    and home-<agentID> and fails definitively.
+	startOpts := provOpts
+	startOpts.FreshProvision = false
+	startOpts.MoveReincarnationID = ""
+	_, err = mgr.Start(context.Background(), startOpts)
+	require.Error(t, err)
+	assert.DirExists(t, wsDir)
+	assert.DirExists(t, homeDir)
+	gotExportMarker, err := ReadMoveMarker(exportAgentDir)
+	require.NoError(t, err, "Start must mark agents/<slug> before Runtime.Run")
+	assert.Equal(t, rid, gotExportMarker)
+
+	// 3. Rollback: CheckMoveMarkers succeeds, RemoveNFSAgentFiles removes
+	//    workspace/, home-<agentID>, and empty agents/<slug>, and
+	//    DeleteAgentFiles removes broker-local agentDir.
+	rbCtx := WithDeleteMoveReincarnationID(WithDeleteHubAgentID(context.Background(), crTestAgentUUID), rid)
+	_, err = mgr.CheckMoveMarkers(rbCtx, projectPath, crTestProjectUUID, crTestProjectUUID, slug, "", rid)
+	require.NoError(t, err, "recreate rollback CheckMoveMarkers must succeed")
+
+	_, err = mgr.RemoveNFSAgentFiles(rbCtx, projectPath, crTestProjectUUID, slug)
+	require.NoError(t, err)
+	assert.NoDirExists(t, wsDir)
+	assert.NoDirExists(t, homeDir)
+	assert.NoDirExists(t, exportAgentDir)
+
+	_, err = DeleteHubAgentFiles(slug, "", projectPath, crTestProjectUUID, false)
+	require.NoError(t, err)
+	assert.NoDirExists(t, agentDir)
+
+	// 4. Retry with a new move ID succeeds cleanly.
+	retryOpts := provOpts
+	retryOpts.MoveReincarnationID = "rid-cr-recreate-2"
+	_, err = mgr.CheckMoveWorkspaceAbsent(context.Background(), retryOpts)
+	require.NoError(t, err, "retry CheckMoveWorkspaceAbsent must succeed after rollback")
+	_, err = mgr.Provision(context.Background(), retryOpts)
+	require.NoError(t, err, "retry Provision must succeed after rollback")
 }

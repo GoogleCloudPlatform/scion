@@ -231,19 +231,26 @@ func lookupMoveBundleRuntime(runtimeName string) (MoveBundleRuntime, bool) {
 
 const cloudRunSandboxNonDurableReason = "Cloud Run Sandbox workspace and home are not durable for bundle moves"
 
+// refusedMoveBundleRuntimes maps explicitly refused runtime names to their
+// class-only durability reasons. Consulted only after lookupMoveBundleRuntime
+// returns false so a future registration is never shadowed (N1).
+var refusedMoveBundleRuntimes = map[string]string{
+	"cloudrun-sandbox": cloudRunSandboxNonDurableReason,
+}
+
 // CheckMoveBundleSourceDurability evaluates whether an agent on in.RuntimeName
-// is durable for move-bundle export. Cloud Run Sandbox is refused with a
-// class-only non-durable reason; other unsupported runtimes return
+// is durable for move-bundle export. Explicitly refused runtimes return their
+// class-only reason; other unsupported runtimes return
 // Durable: false, Reason: "not yet supported".
 func CheckMoveBundleSourceDurability(ctx context.Context, in MoveBundleRuntimeInput) (MoveBundleDurability, error) {
-	if in.RuntimeName == "cloudrun-sandbox" {
-		return MoveBundleDurability{
-			Durable: false,
-			Reason:  cloudRunSandboxNonDurableReason,
-		}, nil
-	}
 	rt, ok := lookupMoveBundleRuntime(in.RuntimeName)
 	if !ok {
+		if reason, refused := refusedMoveBundleRuntimes[in.RuntimeName]; refused {
+			return MoveBundleDurability{
+				Durable: false,
+				Reason:  reason,
+			}, nil
+		}
 		return MoveBundleDurability{
 			Durable: false,
 			Reason:  "not yet supported",

@@ -547,56 +547,60 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 }
 
 func TestMoveBundle_DockerDefaultWithUnsupportedAgentFailsClosed(t *testing.T) {
-	projectPath, _, _, _ := newMoveBundleTestAgentDir(t, "sub-agent")
-	srv := newTestServer(t)
-	srv.runtime = scionrt.NewDockerRuntime()
-	// Broker advertises AgentMoveBundle from its Docker default runtime.
-	require.True(t, StaticCapabilities(srv.runtime, "").AgentMoveBundle)
+	for _, rtName := range []string{"substrate", "cloudrun-sandbox"} {
+		t.Run(rtName, func(t *testing.T) {
+			slug := "unsup-agent"
+			projectPath, _, _, _ := newMoveBundleTestAgentDir(t, slug)
+			srv := newTestServer(t)
+			srv.runtime = scionrt.NewDockerRuntime()
+			// Broker advertises AgentMoveBundle from its Docker default runtime.
+			require.True(t, StaticCapabilities(srv.runtime, "").AgentMoveBundle)
 
-	// Register an unsupported runtime (substrate) as an auxiliary runtime.
-	subRT := &scionrt.MockRuntime{NameFunc: func() string { return "substrate" }}
-	subMgr := agent.NewManager(subRT)
+			unsupRT := &scionrt.MockRuntime{NameFunc: func() string { return rtName }}
+			unsupMgr := agent.NewManager(unsupRT)
 
-	// 1. Move-bundle provision for an unsupported runtime agent must fail closed.
-	_, err := subMgr.Provision(context.Background(), api.StartOptions{
-		Name:                "sub-agent",
-		ProjectPath:         projectPath,
-		BrokerMode:          true,
-		NoAuth:              true,
-		FreshProvision:      true,
-		MoveReincarnationID: "rid-sub-fail",
-		WorkspaceSource:     api.WorkspaceSourceMoveBundle,
-	})
-	require.Error(t, err, "move-bundle provision on unsupported runtime must fail closed")
-	assert.Contains(t, err.Error(), "not supported")
+			// 1. Move-bundle provision for an unsupported runtime agent must fail closed.
+			_, err := unsupMgr.Provision(context.Background(), api.StartOptions{
+				Name:                slug,
+				ProjectPath:         projectPath,
+				BrokerMode:          true,
+				NoAuth:              true,
+				FreshProvision:      true,
+				MoveReincarnationID: "rid-unsup-fail",
+				WorkspaceSource:     api.WorkspaceSourceMoveBundle,
+			})
+			require.Error(t, err, "move-bundle provision on %s must fail closed", rtName)
+			assert.Contains(t, err.Error(), "not supported")
 
-	// 2. Move-bundle import resolving to an unsupported runtime must return 400,
-	//    never 202 followed by silently writing broker-local dirs.
-	dummyPart := bundle.Part{
-		Index: 0,
-		Size:  1,
-		Hash:  "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			// 2. Move-bundle import resolving to an unsupported runtime must return 400,
+			//    never 202 followed by silently writing broker-local dirs.
+			dummyPart := bundle.Part{
+				Index: 0,
+				Size:  1,
+				Hash:  "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			}
+			manifest := bundle.Manifest{
+				Version:         bundle.ManifestVersion,
+				ReincarnationID: "rid-unsup-fail",
+				Roots: map[string]bundle.RootManifest{
+					bundle.RootWorkspace: {PartSize: 1, Parts: []bundle.Part{dummyPart}},
+					bundle.RootHome:      {PartSize: 1, Parts: []bundle.Part{dummyPart}},
+				},
+			}
+			_, manifestHash, err := bundle.CanonicalManifest(manifest)
+			require.NoError(t, err)
+
+			impPath := fmt.Sprintf("/api/v1/agents/%s/move-bundle/import?%s=%s", slug, api.RecordedRuntimeQueryParam, rtName)
+			rec := doMoveBundleReq(t, srv, http.MethodPost, impPath, api.MoveBundleImportRequest{
+				ReincarnationID: "rid-unsup-fail",
+				ProjectPath:     projectPath,
+				Manifest:        manifest,
+				ManifestHash:    manifestHash,
+				Limits:          api.DefaultMoveBundleLimits(),
+			})
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "import for %s must return 400, not 202: %s", rtName, rec.Body.String())
+		})
 	}
-	manifest := bundle.Manifest{
-		Version:         bundle.ManifestVersion,
-		ReincarnationID: "rid-sub-fail",
-		Roots: map[string]bundle.RootManifest{
-			bundle.RootWorkspace: {PartSize: 1, Parts: []bundle.Part{dummyPart}},
-			bundle.RootHome:      {PartSize: 1, Parts: []bundle.Part{dummyPart}},
-		},
-	}
-	_, manifestHash, err := bundle.CanonicalManifest(manifest)
-	require.NoError(t, err)
-
-	impPath := fmt.Sprintf("/api/v1/agents/sub-agent/move-bundle/import?%s=substrate", api.RecordedRuntimeQueryParam)
-	rec := doMoveBundleReq(t, srv, http.MethodPost, impPath, api.MoveBundleImportRequest{
-		ReincarnationID: "rid-sub-fail",
-		ProjectPath:     projectPath,
-		Manifest:        manifest,
-		ManifestHash:    manifestHash,
-		Limits:          api.DefaultMoveBundleLimits(),
-	})
-	assert.Equal(t, http.StatusBadRequest, rec.Code, "import for unregistered runtime must return 400, not 202: %s", rec.Body.String())
 }
 
 func TestMoveBundle_K8sNFS_PrecheckReadabilityAndBounds(t *testing.T) {

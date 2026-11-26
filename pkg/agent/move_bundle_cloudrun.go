@@ -254,11 +254,15 @@ func (cloudRunMoveBundleRuntime) ProvisionTarget(ctx context.Context, opts api.S
 			return fmt.Errorf("move-bundle target provision: %w", err)
 		}
 	}
+	_, homeStatErr := os.Lstat(nfsHomeDir)
+	homeExisted := homeStatErr == nil
 	if err := homeLeafOps.EnsureHome(resolvedWSBase, homeAgentDirRel, filepath.Base(homeRel), owner.GID); err != nil {
 		return fmt.Errorf("move-bundle target provision: create NFS home leaf: %w", err)
 	}
 	lchownBestEffort(nfsHomeDir, owner.UID, owner.GID)
-	createdHomeLeaf = nfsHomeDir
+	if !homeExisted {
+		createdHomeLeaf = nfsHomeDir
+	}
 
 	// Always mark the home leaf this call created so rollback delete can verify
 	// leaf ownership independently of the parent directory.

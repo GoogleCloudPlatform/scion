@@ -295,13 +295,18 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 	if err != nil {
 		return fail(fmt.Errorf("workspace_storage nfs: %w", err))
 	}
+	moveID := deleteMoveReincarnationIDFrom(ctx)
+	isRollback := moveID != ""
+	if isRollback {
+		if err := checkMoveMarker(checkedDir, moveID); err != nil {
+			return fail(fmt.Errorf("workspace_storage nfs: %w", err))
+		}
+	}
 	removed, err := provision.RemoveAgentWorkspaceOutcome(ctx, checkedDir, nfsAgentDirLockWait)
 	if err != nil {
 		return fail(err)
 	}
-	moveID := deleteMoveReincarnationIDFrom(ctx)
-	isRollback := moveID != ""
-	if isRollback && checkMoveMarker(checkedDir, moveID) == nil {
+	if isRollback {
 		if stageErr := purgeMoveBundleStagingEntries(checkedDir); stageErr != nil {
 			return fail(fmt.Errorf("purge move-bundle staging in %s: %w", checkedDir, stageErr))
 		}

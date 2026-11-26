@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -2490,13 +2491,44 @@ authDone:
 			// agent that worked in the shared checkout before
 			// (cloudRunKeepSharedCheckout), which keeps that checkout and
 			// mode so its work stays where it is.
-			if isCloudRunRuntime(m.Runtime.Name()) && isClonePerAgentStart(opts) {
-				if keep, reason := cloudRunKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, api.Slugify(opts.Name)); keep {
-					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
-					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
-					agentEnv.Set("SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain), envOriginBrokerSystem)
-				} else {
-					recordCloudRunAgentWorkspace(agentDir, opts.Name)
+			if isCloudRunMoveBundleRuntime(m.Runtime.Name()) {
+				if isClonePerAgentStart(opts) {
+					if keep, reason := cloudRunKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, api.Slugify(opts.Name)); keep {
+						slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
+						opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+						agentEnv.Set("SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain), envOriginBrokerSystem)
+					} else {
+						recordCloudRunAgentWorkspace(agentDir, opts.Name)
+					}
+				}
+				// When this agentDir carries a forced-move marker (recreate
+				// move), atomically claim and mark agents/<slug> on the NFS
+				// export before CloudRunRuntime.Run creates workspace/ and
+				// home-<agentID>, matching K8s's ensureNFSAgentWorkspaceLeafClaim
+				// + markMoveExportAgentDir so a definitive start failure can
+				// roll back and allow a clean retry (R2). If agents/<slug>
+				// already exists (e.g. bundle move target provision, or
+				// pre-existing), created is false and nothing is overwritten.
+				if _, markerErr := readMoveMarker(agentDir); markerErr == nil && resolvedWorkspace.HostBase != "" {
+					slug := api.Slugify(opts.Name)
+					if agentRel, relErr := nfsOwnAgentDirRel(resolvedWorkspace, slug); relErr == nil {
+						var wsUID, wsGID int
+						if nfsCfg := settings.Server.EffectiveWorkspaceStorage().NFS; nfsCfg != nil {
+							wsUID, wsGID = nfsCfg.UID, nfsCfg.GID
+						}
+						owner := shareddirs.Owner{
+							UID: provision.DefaultOwnerID(wsUID),
+							GID: provision.DefaultOwnerID(wsGID),
+						}
+						if _, created, claimErr := ensureNFSLeafClaim(resolvedWorkspace.HostBase, agentRel, owner); claimErr != nil {
+							return nil, fmt.Errorf("cloudrun move target: claim export agent dir: %w", claimErr)
+						} else if created {
+							ownDirPath := filepath.Join(resolvedWorkspace.HostBase, agentRel)
+							if markErr := markMoveExportAgentDir(agentDir, ownDirPath); markErr != nil {
+								return nil, markErr
+							}
+						}
+					}
 				}
 			}
 			// ownDirCreated reports whether this start created the agent's
