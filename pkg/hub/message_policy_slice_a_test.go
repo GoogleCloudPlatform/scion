@@ -382,11 +382,139 @@ func TestL1_PromptTextInBody(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotContains(t, string(decJSON), sentinel, "decision rows must never contain prompt text")
 
+		// O2: pin that the shadow policy saw the composite prompt text and recorded a violation.
+		var sawShadowViolation bool
+		for _, d := range decisions {
+			if d.PolicyName == "a9-nolog-shadow" {
+				assert.Equal(t, store.MessagePolicyClassViolation, d.Class, "shadow policy must see composite prompt text")
+				sawShadowViolation = true
+			}
+		}
+		assert.True(t, sawShadowViolation, "expected shadow decision row for a9-nolog-shadow")
+
 		logMu.Lock()
 		logs := logBuf.String()
 		logMu.Unlock()
 		assert.NotEmpty(t, logs, "expected debug/info logs to be captured")
 		assert.NotContains(t, logs, sentinel, "logs must never contain prompt text or raw script")
+	})
+
+	// R1 regression test: @mentions inside prompt text must NOT leak into
+	// mentioned_agent_ids, mentioned_user_ids, or unmentioned_agent_slugs.
+	t.Run("mentions_in_prompt_text_do_not_leak_into_mention_facts", func(t *testing.T) {
+		ctx := context.Background()
+		f := newMpgFixture(t, true)
+		sliceAEnableAllExperiments(t, f.srv)
+
+		// Mention-only CEL policy: rejects if any agent or user is mentioned.
+		mentionOnlyPol := &store.MessagePolicy{
+			ProjectID:     f.project.ID,
+			Name:          "r1-mention-only",
+			Enabled:       true,
+			Mode:          store.MessagePolicyModeEnforce,
+			Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+			ViolationRule: `size(mentioned_agent_ids) > 0 || size(mentioned_user_ids) > 0`,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+			RejectReason:  "Unexpected mention detected.",
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, mentionOnlyPol))
+
+		// (a) Intro has NO mentions; decision question and choice label contain @<peerAgent> and @<alice email>.
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Please pick an option below.",
+			Decisions: []messages.DecisionInput{
+				{
+					Question: "Should we ask @" + f.peerAgent.Slug + " or @" + f.alice.Email + " to review?",
+					Choices:  []messages.ChoiceInput{{Label: "@" + f.peerAgent.Slug}},
+				},
+			},
+		})
+		require.Equal(t, http.StatusOK, rr.Code, "mention-only CEL policy must admit when mentions appear only in decision prompt text: %s", rr.Body.String())
+
+		// (b) Intro has NO mentions; command-request script contains @<peerAgent> and @<alice email>.
+		rrCmd := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Please approve this script.",
+			CommandRequest: &messages.CommandRequestInput{
+				Key:         "r1-mention-cmd",
+				Description: "Notify @" + f.peerAgent.Slug + " after check",
+				Script:      "echo \"@" + f.peerAgent.Slug + " @" + f.alice.Email + "\"",
+			},
+		})
+		require.Equal(t, http.StatusOK, rrCmd.Code, "mention-only CEL policy must admit when mentions appear only in command-request script: %s", rrCmd.Body.String())
+
+		// (c) Group-conversation case: a decision posted to the group whose choice label is
+		// @<defaultAgent.Slug> must still list defaultAgent.Slug in conversation.unmentioned_agent_slugs.
+		groupSnap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: f.sender,
+			req: &OutboundMessageRequest{
+				Msg:  "Group decision intro without mentions.",
+				Type: messages.TypeDecisionPrompt,
+			},
+			routing: &routingResult{
+				Recipient:      "conv:" + f.groupConv.ID,
+				ConversationID: f.groupConv.ID,
+			},
+			hasChoices: true,
+			promptText: messagepolicy.PolicyPromptText([]messages.Decision{
+				{
+					Question: "Who should take this?",
+					Choices:  []messages.Choice{{Label: "@" + f.defaultAgent.Slug}},
+				},
+			}, nil, nil),
+		})
+		groupFacts, _, _, factsErr, unmentionedErr := f.srv.buildH2MessagePolicyFacts(ctx, groupSnap, nil, false, true)
+		require.NoError(t, factsErr)
+		require.NoError(t, unmentionedErr)
+		assert.Empty(t, groupFacts.MentionedAgentIDs, "prompt-text @default-agent must not enter mentioned_agent_ids")
+		assert.Contains(t, groupFacts.Conversation.UnmentionedAgentSlugs, f.defaultAgent.Slug, "default-agent must remain in conversation.unmentioned_agent_slugs")
+		assert.Contains(t, groupFacts.Message.Body, "@"+f.defaultAgent.Slug, "composite message.body still contains prompt text")
+
+		// Verify directly via buildH2MessagePolicyFacts for direct send that mention facts equal intro-only values.
+		snap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: f.sender,
+			req: &OutboundMessageRequest{
+				Msg:  "No mentions in intro.",
+				Type: messages.TypeDecisionPrompt,
+			},
+			routing: &routingResult{
+				Recipient:    "user:" + f.alice.Email,
+				RecipientID:  f.alice.ID,
+				UserResolved: true,
+			},
+			hasChoices: true,
+			promptText: "Decision question: Ask @" + f.peerAgent.Slug + " and @" + f.alice.Email,
+		})
+		facts, _, _, factsErr, unmentionedErr := f.srv.buildH2MessagePolicyFacts(ctx, snap, nil, false, false)
+		require.NoError(t, factsErr)
+		require.NoError(t, unmentionedErr)
+		assert.Empty(t, facts.MentionedAgentIDs, "prompt-text @agent must not enter mentioned_agent_ids")
+		assert.Empty(t, facts.MentionedUserIDs, "prompt-text @user must not enter mentioned_user_ids")
+		assert.Contains(t, facts.Message.Body, "@"+f.peerAgent.Slug, "composite message.body still contains prompt text")
+	})
+
+	// O3: empty intro plus prompt text produces body equal to prompt text with no leading "\n\n".
+	t.Run("empty_intro_plus_prompt_text_has_no_leading_newlines", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		wantPrompt := messagepolicy.PolicyPromptText(
+			[]messages.Decision{{Question: "Proceed?", Choices: []messages.Choice{{Label: "Yes"}}}},
+			nil,
+			nil,
+		)
+		snap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: f.sender,
+			req:   &OutboundMessageRequest{Msg: "", Type: messages.TypeDecisionPrompt},
+			routing: &routingResult{
+				Recipient:    "user:" + f.alice.Email,
+				RecipientID:  f.alice.ID,
+				UserResolved: true,
+			},
+			hasChoices: true,
+			promptText: wantPrompt,
+		})
+		assert.Equal(t, wantPrompt, snap.msgBody)
+		assert.False(t, strings.HasPrefix(snap.msgBody, "\n\n"))
 	})
 }
 
@@ -516,6 +644,10 @@ func TestOversize_Composite(t *testing.T) {
 	require.Len(t, truncProj.InputFields, 1)
 	assert.Equal(t, messagepolicy.FieldMessageBody, truncProj.InputFields[0].Name)
 	assert.True(t, truncProj.InputFields[0].Truncated)
+	// O1: assert recorded truncation byte count (UTF-8 boundary <= MaxBodyBytes).
+	assert.Greater(t, truncProj.InputFields[0].Bytes, 0)
+	assert.LessOrEqual(t, truncProj.InputFields[0].Bytes, messagepolicy.MaxBodyBytes)
+	assert.GreaterOrEqual(t, truncProj.InputFields[0].Bytes, messagepolicy.MaxBodyBytes-4, "UTF-8 truncation should preserve up to the last valid rune boundary within MaxBodyBytes")
 
 	// 2. System One reject: fails with input_too_large.
 	rejectRow := byName["a10-s1-reject"]

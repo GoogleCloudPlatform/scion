@@ -257,6 +257,7 @@ type h2FactSnapshot struct {
 	recipientID     string
 	recipientSlug   string
 	msgType         string
+	introBody       string
 	msgBody         string
 	hasChoices      bool
 	urgent          bool
@@ -908,6 +909,7 @@ func deriveH2FactSnapshot(in *h2PolicyInput) h2FactSnapshot {
 		senderID:        agent.ID,
 		senderSlug:      agent.Slug,
 		msgType:         req.Type,
+		introBody:       req.Msg,
 		msgBody:         msgBody,
 		hasChoices:      in.hasChoices,
 		urgent:          req.Urgent,
@@ -1004,8 +1006,8 @@ func (s *Server) buildH2MessagePolicyFacts(
 		projectAgents     []store.Agent
 		agentsLoaded      bool
 	)
-	if snap.projectID != "" && strings.Contains(snap.msgBody, "@") {
-		proseAgentMentions := dropSelfMentionName(messages.ExtractProseMentionsWithOptions(snap.msgBody, mentionOpts), snap.senderSlug)
+	if snap.projectID != "" && strings.Contains(snap.introBody, "@") {
+		proseAgentMentions := dropSelfMentionName(messages.ExtractProseMentionsWithOptions(snap.introBody, mentionOpts), snap.senderSlug)
 		if len(proseAgentMentions) > 0 {
 			agents, err := listAllProjectAgents(ctx, s.store, snap.projectID)
 			if err != nil {
@@ -1034,8 +1036,8 @@ func (s *Server) buildH2MessagePolicyFacts(
 
 	var mentionedUserIDs []string
 	humans := preloadedHumans
-	if snap.projectID != "" && strings.Contains(snap.msgBody, "@") {
-		if wrapped := messages.ExtractProseWrappedMentionsWithOptions(snap.msgBody, mentionOpts); len(wrapped) > 0 {
+	if snap.projectID != "" && strings.Contains(snap.introBody, "@") {
+		if wrapped := messages.ExtractProseWrappedMentionsWithOptions(snap.introBody, mentionOpts); len(wrapped) > 0 {
 			if !humansLoaded {
 				loadedHumans, err := s.projectHumanMembersStrict(ctx, snap.projectID)
 				if err != nil {
