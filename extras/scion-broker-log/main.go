@@ -173,9 +173,9 @@ func (b *brokerLog) Configure(config map[string]string) error {
 func (b *brokerLog) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.msgCount.Add(1)
 	if b.jsonOutput {
-		writeJSONLine(topic, msg, b.fullMsg, b.fields)
+		writeJSONLine(os.Stdout, topic, msg, b.fullMsg, b.fields)
 	} else {
-		writeHumanLine(topic, msg, b.fullMsg, b.fields)
+		writeHumanLine(os.Stdout, topic, msg, b.fullMsg, b.fields)
 	}
 	if b.downstream != nil {
 		if err := b.downstream.Publish(ctx, topic, msg); err != nil {
@@ -370,7 +370,7 @@ func (r *noopRunner) HostToPlugin(hostNet, hostAddr string) (string, string, err
 
 // --- Output formatting ---
 
-func writeHumanLine(topic string, msg *messages.StructuredMessage, fullMsg bool, fields map[string]bool) {
+func writeHumanLine(w io.Writer, topic string, msg *messages.StructuredMessage, fullMsg bool, fields map[string]bool) {
 	ts := time.Now().Format("15:04:05.000")
 	var b strings.Builder
 
@@ -420,12 +420,26 @@ func writeHumanLine(topic string, msg *messages.StructuredMessage, fullMsg bool,
 		b.WriteByte('\n')
 	}
 
-	if msg.Channel != "" {
-		fmt.Fprintf(&b, "  channel=%s", msg.Channel)
-		if msg.ThreadID != "" {
-			fmt.Fprintf(&b, "  thread=%s", msg.ThreadID)
+	target := plugin.ResolveConversationTarget(msg)
+	if includeField(fields, "conversation") &&
+		(target.ConversationID != "" || target.Surface != "" || target.ExternalRef != "" || target.ParentRef != "" || target.DisplayName != "") {
+		var parts []string
+		if target.ConversationID != "" {
+			parts = append(parts, "conversation="+target.ConversationID)
 		}
-		b.WriteByte('\n')
+		if target.Surface != "" {
+			parts = append(parts, "surface="+target.Surface)
+		}
+		if target.ExternalRef != "" {
+			parts = append(parts, "external_ref="+target.ExternalRef)
+		}
+		if target.ParentRef != "" {
+			parts = append(parts, "parent_ref="+target.ParentRef)
+		}
+		if target.DisplayName != "" {
+			parts = append(parts, fmt.Sprintf("display_name=%q", target.DisplayName))
+		}
+		fmt.Fprintf(&b, "  %s\n", strings.Join(parts, "  "))
 	}
 
 	if includeField(fields, "msg") && msg.Msg != "" {
@@ -442,29 +456,32 @@ func writeHumanLine(topic string, msg *messages.StructuredMessage, fullMsg bool,
 		fmt.Fprintf(&b, "  attachments=[%s]\n", strings.Join(msg.Attachments, ", "))
 	}
 
-	os.Stdout.WriteString(b.String())
+	_, _ = io.WriteString(w, b.String())
 }
 
 type jsonEntry struct {
-	Timestamp   string   `json:"ts"`
-	Topic       string   `json:"topic,omitempty"`
-	Sender      string   `json:"sender,omitempty"`
-	SenderID    string   `json:"sender_id,omitempty"`
-	Recipient   string   `json:"recipient,omitempty"`
-	RecipientID string   `json:"recipient_id,omitempty"`
-	Type        string   `json:"type,omitempty"`
-	Plain       bool     `json:"plain,omitempty"`
-	Urgent      bool     `json:"urgent,omitempty"`
-	Broadcasted bool     `json:"broadcasted,omitempty"`
-	Status      string   `json:"status,omitempty"`
-	Channel     string   `json:"channel,omitempty"`
-	ThreadID    string   `json:"thread_id,omitempty"`
-	MsgLen      int      `json:"msg_len,omitempty"`
-	Msg         string   `json:"msg,omitempty"`
-	Attachments []string `json:"attachments,omitempty"`
+	Timestamp      string   `json:"ts"`
+	Topic          string   `json:"topic,omitempty"`
+	Sender         string   `json:"sender,omitempty"`
+	SenderID       string   `json:"sender_id,omitempty"`
+	Recipient      string   `json:"recipient,omitempty"`
+	RecipientID    string   `json:"recipient_id,omitempty"`
+	Type           string   `json:"type,omitempty"`
+	Plain          bool     `json:"plain,omitempty"`
+	Urgent         bool     `json:"urgent,omitempty"`
+	Broadcasted    bool     `json:"broadcasted,omitempty"`
+	Status         string   `json:"status,omitempty"`
+	ConversationID string   `json:"conversation_id,omitempty"`
+	Surface        string   `json:"surface,omitempty"`
+	ExternalRef    string   `json:"external_ref,omitempty"`
+	ParentRef      string   `json:"parent_ref,omitempty"`
+	DisplayName    string   `json:"display_name,omitempty"`
+	MsgLen         int      `json:"msg_len,omitempty"`
+	Msg            string   `json:"msg,omitempty"`
+	Attachments    []string `json:"attachments,omitempty"`
 }
 
-func writeJSONLine(topic string, msg *messages.StructuredMessage, fullMsg bool, fields map[string]bool) {
+func writeJSONLine(w io.Writer, topic string, msg *messages.StructuredMessage, fullMsg bool, fields map[string]bool) {
 	e := jsonEntry{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 	}
@@ -489,8 +506,14 @@ func writeJSONLine(topic string, msg *messages.StructuredMessage, fullMsg bool, 
 	if includeField(fields, "status") {
 		e.Status = msg.Status
 	}
-	e.Channel = msg.Channel
-	e.ThreadID = msg.ThreadID
+	if includeField(fields, "conversation") {
+		target := plugin.ResolveConversationTarget(msg)
+		e.ConversationID = target.ConversationID
+		e.Surface = target.Surface
+		e.ExternalRef = target.ExternalRef
+		e.ParentRef = target.ParentRef
+		e.DisplayName = target.DisplayName
+	}
 	if includeField(fields, "msg") {
 		e.MsgLen = len(msg.Msg)
 		if fullMsg {
@@ -506,8 +529,8 @@ func writeJSONLine(topic string, msg *messages.StructuredMessage, fullMsg bool, 
 	}
 
 	data, _ := json.Marshal(e)
-	os.Stdout.Write(data)
-	os.Stdout.WriteString("\n")
+	_, _ = w.Write(data)
+	_, _ = io.WriteString(w, "\n")
 }
 
 // --- Helpers ---
