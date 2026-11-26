@@ -847,15 +847,18 @@ func TestPipeline_HubOnlyRevocation404DetachesNativeProducer(t *testing.T) {
 		t.Error("expected Hub outbox active marker to be removed after 404 revocation")
 	}
 
-	ledgerBefore, _, ok, err := p.HubAnalyticsLedger()
+	ledgerBefore, memBefore, ok, err := p.HubAnalyticsLedger()
 	if !ok || err != nil {
 		t.Fatalf("HubAnalyticsLedger before = ok:%v err:%v", ok, err)
 	}
+	if !p.analytics.native.disabled.Load() {
+		t.Fatal("expected native producer to be detached before HubRevoked() became visible")
+	}
 
-	// Subsequent native records must be no-ops: no new seqs, no overflow, no errors.
+	// Subsequent native records must be no-ops: no new seqs, no appends, no overflow, no errors.
 	for i := 2; i <= 50; i++ {
-		if out, err := p.analytics.native.Record(makeObs(fmt.Sprintf("cmp1:ho-rev-%d", i))); err != nil || out != 0 {
-			t.Fatalf("Record %d after revocation = (%v, %v), want (0, nil)", i, out, err)
+		if _, err := p.analytics.native.Record(makeObs(fmt.Sprintf("cmp1:ho-rev-%d", i))); err != nil {
+			t.Fatalf("Record %d after revocation returned err: %v", i, err)
 		}
 	}
 
@@ -865,6 +868,9 @@ func TestPipeline_HubOnlyRevocation404DetachesNativeProducer(t *testing.T) {
 	}
 	if ledgerAfter.LastSeq != ledgerBefore.LastSeq {
 		t.Errorf("Hub outbox LastSeq advanced after 404 revocation: %d -> %d (native producer was not detached)", ledgerBefore.LastSeq, ledgerAfter.LastSeq)
+	}
+	if memAfter.Appended != memBefore.Appended {
+		t.Errorf("Hub outbox Appended advanced after 404 revocation: %d -> %d", memBefore.Appended, memAfter.Appended)
 	}
 	if memAfter.Overflow != 0 || ledgerAfter.OverflowTotal != 0 {
 		t.Errorf("overflow = %d (persisted %d), want 0 after revocation", memAfter.Overflow, ledgerAfter.OverflowTotal)
@@ -2275,10 +2281,17 @@ func TestDualAnalyticsDrainer_SecondProcessHookAppendsTeeAndRespectCaps(t *testi
 			t.Errorf("Hub outbox received append after 404 revocation: seq %d -> %d", ledgerBefore.LastSeq, ledgerAfter.LastSeq)
 		}
 
-		// Hub-only hook after revocation is a no-op and does not error.
+		// Hub-only hook after revocation is a no-op and does not error or append.
 		hubOnlyHook := NewLazyHookUsageAnalytics(home, false, nil)
-		if out, err := hubOnlyHook.Record(makeObs("hk-rev", 3)); err != nil || out != 0 {
-			t.Errorf("hubOnlyHook.Record after revocation = (%v, %v), want (0, nil)", out, err)
+		if _, err := hubOnlyHook.Record(makeObs("hk-rev", 3)); err != nil {
+			t.Errorf("hubOnlyHook.Record after revocation returned err: %v", err)
+		}
+		ledgerFinal, err := hubOutbox.LedgerSnapshot()
+		if err != nil {
+			t.Fatalf("LedgerSnapshot final: %v", err)
+		}
+		if ledgerFinal.LastSeq != ledgerBefore.LastSeq {
+			t.Errorf("Hub-only hook appended after 404 revocation: seq %d -> %d", ledgerBefore.LastSeq, ledgerFinal.LastSeq)
 		}
 	})
 
@@ -2773,4 +2786,96 @@ func TestDualToHubOnlyRestart_IndependentHubOutboxResumesCleanly(t *testing.T) {
 			t.Errorf("hubIDs[%d] = %q, want %q", i, hubIDs[i], decodeUsage(t, gcp.lines[i]).EventID)
 		}
 	}
+}
+
+// O3: both Drain (legacy/GCP path) and DrainBatch must rename a truncated
+// ready-N file to quarantine-N BEFORE advancing the cursor to (N+1, 0), so a
+// crash between the two steps never leaves ready-N behind an advanced cursor
+// where a later drain would delete it instead of keeping the quarantined bytes.
+func TestDrainQuarantineOrder_RenamesBeforeCursor(t *testing.T) {
+	runCase := func(t *testing.T, drainFn func(o *AnalyticsOutbox) error) {
+		o := testOutbox(t)
+		// Write a truncated ready-1.jsonl (no trailing newline).
+		if err := os.WriteFile(filepath.Join(o.Dir(), "ready-1.jsonl"), []byte(`{"partial":true`), 0o600); err != nil {
+			t.Fatalf("write truncated ready-1: %v", err)
+		}
+		// Seed a valid ready-2.jsonl so we can verify recovery after crash-between-steps.
+		ev2 := draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:q-2", 2)
+		ev2.EventID = "u1-q-2"
+		ev2.HubID = "hub-1"
+		ev2.ProducerEpoch = "ep-1"
+		ev2.ProducerSeq = 2
+		ev2.SourceOccurrence = 1
+		line2, err := telemetrycontract.Marshal(ev2)
+		if err != nil {
+			t.Fatalf("marshal ev2: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(o.Dir(), "ready-2.jsonl"), append(line2, '\n'), 0o600); err != nil {
+			t.Fatalf("write ready-2: %v", err)
+		}
+
+		// Force cursor write to fail by turning "cursor" into a directory
+		// after readCursor (which succeeds when cursor does not exist yet —
+		// wait: readCursor returns an error on a directory! So inject the
+		// failure by making cursor a non-empty directory only inside openFile
+		// right before EOF, so readCursor succeeds on entry and writeCursor
+		// fails when Drain tries to advance the cursor).
+		origOpen := o.openFile
+		o.openFile = func(name string) (readyFile, error) {
+			f, err := origOpen(name)
+			if err == nil && filepath.Base(name) == "ready-1.jsonl" {
+				// Block os.Rename(tmp, "cursor") in writeCursor by creating a directory at "cursor".
+				if mkErr := os.Mkdir(filepath.Join(o.Dir(), "cursor"), 0o700); mkErr != nil {
+					t.Fatalf("mkdir cursor blocker: %v", mkErr)
+				}
+			}
+			return f, err
+		}
+
+		if err := drainFn(o); err == nil {
+			t.Fatal("expected drain to fail when cursor write is blocked")
+		}
+
+		// Because quarantine rename happens BEFORE cursor write, quarantine-1.jsonl
+		// must already exist on disk and ready-1.jsonl must be gone.
+		if _, err := os.Stat(filepath.Join(o.Dir(), "quarantine-1.jsonl")); err != nil {
+			t.Fatalf("expected quarantine-1.jsonl to exist before cursor write failed: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(o.Dir(), "ready-1.jsonl")); !os.IsNotExist(err) {
+			t.Fatalf("expected ready-1.jsonl to be renamed away, stat err = %v", err)
+		}
+
+		// Simulate recovery after the crash between rename and cursor write:
+		// remove the cursor blocker and drain again; quarantine-1.jsonl stays
+		// preserved and ready-2.jsonl delivers cleanly.
+		o.openFile = origOpen
+		if err := os.Remove(filepath.Join(o.Dir(), "cursor")); err != nil {
+			t.Fatalf("remove cursor blocker: %v", err)
+		}
+		if err := drainFn(o); err != nil {
+			t.Fatalf("recovery drain failed: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(o.Dir(), "quarantine-1.jsonl")); err != nil {
+			t.Errorf("quarantine-1.jsonl must be preserved after recovery: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(o.Dir(), "ready-2.jsonl")); !os.IsNotExist(err) {
+			t.Errorf("ready-2.jsonl should be delivered and removed after recovery, stat err = %v", err)
+		}
+	}
+
+	t.Run("legacy Drain", func(t *testing.T) {
+		runCase(t, func(o *AnalyticsOutbox) error {
+			_, err := o.Drain(context.Background(), func(context.Context, []byte) error { return nil })
+			return err
+		})
+	})
+
+	t.Run("DrainBatch", func(t *testing.T) {
+		runCase(t, func(o *AnalyticsOutbox) error {
+			_, err := o.DrainBatch(context.Background(), 10, 64<<10, func(context.Context, [][]byte) (BatchSendOutcome, error) {
+				return BatchSendOutcome{}, nil
+			})
+			return err
+		})
+	})
 }

@@ -586,14 +586,14 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			hubSent := 0
 			revokeHub := func() {
 				log.Warn("Analytics drainer: Hub usage ingest returned 404 (capability revoked); disabling Hub sink")
-				d.mu.Lock()
-				d.hubRevoked = true
-				d.hubBackoff, d.hubRetryAfter = 0, time.Time{}
-				d.mu.Unlock()
 				hubOutbox.clearHubActive()
 				if onRevoked != nil {
 					onRevoked()
 				}
+				d.mu.Lock()
+				d.hubRevoked = true
+				d.hubBackoff, d.hubRetryAfter = 0, time.Time{}
+				d.mu.Unlock()
 			}
 			if !hubWaiting {
 				hubSent, hubDrainErr = hubOutbox.DrainBatch(ctx, d.hubSink.cfg.maxBatchEvents(), d.hubSink.EffectiveMaxBatchBytes(), d.batchSend)

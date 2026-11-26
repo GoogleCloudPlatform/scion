@@ -1883,9 +1883,6 @@ func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes in
 		}
 		_ = f.Close()
 		if truncated {
-			if err := o.advanceCursor(n+1, 0); err != nil {
-				return sent, err
-			}
 			o.quarantined.Add(1)
 			target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
 			if _, err := os.Stat(target); err == nil {
@@ -1895,6 +1892,9 @@ func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes in
 				return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
 			}
 			if err := syncDir(o.dir); err != nil {
+				return sent, err
+			}
+			if err := o.advanceCursor(n+1, 0); err != nil {
 				return sent, err
 			}
 			continue
@@ -1999,9 +1999,6 @@ func (o *AnalyticsOutbox) Drain(ctx context.Context, send AnalyticsSendFunc) (in
 			// corruption: keep the file byte-for-byte as quarantine-N for
 			// explicit recovery (never sent, never counted delivered), and
 			// move on so later events are not blocked behind it.
-			if err := o.writeCursor(n+1, 0); err != nil {
-				return sent, err
-			}
 			o.quarantined.Add(1)
 			target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
 			if _, err := os.Stat(target); err == nil {
@@ -2012,6 +2009,9 @@ func (o *AnalyticsOutbox) Drain(ctx context.Context, send AnalyticsSendFunc) (in
 				return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
 			}
 			if err := syncDir(o.dir); err != nil {
+				return sent, err
+			}
+			if err := o.writeCursor(n+1, 0); err != nil {
 				return sent, err
 			}
 			continue
