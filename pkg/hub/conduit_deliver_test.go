@@ -501,7 +501,7 @@ func TestBrokerAgentDeliver_ConcurrentSameIDHasOneOwner(t *testing.T) {
 	mu.Lock()
 	assert.Equal(t, 1, calls, "one call reached the agent")
 	mu.Unlock()
-	assert.Equal(t, 4, tm.calls, "exactly one four-step flush (has-session, load, paste, submit)")
+	assert.Equal(t, 5, tm.calls, "exactly one five-step flush (has-session, load, copy-mode -q, paste, submit)")
 }
 
 // TestBrokerAgentDeliver_OwnerUnbindOnlyAfterDuplicateRefused (review R1,
@@ -674,7 +674,7 @@ func TestBrokerAgentDeliver_InFlightDuplicateLeavesOwnerResponsible(t *testing.T
 	assert.Equal(t, agentcontrol.OutcomeDelivered, resp.Outcome)
 	assert.False(t, resp.Replayed)
 	assert.Equal(t, store.MessageDispatchDelivered, f.state(t, id))
-	assert.Equal(t, 4, tm.calls, "pasted exactly once")
+	assert.Equal(t, 5, tm.calls, "pasted exactly once (has-session, load, copy-mode -q, paste, submit)")
 }
 
 // TestBrokerAgentDeliver_SimultaneousSameIDAdmission (review P3-R1): two
@@ -713,7 +713,7 @@ func TestBrokerAgentDeliver_SimultaneousSameIDAdmission(t *testing.T) {
 			// it finished (then it replays the stored outcome).
 			assert.True(t, got[agentcontrol.OutcomeDelivered], "one call delivered: %+v %+v", a, b)
 			assert.Equal(t, 1, c.count(), "one call reached the agent")
-			assert.Equal(t, 4, tm.calls, "pasted once")
+			assert.Equal(t, 5, tm.calls, "pasted once (has-session, load, copy-mode -q, paste, submit)")
 			assert.Equal(t, store.MessageDispatchDelivered, f.state(t, id))
 		})
 	}

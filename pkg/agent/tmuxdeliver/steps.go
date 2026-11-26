@@ -69,6 +69,28 @@ func SendKeyArgv(key string) []string {
 	return []string{"tmux", "send-keys", "-t", Target, key}
 }
 
+// ExitModeArgv returns Target's pane to the live screen: it cancels
+// copy-mode and any other pane mode. A pane an operator scrolled back is in
+// copy-mode, where tmux does not bracket a paste, even with -p, and looks
+// keys up in the mode's key table: the text would arrive as typed and the
+// submit key would never reach the harness. So a delivery deliberately takes
+// the operator out of scrollback; there is no way to deliver into a pane
+// that stays in a mode. -q makes this a no-op for a pane that is not in a
+// mode.
+//
+// The step is best effort and Deliver ignores its failure. tmux before 3.1a
+// has no -q, and delivery does not require a tmux version; there the
+// delivery goes on as it did before this step existed. A failure that
+// matters, such as a missing session, also fails the next step. For the same
+// reason the step is its own command, not chained in front of the paste or
+// the keys with ";": a failed first command would stop the chain. An operator
+// who scrolls between this step and the next one can therefore still put
+// the pane back in copy-mode; Steps and Deliver run it right before each
+// group of visible commands to keep that window to one command.
+func ExitModeArgv() []string {
+	return []string{"tmux", "copy-mode", "-q", "-t", Target}
+}
+
 // DeleteBufferArgv deletes the named buffer. It cleans up after a failed
 // paste, since paste-buffer's -d does not run when the paste fails.
 func DeleteBufferArgv(bufName string) []string {
@@ -156,6 +178,8 @@ const (
 	// StepPasteBuffer pastes the buffer. Its success means the text is in
 	// the harness's input: any later failure is a partial delivery.
 	StepPasteBuffer
+	// StepExitMode leaves copy-mode. Its failure is ignored (ExitModeArgv).
+	StepExitMode
 )
 
 // Step is one command of a delivery.
@@ -180,8 +204,10 @@ var (
 )
 
 // Steps returns the commands of req, in order, without the extra submits
-// (Deliver runs those after the paste, with their delay). It checks the
-// request's shape: the op, the text presence, the keys each op needs and the
+// (Deliver runs those after the paste, with their delay). The pane leaves
+// copy-mode (ExitModeArgv) right before the first keys and right before the
+// paste; the submit keys follow the paste at once. It checks the request's
+// shape: the op, the text presence, the keys each op needs and the
 // buffer name. It does not apply the deliver-message route bounds (the key
 // allowlist and the counts; CheckRoute): the broker's exec path delivers with
 // the harness config's own keys, as before. It does not sanitise the text;
@@ -210,16 +236,23 @@ func Steps(req Request) ([]Step, error) {
 		return nil, ErrNoBufferName
 	}
 
+	exit := Step{Kind: StepExitMode, Argv: ExitModeArgv()}
 	var steps []Step
 	if req.Op.interrupts() {
+		steps = append(steps, exit)
 		for _, k := range req.InterruptKeys {
 			steps = append(steps, Step{Kind: StepSendKeys, Argv: SendKeyArgv(k)})
 		}
 	}
 	if req.Op.pastes() {
+		// The exit comes after the load, which shows nothing, so that only
+		// one command separates it from the paste.
 		steps = append(steps,
 			Step{Kind: StepLoadBuffer, Argv: LoadBufferArgv(req.BufferName)},
+			exit,
 			Step{Kind: StepPasteBuffer, Argv: PasteBufferArgv(req.BufferName)})
+	} else if !req.Op.interrupts() {
+		steps = append(steps, exit)
 	}
 	for _, k := range req.SubmitKeys {
 		steps = append(steps, Step{Kind: StepSendKeys, Argv: SendKeyArgv(k)})

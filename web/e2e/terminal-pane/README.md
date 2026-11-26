@@ -41,6 +41,10 @@ ignored `web/test-results/terminal-pane/` directory.
       force; requests retain pane identity after route-history change.
 - [x] Browser File/DataTransfer drop posts multipart upload and inserts a quoted
       path through the production session transport.
+- [x] One-finger touch drag (trusted CDP touch events, phone viewport) becomes
+      wheel reports at the touched cell while the application reports the mouse,
+      and a sideways drag sends none; with mouse reporting off xterm scrolls its
+      own viewport and nothing is sent.
 - [ ] Native macOS Option/Shift mouse-selection behavior: unavailable on Linux.
 - [ ] Real OS clipboard permissions and desktop activation: not represented by
       the injected clipboard or headless browser; final headed QA owns those checks.

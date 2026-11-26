@@ -49,12 +49,15 @@ const (
 // Deliver runs req through r. The caller serialises deliveries to one
 // session; Deliver does not lock.
 //
-// A paste op's text is sanitised first (Sanitize) and loaded on
-// load-buffer's stdin. A failure before the paste returns the error as is;
-// nothing is in the harness's input, so the caller may retry. If the paste
-// itself fails, the buffer is deleted (best effort, on a context detached
-// from ctx so a cancelled ctx does not skip it). A failure after the paste
-// returns a *PartialError. The extra submits run only after a paste.
+// It returns the pane to the live screen (ExitModeArgv, best effort) before
+// the first keys, before the paste and before each extra submit pass, so the
+// paste is bracketed and the keys reach the harness. A paste op's text is
+// sanitised first (Sanitize) and loaded on load-buffer's stdin. A failure
+// before the paste returns the error as is; nothing is in the harness's
+// input, so the caller may retry. If the paste itself fails, the buffer is
+// deleted (best effort, on a context detached from ctx so a cancelled ctx
+// does not skip it). A failure after the paste returns a *PartialError. The
+// extra submits run only after a paste.
 func Deliver(ctx context.Context, r Runner, req Request) error {
 	text := ""
 	if req.Op.pastes() {
@@ -71,9 +74,12 @@ func Deliver(ctx context.Context, r Runner, req Request) error {
 	pasted := false
 	for _, st := range steps {
 		var stepErr error
-		if st.Kind == StepLoadBuffer {
+		switch st.Kind {
+		case StepLoadBuffer:
 			_, stepErr = r.Run(ctx, st.Argv, strings.NewReader(text))
-		} else {
+		case StepExitMode:
+			_, _ = r.Run(ctx, st.Argv, nil)
+		default:
 			_, stepErr = r.Run(ctx, st.Argv, nil)
 		}
 		if stepErr != nil {
@@ -103,6 +109,8 @@ func Deliver(ctx context.Context, r Runner, req Request) error {
 			return &PartialError{Stage: StageExtraSubmit, Err: ctx.Err()}
 		case <-t.C:
 		}
+		// The operator may have scrolled back during the delay.
+		_, _ = r.Run(ctx, ExitModeArgv(), nil)
 		for _, k := range req.SubmitKeys {
 			if _, err := r.Run(ctx, SendKeyArgv(k), nil); err != nil {
 				return &PartialError{Stage: StageExtraSubmit, Err: err}

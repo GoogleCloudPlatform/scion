@@ -419,7 +419,7 @@ func TestBufferedFlush_PastesOnlyAfterReady(t *testing.T) {
 			tail = append(tail, c)
 		}
 	}
-	if len(tail) != 5 || !strings.HasPrefix(tail[0], "tmux load-buffer") || !strings.HasPrefix(tail[1], "tmux paste-buffer") {
+	if len(tail) != 8 || !strings.HasPrefix(tail[0], "tmux load-buffer") || tail[1] != exitModeCmd || !strings.HasPrefix(tail[2], "tmux paste-buffer") {
 		t.Fatalf("unexpected delivery sequence %q", tail)
 	}
 	if cmds[len(cmds)-len(tail)-1] != "probe" {
