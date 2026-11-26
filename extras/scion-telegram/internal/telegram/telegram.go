@@ -65,6 +65,86 @@ type inboundPayload struct {
 	// AttachmentIDs names hub uploads of the sender delivered with the
 	// message.
 	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+	plugin.InboundConversation
+}
+
+// parseTelegramConversationTarget extracts the Telegram chat ID and optional
+// forum topic thread ID from msg using plugin.ResolveConversationTarget.
+//
+// Supported formats:
+//   - "<chatID>:<threadID>" in ExternalRef (Phase 11 forum topic format)
+//   - ParentRef="<chatID>" + ExternalRef="<threadID>"
+//   - Bare "<chatID>" in msg.Conversation.ExternalRef (Phase 11 non-threaded chat)
+//   - Bare "<threadID>" when msg.Conversation is nil (legacy hub fallback where
+//     msg.ThreadID carried only the Telegram forum MessageThreadID)
+func parseTelegramConversationTarget(msg *messages.StructuredMessage) (chatID int64, hasChatID bool, threadID int64) {
+	target := plugin.ResolveConversationTarget(msg)
+	if target.ExternalRef == "" {
+		return 0, false, 0
+	}
+	if parts := strings.SplitN(target.ExternalRef, ":", 2); len(parts) == 2 {
+		cid, err1 := strconv.ParseInt(parts[0], 10, 64)
+		tid, err2 := strconv.ParseInt(parts[1], 10, 64)
+		if err1 == nil && cid != 0 {
+			if err2 == nil && tid != 0 {
+				return cid, true, tid
+			}
+			return cid, true, 0
+		}
+		return 0, false, 0
+	}
+	if target.ParentRef != "" {
+		cid, err1 := strconv.ParseInt(target.ParentRef, 10, 64)
+		tid, err2 := strconv.ParseInt(target.ExternalRef, 10, 64)
+		if err1 == nil && cid != 0 {
+			if err2 == nil && tid != 0 {
+				return cid, true, tid
+			}
+			return cid, true, 0
+		}
+		return 0, false, 0
+	}
+	id, err := strconv.ParseInt(target.ExternalRef, 10, 64)
+	if err != nil || id == 0 {
+		return 0, false, 0
+	}
+	if msg != nil && msg.Conversation != nil && msg.Conversation.ExternalRef != "" {
+		return id, true, 0
+	}
+	return 0, false, id
+}
+
+// telegramInboundConversation derives the Phase 11 top-level conversation
+// addressing (surface, external_ref, parent_ref) for an inbound Telegram message.
+func telegramInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
+	if msg == nil {
+		return plugin.InboundConversation{}
+	}
+	var chatID string
+	if msg.Metadata != nil {
+		chatID = msg.Metadata["telegram_chat_id"]
+	}
+	threadID := msg.ThreadID
+	if chatID != "" && threadID != "" {
+		return plugin.InboundConversation{
+			Surface:     "telegram",
+			ExternalRef: chatID + ":" + threadID,
+			ParentRef:   chatID,
+		}
+	}
+	if chatID != "" {
+		return plugin.InboundConversation{
+			Surface:     "telegram",
+			ExternalRef: chatID,
+		}
+	}
+	if threadID != "" {
+		return plugin.InboundConversation{
+			Surface:     "telegram",
+			ExternalRef: threadID,
+		}
+	}
+	return plugin.InboundConversation{}
 }
 
 // hubError represents a structured error returned by the hub API.
@@ -374,6 +454,10 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 		return fmt.Errorf("telegram broker not configured")
 	}
 
+	if !plugin.MatchesSurface(msg, "telegram") {
+		return nil
+	}
+
 	// Dedup: skip if we've already sent this exact message recently.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {
@@ -397,8 +481,13 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 	// Collect target chat IDs
 	var chatIDs []int64
 
+	// Priority 0: Conversation external_ref (Phase 11).
+	if convChatID, ok, _ := parseTelegramConversationTarget(msg); ok {
+		chatIDs = append(chatIDs, convChatID)
+	}
+
 	// Priority 1: Direct routing via metadata
-	if msg != nil && msg.Metadata != nil {
+	if len(chatIDs) == 0 && msg != nil && msg.Metadata != nil {
 		if chatIDStr, ok := msg.Metadata["telegram_chat_id"]; ok {
 			if chatID, err := strconv.ParseInt(chatIDStr, 10, 64); err == nil {
 				chatIDs = append(chatIDs, chatID)
@@ -804,8 +893,9 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 	}
 
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:               topic,
+		Message:             msg,
+		InboundConversation: telegramInboundConversation(msg),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

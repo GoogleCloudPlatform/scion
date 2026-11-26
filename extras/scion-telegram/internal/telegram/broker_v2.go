@@ -977,6 +977,10 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return fmt.Errorf("telegram v2 broker not configured")
 	}
 
+	if !plugin.MatchesSurface(msg, "telegram") {
+		return nil
+	}
+
 	// Dedup check.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {
@@ -1068,8 +1072,14 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	// Collect target chat IDs via dynamic routing.
 	var chatIDs []int64
 
+	// Priority 0: Conversation external_ref (Phase 11).
+	convChatID, hasConvChatID, convThreadID := parseTelegramConversationTarget(msg)
+	if hasConvChatID {
+		chatIDs = append(chatIDs, convChatID)
+	}
+
 	// Priority 1: Direct chat ID from metadata.
-	if msg != nil && msg.Metadata != nil {
+	if len(chatIDs) == 0 && msg != nil && msg.Metadata != nil {
 		if chatIDStr, ok := msg.Metadata["telegram_chat_id"]; ok {
 			if chatID, err := strconv.ParseInt(chatIDStr, 10, 64); err == nil {
 				chatIDs = append(chatIDs, chatID)
@@ -1146,10 +1156,8 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Determine thread ID for Telegram forum topics.
 	var threadOpts []SendOption
-	if msg != nil && msg.ThreadID != "" {
-		if tid, err := strconv.ParseInt(msg.ThreadID, 10, 64); err == nil && tid != 0 {
-			threadOpts = append(threadOpts, SendOption{MessageThreadID: tid})
-		}
+	if convThreadID != 0 {
+		threadOpts = append(threadOpts, SendOption{MessageThreadID: convThreadID})
 	}
 
 	// File attachment: check msg.Attachments (scion CLI --attach flag convention)
@@ -3302,8 +3310,9 @@ func (b *TelegramBrokerV2) deliverInbound(topic string, msg *messages.Structured
 	}
 
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:               topic,
+		Message:             msg,
+		InboundConversation: telegramInboundConversation(msg),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -3411,9 +3420,10 @@ func (b *TelegramBrokerV2) deliverInboundOutcome(ctx context.Context, topic stri
 	}
 
 	payload := inboundPayload{
-		Topic:         topic,
-		Message:       msg,
-		AttachmentIDs: attachmentIDs,
+		Topic:               topic,
+		Message:             msg,
+		AttachmentIDs:       attachmentIDs,
+		InboundConversation: telegramInboundConversation(msg),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
