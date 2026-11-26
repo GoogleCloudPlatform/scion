@@ -519,6 +519,28 @@ func TestAgentBadges_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
+// TestTerminalKeyBar_RegisteredDefaultOff pins web.terminal_key_bar
+// (ptone/scion#9338): a presentation-only web gate, so it has only the web
+// layer, and it ships off.
+func TestTerminalKeyBar_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(TerminalKeyBar)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", TerminalKeyBar)
+	}
+	if entry.Name != "web.terminal_key_bar" {
+		t.Errorf("Name = %q, want web.terminal_key_bar", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 1 || entry.Layers[0] != LayerWeb {
+		t.Errorf("Layers = %v, want exactly LayerWeb", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#9338" || entry.Owner != "web" || entry.ReviewBy != "2027-02-26" {
+		t.Errorf("terminal key bar experiment metadata mismatch: %+v", entry)
+	}
+}
+
 // TestAttachmentArtifacts_RegisteredDefaultOff pins hub.attachment_artifacts
 // (ptone/scion#4595): it gates the hub's attachment upload path and the web
 // surfaces of later phases, so it has both layers, and it ships off.

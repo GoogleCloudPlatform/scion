@@ -63,7 +63,11 @@ import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { copyToClipboard, copyWithToast } from '../../utils/clipboard.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
+  FEATURE_FLAGS_CHANGED_EVENT,
+  isFeatureEnabled,
+  TERMINAL_KEY_BAR_FLAG,
+} from '../../utils/feature-flags.js';
 import {
   TERMINAL_DRAG_MIME,
   TERMINAL_PANE_DIALOG_OPEN_EVENT,
@@ -110,6 +114,20 @@ type CaptureAuthScope = 'project' | 'user';
 
 /** localStorage key: 'true' while the user has hidden the touch key bar. */
 export const KEY_BAR_HIDDEN_STORAGE_KEY = 'scion-terminal-key-bar-hidden';
+
+/** `<input>` types that do not open a text keyboard when focused. */
+const NON_TEXT_INPUT_TYPES = new Set([
+  'button',
+  'checkbox',
+  'color',
+  'file',
+  'hidden',
+  'image',
+  'radio',
+  'range',
+  'reset',
+  'submit',
+]);
 
 /**
  * Keys on the touch key bar, in order: the common ones first, the rest
@@ -1049,18 +1067,6 @@ export class ScionTerminalPane extends LitElement {
       background: var(--scion-badge-success-bg, #dcfce7);
     }
 
-    /* Touch only, so as wide as the window toggles; it must not shrink away
-       in a phone-width toolbar. */
-    .key-bar-toggle {
-      width: 44px;
-      flex-shrink: 0;
-    }
-
-    .key-bar-toggle[aria-pressed='true'] {
-      color: var(--scion-primary, #3b82f6);
-      border-color: var(--scion-primary, #3b82f6);
-    }
-
     /* Touch key bar. It sits below the terminal in the pane's column, so it
        stays just above the on-screen keyboard while client/viewport.ts
        shrinks the app frame to the visible area. It scrolls sideways when
@@ -1093,13 +1099,27 @@ export class ScionTerminalPane extends LitElement {
       padding: 0 0.5rem;
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 6px;
+      border-radius: var(--scion-radius-sm);
       color: var(--scion-text, #1e293b);
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
       cursor: pointer;
       -webkit-tap-highlight-color: transparent;
       -webkit-touch-callout: none;
+    }
+
+    .key-bar button.key-bar-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      padding: 0;
+      font-size: 1rem;
+    }
+
+    .key-bar button.key-bar-toggle[aria-expanded='true'] {
+      color: var(--scion-primary, #3b82f6);
+      border-color: var(--scion-primary, #3b82f6);
     }
 
     .key-bar button:active:not([aria-disabled='true']) {
@@ -1147,6 +1167,7 @@ export class ScionTerminalPane extends LitElement {
     // browser tab is in the foreground), not just this pane's slot in the
     // workspace layout.
     document.addEventListener('visibilitychange', this._onDocumentVisibilityChange);
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this._onFeatureFlagsChanged);
     this.readKeyBarHidden();
     this.updateFrontmost();
     void this.reveal();
@@ -1158,6 +1179,7 @@ export class ScionTerminalPane extends LitElement {
     this.removeEventListener('focusin', this._onFocusIn);
     this.removeEventListener('focusout', this._onFocusOut);
     document.removeEventListener('visibilitychange', this._onDocumentVisibilityChange);
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this._onFeatureFlagsChanged);
     this.session?.setFrontmost(false);
     this.removeWindowListeners();
     this.terminal?.blur();
@@ -1186,6 +1208,10 @@ export class ScionTerminalPane extends LitElement {
     // key typed when they come back.
     if (document.hidden) this.consumeKeyBarModifiers();
     this.updateFrontmost();
+  };
+
+  private _onFeatureFlagsChanged = (): void => {
+    this.requestUpdate();
   };
 
   private updateFrontmost(): void {
@@ -1950,8 +1976,12 @@ export class ScionTerminalPane extends LitElement {
 
   // --- Touch key bar ---
 
+  private get keyBarAvailable(): boolean {
+    return this.touchPrimary.isTouch && isFeatureEnabled(TERMINAL_KEY_BAR_FLAG);
+  }
+
   private get keyBarShown(): boolean {
-    return this.touchPrimary.isTouch && !this.keyBarHidden;
+    return this.keyBarAvailable && !this.keyBarHidden;
   }
 
   private get keyBarModifiers(): Modifiers {
@@ -1969,7 +1999,7 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private applyKeyBarModifiers(data: string): string {
-    if (!this.keyBarShown) return data;
+    if (!this.keyBarShown || !this.connected) return data;
     const result = applyModifiers(data, this.keyBarModifiers);
     if (result.consumed) this.consumeKeyBarModifiers();
     return result.data;
@@ -2015,18 +2045,19 @@ export class ScionTerminalPane extends LitElement {
    * up in onData like an on-screen keyboard character.
    */
   private pressBarKey(entry: (typeof KEY_BAR_KEYS)[number]): void {
-    // A bar key acts on this pane, so when another pane's terminal or an
-    // input has focus, the next typed key must land here instead (several
+    // A bar key acts on this pane, so when another pane's terminal or a
+    // text input has focus, the next typed key must land here instead (several
     // panes can show at once). When nothing takes typed text the user closed
     // the keyboard, e.g. to read with the arrows or PgUp, so it stays closed.
-    if (this.terminal && this.typingFocusIsElsewhere()) this.terminal.focus();
     if ('modifier' in entry) {
+      if (this.terminal && this.typingFocusIsElsewhere()) this.terminal.focus();
       if (entry.modifier === 'ctrl') this.ctrlState = nextModifierState(this.ctrlState);
       else this.altState = nextModifierState(this.altState);
       return;
     }
     const terminal = this.terminal;
     if (!terminal || !this.connected) return;
+    if (this.typingFocusIsElsewhere()) terminal.focus();
     if ('char' in entry) {
       terminal.input(entry.char);
       return;
@@ -2042,23 +2073,53 @@ export class ScionTerminalPane extends LitElement {
 
   /**
    * Whether an element outside this pane that takes typed text has focus:
-   * a textarea (another pane's xterm input is one), an input or an editable
-   * element. A focused button or link does not count: no keyboard is open.
+   * a textarea (another pane's xterm input is one), a text-entry input, or an
+   * editable element. A focused button, link, or non-text input (checkbox,
+   * radio, range, etc.) does not count: no keyboard is open.
    */
   private typingFocusIsElsewhere(): boolean {
     const active = deepActiveElement();
     if (!active || this.contains(active) || this.shadowRoot?.contains(active)) return false;
-    return (
-      active.tagName === 'TEXTAREA' ||
-      active.tagName === 'INPUT' ||
-      (active as HTMLElement).isContentEditable === true
-    );
+    if (active.tagName === 'TEXTAREA' || (active as HTMLElement).isContentEditable === true) {
+      return true;
+    }
+    if (active.tagName === 'INPUT') {
+      const type = ((active as HTMLInputElement).type || 'text').toLowerCase();
+      return !NON_TEXT_INPUT_TYPES.has(type);
+    }
+    return false;
   }
 
   private renderKeyBar() {
-    if (!this.keyBarShown) return nothing;
+    if (!this.keyBarAvailable) return nothing;
+    if (this.keyBarHidden) {
+      return html`
+        <div class="key-bar collapsed" @mousedown=${this.keepFocus}>
+          <button
+            type="button"
+            class="key-bar-toggle"
+            title="Show terminal keys"
+            aria-label="Show terminal keys"
+            aria-expanded="false"
+            @click=${() => this.toggleKeyBar()}
+          >
+            <sl-icon name="keyboard"></sl-icon>
+          </button>
+        </div>
+      `;
+    }
     return html`
       <div class="key-bar" role="group" aria-label="Terminal keys" @mousedown=${this.keepFocus}>
+        <button
+          type="button"
+          class="key-bar-toggle"
+          title="Hide terminal keys"
+          aria-label="Hide terminal keys"
+          aria-expanded="true"
+          @click=${() => this.toggleKeyBar()}
+        >
+          <sl-icon name="keyboard"></sl-icon>
+        </button>
         ${KEY_BAR_KEYS.map((entry) => {
           const state =
             'modifier' in entry
@@ -3026,18 +3087,6 @@ export class ScionTerminalPane extends LitElement {
               @click=${() => this.openInChat()}
             >
               <sl-icon name="chat-dots"></sl-icon>
-            </button>`
-          : nothing}
-        ${this.touchPrimary.isTouch
-          ? html`<button
-              class="pane-action-btn key-bar-toggle"
-              title=${this.keyBarHidden ? 'Show terminal keys' : 'Hide terminal keys'}
-              aria-label="Terminal keys"
-              aria-pressed=${String(!this.keyBarHidden)}
-              @mousedown=${this.keepFocus}
-              @click=${() => this.toggleKeyBar()}
-            >
-              <sl-icon name="keyboard"></sl-icon>
             </button>`
           : nothing}
         <div class="spacer"></div>

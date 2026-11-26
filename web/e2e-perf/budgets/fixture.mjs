@@ -210,6 +210,7 @@ export function buildFixture() {
           'web.gcs_links': false,
           'web.inbox_dashboard': false,
           'web.sse_hidden_tab_close': false,
+          'web.terminal_key_bar': false,
         },
       },
     },

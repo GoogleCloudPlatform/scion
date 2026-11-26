@@ -728,6 +728,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.PortView:                     testAdminPolicyDeny,
 	experiments.AgentBadges:                  testAdminPolicyDeny,
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
+	experiments.TerminalKeyBar:               testAdminPolicyDeny,
 	experiments.SecretRotation:               testAdminPolicyDeny,
 	experiments.ContentHashV2:                testAdminPolicyDeny,
 	experiments.LifecycleEvents:              testAdminPolicyDeny,

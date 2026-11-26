@@ -433,3 +433,10 @@ export const EXEC_CONTAINERS_FLAG = 'hub.exec_containers';
 export function execContainersEnabled(): boolean {
   return isFeatureEnabled(EXEC_CONTAINERS_FLAG);
 }
+
+/**
+ * Terminal touch key bar (web.terminal_key_bar, ptone/scion#9338):
+ * shows an on-screen key bar below the terminal on touch-primary devices,
+ * with a collapse toggle inside the bar. Presentation only. Default OFF.
+ */
+export const TERMINAL_KEY_BAR_FLAG = 'web.terminal_key_bar';

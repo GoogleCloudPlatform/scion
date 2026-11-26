@@ -2695,6 +2695,10 @@ describe('touch-to-wheel scrolling', () => {
     const el = xt.element!;
     xt.modes.mouseTrackingMode = 'any';
     page.dispose();
+    // Restore the terminal reference after dispose so this assertion tests
+    // that the listeners were genuinely removed via AbortController.abort(),
+    // rather than only observing the null-terminal guard in mouseActive().
+    (page as unknown as { terminal: MockTerminal }).terminal = xt;
     const move = touch('touchmove', 100);
     el.dispatchEvent(touch('touchstart', 300));
     el.dispatchEvent(move);
@@ -2705,8 +2709,10 @@ describe('touch-to-wheel scrolling', () => {
 
 describe('touch key bar', () => {
   const keyBar = (): HTMLElement | null => page.shadowRoot!.querySelector<HTMLElement>('.key-bar');
+  const keyGroup = (): HTMLElement | null =>
+    page.shadowRoot!.querySelector<HTMLElement>('.key-bar[role="group"]');
   const toggle = (): HTMLButtonElement | null =>
-    page.shadowRoot!.querySelector<HTMLButtonElement>('button[aria-label="Terminal keys"]');
+    page.shadowRoot!.querySelector<HTMLButtonElement>('.key-bar-toggle');
   const key = (label: string): HTMLButtonElement =>
     page.shadowRoot!.querySelector<HTMLButtonElement>(`.key-bar button[aria-label^="${label}"]`)!;
   /** Data frames the pane sent over the PTY socket since the last clear. */
@@ -2725,28 +2731,39 @@ describe('touch key bar', () => {
   };
 
   /** Stubs the touch query; returns a function that flips it later. */
-  function stubPointer(touch: boolean): (touch: boolean) => void {
+  function stubPointer(touch: boolean): {
+    flip: (touch: boolean) => void;
+    removeEventListener: ReturnType<typeof vi.fn>;
+  } {
     const listeners: Array<() => void> = [];
+    const removeEventListener = vi.fn((_type: string, listener: () => void) => {
+      const idx = listeners.indexOf(listener);
+      if (idx >= 0) listeners.splice(idx, 1);
+    });
     const query = {
       media: '(hover: none) and (pointer: coarse)',
       matches: touch,
       addEventListener: (_type: string, listener: () => void): void => {
         listeners.push(listener);
       },
-      removeEventListener: vi.fn(),
+      removeEventListener,
     };
     vi.stubGlobal(
       'matchMedia',
       vi.fn(() => query)
     );
-    return (next) => {
-      query.matches = next;
-      for (const listener of listeners) listener();
+    return {
+      flip: (next) => {
+        query.matches = next;
+        for (const listener of [...listeners]) listener();
+      },
+      removeEventListener,
     };
   }
 
-  async function mountTouch(): Promise<(touch: boolean) => void> {
-    const flip = stubPointer(true);
+  async function mountTouch(flagEnabled = true): Promise<(touch: boolean) => void> {
+    window.__SCION_FEATURES__ = { 'web.terminal_key_bar': flagEnabled };
+    const { flip } = stubPointer(true);
     await mountConnected();
     FakeSocket.instances[0].send.mockClear();
     return flip;
@@ -2763,7 +2780,12 @@ describe('touch key bar', () => {
     });
   });
 
+  afterEach(() => {
+    delete window.__SCION_FEATURES__;
+  });
+
   it('is absent, with no toggle, when the primary pointer is not touch', async () => {
+    window.__SCION_FEATURES__ = { 'web.terminal_key_bar': true };
     stubPointer(false);
     await mountConnected();
     expect(keyBar()).toBeNull();
@@ -2772,15 +2794,33 @@ describe('touch key bar', () => {
     expect(sent()).toContain('c');
   });
 
-  it('shows on a touch device, and the toolbar toggle hides it and remembers that', async () => {
+  it('is absent when the web.terminal_key_bar experiment is off, and appears when enabled', async () => {
+    await mountTouch(false);
+    expect(keyBar()).toBeNull();
+    expect(toggle()).toBeNull();
+
+    const { setFeatureFlag } = await import('../../utils/feature-flags.js');
+    setFeatureFlag('web.terminal_key_bar', true);
+    await page.updateComplete;
+    expect(keyGroup()).not.toBeNull();
+    expect(toggle()).not.toBeNull();
+  });
+
+  it('shows on a touch device with the toggle inside the key bar (not the toolbar) and remembers collapse', async () => {
     await mountTouch();
-    expect(keyBar()).not.toBeNull();
-    expect(keyBar()!.getAttribute('role')).toBe('group');
-    expect(toggle()!.getAttribute('aria-pressed')).toBe('true');
+    expect(page.shadowRoot!.querySelector('.toolbar .key-bar-toggle')).toBeNull();
+    expect(keyGroup()).not.toBeNull();
+    expect(keyGroup()!.getAttribute('aria-label')).toBe('Terminal keys');
+    expect(toggle()!.getAttribute('aria-label')).toBe('Hide terminal keys');
+    expect(toggle()!.getAttribute('aria-expanded')).toBe('true');
+
     toggle()!.click();
     await page.updateComplete;
-    expect(keyBar()).toBeNull();
-    expect(toggle()!.getAttribute('aria-pressed')).toBe('false');
+    expect(keyGroup()).toBeNull();
+    expect(keyBar()!.classList.contains('collapsed')).toBe(true);
+    expect(keyBar()!.querySelectorAll('button')).toHaveLength(1);
+    expect(toggle()!.getAttribute('aria-label')).toBe('Show terminal keys');
+    expect(toggle()!.getAttribute('aria-expanded')).toBe('false');
     expect(localStorage.getItem('scion-terminal-key-bar-hidden')).toBe('true');
 
     // A pane opened later starts hidden too.
@@ -2791,7 +2831,8 @@ describe('touch key bar', () => {
 
     toggle()!.click();
     await page.updateComplete;
-    expect(keyBar()).not.toBeNull();
+    expect(keyGroup()).not.toBeNull();
+    expect(toggle()!.getAttribute('aria-label')).toBe('Hide terminal keys');
     expect(localStorage.getItem('scion-terminal-key-bar-hidden')).toBeNull();
   });
 
@@ -2835,6 +2876,21 @@ describe('touch key bar', () => {
       expect(xt.focus).not.toHaveBeenCalled();
     } finally {
       button.remove();
+    }
+
+    // A focused non-text input (checkbox, radio, range...) takes no typed text,
+    // so no keyboard is open and the bar key must not open one.
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    document.body.append(checkbox);
+    try {
+      checkbox.focus();
+      expect(document.activeElement).toBe(checkbox);
+      xt.focus.mockClear();
+      await press('PgUp');
+      expect(xt.focus).not.toHaveBeenCalled();
+    } finally {
+      checkbox.remove();
     }
 
     // Already focused in this pane: no focus call.
@@ -3033,8 +3089,11 @@ describe('touch key bar', () => {
     expect(terminal.instances[0].blur).not.toHaveBeenCalled();
   });
 
-  it('disables the sending keys while disconnected, but not the modifiers', async () => {
+  it('disables the sending keys while disconnected without moving focus or consuming armed Ctrl', async () => {
     await mountTouch();
+    await press('Ctrl');
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
+
     FakeSocket.instances[0].onclose?.({ code: 1006 });
     await page.updateComplete;
     // aria-disabled, not disabled: a disabled button may not dispatch the
@@ -3042,8 +3101,24 @@ describe('touch key bar', () => {
     expect(key('Esc').getAttribute('aria-disabled')).toBe('true');
     expect(key('Esc').disabled).toBe(false);
     expect(key('Ctrl').hasAttribute('aria-disabled')).toBe(false);
-    await press('Esc');
-    expect(sent()).toEqual([]);
+
+    const other = document.createElement('input');
+    document.body.append(other);
+    try {
+      other.focus();
+      terminal.instances[0].focus.mockClear();
+      await press('Esc');
+      expect(sent()).toEqual([]);
+      expect(terminal.instances[0].focus).not.toHaveBeenCalled();
+      expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
+    } finally {
+      other.remove();
+    }
+
+    // Typed character while disconnected must also leave an armed modifier alone.
+    type('c');
+    await page.updateComplete;
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
   });
 
   it('a pane shown again picks up a toggle made in another pane', async () => {
@@ -3052,8 +3127,8 @@ describe('touch key bar', () => {
     localStorage.setItem('scion-terminal-key-bar-hidden', 'true');
     page.setVisible(true);
     await page.updateComplete;
-    expect(keyBar()).toBeNull();
-    expect(toggle()!.getAttribute('aria-pressed')).toBe('false');
+    expect(keyGroup()).toBeNull();
+    expect(toggle()!.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('uses up an armed modifier when the tab goes to the background, keeps a locked one', async () => {
@@ -3070,5 +3145,23 @@ describe('touch key bar', () => {
     await page.updateComplete;
     expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
     expect(key('Alt').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('cleans up key-bar listeners on disconnect/dispose without leaking across re-mount', async () => {
+    window.__SCION_FEATURES__ = { 'web.terminal_key_bar': true };
+    const { removeEventListener } = stubPointer(true);
+    const removeWindowSpy = vi.spyOn(window, 'removeEventListener');
+    try {
+      await mountConnected();
+      page.dispose();
+      page.remove();
+      expect(removeEventListener).toHaveBeenCalledWith('change', expect.any(Function));
+      expect(removeWindowSpy).toHaveBeenCalledWith(
+        'scion-feature-flags-changed',
+        expect.any(Function)
+      );
+    } finally {
+      removeWindowSpy.mockRestore();
+    }
   });
 });

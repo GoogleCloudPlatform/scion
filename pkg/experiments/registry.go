@@ -362,6 +362,11 @@ const AgentBadges = "web.agent_badges"
 // serves streams the same way whether or not it is on.
 const SSEHiddenTabClose = "web.sse_hidden_tab_close"
 
+// TerminalKeyBar gates the on-screen touch key bar below the terminal pane on
+// touch-primary devices (ptone/scion#9338). It is web-only and
+// presentation-only: the hub is unaffected whether or not it is on.
+const TerminalKeyBar = "web.terminal_key_bar"
+
 // SecretRotation gates opt-in Hub server keyring configuration
 // (server.keyring_file, ptone/scion#1530): a hub configured with a keyring
 // file refuses to start while it is off. For the keyring it is checked once
@@ -1161,6 +1166,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5235",
 		Owner:       "web",
 		ReviewBy:    "2027-01-22",
+	},
+	{
+		Name:        TerminalKeyBar,
+		Title:       "Terminal touch key bar",
+		Description: "Shows an on-screen key bar (Esc, Tab, sticky Ctrl/Alt, arrows, Home/End, PgUp/PgDn and common shell characters) below the terminal on touch-primary devices, with a collapse toggle inside the bar. Web only; the hub is unaffected.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9338",
+		Owner:       "web",
+		ReviewBy:    "2027-02-26",
 	},
 	{
 		Name:        ArtifactReviewEditor,
