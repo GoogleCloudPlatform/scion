@@ -59,6 +59,7 @@ import {
 import { DecisionsPageController } from '../shared/decisions-page-controller.js';
 import {
   decisionsPageSharedStyles,
+  madeRetentionNoticeText,
   renderBulkDismissDialog,
   renderDateRangeError,
   renderDecisionsErrorState,
@@ -66,6 +67,7 @@ import {
   renderLoadMoreFooter,
   renderMadeEmptyState,
   renderMadeItem,
+  renderMadeRetentionNotice,
   renderMadeTableAndMobileList,
   renderNoMatchState,
   renderPendingEmptyState,
@@ -547,6 +549,13 @@ export class ScionPageProfileDecisions extends LitElement {
     const isEmpty = isByProject
       ? this.ctrl.madeGroups.length === 0
       : this.ctrl.madeEntries.length === 0;
+    const retentionNotice = madeRetentionNoticeText({
+      scope: 'profile',
+      flagEnabled: this.ctrl.decisionRetentionEnabled,
+      profileRetention: this.ctrl.profileRetention,
+      filteredProject: this.ctrl.filterProject,
+      projects: this.ctrl.facetsProjects,
+    });
 
     return html`
       ${this.ctrl.hasDateRangeError ? renderDateRangeError() : nothing}
@@ -561,31 +570,34 @@ export class ScionPageProfileDecisions extends LitElement {
                 retryAttr: 'data-retry-made',
                 onRetry: () => void this.ctrl.loadMadePage({ mode: 'reset' }),
               })
-            : isEmpty
-              ? isFiltered
-                ? renderNoMatchState('made', this.ctrl.clearFilters)
-                : renderMadeEmptyState('profile')
-              : isByProject
-                ? repeat(
-                    this.ctrl.madeGroups,
-                    (g) => g.project.id,
-                    (g) => this.renderMadeProjectGroup(g)
-                  )
-                : html`
-                    ${renderMadeTableAndMobileList(this.ctrl.madeEntries, {
-                      currentUserId: this.ctrl.currentUserId,
-                      showProjectColumn: true,
-                      resolveProjectName: this.resolveProjectName,
-                      disclosure: this.ctrl.madeDisclosure,
-                    })}
-                    ${renderLoadMoreFooter({
-                      tab: 'made',
-                      nextCursor: this.ctrl.madeNextCursor,
-                      loadingMore: this.ctrl.madeLoadingMore,
-                      showEndFilteredNotice: isFiltered,
-                      onLoadMore: () => void this.ctrl.loadMadePage({ mode: 'append' }),
-                    })}
-                  `}
+            : html`
+                ${renderMadeRetentionNotice(retentionNotice)}
+                ${isEmpty
+                  ? isFiltered
+                    ? renderNoMatchState('made', this.ctrl.clearFilters)
+                    : renderMadeEmptyState('profile')
+                  : isByProject
+                    ? repeat(
+                        this.ctrl.madeGroups,
+                        (g) => g.project.id,
+                        (g) => this.renderMadeProjectGroup(g)
+                      )
+                    : html`
+                        ${renderMadeTableAndMobileList(this.ctrl.madeEntries, {
+                          currentUserId: this.ctrl.currentUserId,
+                          showProjectColumn: true,
+                          resolveProjectName: this.resolveProjectName,
+                          disclosure: this.ctrl.madeDisclosure,
+                        })}
+                        ${renderLoadMoreFooter({
+                          tab: 'made',
+                          nextCursor: this.ctrl.madeNextCursor,
+                          loadingMore: this.ctrl.madeLoadingMore,
+                          showEndFilteredNotice: isFiltered,
+                          onLoadMore: () => void this.ctrl.loadMadePage({ mode: 'append' }),
+                        })}
+                      `}
+              `}
     `;
   }
 
