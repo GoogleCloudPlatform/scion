@@ -231,7 +231,7 @@ describe('inbox-tabs registry and visibility (ptone/scion#9291)', () => {
     expect(decisions?.classList.contains('active')).toBe(false);
   });
 
-  it('on <scion-page-profile-decisions>, renders Decisions (active) | Overview when Inbox is on, and omits strip when Inbox is off', async () => {
+  it('on <scion-page-profile-decisions>, renders Overview | Decisions (Decisions active) when Inbox is on, and omits strip when Inbox is off', async () => {
     class StubEventSource extends EventTarget {
       readyState = 0;
       onopen: ((ev: Event) => void) | null = null;
