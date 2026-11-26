@@ -1135,6 +1135,9 @@ export class ScionPageArtifactDetail extends LitElement {
         border-radius: var(--scion-radius-sm);
         padding: 0 0.3rem;
       }
+      .draft-status-icon {
+        display: none;
+      }
       .g-review-actions {
         display: inline-flex;
         align-items: center;
@@ -1153,40 +1156,74 @@ export class ScionPageArtifactDetail extends LitElement {
         .g-review-actions sl-button::part(base) {
           padding-inline: 0.45rem;
         }
+        .g-review-actions sl-button::part(prefix) {
+          padding-inline-end: 0;
+        }
         .g-review-actions sl-button::part(label) {
           padding: 0;
         }
       }
       @media (max-width: 640px) {
+        :host {
+          padding-inline: 0.25rem;
+        }
         .g-sticky {
           top: -1rem;
         }
         .g-toolbar {
           flex-wrap: nowrap;
-          gap: 0.25rem;
-          padding: 0.35rem 0.4rem;
+          gap: 0.2rem;
+          padding: 0.3rem 0.25rem;
         }
-        .g-toolbar .sep {
+        .g-toolbar .sep,
+        .g-toolbar .spacer,
+        .g-toolbar .help-dropdown {
           display: none;
         }
-        .g-toolbar .draft-status-wrap {
-          min-width: 0;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          flex-shrink: 1;
+        .g-toolbar .track-wrap .narrow {
+          display: none;
         }
+        .g-toolbar sl-switch.track::part(label) {
+          margin-inline-start: 0;
+        }
+        .g-toolbar .draft-status-wrap.empty {
+          display: none;
+        }
+        .g-toolbar .draft-status-icon {
+          display: inline-flex;
+          align-items: center;
+          font-size: 0.875rem;
+        }
+        /* Visually hidden, still announced by screen readers via aria-live. */
         .g-toolbar .draft-status {
+          position: absolute;
+          width: 1px;
+          height: 1px;
           overflow: hidden;
-          text-overflow: ellipsis;
+          clip: rect(0 0 0 0);
+          white-space: nowrap;
         }
         .g-toolbar sl-button::part(base) {
-          padding-inline: 0.4rem;
+          padding-inline: 0.25rem;
+        }
+        .g-toolbar sl-button::part(prefix) {
+          padding-inline-end: 0;
         }
         .g-toolbar sl-button::part(label) {
           padding: 0;
         }
+        .g-toolbar sl-radio-button::part(button) {
+          padding-inline: 0.25rem;
+        }
+        .g-toolbar sl-radio-button::part(prefix) {
+          padding-inline-end: 0;
+        }
+        .g-toolbar sl-radio-button::part(label) {
+          padding: 0;
+        }
         .g-review-actions {
-          gap: 0.25rem;
+          gap: 0.2rem;
+          margin-left: auto;
         }
         /* Visually hidden, still the buttons' accessible names. */
         .g-toolbar .lbl {
@@ -1196,9 +1233,6 @@ export class ScionPageArtifactDetail extends LitElement {
           overflow: hidden;
           clip: rect(0 0 0 0);
           white-space: nowrap;
-        }
-        .g-toolbar .narrow {
-          display: inline;
         }
       }
       /* Comment is the only way to comment by touch: a tap target of at
@@ -3977,7 +4011,22 @@ export class ScionPageArtifactDetail extends LitElement {
   /** The current hint, inside the live region. */
   private renderHintStrip(): TemplateResult | typeof nothing {
     const hint = this.graphicalHint;
-    if (!hint) return nothing;
+    if (!hint) {
+      if (this.reviewView === 'source' && this.reviewHint) {
+        return html`<div class="hint-strip warning">
+          <sl-icon class="hint-icon" name="exclamation-triangle"></sl-icon>
+          <div class="hint-text">${this.reviewHint}</div>
+          <sl-icon-button
+            name="x-lg"
+            label="Close"
+            @click=${(): void => {
+              this.reviewHint = null;
+            }}
+          ></sl-icon-button>
+        </div>`;
+      }
+      return nothing;
+    }
     const t = REVIEW_HINT_TEXT[hint];
     const icon =
       hint === 'image'
@@ -4093,8 +4142,7 @@ export class ScionPageArtifactDetail extends LitElement {
                       <sl-icon slot="prefix" name="dash-circle"></sl-icon>
                       <span class="lbl">Delete</span>
                     </sl-button>
-                  </sl-tooltip>
-                  ${this.reviewHint ? html`<span class="hint">${this.reviewHint}</span>` : nothing}`}
+                  </sl-tooltip>`}
             <span class="spacer"></span>
             ${this.renderDraftStatus()}
             <sl-tooltip
@@ -4131,7 +4179,7 @@ export class ScionPageArtifactDetail extends LitElement {
                 </sl-radio-button>
               </sl-radio-group>
             </sl-tooltip>
-            <sl-dropdown placement="bottom-end" distance="4">
+            <sl-dropdown class="help-dropdown" placement="bottom-end" distance="4">
               <sl-icon-button
                 slot="trigger"
                 name="question-circle"
@@ -4383,9 +4431,29 @@ export class ScionPageArtifactDetail extends LitElement {
         : st === 'retrying' || st === 'conflict' || st === 'too_many_drafts'
           ? 'warning'
           : '';
+    const icon =
+      st === 'no_access' || st === 'too_large'
+        ? 'exclamation-octagon'
+        : st === 'retrying' || st === 'conflict' || st === 'too_many_drafts'
+          ? 'exclamation-triangle'
+          : st === 'saving'
+            ? 'arrow-repeat'
+            : st === 'saved'
+              ? 'check-circle'
+              : st === 'unsaved'
+                ? 'clock'
+                : null;
     const showDownload = st === 'too_large' || st === 'no_access';
+    const emptyClass = !text && !showDownload ? 'empty' : '';
     return html`
-      <span class="draft-status-wrap ${tone}">
+      <span class="draft-status-wrap ${tone} ${emptyClass}">
+        ${text && icon
+          ? html`<sl-tooltip content=${text}>
+              <span class="draft-status-icon" tabindex="0" aria-label=${text}>
+                <sl-icon name=${icon}></sl-icon>
+              </span>
+            </sl-tooltip>`
+          : nothing}
         <span class="draft-status" role="status" aria-live="polite">${text}</span>
         ${showDownload
           ? html`<sl-button
@@ -4424,7 +4492,6 @@ export class ScionPageArtifactDetail extends LitElement {
           <sl-button
             size="small"
             class="cancel-review-btn"
-            aria-label="Cancel"
             ?disabled=${this.reviewBusy}
             @click=${this.cancelReview}
           >
@@ -4437,7 +4504,6 @@ export class ScionPageArtifactDetail extends LitElement {
                 <sl-button
                   size="small"
                   class="save-draft-btn"
-                  aria-label="Save Draft"
                   ?loading=${this.draftSnapshot?.inFlight ?? false}
                   ?disabled=${saveDraftDisabled}
                   @click=${(): void => void this.saveDraftNow()}
@@ -4451,7 +4517,6 @@ export class ScionPageArtifactDetail extends LitElement {
                   size="small"
                   variant="primary"
                   class="submit-review-btn"
-                  aria-label="Submit Review"
                   ?loading=${this.reviewBusy}
                   ?disabled=${submitDisabled}
                   @click=${(): void => void this.saveReview()}
@@ -4465,7 +4530,6 @@ export class ScionPageArtifactDetail extends LitElement {
                 size="small"
                 variant="primary"
                 class="submit-review-btn"
-                aria-label="Save review"
                 ?loading=${this.reviewBusy}
                 ?disabled=${submitDisabled}
                 @click=${(): void => void this.saveReview()}

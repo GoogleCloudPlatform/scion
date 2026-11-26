@@ -18,7 +18,10 @@
  * Tests for redundant Cancel, Save Draft, and Submit Review actions in the
  * sticky review header (.g-sticky in artifact-detail.ts, ptone/scion#9488):
  * parity of handlers, confirmations, and disabled/busy/loading states with
- * the bottom .edit-footer buttons, plus compact icon-only mobile layout rules.
+ * the bottom .edit-footer buttons across graphical and source views.
+ *
+ * Mobile single-row geometry and overflow assertions live in
+ * web/e2e/artifacts-review/mobile.pw.ts against real Chromium layout.
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -219,30 +222,6 @@ async function settle(el: ScionPageArtifactDetail, ticks = 10): Promise<void> {
     await new Promise((r) => setTimeout(r, 0));
     await el.updateComplete;
   }
-}
-
-function extractMediaBlocks(cssText: string, query: string): string[] {
-  const blocks: string[] = [];
-  const header = `@media ${query}`;
-  let idx = 0;
-  while ((idx = cssText.indexOf(header, idx)) !== -1) {
-    const open = cssText.indexOf('{', idx + header.length);
-    if (open === -1) break;
-    let depth = 0;
-    let end = open;
-    for (; end < cssText.length; end++) {
-      if (cssText[end] === '{') depth++;
-      else if (cssText[end] === '}') {
-        depth--;
-        if (depth === 0) {
-          blocks.push(cssText.slice(open + 1, end));
-          break;
-        }
-      }
-    }
-    idx = end + 1;
-  }
-  return blocks;
 }
 
 function findButton(
@@ -462,47 +441,54 @@ describe('ScionPageArtifactDetail sticky review header actions', () => {
     expect(el.shadowRoot!.querySelector('.g-sticky')).toBeNull();
   });
 
-  it('renders accessible labels, tooltips, icons, and compact non-wrapping mobile CSS rules', async () => {
+  it('renders accessible labels, tooltips, and icons for sticky actions in graphical and source views', async () => {
     const state: MockServerState = { draft: null, currentSeq: 1, requests: [] };
     mockHub(state);
     const el = await mountAndStartReview(true);
 
-    const buttons = Array.from(
-      el.shadowRoot!.querySelectorAll<HTMLElement>('.g-sticky .g-review-actions sl-button')
-    );
-    expect(buttons).toHaveLength(3);
+    const assertActionControls = (): void => {
+      const buttons = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLElement>('.g-sticky .g-review-actions sl-button')
+      );
+      expect(buttons).toHaveLength(3);
 
-    const expected = [
-      { label: 'Cancel', icon: 'x-lg' },
-      { label: 'Save Draft', icon: 'floppy' },
-      { label: 'Submit Review', icon: 'send' },
-    ];
-    for (const [i, item] of expected.entries()) {
-      const btn = buttons[i]!;
-      const tooltip = btn.closest('sl-tooltip');
-      expect(tooltip?.getAttribute('content')).toBe(item.label);
-      expect(btn.getAttribute('aria-label')).toBe(item.label);
-      expect(btn.querySelector('sl-icon[slot="prefix"]')?.getAttribute('name')).toBe(item.icon);
-      expect(btn.querySelector('.lbl')?.textContent?.trim()).toBe(item.label);
-    }
-
-    // Verify component stylesheet enforces icon-only compact styling on narrow/mobile widths
-    // and non-wrapping, non-overflowing sticky toolbar layout at <=640px.
-    const ctor = customElements.get('scion-page-artifact-detail') as unknown as {
-      styles: Array<{ cssText: string }>;
+      const expected = [
+        { label: 'Cancel', icon: 'x-lg' },
+        { label: 'Save Draft', icon: 'floppy' },
+        { label: 'Submit Review', icon: 'send' },
+      ];
+      for (const [i, item] of expected.entries()) {
+        const btn = buttons[i]!;
+        const tooltip = btn.closest('sl-tooltip');
+        expect(tooltip?.getAttribute('content')).toBe(item.label);
+        expect(btn.querySelector('sl-icon[slot="prefix"]')?.getAttribute('name')).toBe(item.icon);
+        expect(btn.querySelector('.lbl')?.textContent?.trim()).toBe(item.label);
+      }
     };
-    const cssText = ctor.styles.map((s) => s.cssText).join('\n');
 
-    const narrowCss = extractMediaBlocks(cssText, '(max-width: 900px)').join('\n');
-    expect(narrowCss).toContain('.g-review-actions .lbl');
-    expect(narrowCss).toContain('.g-review-actions sl-button::part(label)');
-    expect(narrowCss).toContain('padding: 0;');
+    assertActionControls();
 
-    const mobileCss = extractMediaBlocks(cssText, '(max-width: 640px)').join('\n');
-    expect(mobileCss).toContain('flex-wrap: nowrap;');
-    expect(mobileCss).toContain('.g-toolbar .lbl');
-    expect(mobileCss).toContain('.g-toolbar .draft-status-wrap');
-    expect(mobileCss).toContain('overflow: hidden;');
-    expect(mobileCss).toContain('text-overflow: ellipsis;');
+    // Switch to Source view and verify sticky actions remain present and any
+    // source-view reviewHint renders in .hint-strip below .g-toolbar (never
+    // inside .g-toolbar where it could push actions off-screen).
+    const viewToggle = el.shadowRoot!.querySelector<HTMLElement & { value: string }>(
+      '.g-toolbar .view-toggle'
+    )!;
+    viewToggle.value = 'source';
+    viewToggle.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await settle(el);
+
+    assertActionControls();
+    expect(el.shadowRoot!.querySelector('.g-toolbar .hint')).toBeNull();
+
+    // Triggering a source-view hint (e.g. Delete with no selection) shows it
+    // in .g-sticky .hint-strip, leaving .g-toolbar free of hint text.
+    const deleteBtn = findButton(el, '.g-toolbar sl-button', 'Delete')!;
+    deleteBtn.click();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.g-toolbar .hint')).toBeNull();
+    const strip = el.shadowRoot!.querySelector('.g-sticky .hint-strip');
+    expect(strip).not.toBeNull();
+    expect(strip!.textContent?.trim().length).toBeGreaterThan(0);
   });
 });
