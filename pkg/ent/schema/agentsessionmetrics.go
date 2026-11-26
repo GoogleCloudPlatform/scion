@@ -79,6 +79,13 @@ func (AgentSessionMetrics) Fields() []ent.Field {
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),
+		// converted_at records when this row was converted into the Track 1
+		// usage_events ledger (or explicitly marked skipped because the
+		// producer already emitted Track 1 usage events). Strictly additive
+		// nullable column; indexed for the IS NULL catch-up scan.
+		field.Time("converted_at").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -93,6 +100,8 @@ func (AgentSessionMetrics) Indexes() []ent.Index {
 		index.Fields("project_id").
 			StorageKey("agentsessionmetrics_grove_id"),
 		index.Fields("started_at"),
+		// Supports bounded catch-up scans of unconverted rows (WHERE converted_at IS NULL).
+		index.Fields("converted_at", "id"),
 		// One row per agent, session and segment start: a repeated report
 		// of the same segment (a retry, or a resend after the sender died
 		// before confirming it) carries the same started_at and is not

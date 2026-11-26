@@ -53,12 +53,13 @@ type ToolStats struct {
 // session-end. It matches the Hub Reporting Protocol defined in the design doc
 // (Section 4.2).
 type MetricsPayload struct {
-	Type      string               `json:"type"`
-	AgentID   string               `json:"agent_id"`
-	Timestamp string               `json:"timestamp"`
-	Session   SessionMetrics       `json:"session"`
-	Tokens    TokenMetrics         `json:"tokens"`
-	Tools     map[string]ToolStats `json:"tools,omitempty"`
+	Type               string               `json:"type"`
+	AgentID            string               `json:"agent_id"`
+	Timestamp          string               `json:"timestamp"`
+	UsageEventsEnabled bool                 `json:"usage_events_enabled,omitempty"`
+	Session            SessionMetrics       `json:"session"`
+	Tokens             TokenMetrics         `json:"tokens"`
+	Tools              map[string]ToolStats `json:"tools,omitempty"`
 }
 
 // ReportMetrics sends a metrics payload to the Hub. It follows the same

@@ -116,7 +116,11 @@ func (s *UsageLedgerStore) ListUsageRollupsDailyByAgent(ctx context.Context, age
 
 // GetUsageHourlyCoverageStart implements store.UsageLedgerStore.GetUsageHourlyCoverageStart.
 func (s *UsageLedgerStore) GetUsageHourlyCoverageStart(ctx context.Context) (time.Time, bool, error) {
-	row, err := s.client.HubSetting.Query().
+	return getUsageHourlyCoverageStartTx(ctx, s.client)
+}
+
+func getUsageHourlyCoverageStartTx(ctx context.Context, client *ent.Client) (time.Time, bool, error) {
+	row, err := client.HubSetting.Query().
 		Where(hubsetting.SectionEQ(store.UsageRollupHourlyCoverageSection)).
 		Only(ctx)
 	if err != nil {
@@ -795,6 +799,30 @@ func (s *UsageLedgerStore) HasUsageEventsForRun(ctx context.Context, agentID, ru
 		return false, mapError(err)
 	}
 	return exists, nil
+}
+
+// GetRunUsageSourceSummary implements store.UsageLedgerStore.GetRunUsageSourceSummary.
+func (s *UsageLedgerStore) GetRunUsageSourceSummary(ctx context.Context, agentID, runID string) (store.RunUsageSourceSummary, error) {
+	if agentID == "" || runID == "" {
+		return store.RunUsageSourceSummary{}, nil
+	}
+	var sources []string
+	err := s.client.UsageEvent.Query().
+		Where(usageevent.AgentIDEQ(agentID), usageevent.RunIDEQ(runID)).
+		GroupBy(usageevent.FieldUsageSource).
+		Scan(ctx, &sources)
+	if err != nil {
+		return store.RunUsageSourceSummary{}, mapError(err)
+	}
+	var out store.RunUsageSourceSummary
+	for _, src := range sources {
+		if src == store.UsageSourceLegacySessionMetrics {
+			out.HasLegacyEvents = true
+		} else {
+			out.HasTrack1Events = true
+		}
+	}
+	return out, nil
 }
 
 // DBNow implements store.UsageLedgerStore.DBNow, reading the current UTC

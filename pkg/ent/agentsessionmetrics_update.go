@@ -310,6 +310,26 @@ func (_u *AgentSessionMetricsUpdate) ClearLanguages() *AgentSessionMetricsUpdate
 	return _u
 }
 
+// SetConvertedAt sets the "converted_at" field.
+func (_u *AgentSessionMetricsUpdate) SetConvertedAt(v time.Time) *AgentSessionMetricsUpdate {
+	_u.mutation.SetConvertedAt(v)
+	return _u
+}
+
+// SetNillableConvertedAt sets the "converted_at" field if the given value is not nil.
+func (_u *AgentSessionMetricsUpdate) SetNillableConvertedAt(v *time.Time) *AgentSessionMetricsUpdate {
+	if v != nil {
+		_u.SetConvertedAt(*v)
+	}
+	return _u
+}
+
+// ClearConvertedAt clears the value of the "converted_at" field.
+func (_u *AgentSessionMetricsUpdate) ClearConvertedAt() *AgentSessionMetricsUpdate {
+	_u.mutation.ClearConvertedAt()
+	return _u
+}
+
 // Mutation returns the AgentSessionMetricsMutation object of the builder.
 func (_u *AgentSessionMetricsUpdate) Mutation() *AgentSessionMetricsMutation {
 	return _u.mutation
@@ -465,6 +485,12 @@ func (_u *AgentSessionMetricsUpdate) sqlSave(ctx context.Context) (_node int, er
 	}
 	if _u.mutation.LanguagesCleared() {
 		_spec.ClearField(agentsessionmetrics.FieldLanguages, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.ConvertedAt(); ok {
+		_spec.SetField(agentsessionmetrics.FieldConvertedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ConvertedAtCleared() {
+		_spec.ClearField(agentsessionmetrics.FieldConvertedAt, field.TypeTime)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -767,6 +793,26 @@ func (_u *AgentSessionMetricsUpdateOne) ClearLanguages() *AgentSessionMetricsUpd
 	return _u
 }
 
+// SetConvertedAt sets the "converted_at" field.
+func (_u *AgentSessionMetricsUpdateOne) SetConvertedAt(v time.Time) *AgentSessionMetricsUpdateOne {
+	_u.mutation.SetConvertedAt(v)
+	return _u
+}
+
+// SetNillableConvertedAt sets the "converted_at" field if the given value is not nil.
+func (_u *AgentSessionMetricsUpdateOne) SetNillableConvertedAt(v *time.Time) *AgentSessionMetricsUpdateOne {
+	if v != nil {
+		_u.SetConvertedAt(*v)
+	}
+	return _u
+}
+
+// ClearConvertedAt clears the value of the "converted_at" field.
+func (_u *AgentSessionMetricsUpdateOne) ClearConvertedAt() *AgentSessionMetricsUpdateOne {
+	_u.mutation.ClearConvertedAt()
+	return _u
+}
+
 // Mutation returns the AgentSessionMetricsMutation object of the builder.
 func (_u *AgentSessionMetricsUpdateOne) Mutation() *AgentSessionMetricsMutation {
 	return _u.mutation
@@ -952,6 +998,12 @@ func (_u *AgentSessionMetricsUpdateOne) sqlSave(ctx context.Context) (_node *Age
 	}
 	if _u.mutation.LanguagesCleared() {
 		_spec.ClearField(agentsessionmetrics.FieldLanguages, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.ConvertedAt(); ok {
+		_spec.SetField(agentsessionmetrics.FieldConvertedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ConvertedAtCleared() {
+		_spec.ClearField(agentsessionmetrics.FieldConvertedAt, field.TypeTime)
 	}
 	_node = &AgentSessionMetrics{config: _u.config}
 	_spec.Assign = _node.assignValues

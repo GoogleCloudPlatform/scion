@@ -39,6 +39,7 @@ type usageLedgerHookStore interface {
 	SetRunAttributionConfig(cfg *store.RunAttributionConfig)
 	RunAttributionConfigInstalled() bool
 	BackfillActiveRunAttributions(ctx context.Context, hubID string) (int, error)
+	BackfillLegacySessionMetrics(ctx context.Context, hubID string) (store.LegacySessionMetricsBackfillResult, error)
 }
 
 // usageLedgerRuntime manages the Hub's tokenomics.usage_ledger backfill state
@@ -68,6 +69,8 @@ type usageLedgerRuntime struct {
 	retryMax      time.Duration
 	// backfillFn overrides uls.BackfillActiveRunAttributions in tests.
 	backfillFn func(ctx context.Context, hubID string) (int, error)
+	// legacyBackfillFn overrides uls.BackfillLegacySessionMetrics in tests.
+	legacyBackfillFn func(ctx context.Context, hubID string) (store.LegacySessionMetricsBackfillResult, error)
 }
 
 func (rt *usageLedgerRuntime) nextRetryDelay() time.Duration {
@@ -207,9 +210,17 @@ func (s *Server) prepareBackfillLocked(ctx context.Context, uls usageLedgerHookS
 	if backfillFn == nil {
 		backfillFn = uls.BackfillActiveRunAttributions
 	}
+	legacyBackfillFn := rt.legacyBackfillFn
+	if legacyBackfillFn == nil {
+		legacyBackfillFn = uls.BackfillLegacySessionMetrics
+	}
 
 	return func() {
 		inserted, err := backfillFn(backfillCtx, myHubID)
+		var legacyRes store.LegacySessionMetricsBackfillResult
+		if err == nil && backfillCtx.Err() == nil {
+			legacyRes, err = legacyBackfillFn(backfillCtx, myHubID)
+		}
 		ctxErr := backfillCtx.Err()
 		cancel()
 
@@ -235,11 +246,15 @@ func (s *Server) prepareBackfillLocked(ctx context.Context, uls usageLedgerHookS
 			if inserted > 0 {
 				slog.Info("tokenomics.usage_ledger: backfilled run_attribution rows for active runs", "inserted", inserted)
 			}
+			if legacyRes.Processed > 0 {
+				slog.Info("tokenomics.usage_ledger: backfilled legacy agent_session_metrics rows",
+					"processed", legacyRes.Processed, "converted", legacyRes.Converted, "skipped", legacyRes.Skipped)
+			}
 		default:
 			delay := rt.nextRetryDelay()
 			rt.retryAttempts++
-			slog.Warn("tokenomics.usage_ledger: active-run attribution backfill failed; scheduling retry",
-				"inserted", inserted, "attempt", rt.retryAttempts, "retry_in", delay, "error", err)
+			slog.Warn("tokenomics.usage_ledger: usage ledger backfill failed; scheduling retry",
+				"inserted", inserted, "legacy_processed", legacyRes.Processed, "attempt", rt.retryAttempts, "retry_in", delay, "error", err)
 			retryGen := rt.gen
 			rt.retryTimer = time.AfterFunc(delay, func() {
 				rt.mu.Lock()

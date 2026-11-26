@@ -4882,6 +4882,7 @@ type AgentSessionMetrics struct {
 	ToolCalls       map[string]any `json:"toolCalls,omitempty"`
 	Languages       []string       `json:"languages,omitempty"`
 	CreatedAt       time.Time      `json:"createdAt"`
+	ConvertedAt     *time.Time     `json:"convertedAt,omitempty"`
 }
 
 // AgentSessionMetricsAggregates holds SQL-level aggregation results for

@@ -58,6 +58,7 @@ func entAgentSessionMetricsToStore(e *ent.AgentSessionMetrics) *store.AgentSessi
 		ToolCalls:       e.ToolCalls,
 		Languages:       e.Languages,
 		CreatedAt:       e.CreatedAt,
+		ConvertedAt:     e.ConvertedAt,
 	}
 }
 
@@ -86,7 +87,8 @@ func (s *AgentSessionMetricsStore) CreateAgentSessionMetrics(ctx context.Context
 		SetTokensInput(m.TokensInput).
 		SetTokensOutput(m.TokensOutput).
 		SetTokensCached(m.TokensCached).
-		SetTokensReasoning(m.TokensReasoning)
+		SetTokensReasoning(m.TokensReasoning).
+		SetNillableConvertedAt(m.ConvertedAt)
 
 	if m.ID != "" {
 		uid, err := uuid.Parse(m.ID)

@@ -18,8 +18,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -27,13 +29,14 @@ import (
 // metricsPayloadRequest is the JSON body POSTed by sciontool on session-end.
 // It mirrors the Hub Reporting Protocol from the design doc Section 4.2.
 type metricsPayloadRequest struct {
-	Type      string               `json:"type"`
-	AgentID   string               `json:"agent_id"`
-	Timestamp string               `json:"timestamp"`
-	Session   metricsSession       `json:"session"`
-	Tokens    metricsTokens        `json:"tokens"`
-	Tools     map[string]toolStats `json:"tools"`
-	Languages []string             `json:"languages"`
+	Type               string               `json:"type"`
+	AgentID            string               `json:"agent_id"`
+	Timestamp          string               `json:"timestamp"`
+	UsageEventsEnabled bool                 `json:"usage_events_enabled"`
+	Session            metricsSession       `json:"session"`
+	Tokens             metricsTokens        `json:"tokens"`
+	Tools              map[string]toolStats `json:"tools"`
+	Languages          []string             `json:"languages"`
 }
 
 type metricsSession struct {
@@ -133,7 +136,15 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
-	// Build the store model.
+	// Build the store model. When the producer marks usage_events_enabled=true,
+	// its Hub usage sink is already writing Track 1 usage_events, so we stamp
+	// converted_at immediately to prevent the legacy catch-up backfill from
+	// double counting this row later (D9a).
+	var convertedAt *time.Time
+	if req.UsageEventsEnabled {
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		convertedAt = &now
+	}
 	newID := uuid.New().String()
 	metrics := &store.AgentSessionMetrics{
 		ID:              newID,
@@ -151,6 +162,7 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 		TokensReasoning: req.Tokens.Reasoning,
 		ToolCalls:       toolCalls,
 		Languages:       req.Languages,
+		ConvertedAt:     convertedAt,
 	}
 
 	if err := s.store.CreateAgentSessionMetrics(ctx, metrics); err != nil {
@@ -172,6 +184,21 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 			"agent_id", id, "session_id", req.Session.ID, "error", err)
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Legacy converter (D9/D9a): for unmarked posts while tokenomics.usage_ledger
+	// is enabled, convert into a legacy_session_metrics ledger row and stamp
+	// converted_at atomically through IngestUsageBatch. Never fail the metrics
+	// POST if conversion fails: log and leave converted_at NULL so catch-up retries.
+	if !req.UsageEventsEnabled && s.experimentEnabled(experiments.TokenomicsUsageLedger) {
+		preferredRunID := strings.TrimSpace(presentedAgentTokenRunID(ctx))
+		if preferredRunID == "" {
+			preferredRunID = strings.TrimSpace(agent.RunID)
+		}
+		if _, convErr := s.store.ConvertLegacySessionMetricsRow(ctx, s.usageLedgerHubID(), metrics, preferredRunID); convErr != nil {
+			s.agentMetricsLog.Warn("Failed to convert legacy session metrics to usage ledger; catch-up will retry",
+				"agent_id", id, "session_id", req.Session.ID, "metrics_id", metrics.ID, "error", convErr)
+		}
 	}
 
 	s.agentMetricsLog.Info("Session metrics recorded",

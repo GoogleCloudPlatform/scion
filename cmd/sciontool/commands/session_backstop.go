@@ -79,8 +79,11 @@ func reportOpenSessionAtShutdown(agentHome string, outcome exitOutcome, newClien
 	// grow with the number of unsent reports.
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownSessionReportTimeout)
 	defer cancel()
+	usageEventsEnabled := telemetry.IsHubOutboxActive(agentHome)
 	for _, summary := range summaries {
-		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
+		payload := hub.SummaryToMetricsPayload(summary)
+		payload.UsageEventsEnabled = usageEventsEnabled
+		if err := client.ReportMetrics(ctx, payload); err != nil {
 			log.Error("Session metrics: failed to report session %s at shutdown: %v", summary.SessionID, err)
 			continue
 		}
@@ -223,7 +226,7 @@ func startHeldReportSender(agentHome string, overlay map[string]string, newClien
 		return client
 	}
 	ticks, stopTicks := heldReportTicker()
-	return runHeldReportSender(handlers.NewFileSessionState(agentHome), newReporter, ticks, stopTicks)
+	return runHeldReportSenderWithHome(handlers.NewFileSessionState(agentHome), agentHome, newReporter, ticks, stopTicks)
 }
 
 // runHeldReportSender runs sendDueHeldReports on every tick until the
@@ -231,6 +234,10 @@ func startHeldReportSender(agentHome string, overlay map[string]string, newClien
 // progress, waits for the check in progress to finish, and may be called
 // more than once.
 func runHeldReportSender(store heldReportStore, newReporter func() metricsReporter, ticks <-chan time.Time, stopTicks func()) (stop func()) {
+	return runHeldReportSenderWithHome(store, "", newReporter, ticks, stopTicks)
+}
+
+func runHeldReportSenderWithHome(store heldReportStore, agentHome string, newReporter func() metricsReporter, ticks <-chan time.Time, stopTicks func()) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan struct{})
 	go func() {
@@ -240,7 +247,7 @@ func runHeldReportSender(store heldReportStore, newReporter func() metricsReport
 			case <-ctx.Done():
 				return
 			case <-ticks:
-				sendDueHeldReports(ctx, store, newReporter)
+				sendDueHeldReportsWithHome(ctx, store, agentHome, newReporter)
 			}
 		}
 	}()
@@ -276,6 +283,10 @@ type metricsReporter interface {
 // the shutdown backstop sends it again. That includes a send cancelled
 // through parent (the check is being stopped). Failures are logged.
 func sendDueHeldReports(parent context.Context, store heldReportStore, newReporter func() metricsReporter) {
+	sendDueHeldReportsWithHome(parent, store, "", newReporter)
+}
+
+func sendDueHeldReportsWithHome(parent context.Context, store heldReportStore, agentHome string, newReporter func() metricsReporter) {
 	client := newReporter()
 	if client == nil {
 		log.Debug("Session metrics: Hub client not configured, held report check skipped")
@@ -291,9 +302,12 @@ func sendDueHeldReports(parent context.Context, store heldReportStore, newReport
 	}
 	ctx, cancel := context.WithTimeout(parent, heldReportSendTimeout)
 	defer cancel()
+	usageEventsEnabled := agentHome != "" && telemetry.IsHubOutboxActive(agentHome)
 	var sent, failed []telemetry.SessionSummary
 	for _, summary := range summaries {
-		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
+		payload := hub.SummaryToMetricsPayload(summary)
+		payload.UsageEventsEnabled = usageEventsEnabled
+		if err := client.ReportMetrics(ctx, payload); err != nil {
 			log.Error("Session metrics: failed to report held session %s, will retry: %v", summary.SessionID, err)
 			failed = append(failed, summary)
 			continue

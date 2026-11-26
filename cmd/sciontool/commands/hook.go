@@ -548,7 +548,9 @@ func wireSessionMetrics(parent context.Context, h *handlers.TelemetryHandler, cl
 	h.OnSessionEnd = func(summary telemetry.SessionSummary) {
 		ctx, cancel := context.WithTimeout(parent, sessionMetricsReportTimeout)
 		defer cancel()
-		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
+		payload := hub.SummaryToMetricsPayload(summary)
+		payload.UsageEventsEnabled = telemetry.IsHubOutboxActive(home)
+		if err := client.ReportMetrics(ctx, payload); err != nil {
 			log.Error("Failed to report session metrics to hub: %v", err)
 			return
 		}

@@ -16,6 +16,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -318,17 +320,52 @@ type UsageMeterHealthUpdate struct {
 	FinalState           string
 }
 
+// LegacySessionMetricsEventID returns the deterministic usage_events.event_id
+// for an agent_session_metrics segment keyed by (agent_id, session_id, started_at).
+// Truncating startedAt to UTC microseconds ensures identical IDs across SQLite
+// and Postgres and between live conversion and historical catch-up.
+func LegacySessionMetricsEventID(agentID, sessionID string, startedAt time.Time) string {
+	ts := startedAt.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+	sum := sha256.Sum256([]byte(agentID + "\x00" + sessionID + "\x00" + ts))
+	return "legacy-sm:" + hex.EncodeToString(sum[:])
+}
+
 // UsageIngestBatchInput holds validated, attribution-stamped usage events and
 // an optional meter_health update to persist atomically in one transaction.
 type UsageIngestBatchInput struct {
 	// AgentID is the authenticated agent's ID (used for the Postgres advisory
-	// lock hashtext('usage_rollup:' || agent_id)).
+	// lock hashtext('usage_rollup:' || agent_id)). When empty and Events span
+	// multiple agents (e.g. legacy catch-up), locks are acquired per distinct
+	// event AgentID in canonical sorted order.
 	AgentID string
 	// Events are validated, attribution-stamped usage events ready for
 	// idempotent insert into usage_events.
 	Events []*UsageEvent
 	// MeterHealth, when non-nil, is applied in the same transaction.
 	MeterHealth *UsageMeterHealthUpdate
+	// IsBackfill indicates a historical/catch-up batch:
+	//  - never creates or moves the hourly coverage start marker;
+	//  - writes usage_rollups_hourly ONLY for events whose EventTS hour is at
+	//    or after the existing hourly coverage start (if one exists);
+	//  - always writes usage_rollups_daily and usage_scope_counters_daily.
+	IsBackfill bool
+	// MarkSessionMetricsConvertedIDs lists agent_session_metrics UUIDs to stamp
+	// with converted_at in the same transaction as the ledger/rollup writes.
+	MarkSessionMetricsConvertedIDs []string
+}
+
+// RunUsageSourceSummary reports which classes of usage_events exist for a run.
+type RunUsageSourceSummary struct {
+	HasTrack1Events bool // at least one row with usage_source != legacy_session_metrics
+	HasLegacyEvents bool // at least one row with usage_source == legacy_session_metrics
+}
+
+// LegacySessionMetricsBackfillResult summarizes one catch-up backfill run over
+// unconverted agent_session_metrics rows.
+type LegacySessionMetricsBackfillResult struct {
+	Processed int
+	Converted int
+	Skipped   int
 }
 
 // UsageIngestRowRejection records a single event rejected at persistence time
@@ -529,6 +566,24 @@ type UsageLedgerStore interface {
 	// HasUsageEventsForRun reports whether at least one usage_events row exists
 	// for (agentID, runID).
 	HasUsageEventsForRun(ctx context.Context, agentID, runID string) (bool, error)
+
+	// GetRunUsageSourceSummary reports whether (agentID, runID) has non-legacy
+	// Track 1 usage events and/or legacy_session_metrics usage events.
+	GetRunUsageSourceSummary(ctx context.Context, agentID, runID string) (RunUsageSourceSummary, error)
+
+	// ConvertLegacySessionMetricsRow converts a single agent_session_metrics
+	// row into a legacy_session_metrics ledger row (through IngestUsageBatch)
+	// and atomically stamps converted_at on the source row in the same
+	// transaction. If Track 1 events already exist for the run/session, it
+	// skips inserting a ledger row while still stamping converted_at.
+	ConvertLegacySessionMetricsRow(ctx context.Context, hubID string, row *AgentSessionMetrics, preferredRunID string) (converted bool, err error)
+
+	// BackfillLegacySessionMetrics processes unconverted agent_session_metrics
+	// rows (WHERE converted_at IS NULL) in bounded batches, converting each
+	// non-overlapping row through IngestUsageBatch and stamping converted_at
+	// atomically in the same transaction. Safe to re-run after crashes,
+	// restarts, experiment toggles, and retention deletion of old ledger rows.
+	BackfillLegacySessionMetrics(ctx context.Context, hubID string) (LegacySessionMetricsBackfillResult, error)
 
 	// DBNow returns the current UTC timestamp from the database clock
 	// (Tokenomics design §4.2 item 7).

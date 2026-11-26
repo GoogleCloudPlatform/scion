@@ -800,6 +800,7 @@ var (
 		{Name: "tool_calls", Type: field.TypeJSON, Nullable: true},
 		{Name: "languages", Type: field.TypeJSON, Nullable: true},
 		{Name: "created_at", Type: field.TypeTime},
+		{Name: "converted_at", Type: field.TypeTime, Nullable: true},
 	}
 	// AgentSessionMetricsTable holds the schema information for the "agent_session_metrics" table.
 	AgentSessionMetricsTable = &schema.Table{
@@ -821,6 +822,11 @@ var (
 				Name:    "agentsessionmetrics_started_at",
 				Unique:  false,
 				Columns: []*schema.Column{AgentSessionMetricsColumns[4]},
+			},
+			{
+				Name:    "agentsessionmetrics_converted_at_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentSessionMetricsColumns[16], AgentSessionMetricsColumns[0]},
 			},
 			{
 				Name:    "agentsessionmetrics_agent_id_session_id_started_at",

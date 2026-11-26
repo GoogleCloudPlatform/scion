@@ -1,0 +1,602 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package entadapter
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"entgo.io/ent/dialect"
+	"github.com/google/uuid"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	entasm "github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runattribution"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+)
+
+const (
+	defaultLegacySessionMetricsBackfillPageSize = 100
+	legacySessionMetricsSourceKind              = "agent_session_metrics"
+	legacySessionMetricsProducerEpoch           = "legacy-session-metrics"
+)
+
+// ConvertLegacySessionMetricsRow implements store.UsageLedgerStore.ConvertLegacySessionMetricsRow.
+// Converts a single newly posted agent_session_metrics row into a
+// legacy_session_metrics usage_events row through IngestUsageBatch and stamps
+// converted_at on the source row in the same transaction (D9a).
+func (s *UsageLedgerStore) ConvertLegacySessionMetricsRow(
+	ctx context.Context,
+	hubID string,
+	row *store.AgentSessionMetrics,
+	preferredRunID string,
+) (bool, error) {
+	if row == nil || row.ID == "" || row.AgentID == "" || row.ProjectID == "" || row.SessionID == "" {
+		return false, fmt.Errorf("%w: agent_session_metrics row with id, agent_id, project_id, session_id is required", store.ErrInvalidInput)
+	}
+	if hubID == "" {
+		hubID = "hub-local"
+	}
+
+	var converted bool
+	var wroteHourly bool
+	run := func(client *ent.Client) error {
+		receivedAt := time.Now().UTC().Truncate(time.Microsecond)
+		attrCache := make(map[string]*store.RunAttribution, 1)
+		ev, err := s.prepareLegacyUsageEventTx(ctx, client, hubID, row, preferredRunID, receivedAt, true, attrCache)
+		if err != nil {
+			return err
+		}
+		in := &store.UsageIngestBatchInput{
+			AgentID:                        row.AgentID,
+			MarkSessionMetricsConvertedIDs: []string{row.ID},
+		}
+		if ev != nil {
+			in.Events = []*store.UsageEvent{ev}
+		}
+		res, wh, err := s.ingestUsageBatchTx(ctx, client, in)
+		if err != nil {
+			return err
+		}
+		wroteHourly = wh
+		converted = res.Accepted > 0
+		return nil
+	}
+
+	if s.inTx {
+		if err := run(s.client); err != nil {
+			return false, err
+		}
+		return converted, nil
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := run(tx.Client()); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, mapError(err)
+	}
+	if wroteHourly && s.hourlyCoverageRecorded != nil {
+		s.hourlyCoverageRecorded.Store(true)
+	}
+	return converted, nil
+}
+
+// BackfillLegacySessionMetrics implements store.UsageLedgerStore.BackfillLegacySessionMetrics.
+func (s *UsageLedgerStore) BackfillLegacySessionMetrics(ctx context.Context, hubID string) (store.LegacySessionMetricsBackfillResult, error) {
+	return s.backfillLegacySessionMetricsPaged(ctx, hubID, defaultLegacySessionMetricsBackfillPageSize, nil)
+}
+
+// backfillLegacySessionMetricsPaged processes unconverted agent_session_metrics
+// rows (WHERE converted_at IS NULL) in bounded batches. Each batch acquires a
+// Postgres transaction-scoped advisory lock (and an in-process mutex for
+// SQLite), converts non-overlapping rows through ingestUsageBatchTx with
+// IsBackfill=true, and stamps converted_at on every row in the batch inside the
+// same transaction. afterBatchHook (used in crash-mid-run tests) is called
+// after each committed batch; returning a non-nil error stops the loop cleanly.
+func (s *UsageLedgerStore) backfillLegacySessionMetricsPaged(
+	ctx context.Context,
+	hubID string,
+	pageSize int,
+	afterBatchHook func(batch int, res store.LegacySessionMetricsBackfillResult) error,
+) (store.LegacySessionMetricsBackfillResult, error) {
+	if pageSize <= 0 {
+		pageSize = defaultLegacySessionMetricsBackfillPageSize
+	}
+	if hubID == "" {
+		hubID = "hub-local"
+	}
+
+	if s.legacyBackfillMu != nil {
+		s.legacyBackfillMu.Lock()
+		defer s.legacyBackfillMu.Unlock()
+	}
+
+	var total store.LegacySessionMetricsBackfillResult
+	batchNum := 0
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		batchRes, fetched, err := s.backfillLegacySessionMetricsOneBatch(ctx, hubID, pageSize)
+		if err != nil {
+			return total, err
+		}
+		total.Processed += batchRes.Processed
+		total.Converted += batchRes.Converted
+		total.Skipped += batchRes.Skipped
+		batchNum++
+
+		if afterBatchHook != nil && fetched > 0 {
+			if err := afterBatchHook(batchNum, total); err != nil {
+				return total, err
+			}
+		}
+		if fetched < pageSize {
+			break
+		}
+	}
+	return total, nil
+}
+
+func (s *UsageLedgerStore) backfillLegacySessionMetricsOneBatch(
+	ctx context.Context,
+	hubID string,
+	pageSize int,
+) (store.LegacySessionMetricsBackfillResult, int, error) {
+	var batchRes store.LegacySessionMetricsBackfillResult
+	var fetched int
+
+	run := func(client *ent.Client) error {
+		drv := client.Driver()
+		if drv.Dialect() == dialect.Postgres {
+			var res sql.Result
+			if err := drv.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('legacy_session_metrics_backfill'))", []any{}, &res); err != nil {
+				return mapError(err)
+			}
+		}
+
+		entities, err := client.AgentSessionMetrics.Query().
+			Where(entasm.ConvertedAtIsNil()).
+			Order(ent.Asc(entasm.FieldID)).
+			Limit(pageSize).
+			All(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		fetched = len(entities)
+		if fetched == 0 {
+			return nil
+		}
+
+		receivedAt := time.Now().UTC().Truncate(time.Microsecond)
+		attrCache := make(map[string]*store.RunAttribution, len(entities))
+		events := make([]*store.UsageEvent, 0, len(entities))
+		markIDs := make([]string, 0, len(entities))
+
+		for _, e := range entities {
+			row := entAgentSessionMetricsToStore(e)
+			markIDs = append(markIDs, row.ID)
+			ev, err := s.prepareLegacyUsageEventTx(ctx, client, hubID, row, "", receivedAt, false, attrCache)
+			if err != nil {
+				return err
+			}
+			if ev != nil {
+				events = append(events, ev)
+			} else {
+				batchRes.Skipped++
+			}
+		}
+
+		in := &store.UsageIngestBatchInput{
+			Events:                         events,
+			IsBackfill:                     true,
+			MarkSessionMetricsConvertedIDs: markIDs,
+		}
+		ingestRes, _, err := s.ingestUsageBatchTx(ctx, client, in)
+		if err != nil {
+			return err
+		}
+		batchRes.Processed = fetched
+		batchRes.Converted = ingestRes.Accepted
+		batchRes.Skipped += ingestRes.Duplicates
+		return nil
+	}
+
+	if s.inTx {
+		if err := run(s.client); err != nil {
+			return batchRes, 0, err
+		}
+		return batchRes, fetched, nil
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return batchRes, 0, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := run(tx.Client()); err != nil {
+		return batchRes, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return batchRes, 0, mapError(err)
+	}
+	return batchRes, fetched, nil
+}
+
+// prepareLegacyUsageEventTx checks for Track 1 overlap, resolves or ensures a
+// run_attribution row, and constructs the canonical store.UsageEvent for one
+// agent_session_metrics segment. Returns (nil, nil) when the row overlaps
+// existing non-legacy Track 1 events and must be skipped without double counting.
+func (s *UsageLedgerStore) prepareLegacyUsageEventTx(
+	ctx context.Context,
+	client *ent.Client,
+	hubID string,
+	row *store.AgentSessionMetrics,
+	preferredRunID string,
+	receivedAt time.Time,
+	clampFuture bool,
+	attrCache map[string]*store.RunAttribution,
+) (*store.UsageEvent, error) {
+	overlap, err := hasTrack1OverlapTx(ctx, client, row, preferredRunID)
+	if err != nil {
+		return nil, err
+	}
+	if overlap {
+		return nil, nil
+	}
+
+	attr, err := s.ensureLegacyRunAttributionTx(ctx, client, hubID, row, preferredRunID, attrCache)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildLegacyUsageEvent(hubID, row, attr, receivedAt, clampFuture), nil
+}
+
+// hasTrack1OverlapTx reports whether non-legacy Track 1 usage_events already
+// exist for this agent's run (when preferredRunID is set), session_id_hash, or
+// session time window [started_at, effectiveEnd].
+func hasTrack1OverlapTx(ctx context.Context, client *ent.Client, row *store.AgentSessionMetrics, preferredRunID string) (bool, error) {
+	// 1. Live path: if preferredRunID already has non-legacy Track 1 events for
+	// this agent, never double count.
+	if preferredRunID != "" {
+		exists, err := client.UsageEvent.Query().
+			Where(
+				usageevent.AgentIDEQ(row.AgentID),
+				usageevent.RunIDEQ(preferredRunID),
+				usageevent.UsageSourceNEQ(store.UsageSourceLegacySessionMetrics),
+			).
+			Exist(ctx)
+		if err != nil {
+			return false, mapError(err)
+		}
+		if exists {
+			return true, nil
+		}
+	}
+
+	// 2. Exact session_id_hash match against any non-legacy Track 1 event for
+	// this agent.
+	if row.SessionID != "" {
+		sum := sha256.Sum256([]byte(row.SessionID))
+		sessHash := hex.EncodeToString(sum[:])
+		exists, err := client.UsageEvent.Query().
+			Where(
+				usageevent.AgentIDEQ(row.AgentID),
+				usageevent.SessionIDHashEQ(sessHash),
+				usageevent.UsageSourceNEQ(store.UsageSourceLegacySessionMetrics),
+			).
+			Exist(ctx)
+		if err != nil {
+			return false, mapError(err)
+		}
+		if exists {
+			return true, nil
+		}
+	}
+
+	// 3. Time-window overlap for historical/catch-up rows: if non-legacy Track 1
+	// events for this agent fall within [started_at, effectiveEnd], skip to
+	// avoid double counting harnesses whose Track 1 events omit session_id.
+	startTS := row.StartedAt.UTC().Truncate(time.Microsecond)
+	endTS := startTS
+	if row.EndedAt != nil && !row.EndedAt.IsZero() {
+		endTS = row.EndedAt.UTC().Truncate(time.Microsecond)
+	} else if !row.CreatedAt.IsZero() {
+		endTS = row.CreatedAt.UTC().Truncate(time.Microsecond)
+	}
+	if endTS.Before(startTS) {
+		endTS = startTS
+	}
+	exists, err := client.UsageEvent.Query().
+		Where(
+			usageevent.AgentIDEQ(row.AgentID),
+			usageevent.UsageSourceNEQ(store.UsageSourceLegacySessionMetrics),
+			usageevent.EventTsGTE(startTS),
+			usageevent.EventTsLTE(endTS),
+		).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return exists, nil
+}
+
+// ensureLegacyRunAttributionTx resolves or lazily creates the run_attribution
+// row required by the usage_events.run_id FK.
+//
+// Live path (preferredRunID != ""): uses existing run_attribution for
+// preferredRunID if owned by row.AgentID, or lazily ensures it from the live
+// agents row if agent.RunID == preferredRunID; falls back to synthetic
+// "legacy-agent:<agent_id>" if no run_id exists.
+//
+// Catch-up/backfill path (preferredRunID == ""): uses synthetic
+// "legacy-backfill:<agent_id>" built from the agents row as it exists at
+// conversion time (or minimal project_id/agent_id when the agent was
+// hard-deleted), keeping historical rows separate from active Track 1 runs.
+func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
+	ctx context.Context,
+	client *ent.Client,
+	hubID string,
+	row *store.AgentSessionMetrics,
+	preferredRunID string,
+	attrCache map[string]*store.RunAttribution,
+) (*store.RunAttribution, error) {
+	if preferredRunID != "" {
+		if cached, ok := attrCache[preferredRunID]; ok && cached.AgentID == row.AgentID {
+			return cached, nil
+		}
+		existing, err := client.RunAttribution.Query().
+			Where(runattribution.IDEQ(preferredRunID)).
+			Only(ctx)
+		if err == nil && existing.AgentID == row.AgentID {
+			attr := entRunAttributionToStore(existing)
+			attrCache[preferredRunID] = attr
+			return attr, nil
+		}
+		if err != nil && !ent.IsNotFound(err) {
+			return nil, mapError(err)
+		}
+		// Lazy ensure for live agent's current run_id (same rule as P1 ingest).
+		if uid, parseErr := uuid.Parse(row.AgentID); parseErr == nil {
+			agRow, qerr := client.Agent.Query().
+				Where(
+					agent.IDEQ(uid),
+					agent.DeletedAtIsNil(),
+					agent.RunIDEQ(preferredRunID),
+				).
+				Select(runAttributionAgentColumns...).
+				Only(ctx)
+			if qerr == nil {
+				attr, berr := buildRunAttributionFromAgentRow(ctx, client, agRow, preferredRunID, "", hubID, "")
+				if berr != nil {
+					return nil, berr
+				}
+				if _, ierr := insertRunAttributionOnConflictDoNothing(ctx, client, attr); ierr != nil {
+					return nil, ierr
+				}
+				// Re-read in case a concurrent tx inserted first.
+				stored, rerr := client.RunAttribution.Query().
+					Where(runattribution.IDEQ(preferredRunID)).
+					Only(ctx)
+				if rerr != nil {
+					return nil, mapError(rerr)
+				}
+				res := entRunAttributionToStore(stored)
+				attrCache[preferredRunID] = res
+				return res, nil
+			}
+			if !ent.IsNotFound(qerr) {
+				return nil, mapError(qerr)
+			}
+		}
+	}
+
+	syntheticRunID := "legacy-backfill:" + row.AgentID
+	if preferredRunID != "" {
+		syntheticRunID = "legacy-agent:" + row.AgentID
+	}
+	if cached, ok := attrCache[syntheticRunID]; ok {
+		return cached, nil
+	}
+
+	existing, err := client.RunAttribution.Query().
+		Where(runattribution.IDEQ(syntheticRunID)).
+		Only(ctx)
+	if err == nil {
+		attr := entRunAttributionToStore(existing)
+		attrCache[syntheticRunID] = attr
+		return attr, nil
+	}
+	if !ent.IsNotFound(err) {
+		return nil, mapError(err)
+	}
+
+	var attr *store.RunAttribution
+	if uid, parseErr := uuid.Parse(row.AgentID); parseErr == nil {
+		agRow, qerr := client.Agent.Query().
+			Where(agent.IDEQ(uid)).
+			Select(runAttributionAgentColumns...).
+			Only(ctx)
+		if qerr == nil {
+			attr, err = buildRunAttributionFromAgentRow(ctx, client, agRow, syntheticRunID, "", hubID, "")
+			if err != nil {
+				return nil, err
+			}
+		} else if !ent.IsNotFound(qerr) {
+			return nil, mapError(qerr)
+		}
+	}
+	if attr == nil {
+		// Agent was hard-deleted: preserve minimal project/agent attribution.
+		attr = &store.RunAttribution{
+			RunID:      syntheticRunID,
+			Generation: 1,
+			HubID:      hubID,
+			ProjectID:  row.ProjectID,
+			AgentID:    row.AgentID,
+			CreatedAt:  row.StartedAt.UTC().Truncate(time.Microsecond),
+		}
+	}
+	if _, err := insertRunAttributionOnConflictDoNothing(ctx, client, attr); err != nil {
+		return nil, err
+	}
+	stored, err := client.RunAttribution.Query().
+		Where(runattribution.IDEQ(syntheticRunID)).
+		Only(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || ent.IsNotFound(err) {
+			return attr, nil
+		}
+		return nil, mapError(err)
+	}
+	res := entRunAttributionToStore(stored)
+	attrCache[syntheticRunID] = res
+	return res, nil
+}
+
+// buildLegacyUsageEvent maps one agent_session_metrics segment to a canonical
+// Track 1 store.UsageEvent following §3.1 (unknown = NULL, never 0):
+//   - cache_write and cache_write_1h are always nil;
+//   - input, output, cache_read (tokens_cached), reasoning are non-nil only
+//     when > 0 (legacy columns are NOT NULL DEFAULT 0);
+//   - calls is 0 (usage_events.calls is NOT NULL; agent_session_metrics does
+//     not record api_calls).
+func buildLegacyUsageEvent(
+	hubID string,
+	row *store.AgentSessionMetrics,
+	attr *store.RunAttribution,
+	receivedAt time.Time,
+	clampFuture bool,
+) *store.UsageEvent {
+	eventTS := row.StartedAt
+	if row.EndedAt != nil && !row.EndedAt.IsZero() {
+		eventTS = *row.EndedAt
+	}
+	eventTS = eventTS.UTC().Truncate(time.Microsecond)
+	if clampFuture && eventTS.After(receivedAt.Add(telemetrycontract.UsageIngestMaxFutureSkew)) {
+		eventTS = receivedAt
+	}
+
+	var input, output, cacheRead, reasoning *int64
+	if row.TokensInput > 0 {
+		v := row.TokensInput
+		input = &v
+	}
+	if row.TokensOutput > 0 {
+		v := row.TokensOutput
+		output = &v
+	}
+	if row.TokensCached > 0 {
+		v := row.TokensCached
+		cacheRead = &v
+	}
+	if row.TokensReasoning > 0 {
+		v := row.TokensReasoning
+		reasoning = &v
+	}
+
+	tokenStatus := telemetrycontract.TokenStatusNotReported
+	if input != nil || output != nil || cacheRead != nil || reasoning != nil {
+		// cache_write is never measured by legacy agent_session_metrics.
+		tokenStatus = telemetrycontract.TokenStatusPartial
+	}
+
+	// Anomalous spike guard (§4.1 item 3): > 50,000,000 summable tokens.
+	var summable int64
+	overflow := false
+	for _, p := range []*int64{input, output, cacheRead} {
+		if p == nil || *p <= 0 {
+			continue
+		}
+		if summable > (1<<63-1)-*p {
+			overflow = true
+			break
+		}
+		summable += *p
+	}
+	anomalous := overflow || summable > telemetrycontract.UsageIngestAnomalousTokenThreshold
+
+	model := telemetrycontract.ResolveModelLabel(row.Model, "")
+	modelSource := telemetrycontract.ModelSourceUnknown
+	if strings.TrimSpace(row.Model) != "" {
+		modelSource = telemetrycontract.ModelSourceEvent
+	}
+
+	status := telemetrycontract.StatusSuccess
+	if strings.EqualFold(strings.TrimSpace(row.Status), "error") {
+		status = telemetrycontract.StatusError
+	}
+
+	var sessionIDHash *string
+	if row.SessionID != "" {
+		sum := sha256.Sum256([]byte(row.SessionID))
+		h := hex.EncodeToString(sum[:])
+		sessionIDHash = &h
+	}
+
+	var billingUserID *string
+	if attr.BillingUserID != nil {
+		cp := *attr.BillingUserID
+		billingUserID = &cp
+	}
+
+	return &store.UsageEvent{
+		HubID:          hubID,
+		EventID:        store.LegacySessionMetricsEventID(row.AgentID, row.SessionID, row.StartedAt),
+		RunID:          attr.RunID,
+		ProjectID:      attr.ProjectID,
+		AgentID:        attr.AgentID,
+		BillingUserID:  billingUserID,
+		BrokerID:       attr.BrokerID,
+		Harness:        attr.Harness,
+		Model:          model,
+		ModelSource:    modelSource,
+		UsageSource:    store.UsageSourceLegacySessionMetrics,
+		SourceKind:     legacySessionMetricsSourceKind,
+		SourceIdentity: telemetrycontract.SourceIdentityComposite,
+		SessionIDHash:  sessionIDHash,
+		Status:         status,
+		Calls:          0,
+		Input:          input,
+		Output:         output,
+		CacheRead:      cacheRead,
+		CacheWrite:     nil,
+		CacheWrite1h:   nil,
+		Reasoning:      reasoning,
+		TokenStatus:    tokenStatus,
+		EventTS:        eventTS,
+		ReceivedAt:     receivedAt,
+		ProducerEpoch:  legacySessionMetricsProducerEpoch,
+		ProducerSeq:    0,
+		Anomalous:      anomalous,
+	}
+}
