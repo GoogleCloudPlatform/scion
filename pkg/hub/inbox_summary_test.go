@@ -897,8 +897,7 @@ func TestUserMeInboxSummary_WaitingCategory(t *testing.T) {
 	// Parity check (ptone/scion#9300): GET /api/v1/agents?q=activity:waiting_for_input
 	// returns the exact same count as waiting.Count.
 	setExperimentOverrides(t, f.srv, map[string]bool{
-		experiments.InboxDashboard:      true,
-		experiments.FiltersQueryDialect: true,
+		experiments.InboxDashboard: true,
 	})
 	agentsRec := doRequestAsUser(t, f.srv, memberUser, http.MethodGet, "/api/v1/agents?q=activity%3Awaiting_for_input", nil)
 	require.Equal(t, http.StatusOK, agentsRec.Code, agentsRec.Body.String())
