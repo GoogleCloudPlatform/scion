@@ -327,6 +327,7 @@ func (q projectDecisionsQuery) hasPendingStructuredFilter() bool {
 	}
 	for _, t := range q.parsedQuery.Terms {
 		switch strings.ToLower(t.Key) {
+		// "project" is used by the profile-decisions schema in Phase 3 (ptone/scion#9348).
 		case "agent", "conversation", "project":
 			return true
 		}
@@ -807,17 +808,19 @@ func (s *Server) decisionsCore(
 	answerersFacet := []ProjectDecisionActorView{}
 	conversationsFacet := []ProjectDecisionConversationView{}
 	projectsFacet := []ProjectDecisionProjectRef{}
-	if len(set.chatKeys) > 0 && pq.limit > 0 {
+	if len(set.chatKeys) > 0 && (pq.limit > 0 || pq.parsedQuery != nil) {
 		var err error
 		facetAgents, facetAnswerers, convKeys, err = s.store.ListDecisionFacets(ctx, set.projectIDs, set.chatKeys)
 		if err != nil {
 			return nil, err
 		}
-		agentsFacet = decisionAgentFacetViews(set, facetAgents)
-		answerersFacet = decisionAnswererFacetViews(facetAnswerers)
-		conversationsFacet = decisionConversationFacetViews(set, convKeys)
-		if pq.profile {
-			projectsFacet = decisionProjectFacetViews(set, convKeys)
+		if pq.limit > 0 {
+			agentsFacet = decisionAgentFacetViews(set, facetAgents)
+			answerersFacet = decisionAnswererFacetViews(facetAnswerers)
+			conversationsFacet = decisionConversationFacetViews(set, convKeys)
+			if pq.profile {
+				projectsFacet = decisionProjectFacetViews(set, convKeys)
+			}
 		}
 	}
 

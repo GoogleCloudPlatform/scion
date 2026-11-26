@@ -305,6 +305,55 @@ func TestProjectDecisions_FilterQueryDialect(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rrOff.Code)
 	mOff := decodeMadeDecisions(t, rrOff)
 	assert.Empty(t, mOff.Entries)
+
+	// Re-enable dialect for additional O5/O6 cases.
+	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+
+	// 12. (O5a) Negated free text on Pending (excFolds) and Made (ExcludeQueries with conversation-label keys).
+	pNegText := getPending(f.alice, url.Values{"q": {"agent:" + f.agent.Name + ",db-ops -canary"}})
+	assert.ElementsMatch(t, []string{"P2"}, promptKeys(pNegText))
+	mNegText := getMade(f.alice, url.Values{"q": {"agent:db-ops," + f.agent.Name + " -ops"}})
+	assert.ElementsMatch(t, []string{"M1"}, entryKeys(mNegText))
+
+	// 13. (O5b) Negated conversation: removing every readable key -> empty 200 on both tabs.
+	pNegAllConv := getPending(f.alice, url.Values{"q": {"-conversation:#general,#ops"}})
+	assert.Empty(t, pNegAllConv.Prompts)
+	mNegAllConv := getMade(f.alice, url.Values{"q": {"-conversation:#general,#ops"}})
+	assert.Empty(t, mNegAllConv.Entries)
+
+	// 14. (O5c) user= ANDed with by:, and provenance= ANDed with provenance:.
+	mUserAndBy := getMade(f.alice, url.Values{
+		"user": {sam1.ID},
+		"q":    {`by:"Sam Taylor"`},
+	})
+	assert.ElementsMatch(t, []string{"M3"}, entryKeys(mUserAndBy))
+	mUserAndByDisjoint := getMade(f.alice, url.Values{
+		"user": {f.bob.ID},
+		"q":    {"by:me"},
+	})
+	assert.Empty(t, mUserAndByDisjoint.Entries)
+	mProvAndProv := getMade(f.alice, url.Values{
+		"provenance": {"dismissed"},
+		"q":          {"provenance:direct,dismissed"},
+	})
+	assert.ElementsMatch(t, []string{"M4"}, entryKeys(mProvAndProv))
+	mProvAndProvDisjoint := getMade(f.alice, url.Values{
+		"provenance": {"direct"},
+		"q":          {"provenance:dismissed"},
+	})
+	assert.Empty(t, mProvAndProvDisjoint.Entries)
+
+	// 15. (O5d) Unknown key `foo:bar` stays text mode with dialect on (no 400).
+	seedPrompt(f.agent, f.topicID, "P-FOO", "Check foo:bar literal?")
+	pUnknownKeyText := getPending(f.alice, url.Values{"q": {"foo:bar"}})
+	assert.ElementsMatch(t, []string{"P-FOO"}, promptKeys(pUnknownKeyText))
+
+	// 16. (O6) limit=0 with structured q still loads facets for resolution and returns accurate FilteredCounts.
+	pLimitZero := getPending(f.alice, url.Values{"limit": {"0"}, "q": {"agent:db-ops"}})
+	assert.Empty(t, pLimitZero.Prompts)
+	assert.Empty(t, pLimitZero.Agents)
+	require.NotNil(t, pLimitZero.FilteredCounts)
+	assert.Equal(t, 1, pLimitZero.FilteredCounts.WaitingOnYou+pLimitZero.FilteredCounts.WaitingOnOthers)
 }
 
 func TestProjectDecisions_AnswererSortThenCap600(t *testing.T) {
