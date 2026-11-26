@@ -22,10 +22,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
+	"syscall"
 	"time"
 )
 
 const agySQLiteWakeWriteTimeout = 50 * time.Millisecond
+
+var wakeUmaskMu sync.Mutex
 
 type unixWakeListener struct {
 	conn *net.UnixConn
@@ -48,19 +52,28 @@ func startAgySQLiteWakeListener(sockPath string, owner *OutboxOwner, onWake func
 	if sockPath == "" {
 		return nil, fmt.Errorf("empty wake socket path")
 	}
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
-		return nil, fmt.Errorf("mkdir wake socket dir: %w", err)
+	dir := filepath.Dir(sockPath)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("mkdir wake socket dir: %w", err)
+		}
+		if owner != nil && os.Geteuid() == 0 && owner.UID > 0 {
+			_ = os.Lchown(dir, owner.UID, owner.GID)
+		}
 	}
 	_ = os.Remove(sockPath)
 
 	addr := &net.UnixAddr{Name: sockPath, Net: "unixgram"}
+	// Tighten umask around bind so the socket inode is created 0600 atomically,
+	// avoiding any post-bind chmod symlink race in the agent-writable .scion dir.
+	wakeUmaskMu.Lock()
+	oldUmask := syscall.Umask(0o177)
 	conn, err := net.ListenUnixgram("unixgram", addr)
+	syscall.Umask(oldUmask)
+	wakeUmaskMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("listen wake unixgram %s: %w", sockPath, err)
 	}
-	// Restrict socket access to the agent user (and root) so only the agent's
-	// hook subprocesses can trigger wakes.
-	_ = os.Chmod(sockPath, 0o600)
 	if owner != nil && os.Geteuid() == 0 && owner.UID > 0 {
 		_ = os.Lchown(sockPath, owner.UID, owner.GID)
 	}

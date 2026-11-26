@@ -131,7 +131,7 @@ func TestAntigravityLiveTrack1_OnePostInvocationPlusOneGenMetadata(t *testing.T)
 		AgentHome:         home,
 		DisableWakeSocket: true,
 		Analytics:         telemetry.NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
-		DetectVersion:     func(context.Context) string { return "1.5.18" },
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
 	})
 	if err := tailer.PollOnce(context.Background()); err != nil {
 		t.Fatalf("tailer.PollOnce: %v", err)

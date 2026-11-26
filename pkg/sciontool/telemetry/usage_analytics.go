@@ -361,8 +361,26 @@ func (a *UsageAnalytics) resolveHubOutbox() (*AnalyticsOutbox, bool, error) {
 // outbox independently so a Hub outbox overflow or I/O error never affects
 // the primary GCP outbox outcome or counters.
 func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
+	return a.record(obs, false)
+}
+
+// RecordUnique is like Record, except appends use AppendUsageUnique so any
+// replay carrying an already-indexed (namespace, source_kind, source_event_id)
+// is skipped atomically as AppendCertainDuplicate without minting a second
+// event_id.
+func (a *UsageAnalytics) RecordUnique(obs UsageObservation) (AppendOutcome, error) {
+	return a.record(obs, true)
+}
+
+func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (AppendOutcome, error) {
 	if a == nil || a.disabled.Load() {
 		return 0, nil
+	}
+	appendFn := func(o *AnalyticsOutbox, ev *telemetrycontract.UsageEvent) (AppendOutcome, error) {
+		if uniqueByEventID {
+			return o.AppendUsageUnique(ev)
+		}
+		return o.AppendUsage(ev)
 	}
 	a.metaMu.RLock()
 	onRecord := a.onRecord
@@ -394,7 +412,7 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 			a.recordOpenFailure()
 			return 0, herr
 		}
-		outcome, err := hubOutbox.AppendUsage(ev)
+		outcome, err := appendFn(hubOutbox, ev)
 		if err != nil {
 			a.invalid.Add(1)
 		}
@@ -412,7 +430,7 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 		a.recordOpenFailure()
 		primaryErr = oerr
 	} else {
-		outcome, primaryErr = a.outbox.AppendUsage(ev)
+		outcome, primaryErr = appendFn(a.outbox, ev)
 		if primaryErr != nil {
 			a.invalid.Add(1)
 		}
@@ -429,7 +447,7 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 				}
 			}
 		} else if hubOutbox != nil {
-			_, _ = hubOutbox.AppendUsage(&hubEv)
+			_, _ = appendFn(hubOutbox, &hubEv)
 		}
 	}
 

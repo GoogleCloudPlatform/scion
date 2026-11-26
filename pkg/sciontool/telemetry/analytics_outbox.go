@@ -529,10 +529,25 @@ func (o *AnalyticsOutbox) indexDir() string        { return filepath.Join(o.dir,
 // bytes to staging. The caller fills every other field. On
 // AppendCertainDuplicate and AppendOverflow nothing is written.
 func (o *AnalyticsOutbox) AppendUsage(ev *telemetrycontract.UsageEvent) (AppendOutcome, error) {
+	return o.appendUsageChecked(ev, false)
+}
+
+// AppendUsageUnique is like AppendUsage, except any event whose
+// (producer_namespace, source_kind, source_event_id) is already recorded in
+// the outbox index is treated as a certain duplicate (AppendCertainDuplicate)
+// regardless of SourceIdentity or EventTS. Used by producers whose
+// source_event_id (such as agydecode.Record.EmissionKey) already uniquely
+// identifies one exact emission so crash/retry replays never mint a second
+// event_id.
+func (o *AnalyticsOutbox) AppendUsageUnique(ev *telemetrycontract.UsageEvent) (AppendOutcome, error) {
+	return o.appendUsageChecked(ev, true)
+}
+
+func (o *AnalyticsOutbox) appendUsageChecked(ev *telemetrycontract.UsageEvent, uniqueByEventID bool) (AppendOutcome, error) {
 	if o == nil {
 		return 0, errNilOutbox
 	}
-	outcome, err := o.appendUsage(ev)
+	outcome, err := o.appendUsage(ev, uniqueByEventID)
 	switch {
 	case errors.Is(err, errAppendUnresolved):
 		// Not known lost: the intent persists and decides later.
@@ -582,7 +597,7 @@ func (o *AnalyticsOutbox) refuseLocked(seq int64, counter string) error {
 	return o.writeFileAtomic(counter, []byte(strconv.FormatInt(n+1, 10)))
 }
 
-func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome AppendOutcome, err error) {
+func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent, uniqueByEventID bool) (outcome AppendOutcome, err error) {
 	unlock, err := o.lock()
 	if err != nil {
 		return 0, err
@@ -654,6 +669,9 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 		indexName = analyticsIndexName(ev.ProducerNamespace, ev.SourceKind, ev.SourceEventID)
 		if entry, err = o.readIndex(indexName); err != nil {
 			return 0, err
+		}
+		if uniqueByEventID && entry.count > 0 {
+			return AppendCertainDuplicate, nil
 		}
 		if ev.SourceIdentity == telemetrycontract.SourceIdentityRequestID {
 			if fingerprint, err = usageSemanticFingerprint(ev); err != nil {

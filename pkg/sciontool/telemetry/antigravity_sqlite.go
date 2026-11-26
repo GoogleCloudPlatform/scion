@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/trajectory/agydecode"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
@@ -120,10 +121,17 @@ type AntigravitySQLiteConfig struct {
 	MaxDedupeRoots int
 	// BusyTimeoutMs overrides the SQLite read-only busy_timeout pragma.
 	BusyTimeoutMs int
+	// RunID scopes persisted schema-drift latching to a single agent run.
+	// Defaults to SCION_LAUNCH_ID when empty. A new run with a different RunID
+	// clears any persisted drift latch from an earlier run.
+	RunID string
 
-	// DetectVersion returns the installed agy binary version string. When nil,
-	// defaults to running `agy --version` via procreap.OutputManaged.
-	DetectVersion func(ctx context.Context) string
+	// DetectVersion returns the installed agy binary version string (or an
+	// error on transient detection failure, which is retried on subsequent
+	// polls without advancing cursors or latching drift). When nil, defaults
+	// to resolving `agy` via rootexec.Resolve and running `agy --version`
+	// through procreap.OutputManaged.
+	DetectVersion func(ctx context.Context) (string, error)
 	// Now overrides time.Now for tests.
 	Now func() time.Time
 }
@@ -134,6 +142,7 @@ type agySQLitePersistedState struct {
 	Dedupe              *agydecode.DedupeState        `json:"dedupe,omitempty"`
 	SchemaDriftDetected bool                          `json:"schema_drift_detected,omitempty"`
 	DriftReason         string                        `json:"drift_reason,omitempty"`
+	DriftRunID          string                        `json:"drift_run_id,omitempty"`
 }
 
 type agySQLiteFileState struct {
@@ -147,11 +156,11 @@ type agySQLiteFileState struct {
 type AntigravitySQLiteTailer struct {
 	cfg AntigravitySQLiteConfig
 
-	mu           sync.Mutex
-	state        agySQLitePersistedState
-	versionOnce  sync.Once
-	agyVersion   string
-	driftEmitted map[string]bool
+	mu              sync.Mutex
+	state           agySQLitePersistedState
+	versionResolved bool
+	agyVersion      string
+	driftEmitted    map[string]bool
 
 	driftLatched atomic.Bool
 
@@ -183,6 +192,9 @@ func NewAntigravitySQLiteTailer(cfg AntigravitySQLiteConfig) *AntigravitySQLiteT
 	}
 	if cfg.MaxDedupeRoots <= 0 {
 		cfg.MaxDedupeRoots = agydecode.DefaultMaxDedupeRoots
+	}
+	if cfg.RunID == "" {
+		cfg.RunID = strings.TrimSpace(os.Getenv("SCION_LAUNCH_ID"))
 	}
 	if cfg.DetectVersion == nil {
 		cfg.DetectVersion = detectAgyVersionManaged
@@ -352,7 +364,9 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if t.cfg.ConversationsDir == "" {
+	// Do not consume rows or advance persisted cursors when no analytics sink
+	// is configured (O2).
+	if t.cfg.Analytics == nil || t.cfg.ConversationsDir == "" {
 		return nil
 	}
 	entries, err := os.ReadDir(t.cfg.ConversationsDir)
@@ -409,7 +423,16 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 			continue
 		}
 
-		agyVer := t.resolveVersion(ctx)
+		agyVer, verr := t.resolveVersionLocked(ctx)
+		if verr != nil {
+			// Transient version-detection failure (e.g. timeout, exec error):
+			// retry on the next poll without advancing cursors or latching drift.
+			log.Debug("Antigravity SQLite tailer version detection failed (will retry): %v", verr)
+			if firstErr == nil {
+				firstErr = verr
+			}
+			continue
+		}
 
 		// Decode against a cloned DedupeState and cloned Cursor so an outbox
 		// append failure never mutates persisted state or suppresses re-emission
@@ -472,7 +495,7 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 			}
 			obs := agyRecordToObservation(rec, res.AgyVersion, t.cfg.Now())
 			if t.cfg.Analytics != nil {
-				if _, err := t.cfg.Analytics.Record(obs); err != nil {
+				if _, err := t.cfg.Analytics.RecordUnique(obs); err != nil {
 					log.Debug("Antigravity SQLite tailer outbox append failed for %s (%s): %v", name, rec.EmissionKey, err)
 					if firstErr == nil {
 						firstErr = err
@@ -530,6 +553,7 @@ func (t *AntigravitySQLiteTailer) handleDriftLocked(res *agydecode.Result) error
 	}
 	t.state.SchemaDriftDetected = true
 	t.state.DriftReason = reason
+	t.state.DriftRunID = t.cfg.RunID
 
 	// Emit at most one drift sentinel event per (session, status, version) with
 	// calls=0 and nil tokens so quotas are never debited while the Hub records
@@ -555,7 +579,7 @@ func (t *AntigravitySQLiteTailer) handleDriftLocked(res *agydecode.Result) error
 	} else {
 		obs.TokenStatus = telemetrycontract.TokenStatusUnverified
 	}
-	if _, err := t.cfg.Analytics.Record(obs); err != nil {
+	if _, err := t.cfg.Analytics.RecordUnique(obs); err != nil {
 		return err
 	}
 	t.driftEmitted[sentinelKey] = true
@@ -563,7 +587,10 @@ func (t *AntigravitySQLiteTailer) handleDriftLocked(res *agydecode.Result) error
 }
 
 func agyRecordToObservation(rec agydecode.Record, agyVersion string, now time.Time) UsageObservation {
-	eventTime := now
+	// Never feed high-resolution wall-clock time into fingerprinted fields when
+	// the DB row lacks a timestamp: truncate to UTC day start so replays carry
+	// a deterministic EventTime alongside RecordUnique's index dedupe.
+	eventTime := now.UTC().Truncate(24 * time.Hour)
 	var sourceTime time.Time
 	if rec.Timestamp != nil && !rec.Timestamp.IsZero() {
 		eventTime = rec.Timestamp.UTC()
@@ -630,23 +657,40 @@ func accumulateSessionUsage(dst *SessionUsage, tok *agydecode.TokenUsage) {
 	}
 }
 
-func (t *AntigravitySQLiteTailer) resolveVersion(ctx context.Context) string {
-	t.versionOnce.Do(func() {
-		if t.cfg.DetectVersion != nil {
-			t.agyVersion = agydecode.NormalizeVersion(t.cfg.DetectVersion(ctx))
-		}
-	})
-	return t.agyVersion
+func (t *AntigravitySQLiteTailer) resolveVersionLocked(ctx context.Context) (string, error) {
+	if t.versionResolved {
+		return t.agyVersion, nil
+	}
+	if t.cfg.DetectVersion == nil {
+		return "", errors.New("no agy version detector configured")
+	}
+	raw, err := t.cfg.DetectVersion(ctx)
+	if err != nil {
+		return "", err
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("empty agy version output")
+	}
+	t.agyVersion = agydecode.NormalizeVersion(trimmed)
+	t.versionResolved = true
+	return t.agyVersion, nil
 }
 
-func detectAgyVersionManaged(ctx context.Context) string {
+func detectAgyVersionManaged(ctx context.Context) (string, error) {
+	// Resolve against trusted root-owned SearchPath directories so an
+	// agent-writable directory earlier on PATH cannot hijack root execution.
+	agyPath, err := rootexec.Resolve("agy")
+	if err != nil {
+		return "", fmt.Errorf("resolve agy: %w", err)
+	}
 	cctx, cancel := context.WithTimeout(ctx, agyVersionDetectTimeout)
 	defer cancel()
-	out, err := procreap.OutputManaged(exec.CommandContext(cctx, "agy", "--version"))
+	out, err := procreap.OutputManaged(exec.CommandContext(cctx, agyPath, "--version"))
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("run %s --version: %w", agyPath, err)
 	}
-	return agydecode.NormalizeVersion(string(out))
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (t *AntigravitySQLiteTailer) loadState() {
@@ -683,10 +727,20 @@ func (t *AntigravitySQLiteTailer) loadState() {
 	if loaded.Version == 0 {
 		loaded.Version = agySQLiteStateSchemaVersion
 	}
-	t.state = loaded
 	if loaded.SchemaDriftDetected {
-		t.driftLatched.Store(true)
+		// Scope the persisted drift latch to the run that tripped it: keep it
+		// latched across restarts within the same run, but clear it when a new
+		// run starts (different RunID) so a later verified agy version resumes
+		// token metering.
+		if t.cfg.RunID != "" && loaded.DriftRunID != t.cfg.RunID {
+			loaded.SchemaDriftDetected = false
+			loaded.DriftReason = ""
+			loaded.DriftRunID = ""
+		} else {
+			t.driftLatched.Store(true)
+		}
 	}
+	t.state = loaded
 }
 
 func (t *AntigravitySQLiteTailer) saveStateLocked() error {
@@ -700,14 +754,43 @@ func (t *AntigravitySQLiteTailer) saveStateLocked() error {
 	}
 	data = append(data, '\n')
 
-	tree, err := privatefs.OpenTree(filepath.Dir(t.cfg.StatePath), privatefs.TreeOptions{CreateAnchor: true})
+	dir := filepath.Dir(t.cfg.StatePath)
+	base := filepath.Base(t.cfg.StatePath)
+	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{CreateAnchor: true})
 	if err != nil {
 		return fmt.Errorf("open private state dir: %w", err)
 	}
 	defer func() { _ = tree.Close() }()
 
-	if err := tree.WriteFile(filepath.Base(t.cfg.StatePath), data, privatefs.Private); err != nil {
-		return fmt.Errorf("write antigravity sqlite state: %w", err)
+	// Write to a fresh private temp file, fsync, and atomically rename into
+	// place so a crash/SIGKILL never leaves a torn JSON file and a symlink
+	// planted at the state path is replaced rather than followed.
+	tmp, tmpRel, err := tree.CreateTemp("", "."+base+".tmp-*", privatefs.Private)
+	if err != nil {
+		return fmt.Errorf("create temp antigravity sqlite state: %w", err)
+	}
+	defer func() {
+		if tmpRel != "" {
+			_ = tree.Remove(tmpRel)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp antigravity sqlite state: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp antigravity sqlite state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp antigravity sqlite state: %w", err)
+	}
+	if err := tree.Rename(tmpRel, base); err != nil {
+		return fmt.Errorf("rename antigravity sqlite state: %w", err)
+	}
+	tmpRel = ""
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("sync antigravity sqlite state dir: %w", err)
 	}
 	return nil
 }

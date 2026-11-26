@@ -1095,6 +1095,9 @@ func (p *Pipeline) schemaDriftDetected() bool {
 	if p == nil {
 		return false
 	}
+	if p.driftLatched.Load() {
+		return true
+	}
 	if tailer := p.agyTailer.Load(); tailer != nil && tailer.SchemaDriftDetected() {
 		return true
 	}

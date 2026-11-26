@@ -78,6 +78,7 @@ type Pipeline struct {
 	retryConfig        RetryConfig
 	usageDeriver       atomic.Pointer[UsageDeriver]
 	agyTailer          atomic.Pointer[AntigravitySQLiteTailer]
+	driftLatched       atomic.Bool    // preserved across Pipeline.Stop after agyTailer is swapped nil
 	analytics          analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
 	health             healthEmitter  // telemetry.health events (health.go)
 	sessionUsageSink   atomic.Pointer[SessionUsageSink]
@@ -294,6 +295,10 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 }
 
 func (p *Pipeline) startAgySQLiteTailerLocked(ctx context.Context) error {
+	if p.analytics.sqliteNative == nil {
+		log.Debug("Antigravity SQLite tailer not started: analytics outbox is disabled")
+		return nil
+	}
 	agentHome := p.analytics.agentHome
 	if agentHome == "" {
 		agentHome, _ = os.UserHomeDir()
@@ -691,10 +696,14 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 
 	// Final bounded drain of the Antigravity SQLite tailer before stopping the
 	// analytics outbox drainer so any final DB rows flushed as agy exited are
-	// appended and drained to the Hub.
+	// appended and drained to the Hub. Capture the drift latch before clearing
+	// agyTailer so the final heartbeat remains honest.
 	if tailer := p.agyTailer.Swap(nil); tailer != nil {
 		if err := tailer.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
+		}
+		if tailer.SchemaDriftDetected() {
+			p.driftLatched.Store(true)
 		}
 	}
 
