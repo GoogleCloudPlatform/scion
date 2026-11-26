@@ -2095,26 +2095,6 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	// Identity-key rows persist through soft-delete (only a hard delete or
-	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
-	// PurgeDeletedAgents), so restoring an agent should normally find its own
-	// keys already reserved and in place. But an agent soft-deleted before
-	// this invariant existed, or before a backfill of it, may have no key
-	// rows at all, leaving a window where another agent could since have
-	// taken its slug or display-name key. restoreAgentTx re-asserts the keys
-	// in the same transaction as the restore, turning that window into a
-	// defensive revalidation: a genuine collision surfaces as the same
-	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
-	// than silently restoring an agent whose key now belongs to someone else.
-	// The same transaction checks that every delegator of the edges the soft
-	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
-	// fails), reactivates those edges (a conflicting active edge is a 409)
-	// and writes the agent_restore audit record. It also refuses an agent
-	// whose guard user (its owner, ancestry root or, for a scheduled agent,
-	// the principal of its schedule's latest revision) does not exist,
-	// normally a deleted user but possibly a purged legacy root agent
-	// (ptone/scion#2769; errAgentOwnerUserMissing, see
-	// lockAgentGuardUserTx).
 	// Re-reserve the per-project never-suspend quota when restoring a flagged
 	// agent while the experiment is enabled (design §4.1, §4.2 point 7, §4.5,
 	// §9 item 8). Over-cap returns 409 Conflict so callers can distinguish a
@@ -2135,6 +2115,26 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		neverSuspendReserved = created
 	}
 
+	// Identity-key rows persist through soft-delete (only a hard delete or
+	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
+	// PurgeDeletedAgents), so restoring an agent should normally find its own
+	// keys already reserved and in place. But an agent soft-deleted before
+	// this invariant existed, or before a backfill of it, may have no key
+	// rows at all, leaving a window where another agent could since have
+	// taken its slug or display-name key. restoreAgentTx re-asserts the keys
+	// in the same transaction as the restore, turning that window into a
+	// defensive revalidation: a genuine collision surfaces as the same
+	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
+	// than silently restoring an agent whose key now belongs to someone else.
+	// The same transaction checks that every delegator of the edges the soft
+	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
+	// fails), reactivates those edges (a conflicting active edge is a 409)
+	// and writes the agent_restore audit record. It also refuses an agent
+	// whose guard user (its owner, ancestry root or, for a scheduled agent,
+	// the principal of its schedule's latest revision) does not exist,
+	// normally a deleted user but possibly a purged legacy root agent
+	// (ptone/scion#2769; errAgentOwnerUserMissing, see
+	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
 		if neverSuspendReserved {
 			relCtx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)

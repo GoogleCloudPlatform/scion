@@ -368,6 +368,36 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		return false, fmt.Errorf("quota: check existing reservation for %q: %w", limitName, err)
 	}
 
+	// 4.6. Live never-suspend row idempotency (ptone/scion#9183): a live
+	// (non-deleted) agent already flagged suspend_policy="never" in this
+	// project holds its slot via neverSuspendQuotaUsage even if it has no
+	// usage_reservations row (e.g. flagged while Phase 1 was deployed, or
+	// restored while lifecycle.never_suspend was off). Decided under the
+	// quota lock so a concurrent never->auto PATCH cannot bypass the cap.
+	// Backfill its reservation unchecked so future calls hit step 4.5;
+	// created stays false so a caller rolling back a failed PATCH does not
+	// release a slot the live row already owns.
+	if limitName == store.LimitMaxNeverSuspendAgentsPerProject && scopeType == store.QuotaScopeProject {
+		agents, err := qs.store.GetAgentsByIDs(ctx, []string{resourceID})
+		if err != nil {
+			return false, fmt.Errorf("quota: check existing never-suspend agent for %q: %w", limitName, err)
+		}
+		if a, ok := agents[resourceID]; ok && a.ProjectID == scopeID && a.SuspendPolicy == store.SuspendPolicyNever {
+			if _, recErr := qs.recordUnchecked(ctx, limitName, &store.UsageReservation{
+				LimitDefinitionID: limitDef.ID,
+				SubjectID:         subjectID,
+				ScopeType:         scopeType,
+				ScopeID:           scopeID,
+				ResourceID:        resourceID,
+				Reserved:          1,
+			}); recErr != nil {
+				qs.logger.Warn("quota: failed to backfill reservation for existing never-suspend agent",
+					"limit", limitName, "resource_id", resourceID, "error", recErr)
+			}
+			return false, nil
+		}
+	}
+
 	// 5. Count active reservations: across every subject in the scope for a
 	// limit counted that way (countsAcrossSubjects), else the subject's own.
 	count, err := qs.countActive(ctx, limitName, limitDef.ID, subjectID, scopeType, scopeID)
@@ -427,19 +457,28 @@ func countsAcrossSubjects(limitName string) bool {
 // getUsageByLimit). When projectID is non-empty, results are scoped to that
 // project; when empty, all projects are included.
 //
-// Rules:
-//   - Active reservations for live agents with suspend_policy="never" count.
-//   - Active reservations for live agents with suspend_policy="auto" count only
-//     while younger than reconcileMinReservationAge (in-flight PATCH auto->never);
-//     older ones are stale and ignored (released by reconcile).
-//   - Active reservations whose agent row is soft-deleted never count.
-//   - Active reservations whose agent row does not exist count only while
-//     younger than reconcileMinReservationAge (in-flight creates before row
-//     commit, preventing concurrent overshoot); older ones are stale orphans and
-//     ignored (released by reconcile).
-//   - Live (non-deleted) agents with suspend_policy="never" that have no active
-//     reservation (e.g. flagged while Phase 1 was deployed) are included as
-//     synthesized usage entries so enforcement and admin views agree.
+// State model for (agent row × active reservation), where "young" means
+// age < reconcileMinReservationAge and "old" means age >= reconcileMinReservationAge:
+//
+//	| Agent row    | Reservation | Counted?          | Reconcile action | Reason                                                        |
+//	|--------------|-------------|-------------------|------------------|---------------------------------------------------------------|
+//	| missing      | none        | no                | n/a              | No agent and no reservation.                                  |
+//	| missing      | young       | yes               | keep             | In-flight create before row commit (or recent failed release).|
+//	| missing      | old         | no                | release          | Stale orphan from failed create or failed hard-delete release.|
+//	| soft-deleted | none        | no                | n/a              | Soft-delete explicitly releases; row no longer holds a slot.  |
+//	| soft-deleted | young       | yes               | keep             | In-flight restore before tx commit (or recent failed release).|
+//	| soft-deleted | old         | no                | release          | Stale orphan from failed restore or failed soft-delete release.|
+//	| live auto    | none        | no                | n/a              | Ordinary auto-suspend agent.                                  |
+//	| live auto    | young       | yes               | keep             | In-flight PATCH auto->never before tx commit.                 |
+//	| live auto    | old         | no                | release          | Stale reservation from failed PATCH or failed clear release.  |
+//	| live never   | none        | yes (synthesized) | n/a              | Flagged without reservation (Phase 1 or experiment-off restore).|
+//	| live never   | young       | yes               | keep             | Active never-suspend agent.                                   |
+//	| live never   | old         | yes               | keep             | Active never-suspend agent.                                   |
+//
+// Invariant: an active reservation counts iff the agent is a live "never" row
+// OR the reservation is younger than reconcileMinReservationAge;
+// ReconcileStaleNeverSuspendQuotaReservations releases the exact complement
+// (any active reservation that is not counted).
 func neverSuspendQuotaUsage(ctx context.Context, st store.Store, limitDefID, projectID string, now time.Time) ([]*store.UsageReservation, error) {
 	var reservations []*store.UsageReservation
 	var err error
@@ -470,31 +509,19 @@ func neverSuspendQuotaUsage(ctx context.Context, st store.Store, limitDefID, pro
 			continue
 		}
 		a, ok := agentsByID[r.ResourceID]
-		if ok {
-			if a.SuspendPolicy == store.SuspendPolicyNever || now.Sub(r.CreatedAt) < reconcileMinReservationAge {
-				out = append(out, r)
-				seen[r.ResourceID] = struct{}{}
-			}
+		if ok && a.SuspendPolicy == store.SuspendPolicyNever {
+			out = append(out, r)
+			seen[r.ResourceID] = struct{}{}
 			continue
 		}
-		// No live row in GetAgentsByIDs: either soft-deleted, hard-deleted, or
-		// an in-flight create that has not committed its row yet.
-		if now.Sub(r.CreatedAt) >= reconcileMinReservationAge {
-			continue
+		// Non-live row (missing or soft-deleted) or live auto row: count only
+		// while younger than reconcileMinReservationAge to protect in-flight
+		// creates, restores, and auto->never PATCHes against concurrent
+		// overshoot; older reservations are stale and released by reconcile.
+		if now.Sub(r.CreatedAt) < reconcileMinReservationAge {
+			out = append(out, r)
+			seen[r.ResourceID] = struct{}{}
 		}
-		row, getErr := st.GetAgent(ctx, r.ResourceID)
-		if getErr == nil && !row.DeletedAt.IsZero() {
-			// Soft-deleted row: does not count.
-			continue
-		}
-		if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
-			return nil, getErr
-		}
-		// In-flight create (row not yet committed) or recently hard-deleted
-		// row awaiting reconcile: keep counting within the grace window so
-		// concurrent creates cannot overshoot the cap.
-		out = append(out, r)
-		seen[r.ResourceID] = struct{}{}
 	}
 
 	flagged, err := st.ListNeverSuspendAgents(ctx, projectID)

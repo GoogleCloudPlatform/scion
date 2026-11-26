@@ -5889,8 +5889,9 @@ type agentUpdateResponse struct {
 	// effect.
 	Disposition AgentUpdateDisposition `json:"disposition"`
 	// SuspensionInFlight is true when a PATCH setting suspendPolicy="never"
-	// committed while a stop or suspend was already in flight; the in-flight
-	// operation is not canceled.
+	// committed while a stop or suspend was already in flight (an active
+	// idle-suspend claim, or a running agent whose run_intent is already
+	// stopped); the in-flight operation is not canceled.
 	SuspensionInFlight bool `json:"suspensionInFlight,omitempty"`
 }
 

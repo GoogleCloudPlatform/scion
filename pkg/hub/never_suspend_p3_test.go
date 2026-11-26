@@ -883,7 +883,7 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		assert.Equal(t, float64(1), errResp.Error.Details["limit"])
 	})
 
-	t.Run("soft-deleted row with young reservation does not count and is released by reconcile", func(t *testing.T) {
+	t.Run("soft-deleted row with young reservation counts until past min age then reconcile frees slot", func(t *testing.T) {
 		srv, s := testServer(t)
 		setNeverSuspendExperiment(t, srv, true)
 		def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxNeverSuspendAgentsPerProject)
@@ -907,7 +907,8 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		}))
 		srv.SetDispatcher(&createAgentDispatcher{})
 
-		// Seed a soft-deleted flagged agent with a brand-new (young) reservation.
+		// Seed a soft-deleted flagged agent with a brand-new (young) reservation
+		// (same state as an in-flight restore or a soft-delete whose release failed).
 		deletedAgent := &store.Agent{
 			ID: tid("ns-sd-young-agent"), Slug: "ns-sd-young-agent", Name: "ns-sd-young-agent",
 			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
@@ -925,12 +926,24 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		require.NoError(t, err)
 		softDeleteAgentRow(t, s, deletedAgent.ID)
 
-		// Unified usage must not count the soft-deleted agent's young reservation.
+		// While young, the reservation counts and survives reconcile to protect in-flight restores.
 		usage, err := neverSuspendQuotaUsage(ctx, s, def.ID, projectID, time.Now())
 		require.NoError(t, err)
-		assert.Empty(t, usage, "young reservation for soft-deleted row must not count")
+		assert.Len(t, usage, 1, "young reservation on soft-deleted row must count")
+		srv.ReconcileStaleNeverSuspendQuotaReservations(ctx)
+		assert.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, deletedAgent.ID),
+			"young reservation on soft-deleted row must survive reconcile")
 
-		// Enforcement allows creating a new flagged agent at cap=1 even before reconcile.
+		// Backdate past reconcileMinReservationAge: reconcile releases it and frees the slot.
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err = db.ExecContext(ctx,
+			"UPDATE usage_reservations SET created_at = ? WHERE resource_id = ? AND limit_definition_id = ?",
+			time.Now().Add(-2*reconcileMinReservationAge), deletedAgent.ID, def.ID)
+		require.NoError(t, err)
+
+		srv.ReconcileStaleNeverSuspendQuotaReservations(ctx)
+		assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, deletedAgent.ID))
+
 		createRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]any{
 			"name":          "ns-sd-young-new",
 			"projectId":     projectID,
@@ -938,10 +951,137 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 			"suspendPolicy": store.SuspendPolicyNever,
 		})
 		require.Equal(t, http.StatusCreated, createRec.Code, "body: %s", createRec.Body.String())
+	})
 
-		// Reconcile releases the young soft-deleted reservation immediately.
-		srv.ReconcileStaleNeverSuspendQuotaReservations(ctx)
-		assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, deletedAgent.ID))
+	t.Run("R1: no-op never PATCH and labels+never PATCH on Phase-1 rows at cap succeed while N+1th auto fails 429", func(t *testing.T) {
+		srv, s := testServer(t)
+		setNeverSuspendExperiment(t, srv, true)
+		setProjectNeverSuspendCeiling(t, s, 2)
+
+		projectID := tid("ns-r1-cap-project")
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "NS R1 Cap Project", Slug: "ns-r1-cap-project",
+			GitRemote: "https://github.com/example/ns-r1-cap.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+
+		// Seed N=2 Phase-1-style flagged rows with no usage_reservations.
+		p1a := &store.Agent{
+			ID: tid("ns-r1-p1a"), Slug: "ns-r1-p1a", Name: "ns-r1-p1a",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+		}
+		p1b := &store.Agent{
+			ID: tid("ns-r1-p1b"), Slug: "ns-r1-p1b", Name: "ns-r1-p1b",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+		}
+		autoAgent := &store.Agent{
+			ID: tid("ns-r1-auto"), Slug: "ns-r1-auto", Name: "ns-r1-auto",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyAuto,
+		}
+		require.NoError(t, s.CreateAgent(ctx, p1a))
+		require.NoError(t, s.CreateAgent(ctx, p1b))
+		require.NoError(t, s.CreateAgent(ctx, autoAgent))
+		require.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, p1a.ID))
+		require.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, p1b.ID))
+
+		// No-op PATCH {"suspendPolicy":"never"} at cap=2 -> 200.
+		recNoop := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+p1a.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, recNoop.Code, "body: %s", recNoop.Body.String())
+
+		// Labels + suspendPolicy="never" PATCH at cap=2 -> 200 and labels persisted.
+		recCombined := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+p1b.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+			"labels":        map[string]string{"env": "prod"},
+		})
+		require.Equal(t, http.StatusOK, recCombined.Code, "body: %s", recCombined.Body.String())
+		storedB, err := s.GetAgent(ctx, p1b.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "prod", storedB.Labels["env"])
+		assert.Equal(t, store.SuspendPolicyNever, storedB.SuspendPolicy)
+
+		// Flagging an (N+1)th auto agent at cap=2 -> 429 quota_exceeded.
+		recOver := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+autoAgent.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusTooManyRequests, recOver.Code, "body: %s", recOver.Body.String())
+	})
+
+	t.Run("R2: in-flight restore reservation blocks concurrent create, PATCH auto->never, and second restore", func(t *testing.T) {
+		srv, s := testServer(t)
+		setNeverSuspendExperiment(t, srv, true)
+		srv.mu.Lock()
+		srv.config.SoftDeleteRetention = 24 * time.Hour
+		srv.mu.Unlock()
+		setProjectNeverSuspendCeiling(t, s, 1)
+
+		projectID := tid("ns-r2-inflight-project")
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "NS R2 InFlight Project", Slug: "ns-r2-inflight-project",
+			GitRemote: "https://github.com/example/ns-r2-inflight.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+		brokerID := tid("ns-r2-inflight-broker")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID: brokerID, Name: "NS R2 InFlight Broker", Slug: "ns-r2-inflight-broker", Status: store.BrokerStatusOnline,
+			CreatedBy: DevUserID,
+		}))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS R2 InFlight Broker",
+			Status: store.BrokerStatusOnline,
+		}))
+		srv.SetDispatcher(&createAgentDispatcher{})
+
+		// Two soft-deleted flagged agents + one live auto agent.
+		restoring := &store.Agent{
+			ID: tid("ns-r2-restoring"), Slug: "ns-r2-restoring", Name: "ns-r2-restoring",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+		}
+		secondDel := &store.Agent{
+			ID: tid("ns-r2-second-del"), Slug: "ns-r2-second-del", Name: "ns-r2-second-del",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+		}
+		autoAgent := &store.Agent{
+			ID: tid("ns-r2-auto"), Slug: "ns-r2-auto", Name: "ns-r2-auto",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyAuto,
+		}
+		require.NoError(t, s.CreateAgent(ctx, restoring))
+		require.NoError(t, s.CreateAgent(ctx, secondDel))
+		require.NoError(t, s.CreateAgent(ctx, autoAgent))
+		softDeleteAgentRow(t, s, restoring.ID)
+		softDeleteAgentRow(t, s, secondDel.ID)
+
+		// Simulate restoreAgent's Reserve step completing before restoreAgentTx commits.
+		created, err := srv.quotaService.Reserve(ctx, store.LimitMaxNeverSuspendAgentsPerProject,
+			DevUserID, store.QuotaScopeProject, projectID, restoring.ID)
+		require.NoError(t, err)
+		require.True(t, created)
+
+		// 1. Concurrent create with suspendPolicy=never -> 429.
+		recCreate := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-r2-concurrent-create",
+			"projectId":     projectID,
+			"provisionOnly": true,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		assert.Equal(t, http.StatusTooManyRequests, recCreate.Code, "body: %s", recCreate.Body.String())
+
+		// 2. Concurrent PATCH auto->never -> 429.
+		recPatch := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+autoAgent.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		assert.Equal(t, http.StatusTooManyRequests, recPatch.Code, "body: %s", recPatch.Body.String())
+
+		// 3. Concurrent second restore of another flagged agent -> 409 quota_exceeded.
+		recRestore := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+secondDel.ID+"/restore", nil)
+		assert.Equal(t, http.StatusConflict, recRestore.Code, "body: %s", recRestore.Body.String())
 	})
 
 	t.Run("restore over cap succeeds when lifecycle.never_suspend experiment is off", func(t *testing.T) {
@@ -1041,5 +1181,169 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		require.NoError(t, err)
 		assert.Empty(t, storedUnpinned.RuntimeBrokerID, "refused mismatch must not assign or pin a broker")
 		assert.Empty(t, storedUnpinned.PinnedRuntimeBrokerID, "refused mismatch must not persist a pin")
+	})
+}
+
+// TestNeverSuspend_QuotaStateModelTable verifies every cell of the 4x3 state
+// model documented on neverSuspendQuotaUsage:
+//
+//	agent row ∈ {missing, soft-deleted, live auto, live never}
+//	  × reservation ∈ {none, young, old}
+//
+// asserting both neverSuspendQuotaUsage count and
+// ReconcileStaleNeverSuspendQuotaReservations outcome, plus Reserve idempotency
+// for a live "never" row that already owns its slot without a reservation.
+func TestNeverSuspend_QuotaStateModelTable(t *testing.T) {
+	ctx := context.Background()
+
+	type rowKind string
+	const (
+		rowMissing     rowKind = "missing"
+		rowSoftDeleted rowKind = "soft-deleted"
+		rowLiveAuto    rowKind = "live-auto"
+		rowLiveNever   rowKind = "live-never"
+	)
+	type resKind string
+	const (
+		resNone  resKind = "none"
+		resYoung resKind = "young"
+		resOld   resKind = "old"
+	)
+
+	cases := []struct {
+		row          rowKind
+		res          resKind
+		wantCount    int
+		wantKept     bool // meaningful when res != resNone
+		wantReleased bool // meaningful when res != resNone
+	}{
+		{rowMissing, resNone, 0, false, false},
+		{rowMissing, resYoung, 1, true, false},
+		{rowMissing, resOld, 0, false, true},
+
+		{rowSoftDeleted, resNone, 0, false, false},
+		{rowSoftDeleted, resYoung, 1, true, false},
+		{rowSoftDeleted, resOld, 0, false, true},
+
+		{rowLiveAuto, resNone, 0, false, false},
+		{rowLiveAuto, resYoung, 1, true, false},
+		{rowLiveAuto, resOld, 0, false, true},
+
+		{rowLiveNever, resNone, 1, false, false},
+		{rowLiveNever, resYoung, 1, true, false},
+		{rowLiveNever, resOld, 1, true, false},
+	}
+
+	for _, tc := range cases {
+		name := string(tc.row) + "/" + string(tc.res)
+		t.Run(name, func(t *testing.T) {
+			srv, s := testServer(t)
+			setNeverSuspendExperiment(t, srv, true)
+			def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxNeverSuspendAgentsPerProject)
+			require.NoError(t, err)
+
+			projectID := tid("ns-tbl-proj-" + name)
+			require.NoError(t, s.CreateProject(ctx, &store.Project{
+				ID: projectID, Name: "NS Tbl " + name, Slug: "ns-tbl-" + string(tc.row) + "-" + string(tc.res),
+				GitRemote: "https://github.com/example/ns-tbl.git",
+				OwnerID:   DevUserID, CreatedBy: DevUserID,
+			}))
+
+			agentID := tid("ns-tbl-agent-" + name)
+			switch tc.row {
+			case rowMissing:
+				// No agent row created.
+			case rowSoftDeleted:
+				require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+					ID: agentID, Slug: "a-" + string(tc.res), Name: "a-" + string(tc.res),
+					ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+					Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+				}))
+				softDeleteAgentRow(t, s, agentID)
+			case rowLiveAuto:
+				require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+					ID: agentID, Slug: "a-" + string(tc.res), Name: "a-" + string(tc.res),
+					ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+					Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyAuto,
+				}))
+			case rowLiveNever:
+				require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+					ID: agentID, Slug: "a-" + string(tc.res), Name: "a-" + string(tc.res),
+					ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+					Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+				}))
+			}
+
+			if tc.res != resNone {
+				_, err = s.CreateUsageReservation(ctx, &store.UsageReservation{
+					LimitDefinitionID: def.ID,
+					SubjectID:         DevUserID,
+					ScopeType:         store.QuotaScopeProject,
+					ScopeID:           projectID,
+					ResourceID:        agentID,
+					Reserved:          1,
+				})
+				require.NoError(t, err)
+				if tc.res == resOld {
+					db := s.(*entadapter.CompositeStore).DB()
+					_, err = db.ExecContext(ctx,
+						"UPDATE usage_reservations SET created_at = ? WHERE resource_id = ? AND limit_definition_id = ?",
+						time.Now().Add(-2*reconcileMinReservationAge), agentID, def.ID)
+					require.NoError(t, err)
+				}
+			}
+
+			// 1. Check neverSuspendQuotaUsage count.
+			usage, err := neverSuspendQuotaUsage(ctx, s, def.ID, projectID, time.Now())
+			require.NoError(t, err)
+			assert.Len(t, usage, tc.wantCount, "neverSuspendQuotaUsage count for %s", name)
+
+			// 2. Check ReconcileStaleNeverSuspendQuotaReservations outcome.
+			srv.ReconcileStaleNeverSuspendQuotaReservations(ctx)
+			if tc.res != resNone {
+				gotHas := hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, agentID)
+				if tc.wantKept {
+					assert.True(t, gotHas, "reconcile must keep reservation for %s", name)
+				}
+				if tc.wantReleased {
+					assert.False(t, gotHas, "reconcile must release reservation for %s", name)
+				}
+			}
+		})
+	}
+
+	t.Run("Reserve for already-counted live never row without reservation succeeds at cap", func(t *testing.T) {
+		srv, s := testServer(t)
+		setNeverSuspendExperiment(t, srv, true)
+		setProjectNeverSuspendCeiling(t, s, 1)
+
+		projectID := tid("ns-tbl-res-proj")
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "NS Tbl Res", Slug: "ns-tbl-res",
+			GitRemote: "https://github.com/example/ns-tbl-res.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+
+		liveNever := &store.Agent{
+			ID: tid("ns-tbl-res-a1"), Slug: "ns-tbl-res-a1", Name: "ns-tbl-res-a1",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+		}
+		require.NoError(t, s.CreateAgent(ctx, liveNever))
+		require.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, liveNever.ID))
+
+		// Re-reserving the already-counted live never row succeeds without creating a rollback-owned slot.
+		created, err := srv.quotaService.Reserve(ctx, store.LimitMaxNeverSuspendAgentsPerProject,
+			DevUserID, store.QuotaScopeProject, projectID, liveNever.ID)
+		require.NoError(t, err)
+		assert.False(t, created)
+		assert.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, liveNever.ID),
+			"Reserve should backfill the reservation unchecked for future fast-path hits")
+
+		// A distinct resource at cap=1 is still rejected.
+		createdOther, errOther := srv.quotaService.Reserve(ctx, store.LimitMaxNeverSuspendAgentsPerProject,
+			DevUserID, store.QuotaScopeProject, projectID, tid("ns-tbl-res-other"))
+		assert.False(t, createdOther)
+		require.ErrorIs(t, errOther, store.ErrQuotaExceeded)
 	})
 }
