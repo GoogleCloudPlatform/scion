@@ -232,20 +232,105 @@ func (m *memTriggerStore) RecordTriggerFire(_ context.Context, id string, firedA
 	}
 	return store.ErrNotFound
 }
-func (m *memTriggerStore) RecordTriggerFireErrorDelta(_ context.Context, id string, firedAt time.Time, status, errMsg string) error {
+func (m *memTriggerStore) FlushTriggerEventCounters(_ context.Context, triggerID, eventID string, firedAt time.Time, status, errMsg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, tr := range m.triggers {
-		if tr.ID == id {
-			tr.ErrorCount++
-			if tr.LastFireAt == nil || !firedAt.Before(*tr.LastFireAt) {
-				t := firedAt
-				tr.LastFireAt = &t
-				tr.LastFireStatus = status
-				tr.LastFireError = errMsg
-			}
-			return nil
+	isErr := func(s string) bool {
+		return s == store.TriggerFireStatusFailed || s == store.TriggerFireStatusRefused || s == store.TriggerFireStatusExpired
+	}
+	isTerm := func(s string) bool {
+		return s == store.TriggerFireStatusFired || s == store.TriggerFireStatusFailed || s == store.TriggerFireStatusRefused || s == store.TriggerFireStatusSkipped || s == store.TriggerFireStatusExpired
+	}
+	var (
+		alreadyCounted       bool
+		priorFlushedError    bool
+		unflushedErrStatus   string
+		unflushedErrMsg      string
+		unflushedErrAt       time.Time
+		firstUnflushedStatus string
+		firstUnflushedErr    string
+		firstUnflushedAt     time.Time
+		terminalUnflushed    []*store.TriggerFire
+	)
+	for _, f := range m.byFireID {
+		if f.TriggerID != triggerID || f.EventID != eventID {
+			continue
 		}
+		if f.CounterFlushed {
+			alreadyCounted = true
+			if isErr(f.Status) {
+				priorFlushedError = true
+			}
+			continue
+		}
+		if !isTerm(f.Status) {
+			continue
+		}
+		terminalUnflushed = append(terminalUnflushed, f)
+		var fAt time.Time
+		if f.FinishedAt != nil {
+			fAt = f.FinishedAt.UTC()
+		}
+		if firstUnflushedStatus == "" {
+			firstUnflushedStatus = f.Status
+			firstUnflushedErr = f.Error
+			firstUnflushedAt = fAt
+		}
+		if isErr(f.Status) && unflushedErrStatus == "" {
+			unflushedErrStatus = f.Status
+			unflushedErrMsg = f.Error
+			unflushedErrAt = fAt
+		}
+	}
+	if len(terminalUnflushed) == 0 && status == "" {
+		return nil
+	}
+	effStatus, effErr, effAt := status, errMsg, firedAt.UTC()
+	if !isErr(effStatus) && unflushedErrStatus != "" {
+		effStatus = unflushedErrStatus
+		effErr = unflushedErrMsg
+		if effAt.IsZero() {
+			effAt = unflushedErrAt
+		}
+	}
+	if effStatus == "" {
+		effStatus = firstUnflushedStatus
+		effErr = firstUnflushedErr
+		if effAt.IsZero() {
+			effAt = firstUnflushedAt
+		}
+	}
+	if effAt.IsZero() {
+		effAt = time.Now().UTC()
+	}
+	for _, tr := range m.triggers {
+		if tr.ID != triggerID {
+			continue
+		}
+		if !alreadyCounted {
+			tr.FireCount++
+			if isErr(effStatus) {
+				tr.ErrorCount++
+			}
+			if tr.LastFireAt == nil || effAt.After(*tr.LastFireAt) {
+				t := effAt
+				tr.LastFireAt = &t
+				tr.LastFireStatus = effStatus
+				tr.LastFireError = effErr
+			}
+		} else if isErr(effStatus) && !priorFlushedError {
+			tr.ErrorCount++
+			if tr.LastFireAt == nil || !effAt.Before(*tr.LastFireAt) {
+				t := effAt
+				tr.LastFireAt = &t
+				tr.LastFireStatus = effStatus
+				tr.LastFireError = effErr
+			}
+		}
+		for _, f := range terminalUnflushed {
+			f.CounterFlushed = true
+		}
+		return nil
 	}
 	return store.ErrNotFound
 }
@@ -643,6 +728,14 @@ func (m *memTriggerStore) CountTriggerActionFiresSince(context.Context, string, 
 }
 func (m *memTriggerStore) CountRecentTriggerFires(context.Context, string, time.Time, string) (int, error) {
 	return 0, nil
+}
+func (m *memTriggerStore) RecordTriggerFireRateDecision(_ context.Context, fireID, decision string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if f, ok := m.byFireID[fireID]; ok && f.RateDecision == "" {
+		f.RateDecision = decision
+	}
+	return nil
 }
 func (m *memTriggerStore) HasLiveTriggerFireForSubject(_ context.Context, triggerID string, actionIndex int, subject string, now time.Time) (bool, error) {
 	return m.HasLiveTriggerFireForSubjectExcluding(context.Background(), triggerID, actionIndex, subject, "", true, now)

@@ -43,6 +43,10 @@ const (
 	FieldActionIndex = "action_index"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
+	// FieldRateDecision holds the string denoting the rate_decision field in the database.
+	FieldRateDecision = "rate_decision"
+	// FieldCounterFlushed holds the string denoting the counter_flushed field in the database.
+	FieldCounterFlushed = "counter_flushed"
 	// FieldError holds the string denoting the error field in the database.
 	FieldError = "error"
 	// FieldResultRef holds the string denoting the result_ref field in the database.
@@ -105,6 +109,8 @@ var Columns = []string{
 	FieldActionType,
 	FieldActionIndex,
 	FieldStatus,
+	FieldRateDecision,
+	FieldCounterFlushed,
 	FieldError,
 	FieldResultRef,
 	FieldMatchedThrough,
@@ -142,6 +148,12 @@ var (
 	DefaultActionIndex int
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
+	// DefaultRateDecision holds the default value on creation for the "rate_decision" field.
+	DefaultRateDecision string
+	// RateDecisionValidator is a validator for the "rate_decision" field. It is called by the builders before save.
+	RateDecisionValidator func(string) error
+	// DefaultCounterFlushed holds the default value on creation for the "counter_flushed" field.
+	DefaultCounterFlushed bool
 	// MatchedThroughValidator is a validator for the "matched_through" field. It is called by the builders before save.
 	MatchedThroughValidator func(string) error
 	// DecidedDialectValidator is a validator for the "decided_dialect" field. It is called by the builders before save.
@@ -236,6 +248,16 @@ func ByActionIndex(opts ...sql.OrderTermOption) OrderOption {
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
+}
+
+// ByRateDecision orders the results by the rate_decision field.
+func ByRateDecision(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRateDecision, opts...).ToFunc()
+}
+
+// ByCounterFlushed orders the results by the counter_flushed field.
+func ByCounterFlushed(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCounterFlushed, opts...).ToFunc()
 }
 
 // ByError orders the results by the error field.

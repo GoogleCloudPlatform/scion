@@ -319,7 +319,8 @@ func (a *execAction) Authorize(
 		}
 		triggerCtx = built
 
-		// Per-trigger exec fire rate cap (own cap, separate from schedule quotas).
+		// Per-trigger exec fire rate cap (cap = 30 exec rows from other events per minute,
+		// separate from schedule quotas and from the event-level max_fires_per_minute).
 		// Count only exec rows from other events so non-exec siblings and earlier
 		// exec actions of the same matched event never rate-limit later exec siblings (O-c).
 		if req.Authority.DefinitionID != "" {

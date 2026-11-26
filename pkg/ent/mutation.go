@@ -133277,6 +133277,8 @@ type TriggerFireMutation struct {
 	action_index                  *int
 	addaction_index               *int
 	status                        *string
+	rate_decision                 *string
+	counter_flushed               *bool
 	error                         *string
 	result_ref                    *string
 	matched_through               *string
@@ -134061,6 +134063,78 @@ func (m *TriggerFireMutation) OldStatus(ctx context.Context) (v string, err erro
 // ResetStatus resets all changes to the "status" field.
 func (m *TriggerFireMutation) ResetStatus() {
 	m.status = nil
+}
+
+// SetRateDecision sets the "rate_decision" field.
+func (m *TriggerFireMutation) SetRateDecision(s string) {
+	m.rate_decision = &s
+}
+
+// RateDecision returns the value of the "rate_decision" field in the mutation.
+func (m *TriggerFireMutation) RateDecision() (r string, exists bool) {
+	v := m.rate_decision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRateDecision returns the old "rate_decision" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldRateDecision(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRateDecision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRateDecision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRateDecision: %w", err)
+	}
+	return oldValue.RateDecision, nil
+}
+
+// ResetRateDecision resets all changes to the "rate_decision" field.
+func (m *TriggerFireMutation) ResetRateDecision() {
+	m.rate_decision = nil
+}
+
+// SetCounterFlushed sets the "counter_flushed" field.
+func (m *TriggerFireMutation) SetCounterFlushed(b bool) {
+	m.counter_flushed = &b
+}
+
+// CounterFlushed returns the value of the "counter_flushed" field in the mutation.
+func (m *TriggerFireMutation) CounterFlushed() (r bool, exists bool) {
+	v := m.counter_flushed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCounterFlushed returns the old "counter_flushed" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldCounterFlushed(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCounterFlushed is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCounterFlushed requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCounterFlushed: %w", err)
+	}
+	return oldValue.CounterFlushed, nil
+}
+
+// ResetCounterFlushed resets all changes to the "counter_flushed" field.
+func (m *TriggerFireMutation) ResetCounterFlushed() {
+	m.counter_flushed = nil
 }
 
 // SetError sets the "error" field.
@@ -134862,7 +134936,7 @@ func (m *TriggerFireMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerFireMutation) Fields() []string {
-	fields := make([]string, 0, 30)
+	fields := make([]string, 0, 32)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, triggerfire.FieldInitiatorPrincipalKind)
 	}
@@ -134904,6 +134978,12 @@ func (m *TriggerFireMutation) Fields() []string {
 	}
 	if m.status != nil {
 		fields = append(fields, triggerfire.FieldStatus)
+	}
+	if m.rate_decision != nil {
+		fields = append(fields, triggerfire.FieldRateDecision)
+	}
+	if m.counter_flushed != nil {
+		fields = append(fields, triggerfire.FieldCounterFlushed)
 	}
 	if m.error != nil {
 		fields = append(fields, triggerfire.FieldError)
@@ -134989,6 +135069,10 @@ func (m *TriggerFireMutation) Field(name string) (ent.Value, bool) {
 		return m.ActionIndex()
 	case triggerfire.FieldStatus:
 		return m.Status()
+	case triggerfire.FieldRateDecision:
+		return m.RateDecision()
+	case triggerfire.FieldCounterFlushed:
+		return m.CounterFlushed()
 	case triggerfire.FieldError:
 		return m.Error()
 	case triggerfire.FieldResultRef:
@@ -135058,6 +135142,10 @@ func (m *TriggerFireMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldActionIndex(ctx)
 	case triggerfire.FieldStatus:
 		return m.OldStatus(ctx)
+	case triggerfire.FieldRateDecision:
+		return m.OldRateDecision(ctx)
+	case triggerfire.FieldCounterFlushed:
+		return m.OldCounterFlushed(ctx)
 	case triggerfire.FieldError:
 		return m.OldError(ctx)
 	case triggerfire.FieldResultRef:
@@ -135196,6 +135284,20 @@ func (m *TriggerFireMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetStatus(v)
+		return nil
+	case triggerfire.FieldRateDecision:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRateDecision(v)
+		return nil
+	case triggerfire.FieldCounterFlushed:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCounterFlushed(v)
 		return nil
 	case triggerfire.FieldError:
 		v, ok := value.(string)
@@ -135555,6 +135657,12 @@ func (m *TriggerFireMutation) ResetField(name string) error {
 		return nil
 	case triggerfire.FieldStatus:
 		m.ResetStatus()
+		return nil
+	case triggerfire.FieldRateDecision:
+		m.ResetRateDecision()
+		return nil
+	case triggerfire.FieldCounterFlushed:
+		m.ResetCounterFlushed()
 		return nil
 	case triggerfire.FieldError:
 		m.ResetError()

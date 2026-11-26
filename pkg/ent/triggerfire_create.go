@@ -181,6 +181,34 @@ func (_c *TriggerFireCreate) SetNillableStatus(v *string) *TriggerFireCreate {
 	return _c
 }
 
+// SetRateDecision sets the "rate_decision" field.
+func (_c *TriggerFireCreate) SetRateDecision(v string) *TriggerFireCreate {
+	_c.mutation.SetRateDecision(v)
+	return _c
+}
+
+// SetNillableRateDecision sets the "rate_decision" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableRateDecision(v *string) *TriggerFireCreate {
+	if v != nil {
+		_c.SetRateDecision(*v)
+	}
+	return _c
+}
+
+// SetCounterFlushed sets the "counter_flushed" field.
+func (_c *TriggerFireCreate) SetCounterFlushed(v bool) *TriggerFireCreate {
+	_c.mutation.SetCounterFlushed(v)
+	return _c
+}
+
+// SetNillableCounterFlushed sets the "counter_flushed" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableCounterFlushed(v *bool) *TriggerFireCreate {
+	if v != nil {
+		_c.SetCounterFlushed(*v)
+	}
+	return _c
+}
+
 // SetError sets the "error" field.
 func (_c *TriggerFireCreate) SetError(v string) *TriggerFireCreate {
 	_c.mutation.SetError(v)
@@ -465,6 +493,14 @@ func (_c *TriggerFireCreate) defaults() {
 		v := triggerfire.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
+	if _, ok := _c.mutation.RateDecision(); !ok {
+		v := triggerfire.DefaultRateDecision
+		_c.mutation.SetRateDecision(v)
+	}
+	if _, ok := _c.mutation.CounterFlushed(); !ok {
+		v := triggerfire.DefaultCounterFlushed
+		_c.mutation.SetCounterFlushed(v)
+	}
 	if _, ok := _c.mutation.Attempts(); !ok {
 		v := triggerfire.DefaultAttempts
 		_c.mutation.SetAttempts(v)
@@ -519,6 +555,17 @@ func (_c *TriggerFireCreate) check() error {
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "TriggerFire.status"`)}
+	}
+	if _, ok := _c.mutation.RateDecision(); !ok {
+		return &ValidationError{Name: "rate_decision", err: errors.New(`ent: missing required field "TriggerFire.rate_decision"`)}
+	}
+	if v, ok := _c.mutation.RateDecision(); ok {
+		if err := triggerfire.RateDecisionValidator(v); err != nil {
+			return &ValidationError{Name: "rate_decision", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.rate_decision": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.CounterFlushed(); !ok {
+		return &ValidationError{Name: "counter_flushed", err: errors.New(`ent: missing required field "TriggerFire.counter_flushed"`)}
 	}
 	if v, ok := _c.mutation.MatchedThrough(); ok {
 		if err := triggerfire.MatchedThroughValidator(v); err != nil {
@@ -644,6 +691,14 @@ func (_c *TriggerFireCreate) createSpec() (*TriggerFire, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(triggerfire.FieldStatus, field.TypeString, value)
 		_node.Status = value
+	}
+	if value, ok := _c.mutation.RateDecision(); ok {
+		_spec.SetField(triggerfire.FieldRateDecision, field.TypeString, value)
+		_node.RateDecision = value
+	}
+	if value, ok := _c.mutation.CounterFlushed(); ok {
+		_spec.SetField(triggerfire.FieldCounterFlushed, field.TypeBool, value)
+		_node.CounterFlushed = value
 	}
 	if value, ok := _c.mutation.Error(); ok {
 		_spec.SetField(triggerfire.FieldError, field.TypeString, value)
@@ -924,6 +979,30 @@ func (u *TriggerFireUpsert) SetStatus(v string) *TriggerFireUpsert {
 // UpdateStatus sets the "status" field to the value that was provided on create.
 func (u *TriggerFireUpsert) UpdateStatus() *TriggerFireUpsert {
 	u.SetExcluded(triggerfire.FieldStatus)
+	return u
+}
+
+// SetRateDecision sets the "rate_decision" field.
+func (u *TriggerFireUpsert) SetRateDecision(v string) *TriggerFireUpsert {
+	u.Set(triggerfire.FieldRateDecision, v)
+	return u
+}
+
+// UpdateRateDecision sets the "rate_decision" field to the value that was provided on create.
+func (u *TriggerFireUpsert) UpdateRateDecision() *TriggerFireUpsert {
+	u.SetExcluded(triggerfire.FieldRateDecision)
+	return u
+}
+
+// SetCounterFlushed sets the "counter_flushed" field.
+func (u *TriggerFireUpsert) SetCounterFlushed(v bool) *TriggerFireUpsert {
+	u.Set(triggerfire.FieldCounterFlushed, v)
+	return u
+}
+
+// UpdateCounterFlushed sets the "counter_flushed" field to the value that was provided on create.
+func (u *TriggerFireUpsert) UpdateCounterFlushed() *TriggerFireUpsert {
+	u.SetExcluded(triggerfire.FieldCounterFlushed)
 	return u
 }
 
@@ -1405,6 +1484,34 @@ func (u *TriggerFireUpsertOne) SetStatus(v string) *TriggerFireUpsertOne {
 func (u *TriggerFireUpsertOne) UpdateStatus() *TriggerFireUpsertOne {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetRateDecision sets the "rate_decision" field.
+func (u *TriggerFireUpsertOne) SetRateDecision(v string) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetRateDecision(v)
+	})
+}
+
+// UpdateRateDecision sets the "rate_decision" field to the value that was provided on create.
+func (u *TriggerFireUpsertOne) UpdateRateDecision() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateRateDecision()
+	})
+}
+
+// SetCounterFlushed sets the "counter_flushed" field.
+func (u *TriggerFireUpsertOne) SetCounterFlushed(v bool) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetCounterFlushed(v)
+	})
+}
+
+// UpdateCounterFlushed sets the "counter_flushed" field to the value that was provided on create.
+func (u *TriggerFireUpsertOne) UpdateCounterFlushed() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateCounterFlushed()
 	})
 }
 
@@ -2092,6 +2199,34 @@ func (u *TriggerFireUpsertBulk) SetStatus(v string) *TriggerFireUpsertBulk {
 func (u *TriggerFireUpsertBulk) UpdateStatus() *TriggerFireUpsertBulk {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetRateDecision sets the "rate_decision" field.
+func (u *TriggerFireUpsertBulk) SetRateDecision(v string) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetRateDecision(v)
+	})
+}
+
+// UpdateRateDecision sets the "rate_decision" field to the value that was provided on create.
+func (u *TriggerFireUpsertBulk) UpdateRateDecision() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateRateDecision()
+	})
+}
+
+// SetCounterFlushed sets the "counter_flushed" field.
+func (u *TriggerFireUpsertBulk) SetCounterFlushed(v bool) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetCounterFlushed(v)
+	})
+}
+
+// UpdateCounterFlushed sets the "counter_flushed" field to the value that was provided on create.
+func (u *TriggerFireUpsertBulk) UpdateCounterFlushed() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateCounterFlushed()
 	})
 }
 

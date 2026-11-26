@@ -4284,32 +4284,42 @@ func init() {
 	triggerfireDescStatus := triggerfireFields[7].Descriptor()
 	// triggerfire.DefaultStatus holds the default value on creation for the status field.
 	triggerfire.DefaultStatus = triggerfireDescStatus.Default.(string)
+	// triggerfireDescRateDecision is the schema descriptor for rate_decision field.
+	triggerfireDescRateDecision := triggerfireFields[8].Descriptor()
+	// triggerfire.DefaultRateDecision holds the default value on creation for the rate_decision field.
+	triggerfire.DefaultRateDecision = triggerfireDescRateDecision.Default.(string)
+	// triggerfire.RateDecisionValidator is a validator for the "rate_decision" field. It is called by the builders before save.
+	triggerfire.RateDecisionValidator = triggerfireDescRateDecision.Validators[0].(func(string) error)
+	// triggerfireDescCounterFlushed is the schema descriptor for counter_flushed field.
+	triggerfireDescCounterFlushed := triggerfireFields[9].Descriptor()
+	// triggerfire.DefaultCounterFlushed holds the default value on creation for the counter_flushed field.
+	triggerfire.DefaultCounterFlushed = triggerfireDescCounterFlushed.Default.(bool)
 	// triggerfireDescMatchedThrough is the schema descriptor for matched_through field.
-	triggerfireDescMatchedThrough := triggerfireFields[10].Descriptor()
+	triggerfireDescMatchedThrough := triggerfireFields[12].Descriptor()
 	// triggerfire.MatchedThroughValidator is a validator for the "matched_through" field. It is called by the builders before save.
 	triggerfire.MatchedThroughValidator = triggerfireDescMatchedThrough.Validators[0].(func(string) error)
 	// triggerfireDescDecidedDialect is the schema descriptor for decided_dialect field.
-	triggerfireDescDecidedDialect := triggerfireFields[11].Descriptor()
+	triggerfireDescDecidedDialect := triggerfireFields[13].Descriptor()
 	// triggerfire.DecidedDialectValidator is a validator for the "decided_dialect" field. It is called by the builders before save.
 	triggerfire.DecidedDialectValidator = triggerfireDescDecidedDialect.Validators[0].(func(string) error)
 	// triggerfireDescRuleTrace is the schema descriptor for rule_trace field.
-	triggerfireDescRuleTrace := triggerfireFields[12].Descriptor()
+	triggerfireDescRuleTrace := triggerfireFields[14].Descriptor()
 	// triggerfire.RuleTraceValidator is a validator for the "rule_trace" field. It is called by the builders before save.
 	triggerfire.RuleTraceValidator = triggerfireDescRuleTrace.Validators[0].(func(string) error)
 	// triggerfireDescAttempts is the schema descriptor for attempts field.
-	triggerfireDescAttempts := triggerfireFields[15].Descriptor()
+	triggerfireDescAttempts := triggerfireFields[17].Descriptor()
 	// triggerfire.DefaultAttempts holds the default value on creation for the attempts field.
 	triggerfire.DefaultAttempts = triggerfireDescAttempts.Default.(int)
 	// triggerfireDescExecutorKind is the schema descriptor for executor_kind field.
-	triggerfireDescExecutorKind := triggerfireFields[16].Descriptor()
+	triggerfireDescExecutorKind := triggerfireFields[18].Descriptor()
 	// triggerfire.DefaultExecutorKind holds the default value on creation for the executor_kind field.
 	triggerfire.DefaultExecutorKind = triggerfireDescExecutorKind.Default.(string)
 	// triggerfireDescExecutorID is the schema descriptor for executor_id field.
-	triggerfireDescExecutorID := triggerfireFields[17].Descriptor()
+	triggerfireDescExecutorID := triggerfireFields[19].Descriptor()
 	// triggerfire.DefaultExecutorID holds the default value on creation for the executor_id field.
 	triggerfire.DefaultExecutorID = triggerfireDescExecutorID.Default.(string)
 	// triggerfireDescCreated is the schema descriptor for created field.
-	triggerfireDescCreated := triggerfireFields[23].Descriptor()
+	triggerfireDescCreated := triggerfireFields[25].Descriptor()
 	// triggerfire.DefaultCreated holds the default value on creation for the created field.
 	triggerfire.DefaultCreated = triggerfireDescCreated.Default.(func() time.Time)
 	// triggerfireDescID is the schema descriptor for id field.

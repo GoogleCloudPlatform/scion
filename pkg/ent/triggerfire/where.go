@@ -126,6 +126,16 @@ func Status(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldStatus, v))
 }
 
+// RateDecision applies equality check predicate on the "rate_decision" field. It's identical to RateDecisionEQ.
+func RateDecision(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldRateDecision, v))
+}
+
+// CounterFlushed applies equality check predicate on the "counter_flushed" field. It's identical to CounterFlushedEQ.
+func CounterFlushed(v bool) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldCounterFlushed, v))
+}
+
 // Error applies equality check predicate on the "error" field. It's identical to ErrorEQ.
 func Error(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldError, v))
@@ -1034,6 +1044,81 @@ func StatusEqualFold(v string) predicate.TriggerFire {
 // StatusContainsFold applies the ContainsFold predicate on the "status" field.
 func StatusContainsFold(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldContainsFold(FieldStatus, v))
+}
+
+// RateDecisionEQ applies the EQ predicate on the "rate_decision" field.
+func RateDecisionEQ(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldRateDecision, v))
+}
+
+// RateDecisionNEQ applies the NEQ predicate on the "rate_decision" field.
+func RateDecisionNEQ(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldRateDecision, v))
+}
+
+// RateDecisionIn applies the In predicate on the "rate_decision" field.
+func RateDecisionIn(vs ...string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIn(FieldRateDecision, vs...))
+}
+
+// RateDecisionNotIn applies the NotIn predicate on the "rate_decision" field.
+func RateDecisionNotIn(vs ...string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotIn(FieldRateDecision, vs...))
+}
+
+// RateDecisionGT applies the GT predicate on the "rate_decision" field.
+func RateDecisionGT(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGT(FieldRateDecision, v))
+}
+
+// RateDecisionGTE applies the GTE predicate on the "rate_decision" field.
+func RateDecisionGTE(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGTE(FieldRateDecision, v))
+}
+
+// RateDecisionLT applies the LT predicate on the "rate_decision" field.
+func RateDecisionLT(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLT(FieldRateDecision, v))
+}
+
+// RateDecisionLTE applies the LTE predicate on the "rate_decision" field.
+func RateDecisionLTE(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLTE(FieldRateDecision, v))
+}
+
+// RateDecisionContains applies the Contains predicate on the "rate_decision" field.
+func RateDecisionContains(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldContains(FieldRateDecision, v))
+}
+
+// RateDecisionHasPrefix applies the HasPrefix predicate on the "rate_decision" field.
+func RateDecisionHasPrefix(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldHasPrefix(FieldRateDecision, v))
+}
+
+// RateDecisionHasSuffix applies the HasSuffix predicate on the "rate_decision" field.
+func RateDecisionHasSuffix(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldHasSuffix(FieldRateDecision, v))
+}
+
+// RateDecisionEqualFold applies the EqualFold predicate on the "rate_decision" field.
+func RateDecisionEqualFold(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEqualFold(FieldRateDecision, v))
+}
+
+// RateDecisionContainsFold applies the ContainsFold predicate on the "rate_decision" field.
+func RateDecisionContainsFold(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldContainsFold(FieldRateDecision, v))
+}
+
+// CounterFlushedEQ applies the EQ predicate on the "counter_flushed" field.
+func CounterFlushedEQ(v bool) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldCounterFlushed, v))
+}
+
+// CounterFlushedNEQ applies the NEQ predicate on the "counter_flushed" field.
+func CounterFlushedNEQ(v bool) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldCounterFlushed, v))
 }
 
 // ErrorEQ applies the EQ predicate on the "error" field.

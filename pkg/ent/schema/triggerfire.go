@@ -63,6 +63,11 @@ func (TriggerFire) Fields() []ent.Field {
 			Immutable(),
 		field.String("status").
 			Default("firing"),
+		field.String("rate_decision").
+			Default("").
+			MaxLen(16),
+		field.Bool("counter_flushed").
+			Default(false),
 		field.String("error").
 			Optional(),
 		field.String("result_ref").

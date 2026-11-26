@@ -1802,28 +1802,160 @@ func (s *TriggerStore) RecordTriggerFire(ctx context.Context, id string, firedAt
 	return mapError(err)
 }
 
-func (s *TriggerStore) RecordTriggerFireErrorDelta(ctx context.Context, id string, firedAt time.Time, status, errMsg string) error {
-	uid, err := parseUUID(id)
+func isTriggerFireErrorStatus(status string) bool {
+	return status == store.TriggerFireStatusFailed ||
+		status == store.TriggerFireStatusRefused ||
+		status == store.TriggerFireStatusExpired
+}
+
+func isTriggerFireTerminalStatus(status string) bool {
+	switch status {
+	case store.TriggerFireStatusFired,
+		store.TriggerFireStatusFailed,
+		store.TriggerFireStatusRefused,
+		store.TriggerFireStatusSkipped,
+		store.TriggerFireStatusExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *TriggerStore) FlushTriggerEventCounters(ctx context.Context, triggerID, eventID string, firedAt time.Time, status, errMsg string) error {
+	tid, err := parseUUID(triggerID)
 	if err != nil {
 		return err
 	}
-	firedAt = firedAt.UTC()
-	now := time.Now().UTC()
-	if err := s.client.Trigger.UpdateOneID(uid).AddErrorCount(1).SetUpdated(now).Exec(ctx); err != nil {
-		return mapError(err)
+	eid, err := parseUUID(eventID)
+	if err != nil {
+		return err
 	}
-	last := s.client.Trigger.Update().
-		Where(trigger.ID(uid), trigger.Or(trigger.LastFireAtIsNil(), trigger.LastFireAtLTE(firedAt))).
-		SetLastFireAt(firedAt).
-		SetLastFireStatus(status).
-		SetUpdated(now)
-	if errMsg != "" {
-		last.SetLastFireError(errMsg)
-	} else {
-		last.ClearLastFireError()
-	}
-	_, err = last.Save(ctx)
-	return mapError(err)
+	return s.withClientTx(ctx, func(c *ent.Client) error {
+		rows, qErr := c.TriggerFire.Query().
+			Where(
+				triggerfire.TriggerIDEQ(tid),
+				triggerfire.EventIDEQ(eid),
+			).
+			Order(ent.Asc(triggerfire.FieldActionIndex)).
+			All(ctx)
+		if qErr != nil {
+			return mapError(qErr)
+		}
+
+		var (
+			alreadyCounted       bool
+			priorFlushedError    bool
+			unflushedErrStatus   string
+			unflushedErrMsg      string
+			unflushedErrAt       time.Time
+			firstUnflushedStatus string
+			firstUnflushedErr    string
+			firstUnflushedAt     time.Time
+			terminalUnflushedIDs []uuid.UUID
+		)
+		for _, row := range rows {
+			if row.CounterFlushed {
+				alreadyCounted = true
+				if isTriggerFireErrorStatus(row.Status) {
+					priorFlushedError = true
+				}
+				continue
+			}
+			if !isTriggerFireTerminalStatus(row.Status) {
+				continue
+			}
+			terminalUnflushedIDs = append(terminalUnflushedIDs, row.ID)
+			var rowAt time.Time
+			if row.FinishedAt != nil {
+				rowAt = row.FinishedAt.UTC()
+			}
+			if firstUnflushedStatus == "" {
+				firstUnflushedStatus = row.Status
+				firstUnflushedErr = row.Error
+				firstUnflushedAt = rowAt
+			}
+			if isTriggerFireErrorStatus(row.Status) && unflushedErrStatus == "" {
+				unflushedErrStatus = row.Status
+				unflushedErrMsg = row.Error
+				unflushedErrAt = rowAt
+			}
+		}
+		if len(terminalUnflushedIDs) == 0 && status == "" {
+			return nil
+		}
+
+		effStatus := status
+		effErr := errMsg
+		effAt := firedAt.UTC()
+		if !isTriggerFireErrorStatus(effStatus) && unflushedErrStatus != "" {
+			effStatus = unflushedErrStatus
+			effErr = unflushedErrMsg
+			if effAt.IsZero() {
+				effAt = unflushedErrAt
+			}
+		}
+		if effStatus == "" {
+			effStatus = firstUnflushedStatus
+			effErr = firstUnflushedErr
+			if effAt.IsZero() {
+				effAt = firstUnflushedAt
+			}
+		}
+		now := time.Now().UTC()
+		if effAt.IsZero() {
+			effAt = now
+		}
+
+		if !alreadyCounted {
+			counters := c.Trigger.UpdateOneID(tid).AddFireCount(1).SetUpdated(now)
+			if isTriggerFireErrorStatus(effStatus) {
+				counters.AddErrorCount(1)
+			}
+			if uErr := counters.Exec(ctx); uErr != nil {
+				return mapError(uErr)
+			}
+			last := c.Trigger.Update().
+				Where(trigger.ID(tid), trigger.Or(trigger.LastFireAtIsNil(), trigger.LastFireAtLT(effAt))).
+				SetLastFireAt(effAt).
+				SetLastFireStatus(effStatus).
+				SetUpdated(now)
+			if effErr != "" {
+				last.SetLastFireError(effErr)
+			} else {
+				last.ClearLastFireError()
+			}
+			if _, uErr := last.Save(ctx); uErr != nil {
+				return mapError(uErr)
+			}
+		} else if isTriggerFireErrorStatus(effStatus) && !priorFlushedError {
+			if uErr := c.Trigger.UpdateOneID(tid).AddErrorCount(1).SetUpdated(now).Exec(ctx); uErr != nil {
+				return mapError(uErr)
+			}
+			last := c.Trigger.Update().
+				Where(trigger.ID(tid), trigger.Or(trigger.LastFireAtIsNil(), trigger.LastFireAtLTE(effAt))).
+				SetLastFireAt(effAt).
+				SetLastFireStatus(effStatus).
+				SetUpdated(now)
+			if effErr != "" {
+				last.SetLastFireError(effErr)
+			} else {
+				last.ClearLastFireError()
+			}
+			if _, uErr := last.Save(ctx); uErr != nil {
+				return mapError(uErr)
+			}
+		}
+
+		if len(terminalUnflushedIDs) > 0 {
+			if _, uErr := c.TriggerFire.Update().
+				Where(triggerfire.IDIn(terminalUnflushedIDs...)).
+				SetCounterFlushed(true).
+				Save(ctx); uErr != nil {
+				return mapError(uErr)
+			}
+		}
+		return nil
+	})
 }
 
 func (s *TriggerStore) DeleteTrigger(ctx context.Context, id string) error {
@@ -2585,6 +2717,8 @@ func entTriggerFireToStore(e *ent.TriggerFire) *store.TriggerFire {
 		ActionType:     e.ActionType,
 		ActionIndex:    e.ActionIndex,
 		Status:         e.Status,
+		RateDecision:   e.RateDecision,
+		CounterFlushed: e.CounterFlushed,
 		Error:          e.Error,
 		ResultRef:      e.ResultRef,
 		WaitUntil:      e.WaitUntil,
@@ -3586,9 +3720,9 @@ func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID st
 		q = q.Where(triggerfire.IDNEQ(exID))
 		callerRow, getErr := s.client.TriggerFire.Get(ctx, exID)
 		if getErr == nil {
-			// R2-bis: derive the per-(trigger, event) rate-limit decision from
-			// durable sibling rows first so it survives across HandleItem passes
-			// (reuse deferral, crash, or lease re-handle).
+			// R3-1: derive the per-(trigger, event) rate-limit decision ONLY from
+			// the explicit durable rate_decision marker written inside LockTriggerQuota.
+			// Never infer admission or rate-limiting from outcome status or error text.
 			siblings, sibErr := s.client.TriggerFire.Query().
 				Where(
 					triggerfire.TriggerIDEQ(tid),
@@ -3611,21 +3745,10 @@ func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID st
 					callerOrderID = sib.ID
 					anchorSet = true
 				}
-				if sib.ID == exID {
-					continue
-				}
-				if sib.Status == store.TriggerFireStatusSkipped && sib.Error == "rate limit" {
-					// A sibling of this matched event was already rate-limited:
-					// reuse that durable skip decision across passes.
+				switch sib.RateDecision {
+				case store.TriggerFireRateDecisionLimited:
 					return store.MaxTriggerFiresPerMinute, nil
-				}
-				if sib.Status == store.TriggerFireStatusFired ||
-					sib.Status == store.TriggerFireStatusWaiting ||
-					sib.Status == store.TriggerFireStatusFailed ||
-					(sib.Status == store.TriggerFireStatusSkipped &&
-						(sib.Error == "concurrency limit" || sib.Error == "project trigger-agent cap")) {
-					// A sibling of this matched event already passed the rate-limit
-					// check: reuse that durable admit decision across passes.
+				case store.TriggerFireRateDecisionAdmitted:
 					return 0, nil
 				}
 			}
@@ -3649,6 +3772,24 @@ func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID st
 		return 0, mapError(err)
 	}
 	return len(eventIDs), nil
+}
+
+func (s *TriggerStore) RecordTriggerFireRateDecision(ctx context.Context, fireID, decision string) error {
+	if decision != store.TriggerFireRateDecisionAdmitted && decision != store.TriggerFireRateDecisionLimited {
+		return fmt.Errorf("%w: invalid trigger fire rate decision %q", store.ErrInvalidInput, decision)
+	}
+	id, err := parseUUID(fireID)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.TriggerFire.Update().
+		Where(
+			triggerfire.IDEQ(id),
+			triggerfire.RateDecisionEQ(store.TriggerFireRateDecisionNone),
+		).
+		SetRateDecision(decision).
+		Save(ctx)
+	return mapError(err)
 }
 
 func (s *TriggerStore) HasLiveTriggerFireForSubject(ctx context.Context, triggerID string, actionIndex int, subject string, now time.Time) (bool, error) {

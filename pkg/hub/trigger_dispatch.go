@@ -295,7 +295,17 @@ func (s *Server) checkTriggerFireLimits(ctx context.Context, req hubfire.FireReq
 				}
 				var cErr error
 				recent, cErr = tx.CountRecentTriggerFires(ctx, triggerID, since, req.Authority.FireID)
-				return cErr
+				if cErr != nil {
+					return cErr
+				}
+				if req.Authority.FireID != "" {
+					decision := store.TriggerFireRateDecisionAdmitted
+					if recent >= maxPerMin {
+						decision = store.TriggerFireRateDecisionLimited
+					}
+					return tx.RecordTriggerFireRateDecision(ctx, req.Authority.FireID, decision)
+				}
+				return nil
 			})
 			if err != nil {
 				return "", fmt.Errorf("count recent trigger fires: %w", err)

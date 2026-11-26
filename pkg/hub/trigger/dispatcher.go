@@ -973,24 +973,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			trigAggStatus        string
 			trigAggErr           string
 			trigAggTime          time.Time
-			priorTerminalCounted bool
-			priorHadError        bool
+			hasUnflushedTerminal bool
 		)
 		notePriorTerminal := func(existing *store.TriggerFire) {
-			if existing == nil {
-				return
-			}
-			if isErrStatus(existing.Status) {
-				priorHadError = true
-			}
-			// Distinguish an already-flushed prior pass from a crash between
-			// FinishTriggerFire and flushTrigCounters: if FireCount is still 0
-			// or LastFireAt predates existing.FinishedAt, the prior pass crashed
-			// before flushing, so this retry should still flush fire_count.
-			if tr.FireCount > 0 && tr.LastFireAt != nil {
-				if existing.FinishedAt == nil || !tr.LastFireAt.Before(existing.FinishedAt.UTC()) {
-					priorTerminalCounted = true
-				}
+			if existing != nil && !existing.CounterFlushed {
+				hasUnflushedTerminal = true
 			}
 		}
 		recordTrigOutcome := func(status, errMsg string, at time.Time) {
@@ -1013,26 +1000,14 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 		}
 		flushTrigCounters := func() {
-			if trigRecordedCount == 0 {
+			if trigRecordedCount == 0 && !hasUnflushedTerminal {
 				return
 			}
 			writeCtx, cancelWrite := storeWriteContext(ctx)
 			defer cancelWrite()
-			if !priorTerminalCounted {
-				if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, trigAggTime, trigAggStatus, trigAggErr); rErr != nil {
-					d.logger.Warn("trigger: failed to update trigger fire counters",
-						"triggerID", tr.ID, "eventID", ev.ID, "error", rErr)
-				}
-				return
-			}
-			// O-b: later pass for an already-counted matched event flushes only
-			// an error delta when a deferred/retried sibling records the event's
-			// first error outcome (never double-counting fire_count).
-			if isErrStatus(trigAggStatus) && !priorHadError {
-				if rErr := d.store.RecordTriggerFireErrorDelta(writeCtx, tr.ID, trigAggTime, trigAggStatus, trigAggErr); rErr != nil {
-					d.logger.Warn("trigger: failed to update trigger fire error delta",
-						"triggerID", tr.ID, "eventID", ev.ID, "error", rErr)
-				}
+			if rErr := d.store.FlushTriggerEventCounters(writeCtx, tr.ID, ev.ID, trigAggTime, trigAggStatus, trigAggErr); rErr != nil {
+				d.logger.Warn("trigger: failed to update trigger fire counters",
+					"triggerID", tr.ID, "eventID", ev.ID, "error", rErr)
 			}
 		}
 
@@ -1075,9 +1050,8 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					}
 					if claimedDirect {
 						recordTrigOutcome(store.TriggerFireStatusRefused, ErrFireStaleEvent, d.now().UTC())
-					} else if tr.FireCount > 0 {
-						priorTerminalCounted = true
-						priorHadError = true
+					} else {
+						hasUnflushedTerminal = true
 					}
 					continue
 				}
@@ -1099,9 +1073,8 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					}
 					if claimedDirect {
 						recordTrigOutcome(store.TriggerFireStatusRefused, reason, d.now().UTC())
-					} else if tr.FireCount > 0 {
-						priorTerminalCounted = true
-						priorHadError = true
+					} else {
+						hasUnflushedTerminal = true
 					}
 					continue
 				}

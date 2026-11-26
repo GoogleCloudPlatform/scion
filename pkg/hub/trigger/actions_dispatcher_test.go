@@ -708,24 +708,83 @@ func TestDispatcher_MultiAction_SharesRateDecisionPointerAcrossSiblings(t *testi
 	assert.True(t, seenOnAction1, "action 1 must observe action 0's cached rate decision")
 }
 
-// TestDispatcher_MultiAction_CrashBeforeFlushAndDeferredErrorDelta verifies O-b:
-// (1) If pass 1 wrote a terminal row for action 0 and crashed BEFORE flushing
-// counters (FireCount == 0), pass 2 still flushes fire_count=1.
-// (2) If pass 1 flushed action 0 as fired (FireCount == 1, ErrorCount == 0) and
-// pass 2 runs action 1 which fails, pass 2 flushes ONLY the error delta
-// (FireCount stays 1, ErrorCount becomes 1).
+// TestDispatcher_MultiAction_CrashBeforeFlushAndDeferredErrorDelta verifies O-b / O-b1:
+// (1) Crash before flush even when a concurrent event already advanced FireCount/LastFireAt
+//
+//	still flushes fire_count via the durable CounterFlushed marker.
+//
+// (2) Crash after ALL actions finished still flushes fire_count on retry.
+// (3) Crash after action 0 errored and retry's action 1 succeeds still flushes error_count=1.
+// (4) If pass 1 flushed action 0 as fired (CounterFlushed=true) and pass 2 fails action 1,
+//
+//	pass 2 flushes ONLY the error delta (FireCount stays 1, ErrorCount becomes 1).
 func TestDispatcher_MultiAction_CrashBeforeFlushAndDeferredErrorDelta(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 26, 17, 0, 0, 0, time.UTC)
 
-	// Subcase 1: crash before flush -> retry still counts the matched event once.
-	t.Run("crash_before_flush", func(t *testing.T) {
+	// Subcase 1: crash before flush with concurrent event advancing FireCount and LastFireAt.
+	t.Run("crash_before_flush_with_concurrent_event", func(t *testing.T) {
+		ms := newMemTriggerStore()
+		projID, epID, trigID, evID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+		concurrentAt := now.Add(10 * time.Second)
+		ms.triggers = append(ms.triggers, &store.Trigger{
+			ID:             trigID,
+			ProjectID:      projID,
+			Name:           "ob1-crash-concurrent",
+			SourceKind:     store.TriggerSourceKindWebhook,
+			SourceID:       epID,
+			MatchTypes:     []string{"webhook.received"},
+			FireCount:      1,
+			LastFireAt:     &concurrentAt,
+			LastFireStatus: store.TriggerFireStatusFired,
+			Actions: []store.TriggerAction{
+				{Type: store.TriggerActionMessage, Payload: `{"agentId":"a-0","message":"m0"}`},
+				{Type: store.TriggerActionMessage, Payload: `{"agentId":"a-1","message":"m1"}`},
+			},
+			SubjectMode: store.TriggerSubjectModeNew,
+			Status:      store.TriggerStatusActive,
+			CreatedAt:   now,
+		})
+		ms.events[evID] = &store.TriggerEvent{
+			ID: evID, ProjectID: projID, SourceKind: store.TriggerSourceKindWebhook, SourceID: epID,
+			Type: "webhook.received", Subject: "s", OccurredAt: now, ReceivedAt: now, Status: store.TriggerEventStatusPending,
+		}
+		// Pass 1 finished action 0 at t=now and crashed before FlushTriggerEventCounters
+		// (CounterFlushed=false), while a concurrent event flushed at t+10s.
+		fin := now
+		f0 := &store.TriggerFire{
+			ID: uuid.NewString(), ProjectID: projID, TriggerID: trigID, EventID: evID,
+			Subject: "s", ActionType: store.TriggerActionMessage, ActionIndex: 0,
+			Status: store.TriggerFireStatusFired, CounterFlushed: false, FinishedAt: &fin, StartedAt: now, CreatedAt: now,
+		}
+		ms.fires[evID+"|"+trigID+"|0"] = f0
+		ms.byFireID[f0.ID] = f0
+
+		fc := &fakeCore{fireFn: func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired, ResultRef: "ok-1"}
+		}}
+		fc.enabled.Store(true)
+		d, err := trigger.NewDispatcher(trigger.DispatcherConfig{Core: fc, Store: ms, Now: func() time.Time { return now.Add(11 * time.Second) }})
+		require.NoError(t, err)
+		payload, _ := json.Marshal(trigger.EventQueuePayload{Version: trigger.EventQueuePayloadVersion, EventID: evID})
+		res := d.HandleItem(ctx, durablequeue.Item{Seq: 1, Kind: trigger.EventQueueKind, DedupKey: evID, ProjectID: projID, Payload: payload, Attempts: 2}, nopLease{})
+		require.True(t, res.Done)
+		require.NoError(t, res.Err)
+
+		tr, err := ms.GetTrigger(ctx, trigID)
+		require.NoError(t, err)
+		assert.Equal(t, 2, tr.FireCount, "crash before flush must still count the event even when another event advanced LastFireAt")
+		assert.Equal(t, 0, tr.ErrorCount)
+	})
+
+	// Subcase 2: crash after ALL actions finished -> retry still flushes fire_count once.
+	t.Run("crash_after_all_actions_finished", func(t *testing.T) {
 		ms := newMemTriggerStore()
 		projID, epID, trigID, evID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
 		ms.triggers = append(ms.triggers, &store.Trigger{
 			ID:         trigID,
 			ProjectID:  projID,
-			Name:       "ob-crash-before-flush",
+			Name:       "ob1-crash-all-done",
 			SourceKind: store.TriggerSourceKindWebhook,
 			SourceID:   epID,
 			MatchTypes: []string{"webhook.received"},
@@ -741,13 +800,60 @@ func TestDispatcher_MultiAction_CrashBeforeFlushAndDeferredErrorDelta(t *testing
 			ID: evID, ProjectID: projID, SourceKind: store.TriggerSourceKindWebhook, SourceID: epID,
 			Type: "webhook.received", Subject: "s", OccurredAt: now, ReceivedAt: now, Status: store.TriggerEventStatusPending,
 		}
-		// Simulate pass 1 finishing action 0 and crashing before flushTrigCounters:
-		// fire row is terminal "fired", but tr.FireCount is still 0.
+		fin := now
+		for idx := 0; idx < 2; idx++ {
+			f := &store.TriggerFire{
+				ID: uuid.NewString(), ProjectID: projID, TriggerID: trigID, EventID: evID,
+				Subject: "s", ActionType: store.TriggerActionMessage, ActionIndex: idx,
+				Status: store.TriggerFireStatusFired, CounterFlushed: false, FinishedAt: &fin, StartedAt: now, CreatedAt: now,
+			}
+			ms.fires[evID+"|"+trigID+"|"+string(rune('0'+idx))] = f
+			ms.byFireID[f.ID] = f
+		}
+
+		fc := &fakeCore{}
+		fc.enabled.Store(true)
+		d, err := trigger.NewDispatcher(trigger.DispatcherConfig{Core: fc, Store: ms, Now: func() time.Time { return now.Add(time.Second) }})
+		require.NoError(t, err)
+		payload, _ := json.Marshal(trigger.EventQueuePayload{Version: trigger.EventQueuePayloadVersion, EventID: evID})
+		res := d.HandleItem(ctx, durablequeue.Item{Seq: 1, Kind: trigger.EventQueueKind, DedupKey: evID, ProjectID: projID, Payload: payload, Attempts: 2}, nopLease{})
+		require.True(t, res.Done)
+		require.NoError(t, res.Err)
+
+		tr, err := ms.GetTrigger(ctx, trigID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, tr.FireCount, "crash after all actions finished must still flush fire_count on retry")
+		assert.Equal(t, 0, tr.ErrorCount)
+	})
+
+	// Subcase 3: crash after action 0 failed, retry's action 1 succeeds -> FireCount=1, ErrorCount=1.
+	t.Run("crash_after_error_retry_succeeds", func(t *testing.T) {
+		ms := newMemTriggerStore()
+		projID, epID, trigID, evID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+		ms.triggers = append(ms.triggers, &store.Trigger{
+			ID:         trigID,
+			ProjectID:  projID,
+			Name:       "ob1-crash-error",
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			MatchTypes: []string{"webhook.received"},
+			Actions: []store.TriggerAction{
+				{Type: store.TriggerActionMessage, Payload: `{"agentId":"a-0","message":"m0"}`},
+				{Type: store.TriggerActionMessage, Payload: `{"agentId":"a-1","message":"m1"}`},
+			},
+			SubjectMode: store.TriggerSubjectModeNew,
+			Status:      store.TriggerStatusActive,
+			CreatedAt:   now,
+		})
+		ms.events[evID] = &store.TriggerEvent{
+			ID: evID, ProjectID: projID, SourceKind: store.TriggerSourceKindWebhook, SourceID: epID,
+			Type: "webhook.received", Subject: "s", OccurredAt: now, ReceivedAt: now, Status: store.TriggerEventStatusPending,
+		}
 		fin := now
 		f0 := &store.TriggerFire{
 			ID: uuid.NewString(), ProjectID: projID, TriggerID: trigID, EventID: evID,
 			Subject: "s", ActionType: store.TriggerActionMessage, ActionIndex: 0,
-			Status: store.TriggerFireStatusFired, FinishedAt: &fin, StartedAt: now, CreatedAt: now,
+			Status: store.TriggerFireStatusFailed, Error: "pass1 error", CounterFlushed: false, FinishedAt: &fin, StartedAt: now, CreatedAt: now,
 		}
 		ms.fires[evID+"|"+trigID+"|0"] = f0
 		ms.byFireID[f0.ID] = f0
@@ -765,11 +871,11 @@ func TestDispatcher_MultiAction_CrashBeforeFlushAndDeferredErrorDelta(t *testing
 
 		tr, err := ms.GetTrigger(ctx, trigID)
 		require.NoError(t, err)
-		assert.Equal(t, 1, tr.FireCount, "crash before flush must still count the event on retry")
-		assert.Equal(t, 0, tr.ErrorCount)
+		assert.Equal(t, 1, tr.FireCount)
+		assert.Equal(t, 1, tr.ErrorCount, "unflushed error from crashed pass 1 must be preserved when pass 2 succeeds")
 	})
 
-	// Subcase 2: pass 1 flushed fired (FireCount=1, ErrorCount=0); pass 2 fails action 1 -> FireCount stays 1, ErrorCount becomes 1.
+	// Subcase 4: pass 1 flushed fired (CounterFlushed=true, FireCount=1, ErrorCount=0); pass 2 fails action 1 -> FireCount stays 1, ErrorCount becomes 1.
 	t.Run("deferred_sibling_error_delta", func(t *testing.T) {
 		ms := newMemTriggerStore()
 		projID, epID, trigID, evID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
@@ -800,7 +906,7 @@ func TestDispatcher_MultiAction_CrashBeforeFlushAndDeferredErrorDelta(t *testing
 		f0 := &store.TriggerFire{
 			ID: uuid.NewString(), ProjectID: projID, TriggerID: trigID, EventID: evID,
 			Subject: "s", ActionType: store.TriggerActionMessage, ActionIndex: 0,
-			Status: store.TriggerFireStatusFired, FinishedAt: &t0, StartedAt: now, CreatedAt: now,
+			Status: store.TriggerFireStatusFired, CounterFlushed: true, FinishedAt: &t0, StartedAt: now, CreatedAt: now,
 		}
 		ms.fires[evID+"|"+trigID+"|0"] = f0
 		ms.byFireID[f0.ID] = f0

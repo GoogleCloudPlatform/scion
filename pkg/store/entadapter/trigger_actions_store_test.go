@@ -431,6 +431,7 @@ func TestTriggerActionsStore_RateDecisionPersistsAcrossPasses(t *testing.T) {
 	n0, err := cs.CountRecentTriggerFires(ctx, trigID, time.Now().UTC().Add(-time.Minute), ea0.ID)
 	require.NoError(t, err)
 	require.Equal(t, 1, n0, "pass 1: E a0 counts F -> rate limited at max=1")
+	require.NoError(t, cs.RecordTriggerFireRateDecision(ctx, ea0.ID, store.TriggerFireRateDecisionLimited))
 	_, err = cs.FinishTriggerFire(ctx, ea0.ID, store.TriggerFireStatusSkipped, "", "", "rate limit", start)
 	require.NoError(t, err)
 
@@ -438,7 +439,7 @@ func TestTriggerActionsStore_RateDecisionPersistsAcrossPasses(t *testing.T) {
 	// Pass 2: window slides past F (using since after F.Created).
 	n1, err := cs.CountRecentTriggerFires(ctx, trigID, start.Add(-30*time.Second), ea1.ID)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, n1, 1, "pass 2: E a1 must reuse E a0's durable rate-limit skip decision")
+	require.GreaterOrEqual(t, n1, 1, "pass 2: E a1 must reuse E a0's durable rate_decision=limited marker")
 
 	// Case 2: Admit-then-skip across deferral > 60s.
 	trigID2 := uuid.NewString()
@@ -464,17 +465,19 @@ func TestTriggerActionsStore_RateDecisionPersistsAcrossPasses(t *testing.T) {
 		return tf
 	}
 	a0 := claimOn(trigID2, evA, 0, start.Add(-70*time.Second))
+	require.NoError(t, cs.RecordTriggerFireRateDecision(ctx, a0.ID, store.TriggerFireRateDecisionAdmitted))
 	_, err = cs.FinishTriggerFire(ctx, a0.ID, store.TriggerFireStatusFired, "", "", "", start.Add(-70*time.Second))
 	require.NoError(t, err)
 	// Event G arrives >60s later and is admitted.
 	g0 := claimOn(trigID2, evG, 0, start.Add(-5*time.Second))
+	require.NoError(t, cs.RecordTriggerFireRateDecision(ctx, g0.ID, store.TriggerFireRateDecisionAdmitted))
 	_, err = cs.FinishTriggerFire(ctx, g0.ID, store.TriggerFireStatusFired, "", "", "", start.Add(-5*time.Second))
 	require.NoError(t, err)
 	// Event A's deferred action 1 is re-checked in pass 2: must reuse A a0's durable admit decision (0).
 	a1 := claimOn(trigID2, evA, 1, start)
 	nA1, err := cs.CountRecentTriggerFires(ctx, trigID2, start.Add(-time.Minute), a1.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 0, nA1, "pass 2: deferred E a1 must reuse E a0's durable admit decision")
+	assert.Equal(t, 0, nA1, "pass 2: deferred E a1 must reuse E a0's durable rate_decision=admitted marker")
 }
 
 // TestTriggerActionsStore_CountTriggerActionFiresSince_MixedExecTrigger verifies O-c
@@ -521,4 +524,173 @@ func TestTriggerActionsStore_CountTriggerActionFiresSince_MixedExecTrigger(t *te
 	n, err := cs.CountTriggerActionFiresSince(ctx, trigID, store.TriggerActionExec, lastEv, now.Add(-time.Minute), store.TriggerFireStatusSkipped)
 	require.NoError(t, err)
 	assert.Equal(t, 4, n, "exec rate cap must count only exec rows from other events")
+}
+
+// TestTriggerActionsStore_RateDecisionExplicitMarker_Review3Probes lifts both
+// review 3 store probes on SQLite and real Postgres 17:
+// (1) a pre-rate failed sibling (no rate_decision marker) is never read as admitted;
+// (2) an exec-cap skipped sibling (no rate_decision marker) is never read as the event rate limit.
+func TestTriggerActionsStore_RateDecisionExplicitMarker_Review3Probes(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t.Logf("dialect=%s", cs.client.Driver().Dialect())
+
+	claim := func(projID, trigID, ev string, idx int, typ string, at time.Time) *store.TriggerFire {
+		t.Helper()
+		tf := &store.TriggerFire{
+			ID:          uuid.NewString(),
+			ProjectID:   projID,
+			TriggerID:   trigID,
+			EventID:     ev,
+			Subject:     "pr-1",
+			ActionType:  typ,
+			ActionIndex: idx,
+			Status:      store.TriggerFireStatusFiring,
+			LeaseUntil:  at.Add(10 * time.Minute),
+			StartedAt:   at,
+			CreatedAt:   at,
+		}
+		ok, _, err := cs.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, err)
+		require.True(t, ok)
+		return tf
+	}
+
+	t.Run("failed_pre_rate_sibling_not_read_as_admitted", func(t *testing.T) {
+		projID, trigID, evF, evE := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		since := now.Add(-time.Minute)
+
+		f0 := claim(projID, trigID, evF, 0, store.TriggerActionMessage, now.Add(-30*time.Second))
+		_, err := cs.FinishTriggerFire(ctx, f0.ID, store.TriggerFireStatusFired, "", "", "", now.Add(-30*time.Second))
+		require.NoError(t, err)
+
+		// Action 0 failed BEFORE BeforeFire: rate_decision remains "".
+		a0 := claim(projID, trigID, evE, 0, store.TriggerActionMessage, now)
+		_, err = cs.FinishTriggerFire(ctx, a0.ID, store.TriggerFireStatusFailed, "", "", "message payload must include agentId or agentName", now)
+		require.NoError(t, err)
+
+		// Action 1 reaches the rate check: must count F (= 1), NOT treat a0 as admitted,
+		// and record rate_decision=limited.
+		a1 := claim(projID, trigID, evE, 1, store.TriggerActionMessage, now.Add(time.Millisecond))
+		n1, err := cs.CountRecentTriggerFires(ctx, trigID, since, a1.ID)
+		require.NoError(t, err)
+		require.Equal(t, 1, n1, "pass 1: a1 counts F -> rate limited at max=1")
+		require.NoError(t, cs.RecordTriggerFireRateDecision(ctx, a1.ID, store.TriggerFireRateDecisionLimited))
+		_, err = cs.FinishTriggerFire(ctx, a1.ID, store.TriggerFireStatusSkipped, "", "", "rate limit", now)
+		require.NoError(t, err)
+
+		// Pass 2 (even after window slides past F): a2 must see a1's limited marker.
+		a2 := claim(projID, trigID, evE, 2, store.TriggerActionDispatchAgent, now.Add(2*time.Millisecond))
+		n2, err := cs.CountRecentTriggerFires(ctx, trigID, now.Add(-5*time.Second), a2.ID)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, n2, 1, "a2 must share a1's rate_decision=limited; pre-rate failed a0 is not an admit")
+	})
+
+	t.Run("exec_cap_skip_not_read_as_event_rate_limit", func(t *testing.T) {
+		projID, trigID, evE := uuid.NewString(), uuid.NewString(), uuid.NewString()
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		since := now.Add(-time.Minute)
+
+		// Action 0 skipped by P8 exec cap before BeforeFire (even if error text were "rate limit",
+		// rate_decision is "" so it never acts as the event rate decision).
+		a0 := claim(projID, trigID, evE, 0, store.TriggerActionExec, now)
+		_, err := cs.FinishTriggerFire(ctx, a0.ID, store.TriggerFireStatusSkipped, "", "", "rate limit", now)
+		require.NoError(t, err)
+
+		a1 := claim(projID, trigID, evE, 1, store.TriggerActionMessage, now.Add(time.Millisecond))
+		n1, err := cs.CountRecentTriggerFires(ctx, trigID, since, a1.ID)
+		require.NoError(t, err)
+		require.Equal(t, 0, n1, "a1: exec-cap skip has no rate_decision marker and must not rate-limit message sibling")
+		require.NoError(t, cs.RecordTriggerFireRateDecision(ctx, a1.ID, store.TriggerFireRateDecisionAdmitted))
+		_, err = cs.FinishTriggerFire(ctx, a1.ID, store.TriggerFireStatusFired, "", "", "", now.Add(time.Millisecond))
+		require.NoError(t, err)
+
+		a2 := claim(projID, trigID, evE, 2, store.TriggerActionDispatchAgent, now.Add(2*time.Millisecond))
+		n2, err := cs.CountRecentTriggerFires(ctx, trigID, since, a2.ID)
+		require.NoError(t, err)
+		require.Equal(t, 0, n2, "a2 must share a1's rate_decision=admitted marker")
+	})
+}
+
+// TestTriggerActionsStore_FlushTriggerEventCounters_DurableMarker verifies O-b1
+// on SQLite and real Postgres 17: counter_flushed eliminates the LastFireAt
+// heuristic across crash-before-flush with concurrent events, crash after all
+// actions finished, crash after an error, and deferred-sibling error deltas.
+func TestTriggerActionsStore_FlushTriggerEventCounters_DurableMarker(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t.Logf("dialect=%s", cs.client.Driver().Dialect())
+
+	projID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	tr := &store.Trigger{
+		ID:          uuid.NewString(),
+		ProjectID:   projID,
+		Name:        "ob1-durable-counter",
+		SourceKind:  store.TriggerSourceKindWebhook,
+		SourceID:    uuid.NewString(),
+		MatchTypes:  []string{"webhook.received"},
+		Actions:     []store.TriggerAction{{Type: store.TriggerActionMessage, Payload: `{"agentId":"a0","message":"m0"}`}, {Type: store.TriggerActionMessage, Payload: `{"agentId":"a1","message":"m1"}`}},
+		SubjectMode: store.TriggerSubjectModeNew,
+		Status:      store.TriggerStatusActive,
+	}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	claimAndFinish := func(ev string, idx int, status, errMsg string, at time.Time) *store.TriggerFire {
+		t.Helper()
+		tf := &store.TriggerFire{
+			ID: uuid.NewString(), ProjectID: projID, TriggerID: tr.ID, EventID: ev,
+			Subject: "s", ActionType: store.TriggerActionMessage, ActionIndex: idx,
+			Status: store.TriggerFireStatusFiring, LeaseUntil: at.Add(10 * time.Minute),
+			StartedAt: at, CreatedAt: at,
+		}
+		ok, _, err := cs.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, err)
+		require.True(t, ok)
+		_, err = cs.FinishTriggerFire(ctx, tf.ID, status, "", "", errMsg, at)
+		require.NoError(t, err)
+		return tf
+	}
+
+	// Event E finishes action 0 at t1 and crashes before FlushTriggerEventCounters.
+	// Meanwhile concurrent Event H flushes at t2 > t1 (advancing trigger.LastFireAt).
+	evE, evH := uuid.NewString(), uuid.NewString()
+	t1 := now
+	t2 := now.Add(5 * time.Second)
+	claimAndFinish(evE, 0, store.TriggerFireStatusFired, "", t1)
+	claimAndFinish(evH, 0, store.TriggerFireStatusFired, "", t2)
+	require.NoError(t, cs.FlushTriggerEventCounters(ctx, tr.ID, evH, t2, store.TriggerFireStatusFired, ""))
+
+	// Retry of Event E finishes action 1 and flushes: because E's rows have
+	// counter_flushed=false, E MUST still increment fire_count (from 1 to 2)
+	// despite trigger.LastFireAt == t2 > t1!
+	claimAndFinish(evE, 1, store.TriggerFireStatusFired, "", t2.Add(time.Second))
+	require.NoError(t, cs.FlushTriggerEventCounters(ctx, tr.ID, evE, t2.Add(time.Second), store.TriggerFireStatusFired, ""))
+
+	got, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.FireCount, "crash before flush must not lose count when a concurrent event advances LastFireAt")
+	assert.Equal(t, 0, got.ErrorCount)
+
+	// Re-flushing Event E is an idempotent no-op.
+	require.NoError(t, cs.FlushTriggerEventCounters(ctx, tr.ID, evE, t2.Add(2*time.Second), store.TriggerFireStatusFired, ""))
+	got, err = cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.FireCount)
+
+	// Event D: pass 1 flushes fired, pass 2 fails action 1 -> error delta only,
+	// pass 3 fails action 2 -> no double error count.
+	evD := uuid.NewString()
+	claimAndFinish(evD, 0, store.TriggerFireStatusFired, "", t2.Add(3*time.Second))
+	require.NoError(t, cs.FlushTriggerEventCounters(ctx, tr.ID, evD, t2.Add(3*time.Second), store.TriggerFireStatusFired, ""))
+	claimAndFinish(evD, 1, store.TriggerFireStatusFailed, "err-1", t2.Add(4*time.Second))
+	require.NoError(t, cs.FlushTriggerEventCounters(ctx, tr.ID, evD, t2.Add(4*time.Second), store.TriggerFireStatusFailed, "err-1"))
+	claimAndFinish(evD, 2, store.TriggerFireStatusFailed, "err-2", t2.Add(5*time.Second))
+	require.NoError(t, cs.FlushTriggerEventCounters(ctx, tr.ID, evD, t2.Add(5*time.Second), store.TriggerFireStatusFailed, "err-2"))
+
+	got, err = cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, got.FireCount, "deferred siblings must never double-count fire_count")
+	assert.Equal(t, 1, got.ErrorCount, "first deferred error counts once; second deferred error does not double-count")
 }

@@ -779,6 +779,9 @@ func TestTriggerActions_RateDecisionSurvivesAcrossPasses(t *testing.T) {
 	trigID2 := api.NewUUID()
 	evE2 := api.NewUUID()
 	e2a0 := claim(trigID2, evE2, 0, start.Add(-70*time.Second))
+	reasonE2A0, err := f.srv.checkTriggerFireLimits(ctx, mkReq(trigID2, evE2, e2a0.ID, 0, &hubfire.EventRateDecision{}))
+	require.NoError(t, err)
+	require.Empty(t, reasonE2A0, "pass 1: E2 a0 admitted")
 	_, err = f.store.FinishTriggerFire(ctx, e2a0.ID, store.TriggerFireStatusFired, "", "", "", start.Add(-70*time.Second))
 	require.NoError(t, err)
 	g0 := claim(trigID2, api.NewUUID(), 0, start.Add(-5*time.Second))
@@ -1047,4 +1050,108 @@ func TestTriggerActions_ExecRateCapIgnoresNonExecSiblingsInMixed8ActionTrigger(t
 		Attempts: 1,
 	})
 	require.Equal(t, hubfire.FireStatusFired, out.Status, "exec action must not be rate-limited by non-exec sibling rows: err=%q", out.Error)
+}
+
+// TestTriggerActions_RateDecisionExplicitMarker_Review3HubProbes lifts both
+// review 3 hub probes against real checkTriggerFireLimits:
+// (1) a post-rate refused sibling preserves its durable admitted marker across passes;
+// (2) a pre-rate failed sibling (no marker) never bypasses max_fires_per_minute;
+// (3) a P8 exec-cap skip uses its distinct reason ("exec rate limit") and never
+//
+//	writes the event rate_decision marker, so a message sibling is still admitted.
+func TestTriggerActions_RateDecisionExplicitMarker_Review3HubProbes(t *testing.T) {
+	ctx := context.Background()
+
+	newHelper := func(t *testing.T) (
+		f *triggersTestFixture,
+		trigID string,
+		claim func(ev string, idx int, typ string, at time.Time) *store.TriggerFire,
+		finish func(id, status, errMsg string, at time.Time),
+		check func(ev string, tf *store.TriggerFire, maxPerMin int, d *hubfire.EventRateDecision) string,
+	) {
+		t.Helper()
+		f = setupTriggersTestFixture(t)
+		trigID = api.NewUUID()
+		claim = func(ev string, idx int, typ string, at time.Time) *store.TriggerFire {
+			t.Helper()
+			tf := &store.TriggerFire{
+				ID: api.NewUUID(), ProjectID: f.projectID, TriggerID: trigID, EventID: ev,
+				Subject: "sub", ActionType: typ, ActionIndex: idx,
+				Status: store.TriggerFireStatusFiring, LeaseUntil: at.Add(10 * time.Minute),
+				StartedAt: at, CreatedAt: at,
+			}
+			ok, _, err := f.store.ClaimTriggerFire(ctx, tf)
+			require.NoError(t, err)
+			require.True(t, ok)
+			return tf
+		}
+		finish = func(id, status, errMsg string, at time.Time) {
+			t.Helper()
+			_, err := f.store.FinishTriggerFire(ctx, id, status, "", "", errMsg, at)
+			require.NoError(t, err)
+		}
+		check = func(ev string, tf *store.TriggerFire, maxPerMin int, d *hubfire.EventRateDecision) string {
+			t.Helper()
+			reason, err := f.srv.checkTriggerFireLimits(ctx, hubfire.FireRequest{
+				ProjectID:  f.projectID,
+				ActionType: store.TriggerActionMessage,
+				Authority: hubfire.RecordedAuthority{
+					DefinitionKind: hubfire.DefinitionKindTrigger, DefinitionID: trigID, FireID: tf.ID,
+				},
+				Event: &hubfire.FireEvent{
+					ID: ev, ProjectID: f.projectID,
+					Trigger: &hubfire.FireTriggerRef{ID: trigID, ActionIndex: tf.ActionIndex, MaxFiresPerMinute: maxPerMin, RateDecision: d},
+				},
+			})
+			require.NoError(t, err)
+			return reason
+		}
+		return f, trigID, claim, finish, check
+	}
+
+	t.Run("post_rate_refused_sibling_preserves_admit_across_passes", func(t *testing.T) {
+		_, _, claim, finish, check := newHelper(t)
+		now := time.Now().UTC()
+		evE, evG := api.NewUUID(), api.NewUUID()
+
+		a0 := claim(evE, 0, store.TriggerActionGitHubComment, now.Add(-70*time.Second))
+		require.Equal(t, "", check(evE, a0, 1, &hubfire.EventRateDecision{}), "pass 1: E a0 admitted")
+		finish(a0.ID, store.TriggerFireStatusRefused, "github write not permitted", now.Add(-70*time.Second))
+		a1 := claim(evE, 1, store.TriggerActionDispatchAgent, now.Add(-70*time.Second).Add(time.Millisecond))
+
+		g0 := claim(evG, 0, store.TriggerActionGitHubComment, now.Add(-5*time.Second))
+		finish(g0.ID, store.TriggerFireStatusFired, "", now.Add(-5*time.Second))
+
+		reason := check(evE, a1, 1, &hubfire.EventRateDecision{})
+		require.Equal(t, "", reason, "E a1 must share E a0's durable rate_decision=admitted marker across passes")
+	})
+
+	t.Run("pre_rate_failed_sibling_does_not_bypass_rate_limit", func(t *testing.T) {
+		_, _, claim, finish, check := newHelper(t)
+		now := time.Now().UTC()
+		evF, evE := api.NewUUID(), api.NewUUID()
+
+		f0 := claim(evF, 0, store.TriggerActionMessage, now.Add(-30*time.Second))
+		finish(f0.ID, store.TriggerFireStatusFired, "", now.Add(-30*time.Second))
+
+		pass := &hubfire.EventRateDecision{}
+		a0 := claim(evE, 0, store.TriggerActionMessage, now)
+		finish(a0.ID, store.TriggerFireStatusFailed, "exec trigger fire: count recent fires: context deadline exceeded", now)
+		a1 := claim(evE, 1, store.TriggerActionMessage, now.Add(time.Millisecond))
+		reason := check(evE, a1, 1, pass)
+		require.Equal(t, trigger.ErrFireRateLimit, reason, "E a1 must be rate limited: F is in the window and pre-rate failed a0 has no rate_decision marker")
+	})
+
+	t.Run("exec_cap_skip_has_distinct_reason_and_does_not_skip_message_sibling", func(t *testing.T) {
+		require.NotEqual(t, trigger.ErrFireRateLimit, execReasonRateLimit, "P8 exec cap reason must be distinct from event rate-limit reason")
+		_, _, claim, finish, check := newHelper(t)
+		now := time.Now().UTC()
+		evE := api.NewUUID()
+
+		a0 := claim(evE, 0, store.TriggerActionExec, now)
+		finish(a0.ID, store.TriggerFireStatusSkipped, execReasonRateLimit, now)
+		a1 := claim(evE, 1, store.TriggerActionMessage, now.Add(time.Millisecond))
+		reason := check(evE, a1, 10, &hubfire.EventRateDecision{})
+		require.Equal(t, "", reason, "message sibling must be admitted after exec-cap skip")
+	})
 }

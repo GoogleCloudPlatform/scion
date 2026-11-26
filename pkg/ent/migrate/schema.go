@@ -4486,6 +4486,8 @@ var (
 		{Name: "action_type", Type: field.TypeString},
 		{Name: "action_index", Type: field.TypeInt, Default: 0},
 		{Name: "status", Type: field.TypeString, Default: "firing"},
+		{Name: "rate_decision", Type: field.TypeString, Size: 16, Default: ""},
+		{Name: "counter_flushed", Type: field.TypeBool, Default: false},
 		{Name: "error", Type: field.TypeString, Nullable: true},
 		{Name: "result_ref", Type: field.TypeString, Nullable: true},
 		{Name: "matched_through", Type: field.TypeString, Nullable: true, Size: 16},
@@ -4512,7 +4514,7 @@ var (
 			{
 				Name:    "triggerfire_trigger_id_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[30]},
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[32]},
 			},
 			{
 				Name:    "triggerfire_event_id_trigger_id_action_index",
@@ -4527,12 +4529,12 @@ var (
 			{
 				Name:    "triggerfire_status_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[14], TriggerFiresColumns[25]},
+				Columns: []*schema.Column{TriggerFiresColumns[14], TriggerFiresColumns[27]},
 			},
 			{
 				Name:    "triggerfire_target_agent_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[20], TriggerFiresColumns[14]},
+				Columns: []*schema.Column{TriggerFiresColumns[22], TriggerFiresColumns[14]},
 			},
 			{
 				Name:    "triggerfire_project_id_status",
@@ -4542,7 +4544,7 @@ var (
 			{
 				Name:    "triggerfire_result_ref",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[16]},
+				Columns: []*schema.Column{TriggerFiresColumns[18]},
 			},
 		},
 	}

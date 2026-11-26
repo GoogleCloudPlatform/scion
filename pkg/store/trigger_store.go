@@ -116,6 +116,16 @@ const (
 	TriggerFireStatusExpired    = "expired"
 )
 
+// TriggerFire rate-limit decision markers (action-arrays §3.5).
+// Persisted once per (trigger_id, event_id) inside LockTriggerQuota so all
+// sibling actions across dispatcher passes share the exact same rate decision
+// without inferring from outcome status or error text.
+const (
+	TriggerFireRateDecisionNone     = ""
+	TriggerFireRateDecisionAdmitted = "admitted"
+	TriggerFireRateDecisionLimited  = "limited"
+)
+
 // TriggerSubjectClaim states (Stage 2 §5.6).
 const (
 	TriggerSubjectClaimStateActive   = "active"
@@ -384,6 +394,8 @@ type TriggerFire struct {
 	ActionType     string     `json:"actionType"`
 	ActionIndex    int        `json:"actionIndex"`
 	Status         string     `json:"status"`
+	RateDecision   string     `json:"-"`
+	CounterFlushed bool       `json:"-"`
 	Error          string     `json:"error,omitempty"`
 	ResultRef      string     `json:"resultRef,omitempty"`
 	TargetAgentID  string     `json:"targetAgentId,omitempty"`
@@ -492,11 +504,12 @@ type TriggerStore interface {
 	UpdateTrigger(ctx context.Context, tr *Trigger, fields TriggerFieldMask, prevRevision int, prevRevisionKnown bool, attribution *InitiatorAttribution) error
 	UpdateTriggerStatus(ctx context.Context, id, status, reason string) error
 	RecordTriggerFire(ctx context.Context, id string, firedAt time.Time, status, errMsg string) error
-	// RecordTriggerFireErrorDelta increments error_count by 1 without
-	// incrementing fire_count, and updates last_fire_* if firedAt is newer.
-	// Used when a later dispatcher pass for an already-counted matched event
-	// records the event's first error outcome (action-arrays §3.5).
-	RecordTriggerFireErrorDelta(ctx context.Context, id string, firedAt time.Time, status, errMsg string) error
+	// FlushTriggerEventCounters atomically updates a trigger's fire_count,
+	// error_count, and last_fire_* once per matched (trigger_id, event_id)
+	// using the durable counter_flushed marker on trigger_fires rows, and
+	// flushes a single error_count delta when a later pass records the event's
+	// first error outcome (action-arrays §3.5).
+	FlushTriggerEventCounters(ctx context.Context, triggerID, eventID string, firedAt time.Time, status, errMsg string) error
 	DeleteTrigger(ctx context.Context, id string) error
 	DeleteTriggersByProject(ctx context.Context, projectID string) (int, error)
 
@@ -548,7 +561,14 @@ type TriggerStore interface {
 	// sibling actions of the same matched event never count against each other
 	// and an in-flight firing row does not count against its own
 	// max_fires_per_minute budget (Stage 2 §7.4, action-arrays §3.5).
+	// When any sibling row for (trigger_id, event_id) already has an explicit
+	// rate_decision marker ("admitted" or "limited"), returns 0 or
+	// MaxTriggerFiresPerMinute respectively without inspecting status or error text.
 	CountRecentTriggerFires(ctx context.Context, triggerID string, since time.Time, excludeFireID string) (int, error)
+	// RecordTriggerFireRateDecision persists the per-(trigger, event) rate-limit
+	// decision ("admitted" or "limited") on fireID if not already set. Must be
+	// called inside the same LockTriggerQuota transaction as CountRecentTriggerFires.
+	RecordTriggerFireRateDecision(ctx context.Context, fireID, decision string) error
 	HasLiveTriggerFireForSubject(ctx context.Context, triggerID string, actionIndex int, subject string, now time.Time) (bool, error)
 	HasLiveTriggerFireForSubjectExcluding(ctx context.Context, triggerID string, actionIndex int, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error)
 	HasPendingTriggerFiresForEvent(ctx context.Context, eventID string) (bool, error)
