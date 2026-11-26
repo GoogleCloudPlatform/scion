@@ -148,16 +148,21 @@ func (s *httptestMoveBundleStorage) Delete(_ context.Context, objectPath string)
 func (s *httptestMoveBundleStorage) DeletePrefix(_ context.Context, prefix string) error {
 	s.mu.Lock()
 	hook := s.deletePrefixHook
-	s.deletePrefixCalls = append(s.deletePrefixCalls, prefix)
+	s.mu.Unlock()
+	// Run the hook before recording the call in deletePrefixCalls so waiters
+	// polling deletePrefixes() (such as waitForBundleStagingDeleted) only
+	// observe the delete after the hook has finished running.
+	if hook != nil {
+		hook(prefix)
+	}
+	s.mu.Lock()
 	for k := range s.objects {
 		if strings.HasPrefix(k, prefix) {
 			delete(s.objects, k)
 		}
 	}
+	s.deletePrefixCalls = append(s.deletePrefixCalls, prefix)
 	s.mu.Unlock()
-	if hook != nil {
-		hook(prefix)
-	}
 	return nil
 }
 
