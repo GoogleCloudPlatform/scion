@@ -63,9 +63,9 @@ func TestProvision_MoveBundleWorkspaceSourceLeavesWorkspaceEmpty(t *testing.T) {
 }
 
 func TestProvision_MoveBundleRefusesSharedLayout(t *testing.T) {
-	sl := newSharedLayoutStarter(t, "kubernetes")
+	sl := newSharedLayoutStarter(t, "docker")
 	mgr := NewManager(&runtime.MockRuntime{
-		NameFunc: func() string { return "kubernetes" },
+		NameFunc: func() string { return "docker" },
 	}).(*AgentManager)
 	opts := api.StartOptions{
 		Name:                "test-agent",

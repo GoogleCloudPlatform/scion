@@ -183,10 +183,34 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 	}, nil
 }
 
+// EstimateOptions configures optional checks performed during EstimateWithOptions.
+type EstimateOptions struct {
+	// CheckReadable, when true, verifies via stat-based POSIX mode/owner checks
+	// (or for euid 0, a single squash-detection probe) that every non-excluded
+	// directory and regular file encountered within limits is
+	// readable/traversable by the current process, failing closed with
+	// fs.ErrPermission on unreadable entries without exceeding Limits or
+	// walking excluded subtrees.
+	CheckReadable bool
+	// ExpectedOwnerUID, when > 0, identifies the expected non-root owner UID
+	// (e.g. Kubernetes K8sContainerUID) for root squash-detection probing. When
+	// set, a root process (euid == 0) only latches "root not squashed" after a
+	// successful probe of a non-world-readable entry owned by ExpectedOwnerUID
+	// (never on an NFS anonymous/nobody UID or an arbitrary third UID). When 0,
+	// any non-anon owner qualifies to latch.
+	ExpectedOwnerUID int
+}
+
 // Estimate performs a stat-only walk of root using the same excluder, symlink
 // rules, and limits as Write, stopping early with *ErrLimitExceeded if any
 // bound is crossed.
 func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (EstimateResult, error) {
+	return EstimateWithOptions(ctx, root, ex, lim, EstimateOptions{})
+}
+
+// EstimateWithOptions performs a bounded walk of root using the same excluder,
+// symlink rules, and limits as Write, with optional extra checks from opts.
+func EstimateWithOptions(ctx context.Context, root *os.Root, ex Excluder, lim Limits, opts EstimateOptions) (EstimateResult, error) {
 	if root == nil {
 		return EstimateResult{}, errors.New("bundle estimate: root is nil")
 	}
@@ -200,6 +224,11 @@ func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (Esti
 	ex, excludedInodes, err := resolveExcluderInRoot(root, ex)
 	if err != nil {
 		return EstimateResult{}, err
+	}
+
+	var access statAccessChecker
+	if opts.CheckReadable {
+		access = newStatAccessChecker(opts.ExpectedOwnerUID)
 	}
 
 	var (
@@ -222,6 +251,15 @@ func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (Esti
 			pathBytes += entryPathBytesLen(rel, linkTarget)
 			return nil
 		case entryDir:
+			if opts.CheckReadable {
+				info, err := d.Info()
+				if err != nil {
+					return fmt.Errorf("stat %s: %w", rel, err)
+				}
+				if err := access.checkReadable(root, rel, info, true); err != nil {
+					return fmt.Errorf("read %s: %w", rel, err)
+				}
+			}
 			res.Entries++
 			pathBytes += entryPathBytesLen(rel, "")
 			return nil
@@ -232,6 +270,11 @@ func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (Esti
 			}
 			if res.Bytes+info.Size() > lim.MaxBytes {
 				return &ErrLimitExceeded{Field: "bytes", Got: res.Bytes + info.Size(), Max: lim.MaxBytes}
+			}
+			if opts.CheckReadable {
+				if err := access.checkReadable(root, rel, info, false); err != nil {
+					return fmt.Errorf("read %s: %w", rel, err)
+				}
 			}
 			res.Entries++
 			res.Bytes += info.Size()

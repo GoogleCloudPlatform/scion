@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,15 +210,65 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 	if err != nil {
 		return dirs, fmt.Errorf("%w: resolve the NFS export: %v", ErrMoveMarkerMismatch, err)
 	}
+	var wsExportAgentDir string
 	if hostBase != "" {
 		agentRel, err := runtime.NFSAgentDirSubPath(rel, agentName)
 		if err != nil {
 			return dirs, fmt.Errorf("%w: workspace_storage nfs: %v", ErrMoveMarkerMismatch, err)
 		}
-		dirs = append(dirs, filepath.Join(hostBase, agentRel))
+		wsExportAgentDir = filepath.Join(hostBase, agentRel)
+		dirs = append(dirs, wsExportAgentDir)
 		// RemoveNFSAgentFiles also removes the agent's worktree under the
 		// project's shared checkout on the export.
 		worktrees = append(worktrees, filepath.Join(hostBase, nfsWorktreeSubPath(rel, agentName)))
+	} else {
+		// Non-Kubernetes runtimes that put per-agent workspaces on the NFS
+		// export (e.g. Cloud Run) have their export agent dir removed by
+		// removeNFSAgentWorkspace without worktrees.
+		crHostBase, crRel, crErr := m.nfsAgentDirExportWorkspace(projectPath, projectID, agentName)
+		if crErr != nil {
+			return dirs, fmt.Errorf("%w: resolve the NFS export: %v", ErrMoveMarkerMismatch, crErr)
+		}
+		if crHostBase != "" {
+			agentRel, err := runtime.NFSAgentDirSubPath(crRel, agentName)
+			if err != nil {
+				return dirs, fmt.Errorf("%w: workspace_storage nfs: %v", ErrMoveMarkerMismatch, err)
+			}
+			wsExportAgentDir = filepath.Join(crHostBase, agentRel)
+			dirs = append(dirs, wsExportAgentDir)
+		}
+	}
+	// For runtimes with an external home leaf (e.g. Kubernetes NFS home or
+	// Cloud Run NFS home), a rollback delete also removes the home leaf. When
+	// the home leaf's parent directory differs from wsExportAgentDir (or when
+	// the home leaf exists independently), verify that either the home leaf
+	// itself or its parent carries moveID (R3).
+	if m.Runtime != nil {
+		if mbRT, ok := lookupMoveBundleRuntime(m.Runtime.Name()); ok {
+			if hubAgentID := deleteHubAgentIDFrom(ctx); validHomeAgentID(hubAgentID, agentName) {
+				paths, hErr := mbRT.RollbackPaths(ctx, projectPath, projectID, agentName, hubAgentID)
+				if hErr != nil {
+					// Home-share availability/resolution errors must not be
+					// misclassified as ErrMoveMarkerMismatch (409), which would
+					// block workspace rollback and prevent RemoveTargetLeaves
+					// from auditing the OutcomeFailed TreeAgentHome deletion (V2).
+					slog.Warn("move marker check: could not resolve NFS home share; skipping home marker check so workspace rollback proceeds",
+						"project_id", projectID, "agent", agentName, "error", hErr)
+				} else if paths.OK {
+					if paths.ExportAgentDir != wsExportAgentDir {
+						if _, lstatErr := os.Lstat(paths.HomeLeafPath); lstatErr == nil {
+							// Home leaf exists on a distinct home share: require moveID on
+							// either homeLeaf or homeParent (fail closed if neither matches).
+							if checkMoveMarker(paths.HomeLeafPath, moveID) != nil && checkMoveMarker(paths.ExportAgentDir, moveID) != nil {
+								return append(dirs, paths.HomeLeafPath), fmt.Errorf("%w: %s has no matching move marker", ErrMoveMarkerMismatch, paths.HomeLeafPath)
+							}
+						} else if !errors.Is(lstatErr, fs.ErrNotExist) {
+							return append(dirs, paths.HomeLeafPath), fmt.Errorf("%w: stat %s: %v", ErrMoveMarkerMismatch, paths.HomeLeafPath, lstatErr)
+						}
+					}
+				}
+			}
+		}
 	}
 	checked := append(append([]string(nil), dirs...), worktrees...)
 	for _, dir := range dirs {

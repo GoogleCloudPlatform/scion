@@ -122,6 +122,16 @@ func (m *AgentManager) moveNFSOwnAgentDir(ctx context.Context, opts api.StartOpt
 	if emptyPerAgent {
 		dirName, mode = emptyDirName, store.SharingModeEmptyPerAgent
 	}
+	if dirName == "" && ws.Backend == "nfs" {
+		if mbRT, ok := lookupMoveBundleRuntime(runtimeName); ok && mbRT.UsesNFSWorkspaceTarget() {
+			if opts.WorkspaceSource == api.WorkspaceSourceMoveBundle || (isCloudRunMoveBundleRuntime(runtimeName) && isClonePerAgentStart(opts)) {
+				if !isNFSWorktreeName(opts.Name) {
+					return "", fmt.Errorf("%w: invalid agent slug %q", ErrMoveWorkspaceUnconfirmed, opts.Name)
+				}
+				dirName = opts.Name
+			}
+		}
+	}
 	if dirName == "" {
 		return "", nil
 	}

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build unix
+
 package runtimebroker
 
 import (
@@ -107,16 +109,71 @@ func waitForMoveBundleJob(t *testing.T, srv *Server, agentSlug, projectID, kind,
 }
 
 func TestBrokerCapabilities_AdvertiseAgentMoveBundle(t *testing.T) {
-	srv := newTestServer(t)
-	rec := doMoveBundleReq(t, srv, http.MethodGet, "/api/v1/info", nil)
-	require.Equal(t, http.StatusOK, rec.Code)
+	// Plain environment without K8s NFS storage: local container runtimes advertise
+	// AgentMoveBundle, while plain K8s and unsupported/nil/degraded runtimes do not.
+	plainHome := t.TempDir()
+	t.Setenv("HOME", plainHome)
+	t.Setenv("SCION_CONFIG_DIR", filepath.Join(plainHome, ".scion"))
 
-	var resp BrokerInfoResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Capabilities)
-	assert.True(t, resp.Capabilities.AgentMoveBundle, "/api/v1/info must advertise AgentMoveBundle")
-	assert.True(t, StaticCapabilities(nil, "").AgentMoveBundle, "StaticCapabilities must advertise AgentMoveBundle")
-	assert.Contains(t, StaticCapabilityNames(nil), "agentMoveBundle")
+	for _, tc := range []struct {
+		name string
+		rt   scionrt.Runtime
+		want bool
+	}{
+		{"docker", scionrt.NewDockerRuntime(), true},
+		{"podman", &scionrt.PodmanRuntime{}, true},
+		{"apple", scionrt.NewAppleContainerRuntime(), true},
+		{"kubernetes-without-nfs", &scionrt.KubernetesRuntime{}, false},
+		{"cloudrun", &scionrt.CloudRunRuntime{}, false},
+		{"cloudrun-sandbox", &scionrt.CloudRunSandboxRuntime{}, false},
+		{"nil", nil, false},
+		{"error-runtime", &scionrt.ErrorRuntime{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, StaticCapabilities(tc.rt, "").AgentMoveBundle)
+			if tc.want {
+				assert.Contains(t, StaticCapabilityNames(tc.rt), "agentMoveBundle")
+			} else {
+				assert.NotContains(t, StaticCapabilityNames(tc.rt), "agentMoveBundle")
+			}
+		})
+	}
+
+	// /api/v1/info uses the exact same rule as StaticCapabilities / heartbeat.
+	srvPlainK8s := newTestServer(t)
+	srvPlainK8s.runtime = &scionrt.KubernetesRuntime{}
+	recPlain := doMoveBundleReq(t, srvPlainK8s, http.MethodGet, "/api/v1/info", nil)
+	require.Equal(t, http.StatusOK, recPlain.Code)
+	var respPlain BrokerInfoResponse
+	require.NoError(t, json.Unmarshal(recPlain.Body.Bytes(), &respPlain))
+	require.NotNil(t, respPlain.Capabilities)
+	assert.False(t, respPlain.Capabilities.AgentMoveBundle, "/api/v1/info must not advertise AgentMoveBundle for plain Kubernetes without NFS workspace+home")
+	assert.Equal(t, StaticCapabilities(srvPlainK8s.runtime, "").AgentMoveBundle, respPlain.Capabilities.AgentMoveBundle)
+
+	// With K8s NFS workspace + NFS home configured, both StaticCapabilities and /api/v1/info advertise AgentMoveBundle.
+	srvK8sNFS, _, _, _ := setupK8sBrokerNFSFixture(t)
+	srvK8sNFS.runtime = &scionrt.KubernetesRuntime{}
+	assert.True(t, StaticCapabilities(srvK8sNFS.runtime, "").AgentMoveBundle)
+	assert.Contains(t, StaticCapabilityNames(srvK8sNFS.runtime), "agentMoveBundle")
+
+	recNFS := doMoveBundleReq(t, srvK8sNFS, http.MethodGet, "/api/v1/info", nil)
+	require.Equal(t, http.StatusOK, recNFS.Code)
+	var respNFS BrokerInfoResponse
+	require.NoError(t, json.Unmarshal(recNFS.Body.Bytes(), &respNFS))
+	require.NotNil(t, respNFS.Capabilities)
+	assert.True(t, respNFS.Capabilities.AgentMoveBundle, "/api/v1/info must advertise AgentMoveBundle for K8s NFS broker")
+	assert.Equal(t, StaticCapabilities(srvK8sNFS.runtime, "").AgentMoveBundle, respNFS.Capabilities.AgentMoveBundle)
+
+	// Unsupported default runtime never advertises AgentMoveBundle even if an auxiliary runtime is registered.
+	srvUnsupported := newTestServer(t)
+	srvUnsupported.runtime = &scionrt.CloudRunRuntime{}
+	rec2 := doMoveBundleReq(t, srvUnsupported, http.MethodGet, "/api/v1/info", nil)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var resp2 BrokerInfoResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	require.NotNil(t, resp2.Capabilities)
+	assert.False(t, resp2.Capabilities.AgentMoveBundle, "/api/v1/info must not advertise AgentMoveBundle when default runtime is unsupported")
+	assert.Equal(t, StaticCapabilities(srvUnsupported.runtime, "").AgentMoveBundle, resp2.Capabilities.AgentMoveBundle)
 }
 
 func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
@@ -180,10 +237,29 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 		}
 	})
 
-	t.Run("kubernetes and cloudrun not yet supported", func(t *testing.T) {
-		for _, rt := range []string{"kubernetes", "cloudrun", "cloudrun-sandbox"} {
+	t.Run("plain kubernetes and cloudrun refused", func(t *testing.T) {
+		srvK8s := newTestServer(t)
+		srvK8s.moveBundle.durabilityRuntime = "kubernetes"
+		recK8s := doMoveBundleReq(t, srvK8s, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
+			ProjectPath: projectPath,
+			Limits:      api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusOK, recK8s.Code)
+		var respK8s api.MoveBundlePrecheckResponse
+		require.NoError(t, json.Unmarshal(recK8s.Body.Bytes(), &respK8s))
+		assert.False(t, respK8s.Durable, "plain kubernetes without NFS must not be durable")
+		assert.Equal(t, "workspace and home live only in the pod and are deleted on stop", respK8s.Reason)
+
+		for _, tc := range []struct {
+			rt         string
+			wantReason string
+		}{
+			{"cloudrun", "Cloud Run requires NFS project storage for bundle moves"},
+			{"cloudrun-sandbox", "Cloud Run Sandbox workspace and home are not durable for bundle moves"},
+			{"substrate", "not yet supported"},
+		} {
 			srv := newTestServer(t)
-			srv.moveBundle.durabilityRuntime = rt
+			srv.moveBundle.durabilityRuntime = tc.rt
 			rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
 				ProjectPath: projectPath,
 				Limits:      api.DefaultMoveBundleLimits(),
@@ -191,8 +267,8 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code)
 			var resp api.MoveBundlePrecheckResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-			assert.False(t, resp.Durable, "runtime %s should not be durable in phase 1", rt)
-			assert.Equal(t, "not yet supported", resp.Reason)
+			assert.False(t, resp.Durable, "runtime %s should not be durable", tc.rt)
+			assert.Equal(t, tc.wantReason, resp.Reason)
 		}
 	})
 
@@ -459,7 +535,8 @@ server:
 		require.NoError(t, err)
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchDownloadURLs: func(_ context.Context, _, _, rid string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
 				var parts []api.MoveBundleDownloadPartURL
 				for rootName, rm := range st.Manifest.Roots {
@@ -614,7 +691,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchDownloadURLs: func(_ context.Context, _, _, rid string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
 				var parts []api.MoveBundleDownloadPartURL
 				for rootName, rm := range st.Manifest.Roots {
@@ -861,7 +939,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		writeTestMoveMarker(t, dstAgentDir, "rid-refresh")
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchDownloadURLs: func(_ context.Context, _, _, _ string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
 				gen := fetchCount.Add(1)
 				expSec := int64(900)

@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -52,8 +53,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		AgentMoveRecreate: true,
 		// This broker implements the portable workspace+$HOME bundle move
 		// endpoints (precheck, export, import) and WorkspaceSource="move-bundle"
-		// provision (ptone/scion#8960).
-		AgentMoveBundle: true,
+		// provision (ptone/scion#8960), advertised only when a supported
+		// runtime is configured.
+		AgentMoveBundle: moveBundleSupported(rt),
 		// This broker's reprovision reuses an empty-per-agent workspace in
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,
@@ -120,6 +122,22 @@ func webPTYSupported(rt scionrt.Runtime) bool {
 	default:
 		return false
 	}
+}
+
+// moveBundleSupported reports whether rt is a runtime for which this broker
+// supports portable workspace+$HOME bundle moves (ptone/scion#8960).
+//
+// Dispatches through the single agent.MoveBundleRuntimeConfigured registry
+// keyed by runtime name, while explicitly excluding nil runtimes and degraded
+// *ErrorRuntime placeholders.
+func moveBundleSupported(rt scionrt.Runtime) bool {
+	if rt == nil {
+		return false
+	}
+	if _, isErr := rt.(*scionrt.ErrorRuntime); isErr {
+		return false
+	}
+	return agent.MoveBundleRuntimeConfigured(rt.Name())
 }
 
 // StaticCapabilityNames is StaticCapabilities as the capability names the

@@ -23,20 +23,16 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // Target-side staging, commit, and imported marker logic for move-bundle
 // imports (design §3.5 "Target commit", §3.8).
 
-const (
-	moveBundleStageInfix     = ".bundle-"
-	moveBundleStageSuffixLen = 32
-	moveBundleMarkerPrefix   = ".scion-move-bundle-"
-)
+const moveBundleMarkerPrefix = ".scion-move-bundle-"
 
 // errMoveBundleCommitCrash is returned by a test crash hook to simulate a
 // process abort mid-commit (skipping cleanup so .bundle-* siblings remain).
@@ -57,11 +53,11 @@ func moveBundleCommitHook(step string) error {
 // newMoveBundleStageName returns a fresh sibling staging directory name
 // ".<base>.bundle-<32hex>" for target directory base name base.
 func newMoveBundleStageName(base string) (string, error) {
-	var b [moveBundleStageSuffixLen / 2]byte
+	var b [bundle.StageSuffixLen / 2]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	return "." + base + moveBundleStageInfix + hex.EncodeToString(b[:]), nil
+	return "." + base + bundle.StageInfix + hex.EncodeToString(b[:]), nil
 }
 
 // moveBundleImportedMarkerName returns ".scion-move-bundle-<rid>".
@@ -278,16 +274,46 @@ func countDirEntries(fsys fs.FS, dir string) (int64, error) {
 	return n, nil
 }
 
+// moveBundleCommitLchown is the lchown function used after committing imported
+// bundle trees to target directories that require a specific NFS owner
+// (e.g., Kubernetes NFS workspace and home leaves). Replaced in unit tests to
+// record and assert target ownership without requiring root privileges.
+var moveBundleCommitLchown = os.Lchown
+
+// chownMoveBundleTree applies uid:gid ownership recursively to rootDir and all
+// entries inside it without following symlinks. In non-root environments
+// (such as unprivileged unit tests), EPERM is tolerated so local tests that do
+// not stub moveBundleCommitLchown do not fail.
+func chownMoveBundleTree(rootDir string, uid, gid int) error {
+	if uid <= 0 && gid <= 0 {
+		return nil
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return fmt.Errorf("open committed tree %q for chown: %w", filepath.Base(rootDir), err)
+	}
+	defer func() { _ = root.Close() }()
+
+	nonRoot := os.Geteuid() != 0
+	return fs.WalkDir(root.FS(), ".", func(p string, _ fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		target := rootDir
+		if p != "." {
+			target = filepath.Join(rootDir, filepath.FromSlash(p))
+		}
+		if err := moveBundleCommitLchown(target, uid, gid); err != nil {
+			if errors.Is(err, fs.ErrNotExist) || (nonRoot && errors.Is(err, fs.ErrPermission)) {
+				return nil
+			}
+			return fmt.Errorf("chown %q to %d:%d: %w", p, uid, gid, err)
+		}
+		return nil
+	})
+}
+
 // isMoveBundleStageName reports whether name is ".<base>.bundle-<32hex>".
 func isMoveBundleStageName(name, base string) bool {
-	suffix, ok := strings.CutPrefix(name, "."+base+moveBundleStageInfix)
-	if !ok || len(suffix) != moveBundleStageSuffixLen {
-		return false
-	}
-	for _, c := range suffix {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
+	return bundle.IsStageName(name, base)
 }

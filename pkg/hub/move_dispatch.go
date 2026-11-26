@@ -297,6 +297,7 @@ func (d *HTTPAgentDispatcher) DispatchMoveBundlePrecheck(ctx context.Context, ag
 		return nil, err
 	}
 	req := &api.MoveBundlePrecheckRequest{
+		AgentID:           agent.ID,
 		ProjectID:         agent.ProjectID,
 		ProjectPath:       info.projectPath,
 		ProjectSlug:       info.projectSlug,

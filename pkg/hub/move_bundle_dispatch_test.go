@@ -100,6 +100,22 @@ func TestDispatchMoveBundle_HTTPRoundTripsAndCapabilityGuard(t *testing.T) {
 		assert.Contains(t, err.Error(), "resolve project dispatch info")
 	})
 
+	t.Run("DispatchMoveBundlePrecheck carries agent.ID in request body (Phase 2a R1)", func(t *testing.T) {
+		d, client, agent := newMoveDispatchFixture(t, bundleCaps)
+		require.NoError(t, d.store.CreateProject(context.Background(), &store.Project{
+			ID:   agent.ProjectID,
+			Name: "demo",
+			Slug: "demo",
+		}))
+		agent.ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+		resp, err := d.DispatchMoveBundlePrecheck(context.Background(), agent, api.DefaultMoveBundleLimits(), []string{"~/.config/hub/tok"})
+		require.NoError(t, err)
+		require.True(t, resp.Durable)
+		require.NotNil(t, client.lastPrecheckReq)
+		assert.Equal(t, agent.ID, client.lastPrecheckReq.AgentID)
+		assert.Equal(t, agent.ProjectID, client.lastPrecheckReq.ProjectID)
+	})
+
 	t.Run("HTTP client round-trips all five endpoints", func(t *testing.T) {
 		var seenPaths []string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1403,6 +1403,9 @@ func reprovisionEmptyPerAgentPreflight(ctx context.Context, projectDir, agentNam
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	if opts.WorkspaceSource == api.WorkspaceSourceMoveBundle && !MoveBundleRuntimeSupported(m.runtimeName()) {
+		return nil, fmt.Errorf("move-bundle workspace is not supported on runtime %q", m.runtimeName())
+	}
 	// A create over a legacy agent directory no agent owns is refused
 	// before anything runs. A project dir that does not resolve fails here
 	// too (fail closed), as GetAgent would.
@@ -1444,6 +1447,12 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		recordCloudRunAgentWorkspace(agentDir, opts.Name)
 	}
 	if err := provisionFinish(m, opts, agentDir, agentHome, cfg); err != nil {
+		return cfg, err
+	}
+	if err := m.provisionMoveBundleTarget(ctx, opts, projectDir, agentDir, agentHome); err != nil {
+		if opts.MoveReincarnationID != "" {
+			_ = removeAgentDirGuarded(projectAgentFilesGuard(ctx, projectDir, opts.Name, agentDir, agentHome), agentDir, "")
+		}
 		return cfg, err
 	}
 
@@ -2274,17 +2283,22 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// Bundle move target provision (design §3.5 step 7): create an empty
 		// workspace directory (no clone, no worktree, no empty-repo init) so
 		// move-bundle/import can populate it before the container starts.
+		if rtName := agentRuntimeFromContext(ctx); !MoveBundleRuntimeSupported(rtName) {
+			return "", "", nil, fmt.Errorf("move-bundle workspace is not supported on runtime %q", rtName)
+		}
 		if workspace != "" {
 			return "", "", nil, fmt.Errorf("move-bundle workspace does not take a workspace path (got %q)", workspace)
 		}
 		if sharedWorkspace {
 			return "", "", nil, fmt.Errorf("move-bundle workspace cannot be combined with a shared workspace")
 		}
-		if sharedAgentWorkspace != "" {
+		if sharedAgentWorkspace != "" && !isKubernetesRuntime(agentRuntimeFromContext(ctx)) {
 			return "", "", nil, fmt.Errorf("move-bundle workspace is not supported on a shared project storage layout")
 		}
-		if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
-			return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
+		if sharedAgentWorkspace == "" {
+			if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
+			}
 		}
 	} else if emptyPerAgent {
 		// Empty-per-agent (design #2703): a private, initially empty, non-git
