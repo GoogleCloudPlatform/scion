@@ -46,7 +46,16 @@ declare global {
  * Go-side consistency test extracts this set with a regex that only sees
  * literals.
  */
-const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.agent_edit']);
+const DEFAULT_ON_FLAGS = new Set([
+  'hub.artifacts',
+  'hub.flat_runtime_brokers',
+  'hub.user_delete_force_cascade',
+  'web.agent_edit',
+  'web.artifact_manage_access',
+  'web.artifact_review_editor',
+  'web.native_chat',
+  'web.sse_hidden_tab_close',
+]);
 
 /**
  * The window event sent after the flag bag changes (server flags applied, or
@@ -185,7 +194,7 @@ export const AGENT_EDIT_FLAG = 'web.agent_edit';
  * Brokers area (broker UI Option A, slice A1): with the registered
  * experiment hub.flat_runtime_brokers on, /brokers and /brokers/{id} render
  * the new Brokers area; with it off, the existing pages. Presentation only:
- * every hub check is server-side. Default OFF (not in DEFAULT_ON_FLAGS).
+ * every hub check is server-side. Default ON.
  */
 export const FLAT_BROKERS_FLAG = 'hub.flat_runtime_brokers';
 
@@ -200,7 +209,7 @@ export const AGENT_BADGES_FLAG = 'web.agent_badges';
  * Hidden-tab stream close (ptone/scion#5235): a tab hidden for 60 s closes
  * its events streams (view, agent feed, terminal metadata) and reopens them
  * with a resync when shown. PTY sockets are unaffected. Presentation only:
- * the hub behaves the same either way. Default OFF.
+ * the hub behaves the same either way. Default ON.
  */
 export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
 
@@ -209,7 +218,7 @@ export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
  * opens in a graphical editor with marks inline, where typing is recorded
  * as suggestions, with a Graphical and Source toggle. Presentation only:
  * every save goes through the unchanged review publish, which the hub
- * checks. Default OFF.
+ * checks. Default ON.
  */
 export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
 
@@ -217,7 +226,7 @@ export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
  * Manage access dialog (ptone/scion#7107): one Manage access button and
  * dialog on the artifact page instead of Share, Grant review access and
  * Retention…. Presentation only: every change goes through the existing
- * routes, which the hub decides. Default OFF.
+ * routes, which the hub decides. Default ON.
  */
 export const ARTIFACT_MANAGE_ACCESS_FLAG = 'web.artifact_manage_access';
 
@@ -252,7 +261,7 @@ export const ARTIFACTS_REVIEW_REQUESTS_FLAG = 'hub.artifacts_review_requests';
  * Force user delete (ptone/scion#2143): the admin users page offers to
  * force-delete a user who has agents and shows a deletion in
  * progress. Presentation only: the hub checks the experiment on the force
- * request and on the deletion resource. Default OFF.
+ * request and on the deletion resource. Default ON.
  */
 export const USER_DELETE_FORCE_CASCADE_FLAG = 'hub.user_delete_force_cascade';
 

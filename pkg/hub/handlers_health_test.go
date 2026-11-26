@@ -223,6 +223,7 @@ func enableExperimentForReadyzTest(t *testing.T, srv *Server, name string) {
 func TestReadyz_ArtifactStoreStartupLifecycle(t *testing.T) {
 	t.Run("artifacts disabled does not block readyz", func(t *testing.T) {
 		srv, _ := testServer(t)
+		setServerExperimentDefault(t, srv, experiments.Artifacts, false)
 		require.False(t, srv.experimentEnabled(experiments.Artifacts))
 		require.False(t, srv.experimentEnabled(experiments.AttachmentArtifacts))
 

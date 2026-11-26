@@ -187,7 +187,7 @@ func TestArtifactsExperimentOffAnswers404(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	srv.experiments = experiments.Default() // hub.artifacts defaults off
+	setServerExperimentDefault(t, srv, experiments.Artifacts, false)
 	for _, rq := range []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/artifacts/" + pub.Artifact.ID},
 		{http.MethodGet, "/api/v1/artifacts/" + pub.Artifact.ID + "/files/a.txt"},
@@ -849,9 +849,7 @@ func TestArtifactsHTMLViewOnRoutes(t *testing.T) {
 	srv.Handler().ServeHTTP(off, httptest.NewRequest(http.MethodGet, view.URL, nil))
 	assert.Equal(t, http.StatusNotFound, off.Code, "settings off")
 	srv.SetOperationalSettings(artifactsOps(t, ""))
-	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
-	require.NoError(t, err)
-	srv.experiments = reg
+	setServerExperimentDefault(t, srv, experiments.Artifacts, false)
 	require.False(t, srv.experimentEnabled(experiments.Artifacts))
 	off = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(off, httptest.NewRequest(http.MethodGet, view.URL, nil))

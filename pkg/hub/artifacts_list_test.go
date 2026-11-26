@@ -164,7 +164,7 @@ func TestArtifactsListMine(t *testing.T) {
 	// No mine: 400. Experiment off: 404 like every artifact route.
 	rec := userArtifactRequest(t, srv, user, http.MethodGet, "/api/v1/artifacts", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	srv.experiments = experiments.Default() // hub.artifacts defaults off
+	setServerExperimentDefault(t, srv, experiments.Artifacts, false)
 	rec = userArtifactRequest(t, srv, user, http.MethodGet, artifactListPath, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }

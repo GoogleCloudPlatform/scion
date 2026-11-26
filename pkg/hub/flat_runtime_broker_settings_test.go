@@ -32,10 +32,10 @@ import (
 // P1.1 Hub-side tests of the flat Runtime Broker contract that run for real
 // (.design/flat-runtime-brokers-contract.md section 15, groups A and D).
 
-func TestFlatRuntimeBrokersExperiment_DefaultOffInHub(t *testing.T) {
+func TestFlatRuntimeBrokersExperiment_DefaultOnInHub(t *testing.T) {
 	srv := &Server{experiments: experiments.Default()}
-	if srv.experimentEnabled(experiments.FlatRuntimeBrokers) {
-		t.Fatal("hub.flat_runtime_brokers must be off without an override")
+	if !srv.experimentEnabled(experiments.FlatRuntimeBrokers) {
+		t.Fatal("hub.flat_runtime_brokers must be on without an override")
 	}
 }
 

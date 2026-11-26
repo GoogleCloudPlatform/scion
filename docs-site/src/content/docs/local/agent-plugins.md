@@ -4,7 +4,7 @@ description: Declare Agent Plugins 1.0.0 bundles in a template and have Scion in
 ---
 
 :::caution[Experimental]
-Agent Plugins support is behind the `hub.agent_plugins` experiment, which is **off by default**. While it is off, Scion ignores `agent_plugins` in templates. The behaviour, messages and file locations on this page may change.
+Agent Plugins support is behind the `hub.agent_plugins` experiment, which is **on by default**. While it is off, Scion ignores `agent_plugins` in templates. The behaviour, messages and file locations on this page may change.
 :::
 
 An **Agent Plugin** is a bundle of agent extensions in the open [Agent Plugins](https://github.com/agentplugins/agent-plugins-spec) format. Scion supports version **1.0.0** of the format. A bundle is a directory with:

@@ -93,6 +93,25 @@ describe('feature-flags: starred messages flag removed', () => {
   });
 });
 
+describe('feature-flags: batch-1 default-on experiments', () => {
+  const defaultOnBatch = [
+    'hub.artifacts',
+    'hub.flat_runtime_brokers',
+    'hub.user_delete_force_cascade',
+    'web.artifact_manage_access',
+    'web.artifact_review_editor',
+    'web.sse_hidden_tab_close',
+  ] as const;
+
+  for (const name of defaultOnBatch) {
+    it(`${name} defaults ON (in DEFAULT_ON_FLAGS) and can be disabled by the server`, () => {
+      expect(isFeatureEnabled(name)).toBe(true);
+      setServerFlags({ [name]: false });
+      expect(isFeatureEnabled(name)).toBe(false);
+    });
+  }
+});
+
 describe('feature-flags: access boundary flags removed', () => {
   it('does not export ACCESS_BOUNDARIES_READ_FLAG', () => {
     expect(featureFlagExports.ACCESS_BOUNDARIES_READ_FLAG).toBeUndefined();

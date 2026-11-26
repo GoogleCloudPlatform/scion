@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -315,10 +316,11 @@ func serveArtifactRequests(t *testing.T, mux http.Handler, identity Identity) {
 }
 
 // TestArtifactRoutes404WhileExperimentOff covers every pattern through
-// the hub's real mux: with hub.artifacts off (its default), every route
-// answers 404, for an authenticated caller and an anonymous one alike.
+// the hub's real mux: with hub.artifacts off, every route answers 404,
+// for an authenticated caller and an anonymous one alike.
 func TestArtifactRoutes404WhileExperimentOff(t *testing.T) {
 	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux()}
+	setServerExperimentDefault(t, srv, experiments.Artifacts, false)
 	srv.registerRoutes()
 	require.False(t, srv.experimentEnabled("hub.artifacts"))
 

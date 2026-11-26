@@ -1686,7 +1686,7 @@ scion unexpose 8080
 
 ### `scion artifact`
 
-Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires the `hub.artifacts` experiment (off by default). Available in agent mode, except `share`, `grants` and `delete`. An unknown subcommand is an error, also with `--help`: `scion artifact nosuch --help` exits non-zero with `unknown command`, as do `scion hub nosuch --help` and `scion config nosuch --help`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
+Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires the `hub.artifacts` experiment (on by default). Available in agent mode, except `share`, `grants` and `delete`. An unknown subcommand is an error, also with `--help`: `scion artifact nosuch --help` exits non-zero with `unknown command`, as do `scion hub nosuch --help` and `scion config nosuch --help`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
 
 - `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
     - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
