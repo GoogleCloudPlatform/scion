@@ -177,12 +177,16 @@ func idleSuspendSettleBudget() time.Duration {
 // Nothing is started by the wait; the caller's delivery authorization
 // covers delivering to the run another start brought up.
 func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmErr *AgentDMError, awaitErr error) {
-	if agent != nil && (agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil) {
-		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
+	if agent != nil && (agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil ||
+		s.autoSuspending.isActive(agent.ID) || s.isStoppingForSuspend(agent)) {
+		if err := s.waitForHubAutoSuspendToSettle(ctx, agent); err != nil {
 			return nil, err
 		}
 		if state.Phase(agent.Phase) == state.PhaseRunning {
 			return nil, nil
+		}
+		if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
+			return dmErr, nil
 		}
 		if s.autoWakeModeOf(agent) == autoWakeNone {
 			return s.validateAgentDeliverable(agent), nil
@@ -201,6 +205,75 @@ func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmEr
 	s.messageLog.Info("wake: another start of the target is in progress; waiting for it",
 		"agent_id", agent.ID, "holder", string(agent.StartClaimKind))
 	return nil, s.awaitStartInProgress(ctx, agent)
+}
+
+// waitForHubAutoSuspendToSettle waits, bounded by idleSuspendSettleBudget (and
+// any tighter caller deadline on ctx), for an in-flight idle-suspend claim,
+// in-flight local hub auto-suspend (stalled or idle), or suspend-driven
+// stopping phase to settle, refreshing *agent to the settled row.
+func (s *Server) waitForHubAutoSuspendToSettle(ctx context.Context, agent *store.Agent) error {
+	if agent == nil {
+		return store.ErrNotFound
+	}
+	if agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil {
+		return s.waitForIdleSuspendToSettle(ctx, agent)
+	}
+	wctx, cancel := context.WithTimeout(ctx, idleSuspendSettleBudget())
+	defer cancel()
+	if _, done, ok := s.autoSuspending.active(agent.ID); ok {
+		select {
+		case <-done:
+		case <-wctx.Done():
+			return errIdleSuspendInProgressNotSettled
+		}
+		fresh, err := s.store.GetAgent(wctx, agent.ID)
+		if err != nil {
+			return fmt.Errorf("failed to check agent status after auto-suspend: %w", err)
+		}
+		if fresh == nil {
+			return store.ErrNotFound
+		}
+		*agent = *fresh
+		if fresh.IdleSuspendClaimActive {
+			return s.waitForIdleSuspendToSettle(wctx, agent)
+		}
+		if s.isStoppingForSuspend(agent) {
+			return s.waitForStoppingToSettle(wctx, agent)
+		}
+		return nil
+	}
+	if s.isStoppingForSuspend(agent) {
+		return s.waitForStoppingToSettle(wctx, agent)
+	}
+	return nil
+}
+
+// waitForStoppingToSettle polls the store until agent leaves phase=stopping
+// (or a deletion/reincarnation claims it), bounded by ctx and
+// idleSuspendSettleBudget, refreshing *agent to the settled row.
+func (s *Server) waitForStoppingToSettle(ctx context.Context, agent *store.Agent) error {
+	wctx, cancel := context.WithTimeout(ctx, idleSuspendSettleBudget())
+	defer cancel()
+	ticker := time.NewTicker(scheduledWakePollInterval)
+	defer ticker.Stop()
+	for {
+		fresh, err := s.store.GetAgent(wctx, agent.ID)
+		if err != nil {
+			return fmt.Errorf("failed to check agent status while stopping: %w", err)
+		}
+		if fresh == nil {
+			return store.ErrNotFound
+		}
+		*agent = *fresh
+		if state.Phase(fresh.Phase) != state.PhaseStopping || deletionActive(fresh) || reincarnationInFlight(fresh) {
+			return nil
+		}
+		select {
+		case <-wctx.Done():
+			return errIdleSuspendInProgressNotSettled
+		case <-ticker.C:
+		}
+	}
 }
 
 // waitForIdleSuspendToSettle waits, up to idleSuspendSettleBudget (the claim

@@ -463,7 +463,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			mode = s.autoWakeModeOf(input.TargetAgent)
 		}
 		isFanoutMention := input.SkipPhaseGate && input.Type == messages.TypeMention
-		claimActive := input.TargetAgent.IdleSuspendClaimActive
+		claimActive := s.isHubAutoSuspending(input.TargetAgent) || s.isStoppingForSuspend(input.TargetAgent)
 		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && (!isFanoutMention || claimActive))
 		switch {
 		case holdErr != nil:
@@ -789,7 +789,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				}
 				wctx, wcancel := dispatchContext(ctx, scheduledWakeBudget)
 				defer wcancel()
-				if err := s.syncAutoWakeForDM(wctx, target); err != nil {
+				if err := s.syncWakeForDM(wctx, target, input.Wake, input.SenderIdentity); err != nil {
 					return nil, nil, err
 				}
 				freshCtx, freshCancel := dispatchContext(ctx, agentDMDispatchTimeout)
@@ -1109,7 +1109,9 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 // is suspended and identity lacks that permission, and nil otherwise. A
 // target in any other phase needs no resume, so the rule does not apply.
 func (s *Server) wakeResumeDenial(ctx context.Context, identity Identity, target *store.Agent) *AgentDMError {
-	if state.Phase(target.Phase) != state.PhaseSuspended {
+	if state.Phase(store.EffectiveRestingPhase(target)) != state.PhaseSuspended &&
+		!s.isHubAutoSuspending(target) &&
+		!s.isStoppingForSuspend(target) {
 		return nil
 	}
 	if s.agentLifecycleAllowed(ctx, identity, target) {

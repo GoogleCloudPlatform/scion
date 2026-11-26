@@ -97,8 +97,8 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 	if isShellAgent(agent) {
 		return nil, shellAgentNotMessageableError(agent)
 	}
-	if agent != nil && agent.IdleSuspendClaimActive {
-		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
+	if agent != nil && (agent.IdleSuspendClaimActive || s.autoSuspending.isActive(agent.ID) || s.isStoppingForSuspend(agent)) {
+		if err := s.waitForHubAutoSuspendToSettle(ctx, agent); err != nil {
 			return nil, startInProgressDMError(agent, err)
 		}
 	}
@@ -539,7 +539,7 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 // agent automatically without --wake, so the hint omits "--wake".
 func (s *Server) groupMemberDeliverableError(agent *store.Agent) *AgentDMError {
 	err := s.validateAgentDeliverable(agent)
-	claimSuspending := agent != nil && agent.IdleSuspendClaimActive
+	claimSuspending := s.isHubAutoSuspending(agent)
 	if err != nil && (state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended || claimSuspending) {
 		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly with --wake", agent.Slug)
 	}
@@ -550,8 +550,19 @@ func (s *Server) groupMemberDeliverableError(agent *store.Agent) *AgentDMError {
 }
 
 // validateAgentDeliverable checks target deliverability, always honouring an
-// active idle-suspend claim on the target row regardless of current settings.
+// active idle-suspend claim or in-flight hub auto-suspend on this replica
+// regardless of current settings.
 func (s *Server) validateAgentDeliverable(agent *store.Agent) *AgentDMError {
+	if isShellAgent(agent) {
+		return shellAgentNotMessageableError(agent)
+	}
+	if agent != nil && s != nil && s.autoSuspending.isActive(agent.ID) {
+		return &AgentDMError{
+			Code:       ErrCodeAgentNotRunning,
+			Message:    fmt.Sprintf("agent %q is suspended; use --wake to resume and deliver", agentTargetLabel(agent)),
+			HTTPStatus: http.StatusConflict,
+		}
+	}
 	return validateAgentDeliverable(agent)
 }
 
@@ -643,7 +654,7 @@ func (s *Server) deferredReason(agent *store.Agent) string {
 	if reincarnationInFlight(agent) {
 		return "agent is reincarnating"
 	}
-	if agent != nil && agent.IdleSuspendClaimActive {
+	if s.isHubAutoSuspending(agent) {
 		return "agent is suspending"
 	}
 	if agent != nil && agent.StartClaimKind == store.StartClaimStop {

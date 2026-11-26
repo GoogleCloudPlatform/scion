@@ -894,7 +894,11 @@ func (s *Server) idleSuspendDeliveryGateActive() bool {
 }
 
 func (s *Server) deliveryMarker() agentDeliveryMarker {
-	return gatedDeliveryMarker{store: s.store, gate: s.idleSuspendDeliveryGateActive}
+	return gatedDeliveryMarker{
+		store:          s.store,
+		gate:           s.idleSuspendDeliveryGateActive,
+		autoSuspending: s.autoSuspending.activeReason,
+	}
 }
 
 // brokerQuotasEnforced reports whether the per-broker agent quota cap
@@ -2570,7 +2574,8 @@ type Server struct {
 
 	// autoSuspend is the auto-suspend worker the stalled-detection and
 	// idle-suspend sweeps hand eligible agents to (auto_suspend_worker.go).
-	autoSuspend autoSuspendWorker
+	autoSuspend    autoSuspendWorker
+	autoSuspending autoSuspendTracker
 
 	// autoWakeWork admits and joins background auto-wakes, and autoWakes
 	// holds the one in flight per agent (auto_wake.go, ptone/scion#7826).
@@ -6676,6 +6681,8 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		claimUntil  time.Time
 		claimedIdle bool
 	)
+	endAutoSuspend := s.autoSuspending.begin(agent.ID, reason)
+	defer endAutoSuspend()
 	if reason == state.SuspendReasonIdle {
 		if !s.experimentEnabled(experiments.IdleSuspend) {
 			s.clearWorkspaceAtStop(ctx, agent)
@@ -6839,6 +6846,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	if claimedIdle {
 		s.clearIdleSuspendClaimBestEffort(ctx, agent.ID)
 	}
+	endAutoSuspend()
 	// Non-blocking in-memory publish; final step of auto-suspend.
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
