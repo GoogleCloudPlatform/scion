@@ -204,7 +204,7 @@ func selectRuntime(projectPath string, profileName string) runtimeSelection {
 			// Cloud Run Instance detection: CLOUD_RUN_INSTANCE is set on Instances
 			// (unlike K_SERVICE, which is NOT set). Probe the sandbox binary to
 			// distinguish cloudrun-sandbox from cloudrun-instances.
-			if cloudrunenv.IsInstance() {
+			if _, overridden := CloudRunEnvOverride(runtimeType); overridden && cloudrunenv.IsInstance() {
 				if SandboxLauncherAvailable() {
 					runtimeType = "cloudrun-sandbox"
 					util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher, using cloudrun-sandbox runtime")
@@ -212,7 +212,7 @@ func selectRuntime(projectPath string, profileName string) runtimeSelection {
 					runtimeType = "cloudrun-instances"
 					util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher, using cloudrun-instances runtime")
 				}
-			} else if cloudrunenv.IsService() {
+			} else if _, overridden := CloudRunEnvOverride(runtimeType); overridden && cloudrunenv.IsService() {
 				runtimeType = "cloudrun"
 				util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
 			} else if _, err := exec.LookPath("podman"); err == nil {
@@ -256,44 +256,46 @@ func (s runtimeSelection) build() Runtime {
 	case "container":
 		return NewAppleContainerRuntime()
 	case "docker":
-		// On Cloud Run Instances the docker daemon is unavailable.
-		// CLOUD_RUN_INSTANCE is set on Instances (K_SERVICE is NOT).
-		if cloudrunenv.IsInstance() {
-			if SandboxLauncherAvailable() {
-				util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher (docker override), using cloudrun-sandbox runtime")
-				return NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
-			}
-			util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher (docker override), using cloudrun-instances runtime")
-			instCfg := rtConfig.CloudRunInstances
-			if instCfg == nil {
-				rt, err := NewCloudRunRuntime(&config.CloudRunConfig{})
+		// On Cloud Run (Instances or Services) the docker daemon is unavailable.
+		// Apply the shared CloudRunEnvOverride rule used by request-time volume checks.
+		if _, overridden := CloudRunEnvOverride(runtimeType); overridden {
+			if cloudrunenv.IsInstance() {
+				if SandboxLauncherAvailable() {
+					util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher (docker override), using cloudrun-sandbox runtime")
+					return NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
+				}
+				util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher (docker override), using cloudrun-instances runtime")
+				instCfg := rtConfig.CloudRunInstances
+				if instCfg == nil {
+					rt, err := NewCloudRunRuntime(&config.CloudRunConfig{})
+					if err != nil {
+						util.Debugf("GetRuntime: failed to create cloudrun runtime for auto-detected instance (docker override): %v", err)
+						return &ErrorRuntime{Err: err}
+					}
+					return rt
+				}
+				rt, err := NewCloudRunRuntimeFromInstances(instCfg)
 				if err != nil {
-					util.Debugf("GetRuntime: failed to create cloudrun runtime for auto-detected instance (docker override): %v", err)
+					util.Debugf("GetRuntime: failed to create cloudrun-instances runtime (docker override): %v", err)
 					return &ErrorRuntime{Err: err}
 				}
 				return rt
 			}
-			rt, err := NewCloudRunRuntimeFromInstances(instCfg)
-			if err != nil {
-				util.Debugf("GetRuntime: failed to create cloudrun-instances runtime (docker override): %v", err)
-				return &ErrorRuntime{Err: err}
+			// On Cloud Run Services the docker daemon is unavailable regardless of
+			// whether the CLI binary exists in the container image.
+			if cloudrunenv.IsService() {
+				util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), docker daemon unavailable — using cloudrun runtime")
+				cfg := rtConfig.CloudRun
+				if cfg == nil {
+					cfg = &config.CloudRunConfig{}
+				}
+				rt, err := NewCloudRunRuntime(cfg)
+				if err != nil {
+					util.Debugf("GetRuntime: failed to create cloudrun runtime for K_SERVICE fallback: %v", err)
+					return &ErrorRuntime{Err: err}
+				}
+				return rt
 			}
-			return rt
-		}
-		// On Cloud Run the docker daemon is unavailable regardless of
-		// whether the CLI binary exists in the container image.
-		if cloudrunenv.IsService() {
-			util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), docker daemon unavailable — using cloudrun runtime")
-			cfg := rtConfig.CloudRun
-			if cfg == nil {
-				cfg = &config.CloudRunConfig{}
-			}
-			rt, err := NewCloudRunRuntime(cfg)
-			if err != nil {
-				util.Debugf("GetRuntime: failed to create cloudrun runtime for K_SERVICE fallback: %v", err)
-				return &ErrorRuntime{Err: err}
-			}
-			return rt
 		}
 		if _, err := exec.LookPath("docker"); err != nil {
 			util.Debugf("GetRuntime: docker binary not found, returning DockerRuntime (will fail on use)")

@@ -41,7 +41,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
@@ -1113,8 +1112,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// No volume in the request may reach a Runtime Broker control path;
-	// refused before beginCreateAttempt, so the refusal has no side effect.
+	// No volume in the request may reach a Runtime Broker control path or use
+	// an unsupported volume type for the target runtime; refused before
+	// beginCreateAttempt, so the refusal has no side effect.
 	{
 		var cfgVols, inlineVols []api.VolumeMount
 		if req.Config != nil {
@@ -1123,15 +1123,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if req.InlineConfig != nil {
 			inlineVols = req.InlineConfig.Volumes
 		}
-		if err := checkRequestVolumes(cfgVols, inlineVols); err != nil {
-			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
-			writeControlPathRefusal(w, err)
-			return
-		}
-		// On a hosted broker, member-written request config (volumes and
-		// inline config) may not name host resources. An unresolvable
-		// profile fails the create later; the default runtime's name is
-		// used for this check then.
+		// An unresolvable profile fails the create later; the default
+		// runtime's name is used for these checks then.
 		runtimeName := func() string {
 			name, _ := s.resolveRuntimeNameForOpts(api.StartOptions{
 				Name:        req.Name,
@@ -1140,6 +1133,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			})
 			return name
 		}
+		if len(cfgVols) > 0 || len(inlineVols) > 0 {
+			if err := checkRequestVolumes(scionrt.EffectiveVolumeRuntimeKind(runtimeName()), cfgVols, inlineVols); err != nil {
+				span.SetStatus(codes.Error, volumeRefusalCode(err))
+				writeControlPathRefusal(w, err)
+				return
+			}
+		}
+		// On a hosted broker, member-written request config (volumes and
+		// inline config) may not name host resources.
 		if err := s.checkHostedRequestConfig(runtimeName, &api.ScionConfig{Volumes: cfgVols}, req.InlineConfig); err != nil {
 			span.SetStatus(codes.Error, hostedguard.ErrorCode)
 			writeHostedConfigRefusal(w, err)
@@ -4439,10 +4441,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
 
 	// No volume in the Hub's inline config may reach a Runtime Broker
-	// control path; refused before it is merged into scion-agent.json.
+	// control path or use an unsupported volume type; refused before it is
+	// merged into scion-agent.json.
 	if startReq.InlineConfig != nil {
-		if err := checkRequestVolumes(startReq.InlineConfig.Volumes); err != nil {
-			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
+		if err := checkRequestVolumes(resolvedRuntimeType, startReq.InlineConfig.Volumes); err != nil {
+			span.SetStatus(codes.Error, volumeRefusalCode(err))
 			writeControlPathRefusal(w, err)
 			return
 		}

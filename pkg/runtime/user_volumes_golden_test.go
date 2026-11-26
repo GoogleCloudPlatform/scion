@@ -76,6 +76,9 @@ func userVolumeCases() []struct {
 		}},
 		{"other-types", false, []api.VolumeMount{
 			{Type: "nfs", Server: "10.0.0.2", Source: "/export/x", Target: "/nfs"},
+		}},
+		// cloudrun-volume is unsupported on bind runtimes and refused before run.
+		{"unsupported-types", true, []api.VolumeMount{
 			{Type: "cloudrun-volume", VolumeName: "vol", Source: "/cr", Target: "/cr"},
 		}},
 		// The host home holds the Scion global directory: the source is

@@ -145,6 +145,10 @@ const (
 	// but is not usable from the agent container (not mounted there,
 	// read-only, unreadable, not writable, or not answering).
 	LaunchCodeVolumeUnhealthy = "volume_unhealthy"
+	// LaunchCodeUnsupportedVolumeType: a configured volume uses a type that
+	// the target runtime cannot realize (for example cloudrun-volume or
+	// gke-shared-volume on a bind runtime).
+	LaunchCodeUnsupportedVolumeType = "unsupported_volume_type"
 	// LaunchCodeUnschedulable: the pod cannot be scheduled and the cluster
 	// will not add capacity for it (not GKE).
 	LaunchCodeUnschedulable = "unschedulable"

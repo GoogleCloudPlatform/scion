@@ -708,8 +708,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
 		// No configured volume (settings, profile, template, harness
 		// config, the requester's own) may reach a Runtime Broker control
-		// path: refuse before anything below persists or runs.
-		if err := runtime.CheckVolumeSourcesWithPolicy(finalScionCfg.Volumes, opts.GitHubTokenInstallationOnly); err != nil {
+		// path or use an unsupported volume type for this runtime: refuse
+		// before anything below persists or runs.
+		if err := runtime.CheckVolumeSourcesWithPolicy(finalScionCfg.Volumes, m.runtimeName(), opts.GitHubTokenInstallationOnly); err != nil {
 			return nil, err
 		}
 	}
@@ -2127,6 +2128,7 @@ authDone:
 		workspace:   effectiveWorkspace,
 		ctxRepoRoot: ctxRepoRoot,
 		explicit:    explicitWorkspace,
+		runtimeName: m.runtimeName(),
 		volumes:     startVolumes,
 		settings:    settings,
 	})
@@ -2717,7 +2719,7 @@ authDone:
 	// provision-only dispatch, which provisions without starting — so there
 	// is exactly one persistence gate even though there is more than one
 	// caller.
-	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, preValidationWorkspace, startVolumes)
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, preValidationWorkspace, m.runtimeName(), startVolumes)
 
 	// The agent's workspace placement, reported to the hub on every start
 	// that gets here (so a re-provision refreshes it). See

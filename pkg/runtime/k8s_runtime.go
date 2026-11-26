@@ -3098,8 +3098,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	var gcsVolumes []gcsVolumeInfo
 
 	for i, v := range config.Volumes {
-		switch v.Type {
-		case "gcs":
+		switch RealizeVolume(v, r.Name()) {
+		case RealizeCSI:
 			// The entry is a user-owned Mount: Realize gives its target and
 			// read-only flag, the GCS FUSE CSI driver its volume.
 			realized, err := realizeUserVolume(v.Bucket, v.Target, v.ReadOnly, projectfs.RuntimePod)

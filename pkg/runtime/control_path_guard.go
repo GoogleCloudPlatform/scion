@@ -147,36 +147,48 @@ func expandHostSource(path string, refuse func(string) bool) string {
 }
 
 // CheckVolumeSources applies the configured-volume control-path check to
-// every host-path volume in vols, with each source expanded as it will be
-// when the agent's container is created. It is for configuration time: a
-// caller about to persist or start an agent configuration refuses it here,
-// before anything is written or run. Volume types that name no broker-host
-// path (gcs, cloudrun-volume, gke-shared-volume) are skipped, and so is a
-// volume at /workspace: that is the agent's workspace, judged where the
-// workspace is decided.
+// every host-path volume in vols for the default bind-runtime semantics, with
+// each source expanded as it will be when the agent's container is created.
+// Callers that know the target runtime should use CheckVolumeSourcesForRuntime
+// or CheckVolumeSourcesWithPolicy.
 func CheckVolumeSources(vols []api.VolumeMount) error {
-	return CheckVolumeSourcesWithPolicy(vols, false)
+	return CheckVolumeSourcesWithPolicy(vols, "", false)
 }
 
-// CheckVolumeSourcesWithPolicy is CheckVolumeSources with the agent's
-// GitHubTokenInstallationOnly policy applied to host-env expansion of volume
-// sources.
-func CheckVolumeSourcesWithPolicy(vols []api.VolumeMount, githubTokenInstallationOnly bool) error {
+// CheckVolumeSourcesForRuntime is CheckVolumeSources for a specific runtime
+// kind, using default host-env expansion policy.
+func CheckVolumeSourcesForRuntime(vols []api.VolumeMount, runtimeKind string) error {
+	return CheckVolumeSourcesWithPolicy(vols, runtimeKind, false)
+}
+
+// CheckVolumeSourcesWithPolicy applies the configured-volume checks to vols
+// for runtimeKind, using RealizeVolume to decide how each entry is realized
+// and applying the agent's GitHubTokenInstallationOnly policy to host-env
+// expansion of volume sources. It is for configuration time: a caller about
+// to persist or start an agent configuration refuses unsupported volume types
+// and control-path mounts here, before anything is written or run.
+func CheckVolumeSourcesWithPolicy(vols []api.VolumeMount, runtimeKind string, githubTokenInstallationOnly bool) error {
 	refuse := volumeEnvRefuser(githubTokenInstallationOnly)
 	for i, v := range vols {
-		switch strings.ToLower(v.Type) {
-		case "gcs", "cloudrun-volume", "gke-shared-volume":
+		switch RealizeVolume(v, runtimeKind) {
+		case RealizeNamed, RealizeFUSE, RealizeCSI:
 			continue
-		}
-		if v.Target == "/workspace" {
-			// The workspace mount is resolved, filtered and validated where
-			// the workspace is decided (ValidateWorkspaceSource, which
-			// includes the control-path check), and every bind is checked
-			// again when the container is created.
+		case RealizeUnsupported:
+			if !isNonBindRuntime(runtimeKind) {
+				return unsupportedVolumeTypeError(i, v, runtimeKind)
+			}
 			continue
-		}
-		if err := checkConfiguredVolumeSource(expandHostSource(v.Source, refuse)); err != nil {
-			return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
+		case RealizeHostBind:
+			if v.Target == "/workspace" {
+				// The workspace mount is resolved, filtered and validated where
+				// the workspace is decided (ValidateWorkspaceSource, which
+				// includes the control-path check), and every bind is checked
+				// again when the container is created.
+				continue
+			}
+			if err := checkConfiguredVolumeSource(expandHostSource(v.Source, refuse)); err != nil {
+				return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
+			}
 		}
 	}
 	return nil
@@ -184,21 +196,41 @@ func CheckVolumeSourcesWithPolicy(vols []api.VolumeMount, githubTokenInstallatio
 
 // CheckWorkspaceVolumeSources applies the named control-path check and the
 // global-directory floor (checkBindSource, no allow list) to a volume at
-// /workspace in vols. It is for a request that is about to be persisted
-// (the Hub's create and start): which workspace shapes are allowed is
-// decided later, where the workspace is resolved, but a workspace that
-// reaches a control path is refused before anything is written.
+// /workspace in vols using default bind-runtime semantics.
 func CheckWorkspaceVolumeSources(vols []api.VolumeMount) error {
+	return CheckWorkspaceVolumeSourcesForRuntime(vols, "")
+}
+
+// CheckWorkspaceVolumeSourcesForRuntime applies the workspace volume checks
+// for runtimeKind using RealizeVolume. It is for a request that is about to
+// be persisted (the Runtime Broker's create and start handlers): which
+// workspace shapes are allowed is decided later, where the workspace is
+// resolved, but an unsupported volume type on a bind runtime or a workspace
+// that reaches a control path is refused before anything is written.
+func CheckWorkspaceVolumeSourcesForRuntime(vols []api.VolumeMount, runtimeKind string) error {
 	for i, v := range vols {
 		if v.Target != "/workspace" {
 			continue
 		}
-		switch strings.ToLower(v.Type) {
-		case "gcs", "cloudrun-volume", "gke-shared-volume":
+		switch RealizeVolume(v, runtimeKind) {
+		case RealizeNamed, RealizeFUSE, RealizeCSI:
 			continue
-		}
-		if _, err := checkBindSource(expandHostSource(v.Source, nil)); err != nil {
-			return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
+		case RealizeHostBind:
+			if _, err := checkBindSource(expandHostSource(v.Source, nil)); err != nil {
+				return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
+			}
+		case RealizeUnsupported:
+			if !isNonBindRuntime(runtimeKind) {
+				return unsupportedVolumeTypeError(i, v, runtimeKind)
+			}
+			// On non-bind runtimes (e.g. Kubernetes), a /workspace entry with
+			// a host Source is still synced from the broker host, so check
+			// non-empty sources against broker control paths.
+			if v.Source != "" {
+				if _, err := checkBindSource(expandHostSource(v.Source, nil)); err != nil {
+					return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
+				}
+			}
 		}
 	}
 	return nil

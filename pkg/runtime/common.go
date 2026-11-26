@@ -432,7 +432,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	addVolume := func(v api.VolumeMount) {
 		tgt := expandPath(v.Target, true)
 
-		if v.Type == "gcs" {
+		switch RealizeVolume(v, config.RuntimeName) {
+		case RealizeFUSE:
 			// Do not register as docker bind mount
 			cmd := fmt.Sprintf("mkdir -p %s && gcsfuse ", shellQuote(tgt))
 			if v.Prefix != "" {
@@ -454,41 +455,68 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 				Prefix: v.Prefix,
 			})
 			return
-		}
 
-		src := expandPath(v.Source, false)
-		if _, exists := volumeMap[tgt]; exists {
-			// Already mounted (for example the workspace, checked on its
-			// own path); registerMount below would not add this one.
-			return
-		}
-		// No configured volume may reach a Runtime Broker control path,
-		// read-only or not (checkConfiguredVolumeSource). Agents' own
-		// directories under ~/.scion/project-configs hold state the host
-		// relies on; no configured volume may mount them either
-		// (checkVolumeSource).
-		if err := checkConfiguredVolumeSource(src); err != nil {
+		case RealizeUnsupported, RealizeCSI:
 			if volumeErr == nil {
-				volumeErr = err
+				volumeErr = newLaunchFailure(
+					api.LaunchCodeUnsupportedVolumeType,
+					api.LaunchStepLaunching,
+					"",
+					unsupportedVolumeTypeError(-1, v, config.RuntimeName),
+				)
 			}
 			return
-		}
-		if err := checkVolumeSource(src, v.ReadOnly); err != nil {
-			if volumeErr == nil {
-				volumeErr = err
+
+		case RealizeNamed:
+			src := expandPath(v.Source, false)
+			if _, exists := volumeMap[tgt]; exists {
+				return
 			}
-			return
-		}
-		// The entry is a user-owned Mount realized as a bind mount.
-		realized, err := realizeUserVolume(src, tgt, v.ReadOnly, projectfs.RuntimeBind)
-		if err != nil {
-			if volumeErr == nil {
-				volumeErr = err
+			realized, err := realizeUserVolume(src, tgt, v.ReadOnly, projectfs.RuntimeBind)
+			if err != nil {
+				if volumeErr == nil {
+					volumeErr = err
+				}
+				return
 			}
+			registerMount(realized.Source, realized.Target, realized.ReadOnly, false)
 			return
+
+		case RealizeHostBind:
+			src := expandPath(v.Source, false)
+			if _, exists := volumeMap[tgt]; exists {
+				// Already mounted (for example the workspace, checked on its
+				// own path); registerMount below would not add this one.
+				return
+			}
+			// No configured volume may reach a Runtime Broker control path,
+			// read-only or not (checkConfiguredVolumeSource). Agents' own
+			// directories under ~/.scion/project-configs hold state the host
+			// relies on; no configured volume may mount them either
+			// (checkVolumeSource).
+			if err := checkConfiguredVolumeSource(src); err != nil {
+				if volumeErr == nil {
+					volumeErr = err
+				}
+				return
+			}
+			if err := checkVolumeSource(src, v.ReadOnly); err != nil {
+				if volumeErr == nil {
+					volumeErr = err
+				}
+				return
+			}
+			// The entry is a user-owned Mount realized as a bind mount.
+			realized, err := realizeUserVolume(src, tgt, v.ReadOnly, projectfs.RuntimeBind)
+			if err != nil {
+				if volumeErr == nil {
+					volumeErr = err
+				}
+				return
+			}
+			// Generic volumes from config should NOT overwrite already registered mounts (like workspace)
+			registerMount(realized.Source, realized.Target, realized.ReadOnly, false)
 		}
-		// Generic volumes from config should NOT overwrite already registered mounts (like workspace)
-		registerMount(realized.Source, realized.Target, realized.ReadOnly, false)
 	}
 
 	addArg("--name", config.Name)

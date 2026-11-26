@@ -81,6 +81,7 @@ var launchCodeLabels = map[string]string{
 	api.LaunchCodeInitContainerFailed:                  "an init container of the agent pod failed",
 	api.LaunchCodeVolumeMountFailed:                    "an agent volume could not be mounted",
 	api.LaunchCodeVolumeUnhealthy:                      "an agent volume is mounted but not usable",
+	api.LaunchCodeUnsupportedVolumeType:                "an agent volume uses a type not supported by this runtime",
 	api.LaunchCodeUnschedulable:                        "the agent pod cannot be scheduled",
 	api.LaunchCodePodDisrupted:                         "the agent pod was preempted, evicted or deleted while starting",
 	api.LaunchCodeBrokerRestarted:                      "the runtime broker restarted during the launch",

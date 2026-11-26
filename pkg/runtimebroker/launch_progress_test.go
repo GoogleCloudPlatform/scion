@@ -666,6 +666,7 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		{api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, "Error", "an init container of the agent pod failed (Error)"},
 		{api.LaunchCodeVolumeMountFailed, api.LaunchStepContainerCreate, "FailedMount", "an agent volume could not be mounted (FailedMount)"},
 		{api.LaunchCodeVolumeUnhealthy, api.LaunchStepContainerStart, "ShareNotWritable", "an agent volume is mounted but not usable (ShareNotWritable)"},
+		{api.LaunchCodeUnsupportedVolumeType, api.LaunchStepLaunching, "", "an agent volume uses a type not supported by this runtime"},
 		{api.LaunchCodeUnschedulable, api.LaunchStepScheduling, "Unschedulable", "the agent pod cannot be scheduled (Unschedulable)"},
 		{api.LaunchCodePodDisrupted, api.LaunchStepScheduling, "PreemptionByScheduler", "the agent pod was preempted, evicted or deleted while starting: it was preempted (PreemptionByScheduler)"},
 		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "Evicted", "the agent pod was preempted, evicted or deleted while starting: it was evicted (Evicted)"},
@@ -704,6 +705,14 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		_, step, _ := classifyStartError(context.Background(), errors.New("boom"), "", "", store.LaunchKindCreate)
 		if step != api.LaunchStepLaunching {
 			t.Fatalf("step = %q, want launching", step)
+		}
+	})
+	t.Run("config-time unsupported volume type classifies cleanly", func(t *testing.T) {
+		err := fmt.Errorf("volumes[0] (target /mnt/x): %w", &scionrt.UnsupportedVolumeTypeError{Index: 0, Type: "cloudrun-volume", Target: "/mnt/x", Runtime: "docker"})
+		code, step, msg := classifyStartError(context.Background(), err, "", api.LaunchStepLaunching, store.LaunchKindCreate)
+		wantMsg := "an agent volume uses a type not supported by this runtime"
+		if code != api.LaunchCodeUnsupportedVolumeType || step != api.LaunchStepLaunching || msg != wantMsg {
+			t.Fatalf("got (%q, %q, %q), want (%q, %q, %q)", code, step, msg, api.LaunchCodeUnsupportedVolumeType, api.LaunchStepLaunching, wantMsg)
 		}
 	})
 	t.Run("wrapped post-run image_lacks_netns_setup failure", func(t *testing.T) {

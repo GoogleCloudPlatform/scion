@@ -63,4 +63,26 @@ func TestCheckInstanceDefaultVolumes(t *testing.T) {
 	if !errors.Is(err, brokercontrol.ErrControlPathMount) || !strings.Contains(err.Error(), "harness_overrides.claude") {
 		t.Fatalf("err = %v", err)
 	}
+
+	// Unsupported volume types are refused for bind runtimes and allowed on kubernetes.
+	dockerUnsupported := config.V1RuntimeBrokerInstanceConfig{
+		Key:           "d1",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"},
+		AgentDefaults: &config.V1InstanceAgentDefaults{
+			Volumes: []api.VolumeMount{{Type: "gke-shared-volume", VolumeName: "v", Target: "/mnt/gke"}},
+		},
+	}
+	if err := CheckInstanceDefaultVolumesAt("server.broker.instances[0]", dockerUnsupported); err == nil || !strings.Contains(err.Error(), "unsupported volume type") {
+		t.Fatalf("gke-shared-volume on docker instance: err = %v, want unsupported volume type", err)
+	}
+	k8sShared := config.V1RuntimeBrokerInstanceConfig{
+		Key:           "k1",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "kubernetes"},
+		AgentDefaults: &config.V1InstanceAgentDefaults{
+			Volumes: []api.VolumeMount{{Type: "gke-shared-volume", VolumeName: "v", Target: "/mnt/gke"}},
+		},
+	}
+	if err := CheckInstanceDefaultVolumesAt("server.broker.instances[0]", k8sShared); err != nil {
+		t.Fatalf("gke-shared-volume on kubernetes instance: %v", err)
+	}
 }

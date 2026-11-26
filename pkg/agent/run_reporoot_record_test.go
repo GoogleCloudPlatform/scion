@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -210,27 +211,27 @@ func TestReadRepoRootRecordState(t *testing.T) {
 	agentDir := t.TempDir()
 	recPath := filepath.Join(agentDir, provisionedWorktreeStateFile)
 
-	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordMissing {
+	if rs := readRepoRootRecordState("a", agentDir, ws, "", nil); rs.status != recordMissing {
 		t.Errorf("no file: got %+v, want missing", rs)
 	}
 
 	mustWrite(t, recPath, `{"repoRoot":"/repo","source":"provision"}`)
-	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordPresent || rs.root != "/repo" {
+	if rs := readRepoRootRecordState("a", agentDir, ws, "", nil); rs.status != recordPresent || rs.root != "/repo" {
 		t.Errorf("valid record: got %+v, want present /repo", rs)
 	}
 
 	mustWrite(t, recPath, `{"repoRoot":"/repo"}`)
-	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordPresent || rs.root != "/repo" {
+	if rs := readRepoRootRecordState("a", agentDir, ws, "", nil); rs.status != recordPresent || rs.root != "/repo" {
 		t.Errorf("legacy record without a source: got %+v, want present /repo", rs)
 	}
 
 	mustWrite(t, recPath, `{not json`)
-	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordUnreadable {
+	if rs := readRepoRootRecordState("a", agentDir, ws, "", nil); rs.status != recordUnreadable {
 		t.Errorf("corrupt record: got %+v, want unreadable", rs)
 	}
 
 	mustWrite(t, recPath, `{"source":"provision"}`)
-	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordUnreadable {
+	if rs := readRepoRootRecordState("a", agentDir, ws, "", nil); rs.status != recordUnreadable {
 		t.Errorf("record with an empty root: got %+v, want unreadable", rs)
 	}
 
@@ -251,7 +252,7 @@ func TestReadRepoRootRecordState(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mustWrite(t, rec2Path, tc.content)
-			if rs := readRepoRootRecordState("a", agentDir2, ws2, nil); rs.status != recordMissing {
+			if rs := readRepoRootRecordState("a", agentDir2, ws2, "", nil); rs.status != recordMissing {
 				t.Errorf("record under the workspace mount: got %+v, want missing (ignored)", rs)
 			}
 		})
@@ -264,7 +265,7 @@ func TestReadRepoRootRecordState(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(ad, provisionedWorktreeStateFile), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if rs := readRepoRootRecordState("a", ad, t.TempDir(), nil); rs.status != recordUnreadable {
+		if rs := readRepoRootRecordState("a", ad, t.TempDir(), "", nil); rs.status != recordUnreadable {
 			t.Errorf("directory at the record path, plain: got %+v, want unreadable", rs)
 		}
 	})
@@ -275,7 +276,7 @@ func TestReadRepoRootRecordState(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(ad, provisionedWorktreeStateFile), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if rs := readRepoRootRecordState("a", ad, ws3, nil); rs.status != recordMissing {
+		if rs := readRepoRootRecordState("a", ad, ws3, "", nil); rs.status != recordMissing {
 			t.Errorf("directory at the record path, under a mount: got %+v, want missing", rs)
 		}
 	})
@@ -290,7 +291,7 @@ func TestReadRepoRootRecordState(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(ad, provisionedWorktreeStateFile)); err != nil {
 			t.Fatal(err)
 		}
-		if rs := readRepoRootRecordState("a", ad, t.TempDir(), nil); rs.status != recordUnreadable {
+		if rs := readRepoRootRecordState("a", ad, t.TempDir(), "", nil); rs.status != recordUnreadable {
 			t.Errorf("symlink at the record path, plain: got %+v, want unreadable (no-follow)", rs)
 		}
 	})
@@ -303,7 +304,7 @@ func TestReadRepoRootRecordState(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(ad, provisionedWorktreeStateFile)); err != nil {
 			t.Fatal(err)
 		}
-		if rs := readRepoRootRecordState("a", ad, ws3, nil); rs.status != recordMissing {
+		if rs := readRepoRootRecordState("a", ad, ws3, "", nil); rs.status != recordMissing {
 			t.Errorf("symlink at the record path, under a mount: got %+v, want missing", rs)
 		}
 	})
@@ -314,7 +315,7 @@ func TestReadRepoRootRecordState(t *testing.T) {
 	t.Run("agentDir is a file, plain -> unreadable", func(t *testing.T) {
 		agentFile := filepath.Join(t.TempDir(), "notadir")
 		mustWrite(t, agentFile, "x")
-		if rs := readRepoRootRecordState("a", agentFile, t.TempDir(), nil); rs.status != recordUnreadable {
+		if rs := readRepoRootRecordState("a", agentFile, t.TempDir(), "", nil); rs.status != recordUnreadable {
 			t.Errorf("agentDir is a file, plain: got %+v, want unreadable", rs)
 		}
 	})
@@ -324,8 +325,25 @@ func TestReadRepoRootRecordState(t *testing.T) {
 		mkdirAllT(t, filepath.Join(ws3, "agents"))
 		agentFile := filepath.Join(ws3, "agents", "notadir")
 		mustWrite(t, agentFile, "x")
-		if rs := readRepoRootRecordState("a", agentFile, ws3, nil); rs.status != recordMissing {
+		if rs := readRepoRootRecordState("a", agentFile, ws3, "", nil); rs.status != recordMissing {
 			t.Errorf("agentDir is a file, under a mount: got %+v, want missing", rs)
+		}
+	})
+
+	// A mixed-case GCS volume with a Source pointing at agentDir's parent is
+	// realized as FUSE (not a host bind), so it does not make agentDir
+	// reachable: the repository root record is still written and read.
+	t.Run("mixed-case GCS volume does not block record write or read", func(t *testing.T) {
+		parent := t.TempDir()
+		ad := mkdirAllT(t, filepath.Join(parent, "agent-dir"))
+		ws3 := t.TempDir()
+		vols := []api.VolumeMount{{Type: "GCS", Bucket: "b", Source: parent, Target: "/mnt/gcs"}}
+		sources := agentMountSources(ws3, "/repo", "docker", vols)
+		if err := writeRepoRootRecord(ad, "/repo", repoRootSourceProvision, sources); err != nil {
+			t.Fatalf("writeRepoRootRecord with GCS volume: %v", err)
+		}
+		if rs := readRepoRootRecordState("a", ad, ws3, "docker", vols); rs.status != recordPresent || rs.root != "/repo" {
+			t.Fatalf("readRepoRootRecordState with GCS volume = %+v, want present /repo", rs)
 		}
 	})
 }

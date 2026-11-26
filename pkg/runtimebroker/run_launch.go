@@ -958,6 +958,7 @@ var launchFailureText = map[string]string{
 	api.LaunchCodeInitContainerFailed:                  "an init container of the agent pod failed",
 	api.LaunchCodeVolumeMountFailed:                    "an agent volume could not be mounted",
 	api.LaunchCodeVolumeUnhealthy:                      "an agent volume is mounted but not usable",
+	api.LaunchCodeUnsupportedVolumeType:                "an agent volume uses a type not supported by this runtime",
 	api.LaunchCodeUnschedulable:                        "the agent pod cannot be scheduled",
 	api.LaunchCodePodDisrupted:                         "the agent pod was preempted, evicted or deleted while starting",
 	api.LaunchCodeLaunchTimeout:                        "launch timed out waiting for the agent pod to be ready",
@@ -1086,6 +1087,9 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 	// their order does not change behaviour.
 	if re, ok := resourceLimitsErrorFrom(err); ok {
 		return api.LaunchCodeContainerConfig, re.PublicMessage()
+	}
+	if !errors.As(err, new(*scionrt.LaunchFailure)) && errors.Is(err, scionrt.ErrUnsupportedVolumeType) {
+		return api.LaunchCodeUnsupportedVolumeType, launchFailureText[api.LaunchCodeUnsupportedVolumeType]
 	}
 	var skillErr *agent.SkillResolutionError
 	switch {

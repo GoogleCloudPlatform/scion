@@ -958,8 +958,12 @@ func CheckInstanceDefaultVolumesAt(path string, inst config.V1RuntimeBrokerInsta
 	if d == nil {
 		return nil
 	}
+	rtType := ""
+	if inst.RuntimeTarget != nil {
+		rtType = inst.RuntimeTarget.Type
+	}
 	p := path + ".agent_defaults"
-	if err := runtime.CheckVolumeSources(d.Volumes); err != nil {
+	if err := runtime.CheckVolumeSourcesForRuntime(d.Volumes, rtType); err != nil {
 		return fmt.Errorf("%s.%w", p, err)
 	}
 	names := make([]string, 0, len(d.HarnessOverrides))
@@ -968,7 +972,7 @@ func CheckInstanceDefaultVolumesAt(path string, inst config.V1RuntimeBrokerInsta
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := runtime.CheckVolumeSources(d.HarnessOverrides[name].Volumes); err != nil {
+		if err := runtime.CheckVolumeSourcesForRuntime(d.HarnessOverrides[name].Volumes, rtType); err != nil {
 			return fmt.Errorf("%s.harness_overrides.%s.%w", p, name, err)
 		}
 	}

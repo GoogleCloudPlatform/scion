@@ -13,12 +13,10 @@ SCION_HOST_UID=HOST_ID
 SCION_HOST_GID=HOST_ID
 -v
 /export/x:/nfs
--v
-/cr:/cr
 -e
 SCION_METADATA_INTERCEPTION=off
 --label
-scion.bind_sources=W3sic291cmNlIjoiL2V4cG9ydC94IiwiZGVzdGluYXRpb24iOiIvbmZzIn0seyJzb3VyY2UiOiIvY3IiLCJkZXN0aW5hdGlvbiI6Ii9jciJ9XQ==
+scion.bind_sources=W3sic291cmNlIjoiL2V4cG9ydC94IiwiZGVzdGluYXRpb24iOiIvbmZzIn1d
 scion-agent:latest
 sh
 -c
