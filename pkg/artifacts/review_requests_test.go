@@ -31,14 +31,18 @@ import (
 type reviewRequestTestHost struct {
 	*fakeHost
 	gateOn         bool
+	draftsGateOn   bool
+	nonInteractive bool
 	inboxHintsOn   bool
 	inboxHints     []string
 	resolveErr     error
+	resolveErrFor  map[string]error
 	resolveMap     map[string]RecipientSubject
 	visibleUsers   map[string]bool
 	visErr         error
 	sentRequests   []ReviewRequestNotice
 	sentDismissals []ReviewRequestDismissNotice
+	closedAcks     []string
 	notifyErr      error
 	names          map[string]string
 }
@@ -52,12 +56,26 @@ var (
 )
 
 func (h *reviewRequestTestHost) FeatureEnabled(_ context.Context, name string) bool {
-	return h.gateOn && name == FeatureReviewRequests
+	switch name {
+	case FeatureReviewRequests:
+		return h.gateOn
+	case FeatureReviewDrafts:
+		return h.draftsGateOn
+	default:
+		return false
+	}
+}
+
+func (h *reviewRequestTestHost) IsInteractiveSession(_ context.Context) bool {
+	return !h.nonInteractive
 }
 
 func (h *reviewRequestTestHost) ResolveRecipient(_ context.Context, kind, ref string) (RecipientSubject, error) {
 	if h.resolveErr != nil {
 		return nil, h.resolveErr
+	}
+	if err := h.resolveErrFor[ref]; err != nil {
+		return nil, err
 	}
 	if kind != PrincipalKindUser {
 		return nil, nil
@@ -89,6 +107,10 @@ func (h *reviewRequestTestHost) NotifyRequestDismissed(_ context.Context, n Revi
 	}
 	h.sentDismissals = append(h.sentDismissals, n)
 	return nil
+}
+
+func (h *reviewRequestTestHost) RequestClosed(_ context.Context, artifactID, reviewerUserID string) {
+	h.closedAcks = append(h.closedAcks, artifactID+":"+reviewerUserID)
 }
 
 func (h *reviewRequestTestHost) InboxHintsActive(_ context.Context) bool { return h.inboxHintsOn }
@@ -354,6 +376,16 @@ func TestReviewRequestsAuthorization(t *testing.T) {
 		t.Errorf("agent requester = %d, want 403", rec.Code)
 	}
 
+	// Non-interactive credential is refused at the route level with 403 interactive_session_required
+	// before charging the limiter or entering the per-reviewer loop.
+	h.nonInteractive = true
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+	h.nonInteractive = false
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), CodeInteractiveSessionRequired) {
+		t.Errorf("non-interactive = %d %s, want 403 %s", rec.Code, rec.Body.String(), CodeInteractiveSessionRequired)
+	}
+
 	// Grant Eve review access so she CAN review, but omit her from visibleUsers
 	// to prove step 4 (anti-spam visibility) runs before step 5a (access check).
 	h.resolveMap["eve"] = &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}}
@@ -364,7 +396,9 @@ func TestReviewRequestsAuthorization(t *testing.T) {
 		t.Fatalf("grant eve review = %d %s", eveGrantRec.Code, eveGrantRec.Body.String())
 	}
 
-	// Per-reviewer outcomes: Bob (can review) -> created; Carol (cannot review) -> reviewer_cannot_review;
+	// Per-reviewer outcomes when requester is owner/admin (Alice):
+	// Bob (can review) -> created (access=existing);
+	// Carol (cannot review yet, Alice is admin) -> created (access=raised);
 	// Eve (can review, but invisible to requester) -> reviewer_unavailable;
 	// Alice (self) & unknown & hidden -> reviewer_unavailable.
 	h.visibleUsers = map[string]bool{"bob": true, "carol": true}
@@ -388,7 +422,7 @@ func TestReviewRequestsAuthorization(t *testing.T) {
 		notified                        bool
 	}{
 		{"user:bob", ReviewRequestOutcomeCreated, "", ReviewRequestAccessExisting, true},
-		{"user:carol", ReviewRequestOutcomeRefused, CodeReviewerCannotReview, "", false},
+		{"user:carol", ReviewRequestOutcomeCreated, "", ReviewRequestAccessRaised, true},
 		{"user:eve", ReviewRequestOutcomeRefused, CodeReviewerUnavailable, "", false},
 		{"user:alice", ReviewRequestOutcomeRefused, CodeReviewerUnavailable, "", false},
 		{"user:ghost", ReviewRequestOutcomeRefused, CodeReviewerUnavailable, "", false},
@@ -401,18 +435,42 @@ func TestReviewRequestsAuthorization(t *testing.T) {
 		}
 	}
 
-	// Verify inbox hint sent for Bob only.
-	if len(h.inboxHints) != 1 || h.inboxHints[0] != "bob" {
-		t.Errorf("inboxHints = %v, want [bob]", h.inboxHints)
+	// Verify inbox hints sent for Bob and Carol.
+	if len(h.inboxHints) != 2 || h.inboxHints[0] != "bob" || h.inboxHints[1] != "carol" {
+		t.Errorf("inboxHints = %v, want [bob carol]", h.inboxHints)
 	}
 
-	// Store/lookup fault -> 503.
+	// Non-admin publisher (write grantee) requesting a user who cannot review -> reviewer_cannot_review.
+	h.resolveMap["frank"] = &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}}
+	h.visibleUsers["frank"] = true
+	grantRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", "alice",
+		GrantRequest{SubjectKind: "principal", SubjectRef: "user:carol", Permission: GrantWrite})
+	if grantRec.Code != http.StatusOK {
+		t.Fatalf("upgrade carol to write = %d %s", grantRec.Code, grantRec.Body.String())
+	}
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "carol",
+		CreateReviewRequestsBody{Reviewers: []string{"user:frank"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("carol request frank = %d %s", rec.Code, rec.Body.String())
+	}
+	var frankResp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &frankResp)
+	if len(frankResp.Requests) != 1 || frankResp.Requests[0].Outcome != ReviewRequestOutcomeRefused || frankResp.Requests[0].Code != CodeReviewerCannotReview {
+		t.Errorf("non-admin publisher request = %+v, want refused reviewer_cannot_review", frankResp.Requests)
+	}
+
+	// Lookup fault records per-reviewer refused (unavailable) instead of 503.
 	h.resolveErr = errors.New("db down")
 	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
 		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
 	h.resolveErr = nil
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("resolve fault = %d, want 503", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve fault = %d, want 200 with per-reviewer refused", rec.Code)
+	}
+	var faultResp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &faultResp)
+	if len(faultResp.Requests) != 1 || faultResp.Requests[0].Outcome != ReviewRequestOutcomeRefused || faultResp.Requests[0].Code != "unavailable" {
+		t.Errorf("resolve fault result = %+v, want refused unavailable", faultResp.Requests)
 	}
 }
 
@@ -798,5 +856,378 @@ func TestReviewRequestCanonicalisesReviewerUUIDs(t *testing.T) {
 	disRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-request/dismiss", "user", bobUUID, nil)
 	if disRec.Code != http.StatusOK {
 		t.Fatalf("bob dismiss = %d %s, want 200", disRec.Code, disRec.Body.String())
+	}
+}
+
+func TestListReviewRequestsPublisherAndSelfView(t *testing.T) {
+	svc, h, st, artID := newReviewRequestFixture(t)
+	h.draftsGateOn = true
+
+	// Request Bob (existing) and Carol (raised by owner Alice).
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob", "user:carol"}, Note: "Check v1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Bob saves a draft; Eve (unsolicited reviewer with review grant) also saves a draft.
+	_, err := st.PutReviewDraft(context.Background(), ReviewDraft{
+		ArtifactID: artID, PrincipalKind: PrincipalKindUser, PrincipalRef: "bob",
+		BaseSeq: 1, EntryPath: "doc.md", Body: "SECRET BOB DRAFT CONTENT",
+	}, 0, time.Now().UTC(), MaxDraftsPerPrincipal)
+	if err != nil {
+		t.Fatalf("PutReviewDraft bob: %v", err)
+	}
+	_, err = st.PutReviewDraft(context.Background(), ReviewDraft{
+		ArtifactID: artID, PrincipalKind: PrincipalKindUser, PrincipalRef: "eve",
+		BaseSeq: 1, EntryPath: "doc.md", Body: "SECRET EVE DRAFT CONTENT",
+	}, 0, time.Now().UTC(), MaxDraftsPerPrincipal)
+	if err != nil {
+		t.Fatalf("PutReviewDraft eve: %v", err)
+	}
+
+	// Revoke Carol's review grant so Carol has reviewerCanReview=false.
+	grants, _ := st.ListGrants(context.Background(), artID)
+	for _, g := range grants {
+		if g.SubjectRef == "user:carol" {
+			_ = st.DeleteGrant(context.Background(), artID, g.ID, &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner})
+		}
+	}
+
+	// Publisher view (Alice): sees both Bob and Carol, never Eve, never draft content.
+	rec = doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET review-requests (publisher) = %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "SECRET") || strings.Contains(rec.Body.String(), "eve") {
+		t.Fatalf("publisher response leaked draft content or unsolicited drafter: %s", rec.Body.String())
+	}
+	var pubList ListReviewRequestsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &pubList); err != nil {
+		t.Fatalf("decode pubList: %v", err)
+	}
+	if len(pubList.Requests) != 2 {
+		t.Fatalf("pubList len = %d, want 2", len(pubList.Requests))
+	}
+	byReviewer := map[string]ReviewRequestInfo{}
+	for _, r := range pubList.Requests {
+		byReviewer[r.Reviewer.Ref] = r
+	}
+	if bobR := byReviewer["bob"]; bobR.ReviewerCanReview == nil || !*bobR.ReviewerCanReview || !bobR.InDraft {
+		t.Errorf("bob publisher view = %+v, want reviewerCanReview=true inDraft=true", bobR)
+	}
+	if carolR := byReviewer["carol"]; carolR.ReviewerCanReview == nil || *carolR.ReviewerCanReview || carolR.InDraft {
+		t.Errorf("carol publisher view = %+v, want reviewerCanReview=false inDraft=false", carolR)
+	}
+
+	// With drafts gate OFF: inDraft is false for Bob.
+	h.draftsGateOn = false
+	rec = doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice", nil)
+	var pubNoDrafts ListReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &pubNoDrafts)
+	for _, r := range pubNoDrafts.Requests {
+		if r.InDraft {
+			t.Errorf("inDraft must be false when drafts gate is off: %+v", r)
+		}
+	}
+	h.draftsGateOn = true
+
+	// Self-only view (Bob): sees ONLY Bob's request, without reviewerCanReview or inDraft.
+	rec = doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID+"/review-requests", "user", "bob", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET review-requests (self) = %d %s", rec.Code, rec.Body.String())
+	}
+	var selfList ListReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &selfList)
+	if len(selfList.Requests) != 1 || selfList.Requests[0].Reviewer.Ref != "bob" {
+		t.Fatalf("selfList = %+v, want only bob", selfList.Requests)
+	}
+	if selfList.Requests[0].ReviewerCanReview != nil || selfList.Requests[0].InDraft {
+		t.Errorf("self view must omit reviewerCanReview and inDraft: %+v", selfList.Requests[0])
+	}
+}
+
+func TestWithdrawReviewRequestPermissionsAndLifecycle(t *testing.T) {
+	svc, h, st, artID := newReviewRequestFixture(t)
+
+	// Alice requests Carol (access=raised).
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:carol"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+	var createResp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &createResp)
+	reqID := createResp.Requests[0].Request.ID
+
+	// Non-requester reviewer (Bob) and requested reviewer (Carol) cannot withdraw -> 403.
+	for _, who := range []string{"bob", "carol"} {
+		wrec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests/"+reqID+"/withdraw", "user", who, nil)
+		if wrec.Code != http.StatusForbidden {
+			t.Errorf("withdraw by %s = %d, want 403", who, wrec.Code)
+		}
+	}
+
+	// Agent guard unit test: an agent may withdraw ONLY requests it made,
+	// even if it owns the artifact.
+	agentArt, _, _, _ := seedArtifact(t, st, "")
+	// Give agent-1 read/publish on a fresh agent-owned artifact by inserting a request
+	// created by user:alice and another created by agent:agent-1.
+	aRow, _ := st.GetArtifact(context.Background(), artID)
+	fakeOwnedByAgent := *aRow
+	fakeOwnedByAgent.OwnerKind = PrincipalKindAgent
+	fakeOwnedByAgent.OwnerRef = "agent-1"
+	b, _ := svc.backend()
+	ctx := context.Background()
+	_, allowedOther, err := svc.withdrawAuthority(ctx, b, &fakeOwnedByAgent, &ReviewRequest{
+		RequesterKind: PrincipalKindUser, RequesterRef: "alice",
+	}, PrincipalKindAgent, "agent-1")
+	if err != nil || allowedOther {
+		t.Errorf("agent withdrawing user's request on agent-owned artifact = %v, %v; want false, nil", allowedOther, err)
+	}
+	actorOwn, allowedOwn, err := svc.withdrawAuthority(ctx, b, &fakeOwnedByAgent, &ReviewRequest{
+		RequesterKind: PrincipalKindAgent, RequesterRef: "agent-1",
+	}, PrincipalKindAgent, "agent-1")
+	if err != nil || !allowedOwn || actorOwn == nil {
+		t.Errorf("agent withdrawing its own request = %v, %v; want true, nil", allowedOwn, err)
+	}
+	_ = agentArt
+
+	// Owner (Alice) withdraws Carol's request -> 200, RequestClosed + inbox hint fired, raised grant kept.
+	h.inboxHints = nil
+	h.closedAcks = nil
+	wrec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests/"+reqID+"/withdraw", "user", "alice", nil)
+	if wrec.Code != http.StatusOK {
+		t.Fatalf("withdraw by alice = %d %s", wrec.Code, wrec.Body.String())
+	}
+	var wResp WithdrawReviewRequestResponse
+	_ = json.Unmarshal(wrec.Body.Bytes(), &wResp)
+	if wResp.Request.State != ReviewRequestStateWithdrawn {
+		t.Errorf("withdrawn state = %q, want withdrawn", wResp.Request.State)
+	}
+	if len(h.closedAcks) != 1 || h.closedAcks[0] != artID+":carol" {
+		t.Errorf("closedAcks = %v, want [%s:carol]", h.closedAcks, artID)
+	}
+	if len(h.inboxHints) != 1 || h.inboxHints[0] != "carol" {
+		t.Errorf("inboxHints = %v, want [carol]", h.inboxHints)
+	}
+
+	// Second withdraw returns 409 request_closed.
+	wrec2 := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests/"+reqID+"/withdraw", "user", "alice", nil)
+	if wrec2.Code != http.StatusConflict || !strings.Contains(wrec2.Body.String(), CodeRequestClosed) {
+		t.Errorf("second withdraw = %d %s, want 409 %s", wrec2.Code, wrec2.Body.String(), CodeRequestClosed)
+	}
+}
+
+func TestMidBatchFaultContinuesWithoutAbortingBatch(t *testing.T) {
+	svc, h, _, artID := newReviewRequestFixture(t)
+	// Grant Carol and Eve review access; fail resolver on Carol (second reviewer).
+	h.resolveMap["eve"] = &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}}
+	h.names["user:eve"] = "Eve"
+	for _, u := range []string{"carol", "eve"} {
+		doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", "alice",
+			GrantRequest{SubjectKind: "principal", SubjectRef: "user:" + u, Permission: GrantReview})
+	}
+	h.resolveErrFor = map[string]error{"carol": errors.New("transient ldap timeout")}
+
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob", "user:carol", "user:eve"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mid-batch fault = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	var resp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Requests) != 3 {
+		t.Fatalf("len(requests) = %d, want 3", len(resp.Requests))
+	}
+	if resp.Requests[0].Outcome != ReviewRequestOutcomeCreated || !resp.Requests[0].Notified {
+		t.Errorf("reviewer 1 (bob) = %+v, want created+notified", resp.Requests[0])
+	}
+	if resp.Requests[1].Outcome != ReviewRequestOutcomeRefused || resp.Requests[1].Code != "unavailable" {
+		t.Errorf("reviewer 2 (carol) = %+v, want refused unavailable", resp.Requests[1])
+	}
+	if resp.Requests[2].Outcome != ReviewRequestOutcomeCreated || !resp.Requests[2].Notified {
+		t.Errorf("reviewer 3 (eve) = %+v, want created+notified", resp.Requests[2])
+	}
+
+	// Retry with resolver healthy: reviewer 1 (bob) -> reminded (1 extra notice),
+	// reviewer 2 (carol) -> created (notified), reviewer 3 (eve) -> reminded.
+	h.resolveErrFor = nil
+	noticesBeforeRetry := len(h.sentRequests)
+	rec2 := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob", "user:carol", "user:eve"}})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("retry 1 = %d %s, want 200", rec2.Code, rec2.Body.String())
+	}
+	var resp2 CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	if len(resp2.Requests) != 3 {
+		t.Fatalf("retry 1 len = %d, want 3", len(resp2.Requests))
+	}
+	if resp2.Requests[0].Outcome != ReviewRequestOutcomeReminded || !resp2.Requests[0].Notified {
+		t.Errorf("retry 1 bob = %+v, want reminded+notified", resp2.Requests[0])
+	}
+	if resp2.Requests[1].Outcome != ReviewRequestOutcomeCreated || !resp2.Requests[1].Notified {
+		t.Errorf("retry 1 carol = %+v, want created+notified", resp2.Requests[1])
+	}
+	if resp2.Requests[2].Outcome != ReviewRequestOutcomeReminded || !resp2.Requests[2].Notified {
+		t.Errorf("retry 1 eve = %+v, want reminded+notified", resp2.Requests[2])
+	}
+	if len(h.sentRequests) != noticesBeforeRetry+3 {
+		t.Errorf("notices sent on retry 1 = %d, want 3", len(h.sentRequests)-noticesBeforeRetry)
+	}
+
+	// Retry once more within 24h cooldown: reviewer 1 (bob) and reviewer 3 (eve)
+	// answer unchanged with no notice; reviewer 2 (carol) answers reminded.
+	noticesBeforeRetry2 := len(h.sentRequests)
+	rec3 := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob", "user:carol", "user:eve"}})
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("retry 2 = %d %s, want 200", rec3.Code, rec3.Body.String())
+	}
+	var resp3 CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec3.Body.Bytes(), &resp3)
+	if len(resp3.Requests) != 3 {
+		t.Fatalf("retry 2 len = %d, want 3", len(resp3.Requests))
+	}
+	if resp3.Requests[0].Outcome != ReviewRequestOutcomeUnchanged || resp3.Requests[0].Notified {
+		t.Errorf("retry 2 bob = %+v, want unchanged+not notified", resp3.Requests[0])
+	}
+	if resp3.Requests[1].Outcome != ReviewRequestOutcomeReminded || !resp3.Requests[1].Notified {
+		t.Errorf("retry 2 carol = %+v, want reminded+notified", resp3.Requests[1])
+	}
+	if resp3.Requests[2].Outcome != ReviewRequestOutcomeUnchanged || resp3.Requests[2].Notified {
+		t.Errorf("retry 2 eve = %+v, want unchanged+not notified", resp3.Requests[2])
+	}
+	if len(h.sentRequests) != noticesBeforeRetry2+1 {
+		t.Errorf("notices sent on retry 2 = %d, want 1 (carol only)", len(h.sentRequests)-noticesBeforeRetry2)
+	}
+}
+
+func TestGrantsNotifyReviewRefusedWhileGateOn(t *testing.T) {
+	svc, h, _, artID := newReviewRequestFixture(t)
+
+	// Gate ON: POST /grants with notify:true and permission:"review" -> 400 use_review_requests.
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", "alice",
+		GrantRequest{SubjectKind: SubjectPrincipal, SubjectRef: "user:carol", Permission: GrantReview, Notify: true})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), CodeUseReviewRequests) {
+		t.Fatalf("grants notify+review (gate on) = %d %s, want 400 %s", rec.Code, rec.Body.String(), CodeUseReviewRequests)
+	}
+
+	// Gate ON: POST /grants with notify:true and permission:"read" still works.
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", "alice",
+		GrantRequest{SubjectKind: SubjectPrincipal, SubjectRef: "user:carol", Permission: GrantRead, Notify: true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("grants notify+read (gate on) = %d %s, want 201", rec.Code, rec.Body.String())
+	}
+
+	// Gate OFF: POST /grants with notify:true and permission:"review" works as before.
+	h.gateOn = false
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", "alice",
+		GrantRequest{SubjectKind: SubjectPrincipal, SubjectRef: "user:carol", Permission: GrantReview, Notify: true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("grants notify+review (gate off) = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteArtifactNotifiesOpenRequestReviewers(t *testing.T) {
+	svc, h, _, artID := newReviewRequestFixture(t)
+
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+	h.inboxHints = nil
+
+	delRec := doJSON(svc, http.MethodDelete, "/api/v1/artifacts/"+artID, "user", "alice", nil)
+	if delRec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE = %d %s", delRec.Code, delRec.Body.String())
+	}
+	// Both owner (alice) and open-request reviewer (bob) receive inbox hints.
+	got := map[string]bool{}
+	for _, u := range h.inboxHints {
+		got[u] = true
+	}
+	if !got["alice"] || !got["bob"] {
+		t.Errorf("inboxHints on delete = %v, want alice and bob", h.inboxHints)
+	}
+}
+
+func TestReapReviewRequestsTTLAndLostAccessAndLookupErrorFailSafe(t *testing.T) {
+	_, h, st, artID := newReviewRequestFixture(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	ownerActor := &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner}
+
+	// 1. Bob: open request created at t0; Carol: open request created at t0 (no review grant -> lost access).
+	rrBob, _, err := st.CreateOrRemindReviewRequest(ctx, ReviewRequest{
+		ArtifactID: artID, ReviewerKind: PrincipalKindUser, ReviewerRef: "bob",
+		RequesterKind: PrincipalKindUser, RequesterRef: "alice", Access: ReviewRequestAccessExisting,
+	}, 24*time.Hour, t0, ownerActor, nil)
+	if err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+	rrCarol, _, err := st.CreateOrRemindReviewRequest(ctx, ReviewRequest{
+		ArtifactID: artID, ReviewerKind: PrincipalKindUser, ReviewerRef: "carol",
+		RequesterKind: PrincipalKindUser, RequesterRef: "alice", Access: ReviewRequestAccessExisting,
+	}, 24*time.Hour, t0, ownerActor, nil)
+	if err != nil {
+		t.Fatalf("create carol: %v", err)
+	}
+
+	// Lookup error on Carol must NEVER close Carol's request (fail safe).
+	h.resolveErrFor = map[string]error{"carol": errors.New("directory unavailable")}
+	res, err := ReapReviewRequests(ctx, st, h, t0.Add(24*time.Hour), 50, nil)
+	if err == nil || res.Errors == 0 || res.Expired != 0 {
+		t.Fatalf("lookup-error reap = %+v, %v; want Errors>0 Expired=0", res, err)
+	}
+	if got, err := st.GetOpenReviewRequest(ctx, artID, PrincipalKindUser, "carol"); err != nil || got.ID != rrCarol.ID {
+		t.Fatalf("carol must remain open after lookup error: got=%+v err=%v", got, err)
+	}
+
+	// Clear lookup error -> Carol (no review grant) expires via lost_access; Bob stays open.
+	h.resolveErrFor = nil
+	h.closedAcks = nil
+	h.inboxHints = nil
+	res, err = ReapReviewRequests(ctx, st, h, t0.Add(25*time.Hour), 50, nil)
+	if err != nil || res.Expired != 1 {
+		t.Fatalf("lost-access reap = %+v, %v; want Expired=1", res, err)
+	}
+	if got, _ := st.GetReviewRequest(ctx, artID, rrCarol.ID); got.State != ReviewRequestStateExpired {
+		t.Errorf("carol state = %q, want expired", got.State)
+	}
+	if len(h.closedAcks) != 1 || h.closedAcks[0] != artID+":carol" {
+		t.Errorf("closedAcks = %v, want [%s:carol]", h.closedAcks, artID)
+	}
+	if len(h.inboxHints) != 1 || h.inboxHints[0] != "carol" {
+		t.Errorf("inboxHints = %v, want [carol]", h.inboxHints)
+	}
+
+	// Remind Bob at day 20 -> at day 35 (15 days after remind), Bob must NOT expire!
+	if _, _, err := st.CreateOrRemindReviewRequest(ctx, ReviewRequest{
+		ArtifactID: artID, ReviewerKind: PrincipalKindUser, ReviewerRef: "bob",
+		RequesterKind: PrincipalKindUser, RequesterRef: "alice", Access: ReviewRequestAccessExisting,
+	}, 24*time.Hour, t0.Add(20*24*time.Hour), ownerActor, nil); err != nil {
+		t.Fatalf("remind bob: %v", err)
+	}
+	res, err = ReapReviewRequests(ctx, st, h, t0.Add(35*24*time.Hour), 50, nil)
+	if err != nil || res.Expired != 0 {
+		t.Fatalf("day 35 reap (15d after remind) = %+v, %v; want Expired=0", res, err)
+	}
+
+	// At day 51 (31 days after remind), Bob expires via TTL!
+	res, err = ReapReviewRequests(ctx, st, h, t0.Add(51*24*time.Hour), 50, nil)
+	if err != nil || res.Expired != 1 {
+		t.Fatalf("day 51 reap = %+v, %v; want Expired=1", res, err)
+	}
+	if got, _ := st.GetReviewRequest(ctx, artID, rrBob.ID); got.State != ReviewRequestStateExpired {
+		t.Errorf("bob state = %q, want expired", got.State)
+	}
+
+	// At day 150 (>90d after both resolved_at), both closed rows are purged.
+	res, err = ReapReviewRequests(ctx, st, h, t0.Add(150*24*time.Hour), 50, nil)
+	if err != nil || res.Purged != 2 {
+		t.Fatalf("day 150 purge = %+v, %v; want Purged=2", res, err)
 	}
 }

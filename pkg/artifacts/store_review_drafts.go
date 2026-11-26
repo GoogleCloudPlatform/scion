@@ -523,3 +523,29 @@ func (s *sqlStore) ListReviewDraftKeys(ctx context.Context, after *ReviewDraftKe
 	}
 	return out, nil
 }
+
+// ListReviewDraftPrincipals implements Store: returns the (artifact_id,
+// principal_kind, principal_ref) keys of all saved review drafts on
+// artifactID without reading draft bodies or notes.
+func (s *sqlStore) ListReviewDraftPrincipals(ctx context.Context, artifactID string) ([]ReviewDraftKey, error) {
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT artifact_id, principal_kind, principal_ref
+		FROM artifact_review_draft
+		WHERE artifact_id = ?
+		ORDER BY principal_kind, principal_ref`), artifactID)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: list review draft principals: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ReviewDraftKey
+	for rows.Next() {
+		var k ReviewDraftKey
+		if err := rows.Scan(&k.ArtifactID, &k.PrincipalKind, &k.PrincipalRef); err != nil {
+			return nil, fmt.Errorf("artifacts: scan review draft principal: %w", err)
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("artifacts: list review draft principals: %w", err)
+	}
+	return out, nil
+}

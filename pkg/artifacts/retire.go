@@ -95,7 +95,8 @@ func (s *Service) handleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 	}
 	// The delete applies only while the artifact is still homed where the
 	// authority was decided; after a concurrent move it answers 404.
-	switch _, err := b.store.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: s.callerActor(ctx, a, authority), ScopeRef: a.ScopeRef}); {
+	delRes, err := b.store.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: s.callerActor(ctx, a, authority), ScopeRef: a.ScopeRef})
+	switch {
 	case errors.Is(err, ErrNotFound):
 		s.logStewardPrecondition(r, logActionDelete, a, err)
 		writeNotFound(w)
@@ -104,8 +105,15 @@ func (s *Service) handleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusInternalServerError, "internal", "could not delete the artifact")
 	default:
 		s.logAllowed(r, logEntry{action: logActionDeleted, artifact: a, authority: authority})
+		notifiedOwner := ""
 		if a.OwnerKind == PrincipalKindUser {
 			s.notifyInboxChanged(ctx, a.OwnerRef)
+			notifiedOwner = a.OwnerRef
+		}
+		for _, uid := range delRes.OpenRequestReviewers {
+			if uid != "" && uid != notifiedOwner {
+				s.notifyInboxChanged(ctx, uid)
+			}
 		}
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)

@@ -91,8 +91,9 @@ var windowsAllowed = map[string]bool{
 	// Artifact review request and dismiss (ptone/scion#9306): pure Hub API
 	// calls, no local writes. The parent 'artifact' stays gated while its
 	// other subcommands write local files, as for project.use.
-	"artifact.request-review": true,
-	"artifact.dismiss-review": true,
+	"artifact.request-review":  true,
+	"artifact.dismiss-review":  true,
+	"artifact.review-requests": true,
 
 	// Event triggers and webhook endpoints (ptone/scion#8028): pure Hub API
 	// calls, no local writes.

@@ -101,9 +101,6 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	if !actor.valid() {
 		return GrantPutUnchanged, false, errNoActor
 	}
-	// Only a user is ever told.
-	notify = notify && g.SubjectKind == SubjectPrincipal && strings.HasPrefix(g.SubjectRef, PrincipalKindUser+":")
-	// The automatic form is reserved to the creation path (ptone/scion#7134).
 	if g.CreatedByRef == SponsorReviewCreator || actor.Authority == AuthoritySponsorReview {
 		return GrantPutUnchanged, false, errSponsorReviewReserved
 	}
@@ -120,6 +117,35 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	}
 	if err := s.refuseAttachmentTx(ctx, tx, g.ArtifactID); err != nil {
 		return GrantPutUnchanged, false, err
+	}
+	put, notified, err := s.putGrantTx(ctx, tx, g, maxGrants, crossScope, actor, notify, time.Now())
+	if err != nil {
+		return GrantPutUnchanged, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return GrantPutUnchanged, false, fmt.Errorf("artifacts: commit grant: %w", err)
+	}
+	return put, notified, nil
+}
+
+// putGrantTx applies a principal or scope grant inside an open transaction
+// that already holds lockLiveArtifact and has passed refuseAttachmentTx.
+func (s *sqlStore) putGrantTx(ctx context.Context, tx *sql.Tx, g *Grant, maxGrants int, crossScope bool, actor *Actor, notify bool, at time.Time) (GrantPut, bool, error) {
+	if g == nil || (g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope) || g.SubjectRef == "" ||
+		!validGrantPermission(g.Permission) || !reviewSubjectOK(g.Permission, g.SubjectKind, g.SubjectRef) {
+		return GrantPutUnchanged, false, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission (review: a user principal only)")
+	}
+	if !actor.valid() {
+		return GrantPutUnchanged, false, errNoActor
+	}
+	// Only a user is ever told.
+	notify = notify && g.SubjectKind == SubjectPrincipal && strings.HasPrefix(g.SubjectRef, PrincipalKindUser+":")
+	// The automatic form is reserved to the creation path (ptone/scion#7134).
+	if g.CreatedByRef == SponsorReviewCreator || actor.Authority == AuthoritySponsorReview {
+		return GrantPutUnchanged, false, errSponsorReviewReserved
+	}
+	if stewardActor(actor) && g.Permission == GrantAdmin {
+		return GrantPutUnchanged, false, ErrStewardActionNotAllowed
 	}
 	if err := s.checkExpect(ctx, tx, g.ArtifactID, actor); err != nil {
 		return GrantPutUnchanged, false, err
@@ -143,7 +169,7 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		created  dbTime
 		notified bool
 	)
-	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, permission, created_by_ref, created_at FROM artifact_grant
+	err := tx.QueryRowContext(ctx, s.rebind(`SELECT id, permission, created_by_ref, created_at FROM artifact_grant
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &by, &created)
 	switch {
 	case err == nil:
@@ -170,12 +196,9 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 			if notified {
 				detail["notified"] = true
 			}
-			if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantChanged, actor, time.Now(), detail); err != nil {
+			if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantChanged, actor, at, detail); err != nil {
 				return GrantPutUnchanged, false, err
 			}
-		}
-		if err := tx.Commit(); err != nil {
-			return GrantPutUnchanged, false, fmt.Errorf("artifacts: commit grant: %w", err)
 		}
 		g.ID, g.CreatedAt = id, created.Time
 		if perm != g.Permission {
@@ -203,11 +226,8 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	if notify {
 		detail["notified"] = true
 	}
-	if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantCreated, actor, time.Now(), detail); err != nil {
+	if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantCreated, actor, at, detail); err != nil {
 		return GrantPutUnchanged, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return GrantPutUnchanged, false, fmt.Errorf("artifacts: commit grant: %w", err)
 	}
 	return GrantPutCreated, notify, nil
 }

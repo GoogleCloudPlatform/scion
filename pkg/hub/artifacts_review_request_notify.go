@@ -32,11 +32,24 @@ var _ artifacts.ReviewRequestNotifier = (*artifactHost)(nil)
 
 const reviewRequestTitleMaxRunes = 120
 
+// reviewRequestAskedPhrase is the fixed phrase shared between review-request
+// notification templates (NotifyReviewRequest, grantNoticeMessage) and the
+// legacy inbox parser (reviewRequestedByFromMessage in inbox_reviews.go) so
+// they cannot drift.
+const reviewRequestAskedPhrase = " asked you to review "
+
 var (
 	errReviewRequestNoticeActor       = errors.New("hub: review request notices require a user actor in phase 1")
 	errReviewRequestNoticeUnavailable = errors.New("hub: review request notices are unavailable")
 	errReviewRequestDismissNoTarget   = errors.New("hub: no user recipient for review request dismiss notice")
 )
+
+// IsInteractiveSession implements artifacts.ReviewRequestNotifier: reports
+// whether the caller in ctx holds an interactive, unscoped user session.
+func (h *artifactHost) IsInteractiveSession(ctx context.Context) bool {
+	_, ok := interactiveUserSession(ctx)
+	return ok
+}
 
 // MayNotifyReviewer implements artifacts.ReviewRequestNotifier: checks that the
 // caller is an interactive, unscoped user session and can read reviewerUserID
@@ -60,7 +73,7 @@ func (h *artifactHost) NotifyReviewRequest(ctx context.Context, n artifacts.Revi
 	if title == "" {
 		title = "untitled"
 	}
-	msg := fmt.Sprintf("%s asked you to review %q (v%d): %s", label, title, n.RequestedSeq, artifacts.FormatRef(n.ArtifactID, 0))
+	msg := fmt.Sprintf("%s%s%q (v%d): %s", label, reviewRequestAskedPhrase, title, n.RequestedSeq, artifacts.FormatRef(n.ArtifactID, 0))
 	excerpt := cleanNotificationText(n.Note, reviewExcerptMaxRunes)
 	return h.server.writeUserNotification(ctx, userNotice{
 		Kind:             store.NotificationKindArtifactReviewRequest,
@@ -126,6 +139,17 @@ func (h *artifactHost) NotifyRequestDismissed(ctx context.Context, n artifacts.R
 		}
 	}
 	return firstErr
+}
+
+// RequestClosed implements artifacts.ReviewRequestNotifier: best-effort
+// acknowledges the reviewer's unacknowledged ARTIFACT_REVIEW_REQUESTED
+// notifications for artifactID when a review request is withdrawn, expired, or
+// fulfilled.
+func (h *artifactHost) RequestClosed(ctx context.Context, artifactID, reviewerUserID string) {
+	if reviewerUserID == "" || artifactID == "" {
+		return
+	}
+	h.ackReviewRequestNotifications(ctx, reviewerUserID, artifactID)
 }
 
 // ackReviewRequestNotifications best-effort acknowledges the reviewer's

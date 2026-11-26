@@ -495,6 +495,13 @@ func (s staleBaseStore) FinalizeVersion(ctx context.Context, id string, seq int,
 	return s.Store.FinalizeVersion(ctx, id, seq, claim, extra, base)
 }
 
+func (s staleBaseStore) FinalizeVersionWithEffects(ctx context.Context, id string, seq int, claim time.Time, extra []File, base int) (*Artifact, FinalizeEffects, error) {
+	if base > 0 {
+		return nil, FinalizeEffects{}, ErrStaleBase
+	}
+	return s.Store.FinalizeVersionWithEffects(ctx, id, seq, claim, extra, base)
+}
+
 func TestReviewStaleAfterCheck(t *testing.T) {
 	f := newReviewFixture(t)
 	f.svc.SetStore(staleBaseStore{f.store})

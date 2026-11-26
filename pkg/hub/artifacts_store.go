@@ -337,6 +337,13 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 		slog.InfoContext(ctx, "artifacts: reaped review drafts without access",
 			"checked", res.Checked, "deleted", res.Deleted)
 	}
+	if res, err := artifacts.ReapReviewRequests(ctx, st, newArtifactHost(s), now, artifactReapBatch, s.artifactLog()); err != nil {
+		slog.WarnContext(ctx, "artifacts: reaping review requests failed", "error", err,
+			"checked", res.Checked, "expired", res.Expired, "purged", res.Purged, "errors", res.Errors)
+	} else if res.Expired > 0 || res.Purged > 0 {
+		slog.InfoContext(ctx, "artifacts: reaped review requests",
+			"checked", res.Checked, "expired", res.Expired, "purged", res.Purged)
+	}
 	s.backfillArtifactSponsors(ctx, st)
 	s.reconcileArtifactOwners(ctx, st, now)
 	s.retireArtifactAttachments(ctx, st, now)

@@ -641,6 +641,9 @@ func (failingStore) CreateVersion(context.Context, *Version, []File, int) error 
 func (failingStore) FinalizeVersion(context.Context, string, int, time.Time, []File, int) (*Artifact, error) {
 	return nil, errStoreDown
 }
+func (failingStore) FinalizeVersionWithEffects(context.Context, string, int, time.Time, []File, int) (*Artifact, FinalizeEffects, error) {
+	return nil, FinalizeEffects{}, errStoreDown
+}
 
 // TestDecisionLogVersionFailed: a version that could not be recorded or
 // finalized is logged as version_failed with outcome error and reason

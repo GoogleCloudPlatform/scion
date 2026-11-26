@@ -41,16 +41,19 @@ const (
 	maxReviewRequestReviewers = 10
 	maxReviewRequestNoteRunes = 1000
 	maxReviewRequestBodyBytes = 16 << 10
+	maxClosedReviewRequests   = 50
 
 	reviewRequestRemindCooldown = 24 * time.Hour
 )
 
 // Error and per-reviewer refusal codes for review requests (design §4.3, §4.4).
 const (
-	CodeReviewerUnavailable   = "reviewer_unavailable"
-	CodeReviewerCannotReview  = "reviewer_cannot_review"
-	CodeRequestClosed         = "request_closed"
-	CodeAgentCannotRequestRev = "agent_cannot_request_review"
+	CodeReviewerUnavailable        = "reviewer_unavailable"
+	CodeReviewerCannotReview       = "reviewer_cannot_review"
+	CodeRequestClosed              = "request_closed"
+	CodeAgentCannotRequestRev      = "agent_cannot_request_review"
+	CodeInteractiveSessionRequired = "interactive_session_required"
+	CodeUseReviewRequests          = "use_review_requests"
 )
 
 // CreateReviewRequestsBody is the JSON body of POST /api/v1/artifacts/{id}/review-requests.
@@ -84,6 +87,16 @@ type DismissReviewRequestBody struct {
 type DismissReviewRequestResponse struct {
 	Request        ReviewRequestInfo `json:"request"`
 	AuthorNotified bool              `json:"authorNotified"`
+}
+
+// ListReviewRequestsResponse is the JSON response of GET /api/v1/artifacts/{id}/review-requests.
+type ListReviewRequestsResponse struct {
+	Requests []ReviewRequestInfo `json:"requests"`
+}
+
+// WithdrawReviewRequestResponse is the JSON response of POST /api/v1/artifacts/{id}/review-requests/{rid}/withdraw.
+type WithdrawReviewRequestResponse struct {
+	Request ReviewRequestInfo `json:"request"`
 }
 
 func (s *Service) reviewRequestInfo(ctx context.Context, rr ReviewRequest, names map[string]string) ReviewRequestInfo {
@@ -165,9 +178,9 @@ func (s *Service) populateReviewState(ctx context.Context, b backend, a *Artifac
 }
 
 // handleCreateReviewRequests serves POST /api/v1/artifacts/{id}/review-requests.
-// In Phase 1 (ptone/scion#9306), only user requesters and reviewers who already
-// have review access (access=existing) are admitted; agents and reviewers who
-// cannot already review are refused.
+// User requesters must hold an interactive session and publish access; when
+// they may also administer the artifact, reviewers who cannot yet review are
+// raised to a principal review grant in the same transaction (access=raised).
 func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 	if !s.featureEnabled(ctx, FeatureReviewRequests) {
@@ -207,6 +220,22 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			}
 		}
 		writeError(w, http.StatusForbidden, "forbidden", "your credential does not permit requesting reviews")
+		return
+	}
+	auth, hasAuth := s.host.(RecipientAuthority)
+	if !hasAuth {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "reviewer resolution is unavailable")
+		return
+	}
+	notifier, hasNotifier := s.host.(ReviewRequestNotifier)
+	if !hasNotifier {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "reviewer visibility check is unavailable")
+		return
+	}
+	// Route-level refusal for non-interactive credentials before charging the
+	// limiter or entering the per-reviewer loop.
+	if !notifier.IsInteractiveSession(ctx) {
+		writeError(w, http.StatusForbidden, CodeInteractiveSessionRequired, "requesting reviews requires an interactive user session")
 		return
 	}
 	if !s.chargePrincipal(w, LimitReviewRequest, kind, ref) {
@@ -267,18 +296,7 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	auth, hasAuth := s.host.(RecipientAuthority)
-	if !hasAuth {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "reviewer resolution is unavailable")
-		return
-	}
-	notifier, hasNotifier := s.host.(ReviewRequestNotifier)
-	if !hasNotifier {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "reviewer visibility check is unavailable")
-		return
-	}
-
-	// Load grants lazily once for the existing-access checks.
+	// Load grants lazily once for existing-access and admin-authority checks.
 	var (
 		grantsLoaded bool
 		grants       []Grant
@@ -290,6 +308,19 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			grantsLoaded = true
 		}
 		return grants, grantsErr
+	}
+
+	var (
+		adminChecked   bool
+		adminAuthority string
+		adminErr       error
+	)
+	checkAdmin := func() (string, error) {
+		if !adminChecked {
+			adminAuthority, adminErr = s.adminAuthorityWith(ctx, a, loadGrants)
+			adminChecked = true
+		}
+		return adminAuthority, adminErr
 	}
 
 	now := s.now()
@@ -316,8 +347,12 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		subject, err := auth.ResolveRecipient(ctx, PrincipalKindUser, t.userID)
 		if err != nil {
 			slog.ErrorContext(ctx, "artifacts: resolve reviewer failed", "error", err)
-			writeError(w, http.StatusServiceUnavailable, "unavailable", "could not resolve reviewer")
-			return
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     "unavailable",
+			})
+			continue
 		}
 		if subject == nil {
 			results = append(results, ReviewRequestResult{
@@ -332,8 +367,12 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		visible, err := notifier.MayNotifyReviewer(ctx, t.userID)
 		if err != nil {
 			slog.ErrorContext(ctx, "artifacts: reviewer visibility check failed", "error", err)
-			writeError(w, http.StatusServiceUnavailable, "unavailable", "could not verify reviewer visibility")
-			return
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     "unavailable",
+			})
+			continue
 		}
 		if !visible {
 			results = append(results, ReviewRequestResult{
@@ -344,20 +383,55 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 
-		// Step 5a (P1): reviewer must already be able to review.
+		// Step 5a: reviewer already can review -> access=existing.
 		canReview, err := principalCanReview(ctx, subject, a, PrincipalKindUser, t.userID, now, loadGrants)
 		if err != nil {
 			slog.ErrorContext(ctx, "artifacts: reviewer access check failed", "error", err)
-			writeError(w, http.StatusServiceUnavailable, "unavailable", "could not verify reviewer access")
-			return
-		}
-		if !canReview {
 			results = append(results, ReviewRequestResult{
 				Reviewer: t.principal,
 				Outcome:  ReviewRequestOutcomeRefused,
-				Code:     CodeReviewerCannotReview,
+				Code:     "unavailable",
 			})
 			continue
+		}
+
+		reqAccess := ReviewRequestAccessExisting
+		var grantOpt *ReviewRequestGrantOption
+		if !canReview {
+			// Step 5b: user requester who may administer raises the reviewer's
+			// principal grant to review in the same transaction.
+			admAuth, aerr := checkAdmin()
+			if aerr != nil {
+				slog.ErrorContext(ctx, "artifacts: reviewer admin check failed", "error", aerr)
+				results = append(results, ReviewRequestResult{
+					Reviewer: t.principal,
+					Outcome:  ReviewRequestOutcomeRefused,
+					Code:     "unavailable",
+				})
+				continue
+			}
+			if admAuth == "" {
+				results = append(results, ReviewRequestResult{
+					Reviewer: t.principal,
+					Outcome:  ReviewRequestOutcomeRefused,
+					Code:     CodeReviewerCannotReview,
+				})
+				continue
+			}
+			reqAccess = ReviewRequestAccessRaised
+			grantOpt = &ReviewRequestGrantOption{
+				Grant: &Grant{
+					ID:           uuid.NewString(),
+					ArtifactID:   a.ID,
+					SubjectKind:  SubjectPrincipal,
+					SubjectRef:   t.principal,
+					Permission:   GrantReview,
+					CreatedByRef: PrincipalRef(kind, ref),
+					CreatedAt:    now,
+				},
+				MaxGrants: MaxGrantsPerArtifact,
+				Actor:     s.callerActor(ctx, a, admAuth),
+			}
 		}
 
 		row, outcome, err := b.store.CreateOrRemindReviewRequest(ctx, ReviewRequest{
@@ -367,8 +441,8 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			RequesterKind: kind,
 			RequesterRef:  ref,
 			Note:          req.Note,
-			Access:        ReviewRequestAccessExisting,
-		}, reviewRequestRemindCooldown, now, actor)
+			Access:        reqAccess,
+		}, reviewRequestRemindCooldown, now, actor, grantOpt)
 		if errors.Is(err, ErrNotFound) {
 			writeNotFound(w)
 			return
@@ -377,10 +451,31 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusConflict, CodeNothingToReview, "a review request needs an artifact with a published version")
 			return
 		}
+		if errors.Is(err, ErrTooManyGrants) {
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     "too_many_grants",
+			})
+			continue
+		}
+		if errors.Is(err, ErrStewardPrecondition) {
+			writeNotFound(w)
+			return
+		}
 		if err != nil {
 			slog.ErrorContext(ctx, "artifacts: create review request failed", "error", err)
-			writeError(w, http.StatusServiceUnavailable, "unavailable", "could not save review request")
-			return
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     "unavailable",
+			})
+			continue
+		}
+		if grantOpt != nil {
+			// Invalidate cached grants so subsequent reviewers in the same batch
+			// see the updated grant list.
+			grantsLoaded = false
 		}
 
 		if outcome == ReviewRequestOutcomeCreated {
@@ -440,6 +535,216 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, CreateReviewRequestsResponse{Requests: results})
+}
+
+// handleListReviewRequests serves GET /api/v1/artifacts/{id}/review-requests.
+// Callers who can publish receive every open request and up to 50 most recent
+// closed ones, with reviewerCanReview and inDraft (open requests only, when
+// FeatureReviewDrafts is enabled). Other readable callers receive only
+// requests addressed to themselves, without reviewerCanReview or inDraft.
+func (s *Service) handleListReviewRequests(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+	if !s.featureEnabled(ctx, FeatureReviewRequests) {
+		writeNotFound(w)
+		return
+	}
+	kind, ref, _, ok := s.host.Principal(ctx)
+	if !ok {
+		writeNotFound(w)
+		return
+	}
+	b, a, ok := s.readableArtifact(w, r, id)
+	if !ok {
+		return
+	}
+	access, err := s.canWriteErr(ctx, b, a)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list review requests write check failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "could not verify artifact permissions")
+		return
+	}
+
+	isPublisher := access.canPublish()
+	var rows []ReviewRequest
+	if isPublisher {
+		rows, err = b.store.ListReviewRequests(ctx, a.ID, maxClosedReviewRequests)
+	} else {
+		rows, err = b.store.ListReviewRequestsForReviewer(ctx, a.ID, kind, ref, maxClosedReviewRequests)
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list review requests failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not list review requests")
+		return
+	}
+
+	// Collect principal refs for one batch display-name lookup.
+	nameSeen := make(map[string]bool, len(rows)*2)
+	nameRefs := make([]string, 0, len(rows)*2)
+	hasOpen := false
+	for _, rr := range rows {
+		if rr.State == ReviewRequestStateOpen {
+			hasOpen = true
+		}
+		for _, pr := range []string{PrincipalRef(rr.ReviewerKind, rr.ReviewerRef), PrincipalRef(rr.RequesterKind, rr.RequesterRef)} {
+			if pr != "" && !nameSeen[pr] {
+				nameSeen[pr] = true
+				nameRefs = append(nameRefs, pr)
+			}
+		}
+	}
+	names := s.principalDisplayNames(ctx, nameRefs)
+
+	// Publisher view: check inDraft (open requests only, when drafts gate is on)
+	// and reviewerCanReview for open requests.
+	var draftHolders map[string]bool
+	if isPublisher && hasOpen && s.featureEnabled(ctx, FeatureReviewDrafts) {
+		dkeys, derr := b.store.ListReviewDraftPrincipals(ctx, a.ID)
+		if derr != nil {
+			slog.WarnContext(ctx, "artifacts: list draft principals for review requests failed", "artifact", a.ID, "error", derr)
+		} else if len(dkeys) > 0 {
+			draftHolders = make(map[string]bool, len(dkeys))
+			for _, dk := range dkeys {
+				draftHolders[PrincipalRef(dk.PrincipalKind, dk.PrincipalRef)] = true
+			}
+		}
+	}
+
+	var (
+		auth, _      = s.host.(RecipientAuthority)
+		grantsLoaded bool
+		grants       []Grant
+		grantsErr    error
+	)
+	loadGrants := func() ([]Grant, error) {
+		if !grantsLoaded {
+			grants, grantsErr = b.store.ListGrants(ctx, a.ID)
+			grantsLoaded = true
+		}
+		return grants, grantsErr
+	}
+	now := s.now()
+
+	infos := make([]ReviewRequestInfo, 0, len(rows))
+	for _, rr := range rows {
+		info := s.reviewRequestInfo(ctx, rr, names)
+		if isPublisher && rr.State == ReviewRequestStateOpen {
+			if auth != nil {
+				subject, rerr := auth.ResolveRecipient(ctx, rr.ReviewerKind, rr.ReviewerRef)
+				if rerr != nil {
+					slog.WarnContext(ctx, "artifacts: resolve reviewer for list failed", "artifact", a.ID, "error", rerr)
+				} else {
+					canRev, cerr := principalCanReview(ctx, subject, a, rr.ReviewerKind, rr.ReviewerRef, now, loadGrants)
+					if cerr != nil {
+						slog.WarnContext(ctx, "artifacts: reviewer access check for list failed", "artifact", a.ID, "error", cerr)
+					} else {
+						info.ReviewerCanReview = &canRev
+					}
+				}
+			}
+			if draftHolders[PrincipalRef(rr.ReviewerKind, rr.ReviewerRef)] {
+				info.InDraft = true
+			}
+		}
+		infos = append(infos, info)
+	}
+
+	writeJSON(w, http.StatusOK, ListReviewRequestsResponse{Requests: infos})
+}
+
+// handleWithdrawReviewRequest serves POST /api/v1/artifacts/{id}/review-requests/{rid}/withdraw.
+// Allowed for the request's requester, the artifact owner, and anyone who may
+// administer the artifact. An agent may withdraw only requests it made.
+func (s *Service) handleWithdrawReviewRequest(w http.ResponseWriter, r *http.Request, id, rid string) {
+	ctx := r.Context()
+	if !s.featureEnabled(ctx, FeatureReviewRequests) {
+		writeNotFound(w)
+		return
+	}
+	kind, ref, _, ok := s.host.Principal(ctx)
+	if !ok {
+		writeNotFound(w)
+		return
+	}
+	b, a, ok := s.readableArtifact(w, r, id)
+	if !ok {
+		return
+	}
+	rr, err := b.store.GetReviewRequest(ctx, a.ID, rid)
+	if errors.Is(err, ErrNotFound) {
+		writeNotFound(w)
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: get review request for withdraw failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "could not read the review request")
+		return
+	}
+
+	actor, allowed, err := s.withdrawAuthority(ctx, b, a, rr, kind, ref)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: withdraw authority check failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "could not verify artifact permissions")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "forbidden", "you are not allowed to withdraw this review request")
+		return
+	}
+
+	row, err := b.store.WithdrawReviewRequest(ctx, a.ID, rid, s.now(), actor)
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStewardPrecondition) {
+		writeNotFound(w)
+		return
+	}
+	if errors.Is(err, ErrRequestClosed) {
+		writeError(w, http.StatusConflict, CodeRequestClosed, "the review request is no longer open")
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: withdraw review request failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "could not withdraw the review request")
+		return
+	}
+
+	if row.ReviewerKind == PrincipalKindUser && row.ReviewerRef != "" {
+		if notifier, ok := s.host.(ReviewRequestNotifier); ok {
+			notifier.RequestClosed(ctx, a.ID, row.ReviewerRef)
+		}
+		s.notifyInboxChanged(ctx, row.ReviewerRef)
+	}
+
+	info := s.reviewRequestInfo(ctx, row, nil)
+	writeJSON(w, http.StatusOK, WithdrawReviewRequestResponse{Request: info})
+}
+
+// withdrawAuthority decides whether principal (kind, ref) may withdraw rr on
+// artifact a (design §4.4):
+//   - An agent may withdraw only requests it made (even if it owns a).
+//   - A user may withdraw if they are the request's requester, the artifact
+//     owner, or hold admin/steward authority on a.
+func (s *Service) withdrawAuthority(ctx context.Context, b backend, a *Artifact, rr *ReviewRequest, kind, ref string) (*Actor, bool, error) {
+	if kind == PrincipalKindAgent {
+		if rr.RequesterKind == PrincipalKindAgent && rr.RequesterRef == ref {
+			return &Actor{Kind: kind, Ref: ref, Authority: AuthorityPublisher}, true, nil
+		}
+		return nil, false, nil
+	}
+	if rr.RequesterKind == kind && rr.RequesterRef == ref {
+		return &Actor{Kind: kind, Ref: ref, Authority: AuthorityPublisher}, true, nil
+	}
+	if a.OwnerKind == kind && a.OwnerRef == ref {
+		return &Actor{Kind: kind, Ref: ref, Authority: AuthorityOwner}, true, nil
+	}
+	admAuth, err := s.adminAuthorityWith(ctx, a, func() ([]Grant, error) {
+		return b.store.ListGrants(ctx, a.ID)
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if admAuth != "" {
+		return s.callerActor(ctx, a, admAuth), true, nil
+	}
+	return nil, false, nil
 }
 
 // handleDismissReviewRequest serves POST /api/v1/artifacts/{id}/review-request/dismiss.

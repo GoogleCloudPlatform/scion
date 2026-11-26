@@ -921,7 +921,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 			priorWasReview = true
 		}
 	}
-	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra, base)
+	updated, finEffects, err := b.store.FinalizeVersionWithEffects(work, a.ID, seq, claim, extra, base)
 	if errors.Is(err, ErrStaleBase) {
 		// A version was published between the review check and now.
 		s.discardStaleReview(w, r, b, a, seq, claim)
@@ -966,6 +966,16 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	var delivery *ReviewDeliveryInfo
 	if ready.Kind == VersionKindReview {
 		delivery = s.notifyReviewWithDelivery(ctx, w, updated, ready, access, freq.Wake)
+		if ready.CreatedByKind == PrincipalKindUser && ready.CreatedByRef != "" {
+			if finEffects.FulfilledRequestID != "" {
+				if notifier, ok := s.host.(ReviewRequestNotifier); ok {
+					notifier.RequestClosed(ctx, updated.ID, ready.CreatedByRef)
+				}
+			}
+			if finEffects.FulfilledRequestID != "" || finEffects.DraftDeleted {
+				s.notifyInboxChanged(ctx, ready.CreatedByRef)
+			}
+		}
 	} else if priorWasReview && updated.CurrentSeq == seq && updated.OwnerKind == PrincipalKindUser {
 		s.notifyInboxChanged(ctx, updated.OwnerRef)
 	}

@@ -122,6 +122,14 @@ type ArtifactService interface {
 	// more users (POST /api/v1/artifacts/{id}/review-requests).
 	RequestReview(ctx context.Context, id string, req *ArtifactReviewRequestsInput) (*ArtifactReviewRequestsResponse, error)
 
+	// ListReviewRequests lists review requests on artifact id
+	// (GET /api/v1/artifacts/{id}/review-requests).
+	ListReviewRequests(ctx context.Context, id string) (*ArtifactListReviewRequestsResponse, error)
+
+	// WithdrawReviewRequest withdraws an open review request on artifact id
+	// (POST /api/v1/artifacts/{id}/review-requests/{rid}/withdraw).
+	WithdrawReviewRequest(ctx context.Context, id, requestID string) (*ArtifactWithdrawReviewRequestResponse, error)
+
 	// DismissReviewRequest dismisses the caller's open review request on
 	// artifact id with an optional note (POST /api/v1/artifacts/{id}/review-request/dismiss).
 	DismissReviewRequest(ctx context.Context, id, note string) (*ArtifactDismissReviewRequestResponse, error)
@@ -373,18 +381,30 @@ type ArtifactReviewRequestPrincipal struct {
 
 // ArtifactReviewRequest mirrors ReviewRequestInfo from the hub.
 type ArtifactReviewRequest struct {
-	ID           string                         `json:"id"`
-	Reviewer     ArtifactReviewRequestPrincipal `json:"reviewer"`
-	Requester    ArtifactReviewRequestPrincipal `json:"requester"`
-	RequestedSeq int                            `json:"requestedSeq"`
-	Note         string                         `json:"note,omitempty"`
-	Access       string                         `json:"access"`
-	State        string                         `json:"state"`
-	ResponseNote string                         `json:"responseNote,omitempty"`
-	ResolvedSeq  *int                           `json:"resolvedSeq,omitempty"`
-	CreatedAt    time.Time                      `json:"createdAt"`
-	RemindedAt   *time.Time                     `json:"remindedAt,omitempty"`
-	ResolvedAt   *time.Time                     `json:"resolvedAt,omitempty"`
+	ID                string                         `json:"id"`
+	Reviewer          ArtifactReviewRequestPrincipal `json:"reviewer"`
+	Requester         ArtifactReviewRequestPrincipal `json:"requester"`
+	RequestedSeq      int                            `json:"requestedSeq"`
+	Note              string                         `json:"note,omitempty"`
+	Access            string                         `json:"access"`
+	State             string                         `json:"state"`
+	ResponseNote      string                         `json:"responseNote,omitempty"`
+	ResolvedSeq       *int                           `json:"resolvedSeq,omitempty"`
+	CreatedAt         time.Time                      `json:"createdAt"`
+	RemindedAt        *time.Time                     `json:"remindedAt,omitempty"`
+	ResolvedAt        *time.Time                     `json:"resolvedAt,omitempty"`
+	ReviewerCanReview *bool                          `json:"reviewerCanReview,omitempty"`
+	InDraft           bool                           `json:"inDraft,omitempty"`
+}
+
+// ArtifactListReviewRequestsResponse mirrors GET /api/v1/artifacts/{id}/review-requests.
+type ArtifactListReviewRequestsResponse struct {
+	Requests []ArtifactReviewRequest `json:"requests"`
+}
+
+// ArtifactWithdrawReviewRequestResponse mirrors POST /api/v1/artifacts/{id}/review-requests/{rid}/withdraw.
+type ArtifactWithdrawReviewRequestResponse struct {
+	Request ArtifactReviewRequest `json:"request"`
 }
 
 // ArtifactReviewRequestsInput is the body of POST /api/v1/artifacts/{id}/review-requests.
@@ -870,6 +890,24 @@ func (s *artifactService) RequestReview(ctx context.Context, id string, req *Art
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ArtifactReviewRequestsResponse](resp)
+}
+
+// ListReviewRequests implements ArtifactService.
+func (s *artifactService) ListReviewRequests(ctx context.Context, id string) (*ArtifactListReviewRequestsResponse, error) {
+	resp, err := s.c.transport.Get(ctx, artifactPath(id)+"/review-requests", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactListReviewRequestsResponse](resp)
+}
+
+// WithdrawReviewRequest implements ArtifactService.
+func (s *artifactService) WithdrawReviewRequest(ctx context.Context, id, requestID string) (*ArtifactWithdrawReviewRequestResponse, error) {
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/review-requests/"+url.PathEscape(requestID)+"/withdraw", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactWithdrawReviewRequestResponse](resp)
 }
 
 // DismissReviewRequest implements ArtifactService.

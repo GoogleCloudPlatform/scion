@@ -362,7 +362,15 @@ type Store interface {
 	// advances the current version; on either error nothing changes.
 	// Pending review versions do not count: a review never shadows another
 	// version, because its own base check refuses it.
+	// For kind: review versions, it also fulfils the finalizing reviewer's
+	// open review request and deletes their saved review draft in the same
+	// transaction.
 	FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, error)
+
+	// FinalizeVersionWithEffects behaves like FinalizeVersion and also
+	// reports review-request and draft side effects committed in the same
+	// transaction.
+	FinalizeVersionWithEffects(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, FinalizeEffects, error)
 
 	// DiscardFinalize fails the claimed (finalizing) version seq of an
 	// artifact and drops its manifest, for a finalize that rejected the
@@ -723,8 +731,10 @@ type Store interface {
 	// existing open request if remindCooldown has elapsed since its last
 	// reminder (or if it has never been reminded). Runs under
 	// lockLiveArtifact and sets requested_seq = current_seq at commit.
-	// Returns the row and the outcome (created, reminded, unchanged).
-	CreateOrRemindReviewRequest(ctx context.Context, req ReviewRequest, remindCooldown time.Duration, now time.Time, actor *Actor) (ReviewRequest, string, error)
+	// When grantOpt is non-nil, raises the reviewer's principal grant to
+	// review in the same transaction. Returns the row and the outcome
+	// (created, reminded, unchanged).
+	CreateOrRemindReviewRequest(ctx context.Context, req ReviewRequest, remindCooldown time.Duration, now time.Time, actor *Actor, grantOpt *ReviewRequestGrantOption) (ReviewRequest, string, error)
 
 	// DismissReviewRequest transitions the caller's open review request on
 	// artifactID to dismissed using a CAS on state='open'. Returns
@@ -735,6 +745,47 @@ type Store interface {
 	// GetOpenReviewRequest returns the open review request for
 	// (artifactID, reviewerKind, reviewerRef), or ErrNotFound.
 	GetOpenReviewRequest(ctx context.Context, artifactID, reviewerKind, reviewerRef string) (*ReviewRequest, error)
+
+	// GetReviewRequest returns the review request with id requestID on
+	// artifactID, or ErrNotFound.
+	GetReviewRequest(ctx context.Context, artifactID, requestID string) (*ReviewRequest, error)
+
+	// ListReviewRequests returns all open review requests for artifactID
+	// (newest first) followed by up to closedLimit most recent closed rows.
+	ListReviewRequests(ctx context.Context, artifactID string, closedLimit int) ([]ReviewRequest, error)
+
+	// ListReviewRequestsForReviewer returns all open review requests for
+	// (artifactID, reviewerKind, reviewerRef) followed by up to closedLimit
+	// most recent closed rows.
+	ListReviewRequestsForReviewer(ctx context.Context, artifactID, reviewerKind, reviewerRef string, closedLimit int) ([]ReviewRequest, error)
+
+	// WithdrawReviewRequest transitions an open review request to withdrawn
+	// under lockLiveArtifact + CAS on state='open'. Returns ErrNotFound if
+	// missing or ErrRequestClosed if already closed.
+	WithdrawReviewRequest(ctx context.Context, artifactID, requestID string, now time.Time, actor *Actor) (ReviewRequest, error)
+
+	// ListOpenReviewRequests walks open review requests in (artifact_id, id)
+	// order for the maintenance reaper.
+	ListOpenReviewRequests(ctx context.Context, after *ReviewRequestKey, limit int) ([]ReviewRequest, error)
+
+	// ExpireReviewRequest CAS-transitions an open review request to expired
+	// only if state is still 'open' and updated_at matches expectUpdatedAt.
+	ExpireReviewRequest(ctx context.Context, artifactID, requestID string, expectUpdatedAt time.Time, reason string, now time.Time, actor *Actor) (bool, error)
+
+	// PurgeClosedReviewRequests deletes up to limit closed review request
+	// rows whose resolved_at is at or before resolvedBefore.
+	PurgeClosedReviewRequests(ctx context.Context, resolvedBefore time.Time, limit int) (int, error)
+
+	// ListReviewDraftPrincipals returns the principal keys of all saved
+	// review drafts on artifactID without reading draft content.
+	ListReviewDraftPrincipals(ctx context.Context, artifactID string) ([]ReviewDraftKey, error)
+}
+
+// FinalizeEffects reports review-request and draft side effects committed
+// inside FinalizeVersion's transaction for a kind: review version.
+type FinalizeEffects struct {
+	FulfilledRequestID string
+	DraftDeleted       bool
 }
 
 // TransferOptions qualifies Store.TransferOwner.

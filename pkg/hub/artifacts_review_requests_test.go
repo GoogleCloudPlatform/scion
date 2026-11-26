@@ -283,13 +283,9 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	bobNotifsBeforeUAT, err := s.GetNotifications(ctx, store.SubscriberTypeUser, bob.ID, false)
 	require.NoError(t, err)
 	rec = identityArtifactRequest(t, srv, aliceAdmitUAT, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", reqBody)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var uatBlockedResp artifacts.CreateReviewRequestsResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &uatBlockedResp))
-	require.Len(t, uatBlockedResp.Requests, 1)
-	assert.Equal(t, artifacts.ReviewRequestOutcomeRefused, uatBlockedResp.Requests[0].Outcome, "scoped UAT must have every reviewer refused by MayNotifyReviewer")
-	assert.Equal(t, artifacts.CodeReviewerUnavailable, uatBlockedResp.Requests[0].Code)
-	assert.False(t, uatBlockedResp.Requests[0].Notified)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), artifacts.CodeInteractiveSessionRequired,
+		"scoped UAT create must be refused at route level with 403 interactive_session_required")
 	bobNotifsAfterUAT, err := s.GetNotifications(ctx, store.SubscriberTypeUser, bob.ID, false)
 	require.NoError(t, err)
 	assert.Len(t, bobNotifsAfterUAT, len(bobNotifsBeforeUAT), "scoped UAT create must write no notification")
@@ -351,6 +347,40 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	require.Len(t, cliResp.Requests, 1)
 	assert.Equal(t, artifacts.ReviewRequestOutcomeCreated, cliResp.Requests[0].Outcome, "CLI interactive session must be admitted by MayNotifyReviewer")
 	assert.True(t, cliResp.Requests[0].Notified)
+	cliReqID := cliResp.Requests[0].Request.ID
+
+	// GET /review-requests: publisher view vs self-only view.
+	listRec := doAsUser(alice, http.MethodGet, "/api/v1/artifacts/"+artID+"/review-requests", nil)
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	var pubList artifacts.ListReviewRequestsResponse
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &pubList))
+	require.NotEmpty(t, pubList.Requests)
+	assert.Equal(t, cliReqID, pubList.Requests[0].ID)
+	require.NotNil(t, pubList.Requests[0].ReviewerCanReview)
+	assert.True(t, *pubList.Requests[0].ReviewerCanReview)
+
+	selfListRec := doAsUser(bob, http.MethodGet, "/api/v1/artifacts/"+artID+"/review-requests", nil)
+	require.Equal(t, http.StatusOK, selfListRec.Code, selfListRec.Body.String())
+	var selfList artifacts.ListReviewRequestsResponse
+	require.NoError(t, json.Unmarshal(selfListRec.Body.Bytes(), &selfList))
+	require.NotEmpty(t, selfList.Requests)
+	assert.Nil(t, selfList.Requests[0].ReviewerCanReview, "self-only view must omit reviewerCanReview")
+
+	// Withdraw auto-acks Bob's unacked ARTIFACT_REVIEW_REQUESTED notifications via RequestClosed.
+	withdrawRec := doAsUser(alice, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests/"+cliReqID+"/withdraw", nil)
+	require.Equal(t, http.StatusOK, withdrawRec.Code, withdrawRec.Body.String())
+	bobUnackedAfterWithdraw, err := s.GetNotifications(ctx, store.SubscriberTypeUser, bob.ID, true)
+	require.NoError(t, err)
+	for _, n := range bobUnackedAfterWithdraw {
+		assert.NotEqual(t, store.NotificationStatusArtifactReviewRequested, n.Status,
+			"withdraw must auto-ack unacked ARTIFACT_REVIEW_REQUESTED notifications")
+	}
+
+	// POST /grants with notify:true and permission:"review" -> 400 use_review_requests while gate is on.
+	grantNotifyRec := doAsUser(alice, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants",
+		artifacts.GrantRequest{SubjectKind: "principal", SubjectRef: "user:" + bob.ID, Permission: "review", Notify: true})
+	assert.Equal(t, http.StatusBadRequest, grantNotifyRec.Code, grantNotifyRec.Body.String())
+	assert.Contains(t, grantNotifyRec.Body.String(), artifacts.CodeUseReviewRequests)
 
 	// 5. Agent requester refused with 403.
 	agentBody, _ := json.Marshal(artifacts.CreateReviewRequestsBody{Reviewers: []string{"user:" + bob.ID}})

@@ -149,18 +149,20 @@ type ReviewRequestPrincipal struct {
 
 // ReviewRequestInfo is the JSON representation of one artifact review request.
 type ReviewRequestInfo struct {
-	ID           string                 `json:"id"`
-	Reviewer     ReviewRequestPrincipal `json:"reviewer"`
-	Requester    ReviewRequestPrincipal `json:"requester"`
-	RequestedSeq int                    `json:"requestedSeq"`
-	Note         string                 `json:"note,omitempty"`
-	Access       string                 `json:"access"`
-	State        string                 `json:"state"`
-	ResponseNote string                 `json:"responseNote,omitempty"`
-	ResolvedSeq  *int                   `json:"resolvedSeq,omitempty"`
-	CreatedAt    time.Time              `json:"createdAt"`
-	RemindedAt   *time.Time             `json:"remindedAt,omitempty"`
-	ResolvedAt   *time.Time             `json:"resolvedAt,omitempty"`
+	ID                string                 `json:"id"`
+	Reviewer          ReviewRequestPrincipal `json:"reviewer"`
+	Requester         ReviewRequestPrincipal `json:"requester"`
+	RequestedSeq      int                    `json:"requestedSeq"`
+	Note              string                 `json:"note,omitempty"`
+	Access            string                 `json:"access"`
+	State             string                 `json:"state"`
+	ResponseNote      string                 `json:"responseNote,omitempty"`
+	ResolvedSeq       *int                   `json:"resolvedSeq,omitempty"`
+	CreatedAt         time.Time              `json:"createdAt"`
+	RemindedAt        *time.Time             `json:"remindedAt,omitempty"`
+	ResolvedAt        *time.Time             `json:"resolvedAt,omitempty"`
+	ReviewerCanReview *bool                  `json:"reviewerCanReview,omitempty"`
+	InDraft           bool                   `json:"inDraft,omitempty"`
 }
 
 // ReviewDeliveryStatus values describe what happened to the review notice
