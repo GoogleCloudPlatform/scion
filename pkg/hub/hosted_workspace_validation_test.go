@@ -313,4 +313,32 @@ func TestDispatch_HostedWorkspacePrecheck(t *testing.T) {
 		d, _, a, _, _ := newSetup(t, false, "/var/tmp/workstation-dir", nil)
 		require.NoError(t, d.hostedConfigPrecheck(ctx, a))
 	})
+
+	t.Run("non-NotFound GetProject store error is returned rather than masked as workspace_not_permitted", func(t *testing.T) {
+		d, _, a, _, _ := newSetup(t, true, "/var/tmp/foreign-dir", nil)
+		storeErr := errors.New("database temporarily unavailable")
+		// Fail on the 2nd GetProject call (the first is inside resolveDispatchProjectInfo,
+		// the second is inside hostedWorkspacePrecheck itself).
+		d.store = &getProjectFailNthStore{Store: d.store, failOn: 2, err: storeErr}
+		err := d.hostedConfigPrecheck(ctx, a)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, storeErr)
+		var refusal *RuntimeTargetRefusal
+		assert.False(t, errors.As(err, &refusal), "transient store error must not be masked as RuntimeTargetRefusal")
+	})
+}
+
+type getProjectFailNthStore struct {
+	store.Store
+	calls  int
+	failOn int
+	err    error
+}
+
+func (s *getProjectFailNthStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	s.calls++
+	if s.calls == s.failOn {
+		return nil, s.err
+	}
+	return s.Store.GetProject(ctx, id)
 }

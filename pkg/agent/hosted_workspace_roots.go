@@ -29,29 +29,32 @@ import (
 
 // hostedExplicitWorkspaceRoots returns the containment roots permitted for an
 // explicit workspace on a hosted Runtime Broker. Every root comes exclusively
-// from broker-global sources (never from project-level settings.yaml):
+// from broker-global or structural provider sources (never from project-level
+// settings.yaml):
 //   - the broker's hub-managed local project subtrees under ~/.scion
 //     (projects, project-configs, workspace; runtime.ValidateWorkspaceSource
 //     additionally enforces isScionHomeAllowedSubtree within ~/.scion),
 //   - the shared workspace storage root known to the layout authority
 //     (pkg/projectfs) loaded via config.LoadGlobalSettingsWithOverlayFor
-//     (global-only, ignoring project-level server.* overrides), and
+//     (global-only, ignoring project-level server.* overrides),
 //   - the structural project directory root for non-global projectDir (parent
-//     of .scion, ignoring project-level workspace_path overrides) so a
-//     project-relative workspace resolved via resolveWorkspaceSubdir continues
-//     to pass containment on Start.
+//     of .scion, ignoring project-level workspace_path overrides), and
+//   - the directory holding the .scion marker file when the broker-supplied
+//     projectPath resolved to projectDir through a marker file (standard
+//     externalized linked git project layout), so project-relative workspaces
+//     resolved under that repository continue to pass containment on Start.
 //
 // It never returns an empty slice without an error: on a hosted broker,
 // explicit workspaces are always subject to root containment.
-func hostedExplicitWorkspaceRoots(ctx context.Context, projectDir string) ([]string, error) {
+func hostedExplicitWorkspaceRoots(ctx context.Context, projectPath, projectDir string) ([]string, error) {
 	globalSettings, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load global settings for hosted workspace validation: %w", err)
 	}
-	return hostedExplicitWorkspaceRootsFromGlobal(globalSettings, projectDir)
+	return hostedExplicitWorkspaceRootsFromGlobal(globalSettings, projectPath, projectDir)
 }
 
-func hostedExplicitWorkspaceRootsFromGlobal(globalSettings *config.VersionedSettings, projectDir string) ([]string, error) {
+func hostedExplicitWorkspaceRootsFromGlobal(globalSettings *config.VersionedSettings, projectPath, projectDir string) ([]string, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil || globalDir == "" {
 		return nil, fmt.Errorf("resolve global scion dir for hosted workspace validation: %w", err)
@@ -86,7 +89,41 @@ func hostedExplicitWorkspaceRootsFromGlobal(globalSettings *config.VersionedSett
 		}
 	}
 
+	if markerDir := markerHoldingDir(projectPath, projectDir); isUsableHostedProjectRoot(markerDir, globalDir) {
+		roots = append(roots, markerDir)
+	}
+
 	return roots, nil
+}
+
+// markerHoldingDir returns the directory containing the .scion marker file
+// when projectPath resolved to projectDir through a marker file. It returns
+// "" when projectPath is empty, is "global"/"home", does not point at a marker
+// file, or the marker does not resolve to projectDir.
+func markerHoldingDir(projectPath, projectDir string) string {
+	if projectPath == "" || projectPath == "global" || projectPath == "home" || projectDir == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(projectPath)
+	if err != nil {
+		return ""
+	}
+	var markerPath, holderDir string
+	if filepath.Base(abs) == config.DotScion {
+		markerPath = abs
+		holderDir = filepath.Dir(abs)
+	} else {
+		markerPath = filepath.Join(abs, config.DotScion)
+		holderDir = abs
+	}
+	if !config.IsProjectMarkerFile(markerPath) {
+		return ""
+	}
+	resolved, err := config.ResolveProjectMarker(markerPath)
+	if err != nil || !samePath(resolved, projectDir) {
+		return ""
+	}
+	return holderDir
 }
 
 // structuralProjectRoot returns the directory root implied by projectDir's

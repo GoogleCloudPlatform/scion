@@ -2214,6 +2214,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.writeHarnessPolicyRefusal(w, d, "provision agent", req.ID, nil)
 				return
 			}
+			if workspaceNotPermittedFrom(err) {
+				markAttemptFailed(http.StatusBadRequest, launchFailureText[api.LaunchCodeWorkspaceNotPermitted])
+				span.SetStatus(codes.Error, api.LaunchCodeWorkspaceNotPermitted)
+				writeWorkspaceNotPermitted(w, nil)
+				return
+			}
 			// Design §3.4 Amendment A4.2: Reprovision wraps every refusal in
 			// agent.ErrReprovisionRefused (workspace preconditions, running-container
 			// check). Surface those as 409 Conflict rather than a generic 500 so
@@ -2266,11 +2272,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			if re, ok := hostedConfigRefusalFrom(err); ok {
 				markAttemptFailed(http.StatusBadRequest, re.Error())
 				writeHostedConfigRefusalDetails(w, re, nil)
-				return
-			}
-			if workspaceNotPermittedFrom(err) {
-				markAttemptFailed(http.StatusBadRequest, launchFailureText[api.LaunchCodeWorkspaceNotPermitted])
-				writeWorkspaceNotPermitted(w, nil)
 				return
 			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")

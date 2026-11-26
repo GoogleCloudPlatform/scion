@@ -1232,7 +1232,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 
 		if filepath.IsAbs(opts.Workspace) {
 			if opts.HostedMode {
-				roots, err := hostedExplicitWorkspaceRoots(ctx, projectDir)
+				roots, err := hostedExplicitWorkspaceRoots(ctx, opts.ProjectPath, projectDir)
 				if err != nil {
 					return nil, fmt.Errorf("%w: %w", ErrReprovisionRefused, newWorkspaceNotPermittedError(err))
 				}
@@ -2367,7 +2367,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				return "", "", nil, fmt.Errorf("failed to resolve absolute path for workspace %s: %w", workspace, err)
 			}
 			if api.IsHostedModeFromContext(ctx) {
-				roots, err := hostedExplicitWorkspaceRoots(ctx, projectDir)
+				roots, err := hostedExplicitWorkspaceRoots(ctx, projectPath, projectDir)
 				if err != nil {
 					return "", "", nil, newWorkspaceNotPermittedError(err)
 				}

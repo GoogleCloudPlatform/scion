@@ -2188,7 +2188,7 @@ authDone:
 		roots = []string{effectiveWorkspace}
 	} else {
 		var rootsErr error
-		roots, rootsErr = workspaceSourceRootsForMode(ctx, explicitWorkspace, opts.HostedMode, effectiveWorkspace, settings, projectDir)
+		roots, rootsErr = workspaceSourceRootsForMode(ctx, explicitWorkspace, opts.HostedMode, effectiveWorkspace, settings, opts.ProjectPath, projectDir)
 		if rootsErr != nil {
 			if explicitWorkspace && opts.HostedMode {
 				return nil, newWorkspaceNotPermittedError(rootsErr)
@@ -4165,13 +4165,13 @@ func resolvedPathWithin(p, root string) bool {
 // resume, rather than being re-classified as git and checked against a
 // repo root it was never provisioned relative to.
 func workspaceSourceRoots(explicitWorkspace bool, effectiveWorkspace string, settings *config.VersionedSettings, projectDir string) ([]string, error) {
-	return workspaceSourceRootsForMode(context.Background(), explicitWorkspace, false, effectiveWorkspace, settings, projectDir)
+	return workspaceSourceRootsForMode(context.Background(), explicitWorkspace, false, effectiveWorkspace, settings, "", projectDir)
 }
 
-func workspaceSourceRootsForMode(ctx context.Context, explicitWorkspace, hostedMode bool, effectiveWorkspace string, settings *config.VersionedSettings, projectDir string) ([]string, error) {
+func workspaceSourceRootsForMode(ctx context.Context, explicitWorkspace, hostedMode bool, effectiveWorkspace string, settings *config.VersionedSettings, projectPath, projectDir string) ([]string, error) {
 	if explicitWorkspace {
 		if hostedMode {
-			return hostedExplicitWorkspaceRoots(ctx, projectDir)
+			return hostedExplicitWorkspaceRoots(ctx, projectPath, projectDir)
 		}
 		return nil, nil
 	}

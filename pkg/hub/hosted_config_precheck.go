@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -103,6 +104,9 @@ func (d *HTTPAgentDispatcher) hostedWorkspacePrecheck(ctx context.Context, agent
 	var project *store.Project
 	if agent.ProjectID != "" {
 		p, getErr := d.store.GetProject(ctx, agent.ProjectID)
+		if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
+			return fmt.Errorf("resolve project %s for hosted workspace check: %w", agent.ProjectID, getErr)
+		}
 		if getErr == nil {
 			project = p
 		}

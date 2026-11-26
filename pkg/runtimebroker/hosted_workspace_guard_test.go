@@ -91,3 +91,70 @@ func TestCreateAgent_HostedBrokerRefusesExternalAbsoluteWorkspace(t *testing.T) 
 		t.Fatalf("runtime.Run must not be called when workspace is refused")
 	}
 }
+
+// TestReprovision_HostedBrokerRefusesExternalAbsoluteWorkspace verifies that
+// a hosted broker surfaces a Reprovision explicit-workspace refusal as HTTP
+// 400 with typed code workspace_not_permitted and fixed public text (never
+// echoing the host path).
+func TestReprovision_HostedBrokerRefusesExternalAbsoluteWorkspace(t *testing.T) {
+	setupTestScionEnv(t)
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	projectDir := filepath.Join(homeDir, ".scion", "projects", "demo", ".scion")
+	agentDir := filepath.Join(projectDir, "agents", "hosted-reprov-agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir agentDir: %v", err)
+	}
+
+	outsideDir := filepath.Join(t.TempDir(), "external-reprov-dir")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outsideDir: %v", err)
+	}
+
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+	}
+	mgr := agent.NewManager(rt)
+
+	cfg := testServerConfig()
+	cfg.BrokerID = "hosted-reprov-broker"
+	cfg.WorkstationMode = false
+	cfg.ForceRuntime = "docker"
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+	endAsyncLaunchesAtCleanup(t, srv)
+
+	bodyBytes, err := json.Marshal(CreateAgentRequest{
+		Name:          "hosted-reprov-agent",
+		ProjectPath:   projectDir,
+		ProvisionOnly: true,
+		Reprovision:   true,
+		Config: &CreateAgentConfig{
+			Workspace: outsideDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+	}
+	code, msg := decodeError(t, w)
+	if code != api.LaunchCodeWorkspaceNotPermitted {
+		t.Fatalf("code = %q, want %q", code, api.LaunchCodeWorkspaceNotPermitted)
+	}
+	if msg != launchFailureText[api.LaunchCodeWorkspaceNotPermitted] {
+		t.Fatalf("message = %q, want %q", msg, launchFailureText[api.LaunchCodeWorkspaceNotPermitted])
+	}
+	if strings.Contains(msg, outsideDir) || strings.Contains(msg, "external-reprov-dir") {
+		t.Fatalf("message %q must not leak host path", msg)
+	}
+}

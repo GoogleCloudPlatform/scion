@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -64,7 +65,7 @@ func TestHostedExplicitWorkspaceRoots_LocalAndShared(t *testing.T) {
 		},
 	}
 
-	roots, err := hostedExplicitWorkspaceRootsFromGlobal(globalSettings, linkedProjectDir)
+	roots, err := hostedExplicitWorkspaceRootsFromGlobal(globalSettings, linkedRoot, linkedProjectDir)
 	require.NoError(t, err)
 	require.NotEmpty(t, roots)
 
@@ -89,7 +90,7 @@ func TestHostedExplicitWorkspaceRoots_LocalAndShared(t *testing.T) {
 	assert.Error(t, err)
 
 	// Workstation mode keeps explicit workspaces unconstrained by hosted roots.
-	wsRoots, err := workspaceSourceRootsForMode(context.Background(), true, false, outsideDir, globalSettings, linkedProjectDir)
+	wsRoots, err := workspaceSourceRootsForMode(context.Background(), true, false, outsideDir, globalSettings, linkedRoot, linkedProjectDir)
 	require.NoError(t, err)
 	assert.Nil(t, wsRoots)
 	_, err = runtime.ValidateWorkspaceSource(outsideDir, wsRoots...)
@@ -130,7 +131,7 @@ server:
 `, outsideWorkspacePath, outsideMountRoot)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettingsYAML), 0o644))
 
-	roots, err := hostedExplicitWorkspaceRoots(context.Background(), projectDir)
+	roots, err := hostedExplicitWorkspaceRoots(context.Background(), projectDir, projectDir)
 	require.NoError(t, err)
 	require.NotEmpty(t, roots)
 
@@ -141,6 +142,192 @@ server:
 
 	_, err = runtime.ValidateWorkspaceSource(outsideWorkspacePath, roots...)
 	assert.Error(t, err, "project-level workspace_path must not widen hosted L3 roots")
+}
+
+// TestStart_HostedExplicitWorkspaceContainment exercises the Start-path L3
+// guard directly:
+//   - a pre-existing agent with a persisted explicit workspace outside the
+//     hosted roots is refused on Start (without reaching ProvisionAgent or
+//     runtime.Run);
+//   - a marker-style linked project with a project-relative workspace succeeds
+//     through both Provision and Start;
+//   - the same marker-style project whose external settings.yaml points
+//     workspace_path outside the marker's directory is refused on Start;
+//   - an in-repository .scion project with a relative workspace succeeds.
+func TestStart_HostedExplicitWorkspaceContainment(t *testing.T) {
+	writeMinimalHarness := func(t *testing.T, dir string) {
+		t.Helper()
+		hcDir := filepath.Join(dir, "harness-configs", "claude")
+		require.NoError(t, os.MkdirAll(hcDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nimage: dummy:latest\n"), 0o644))
+	}
+
+	setupMarkerProject := func(t *testing.T, tmpHome, workspacePath string) (repoDir, externalScionDir string) {
+		t.Helper()
+		repoDir = filepath.Join(t.TempDir(), "linked-repo")
+		require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "sub", "dir"), 0o755))
+
+		marker := &config.ProjectMarker{
+			ProjectID:   "12345678-1234-1234-1234-1234567890ab",
+			ProjectSlug: "linked-repo",
+		}
+		markerPath := filepath.Join(repoDir, config.DotScion)
+		require.NoError(t, config.WriteProjectMarker(markerPath, marker))
+
+		var err error
+		externalScionDir, err = config.ResolveProjectMarker(markerPath)
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(externalScionDir, 0o755))
+		writeMinimalHarness(t, externalScionDir)
+
+		if workspacePath == "" {
+			workspacePath = repoDir
+		}
+		settingsYAML := fmt.Sprintf("schema_version: \"1\"\nworkspace_path: %q\n", workspacePath)
+		require.NoError(t, os.WriteFile(filepath.Join(externalScionDir, "settings.yaml"), []byte(settingsYAML), 0o644))
+		return repoDir, externalScionDir
+	}
+
+	t.Run("persisted external explicit workspace refused on Start without ProvisionAgent", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+
+		projectDir := filepath.Join(tmpHome, ".scion", "projects", "demo", ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0o755))
+		writeMinimalHarness(t, projectDir)
+
+		outsideDir := filepath.Join(t.TempDir(), "external-persisted-ws")
+		require.NoError(t, os.MkdirAll(outsideDir, 0o755))
+
+		// Pre-create the agent directory and scion-agent.json so GetAgent
+		// returns the existing agent without invoking ProvisionAgent.
+		agentDir := filepath.Join(projectDir, "agents", "existing-agent")
+		require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0o755))
+		cfgBytes, err := json.Marshal(&api.ScionConfig{
+			Harness:           "claude",
+			HarnessConfig:     "claude",
+			Image:             "dummy:latest",
+			ExplicitWorkspace: true,
+			Volumes: []api.VolumeMount{
+				{Source: outsideDir, Target: "/workspace"},
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgBytes, 0o644))
+
+		runCalled := false
+		rt := &runtime.MockRuntime{
+			NameFunc: func() string { return "docker" },
+			RunFunc: func(_ context.Context, _ runtime.RunConfig) (string, error) {
+				runCalled = true
+				return "unexpected-container", nil
+			},
+		}
+		mgr := NewManager(rt)
+		_, err = mgr.Start(context.Background(), api.StartOptions{
+			Name:        "existing-agent",
+			ProjectPath: projectDir,
+			HostedMode:  true,
+		})
+		require.Error(t, err)
+		var lf *runtime.LaunchFailure
+		require.True(t, errors.As(err, &lf), "expected LaunchFailure, got %v", err)
+		assert.Equal(t, api.LaunchCodeWorkspaceNotPermitted, lf.Code)
+		assert.False(t, runCalled, "runtime.Run must not be called when Start-path guard refuses")
+	})
+
+	t.Run("marker-style linked project relative workspace succeeds on hosted Start", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		repoDir, _ := setupMarkerProject(t, tmpHome, "")
+
+		runCalled := false
+		var capturedWS string
+		rt := &runtime.MockRuntime{
+			NameFunc: func() string { return "docker" },
+			RunFunc: func(_ context.Context, rc runtime.RunConfig) (string, error) {
+				runCalled = true
+				capturedWS = rc.Workspace
+				return "marker-container", nil
+			},
+		}
+		mgr := NewManager(rt)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:          "marker-rel-agent",
+			ProjectPath:   repoDir,
+			Workspace:     "sub/dir",
+			HarnessConfig: "claude",
+			HostedMode:    true,
+			NoAuth:        true,
+		})
+		require.NoError(t, err)
+		assert.True(t, runCalled, "runtime.Run should be called for marker-style relative workspace")
+		assert.True(t, samePath(capturedWS, filepath.Join(repoDir, "sub", "dir")),
+			"workspace = %q, want %q", capturedWS, filepath.Join(repoDir, "sub", "dir"))
+	})
+
+	t.Run("marker-style linked project with workspace_path outside marker dir is refused on Start", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+
+		outsideRoot := filepath.Join(t.TempDir(), "outside-root")
+		require.NoError(t, os.MkdirAll(filepath.Join(outsideRoot, "sub", "dir"), 0o755))
+		repoDir, _ := setupMarkerProject(t, tmpHome, outsideRoot)
+
+		runCalled := false
+		rt := &runtime.MockRuntime{
+			NameFunc: func() string { return "docker" },
+			RunFunc: func(_ context.Context, _ runtime.RunConfig) (string, error) {
+				runCalled = true
+				return "unexpected-container", nil
+			},
+		}
+		mgr := NewManager(rt)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:          "marker-widened-agent",
+			ProjectPath:   repoDir,
+			Workspace:     "sub/dir",
+			HarnessConfig: "claude",
+			HostedMode:    true,
+			NoAuth:        true,
+		})
+		require.Error(t, err)
+		var lf *runtime.LaunchFailure
+		require.True(t, errors.As(err, &lf), "expected LaunchFailure, got %v", err)
+		assert.Equal(t, api.LaunchCodeWorkspaceNotPermitted, lf.Code)
+		assert.False(t, runCalled, "runtime.Run must not be called when workspace_path points outside marker dir")
+	})
+
+	t.Run("in-repository .scion project relative workspace succeeds on hosted Start", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+
+		repoDir := filepath.Join(t.TempDir(), "inrepo")
+		scionDir := filepath.Join(repoDir, config.DotScion)
+		require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "sub", "dir"), 0o755))
+		require.NoError(t, os.MkdirAll(scionDir, 0o755))
+		writeMinimalHarness(t, scionDir)
+
+		runCalled := false
+		rt := &runtime.MockRuntime{
+			NameFunc: func() string { return "docker" },
+			RunFunc: func(_ context.Context, _ runtime.RunConfig) (string, error) {
+				runCalled = true
+				return "inrepo-container", nil
+			},
+		}
+		mgr := NewManager(rt)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:          "inrepo-rel-agent",
+			ProjectPath:   repoDir,
+			Workspace:     "sub/dir",
+			HarnessConfig: "claude",
+			HostedMode:    true,
+			NoAuth:        true,
+		})
+		require.NoError(t, err)
+		assert.True(t, runCalled)
+	})
 }
 
 func TestReprovision_HostedRefusesExternalAbsoluteWorkspace(t *testing.T) {
