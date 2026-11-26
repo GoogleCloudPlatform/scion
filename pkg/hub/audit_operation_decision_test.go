@@ -42,7 +42,6 @@ func TestAuditOperation_T2_DecisionCorrelationEqualsRequestID(t *testing.T) {
 	capture := &decisionLogCapture{}
 	srv, s := newDecisionLogServer(t, capture)
 	admin := seedDecisionLogAdmin(t, s)
-	setDecisionLogFlag(t, srv, true)
 
 	rec, _ := userRequest(t, srv, admin, http.MethodPost, stopAllPath, nil, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -71,7 +70,6 @@ func TestAuditOperation_T2_NoRequestLoggerStillExcludedCorrelation(t *testing.T)
 	// Deliberately no SetRequestLogger: the fallback loggingMiddleware sets
 	// no request ID.
 	admin := seedDecisionLogAdmin(t, s)
-	setDecisionLogFlag(t, srv, true)
 	counts := srv.decisionAuditLogger.counts
 	before := counts.get(decisionAuditExcludedCorrelation, true)
 
@@ -96,7 +94,6 @@ func TestAuditOperation_T2_ReentryDecisionKeepsOuterCorrelation(t *testing.T) {
 	capture := &decisionLogCapture{}
 	srv, s := newDecisionLogServer(t, capture)
 	member, _, projectID := seedDecisionLogProject(t, s)
-	setDecisionLogFlag(t, srv, true)
 	counts := srv.decisionAuditLogger.counts
 	before := counts.get(decisionAuditEnqueued, true)
 	identity := NewAuthenticatedUser(member.ID, member.Email, member.DisplayName, member.Role, "web")

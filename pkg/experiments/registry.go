@@ -295,11 +295,6 @@ const DecisionRetention = "hub.decision_retention"
 // route answers 404; sequence allocation and backfill remain active.
 const ConversationWatch = "hub.conversation_watch"
 
-// AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
-// It is the only activation control and stays default-off; turning it on
-// needs explicit owner approval.
-const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
-
 // PortView gates the page view mode of the agent port proxy
 // (ptone/scion#5569): a user who opens an exposed port's link from the hub
 // is sent to a short-lived page link under /api/v1/portview/, through
@@ -953,17 +948,6 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-31",
 	},
 	{
-		Name:        AuthorizationDecisionAuditV2,
-		Title:       "Authorization decision audit v2",
-		Description: "Records authorization decisions in the existing project/agent audit domain to the configured structured logger, asynchronously; losses are counted, not retried.",
-		Default:     false,
-		Layers:      []Layer{LayerServer},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#2379",
-		Owner:       "audit-update",
-		ReviewBy:    "2026-11-30",
-	},
-	{
 		Name:        "web.gcs_links",
 		Title:       "gs:// link previews",
 		Description: "Linkifies a gs://bucket/object URI an agent posts in chat and lets the viewer fetch and preview that object through the hub. Gates both the linkifier (LayerWeb) and the GET /api/v1/gcs/object endpoint itself (LayerServer): the endpoint also requires a configured GCP token generator, so this experiment alone does not make links fetchable on a hub without one.",
@@ -1560,6 +1544,8 @@ var compiledRetired = []string{
 	"web.project_decisions",
 	// Graduated: unified filter query dialect is always on (ptone/scion#9034).
 	"filters.query_dialect",
+	// Graduated: authorization decision audit v2 is always on (ptone/scion#9483).
+	"hub.authorization_decision_audit_v2",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way

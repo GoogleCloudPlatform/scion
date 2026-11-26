@@ -18,13 +18,11 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sort"
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -112,12 +110,6 @@ func TestWireHubCoreMetrics_DecisionLogInstruments(t *testing.T) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 	wireHubCoreMetrics(srv, mp)
-
-	ops := hub.NewOperationalSettings(inner, koanf.New("."), koanf.New("."))
-	_, err = ops.Update(ctx, "experiments",
-		json.RawMessage(`{"overrides":{"hub.authorization_decision_audit_v2":true}}`), "test", 0, "managed")
-	require.NoError(t, err)
-	srv.SetOperationalSettings(ops)
 
 	// A decision in the recorded domain: the global stop-all shape (an
 	// explicit registered Permission on an unparented agent resource), the

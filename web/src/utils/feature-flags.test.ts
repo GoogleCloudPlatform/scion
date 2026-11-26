@@ -216,6 +216,18 @@ describe('feature-flags: unified filter query dialect flag removed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Removed authorization decision audit v2 flag (graduated, ptone/scion#9483)
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: authorization decision audit v2 flag removed', () => {
+  // The one allowed reference to the retired name outside compiledRetired
+  // (see the experiment-removal checklist).
+  it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
+    expect(isFeatureEnabled('hub.authorization_decision_audit_v2')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // isFeatureEnabled: resolution order
 // ---------------------------------------------------------------------------
 

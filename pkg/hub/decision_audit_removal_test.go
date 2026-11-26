@@ -54,8 +54,8 @@ func TestDecisionAuditRemoval_NoPersistence(t *testing.T) {
 			request.Permission = "project.read"
 			delegated := srv.authzService.Decide(agentCtx, request)
 			require.True(t, delegated.Allowed, delegated.Reason)
-			// Decisions go only to the in-memory decision logger (default
-			// off), never to a store table.
+			// Decisions go only to the in-memory decision logger, never to a
+			// store table.
 			require.Same(t, srv.decisionAuditLogger, srv.authzService.decisionAuditEmitter)
 			requireNoDecisionPersistenceTable(t, cs)
 			require.NoError(t, srv.Shutdown(ctx))
