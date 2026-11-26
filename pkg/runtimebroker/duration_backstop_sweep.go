@@ -188,7 +188,8 @@ func (sw *durationBackstopSweeper) sweepRuntime(ctx context.Context, rt scionrt.
 		if !ok {
 			continue
 		}
-		key := backstopReportKey(rt.Name(), a.ContainerID, a.RunID)
+		opID := scionrt.AgentOperationID(a)
+		key := backstopReportKey(rt.Name(), opID, a.RunID)
 		active[key] = true
 		if now.Before(deadline) {
 			continue
@@ -201,36 +202,36 @@ func (sw *durationBackstopSweeper) sweepRuntime(ctx context.Context, rt scionrt.
 			continue
 		}
 
-		sw.stopExpired(ctx, rt, a, deadline, key)
+		sw.stopExpired(ctx, rt, a, opID, deadline, key)
 	}
 	return active, true
 }
 
-func (sw *durationBackstopSweeper) stopExpired(ctx context.Context, rt scionrt.Runtime, a api.AgentInfo, deadline time.Time, key string) {
+func (sw *durationBackstopSweeper) stopExpired(ctx context.Context, rt scionrt.Runtime, a api.AgentInfo, opID string, deadline time.Time, key string) {
 	sw.log.Warn("duration backstop sweep: stopping agent whose max_duration deadline elapsed",
-		"agent", a.Name, "runtime", rt.Name(), "container", a.ContainerID, "run_id", a.RunID,
+		"agent", a.Name, "runtime", rt.Name(), "container", opID, "run_id", a.RunID,
 		"deadline", deadline.UTC().Format(time.RFC3339))
 
 	stopCtx, cancel := context.WithTimeout(ctx, durationBackstopCallTimeout)
-	err := rt.Stop(stopCtx, scionrt.RunRef{ID: a.ContainerID, RunID: a.RunID})
+	err := rt.Stop(stopCtx, scionrt.RunRef{ID: opID, RunID: a.RunID})
 	cancel()
 	if err != nil {
-		if errors.Is(err, scionrt.ErrRunConflict) {
-			// A newer run replaced this container between List and Stop: do not
+		if errors.Is(err, scionrt.ErrRunConflict) || errors.Is(err, scionrt.ErrRunMismatch) {
+			// A newer run replaced this container/pod between List and Stop: do not
 			// report limits_exceeded against the replacement run.
 			sw.log.Debug("duration backstop sweep: run changed before stop; skipping report",
-				"agent", a.Name, "runtime", rt.Name(), "run_id", a.RunID)
+				"agent", a.Name, "runtime", rt.Name(), "container", opID, "run_id", a.RunID)
 			return
 		}
 		if isAlreadyStoppedRuntimeErr(err) {
 			// sciontool or the platform already exited/removed the container
 			// between List and Stop: avoid duplicate stop/report.
 			sw.log.Debug("duration backstop sweep: container already stopped/absent; skipping report",
-				"agent", a.Name, "runtime", rt.Name(), "container", a.ContainerID, "error", err)
+				"agent", a.Name, "runtime", rt.Name(), "container", opID, "error", err)
 			return
 		}
 		sw.log.Error("duration backstop sweep: failed to stop expired agent; retrying on next sweep",
-			"agent", a.Name, "runtime", rt.Name(), "container", a.ContainerID, "error", err)
+			"agent", a.Name, "runtime", rt.Name(), "container", opID, "error", err)
 		return
 	}
 

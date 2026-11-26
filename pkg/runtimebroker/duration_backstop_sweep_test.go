@@ -62,7 +62,7 @@ func (f *backstopFakeRuntime) Stop(_ context.Context, ref scionrt.RunRef) error 
 		return f.stopErr
 	}
 	for i := range f.agents {
-		if f.agents[i].ContainerID == ref.ID {
+		if f.agents[i].ContainerID == ref.ID || scionrt.AgentOperationID(f.agents[i]) == ref.ID {
 			f.agents[i].Phase = string(state.PhaseStopped)
 		}
 	}
@@ -121,6 +121,10 @@ func TestDurationBackstopSweeper_StopsExpiredAndReportsLimitsExceeded(t *testing
 				RunID:       "run-k8s-1",
 				Phase:       string(state.PhaseRunning),
 				Annotations: map[string]string{api.LabelRunDeadline: expired},
+				Kubernetes: &api.AgentK8sMetadata{
+					Namespace: "other-ns",
+					PodName:   "pod-1",
+				},
 			},
 		},
 	}
@@ -147,8 +151,8 @@ func TestDurationBackstopSweeper_StopsExpiredAndReportsLimitsExceeded(t *testing
 		t.Fatalf("docker stops = %+v, want [{ID:ctr-1 RunID:run-1}]", dockerStops)
 	}
 	k8sStops := k8sRT.stoppedRefs()
-	if len(k8sStops) != 1 || k8sStops[0].ID != "pod-1" || k8sStops[0].RunID != "run-k8s-1" {
-		t.Fatalf("k8s stops = %+v, want [{ID:pod-1 RunID:run-k8s-1}]", k8sStops)
+	if len(k8sStops) != 1 || k8sStops[0].ID != "other-ns/pod-1" || k8sStops[0].RunID != "run-k8s-1" {
+		t.Fatalf("k8s stops = %+v, want [{ID:other-ns/pod-1 RunID:run-k8s-1}]", k8sStops)
 	}
 	if len(reported) != 2 {
 		t.Fatalf("reported count = %d, want 2: %+v", len(reported), reported)
@@ -197,8 +201,12 @@ func TestDurationBackstopSweeper_NoDoubleStopWhenSciontoolExitedFirst(t *testing
 		}
 	})
 
-	t.Run("ErrRunConflict or already-stopped Stop error emits no report", func(t *testing.T) {
-		for _, stopErr := range []error{scionrt.ErrRunConflict, errors.New("Error: No such container: ctr-gone")} {
+	t.Run("ErrRunConflict, ErrRunMismatch, or already-stopped Stop error emits no report and logs at Debug", func(t *testing.T) {
+		for _, stopErr := range []error{
+			scionrt.ErrRunConflict,
+			scionrt.ErrRunMismatch,
+			errors.New("Error: No such container: ctr-gone"),
+		} {
 			rt := &backstopFakeRuntime{
 				name:    "docker",
 				stopErr: stopErr,
@@ -212,11 +220,13 @@ func TestDurationBackstopSweeper_NoDoubleStopWhenSciontoolExitedFirst(t *testing
 					},
 				},
 			}
+			var logRecs []slog.Record
+			captureHandler := &backstopCaptureHandler{records: &logRecs}
 			reports := 0
 			sw := newDurationBackstopSweeper(
 				func() []scionrt.Runtime { return []scionrt.Runtime{rt} },
 				func(context.Context, api.AgentInfo) { reports++ },
-				slog.Default(),
+				slog.New(captureHandler),
 			)
 			sw.now = func() time.Time { return now }
 			sw.sweep(context.Background())
@@ -224,13 +234,18 @@ func TestDurationBackstopSweeper_NoDoubleStopWhenSciontoolExitedFirst(t *testing
 			if reports != 0 {
 				t.Errorf("stopErr=%v: expected 0 reports, got %d", stopErr, reports)
 			}
+			for _, rec := range logRecs {
+				if rec.Level >= slog.LevelError {
+					t.Errorf("stopErr=%v: unexpected Error log %q", stopErr, rec.Message)
+				}
+			}
 		}
 	})
 }
 
 func TestDurationBackstopSweeper_SurvivesBrokerRestart(t *testing.T) {
 	launch := time.Date(2026, 11, 26, 17, 0, 0, 0, time.UTC)
-	deadline := launch.Add(4 * time.Minute) // 2m max_duration + 2m grace
+	deadline := launch.Add(2*time.Minute + api.DurationBackstopTotalGrace) // 2m max_duration + 12m total grace
 
 	rt := &backstopFakeRuntime{
 		name: "docker",
@@ -246,28 +261,29 @@ func TestDurationBackstopSweeper_SurvivesBrokerRestart(t *testing.T) {
 		},
 	}
 
-	// Simulate broker 1 sweeping before deadline: nothing stopped.
+	// Simulate broker 1 sweeping during a slow start (launch+6m: past 2m+2m,
+	// still within 2m+12m): nothing stopped.
 	reports1 := 0
 	sw1 := newDurationBackstopSweeper(
 		func() []scionrt.Runtime { return []scionrt.Runtime{rt} },
 		func(context.Context, api.AgentInfo) { reports1++ },
 		slog.Default(),
 	)
-	sw1.now = func() time.Time { return launch.Add(3 * time.Minute) }
+	sw1.now = func() time.Time { return launch.Add(6 * time.Minute) }
 	sw1.sweep(context.Background())
 	if len(rt.stoppedRefs()) != 0 || reports1 != 0 {
 		t.Fatalf("before deadline: stops=%d reports=%d, want 0/0", len(rt.stoppedRefs()), reports1)
 	}
 
 	// Simulate broker restart: brand-new sweeper with zero in-memory state,
-	// now past deadline.
+	// now past the 14m deadline.
 	reports2 := 0
 	sw2 := newDurationBackstopSweeper(
 		func() []scionrt.Runtime { return []scionrt.Runtime{rt} },
 		func(context.Context, api.AgentInfo) { reports2++ },
 		slog.Default(),
 	)
-	sw2.now = func() time.Time { return launch.Add(5 * time.Minute) }
+	sw2.now = func() time.Time { return launch.Add(15 * time.Minute) }
 	sw2.sweep(context.Background())
 	if len(rt.stoppedRefs()) != 1 || reports2 != 1 {
 		t.Fatalf("after restart past deadline: stops=%d reports=%d, want 1/1", len(rt.stoppedRefs()), reports2)
@@ -318,3 +334,20 @@ func TestServer_ReportDurationBackstopStop_NoHubConnectionDropsCleanly(t *testin
 		RunID:     "run-1",
 	})
 }
+
+type backstopCaptureHandler struct {
+	mu      sync.Mutex
+	records *[]slog.Record
+}
+
+func (h *backstopCaptureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *backstopCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	*h.records = append(*h.records, r.Clone())
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *backstopCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *backstopCaptureHandler) WithGroup(string) slog.Handler      { return h }

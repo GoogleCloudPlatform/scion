@@ -27,10 +27,22 @@ const (
 	// an agent run's absolute UTC RFC3339 deadline for the broker backstop.
 	LabelRunDeadline = "scion.io/run-deadline"
 
-	// DurationBackstopGrace is added to effective max_duration when computing
-	// the broker-enforced run deadline, matching limitsExceededStopGrace so
-	// sciontool's cooperative timer normally exits cleanly first.
+	// DurationBackstopGrace is the cooperative shutdown grace added on top of
+	// effective max_duration, matching limitsExceededStopGrace so sciontool's
+	// clean exit-10 path normally wins before the broker hard stop fires.
 	DurationBackstopGrace = 2 * time.Minute
+
+	// DurationBackstopStartupAllowance covers image pull, container/pod/instance
+	// creation, in-container git clone, and pre-start hooks that execute before
+	// sciontool arms its own max_duration timer, so slow startups do not cause
+	// the broker backstop (or Kubernetes activeDeadlineSeconds) to fire ahead
+	// of sciontool.
+	DurationBackstopStartupAllowance = 10 * time.Minute
+
+	// DurationBackstopTotalGrace is the total grace added to effective
+	// max_duration (2m cooperative grace + 10m startup allowance = 12m) when
+	// stamping scion.io/run-deadline and Kubernetes spec.activeDeadlineSeconds.
+	DurationBackstopTotalGrace = DurationBackstopGrace + DurationBackstopStartupAllowance
 
 	// ReasonMaxDurationBackstop is the status message / reason reported when
 	// the broker backstop (or Kubernetes activeDeadlineSeconds) terminates an

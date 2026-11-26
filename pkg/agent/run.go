@@ -3214,7 +3214,7 @@ authDone:
 	var runDeadlineStr string
 	if api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.AgentPolicyDurationBackstop) {
 		if effDur := finalScionCfg.ParseMaxDuration(); effDur > 0 {
-			totalBudget := effDur + api.DurationBackstopGrace
+			totalBudget := effDur + api.DurationBackstopTotalGrace
 			deadline := time.Now().UTC().Add(totalBudget)
 			runCfg.RunDeadline = deadline
 			runCfg.RunDeadlineDuration = totalBudget

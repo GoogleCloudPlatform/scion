@@ -24,7 +24,7 @@ import (
 )
 
 func TestStart_DurationBackstopGateAndDeadline(t *testing.T) {
-	t.Run("enabled with positive max_duration stamps deadline with 2m grace and echoes EffectiveRunDeadline", func(t *testing.T) {
+	t.Run("enabled with positive max_duration stamps deadline with 12m total grace and echoes EffectiveRunDeadline", func(t *testing.T) {
 		project, _ := envFixture(t, envSettingsV1)
 		ctx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
 			Experiments: []string{experiments.AgentPolicyDurationBackstop},
@@ -35,7 +35,7 @@ func TestStart_DurationBackstopGateAndDeadline(t *testing.T) {
 		})
 		after := time.Now().UTC()
 
-		wantDuration := 5*time.Minute + api.DurationBackstopGrace
+		wantDuration := 5*time.Minute + api.DurationBackstopTotalGrace
 		if rc.RunDeadlineDuration != wantDuration {
 			t.Fatalf("RunDeadlineDuration = %v, want %v", rc.RunDeadlineDuration, wantDuration)
 		}
@@ -49,6 +49,26 @@ func TestStart_DurationBackstopGateAndDeadline(t *testing.T) {
 		}
 		if want := rc.RunDeadline.UTC().Format(time.RFC3339); info.EffectiveRunDeadline != want {
 			t.Errorf("EffectiveRunDeadline = %q, want %q", info.EffectiveRunDeadline, want)
+		}
+	})
+
+	t.Run("slow startup (>2m, <12m) leaves backstop deadline after sciontool cooperative exit", func(t *testing.T) {
+		project, _ := envFixture(t, envSettingsV1)
+		ctx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
+			Experiments: []string{experiments.AgentPolicyDurationBackstop},
+		})
+		launchTime := time.Now().UTC()
+		rc, _ := startEnvCtxWithInfo(t, ctx, project, func(o *api.StartOptions) {
+			o.InlineConfig = &api.ScionConfig{MaxDuration: "2m"}
+		})
+		// Suppose image pull + clone + hooks take 4m (> 2m cooperative grace,
+		// < 10m startup allowance); sciontool arms its 2m timer at launch+4m
+		// and exits cooperatively at launch+6m. The broker backstop deadline
+		// (launch + 2m + 12m = launch + 14m) must remain strictly after that.
+		sciontoolWouldExit := launchTime.Add(4*time.Minute + 2*time.Minute)
+		if !rc.RunDeadline.After(sciontoolWouldExit) {
+			t.Fatalf("RunDeadline (%v) must be after sciontool cooperative exit (%v) for a 4m slow startup",
+				rc.RunDeadline, sciontoolWouldExit)
 		}
 	})
 

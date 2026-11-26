@@ -52,7 +52,7 @@ type RunConfig struct {
 	// this launch or no positive effective max_duration applies.
 	RunDeadline time.Time
 	// RunDeadlineDuration is the total wall-clock budget (effective
-	// max_duration + api.DurationBackstopGrace) used to set Kubernetes
+	// max_duration + api.DurationBackstopTotalGrace) used to set Kubernetes
 	// pod.Spec.ActiveDeadlineSeconds when RunDeadline is set.
 	RunDeadlineDuration time.Duration
 	ResolvedAuth        *api.ResolvedAuth
