@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -378,11 +379,13 @@ func (s *BrokerDispatchStore) FailUndeliveredMessage(ctx context.Context, id str
 
 // failMessage moves row id to failed with reason, from any state in from
 // (nil: any state but failed and delivered), and reports whether it did.
-// Each transition is one conditional UPDATE, so a racing /deliver finish
-// and this write can never both win. A row still delivering also gets the
-// stored outcome partial-unknown in the same write, so a same-id /deliver
-// replays it instead of answering bound, and the delivery's own finish
-// (compare-and-set on delivering) can no longer change it.
+// It locks, reads, decides, and updates in one transaction (SELECT ... FOR
+// UPDATE on Postgres; single-writer transaction on SQLite) so a racing
+// /deliver bind or finish can never slip between two conditional updates.
+// A row still delivering also gets the stored outcome partial-unknown in
+// the same write, so a same-id /deliver replays it instead of answering
+// bound, and the delivery's own finish (compare-and-set on delivering) can
+// no longer change it.
 func (s *BrokerDispatchStore) failMessage(ctx context.Context, id, reason string, from []string) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -399,40 +402,62 @@ func (s *BrokerDispatchStore) failMessage(ctx context.Context, id, reason string
 		}
 		return false
 	}
-	if allowed(store.MessageDispatchDelivering) {
-		n, err := s.client.Message.Update().
-			Where(message.IDEQ(uid), message.DispatchStateEQ(store.MessageDispatchDelivering)).
+
+	apply := func(c *ent.Client) (bool, error) {
+		q := c.Message.Query().Where(message.IDEQ(uid))
+		if c.Driver().Dialect() == dialect.Postgres {
+			q = q.ForUpdate()
+		}
+		row, err := q.Select(message.FieldDispatchState).Only(ctx)
+		if err != nil {
+			if ent.IsNotFound(err) {
+				return false, nil
+			}
+			return false, mapError(err)
+		}
+		if !allowed(row.DispatchState) {
+			return false, nil
+		}
+		upd := c.Message.Update().
+			Where(message.IDEQ(uid), message.DispatchStateEQ(row.DispatchState)).
 			SetDispatchState(store.MessageDispatchFailed).
 			SetNillableDispatchFailureReason(&reason).
-			SetDeliveryOutcome(store.DeliveryOutcomeUnknownPartial).
 			ClearNotReached().
-			ClearNotReachedAt().
-			Save(ctx)
+			ClearNotReachedAt()
+		if row.DispatchState == store.MessageDispatchDelivering {
+			upd = upd.SetDeliveryOutcome(store.DeliveryOutcomeUnknownPartial)
+		}
+		n, err := upd.Save(ctx)
 		if err != nil {
 			return false, mapError(err)
 		}
-		if n > 0 {
-			return true, nil
+		return n > 0, nil
+	}
+
+	var won bool
+	if s.inTx {
+		won, err = apply(s.client)
+		if err != nil {
+			return false, err
+		}
+	} else {
+		tx, err := s.client.Tx(ctx)
+		if err != nil {
+			return false, mapError(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		won, err = apply(tx.Client())
+		if err != nil {
+			return false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return false, mapError(err)
 		}
 	}
-	q := s.client.Message.Update().Where(message.IDEQ(uid), message.DispatchStateNEQ(store.MessageDispatchDelivering))
-	if from == nil {
-		q = q.Where(message.DispatchStateNotIn(store.MessageDispatchFailed, store.MessageDispatchDelivered))
-	} else {
-		q = q.Where(message.DispatchStateIn(from...))
-	}
-	n, err := q.SetDispatchState(store.MessageDispatchFailed).
-		SetNillableDispatchFailureReason(&reason).
-		ClearNotReached().
-		ClearNotReachedAt().
-		Save(ctx)
-	if err != nil {
-		return false, mapError(err)
-	}
-	if n > 0 && from == nil {
+	if won && from == nil {
 		s.syncHoldMarkerAfterDirectFail(ctx, uid)
 	}
-	return n > 0, nil
+	return won, nil
 }
 
 // CountBrokerDispatchHealth returns the number of in_progress dispatches whose
