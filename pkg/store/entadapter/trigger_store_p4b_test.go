@@ -31,7 +31,9 @@ import (
 
 func TestTriggerStore_WebhookEndpointRoutingHintsRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	client := enttest.NewClient(t)
+	t.Logf("dialect=%s", client.Driver().Dialect())
+	cs := entadapter.NewCompositeStore(client)
 
 	projID := uuid.NewString()
 	require.NoError(t, cs.CreateProject(ctx, &store.Project{
