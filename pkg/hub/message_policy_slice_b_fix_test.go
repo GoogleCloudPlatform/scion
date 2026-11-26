@@ -472,8 +472,12 @@ func TestR2_ShadowOnlyUnmentionedFactsIsolation(t *testing.T) {
 			OnFailed:      store.MessagePolicyOutcomeAdmit,
 		}))
 
-		// Inject ListAgents fault ONLY inside the shadow worker right before shadow eval.
+		// Inject ListAgents fault ONLY inside the shadow worker after foreground
+		// copy delivery completes, so we deterministically test a shadow-only
+		// lookup failure without faulting the foreground request's own lookups.
+		copyDone := make(chan struct{})
 		f.srv.messagePolicyGate.testShadowBeforeEval = func() {
+			<-copyDone
 			f.faultWrapper.failListAgents.Store(true)
 		}
 		defer func() {
@@ -487,6 +491,7 @@ func TestR2_ShadowOnlyUnmentionedFactsIsolation(t *testing.T) {
 			Msg:             "hello @" + m1.Slug,
 			Type:            messages.TypeInstruction,
 		})
+		close(copyDone)
 		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 		assert.Len(t, f.dispatcher.getCalls(), 1, "copy delivery must succeed unaffected by shadow lookup failure")
 
@@ -552,11 +557,10 @@ func TestO1_ExpiryAndRegistryRelease(t *testing.T) {
 	}, m1, "body")
 	require.NoError(t, preflightErr)
 
-	// 2a. Expire context between preflight and ExecuteAgentDM verify -> errCopyAdmissionClosed.
+	// 2a. Expire context between preflight and delivery verify -> errCopyAdmissionClosed.
 	expiredCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	sliceBResetDispatcher(f.dispatcher)
-	_, dmErr := f.srv.ExecuteAgentDM(expiredCtx, &AgentDMInput{
+	verifyErr := f.srv.verifyCopyAdmissionAtDelivery(expiredCtx, &AgentDMInput{
 		SenderAgent:         f.sender,
 		SenderIdentity:      sliceBSendAgentIdent(f.sender),
 		TargetAgent:         m1,
@@ -568,14 +572,14 @@ func TestO1_ExpiryAndRegistryRelease(t *testing.T) {
 		copyAdmission:       out.copyAdmission,
 		copyParentMessageID: "o1-origin-msg",
 	})
-	require.NotNil(t, dmErr)
-	assert.Contains(t, dmErr.Message, errCopyAdmissionClosed.Error())
-	assert.Empty(t, f.dispatcher.getCalls())
+	assert.ErrorIs(t, verifyErr, errCopyAdmissionClosed)
 
-	// 2b. Close admission between preflight and ExecuteAgentDM verify -> errCopyAdmissionClosed.
+	// 2b. Close admission between preflight and ExecuteAgentDM verify -> errCopyAdmissionClosed,
+	// zero delivery, and zero persistence.
+	sliceBResetDispatcher(f.dispatcher)
 	out.copyAdmission.Close()
 	assert.False(t, out.copyAdmission.isOpen(), "Close must release admission from registry")
-	_, dmErr = f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+	_, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
 		SenderAgent:         f.sender,
 		SenderIdentity:      sliceBSendAgentIdent(f.sender),
 		TargetAgent:         m1,
