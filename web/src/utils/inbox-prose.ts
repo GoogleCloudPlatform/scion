@@ -142,6 +142,7 @@ export function formatInboxProseSegments(
           : count;
       const mentions = breakdown?.mentions ?? 0;
       const starred = breakdown?.starredMessages ?? 0;
+      const starredCapped = (breakdown?.starredMessagesCapped ?? 0) > 0;
 
       const segments: ProseSegment[] = [];
       let hasClause = false;
@@ -168,7 +169,7 @@ export function formatInboxProseSegments(
           appendUnlinked(segments, ', ');
         }
         segments.push({
-          text: pluralize(starred, 'starred message', 'starred messages'),
+          text: formatCountNoun(starred, starredCapped, 'starred message', 'starred messages'),
           link: 'chat-starred',
         });
         hasClause = true;

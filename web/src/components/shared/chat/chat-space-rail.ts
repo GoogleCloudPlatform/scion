@@ -480,9 +480,6 @@ export interface RailFilterChangeDetail {
   filter: RailFilter;
 }
 
-/** localStorage key of the selected rail filter (the only thing persisted). */
-export { RAIL_FILTER_STORAGE_KEY };
-
 /**
  * The peer of a DM key for `userId` (the slot that is not the caller's user
  * slot), or null for a malformed key.
@@ -1246,6 +1243,7 @@ export class ScionChatSpaceRail extends LitElement {
       }
 
       .filter-toggle button {
+        flex: auto;
         padding: 0 0.25rem;
         font-size: var(--chat-fs-xs);
       }
@@ -2042,8 +2040,8 @@ export class ScionChatSpaceRail extends LitElement {
           ids.add(space.projectId);
         }
       }
-    } else if (this.spaceFilter !== 'starred') {
-      for (const space of this.getFilteredSpaces()) {
+    } else {
+      for (const space of this.spaces) {
         if (!this.collapsedSpaces.has(space.projectId)) ids.add(space.projectId);
       }
     }

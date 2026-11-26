@@ -25,7 +25,12 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
-import { RAIL_FILTER_STORAGE_KEY, railFilterFromSearch } from '../../../client/chat-routes.js';
+import {
+  RAIL_FILTER_STORAGE_KEY,
+  hydrateRailFilterFromSearch,
+  railFilterFromSearch,
+  type ChatUrlRailFilter,
+} from '../../../client/chat-routes.js';
 import { CHAT_STARRED_MESSAGES_EXPERIMENT } from '../../../client/chat-stars.js';
 import { resetServerFlagStateForTests, setFeatureFlag } from '../../../utils/feature-flags.js';
 import type { ChatSpace, ChatSpaceThread, RailFilterChangeDetail } from './chat-space-rail.js';
@@ -142,6 +147,64 @@ describe('railFilterFromSearch', () => {
     expect(railFilterFromSearch('?filter=all')).toBeNull();
     expect(railFilterFromSearch('?filter=bogus')).toBeNull();
     expect(railFilterFromSearch('')).toBeNull();
+  });
+});
+
+describe('hydrateRailFilterFromSearch (design §7.1, §14.4)', () => {
+  const runHydrate = (search: string, starredEnabled = true) => {
+    let replacedParams: URLSearchParams | null = null;
+    const persisted: ChatUrlRailFilter[] = [];
+    const applied: ChatUrlRailFilter[] = [];
+    const result = hydrateRailFilterFromSearch({
+      search,
+      starredEnabled,
+      replaceSearch: (p) => {
+        replacedParams = p;
+      },
+      persistFilter: (f) => persisted.push(f),
+      applyFilter: (f) => applied.push(f),
+    });
+    return { result, replacedParams, persisted, applied };
+  };
+
+  it('hydrates unread, persists, strips filter, and preserves other query params', () => {
+    const out = runHydrate('?filter=unread&messages=starred');
+    expect(out.result).toBe('unread');
+    expect(out.persisted).toEqual(['unread']);
+    expect(out.applied).toEqual(['unread']);
+    expect(out.replacedParams?.toString()).toBe('messages=starred');
+  });
+
+  it('hydrates mentions, persists, and strips filter', () => {
+    const out = runHydrate('?filter=mentions');
+    expect(out.result).toBe('mentions');
+    expect(out.persisted).toEqual(['mentions']);
+    expect(out.applied).toEqual(['mentions']);
+    expect(out.replacedParams?.toString()).toBe('');
+  });
+
+  it('hydrates starred when flag is on, persists, and strips filter', () => {
+    const out = runHydrate('?filter=starred', true);
+    expect(out.result).toBe('starred');
+    expect(out.persisted).toEqual(['starred']);
+    expect(out.applied).toEqual(['starred']);
+    expect(out.replacedParams?.toString()).toBe('');
+  });
+
+  it('strips starred without persisting or applying when flag is off', () => {
+    const out = runHydrate('?filter=starred', false);
+    expect(out.result).toBeNull();
+    expect(out.persisted).toEqual([]);
+    expect(out.applied).toEqual([]);
+    expect(out.replacedParams?.toString()).toBe('');
+  });
+
+  it('strips and ignores invalid filter values', () => {
+    const out = runHydrate('?filter=bogus');
+    expect(out.result).toBeNull();
+    expect(out.persisted).toEqual([]);
+    expect(out.applied).toEqual([]);
+    expect(out.replacedParams?.toString()).toBe('');
   });
 });
 

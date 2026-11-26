@@ -452,5 +452,36 @@ describe('<scion-page-profile-inbox>', () => {
     expect(
       gateOffLinks.map((a) => ({ text: a.textContent?.trim(), href: a.getAttribute('href') }))
     ).toEqual([{ text: '2 unread conversations', href: '/chat?filter=unread' }]);
+
+    // AC-10: starredMessagesCapped renders N+ on starred clause only, never on badge or unread count.
+    const cappedStarred = makeSummary({
+      chat: makeCat({
+        count: 2,
+        capped: false,
+        href: '/chat',
+        breakdown: {
+          unreadConversations: 2,
+          dms: 0,
+          mentions: 0,
+          starredMessages: 4,
+          starredMessagesCapped: 1,
+          projects: 2,
+        },
+      }),
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(cappedStarred), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await page.updateComplete;
+
+    expect(chatCard?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('2');
+    expect(chatCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
+      '2 unread conversations, 4+ starred messages across 2 projects'
+    );
   });
 });

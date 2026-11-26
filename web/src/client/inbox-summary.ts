@@ -65,7 +65,8 @@ export type InboxBreakdownKey =
   | 'unreadConversations'
   | 'dms'
   | 'mentions'
-  | 'starredMessages';
+  | 'starredMessages'
+  | 'starredMessagesCapped';
 
 export interface InboxCategory<TPreview = unknown> {
   state: InboxCategoryState;

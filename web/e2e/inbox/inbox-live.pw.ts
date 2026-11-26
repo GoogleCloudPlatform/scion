@@ -398,7 +398,7 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       await expect(rail.locator('.thread-item .thread-name', { hasText: 'plain-' })).toHaveCount(0);
       await expect(rail.locator('.dm-section')).toHaveCount(0);
 
-      // AC-8 extended: toolbar does not overflow at a 200px rail width.
+      // AC-8 extended: toolbar and individual filter button labels do not overflow or clip at a 200px rail width.
       const overflow200 = await page.evaluate(() => {
         const chatPage = document.querySelector('scion-page-chat');
         const railWrap = chatPage?.shadowRoot?.querySelector<HTMLElement>('.v2-rail');
@@ -410,15 +410,30 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         const railEl = chatPage?.shadowRoot?.querySelector('scion-chat-space-rail');
         const toolbar = railEl?.shadowRoot?.querySelector<HTMLElement>('.rail-toolbar');
         const subfilter = railEl?.shadowRoot?.querySelector<HTMLElement>('.rail-subfilter');
+        const buttons = Array.from(
+          railEl?.shadowRoot?.querySelectorAll<HTMLElement>('.filter-toggle button') ?? []
+        );
+        const buttonOverflows = buttons.map((b) => ({
+          label: b.textContent?.trim() ?? '',
+          scrollWidth: b.scrollWidth,
+          clientWidth: b.clientWidth,
+          clipped: b.scrollWidth > b.clientWidth + 1,
+        }));
         return {
           railWidth: railEl?.getBoundingClientRect().width ?? 0,
           toolbarOverflow: toolbar ? toolbar.scrollWidth > toolbar.clientWidth + 1 : true,
           subfilterOverflow: subfilter ? subfilter.scrollWidth > subfilter.clientWidth + 1 : true,
+          buttonOverflows,
         };
       });
       expect(overflow200.railWidth).toBeLessThanOrEqual(201);
       expect(overflow200.toolbarOverflow).toBe(false);
       expect(overflow200.subfilterOverflow).toBe(false);
+      expect(overflow200.buttonOverflows.length).toBeGreaterThanOrEqual(3);
+      expect(
+        overflow200.buttonOverflows.every((b) => !b.clipped),
+        JSON.stringify(overflow200.buttonOverflows)
+      ).toBe(true);
 
       // Hydrate ?filter=starred directly -> Starred active, chip hidden, param stripped.
       await page.goto('/chat?filter=starred', { waitUntil: 'domcontentloaded' });

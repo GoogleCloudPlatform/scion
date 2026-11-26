@@ -48,12 +48,11 @@ import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/
 import { browserPath, replaceSearch, stripBasePath } from '../../client/navigation.js';
 import { agentIndexOf, agentStore } from '../../client/agent-store.js';
 import {
-  CHAT_RAIL_FILTER_PARAM,
   RAIL_FILTER_STORAGE_KEY,
   dmPeerFromKey,
+  hydrateRailFilterFromSearch,
   isChatConversationPath,
   messageFilterFromSearch,
-  railFilterFromSearch,
   searchWithMessageFilter,
   type ChatMessageFilter,
   type ChatUrlRailFilter,
@@ -2568,27 +2567,29 @@ export class ScionPageChat extends LitElement {
    * `replaceSearch` (design §7.1, §14.4). Invalid values are ignored and stripped.
    */
   private hydrateRailFilterFromUrl(): void {
-    const params = new URLSearchParams(window.location.search);
-    if (!params.has(CHAT_RAIL_FILTER_PARAM)) return;
-    const requested = railFilterFromSearch(window.location.search);
-    params.delete(CHAT_RAIL_FILTER_PARAM);
-    replaceSearch(params);
-    if (!requested) return;
-    if (requested === 'starred' && !starredMessagesEnabled()) return;
-    try {
-      localStorage.setItem(RAIL_FILTER_STORAGE_KEY, requested);
-    } catch {
-      // Ignore storage errors.
-    }
-    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
-      | (HTMLElement & { applyUrlFilter?: (f: ChatUrlRailFilter) => void })
-      | null;
-    if (rail?.applyUrlFilter) {
-      rail.applyUrlFilter(requested);
-      this._pendingUrlRailFilter = null;
-    } else {
-      this._pendingUrlRailFilter = requested;
-    }
+    hydrateRailFilterFromSearch({
+      search: window.location.search,
+      starredEnabled: starredMessagesEnabled(),
+      replaceSearch,
+      persistFilter: (filter) => {
+        try {
+          localStorage.setItem(RAIL_FILTER_STORAGE_KEY, filter);
+        } catch {
+          // Ignore storage errors.
+        }
+      },
+      applyFilter: (filter) => {
+        const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+          | (HTMLElement & { applyUrlFilter?: (f: ChatUrlRailFilter) => void })
+          | null;
+        if (rail?.applyUrlFilter) {
+          rail.applyUrlFilter(filter);
+          this._pendingUrlRailFilter = null;
+        } else {
+          this._pendingUrlRailFilter = filter;
+        }
+      },
+    });
   }
 
   private parseV2Route(): void {

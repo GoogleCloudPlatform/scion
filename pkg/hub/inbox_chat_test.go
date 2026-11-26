@@ -876,14 +876,19 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 		InboxBreakdownUnreadConversations: 1,
 	}, uatResp.Categories[InboxCategoryChat].Breakdown)
 
-	// Case 4: Scan budget cap sets chat.capped = true (4 starred conversations > budget 2).
+	// Case 4: Scan budget cap sets breakdown.starredMessagesCapped = 1 without
+	// setting chat.capped or summary.totalCapped (AC-10: starred never changes badge total).
 	f.srv.inboxChatStarredScanBudgetForTest = 2
 	capResp := h.decodeSummary(doRequestAsUser(t, f.srv, memberUser, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", nil))
-	assert.True(t, capResp.Categories[InboxCategoryChat].Capped)
-	assert.True(t, capResp.TotalCapped)
+	assert.Equal(t, 2, capResp.Total)
+	assert.False(t, capResp.TotalCapped, "starred scan cap must not set summary.totalCapped (AC-10)")
+	assert.False(t, capResp.Categories[InboxCategoryChat].Capped, "starred scan cap must not set chat.capped (AC-10)")
+	assert.Equal(t, 1, capResp.Categories[InboxCategoryChat].Breakdown[InboxBreakdownStarredMessagesCapped])
+	assert.Greater(t, capResp.Categories[InboxCategoryChat].Breakdown[InboxBreakdownStarredMessages], 0)
 	f.srv.inboxChatStarredScanBudgetForTest = 0
 
-	// Case 5: AC-13: web.chat_starred_messages gate off omits starredMessages and excludes projC.
+	// Case 5: AC-13: web.chat_starred_messages gate off omits starredMessages,
+	// starredMessagesCapped, and excludes projC.
 	setExperimentOverrides(t, f.srv, map[string]bool{
 		experiments.InboxDashboard:      true,
 		experiments.ChatStarredMessages: false,
@@ -891,11 +896,159 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 	gateOffResp := h.decodeSummary(doRequestAsUser(t, f.srv, memberUser, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", nil))
 	gateOffChat := gateOffResp.Categories[InboxCategoryChat]
 	_, hasStarredKey := gateOffChat.Breakdown[InboxBreakdownStarredMessages]
+	_, hasStarredCapKey := gateOffChat.Breakdown[InboxBreakdownStarredMessagesCapped]
 	assert.False(t, hasStarredKey, "starredMessages must be omitted when web.chat_starred_messages is off")
+	assert.False(t, hasStarredCapKey, "starredMessagesCapped must be omitted when web.chat_starred_messages is off")
 	assert.Equal(t, map[string]int{
 		InboxBreakdownDMs:                 1,
 		InboxBreakdownMentions:            0,
 		InboxBreakdownProjects:            2,
 		InboxBreakdownUnreadConversations: 2,
 	}, gateOffChat.Breakdown)
+}
+
+// TestUserMeInboxSummary_ChatStarredHiddenAgentDMProjectNotDisclosed verifies
+// that a starred read agent DM whose peer agent belongs to a project hidden
+// from the caller counts the star without disclosing the hidden project in
+// breakdown.projects, for both session and UAT callers.
+func TestUserMeInboxSummary_ChatStarredHiddenAgentDMProjectNotDisclosed(t *testing.T) {
+	f := newChatFixture(t)
+	setExperimentOverrides(t, f.srv, map[string]bool{
+		experiments.InboxDashboard:      true,
+		experiments.ChatStarredMessages: true,
+	})
+	ctx := context.Background()
+
+	hiddenProj := &store.Project{
+		ID:      api.NewUUID(),
+		Name:    "Hidden Starred DM Project",
+		Slug:    "hidden-starred-dm-project",
+		Created: time.Now().UTC(),
+		Updated: time.Now().UTC(),
+	}
+	require.NoError(t, f.s.CreateProject(ctx, hiddenProj))
+
+	hiddenAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "Hidden Starred Bot",
+		Slug:      "hidden-starred-bot",
+		ProjectID: hiddenProj.ID,
+		Phase:     "running",
+		Created:   time.Now().UTC(),
+		Updated:   time.Now().UTC(),
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, hiddenAgent))
+
+	h := &inboxChatTestHelper{t: t, srv: f.srv, s: f.s, wcs: f.wcs}
+	stars := messageStarStoreFrom(f.wcs)
+	require.NotNil(t, stars)
+
+	dmKey, dmMsgID := h.seedAgentDM(f.member, hiddenAgent, "starred hidden agent dm", time.Now().UTC().Truncate(time.Second))
+	require.NoError(t, f.wcs.SetReadState(ctx, f.member, dmKey, dmMsgID))
+	_, _, err := stars.AddMessageStar(ctx, f.member, StarTarget{
+		MessageID: dmMsgID,
+		ProjectID: hiddenProj.ID,
+		Selector: StarSelector{
+			ConversationKey: dmKey,
+			Channel:         "web",
+			ThreadID:        dmKey,
+		},
+	})
+	require.NoError(t, err)
+
+	// Session caller: DM star is counted, hidden project is NOT counted in projects.
+	memberUser, err := f.s.GetUser(ctx, f.member)
+	require.NoError(t, err)
+	sessResp := h.decodeSummary(doRequestAsUser(t, f.srv, memberUser, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", nil))
+	sessChat := sessResp.Categories[InboxCategoryChat]
+	assert.Equal(t, InboxStateOK, sessChat.State)
+	assert.Equal(t, 0, sessChat.Count)
+	assert.Equal(t, 1, sessChat.Breakdown[InboxBreakdownStarredMessages])
+	assert.Equal(t, 0, sessChat.Breakdown[InboxBreakdownProjects], "hidden agent DM project must not be counted in projects")
+
+	// Hub-bounded UAT caller: hidden project is also never counted in projects.
+	tokHub := f.mint(t, f.member, hubBoundary(), "inbox:read", "project:read", "agent:read")
+	uatResp := h.decodeSummary(f.call(t, tokHub, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", nil))
+	uatChat := uatResp.Categories[InboxCategoryChat]
+	assert.Equal(t, InboxStateOK, uatChat.State)
+	assert.Equal(t, 0, uatChat.Count)
+	assert.Equal(t, 0, uatChat.Breakdown[InboxBreakdownProjects], "UAT must not disclose hidden agent DM project in projects")
+}
+
+type inboxChatStarFaultWebChatStore struct {
+	WebChatStore
+	MessageStarStore
+	starErr error
+}
+
+func (s *inboxChatStarFaultWebChatStore) ListStarredConversationCandidates(ctx context.Context, f StarredConversationFilter) (StarredConversationPage, error) {
+	if s.starErr != nil {
+		return StarredConversationPage{}, s.starErr
+	}
+	return s.MessageStarStore.ListStarredConversationCandidates(ctx, f)
+}
+
+// TestUserMeInboxSummary_ChatStarredScanErrorDegradesGracefully verifies that
+// a failure or deadline in ListStarredConversationCandidates logs and omits
+// starred breakdown keys while keeping the chat category ok with exact unread.
+func TestUserMeInboxSummary_ChatStarredScanErrorDegradesGracefully(t *testing.T) {
+	srv, s, wcs, proj := setupSharedChatTest(t)
+	setExperimentOverrides(t, srv, map[string]bool{
+		experiments.InboxDashboard:      true,
+		experiments.ChatStarredMessages: true,
+	})
+	ctx := context.Background()
+
+	me := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "star-fault@example.com",
+		DisplayName: "Star Fault",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateUser(ctx, me))
+	bindProjectMember(t, s, proj.ID, me.ID)
+
+	h := &inboxChatTestHelper{t: t, srv: srv, s: s, wcs: wcs}
+	h.seedThread(proj, "unread-topic", api.NewUUID(), "hello", time.Now().UTC().Truncate(time.Second), []string{me.ID})
+
+	stars := messageStarStoreFrom(wcs)
+	require.NotNil(t, stars)
+	faultWCS := &inboxChatStarFaultWebChatStore{
+		WebChatStore:     wcs,
+		MessageStarStore: stars,
+		starErr:          errors.New("star store unavailable"),
+	}
+	srv.SetWebChatStore(faultWCS)
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "internal error", err: errors.New("star store unavailable")},
+		{name: "deadline exceeded", err: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			faultWCS.starErr = tc.err
+			resp := h.decodeSummary(doRequestAsUser(t, srv, me, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", nil))
+			assert.Equal(t, 1, resp.Total)
+			assert.False(t, resp.TotalCapped)
+			chatCat := resp.Categories[InboxCategoryChat]
+			assert.Equal(t, InboxStateOK, chatCat.State)
+			assert.Equal(t, 1, chatCat.Count)
+			assert.False(t, chatCat.Capped)
+			assert.True(t, chatCat.CountsTowardTotal)
+			_, hasStarred := chatCat.Breakdown[InboxBreakdownStarredMessages]
+			_, hasStarredCap := chatCat.Breakdown[InboxBreakdownStarredMessagesCapped]
+			assert.False(t, hasStarred, "starredMessages must be omitted on starred scan error")
+			assert.False(t, hasStarredCap, "starredMessagesCapped must be omitted on starred scan error")
+			assert.Equal(t, map[string]int{
+				InboxBreakdownDMs:                 0,
+				InboxBreakdownMentions:            1,
+				InboxBreakdownProjects:            1,
+				InboxBreakdownUnreadConversations: 1,
+			}, chatCat.Breakdown)
+		})
+	}
 }

@@ -98,6 +98,7 @@ func formatInboxProseSegments(category string, count int, capped bool, breakdown
 		}
 		mentions := breakdown[hubclient.InboxBreakdownMentions]
 		starred := breakdown[hubclient.InboxBreakdownStarredMessages]
+		starredCapped := breakdown[hubclient.InboxBreakdownStarredMessagesCapped] > 0
 		projects := breakdown[hubclient.InboxBreakdownProjects]
 
 		var segments []inboxProseSegment
@@ -124,7 +125,7 @@ func formatInboxProseSegments(category string, count int, capped bool, breakdown
 				segments = appendUnlinkedSegment(segments, ", ")
 			}
 			segments = append(segments, inboxProseSegment{
-				Text: pluralizeInbox(starred, "starred message", "starred messages"),
+				Text: formatCountNoun(starred, starredCapped, "starred message", "starred messages"),
 				Link: inboxLinkChatStarred,
 			})
 			hasClause = true

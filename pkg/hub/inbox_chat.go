@@ -114,17 +114,23 @@ func (s *Server) inboxChatCategory(ctx context.Context, v inboxViewer, previews 
 		InboxBreakdownUnreadConversations: detail.counts.Conversations,
 	}
 
-	capped := false
 	if s.experimentEnabled(experiments.ChatStarredMessages) {
 		if stars := messageStarStoreFrom(wcs); stars != nil {
 			starredCount, starredProjects, starredCapped, err := s.inboxChatStarredSummary(ctx, v, wcs, stars)
 			if err != nil {
-				return inboxChatError(ctx, err)
-			}
-			breakdown[InboxBreakdownStarredMessages] = starredCount
-			capped = starredCapped
-			for pid := range starredProjects {
-				seenProjects[pid] = struct{}{}
+				slog.Warn("inbox summary: chat starred scan failed; omitting starred breakdown",
+					"error_code", inboxCategoryErrorCode(ctx, err),
+					"error", err)
+			} else {
+				breakdown[InboxBreakdownStarredMessages] = starredCount
+				if starredCapped {
+					breakdown[InboxBreakdownStarredMessagesCapped] = 1
+				}
+				for pid := range starredProjects {
+					if detail.visibleSpaces[pid] != nil {
+						seenProjects[pid] = struct{}{}
+					}
+				}
 			}
 		}
 	}
@@ -138,7 +144,7 @@ func (s *Server) inboxChatCategory(ctx context.Context, v inboxViewer, previews 
 	return InboxCategory{
 		State:             InboxStateOK,
 		Count:             detail.counts.Conversations,
-		Capped:            capped,
+		Capped:            false,
 		CountsTowardTotal: true,
 		Href:              inboxChatHref,
 		Previews:          items,
