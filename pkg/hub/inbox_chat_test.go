@@ -728,8 +728,6 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 
 	projA, err := f.s.GetProject(ctx, f.projA)
 	require.NoError(t, err)
-	projB, err := f.s.GetProject(ctx, f.projB)
-	require.NoError(t, err)
 	bindProjectMember(t, f.s, f.projB, f.member)
 
 	// projC: readable by member, has starred messages only (no unread).
