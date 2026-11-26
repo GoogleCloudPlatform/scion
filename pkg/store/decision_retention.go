@@ -136,7 +136,8 @@ type DecisionRetentionStore interface {
 	// settled predicate (replaced, withdrawn, dismissed, or decided with a
 	// direct answer), and has last activity strictly older than its project's
 	// cutoff. On Postgres, all decision rows for messageIDs are locked FOR
-	// UPDATE ordered by id before re-checking eligibility. Eligible answers
+	// UPDATE ordered by (key_norm, version, asker_agent_id, id) before
+	// re-checking eligibility. Eligible answers
 	// and decisions are deleted and decision_facet_entries are decremented,
 	// pruned at ref_count <= 0, and recomputed when the purged row was the
 	// newest contributor. Chat messages and decision_key_counters are kept.

@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -412,5 +413,126 @@ func TestDecisionRetentionRace_DeterministicAnswersIndexerSnapshotVsPurge(t *tes
 	pr2, err := st.PurgeDecisionMessages(ctx, []string{pUnidx.Message.ID}, map[string]time.Time{f.projectID: cutoff})
 	require.NoError(t, err)
 	assert.Equal(t, 1, pr2.PurgedMessages)
+	assertFacetSummaryMatchesRecompute(t, ctx, f.cs.client)
+}
+
+// TestDecisionRetentionRace_DeterministicPurgeVsRepostVersionLockOrder
+// deterministically exercises the multi-version lock-order interleaving:
+// an agent key K has 6 versions (v1..v6), each answered and replaced on its
+// own message, back-dated 60 days, with a later version's UUID sorting below
+// v1's UUID. Holding v1's FOR UPDATE lock while both PurgeDecisionMessages
+// (all 6 messages) and a --update repost of K queue up would deadlock with
+// 40P01 if purge locked by id while loadKeyStates locked by (key_norm, version).
+// With purge locking in (key_norm, version, asker_agent_id, id) order, both
+// serialize on v1 and succeed with zero deadlocks.
+func TestDecisionRetentionRace_DeterministicPurgeVsRepostVersionLockOrder(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	oldTime := time.Now().UTC().Add(-60 * 24 * time.Hour).Truncate(time.Microsecond)
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	const versions = 6
+	var (
+		key    string
+		msgIDs []string
+		rowIDs []string
+	)
+	// Seed 6 versions of a key; guarantee a later version's UUID sorts below
+	// v1's UUID so an id-ordered purge would lock it before blocking on v1.
+	for attempt := 0; attempt < 32; attempt++ {
+		key = "LOCK-" + uuid.NewString()[:8]
+		msgIDs = make([]string, 0, versions)
+		rowIDs = make([]string, 0, versions)
+		for v := 0; v < versions; v++ {
+			p := f.prompt("", v > 0, yesNo(key, "v"))
+			p.Message.ThreadID = "topic-race-lockorder"
+			res, err := f.cs.CreateDecisionPrompt(ctx, p)
+			require.NoError(t, err)
+			rowID := res.Decisions[0].RowID
+			_, _, err = f.cs.RecordAnswer(ctx, f.answer(rowID, "1", "user-1", ""))
+			require.NoError(t, err)
+			msgIDs = append(msgIDs, p.Message.ID)
+			rowIDs = append(rowIDs, rowID)
+		}
+		hasLowerLaterID := false
+		for v := 1; v < versions; v++ {
+			if rowIDs[v] < rowIDs[0] {
+				hasLowerLaterID = true
+				break
+			}
+		}
+		if hasLowerLaterID {
+			break
+		}
+		if attempt == 31 {
+			t.Fatal("failed to generate a later version UUID sorting below v1")
+		}
+	}
+
+	// Back-date all 6 versions (created_at, decided_at, replaced_at, answer.created_at)
+	// and rebuild facet entries so all 6 messages are purge-eligible.
+	db := clientDB(f.cs.client)
+	for v, rowID := range rowIDs {
+		uid := uuid.MustParse(rowID)
+		ts := oldTime.Add(time.Duration(v) * time.Minute)
+		_, err := db.ExecContext(ctx, "UPDATE decisions SET created_at = $1 WHERE id = $2", ts, uid)
+		require.NoError(t, err)
+		upd := f.cs.client.Decision.UpdateOneID(uid).SetDecidedAt(ts)
+		if v < versions-1 {
+			upd = upd.SetReplacedAt(ts)
+		}
+		require.NoError(t, upd.Exec(ctx))
+		_, err = db.ExecContext(ctx, "UPDATE decision_answers SET created_at = $1 WHERE decision_row_id = $2", ts, uid)
+		require.NoError(t, err)
+	}
+	_, err := f.cs.client.DecisionFacetEntry.Delete().Exec(ctx)
+	require.NoError(t, err)
+	require.NoError(t, f.cs.client.Decision.Update().SetFacetIndexed(false).Exec(ctx))
+	require.NoError(t, f.cs.client.DecisionAnswer.Update().SetFacetIndexed(false).Exec(ctx))
+	drainDecisionIndex(t, ctx, f.cs, 100)
+
+	// Hold FOR UPDATE on v1 first.
+	holdTx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holdTx.Rollback() })
+	_, err = holdTx.Decision.Query().
+		Where(decision.IDEQ(uuid.MustParse(rowIDs[0]))).
+		ForUpdate().
+		Only(ctx)
+	require.NoError(t, err)
+
+	st := f.cs.DecisionRetention()
+	purgeDone := make(chan error, 1)
+	go func() {
+		_, err := st.PurgeDecisionMessages(ctx, msgIDs, map[string]time.Time{f.projectID: cutoff})
+		purgeDone <- err
+	}()
+
+	// Wait until purge is blocked on v1 (not holding a later version lock ahead of v1).
+	select {
+	case err := <-purgeDone:
+		t.Fatalf("purge did not block on v1 lock: %v", err)
+	case <-time.After(blockedFor):
+	}
+
+	repostDone := make(chan error, 1)
+	go func() {
+		p := f.prompt("", true, yesNo(key, "v7"))
+		p.Message.ThreadID = "topic-race-lockorder"
+		_, err := f.cs.CreateDecisionPrompt(ctx, p)
+		repostDone <- err
+	}()
+
+	select {
+	case err := <-repostDone:
+		t.Fatalf("repost did not block on v1 lock: %v", err)
+	case <-time.After(blockedFor):
+	}
+
+	// Release v1: both purge and repost must succeed without 40P01 deadlock.
+	require.NoError(t, holdTx.Rollback())
+	require.NoError(t, <-purgeDone, "purge must succeed without lock-order deadlock")
+	require.NoError(t, <-repostDone, "repost must succeed without lock-order deadlock")
 	assertFacetSummaryMatchesRecompute(t, ctx, f.cs.client)
 }

@@ -208,20 +208,20 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 	res := store.DecisionRetentionPurgeResult{ByProject: map[string]store.DecisionRetentionCounts{}}
 	client := txCS.client
 
-	// 1. Lock all decision rows for the candidate messages in deterministic id
-	// order (FOR UPDATE on Postgres) so we serialize cleanly with live writers
-	// and the facet indexer (design-8984 §3.4).
-	//
-	// Note on lock ordering vs multi-key --update repost: purge locks decisions
-	// by id, whereas loadKeyStates in CreateDecisionPrompt locks by
-	// (key_norm, version). If a multi-key repost overlaps a purge of the same
-	// rows on Postgres, Postgres may abort one transaction with SQLSTATE 40P01
-	// (deadlock). This is rare (only old settled prompts being replaced by
-	// --update during a purge tick) and self-healing: the failed retention tick
-	// retries on the next interval, and the agent retries the repost.
+	// 1. Lock all decision rows for the candidate messages in deterministic
+	// (key_norm, version, asker_agent_id, id) order (FOR UPDATE on Postgres).
+	// This matches the lock acquisition order of every live decision writer
+	// (loadKeyStates on CreateDecisionPrompt, recordAnswerSetTx,
+	// recordInterpretedAnswersTx, withdrawDecisionsTx, and dismissDecisionsTx),
+	// preventing 40P01 deadlocks when a purge overlaps a repost or answer.
 	decQ := client.Decision.Query().
 		Where(decision.MessageIDIn(msgUUIDs...)).
-		Order(ent.Asc(decision.FieldID))
+		Order(
+			ent.Asc(decision.FieldKeyNorm),
+			ent.Asc(decision.FieldVersion),
+			ent.Asc(decision.FieldAskerAgentID),
+			ent.Asc(decision.FieldID),
+		)
 	if txCS.isPostgres() {
 		decQ = decQ.ForUpdate()
 	}
