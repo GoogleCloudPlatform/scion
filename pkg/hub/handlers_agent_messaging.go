@@ -2654,23 +2654,16 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	if req.Surface != "" && req.ExternalRef != "" {
-		var keyOpts []messaging.ConversationByKeyOption
-		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
-		if req.ParentRef != "" {
-			keyOpts = append(keyOpts, messaging.WithParentRef(req.ParentRef))
+		if _, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, req.ExternalRef); keyErr != nil {
+			messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
+			ValidationError(w, "invalid external_ref for thread conversation", nil)
+			return
 		}
-		if agent.ID != "" {
-			agentID := agent.ID
-			keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
-		}
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-		}
-		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
-			ctx, s.store, s.messageLog, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
+		convResult, convErr := s.resolveBrokerInboundConversation(
+			ctx, s.messageLog, agent.ProjectID,
+			req.Surface, req.ExternalRef, req.ParentRef, "", agent.ID,
+			structuredMsg.Channel, structuredMsg.ThreadID,
+		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
 				logReferenceRefused(ctx, logging.RequestPath(r), reasonExternalRefOfOtherProject, GetIdentityFromContext(ctx))

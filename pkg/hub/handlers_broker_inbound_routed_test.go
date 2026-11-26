@@ -890,3 +890,31 @@ func TestHandleBrokerInboundRouted_LegacyChannelThreadIDOnly(t *testing.T) {
 	assert.Equal(t, "slack", msgs.Items[0].Channel)
 	assert.Equal(t, "C9999:1700000002.000300", msgs.Items[0].ThreadID)
 }
+
+func TestHandleBrokerInboundRouted_StripsClientSuppliedConversation(t *testing.T) {
+	t.Parallel()
+	env := setupRoutedTestEnv(t)
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "attempt spoofed conversation on routed inbound",
+			Type:    messages.TypeInstruction,
+			Conversation: &messages.Conversation{
+				Surface:     "slack",
+				ExternalRef: "C_OTHER:1",
+			},
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	calls := env.dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.Nil(t, calls[0].StructuredMessage.Conversation,
+		"client-supplied Conversation must be stripped on /api/v1/broker/inbound/routed")
+}

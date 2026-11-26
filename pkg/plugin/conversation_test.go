@@ -211,3 +211,13 @@ func TestInboundConversationJSONEmbedding(t *testing.T) {
 	assert.Equal(t, "C0123", decoded["parent_ref"])
 	assert.Equal(t, "#eng", decoded["display_name"])
 }
+
+func TestHubSupportsInboundConversation(t *testing.T) {
+	assert.False(t, HubSupportsInboundConversation(nil))
+	assert.False(t, HubSupportsInboundConversation(map[string]string{}))
+	assert.False(t, HubSupportsInboundConversation(map[string]string{ConfigKeyHubInboundConversation: ""}))
+	assert.False(t, HubSupportsInboundConversation(map[string]string{ConfigKeyHubInboundConversation: "0"}))
+	assert.False(t, HubSupportsInboundConversation(map[string]string{ConfigKeyHubInboundConversation: "false"}))
+	assert.True(t, HubSupportsInboundConversation(map[string]string{ConfigKeyHubInboundConversation: "1"}))
+	assert.True(t, HubSupportsInboundConversation(map[string]string{ConfigKeyHubInboundConversation: "true"}))
+}

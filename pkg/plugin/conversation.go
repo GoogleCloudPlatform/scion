@@ -39,11 +39,15 @@ import "github.com/GoogleCloudPlatform/scion/pkg/messages"
 //   - On inbound HTTP delivery (/api/v1/broker/inbound and
 //     /api/v1/broker/inbound/routed), embed InboundConversation (surface,
 //     external_ref, optional parent_ref and display_name) at the top level of
-//     the request JSON for threaded/channel conversations. The hub maps
-//     (surface, external_ref) onto the canonical thread:<project>:<ref> key
-//     so inbound and outbound threads share one conversation. 1:1 surface DMs
-//     without a thread omit external_ref so Phase 5 resolves the shared direct
-//     dm: conversation.
+//     the request JSON ONLY when HubSupportsInboundConversation(config) is true
+//     (hub passes hub_inbound_conversation="1" in Configure). Against older
+//     hubs where the flag is absent, plugins omit those fields so inbound falls
+//     through to legacy Phase 5 resolution without creating raw-keyed rows.
+//   - When (surface, external_ref) is sent to a P4+ hub, the hub maps it onto
+//     the canonical thread:<project>:<ref> key (with a read-only fallback to
+//     pre-P4 Phase 5 keys when no row exists under the new key) so inbound and
+//     outbound threads share one conversation. 1:1 surface DMs without a thread
+//     omit external_ref so Phase 5 resolves the shared direct dm: conversation.
 //   - Exception: scion-chat-app delivers inbound messages through the
 //     user-authenticated agent-message API (/api/v1/agents/{id}/message)
 //     rather than /api/v1/broker/inbound and is therefore a documented
@@ -54,6 +58,23 @@ type ConversationTarget struct {
 	ExternalRef    string
 	ParentRef      string
 	DisplayName    string
+}
+
+// ConfigKeyHubInboundConversation is the Configure map key injected by hubs
+// that support Phase 11 inbound conversation key alignment (mapping top-level
+// surface + external_ref onto canonical thread:<project>:<external_ref> keys).
+// Broker plugins MUST populate top-level InboundConversation fields only when
+// HubSupportsInboundConversation(config) returns true.
+const ConfigKeyHubInboundConversation = "hub_inbound_conversation"
+
+// HubSupportsInboundConversation reports whether a plugin Configure map
+// advertises hub support for Phase 11 inbound conversation addressing.
+func HubSupportsInboundConversation(config map[string]string) bool {
+	if config == nil {
+		return false
+	}
+	v := config[ConfigKeyHubInboundConversation]
+	return v == "1" || v == "true"
 }
 
 // InboundConversation carries the top-level conversation resolution fields

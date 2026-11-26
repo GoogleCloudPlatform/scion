@@ -1039,6 +1039,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 									"hmac_key":    secretKey,
 									"broker_id":   brokerID,
 									"plugin_name": bt,
+									scionplugin.ConfigKeyHubInboundConversation: "1",
 								}
 								// Inject project slug map so hub-managed plugins can resolve
 								// human-readable project names without user-level API access.

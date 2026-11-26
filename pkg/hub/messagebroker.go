@@ -344,6 +344,142 @@ func deriveBrokerInboundThreadKey(projectID, externalRef string) (string, error)
 	return key, nil
 }
 
+// resolveBrokerInboundConversation resolves or creates a Phase 11 external
+// thread conversation under the canonical key thread:<projectID>:<externalRef>.
+//
+// Pre-P4 continuity (read-only fallback):
+//  1. If a conversation already exists under the new key (surface, newKey),
+//     the new key wins.
+//  2. Otherwise, check read-only whether a pre-P4 Phase-5 row exists under
+//     legacy keys derived from legacyThreadID/legacyChannel (Slack
+//     thread:<p>:<ts>, Teams thread:<p>:<replyToId> and stripped parent
+//     thread:<p>:<parentRef>, Telegram forum thread:<p>:<topic>). If found and
+//     owned by projectID (and not deleted), reuse it without creating any row.
+//  3. When neither exists (or when the new key exists), resolve-or-create
+//     under the new key.
+func (s *Server) resolveBrokerInboundConversation(
+	ctx context.Context,
+	log *slog.Logger,
+	projectID, surface, externalRef, parentRef, displayName, defaultAgentID string,
+	legacyChannel, legacyThreadID string,
+) (*messaging.ConversationResult, error) {
+	newKey, keyErr := deriveBrokerInboundThreadKey(projectID, externalRef)
+	if keyErr != nil {
+		return nil, keyErr
+	}
+
+	// Step 1 & 2: Check whether the new key already exists. Only when it does
+	// NOT exist do we attempt a read-only lookup for pre-P4 Phase-5 rows.
+	existingNew, lookupErr := s.store.GetConversationByExternalRef(ctx, surface, newKey)
+	if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+		return nil, lookupErr
+	}
+	if errors.Is(lookupErr, store.ErrNotFound) || existingNew == nil {
+		if legacyConv, err := s.lookupLegacyPhase5Conversation(ctx, log, projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID); err != nil {
+			return nil, err
+		} else if legacyConv != nil {
+			return &messaging.ConversationResult{
+				ConversationID: legacyConv.ID,
+				ExternalRef:    legacyConv.ExternalRef,
+				Kind:           legacyConv.Kind,
+				Surface:        legacyConv.Surface,
+				DisplayName:    legacyConv.DisplayName,
+			}, nil
+		}
+	}
+
+	// Step 3: Resolve or create under the canonical new key.
+	var keyOpts []messaging.ConversationByKeyOption
+	keyOpts = append(keyOpts, messaging.WithSurface(surface))
+	if parentRef != "" {
+		keyOpts = append(keyOpts, messaging.WithParentRef(parentRef))
+	}
+	if displayName != "" {
+		keyOpts = append(keyOpts, messaging.WithDisplayName(displayName))
+	}
+	if defaultAgentID != "" {
+		aid := defaultAgentID
+		keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&aid))
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs != nil {
+		keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+	}
+	return messaging.ResolveOrCreateConversationByKey(
+		ctx, s.store, log, newKey, "group", &projectID, keyOpts...)
+}
+
+// lookupLegacyPhase5Conversation performs a strictly read-only lookup for a
+// pre-P4 Phase-5 conversation row matching legacyThreadID (or Teams stripped
+// parentRef). It never creates a row.
+func (s *Server) lookupLegacyPhase5Conversation(
+	ctx context.Context,
+	log *slog.Logger,
+	projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID string,
+) (*store.Conversation, error) {
+	type candidate struct {
+		surface string
+		key     string
+	}
+	var candidates []candidate
+	seen := map[candidate]bool{}
+	addCandidate := func(surf, threadID string) {
+		if surf == "" || threadID == "" || strings.HasPrefix(threadID, "dm:") {
+			return
+		}
+		key, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+		if err != nil || key == newKey {
+			return
+		}
+		c := candidate{surface: surf, key: key}
+		if !seen[c] {
+			seen[c] = true
+			candidates = append(candidates, c)
+		}
+	}
+
+	legacySurface := surface
+	if legacyChannel != "" {
+		if mapped := messaging.ChannelToSurface(legacyChannel, log); mapped != "" {
+			legacySurface = mapped
+		}
+	}
+	if legacyThreadID != "" {
+		addCandidate(legacySurface, legacyThreadID)
+		if legacySurface != surface {
+			addCandidate(surface, legacyThreadID)
+		}
+	}
+	// Teams pre-P4 channel posts stored thread:<project>:<stripped conv id>
+	// (without ";messageid=...") while P4 sends the full conv id with parentRef
+	// equal to the stripped id.
+	if surface == "teams" && parentRef != "" && strings.Contains(externalRef, ";messageid=") {
+		addCandidate(legacySurface, parentRef)
+		if legacySurface != surface {
+			addCandidate(surface, parentRef)
+		}
+	}
+
+	for _, c := range candidates {
+		conv, err := s.store.GetConversationByExternalRef(ctx, c.surface, c.key)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if conv == nil || conv.DeletedAt != nil {
+			continue
+		}
+		if conv.ProjectID != nil && *conv.ProjectID == projectID {
+			return conv, nil
+		}
+	}
+	return nil, nil
+}
+
 // enrichConversation populates msg.Conversation from the conversations table
 // when msg.ConversationID is set. It always overwrites any pre-existing
 // Conversation from the authoritative store row (translating stored thread

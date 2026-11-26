@@ -332,33 +332,17 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// use it after the Phase 11 block and before dispatch.
 	var preDispatchConvResult *messaging.ConversationResult
 	if req.Surface != "" && req.ExternalRef != "" {
-		convKey, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, req.ExternalRef)
-		if keyErr != nil {
+		if _, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, req.ExternalRef); keyErr != nil {
 			messaging.WriteDenialMetrics.Inc("broker.phase11")
 			log.Error("conversation key derivation failed", "error", keyErr)
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "invalid external_ref for thread conversation", nil)
 			return
 		}
-		var keyOpts []messaging.ConversationByKeyOption
-		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
-		if req.ParentRef != "" {
-			keyOpts = append(keyOpts, messaging.WithParentRef(req.ParentRef))
-		}
-		if req.DisplayName != "" {
-			keyOpts = append(keyOpts, messaging.WithDisplayName(req.DisplayName))
-		}
-		if agent.ID != "" {
-			agentID := agent.ID
-			keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
-		}
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-		}
-		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
-			r.Context(), s.store, log, convKey, "group", &agent.ProjectID, keyOpts...)
+		convResult, convErr := s.resolveBrokerInboundConversation(
+			r.Context(), log, agent.ProjectID,
+			req.Surface, req.ExternalRef, req.ParentRef, req.DisplayName, agent.ID,
+			req.Message.Channel, req.Message.ThreadID,
+		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
 				logReferenceRefused(r.Context(), logging.RequestPath(r), reasonExternalRefOfOtherProject, GetIdentityFromContext(r.Context()))

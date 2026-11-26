@@ -788,6 +788,9 @@ func TestReconfigureIntegration_EmptyManagerConfig(t *testing.T) {
 	if cfg["plugin_name"] != "telegram" {
 		t.Errorf("plugin_name should be set even with empty manager map: got %q", cfg["plugin_name"])
 	}
+	if cfg["hub_inbound_conversation"] != "1" {
+		t.Errorf("hub_inbound_conversation should be advertised as \"1\": got %q", cfg["hub_inbound_conversation"])
+	}
 }
 
 // --- Config PUT endpoint ---

@@ -527,31 +527,17 @@ func (s *Server) dispatchRoutedRecipient(
 	var effectiveConv *messaging.ConversationResult
 
 	if params.req.Surface != "" && params.req.ExternalRef != "" {
-		convKey, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, params.req.ExternalRef)
-		if keyErr != nil {
+		if _, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, params.req.ExternalRef); keyErr != nil {
 			messaging.WriteDenialMetrics.Inc("broker.routed.phase11")
 			result.Status = "conversation_not_resolved"
 			result.Error = "invalid external_ref for thread conversation"
 			return result
 		}
-		var keyOpts []messaging.ConversationByKeyOption
-		keyOpts = append(keyOpts, messaging.WithSurface(params.req.Surface))
-		if params.req.ParentRef != "" {
-			keyOpts = append(keyOpts, messaging.WithParentRef(params.req.ParentRef))
-		}
-		if params.req.DisplayName != "" {
-			keyOpts = append(keyOpts, messaging.WithDisplayName(params.req.DisplayName))
-		}
-		agentID := agent.ID
-		keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-		}
-		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
-			ctx, s.store, s.messageLog, convKey, "group", &agent.ProjectID, keyOpts...)
+		convResult, convErr := s.resolveBrokerInboundConversation(
+			ctx, s.messageLog, agent.ProjectID,
+			params.req.Surface, params.req.ExternalRef, params.req.ParentRef, params.req.DisplayName, agent.ID,
+			params.req.Message.Channel, params.req.Message.ThreadID,
+		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
 				logReferenceRefused(ctx, routedInboundRoute, reasonExternalRefOfOtherProject, GetIdentityFromContext(ctx))
