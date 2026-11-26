@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -393,6 +394,18 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 	}
 	budget := s.messagePolicyGate.makeSendBudget()
 	soBudget := s.messagePolicyGate.systemOneSendBudget()
+	s1Results := make([]policyEvalResult, len(job.policies))
+	if hasSystemOne && !factsUnavailable {
+		// Group shadow policies among themselves inside one immutable
+		// shadow-job plan under the shadow job's own context (never reusing
+		// enforce results across contexts).
+		soCtx, soCancel := context.WithTimeout(ctx, soBudget)
+		s.evalPlannedSystemOnePolicies(soCtx, job.policies, len(job.policies), job.snapshot.projectID, facts, act, budget, soBudget, unmentionedUnavailable, s1Results)
+		soCancel()
+		if ctx.Err() != nil {
+			return
+		}
+	}
 	tplData := messagepolicy.TemplateData{
 		Recipient: job.snapshot.recipientSlug,
 	}
@@ -415,6 +428,9 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonFactsUnavailable,
 			}
+		case polHasS1 && s1Results[i].policy != nil:
+			classification = s1Results[i].classification
+			elapsed = s1Results[i].elapsed
 		default:
 			start := time.Now()
 			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, job.snapshot.projectID, facts, act, budget, soBudget)
@@ -605,44 +621,17 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 	budget := s.messagePolicyGate.makeSendBudget()
 	soBudget := s.messagePolicyGate.systemOneSendBudget()
 
-	type enforceEvalResult struct {
-		policy         *store.MessagePolicy
-		classification messagepolicy.Classification
-		outcome        string
-		elapsed        time.Duration
-	}
-
-	results := make([]enforceEvalResult, len(enforcePols))
+	results := make([]policyEvalResult, len(enforcePols))
 	if hasSystemOneEnforce && factsErr == nil {
-		// Evaluate enforce policies carrying a system_one_rule concurrently under
-		// the shared synchronous System One send deadline (consumer design §5.5).
+		// Plan eligible enforce System One policies into immutable evaluation
+		// groups and evaluate each group once concurrently under the shared
+		// synchronous System One send deadline (M3 Slice A2).
 		soCtx, soCancel := context.WithTimeout(ctx, soBudget)
-		var wg sync.WaitGroup
-		for i := 0; i < len(enforcePols) && i < store.MaxActiveMatchingMessagePolicies; i++ {
-			pol := &enforcePols[i]
-			if strings.TrimSpace(pol.SystemOneRule) == "" {
-				continue
-			}
-			if unmentionedErr != nil && policyUsesUnmentionedAgentSlugs(pol) {
-				continue
-			}
-			wg.Add(1)
-			go func(idx int, p *store.MessagePolicy) {
-				defer wg.Done()
-				start := time.Now()
-				cls := s.evalOneMessagePolicyWithFacts(soCtx, p, snap.projectID, facts, act, budget, soBudget)
-				results[idx] = enforceEvalResult{
-					policy:         p,
-					classification: cls,
-					elapsed:        time.Since(start),
-				}
-			}(i, pol)
-		}
-		wg.Wait()
+		s.evalPlannedSystemOnePolicies(soCtx, enforcePols, store.MaxActiveMatchingMessagePolicies, snap.projectID, facts, act, budget, soBudget, unmentionedErr != nil, results)
 		soCancel()
 	}
 
-	var firstReject *enforceEvalResult
+	var firstReject *policyEvalResult
 
 	for i := range enforcePols {
 		pol := &enforcePols[i]
@@ -686,7 +675,7 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			pol.OnFailed,
 			pol.OnFailedReasons,
 		)
-		results[i] = enforceEvalResult{
+		results[i] = policyEvalResult{
 			policy:         pol,
 			classification: classification,
 			outcome:        outcome,
@@ -836,6 +825,115 @@ func (s *Server) recordAdmittedH2PolicyDecisions(ctx context.Context, out *h2Pol
 		out.shadowJob = nil
 		s.recordMessagePolicyShadowCapDrop(job.snapshot.projectID, job.droppedCount)
 		s.enqueueMessagePolicyShadow(job)
+	}
+}
+
+type policyEvalResult struct {
+	policy         *store.MessagePolicy
+	classification messagepolicy.Classification
+	outcome        string
+	elapsed        time.Duration
+}
+
+// evalPlannedSystemOnePolicies partitions eligible System One policies in
+// policies[:min(len(policies), maxPolicies)] into immutable evaluation groups,
+// executes each group once concurrently under soCtx, and applies each member's
+// own CEL violation_rule and provenance into results.
+func (s *Server) evalPlannedSystemOnePolicies(
+	soCtx context.Context,
+	policies []store.MessagePolicy,
+	maxPolicies int,
+	projectID string,
+	facts messagepolicy.Facts,
+	act messagepolicy.Activation,
+	budget *ruleengine.BudgetTracker,
+	soBudget time.Duration,
+	unmentionedUnavailable bool,
+	results []policyEvalResult,
+) {
+	limit := len(policies)
+	if maxPolicies < limit {
+		limit = maxPolicies
+	}
+
+	ev := s.messagePolicyGate.evaluator
+	overrideFn := s.messagePolicyGate.evalOverride
+
+	candidates := make([]messagepolicy.GroupCandidate, 0, limit)
+	for i := 0; i < limit; i++ {
+		pol := &policies[i]
+		if strings.TrimSpace(pol.SystemOneRule) == "" {
+			continue
+		}
+		if unmentionedUnavailable && policyUsesUnmentionedAgentSlugs(pol) {
+			continue
+		}
+		if overrideFn != nil {
+			start := time.Now()
+			if cls, handled := overrideFn(soCtx, pol, act, budget); handled {
+				results[i] = policyEvalResult{
+					policy:         pol,
+					classification: cls,
+					elapsed:        time.Since(start),
+				}
+				continue
+			}
+		}
+		if ev == nil {
+			results[i] = policyEvalResult{
+				policy: pol,
+				classification: messagepolicy.ClassifyError(&ruleengine.UnsupportedDialectError{
+					Dialect:  ruleengine.DialectCEL,
+					Consumer: messagepolicy.ConsumerName,
+					Reason:   ruleengine.ReasonConsumerNotRegistered,
+				}),
+			}
+			continue
+		}
+		candidates = append(candidates, messagepolicy.GroupCandidate{
+			Index:         i,
+			PolicyID:      pol.ID,
+			PolicyName:    pol.Name,
+			Revision:      pol.Revision,
+			SystemOneRule: pol.SystemOneRule,
+			ViolationRule: pol.ViolationRule,
+		})
+	}
+
+	if len(candidates) == 0 || ev == nil {
+		return
+	}
+
+	evalCtx := soCtx
+	if projectID != "" {
+		evalCtx = systemoneruntime.WithEvalProjectID(soCtx, projectID)
+	}
+	baseReq := systemone.Request{
+		Input:     messagepolicy.BuildSystemOneInput(facts),
+		ProjectID: projectID,
+	}
+	keyCfg := messagepolicy.GroupKeyConfig{
+		Consumer:     messagepolicy.ConsumerName,
+		Dialect:      systemone.DialectName,
+		AllowlistRef: projectID,
+		MaxEvalTime:  soBudget,
+	}
+
+	plan := ev.PlanSystemOneGroups(evalCtx, candidates, baseReq, keyCfg)
+	memberResults := ev.RunGroupPlan(
+		evalCtx,
+		plan,
+		baseReq,
+		facts,
+		[]messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(soBudget)},
+		[]messagepolicy.EvalOption{messagepolicy.WithBudget(budget)},
+	)
+	for _, mr := range memberResults {
+		results[mr.Candidate.Index] = policyEvalResult{
+			policy:         &policies[mr.Candidate.Index],
+			classification: mr.Classification,
+			elapsed:        mr.Elapsed,
+		}
 	}
 }
 
@@ -1211,7 +1309,7 @@ func buildMessagePolicyDecisionRecord(
 		Action:         action,
 		Reason:         reason,
 		CELErrorReason: celErrReason,
-		Evaluation:     messagepolicy.MarshalEvaluationProjection(classification.Evaluation),
+		Evaluation:     messagepolicy.MarshalEvaluationProjectionWithSource(classification.Evaluation, classification.SourceEvalID),
 		ElapsedMs:      elapsedMs,
 	}
 }

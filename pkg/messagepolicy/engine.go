@@ -103,27 +103,29 @@ func (e *Evaluator) EvaluateSystemOne(
 			return nil, ClassifyError(&ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err})
 		}
 	}
-	cfg := applyEvalOpts(opts)
 	compiled, err := e.CompileSystemOne(ctx, rawRule)
 	if err != nil {
-		// When hub.system_one is turned off after a policy was authored,
-		// Dialect.Compile returns UnsupportedDialectError{Reason: unknown_dialect}
-		// even though the dialect is registered and admitted for message_policy.
-		// Surface that as FailedError{Reason: dialect_disabled} (without
-		// AdmissionError) so on_failed_reasons["dialect_disabled"] is reachable
-		// on the real evaluation path while authoring stays 400 unsupported_dialect.
-		var unsup *ruleengine.UnsupportedDialectError
-		if errors.As(err, &unsup) &&
-			unsup.Dialect == systemone.DialectName &&
-			unsup.Reason == ruleengine.ReasonUnknownDialect &&
-			e.engine.Supports(ConsumerName, systemone.DialectName) {
-			return nil, ClassifyError(&ruleengine.FailedError{
-				Reason: systemone.ReasonDialectDisabled,
-				Cause:  err,
-			})
-		}
-		return nil, ClassifyError(err)
+		return nil, e.classifySystemOneCompileError(err)
 	}
+	return e.EvaluateJudgment(ctx, compiled, req, opts...)
+}
+
+// EvaluateJudgment evaluates an already-compiled System One judgments rule
+// against req via ruleengine.Engine. On Success it returns ClassPass with
+// Evaluation and extracted Judgments (Flags/Labels only); on Uncertain or
+// Failed it returns the classified error with Evaluation attached.
+func (e *Evaluator) EvaluateJudgment(
+	ctx context.Context,
+	compiled ruleengine.Compiled,
+	req systemone.Request,
+	opts ...EvalOption,
+) (*systemone.Evaluation, Classification) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, ClassifyError(&ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err})
+		}
+	}
+	cfg := applyEvalOpts(opts)
 	dec, err := e.engine.Evaluate(ctx, compiled, ruleengine.Input{
 		Payload: req,
 	}, ruleengine.Budget{
@@ -141,6 +143,84 @@ func (e *Evaluator) EvaluateSystemOne(
 		Evaluation: eval,
 		Judgments:  judgments,
 	}
+}
+
+func (e *Evaluator) classifySystemOneCompileError(err error) Classification {
+	// When hub.system_one is turned off after a policy was authored,
+	// Dialect.Compile returns UnsupportedDialectError{Reason: unknown_dialect}
+	// even though the dialect is registered and admitted for message_policy.
+	// Surface that as FailedError{Reason: dialect_disabled} (without
+	// AdmissionError) so on_failed_reasons["dialect_disabled"] is reachable
+	// on the real evaluation path while authoring stays 400 unsupported_dialect.
+	var unsup *ruleengine.UnsupportedDialectError
+	if errors.As(err, &unsup) &&
+		unsup.Dialect == systemone.DialectName &&
+		unsup.Reason == ruleengine.ReasonUnknownDialect &&
+		e.engine.Supports(ConsumerName, systemone.DialectName) {
+		return ClassifyError(&ruleengine.FailedError{
+			Reason: systemone.ReasonDialectDisabled,
+			Cause:  err,
+		})
+	}
+	return ClassifyError(err)
+}
+
+// ApplyJudgment applies a policy's own CEL violation_rule to a System One
+// judgment evaluation result. Uncertain and Failed System One classifications
+// short-circuit before CEL with eval attached; on ClassPass, extracted
+// judgment_flags and judgment_labels are fed into the CEL activation and
+// evaluated through EvaluateViolation (charging any BudgetTracker in celOpts).
+func (e *Evaluator) ApplyJudgment(
+	ctx context.Context,
+	policyID string,
+	revision int64,
+	violationRule string,
+	facts Facts,
+	eval *systemone.Evaluation,
+	soCls Classification,
+	celOpts ...EvalOption,
+) Classification {
+	return e.applyJudgment(ctx, policyID, revision, violationRule, facts, eval, soCls, true, celOpts)
+}
+
+func (e *Evaluator) applyJudgment(
+	ctx context.Context,
+	policyID string,
+	revision int64,
+	violationRule string,
+	facts Facts,
+	eval *systemone.Evaluation,
+	soCls Classification,
+	useCELCache bool,
+	celOpts []EvalOption,
+) Classification {
+	if soCls.Class != ClassPass {
+		if eval != nil {
+			soCls.Evaluation = eval
+		}
+		return soCls
+	}
+
+	judgments := soCls.Judgments
+	if judgments.Flags == nil && judgments.Labels == nil && eval != nil {
+		judgments = ExtractJudgments(eval)
+	}
+
+	factsWithJudgments := facts
+	factsWithJudgments.Judgments = Judgments{
+		Flags:  judgments.Flags,
+		Labels: judgments.Labels,
+	}
+	act := NewActivation(factsWithJudgments)
+	var celCls Classification
+	if useCELCache {
+		celCls = e.EvaluateViolation(ctx, policyID, revision, violationRule, act, celOpts...)
+	} else {
+		celCls = e.EvaluateExpr(ctx, violationRule, act, celOpts...)
+	}
+	celCls.Evaluation = eval
+	celCls.Judgments = judgments
+	return celCls
 }
 
 // EvaluatePolicy evaluates a message policy (optional system_one_rule followed
@@ -209,25 +289,7 @@ func (e *Evaluator) evaluatePolicy(
 		Revision:  revision,
 	}
 	eval, soCls := e.EvaluateSystemOne(ctx, systemOneRule, req, soOpts...)
-	if soCls.Class != ClassPass {
-		return soCls
-	}
-
-	factsWithJudgments := facts
-	factsWithJudgments.Judgments = Judgments{
-		Flags:  soCls.Judgments.Flags,
-		Labels: soCls.Judgments.Labels,
-	}
-	act := NewActivation(factsWithJudgments)
-	var celCls Classification
-	if useCELCache {
-		celCls = e.EvaluateViolation(ctx, policyID, revision, violationRule, act, celOpts...)
-	} else {
-		celCls = e.EvaluateExpr(ctx, violationRule, act, celOpts...)
-	}
-	celCls.Evaluation = eval
-	celCls.Judgments = soCls.Judgments
-	return celCls
+	return e.applyJudgment(ctx, policyID, revision, violationRule, facts, eval, soCls, useCELCache, celOpts)
 }
 
 // Invalidate removes cached compiled program bindings for policyID at or below
