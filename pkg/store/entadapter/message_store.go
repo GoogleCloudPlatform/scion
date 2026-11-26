@@ -209,6 +209,13 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	// logged below once it is persisted.
 	defaulted := msg.DispatchState == ""
 
+	// Resolve the message timestamp up front so the inserted row and
+	// conversations.last_activity_at share the exact same UTC instant.
+	activityAt := msg.CreatedAt.UTC()
+	if msg.CreatedAt.IsZero() {
+		activityAt = time.Now().UTC()
+	}
+
 	buildCreate := func(mc *ent.MessageClient, seq int64, hasSeq bool) *ent.MessageCreate {
 		create := mc.Create().
 			SetID(uid).
@@ -282,6 +289,8 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		}
 		if !msg.CreatedAt.IsZero() {
 			create.SetCreated(msg.CreatedAt)
+		} else {
+			create.SetCreated(activityAt)
 		}
 		return create
 	}
@@ -297,7 +306,7 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		}
 		defer func() { _ = tx.Rollback() }()
 
-		seq, hasSeq, bumpErr := bumpConversationSeq(ctx, tx.Client().Driver(), convUUID)
+		seq, hasSeq, bumpErr := bumpConversationSeq(ctx, tx.Client().Driver(), convUUID, activityAt)
 		if bumpErr != nil {
 			return markTransient(mapError(bumpErr))
 		}
@@ -315,7 +324,7 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		)
 		if hasConvID {
 			var bumpErr error
-			seq, hasSeq, bumpErr = bumpConversationSeq(ctx, s.client.Driver(), convUUID)
+			seq, hasSeq, bumpErr = bumpConversationSeq(ctx, s.client.Driver(), convUUID, activityAt)
 			if bumpErr != nil {
 				return markTransient(mapError(bumpErr))
 			}
@@ -356,18 +365,49 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 var lastMissingConvWarnUnix atomic.Int64
 
 // bumpConversationSeq atomically increments conversations.last_message_seq for
-// cid and returns the new sequence number. When no conversation row exists for
-// cid (for example synthetic messages in tests that do not seed a conversation),
-// it logs a rate-limited warning and returns (0, false, nil) so CreateMessage
-// leaves conversation_seq NULL.
-func bumpConversationSeq(ctx context.Context, drv dialect.Driver, cid uuid.UUID) (int64, bool, error) {
-	ph := "?"
-	if drv.Dialect() == dialect.Postgres {
-		ph = "$1"
+// cid, advances conversations.last_activity_at when activityAt is non-zero and
+// newer than the stored value, and returns the new sequence number. When no
+// conversation row exists for cid (for example synthetic messages in tests that
+// do not seed a conversation), it logs a rate-limited warning and returns
+// (0, false, nil) so CreateMessage leaves conversation_seq NULL.
+func bumpConversationSeq(ctx context.Context, drv dialect.Driver, cid uuid.UUID, activityAt time.Time) (int64, bool, error) {
+	var (
+		query string
+		args  []any
+	)
+	isPostgres := drv.Dialect() == dialect.Postgres
+	if activityAt.IsZero() {
+		ph := "?"
+		if isPostgres {
+			ph = "$1"
+		}
+		query = "UPDATE " + conversation.Table +
+			" SET " + conversation.FieldLastMessageSeq + " = " + conversation.FieldLastMessageSeq + " + 1" +
+			" WHERE " + conversation.FieldID + " = " + ph +
+			" RETURNING " + conversation.FieldLastMessageSeq
+		args = []any{cid}
+	} else if isPostgres {
+		query = "UPDATE " + conversation.Table +
+			" SET " + conversation.FieldLastMessageSeq + " = " + conversation.FieldLastMessageSeq + " + 1, " +
+			conversation.FieldLastActivityAt + " = CASE WHEN " + conversation.FieldLastActivityAt + " < $1 THEN $1 ELSE " + conversation.FieldLastActivityAt + " END" +
+			" WHERE " + conversation.FieldID + " = $2" +
+			" RETURNING " + conversation.FieldLastMessageSeq
+		args = []any{timeArg(dialect.Postgres, activityAt.UTC()), cid}
+	} else {
+		// Strip any legacy SQLite monotonic-clock suffix (" m=...") before
+		// comparing against canonical UTC text (see timeColumnExpr).
+		col := conversation.FieldLastActivityAt
+		normCol := "(CASE WHEN instr(" + col + ", ' m=') > 0 THEN substr(" + col + ", 1, instr(" + col + ", ' m=') - 1) ELSE " + col + " END)"
+		query = "UPDATE " + conversation.Table +
+			" SET " + conversation.FieldLastMessageSeq + " = " + conversation.FieldLastMessageSeq + " + 1, " +
+			col + " = CASE WHEN " + normCol + " < ? THEN ? ELSE " + col + " END" +
+			" WHERE " + conversation.FieldID + " = ?" +
+			" RETURNING " + conversation.FieldLastMessageSeq
+		tsArg := timeArg(drv.Dialect(), activityAt)
+		args = []any{tsArg, tsArg, cid}
 	}
-	query := "UPDATE " + conversation.Table + " SET " + conversation.FieldLastMessageSeq + " = " + conversation.FieldLastMessageSeq + " + 1 WHERE " + conversation.FieldID + " = " + ph + " RETURNING " + conversation.FieldLastMessageSeq
 	var rows entsql.Rows
-	if err := drv.Query(ctx, query, []any{cid}, &rows); err != nil {
+	if err := drv.Query(ctx, query, args, &rows); err != nil {
 		return 0, false, err
 	}
 	defer func() { _ = rows.Close() }()
@@ -808,7 +848,7 @@ func (s *MessageStore) SetMessageConversationID(ctx context.Context, messageID, 
 			return nil
 		}
 
-		seq, hasSeq, bumpErr := bumpConversationSeq(ctx, drv, cid)
+		seq, hasSeq, bumpErr := bumpConversationSeq(ctx, drv, cid, time.Time{})
 		if bumpErr != nil {
 			return markTransient(mapError(bumpErr))
 		}

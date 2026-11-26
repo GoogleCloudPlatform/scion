@@ -450,3 +450,98 @@ func TestMessageDelegationAttribution_RoundTrip(t *testing.T) {
 	}
 	assert.Equal(t, 1, attributed)
 }
+
+func TestCreateMessage_BumpsConversationLastActivityAt(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	oldTime := base.Add(-2 * time.Hour)
+	newerTime := base.Add(-1 * time.Hour)
+
+	convOld := &store.Conversation{
+		ID:             uuid.NewString(),
+		ProjectID:      &projectID,
+		Kind:           "group",
+		Surface:        "native",
+		ExternalRef:    "thread:" + projectID + ":old",
+		DisplayName:    "old-thread",
+		LastActivityAt: oldTime,
+	}
+	convNew := &store.Conversation{
+		ID:             uuid.NewString(),
+		ProjectID:      &projectID,
+		Kind:           "group",
+		Surface:        "native",
+		ExternalRef:    "thread:" + projectID + ":new",
+		DisplayName:    "new-thread",
+		LastActivityAt: newerTime,
+	}
+	require.NoError(t, cs.CreateConversation(ctx, convOld))
+	require.NoError(t, cs.CreateConversation(ctx, convNew))
+
+	// Initially convNew sorts ahead of convOld.
+	list, err := cs.ListConversations(ctx, store.ConversationFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 2)
+	assert.Equal(t, convNew.ID, list.Items[0].ID)
+	assert.Equal(t, convOld.ID, list.Items[1].ID)
+
+	// Persisting a message into convOld must advance its last_activity_at and move it to the top.
+	msg := newTestMessage(projectID, "agent-1")
+	msg.ConversationID = convOld.ID
+	require.NoError(t, cs.CreateMessage(ctx, msg))
+
+	gotOld, err := cs.GetConversation(ctx, convOld.ID)
+	require.NoError(t, err)
+	assert.True(t, gotOld.LastActivityAt.After(newerTime),
+		"expected convOld.LastActivityAt (%s) to advance past newerTime (%s)", gotOld.LastActivityAt, newerTime)
+	assert.False(t, gotOld.LastActivityAt.Before(msg.CreatedAt.Truncate(time.Microsecond)),
+		"expected convOld.LastActivityAt (%s) >= msg.CreatedAt (%s)", gotOld.LastActivityAt, msg.CreatedAt)
+
+	list, err = cs.ListConversations(ctx, store.ConversationFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 2)
+	assert.Equal(t, convOld.ID, list.Items[0].ID, "convOld must now sort first after receiving a message")
+	assert.Equal(t, convNew.ID, list.Items[1].ID)
+
+	// A backdated message must not regress last_activity_at backward.
+	afterFirst := gotOld.LastActivityAt
+	backdated := newTestMessage(projectID, "agent-1")
+	backdated.ConversationID = convOld.ID
+	backdated.CreatedAt = base.Add(-3 * time.Hour)
+	require.NoError(t, cs.CreateMessage(ctx, backdated))
+
+	gotOld, err = cs.GetConversation(ctx, convOld.ID)
+	require.NoError(t, err)
+	assert.True(t, gotOld.LastActivityAt.Equal(afterFirst),
+		"backdated message must not regress last_activity_at: got %s, want %s", gotOld.LastActivityAt, afterFirst)
+
+	// CreateMessage inside WithTx (inTx == true) must also advance last_activity_at.
+	futureTime := base.Add(1 * time.Hour)
+	err = cs.WithTx(ctx, func(tx store.Store) error {
+		txMsg := newTestMessage(projectID, "agent-1")
+		txMsg.ConversationID = convOld.ID
+		txMsg.CreatedAt = futureTime
+		return tx.CreateMessage(ctx, txMsg)
+	})
+	require.NoError(t, err)
+
+	gotOld, err = cs.GetConversation(ctx, convOld.ID)
+	require.NoError(t, err)
+	assert.True(t, gotOld.LastActivityAt.Equal(futureTime),
+		"in-tx CreateMessage must advance last_activity_at: got %s, want %s", gotOld.LastActivityAt, futureTime)
+
+	// SetMessageConversationID (backfill/migration) must not bump last_activity_at to now.
+	unlinked := newTestMessage(projectID, "agent-1")
+	unlinked.CreatedAt = base.Add(-4 * time.Hour)
+	require.NoError(t, cs.CreateMessage(ctx, unlinked))
+	require.NoError(t, cs.SetMessageConversationID(ctx, unlinked.ID, convNew.ID))
+
+	gotNew, err := cs.GetConversation(ctx, convNew.ID)
+	require.NoError(t, err)
+	assert.True(t, gotNew.LastActivityAt.Equal(newerTime),
+		"SetMessageConversationID must not alter last_activity_at: got %s, want %s", gotNew.LastActivityAt, newerTime)
+}

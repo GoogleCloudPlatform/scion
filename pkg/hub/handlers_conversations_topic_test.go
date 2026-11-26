@@ -930,3 +930,98 @@ func TestIsTopicNameConflict(t *testing.T) {
 
 	require.False(t, isTopicNameConflict(errors.New("some other failure")))
 }
+
+// TestPostConvRef_UpdatesLastActivityAtAndListOrder reproduces ptone/scion#9447:
+// posting to an existing group conversation addressed by conv:<id> must bump
+// conversations.last_activity_at and move it to the top of GET /api/v1/conversations
+// (which backs `scion conversation list`).
+func TestPostConvRef_UpdatesLastActivityAtAndListOrder(t *testing.T) {
+	srv, s, _, _ := setupGroupConvTopicTest(t)
+	ctx := context.Background()
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	createGroup := func(name string) *store.Conversation {
+		t.Helper()
+		createBytes, err := json.Marshal(createConversationRequest{
+			DisplayName: name,
+			ProjectID:   project.ID,
+			Kind:        "group",
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(createBytes))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+		rr := httptest.NewRecorder()
+		srv.handleCreateConversation(rr, req)
+		require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+		var resp conversationResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		conv, err := s.GetConversation(ctx, resp.ID)
+		require.NoError(t, err)
+		return conv
+	}
+
+	convA := createGroup("older-group")
+	convB := createGroup("newer-group")
+
+	// Backdate both conversations so convB is newer than convA.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	oldA := now.Add(-2 * time.Hour)
+	oldB := now.Add(-1 * time.Hour)
+	convA.LastActivityAt = oldA
+	require.NoError(t, s.UpdateConversation(ctx, convA))
+	convB.LastActivityAt = oldB
+	require.NoError(t, s.UpdateConversation(ctx, convB))
+
+	listConvIDs := func() []string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?projectId="+project.ID+"&kind=group", nil)
+		req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+		rr := httptest.NewRecorder()
+		srv.handleListConversations(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		var listResp conversationListResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &listResp))
+		ids := make([]string, 0, len(listResp.Conversations))
+		for _, c := range listResp.Conversations {
+			ids = append(ids, c.ID)
+		}
+		return ids
+	}
+
+	// Confirm convB sorts ahead of convA before posting.
+	beforeIDs := listConvIDs()
+	require.GreaterOrEqual(t, len(beforeIDs), 2)
+	var idxA, idxB int
+	for i, id := range beforeIDs {
+		switch id {
+		case convA.ID:
+			idxA = i
+		case convB.ID:
+			idxB = i
+		}
+	}
+	require.Less(t, idxB, idxA, "convB should sort ahead of convA before posting; order=%v", beforeIDs)
+
+	// Post to convA via conv:<id> (the `scion message conv:<id>` path).
+	sendRR := postConvRefNoRecipient(t, srv, project.ID, agent.ID, "bump activity via conv ref", "conv:"+convA.ID)
+	require.Equal(t, http.StatusOK, sendRR.Code, "body: %s", sendRR.Body.String())
+
+	// convA.LastActivityAt must advance past oldB and convA must now sort ahead of convB.
+	updatedA, err := s.GetConversation(ctx, convA.ID)
+	require.NoError(t, err)
+	require.True(t, updatedA.LastActivityAt.After(oldB),
+		"posting via conv:<id> must bump conversations.last_activity_at: got %s, want > %s", updatedA.LastActivityAt, oldB)
+
+	afterIDs := listConvIDs()
+	for i, id := range afterIDs {
+		switch id {
+		case convA.ID:
+			idxA = i
+		case convB.ID:
+			idxB = i
+		}
+	}
+	require.Less(t, idxA, idxB, "convA must sort ahead of convB after posting via conv:<id>; order=%v", afterIDs)
+}
