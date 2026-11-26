@@ -261,12 +261,17 @@ func TestDecisionRetentionStore_EligibilityMatrix(t *testing.T) {
 	backdateDecision(decRepV1[0], oldTime, nil, &oldTime, nil, nil)
 	backdateDecision(decRepV2[0], recentTime, nil, nil, nil, nil)
 
-	// 10. Multi-decision message: one old settled + one pending sibling -> WHOLE MESSAGE KEPT.
-	msgMixed, decMixed := postPrompt(proj, agentID, topic, false, "K-MIX1", "K-MIX2")
+	// 10. Multi-decision message: two old settled rows bracketing an old pending
+	// sibling (K-MIX1 settled, K-MIX2 pending, K-MIX3 settled) -> WHOLE MESSAGE
+	// KEPT deterministically regardless of first/last lock position.
+	msgMixed, decMixed := postPrompt(proj, agentID, topic, false, "K-MIX1", "K-MIX2", "K-MIX3")
 	recordDirect(proj, decMixed[0], user1, "1", "")
 	backdateDecision(decMixed[0], oldTime, &oldTime, nil, nil, nil)
 	backdateAnswers(decMixed[0], oldTime)
 	backdateDecision(decMixed[1], oldTime, nil, nil, nil, nil)
+	recordDirect(proj, decMixed[2], user1, "1", "")
+	backdateDecision(decMixed[2], oldTime, &oldTime, nil, nil, nil)
+	backdateAnswers(decMixed[2], oldTime)
 
 	// 11. Old decision with recent answer -> KEPT.
 	msgRecentAns, decRecentAns := postPrompt(proj, agentID, topic, false, "K-RANS")
@@ -339,7 +344,7 @@ func TestDecisionRetentionStore_EligibilityMatrix(t *testing.T) {
 	// Verify kept decisions still exist with their answers intact.
 	keptDecs := []string{
 		decPending[0], decInterpWait[0], decRepV2[0],
-		decMixed[0], decMixed[1], decRecentAns[0], decHold[0],
+		decMixed[0], decMixed[1], decMixed[2], decRecentAns[0], decHold[0],
 	}
 	for _, id := range keptDecs {
 		_, err := cs.GetDecision(ctx, id)
