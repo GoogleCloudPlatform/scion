@@ -281,7 +281,7 @@ export function normalizeDecisionsSearchQuery(raw: string | undefined | null): s
 }
 
 /**
- * Normalizes a `q` parameter when `filters.query_dialect` is enabled: trims
+ * Normalizes a `q` parameter when the decisions query dialect is enabled: trims
  * edge whitespace, rejects control characters, enforces the 512-byte
  * `filterquery.MaxInputBytes` bound, and runs an optional caller-supplied
  * `validateQuery` predicate (kept injected so this module does not pull
@@ -371,7 +371,7 @@ function cleanProvenanceValue(raw: string | undefined | null): MadeDecisionsProv
 /**
  * Parses URL query parameters on load for `/projects/{id}/decisions`.
  * Invalid values are dropped from the committed filter state so malformed or
- * stale links never fail with HTTP 400 (D10, D11). Under `filters.query_dialect`,
+ * stale links never fail with HTTP 400 (D10, D11). Under the decisions query dialect,
  * `q` is validated with the `decisions` schema parser/validator and the
  * text-mode 2-rune minimum (200-rune text cap); callers may still read the raw
  * `q` via `extractRawDecisionsQueryParam()` to show it with its inline error

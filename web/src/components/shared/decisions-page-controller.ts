@@ -57,7 +57,6 @@ import {
 } from '../../client/project-decisions.js';
 import {
   canonical,
-  filtersQueryDialectEnabled,
   getViewSchema,
   knownKeysFor,
   parse as parseFilterQuery,
@@ -369,13 +368,7 @@ export class DecisionsPageController implements ReactiveController {
 
   private readonly boundOnFlagsChanged = (): void => {
     const next = decisionsEnabled();
-    const nextDialect = filtersQueryDialectEnabled();
-    const dialectChanged = nextDialect !== this.queryDialect;
-    this.queryDialect = nextDialect;
     if (next === this.enabled) {
-      if (dialectChanged) {
-        this.notify();
-      }
       return;
     }
     this.enabled = next;
@@ -454,7 +447,7 @@ export class DecisionsPageController implements ReactiveController {
   };
 
   hostConnected(): void {
-    this.queryDialect = filtersQueryDialectEnabled();
+    this.queryDialect = true;
     this.extractRouteState();
     this.enabled = decisionsEnabled();
     this.notify();
@@ -572,7 +565,7 @@ export class DecisionsPageController implements ReactiveController {
       this.sort = 'recent';
       this.filterProject = '';
       this.filterQ = parsed.q;
-      // Under filters.query_dialect, keep a malformed raw q= (parse/validate
+      // Under the decisions query dialect, keep a malformed raw q= (parse/validate
       // error) in searchDraft so <scion-filter-box> shows its inline error
       // while filterQ stays empty and loads the unfiltered list without a 400.
       // Sub-minimum text like `?q=a` has no inline error, so clear searchDraft

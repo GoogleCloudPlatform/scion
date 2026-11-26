@@ -35,20 +35,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setDecisionsAndDialectExperiments(t *testing.T, srv *Server, decisionsOn, dialectOn bool) {
+func setDecisionsExperiments(t *testing.T, srv *Server, decisionsOn bool) {
 	t.Helper()
 	setExperimentOverrides(t, srv, map[string]bool{
-		experiments.ChatScheduledSend:   true,
-		experiments.Decisions:           decisionsOn,
-		experiments.FiltersQueryDialect: dialectOn,
+		experiments.ChatScheduledSend: true,
+		experiments.Decisions:         decisionsOn,
 	})
 	require.Equal(t, decisionsOn, srv.experimentEnabled(experiments.Decisions))
-	require.Equal(t, dialectOn, srv.experimentEnabled(experiments.FiltersQueryDialect))
 }
 
 func TestProjectDecisions_FilterQueryDialect(t *testing.T) {
 	f := newDecisionsFixture(t)
-	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+	setDecisionsExperiments(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -299,15 +297,9 @@ func TestProjectDecisions_FilterQueryDialect(t *testing.T) {
 	assert.Equal(t, float64(0), errBody.Error.Details["offset"])
 	assert.Equal(t, float64(len("provenance:bogus")), errBody.Error.Details["length"])
 
-	// 11. With filters.query_dialect OFF: q is treated as plain text (no structured parsing, no 400 on `agent:`).
-	setDecisionsAndDialectExperiments(t, f.srv, true, false)
-	rrOff := doRequestAsUser(t, f.srv, f.alice, http.MethodGet, basePath+"?tab=made&q="+url.QueryEscape("agent:"), nil)
-	assert.Equal(t, http.StatusOK, rrOff.Code)
-	mOff := decodeMadeDecisions(t, rrOff)
-	assert.Empty(t, mOff.Entries)
-
-	// Re-enable dialect for additional O5/O6 cases.
-	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+	// 11. Malformed structured query returns 400 invalid_filter_query.
+	rrMalformed := doRequestAsUser(t, f.srv, f.alice, http.MethodGet, basePath+"?tab=made&q="+url.QueryEscape("agent:"), nil)
+	assert.Equal(t, http.StatusBadRequest, rrMalformed.Code)
 
 	// 12. (O5a) Negated free text on Pending (excFolds) and Made (ExcludeQueries with conversation-label keys).
 	pNegText := getPending(f.alice, url.Values{"q": {"agent:" + f.agent.Name + ",db-ops -canary"}})
