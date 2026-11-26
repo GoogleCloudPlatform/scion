@@ -440,16 +440,19 @@ func TestDecisionRetentionJob_CursorDoesNotResetBeforeReachingCutoff(t *testing.
 	db := cs.DB()
 
 	// Seed 60 ineligible old settled rows (each sharing its message with a
-	// pending sibling) so page 1 (size 50) scans only ineligible rows.
+	// pending sibling) so page 1 (size 50) scans only ineligible rows. Use a
+	// fresh asker agent ID per iteration so we stay under the per-agent
+	// pending-decisions cap (50).
 	const backlogMsgs = 60
 	for i := 0; i < backlogMsgs; i++ {
+		backlogAgentID := uuid.NewString()
 		msgID := uuid.NewString()
 		res, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 			Message: &store.Message{
 				ID: msgID, ProjectID: projID, ThreadID: "topic-ret-backlog",
-				Sender: "agent:bot", SenderID: agentID, Recipient: "user:" + userID, RecipientID: userID,
+				Sender: "agent:bot", SenderID: backlogAgentID, Recipient: "user:" + userID, RecipientID: userID,
 			},
-			AskerAgentID:   agentID,
+			AskerAgentID:   backlogAgentID,
 			AskerAgentName: "bot",
 			Decisions: []messages.Decision{
 				{Key: fmt.Sprintf("B%02d-S", i), Question: "Settled", Choices: []messages.Choice{{ID: "1", Label: "Yes"}}},
@@ -465,7 +468,7 @@ func TestDecisionRetentionJob_CursorDoesNotResetBeforeReachingCutoff(t *testing.
 			Provenance: store.DecisionProvenanceDirect, Surface: store.DecisionSurfaceNative,
 			ResponseMessage: &store.Message{
 				ID: uuid.NewString(), ProjectID: projID, ThreadID: "topic-ret-backlog",
-				Sender: "user:" + userID, SenderID: userID, Recipient: "agent:bot", RecipientID: agentID,
+				Sender: "user:" + userID, SenderID: userID, Recipient: "agent:bot", RecipientID: backlogAgentID,
 			},
 		})
 		require.NoError(t, err)
