@@ -203,6 +203,10 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
       { value: 'beta-bot', help: 'beta-svc' },
     ]);
 
+    // `by:` suggestions pin `me` first.
+    const bySugs = box?.valueSuggestions?.('by', '');
+    expect(bySugs?.[0]).toEqual({ value: 'me', help: 'You · Alice', pinned: true });
+
     // Date range disclosure is present on Made tab with From/To inputs.
     const toggle = panel.shadowRoot?.querySelector('[data-date-range-toggle]') as HTMLButtonElement;
     expect(toggle).not.toBeNull();
@@ -286,5 +290,88 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
     expect(params.get('sort')).toBe('recent');
     expect(params.get('q')).toBe('project:alpha-app');
     expect(params.get('project')).toBeNull();
+  });
+
+  it('drill-down replaces positive project: terms, keeps negations and other terms, and matches href (O2)', async () => {
+    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+
+    // Case 1: existing positive OR project:alpha-app,beta-svc -> replaced by single project:alpha-app
+    const el1 = await mountPage('?tab=made&sort=project&q=project%3Aalpha-app%2Cbeta-svc');
+    const link1 = el1.shadowRoot?.querySelector(
+      `[data-see-all-project="${PROJ_ALPHA_ID}"]`
+    ) as HTMLAnchorElement | null;
+    expect(link1).not.toBeNull();
+    const href1 = link1?.getAttribute('href') ?? '';
+    link1?.click();
+    await flushRender(el1);
+    expect(`?${window.location.search.replace(/^\?/, '')}`).toBe(href1);
+    const params1 = new URLSearchParams(window.location.search);
+    expect(params1.get('q')).toBe('project:alpha-app');
+    expect(params1.get('project')).toBeNull();
+    const panel1 = el1.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    const box1 = panel1.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    expect(box1.shadowRoot?.querySelector('.feedback.warning')).toBeNull();
+    el1.remove();
+
+    // Case 2: negated -project:gamma + agent:x -> keeps both and adds single positive project:alpha-app
+    const el2 = await mountPage('?tab=made&sort=project&q=-project%3Agamma+agent%3Ax');
+    const link2 = el2.shadowRoot?.querySelector(
+      `[data-see-all-project="${PROJ_ALPHA_ID}"]`
+    ) as HTMLAnchorElement | null;
+    expect(link2).not.toBeNull();
+    const href2 = link2?.getAttribute('href') ?? '';
+    link2?.click();
+    await flushRender(el2);
+    expect(`?${window.location.search.replace(/^\?/, '')}`).toBe(href2);
+    const params2 = new URLSearchParams(window.location.search);
+    expect(params2.get('q')).toBe('agent:x project:alpha-app -project:gamma');
+    expect(params2.get('project')).toBeNull();
+    const panel2 = el2.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    const box2 = panel2.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    expect(box2.shadowRoot?.querySelector('.feedback.warning')).toBeNull();
+  });
+
+  it('shows invalid profile q= URL inline without sending a 400 API request', async () => {
+    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    const el = await mountPage('?tab=made&q=project%3Aa+OR+project%3Ab');
+
+    // No API request should include the invalid q= param.
+    expect(requestedUrls.some((u) => u.includes('q='))).toBe(false);
+
+    const panel = el.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    expect(box.value).toBe('project:a OR project:b');
+    expect(box.shadowRoot?.querySelector('.feedback.error')).not.toBeNull();
+  });
+
+  it('clears the filter box for sub-minimum plain text q=a on profile load without sending a 400 request', async () => {
+    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    const el = await mountPage('?tab=made&q=a');
+
+    expect(requestedUrls.some((u) => u.includes('q='))).toBe(false);
+
+    const panel = el.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    expect(box.value).toBe('');
+  });
+
+  it('keeps exact project ID for colliding or absent legacy project= param', async () => {
+    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    const unknownProjId = '99999999-9999-9999-9999-999999999999';
+    const el = await mountPage(`?tab=made&project=${unknownProjId}`);
+
+    const panel = el.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    expect(box.value).toBe(`project:${unknownProjId}`);
   });
 });

@@ -147,6 +147,7 @@ export interface ProfileDecisionsQueryOptions {
   limit?: number | undefined;
   filter?: ProfileMadeDecisionsFilter | undefined;
   dialect?: boolean | undefined;
+  validateQuery?: ((q: string) => boolean) | undefined;
 }
 
 /** Validated URL filter/tab/sort state for `/profile/decisions` (D10, R6). */
@@ -249,7 +250,7 @@ function cleanSortValue(
  */
 export function parseProfileDecisionsUrlState(
   search: string | URLSearchParams,
-  opts?: { dialect?: boolean }
+  opts?: { dialect?: boolean; validateQuery?: (q: string) => boolean }
 ): ProfileDecisionsUrlState {
   const params = typeof search === 'string' ? new URLSearchParams(search) : search;
   const base = parseDecisionsUrlState(params, opts);
@@ -270,7 +271,7 @@ export function parseProfileDecisionsUrlState(
  */
 export function buildProfileDecisionsUrlSearch(
   state: Partial<ProfileDecisionsUrlState>,
-  opts?: { dialect?: boolean }
+  opts?: { dialect?: boolean; validateQuery?: (q: string) => boolean }
 ): string {
   const params = new URLSearchParams();
   const tab: 'pending' | 'made' = state.tab === 'made' ? 'made' : 'pending';
@@ -283,7 +284,7 @@ export function buildProfileDecisionsUrlSearch(
   if (project) params.set('project', project);
 
   const q = opts?.dialect
-    ? normalizeDecisionsFilterQuery(state.q)
+    ? normalizeDecisionsFilterQuery(state.q, opts.validateQuery)
     : normalizeDecisionsSearchQuery(state.q);
   if (q) params.set('q', q);
 
@@ -331,7 +332,7 @@ export function buildProfileDecisionsQuery(options: ProfileDecisionsQueryOptions
 
   if (options.filter) {
     const q = options.dialect
-      ? normalizeDecisionsFilterQuery(options.filter.q)
+      ? normalizeDecisionsFilterQuery(options.filter.q, options.validateQuery)
       : normalizeDecisionsSearchQuery(options.filter.q);
     if (q) params.set('q', q);
 
@@ -472,6 +473,7 @@ export async function fetchProfilePendingDecisions(
     filter?: ProfileSharedDecisionsFilter | undefined;
     signal?: AbortSignal | undefined;
     dialect?: boolean | undefined;
+    validateQuery?: ((q: string) => boolean) | undefined;
   } = {}
 ): Promise<ProfilePendingDecisionsResponse> {
   return recordPageFetchForProbe(async () => {
@@ -482,6 +484,7 @@ export async function fetchProfilePendingDecisions(
       limit: options.limit,
       filter: options.filter,
       dialect: options.dialect,
+      validateQuery: options.validateQuery,
     });
     const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
     if (!res.ok) {
@@ -521,6 +524,7 @@ export async function fetchProfileMadeDecisions(
     limit?: number | undefined;
     signal?: AbortSignal | undefined;
     dialect?: boolean | undefined;
+    validateQuery?: ((q: string) => boolean) | undefined;
   } = {}
 ): Promise<ProfileMadeDecisionsResponse> {
   return recordPageFetchForProbe(async () => {
@@ -532,6 +536,7 @@ export async function fetchProfileMadeDecisions(
       limit: options.limit,
       filter,
       dialect: options.dialect,
+      validateQuery: options.validateQuery,
     });
     const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
     if (!res.ok) {

@@ -37,7 +37,6 @@ import type {
   ProjectDecisionPromptView,
 } from '../../client/project-decisions.js';
 import {
-  buildProfileDecisionsUrlSearch,
   dispatchProfileDecisionsCountChanged,
   dispatchProfileDecisionsNotFound,
   fetchProfileMadeDecisions,
@@ -127,6 +126,7 @@ export class ScionPageProfileDecisions extends LitElement {
         filter,
         signal,
         dialect: this.ctrl.queryDialect,
+        validateQuery: this.ctrl.validateDialectQuery,
       }),
     fetchMade: ({ sort, cursor, limit, filter, signal }): Promise<ProfileMadeDecisionsResponse> =>
       fetchProfileMadeDecisions(filter, {
@@ -135,6 +135,7 @@ export class ScionPageProfileDecisions extends LitElement {
         limit,
         signal,
         dialect: this.ctrl.queryDialect,
+        validateQuery: this.ctrl.validateDialectQuery,
       }),
   });
 
@@ -637,21 +638,7 @@ export class ScionPageProfileDecisions extends LitElement {
 
   private renderMadeProjectGroup(g: ProfileDecisionMadeGroupView): TemplateResult {
     const projectName = this.ctrl.projectDisplayName(g.project);
-    const drillSearch = buildProfileDecisionsUrlSearch(
-      {
-        tab: 'made',
-        sort: 'recent',
-        project: g.project.id,
-        q: this.ctrl.filterQ,
-        conversation: this.ctrl.filterConversation,
-        agent: this.ctrl.filterAgent,
-        user: this.ctrl.filterUser,
-        provenance: this.ctrl.filterProvenance,
-        from: this.ctrl.filterFrom,
-        to: this.ctrl.filterTo,
-      },
-      { dialect: this.ctrl.queryDialect }
-    );
+    const drillSearch = this.ctrl.buildDrillDownMadeProjectSearch(g.project.id);
 
     return html`
       <section class="made-project-group" data-made-group=${g.project.id}>

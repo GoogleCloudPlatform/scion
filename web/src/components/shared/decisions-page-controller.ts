@@ -56,6 +56,7 @@ import {
   type ProjectPendingDecisionsResponse,
 } from '../../client/project-decisions.js';
 import {
+  canonical,
   filtersQueryDialectEnabled,
   getViewSchema,
   knownKeysFor,
@@ -64,14 +65,21 @@ import {
 } from '../../shared/filter-query/index.js';
 import { formatValue } from '../../shared/filter-query/canonical.js';
 
+/** Schema view name used to validate Decisions filter query URLs. */
+export type DecisionsFilterView = 'decisions' | 'profile-decisions';
+
 /**
- * Validates a `q=` query string against the `decisions` filter query schema
- * plus the text-mode 2-rune minimum (and 200-rune text cap). Kept here rather
- * than in `client/project-decisions.ts` so profile-shell/profile-nav closures
- * do not pull `shared/filter-query`.
+ * Validates a `q=` query string against `view` (`decisions` or
+ * `profile-decisions`) plus the text-mode 2-rune minimum (and 200-rune text
+ * cap). Kept here rather than in `client/project-decisions.ts` or
+ * `client/profile-decisions.ts` so profile-shell/profile-nav closures do not
+ * pull `shared/filter-query`.
  */
-export function isValidDecisionsDialectQuery(raw: string): boolean {
-  const schema = getViewSchema('decisions');
+export function isValidDecisionsDialectQuery(
+  raw: string,
+  view: DecisionsFilterView = 'decisions'
+): boolean {
+  const schema = getViewSchema(view);
   if (!schema) return Boolean(normalizeDecisionsSearchQuery(raw));
   const parsed = parseFilterQuery(raw, knownKeysFor(schema));
   if (parsed.error || !parsed.query) return false;
@@ -88,13 +96,68 @@ export function isValidDecisionsDialectQuery(raw: string): boolean {
  * `<scion-filter-box>` will surface inline (e.g. `provenance:bogus`, `agent:`,
  * or >200-rune plain text), as opposed to sub-minimum plain text like `a`.
  */
-function hasDecisionsDialectInlineError(raw: string): boolean {
-  const schema = getViewSchema('decisions');
+function hasDecisionsDialectInlineError(
+  raw: string,
+  view: DecisionsFilterView = 'decisions'
+): boolean {
+  const schema = getViewSchema(view);
   if (!schema) return false;
   const parsed = parseFilterQuery(raw, knownKeysFor(schema));
   if (parsed.error || !parsed.query) return true;
   return Boolean(validateFilterQuery(parsed.query, schema, raw).error);
 }
+
+/**
+ * Builds the filter query string when drilling down into a single project from
+ * the profile Made `sort=project` overview (O2): drops any existing positive
+ * `project:` terms (the drilled group already satisfies them), preserves
+ * negated `-project:` terms, all other keys, and text, and inserts the single
+ * positive `project:<slugOrId>` term in canonical form. Kept here so
+ * `client/profile-decisions.ts` does not import `shared/filter-query`.
+ */
+export function buildProfileProjectDrillDownQuery(
+  existingQ: string,
+  projectSlugOrId: string
+): string {
+  const target = projectSlugOrId.trim();
+  if (!target) return existingQ.trim();
+  const newTerm = {
+    key: 'project',
+    values: [target],
+    negate: false,
+    offset: 0,
+    length: 0,
+  };
+  const trimmed = existingQ.trim();
+  if (!trimmed) {
+    return `project:${formatValue(target)}`;
+  }
+  const schema = getViewSchema('profile-decisions');
+  if (!schema) {
+    return `project:${formatValue(target)} ${trimmed}`;
+  }
+  const parsed = parseFilterQuery(trimmed, knownKeysFor(schema));
+  if (parsed.error || !parsed.query) {
+    return `project:${formatValue(target)}`;
+  }
+  if (parsed.query.mode === 'text') {
+    return canonical({
+      mode: 'structured',
+      terms: [newTerm],
+      text: parsed.query.text,
+    });
+  }
+  const keptTerms = parsed.query.terms.filter(
+    (t) => !(t.key.toLowerCase() === 'project' && !t.negate)
+  );
+  return canonical({
+    mode: 'structured',
+    terms: [...keptTerms, newTerm],
+    ...(parsed.query.text ? { text: parsed.query.text } : {}),
+    ...(parsed.query.excludeText?.length ? { excludeText: parsed.query.excludeText } : {}),
+  });
+}
+
 import {
   buildProfileDecisionsUrlSearch,
   cleanProfileProjectValue,
@@ -469,7 +532,10 @@ export class DecisionsPageController implements ReactiveController {
 
     const search = query ? `?${query}` : window.location.search;
     if (this.adapter.scope === 'profile') {
-      const parsed = parseProfileDecisionsUrlState(search, { dialect: this.queryDialect });
+      const parsed = parseProfileDecisionsUrlState(search, {
+        dialect: this.queryDialect,
+        validateQuery: this.validateDialectQuery,
+      });
       this.activeTab = parsed.tab;
       this.sort = parsed.sort;
       if (parsed.tab === 'pending') {
@@ -483,7 +549,14 @@ export class DecisionsPageController implements ReactiveController {
       }
       this.filterProject = parsed.project;
       this.filterQ = parsed.q;
-      this.searchDraft = parsed.q;
+      // Under filters.query_dialect, keep a malformed raw q= (parse/validate
+      // error) in searchDraft so <scion-filter-box> shows its inline error
+      // while filterQ stays empty and loads the unfiltered list without a 400.
+      // Sub-minimum text like `?q=a` has no inline error, so clear searchDraft
+      // so the box never displays text that isn't filtering.
+      const rawQ = this.queryDialect ? extractRawDecisionsQueryParam(search) : '';
+      this.searchDraft =
+        parsed.q || (rawQ && hasDecisionsDialectInlineError(rawQ, 'profile-decisions') ? rawQ : '');
       this.filterConversation = parsed.conversation;
       this.filterAgent = parsed.agent;
       this.filterUser = parsed.user;
@@ -532,7 +605,7 @@ export class DecisionsPageController implements ReactiveController {
               from: this.filterFrom,
               to: this.filterTo,
             },
-            { dialect: this.queryDialect }
+            { dialect: this.queryDialect, validateQuery: this.validateDialectQuery }
           )
         : buildDecisionsUrlSearch(
             {
@@ -724,13 +797,18 @@ export class DecisionsPageController implements ReactiveController {
     };
   }
 
+  private get dialectView(): DecisionsFilterView {
+    return this.adapter.scope === 'profile' ? 'profile-decisions' : 'decisions';
+  }
+
+  readonly validateDialectQuery = (raw: string): boolean =>
+    isValidDecisionsDialectQuery(raw, this.dialectView);
+
   private hasPendingDialectFilter(): boolean {
     if (!this.queryDialect) return false;
-    const raw = normalizeDecisionsFilterQuery(this.filterQ, isValidDecisionsDialectQuery);
+    const raw = normalizeDecisionsFilterQuery(this.filterQ, this.validateDialectQuery);
     if (!raw) return false;
-    const schema = getViewSchema(
-      this.adapter.scope === 'profile' ? 'profile-decisions' : 'decisions'
-    );
+    const schema = getViewSchema(this.dialectView);
     if (!schema) return Boolean(normalizeDecisionsSearchQuery(raw));
     const parsed = parseFilterQuery(raw, knownKeysFor(schema));
     if (parsed.error || !parsed.query) return false;
@@ -759,7 +837,7 @@ export class DecisionsPageController implements ReactiveController {
 
   get isMadeFiltered(): boolean {
     const qActive = this.queryDialect
-      ? Boolean(normalizeDecisionsFilterQuery(this.filterQ, isValidDecisionsDialectQuery))
+      ? Boolean(normalizeDecisionsFilterQuery(this.filterQ, this.validateDialectQuery))
       : Boolean(normalizeDecisionsSearchQuery(this.filterQ));
     return Boolean(
       (this.supportsSearch && (qActive || this.filterConversation)) ||
@@ -1431,33 +1509,50 @@ export class DecisionsPageController implements ReactiveController {
     }
   }
 
+  private buildDrillDownMadeProjectState(projectId: string): { project: string; q: string } {
+    const cleaned = cleanProfileProjectValue(projectId);
+    if (!cleaned) return { project: this.filterProject, q: this.filterQ };
+    if (this.queryDialect) {
+      const proj = this.knownProjectsById.get(cleaned);
+      const nextQ = buildProfileProjectDrillDownQuery(this.filterQ, proj?.slug || cleaned);
+      return { project: '', q: nextQ };
+    }
+    return { project: cleaned, q: this.filterQ };
+  }
+
+  buildDrillDownMadeProjectSearch(projectId: string): string {
+    const next = this.buildDrillDownMadeProjectState(projectId);
+    return buildProfileDecisionsUrlSearch(
+      {
+        tab: 'made',
+        sort: 'recent',
+        project: next.project,
+        q: next.q,
+        conversation: this.filterConversation,
+        agent: this.filterAgent,
+        user: this.filterUser,
+        provenance: this.filterProvenance,
+        from: this.filterFrom,
+        to: this.filterTo,
+      },
+      { dialect: this.queryDialect, validateQuery: this.validateDialectQuery }
+    );
+  }
+
   drillDownMadeProject(projectId: string): void {
     if (this.adapter.scope !== 'profile') return;
     const cleaned = cleanProfileProjectValue(projectId);
     if (!cleaned) return;
     const flushedSearch = this.flushDebouncedSearchIfPending();
-    if (this.queryDialect) {
-      const proj = this.knownProjectsById.get(cleaned);
-      const projTerm = `project:${formatValue(proj?.slug || cleaned)}`;
-      const existing = normalizeDecisionsFilterQuery(this.filterQ);
-      const nextQ = existing ? `${projTerm} ${existing}` : projTerm;
-      const changed = nextQ !== this.filterQ || Boolean(this.filterProject) || flushedSearch;
-      this.filterProject = '';
-      this.filterQ = nextQ;
-      this.searchDraft = nextQ;
-      this.sort = 'recent';
-      this.madeSortOverride = null;
-      if (changed) {
-        this.invalidateInFlightPendingLoad();
-      }
-    } else {
-      const projectChanged = cleaned !== this.filterProject;
-      this.filterProject = cleaned;
-      this.sort = 'recent';
-      this.madeSortOverride = null;
-      if (projectChanged || flushedSearch) {
-        this.invalidateInFlightPendingLoad();
-      }
+    const next = this.buildDrillDownMadeProjectState(cleaned);
+    const changed = next.project !== this.filterProject || next.q !== this.filterQ || flushedSearch;
+    this.filterProject = next.project;
+    this.filterQ = next.q;
+    this.searchDraft = next.q;
+    this.sort = 'recent';
+    this.madeSortOverride = null;
+    if (changed) {
+      this.invalidateInFlightPendingLoad();
     }
     this.madeNextCursor = '';
     this.madePagedBeyondFirst = false;
@@ -1545,7 +1640,7 @@ export class DecisionsPageController implements ReactiveController {
       clearTimeout(this.searchDebounceTimer);
       this.searchDebounceTimer = null;
     }
-    const nextQ = normalizeDecisionsFilterQuery(rawQ, isValidDecisionsDialectQuery);
+    const nextQ = normalizeDecisionsFilterQuery(rawQ, this.validateDialectQuery);
     const hadLegacy = Boolean(
       this.filterProject ||
       this.filterConversation ||

@@ -547,7 +547,11 @@ export class ScionDecisionsFilterPanel extends LitElement {
     const parts: string[] = [];
     if (this.scope === 'profile' && this.project) {
       const proj = this.projects.find((p) => p.id === this.project || p.slug === this.project);
-      parts.push(`project:${formatValue(proj?.slug || this.project)}`);
+      const uniqueSlug =
+        proj !== undefined &&
+        Boolean(proj.slug) &&
+        this.projects.filter((p) => p.slug.toLowerCase() === proj.slug.toLowerCase()).length === 1;
+      parts.push(`project:${formatValue(uniqueSlug ? proj.slug : this.project)}`);
     }
     if (this.conversation) {
       const conv = this.conversations.find((c) => c.key === this.conversation);
