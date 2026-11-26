@@ -560,6 +560,10 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// (opsettings.ChatRetentionSettings.Resolve), not a user or
 		// transport resolver.
 		"handlePutChatRetention settings",
+		// The decision_retention settings document's bounds check
+		// (opsettings.DecisionRetentionSettings.Resolve), not a user or
+		// transport resolver.
+		"handlePutDecisionRetention settings",
 		// The conduit router (router.Resolve: which session would carry a
 		// page view stream), not a user or transport resolver.
 		"portViewConduitRoute rtr",
