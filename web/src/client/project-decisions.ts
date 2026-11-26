@@ -21,12 +21,6 @@
  */
 
 import { apiFetch, parseApiError } from './api.js';
-import {
-  getViewSchema,
-  knownKeysFor,
-  parse as parseFilterQuery,
-  validate as validateFilterQuery,
-} from '../shared/filter-query/index.js';
 import type {
   AnswerView,
   ChoiceOption,
@@ -221,6 +215,7 @@ export interface ProjectDecisionsQueryOptions {
   limit?: number | undefined;
   filter?: MadeDecisionsFilter | undefined;
   dialect?: boolean | undefined;
+  validateQuery?: ((q: string) => boolean) | undefined;
 }
 
 /** Validated URL filter/tab state for the project Decisions page (D10, D11). */
@@ -288,27 +283,21 @@ export function normalizeDecisionsSearchQuery(raw: string | undefined | null): s
 /**
  * Normalizes a `q` parameter when `filters.query_dialect` is enabled: trims
  * edge whitespace, rejects control characters, enforces the 512-byte
- * `filterquery.MaxInputBytes` bound, runs client `parse()` + `validate()`
- * against the `decisions` schema, and enforces the text-mode 2-rune minimum
- * (and 200-rune text cap). Returns `''` for invalid inputs so stale or
- * hand-edited URLs never trigger HTTP 400 from the Hub.
+ * `filterquery.MaxInputBytes` bound, and runs an optional caller-supplied
+ * `validateQuery` predicate (kept injected so this module does not pull
+ * `shared/filter-query` into profile-shell/profile-nav closures).
  */
-export function normalizeDecisionsFilterQuery(raw: string | undefined | null): string {
+export function normalizeDecisionsFilterQuery(
+  raw: string | undefined | null,
+  validateQuery?: (q: string) => boolean
+): string {
   const trimmed = trimEdgeSpace(raw);
   if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return '';
   if (new TextEncoder().encode(trimmed).length > MAX_DECISIONS_FILTER_QUERY_BYTES) {
     return '';
   }
-  const schema = getViewSchema('decisions');
-  if (!schema) return normalizeDecisionsSearchQuery(trimmed);
-  const parsed = parseFilterQuery(trimmed, knownKeysFor(schema));
-  if (parsed.error || !parsed.query) return '';
-  const validation = validateFilterQuery(parsed.query, schema, trimmed);
-  if (validation.error) return '';
-  if (parsed.query.mode === 'text') {
-    if ([...parsed.query.text].length < MIN_DECISIONS_SEARCH_RUNES) {
-      return '';
-    }
+  if (validateQuery && !validateQuery(trimmed)) {
+    return '';
   }
   return trimmed;
 }
@@ -390,14 +379,14 @@ function cleanProvenanceValue(raw: string | undefined | null): MadeDecisionsProv
  */
 export function parseDecisionsUrlState(
   search: string | URLSearchParams,
-  opts?: { dialect?: boolean }
+  opts?: { dialect?: boolean; validateQuery?: (q: string) => boolean }
 ): DecisionsUrlState {
   const params = typeof search === 'string' ? new URLSearchParams(search) : search;
   const rawTab = (params.get('tab') ?? '').trim();
   const tab: 'pending' | 'made' = rawTab === 'made' ? 'made' : 'pending';
 
   const q = opts?.dialect
-    ? normalizeDecisionsFilterQuery(params.get('q'))
+    ? normalizeDecisionsFilterQuery(params.get('q'), opts.validateQuery)
     : normalizeDecisionsSearchQuery(params.get('q'));
   const conversation = cleanConversationValue(params.get('conversation'));
   const rawAgent = cleanFilterValue(params.get('agent'));
@@ -446,7 +435,7 @@ export function parseDecisionsUrlState(
  */
 export function buildDecisionsUrlSearch(
   state: Partial<DecisionsUrlState>,
-  opts?: { dialect?: boolean }
+  opts?: { dialect?: boolean; validateQuery?: (q: string) => boolean }
 ): string {
   const params = new URLSearchParams();
   const tab = state.tab === 'made' ? 'made' : 'pending';
@@ -455,7 +444,7 @@ export function buildDecisionsUrlSearch(
   }
 
   const q = opts?.dialect
-    ? normalizeDecisionsFilterQuery(state.q)
+    ? normalizeDecisionsFilterQuery(state.q, opts.validateQuery)
     : normalizeDecisionsSearchQuery(state.q);
   if (q) params.set('q', q);
 
@@ -501,7 +490,7 @@ export function buildProjectDecisionsQuery(options: ProjectDecisionsQueryOptions
 
   if (options.filter) {
     const q = options.dialect
-      ? normalizeDecisionsFilterQuery(options.filter.q)
+      ? normalizeDecisionsFilterQuery(options.filter.q, options.validateQuery)
       : normalizeDecisionsSearchQuery(options.filter.q);
     if (q) params.set('q', q);
 
@@ -547,6 +536,7 @@ export async function fetchProjectPendingDecisions(
     filter?: SharedDecisionsFilter | undefined;
     signal?: AbortSignal | undefined;
     dialect?: boolean | undefined;
+    validateQuery?: ((q: string) => boolean) | undefined;
   } = {}
 ): Promise<ProjectPendingDecisionsResponse> {
   const url = projectDecisionsUrl(projectId, {
@@ -555,6 +545,7 @@ export async function fetchProjectPendingDecisions(
     limit: options.limit,
     filter: options.filter,
     dialect: options.dialect,
+    validateQuery: options.validateQuery,
   });
   const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
   if (!res.ok) {
@@ -591,6 +582,7 @@ export async function fetchProjectMadeDecisions(
     limit?: number | undefined;
     signal?: AbortSignal | undefined;
     dialect?: boolean | undefined;
+    validateQuery?: ((q: string) => boolean) | undefined;
   } = {}
 ): Promise<ProjectMadeDecisionsResponse> {
   const url = projectDecisionsUrl(projectId, {
@@ -599,6 +591,7 @@ export async function fetchProjectMadeDecisions(
     limit: options.limit,
     filter,
     dialect: options.dialect,
+    validateQuery: options.validateQuery,
   });
   const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
   if (!res.ok) {

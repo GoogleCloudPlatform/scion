@@ -48,7 +48,10 @@ import type {
 } from '../shared/decisions-filter-panel.js';
 import '../shared/decisions-filter-panel.js';
 import { collectWaitingOnOthersItems } from '../shared/decisions-format.js';
-import { DecisionsPageController } from '../shared/decisions-page-controller.js';
+import {
+  DecisionsPageController,
+  isValidDecisionsDialectQuery,
+} from '../shared/decisions-page-controller.js';
 import {
   decisionsPageSharedStyles,
   renderBulkDismissDialog,
@@ -117,6 +120,7 @@ export class ScionPageProjectDecisions extends LitElement {
         filter,
         signal,
         dialect: this.ctrl.queryDialect,
+        validateQuery: isValidDecisionsDialectQuery,
       }),
     fetchMade: ({ cursor, limit, filter, signal }): Promise<ProjectMadeDecisionsResponse> =>
       fetchProjectMadeDecisions(this.projectId, filter, {
@@ -124,6 +128,7 @@ export class ScionPageProjectDecisions extends LitElement {
         limit,
         signal,
         dialect: this.ctrl.queryDialect,
+        validateQuery: isValidDecisionsDialectQuery,
       }),
   });
 
