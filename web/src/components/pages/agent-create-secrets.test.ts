@@ -134,9 +134,8 @@ async function addAndFillRow(
   opts: {
     key: string;
     value: string;
-    type?: 'environment' | 'file' | 'variable';
+    type?: 'environment' | 'file' | 'on_demand';
     target?: string;
-    injectionMode?: 'as_needed' | 'always';
   }
 ): Promise<HTMLElement> {
   const addBtn = form.shadowRoot!.querySelector<HTMLElement>('[data-testid="add-secret-row"]')!;
@@ -164,13 +163,6 @@ async function addAndFillRow(
     const targetInput = rowEl.querySelector<Valued>('[data-field="target"]')!;
     targetInput.value = opts.target;
     targetInput.dispatchEvent(new Event('sl-input'));
-    await form.updateComplete;
-  }
-
-  if (opts.injectionMode) {
-    const modeSelect = rowEl.querySelector<Valued>('[data-field="injectionMode"]')!;
-    modeSelect.value = opts.injectionMode;
-    modeSelect.dispatchEvent(new Event('sl-change'));
     await form.updateComplete;
   }
 
@@ -318,7 +310,7 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
         key: 'SECOND_KEY',
         value: 'second-secret',
         type: 'environment',
-        injectionMode: 'as_needed',
+        injectionMode: 'always',
       },
     ]);
     const remainingRow = form.shadowRoot!.querySelector<HTMLElement>('[data-testid="secret-row"]')!;
@@ -365,14 +357,17 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
       key: 'GITHUB_TOKEN',
       value: 'ghp_secret_canary_value',
       type: 'environment',
-      injectionMode: 'always',
     });
     await addAndFillRow(form, {
       key: 'DEPLOY_KEY',
       value: '-----BEGIN KEY-----\nsecret-pem-canary\n-----END KEY-----',
       type: 'file',
       target: '~/.ssh/id_ed25519',
-      injectionMode: 'as_needed',
+    });
+    await addAndFillRow(form, {
+      key: 'CLI_TOKEN',
+      value: 'cli-only-secret',
+      type: 'on_demand',
     });
 
     await page.handleSubmit(new Event('submit'));
@@ -390,7 +385,11 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
         value: '-----BEGIN KEY-----\nsecret-pem-canary\n-----END KEY-----',
         type: 'file',
         target: '~/.ssh/id_ed25519',
-        injectionMode: 'as_needed',
+      },
+      {
+        key: 'CLI_TOKEN',
+        value: 'cli-only-secret',
+        type: 'on_demand',
       },
     ]);
 
@@ -494,5 +493,46 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
       'agent secrets could not be stored; the agent was not created'
     );
     mounted.page.remove();
+  });
+
+  it('offers Environment/File/On demand, shows Type tooltip, hides delivery selector, and scopes Target to File only', async () => {
+    const { form } = await mountCreate(true);
+    const addBtn = form.shadowRoot!.querySelector<HTMLElement>('[data-testid="add-secret-row"]')!;
+    addBtn.click();
+    await form.updateComplete;
+
+    const rowEl = form.shadowRoot!.querySelector<HTMLElement>('[data-testid="secret-row"]')!;
+    const typeSelect = rowEl.querySelector<Valued>('[data-field="type"]')!;
+    const optionValues = Array.from(typeSelect.querySelectorAll('sl-option')).map((o) =>
+      o.getAttribute('value')
+    );
+    expect(optionValues).toEqual(['environment', 'file', 'on_demand']);
+
+    // Type tooltip is present with descriptions of all three types.
+    const tooltip = rowEl.querySelector('[data-testid="secret-type-tooltip"]');
+    expect(tooltip).not.toBeNull();
+    expect(tooltip!.textContent).toContain('Environment:');
+    expect(tooltip!.textContent).toContain('File:');
+    expect(tooltip!.textContent).toContain('On demand:');
+    expect(tooltip!.textContent).toContain('scion secret get --value KEY');
+    expect(tooltip!.querySelector('sl-icon[name="info-circle"]')).not.toBeNull();
+
+    // No delivery (injectionMode) selector at agent scope.
+    expect(rowEl.querySelector('[data-field="injectionMode"]')).toBeNull();
+
+    // Target is hidden for environment.
+    expect(rowEl.querySelector('[data-field="target"]')).toBeNull();
+
+    // Target appears for file.
+    typeSelect.value = 'file';
+    typeSelect.dispatchEvent(new Event('sl-change'));
+    await form.updateComplete;
+    expect(rowEl.querySelector('[data-field="target"]')).not.toBeNull();
+
+    // Target hides again for on_demand.
+    typeSelect.value = 'on_demand';
+    typeSelect.dispatchEvent(new Event('sl-change'));
+    await form.updateComplete;
+    expect(rowEl.querySelector('[data-field="target"]')).toBeNull();
   });
 });

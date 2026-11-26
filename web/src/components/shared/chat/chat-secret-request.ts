@@ -92,6 +92,15 @@ export interface SecretRequestRefreshedDetail {
   card: SecretRequestCardResponse;
 }
 
+/** Display label for a secret request row's type badge. */
+function secretRequestTypeLabel(secretType: string): string {
+  // Historical secret-request messages may still carry "variable"; render as "On demand".
+  if (secretType === 'on_demand' || secretType === 'variable') {
+    return 'On demand';
+  }
+  return secretType;
+}
+
 @customElement('scion-chat-secret-request')
 export class ScionChatSecretRequest extends LitElement {
   readonly _zone = new DisplayZoneController(this);
@@ -973,7 +982,7 @@ export class ScionChatSecretRequest extends LitElement {
             <span class="key-label">${row.key}</span>
             ${row.version > 0 ? html`<span class="version">v${row.version}</span>` : nothing}
             ${row.secretType && row.secretType !== 'environment'
-              ? html`<span class="type-badge">${row.secretType}</span>`
+              ? html`<span class="type-badge">${secretRequestTypeLabel(row.secretType)}</span>`
               : nothing}
             ${row.target ? html`<span class="target-path">${row.target}</span>` : nothing}
           </div>

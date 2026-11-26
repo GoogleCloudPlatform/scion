@@ -1655,7 +1655,7 @@ export class ScionPageAdminSystemOne extends LitElement {
           name="secretName"
           hoist
           required
-          help-text="Restricted to Hub-approved secret names for this adapter (configured by the host operator). Only environment/variable secrets are permitted; internal and file secrets are refused."
+          help-text="Restricted to Hub-approved secret names for this adapter (configured by the host operator). Only environment and on_demand secrets are permitted; internal and file secrets are refused."
           .value=${this.createSecretName}
           @sl-change=${(e: Event) => {
             this.createSecretName = (e.target as HTMLSelectElement).value;

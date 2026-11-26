@@ -34,7 +34,7 @@ export type SecretRequestStatus =
   | 'expired';
 
 /** Supported secret types for a requested secret. */
-export type SecretRequestSecretType = 'environment' | 'file' | 'variable';
+export type SecretRequestSecretType = 'environment' | 'file' | 'on_demand';
 
 /** Responder surface recorded on fulfill and dismiss requests. */
 export type SecretRequestSurface = 'native' | 'standalone_page';

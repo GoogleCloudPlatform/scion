@@ -279,7 +279,7 @@ export class ScionPageAgentCreate extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
       padding: 1.5rem;
-      max-width: 720px;
+      max-width: 960px;
     }
 
     .form-field {

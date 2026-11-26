@@ -159,7 +159,7 @@ describe('scion-secret-list — agent scope and existing scopes', () => {
       scope: 'agent',
       scopeId: 'agent-uuid-1',
       type: 'environment',
-      injectionMode: 'as_needed',
+      injectionMode: 'always',
     });
     expect(putCall!.body!.allowProgeny).toBeUndefined();
 
@@ -418,5 +418,138 @@ describe('scion-secret-list — agent scope and existing scopes', () => {
     expect(tbody!.textContent).not.toContain('Approve');
     expect(tbody!.textContent).not.toContain('Reject');
     expect(tbody!.textContent).not.toContain('Reveal');
+  });
+
+  it('offers On demand only at project and agent scopes, renders Type tooltip, and scopes Target and Inject controls', async () => {
+    const scopeExpectations: Array<{
+      scope: 'user' | 'hub' | 'project' | 'agent';
+      scopeId?: string;
+      apiBasePath?: string;
+      expectOnDemand: boolean;
+      expectEnvInjectSelector: boolean;
+    }> = [
+      { scope: 'user', expectOnDemand: false, expectEnvInjectSelector: true },
+      { scope: 'hub', expectOnDemand: false, expectEnvInjectSelector: true },
+      {
+        scope: 'project',
+        scopeId: 'proj-1',
+        apiBasePath: '/api/v1/projects/proj-1',
+        expectOnDemand: true,
+        expectEnvInjectSelector: true,
+      },
+      {
+        scope: 'agent',
+        scopeId: 'agent-1',
+        expectOnDemand: true,
+        expectEnvInjectSelector: false,
+      },
+    ];
+
+    for (const cfg of scopeExpectations) {
+      installFetch([]);
+      const el = await mountList({
+        scope: cfg.scope,
+        scopeId: cfg.scopeId,
+        apiBasePath: cfg.apiBasePath,
+        compact: cfg.scope !== 'user',
+      });
+
+      const priv = el as unknown as {
+        openCreateDialog: () => void;
+        dialogType: string;
+      };
+      priv.openCreateDialog();
+      await el.updateComplete;
+
+      const typeSelect = el.shadowRoot!.querySelector('sl-select[data-field="type"]')!;
+      const optionValues = Array.from(typeSelect.querySelectorAll('sl-option')).map((o) =>
+        o.getAttribute('value')
+      );
+      expect(optionValues).not.toContain('variable');
+      if (cfg.expectOnDemand) {
+        expect(optionValues).toEqual(['environment', 'file', 'on_demand']);
+      } else {
+        expect(optionValues).toEqual(['environment', 'file']);
+      }
+
+      // Type tooltip present in dialog.
+      const tooltip = el.shadowRoot!.querySelector('[data-testid="secret-type-tooltip"]');
+      expect(tooltip).not.toBeNull();
+      expect(tooltip!.textContent).toContain('Environment:');
+      expect(tooltip!.textContent).toContain('File:');
+      expect(tooltip!.textContent).toContain('On demand:');
+      expect(tooltip!.querySelector('sl-icon[name="info-circle"]')).not.toBeNull();
+
+      // Environment: target hidden; inject selector follows scope rule.
+      expect(el.shadowRoot!.querySelector('[data-field="target"]')).toBeNull();
+      if (cfg.expectEnvInjectSelector) {
+        expect(el.shadowRoot!.querySelector('[data-testid="injection-mode-field"]')).not.toBeNull();
+      } else {
+        expect(el.shadowRoot!.querySelector('[data-testid="injection-mode-field"]')).toBeNull();
+      }
+
+      // File: target shown; inject selector hidden.
+      priv.dialogType = 'file';
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('[data-field="target"]')).not.toBeNull();
+      expect(el.shadowRoot!.querySelector('[data-testid="injection-mode-field"]')).toBeNull();
+
+      // On demand (when supported): target hidden; inject selector hidden.
+      if (cfg.expectOnDemand) {
+        priv.dialogType = 'on_demand';
+        await el.updateComplete;
+        expect(el.shadowRoot!.querySelector('[data-field="target"]')).toBeNull();
+        expect(el.shadowRoot!.querySelector('[data-testid="injection-mode-field"]')).toBeNull();
+      }
+
+      el.remove();
+    }
+  });
+
+  it('omits target and injectionMode when saving on_demand secrets and renders on_demand badge in table', async () => {
+    const onDemandSecret: Secret = {
+      id: 'sec-od',
+      key: 'CLI_SECRET',
+      type: 'on_demand',
+      scope: 'project',
+      scopeId: 'proj-1',
+      version: 1,
+      created: '2026-11-20T00:00:00Z',
+      updated: '2026-11-21T00:00:00Z',
+    };
+    const calls = installFetch([onDemandSecret]);
+    const el = await mountList({
+      scope: 'project',
+      scopeId: 'proj-1',
+      apiBasePath: '/api/v1/projects/proj-1',
+      compact: true,
+    });
+
+    const badge = el.shadowRoot!.querySelector('.type-badge.on_demand');
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent?.trim()).toBe('on demand');
+
+    const priv = el as unknown as {
+      openCreateDialog: () => void;
+      dialogKey: string;
+      dialogValue: string;
+      dialogType: string;
+      dialogTarget: string;
+      dialogInjectionMode: string;
+      handleSave: (e: Event) => Promise<void>;
+    };
+    priv.openCreateDialog();
+    priv.dialogKey = 'NEW_OD';
+    priv.dialogValue = 'secret-val';
+    priv.dialogType = 'on_demand';
+    priv.dialogTarget = '/stale/path';
+    priv.dialogInjectionMode = 'always';
+    await priv.handleSave(new Event('submit'));
+
+    const putCall = calls.find((c) => c.method === 'PUT' && c.url.includes('NEW_OD'));
+    expect(putCall).toBeDefined();
+    expect(putCall!.body!.type).toBe('on_demand');
+    expect(putCall!.body!.target).toBeUndefined();
+    expect(putCall!.body!.injectionMode).toBeUndefined();
   });
 });

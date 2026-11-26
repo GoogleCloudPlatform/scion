@@ -64,7 +64,6 @@ import type {
   AgentSecretInput,
   CapabilityField,
   HarnessAdvancedCapabilities,
-  InjectionMode,
   MessageMode,
   SecretType,
   TelemetryConfig,
@@ -2240,34 +2239,42 @@ export class ScionAgentConfigForm extends LitElement {
 
                 <sl-select
                   size="small"
-                  label="Type"
                   data-field="type"
                   .value=${row.type}
                   ?disabled=${this.disabled}
-                  @sl-change=${(e: Event) =>
+                  @sl-change=${(e: Event) => {
+                    const nextType = (e.target as HTMLElement & { value: string })
+                      .value as SecretType;
                     this.updateSecretRow(i, {
-                      type: (e.target as HTMLElement & { value: string }).value as SecretType,
-                    })}
+                      type: nextType,
+                      ...(nextType !== 'file' ? { target: '' } : {}),
+                      injectionMode: nextType === 'on_demand' ? 'as_needed' : 'always',
+                    });
+                  }}
                 >
+                  <span slot="label" class="type-label-with-help">
+                    Type
+                    <sl-tooltip hoist data-testid="secret-type-tooltip">
+                      <div slot="content" class="secret-type-tooltip">
+                        <div><strong>Environment:</strong> injected as an env var at start.</div>
+                        <div><strong>File:</strong> written to the target path at start.</div>
+                        <div>
+                          <strong>On demand:</strong> never placed in the container — the agent
+                          reads it with <code>scion secret get --value KEY</code> and sees it in
+                          <code>scion secret list</code>.
+                        </div>
+                      </div>
+                      <sl-icon
+                        name="info-circle"
+                        class="type-help-icon"
+                        tabindex="0"
+                        aria-label="Secret type help"
+                      ></sl-icon>
+                    </sl-tooltip>
+                  </span>
                   <sl-option value="environment">Environment</sl-option>
                   <sl-option value="file">File</sl-option>
-                  <sl-option value="variable">Variable</sl-option>
-                </sl-select>
-
-                <sl-select
-                  size="small"
-                  label="Inject"
-                  data-field="injectionMode"
-                  .value=${row.injectionMode}
-                  ?disabled=${this.disabled}
-                  @sl-change=${(e: Event) =>
-                    this.updateSecretRow(i, {
-                      injectionMode: (e.target as HTMLElement & { value: string })
-                        .value as InjectionMode,
-                    })}
-                >
-                  <sl-option value="as_needed">As needed</sl-option>
-                  <sl-option value="always">Always</sl-option>
+                  <sl-option value="on_demand">On demand</sl-option>
                 </sl-select>
 
                 <sl-icon-button
@@ -2294,22 +2301,24 @@ export class ScionAgentConfigForm extends LitElement {
                 ></scion-secret-value-field>
               </div>
 
-              <div class="secret-row-target">
-                <sl-input
-                  size="small"
-                  label=${row.type === 'file' ? 'Target path (required)' : 'Target (optional)'}
-                  data-field="target"
-                  placeholder=${row.type === 'file'
-                    ? 'e.g. ~/.ssh/id_ed25519 or /etc/app/key.pem'
-                    : 'Defaults to key'}
-                  .value=${row.target}
-                  ?disabled=${this.disabled}
-                  @sl-input=${(e: Event) =>
-                    this.updateSecretRow(i, {
-                      target: (e.target as HTMLElement & { value: string }).value,
-                    })}
-                ></sl-input>
-              </div>
+              ${row.type === 'file'
+                ? html`
+                    <div class="secret-row-target">
+                      <sl-input
+                        size="small"
+                        label="Target path (required)"
+                        data-field="target"
+                        placeholder="e.g. ~/.ssh/id_ed25519 or /etc/app/key.pem"
+                        .value=${row.target}
+                        ?disabled=${this.disabled}
+                        @sl-input=${(e: Event) =>
+                          this.updateSecretRow(i, {
+                            target: (e.target as HTMLElement & { value: string }).value,
+                          })}
+                      ></sl-input>
+                    </div>
+                  `
+                : nothing}
             </div>
           `
         )}
@@ -2560,9 +2569,32 @@ export class ScionAgentConfigForm extends LitElement {
     }
     .secret-row-top {
       display: grid;
-      grid-template-columns: 1fr 8.5rem 8rem auto;
+      grid-template-columns: 1fr 9.5rem auto;
       gap: 0.5rem;
       align-items: end;
+    }
+    .type-label-with-help {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .type-help-icon {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted);
+      cursor: help;
+      vertical-align: middle;
+    }
+    .secret-type-tooltip {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      text-align: left;
+      max-width: 24rem;
+      line-height: 1.4;
+    }
+    .secret-type-tooltip code {
+      font-family: var(--scion-font-mono);
+      font-size: 0.9em;
     }
     .secret-row-value {
       display: flex;
