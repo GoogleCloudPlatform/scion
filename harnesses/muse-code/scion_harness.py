@@ -2747,10 +2747,11 @@ class NativeTelemetryDecision:
 
     enabled: whether native OTel export to sciontool's loopback receiver is active.
     loopback_only: True when native OTel is enabled solely for local Hub usage
-        metering (SCION_USAGE_HUB_INGEST=1) without a configured cloud provider
-        or endpoint. In this mode, provisioners must export only the minimal
-        usage signal to sciontool's loopback receiver, must not require a cloud
-        provider, and must not enable prompt/content logging.
+        metering (SCION_USAGE_HUB_INGEST=1) without explicit cloud telemetry
+        configuration. In this mode, provisioners emit
+        SCION_NATIVE_TELEMETRY_POLICY=metering so sciontool derives usage from
+        native signals and does not forward them to any cloud exporter, do not
+        require a cloud provider, and do not enable prompt/content logging.
     config: the telemetry dict from inputs/telemetry.json, or None.
     source_env: the env dict from inputs/telemetry.json (always a dict).
     """
@@ -2759,6 +2760,15 @@ class NativeTelemetryDecision:
     loopback_only: bool
     config: dict[str, Any] | None
     source_env: dict[str, str]
+
+    @property
+    def policy(self) -> str:
+        """SCION_NATIVE_TELEMETRY_POLICY value for this decision."""
+        if not self.enabled:
+            return "disabled"
+        if self.loopback_only:
+            return "metering"
+        return "enabled"
 
 
 def _parse_explicit_bool_env(val: Any) -> bool | None:
@@ -2787,6 +2797,9 @@ def _has_cloud_telemetry_config(
         source_env.get("SCION_TELEMETRY_CLOUD_PROVIDER")
         or source_env.get("SCION_OTEL_ENDPOINT")
         or source_env.get("SCION_OTEL_GCP_CREDENTIALS")
+        or os.environ.get("SCION_TELEMETRY_CLOUD_PROVIDER")
+        or os.environ.get("SCION_OTEL_ENDPOINT")
+        or os.environ.get("SCION_OTEL_GCP_CREDENTIALS")
     ):
         return True
     if home and os.path.isfile(os.path.join(home, ".scion", "telemetry-gcp-credentials.json")):
@@ -2794,11 +2807,7 @@ def _has_cloud_telemetry_config(
     return False
 
 
-def resolve_native_telemetry(
-    ctx: ProvisionContext,
-    *,
-    allow_hub_usage_loopback: bool = True,
-) -> NativeTelemetryDecision:
+def resolve_native_telemetry(ctx: ProvisionContext) -> NativeTelemetryDecision:
     """Resolve whether native OTel should be enabled, including loopback-only Hub metering.
 
     Precedence:
@@ -2807,12 +2816,14 @@ def resolve_native_telemetry(
     2. Explicit telemetry config in inputs/telemetry.json (non-empty dict with
        enabled != false) enables native OTel. If Hub usage ingest is active
        (SCION_USAGE_HUB_INGEST=1) and no cloud provider/endpoint/GCP credentials
-       are configured, loopback_only is True so harnesses (e.g. Claude) do not
-       abort requiring a cloud provider.
+       are configured, loopback_only is True (policy="metering") so harnesses
+       (e.g. Claude) do not abort requiring a cloud provider and sciontool does
+       not forward native signals to any cloud exporter.
     3. Unset/default telemetry (telemetry is None or empty dict): when
-       allow_hub_usage_loopback is True and SCION_USAGE_HUB_INGEST=1, enables
-       loopback-only native OTel to sciontool's loopback receiver; otherwise
-       keeps native OTel disabled.
+       SCION_USAGE_HUB_INGEST=1, enables metering-only native OTel
+       (loopback_only=True, policy="metering") to sciontool's loopback receiver;
+       sciontool enforces that native harness signals are never forwarded to any
+       cloud exporter in metering mode. Otherwise keeps native OTel disabled.
     """
     payload = ctx.telemetry
     raw_config = payload.get("telemetry") if isinstance(payload, dict) else None
@@ -2835,7 +2846,7 @@ def resolve_native_telemetry(
     hub_ingest_val = os.environ.get("SCION_USAGE_HUB_INGEST")
     if hub_ingest_val is None or hub_ingest_val == "":
         hub_ingest_val = source_env.get("SCION_USAGE_HUB_INGEST", "")
-    hub_usage_active = allow_hub_usage_loopback and hub_ingest_val == "1"
+    hub_usage_active = hub_ingest_val == "1"
     has_cloud = _has_cloud_telemetry_config(config, source_env, ctx.home)
 
     # 2. Explicit telemetry block (non-empty dict, enabled is True or omitted).
@@ -2845,7 +2856,7 @@ def resolve_native_telemetry(
             return NativeTelemetryDecision(True, bool(hub_usage_active and not has_cloud), config, source_env)
         return NativeTelemetryDecision(False, False, config, source_env)
 
-    # 3. Default / unset telemetry: auto-enable loopback-only native OTel when Hub usage sink is active.
+    # 3. Default / unset telemetry: auto-enable metering-only native OTel when Hub usage sink is active.
     if hub_usage_active:
         return NativeTelemetryDecision(True, True, config, source_env)
 
