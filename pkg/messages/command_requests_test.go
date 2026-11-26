@@ -106,6 +106,13 @@ func TestNormalizeCommandRequest(t *testing.T) {
 			{"hangul_choseong", "echo \u115F", "U+115F"},
 			{"hangul_jungseong", "echo \u1160", "U+1160"},
 			{"halfwidth_hangul_filler", "echo \uFFA0", "U+FFA0"},
+			{"vs1_low", "echo done \uFE00# ; echo PAYLOAD", "U+FE00"},
+			{"vs16_high", "echo done \uFE0F# ; echo PAYLOAD", "U+FE0F"},
+			{"vs_supp_low", "echo done \U000E0100# ; echo PAYLOAD", "U+E0100"},
+			{"vs_supp_high", "echo done \U000E01EF# ; echo PAYLOAD", "U+E01EF"},
+			{"mongolian_fvs1", "echo done \u180B# ; echo PAYLOAD", "U+180B"},
+			{"mongolian_fvs4", "echo done \u180F# ; echo PAYLOAD", "U+180F"},
+			{"braille_blank", "echo done \u2800# ; echo PAYLOAD", "U+2800"},
 		}
 		for _, tc := range scriptCases {
 			err := ValidateCommandRequestScript(tc.script)
@@ -129,6 +136,13 @@ func TestNormalizeCommandRequest(t *testing.T) {
 			{"nbsp", "/tmp/a\u00A0b", "U+00A0"},
 			{"hangul_filler", "/tmp/a\u3164b", "U+3164"},
 			{"line_sep", "/tmp/a\u2028b", "U+2028"},
+			{"vs1_low", "/tmp/a\uFE00b", "U+FE00"},
+			{"vs16_high", "/tmp/a\uFE0Fb", "U+FE0F"},
+			{"vs_supp_low", "/tmp/a\U000E0100b", "U+E0100"},
+			{"vs_supp_high", "/tmp/a\U000E01EFb", "U+E01EF"},
+			{"mongolian_fvs1", "/tmp/a\u180Bb", "U+180B"},
+			{"mongolian_fvs4", "/tmp/a\u180Fb", "U+180F"},
+			{"braille_blank", "/tmp/a\u2800b", "U+2800"},
 		}
 		for _, tc := range workdirCases {
 			err := ValidateCommandRequestWorkdir(tc.workdir)

@@ -385,6 +385,9 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 			tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 			if wonRun, terr := s.store.TransitionCommandRunToRunning(tctx, run.ID); terr == nil && wonRun {
 				run.Status = store.CommandRunStatusRunning
+				if req != nil {
+					s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestSSEView(req, nil, run))
+				}
 			}
 			cancel()
 		}

@@ -702,3 +702,90 @@ func TestCommandRequests_S12_NoScriptInLogsAcrossDeliveryPaths(t *testing.T) {
 		assert.Contains(t, stored.Msg, marker)
 	})
 }
+
+func TestCommandRequestGet_MessageIDFallbackAndDetailEnrichment(t *testing.T) {
+	f := newCommandRequestsFixture(t, true)
+	ctx := context.Background()
+
+	// Register Alice's execution container.
+	_, err := f.store.PutUserExecContainer(ctx, f.alice.ID, f.execAgent.ID)
+	require.NoError(t, err)
+
+	// Send v1 with an intro and a /workspace workdir.
+	rrSend1 := f.doAgentJSON(t, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/outbound-message", OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       "Please run this **deploy**",
+		CommandRequest: &messages.CommandRequestInput{
+			Key:         "deploy-p3",
+			Description: "Deploy preview",
+			Script:      "echo v1\n",
+			Workdir:     "/workspace/app",
+		},
+	})
+	require.Equal(t, http.StatusOK, rrSend1.Code, rrSend1.Body.String())
+	var send1 struct {
+		MessageID      string                            `json:"message_id"`
+		CommandRequest messages.CommandRequestSendResult `json:"command_request"`
+	}
+	require.NoError(t, json.Unmarshal(rrSend1.Body.Bytes(), &send1))
+	require.NotEmpty(t, send1.MessageID)
+	require.NotEmpty(t, send1.CommandRequest.RowID)
+
+	// GET by message_id falls back to GetCommandRequestByMessageID and returns
+	// enriched metadata (workdirKind, intro, projectName, approverName).
+	rrGetByMsg := f.doUserJSON(t, http.MethodGet, "/api/v1/command-requests/"+send1.MessageID, f.alice, nil)
+	require.Equal(t, http.StatusOK, rrGetByMsg.Code, rrGetByMsg.Body.String())
+	var detail1 messages.CommandRequestDetailResponse
+	require.NoError(t, json.Unmarshal(rrGetByMsg.Body.Bytes(), &detail1))
+	assert.Equal(t, send1.CommandRequest.RowID, detail1.Request.RowID)
+	assert.Equal(t, messages.CommandWorkdirKindWorkspace, detail1.Request.WorkdirKind)
+	assert.Equal(t, "Please run this **deploy**", detail1.Intro)
+	assert.Equal(t, "Command Project", detail1.ProjectName)
+	assert.Equal(t, "Alice", detail1.ApproverName)
+	assert.Nil(t, detail1.PreviousVersionUnknown)
+
+	// Approve v1 and mark its run as unknown, then re-propose v2 -> D7 banner field populated.
+	rrApprove := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/"+send1.CommandRequest.RowID+"/approve", f.alice, messages.ApproveCommandRequestBody{
+		RowID:          send1.CommandRequest.RowID,
+		CommandSHA256:  send1.CommandRequest.CommandSHA256,
+		Surface:        msgaction.CommandRequestSurfaceNative,
+		IdempotencyKey: "p3-d7-test-1",
+	})
+	require.Equal(t, http.StatusAccepted, rrApprove.Code, rrApprove.Body.String())
+	var approveResp messages.ApproveCommandRequestResponse
+	require.NoError(t, json.Unmarshal(rrApprove.Body.Bytes(), &approveResp))
+
+	won, err := f.store.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+		RunID:      approveResp.Run.RunID,
+		Status:     store.CommandRunStatusUnknown,
+		Reason:     "timeout",
+		FinishedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	// Re-propose v2 (RepostTerminalOK=true).
+	rrSend2 := f.doAgentJSON(t, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/outbound-message", OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		CommandRequest: &messages.CommandRequestInput{
+			Key:         "deploy-p3",
+			Description: "Retry deploy",
+			Script:      "echo v2\n",
+		},
+	})
+	require.Equal(t, http.StatusOK, rrSend2.Code, rrSend2.Body.String())
+	var send2 struct {
+		CommandRequest messages.CommandRequestSendResult `json:"command_request"`
+	}
+	require.NoError(t, json.Unmarshal(rrSend2.Body.Bytes(), &send2))
+	require.Equal(t, 2, send2.CommandRequest.Version)
+
+	rrGet2 := f.doUserJSON(t, http.MethodGet, "/api/v1/command-requests/"+send2.CommandRequest.RowID, f.alice, nil)
+	require.Equal(t, http.StatusOK, rrGet2.Code, rrGet2.Body.String())
+	var detail2 messages.CommandRequestDetailResponse
+	require.NoError(t, json.Unmarshal(rrGet2.Body.Bytes(), &detail2))
+	require.NotNil(t, detail2.PreviousVersionUnknown, "D7: v2 after unknown v1 must populate previousVersionUnknown")
+	assert.Equal(t, 1, detail2.PreviousVersionUnknown.Version)
+	assert.Equal(t, send1.CommandRequest.RowID, detail2.PreviousVersionUnknown.RowID)
+	assert.Equal(t, approveResp.Run.RunID, detail2.PreviousVersionUnknown.RunID)
+}
