@@ -25,48 +25,116 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// ErrCodeHarnessConfigSlugReserved answers a hosted-hub request that would
-// give a project-scope harness config the slug of a global one (409).
-const ErrCodeHarnessConfigSlugReserved = "harness_config_slug_reserved"
+// ErrCodeGlobalNameReserved answers a hosted-hub request that would give a
+// project-scope template or harness config the slug or name of a global one
+// (409).
+const ErrCodeGlobalNameReserved = "global_name_reserved"
 
-// harnessConfigSlugReservedError refuses a project-scope harness config
-// whose slug is taken by a global harness config on a hosted hub. A hosted
-// hub resolves global scope first (harnessConfigLookupScopes), so such a row
-// is not used while the global one exists; it is refused at write time as
-// well so the name stays unambiguous and the row cannot take over the name
-// for every agent in the project if the global row is later deleted.
-type harnessConfigSlugReservedError struct {
-	slug string
+// errGlobalNameReserved is the sentinel wrapped by globalNameReservedError so
+// callers (such as project clone and tests) can match it with errors.Is.
+var errGlobalNameReserved = errors.New("slug or name is reserved by a global resource")
+
+// globalNameReservedError refuses a project-scope template or harness config
+// whose slug or name (as written or slugified) is taken by a global resource
+// on a hosted hub.
+//
+// Templates resolve project-first on both the Hub and the CLI (matching the
+// CLI's lookup and explicit project:/global: prefixes), and the CLI matches
+// templates and harness configs by name as well as slug. Project members can
+// author project-scope templates and harness configs whose contents run inside
+// agents started by other project members. Refusing global names and slugs
+// (including built-in names whose global rows were deleted, and global
+// settings harness_configs) at write time prevents shadowing for templates
+// and keeps harness-config names unambiguous even if a global row is later
+// deleted. User-scope records (resolved only for their own user) and
+// workstation hubs (single user) are not checked.
+type globalNameReservedError struct {
+	Kind  string // "template" or "harness config"
+	Field string // "slug" or "name"
+	Value string
 }
 
-func (e *harnessConfigSlugReservedError) Error() string {
-	return fmt.Sprintf("harness config slug %q is reserved by a global harness config; choose a different name", e.slug)
+func (e *globalNameReservedError) Error() string {
+	return fmt.Sprintf("%s %s %q is reserved by a global %s; choose a different name", e.Kind, e.Field, e.Value, e.Kind)
 }
 
-// checkHarnessConfigSlugNotGlobal returns a *harnessConfigSlugReservedError
-// when, on a hosted hub, a harness config in scope with this slug would take
-// the slug of a global harness config: a hub global harness config, a
-// built-in harness config name (reserved even after its global row was
-// deleted, since brokers still resolve it), or an entry of the global
-// settings harness_configs. It returns nil on a
-// workstation hub and for every scope other than project. A store failure
-// other than not-found is returned as is, so callers fail closed.
-func (s *Server) checkHarnessConfigSlugNotGlobal(ctx context.Context, scope, slug string) error {
-	if s.workstation || scope != store.HarnessConfigScopeProject || slug == "" {
+func (e *globalNameReservedError) Unwrap() error { return errGlobalNameReserved }
+
+// shadowCandidate is one value a record could be found by.
+type shadowCandidate struct {
+	field, value string
+}
+
+// shadowCandidates returns the values a record with name and slug could be
+// found by: each as stored (a PATCH stores a caller's slug as given) and
+// slugified, slug first, without empty or repeated values.
+func shadowCandidates(name, slug string) []shadowCandidate {
+	var out []shadowCandidate
+	seen := map[string]bool{}
+	add := func(field, v string) {
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, shadowCandidate{field, v})
+	}
+	add("slug", slug)
+	add("slug", api.Slugify(slug))
+	add("name", name)
+	add("name", api.Slugify(name))
+	return out
+}
+
+// checkTemplateNotGlobal returns a *globalNameReservedError when, on a hosted
+// hub, a template in scope with this name or slug would shadow a global
+// template: a hub global template (matched by name or slug) or a built-in
+// template name (reserved even after its global row was deleted). It returns
+// nil on a workstation hub and for every scope other than project. A store
+// failure is returned as is, so callers fail closed.
+func (s *Server) checkTemplateNotGlobal(ctx context.Context, scope, name, slug string) error {
+	if s.workstation || scope != store.TemplateScopeProject {
 		return nil
 	}
-	if isBuiltinName(storage.ResourceKindHarnessConfig, slug) || s.settingsHarnessConfigSlugTaken(slug) {
-		return &harnessConfigSlugReservedError{slug: slug}
-	}
-	hc, err := s.store.GetHarnessConfigBySlug(ctx, slug, store.HarnessConfigScopeGlobal, "")
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
+	for _, c := range shadowCandidates(name, slug) {
+		if isBuiltinName(storage.ResourceKindTemplate, c.value) {
+			return &globalNameReservedError{Kind: "template", Field: c.field, Value: c.value}
 		}
-		return err
+		found, err := s.store.ListTemplates(ctx, store.TemplateFilter{Name: c.value, Scope: store.TemplateScopeGlobal},
+			store.ListOptions{Limit: 1, SkipTotalCount: true})
+		if err != nil {
+			return err
+		}
+		if len(found.Items) > 0 {
+			return &globalNameReservedError{Kind: "template", Field: c.field, Value: c.value}
+		}
 	}
-	if hc != nil {
-		return &harnessConfigSlugReservedError{slug: slug}
+	return nil
+}
+
+// checkHarnessConfigNotGlobal returns a *globalNameReservedError when, on a
+// hosted hub, a harness config in scope with this name or slug would take the
+// slug or name of a global harness config: a hub global harness config
+// (matched by name or slug), a built-in harness config name (reserved even
+// after its global row was deleted, since brokers still resolve it), or an
+// entry of the global settings harness_configs. It returns nil on a
+// workstation hub and for every scope other than project. A store failure is
+// returned as is, so callers fail closed.
+func (s *Server) checkHarnessConfigNotGlobal(ctx context.Context, scope, name, slug string) error {
+	if s.workstation || scope != store.HarnessConfigScopeProject {
+		return nil
+	}
+	for _, c := range shadowCandidates(name, slug) {
+		if isBuiltinName(storage.ResourceKindHarnessConfig, c.value) || s.settingsHarnessConfigSlugTaken(c.value) {
+			return &globalNameReservedError{Kind: "harness config", Field: c.field, Value: c.value}
+		}
+		found, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{Name: c.value, Scope: store.HarnessConfigScopeGlobal},
+			store.ListOptions{Limit: 1, SkipTotalCount: true})
+		if err != nil {
+			return err
+		}
+		if len(found.Items) > 0 {
+			return &globalNameReservedError{Kind: "harness config", Field: c.field, Value: c.value}
+		}
 	}
 	return nil
 }
@@ -81,7 +149,7 @@ type harnessConfigScope struct {
 // name resolves in for an agent of projectID. A workstation hub looks in the
 // project scope first, then globally. A hosted hub looks globally first, so a
 // project-scope row can never replace a global one of the same slug: not a
-// row stored before checkHarnessConfigSlugNotGlobal existed, nor one whose
+// row stored before checkHarnessConfigNotGlobal existed, nor one whose
 // slug a global config (or a newly seeded built-in) took later. The project
 // scope is omitted when projectID is empty.
 func (s *Server) harnessConfigLookupScopes(projectID string) []harnessConfigScope {
@@ -111,27 +179,40 @@ func (s *Server) settingsHarnessConfigSlugTaken(slug string) bool {
 	return false
 }
 
-// writeHarnessConfigSlugReserved writes the 409 for a
-// *harnessConfigSlugReservedError in err and reports whether it did.
-func writeHarnessConfigSlugReserved(w http.ResponseWriter, err error) bool {
-	var reserved *harnessConfigSlugReservedError
+// writeGlobalNameReserved writes the 409 for a *globalNameReservedError in err
+// and reports whether it did.
+func writeGlobalNameReserved(w http.ResponseWriter, err error) bool {
+	var reserved *globalNameReservedError
 	if !errors.As(err, &reserved) {
 		return false
 	}
-	writeError(w, http.StatusConflict, ErrCodeHarnessConfigSlugReserved, reserved.Error(),
-		map[string]interface{}{"field": "slug"})
+	writeError(w, http.StatusConflict, ErrCodeGlobalNameReserved, reserved.Error(),
+		map[string]interface{}{"field": reserved.Field, "reason": "shadows_global"})
 	return true
 }
 
-// refuseGlobalHarnessConfigSlug runs checkHarnessConfigSlugNotGlobal and
-// writes the refusal (409) or the store failure. It reports whether a
-// response was written.
-func (s *Server) refuseGlobalHarnessConfigSlug(ctx context.Context, w http.ResponseWriter, scope, slug string) bool {
-	err := s.checkHarnessConfigSlugNotGlobal(ctx, scope, slug)
+// refuseGlobalTemplateName runs checkTemplateNotGlobal and writes the refusal
+// (409) or the store failure. It reports whether a response was written.
+func (s *Server) refuseGlobalTemplateName(ctx context.Context, w http.ResponseWriter, scope, name, slug string) bool {
+	err := s.checkTemplateNotGlobal(ctx, scope, name, slug)
 	if err == nil {
 		return false
 	}
-	if !writeHarnessConfigSlugReserved(w, err) {
+	if !writeGlobalNameReserved(w, err) {
+		writeErrorFromErr(w, err, "")
+	}
+	return true
+}
+
+// refuseGlobalHarnessConfigName runs checkHarnessConfigNotGlobal and writes
+// the refusal (409) or the store failure. It reports whether a response was
+// written.
+func (s *Server) refuseGlobalHarnessConfigName(ctx context.Context, w http.ResponseWriter, scope, name, slug string) bool {
+	err := s.checkHarnessConfigNotGlobal(ctx, scope, name, slug)
+	if err == nil {
+		return false
+	}
+	if !writeGlobalNameReserved(w, err) {
 		writeErrorFromErr(w, err, "")
 	}
 	return true
