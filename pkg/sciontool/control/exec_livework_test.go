@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// The exec routes run only on Linux (execSupported; ExecEnabled never
+// registers them elsewhere), and these tests use POSIX paths and PATH
+// lists, so they build only there. exec_other_test.go covers the other
+// platforms.
+
+//go:build linux
+
 package control
 
 import (
@@ -198,9 +205,6 @@ func TestExecRoute_LiveWork_LifecycleAndCollectedMark(t *testing.T) {
 // present so start-env SCION_HARNESS=shell cannot spoof shell-ness on an LLM
 // agent, falling back to SCION_HARNESS only when SCION_HARNESS_READY is absent.
 func TestExecEnabled_BrokerReadySignalAndFallback(t *testing.T) {
-	if !execSupported {
-		t.Skip("exec routes unsupported on this platform")
-	}
 	idleReady := state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyIdle))
 	hookReady := state.FormatReadySpecEnv(state.DefaultReadySpec(state.ReadyStrategyHook))
 
