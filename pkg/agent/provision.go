@@ -5525,6 +5525,13 @@ func installSkillsIntoHome(ctx context.Context, agentName, projectDir string, h 
 	if err != nil {
 		return nil, err
 	}
+	if skillsDir == "" {
+		if len(skills) > 0 {
+			slog.DebugContext(ctx, "provision: harness has no skills directory configured; skipping skill resolution",
+				"agent", agentName, "harness", h.Name(), "skipped", len(skills))
+		}
+		return nil, nil
+	}
 	// Optional scion-platform:// entries are display-only: Step 3a2 installs
 	// those skills, so they are left out of resolution rather than logged as
 	// skipped on every start (ptone/scion#5431).

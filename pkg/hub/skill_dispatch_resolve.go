@@ -187,7 +187,7 @@ func isHubRegistrySkillURI(raw string) (*api.SkillURI, bool) {
 // (template, hub, user, project and progeny injections) plus the skills
 // declared in the Hub template's scion-agent.yaml.
 func (s *Server) dispatchSkillRefs(ctx context.Context, agent *store.Agent) []api.SkillReference {
-	if agent == nil || agent.AppliedConfig == nil {
+	if agent == nil || agent.AppliedConfig == nil || isShellAgent(agent) {
 		return nil
 	}
 	var refs []api.SkillReference
