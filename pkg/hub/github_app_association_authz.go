@@ -345,7 +345,65 @@ func githubAccessCacheKey(projectID string, installationID int64, apiBase, owner
 const (
 	githubAccessCacheGrantTTL  = 10 * time.Minute
 	githubAccessCacheDenialTTL = time.Minute
+	// Read-model-only bounds for creator-access checks triggered by
+	// GET /api/v1/projects/{id}/github. Minting never uses these.
+	githubReadModelInconclusiveTTL     = 45 * time.Second
+	githubReadModelCreatorCheckTimeout = 10 * time.Second
 )
+
+// githubReadModelInconclusiveCache is a short read-model-only negative cache
+// for inconclusive creator-access checks. The zero value is ready to use.
+type githubReadModelInconclusiveCache struct {
+	mu      sync.Mutex
+	entries map[string]githubReadModelInconclusiveEntry
+}
+
+type githubReadModelInconclusiveEntry struct {
+	projectID string
+	expires   time.Time
+}
+
+func (c *githubReadModelInconclusiveCache) recent(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return false
+	}
+	if !timeNow().Before(e.expires) {
+		delete(c.entries, key)
+		return false
+	}
+	return true
+}
+
+func (c *githubReadModelInconclusiveCache) put(key, projectID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]githubReadModelInconclusiveEntry)
+	}
+	now := timeNow()
+	for k, e := range c.entries {
+		if !now.Before(e.expires) {
+			delete(c.entries, k)
+		}
+	}
+	c.entries[key] = githubReadModelInconclusiveEntry{
+		projectID: projectID,
+		expires:   now.Add(githubReadModelInconclusiveTTL),
+	}
+}
+
+func (c *githubReadModelInconclusiveCache) invalidateProject(projectID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, e := range c.entries {
+		if e.projectID == projectID {
+			delete(c.entries, k)
+		}
+	}
+}
 
 // githubRepoAccessCache caches access-check outcomes. The zero value is
 // ready to use.
@@ -684,6 +742,7 @@ func (c *githubAssociationReportCache) invalidate(projectID string) {
 // the admin report's entry. Every association change goes through here.
 func (s *Server) invalidateGitHubAssociation(projectID string) {
 	s.githubAccessCache.invalidateProject(projectID)
+	s.githubReadModelInconclusive.invalidateProject(projectID)
 	s.githubTokenCache.invalidateProject(projectID)
 	s.githubAssociationReportCache.invalidate(projectID)
 	s.githubAssociationRefusalLog.clear(projectID)
@@ -1071,7 +1130,25 @@ func (s *Server) evaluateGitHubAssociationCached(
 	}
 
 	if allowCreatorCheck {
-		access, accessErr := s.githubCreatorRepoAccess(ctx, project, instID, owner, repo)
+		key := githubAccessCacheKey(project.ID, instID, s.githubAppAPIBase(), owner, repo, project.CreatedBy, creatorToken)
+		if s.githubReadModelInconclusive.recent(key) {
+			eval.Verified = false
+			eval.ErrorCode = githubAppErrAssociationUnverified
+			eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
+			return eval, nil
+		}
+		v, accessErr, _ := s.githubReadModelSF.Do(key, func() (any, error) {
+			if s.githubReadModelInconclusive.recent(key) {
+				return githubapp.RepoAccess{}, errGitHubAssociationCheckFailed
+			}
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubReadModelCreatorCheckTimeout)
+			defer cancel()
+			access, err := s.githubCreatorRepoAccess(cctx, project, instID, owner, repo)
+			if errors.Is(err, errGitHubAssociationCheckFailed) {
+				s.githubReadModelInconclusive.put(key, project.ID)
+			}
+			return access, err
+		})
 		if accessErr != nil {
 			if errors.Is(accessErr, errGitHubAssociationCheckFailed) {
 				eval.Verified = false
@@ -1084,6 +1161,7 @@ func (s *Server) evaluateGitHubAssociationCached(
 			eval.Reason = fmt.Sprintf("the project creator's GitHub identity has no access to %s/%s", owner, repo)
 			return eval, nil
 		}
+		access, _ := v.(githubapp.RepoAccess)
 		switch {
 		case access.Push:
 			eval.Authorized = true

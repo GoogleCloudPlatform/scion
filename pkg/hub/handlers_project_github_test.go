@@ -19,10 +19,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -899,4 +901,209 @@ func TestProjectGitHub_EffectivePermissionsMatchMint(t *testing.T) {
 		assert.Equal(t, []string{"contents"}, resp.Permissions.Capped)
 		assert.Equal(t, map[string]string{"contents": "association_read_only"}, resp.Permissions.CapReasons)
 	})
+}
+
+func TestProjectGitHub_CreatorCheckBoundedConcurrencyAndNegativeCache(t *testing.T) {
+	fakeAPI := newProjectGitHubFakeAPI(t, "bounded-app", map[string]string{
+		"contents":      "write",
+		"pull_requests": "write",
+		"issues":        "write",
+		"metadata":      "read",
+	})
+	srv, st, admin := setupProjectGitHubTestHub(t, fakeAPI)
+	ctx := context.Background()
+
+	require.NoError(t, st.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: 8301,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+
+	creator := &store.User{
+		ID:          tid("pg-bounded-creator"),
+		Email:       "pg-bounded-creator@example.com",
+		DisplayName: "Bounded Creator",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+	}
+	require.NoError(t, st.CreateUser(ctx, creator))
+	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
+		ID:             tid("pg-bounded-creator-tok"),
+		Key:            "GITHUB_TOKEN",
+		EncryptedValue: "ghp_bounded_push",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "GITHUB_TOKEN",
+		Scope:          store.ScopeUser,
+		ScopeID:        creator.ID,
+	}))
+	srv.SetSecretBackend(secret.NewLocalBackend(st, "test-hub-id", "test-secret"))
+
+	instID := int64(8301)
+	proj := &store.Project{
+		ID:                   tid("pg-bounded-proj"),
+		Name:                 "pg-bounded-proj",
+		Slug:                 tid("pg-bounded-proj"),
+		GitRemote:            fakeAPI.srv.URL + "/acme/bounded-repo",
+		CreatedBy:            creator.ID,
+		GitHubInstallationID: &instID,
+		Created:              time.Now(),
+		Updated:              time.Now(),
+	}
+	require.NoError(t, st.CreateProject(ctx, proj))
+
+	// Use a mutex-protected fake clock so concurrent singleflight goroutines
+	// are race-free under -race.
+	var clockMu sync.Mutex
+	now := time.Now().UTC()
+	origTimeNow := timeNow
+	timeNow = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	t.Cleanup(func() { timeNow = origTimeNow })
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		now = now.Add(d)
+		clockMu.Unlock()
+	}
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		admin.ID, admin.Email, admin.DisplayName, admin.Role, ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	origCheck := srv.githubRepoAccessCheck
+	t.Cleanup(func() { srv.githubRepoAccessCheck = origCheck })
+
+	// 1. N concurrent cold GETs collapse into a single creator-token check.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	srv.githubRepoAccessCheck = func(_ context.Context, _, _, _, _ string) (githubapp.RepoAccess, error) {
+		calls.Add(1)
+		startOnce.Do(func() { close(started) })
+		<-release
+		return githubapp.RepoAccess{Pull: true, Push: true}, nil
+	}
+
+	const concurrency = 10
+	type getResult struct {
+		code int
+		resp ProjectGitHubResponse
+		err  error
+	}
+	results := make([]getResult, concurrency)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			var r ProjectGitHubResponse
+			uerr := json.Unmarshal(rec.Body.Bytes(), &r)
+			results[idx] = getResult{code: rec.Code, resp: r, err: uerr}
+		}(i)
+	}
+	<-started
+	time.Sleep(25 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	assert.Equal(t, int32(1), calls.Load(), "concurrent cold GETs must collapse into 1 creator-token call")
+	for i, res := range results {
+		require.NoError(t, res.err, "request %d decode", i)
+		require.Equal(t, http.StatusOK, res.code, "request %d status", i)
+		assert.True(t, res.resp.Association.Authorized, "request %d authorized", i)
+		assert.True(t, res.resp.Association.Verified, "request %d verified", i)
+	}
+
+	// 2. N sequential GETs after an inconclusive error make only 1 creator-token
+	// call within the negative-cache TTL, while minting still makes its own live call.
+	advance(11 * time.Minute)
+	srv.githubRepoAccessCheck = func(_ context.Context, _, _, _, _ string) (githubapp.RepoAccess, error) {
+		calls.Add(1)
+		return githubapp.RepoAccess{}, errors.New("transient github 503")
+	}
+
+	for i := 0; i < 5; i++ {
+		rec := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ProjectGitHubResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.False(t, resp.Association.Authorized, "sequential GET %d authorized", i)
+		assert.False(t, resp.Association.Verified, "sequential GET %d verified", i)
+		assert.Equal(t, githubAppErrAssociationUnverified, resp.Association.ErrorCode)
+	}
+	assert.Equal(t, int32(2), calls.Load(), "5 sequential GETs after inconclusive error must share 1 call within TTL")
+
+	// Mint path is unchanged: bypasses the read-model negative cache and calls live.
+	_, _, mintErr := srv.mintGitHubAppToken(ctx, proj)
+	require.Error(t, mintErr)
+	assert.Equal(t, int32(3), calls.Load(), "mint must still make its own live creator-token check")
+
+	// After the negative-cache TTL expires, GET retries and recovers.
+	advance(githubReadModelInconclusiveTTL + time.Second)
+	srv.githubRepoAccessCheck = func(_ context.Context, _, _, _, _ string) (githubapp.RepoAccess, error) {
+		calls.Add(1)
+		return githubapp.RepoAccess{Pull: true, Push: true}, nil
+	}
+	recRecovered := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, recRecovered.Code, recRecovered.Body.String())
+	var recovResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(recRecovered.Body.Bytes(), &recovResp))
+	assert.True(t, recovResp.Association.Authorized)
+	assert.True(t, recovResp.Association.Verified)
+	assert.Equal(t, int32(4), calls.Load(), "GET after negative-cache TTL expiry should retry once")
+
+	// 3. Cancelling the caller's request context does not cancel the detached
+	// creator-access check, so the check completes and populates the access cache.
+	advance(11 * time.Minute)
+	detachStarted := make(chan struct{})
+	detachRelease := make(chan struct{})
+	var detachOnce sync.Once
+	var checkCtxErr atomic.Value
+	srv.githubRepoAccessCheck = func(checkCtx context.Context, _, _, _, _ string) (githubapp.RepoAccess, error) {
+		calls.Add(1)
+		detachOnce.Do(func() { close(detachStarted) })
+		<-detachRelease
+		if err := checkCtx.Err(); err != nil {
+			checkCtxErr.Store(err)
+		}
+		return githubapp.RepoAccess{Pull: true, Push: true}, nil
+	}
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	reqDone := make(chan struct{})
+	go func() {
+		defer close(reqDone)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil).WithContext(reqCtx)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+	}()
+
+	<-detachStarted
+	cancelReq()
+	time.Sleep(15 * time.Millisecond)
+	close(detachRelease)
+	<-reqDone
+
+	assert.Nil(t, checkCtxErr.Load(), "cancelling caller request context must not cancel the creator-access check")
+	assert.Equal(t, int32(5), calls.Load())
+
+	// Subsequent GET hits the warm access cache populated by the detached check.
+	recWarm := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, recWarm.Code, recWarm.Body.String())
+	var warmResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(recWarm.Body.Bytes(), &warmResp))
+	assert.True(t, warmResp.Association.Authorized)
+	assert.True(t, warmResp.Association.Verified)
+	assert.Equal(t, int32(5), calls.Load(), "warm cache after detached check must require 0 additional calls")
 }
