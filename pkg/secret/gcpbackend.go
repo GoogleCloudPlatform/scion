@@ -676,8 +676,12 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 		}
 		// Re-check the stored record after reading the Secret Manager value so
 		// a concurrent type or generation change (e.g. environment -> on_demand
-		// between ListSecrets and AccessSecretVersion) can never deliver the
-		// new value under the stale listed type.
+		// between ListSecrets and AccessSecretVersion) is skipped rather than
+		// delivered under the stale listed type. As in FetchValues, this
+		// narrows the race rather than eliminating it: Set adds the Secret
+		// Manager version before upserting the database record, so a resolve
+		// that completes both reads in between can still observe the new value
+		// under the old metadata.
 		cur, err := b.store.GetSecret(ctx, s.Key, s.Scope, s.ScopeID)
 		if errors.Is(err, store.ErrNotFound) {
 			continue
