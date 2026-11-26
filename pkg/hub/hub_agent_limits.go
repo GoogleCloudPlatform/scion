@@ -16,11 +16,9 @@ package hub
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // ErrCodeLimitExceedsHubCeiling is the HTTP 400 error code returned when a
@@ -69,47 +67,4 @@ func validLimitClampedName(name string) bool {
 	default:
 		return false
 	}
-}
-
-// limitsClampedWarning formats a create/start warning when the broker reports
-// that one or more run limits were clamped to Hub ceilings.
-func limitsClampedWarning(clamped []string, eff store.AgentEffectiveConfig) string {
-	if len(clamped) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(clamped))
-	for _, field := range clamped {
-		switch field {
-		case "max_turns":
-			if eff.MaxTurns > 0 {
-				parts = append(parts, fmt.Sprintf("max_turns=%d", eff.MaxTurns))
-			} else {
-				parts = append(parts, field)
-			}
-		case "max_model_calls":
-			if eff.MaxModelCalls > 0 {
-				parts = append(parts, fmt.Sprintf("max_model_calls=%d", eff.MaxModelCalls))
-			} else {
-				parts = append(parts, field)
-			}
-		case "max_duration":
-			if eff.MaxDuration != "" {
-				parts = append(parts, fmt.Sprintf("max_duration=%s", eff.MaxDuration))
-			} else {
-				parts = append(parts, field)
-			}
-		default:
-			parts = append(parts, field)
-		}
-	}
-	return "Run limits were clamped to hub ceiling: " + strings.Join(parts, ", ")
-}
-
-func warningsMentionClamped(warnings []string) bool {
-	for _, w := range warnings {
-		if strings.Contains(strings.ToLower(w), "clamped") {
-			return true
-		}
-	}
-	return false
 }

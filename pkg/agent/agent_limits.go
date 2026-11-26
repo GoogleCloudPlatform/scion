@@ -155,7 +155,9 @@ func effectiveLimitsFromConfig(cfg *api.ScionConfig) (maxTurns, maxModelCalls in
 	if n, ok := cfg.ModelCallLimit(); ok {
 		maxModelCalls = n
 	}
-	maxDuration = cfg.MaxDuration
+	if d := strings.TrimSpace(cfg.MaxDuration); d != "" && api.ParseDuration(d) > 0 {
+		maxDuration = d
+	}
 	return maxTurns, maxModelCalls, maxDuration
 }
 

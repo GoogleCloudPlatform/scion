@@ -1657,12 +1657,6 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *st
 	}
 	if resp.Agent != nil {
 		addDispatchWarnings(ctx, resp.Agent.Warnings...)
-		if len(resp.Agent.LimitsClampedBy) > 0 && !warningsMentionClamped(resp.Agent.Warnings) {
-			eff, _ := brokerEffectiveConfigOf(resp.Agent, agent.RuntimeBrokerID, d.log)
-			if w := limitsClampedWarning(eff.LimitsClampedBy, eff); w != "" {
-				addDispatchWarnings(ctx, w)
-			}
-		}
 		if d.debug {
 			d.log.Debug("applyBrokerResponse: applying broker phase",
 				"agentName", agent.Name,

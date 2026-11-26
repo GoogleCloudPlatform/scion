@@ -50,6 +50,9 @@ func setAgentLimitsOpSettings(t *testing.T, srv *Server, experimentOn bool, ceil
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 	require.NoError(t, func() error { _, err := ops.Refresh(context.Background()); return err }())
 	srv.SetOperationalSettings(ops)
+	if hd, ok := srv.GetDispatcher().(*HTTPAgentDispatcher); ok && hd != nil {
+		hd.SetAgentLimitsProvider(srv.agentLimitCeilings)
+	}
 	return ops
 }
 
@@ -90,6 +93,7 @@ func TestAgentLimits_OpsettingsCrossSectionValidation(t *testing.T) {
 type limitCeilingsBrokerClient struct {
 	*mockRuntimeBrokerClient
 	mu                    sync.Mutex
+	lastCreateReq         *RemoteCreateAgentRequest
 	lastCreateHubDefaults *RemoteHubAgentDefaults
 	lastStartHubDefaults  *RemoteHubAgentDefaults
 	templateMaxTurns      *int
@@ -97,8 +101,11 @@ type limitCeilingsBrokerClient struct {
 
 func (c *limitCeilingsBrokerClient) CreateAgent(ctx context.Context, brokerID, endpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	c.mu.Lock()
+	c.lastCreateReq = req
 	if req != nil && req.Config != nil {
 		c.lastCreateHubDefaults = req.Config.HubAgentDefaults
+	} else {
+		c.lastCreateHubDefaults = nil
 	}
 	tplTurns := api.CloneIntPtr(c.templateMaxTurns)
 	c.mu.Unlock()
@@ -213,18 +220,20 @@ func TestAgentLimits_CreateFailFastAndExperimentGate(t *testing.T) {
 		"config": map[string]interface{}{"max_turns": 100},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	if brokerClient.lastCreateHubDefaults != nil {
-		assert.Nil(t, brokerClient.lastCreateHubDefaults.LimitCeilings, "experiment off must not send LimitCeilings")
-	}
+	require.NotNil(t, brokerClient.lastCreateReq, "expected broker create request to be captured")
+	raw100, err := json.Marshal(brokerClient.lastCreateReq)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw100), "limitCeilings", "experiment off must omit limitCeilings on wire")
 
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
 		"name":   "exp-off-0",
 		"config": map[string]interface{}{"max_turns": 0},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	if brokerClient.lastCreateHubDefaults != nil {
-		assert.Nil(t, brokerClient.lastCreateHubDefaults.LimitCeilings, "experiment off must not send LimitCeilings")
-	}
+	require.NotNil(t, brokerClient.lastCreateReq, "expected broker create request to be captured")
+	raw0, err := json.Marshal(brokerClient.lastCreateReq)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw0), "limitCeilings", "experiment off must omit limitCeilings on wire")
 
 	// 2. Experiment ON with ceiling 50: 100 and 0 refused with 400 limit_exceeds_hub_ceiling.
 	setAgentLimitsOpSettings(t, srv, true, `{"max_turns":50}`)
@@ -284,7 +293,8 @@ func TestAgentLimits_EndToEndTemplateUnlimitedClampedWithEchoAndWarning(t *testi
 	assert.Equal(t, 50, brokerClient.lastCreateHubDefaults.LimitCeilings.MaxTurns)
 
 	// Warning surfaced to caller.
-	assert.True(t, warningsMentionClamped(createResp.Warnings), "expected clamped warning in create response, got %v", createResp.Warnings)
+	assert.Contains(t, strings.Join(createResp.Warnings, "\n"), "clamped to hub ceiling: max_turns=50",
+		"expected clamped warning in create response, got %v", createResp.Warnings)
 
 	// EffectiveConfig persisted on agent row.
 	stored, err := s.GetAgent(context.Background(), createResp.Agent.ID)

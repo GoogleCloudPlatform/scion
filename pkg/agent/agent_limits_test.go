@@ -430,3 +430,20 @@ func TestStart_LimitCeilingsClampStoredOverCeiling(t *testing.T) {
 	}
 	wantPersistedLimits(t, "persisted value unchanged", project, 100, 0, "")
 }
+
+func TestEffectiveLimitsFromConfig_NormalizesUnlimitedDuration(t *testing.T) {
+	for _, raw := range []string{"", "0", "0s", "-5m", "bogus"} {
+		_, _, dur := effectiveLimitsFromConfig(&api.ScionConfig{MaxDuration: raw})
+		if dur != "" {
+			t.Errorf("MaxDuration=%q: got %q, want empty", raw, dur)
+		}
+	}
+	turns, calls, dur := effectiveLimitsFromConfig(&api.ScionConfig{
+		MaxTurns:      api.IntPtr(0),
+		MaxModelCalls: api.IntPtr(25),
+		MaxDuration:   "30m",
+	})
+	if turns != 0 || calls != 25 || dur != "30m" {
+		t.Errorf("got (%d, %d, %q), want (0, 25, 30m)", turns, calls, dur)
+	}
+}

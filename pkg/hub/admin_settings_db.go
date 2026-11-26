@@ -1873,15 +1873,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			allValidationErrors[secName] = errs
 		}
 	}
-	if agentDefaultsDoc, ok := sectionDocs["agent_defaults"]; ok && len(allValidationErrors["agent_defaults"]) == 0 && len(allValidationErrors[opsettings.AgentLimitsSectionName]) == 0 {
-		limits := ops.AgentLimits()
-		if limitsDoc, hasLimits := sectionDocs[opsettings.AgentLimitsSectionName]; hasLimits {
-			if parsed, err := opsettings.ParseAgentLimitsDoc(limitsDoc); err == nil {
-				limits = parsed
+	// Validate agent_defaults against any stored agent_limits ceilings here
+	// (before writing any section) so a violation returns a clean 400 with all
+	// validation errors rather than failing mid-save in ops.Update.
+	if agentDefaultsDoc, ok := sectionDocs["agent_defaults"]; ok && len(allValidationErrors["agent_defaults"]) == 0 {
+		if limits := ops.AgentLimits(); !limits.IsEmpty() {
+			if errs := opsettings.ValidateAgentDefaultsDocAgainstLimits(agentDefaultsDoc, limits); len(errs) > 0 {
+				allValidationErrors["agent_defaults"] = append(allValidationErrors["agent_defaults"], errs...)
 			}
-		}
-		if errs := opsettings.ValidateAgentDefaultsDocAgainstLimits(agentDefaultsDoc, limits); len(errs) > 0 {
-			allValidationErrors["agent_defaults"] = append(allValidationErrors["agent_defaults"], errs...)
 		}
 	}
 	if len(allValidationErrors) > 0 {
