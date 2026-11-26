@@ -107,6 +107,16 @@ export function pushUrl(path: string): void {
 }
 
 /**
+ * Replace the current history entry with an app path without rendering
+ * anything or adding a Back entry, e.g. for legacy redirects or fallback
+ * tab normalization.
+ */
+export function replaceUrl(path: string): void {
+  window.history.replaceState({}, '', browserPath(path));
+  noteShownEntry();
+}
+
+/**
 /**
  * Asked before the router leaves the page on screen; returns true to let it
  * leave (e.g. once the user has confirmed), false to stay.

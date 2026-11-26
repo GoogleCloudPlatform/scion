@@ -172,7 +172,7 @@ export function attentionHref(
       return `#${hubInstanceAnchor(id)}`;
     case 'integration':
       if (!integrationsDetail) return null;
-      return `${INTEGRATIONS_PAGE}/${encodeURIComponent(id)}`;
+      return `${INTEGRATIONS_PAGE}/chat/${encodeURIComponent(id)}`;
     case 'schedule':
       // Schedules have no page of their own: link to the project's list.
       if (!item.subject.project_id) return null;

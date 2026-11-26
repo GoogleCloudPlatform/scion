@@ -627,7 +627,7 @@ describe('scion-page-health-dashboard needs attention (ptone/scion#3595)', () =>
       summaryBody({ status: 'degraded', attention: [item], integrations_detail: true })
     );
     expect(attentionRows(full)[0]!.querySelector('a')?.getAttribute('href')).toBe(
-      '/admin/integrations/chat'
+      '/admin/integrations/chat/chat'
     );
   });
 

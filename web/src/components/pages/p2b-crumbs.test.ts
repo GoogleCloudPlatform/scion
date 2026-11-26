@@ -67,6 +67,7 @@ beforeAll(async () => {
     import('./admin-access-boundary-editor.js'),
     import('./admin-skill-registry-detail.js'),
     import('./admin-integrations.js'),
+    import('./admin-integrations-chat.js'),
   ]);
 }, 60_000);
 
@@ -234,9 +235,9 @@ describe('Phase 2b breadcrumb trails', () => {
 
   describe('admin-integrations', () => {
     it('renders no breadcrumb on the list view', () => {
-      window.history.replaceState({}, '', '/admin/integrations');
+      window.history.replaceState({}, '', '/admin/integrations/chat');
       try {
-        const host = renderPage('scion-page-admin-integrations', {
+        const host = renderPage('scion-admin-integrations-chat', {
           loading: false,
           integrations: [],
           availableIntegrations: [],
@@ -248,9 +249,9 @@ describe('Phase 2b breadcrumb trails', () => {
     });
 
     it('renders Integrations / {integration} on the detail view', () => {
-      window.history.replaceState({}, '', '/admin/integrations/telegram');
+      window.history.replaceState({}, '', '/admin/integrations/chat/telegram');
       try {
-        const host = renderPage('scion-page-admin-integrations', {
+        const host = renderPage('scion-admin-integrations-chat', {
           loading: false,
           detail: {
             name: 'telegram',
@@ -261,7 +262,7 @@ describe('Phase 2b breadcrumb trails', () => {
           },
         });
         expect(crumbTuples(host)).toEqual([
-          ['Integrations', '/admin/integrations'],
+          ['Integrations', '/admin/integrations/chat'],
           ['telegram', undefined],
         ]);
         expect(host.querySelector('a.back-link')).toBeNull();
@@ -271,14 +272,14 @@ describe('Phase 2b breadcrumb trails', () => {
     });
 
     it('renders ancestor-only trail in detail loading and not-found states', () => {
-      window.history.replaceState({}, '', '/admin/integrations/telegram');
+      window.history.replaceState({}, '', '/admin/integrations/chat/telegram');
       try {
         for (const state of [
           { loading: true, detail: null },
           { loading: false, detail: null },
         ]) {
-          const host = renderPage('scion-page-admin-integrations', state);
-          expect(crumbTuples(host)).toEqual([['Integrations', '/admin/integrations']]);
+          const host = renderPage('scion-admin-integrations-chat', state);
+          expect(crumbTuples(host)).toEqual([['Integrations', '/admin/integrations/chat']]);
           expect(host.querySelector('a.back-link')).toBeNull();
         }
       } finally {

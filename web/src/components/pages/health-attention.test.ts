@@ -134,7 +134,7 @@ describe('scion-health-attention', () => {
       // The broker list item is about the hub: no broker link.
       null,
       '/brokers/b%201',
-      '/admin/integrations/chat',
+      '/admin/integrations/chat/chat',
       // No integration identity (integrations_detail false): no link.
       null,
       null,
@@ -453,7 +453,7 @@ describe('attentionHref', () => {
   });
 
   it('links an integration only when the summary carries integration identity', () => {
-    expect(attentionHref(items[3]!, true)).toBe('/admin/integrations/chat');
+    expect(attentionHref(items[3]!, true)).toBe('/admin/integrations/chat/chat');
     expect(attentionHref(items[3]!, false)).toBeNull();
     expect(attentionHref(items[2]!, false)).toBe('/brokers/b%201');
   });

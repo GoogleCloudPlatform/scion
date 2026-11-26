@@ -1298,7 +1298,7 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
       ['components/pages/admin-group-detail.ts', '.group-icon', 'border-radius', [8]],
       ['components/pages/admin-groups.ts', '.group-icon', 'border-radius', [8]],
       ['components/pages/admin-groups.ts', '.group-name-link:focus-visible', 'border-radius', [2]],
-      ['components/pages/admin-integrations.ts', '.required-tag', 'border-radius', [4]],
+      ['components/pages/admin-integrations-chat.ts', '.required-tag', 'border-radius', [4]],
       [
         'components/pages/admin-maintenance.ts',
         '.maintenance-mode-toggle .toggle-track',

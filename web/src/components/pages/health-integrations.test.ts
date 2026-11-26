@@ -153,7 +153,7 @@ describe('scion-health-integrations', () => {
     const root = await mount([integration({ name: 'a2a bridge' })]);
     expect(root.querySelector('a.manage')?.getAttribute('href')).toBe('/admin/integrations');
     expect(root.querySelector('td.name a')?.getAttribute('href')).toBe(
-      '/admin/integrations/a2a%20bridge'
+      '/admin/integrations/chat/a2a%20bridge'
     );
   });
 

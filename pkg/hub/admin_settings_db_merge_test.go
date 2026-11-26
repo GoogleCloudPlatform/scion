@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	yamlv3 "gopkg.in/yaml.v3"
 )
 
 const storedGitHubApp = `{"app_id":42,"api_base_url":"https://ghe.example.com/api/v3","webhooks_enabled":true,"installation_url":"https://github.com/apps/x","private_key_path":"/etc/ghapp/key.pem"}`
@@ -360,4 +361,94 @@ func TestPutServerConfigDB_GitHubAppMaskedEchoLeavesRowUnchanged(t *testing.T) {
 	var want map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(storedGitHubApp), &want))
 	assert.Equal(t, want, githubAppRowRaw(t, fakeStore))
+}
+
+// OQ8 (DB mode): PUT /api/v1/admin/server-config without server.github_app
+// leaves every stored github_app key and settings.yaml unchanged.
+func TestPutServerConfigDB_OmittingGitHubAppLeavesStoredConfigAndSecretsUnchanged(t *testing.T) {
+	settingsPath := setTempScionHome(t)
+	fileSettings := "schema_version: \"1\"\nserver:\n  github_app:\n    app_id: 42\n    private_key: |\n      -----BEGIN RSA PRIVATE KEY-----\n      test-key-material\n      -----END RSA PRIVATE KEY-----\n    webhook_secret: " + rtWebhookSec + "\n"
+	require.NoError(t, os.WriteFile(settingsPath, []byte(fileSettings), 0600))
+
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seedWithOrigin("github_app", json.RawMessage(storedGitHubApp), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	// Send a server-config PUT touching another server section, omitting server.github_app completely.
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"admin_emails":["updated@example.com"]}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// Stored github_app row and revision are untouched.
+	var want map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(storedGitHubApp), &want))
+	assert.Equal(t, want, githubAppRowRaw(t, fakeStore))
+	setting, err := fakeStore.GetHubSetting(context.Background(), "github_app")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), setting.Revision, "github_app row revision must not bump when server.github_app is omitted")
+
+	// OperationalSettings snapshot retains every stored github_app value.
+	snap := ops.Snapshot()
+	assert.Equal(t, int64(42), snap.GitHubAppID)
+	assert.Equal(t, "https://ghe.example.com/api/v3", snap.GitHubAPIBaseURL)
+	assert.True(t, snap.GitHubWebhooksEnabled)
+	assert.Equal(t, "https://github.com/apps/x", snap.GitHubInstallationURL)
+	assert.Equal(t, "/etc/ghapp/key.pem", snap.GitHubPrivateKeyPath)
+
+	// DB mode keeps GitHub App secrets (private key, webhook secret) in the hub
+	// secrets backend, which PUT /api/v1/admin/server-config never touches; verify
+	// settings.yaml itself is byte-identical after the DB-mode PUT.
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	assert.Equal(t, fileSettings, string(data), "settings.yaml must remain byte-identical after DB-mode server-config PUT")
+}
+
+// OQ8 (file mode): PUT /api/v1/admin/server-config without server.github_app
+// leaves every stored github_app key, private key and webhook secret unchanged.
+func TestPutServerConfigFile_OmittingGitHubAppLeavesStoredConfigAndSecretsUnchanged(t *testing.T) {
+	settingsPath := setTempScionHome(t)
+	fileSettings := `schema_version: "1"
+server:
+  hub:
+    admin_emails:
+      - initial@example.com
+  github_app:
+    app_id: 42
+    api_base_url: https://ghe.example.com/api/v3
+    webhooks_enabled: true
+    installation_url: https://github.com/apps/x
+    private_key_path: /etc/ghapp/key.pem
+    private_key: "-----BEGIN RSA PRIVATE KEY-----\ntest-key\n-----END RSA PRIVATE KEY-----"
+    webhook_secret: ` + rtWebhookSec + `
+`
+	require.NoError(t, os.WriteFile(settingsPath, []byte(fileSettings), 0600))
+
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"server":{"hub":{"admin_emails":["updated@example.com"]}}}`))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	var raw map[string]interface{}
+	require.NoError(t, yamlv3.Unmarshal(data, &raw))
+	serverMap, ok := raw["server"].(map[string]interface{})
+	require.True(t, ok)
+
+	// Confirm the PUT actually persisted the requested change.
+	hubMap, ok := serverMap["hub"].(map[string]interface{})
+	require.True(t, ok, "server.hub must be present in settings.yaml")
+	assert.Equal(t, []interface{}{"updated@example.com"}, hubMap["admin_emails"])
+
+	ga, ok := serverMap["github_app"].(map[string]interface{})
+	require.True(t, ok, "server.github_app must remain present in settings.yaml")
+
+	assert.Equal(t, 42, ga["app_id"])
+	assert.Equal(t, "https://ghe.example.com/api/v3", ga["api_base_url"])
+	assert.Equal(t, true, ga["webhooks_enabled"])
+	assert.Equal(t, "https://github.com/apps/x", ga["installation_url"])
+	assert.Equal(t, "/etc/ghapp/key.pem", ga["private_key_path"])
+	assert.Equal(t, "-----BEGIN RSA PRIVATE KEY-----\ntest-key\n-----END RSA PRIVATE KEY-----", ga["private_key"])
+	assert.Equal(t, rtWebhookSec, ga["webhook_secret"])
 }
