@@ -157,7 +157,7 @@ func createUserProjectTopic(t *testing.T, srv *Server, projID, name, createdBy s
 	return topicID
 }
 
-func doBearerRequest(t *testing.T, srv *Server, method, path, bearer string) *httptest.ResponseRecorder {
+func doActionInboxBearerRequest(t *testing.T, srv *Server, method, path, bearer string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
 	if bearer != "" {
@@ -176,9 +176,9 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 
 	// 1. Gate off: POST returns 405 before gate; GET returns 404 (AC-13).
 	aliceTok := f.sessionToken(t, f.alice)
-	rrPostOff := doBearerRequest(t, srv, http.MethodPost, userMeSecretRequestsPath, aliceTok)
+	rrPostOff := doActionInboxBearerRequest(t, srv, http.MethodPost, userMeSecretRequestsPath, aliceTok)
 	assert.Equal(t, http.StatusMethodNotAllowed, rrPostOff.Code)
-	rrGetOff := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, aliceTok)
+	rrGetOff := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, aliceTok)
 	assert.Equal(t, http.StatusNotFound, rrGetOff.Code)
 
 	// Enable hub.agent_secrets.
@@ -189,7 +189,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 
 	// 2. Caller authentication & credential matrix:
 	// Unauthenticated -> 401.
-	rrUnauth := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, "")
+	rrUnauth := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, "")
 	assert.Equal(t, http.StatusUnauthorized, rrUnauth.Code)
 
 	// Agent identity -> 403.
@@ -218,7 +218,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	// User Access Token (UAT) -> 403 (AC-6 session-only).
 	uatRaw, _, err := srv.uatService.CreateToken(rs4MintContext(f.alice.ID), f.alice.ID, "sr-uat", f.project.ID, []string{"inbox:read", "project:read", "agent:read"}, nil)
 	require.NoError(t, err)
-	rrUAT := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, uatRaw)
+	rrUAT := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, uatRaw)
 	assert.Equal(t, http.StatusForbidden, rrUAT.Code)
 
 	// 3. Seed projects, topics, agents, and secret requests:
@@ -311,7 +311,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 
 	// Alice: sees Card 3 (DM to Alice, 1 row) + Card 1 (Project A thread, 2 rows) = 3 open, 3 answerable.
 	// Does NOT see Card 2 (Project B thread), Card 4 (DM to Carol), or Card 5 (DM from unreadable agentB).
-	rrAlice := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, aliceTok)
+	rrAlice := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, aliceTok)
 	require.Equal(t, http.StatusOK, rrAlice.Code, rrAlice.Body.String())
 	var aliceResp secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrAlice.Body.Bytes(), &aliceResp))
@@ -326,7 +326,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	assert.True(t, aliceResp.Cards[1].CanRespond)
 
 	// Alice cannot leak Carol's DM or Project B's thread via q or project filter.
-	rrAliceProbe := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?q=CAROL_DM_KEY", aliceTok)
+	rrAliceProbe := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?q=CAROL_DM_KEY", aliceTok)
 	require.Equal(t, http.StatusOK, rrAliceProbe.Code)
 	var aliceProbe secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrAliceProbe.Body.Bytes(), &aliceProbe))
@@ -335,7 +335,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	assert.Equal(t, ActionInboxCounts{Answerable: 3, Open: 3}, aliceProbe.Counts)
 
 	// Alice filters by q matching description (case-insensitive) and project facet.
-	rrAliceQ := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?q=database+password", aliceTok)
+	rrAliceQ := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?q=database+password", aliceTok)
 	require.Equal(t, http.StatusOK, rrAliceQ.Code)
 	var aliceQ secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrAliceQ.Body.Bytes(), &aliceQ))
@@ -344,7 +344,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	assert.Equal(t, ActionInboxCounts{Answerable: 1, Open: 1}, *aliceQ.FilteredCounts)
 
 	// sort=project puts "Alpha Project C" (Card 3) before "Secret Project" (Card 1).
-	rrAliceSortProj := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?sort=project", aliceTok)
+	rrAliceSortProj := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?sort=project", aliceTok)
 	require.Equal(t, http.StatusOK, rrAliceSortProj.Code)
 	var aliceSortProj secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrAliceSortProj.Body.Bytes(), &aliceSortProj))
@@ -353,7 +353,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	assert.Equal(t, f.project.ID, aliceSortProj.Cards[1].ProjectID)
 
 	// Open tab pagination: limit=1 returns Card 3 + nextCursor; second page returns Card 1.
-	rrPage1 := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=1", aliceTok)
+	rrPage1 := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=1", aliceTok)
 	require.Equal(t, http.StatusOK, rrPage1.Code)
 	var page1 secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrPage1.Body.Bytes(), &page1))
@@ -361,7 +361,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	assert.Equal(t, card3DMAlice.Message.ID, page1.Cards[0].MessageID)
 	require.NotEmpty(t, page1.NextCursor)
 
-	rrPage2 := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=1&cursor="+page1.NextCursor, aliceTok)
+	rrPage2 := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=1&cursor="+page1.NextCursor, aliceTok)
 	require.Equal(t, http.StatusOK, rrPage2.Code)
 	var page2 secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrPage2.Body.Bytes(), &page2))
@@ -370,13 +370,13 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	assert.Empty(t, page2.NextCursor)
 
 	// Cursor bound to different query -> 400.
-	rrBadCur := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=1&sort=project&cursor="+page1.NextCursor, aliceTok)
+	rrBadCur := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=1&sort=project&cursor="+page1.NextCursor, aliceTok)
 	assert.Equal(t, http.StatusBadRequest, rrBadCur.Code)
 
 	// Carol (project-viewer on Project A: agent.read, NO agent.attach):
 	// Sees Card 4 (DM to Carol, 1 row) + Card 1 (Project A thread, 2 rows) = 3 open, 0 answerable!
 	carolTok := f.sessionToken(t, f.carol)
-	rrCarol := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, carolTok)
+	rrCarol := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, carolTok)
 	require.Equal(t, http.StatusOK, rrCarol.Code)
 	var carolResp secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrCarol.Body.Bytes(), &carolResp))
@@ -391,7 +391,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	// Bob (project-owner of Project B, non-member of Project A):
 	// Sees ONLY Card 2 (Project B thread). Must NOT see Alice's DM (even though agentB is in Project B!) or Project A.
 	bobTok := f.sessionToken(t, f.bob)
-	rrBob := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, bobTok)
+	rrBob := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, bobTok)
 	require.Equal(t, http.StatusOK, rrBob.Code)
 	var bobResp secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrBob.Body.Bytes(), &bobResp))
@@ -409,7 +409,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	}
 	require.NoError(t, st.CreateUser(ctx, outsider))
 	outsiderTok := f.sessionToken(t, outsider)
-	rrOut := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?project="+f.project.ID, outsiderTok)
+	rrOut := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?project="+f.project.ID, outsiderTok)
 	require.Equal(t, http.StatusOK, rrOut.Code)
 	var outResp secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrOut.Body.Bytes(), &outResp))
@@ -441,7 +441,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 		{Key: "REPL_KEY", KeyNorm: "REPL_KEY", SecretType: "environment"},
 	}, true)
 
-	rrRes := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?tab=resolved", aliceTok)
+	rrRes := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?tab=resolved", aliceTok)
 	require.Equal(t, http.StatusOK, rrRes.Code)
 	var resResp secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrRes.Body.Bytes(), &resResp))
@@ -464,7 +464,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	require.NoError(t, err)
 
 	srv.actionInboxMaxProjectsForTest = 1
-	rrTrunc := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=0", aliceTok)
+	rrTrunc := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=0", aliceTok)
 	require.Equal(t, http.StatusOK, rrTrunc.Code)
 	var truncResp secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrTrunc.Body.Bytes(), &truncResp))
@@ -477,7 +477,7 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 		{Key: "CAP_KEY_2", KeyNorm: "CAP_KEY_2", SecretType: "environment"},
 	}, false)
 	srv.actionInboxScanCapForTest = 2
-	rrCapped := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=0", aliceTok)
+	rrCapped := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=0", aliceTok)
 	require.Equal(t, http.StatusOK, rrCapped.Code)
 	var cappedResp secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrCapped.Body.Bytes(), &cappedResp))
@@ -497,7 +497,7 @@ func TestInboxSummary_AgentSecretsParityAndGates(t *testing.T) {
 	})
 
 	aliceTok := f.sessionToken(t, f.alice)
-	rrOff := doBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", aliceTok)
+	rrOff := doActionInboxBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", aliceTok)
 	require.Equal(t, http.StatusOK, rrOff.Code)
 	var sumOff InboxSummaryResponse
 	require.NoError(t, json.Unmarshal(rrOff.Body.Bytes(), &sumOff))
@@ -526,12 +526,12 @@ func TestInboxSummary_AgentSecretsParityAndGates(t *testing.T) {
 
 	// AC-7: agent_secrets.count == GET /users/me/secret-requests?limit=0 -> counts.answerable,
 	// and decisions.count is unchanged.
-	rrSum := doBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", aliceTok)
+	rrSum := doActionInboxBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", aliceTok)
 	require.Equal(t, http.StatusOK, rrSum.Code)
 	var sumOn InboxSummaryResponse
 	require.NoError(t, json.Unmarshal(rrSum.Body.Bytes(), &sumOn))
 
-	rrProbe := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=0", aliceTok)
+	rrProbe := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=0", aliceTok)
 	require.Equal(t, http.StatusOK, rrProbe.Code)
 	var probe secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrProbe.Body.Bytes(), &probe))
@@ -551,12 +551,12 @@ func TestInboxSummary_AgentSecretsParityAndGates(t *testing.T) {
 
 	// Carol (no ActionAttach): summary count == 0 == probe counts.answerable (while probe counts.open == 2).
 	carolTok := f.sessionToken(t, f.carol)
-	rrCarolSum := doBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", carolTok)
+	rrCarolSum := doActionInboxBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", carolTok)
 	require.Equal(t, http.StatusOK, rrCarolSum.Code)
 	var carolSum InboxSummaryResponse
 	require.NoError(t, json.Unmarshal(rrCarolSum.Body.Bytes(), &carolSum))
 
-	rrCarolProbe := doBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=0", carolTok)
+	rrCarolProbe := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?limit=0", carolTok)
 	require.Equal(t, http.StatusOK, rrCarolProbe.Code)
 	var carolProbe secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrCarolProbe.Body.Bytes(), &carolProbe))
@@ -568,7 +568,7 @@ func TestInboxSummary_AgentSecretsParityAndGates(t *testing.T) {
 	// UAT caller: agent_secrets is unavailable (§4.4, AC-6).
 	uatRaw, _, err := srv.uatService.CreateToken(rs4MintContext(f.alice.ID), f.alice.ID, "inbox-uat", f.project.ID, []string{"inbox:read"}, nil)
 	require.NoError(t, err)
-	rrUAT := doBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", uatRaw)
+	rrUAT := doActionInboxBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", uatRaw)
 	require.Equal(t, http.StatusOK, rrUAT.Code)
 	var uatSum InboxSummaryResponse
 	require.NoError(t, json.Unmarshal(rrUAT.Body.Bytes(), &uatSum))
