@@ -110,7 +110,7 @@
 - [artifact.review.draft.read](#artifactreviewdraftread) — Read the caller's own saved draft review of an artifact (200 with draft null when none exists, plus currentSeq; ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); the row is always keyed by the caller's own principal with no administrator, steward, owner or publisher override
 - [artifact.review.draft.write](#artifactreviewdraftwrite) — Create, replace or delete the caller's own saved draft review of an artifact with optimistic rev concurrency (ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); rate limited per principal (LimitDraftWrite) after authorization and before reading the request body; the row is always keyed by the caller's own principal with no override; a DELETE that deletes the caller's draft row writes a review_draft_deleted decision-log entry without content, while a DELETE when no draft exists writes none (both answer 204); draft saves never trigger review notifications
 - [artifact.review.request.create](#artifactreviewrequestcreate) — Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), and credential permission artifact.request_review in the artifact's home scope; in phase 1 only user requesters and reviewers who already can review (access=existing) are admitted; rate limited per requester (LimitReviewRequest)
-- [artifact.review.request.dismiss](#artifactreviewrequestdismiss) — Dismiss the caller's own open review request on an artifact with an optional note (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off or when no open request exists for the caller; works even after the caller lost read access to the artifact and returns only the request row; rate limited per user (LimitReviewRequestDismiss)
+- [artifact.review.request.dismiss](#artifactreviewrequestdismiss) — Dismiss the caller's own open review request on an artifact with an optional note (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off, when the caller's credential does not permit artifact.read in the artifact's home scope, or when no open request exists for the caller; session callers who lost read access via role or grant removal can still dismiss and receive only the request row; rate limited per user (LimitReviewRequestDismiss)
 - [artifact.version.upload](#artifactversionupload) — Upload one manifest file of a pending version; only the principal that started the version may upload to it
 - [artifact.version.finalize](#artifactversionfinalize) — Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
 - [artifact.version.view](#artifactversionview) — Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check
@@ -4708,7 +4708,7 @@
 
 **Domain:** artifact
 
-**Description:** Dismiss the caller's own open review request on an artifact with an optional note (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off or when no open request exists for the caller; works even after the caller lost read access to the artifact and returns only the request row; rate limited per user (LimitReviewRequestDismiss)
+**Description:** Dismiss the caller's own open review request on an artifact with an optional note (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off, when the caller's credential does not permit artifact.read in the artifact's home scope, or when no open request exists for the caller; session callers who lost read access via role or grant removal can still dismiss and receive only the request row; rate limited per user (LimitReviewRequestDismiss)
 
 ### Entry Points
 
@@ -4724,7 +4724,7 @@
 
 **Base Permission:** `artifact.read`
 
-**Resource Resolver:** self
+**Resource Resolver:** artifact-home-project
 
 **Effects:** `update-resource`
 

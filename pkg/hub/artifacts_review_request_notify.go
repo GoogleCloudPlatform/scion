@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -88,12 +89,17 @@ func (h *artifactHost) NotifyReviewRequest(ctx context.Context, n artifacts.Revi
 	})
 }
 
-// NotifyRequestDismissed implements artifacts.ReviewRequestNotifier: writes an
-// in-app ARTIFACT_REVIEW_DISMISSED notification to the requester and, when
-// different, to the artifact's user owner.
+// NotifyRequestDismissed implements artifacts.ReviewRequestNotifier: best-effort
+// acknowledges the reviewer's unacknowledged ARTIFACT_REVIEW_REQUESTED
+// notifications for the artifact, then writes an in-app
+// ARTIFACT_REVIEW_DISMISSED notification to the requester and, when different,
+// to the artifact's user owner.
 func (h *artifactHost) NotifyRequestDismissed(ctx context.Context, n artifacts.ReviewRequestDismissNotice) error {
 	if h.server == nil {
 		return errReviewRequestNoticeUnavailable
+	}
+	if n.ReviewerKind == artifacts.PrincipalKindUser && n.ReviewerRef != "" && n.ArtifactID != "" {
+		h.ackReviewRequestNotifications(ctx, n.ReviewerRef, n.ArtifactID)
 	}
 	var recipients []string
 	if n.RequesterKind == artifacts.PrincipalKindUser && n.RequesterRef != "" {
@@ -130,4 +136,32 @@ func (h *artifactHost) NotifyRequestDismissed(ctx context.Context, n artifacts.R
 		}
 	}
 	return firstErr
+}
+
+// ackReviewRequestNotifications best-effort acknowledges the reviewer's
+// unacknowledged ARTIFACT_REVIEW_REQUESTED notifications for artifactID so the
+// Inbox "requested" count clears on dismiss. Errors are logged and never undo
+// the committed dismiss.
+func (h *artifactHost) ackReviewRequestNotifications(ctx context.Context, reviewerUserID, artifactID string) {
+	if h.server == nil || h.server.store == nil {
+		return
+	}
+	notifs, err := h.server.store.GetNotifications(ctx, store.SubscriberTypeUser, reviewerUserID, true)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: list review-request notifications for ack failed",
+			"artifact", artifactID, "reviewer", reviewerUserID, "error", err)
+		return
+	}
+	for _, notif := range notifs {
+		if notif.Status != store.NotificationStatusArtifactReviewRequested || notif.ResourceID != artifactID {
+			continue
+		}
+		if notif.ResourceType != "" && notif.ResourceType != store.NotificationResourceArtifact {
+			continue
+		}
+		if err := h.server.store.AcknowledgeNotification(ctx, notif.ID); err != nil {
+			slog.WarnContext(ctx, "artifacts: acknowledge review-request notification failed",
+				"artifact", artifactID, "notification", notif.ID, "error", err)
+		}
+	}
 }

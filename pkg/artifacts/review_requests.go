@@ -248,6 +248,10 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	notifier, hasNotifier := s.host.(ReviewRequestNotifier)
+	if !hasNotifier {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "reviewer visibility check is unavailable")
+		return
+	}
 
 	// Load grants lazily once for the existing-access checks.
 	var (
@@ -300,21 +304,19 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		}
 
 		// Step 4: anti-spam visibility for user requesters.
-		if hasNotifier {
-			visible, err := notifier.MayNotifyReviewer(ctx, t.userID)
-			if err != nil {
-				slog.ErrorContext(ctx, "artifacts: reviewer visibility check failed", "error", err)
-				writeError(w, http.StatusServiceUnavailable, "unavailable", "could not verify reviewer visibility")
-				return
-			}
-			if !visible {
-				results = append(results, ReviewRequestResult{
-					Reviewer: t.principal,
-					Outcome:  ReviewRequestOutcomeRefused,
-					Code:     CodeReviewerUnavailable,
-				})
-				continue
-			}
+		visible, err := notifier.MayNotifyReviewer(ctx, t.userID)
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: reviewer visibility check failed", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "could not verify reviewer visibility")
+			return
+		}
+		if !visible {
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     CodeReviewerUnavailable,
+			})
+			continue
 		}
 
 		// Step 5a (P1): reviewer must already be able to review.
@@ -365,8 +367,6 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		if outcome == ReviewRequestOutcomeCreated || outcome == ReviewRequestOutcomeReminded {
 			if _, allowed := s.notifyLimiterFor().allow(PrincipalRef(kind, ref)); !allowed {
 				notifySkipped = NotifySkippedRateLimited
-			} else if !hasNotifier {
-				notifySkipped = NotifySkippedUnavailable
 			} else {
 				nerr := notifier.NotifyReviewRequest(ctx, ReviewRequestNotice{
 					ArtifactID:     a.ID,
@@ -452,6 +452,24 @@ func (s *Service) handleDismissReviewRequest(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Enforce the caller's credential ceiling and project boundary (Permits is
+	// credential-only and always true for session users, so reviewers who lost
+	// read through role or grant removal can still dismiss).
+	a, err := b.store.GetArtifact(ctx, id)
+	if errors.Is(err, ErrNotFound) || a == nil {
+		writeNotFound(w)
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: load artifact for dismiss failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "could not verify artifact scope")
+		return
+	}
+	if !s.host.Permits(ctx, a.ScopeRef, PermissionRead) {
+		writeNotFound(w)
+		return
+	}
+
 	actor := &Actor{Kind: kind, Ref: ref, Authority: AuthorityReviewer}
 	row, err := b.store.DismissReviewRequest(ctx, id, kind, ref, req.Note, s.now(), actor)
 	if errors.Is(err, ErrNotFound) {
@@ -468,23 +486,14 @@ func (s *Service) handleDismissReviewRequest(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	s.notifyInboxChanged(ctx, ref)
-
 	authorNotified := false
 	if notifier, ok := s.host.(ReviewRequestNotifier); ok {
-		var title, homeScope, ownerKind, ownerRef string
-		if a, aerr := b.store.GetArtifact(ctx, id); aerr == nil && a != nil {
-			title = a.Title
-			homeScope = a.ScopeRef
-			ownerKind = a.OwnerKind
-			ownerRef = a.OwnerRef
-		}
 		if nerr := notifier.NotifyRequestDismissed(ctx, ReviewRequestDismissNotice{
 			ArtifactID:    id,
-			ArtifactTitle: title,
-			HomeScope:     homeScope,
-			OwnerKind:     ownerKind,
-			OwnerRef:      ownerRef,
+			ArtifactTitle: a.Title,
+			HomeScope:     a.ScopeRef,
+			OwnerKind:     a.OwnerKind,
+			OwnerRef:      a.OwnerRef,
 			RequesterKind: row.RequesterKind,
 			RequesterRef:  row.RequesterRef,
 			ReviewerKind:  kind,
@@ -496,6 +505,8 @@ func (s *Service) handleDismissReviewRequest(w http.ResponseWriter, r *http.Requ
 			authorNotified = true
 		}
 	}
+
+	s.notifyInboxChanged(ctx, ref)
 
 	info := s.reviewRequestInfo(ctx, row, nil)
 	writeJSON(w, http.StatusOK, DismissReviewRequestResponse{

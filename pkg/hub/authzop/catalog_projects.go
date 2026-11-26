@@ -2016,13 +2016,13 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.review.request.dismiss",
 		Domain:      "artifact",
-		Description: "Dismiss the caller's own open review request on an artifact with an optional note (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off or when no open request exists for the caller; works even after the caller lost read access to the artifact and returns only the request row; rate limited per user (LimitReviewRequestDismiss)",
+		Description: "Dismiss the caller's own open review request on an artifact with an optional note (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off, when the caller's credential does not permit artifact.read in the artifact's home scope, or when no open request exists for the caller; session callers who lost read access via role or grant removal can still dismiss and receive only the request row; rate limited per user (LimitReviewRequestDismiss)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-request/dismiss", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
-		ResourceResolver: "self",
+		ResourceResolver: "artifact-home-project",
 		BasePermission:   "artifact.read",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,

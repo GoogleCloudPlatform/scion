@@ -54,7 +54,7 @@ func artifactPagePath(scopeRef, artifactID string) string {
 }
 
 func reviewRequestedByFromMessage(msg string) string {
-	before, _, ok := strings.Cut(msg, reviewRequestMessagePhrase)
+	before, _, ok := strings.Cut(msg, " asked you to review ")
 	if !ok {
 		return ""
 	}

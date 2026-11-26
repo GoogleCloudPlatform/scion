@@ -38,7 +38,7 @@ func setReviewRequestsForTest(t *testing.T, srv *Server, on bool) {
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		switch e.Name {
-		case experiments.Artifacts, experiments.FiltersQueryDialect:
+		case experiments.Artifacts, experiments.FiltersQueryDialect, experiments.InboxDashboard:
 			e.Default = true
 		case experiments.ArtifactsReviewRequests:
 			e.Default = on
@@ -74,8 +74,11 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 
 	ctx := context.Background()
 	p1 := artifactProject(t, s, "rr-p1")
+	p2 := artifactProject(t, s, "rr-p2")
 	createTestUserWithProjectRole(t, s, tid("rr-alice"), "alice-rr@test.com", p1.ID, store.ProjectRoleOwner)
+	createTestUserWithProjectRole(t, s, tid("rr-alice"), "alice-rr@test.com", p2.ID, store.ProjectRoleOwner)
 	createTestUserWithProjectRole(t, s, tid("rr-bob"), "bob-rr@test.com", p1.ID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, tid("rr-bob"), "bob-rr@test.com", p2.ID, store.ProjectRoleMember)
 	createTestUserWithProjectRole(t, s, tid("rr-carol"), "carol-rr@test.com", p1.ID, store.ProjectRoleMember)
 	alice, err := s.GetUser(ctx, tid("rr-alice"))
 	require.NoError(t, err)
@@ -178,6 +181,33 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	assert.Equal(t, artID, listResp.Artifacts[0].ID)
 	assert.True(t, listResp.Artifacts[0].ReviewRequested)
 
+	// Bob's Inbox "reviews" category reflects the request and parses Alice as requester (O1/O2).
+	bobSession := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "web")
+	inboxBefore := decodeInboxSummary(t, doRequestAsUser(t, srv, bob, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, InboxStateOK, inboxBefore.Categories[InboxCategoryReviews].State)
+	assert.Equal(t, 1, inboxBefore.Categories[InboxCategoryReviews].Breakdown["requested"])
+	beforePreviews := decodeReviewPreviews(t, inboxBefore.Categories[InboxCategoryReviews])
+	require.Len(t, beforePreviews, 1)
+	assert.Equal(t, InboxReviewKindRequested, beforePreviews[0].Kind)
+	assert.NotEmpty(t, beforePreviews[0].RequestedBy, "Inbox preview should parse requester from review-request notice")
+
+	// Scoped UAT on dismiss (R1): boundary excluding p1 or ceiling lacking artifact:read
+	// must answer 404 and leave the open request row untouched.
+	bobOtherProjUAT := artifactTestUAT(t, bobSession, p2.ID, "artifact:read")
+	bobNoReadUAT := artifactTestUAT(t, bobSession, p1.ID, "inbox:read")
+	dismissBody, _ := json.Marshal(artifacts.DismissReviewRequestBody{Note: "should not apply"})
+	rec = identityArtifactRequest(t, srv, bobOtherProjUAT, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-request/dismiss", dismissBody)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "dismiss with UAT bounded to another project must 404")
+	rec = identityArtifactRequest(t, srv, bobNoReadUAT, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-request/dismiss", dismissBody)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "dismiss with UAT lacking artifact:read must 404")
+	// Verify open row is still intact.
+	rec = doAsUser(bob, http.MethodGet, "/api/v1/artifacts/"+artID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var stillOpen artifacts.ArtifactResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &stillOpen))
+	require.NotNil(t, stillOpen.ReviewState)
+	require.NotNil(t, stillOpen.ReviewState.RequestedOfMe, "refused UAT dismiss must not change the open request row")
+
 	// Bob dismisses with a note.
 	rec = doAsUser(bob, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-request/dismiss",
 		artifacts.DismissReviewRequestBody{Note: "Out of office until Friday"})
@@ -186,6 +216,11 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &dismissResp))
 	assert.Equal(t, artifacts.ReviewRequestStateDismissed, dismissResp.Request.State)
 	assert.True(t, dismissResp.AuthorNotified)
+
+	// Bob's Inbox "requested" count drops to 0 after dismiss (O1: unacked request notices acked).
+	inboxAfter := decodeInboxSummary(t, doRequestAsUser(t, srv, bob, http.MethodGet, userMeInboxSummaryPath, nil))
+	assert.Equal(t, InboxStateOK, inboxAfter.Categories[InboxCategoryReviews].State)
+	assert.Equal(t, 0, inboxAfter.Categories[InboxCategoryReviews].Breakdown["requested"])
 
 	// Alice received ARTIFACT_REVIEW_DISMISSED with the note.
 	aliceNotifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, alice.ID, false)
@@ -222,7 +257,34 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, aliceNotifs, 2, "owner Alice should also receive dismiss notice when Carol was requester")
 
-	// 4. Agent requester refused with 403.
+	// 4. Scoped UATs on create and admitting dismiss (R1).
+	aliceSession := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, alice.Role, "web")
+	aliceNoReqUAT := artifactTestUAT(t, aliceSession, p1.ID, "artifact:read", "artifact:create")
+	aliceOtherProjUAT := artifactTestUAT(t, aliceSession, p2.ID, "artifact:read", "artifact:create", "artifact:request_review")
+	aliceAdmitUAT := artifactTestUAT(t, aliceSession, p1.ID, "artifact:read", "artifact:create", "artifact:request_review")
+	reqBody, _ := json.Marshal(artifacts.CreateReviewRequestsBody{Reviewers: []string{"user:" + bob.ID}, Note: "via UAT"})
+	rec = identityArtifactRequest(t, srv, aliceNoReqUAT, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", reqBody)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "create with UAT lacking artifact:request_review must 403")
+	rec = identityArtifactRequest(t, srv, aliceOtherProjUAT, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", reqBody)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "create with UAT bounded to another project must 404 (no existence oracle)")
+	rec = identityArtifactRequest(t, srv, aliceAdmitUAT, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", reqBody)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Create an open request as Alice (session) so Bob can dismiss it using a scoped UAT
+	// bounded to p1 with artifact:read.
+	rec = doAsUser(alice, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests",
+		artifacts.CreateReviewRequestsBody{Reviewers: []string{"user:" + bob.ID}, Note: "for UAT dismiss"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var uatCreateResp artifacts.CreateReviewRequestsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &uatCreateResp))
+	require.Len(t, uatCreateResp.Requests, 1)
+	require.Equal(t, artifacts.ReviewRequestOutcomeCreated, uatCreateResp.Requests[0].Outcome)
+
+	bobAdmitUAT := artifactTestUAT(t, bobSession, p1.ID, "artifact:read")
+	rec = identityArtifactRequest(t, srv, bobAdmitUAT, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-request/dismiss", nil)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 5. Agent requester refused with 403.
 	agentBody, _ := json.Marshal(artifacts.CreateReviewRequestsBody{Reviewers: []string{"user:" + bob.ID}})
 	agentReq := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", bytes.NewReader(agentBody))
 	agentReq.Header.Set("Authorization", "Bearer "+agentTok)

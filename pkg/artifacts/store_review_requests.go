@@ -217,10 +217,14 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 			}
 			return existing, ReviewRequestOutcomeUnchanged, nil
 		}
+		nextNote := existing.Note
+		if req.Note != "" {
+			nextNote = req.Note
+		}
 		res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_review_request
-			SET reminded_at = ?, updated_at = ?
+			SET note = ?, reminded_at = ?, updated_at = ?
 			WHERE id = ? AND state = ?`),
-			s.timeArg(at), s.timeArg(at), existing.ID, ReviewRequestStateOpen)
+			nextNote, s.timeArg(at), s.timeArg(at), existing.ID, ReviewRequestStateOpen)
 		if err != nil {
 			return ReviewRequest{}, "", fmt.Errorf("artifacts: remind review request: %w", err)
 		}
@@ -243,6 +247,7 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 		if err := tx.Commit(); err != nil {
 			return ReviewRequest{}, "", fmt.Errorf("artifacts: commit review request remind: %w", err)
 		}
+		existing.Note = nextNote
 		existing.RemindedAt = &at
 		existing.UpdatedAt = at
 		return existing, ReviewRequestOutcomeReminded, nil

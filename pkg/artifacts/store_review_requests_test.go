@@ -157,27 +157,42 @@ func TestReviewRequestRemindCooldownAndDismissLifecycle(t *testing.T) {
 			t.Fatalf("create: out=%q err=%v", out, err)
 		}
 
-		// 2. First remind succeeds (reminded_at was nil).
-		rem1, out, err := st.CreateOrRemindReviewRequest(ctx, req, 24*time.Hour, t0.Add(time.Minute), pubActor)
+		// 2. First remind with a new note succeeds and updates the stored note (reminded_at was nil).
+		reqRemind := req
+		reqRemind.Note = "updated note"
+		rem1, out, err := st.CreateOrRemindReviewRequest(ctx, reqRemind, 24*time.Hour, t0.Add(time.Minute), pubActor)
 		if err != nil || out != ReviewRequestOutcomeReminded || rem1.RemindedAt == nil {
 			t.Fatalf("first remind: out=%q remindedAt=%v err=%v", out, rem1.RemindedAt, err)
 		}
+		if rem1.Note != "updated note" {
+			t.Fatalf("first remind note = %q, want %q", rem1.Note, "updated note")
+		}
 
-		// 3. Second remind within 24h is unchanged.
-		_, out, err = st.CreateOrRemindReviewRequest(ctx, req, 24*time.Hour, t0.Add(2*time.Hour), pubActor)
+		// 3. Second remind within 24h is unchanged and does NOT overwrite the stored note.
+		reqCooldown := req
+		reqCooldown.Note = "ignored during cooldown"
+		unch, out, err := st.CreateOrRemindReviewRequest(ctx, reqCooldown, 24*time.Hour, t0.Add(2*time.Hour), pubActor)
 		if err != nil || out != ReviewRequestOutcomeUnchanged {
 			t.Fatalf("within cooldown: out=%q err=%v", out, err)
 		}
+		if unch.Note != "updated note" {
+			t.Fatalf("cooldown note = %q, want %q", unch.Note, "updated note")
+		}
 
-		// 4. After 24h, remind succeeds again.
-		_, out, err = st.CreateOrRemindReviewRequest(ctx, req, 24*time.Hour, t0.Add(25*time.Hour), pubActor)
+		// 4. After 24h, remind with empty note succeeds and preserves the stored note.
+		reqEmpty := req
+		reqEmpty.Note = ""
+		rem2, out, err := st.CreateOrRemindReviewRequest(ctx, reqEmpty, 24*time.Hour, t0.Add(25*time.Hour), pubActor)
 		if err != nil || out != ReviewRequestOutcomeReminded {
 			t.Fatalf("after cooldown: out=%q err=%v", out, err)
 		}
+		if rem2.Note != "updated note" {
+			t.Fatalf("remind empty note = %q, want %q", rem2.Note, "updated note")
+		}
 
-		// 5. GetOpenReviewRequest finds it.
+		// 5. GetOpenReviewRequest finds it with the updated note.
 		got, err := st.GetOpenReviewRequest(ctx, a.ID, PrincipalKindUser, "rev-1")
-		if err != nil || got.ID != created.ID {
+		if err != nil || got.ID != created.ID || got.Note != "updated note" {
 			t.Fatalf("GetOpenReviewRequest: got=%+v err=%v", got, err)
 		}
 

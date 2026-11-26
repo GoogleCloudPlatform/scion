@@ -279,12 +279,23 @@ func TestReviewRequestsAuthorization(t *testing.T) {
 		t.Errorf("agent requester = %d, want 403", rec.Code)
 	}
 
+	// Grant Eve review access so she CAN review, but omit her from visibleUsers
+	// to prove step 4 (anti-spam visibility) runs before step 5a (access check).
+	h.resolveMap["eve"] = &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}}
+	h.names["user:eve"] = "Eve"
+	eveGrantRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", "alice",
+		GrantRequest{SubjectKind: "principal", SubjectRef: "user:eve", Permission: GrantReview})
+	if eveGrantRec.Code != http.StatusCreated {
+		t.Fatalf("grant eve review = %d %s", eveGrantRec.Code, eveGrantRec.Body.String())
+	}
+
 	// Per-reviewer outcomes: Bob (can review) -> created; Carol (cannot review) -> reviewer_cannot_review;
+	// Eve (can review, but invisible to requester) -> reviewer_unavailable;
 	// Alice (self) & unknown & hidden -> reviewer_unavailable.
 	h.visibleUsers = map[string]bool{"bob": true, "carol": true}
 	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
 		CreateReviewRequestsBody{
-			Reviewers: []string{"user:bob", "user:carol", "user:alice", "user:ghost", "user:dave"},
+			Reviewers: []string{"user:bob", "user:carol", "user:eve", "user:alice", "user:ghost", "user:dave"},
 			Note:      "Please check section 2",
 		})
 	if rec.Code != http.StatusOK {
@@ -294,8 +305,8 @@ func TestReviewRequestsAuthorization(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.Requests) != 5 {
-		t.Fatalf("got %d results, want 5", len(resp.Requests))
+	if len(resp.Requests) != 6 {
+		t.Fatalf("got %d results, want 6", len(resp.Requests))
 	}
 	want := []struct {
 		reviewer, outcome, code, access string
@@ -303,6 +314,7 @@ func TestReviewRequestsAuthorization(t *testing.T) {
 	}{
 		{"user:bob", ReviewRequestOutcomeCreated, "", ReviewRequestAccessExisting, true},
 		{"user:carol", ReviewRequestOutcomeRefused, CodeReviewerCannotReview, "", false},
+		{"user:eve", ReviewRequestOutcomeRefused, CodeReviewerUnavailable, "", false},
 		{"user:alice", ReviewRequestOutcomeRefused, CodeReviewerUnavailable, "", false},
 		{"user:ghost", ReviewRequestOutcomeRefused, CodeReviewerUnavailable, "", false},
 		{"user:dave", ReviewRequestOutcomeRefused, CodeReviewerUnavailable, "", false},
@@ -386,9 +398,21 @@ func TestReviewRequestDismissAndLostReadAndFilters(t *testing.T) {
 		}
 	}
 
-	// Revoke Bob's read access: requested=1 must NOT show the unreadable artifact,
-	// yet POST /review-request/dismiss STILL succeeds and returns only the request row.
+	// Credential refusal (Permits false, modeling a scoped UAT lacking artifact:read
+	// or bounded to another project) must answer 404 and leave the open row untouched.
 	h.deny(principal{PrincipalKindUser, "bob", ""}, "proj-1", PermissionRead)
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-request/dismiss", "user", "bob",
+		DismissReviewRequestBody{Note: "Should be refused"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("dismiss with denied credential = %d, want 404", rec.Code)
+	}
+	delete(h.denied, PrincipalRef(PrincipalKindUser, "bob")+" proj-1 "+PermissionRead)
+
+	// Revoke Bob's read access via role (Authorize) and grant removal — NOT via Permits,
+	// because session credentials still pass Permits: requested=1 must NOT show the
+	// unreadable artifact, yet POST /review-request/dismiss STILL succeeds and returns
+	// only the request row.
+	delete(h.perms[PrincipalRef(PrincipalKindUser, "bob")]["proj-1"], PermissionRead)
 	// Also delete Bob's review grant so Bob truly cannot read.
 	grantsRec := doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID+"/grants", "user", "alice", nil)
 	var gl GrantListResponse
@@ -457,5 +481,102 @@ func TestReviewRequestNotifyRateLimitedDoesNotBlockState(t *testing.T) {
 	r := resp.Requests[0]
 	if r.Outcome != ReviewRequestOutcomeCreated || r.Notified || r.NotifySkipped != NotifySkippedRateLimited {
 		t.Errorf("got %+v, want created + notified=false + notifySkipped=rate_limited", r)
+	}
+}
+
+type noNotifierReviewRequestHost struct {
+	*fakeHost
+	resolveMap map[string]RecipientSubject
+}
+
+func (h *noNotifierReviewRequestHost) FeatureEnabled(_ context.Context, name string) bool {
+	return name == FeatureReviewRequests
+}
+
+func (h *noNotifierReviewRequestHost) ResolveRecipient(_ context.Context, kind, ref string) (RecipientSubject, error) {
+	if kind != PrincipalKindUser {
+		return nil, nil
+	}
+	return h.resolveMap[ref], nil
+}
+
+func TestReviewRequestsFailClosedWithoutNotifier(t *testing.T) {
+	f := newFixture(t, false)
+	fh := newFakeHost()
+	fh.allow(principal{PrincipalKindUser, "alice", ""}, "proj-1", PermissionRead, PermissionCreate, PermissionManage, PermissionRequestReview)
+	fh.allow(principal{PrincipalKindUser, "bob", ""}, "proj-1", PermissionRead)
+	h := &noNotifierReviewRequestHost{
+		fakeHost: fh,
+		resolveMap: map[string]RecipientSubject{
+			"bob": &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}},
+		},
+	}
+	svc := NewService(h)
+	svc.SetStore(f.store)
+	svc.SetBlobStorage(f.blobs, "hub-test")
+
+	pubReq := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts?name=doc.md&title=Design+Doc&scope=proj-1", strings.NewReader("# Hello\n"))
+	pubReq = withPrincipal(pubReq, principal{PrincipalKindUser, "alice", ""})
+	pubRec := httptest.NewRecorder()
+	svc.ServeHTTP(pubRec, pubReq)
+	if pubRec.Code != http.StatusCreated {
+		t.Fatalf("publish: %d %s", pubRec.Code, pubRec.Body.String())
+	}
+	var pubResp ArtifactResponse
+	if err := json.Unmarshal(pubRec.Body.Bytes(), &pubResp); err != nil {
+		t.Fatalf("decode publish: %v", err)
+	}
+
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+pubResp.Artifact.ID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST review-requests without ReviewRequestNotifier = %d %s, want 503", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReviewRequestRemindUpdatesNoteAndCooldownUnchanged(t *testing.T) {
+	svc, h, _, artID := newReviewRequestFixture(t)
+
+	// Initial create.
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}, Note: "initial note"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// First remind with a new note updates the stored note and sends it.
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}, Note: "please prioritize"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remind = %d %s", rec.Code, rec.Body.String())
+	}
+	var remResp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &remResp)
+	if len(remResp.Requests) != 1 || remResp.Requests[0].Outcome != ReviewRequestOutcomeReminded || !remResp.Requests[0].Notified {
+		t.Fatalf("remind response = %+v, want reminded + notified", remResp.Requests)
+	}
+	if remResp.Requests[0].Request.Note != "please prioritize" {
+		t.Errorf("remind stored note = %q, want %q", remResp.Requests[0].Request.Note, "please prioritize")
+	}
+	if len(h.sentRequests) != 2 || h.sentRequests[1].Note != "please prioritize" {
+		t.Errorf("sentRequests = %+v, want second notice with updated note", h.sentRequests)
+	}
+
+	// Second remind within cooldown returns unchanged, keeps stored note, sends no notice.
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}, Note: "should be ignored"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cooldown remind = %d %s", rec.Code, rec.Body.String())
+	}
+	var cdResp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &cdResp)
+	if len(cdResp.Requests) != 1 || cdResp.Requests[0].Outcome != ReviewRequestOutcomeUnchanged || cdResp.Requests[0].Notified {
+		t.Fatalf("cooldown response = %+v, want unchanged + not notified", cdResp.Requests)
+	}
+	if cdResp.Requests[0].Request.Note != "please prioritize" {
+		t.Errorf("cooldown note = %q, want %q", cdResp.Requests[0].Request.Note, "please prioritize")
+	}
+	if len(h.sentRequests) != 2 {
+		t.Errorf("sentRequests count = %d, want 2 (no notice during cooldown)", len(h.sentRequests))
 	}
 }

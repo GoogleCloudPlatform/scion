@@ -559,11 +559,11 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
 	{OperationID: "artifact.review.request.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-requests"}: {
-		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off) and the artifact service answers 404 for callers that cannot read the artifact; TestArtifactsReviewRequestsOnRoutes exercises session, scoped UAT and agent callers with the experiment on and off",
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off) and the artifact service answers 404 for callers that cannot read the artifact; TestArtifactsReviewRequestsOnRoutes exercises session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> 200) and agent callers with the experiment on and off",
 		Pin:    "TestArtifactsReviewRequestsOnRoutes",
 	},
 	{OperationID: "artifact.review.request.dismiss", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-request/dismiss"}: {
-		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off) and answers 404 when the caller has no open review request; TestArtifactsReviewRequestsOnRoutes exercises dismiss with the experiment on and off",
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off) and answers uniform 404 when the caller's credential lacks artifact:read in the artifact's home scope or when no open review request exists; TestArtifactsReviewRequestsOnRoutes exercises session and scoped UAT (boundary excluding project -> 404 row unchanged, ceiling lacking artifact:read -> 404 row unchanged, admitting UAT -> 200) dismiss with the experiment on and off",
 		Pin:    "TestArtifactsReviewRequestsOnRoutes",
 	},
 	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}: {
