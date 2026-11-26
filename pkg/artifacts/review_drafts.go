@@ -211,7 +211,7 @@ type DraftAccessReapResult struct {
 // When any drafts were deleted or any error occurred, it writes one
 // count-only summary entry to the artifact decision log (never logging draft
 // bodies, notes or principal details).
-func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAuthority, now time.Time, pageSize int, log *slog.Logger) (DraftAccessReapResult, error) {
+func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAuthority, notifier InboxNotifier, now time.Time, pageSize int, log *slog.Logger) (DraftAccessReapResult, error) {
 	var res DraftAccessReapResult
 	if st == nil || auth == nil {
 		return res, nil
@@ -236,7 +236,6 @@ func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAut
 	principals := make(map[string]resolvedPrincipal)
 
 	var hintedUsers map[string]struct{}
-	inboxNotifier, _ := auth.(InboxNotifier)
 	recordDeleted := func(k ReviewDraftKey) {
 		res.Deleted++
 		if k.PrincipalKind == PrincipalKindUser && k.PrincipalRef != "" {
@@ -369,9 +368,9 @@ func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAut
 		after = &last
 	}
 
-	if len(hintedUsers) > 0 && inboxNotifier != nil && inboxNotifier.InboxHintsActive(ctx) {
+	if len(hintedUsers) > 0 && notifier != nil && notifier.InboxHintsActive(ctx) {
 		for uid := range hintedUsers {
-			inboxNotifier.InboxChanged(ctx, uid)
+			notifier.InboxChanged(ctx, uid)
 		}
 	}
 

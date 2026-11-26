@@ -265,11 +265,12 @@ func TestReviewDraftStoreCapConcurrent(t *testing.T) {
 		t.Cleanup(func() { reviewDraftPutHook = nil })
 
 		errs := make([]error, 2)
+		created := make([]bool, 2)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, _, errs[0] = st.PutReviewDraft(
+			_, created[0], errs[0] = st.PutReviewDraft(
 				context.WithValue(ctx, heldKey{}, true),
 				testDraft(raceA, PrincipalKindUser, "u1", 1, "doc.md", "race-a", ""),
 				0, now.Add(time.Millisecond), limit,
@@ -278,7 +279,7 @@ func TestReviewDraftStoreCapConcurrent(t *testing.T) {
 		<-reached
 		go func() {
 			defer wg.Done()
-			_, _, errs[1] = st.PutReviewDraft(
+			_, created[1], errs[1] = st.PutReviewDraft(
 				ctx,
 				testDraft(raceB, PrincipalKindUser, "u1", 1, "doc.md", "race-b", ""),
 				0, now.Add(2*time.Millisecond), limit,
@@ -289,19 +290,28 @@ func TestReviewDraftStoreCapConcurrent(t *testing.T) {
 		close(release)
 		wg.Wait()
 
-		ok, refused := 0, 0
-		for _, err := range errs {
+		ok, refused, createdCount := 0, 0, 0
+		for i, err := range errs {
 			switch {
 			case err == nil:
 				ok++
+				if !created[i] {
+					t.Errorf("successful concurrent insert %d reported created=false, want true", i)
+				}
 			case errors.Is(err, ErrTooManyDrafts):
 				refused++
+				if created[i] {
+					t.Errorf("refused concurrent insert %d reported created=true, want false", i)
+				}
 			default:
 				t.Errorf("unexpected error: %v", err)
 			}
+			if created[i] {
+				createdCount++
+			}
 		}
-		if ok != 1 || refused != 1 {
-			t.Errorf("concurrent inserts at cap-1: %d recorded, %d refused; want 1 and 1 (%v)", ok, refused, errs)
+		if ok != 1 || refused != 1 || createdCount != 1 {
+			t.Errorf("concurrent inserts at cap-1: %d recorded, %d refused, %d created; want 1, 1, 1 (%v)", ok, refused, createdCount, errs)
 		}
 		var total int
 		q := st.(*sqlStore).rebind(`SELECT COUNT(*) FROM artifact_review_draft WHERE principal_kind = ? AND principal_ref = ?`)

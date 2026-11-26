@@ -514,7 +514,7 @@ func TestReapLostAccessReviewDraftsIndeterminateAuthzFailSafe(t *testing.T) {
 		authzService: NewAuthzService(&failEffectiveGroupsStore{Store: s, failErr: fmt.Errorf("injected authz store failure")}, slog.Default()),
 	}
 
-	res, err := artifacts.ReapLostAccessReviewDrafts(ctx, st, newArtifactHost(faultySrv), now, 100, nil)
+	res, err := artifacts.ReapLostAccessReviewDrafts(ctx, st, newArtifactHost(faultySrv), nil, now, 100, nil)
 	require.Error(t, err)
 	assert.Equal(t, 1, res.Checked)
 	assert.Equal(t, 0, res.Deleted)

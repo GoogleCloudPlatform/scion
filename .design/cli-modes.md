@@ -151,7 +151,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | Command | `human` | `agent` |
 |---------|:-------:|:-------:|
 | `attach` | Y | - |
-| `artifact list` | Y | Y (`--requested` and `--drafts` accepted in both modes; empty for agents, ptone/scion#9309) |
+| `artifact list` | Y | Y (`--requested` is empty for agents; `--drafts` returns only the caller's own drafts, ptone/scion#9309) |
 | `artifact request-review` | Y | - (human-only in Phase 1, ptone/scion#9306; agent mode arrives in Phase 4) |
 | `artifact dismiss-review` | Y | - (human-only: agents are never requested reviewers, ptone/scion#9306) |
 | `broker` (all) | Y | - |

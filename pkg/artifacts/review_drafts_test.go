@@ -1042,7 +1042,7 @@ func TestReapLostAccessReviewDrafts(t *testing.T) {
 	reapLogger := slog.New(slog.NewJSONHandler(decisionCap, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Use a small pageSize (2) to exercise multi-page cursor pagination.
-	res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 2, reapLogger)
+	res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, nil, now, 2, reapLogger)
 	if err != nil {
 		t.Fatalf("ReapLostAccessReviewDrafts: %v", err)
 	}
@@ -1088,7 +1088,7 @@ func TestReapLostAccessReviewDrafts(t *testing.T) {
 	}
 
 	// Second pass with no lost-access drafts left deletes 0 and writes no log.
-	res2, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 2, reapLogger)
+	res2, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, nil, now, 2, reapLogger)
 	if err != nil || res2.Checked != 3 || res2.Deleted != 0 || res2.Errors != 0 {
 		t.Fatalf("second pass = %+v, %v; want Checked=3 Deleted=0 Errors=0", res2, err)
 	}
@@ -1106,10 +1106,10 @@ func TestReapLostAccessReviewDraftsTransientErrorsFailSafe(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Nil store / nil authority are safe no-ops.
-	if res, err := ReapLostAccessReviewDrafts(ctx, nil, &fakeRecipientHost{fakeHost: f.host}, now, 10, nil); err != nil || res != (DraftAccessReapResult{}) {
+	if res, err := ReapLostAccessReviewDrafts(ctx, nil, &fakeRecipientHost{fakeHost: f.host}, nil, now, 10, nil); err != nil || res != (DraftAccessReapResult{}) {
 		t.Fatalf("nil store = %+v, %v", res, err)
 	}
-	if res, err := ReapLostAccessReviewDrafts(ctx, f.store, nil, now, 10, nil); err != nil || res != (DraftAccessReapResult{}) {
+	if res, err := ReapLostAccessReviewDrafts(ctx, f.store, nil, nil, now, 10, nil); err != nil || res != (DraftAccessReapResult{}) {
 		t.Fatalf("nil auth = %+v, %v", res, err)
 	}
 
@@ -1133,7 +1133,7 @@ func TestReapLostAccessReviewDraftsTransientErrorsFailSafe(t *testing.T) {
 		decisionCap := &logCapture{}
 		logger := slog.New(slog.NewJSONHandler(decisionCap, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		auth := &fakeRecipientHost{fakeHost: f.host, resolveErr: errStoreDown}
-		res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, logger)
+		res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, nil, now, 10, logger)
 		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
 			t.Fatalf("res=%+v err=%v", res, err)
 		}
@@ -1149,7 +1149,7 @@ func TestReapLostAccessReviewDraftsTransientErrorsFailSafe(t *testing.T) {
 
 	t.Run("Permits error", func(t *testing.T) {
 		auth := &fakeRecipientHost{fakeHost: f.host, err: errStoreDown}
-		res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+		res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, nil, now, 10, nil)
 		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
 			t.Fatalf("res=%+v err=%v", res, err)
 		}
@@ -1158,7 +1158,7 @@ func TestReapLostAccessReviewDraftsTransientErrorsFailSafe(t *testing.T) {
 
 	t.Run("Authorize error", func(t *testing.T) {
 		auth := authorizeErrRecipientHost{inner: &fakeRecipientHost{fakeHost: f.host}, err: errStoreDown}
-		res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+		res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, nil, now, 10, nil)
 		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
 			t.Fatalf("res=%+v err=%v", res, err)
 		}
@@ -1167,7 +1167,7 @@ func TestReapLostAccessReviewDraftsTransientErrorsFailSafe(t *testing.T) {
 
 	t.Run("GetArtifact error", func(t *testing.T) {
 		auth := &fakeRecipientHost{fakeHost: f.host}
-		res, err := ReapLostAccessReviewDrafts(ctx, draftFaultStore{Store: f.store, getArtifactErr: errStoreDown}, auth, now, 10, nil)
+		res, err := ReapLostAccessReviewDrafts(ctx, draftFaultStore{Store: f.store, getArtifactErr: errStoreDown}, auth, nil, now, 10, nil)
 		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
 			t.Fatalf("res=%+v err=%v", res, err)
 		}
@@ -1176,7 +1176,7 @@ func TestReapLostAccessReviewDraftsTransientErrorsFailSafe(t *testing.T) {
 
 	t.Run("ListGrants error", func(t *testing.T) {
 		auth := &fakeRecipientHost{fakeHost: f.host}
-		res, err := ReapLostAccessReviewDrafts(ctx, draftFaultStore{Store: f.store, listGrantsErr: errStoreDown}, auth, now, 10, nil)
+		res, err := ReapLostAccessReviewDrafts(ctx, draftFaultStore{Store: f.store, listGrantsErr: errStoreDown}, auth, nil, now, 10, nil)
 		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
 			t.Fatalf("res=%+v err=%v", res, err)
 		}
@@ -1185,7 +1185,7 @@ func TestReapLostAccessReviewDraftsTransientErrorsFailSafe(t *testing.T) {
 
 	t.Run("ListReviewDraftKeys error", func(t *testing.T) {
 		auth := &fakeRecipientHost{fakeHost: f.host}
-		res, err := ReapLostAccessReviewDrafts(ctx, draftFaultStore{Store: f.store, listKeysErr: errStoreDown}, auth, now, 10, nil)
+		res, err := ReapLostAccessReviewDrafts(ctx, draftFaultStore{Store: f.store, listKeysErr: errStoreDown}, auth, nil, now, 10, nil)
 		if !errors.Is(err, errStoreDown) || res.Checked != 0 || res.Deleted != 0 {
 			t.Fatalf("res=%+v err=%v", res, err)
 		}
@@ -1246,7 +1246,7 @@ func TestReapLostAccessReviewDraftsAccessDecisionAccuracy(t *testing.T) {
 	f.host.deny(noCreateA, "project-1", PermissionCreate)
 
 	auth := &fakeRecipientHost{fakeHost: f.host, unknown: map[string]bool{}}
-	res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+	res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, nil, now, 10, nil)
 	if err != nil {
 		t.Fatalf("pass 1: %v", err)
 	}
@@ -1268,7 +1268,7 @@ func TestReapLostAccessReviewDraftsAccessDecisionAccuracy(t *testing.T) {
 	f.host.mu.Lock()
 	delete(f.host.perms[PrincipalRef(scopeRevU.kind, scopeRevU.ref)], "project-2")
 	f.host.mu.Unlock()
-	res, err = ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+	res, err = ReapLostAccessReviewDrafts(ctx, f.store, auth, nil, now, 10, nil)
 	if err != nil || res.Deleted != 1 {
 		t.Fatalf("pass 2 (scope review revoked) = %+v, %v; want Deleted=1", res, err)
 	}
@@ -1281,7 +1281,7 @@ func TestReapLostAccessReviewDraftsAccessDecisionAccuracy(t *testing.T) {
 	if _, err := f.store.SetExpiry(ctx, id, &past, &Actor{Kind: agentA.kind, Ref: agentA.ref, Authority: AuthorityOwner}); err != nil {
 		t.Fatal(err)
 	}
-	res, err = ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+	res, err = ReapLostAccessReviewDrafts(ctx, f.store, auth, nil, now, 10, nil)
 	if err != nil || res.Deleted != 4 {
 		t.Fatalf("pass 3 (expired artifact) = %+v, %v; want Deleted=4", res, err)
 	}
@@ -1327,7 +1327,7 @@ func TestReapLostAccessReviewDraftsNoCrossPrincipalDeletion(t *testing.T) {
 		unknown:  map[string]bool{agentB.ref: true},
 	}
 
-	res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+	res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, nil, now, 10, nil)
 	if err != nil {
 		t.Fatalf("ReapLostAccessReviewDrafts: %v", err)
 	}

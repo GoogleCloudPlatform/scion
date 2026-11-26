@@ -330,7 +330,7 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 	} else if n > 0 {
 		slog.InfoContext(ctx, "artifacts: reaped expired review drafts", "count", n)
 	}
-	if res, err := artifacts.ReapLostAccessReviewDrafts(ctx, st, host, now, artifactReapBatch, s.artifactLog()); err != nil {
+	if res, err := artifacts.ReapLostAccessReviewDrafts(ctx, st, host, host, now, artifactReapBatch, s.artifactLog()); err != nil {
 		slog.WarnContext(ctx, "artifacts: reaping review drafts without access failed", "error", err,
 			"checked", res.Checked, "deleted", res.Deleted, "errors", res.Errors)
 	} else if res.Deleted > 0 {

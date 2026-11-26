@@ -575,7 +575,7 @@ func TestReviewDraftInboxHints(t *testing.T) {
 		}
 	}
 	// resolveMap does not include userB or agentC, so ResolveRecipient returns nil (gone/no access).
-	res, err := ReapLostAccessReviewDrafts(ctx, f.store, h, now, 100, nil)
+	res, err := ReapLostAccessReviewDrafts(ctx, f.store, h, h, now, 100, nil)
 	if err != nil || res.Deleted != 3 {
 		t.Fatalf("ReapLostAccessReviewDrafts = %+v, %v; want Deleted=3", res, err)
 	}
@@ -601,5 +601,108 @@ func TestReviewDraftInboxHints(t *testing.T) {
 	raw, _ := json.Marshal(ReviewStateInfo{})
 	if strings.Contains(string(raw), "myDraft") || strings.Contains(string(raw), "draftsInProgress") {
 		t.Fatalf("zero ReviewStateInfo serialized draft fields: %s", raw)
+	}
+}
+
+// TestReviewDraftPerCallerIsolation pins the per-caller principal predicate at
+// every SQL site (my_draft select column, drafts=1 filter, positive/negative
+// is:draft filter on global and project-scoped lists, and GetReviewDraftSummary
+// on GET /{id} and GET /{id}/versions/{seq}). When one user saves a draft, a
+// second principal who can read the artifact must never see reviewInDraft=true,
+// never match drafts=1 or is:draft, still see the artifact under -is:draft, and
+// always receive reviewState.myDraft == nil.
+func TestReviewDraftPerCallerIsolation(t *testing.T) {
+	f := newFixture(t, false)
+	fh := newFakeHost()
+	h := newDraftStateTestHost(fh)
+	svc := NewService(h)
+	svc.SetStore(f.store)
+	svc.SetBlobStorage(f.blobs, "hub-test")
+
+	owner := principal{kind: PrincipalKindUser, ref: "u-owner"}
+	drafter := principal{kind: PrincipalKindUser, ref: "u-drafter"}
+	const scope = "proj-1"
+
+	fh.allow(owner, scope, PermissionRead, PermissionCreate)
+	fh.allow(drafter, scope, PermissionRead, PermissionCreate)
+
+	rec := doDraftReq(svc, owner, http.MethodPost, "/api/v1/artifacts?name=doc.md&scope="+scope, []byte("# Plan\n"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish = %d: %s", rec.Code, rec.Body.String())
+	}
+	artID := decodeInto[ArtifactResponse](t, rec).Artifact.ID
+
+	if _, err := f.store.PutGrant(context.Background(), &Grant{
+		ID: "g-drafter", ArtifactID: artID,
+		SubjectKind: SubjectPrincipal, SubjectRef: PrincipalRef(drafter.kind, drafter.ref),
+		Permission: GrantReview,
+	}, 100, true, &Actor{Kind: owner.kind, Ref: owner.ref, Authority: AuthorityOwner}); err != nil {
+		t.Fatalf("PutGrant: %v", err)
+	}
+
+	// drafter saves a draft; owner holds no draft.
+	rec = doDraftReq(svc, drafter, http.MethodPut, draftPath(artID),
+		[]byte(`{"rev":0,"base":1,"entry":"doc.md","body":"drafter private text","note":"drafter note"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT draft as drafter = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 1. Unfiltered global list as owner: reviewInDraft must be false on every row.
+	rec = doDraftReq(svc, owner, http.MethodGet, "/api/v1/artifacts?mine=1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unfiltered list as owner = %d: %s", rec.Code, rec.Body.String())
+	}
+	unfiltered := decodeInto[ArtifactListResponse](t, rec)
+	if len(unfiltered.Artifacts) != 1 {
+		t.Fatalf("unfiltered list len = %d, want 1", len(unfiltered.Artifacts))
+	}
+	for _, it := range unfiltered.Artifacts {
+		if it.ReviewInDraft {
+			t.Fatalf("owner saw reviewInDraft=true on %s drafted by another user", it.ID)
+		}
+	}
+
+	// 2. drafts=1, global is:draft, and project-scoped is:draft all return 0 rows for owner.
+	for _, path := range []string{
+		"/api/v1/artifacts?mine=1&drafts=1",
+		"/api/v1/artifacts?mine=1&q=is:draft",
+		"/api/v1/artifacts?mine=1&scope=" + scope + "&q=is:draft",
+	} {
+		rec = doDraftReq(svc, owner, http.MethodGet, path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s as owner = %d: %s", path, rec.Code, rec.Body.String())
+		}
+		got := decodeInto[ArtifactListResponse](t, rec)
+		if len(got.Artifacts) != 0 {
+			t.Fatalf("GET %s as owner returned %d rows (%+v), want 0", path, len(got.Artifacts), got.Artifacts)
+		}
+	}
+
+	// 3. Project-scoped -is:draft still returns the artifact for owner.
+	rec = doDraftReq(svc, owner, http.MethodGet, "/api/v1/artifacts?mine=1&scope="+scope+"&q=-is:draft", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("project -is:draft as owner = %d: %s", rec.Code, rec.Body.String())
+	}
+	negGot := decodeInto[ArtifactListResponse](t, rec)
+	if len(negGot.Artifacts) != 1 || negGot.Artifacts[0].ID != artID {
+		t.Fatalf("project -is:draft as owner = %+v, want [%s]", negGot.Artifacts, artID)
+	}
+
+	// 4. GET /{id} and GET /{id}/versions/1 as owner have reviewState.myDraft == nil.
+	for _, path := range []string{
+		"/api/v1/artifacts/" + artID,
+		"/api/v1/artifacts/" + artID + "/versions/1",
+	} {
+		rec = doDraftReq(svc, owner, http.MethodGet, path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s as owner = %d: %s", path, rec.Code, rec.Body.String())
+		}
+		got := decodeInto[ArtifactResponse](t, rec)
+		if got.ReviewState == nil {
+			t.Fatalf("GET %s as owner: reviewState is nil, want non-nil with myDraft=nil", path)
+		}
+		if got.ReviewState.MyDraft != nil {
+			t.Fatalf("GET %s as owner leaked other user's myDraft: %+v", path, got.ReviewState.MyDraft)
+		}
 	}
 }
