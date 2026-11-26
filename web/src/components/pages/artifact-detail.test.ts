@@ -2592,6 +2592,30 @@ describe('Files tab shared file viewer (ptone/scion#8957)', () => {
     return Array.from(el.shadowRoot!.querySelectorAll('sl-tab-panel[name="files"] tbody tr'));
   }
 
+  /**
+   * Waits for the lazily imported `<scion-chat-file-preview>` chunk to register,
+   * upgrade, receive `.target`, and render the expected content element.
+   */
+  async function waitForPreviewReady(
+    el: ScionPageArtifactDetail,
+    preview: PreviewEl,
+    selector: string
+  ): Promise<Element> {
+    await customElements.whenDefined('scion-chat-file-preview');
+    return vi.waitFor(
+      async () => {
+        await el.updateComplete;
+        await preview.updateComplete;
+        const found = preview.shadowRoot?.querySelector(selector);
+        if (!found) {
+          throw new Error(`Expected ${selector} inside <scion-chat-file-preview>`);
+        }
+        return found;
+      },
+      { timeout: 4000, interval: 10 }
+    );
+  }
+
   it('opens the shared file viewer when clicking the eye icon, keeping raw and download actions available', async () => {
     const meta = artifact('docs/readme.md', 'text/markdown');
     meta.version!.seq = 2;
@@ -2650,11 +2674,7 @@ describe('Files tab shared file viewer (ptone/scion#8957)', () => {
     expect(preview.target).toBeNull();
 
     (jsEye as HTMLElement).click();
-    for (let i = 0; i < 10; i++) {
-      await new Promise((r) => setTimeout(r, 0));
-      await el.updateComplete;
-      await preview.updateComplete;
-    }
+    const editor = await waitForPreviewReady(el, preview, 'scion-code-editor');
 
     expect(preview.target).toEqual({
       kind: 'artifact',
@@ -2666,7 +2686,7 @@ describe('Files tab shared file viewer (ptone/scion#8957)', () => {
     const dialog = preview.shadowRoot!.querySelector('sl-dialog.file-preview-dialog');
     expect(dialog).not.toBeNull();
     expect(dialog!.getAttribute('label')).toBe('app.js');
-    expect(preview.shadowRoot!.querySelector('scion-code-editor')).not.toBeNull();
+    expect(editor).not.toBeNull();
 
     // Closing the preview clears the target.
     preview.dispatchEvent(
@@ -2689,13 +2709,8 @@ describe('Files tab shared file viewer (ptone/scion#8957)', () => {
 
     (htmlEye as HTMLElement).click();
     const preview = el.shadowRoot!.querySelector('scion-chat-file-preview') as PreviewEl;
-    for (let i = 0; i < 10; i++) {
-      await new Promise((r) => setTimeout(r, 0));
-      await el.updateComplete;
-      await preview.updateComplete;
-    }
+    const frame = await waitForPreviewReady(el, preview, 'iframe');
 
-    const frame = preview.shadowRoot!.querySelector('iframe');
     expect(frame).not.toBeNull();
     expect(frame!.getAttribute('sandbox')).toBe('allow-scripts');
     expect(frame!.getAttribute('src')).toBe(VIEW_URL);
