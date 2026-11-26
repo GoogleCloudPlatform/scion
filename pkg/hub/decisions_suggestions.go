@@ -379,6 +379,7 @@ func (s *Server) decisionSuggestionsCore(
 
 	type rankedSuggestion struct {
 		item       DecisionSuggestionValue
+		pinned     bool
 		tier       int
 		lowerValue string
 		lowerHelp  string
@@ -387,11 +388,11 @@ func (s *Server) decisionSuggestionsCore(
 	for _, c := range candidates {
 		tier := filterquery.MatchTierExact
 		if normPrefix != "" {
-			t, ok := filterquery.ClassifyMatch(normPrefix, c.Value)
+			t, ok := filterquery.ClassifyMatch(normPrefix, c.item.Value)
 			if ok {
 				tier = t
-			} else if c.Help != "" {
-				ht, hok := filterquery.ClassifyMatch(normPrefix, c.Help)
+			} else if c.item.Help != "" {
+				ht, hok := filterquery.ClassifyMatch(normPrefix, c.item.Help)
 				if !hok {
 					continue
 				}
@@ -401,16 +402,20 @@ func (s *Server) decisionSuggestionsCore(
 			}
 		}
 		ranked = append(ranked, rankedSuggestion{
-			item:       c,
+			item:       c.item,
+			pinned:     c.pinned,
 			tier:       tier,
-			lowerValue: strings.ToLower(c.Value),
-			lowerHelp:  strings.ToLower(c.Help),
+			lowerValue: strings.ToLower(c.item.Value),
+			lowerHelp:  strings.ToLower(c.item.Help),
 		})
 	}
 
 	sort.Slice(ranked, func(i, j int) bool {
 		if ranked[i].tier != ranked[j].tier {
 			return ranked[i].tier < ranked[j].tier
+		}
+		if ranked[i].pinned != ranked[j].pinned {
+			return ranked[i].pinned
 		}
 		if ranked[i].lowerValue != ranked[j].lowerValue {
 			return ranked[i].lowerValue < ranked[j].lowerValue
@@ -452,16 +457,21 @@ func (s *Server) decisionSuggestionsCore(
 	}, nil
 }
 
+type decisionSuggestionCandidate struct {
+	item   DecisionSuggestionValue
+	pinned bool
+}
+
 func decisionSuggestionCandidates(
 	set *decisionScopeSet,
 	user UserIdentity,
 	bundle decisionFacetsBundle,
 	kind decisionFacetKind,
 	profile bool,
-) []DecisionSuggestionValue {
+) []decisionSuggestionCandidate {
 	seen := make(map[string]bool)
-	var out []DecisionSuggestionValue
-	add := func(val, help string) {
+	var out []decisionSuggestionCandidate
+	add := func(val, help string, pinned bool) {
 		if val == "" {
 			return
 		}
@@ -470,7 +480,10 @@ func decisionSuggestionCandidates(
 			return
 		}
 		seen[k] = true
-		out = append(out, DecisionSuggestionValue{Value: val, Help: help})
+		out = append(out, decisionSuggestionCandidate{
+			item:   DecisionSuggestionValue{Value: val, Help: help},
+			pinned: pinned,
+		})
 	}
 
 	switch kind {
@@ -486,7 +499,7 @@ func decisionSuggestionCandidates(
 					help = p.Name
 				}
 			}
-			add(val, help)
+			add(val, help, false)
 		}
 
 	case decisionFacetConversation:
@@ -501,7 +514,7 @@ func decisionSuggestionCandidates(
 					help = p.Name
 				}
 			}
-			add(val, help)
+			add(val, help, false)
 		}
 
 	case decisionFacetAnswerer:
@@ -529,7 +542,7 @@ func decisionSuggestionCandidates(
 			if selfName != "" {
 				help = "You · " + selfName
 			}
-			add("me", help)
+			add("me", help, true)
 		}
 		for _, a := range bundle.rawAnswerers {
 			if viewerID != "" && a.ID == viewerID {
@@ -537,7 +550,7 @@ func decisionSuggestionCandidates(
 			}
 			lower := strings.ToLower(a.Name)
 			if lower != "" && nameCounts[lower] > 1 && a.Email != "" {
-				add(a.Email, a.Name)
+				add(a.Email, a.Name, false)
 				continue
 			}
 			val := a.Name
@@ -551,7 +564,7 @@ func decisionSuggestionCandidates(
 			if a.Email != "" && !strings.EqualFold(a.Email, val) {
 				help = a.Email
 			}
-			add(val, help)
+			add(val, help, false)
 		}
 	}
 

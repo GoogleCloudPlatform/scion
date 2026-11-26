@@ -264,16 +264,18 @@ func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *test
 	assert.Empty(t, p2.NextCursor)
 	assert.Equal(t, []string{"release-deployer", "data-engine-prod"}, []string{p2.Values[0].Value, p2.Values[1].Value})
 
-	// by: collision rules — two answerers share "Sam Taylor", one unique "Priya Raman", plus caller Bob as "me".
+	// by: collision rules — two answerers share "Sam Taylor", one unique "Aaron Park"
+	// (alphabetically before "me") + "Priya Raman", plus caller Bob pinned first as "me".
+	aaron := &store.User{ID: tid("sugg-aaron"), Email: "aaron@example.com", DisplayName: "Aaron Park", Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC()}
 	sam1 := &store.User{ID: tid("sugg-sam1"), Email: "sam1@example.com", DisplayName: "Sam Taylor", Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC()}
 	sam2 := &store.User{ID: tid("sugg-sam2"), Email: "sam2@example.com", DisplayName: "Sam Taylor", Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC()}
 	priya := &store.User{ID: tid("sugg-priya"), Email: "priya@example.com", DisplayName: "Priya Raman", Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC()}
-	for _, u := range []*store.User{sam1, sam2, priya} {
+	for _, u := range []*store.User{aaron, sam1, sam2, priya} {
 		require.NoError(t, f.store.CreateUser(ctx, u))
 		ensureHubMembership(ctx, f.store, u.ID)
 		addProjectMemberWithRole(t, f.store, f.project, u.ID, store.GroupMemberRoleAdmin)
 	}
-	for i, u := range []*store.User{f.bob, sam1, sam2, priya} {
+	for i, u := range []*store.User{f.bob, aaron, sam1, sam2, priya} {
 		_, rowID := seedSuggestionPrompt(t, f, f.agent.ID, f.agent.Slug, f.agent.Name, f.topicID, fmt.Sprintf("k-by-%d", i), fmt.Sprintf("Ans Q %d", i))
 		require.Equal(t, http.StatusOK, f.answer(t, u, rowID, map[string]interface{}{"choice_id": "yes"}).Code)
 	}
@@ -282,16 +284,33 @@ func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *test
 	require.Equal(t, http.StatusOK, byRR.Code, byRR.Body.String())
 	var byResp DecisionSuggestionsResponse
 	require.NoError(t, json.Unmarshal(byRR.Body.Bytes(), &byResp))
+	require.NotEmpty(t, byResp.Values)
+	assert.Equal(t, "me", byResp.Values[0].Value, "me must stay pinned first for by: even ahead of alphabetically earlier names")
 	byMap := make(map[string]string, len(byResp.Values))
 	for _, v := range byResp.Values {
 		byMap[v.Value] = v.Help
 	}
 	assert.Contains(t, byMap, "me")
 	assert.Contains(t, byMap["me"], "You")
+	assert.Equal(t, "aaron@example.com", byMap["Aaron Park"])
 	assert.Equal(t, "priya@example.com", byMap["Priya Raman"], "unique answerer inserts display name with email hint")
 	assert.Equal(t, "Sam Taylor", byMap["sam1@example.com"], "colliding answerer inserts email with display name hint")
 	assert.Equal(t, "Sam Taylor", byMap["sam2@example.com"], "colliding answerer inserts email with display name hint")
 	assert.NotContains(t, byMap, "Sam Taylor", "colliding display name must not be inserted directly")
+
+	// limit=0 with structured q loads raw facets for resolution, returns filteredCounts,
+	// and emits no facet views or facetsTruncated.
+	lim0RR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+		"/api/v1/projects/"+f.project.ID+"/decisions?tab=pending&limit=0&q="+url.QueryEscape("agent:dep"), nil)
+	require.Equal(t, http.StatusOK, lim0RR.Code, lim0RR.Body.String())
+	var lim0Resp ProjectPendingDecisionsResponse
+	require.NoError(t, json.Unmarshal(lim0RR.Body.Bytes(), &lim0Resp))
+	require.NotNil(t, lim0Resp.FilteredCounts)
+	assert.Equal(t, 1, lim0Resp.FilteredCounts.WaitingOnYou)
+	assert.Empty(t, lim0Resp.Agents)
+	assert.Empty(t, lim0Resp.Answerers)
+	assert.Empty(t, lim0Resp.Conversations)
+	assert.Nil(t, lim0Resp.FacetsTruncated)
 }
 
 func TestProjectDecisionSuggestions_UncappedPast500AndFacetsTruncated(t *testing.T) {
