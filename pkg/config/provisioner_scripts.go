@@ -41,6 +41,7 @@ var provisionerOwnedFiles = map[string]bool{
 	"capture_auth.py":       true,
 	AgentPluginsSidecarFile: true,
 	NoAuthEnvSidecarFile:    true,
+	UsageSidecarFile:        true,
 }
 
 // isProvisionerOwnedFile reports whether relPath, relative to the

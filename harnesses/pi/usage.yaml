@@ -1,0 +1,9 @@
+# Live Track 1 usage metering capability for pi.
+# Not yet live-metered in Track 1.
+schema_version: 1
+usage:
+  live:
+    source: none
+    token_types: []
+    not_applicable_token_types: []
+    counts_failed_calls: false

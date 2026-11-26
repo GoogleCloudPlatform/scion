@@ -73,14 +73,22 @@ func deriveHarnessConfigIndex(configYAML []byte, present bool, name string) harn
 
 // deriveHarnessConfigIndexWithSidecar derives a harness-config's index from
 // its config.yaml and optional agent-plugins.yaml sidecar.
+func deriveHarnessConfigIndexWithSidecar(configYAML []byte, present bool, sidecarYAML []byte, sidecarPresent bool, name string) harnessConfigIndex {
+	return deriveHarnessConfigIndexWithSidecars(configYAML, present, sidecarYAML, sidecarPresent, nil, false, name)
+}
+
+// deriveHarnessConfigIndexWithSidecars derives a harness-config's index from
+// its config.yaml, optional agent-plugins.yaml sidecar, and optional
+// usage.yaml sidecar.
 //
 // Every HarnessConfigData field comes from config.yaml (plus agent-plugins.yaml
-// for capabilities.agent_plugins), and a key absent from those files clears
-// its field: there is no merge with what the row held. A config.yaml that does
-// not parse is derived like a missing one and logged; an invalid or oversize
-// agent-plugins.yaml degrades capabilities.agent_plugins to support "no" with
-// the error as the reason.
-func deriveHarnessConfigIndexWithSidecar(configYAML []byte, present bool, sidecarYAML []byte, sidecarPresent bool, name string) harnessConfigIndex {
+// for capabilities.agent_plugins and usage.yaml for usage), and a key absent
+// from those files clears its field: there is no merge with what the row held.
+// A config.yaml that does not parse is derived like a missing one and logged;
+// an invalid or oversize agent-plugins.yaml degrades capabilities.agent_plugins
+// to support "no" with the error as the reason; an invalid or oversize
+// usage.yaml warns and leaves usage nil (unknown capability).
+func deriveHarnessConfigIndexWithSidecars(configYAML []byte, present bool, sidecarYAML []byte, sidecarPresent bool, usageYAML []byte, usagePresent bool, name string) harnessConfigIndex {
 	var idx harnessConfigIndex
 	var entry config.HarnessConfigEntry
 	hasEntry := false
@@ -104,6 +112,17 @@ func deriveHarnessConfigIndexWithSidecar(configYAML []byte, present bool, sideca
 		}
 		hasEntry = true
 	}
+	if usagePresent {
+		where := name + "/" + config.UsageSidecarFile
+		if usageYAML == nil {
+			config.ApplyUsageSidecarError(&entry, errTemplateObjectTooLarge, where)
+		} else {
+			config.ApplyUsageSidecarBytes(&entry, usageYAML, where)
+		}
+		if entry.UsageSidecar != nil {
+			hasEntry = true
+		}
+	}
 	if idx.Harness == "" {
 		idx.Harness = inferHarnessFromName(name)
 	}
@@ -113,7 +132,7 @@ func deriveHarnessConfigIndexWithSidecar(configYAML []byte, present bool, sideca
 	return idx
 }
 
-// harnessConfigDataFromEntry maps a parsed config.yaml (and sidecar) onto the
+// harnessConfigDataFromEntry maps a parsed config.yaml (and sidecars) onto the
 // stored HarnessConfigData. It returns nil when no field is set.
 func harnessConfigDataFromEntry(entry config.HarnessConfigEntry, resolvedHarness string) *store.HarnessConfigData {
 	caps := entry.DeclaredCapabilities()
@@ -131,6 +150,7 @@ func harnessConfigDataFromEntry(entry config.HarnessConfigEntry, resolvedHarness
 		Secrets:          entry.Secrets,
 		ModelAliases:     entry.ModelAliases,
 		Capabilities:     caps,
+		Usage:            entry.UsageSidecar,
 	}
 	if entry.NoAuthConfig != nil {
 		cfg.NoAuthBehavior = entry.NoAuthConfig.Behavior
@@ -146,8 +166,9 @@ func harnessConfigDataFromEntry(entry config.HarnessConfigEntry, resolvedHarness
 }
 
 // deriveHarnessConfigIndexFromCollected is the collected-directory variant
-// of deriveHarnessConfigIndexWithSidecar (bootstrap, import): config.yaml and
-// agent-plugins.yaml are read through the collected directory's root.
+// of deriveHarnessConfigIndexWithSidecars (bootstrap, import): config.yaml,
+// agent-plugins.yaml, and usage.yaml are read through the collected
+// directory's root.
 func deriveHarnessConfigIndexFromCollected(cd *collectedDir, name string) harnessConfigIndex {
 	data, present, err := cd.harnessConfigYAML()
 	if err != nil {
@@ -161,7 +182,13 @@ func deriveHarnessConfigIndexFromCollected(cd *collectedDir, name string) harnes
 			"harness_config", name, "dir", cd.dir, "error", sidecarErr)
 		sidecar, sidecarPresent = nil, false
 	}
-	return deriveHarnessConfigIndexWithSidecar(data, present, sidecar, sidecarPresent, name)
+	usageSidecar, usagePresent, usageErr := cd.harnessConfigFile(config.UsageSidecarFile)
+	if usageErr != nil {
+		slog.Warn("harness-config commit: cannot read usage.yaml; ignoring sidecar",
+			"harness_config", name, "dir", cd.dir, "error", usageErr)
+		usageSidecar, usagePresent = nil, false
+	}
+	return deriveHarnessConfigIndexWithSidecars(data, present, sidecar, sidecarPresent, usageSidecar, usagePresent, name)
 }
 
 // harnessConfigIndexMatches reports whether hc's stored derived fields equal
@@ -332,10 +359,14 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	if err != nil {
 		return fmt.Errorf("harness-config commit: %w", err)
 	}
+	usageYAML, usagePresent, err := s.readHarnessConfigManifestFile(ctx, stor, base, next, config.UsageSidecarFile, opts)
+	if err != nil {
+		return fmt.Errorf("harness-config commit: %w", err)
+	}
 
 	// 3. Content hash. 4. Derived fields.
 	contentHash := s.computeContentHash(next)
-	idx := deriveHarnessConfigIndexWithSidecar(configYAML, present, sidecarYAML, sidecarPresent, hc.Name)
+	idx := deriveHarnessConfigIndexWithSidecars(configYAML, present, sidecarYAML, sidecarPresent, usageYAML, usagePresent, hc.Name)
 
 	// 5. One row write, in the blob layout.
 	prevState := *hc

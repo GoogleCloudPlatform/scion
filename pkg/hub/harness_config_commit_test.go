@@ -1004,4 +1004,66 @@ func TestHarnessConfigCapabilities_APIResponseSidecarAndBackfill(t *testing.T) {
 		assert.Equal(t, api.SupportYes, persisted.Config.Capabilities.Resume.Support)
 		assert.Equal(t, api.CapabilityField{Support: api.SupportPartial, Reason: "marketplace"}, persisted.Config.Capabilities.AgentPlugins)
 	})
+
+	t.Run("GET, List, Delete, and backfill expose usage.yaml sidecar", func(t *testing.T) {
+		srv, s, _ := newHCCommitTestServer(t)
+		ctx := context.Background()
+		hc := ensureDeriveHC(t, srv, s)
+
+		cfgYAML := "name: derive-hc\nharness: gemini-cli\n"
+		usageYAML := "schema_version: 1\nusage:\n  live:\n    source: native\n    token_types: [input, output, cache_read, reasoning]\n    not_applicable_token_types: [cache_write]\n    counts_failed_calls: true\n"
+
+		rec := finalizeHCManifest(t, srv, hc, map[string]string{
+			"config.yaml": cfgYAML,
+			"usage.yaml":  usageYAML,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		wantUsage := &api.HarnessUsageCapabilities{
+			SchemaVersion: 1,
+			Live: api.HarnessUsageLiveCapabilities{
+				Source:                  api.UsageLiveSourceNative,
+				TokenTypes:              []string{"input", "output", "cache_read", "reasoning"},
+				NotApplicableTokenTypes: []string{"cache_write"},
+				CountsFailedCalls:       true,
+			},
+		}
+
+		getRec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+		var gotGet HarnessConfigWithCapabilities
+		require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &gotGet))
+		require.NotNil(t, gotGet.Config)
+		assert.Equal(t, wantUsage, gotGet.Config.Usage)
+
+		// Simulate a row that already has Capabilities but predates Config.Usage.
+		stored, err := s.GetHarnessConfig(ctx, hc.ID)
+		require.NoError(t, err)
+		stored.Config = &store.HarnessConfigData{
+			Harness:      "gemini-cli",
+			Capabilities: &api.HarnessAdvancedCapabilities{Harness: "gemini-cli"},
+		}
+		require.NoError(t, setHarnessConfigContentForTest(ctx, s, stored))
+
+		backfillRec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusOK, backfillRec.Code, backfillRec.Body.String())
+		var gotBackfill HarnessConfigWithCapabilities
+		require.NoError(t, json.Unmarshal(backfillRec.Body.Bytes(), &gotBackfill))
+		require.NotNil(t, gotBackfill.Config)
+		assert.Equal(t, wantUsage, gotBackfill.Config.Usage)
+
+		// Deleting usage.yaml clears Config.Usage.
+		delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/harness-configs/"+hc.ID+"/files/usage.yaml", nil)
+		delReq.Header.Set("Authorization", "Bearer "+testDevToken)
+		delRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(delRec, delReq)
+		require.Equal(t, http.StatusOK, delRec.Code, delRec.Body.String())
+
+		getAfterDel := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusOK, getAfterDel.Code, getAfterDel.Body.String())
+		var gotAfterDel HarnessConfigWithCapabilities
+		require.NoError(t, json.Unmarshal(getAfterDel.Body.Bytes(), &gotAfterDel))
+		require.NotNil(t, gotAfterDel.Config)
+		assert.Nil(t, gotAfterDel.Config.Usage)
+	})
 }

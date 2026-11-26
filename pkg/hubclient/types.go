@@ -739,4 +739,5 @@ type HarnessConfigData struct {
 	ModelAliases     map[string]string                `json:"modelAliases,omitempty"`
 	NoAuthBehavior   string                           `json:"noAuthBehavior,omitempty"`
 	Capabilities     *api.HarnessAdvancedCapabilities `json:"capabilities,omitempty"`
+	Usage            *api.HarnessUsageCapabilities    `json:"usage,omitempty"`
 }

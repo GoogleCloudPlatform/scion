@@ -1,0 +1,15 @@
+# Live Track 1 usage metering capability for gemini-cli.
+# Native OTLP logs: gemini_cli.api_response and gemini_cli.api_error.
+# Gemini API has no cache_write token count (explicit caches are created out of band).
+schema_version: 1
+usage:
+  live:
+    source: native
+    token_types:
+      - input
+      - output
+      - cache_read
+      - reasoning
+    not_applicable_token_types:
+      - cache_write
+    counts_failed_calls: true

@@ -1,0 +1,14 @@
+# Live Track 1 usage metering capability for codex.
+# Native OTLP logs: codex.sse_event (response.completed) and codex.api_request (failed attempts).
+schema_version: 1
+usage:
+  live:
+    source: native
+    token_types:
+      - input
+      - output
+      - cache_read
+      - cache_write
+      - reasoning
+    not_applicable_token_types: []
+    counts_failed_calls: true

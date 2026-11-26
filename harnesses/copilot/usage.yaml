@@ -1,0 +1,14 @@
+# Live Track 1 usage metering capability for copilot.
+# Native OTLP metrics (cumulative-to-delta in sciontool); failed calls are not emitted in OTel metrics.
+schema_version: 1
+usage:
+  live:
+    source: native
+    token_types:
+      - input
+      - output
+      - cache_read
+      - cache_write
+      - reasoning
+    not_applicable_token_types: []
+    counts_failed_calls: false
