@@ -59,6 +59,14 @@ func StructuredMessageToProto(msg *messages.StructuredMessage) *brokerv1.Structu
 			pb.Metadata[k] = v
 		}
 	}
+	if msg.Conversation != nil {
+		pb.Conversation = &brokerv1.Conversation{
+			Surface:     msg.Conversation.Surface,
+			ExternalRef: msg.Conversation.ExternalRef,
+			ParentRef:   msg.Conversation.ParentRef,
+			DisplayName: msg.Conversation.DisplayName,
+		}
+	}
 	return pb
 }
 
@@ -95,6 +103,14 @@ func ProtoToStructuredMessage(pb *brokerv1.StructuredMessage) *messages.Structur
 		msg.Metadata = make(map[string]string, len(pb.Metadata))
 		for k, v := range pb.Metadata {
 			msg.Metadata[k] = v
+		}
+	}
+	if pb.Conversation != nil {
+		msg.Conversation = &messages.Conversation{
+			Surface:     pb.Conversation.Surface,
+			ExternalRef: pb.Conversation.ExternalRef,
+			ParentRef:   pb.Conversation.ParentRef,
+			DisplayName: pb.Conversation.DisplayName,
 		}
 	}
 	return msg
