@@ -22,7 +22,7 @@
  * create, PATCH, suspend, and auto-suspend sweep.
  */
 
-import { html, nothing, type TemplateResult } from 'lit';
+import { css, html, nothing, type TemplateResult } from 'lit';
 
 import { neverSuspendEnabled } from '../utils/feature-flags.js';
 import { can, type Agent, type Capabilities } from './types.js';
@@ -100,8 +100,38 @@ export const FORCE_SUSPEND_CONFIRM_OPTIONS: ConfirmOptions = {
   variant: 'danger',
 };
 
+const NEVER_SUSPEND_BADGE_TOOLTIP =
+  'Never suspend: skipped by automatic idle/stalled and bulk suspends';
+
 /**
- * Renders the "Never suspend" badge when the experiment is enabled and the
+ * Shared styles for the quiet "Never suspend" pill rendered by
+ * `neverSuspendBadge`. Uses the `--scion-badge-primary-*` theme tokens so the
+ * pill stays legible in both light and dark modes.
+ */
+export const neverSuspendBadgeStyles = css`
+  .never-suspend-badge {
+    display: inline-flex;
+    align-items: center;
+    align-self: center;
+    flex-shrink: 0;
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.25;
+    white-space: nowrap;
+    background: var(--scion-badge-primary-bg);
+    color: var(--scion-badge-primary-text);
+  }
+
+  .never-suspend-badge--compact {
+    font-size: 0.6875rem;
+    padding: 0.0625rem 0.4375rem;
+  }
+`;
+
+/**
+ * Renders the "Never suspend" pill when the experiment is enabled and the
  * agent is flagged. Renders `nothing` otherwise (zero DOM nodes for unflagged
  * agents so list/project DOM budgets are unaffected).
  */
@@ -114,15 +144,12 @@ export function neverSuspendBadge(
     ? 'never-suspend-badge never-suspend-badge--compact'
     : 'never-suspend-badge';
   return html`
-    <sl-badge
-      variant="primary"
-      pill
+    <span
       class=${cls}
       data-testid="never-suspend-badge"
-      title="Never suspend: skipped by automatic idle/stalled and bulk suspends"
+      title=${NEVER_SUSPEND_BADGE_TOOLTIP}
+      aria-label=${NEVER_SUSPEND_BADGE_TOOLTIP}
+      >Never suspend</span
     >
-      <sl-icon name="shield-check"></sl-icon>
-      Never suspend
-    </sl-badge>
   `;
 }

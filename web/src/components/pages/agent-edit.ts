@@ -49,7 +49,7 @@ import {
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
-import { neverSuspendBadge } from '../../shared/never-suspend.js';
+import { neverSuspendBadge, neverSuspendBadgeStyles } from '../../shared/never-suspend.js';
 import {
   heldReincarnateKeys,
   REINCARNATE_CONFIRM_MESSAGE,
@@ -717,41 +717,41 @@ export class ScionPageAgentEdit extends LitElement {
     `;
   }
 
-  static override styles = css`
-    :host {
-      display: block;
-      max-width: 52rem;
-    }
-    sl-tab-group {
-      --track-color: var(--scion-border, #e2e8f0);
-    }
-    sl-tab-group::part(body) {
-      padding-top: 1.25rem;
-    }
-    .loading {
-      display: flex;
-      justify-content: center;
-      padding: 3rem;
-    }
-    sl-alert {
-      margin-bottom: 1rem;
-    }
-    .never-suspend-badge sl-icon {
-      margin-right: 0.25rem;
-    }
-    .grouping {
-      margin-bottom: 1rem;
-    }
-    .actions {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-top: 1rem;
-    }
-    .cancel-link {
-      margin-left: auto;
-    }
-  `;
+  static override styles = [
+    neverSuspendBadgeStyles,
+    css`
+      :host {
+        display: block;
+        max-width: 52rem;
+      }
+      sl-tab-group {
+        --track-color: var(--scion-border, #e2e8f0);
+      }
+      sl-tab-group::part(body) {
+        padding-top: 1.25rem;
+      }
+      .loading {
+        display: flex;
+        justify-content: center;
+        padding: 3rem;
+      }
+      sl-alert {
+        margin-bottom: 1rem;
+      }
+      .grouping {
+        margin-bottom: 1rem;
+      }
+      .actions {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-top: 1rem;
+      }
+      .cancel-link {
+        margin-left: auto;
+      }
+    `,
+  ];
 }
 
 declare global {

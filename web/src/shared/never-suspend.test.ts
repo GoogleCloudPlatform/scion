@@ -140,7 +140,7 @@ describe('never-suspend helpers', () => {
     );
   });
 
-  it('neverSuspendBadge renders nothing when inactive and a badge when active', () => {
+  it('neverSuspendBadge renders nothing when inactive and a quiet text pill without icon when active', () => {
     expect(neverSuspendBadge({ suspendPolicy: 'never' })).toBe(nothing);
 
     setFeatureFlag(NEVER_SUSPEND_FLAG, true);
@@ -150,8 +150,18 @@ describe('never-suspend helpers', () => {
     render(neverSuspendBadge({ suspendPolicy: 'never' }), container);
     const badge = container.querySelector('[data-testid="never-suspend-badge"]');
     expect(badge).not.toBeNull();
-    expect(badge?.textContent).toContain('Never suspend');
-    expect(badge?.querySelector('sl-icon')?.getAttribute('name')).toBe('shield-check');
+    expect(badge?.tagName.toLowerCase()).toBe('span');
+    expect(badge?.textContent?.trim()).toBe('Never suspend');
+    expect(badge?.querySelector('sl-icon')).toBeNull();
+    expect(badge?.getAttribute('title')).toContain('Never suspend');
+    expect(badge?.getAttribute('aria-label')).toContain('Never suspend');
+    expect(badge?.classList.contains('never-suspend-badge')).toBe(true);
+    expect(badge?.classList.contains('never-suspend-badge--compact')).toBe(false);
+
+    const compactContainer = document.createElement('div');
+    render(neverSuspendBadge({ suspendPolicy: 'never' }, { compact: true }), compactContainer);
+    const compactBadge = compactContainer.querySelector('[data-testid="never-suspend-badge"]');
+    expect(compactBadge?.classList.contains('never-suspend-badge--compact')).toBe(true);
   });
 
   it('builds force-suspend request init with force=true JSON body', () => {

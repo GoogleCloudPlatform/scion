@@ -47,6 +47,7 @@ import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import {
   isNeverSuspendActive,
   neverSuspendBadge,
+  neverSuspendBadgeStyles,
   resolveSuspendAction,
   showSuspendAction,
 } from '../../shared/never-suspend.js';
@@ -340,6 +341,7 @@ export class ScionPageAgents extends LitElement {
 
   static override styles = [
     listPageStyles,
+    neverSuspendBadgeStyles,
     css`
       .agent-header {
         display: flex;
@@ -384,10 +386,6 @@ export class ScionPageAgents extends LitElement {
       .agent-header > scion-message-mode-badge,
       .agent-header > scion-messageability-indicator {
         flex-shrink: 0;
-      }
-
-      .never-suspend-badge sl-icon {
-        margin-right: 0.25rem;
       }
 
       .policy-auto {
