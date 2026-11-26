@@ -250,13 +250,11 @@ Report completion, a blocker, or a result that unblocks the next step.
   explicitly handed off. A delayed reply is not a reason to ask another agent to
   relay the request, create a multi-hop relay chain, or duplicate the same
   escalation to the user.
-- Signal `sciontool status blocked "<reason>"` while a local background job is
-  running or during a brief wait; do not poll agents with sleep loops. When no
-  local background job is running and you are waiting on remote child agents,
-  human replies, or new work, signal `sciontool status idle "<reason>"` so Scion
-  can suspend the container — any new message or notification wakes you. For
+- When intentionally waiting for input or another agent, signal
+  `sciontool status blocked "<reason>"`. Do not poll agents with sleep loops. For
   external work without completion notifications, follow `scion-scheduler` guidance
-  on scheduled callbacks.
+  on scheduled callbacks. When you have no further work after sending or answering
+  a message, signal `sciontool status idle "<reason>"`; any new message wakes you.
 
 ## Preserve Markdown when sending
 

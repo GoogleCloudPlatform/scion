@@ -96,10 +96,11 @@ scion conversation create "project-x coordination" --json
 
 Capture the returned ID and share it as `conv:<id>` with participants. For a
 user-facing group conversation, set the default agent right after creation so
-unmentioned user replies route to that agent:
+unmentioned user replies route to that agent (pass the agent slug for a
+project-scoped conversation, or the full agent UUID for a projectless group):
 
 ```bash
-scion conversation set-default "conv:<id>" <agent-slug-or-uuid>
+scion conversation set-default "conv:<id>" <agent-id-or-slug>
 ```
 
 ### Catch up and manage membership
@@ -137,6 +138,6 @@ skill for reading and conversation administration.
   produces HTTP 409.
 - Creating a user-facing group conversation without calling
   `scion conversation set-default`, which leaves unmentioned user replies
-  unrouted.
+  without a default agent.
 - Creating a conversation for a one-off message; use `scion message @<agent>`
   for a direct message.

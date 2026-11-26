@@ -75,9 +75,9 @@ When an agent must remain available for follow-up — such as an unanswered huma
 open PR review, or an idle lead between assignments — and its harness supports session
 resume, ensure its state and handoff are durable and use `scion suspend <name>` (under the
 same creator/supervisor authority) to stop the container while keeping the harness session
-resumable. A suspended agent still counts as alive and wakes on demand via
-`scion message --wake` or `scion resume`; if a harness does not support session resume,
-`scion suspend` returns an error. Because suspending stops the container and recreates it on resume,
+resumable. A suspended agent remains resumable in place (an authorized sender with
+lifecycle permission can wake it on demand via `scion message --wake` or `scion resume`);
+if a harness does not support session resume, `scion suspend` returns an error. Because suspending stops the container and recreates it on resume,
 container-local `/tmp/` is wiped (keep reusable scripts, briefs, and handoffs in the
 workspace or a shared directory). Suspension releases the active broker and project capacity slot without closing
 open human questions; human silence is not closure. An agent you suspend receives nothing
