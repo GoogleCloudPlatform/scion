@@ -122,6 +122,7 @@ func IsBrokerPreContainerLaunchRefusal(launchError string) bool {
 		api.BrokerErrCodeSkillResolution,
 		api.LaunchCodeGitConfigRefused,
 		api.LaunchCodeHostedConfigRefused,
+		api.LaunchCodeAgentPolicyRefused,
 		api.BrokerErrCodeStorageMigrationRequired:
 		return true
 	default:

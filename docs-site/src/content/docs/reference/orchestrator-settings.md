@@ -377,6 +377,33 @@ Harness configs are checked for `env`, and for reserved names in `env_template` 
 
 The error names the env variable (or `hub "endpoint"`) and where it came from. It never includes the value.
 
+## Agent Policy (`agent_policy`)
+
+The agent policy is the operator's limit on what any agent on this Runtime Broker host may run with. It is enforced on the agent's final, fully resolved configuration, immediately before the container is created, on every runtime (and image prefixes are also checked before the image is pulled). Whatever set a value (settings, profiles, flat instance `agent_defaults`, harness configs, templates, the agent's stored config, inline config such as `scion create --config`, or a Hub request) makes no difference, so requesters, project members, project owners, harness configs, and templates cannot bypass it.
+
+The policy is read only from the **global** settings file (`~/.scion/settings.yaml` of the user running the Runtime Broker). A project's `settings.yaml`, the Hub settings overlay, and `SCION_*` environment variables never set or loosen it. It is reloaded on every agent start, so changes apply to the next start without a restart. Absent or empty means no policy.
+
+```yaml
+schema_version: "1"
+agent_policy:
+  # The final image must start with one of these (compared fully qualified:
+  # "postgres" is docker.io/library/postgres). A prefix ending in "/" matches
+  # anything under it; any other prefix matches only at a reference boundary,
+  # so registry.example.com/agents/claude does not match .../claude-evil.
+  allowed_image_prefixes:
+    - registry.example.com/agents/
+  max_resources:
+    cpu: "8"
+    memory: 8Gi
+```
+
+| Field | Effect |
+| :--- | :--- |
+| `allowed_image_prefixes` | When non-empty, an agent whose image does not match is refused before the image is pulled. A short name is read as Docker reads it (`docker.io/library/...` or `docker.io/<org>/...`), and the agent then runs the fully qualified reference, so the image checked is the image run on every runtime, regardless of short-name resolution. **Podman local images:** because short names are normalized to `docker.io`, list locally built Podman images with their `localhost/` prefix (for example `localhost/scion-agent` or `localhost/`), not as `scion-agent`. |
+| `max_resources.cpu`, `max_resources.memory` | Every CPU or memory request and limit, in both `resources` and `kubernetes.resources`, above the maximum is refused, and so is a limit that any runtime would read as zero (Docker treats `0` as unlimited) or a negative value. Each value is compared at its largest reading by any runtime's parser (`512m` memory is 512 MB to Docker and 0.512 bytes to Kubernetes, so it is judged at 512 MB). Values in `max_resources` itself must be unambiguous Kubernetes quantities (for example `"8"`, `"500m"`, `"8Gi"`). On runtimes where omitting a limit means unlimited or where only limits are read (`docker`, `podman`, `kubernetes`, `substrate`), the policy fills a missing limit with the maximum; on Docker, Podman, and Substrate, `kubernetes.resources` is still validated against the maximum but never suppresses filling `resources.limits`, and on Kubernetes filling a missing limit also fills a missing request with the default request (`250m` CPU, `512Mi` memory, capped at the maximum) so Kubernetes does not default the request to the limit. **Cloud Run (`cloudrun`) and Apple container (`container`):** missing limits are **not** filled with `max_resources` because those runtimes fall back from limit to request (leaving missing limits unset avoids silently upsizing request-only agents and preserves Cloud Run CPU/memory band compatibility). When **both** limit and request are unset for a capped resource, the policy checks the runtime's default against `max_resources` and refuses the start fail-closed if the default exceeds the ceiling (Cloud Run defaults: `2` vCPU / `2Gi` memory; Apple container: `2G` memory, and unset CPU is refused whenever `max_resources.cpu` is set because the CLI default is host-controlled) — set explicit resources within the ceiling in that case. Any other runtime with unset capped resources is also refused fail-closed. |
+
+**Fail-closed loading:** an unknown key under `agent_policy`, an invalid policy value, or a global settings file that mentions `agent_policy` but cannot be loaded refuses every agent start until the operator fixes the global settings file. Refusals return `agent_policy_refused` (HTTP `400` on synchronous broker start paths, or launch code `agent_policy_refused` on async launches) with a bounded message naming only the refused field and policy setting — never allowlist entries or broker host paths.
+
 ## Telemetry Configuration (`telemetry`)
 
 Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). A template's `telemetry` block is ignored; the Hub telemetry configuration and project telemetry policy also apply, and an agent's own config can only turn telemetry on or off. See the [telemetry ladder](/scion/reference/settings-precedence/#the-telemetry-ladder).

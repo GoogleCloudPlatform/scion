@@ -526,6 +526,29 @@
       "description": "Inject the host's harness credential files (for example OAuth login files) into agent containers when the broker is co-located with a workstation hub on loopback using dev auth. Defaults to true in workstation mode; ignored in hosted mode. Hub secrets take precedence.",
       "x-scope": "global",
       "x-since": "1"
+    },
+    "agent_policy": {
+      "type": "object",
+      "description": "Operator agent policy, enforced on the final resolved configuration of every agent this host starts, whatever set each value. Read only from the global settings file: a project's settings, the Hub settings overlay and SCION_* environment variables never set it. Absent or empty means no policy.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "allowed_image_prefixes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "When non-empty, the agent's image must start with one of these prefixes. References are compared fully qualified (a short name is read as docker.io/library/...). A prefix that does not end in '/' matches only at a reference boundary."
+        },
+        "max_resources": {
+          "type": "object",
+          "description": "Maximum CPU and memory requests and limits. A missing limit is set to the maximum.",
+          "properties": {
+            "cpu": { "type": "string", "description": "Maximum CPU, e.g. \"8\" or \"500m\"." },
+            "memory": { "type": "string", "description": "Maximum memory, e.g. \"8Gi\"." }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,

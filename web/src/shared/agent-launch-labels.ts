@@ -71,6 +71,7 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
     'the project path on the runtime broker is not initialized as a project',
   git_config_refused: "the repository's git config sets keys agents may not be given",
   hosted_config_refused: 'the hosted server does not allow this member-written config',
+  agent_policy_refused: "the broker's agent policy refused this configuration",
   skill_resolution_failed: 'a required skill could not be resolved',
   storage_migration_required: "the agent's storage settings must be migrated first",
   image_pull_failed: 'the agent image could not be pulled',
