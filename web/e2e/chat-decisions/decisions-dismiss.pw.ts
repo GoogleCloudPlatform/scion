@@ -656,8 +656,8 @@ test.describe('Dismiss decisions on real hub (ptone/scion#8216, ptone/scion#8217
         waitUntil: 'domcontentloaded',
       });
       await expect(
-        profilePage.locator('scion-decisions-filter-panel [data-filter-tag="provenance"]')
-      ).toContainText('Provenance: dismissed', { timeout: 15_000 });
+        profilePage.locator('scion-decisions-filter-panel scion-filter-box input')
+      ).toHaveValue('provenance:dismissed', { timeout: 15_000 });
 
       const madeTable = profilePage.locator('table.log');
       await expect(madeTable).toBeVisible();

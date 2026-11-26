@@ -797,8 +797,8 @@ for (const theme of ['light', 'dark'] as const) {
       const pageEl = page.locator('scion-page-project-decisions');
       await expect(pageEl).toBeVisible();
       await expect(
-        pageEl.locator('scion-decisions-filter-panel [data-filter-tag="provenance"]')
-      ).toContainText('Provenance: dismissed');
+        pageEl.locator('scion-decisions-filter-panel scion-filter-box input')
+      ).toHaveValue('provenance:dismissed');
 
       if (isPhone(page)) {
         const mobileItem = pageEl.locator('[data-mobile-answer="ans-d234"]');
