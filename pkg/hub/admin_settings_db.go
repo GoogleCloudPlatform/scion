@@ -1873,16 +1873,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			allValidationErrors[secName] = errs
 		}
 	}
-	// Validate agent_defaults against any stored agent_limits ceilings here
-	// (before writing any section) so a violation returns a clean 400 with all
-	// validation errors rather than failing mid-save in ops.Update.
-	if agentDefaultsDoc, ok := sectionDocs["agent_defaults"]; ok && len(allValidationErrors["agent_defaults"]) == 0 {
-		if limits := ops.AgentLimits(); !limits.IsEmpty() {
-			if errs := opsettings.ValidateAgentDefaultsDocAgainstLimits(agentDefaultsDoc, limits); len(errs) > 0 {
-				allValidationErrors["agent_defaults"] = append(allValidationErrors["agent_defaults"], errs...)
-			}
-		}
-	}
+	// Validate agent_defaults and agent_limits against each other using the
+	// effective post-request values before writing any section so a violation
+	// returns a clean 422 with no partial writes across sections.
+	validateAgentLimitsSectionDocs(ops, sectionDocs, allValidationErrors)
 	if len(allValidationErrors) > 0 {
 		writeSettingsValidation(w, "", sortedSectionValidationEntries(allValidationErrors), nil)
 		return

@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"encoding/json"
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 )
@@ -66,5 +68,59 @@ func validLimitClampedName(name string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// validateAgentLimitsSectionDocs validates agent_defaults and agent_limits
+// against each other using the effective post-request values of sectionDocs
+// (incoming doc when present, falling back to stored operational settings).
+// Called in the upfront validation pass of PUT /api/v1/admin/server-config
+// before any section is written, preventing partial writes across sections.
+func validateAgentLimitsSectionDocs(
+	ops *OperationalSettings,
+	sectionDocs map[string]json.RawMessage,
+	allValidationErrors map[string][]config.ValidationError,
+) {
+	defaultsDoc, hasDefaults := sectionDocs["agent_defaults"]
+	limitsDoc, hasLimits := sectionDocs[opsettings.AgentLimitsSectionName]
+	if !hasDefaults && !hasLimits {
+		return
+	}
+	if len(allValidationErrors["agent_defaults"]) > 0 || len(allValidationErrors[opsettings.AgentLimitsSectionName]) > 0 {
+		return
+	}
+
+	limits := ops.AgentLimits()
+	if hasLimits {
+		parsed, err := opsettings.ParseAgentLimitsDoc(limitsDoc)
+		if err != nil {
+			return // already reported by per-section opsettings.Validate
+		}
+		limits = parsed
+	}
+	if limits.IsEmpty() {
+		return
+	}
+
+	if hasDefaults {
+		if errs := opsettings.ValidateAgentDefaultsDocAgainstLimits(defaultsDoc, limits); len(errs) > 0 {
+			allValidationErrors["agent_defaults"] = append(allValidationErrors["agent_defaults"], errs...)
+		}
+		return
+	}
+
+	if rawDefaults, ok := ops.rawSection("agent_defaults"); ok {
+		if errs := opsettings.ValidateAgentDefaultsDocAgainstLimits(rawDefaults, limits); len(errs) > 0 {
+			allValidationErrors[opsettings.AgentLimitsSectionName] = append(allValidationErrors[opsettings.AgentLimitsSectionName], errs...)
+			return
+		}
+	}
+	snap := ops.Snapshot()
+	if errs := opsettings.ValidateAgentDefaultsAgainstLimits(opsettings.AgentDefaultsSettings{
+		DefaultMaxTurns:      snap.DefaultMaxTurns,
+		DefaultMaxModelCalls: snap.DefaultMaxModelCalls,
+		DefaultMaxDuration:   snap.DefaultMaxDuration,
+	}, limits); len(errs) > 0 {
+		allValidationErrors[opsettings.AgentLimitsSectionName] = append(allValidationErrors[opsettings.AgentLimitsSectionName], errs...)
 	}
 }

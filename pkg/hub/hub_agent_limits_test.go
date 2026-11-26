@@ -381,4 +381,82 @@ func TestPutServerConfigDB_AgentDefaultsExceedsAgentLimitsCeiling_422(t *testing
 	assert.True(t, errors.Is(err, ErrSectionValidation), "want ErrSectionValidation, got %v", err)
 	assert.Contains(t, err.Error(), "agent_defaults.default_max_turns")
 	assert.Contains(t, err.Error(), "agent_limits.max_turns")
+	assert.Equal(t, 50, ops.AgentLimits().MaxTurns, "refused update must leave stored ceiling unchanged")
+}
+
+// TestPutServerConfigDB_AgentLimitsMultiSectionAtomicity pins:
+//  1. Sending agent_limits directly on PUT /api/v1/admin/server-config is
+//     refused (422 unpersisted_keys_rejected) because agent_limits is DB-only
+//     with no KoanfPaths.
+//  2. A multi-section PUT carrying an earlier alphabetical section ("access")
+//     plus an invalid agent_defaults value (default_max_turns > ceiling)
+//     fails upfront with 422 and writes neither section (no partial write).
+//  3. validateAgentLimitsSectionDocs uses effective post-request values when
+//     both agent_defaults and agent_limits are present, and refuses lowering
+//     agent_limits below stored agent_defaults.
+func TestPutServerConfigDB_AgentLimitsMultiSectionAtomicity(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ctx := context.Background()
+
+	_, err := ops.Update(ctx, opsettings.AgentLimitsSectionName, json.RawMessage(`{"max_turns":50}`), "admin", -1, "managed")
+	require.NoError(t, err)
+
+	// (1) PUT carrying agent_limits directly is refused as unpersisted/unsupported.
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":{"max_turns":40}}`)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "unpersisted_keys_rejected")
+	assert.Equal(t, 50, ops.AgentLimits().MaxTurns, "rejected PUT must not change agent_limits")
+
+	// (2) Multi-section PUT where "access" sorts before "agent_defaults" and
+	// agent_defaults exceeds the ceiling: 422 upfront, nothing written.
+	multiBody := `{"server":{"hub":{"admin_emails":["new@example.com"]}},"default_max_turns":80}`
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", multiBody)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "validation_error")
+	assert.Contains(t, rr.Body.String(), "agent_defaults.default_max_turns")
+	assert.Contains(t, rr.Body.String(), "agent_limits.max_turns")
+	_, accessErr := fakeStore.GetHubSetting(ctx, "access")
+	assert.Error(t, accessErr, "earlier section 'access' must not be written when later 'agent_defaults' fails validation")
+	_, defaultsErr := fakeStore.GetHubSetting(ctx, "agent_defaults")
+	assert.Error(t, defaultsErr, "invalid 'agent_defaults' must not be written")
+
+	// (3) Upfront cross-section validator uses effective post-request values
+	// when both sections are present and checks lowering agent_limits against
+	// stored agent_defaults.
+	t.Run("simultaneous raise ceiling and default allowed", func(t *testing.T) {
+		errs := make(map[string][]config.ValidationError)
+		validateAgentLimitsSectionDocs(ops, map[string]json.RawMessage{
+			"agent_defaults":                  json.RawMessage(`{"default_max_turns":80}`),
+			opsettings.AgentLimitsSectionName: json.RawMessage(`{"max_turns":100}`),
+		}, errs)
+		assert.Empty(t, errs)
+	})
+
+	t.Run("simultaneous lower ceiling below incoming default refused", func(t *testing.T) {
+		errs := make(map[string][]config.ValidationError)
+		validateAgentLimitsSectionDocs(ops, map[string]json.RawMessage{
+			"agent_defaults":                  json.RawMessage(`{"default_max_turns":40}`),
+			opsettings.AgentLimitsSectionName: json.RawMessage(`{"max_turns":30}`),
+		}, errs)
+		require.Len(t, errs["agent_defaults"], 1)
+		assert.Contains(t, errs["agent_defaults"][0].Message, "agent_defaults.default_max_turns")
+		assert.Contains(t, errs["agent_defaults"][0].Message, "agent_limits.max_turns")
+	})
+
+	t.Run("lowering agent_limits below stored agent_defaults refused", func(t *testing.T) {
+		_, err := ops.Update(ctx, "agent_defaults", json.RawMessage(`{"default_max_turns":45}`), "admin", -1, "managed")
+		require.NoError(t, err)
+
+		errs := make(map[string][]config.ValidationError)
+		validateAgentLimitsSectionDocs(ops, map[string]json.RawMessage{
+			opsettings.AgentLimitsSectionName: json.RawMessage(`{"max_turns":30}`),
+		}, errs)
+		require.Len(t, errs[opsettings.AgentLimitsSectionName], 1)
+		assert.Contains(t, errs[opsettings.AgentLimitsSectionName][0].Message, "agent_defaults.default_max_turns")
+		assert.Contains(t, errs[opsettings.AgentLimitsSectionName][0].Message, "agent_limits.max_turns")
+	})
 }
