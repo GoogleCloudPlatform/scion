@@ -26,6 +26,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -37,6 +38,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+func sliceBResetDispatcher(d *recordingDispatcher) {
+	d.mu.Lock()
+	d.calls = nil
+	d.mu.Unlock()
+}
 
 func sliceBMakeAgent(t testing.TB, f *mpgFixture, slug string) *store.Agent {
 	t.Helper()
@@ -62,6 +69,18 @@ func sliceBSendAgentIdent(a *store.Agent) Identity {
 		ProjectID: a.ProjectID,
 		Ancestry:  a.Ancestry,
 	}}
+}
+
+func sliceBSendE3a(t testing.TB, f *mpgFixture, msg string) *httptest.ResponseRecorder {
+	t.Helper()
+	dmConv, err := messaging.ResolveOrCreateDMConversation(context.Background(), f.s, f.s, f.srv.messageLog,
+		"agent", f.sender.ID, "agent", f.peerAgent.ID)
+	require.NoError(t, err)
+	return f.sendOutbound(t, OutboundMessageRequest{
+		ConversationRef: "conv:" + dmConv.ConversationID,
+		Msg:             msg,
+		Type:            messages.TypeInstruction,
+	})
 }
 
 func sliceBSendE3b(t testing.TB, f *mpgFixture, sender, target *store.Agent, reqBody map[string]any) *httptest.ResponseRecorder {
@@ -146,10 +165,7 @@ func TestSelectorEligibility_OncePerSurface(t *testing.T) {
 	}))
 
 	// 1. Mention only a3 (not in scope): 0 provider calls, 0 decision rows.
-	rr := f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "agent:" + f.peerAgent.Slug,
-		Msg:       "hello @" + a3.Slug,
-	})
+	rr := sliceBSendE3a(t, f, "hello @"+a3.Slug)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.Equal(t, int32(0), providerCalls.Load(), "unmatched recipient must trigger zero executions")
 
@@ -158,10 +174,7 @@ func TestSelectorEligibility_OncePerSurface(t *testing.T) {
 	assert.Empty(t, decs.Items)
 
 	// 2. Mention a1, a2, a3: 1 provider call, 2 decision rows (ONLY a1 and a2).
-	rr = f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "agent:" + f.peerAgent.Slug,
-		Msg:       "hello @" + a1.Slug + " @" + a2.Slug + " @" + a3.Slug,
-	})
+	rr = sliceBSendE3a(t, f, "hello @"+a1.Slug+" @"+a2.Slug+" @"+a3.Slug)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.Equal(t, int32(1), providerCalls.Load(), "independent policy must execute once across matched copies")
 
@@ -220,10 +233,7 @@ func TestDependent_PerRecipient(t *testing.T) {
 		OnFailed:      store.MessagePolicyOutcomeReject,
 	}))
 
-	rr := f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "agent:" + f.peerAgent.Slug,
-		Msg:       "ping @" + a1.Slug + " @" + a2.Slug,
-	})
+	rr := sliceBSendE3a(t, f, "ping @"+a1.Slug+" @"+a2.Slug)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.Equal(t, int32(2), providerCalls.Load(), "dependent policy must execute once per matched recipient")
 
@@ -284,14 +294,37 @@ func TestResourceBounds_UnitsVsRows(t *testing.T) {
 		return b
 	}(), []byte(" ")))
 
-	rr := f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "agent:" + f.peerAgent.Slug,
-		Msg:       msg,
-	})
+	rr := sliceBSendE3a(t, f, msg)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	// Wait for shadow worker to persist 10*11 = 110 shadow rows on top of 10*11 + 15 = 125 enforce rows => 235 total.
-	decs := mpgWaitForDecisionCount(t, f.s, f.project.ID, 235)
+	listAllDecisions := func() []store.MessagePolicyDecision {
+		var all []store.MessagePolicyDecision
+		cursor := ""
+		for {
+			res, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{ProjectID: f.project.ID}, store.ListOptions{
+				Limit:  200,
+				Cursor: cursor,
+			})
+			require.NoError(t, err)
+			all = append(all, res.Items...)
+			if res.NextCursor == "" || len(res.Items) == 0 {
+				break
+			}
+			cursor = res.NextCursor
+		}
+		return all
+	}
+	var decs []store.MessagePolicyDecision
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		decs = listAllDecisions()
+		if len(decs) >= 235 {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	require.Len(t, decs, 235, "expected 110 enforce unit + 15 enforce cap + 110 shadow rows")
 	var enfUnitRows, enfCapRows, shdRows int
 	for _, d := range decs {
 		switch {
@@ -330,11 +363,8 @@ func TestSingleResolution_PlanEqualsDelivery(t *testing.T) {
 	}))
 
 	// E3a
-	f.dispatcher.reset()
-	rr := f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "agent:" + f.peerAgent.Slug,
-		Msg:       "e3a @" + m1.Slug + " @" + m2.Slug,
-	})
+	sliceBResetDispatcher(f.dispatcher)
+	rr := sliceBSendE3a(t, f, "e3a @"+m1.Slug+" @"+m2.Slug)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{ProjectID: f.project.ID}, store.ListOptions{Limit: 50})
 	require.NoError(t, err)
@@ -342,7 +372,7 @@ func TestSingleResolution_PlanEqualsDelivery(t *testing.T) {
 	assert.Len(t, f.dispatcher.getCalls(), 3, "E3a delivered 1 origin + 2 copies")
 
 	// E3b
-	f.dispatcher.reset()
+	sliceBResetDispatcher(f.dispatcher)
 	rr = sliceBSendE3b(t, f, f.sender, f.peerAgent, map[string]any{
 		"message":  "e3b @" + m1.Slug,
 		"mentions": []string{m2.Slug},
@@ -351,7 +381,7 @@ func TestSingleResolution_PlanEqualsDelivery(t *testing.T) {
 	assert.Len(t, f.dispatcher.getCalls(), 3, "E3b delivered 1 origin + 2 copies")
 
 	// E2 mentions
-	f.dispatcher.reset()
+	sliceBResetDispatcher(f.dispatcher)
 	rr = f.sendOutbound(t, OutboundMessageRequest{
 		Recipient: "user:" + f.alice.Email,
 		Msg:       "e2 @" + m1.Slug,
@@ -360,10 +390,10 @@ func TestSingleResolution_PlanEqualsDelivery(t *testing.T) {
 	assert.Len(t, f.dispatcher.getCalls(), 1, "E2 mention delivered 1 copy")
 
 	// E2 group default wake (no mentions -> wakes f.defaultAgent)
-	f.dispatcher.reset()
+	sliceBResetDispatcher(f.dispatcher)
 	rr = f.sendOutbound(t, OutboundMessageRequest{
-		ConversationID: f.groupConv.ID,
-		Msg:            "group post without mentions",
+		ConversationRef: "conv:" + f.groupConv.ID,
+		Msg:             "group post without mentions",
 	})
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.Len(t, f.dispatcher.getCalls(), 1, "E2 default wake delivered 1 copy to defaultAgent")
@@ -439,10 +469,7 @@ func TestCopyFacts_DMNotYetCreated(t *testing.T) {
 		OnFailed:      store.MessagePolicyOutcomeReject,
 	}))
 
-	rr := f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "agent:" + f.peerAgent.Slug,
-		Msg:       "hello @" + m1.Slug,
-	})
+	rr := sliceBSendE3a(t, f, "hello @"+m1.Slug)
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 
 	// Confirm the copy DM conversation was NEVER created.
@@ -470,8 +497,8 @@ func TestCopyFacts_LookupError_FactsUnavailable(t *testing.T) {
 	defer f.faultWrapper.failListParticipants.Store(false)
 
 	rr := f.sendOutbound(t, OutboundMessageRequest{
-		ConversationID: f.groupConv.ID,
-		Msg:            "group post waking default agent with faulted participants",
+		ConversationRef: "conv:" + f.groupConv.ID,
+		Msg:             "group post waking default agent with faulted participants",
 	})
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 
@@ -551,7 +578,7 @@ func TestCopyFacts_DriftRefused(t *testing.T) {
 	}))
 
 	// Preflight in deliverAgentMentionCopy must refuse due to fingerprint drift.
-	f.dispatcher.reset()
+	sliceBResetDispatcher(f.dispatcher)
 	out := f.srv.deliverAgentMentionCopy(ctx, ctx, agentMentionFanoutInput{
 		Sender:             f.sender,
 		SenderIdent:        sliceBSendAgentIdent(f.sender),
@@ -607,7 +634,7 @@ func TestCopyProvenance_StrippedAdmissionRefused(t *testing.T) {
 	require.NoError(t, err)
 
 	// 1. Nil admission via deliverAgentMentionCopy.
-	f.dispatcher.reset()
+	sliceBResetDispatcher(f.dispatcher)
 	out := f.srv.deliverAgentMentionCopy(ctx, ctx, agentMentionFanoutInput{
 		Sender:        f.sender,
 		SenderIdent:   sliceBSendAgentIdent(f.sender),
@@ -776,10 +803,7 @@ func TestOriginCopy_NoSharingAcrossSurface(t *testing.T) {
 		OnFailed:      store.MessagePolicyOutcomeReject,
 	}))
 
-	rr := f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "agent:" + f.peerAgent.Slug,
-		Msg:       "hello @" + m1.Slug,
-	})
+	rr := sliceBSendE3a(t, f, "hello @"+m1.Slug)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.Equal(t, int32(2), providerCalls.Load(), "origin (agent_dm) and copy (mention_delivery) must never share a provider execution")
 }
@@ -921,11 +945,8 @@ func TestWholeSend_422NoDeliveryEffects(t *testing.T) {
 		OnFailed:      store.MessagePolicyOutcomeReject,
 	}))
 
-	f.dispatcher.reset()
-	rr := f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "agent:" + f.peerAgent.Slug,
-		Msg:       "BLOCK_WHOLE @" + m1.Slug,
-	})
+	sliceBResetDispatcher(f.dispatcher)
+	rr := sliceBSendE3a(t, f, "BLOCK_WHOLE @"+m1.Slug)
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 	assert.Empty(t, f.dispatcher.getCalls(), "422 must produce zero dispatches")
 
@@ -964,7 +985,7 @@ func TestRefusedCopy_PerCopyFailureOnly(t *testing.T) {
 	})
 	defer adm.Close()
 
-	f.dispatcher.reset()
+	sliceBResetDispatcher(f.dispatcher)
 	res := f.srv.deliverResolvedAgentMentions(ctx, agentMentionFanoutInput{
 		Sender:        f.sender,
 		SenderIdent:   sliceBSendAgentIdent(f.sender),
@@ -998,7 +1019,7 @@ func TestGate_AfterAuthzZeroCalls(t *testing.T) {
 	ctx := context.Background()
 	f := newMpgFixture(t, true)
 	silentTarget := sliceBMakeAgent(t, f, "silent-403")
-	silentTarget.MessageMode = store.MessageModeSilent
+	silentTarget.MessageMode = store.MessageModeNone
 	require.NoError(t, f.s.UpdateAgent(ctx, silentTarget))
 
 	var providerCalls atomic.Int32
@@ -1027,14 +1048,17 @@ func TestEvalProject_IsSender(t *testing.T) {
 	ctx := context.Background()
 	f := newMpgFixture(t, true)
 
-	// Create a second project with a target agent that accepts cross-project DMs (open mode).
+	// Create a second project with a target agent that accepts cross-project DMs (hub mode).
+	f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{"cross_project_messaging_enabled": true}`))
 	otherProj := &store.Project{
 		ID:   tid("sb-other-proj"),
 		Name: "sb-other-proj",
 		Slug: "sb-other-proj",
 	}
 	require.NoError(t, f.s.CreateProject(ctx, otherProj))
-	f.sender.MessageMode = store.MessageModeOpen
+	_, err := f.s.UpdateProjectMessagingPolicy(ctx, otherProj.ID, store.CrossProjectInboundAny, 1)
+	require.NoError(t, err)
+	f.sender.MessageMode = store.MessageModeHub
 	require.NoError(t, f.s.UpdateAgent(ctx, f.sender))
 
 	otherTarget := &store.Agent{
@@ -1046,7 +1070,7 @@ func TestEvalProject_IsSender(t *testing.T) {
 		OwnerID:         f.alice.ID,
 		CreatedBy:       f.alice.ID,
 		RuntimeBrokerID: f.sender.RuntimeBrokerID,
-		MessageMode:     store.MessageModeOpen,
+		MessageMode:     store.MessageModeHub,
 		Ancestry:        []string{f.alice.ID},
 	}
 	require.NoError(t, f.s.CreateAgent(ctx, otherTarget))
@@ -1132,7 +1156,7 @@ func TestE3c_Gated(t *testing.T) {
 	}))
 
 	// 1. Policy reject -> 422, zero message row, zero dispatch.
-	f.dispatcher.reset()
+	sliceBResetDispatcher(f.dispatcher)
 	rr := sliceBSendE3c(t, f, f.sender, f.peerAgent, "E3C_BLOCK secret")
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 	assert.Empty(t, f.dispatcher.getCalls())
@@ -1197,10 +1221,7 @@ func TestShadow_OwnGroups_NoEnforceReuse(t *testing.T) {
 		OnFailed:      store.MessagePolicyOutcomeReject,
 	}))
 
-	rr := f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "agent:" + f.peerAgent.Slug,
-		Msg:       "hello @" + m1.Slug,
-	})
+	rr := sliceBSendE3a(t, f, "hello @"+m1.Slug)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	decs := mpgWaitForDecisionCount(t, f.s, f.project.ID, 2)
