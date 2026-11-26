@@ -546,31 +546,31 @@ func TestMoveBundle_K8sNFS_TargetProvisionImportCommitAndRollback(t *testing.T) 
 	assert.NoDirExists(t, exportAgentDir, "rollback delete must remove empty marked export agent dir (N3)")
 }
 
-func TestMoveBundle_DockerDefaultWithCloudRunAgentFailsClosed(t *testing.T) {
-	projectPath, _, _, _ := newMoveBundleTestAgentDir(t, "cr-agent")
+func TestMoveBundle_DockerDefaultWithUnsupportedAgentFailsClosed(t *testing.T) {
+	projectPath, _, _, _ := newMoveBundleTestAgentDir(t, "sub-agent")
 	srv := newTestServer(t)
 	srv.runtime = scionrt.NewDockerRuntime()
 	// Broker advertises AgentMoveBundle from its Docker default runtime.
 	require.True(t, StaticCapabilities(srv.runtime, "").AgentMoveBundle)
 
-	// Register cloudrun as an auxiliary runtime (matching a multi-runtime broker).
-	crRT := &scionrt.MockRuntime{NameFunc: func() string { return "cloudrun" }}
-	crMgr := agent.NewManager(crRT)
+	// Register an unsupported runtime (substrate) as an auxiliary runtime.
+	subRT := &scionrt.MockRuntime{NameFunc: func() string { return "substrate" }}
+	subMgr := agent.NewManager(subRT)
 
-	// 1. Move-bundle provision for a cloudrun agent must fail closed.
-	_, err := crMgr.Provision(context.Background(), api.StartOptions{
-		Name:                "cr-agent",
+	// 1. Move-bundle provision for an unsupported runtime agent must fail closed.
+	_, err := subMgr.Provision(context.Background(), api.StartOptions{
+		Name:                "sub-agent",
 		ProjectPath:         projectPath,
 		BrokerMode:          true,
 		NoAuth:              true,
 		FreshProvision:      true,
-		MoveReincarnationID: "rid-cr-fail",
+		MoveReincarnationID: "rid-sub-fail",
 		WorkspaceSource:     api.WorkspaceSourceMoveBundle,
 	})
-	require.Error(t, err, "move-bundle provision on cloudrun must fail closed")
+	require.Error(t, err, "move-bundle provision on unsupported runtime must fail closed")
 	assert.Contains(t, err.Error(), "not supported")
 
-	// 2. Move-bundle import resolving to cloudrun must return an error (400),
+	// 2. Move-bundle import resolving to an unsupported runtime must return 400,
 	//    never 202 followed by silently writing broker-local dirs.
 	dummyPart := bundle.Part{
 		Index: 0,
@@ -579,7 +579,7 @@ func TestMoveBundle_DockerDefaultWithCloudRunAgentFailsClosed(t *testing.T) {
 	}
 	manifest := bundle.Manifest{
 		Version:         bundle.ManifestVersion,
-		ReincarnationID: "rid-cr-fail",
+		ReincarnationID: "rid-sub-fail",
 		Roots: map[string]bundle.RootManifest{
 			bundle.RootWorkspace: {PartSize: 1, Parts: []bundle.Part{dummyPart}},
 			bundle.RootHome:      {PartSize: 1, Parts: []bundle.Part{dummyPart}},
@@ -588,9 +588,9 @@ func TestMoveBundle_DockerDefaultWithCloudRunAgentFailsClosed(t *testing.T) {
 	_, manifestHash, err := bundle.CanonicalManifest(manifest)
 	require.NoError(t, err)
 
-	impPath := fmt.Sprintf("/api/v1/agents/cr-agent/move-bundle/import?%s=cloudrun", api.RecordedRuntimeQueryParam)
+	impPath := fmt.Sprintf("/api/v1/agents/sub-agent/move-bundle/import?%s=substrate", api.RecordedRuntimeQueryParam)
 	rec := doMoveBundleReq(t, srv, http.MethodPost, impPath, api.MoveBundleImportRequest{
-		ReincarnationID: "rid-cr-fail",
+		ReincarnationID: "rid-sub-fail",
 		ProjectPath:     projectPath,
 		Manifest:        manifest,
 		ManifestHash:    manifestHash,

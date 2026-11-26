@@ -189,8 +189,8 @@ func TestMoveBundle_K8sDurabilityAndResolveDirs(t *testing.T) {
 	t.Run("unregistered runtime fails closed in ResolveMoveBundleDirsForRuntime and Provision (R1)", func(t *testing.T) {
 		_, _, projectPath := setupK8sNFSFixture(t)
 		in := MoveBundleRuntimeInput{
-			RuntimeName: "cloudrun",
-			AgentSlug:   "cr-agent",
+			RuntimeName: "substrate",
+			AgentSlug:   "sub-agent",
 			AgentID:     k8sTestAgentUUID,
 			ProjectPath: projectPath,
 			ProjectID:   k8sTestProjectUUID,
@@ -200,17 +200,17 @@ func TestMoveBundle_K8sDurabilityAndResolveDirs(t *testing.T) {
 		require.Error(t, err, "unregistered runtime must not fall back to broker-local dirs")
 		assert.Contains(t, err.Error(), "not supported")
 
-		crMgr := NewManager(&runtime.MockRuntime{
-			NameFunc: func() string { return "cloudrun" },
+		subMgr := NewManager(&runtime.MockRuntime{
+			NameFunc: func() string { return "substrate" },
 		}).(*AgentManager)
-		_, err = crMgr.Provision(context.Background(), api.StartOptions{
-			Name:                "cr-agent",
+		_, err = subMgr.Provision(context.Background(), api.StartOptions{
+			Name:                "sub-agent",
 			ProjectPath:         projectPath,
 			HubProjectID:        k8sTestProjectUUID,
 			BrokerMode:          true,
 			NoAuth:              true,
 			FreshProvision:      true,
-			MoveReincarnationID: "rid-cr-1",
+			MoveReincarnationID: "rid-sub-1",
 			WorkspaceSource:     api.WorkspaceSourceMoveBundle,
 		})
 		require.Error(t, err, "move-bundle provision must fail closed on unsupported runtime")

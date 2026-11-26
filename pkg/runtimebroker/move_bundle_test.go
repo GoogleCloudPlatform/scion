@@ -248,9 +248,16 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 		assert.False(t, respK8s.Durable, "plain kubernetes without NFS must not be durable")
 		assert.Equal(t, "workspace and home live only in the pod and are deleted on stop", respK8s.Reason)
 
-		for _, rt := range []string{"cloudrun", "cloudrun-sandbox"} {
+		for _, tc := range []struct {
+			rt         string
+			wantReason string
+		}{
+			{"cloudrun", "Cloud Run requires NFS project storage for bundle moves"},
+			{"cloudrun-sandbox", "Cloud Run Sandbox workspace and home are not durable for bundle moves"},
+			{"substrate", "not yet supported"},
+		} {
 			srv := newTestServer(t)
-			srv.moveBundle.durabilityRuntime = rt
+			srv.moveBundle.durabilityRuntime = tc.rt
 			rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
 				ProjectPath: projectPath,
 				Limits:      api.DefaultMoveBundleLimits(),
@@ -258,8 +265,8 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code)
 			var resp api.MoveBundlePrecheckResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-			assert.False(t, resp.Durable, "runtime %s should not be durable yet", rt)
-			assert.Equal(t, "not yet supported", resp.Reason)
+			assert.False(t, resp.Durable, "runtime %s should not be durable", tc.rt)
+			assert.Equal(t, tc.wantReason, resp.Reason)
 		}
 	})
 

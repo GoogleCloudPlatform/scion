@@ -290,7 +290,7 @@ func (m *AgentManager) nfsAgentDirExportWorkspace(projectPath, projectID, agentN
 		if !localRuntimeAgentDirOnShare(rt, projectDir) {
 			return "", "", nil
 		}
-	} else if !isKubernetesRuntime(rt) && !isCloudRunRuntime(rt) {
+	} else if !isKubernetesRuntime(rt) && !isCloudRunMoveBundleRuntime(rt) {
 		return "", "", nil
 	}
 	resolvedHostBase, rel, _, err = nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)

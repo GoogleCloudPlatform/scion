@@ -221,6 +221,22 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 		// RemoveNFSAgentFiles also removes the agent's worktree under the
 		// project's shared checkout on the export.
 		worktrees = append(worktrees, filepath.Join(hostBase, nfsWorktreeSubPath(rel, agentName)))
+	} else {
+		// Non-Kubernetes runtimes that put per-agent workspaces on the NFS
+		// export (e.g. Cloud Run) have their export agent dir removed by
+		// removeNFSAgentWorkspace without worktrees.
+		crHostBase, crRel, crErr := m.nfsAgentDirExportWorkspace(projectPath, projectID, agentName)
+		if crErr != nil {
+			return dirs, fmt.Errorf("%w: resolve the NFS export: %v", ErrMoveMarkerMismatch, crErr)
+		}
+		if crHostBase != "" {
+			agentRel, err := runtime.NFSAgentDirSubPath(crRel, agentName)
+			if err != nil {
+				return dirs, fmt.Errorf("%w: workspace_storage nfs: %v", ErrMoveMarkerMismatch, err)
+			}
+			wsExportAgentDir = filepath.Join(crHostBase, agentRel)
+			dirs = append(dirs, wsExportAgentDir)
+		}
 	}
 	// For runtimes with an external home leaf (e.g. Kubernetes NFS home or
 	// Cloud Run NFS home), a rollback delete also removes the home leaf. When
@@ -230,7 +246,7 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 	if m.Runtime != nil {
 		if mbRT, ok := lookupMoveBundleRuntime(m.Runtime.Name()); ok {
 			if hubAgentID := deleteHubAgentIDFrom(ctx); validHomeAgentID(hubAgentID, agentName) {
-				paths, hErr := mbRT.RollbackPaths(ctx, projectID, agentName, hubAgentID)
+				paths, hErr := mbRT.RollbackPaths(ctx, projectPath, projectID, agentName, hubAgentID)
 				if hErr != nil {
 					// Home-share availability/resolution errors must not be
 					// misclassified as ErrMoveMarkerMismatch (409), which would

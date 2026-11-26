@@ -110,12 +110,12 @@ type MoveBundleRuntime interface {
 
 	// RollbackPaths resolves runtime-specific home leaf paths for move
 	// rollback marker checks.
-	RollbackPaths(ctx context.Context, projectID, agentName, hubAgentID string) (MoveBundleRollbackPaths, error)
+	RollbackPaths(ctx context.Context, projectPath, projectID, agentName, hubAgentID string) (MoveBundleRollbackPaths, error)
 
 	// RemoveTargetLeaves removes runtime-specific target leaves (e.g. NFS
 	// home leaf and staging siblings) during a marker-guarded move rollback
 	// delete (moveID != "").
-	RemoveTargetLeaves(ctx context.Context, projectID, agentName, hubAgentID, moveID string) (d projectfs.Deletion, homeParent string, ok bool)
+	RemoveTargetLeaves(ctx context.Context, projectPath, projectID, agentName, hubAgentID, moveID string) (d projectfs.Deletion, homeParent string, ok bool)
 }
 
 // MoveBundleRuntimeSupported reports whether runtimeName has a registered
@@ -186,23 +186,62 @@ func ReadHomeStorageSubPathRoot(ctx context.Context, projectPath, hubProjectID, 
 	return rec.SubPathRoot
 }
 
+// isCloudRunMoveBundleRuntime reports whether name is a Cloud Run Instances
+// runtime spelling ("cloudrun" or "cloudrun-instances", never "cloudrun-sandbox").
+func isCloudRunMoveBundleRuntime(name string) bool {
+	return isCloudRunRuntime(name) || name == "cloudrun-instances"
+}
+
+// cloudRunMoveBundleConfigured reports whether this broker's global settings
+// have NFS project storage with a usable share configured for Cloud Run
+// Instances move-bundle transfers. Unlike Kubernetes, Cloud Run always places
+// agent homes on the workspace NFS share and mounts by server/export rather
+// than a PV claim, so project_storage.homes and pv_name are not required.
+func cloudRunMoveBundleConfigured() bool {
+	gs, _, err := config.LoadGlobalSettingsWithOverlayFor(context.Background())
+	if err != nil || gs == nil || gs.Server == nil {
+		return false
+	}
+	ws := gs.Server.EffectiveWorkspaceStorage()
+	if ws == nil || ws.Backend != config.WorkspaceStorageBackendNFS || ws.NFS == nil {
+		return false
+	}
+	if ws.NFS.MountRoot == "" || len(ws.NFS.Shares) == 0 {
+		return false
+	}
+	sh := ws.NFS.Shares[0]
+	return sh.ID != "" && sh.Server != "" && sh.Export != ""
+}
+
 // lookupMoveBundleRuntime returns the per-runtime move-bundle strategy for
-// runtimeName, or (nil, false) for runtimes not yet supported.
+// runtimeName, or (nil, false) for runtimes not supported (such as
+// cloudrun-sandbox and substrate).
 func lookupMoveBundleRuntime(runtimeName string) (MoveBundleRuntime, bool) {
 	switch {
 	case api.IsLocalDiskRuntime(runtimeName):
 		return localDiskMoveBundleRuntime{}, true
 	case isKubernetesRuntime(runtimeName):
 		return kubernetesMoveBundleRuntime{}, true
+	case isCloudRunMoveBundleRuntime(runtimeName):
+		return cloudRunMoveBundleRuntime{}, true
 	default:
 		return nil, false
 	}
 }
 
+const cloudRunSandboxNonDurableReason = "Cloud Run Sandbox workspace and home are not durable for bundle moves"
+
 // CheckMoveBundleSourceDurability evaluates whether an agent on in.RuntimeName
-// is durable for move-bundle export. Unsupported runtimes return
+// is durable for move-bundle export. Cloud Run Sandbox is refused with a
+// class-only non-durable reason; other unsupported runtimes return
 // Durable: false, Reason: "not yet supported".
 func CheckMoveBundleSourceDurability(ctx context.Context, in MoveBundleRuntimeInput) (MoveBundleDurability, error) {
+	if in.RuntimeName == "cloudrun-sandbox" {
+		return MoveBundleDurability{
+			Durable: false,
+			Reason:  cloudRunSandboxNonDurableReason,
+		}, nil
+	}
 	rt, ok := lookupMoveBundleRuntime(in.RuntimeName)
 	if !ok {
 		return MoveBundleDurability{
@@ -254,11 +293,11 @@ func (localDiskMoveBundleRuntime) ProvisionTarget(_ context.Context, _ api.Start
 	return nil
 }
 
-func (localDiskMoveBundleRuntime) RollbackPaths(_ context.Context, _, _, _ string) (MoveBundleRollbackPaths, error) {
+func (localDiskMoveBundleRuntime) RollbackPaths(_ context.Context, _, _, _, _ string) (MoveBundleRollbackPaths, error) {
 	return MoveBundleRollbackPaths{}, nil
 }
 
-func (localDiskMoveBundleRuntime) RemoveTargetLeaves(_ context.Context, _, _, _, _ string) (projectfs.Deletion, string, bool) {
+func (localDiskMoveBundleRuntime) RemoveTargetLeaves(_ context.Context, _, _, _, _, _ string) (projectfs.Deletion, string, bool) {
 	return projectfs.Deletion{}, "", false
 }
 
@@ -274,7 +313,7 @@ func (kubernetesMoveBundleRuntime) UsesNFSWorkspaceTarget() bool {
 	return true
 }
 
-func (kubernetesMoveBundleRuntime) RollbackPaths(ctx context.Context, projectID, agentName, hubAgentID string) (MoveBundleRollbackPaths, error) {
+func (kubernetesMoveBundleRuntime) RollbackPaths(ctx context.Context, _, projectID, agentName, hubAgentID string) (MoveBundleRollbackPaths, error) {
 	resolvedHostBase, exportAgentDir, homeLeafPath, ok, err := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
 	return MoveBundleRollbackPaths{
 		ResolvedHostBase: resolvedHostBase,
@@ -284,7 +323,7 @@ func (kubernetesMoveBundleRuntime) RollbackPaths(ctx context.Context, projectID,
 	}, err
 }
 
-func (kubernetesMoveBundleRuntime) RemoveTargetLeaves(ctx context.Context, projectID, agentName, hubAgentID, moveID string) (projectfs.Deletion, string, bool) {
+func (kubernetesMoveBundleRuntime) RemoveTargetLeaves(ctx context.Context, _, projectID, agentName, hubAgentID, moveID string) (projectfs.Deletion, string, bool) {
 	return removeK8sNFSAgentHome(ctx, projectID, agentName, hubAgentID, moveID)
 }
 

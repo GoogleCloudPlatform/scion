@@ -226,7 +226,7 @@ func (m *AgentManager) RemoveNFSAgentFiles(ctx context.Context, projectPath, pro
 	if moveID := deleteMoveReincarnationIDFrom(ctx); moveID != "" {
 		if m.Runtime != nil {
 			if mbRT, ok := lookupMoveBundleRuntime(m.Runtime.Name()); ok {
-				if d, homeParent, removedOK := mbRT.RemoveTargetLeaves(ctx, projectID, agentName, deleteHubAgentIDFrom(ctx), moveID); removedOK {
+				if d, homeParent, removedOK := mbRT.RemoveTargetLeaves(ctx, projectPath, projectID, agentName, deleteHubAgentIDFrom(ctx), moveID); removedOK {
 					ds = append(ds, d)
 					if d.Err != nil {
 						errs = append(errs, d.Err)
@@ -299,8 +299,9 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 	if err != nil {
 		return fail(err)
 	}
-	isRollback := deleteMoveReincarnationIDFrom(ctx) != ""
-	if isRollback {
+	moveID := deleteMoveReincarnationIDFrom(ctx)
+	isRollback := moveID != ""
+	if isRollback && checkMoveMarker(checkedDir, moveID) == nil {
 		if stageErr := purgeMoveBundleStagingEntries(checkedDir); stageErr != nil {
 			return fail(fmt.Errorf("purge move-bundle staging in %s: %w", checkedDir, stageErr))
 		}
@@ -395,6 +396,15 @@ func removeK8sNFSAgentHome(ctx context.Context, projectID, agentName, hubAgentID
 	if !resolved {
 		return d, "", false
 	}
+	return removeNFSHomeLeaf(resolvedHostBase, exportAgentDir, homeLeafPath, agentName, moveID)
+}
+
+// removeNFSHomeLeaf removes a single NFS home leaf (home-<agentID>) and any
+// move-bundle staging siblings from exportAgentDir during a move rollback
+// delete (moveID != ""). Shared by Kubernetes and Cloud Run rollback paths.
+// Refuses to remove home-<agentID> or staging entries unless either the leaf
+// itself or its parent carries MoveMarkerFile == moveID (R3, N1).
+func removeNFSHomeLeaf(resolvedHostBase, exportAgentDir, homeLeafPath, agentName, moveID string) (d projectfs.Deletion, homeParent string, ok bool) {
 	d = projectfs.Deletion{Tree: projectfs.TreeAgentHome, Path: homeLeafPath}
 	fail := func(err error) (projectfs.Deletion, string, bool) {
 		d.Outcome, d.Err = projectfs.OutcomeFailed, err
