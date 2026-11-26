@@ -482,6 +482,9 @@ export class ScionFilterBox extends LitElement {
         clearTimeout(this.commitTimer);
         this.commitTimer = null;
       }
+      this.cancelRemoteSuggestions();
+      this.open = false;
+      this.activeIndex = -1;
       this.lastEmittedValue = this.value;
     }
     if (changed.has('value') || changed.has('view')) {

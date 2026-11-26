@@ -323,12 +323,16 @@ describe('<scion-filter-box>', () => {
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
 
-    // Local results appear immediately; remote not called before 250ms.
+    // Local results appear immediately; remote not called at 249ms, called at 250ms.
     expect(provider).not.toHaveBeenCalled();
     expect(el.shadowRoot?.querySelectorAll('[role="option"]')).toHaveLength(1);
     expect(el.shadowRoot?.querySelector('[data-remote-status="loading"]')).toBeNull();
 
-    vi.advanceTimersByTime(250);
+    vi.advanceTimersByTime(249);
+    await el.updateComplete;
+    expect(provider).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
     await el.updateComplete;
 
     expect(provider).toHaveBeenCalledTimes(1);
@@ -397,9 +401,11 @@ describe('<scion-filter-box>', () => {
     expect(signals).toHaveLength(2);
     expect(signals[1].aborted).toBe(false);
 
-    // Late resolution of first request is ignored; second request wins.
-    resolvers[0]([{ value: 'stale-agent' }]);
+    // Fresh request resolves first, then late stale request resolves and must not overwrite.
     resolvers[1]([{ value: 'fresh-agent' }]);
+    await Promise.resolve();
+    await el.updateComplete;
+    resolvers[0]([{ value: 'stale-agent' }]);
     await Promise.resolve();
     await el.updateComplete;
 
@@ -407,6 +413,44 @@ describe('<scion-filter-box>', () => {
       (n) => n.textContent
     );
     expect(labels).toEqual(['fresh-agent']);
+  });
+
+  it('cancels remote suggestions and keeps listbox closed when host changes value externally', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+
+    let resolveRemote: ((v: Array<{ value: string }>) => void) | null = null;
+    let capturedSignal: AbortSignal | null = null;
+    el.remoteValueSuggestions = (_key, _prefix, signal) => {
+      capturedSignal = signal;
+      return new Promise((resolve) => {
+        resolveRemote = resolve;
+      });
+    };
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:de';
+    input.setSelectionRange(8, 8);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+    expect(capturedSignal).not.toBeNull();
+    expect(capturedSignal!.aborted).toBe(false);
+
+    // Host updates value externally (e.g. Clear filters or URL navigation).
+    el.value = 'by:me';
+    await el.updateComplete;
+    expect(capturedSignal!.aborted).toBe(true);
+    expect(el.shadowRoot?.querySelector('[role="listbox"]')).toBeNull();
+
+    // Resolving the cancelled promise must not reopen the listbox.
+    resolveRemote!([{ value: 'deploy-frontend' }]);
+    await Promise.resolve();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="listbox"]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim() ?? '').toBe('');
   });
 
   it('skips remote loading when remoteValueSuggestions returns null', async () => {
