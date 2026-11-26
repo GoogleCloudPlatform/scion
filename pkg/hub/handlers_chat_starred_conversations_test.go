@@ -545,7 +545,7 @@ func TestChatStarredConversations_ScanBudget(t *testing.T) {
 
 	scan := func(after *StarredConversationPosition) ([]starredConversationItem, *StarredConversationPosition) {
 		t.Helper()
-		items, next, err := f.srv.scanStarredConversations(ctx, call, f.srv.newStarredConversationAuthorizer(req, call), filter, after, 10, 2, 3)
+		items, next, err := f.srv.scanStarredConversations(ctx, call, f.srv.newStarredConversationAuthorizer(req.Context(), call), filter, after, 10, 2, 3)
 		require.NoError(t, err)
 		return items, next
 	}
@@ -561,7 +561,7 @@ func TestChatStarredConversations_ScanBudget(t *testing.T) {
 	assert.Nil(t, next, "exhausted")
 
 	// A full page stops at the item that fills it.
-	items, next, err = f.srv.scanStarredConversations(ctx, call, f.srv.newStarredConversationAuthorizer(req, call), filter, nil, 1, 100, 1000)
+	items, next, err = f.srv.scanStarredConversations(ctx, call, f.srv.newStarredConversationAuthorizer(req.Context(), call), filter, nil, 1, 100, 1000)
 	require.NoError(t, err)
 	assert.Equal(t, []string{visible[0]}, starredConversationRowKeys(items))
 	require.NotNil(t, next)
