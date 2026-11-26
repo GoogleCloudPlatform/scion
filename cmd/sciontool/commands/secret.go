@@ -37,7 +37,8 @@ var secretCmd = &cobra.Command{
 	Short: "Manage agent secrets",
 	Long: `Commands for managing secrets from within an agent container.
 
-To read, list, or store secrets, use 'scion secret get --value',
+To read, list, or store secrets (including on_demand secrets, which are never
+injected into the container at start), use 'scion secret get --value KEY',
 'scion secret list', and 'scion secret set'.`,
 }
 

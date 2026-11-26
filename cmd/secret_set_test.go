@@ -412,3 +412,97 @@ func TestAgentSecretSet_ValidationAndOutsideAgentErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestAgentSecretSet_TypeAndOnDemandValidation(t *testing.T) {
+	t.Run("variable type rejected naming on_demand", func(t *testing.T) {
+		resetAgentSecretSetFlags(t)
+		c := newAgentSecretSetTestCmd("")
+		require.NoError(t, c.Flags().Set("type", "variable"))
+
+		err := runAgentSecretSet(c, []string{"K", "v"})
+		require.Error(t, err)
+		var ue *usageError
+		assert.True(t, errors.As(err, &ue))
+		assert.Contains(t, err.Error(), "on_demand")
+	})
+
+	t.Run("unknown type rejected", func(t *testing.T) {
+		resetAgentSecretSetFlags(t)
+		c := newAgentSecretSetTestCmd("")
+		require.NoError(t, c.Flags().Set("type", "bogus"))
+
+		err := runAgentSecretSet(c, []string{"K", "v"})
+		require.Error(t, err)
+		var ue *usageError
+		assert.True(t, errors.As(err, &ue))
+		assert.Contains(t, err.Error(), "environment, file, on_demand")
+	})
+
+	t.Run("on_demand rejected with target", func(t *testing.T) {
+		resetAgentSecretSetFlags(t)
+		c := newAgentSecretSetTestCmd("")
+		require.NoError(t, c.Flags().Set("type", "on_demand"))
+		require.NoError(t, c.Flags().Set("target", "OTHER"))
+
+		err := runAgentSecretSet(c, []string{"K", "v"})
+		require.Error(t, err)
+		var ue *usageError
+		assert.True(t, errors.As(err, &ue))
+		assert.Contains(t, err.Error(), "--target cannot be used with --type on_demand")
+	})
+
+	t.Run("on_demand rejected at user scope", func(t *testing.T) {
+		resetAgentSecretSetFlags(t)
+		c := newAgentSecretSetTestCmd("")
+		require.NoError(t, c.Flags().Set("type", "on_demand"))
+		require.NoError(t, c.Flags().Set("scope", "user"))
+
+		err := runAgentSecretSet(c, []string{"K", "v"})
+		require.Error(t, err)
+		var ue *usageError
+		assert.True(t, errors.As(err, &ue))
+		assert.Contains(t, err.Error(), "only supported at project and agent scope")
+	})
+
+	t.Run("on_demand accepted at agent and project scope", func(t *testing.T) {
+		var last capturedAgentSetReq
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body sciontoolhub.SetSecretRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			last = capturedAgentSetReq{
+				Value:  body.Value,
+				Type:   body.Type,
+				Target: body.Target,
+				Scope:  body.Scope,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(sciontoolhub.SetSecretResponse{
+				Key:   "OD_KEY",
+				Scope: body.Scope,
+			})
+		}))
+		t.Cleanup(srv.Close)
+		useSecretGetHub(t, srv)
+
+		for _, scope := range []string{"agent", "project"} {
+			t.Run(scope, func(t *testing.T) {
+				resetAgentSecretSetFlags(t)
+				last = capturedAgentSetReq{}
+				c := newAgentSecretSetTestCmd("od-secret\n")
+				var out bytes.Buffer
+				c.SetOut(&out)
+				require.NoError(t, c.Flags().Set("scope", scope))
+				require.NoError(t, c.Flags().Set("type", "on_demand"))
+
+				require.NoError(t, runAgentSecretSet(c, []string{"OD_KEY", "-"}))
+				assert.Equal(t, "on_demand", last.Type)
+				assert.Equal(t, scope, last.Scope)
+				assert.Empty(t, last.Target)
+				decoded, err := base64.StdEncoding.DecodeString(last.Value)
+				require.NoError(t, err)
+				assert.Equal(t, "od-secret", string(decoded))
+			})
+		}
+	})
+}
