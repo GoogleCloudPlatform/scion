@@ -648,3 +648,48 @@ func TestCloudRunRecreateMove_StartFailureRollsBackAndAllowsRetry(t *testing.T) 
 	_, err = mgr.Provision(context.Background(), retryOpts)
 	require.NoError(t, err, "retry Provision must succeed after rollback")
 }
+
+// TestCloudRunRecreateMove_PreExistingExportDirRefusedUpFront pins the
+// up-front absence check in moveNFSOwnAgentDir (move_workspace_absent.go) for
+// Cloud Run clone-per-agent recreate moves (WorkspaceSource == ""): a
+// pre-existing agents/<slug> on the NFS export must be refused with
+// ErrMoveWorkspacePresent before Provision creates anything.
+func TestCloudRunRecreateMove_PreExistingExportDirRefusedUpFront(t *testing.T) {
+	_, hostBase, projectPath := setupCloudRunNFSFixture(t, 2000, 3000)
+
+	resolvedBase, err := filepath.EvalSymlinks(hostBase)
+	require.NoError(t, err)
+
+	slug := "cr-recreate-preexist"
+	exportAgentDir := filepath.Join(resolvedBase, "projects", crTestProjectUUID, "agents", slug)
+	require.NoError(t, os.MkdirAll(filepath.Join(exportAgentDir, "workspace"), 0o755))
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
+	mgr := NewManager(rt).(*AgentManager)
+
+	recreateOpts := api.StartOptions{
+		Name:                slug,
+		ProjectPath:         projectPath,
+		HubProjectID:        crTestProjectUUID,
+		Profile:             "cr",
+		BrokerMode:          true,
+		NoAuth:              true,
+		FreshProvision:      true,
+		MoveReincarnationID: "rid-cr-recreate-preexist-1",
+		GitClone:            &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+		Env: map[string]string{
+			"SCION_PROJECT_ID":     crTestProjectUUID,
+			"SCION_AGENT_ID":       crTestAgentUUID,
+			"SCION_WORKSPACE_MODE": "clone-per-agent",
+		},
+	}
+
+	// Broker-local agentDir does not exist yet; only the NFS export dir exists.
+	agentDir, err := provisionAgentStateDir(contextWithAgentRuntime(context.Background(), "cloudrun"), recreateOpts)
+	require.NoError(t, err)
+	assert.NoDirExists(t, agentDir)
+
+	_, err = mgr.CheckMoveWorkspaceAbsent(context.Background(), recreateOpts)
+	require.ErrorIs(t, err, ErrMoveWorkspacePresent, "recreate move must refuse pre-existing Cloud Run agents/<slug> up front")
+	assert.NoDirExists(t, agentDir, "refusal must occur before broker-local agentDir is created")
+}
