@@ -23,6 +23,7 @@ import (
 	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
@@ -291,7 +292,7 @@ func restoreMaskedServerSecrets(incoming, stored *config.V1ServerConfig) error {
 // itself is never modified (the DB-mode GET passes the snapshot's own
 // config): when a value is masked, the result is a copy holding a new
 // headers map; otherwise it is t.
-func maskedTelemetry(t *config.V1TelemetryConfig) *config.V1TelemetryConfig {
+func maskedTelemetry(t *opsettings.TelemetrySettings) *opsettings.TelemetrySettings {
 	if t == nil || t.Cloud == nil {
 		return t
 	}

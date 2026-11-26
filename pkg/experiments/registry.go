@@ -218,6 +218,12 @@ const AgentPolicyLimitCeilings = "agent_policy.limit_ceilings"
 // even while it is off.
 const ViewAsMember = "hub.view_as_member"
 
+// AgentPolicyTelemetryEnforcement gates Hub-level operator telemetry
+// enforcement (telemetry.enforced in opsettings; ptone/scion#9370). While off,
+// setting telemetry.enforced=true is refused and telemetry dispatch and
+// project settings behave identically to when enforcement is not configured.
+const AgentPolicyTelemetryEnforcement = "agent_policy.telemetry_enforcement"
+
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
 // /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
 // every artifact surface.
@@ -1521,6 +1527,17 @@ var compiled = []Experiment{
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#9080",
 		Owner:       "authz",
+		ReviewBy:    "2027-05-31",
+	},
+	{
+		Name:        AgentPolicyTelemetryEnforcement,
+		Title:       "Hub-enforced telemetry",
+		Description: "Lets a hub operator set telemetry.enforced in operational settings to make telemetry mandatory across all dispatched agents, overriding project and requester disable settings.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9370",
+		Owner:       "@ptone",
 		ReviewBy:    "2027-05-31",
 	},
 }

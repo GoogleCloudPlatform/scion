@@ -139,8 +139,9 @@ type Layer1Snapshot struct {
 	HasMaintenanceRow bool
 
 	// Telemetry
-	TelemetryEnabled *bool
-	TelemetryConfig  *config.V1TelemetryConfig
+	TelemetryEnabled  *bool
+	TelemetryEnforced bool
+	TelemetryConfig   *config.V1TelemetryConfig
 
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
@@ -1333,6 +1334,9 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		v := k.Bool("telemetry.enabled")
 		snap.TelemetryEnabled = &v
 	}
+	if k.Exists("telemetry.enforced") {
+		snap.TelemetryEnforced = k.Bool("telemetry.enforced")
+	}
 
 	// Auto-expose ports
 	if k.Exists("auto_expose_ports.enabled") {
@@ -1770,6 +1774,14 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "telemetry_default")
 	}
 	s.config.TelemetryDefault = telemetryDefault
+	telemetryEnforced := s.config.TelemetryEnforced
+	if snap.FromOperationalSettings {
+		telemetryEnforced = snap.TelemetryEnforced
+	}
+	if s.config.TelemetryEnforced != telemetryEnforced {
+		applied = append(applied, "telemetry_enforced")
+	}
+	s.config.TelemetryEnforced = telemetryEnforced
 	telemetryConfig := s.config.TelemetryConfig
 	if snap.TelemetryConfig != nil {
 		telemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)

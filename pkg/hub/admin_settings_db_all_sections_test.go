@@ -1304,11 +1304,21 @@ telemetry:
 }
 
 func TestMaskedTelemetry_DoesNotModifyInput(t *testing.T) {
-	in := &config.V1TelemetryConfig{Cloud: &config.V1TelemetryCloudConfig{Headers: map[string]string{"a": "secret"}}}
+	in := &opsettings.TelemetrySettings{
+		V1TelemetryConfig: config.V1TelemetryConfig{
+			Cloud: &config.V1TelemetryCloudConfig{Headers: map[string]string{"a": "secret"}},
+		},
+		Enforced: true,
+	}
 	out := maskedTelemetry(in)
 	assert.Equal(t, maskedValue, out.Cloud.Headers["a"])
 	assert.Equal(t, "secret", in.Cloud.Headers["a"])
-	none := &config.V1TelemetryConfig{Cloud: &config.V1TelemetryCloudConfig{Endpoint: "e"}}
+	assert.True(t, out.Enforced)
+	none := &opsettings.TelemetrySettings{
+		V1TelemetryConfig: config.V1TelemetryConfig{
+			Cloud: &config.V1TelemetryCloudConfig{Endpoint: "e"},
+		},
+	}
 	assert.Same(t, none, maskedTelemetry(none))
 	var buf bytes.Buffer
 	require.NoError(t, json.NewEncoder(&buf).Encode(out))

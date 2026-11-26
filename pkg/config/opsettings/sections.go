@@ -58,6 +58,18 @@ type MaintenanceSettings struct {
 // It reuses the existing V1TelemetryConfig to preserve full fidelity.
 type TelemetrySettings struct {
 	config.V1TelemetryConfig
+	// Enforced makes telemetry mandatory for every agent this hub dispatches:
+	// project policy and requester on/off cannot disable it. Requires Enabled=true.
+	Enforced bool `json:"enforced,omitempty"`
+}
+
+// Resolve validates the telemetry operational settings and returns the resolved
+// value. Enforced requires Enabled=true (fail closed).
+func (t TelemetrySettings) Resolve() (TelemetrySettings, error) {
+	if t.Enforced && (t.Enabled == nil || !*t.Enabled) {
+		return TelemetrySettings{}, fmt.Errorf("telemetry.enforced requires telemetry.enabled=true")
+	}
+	return t, nil
 }
 
 // AutoExposePortsSettings holds Layer-1 auto-expose ports configuration.

@@ -2846,8 +2846,10 @@ func TestPutServerConfigDB_CAS_MultiSection_PartialApply(t *testing.T) {
 func TestApplySnapshotToResponse_NilTelemetry(t *testing.T) {
 	enabled := true
 	resp := ServerConfigResponse{
-		Telemetry: &config.V1TelemetryConfig{
-			Enabled: &enabled,
+		Telemetry: &opsettings.TelemetrySettings{
+			V1TelemetryConfig: config.V1TelemetryConfig{
+				Enabled: &enabled,
+			},
 		},
 	}
 

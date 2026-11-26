@@ -325,7 +325,15 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultGCPIdentityServiceAccountID = snap.DefaultGCPIdentityServiceAccountID
 
 	// Telemetry — always set from snapshot (nil = no telemetry configured).
-	resp.Telemetry = snap.TelemetryConfig
+	if snap.TelemetryConfig != nil || snap.TelemetryEnforced {
+		ts := &opsettings.TelemetrySettings{Enforced: snap.TelemetryEnforced}
+		if snap.TelemetryConfig != nil {
+			ts.V1TelemetryConfig = *snap.TelemetryConfig
+		}
+		resp.Telemetry = ts
+	} else {
+		resp.Telemetry = nil
+	}
 
 	// Ensure server sub-structs exist.
 	if resp.Server == nil {
@@ -1646,7 +1654,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		// that sends an invalid telemetry.cloud member next to a masked
 		// header gets this 400 rather than the validation 400; either way
 		// nothing is written.
-		if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
+		if req.Telemetry != nil && len(maskedTelemetryHeaderNames(&req.Telemetry.V1TelemetryConfig)) > 0 {
 			var restored int
 			merged, restored, err = restoreMaskedTelemetryHeadersInDoc(merged, cur)
 			if err != nil {
@@ -1662,6 +1670,24 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 					[]map[string]interface{}{settingsConflictEntry("telemetry", pinned, rev)},
 					map[string]interface{}{"applied": map[string]int64{}})
 				return
+			}
+		}
+		// telemetry.enforced=true is refused while experiment
+		// agent_policy.telemetry_enforcement is off (412 experiment_disabled;
+		// ptone/scion#9370). Echoing an already-stored true value or clearing
+		// it passes so other telemetry settings can still be saved.
+		if !s.experimentEnabled(experiments.AgentPolicyTelemetryEnforcement) {
+			var candidate opsettings.TelemetrySettings
+			if json.Unmarshal(merged, &candidate) == nil && candidate.Enforced {
+				var existing opsettings.TelemetrySettings
+				storedEnforced := false
+				if len(bytes.TrimSpace(cur)) > 0 && json.Unmarshal(cur, &existing) == nil {
+					storedEnforced = existing.Enforced
+				}
+				if !storedEnforced {
+					writeTelemetryEnforcementExperimentDisabled(w)
+					return
+				}
 			}
 		}
 		sectionDocs["telemetry"] = merged

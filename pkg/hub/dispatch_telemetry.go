@@ -17,11 +17,13 @@ package hub
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -61,6 +63,19 @@ import (
 
 // envTelemetryEnabled is the requester's telemetry on/off flag.
 const envTelemetryEnabled = "SCION_TELEMETRY_ENABLED"
+
+// ErrCodeTelemetryEnforcedByHub is returned when a caller tries to disable
+// telemetry while the hub operator has enforced telemetry fleet-wide.
+const ErrCodeTelemetryEnforcedByHub = "telemetry_enforced_by_hub"
+
+// writeTelemetryEnforcementExperimentDisabled writes the 412 experiment_disabled
+// refusal when saving telemetry.enforced=true while experiment
+// agent_policy.telemetry_enforcement is off.
+func writeTelemetryEnforcementExperimentDisabled(w http.ResponseWriter) {
+	writeError(w, http.StatusPreconditionFailed, ErrCodeExperimentDisabled,
+		"telemetry.enforced is not enabled on this Hub (experiment "+experiments.AgentPolicyTelemetryEnforcement+" is off)",
+		map[string]interface{}{"experiment": experiments.AgentPolicyTelemetryEnforcement})
+}
 
 // telemetryGCPCredentialsSecretName is the well-known file secret name that
 // delivers a GCP service account key for sciontool telemetry export.
@@ -150,6 +165,10 @@ func (d *HTTPAgentDispatcher) dispatchTelemetry(agent *store.Agent, policy *bool
 		policy:    policy,
 		requester: requesterTelemetry(agent.AppliedConfig),
 	}
+	if d.telemetryEnforcedProvider != nil && d.telemetryEnforcedProvider() {
+		enforced := true
+		t.policy = &enforced
+	}
 	if d.hubTelemetryProvider != nil {
 		t.hubDefault = d.hubTelemetryProvider()
 	}
@@ -216,6 +235,19 @@ func (s *Server) hubTelemetryDefault() *api.TelemetryConfig {
 	}
 	c := *s.config.TelemetryConfig
 	return &c
+}
+
+// telemetryEnforced reports whether hub-level telemetry enforcement is active:
+// both experiment agent_policy.telemetry_enforcement and opsettings
+// telemetry.enforced must be on. Single reader across the Hub.
+func (s *Server) telemetryEnforced() bool {
+	if !s.experimentEnabled(experiments.AgentPolicyTelemetryEnforcement) {
+		return false
+	}
+	s.mu.RLock()
+	enforced := s.config.TelemetryEnforced
+	s.mu.RUnlock()
+	return enforced
 }
 
 // warnRequesterTelemetryDropped adds a create warning when the requester's

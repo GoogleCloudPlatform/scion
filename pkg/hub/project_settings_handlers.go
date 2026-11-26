@@ -288,6 +288,13 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
+		if present[projectSettingsFieldTelemetryEnabled] && merged.TelemetryEnabled != nil && !*merged.TelemetryEnabled && s.telemetryEnforced() {
+			writeError(w, http.StatusConflict, ErrCodeTelemetryEnforcedByHub,
+				"telemetry is enforced by the hub operator and cannot be disabled at the project level",
+				map[string]interface{}{"field": projectSettingsFieldTelemetryEnabled})
+			return
+		}
+
 		// changedProfileDefaults holds the per-profile entries this request
 		// adds or changes: the entries that were validated, and the only
 		// ones warned about after the save.

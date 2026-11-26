@@ -1092,8 +1092,23 @@ func resolveRef(root map[string]interface{}, ref string) interface{} {
 }
 
 func buildTelemetrySchema(defs map[string]interface{}) map[string]interface{} {
-	if tc, ok := defs["telemetryConfig"]; ok {
-		return tc.(map[string]interface{})
+	if tc, ok := defs["telemetryConfig"].(map[string]interface{}); ok {
+		cloned := make(map[string]interface{}, len(tc))
+		for k, v := range tc {
+			cloned[k] = v
+		}
+		if props, ok := tc["properties"].(map[string]interface{}); ok {
+			clonedProps := make(map[string]interface{}, len(props)+1)
+			for k, v := range props {
+				clonedProps[k] = v
+			}
+			clonedProps["enforced"] = map[string]interface{}{
+				"type":        "boolean",
+				"description": "Make telemetry mandatory for every agent this hub dispatches. Requires enabled=true.",
+			}
+			cloned["properties"] = clonedProps
+		}
+		return cloned
 	}
 	return map[string]interface{}{
 		"type":                 "object",
@@ -1192,6 +1207,15 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 	case AgentLimitsSectionName:
 		if _, err := ParseAgentLimitsDoc(doc); err != nil {
 			return []config.ValidationError{{Message: err.Error()}}
+		}
+		return nil
+	case "telemetry":
+		var ts TelemetrySettings
+		if err := json.Unmarshal(doc, &ts); err != nil {
+			return []config.ValidationError{{Message: fmt.Sprintf("invalid telemetry JSON: %v", err)}}
+		}
+		if _, err := ts.Resolve(); err != nil {
+			return []config.ValidationError{{Path: "enforced", Message: err.Error()}}
 		}
 		return nil
 	default:
