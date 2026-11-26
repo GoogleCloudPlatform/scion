@@ -147,13 +147,17 @@ describe('artifact-detail: review requests (P1)', () => {
 
   async function mount(
     resp: ArtifactResponse,
-    opts: { reviewRequestsOn: boolean; userId?: string }
+    opts: {
+      reviewRequestsOn: boolean;
+      userId?: string;
+      dismissHandler?: (init?: RequestInit) => Response;
+    }
   ): Promise<ScionPageArtifactDetail> {
     localStorage.setItem(`scion:feature:${ARTIFACTS_FLAG}`, 'true');
     if (opts.reviewRequestsOn) {
       localStorage.setItem(`scion:feature:${ARTIFACTS_REVIEW_REQUESTS_FLAG}`, 'true');
     }
-    setupFetch(resp);
+    setupFetch(resp, opts.dismissHandler);
     const el = document.createElement('scion-page-artifact-detail') as ScionPageArtifactDetail;
     el.pageData = {
       path: `/projects/${PROJECT_ID}/artifacts/${ARTIFACT_ID}`,
@@ -280,5 +284,68 @@ describe('artifact-detail: review requests (P1)', () => {
       (c) => callUrl(c[0]) === `/api/v1/artifacts/${ARTIFACT_ID}`
     ).length;
     expect(getCallsAfter).toBe(getCallsBefore);
+  });
+
+  it('clears banner and badge on 404 or 409 request_closed and informs the user', async () => {
+    for (const [status, body] of [
+      [404, { error: { code: 'not_found', message: 'no open review request' } }],
+      [409, { error: { code: 'request_closed', message: 'review request already closed' } }],
+    ] as const) {
+      const el = await mount(
+        artifactResp({
+          canPublish: false,
+          canReview: true,
+          reviewState: { requestedOfMe: OPEN_REQUEST },
+        }),
+        {
+          reviewRequestsOn: true,
+          userId: 'u-bob',
+          dismissHandler: () => jsonResponse(body, status),
+        }
+      );
+
+      expect(el.shadowRoot!.querySelector('.reviewer-request-banner')).not.toBeNull();
+      expect(el.shadowRoot!.querySelector('.review-requested-badge')).not.toBeNull();
+
+      (el.shadowRoot!.querySelector('.banner-dismiss-request-btn') as HTMLElement).click();
+      await settle(el);
+      (el.shadowRoot!.querySelector('.dismiss-request-confirm') as HTMLElement).click();
+      await settle(el);
+
+      expect(el.shadowRoot!.querySelector('.dismiss-request-dialog')).toBeNull();
+      expect(el.shadowRoot!.querySelector('.reviewer-request-banner')).toBeNull();
+      expect(el.shadowRoot!.querySelector('.review-requested-badge')).toBeNull();
+      const notice = el.shadowRoot!.querySelector('.review-notice');
+      expect(notice).not.toBeNull();
+      expect(notice?.textContent).toContain('This review request was already closed.');
+      el.remove();
+    }
+  });
+
+  it('keeps dismiss dialog open with an error alert on server errors', async () => {
+    const el = await mount(
+      artifactResp({
+        canPublish: false,
+        canReview: true,
+        reviewState: { requestedOfMe: OPEN_REQUEST },
+      }),
+      {
+        reviewRequestsOn: true,
+        userId: 'u-bob',
+        dismissHandler: () =>
+          jsonResponse({ error: { code: 'unavailable', message: 'try again later' } }, 503),
+      }
+    );
+
+    (el.shadowRoot!.querySelector('.banner-dismiss-request-btn') as HTMLElement).click();
+    await settle(el);
+    (el.shadowRoot!.querySelector('.dismiss-request-confirm') as HTMLElement).click();
+    await settle(el);
+
+    const dialog = el.shadowRoot!.querySelector('.dismiss-request-dialog');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain('try again later');
+    expect(el.shadowRoot!.querySelector('.reviewer-request-banner')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('.review-requested-badge')).not.toBeNull();
   });
 });

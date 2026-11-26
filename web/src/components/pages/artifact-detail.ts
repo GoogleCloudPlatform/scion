@@ -87,6 +87,7 @@ import {
   deleteReviewDraft,
   discardReasonText,
   dismissReviewRequest,
+  DismissReviewRequestError,
   downloadTextFile,
   formatBytes,
   getReviewDraft,
@@ -2021,6 +2022,26 @@ export class ScionPageArtifactDetail extends LitElement {
         };
       }
     } catch (err) {
+      const alreadyClosed =
+        err instanceof DismissReviewRequestError &&
+        (err.status === 404 || err.status === 409 || err.code === 'request_closed');
+      if (alreadyClosed) {
+        this.dismissRequestOpen = false;
+        this.dismissRequestNote = '';
+        this.dismissRequestError = null;
+        if (this.data) {
+          this.data = {
+            ...this.data,
+            reviewState: {
+              ...(this.data.reviewState ?? { requestedOfMe: null }),
+              requestedOfMe: null,
+            },
+          };
+        }
+        this.reviewNotice = 'This review request was already closed.';
+        this.reviewNoticeVariant = 'primary';
+        return;
+      }
       this.dismissRequestError =
         err instanceof Error ? err.message : 'Could not dismiss review request';
     } finally {

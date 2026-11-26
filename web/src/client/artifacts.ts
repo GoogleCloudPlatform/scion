@@ -1778,6 +1778,18 @@ export async function createReviewRequests(
   return { requests: res.requests ?? [] };
 }
 
+/** A failed review-request dismiss, carrying HTTP status and hub error code. */
+export class DismissReviewRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string
+  ) {
+    super(message);
+    this.name = 'DismissReviewRequestError';
+  }
+}
+
 /** Dismisses the caller's open review request on an artifact (ptone/scion#9306). */
 export async function dismissReviewRequest(
   id: string,
@@ -1787,13 +1799,30 @@ export async function dismissReviewRequest(
   if (note !== undefined && note !== '') {
     payload.note = note;
   }
-  return okJSON<DismissReviewRequestResponse>(
-    await apiFetch(`${artifactPath(id)}/review-request/dismiss`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-  );
+  const res = await apiFetch(`${artifactPath(id)}/review-request/dismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let code = '';
+    try {
+      const body = (await res.clone().json()) as {
+        code?: string;
+        error?: { code?: string };
+      };
+      if (typeof body?.error?.code === 'string') code = body.error.code;
+      else if (typeof body?.code === 'string') code = body.code;
+    } catch {
+      // non-JSON error body
+    }
+    throw new DismissReviewRequestError(
+      await extractApiError(res, `HTTP ${res.status}`),
+      res.status,
+      code
+    );
+  }
+  return (await res.json()) as DismissReviewRequestResponse;
 }
 
 /**

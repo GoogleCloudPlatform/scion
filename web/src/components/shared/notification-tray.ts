@@ -151,17 +151,17 @@ const EXCERPT_BREAKS = /[\t\n\v\f\r\u0085\u2028\u2029]+/g;
 /** Control and format characters, removed from the excerpt. */
 const EXCERPT_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
-/**
- * The excerpt of a review summary row, or '' for any other row: no other
- * kind shows one. The hub already cleans it; line breaks become spaces,
- * control and format characters are removed and runs of spaces collapse
- * here again, so a row from anywhere else still shows as one line of plain
- * text.
- */
 function isArtifactExcerptKind(kind: string | undefined): boolean {
   return kind === ARTIFACT_REVIEW_SUMMARY_KIND || kind === ARTIFACT_REVIEW_REQUEST_KIND;
 }
 
+/**
+ * The excerpt of a review summary or review-request row, or '' for any other
+ * row: no other kind shows one. The hub already cleans it; line breaks become
+ * spaces, control and format characters are removed and runs of spaces collapse
+ * here again, so a row from anywhere else still shows as one line of plain
+ * text.
+ */
 export function reviewSummaryExcerpt(n: Notification): string {
   if (!isArtifactExcerptKind(n.kind) || typeof n.excerpt !== 'string') return '';
   return n.excerpt

@@ -29,8 +29,12 @@ import {
   type ArtifactListResponse,
 } from '../../client/artifacts.js';
 import type { ScionPageArtifacts } from './artifacts.js';
-import { hasIsFlagInQuery, toggleIsFlagInQuery } from '../../shared/filter-query/index.js';
-import { getViewSchema, type ViewSchema } from '../../shared/filter-query/index.js';
+import {
+  getViewSchema,
+  hasIsFlagInQuery,
+  toggleIsFlagInQuery,
+  type ViewSchema,
+} from '../../shared/filter-query/index.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const ME = 'user-me';
