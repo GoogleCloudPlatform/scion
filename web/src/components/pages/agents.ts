@@ -83,6 +83,7 @@ import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
+  canonical,
   drainServerQuery,
   getActiveSingleKeyValue,
   getViewSchema,
@@ -103,6 +104,7 @@ import {
   type Query as FilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
+import { expandGraphMatchesWithAncestors, type GraphFilterResult } from './agent-graph-filter.js';
 import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
@@ -1700,6 +1702,30 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
+  /** Memoised graph filter result (matches ∪ ancestors + contextIds). */
+  private graphFilterCache: {
+    agents: Agent[];
+    matched: Agent[];
+    hasActiveFilter: boolean;
+    result: GraphFilterResult;
+  } | null = null;
+
+  private getFilteredGraph(matched: Agent[], hasActiveFilter: boolean): GraphFilterResult {
+    if (
+      this.graphFilterCache &&
+      this.graphFilterCache.agents === this.agents &&
+      this.graphFilterCache.matched === matched &&
+      this.graphFilterCache.hasActiveFilter === hasActiveFilter
+    ) {
+      return this.graphFilterCache.result;
+    }
+    const result = expandGraphMatchesWithAncestors(this.agents, matched, hasActiveFilter, (id) =>
+      stateManager.getAgent(id)
+    );
+    this.graphFilterCache = { agents: this.agents, matched, hasActiveFilter, result };
+    return result;
+  }
+
   /**
    * The agent views. The empty states read `T`: the member index total
    * while paged (the count-only snapshot above 2,000), otherwise
@@ -1735,9 +1761,11 @@ export class ScionPageAgents extends LitElement {
     }
 
     if (this.viewMode === 'graph') {
+      const graphFiltered = this.getFilteredGraph(filtered, this.hasActiveFilter);
       return html`${this.renderWindowBanner()}<scion-agent-tree-view
-          .agents=${filtered}
-          filterKey=${this.filterQueryText}
+          .agents=${graphFiltered.agents}
+          .contextIds=${graphFiltered.contextIds}
+          filterKey=${this.filterQuery ? canonical(this.filterQuery) : this.filterQueryText}
         ></scion-agent-tree-view>`;
     }
     const items = win.items;

@@ -55,14 +55,20 @@ export function agentToGraphFilterRow(agent: Agent): FilterRow {
 }
 
 /**
- * Evaluates q over allAgents and returns M ∪ ancestors(M) plus
- * contextIds = ancestors(M) \ M, preserving lineage via parentIdOf.
+ * Given the full set of loaded agents and the subset matching an active filter,
+ * returns M ∪ ancestors(M) (in `allAgents` order, followed by any ancestors
+ * resolved via `resolveAncestor`) plus `contextIds = ancestors(M) \ M`,
+ * preserving lineage via `parentIdOf`.
+ * When `hasActiveFilter` is false, returns `allAgents` unchanged with an empty
+ * `contextIds` set.
  */
-export function filterGraphAgents(
+export function expandGraphMatchesWithAncestors(
   allAgents: readonly Agent[],
-  query: Query | null
+  matchedAgents: readonly Agent[],
+  hasActiveFilter = true,
+  resolveAncestor?: (id: string) => Agent | undefined
 ): GraphFilterResult {
-  if (isEmptyGraphQuery(query)) {
+  if (!hasActiveFilter) {
     return {
       agents: allAgents as Agent[],
       contextIds: EMPTY_SET,
@@ -70,16 +76,7 @@ export function filterGraphAgents(
     };
   }
 
-  const byId = new Map<string, Agent>();
-  const matched = new Set<string>();
-  for (const agent of allAgents) {
-    byId.set(agent.id, agent);
-    if (match(query as Query, agentToGraphFilterRow(agent))) {
-      matched.add(agent.id);
-    }
-  }
-
-  if (matched.size === 0) {
+  if (matchedAgents.length === 0) {
     return {
       agents: [],
       contextIds: EMPTY_SET,
@@ -87,7 +84,18 @@ export function filterGraphAgents(
     };
   }
 
+  const byId = new Map<string, Agent>();
+  for (const agent of allAgents) {
+    byId.set(agent.id, agent);
+  }
+  const matched = new Set<string>();
+  for (const agent of matchedAgents) {
+    matched.add(agent.id);
+  }
+
   const contextIds = new Set<string>();
+  const extraAncestors: Agent[] = [];
+  const extraAncestorIds = new Set<string>();
   for (const id of matched) {
     const seen = new Set<string>([id]);
     let cur = byId.get(id);
@@ -95,7 +103,14 @@ export function filterGraphAgents(
       const pid = parentIdOf(cur);
       if (!pid || seen.has(pid)) break;
       seen.add(pid);
-      const parent = byId.get(pid);
+      let parent = byId.get(pid);
+      if (!parent && resolveAncestor) {
+        parent = resolveAncestor(pid);
+        if (parent && !extraAncestorIds.has(pid)) {
+          extraAncestorIds.add(pid);
+          extraAncestors.push(parent);
+        }
+      }
       if (!parent) break;
       if (!matched.has(pid)) {
         contextIds.add(pid);
@@ -105,11 +120,30 @@ export function filterGraphAgents(
   }
 
   const agents = allAgents.filter((a) => matched.has(a.id) || contextIds.has(a.id));
+  if (extraAncestors.length > 0) {
+    agents.push(...extraAncestors);
+  }
   return {
     agents,
     contextIds,
     hasActiveFilter: true,
   };
+}
+
+/**
+ * Evaluates q over allAgents and returns M ∪ ancestors(M) plus
+ * contextIds = ancestors(M) \ M, preserving lineage via parentIdOf.
+ */
+export function filterGraphAgents(
+  allAgents: readonly Agent[],
+  query: Query | null
+): GraphFilterResult {
+  if (isEmptyGraphQuery(query)) {
+    return expandGraphMatchesWithAncestors(allAgents, allAgents, false);
+  }
+  const activeQuery = query as Query;
+  const matched = allAgents.filter((agent) => match(activeQuery, agentToGraphFilterRow(agent)));
+  return expandGraphMatchesWithAncestors(allAgents, matched, true);
 }
 
 /**

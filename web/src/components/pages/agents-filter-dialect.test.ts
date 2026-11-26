@@ -19,6 +19,7 @@ import { resetServerFlagStateForTests } from '../../utils/feature-flags.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentListWindow } from '../../client/agent-list-window.js';
 import type { Agent } from '../../shared/types.js';
+import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
 import './agents.js';
 import type { ScionPageAgents } from './agents.js';
 import './project-detail.js';
@@ -1841,5 +1842,198 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(winRef2.isSortedRefused('')).toBe(true);
     expect(winRef2.isSortedRefused('-test')).toBe(false);
     pRef2.remove();
+  });
+
+  it('inline Graph views on /agents and /projects/:id render non-matching ancestors dimmed as context (ptone/scion#9301)', async () => {
+    const parentAgent: Agent = {
+      id: 'a-parent',
+      name: 'Parent Coord',
+      slug: 'parent-coord',
+      projectId: 'proj-g',
+      projectSlug: 'alpha',
+      template: 'coordinator',
+      phase: 'stopped',
+      harnessConfig: 'claude',
+      ancestry: ['user:u1'],
+    };
+    const childAgent: Agent = {
+      id: 'a-child',
+      name: 'Child Dev',
+      slug: 'child-dev',
+      projectId: 'proj-g',
+      projectSlug: 'alpha',
+      template: 'developer',
+      phase: 'running',
+      harnessConfig: 'antigravity',
+      ancestry: ['user:u1', 'a-parent'],
+    };
+    const unrelatedAgent: Agent = {
+      id: 'a-unrelated',
+      name: 'Unrelated',
+      slug: 'unrelated',
+      projectId: 'proj-g',
+      projectSlug: 'alpha',
+      template: 'developer',
+      phase: 'stopped',
+      harnessConfig: 'codex',
+      ancestry: ['user:u1'],
+    };
+    const allAgents = [parentAgent, childAgent, unrelatedAgent];
+
+    const installGraphFetch = (): string[] => {
+      const urls: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL) => {
+          const url =
+            typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+          urls.push(url);
+          if (url.includes('/agents')) {
+            const parsed = new URL(url, 'http://localhost');
+            const q = parsed.searchParams.get('q') ?? '';
+            // Simulate server-side ?q= filtering (which strips non-matching ancestors).
+            const rows = q.includes('harness:antigravity') ? [childAgent] : allAgents;
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({ agents: rows, complete: true, totalCount: rows.length }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+              )
+            );
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: 'proj-g',
+                name: 'Alpha',
+                slug: 'alpha',
+                _capabilities: { actions: ['read'] },
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        })
+      );
+      return urls;
+    };
+
+    const assertTreeContext = async (tree: ScionAgentTreeView): Promise<void> => {
+      await tree.updateComplete;
+      expect(tree.agents.map((a) => a.id).sort()).toEqual(['a-child', 'a-parent']);
+      expect(Array.from(tree.contextIds ?? [])).toEqual(['a-parent']);
+      const parentLink = tree.shadowRoot!.querySelector<HTMLAnchorElement>(
+        'a.node[data-agent-id="a-parent"]'
+      );
+      const childLink = tree.shadowRoot!.querySelector<HTMLAnchorElement>(
+        'a.node[data-agent-id="a-child"]'
+      );
+      expect(parentLink).not.toBeNull();
+      expect(parentLink!.classList.contains('context')).toBe(true);
+      expect(parentLink!.getAttribute('aria-description')).toBe(
+        'shown as context; does not match filter'
+      );
+      expect(childLink).not.toBeNull();
+      expect(childLink!.classList.contains('context')).toBe(false);
+      expect(tree.shadowRoot!.querySelector('a.node[data-agent-id="a-unrelated"]')).toBeNull();
+    };
+
+    // 1. Global /agents inline Graph view with ?q=phase:running (ancestors in held set)
+    installGraphFetch();
+    localStorage.clear();
+    localStorage.setItem('scion-view-agents', 'graph');
+    window.history.replaceState(null, '', '/agents?q=phase%3Arunning');
+    const agentsPage = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(agentsPage);
+    await vi.waitFor(() => {
+      expect(agentsPage.shadowRoot?.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+    await agentsPage.updateComplete;
+    await assertTreeContext(
+      agentsPage.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView
+    );
+    agentsPage.remove();
+
+    // 2. Global /agents inline Graph view narrowing from unfiltered to server-filtered harness:antigravity
+    installGraphFetch();
+    localStorage.clear();
+    localStorage.setItem('scion-view-agents', 'graph');
+    window.history.replaceState(null, '', '/agents');
+    const agentsNarrow = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(agentsNarrow);
+    await vi.waitFor(() => {
+      expect(agentsNarrow.shadowRoot?.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+    const agentsBox = agentsNarrow.shadowRoot!.querySelector('scion-filter-box')!;
+    agentsBox.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: {
+          value: 'harness:antigravity',
+          query: {
+            mode: 'structured',
+            terms: [{ key: 'harness', values: ['antigravity'], negate: false }],
+          },
+          serverQ: 'harness:antigravity',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await new Promise((r) => setTimeout(r, 25));
+    await agentsNarrow.updateComplete;
+    await assertTreeContext(
+      agentsNarrow.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView
+    );
+    agentsNarrow.remove();
+
+    // 3. Project /projects/:id inline Graph view with ?q=phase:running (ancestors in held set)
+    installGraphFetch();
+    localStorage.clear();
+    localStorage.setItem('scion-view-project-agents', 'graph');
+    window.history.replaceState(null, '', '/projects/proj-g?q=phase%3Arunning');
+    const projPage = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    projPage.projectId = 'proj-g';
+    document.body.appendChild(projPage);
+    await vi.waitFor(() => {
+      expect(projPage.shadowRoot?.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+    await projPage.updateComplete;
+    await assertTreeContext(
+      projPage.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView
+    );
+    projPage.remove();
+
+    // 4. Project /projects/:id inline Graph view narrowing from unfiltered to server-filtered harness:antigravity
+    installGraphFetch();
+    localStorage.clear();
+    localStorage.setItem('scion-view-project-agents', 'graph');
+    window.history.replaceState(null, '', '/projects/proj-g');
+    const projNarrow = document.createElement(
+      'scion-page-project-detail'
+    ) as ScionPageProjectDetail;
+    projNarrow.projectId = 'proj-g';
+    document.body.appendChild(projNarrow);
+    await vi.waitFor(() => {
+      expect(projNarrow.shadowRoot?.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+    const projBox = projNarrow.shadowRoot!.querySelector('scion-filter-box')!;
+    projBox.dispatchEvent(
+      new CustomEvent('filter-commit', {
+        detail: {
+          value: 'harness:antigravity',
+          query: {
+            mode: 'structured',
+            terms: [{ key: 'harness', values: ['antigravity'], negate: false }],
+          },
+          serverQ: 'harness:antigravity',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await new Promise((r) => setTimeout(r, 25));
+    await projNarrow.updateComplete;
+    await assertTreeContext(
+      projNarrow.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView
+    );
+    projNarrow.remove();
   });
 });

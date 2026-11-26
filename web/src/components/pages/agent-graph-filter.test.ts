@@ -25,6 +25,7 @@ import {
 } from '../../shared/filter-query/index.js';
 import {
   agentToGraphFilterRow,
+  expandGraphMatchesWithAncestors,
   extractSingleProjectScope,
   filterGraphAgents,
   makeGraphValueSuggestions,
@@ -185,6 +186,44 @@ describe('agent-graph-filter pure helpers', () => {
     expect(res.hasActiveFilter).toBe(false);
     expect(res.agents.map((a) => a.id)).toEqual(all.map((a) => a.id));
     expect(res.contextIds.size).toBe(0);
+  });
+
+  it('expandGraphMatchesWithAncestors computes matches ∪ ancestors and contextIds cleanly', () => {
+    const inactive = expandGraphMatchesWithAncestors(all, [leaf], false);
+    expect(inactive.hasActiveFilter).toBe(false);
+    expect(inactive.agents.map((a) => a.id)).toEqual(all.map((a) => a.id));
+    expect(inactive.contextIds.size).toBe(0);
+
+    const empty = expandGraphMatchesWithAncestors(all, [], true);
+    expect(empty.hasActiveFilter).toBe(true);
+    expect(empty.agents).toEqual([]);
+    expect(empty.contextIds.size).toBe(0);
+
+    const leafOnly = expandGraphMatchesWithAncestors(all, [leaf], true);
+    expect(leafOnly.hasActiveFilter).toBe(true);
+    expect(leafOnly.agents.map((a) => a.id)).toEqual(['root', 'mid', 'leaf']);
+    expect(Array.from(leafOnly.contextIds).sort()).toEqual(['mid', 'root']);
+
+    // When an ancestor is also in matchedAgents, it must not be marked as context.
+    const midAndLeaf = expandGraphMatchesWithAncestors(all, [mid, leaf], true);
+    expect(midAndLeaf.agents.map((a) => a.id)).toEqual(['root', 'mid', 'leaf']);
+    expect(Array.from(midAndLeaf.contextIds)).toEqual(['root']);
+
+    // Cycles in ancestry terminate without infinite recursion.
+    const cycA = mkAgent({ id: 'cyc-a', ancestry: ['cyc-b'] });
+    const cycB = mkAgent({ id: 'cyc-b', ancestry: ['cyc-a'] });
+    const cycRes = expandGraphMatchesWithAncestors([cycA, cycB], [cycA], true);
+    expect(cycRes.agents.map((a) => a.id)).toEqual(['cyc-a', 'cyc-b']);
+    expect(Array.from(cycRes.contextIds)).toEqual(['cyc-b']);
+
+    // resolveAncestor fills in ancestors missing from allAgents (e.g. server-filtered held set).
+    const lookup = new Map<string, Agent>([
+      [root.id, root],
+      [mid.id, mid],
+    ]);
+    const resolved = expandGraphMatchesWithAncestors([leaf], [leaf], true, (id) => lookup.get(id));
+    expect(resolved.agents.map((a) => a.id).sort()).toEqual(['leaf', 'mid', 'root']);
+    expect(Array.from(resolved.contextIds).sort()).toEqual(['mid', 'root']);
   });
 
   it('provides dynamic value suggestions from loaded agents', () => {

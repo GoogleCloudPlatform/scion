@@ -36,6 +36,7 @@ const MOCK_AGENTS = [
     projectSlug: 'alpha',
     phase: 'stopped',
     status: 'stopped',
+    harnessConfig: 'claude',
     ancestry: ['user:u1'],
     updated: '2026-11-25T12:00:00Z',
   },
@@ -47,6 +48,7 @@ const MOCK_AGENTS = [
     projectSlug: 'alpha',
     phase: 'running',
     status: 'running',
+    harnessConfig: 'antigravity',
     ancestry: ['user:u1', 'agent-parent'],
     updated: '2026-11-25T12:01:00Z',
   },
@@ -58,8 +60,21 @@ const MOCK_AGENTS = [
     projectSlug: 'alpha',
     phase: 'running',
     status: 'running',
+    harnessConfig: 'gemini-cli',
     ancestry: ['user:u1'],
     updated: '2026-11-25T12:02:00Z',
+  },
+  {
+    id: 'agent-unrelated',
+    slug: 'unrelated-dev',
+    name: 'Unrelated Dev',
+    projectId: 'proj-1',
+    projectSlug: 'alpha',
+    phase: 'stopped',
+    status: 'stopped',
+    harnessConfig: 'codex',
+    ancestry: ['user:u1'],
+    updated: '2026-11-25T12:03:00Z',
   },
 ];
 
@@ -113,13 +128,26 @@ async function installMockGraphHub(page: Page): Promise<void> {
         }),
       });
     }
-    if (p === '/api/v1/agents') {
+    if (p === '/api/v1/projects/proj-1') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 'proj-1',
+          slug: 'alpha',
+          name: 'Alpha',
+          _capabilities: { actions: ['read'] },
+        }),
+      });
+    }
+    if (p === '/api/v1/agents' || p === '/api/v1/projects/proj-1/agents') {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
           agents: MOCK_AGENTS,
           complete: true,
+          totalCount: MOCK_AGENTS.length,
         }),
       });
     }
@@ -202,4 +230,61 @@ test('dims unrelated nodes (.node.dim) when hovering a lineage branch', async ({
   await expect
     .poll(async () => siblingNode.evaluate((el) => Number.parseFloat(getComputedStyle(el).opacity)))
     .toBeCloseTo(0.3, 2);
+});
+
+async function assertInlineGraphContextAncestors(page: Page, url: string): Promise<void> {
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
+
+  const parentNode = page.locator('a.node[data-agent-id="agent-parent"]');
+  const childNode = page.locator('a.node[data-agent-id="agent-child"]');
+  const unrelatedNode = page.locator('a.node[data-agent-id="agent-unrelated"]');
+
+  await expect(parentNode).toBeVisible();
+  await expect(childNode).toBeVisible();
+  await expect(unrelatedNode).toHaveCount(0);
+
+  await expect(parentNode).toHaveClass(/\bcontext\b/);
+  await expect(parentNode).toHaveAttribute(
+    'aria-description',
+    'shown as context; does not match filter'
+  );
+  await expect(childNode).not.toHaveClass(/\bcontext\b/);
+
+  await waitForAnimationsToFinish(parentNode);
+  await waitForAnimationsToFinish(childNode);
+
+  await expect
+    .poll(async () => parentNode.evaluate((el) => Number.parseFloat(getComputedStyle(el).opacity)))
+    .toBeCloseTo(0.45, 2);
+
+  await expect
+    .poll(async () => childNode.evaluate((el) => Number.parseFloat(getComputedStyle(el).opacity)))
+    .toBeCloseTo(1, 2);
+
+  await parentNode.hover();
+  await expect
+    .poll(async () => parentNode.evaluate((el) => Number.parseFloat(getComputedStyle(el).opacity)))
+    .toBeCloseTo(1, 2);
+}
+
+test('renders dimmed context ancestors in /agents inline Graph view when filtered', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('scion-view-agents', 'graph');
+  });
+  await installMockGraphHub(page);
+
+  await assertInlineGraphContextAncestors(page, '/agents?q=phase:running');
+});
+
+test('renders dimmed context ancestors in /projects/:id inline Graph view when filtered', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('scion-view-project-agents', 'graph');
+  });
+  await installMockGraphHub(page);
+
+  await assertInlineGraphContextAncestors(page, '/projects/proj-1?q=phase:running');
 });
