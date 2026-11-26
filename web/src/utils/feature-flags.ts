@@ -261,6 +261,14 @@ export const USER_DELETE_FORCE_CASCADE_FLAG = 'hub.user_delete_force_cascade';
 export const CHAT_RETENTION_FLAG = 'hub.chat_retention';
 
 /**
+ * Decision retention (hub.decision_retention, ptone/scion#8984): the Decision
+ * retention panel in Admin > Server Config and the retention notice on Made
+ * views. Presentation only: the hub checks the experiment on the settings API,
+ * maintenance operations, and background sweep. Default OFF.
+ */
+export const DECISION_RETENTION_FLAG = 'hub.decision_retention';
+
+/**
  * Welcome project (hub.welcome_project): the Welcome project step of the
  * workstation setup wizard. Presentation only: the hub checks the
  * experiment on the welcome preview, install and skip routes. Default OFF.
