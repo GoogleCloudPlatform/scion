@@ -550,8 +550,16 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 			payload.Interrupt,
 			structuredMsg,
 			withSyncAutoWakeHook(func(_ context.Context, target *store.Agent) (context.Context, context.CancelFunc, error) {
+				if s != nil && s.store != nil && target != nil {
+					if fresh, err := s.store.GetAgent(ctx, target.ID); err == nil && fresh != nil {
+						*target = *fresh
+					}
+				}
 				if s.autoWakeModeOf(target) == autoWakeNone {
-					return nil, nil, &errAutoWakeRefused{dmErr: s.validateAgentDeliverable(target)}
+					if dmErr := s.validateAgentDeliverable(target); dmErr != nil {
+						return nil, nil, &errAutoWakeRefused{dmErr: dmErr}
+					}
+					return nil, nil, errNoWakeRecovery
 				}
 				if dmErr := s.heldTargetRefusal(ctx, target); dmErr != nil {
 					return nil, nil, &errAutoWakeRefused{dmErr: dmErr}
