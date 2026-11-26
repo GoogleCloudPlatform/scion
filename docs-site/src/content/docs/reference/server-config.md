@@ -1241,6 +1241,29 @@ Controls the background task scheduler in the Hub. This regulates the tick inter
 Configuring a modest concurrency limit (such as the default `2`) is highly recommended for small or single-node database instances to prevent sudden spikes in database connection usage.
 :::
 
+### Reincarnate (`server.reincarnate`)
+
+Controls Hub-side reincarnation settings. `server.reincarnate` is a Layer 0 (startup settings file) section and is not editable through the operational database settings API.
+
+#### Move bundle limits (`server.reincarnate.move_bundle`)
+
+Bounds and timeouts for cross-broker bundle moves (`transferMode: "bundle"`, gated by [`hub.agent_move_bundle`](/scion/reference/experiments/#server-experiments-with-notes)). The Hub sends the resolved limits to the source and target Runtime Brokers on every precheck, export, and import request; zero, omitted, or negative values — as well as unparseable duration strings — fall back silently to the defaults below.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `workspace_max_bytes` | integer | `4294967296` (4 GiB) | Maximum uncompressed regular-file bytes allowed in a bundled workspace. |
+| `workspace_max_entries` | integer | `250000` | Maximum entries (files, directories, symlinks) allowed in a bundled workspace. |
+| `home_max_bytes` | integer | `1073741824` (1 GiB) | Maximum uncompressed regular-file bytes allowed in a bundled `$HOME` after exclusions. |
+| `home_max_entries` | integer | `100000` | Maximum entries allowed in a bundled `$HOME` after exclusions. |
+| `max_depth` | integer | `64` | Maximum directory depth allowed in a bundled root. |
+| `max_path_len` | integer | `4096` | Maximum relative path length in bytes allowed in a bundled root. |
+| `part_size` | integer | `67108864` (64 MiB) | Compressed tar.gz part size in bytes (`maxParts = ceil(max_bytes / part_size) + 8`). |
+| `export_timeout` | duration string | `"20m"` | Whole source export job timeout. |
+| `import_timeout` | duration string | `"20m"` | Whole target import job timeout. |
+| `part_stall_timeout` | duration string | `"2m"` | Per-part no-progress transfer timeout. |
+
+See [Moving an Agent to Another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker) for transfer modes, runtime support, exclusions, and staging cleanup.
+
 ### Maintenance (`server.maintenance`)
 
 Controls how the Hub checks for and applies its own updates. The **deployment tier** sets the update mode: a `binary` Hub updates from release binaries (it checks the effective channel's latest installable release in the Hub's release catalog, read from the GitHub Releases API), while a `source` Hub rebuilds from its git checkout.
