@@ -317,11 +317,6 @@ type TriggerActionSpec struct {
 	Target        string `json:"target,omitempty"`
 	ReplyInThread bool   `json:"replyInThread,omitempty"`
 
-	// github.comment action fields (Stage 3 §7.1).
-	Body          string `json:"body,omitempty"`
-	Target        string `json:"target,omitempty"`
-	ReplyInThread bool   `json:"replyInThread,omitempty"`
-
 	// exec action fields (Stage 2 P8, ptone/scion#8241).
 	Command           []string `json:"command,omitempty"`
 	TimeoutSeconds    int      `json:"timeoutSeconds,omitempty"`

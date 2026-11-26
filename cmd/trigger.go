@@ -826,17 +826,6 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
 		}
-<<<<<<< HEAD
-		agentLabel := tr.Action.AgentName
-		if tr.Action.Type == "dispatch_agent" {
-			agentLabel = "dispatch:" + tr.Action.Template
-		} else if tr.Action.Type == "github.comment" {
-			agentLabel = "github.comment"
-		} else if agentLabel == "" {
-			agentLabel = tr.Action.AgentID
-			if len(agentLabel) > 8 {
-				agentLabel = agentLabel[:8]
-=======
 		actions := effectiveTriggerActions(&tr)
 		agentLabel := "-"
 		if len(actions) > 0 {
@@ -857,7 +846,6 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 			}
 			if len(actions) > 1 {
 				agentLabel = fmt.Sprintf("%s (+%d)", agentLabel, len(actions)-1)
->>>>>>> c8085a518 (feat(triggers): support ordered actions[] per trigger (P9))
 			}
 		}
 		lastFire := "-"

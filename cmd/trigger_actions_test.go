@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -44,6 +45,7 @@ func TestTriggerCreateCLI_RepeatableActionGroups(t *testing.T) {
 	require.NoError(t, triggerCreateCmd.Flags().Parse(args))
 	t.Cleanup(func() {
 		createActionCollector.reset()
+		triggerCreateCmd.Flags().VisitAll(func(f *pflag.Flag) { f.Changed = false })
 		triggerName = ""
 		triggerWebhookRef = ""
 		triggerAction = "message"
@@ -68,6 +70,50 @@ func TestTriggerCreateCLI_RepeatableActionGroups(t *testing.T) {
 	assert.Equal(t, "lead", req.Actions[1].AgentName)
 	assert.Equal(t, "Dispatched review agent", req.Actions[1].Message)
 	assert.True(t, req.Actions[1].Wake)
+}
+
+func TestTriggerCreateCLI_RepeatableActionGroups_GitHubCommentAndAckComment(t *testing.T) {
+	defer createActionCollector.reset()
+
+	args := []string{
+		"--name", "gh-multi-cli",
+		"--github",
+		"--type", "github.pull_request_review_comment.created",
+		"--action", "dispatch-agent",
+		"--template", "dev",
+		"--task", "Review PR",
+		"--ack-comment", "Started **${result.agent_name}**",
+		"--action", "github.comment",
+		"--comment", "Noted @${event.attributes.sender}",
+		"--reply-in-thread",
+	}
+	createActionCollector.reset()
+	require.NoError(t, triggerCreateCmd.Flags().Parse(args))
+	t.Cleanup(func() {
+		createActionCollector.reset()
+		triggerCreateCmd.Flags().VisitAll(func(f *pflag.Flag) { f.Changed = false })
+		triggerName = ""
+		triggerGitHubSource = false
+		triggerMatchTypes = nil
+		triggerAction = "message"
+		triggerComment = ""
+		triggerReplyInThread = false
+		triggerDispatch = dispatchAgentFlagValues{}
+	})
+
+	req, _, err := buildCreateTriggerRequestWithFlags(false, true, true, true)
+	require.NoError(t, err)
+	assert.Empty(t, req.Action.Type)
+	require.Len(t, req.Actions, 2)
+
+	assert.Equal(t, "dispatch_agent", req.Actions[0].Type)
+	require.NotNil(t, req.Actions[0].AckComment)
+	assert.Equal(t, "Started **${result.agent_name}**", req.Actions[0].AckComment.Body)
+
+	assert.Equal(t, "github.comment", req.Actions[1].Type)
+	assert.Equal(t, "Noted @${event.attributes.sender}", req.Actions[1].Body)
+	assert.True(t, req.Actions[1].ReplyInThread)
+	assert.Equal(t, []string{"event.attributes.sender"}, req.Actions[1].UntrustedVars)
 }
 
 func TestTriggerGetCLI_NumbersMultipleActions(t *testing.T) {
