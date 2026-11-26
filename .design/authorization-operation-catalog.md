@@ -15,10 +15,10 @@
 - [agent.lifecycle.env](#agentlifecycleenv) — Submit environment values to an agent
 - [agent.lifecycle.resetauth](#agentlifecycleresetauth) — Reset an agent's harness authentication
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
-- [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
+- [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent. Patch flags also require agent.update for user callers, and --image or --harness requires agent.attach for all callers
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub and project forms: its scope is the authorizing user's list scope within the grant boundary (on the project form, within that one project), and each item is also decided for agent.read
-- [agent.update](#agentupdate) — Update agent configuration or metadata
+- [agent.update](#agentupdate) — Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach
 - [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
@@ -794,7 +794,7 @@
 
 **Domain:** agent
 
-**Description:** Reincarnate an agent
+**Description:** Reincarnate an agent. Patch flags also require agent.update for user callers, and --image or --harness requires agent.attach for all callers
 
 ### Entry Points
 
@@ -820,6 +820,8 @@
 ### Tests
 
 - `pkg/hub:TestAgentSubRoute_CatalogDrift`
+- `pkg/hub:TestReincarnateAgent_ImageEditRequiresAttach`
+- `pkg/hub:TestReincarnateAgent_HarnessSwitchRequiresAttach`
 
 ---
 
@@ -922,7 +924,7 @@
 
 **Domain:** agent
 
-**Description:** Update agent configuration or metadata
+**Description:** Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach
 
 ### Entry Points
 
@@ -950,6 +952,8 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestAgentUpdateToken_PassthroughGateStillApplies`
 - `pkg/hub:TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector`
+- `pkg/hub:TestPatchAgent_ImageEditRequiresAttach`
+- `pkg/hub:TestPendingReauth_ImageEditRequiresAttach`
 
 ---
 

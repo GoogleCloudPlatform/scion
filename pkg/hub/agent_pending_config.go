@@ -727,6 +727,13 @@ func (s *Server) planPendingFold(ctx context.Context, stored *store.Agent, sup b
 		if d.out == saverApply && k == agentConfigKeyPrefix+"env" && envPatchPending.hasEdits() && !plan.envCanView {
 			d.out, d.reason = saverUnauthorized, "agent.attach denied for config.env"
 		}
+		// Mirror live PATCH's ActionAttach requirement for config.image edits
+		// (including "" and null clears; ptone/scion#3402, Invariant ruling A).
+		if d.out == saverApply && k == agentConfigKeyPrefix+"image" && p.present["image"] {
+			if err := s.pendingSaverCheckAttach(ctx, stored, &d, "agent.attach denied for config.image"); err != nil {
+				return plan, err
+			}
+		}
 		switch d.out {
 		case saverApply:
 			continue

@@ -360,6 +360,35 @@ func (s *Server) pendingSaverMayApply(ctx context.Context, agent *store.Agent, d
 	return d, nil
 }
 
+// pendingSaverCheckAttach mirrors a live PATCH's ActionAttach gate for a
+// resolved pending-config saver (such as config.image, ptone/scion#3402),
+// applying the same determinate/indeterminate confirm contract as
+// pendingSaverMayApply.
+func (s *Server) pendingSaverCheckAttach(ctx context.Context, agent *store.Agent, d *pendingSaverIdentity, denyPrefix string) error {
+	if d == nil || d.out != saverApply {
+		return nil
+	}
+	if s.authzService == nil || d.identity == nil {
+		return errPendingReauthIndeterminate
+	}
+	res := agentResource(agent)
+	decision := s.authzService.CheckAccess(ctx, d.identity, res, ActionAttach)
+	if !decision.Allowed {
+		if pendingFoldDenyIndeterminate(decision) {
+			return errPendingReauthIndeterminate
+		}
+		confirm := s.authzService.CheckAccess(maskAllAuthzMemo(ctx), d.identity, res, ActionAttach)
+		switch {
+		case confirm.Allowed:
+		case pendingFoldDenyIndeterminate(confirm):
+			return errPendingReauthIndeterminate
+		default:
+			d.out, d.reason = saverUnauthorized, denyPrefix+": "+confirm.Reason
+		}
+	}
+	return nil
+}
+
 // pendingFoldDenyResult is how a fold treats a deny's cause.
 type pendingFoldDenyResult int
 
