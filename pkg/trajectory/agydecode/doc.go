@@ -29,9 +29,13 @@
 //     and unknown/unreported fields are omitted (nil) rather than fabricated as 0.
 //   - Deduplicates per-call usage across gen_metadata, retry arrays, and steps using
 //     union-find over protobuf identity fields [11, 12, 7], with serializable state so
-//     live tailers can persist seen identities across restarts.
+//     live tailers can persist seen identities across restarts. Across incremental polls,
+//     DedupeState tracks the per-channel high-water mark for each canonical identity and
+//     emits only positive per-channel deltas (matching single-pass max-merge semantics so
+//     incremental Track 1 totals equal single-pass Track 2 totals).
 //   - Pins verified agy versions: unknown versions yield StatusUnverified and wire errors
 //     yield StatusMalformed; guessed or corrupt tokens are never returned as StatusVerified.
+//     DedupeState is only consulted and updated when the agy version is verified.
 //
 // Reverse-engineered protobuf field layout and static model ID fallback mapping are
 // informed by pingdotgg/t3code's MIT-licensed antigravityUsageReader.ts and verified

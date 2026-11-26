@@ -91,6 +91,11 @@ type Record struct {
 	UsageIndex int `json:"usage_index"`
 	// IsRetry is true when this entry came from a retry array (gen_metadata f17 / steps f28).
 	IsRetry bool `json:"is_retry,omitempty"`
+	// IsDelta is true when this record carries only a positive per-channel token
+	// increment for a call identity already partially emitted in an earlier poll.
+	// Live tailers should emit tokens (calls=0) for delta records so calls are
+	// never double-counted.
+	IsDelta bool `json:"is_delta,omitempty"`
 
 	// Identity is the stable canonical dedupe key for this call.
 	Identity string `json:"identity"`
@@ -122,8 +127,8 @@ type Record struct {
 // surface schema drift without crashing on a single corrupt row.
 type DecodeError struct {
 	Source SourceTable `json:"source,omitempty"`
-	RowID  int64       `json:"rowid,omitempty"`
-	Idx    int64       `json:"idx,omitempty"`
+	RowID  int64       `json:"rowid"`
+	Idx    int64       `json:"idx"`
 	Error  string      `json:"error"`
 }
 
@@ -171,9 +176,12 @@ type Options struct {
 	AgyVersion string
 	// Cursor resumes reading strictly after the given rowids.
 	Cursor Cursor
-	// Dedupe is an optional persistent union-find state shared across polls/restarts.
-	// When non-nil, DecodeFile updates it in place and suppresses records whose
-	// identity was already seen in a prior call.
+	// Dedupe is an optional persistent union-find + per-channel high-water-mark
+	// state shared across polls/restarts. When non-nil AND AgyVersion is verified,
+	// DecodeFile updates it in place, suppresses duplicates whose channels did not
+	// increase, and emits only positive per-channel deltas (IsDelta=true) when a
+	// later copy carries higher counts. When AgyVersion is unverified, Dedupe is
+	// neither consulted nor mutated so unverified decodes cannot poison state.
 	Dedupe *DedupeState
 	// SkipSteps skips scanning the steps table when true (gen_metadata only).
 	SkipSteps bool
@@ -204,4 +212,8 @@ type Result struct {
 	Records []Record `json:"records"`
 	// Errors contains any row-level wire/schema decode errors encountered.
 	Errors []DecodeError `json:"errors,omitempty"`
+	// Warnings contains non-fatal diagnostics (such as a corrupt optional
+	// trajectory_metadata_blob fallback timestamp) that do not invalidate
+	// decoded token records or mark the file StatusMalformed.
+	Warnings []string `json:"warnings,omitempty"`
 }

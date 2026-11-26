@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -96,7 +97,16 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
 
-	tables, err := listTables(ctx, db)
+	// Run all reads inside a single read-only transaction so gen_metadata,
+	// trajectory_metadata_blob, and steps see one consistent WAL snapshot
+	// while still streaming one gen_metadata row per query.
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin read-only tx %s: %w", dbPath, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	tables, err := listTables(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("inspect schema %s: %w", dbPath, err)
 	}
@@ -112,7 +122,7 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 		var maxRowID *int64
 		var rowErrs []DecodeError
 		genRows, maxRowID, rowErrs, err = readMetadataTable(
-			ctx, db, SourceGenMetadata,
+			ctx, tx, SourceGenMetadata,
 			"SELECT rowid, idx, data FROM gen_metadata WHERE rowid > ? ORDER BY rowid LIMIT ?",
 			genMetadataPageRows, opts.Cursor.GenMetadataRowID, false,
 		)
@@ -127,12 +137,12 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 
 	var trajTS *time.Time
 	if tables["trajectory_metadata_blob"] {
-		var tsErrs []DecodeError
-		trajTS, tsErrs, err = readTrajectoryTimestamp(ctx, db)
+		var tsWarnings []string
+		trajTS, tsWarnings, err = readTrajectoryTimestamp(ctx, tx)
 		if err != nil {
 			return nil, fmt.Errorf("read trajectory_metadata_blob %s: %w", dbPath, err)
 		}
-		res.Errors = append(res.Errors, tsErrs...)
+		res.Warnings = append(res.Warnings, tsWarnings...)
 	}
 
 	var stepRows []scannedRow
@@ -140,7 +150,7 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 		var maxRowID *int64
 		var rowErrs []DecodeError
 		stepRows, maxRowID, rowErrs, err = readMetadataTable(
-			ctx, db, SourceSteps,
+			ctx, tx, SourceSteps,
 			"SELECT rowid, idx, metadata FROM steps WHERE rowid > ? ORDER BY rowid LIMIT ?",
 			stepsPageRows, opts.Cursor.StepsRowID, true,
 		)
@@ -197,15 +207,17 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 		}
 
 		var canonicalID string
-		if opts.Dedupe != nil {
-			var isNew bool
-			canonicalID, isNew = opts.Dedupe.Add(allKeys...)
-			if !isNew {
-				// Already emitted in an earlier poll/run.
+		tok := c.tokens
+		var isDelta bool
+		if opts.Dedupe != nil && verVerified {
+			var emit bool
+			canonicalID, tok, isDelta, emit = opts.Dedupe.RecordDelta(c.tokens, allKeys...)
+			if !emit {
+				// Already emitted at or above these per-channel counts in an earlier poll.
 				continue
 			}
 		} else {
-			// Deterministic canonical key from sorted keys.
+			// Deterministic canonical key from sorted keys (unverified decodes never mutate Dedupe).
 			canonicalID = allKeys[0]
 		}
 
@@ -221,7 +233,6 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 		}
 		model = telemetrycontract.ResolveModelLabel(model, "")
 
-		tok := c.tokens
 		rec := Record{
 			Status:         recordStatus,
 			SessionID:      sessionID,
@@ -230,6 +241,7 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 			Idx:            c.idx,
 			UsageIndex:     c.usageIndex,
 			IsRetry:        c.isRetry,
+			IsDelta:        isDelta,
 			Identity:       canonicalID,
 			SourceIdentity: sourceIdentity,
 			IdentityKeys:   c.keys,
@@ -291,8 +303,12 @@ func buildReadOnlyDSN(dbPath string, busyTimeoutMs int) (string, error) {
 	return u.String(), nil
 }
 
-func listTables(ctx context.Context, db *sql.DB) (map[string]bool, error) {
-	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table'")
+type sqlQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func listTables(ctx context.Context, q sqlQuerier) (map[string]bool, error) {
+	rows, err := q.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table'")
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +326,7 @@ func listTables(ctx context.Context, db *sql.DB) (map[string]bool, error) {
 
 func readMetadataTable(
 	ctx context.Context,
-	db *sql.DB,
+	q sqlQuerier,
 	source SourceTable,
 	query string,
 	pageRows int,
@@ -319,19 +335,20 @@ func readMetadataTable(
 ) ([]scannedRow, *int64, []DecodeError, error) {
 	var results []scannedRow
 	var decodeErrs []DecodeError
-	var maxRowID *int64
+	var persistMaxRowID *int64
+	sawEmptyGap := false
 
-	// When afterRowID is nil, start from MinInt64 so rowid=0 is included.
-	var cursor int64 = -1 << 62
+	// When afterRowID is nil, start from math.MinInt64 so rowid=0 is included.
+	var scanCursor int64 = math.MinInt64
 	if afterRowID != nil {
-		cursor = *afterRowID
+		scanCursor = *afterRowID
 	}
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, err
 		}
-		rows, err := db.QueryContext(ctx, query, cursor, pageRows)
+		rows, err := q.QueryContext(ctx, query, scanCursor, pageRows)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -348,11 +365,19 @@ func readMetadataTable(
 				return nil, nil, nil, err
 			}
 			lastRowID = rowID
-			v := rowID
-			maxRowID = &v
 
-			if step && len(blob) == 0 {
+			// Do not advance the persisted cursor past a row whose metadata/data
+			// is still NULL (or empty for steps): agy can UPDATE that row in place
+			// later without changing rowid, so holding the cursor before the first
+			// gap ensures later polls see the populated row while Dedupe absorbs
+			// any re-read rows.
+			if (step && len(blob) == 0) || (!step && blob == nil) {
+				sawEmptyGap = true
 				continue
+			}
+			if !sawEmptyGap {
+				v := rowID
+				persistMaxRowID = &v
 			}
 			if !idx.Valid {
 				decodeErrs = append(decodeErrs, DecodeError{
@@ -387,20 +412,20 @@ func readMetadataTable(
 		if count < pageRows {
 			break
 		}
-		cursor = lastRowID
+		scanCursor = lastRowID
 	}
 
-	return results, maxRowID, decodeErrs, nil
+	return results, persistMaxRowID, decodeErrs, nil
 }
 
-func readTrajectoryTimestamp(ctx context.Context, db *sql.DB) (*time.Time, []DecodeError, error) {
-	rows, err := db.QueryContext(ctx, "SELECT data FROM trajectory_metadata_blob")
+func readTrajectoryTimestamp(ctx context.Context, q sqlQuerier) (*time.Time, []string, error) {
+	rows, err := q.QueryContext(ctx, "SELECT data FROM trajectory_metadata_blob")
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	var trajTS *time.Time
-	var errs []DecodeError
+	var warnings []string
 	for rows.Next() {
 		var blob []byte
 		if err := rows.Scan(&blob); err != nil {
@@ -411,16 +436,14 @@ func readTrajectoryTimestamp(ctx context.Context, db *sql.DB) (*time.Time, []Dec
 		}
 		ts, err := decodeTrajectoryTimestamp(blob)
 		if err != nil {
-			errs = append(errs, DecodeError{
-				Error: fmt.Sprintf("trajectory_metadata_blob: %v", err),
-			})
+			warnings = append(warnings, fmt.Sprintf("trajectory_metadata_blob: %v", err))
 			continue
 		}
 		if trajTS == nil && ts != nil {
 			trajTS = ts
 		}
 	}
-	return trajTS, errs, rows.Err()
+	return trajTS, warnings, rows.Err()
 }
 
 func buildCandidates(

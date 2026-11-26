@@ -4,8 +4,7 @@
   "version_verified": false,
   "session_id": "fixture-multi-call",
   "cursor": {
-    "gen_metadata_rowid": 2,
-    "steps_rowid": 7
+    "gen_metadata_rowid": 2
   },
   "records": [
     {
