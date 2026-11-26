@@ -285,4 +285,94 @@ describe('scion-trigger-list', () => {
     expect(patchBodies[2]['action']).toBeUndefined();
     expect(patchBodies[2]['source']).toBeUndefined();
   });
+
+  it('uses canonical deep equality for actions, rules, form, durations, and untrimmed descriptions on rename (O-A, Nit)', async () => {
+    const existing: TriggerDefinition = {
+      id: 'tr-canon',
+      projectId: 'proj-1',
+      name: 'canon-rule',
+      description: '  has surrounding spaces  ',
+      source: { kind: 'webhook', id: 'ep-1' },
+      match: {
+        types: ['webhook.received'],
+        rules: [{ dialect: 'cel', expr: 'true' }],
+        form: { b: 2, a: 1 },
+      },
+      action: { type: 'message', agentId: 'ag-1', message: 'hi' },
+      subject: { mode: 'reuse', expr: 'event.subject', coalesce_window: '5m0s' },
+      status: 'active',
+      authorizationRevision: 7,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-20T10:00:00Z',
+      updatedAt: '2026-11-20T10:00:00Z',
+    };
+
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse(existing));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [existing], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-canon"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    // Re-emit action with reordered keys and empty/false omitempty defaults (e.g. same-agent re-pick).
+    const actionEditor = el.shadowRoot?.querySelector('scion-trigger-action-editor');
+    actionEditor?.dispatchEvent(
+      new CustomEvent('actions-changed', {
+        detail: {
+          actions: [
+            {
+              message: 'hi',
+              agentId: 'ag-1',
+              agentName: '',
+              wake: false,
+              interrupt: false,
+              type: 'message',
+            },
+          ],
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+
+    // Re-emit rules with reordered keys, form with reordered keys, and equivalent duration '5m' vs '5m0s'.
+    const internal = el as unknown as {
+      formRules: Array<{ expr: string; dialect: string }>;
+      formMatchForm: Record<string, unknown>;
+      formCoalesceWindow: string;
+    };
+    internal.formRules = [{ expr: 'true', dialect: 'cel' }];
+    internal.formMatchForm = { a: 1, b: 2, ignored: undefined };
+    internal.formCoalesceWindow = '5m';
+
+    // Rename only (leave untrimmed stored description untouched).
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'canon-rule-renamed';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies[0]).toEqual({
+      name: 'canon-rule-renamed',
+      expectedRevision: 7,
+    });
+  });
 });

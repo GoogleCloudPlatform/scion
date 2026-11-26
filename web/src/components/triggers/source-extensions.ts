@@ -93,6 +93,11 @@ export interface FormAuthoringContext {
   initialForm?: unknown;
   initialTypes?: string[];
   initialRules?: TriggerMatchRuleSpec[];
+  /**
+   * Callback to report updated form output to the dialog.
+   * Must ONLY be called on genuine user/form changes — never unconditionally
+   * from `render()` (even via a microtask), which would loop updates infinitely.
+   */
   onChange: (output: FormAuthoringOutput) => void;
 }
 
@@ -103,7 +108,11 @@ export interface FormAuthoringRegistration {
   isEnabled?: () => boolean;
   /** Optional lazy loader invoked once before rendering. */
   load?: () => Promise<unknown>;
-  /** Renders the form-authoring pane inside the rule create/edit dialog. */
+  /**
+   * Renders the form-authoring pane inside the rule create/edit dialog.
+   * Called on every dialog update: implementations must NOT invoke `ctx.onChange`
+   * unconditionally from `render()` (even via a microtask), only on real changes.
+   */
   render: (ctx: FormAuthoringContext) => TemplateResult | typeof nothing;
 }
 

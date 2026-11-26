@@ -436,12 +436,17 @@ export class ScionTriggerList extends LitElement {
   }
 
   private handleFormAuthoringOutput(out: FormAuthoringOutput): void {
+    this.formAuthoringValid = out.valid !== false;
+    this.formAuthoringErrors = Array.isArray(out.errors) ? [...out.errors] : [];
+    // O-C: never apply types, rules, form, subject, or suggested actions from
+    // an invalid form output so switching to CEL cannot save stale invalid state.
+    if (!this.formAuthoringValid) {
+      return;
+    }
     this.formTypes = [...out.types];
     this.formRules = out.rules.map((r) => ({ ...r }));
     this.formMatchForm = out.form;
     this.formMatchFormDropped = false;
-    this.formAuthoringValid = out.valid !== false;
-    this.formAuthoringErrors = Array.isArray(out.errors) ? [...out.errors] : [];
     if (out.subject) {
       this.formSubjectMode = out.subject.mode || 'new';
       this.formSubjectExpr = out.subject.expr ?? '';
@@ -494,7 +499,7 @@ export class ScionTriggerList extends LitElement {
     }
 
     const nextDesc = this.formDescription.trim();
-    if (nextDesc !== (orig.description ?? '')) {
+    if (nextDesc !== (orig.description ?? '').trim()) {
       body['description'] = nextDesc;
     }
 
@@ -507,11 +512,11 @@ export class ScionTriggerList extends LitElement {
 
     const origTypes = orig.match.types ?? [];
     const origRules = orig.match.rules ?? [];
-    const typesChanged = JSON.stringify(this.formTypes) !== JSON.stringify(origTypes);
-    const rulesChanged = JSON.stringify(this.formRules) !== JSON.stringify(origRules);
+    const typesChanged = !canonicalDeepEqual(this.formTypes, origTypes);
+    const rulesChanged = !canonicalDeepEqual(this.formRules, origRules);
     const formChanged =
       this.formMatchFormDropped ||
-      JSON.stringify(this.formMatchForm ?? null) !== JSON.stringify(orig.match.form ?? null);
+      !canonicalDeepEqual(this.formMatchForm ?? null, orig.match.form ?? null);
     if (typesChanged || rulesChanged || formChanged) {
       body['match'] = matchPayload;
     }
@@ -522,12 +527,14 @@ export class ScionTriggerList extends LitElement {
     const nextMode = this.formSubjectMode || 'new';
     const nextExpr = this.formSubjectExpr.trim();
     const nextWindow = nextMode === 'reuse' ? this.formCoalesceWindow.trim() : '';
-    if (nextMode !== origMode || nextExpr !== origExpr || nextWindow !== origWindow) {
+    if (nextMode !== origMode || nextExpr !== origExpr || !durationsEqual(nextWindow, origWindow)) {
       body['subject'] = subjectPayload;
     }
 
     const origActions = getTriggerActions(orig);
-    const actionsChanged = JSON.stringify(this.formActions) !== JSON.stringify(origActions);
+    const actionsChanged = !canonicalDeepEqual(this.formActions, origActions, {
+      stripFalsyDefaults: true,
+    });
     const firstAction = this.formActions[0];
     if (actionsChanged) {
       // P9 HOOK (ptone/scion#9065): when multiActionEnabled is true, send `actions[]`,
@@ -1426,6 +1433,91 @@ export class ScionTriggerList extends LitElement {
       </sl-dialog>
     `;
   }
+}
+
+/**
+ * Parses a Go-style duration string (e.g. "5m", "5m0s", "300s", "1h30m", "500ms")
+ * into milliseconds for canonical equality comparison, or returns null if unparseable.
+ */
+export function parseDurationMs(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed === '0') return 0;
+  const unitMs: Record<string, number> = {
+    ms: 1,
+    s: 1000,
+    m: 60_000,
+    h: 3_600_000,
+  };
+  let total = 0;
+  let pos = 0;
+  const re = /(\d+(?:\.\d+)?)(ms|s|m|h)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(trimmed)) !== null) {
+    if (match.index !== pos) return null;
+    const num = Number(match[1]);
+    const mult = unitMs[match[2]];
+    if (!Number.isFinite(num) || mult === undefined) return null;
+    total += num * mult;
+    pos = re.lastIndex;
+  }
+  return pos === trimmed.length && pos > 0 ? total : null;
+}
+
+function durationsEqual(a: string, b: string): boolean {
+  const ta = a.trim();
+  const tb = b.trim();
+  if (ta === tb) return true;
+  if (!ta || !tb) return false;
+  const pa = parseDurationMs(ta);
+  const pb = parseDurationMs(tb);
+  if (pa !== null && pb !== null) return pa === pb;
+  return false;
+}
+
+function canonicalizeValue(value: unknown, opts: { stripFalsyDefaults?: boolean } = {}): unknown {
+  if (value === null || value === undefined || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => canonicalizeValue(item, opts));
+  }
+  const obj = value as Record<string, unknown>;
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(obj).sort()) {
+    const rawVal = obj[key];
+    if (rawVal === undefined) continue;
+    const val = canonicalizeValue(rawVal, opts);
+    if (opts.stripFalsyDefaults) {
+      if (val === '' || val === false) continue;
+      if (Array.isArray(val) && val.length === 0) continue;
+      if (
+        val !== null &&
+        typeof val === 'object' &&
+        !Array.isArray(val) &&
+        Object.keys(val).length === 0
+      ) {
+        continue;
+      }
+    }
+    sorted[key] = val;
+  }
+  return sorted;
+}
+
+/**
+ * Key-order-independent deep equality for R1 edit diffing (O-A).
+ * Always normalises `undefined`/absent object properties; when
+ * `stripFalsyDefaults` is set (for Go `omitempty` action structs), also
+ * normalises empty strings, `false`, empty arrays, and empty objects.
+ */
+export function canonicalDeepEqual(
+  a: unknown,
+  b: unknown,
+  opts: { stripFalsyDefaults?: boolean } = {}
+): boolean {
+  return JSON.stringify(canonicalizeValue(a, opts)) === JSON.stringify(canonicalizeValue(b, opts));
 }
 
 declare global {

@@ -326,6 +326,101 @@ describe('triggers source-extensions registry (trivial test provider)', () => {
     expect(patchBody.subject?.coalesce_window).toBe('45s');
   });
 
+  it('ignores invalid form output when switching to CEL (O-C)', async () => {
+    registerSourceKind('demo-source', {
+      label: 'Demo App',
+      sourceIdMode: 'none',
+    });
+
+    registerFormAuthoring('demo-source', {
+      label: 'Demo Form',
+      render: ({ onChange }) => html`
+        <button
+          type="button"
+          data-emit-invalid-garbage
+          @click=${() =>
+            onChange({
+              types: ['invalid.type'],
+              rules: [{ dialect: 'cel', expr: 'invalid_expr' }],
+              form: { broken: true },
+              subject: { mode: 'skip', expr: 'bad' },
+              valid: false,
+              errors: ['Broken form state'],
+            })}
+        >
+          Emit Invalid
+        </button>
+      `,
+    });
+
+    const existingDemoTrigger = {
+      id: 'tr-oc',
+      projectId: 'proj-1',
+      name: 'oc-rule',
+      source: { kind: 'demo-source', id: '' },
+      match: {
+        types: ['demo.opened'],
+        rules: [{ dialect: 'cel', expr: 'true' }],
+        form: { preset: 'original' },
+      },
+      action: { type: 'message', agentId: 'ag-1', message: 'hi' },
+      subject: { mode: 'reuse', expr: 'event.subject', coalesce_window: '5m0s' },
+      status: 'active',
+      authorizationRevision: 3,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-20T10:00:00Z',
+      updatedAt: '2026-11-20T10:00:00Z',
+    };
+
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse(existingDemoTrigger));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [existingDemoTrigger], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-oc"]') as HTMLElement).click();
+    await el.updateComplete;
+
+    // O-C: emit invalid output, switch to CEL pane, rename, and save.
+    (el.shadowRoot?.querySelector('[data-emit-invalid-garbage]') as HTMLButtonElement).click();
+    await el.updateComplete;
+
+    const modeGroup = el.shadowRoot?.querySelector('[data-authoring-mode]') as HTMLElement & {
+      value: string;
+    };
+    modeGroup.value = 'cel';
+    modeGroup.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await el.updateComplete;
+
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'oc-rule-renamed';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Must NOT contain invalid types/rules/form/subject — only the rename!
+    expect(patchBodies[0]).toEqual({
+      name: 'oc-rule-renamed',
+      expectedRevision: 3,
+    });
+  });
+
   it('renders registered event columns and event detail section in trigger-event-list', async () => {
     registerEventColumns('demo-source', {
       columns: () => [
