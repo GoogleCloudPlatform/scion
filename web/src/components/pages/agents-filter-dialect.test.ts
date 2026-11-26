@@ -1413,4 +1413,208 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(win.stats).toEqual({ total: 2, running: 1, incomplete: false });
     el.remove();
   });
+
+  it('admits non-matching-phase live creates matching non-phase terms under mixed ?q=phase:running label:env=x in both complete and paged states (global and project)', async () => {
+    const dispatchCreate = (agent: Agent): void => {
+      stateManager.seedAgents([agent]);
+      stateManager.dispatchEvent(
+        new CustomEvent('agents-changed', {
+          detail: {
+            data: {
+              upserted: [agent.id],
+              deleted: [],
+              unknown: new Map(),
+              generation: stateManager.scopeGeneration,
+            },
+          },
+        })
+      );
+    };
+
+    const runRun = (id: string, projectId: string): Agent => ({
+      id,
+      name: id,
+      slug: id,
+      projectId,
+      template: 'developer',
+      phase: 'running',
+      labels: { env: 'x' },
+      updated: '2026-02-01T00:00:00Z',
+    });
+    const stopX = (id: string, projectId: string): Agent => ({
+      id,
+      name: id,
+      slug: id,
+      projectId,
+      template: 'developer',
+      phase: 'stopped',
+      labels: { env: 'x' },
+      updated: '2026-02-02T00:00:00Z',
+    });
+    const stopY = (id: string, projectId: string): Agent => ({
+      id,
+      name: id,
+      slug: id,
+      projectId,
+      template: 'developer',
+      phase: 'stopped',
+      labels: { env: 'y' },
+      updated: '2026-02-02T00:00:00Z',
+    });
+    const runXNew = (id: string, projectId: string): Agent => ({
+      id,
+      name: id,
+      slug: id,
+      projectId,
+      template: 'developer',
+      phase: 'running',
+      labels: { env: 'x' },
+      updated: '2026-02-03T00:00:00Z',
+    });
+
+    const mixedQ = encodeURIComponent('phase:running label:env=x');
+
+    // --- 1. Complete (small) state on both pages ---
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (rawUrl.includes('/agents')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                agents: [runRun('seed-run', 'proj-mix')],
+                totalCount: 1,
+                complete: true,
+                stats: { total: 1, running: 1, agents: [['seed-run', 'running']] },
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'proj-mix', name: 'Proj Mix', slug: 'proj-mix' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+
+    // 1a. Global page (complete)
+    window.history.replaceState(null, '', `/agents?q=${mixedQ}`);
+    localStorage.setItem('scion-sort-agents', JSON.stringify({ field: 'updated', dir: 'desc' }));
+    const gSmall = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(gSmall);
+    await new Promise((r) => setTimeout(r, 25));
+    await gSmall.updateComplete;
+    const gSmallWin = (gSmall as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(gSmallWin.state).toBe('small');
+    expect(gSmallWin.stats).toEqual({ total: 1, running: 1, incomplete: false });
+    expect(gSmallWin.items.map((a) => a.id)).toEqual(['seed-run']);
+
+    dispatchCreate(stopX('g-stop-x', 'proj-mix'));
+    dispatchCreate(stopY('g-stop-y', 'proj-mix'));
+    await gSmall.updateComplete;
+    expect(gSmallWin.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(gSmallWin.items.map((a) => a.id)).toEqual(['seed-run']);
+    gSmall.remove();
+
+    // 1b. Project page (complete)
+    window.history.replaceState(null, '', `/projects/proj-mix?q=${mixedQ}`);
+    localStorage.setItem(
+      'scion-sort-project-agents-proj-mix',
+      JSON.stringify({ field: 'updated', dir: 'desc' })
+    );
+    const pSmall = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    pSmall.projectId = 'proj-mix';
+    document.body.appendChild(pSmall);
+    await new Promise((r) => setTimeout(r, 25));
+    await pSmall.updateComplete;
+    const pSmallWin = (pSmall as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(pSmallWin.state).toBe('small');
+    expect(pSmallWin.stats).toEqual({ total: 1, running: 1, incomplete: false });
+
+    dispatchCreate(stopX('p-stop-x', 'proj-mix'));
+    dispatchCreate(stopY('p-stop-y', 'proj-mix'));
+    await pSmall.updateComplete;
+    expect(pSmallWin.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(pSmallWin.items.map((a) => a.id)).toEqual(['seed-run']);
+    pSmall.remove();
+
+    // --- 2. Paged state on both pages ---
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (rawUrl.includes('/agents')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                agents: [runRun('pg-run', 'proj-mix')],
+                totalCount: 1,
+                complete: false,
+                nextCursor: 'cur-2',
+                stats: { total: 1, running: 1, agents: [['pg-run', 'running']] },
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'proj-mix', name: 'Proj Mix', slug: 'proj-mix' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+
+    // 2a. Global page (paged)
+    window.history.replaceState(null, '', `/agents?q=${mixedQ}`);
+    const gPaged = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(gPaged);
+    await new Promise((r) => setTimeout(r, 25));
+    await gPaged.updateComplete;
+    const gPagedWin = (gPaged as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(gPagedWin.state).toBe('paged');
+    expect(gPagedWin.stats).toEqual({ total: 1, running: 1, incomplete: false });
+
+    dispatchCreate(stopX('gp-stop-x', 'proj-mix'));
+    dispatchCreate(stopY('gp-stop-y', 'proj-mix'));
+    await gPaged.updateComplete;
+    expect(gPagedWin.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(gPagedWin.updatesAvailable).toBe(false);
+
+    dispatchCreate(runXNew('gp-run-x', 'proj-mix'));
+    await gPaged.updateComplete;
+    expect(gPagedWin.stats).toEqual({ total: 3, running: 2, incomplete: false });
+    expect(gPagedWin.updatesAvailable).toBe(true);
+    gPaged.remove();
+
+    // 2b. Project page (paged)
+    window.history.replaceState(null, '', `/projects/proj-mix?q=${mixedQ}`);
+    const pPaged = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    pPaged.projectId = 'proj-mix';
+    document.body.appendChild(pPaged);
+    await new Promise((r) => setTimeout(r, 25));
+    await pPaged.updateComplete;
+    const pPagedWin = (pPaged as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(pPagedWin.state).toBe('paged');
+    expect(pPagedWin.stats).toEqual({ total: 1, running: 1, incomplete: false });
+
+    dispatchCreate(stopX('pp-stop-x', 'proj-mix'));
+    dispatchCreate(stopY('pp-stop-y', 'proj-mix'));
+    await pPaged.updateComplete;
+    expect(pPagedWin.stats).toEqual({ total: 2, running: 1, incomplete: false });
+    expect(pPagedWin.updatesAvailable).toBe(false);
+
+    dispatchCreate(runXNew('pp-run-x', 'proj-mix'));
+    await pPaged.updateComplete;
+    expect(pPagedWin.stats).toEqual({ total: 3, running: 2, incomplete: false });
+    expect(pPagedWin.updatesAvailable).toBe(true);
+    pPaged.remove();
+  });
 });

@@ -21,7 +21,9 @@ import { describe, expect, it } from 'vitest';
 import {
   VIEW_SCHEMAS,
   buildAgentValueSuggestions,
+  canLiveAddAgent,
   canonical,
+  drainServerQuery,
   getActiveSingleKeyValue,
   getSuggestions,
   getViewSchema,
@@ -439,6 +441,33 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     expect(provider('template', '')).toEqual(expect.arrayContaining(['developer', 'reviewer']));
     expect(provider('owner', '')).toEqual(expect.arrayContaining(['me', 'u-me', 'u-other']));
     expect(provider('label', '')).toEqual(expect.arrayContaining(['team', 'team=ui', 'env=prod']));
+
+    // canLiveAddAgent ignores phase terms so mixed queries keep phase-independent populations.
+    const mixed = parse('phase:running label:env=prod', known).query!;
+    const stoppedProd: Agent = {
+      id: '3',
+      name: 'gamma',
+      slug: 'gamma',
+      projectId: 'p1',
+      phase: 'stopped',
+      labels: { env: 'prod' },
+    };
+    const stoppedDev: Agent = {
+      id: '4',
+      name: 'delta',
+      slug: 'delta',
+      projectId: 'p1',
+      phase: 'stopped',
+      labels: { env: 'dev' },
+    };
+    expect(canLiveAddAgent(mixed, stoppedProd, ctx)).toBe(true);
+    expect(canLiveAddAgent(mixed, stoppedDev, ctx)).toBe(false);
+
+    // drainServerQuery strips phase: terms while preserving quoted text containing "phase:".
+    const quotedText = parse('"foo phase:x"', known).query!;
+    const quotedStructured = parse('label:env=prod "foo phase:x" phase:running', known).query!;
+    expect(drainServerQuery(quotedText, agentsSchema)).toBe('"foo phase:x"');
+    expect(drainServerQuery(quotedStructured, agentsSchema)).toBe('label:env=prod "foo phase:x"');
   });
 });
 
