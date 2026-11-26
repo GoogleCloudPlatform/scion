@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -231,11 +232,36 @@ func TestAccessConstraintsExperiment_GatingAndEnforcement(t *testing.T) {
 	assert.Equal(t, http.StatusOK, delRec.Code, "delete constraint: %s", delRec.Body.String())
 }
 
+// lockedWarnLogBuffer guards a bytes.Buffer used as an slog.SetDefault sink
+// so concurrent background goroutine logs cannot race with test reads or resets.
+type lockedWarnLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedWarnLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedWarnLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedWarnLogBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
 func TestWarnStoredAccessConstraintsExperimentOff(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	var buf bytes.Buffer
+	var buf lockedWarnLogBuffer
 	prevLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	t.Cleanup(func() { slog.SetDefault(prevLogger) })
