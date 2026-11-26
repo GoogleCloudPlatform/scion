@@ -15,8 +15,12 @@
 package trigger
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -53,6 +57,68 @@ type VerifiedHeaders struct {
 // rotation grace) and extracts mode-specific routing headers (Stage 2 §7.2).
 type Verifier interface {
 	Verify(r *http.Request, body []byte, secrets []string) (VerifiedHeaders, error)
+}
+
+// signaturePrechecker is an optional interface implemented by Verifiers to
+// reject missing, duplicated, or syntactically unparseable signature headers
+// with ErrInvalidSignature (401) BEFORE any secret lookup or rotation fallback
+// (review O1: unsigned/malformed requests never get 503 during secret outages
+// or rotation grace).
+type signaturePrechecker interface {
+	Precheck(r *http.Request) error
+}
+
+// parseTimestampedSignatureHeader parses a comma-separated "t=<unix>,v1=<hex>"
+// header shared by scion_v1 and stripe_v1, rejecting empty/malformed parts,
+// duplicate t=, non-canonical t=, >maxSignatureV1Candidates v1= values, or
+// headers with no syntactically valid 64-hex v1= candidate.
+func parseTimestampedSignatureHeader(sigHeader string) bool {
+	if sigHeader == "" {
+		return false
+	}
+	var (
+		tsRaw        string
+		hasTS        bool
+		v1Count      int
+		hasValidHex1 bool
+	)
+	for _, part := range strings.Split(sigHeader, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return false
+		}
+		k, v, ok := strings.Cut(part, "=")
+		if !ok || v == "" {
+			return false
+		}
+		switch k {
+		case "t":
+			if hasTS {
+				return false
+			}
+			hasTS = true
+			tsRaw = v
+		case "v1":
+			if v1Count >= maxSignatureV1Candidates {
+				return false
+			}
+			v1Count++
+			if len(v) == sha256.Size*2 {
+				if _, err := hex.DecodeString(v); err == nil {
+					hasValidHex1 = true
+				}
+			}
+		default:
+			if strings.ContainsAny(k, " \t\r\n") {
+				return false
+			}
+		}
+	}
+	if !hasTS || !hasValidHex1 {
+		return false
+	}
+	ts, err := strconv.ParseInt(tsRaw, 10, 64)
+	return err == nil && strconv.FormatInt(ts, 10) == tsRaw
 }
 
 // GitHubSignatureVerifyFunc matches githubapp.VerifyWebhookSignature.

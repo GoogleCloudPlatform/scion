@@ -222,3 +222,214 @@ func TestIngress_GitHubV1_StripeV1_And_RoutingHints(t *testing.T) {
 	assert.Equal(t, "webhook:"+stripeEP.ID, ovev.Subject)  // beyond 64 KiB -> NOT resolved
 	assert.Empty(t, ovev.Attributes["routing_hint_error"]) // beyond 64 KiB is silently ignored
 }
+
+// TestIngress_O1_MissingOrUnparseableSignature_401BeforeSecretLoad verifies O1:
+// for every HMAC mode (scion_v1, github_v1, stripe_v1), missing, duplicated, or
+// syntactically unparseable signature headers return 401 BEFORE any secret load
+// or rotation-grace fallback, so unsigned callers never receive 503.
+func TestIngress_O1_MissingOrUnparseableSignature_401BeforeSecretLoad(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	now := time.Date(2026, 11, 26, 11, 0, 0, 0, time.UTC)
+	rotatedAt := now.Add(-30 * time.Minute)
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   projID,
+		Name: "o1-proj",
+		Slug: "o1-" + projID[:8],
+	}))
+
+	modes := []struct {
+		mode      string
+		sigHeader string
+		badValues [][]string
+	}{
+		{
+			mode:      store.WebhookSignatureModeScionV1,
+			sigHeader: trigger.HeaderSignature,
+			badValues: [][]string{
+				nil,                                      // missing
+				{""},                                     // empty
+				{"not-a-signature"},                      // unparseable
+				{"t=123,v1=short"},                       // short v1
+				{"t=0123,v1=" + strings.Repeat("a", 64)}, // non-canonical t
+				{"t=1,v1=" + strings.Repeat("a", 64), "t=2,v1=" + strings.Repeat("b", 64)}, // duplicate header
+			},
+		},
+		{
+			mode:      store.WebhookSignatureModeGitHubV1,
+			sigHeader: trigger.HeaderGitHubSignature256,
+			badValues: [][]string{
+				nil,
+				{""},
+				{"sha256="},
+				{"sha1=" + strings.Repeat("a", 64)},
+				{"sha256=" + strings.Repeat("A", 64)}, // uppercase hex
+				{"sha256=" + strings.Repeat("a", 64), "sha256=" + strings.Repeat("b", 64)},
+			},
+		},
+		{
+			mode:      store.WebhookSignatureModeStripeV1,
+			sigHeader: trigger.HeaderStripeSignature,
+			badValues: [][]string{
+				nil,
+				{""},
+				{"v1=" + strings.Repeat("a", 64)}, // missing t
+				{"t=123"},                         // missing v1
+				{"t=123,t=123,v1=" + strings.Repeat("a", 64)}, // duplicate t
+				{"t=123,v1=" + strings.Repeat("a", 64), "t=123,v1=" + strings.Repeat("b", 64)},
+			},
+		},
+	}
+
+	baseQ := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return now }))
+	secretLoadCalls := 0
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      cs,
+		QueueStore: cs,
+		Queue:      baseQ,
+		Now:        func() time.Time { return now },
+		LoadSecret: func(_ context.Context, _, _ string, _ int) (string, error) {
+			secretLoadCalls++
+			return "", errors.New("transient secret backend outage")
+		},
+	})
+
+	for _, tc := range modes {
+		t.Run(tc.mode, func(t *testing.T) {
+			ep := &store.WebhookEndpoint{
+				ID:                  uuid.NewString(),
+				ProjectID:           projID,
+				Name:                "o1-" + tc.mode,
+				OwnerPrincipalKind:  store.DelegationPrincipalUser,
+				OwnerPrincipalID:    uuid.NewString(),
+				OwnerCredentialKind: store.InitiatorCredentialKindSession,
+				SignatureMode:       tc.mode,
+				SecretVersion:       2,
+				SecretRotatedAt:     &rotatedAt,
+				Status:              store.WebhookEndpointStatusActive,
+			}
+			require.NoError(t, cs.CreateWebhookEndpoint(ctx, ep))
+
+			for _, vals := range tc.badValues {
+				secretLoadCalls = 0
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ep.ID, bytes.NewReader([]byte(`{"ok":true}`)))
+				req.Header.Set("Content-Type", "application/json")
+				for _, v := range vals {
+					req.Header.Add(tc.sigHeader, v)
+				}
+				rec := httptest.NewRecorder()
+				ing.ServeHTTP(rec, req)
+				assert.Equal(t, http.StatusUnauthorized, rec.Code, "mode=%s hdr=%v body=%s", tc.mode, vals, rec.Body.String())
+				assert.Equal(t, 0, secretLoadCalls, "mode=%s hdr=%v must not load secrets", tc.mode, vals)
+			}
+		})
+	}
+}
+
+// TestIngress_O2_NonScionModesIgnoreXScionHeaders verifies O2: github_v1 and
+// stripe_v1 ignore X-Scion-Event, X-Scion-Subject, and X-Scion-Delivery
+// completely (neither routing nor storing them in trigger_events.headers).
+func TestIngress_O2_NonScionModesIgnoreXScionHeaders(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	now := time.Date(2026, 11, 26, 11, 30, 0, 0, time.UTC)
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   projID,
+		Name: "o2-proj",
+		Slug: "o2-" + projID[:8],
+	}))
+
+	const secret = "o2-shared-secret"
+	ghEP := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "o2-gh",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    uuid.NewString(),
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SignatureMode:       store.WebhookSignatureModeGitHubV1,
+		Status:              store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, ghEP))
+
+	stripeEP := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "o2-stripe",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    uuid.NewString(),
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SignatureMode:       store.WebhookSignatureModeStripeV1,
+		Status:              store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, stripeEP))
+
+	baseQ := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return now }))
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      cs,
+		QueueStore: cs,
+		Queue:      baseQ,
+		Now:        func() time.Time { return now },
+		LoadSecret: func(_ context.Context, _, _ string, _ int) (string, error) {
+			return secret, nil
+		},
+	})
+
+	// 1. github_v1 ignores X-Scion-* headers in both routing and stored headers.
+	ghBody := []byte(`{"action":"opened"}`)
+	ghReq := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ghEP.ID, bytes.NewReader(ghBody))
+	ghReq.Header.Set("Content-Type", "application/json")
+	ghReq.Header.Set(trigger.HeaderGitHubSignature256, signGitHubTestBody(secret, ghBody))
+	ghReq.Header.Set(trigger.HeaderGitHubEvent, "issues")
+	ghReq.Header.Set(trigger.HeaderGitHubDelivery, "gh-real-deliv")
+	ghReq.Header.Set(trigger.HeaderEvent, "forged.event")
+	ghReq.Header.Set(trigger.HeaderSubject, "forged/subject")
+	ghReq.Header.Set(trigger.HeaderDelivery, "forged-deliv")
+	ghRec := httptest.NewRecorder()
+	ing.ServeHTTP(ghRec, ghReq)
+	require.Equal(t, http.StatusAccepted, ghRec.Code, ghRec.Body.String())
+
+	var ghAcc trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(ghRec.Body.Bytes(), &ghAcc))
+	ghEv, err := cs.GetTriggerEvent(ctx, ghAcc.EventID)
+	require.NoError(t, err)
+	assert.Equal(t, "webhook.issues", ghEv.Type)
+	assert.Equal(t, "webhook:"+ghEP.ID, ghEv.Subject)
+	assert.Equal(t, "gh-real-deliv", ghEv.DedupKey)
+	assert.NotContains(t, ghEv.Headers, trigger.HeaderEvent)
+	assert.NotContains(t, ghEv.Headers, trigger.HeaderSubject)
+	assert.NotContains(t, ghEv.Headers, trigger.HeaderDelivery)
+	assert.Equal(t, "issues", ghEv.Headers[trigger.HeaderGitHubEvent])
+	assert.Equal(t, "gh-real-deliv", ghEv.Headers[trigger.HeaderGitHubDelivery])
+
+	// 2. stripe_v1 ignores both X-Scion-* and X-GitHub-* headers.
+	stBody := []byte(`{"id":"evt_real","type":"invoice.paid","data":{"object":{"id":"in_real"}}}`)
+	stReq := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+stripeEP.ID, bytes.NewReader(stBody))
+	stReq.Header.Set("Content-Type", "application/json")
+	stReq.Header.Set(trigger.HeaderStripeSignature, trigger.SignStripeV1(secret, now.Unix(), stBody))
+	stReq.Header.Set(trigger.HeaderEvent, "forged.event")
+	stReq.Header.Set(trigger.HeaderSubject, "forged/subject")
+	stReq.Header.Set(trigger.HeaderDelivery, "forged-deliv")
+	stReq.Header.Set(trigger.HeaderGitHubEvent, "forged_gh")
+	stReq.Header.Set(trigger.HeaderGitHubDelivery, "forged-gh-deliv")
+	stRec := httptest.NewRecorder()
+	ing.ServeHTTP(stRec, stReq)
+	require.Equal(t, http.StatusAccepted, stRec.Code, stRec.Body.String())
+
+	var stAcc trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(stRec.Body.Bytes(), &stAcc))
+	stEv, err := cs.GetTriggerEvent(ctx, stAcc.EventID)
+	require.NoError(t, err)
+	assert.Equal(t, "webhook.invoice.paid", stEv.Type)
+	assert.Equal(t, "webhook:"+stripeEP.ID+"/in_real", stEv.Subject)
+	assert.Equal(t, "evt_real", stEv.DedupKey)
+	assert.NotContains(t, stEv.Headers, trigger.HeaderEvent)
+	assert.NotContains(t, stEv.Headers, trigger.HeaderSubject)
+	assert.NotContains(t, stEv.Headers, trigger.HeaderDelivery)
+	assert.NotContains(t, stEv.Headers, trigger.HeaderGitHubEvent)
+	assert.NotContains(t, stEv.Headers, trigger.HeaderGitHubDelivery)
+}

@@ -40,6 +40,31 @@ type GitHubV1Verifier struct {
 	VerifySignature GitHubSignatureVerifyFunc
 }
 
+// Precheck rejects missing, duplicated, or syntactically malformed
+// X-Hub-Signature-256 headers ("sha256=<64 lowercase hex>") before any secret
+// lookup.
+func (v *GitHubV1Verifier) Precheck(r *http.Request) error {
+	if r == nil {
+		return ErrInvalidSignature
+	}
+	sigVals := r.Header.Values(HeaderGitHubSignature256)
+	if len(sigVals) != 1 {
+		return ErrInvalidSignature
+	}
+	const prefix = "sha256="
+	sig := sigVals[0]
+	if len(sig) != len(prefix)+64 || sig[:len(prefix)] != prefix {
+		return ErrInvalidSignature
+	}
+	for i := len(prefix); i < len(sig); i++ {
+		c := sig[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ErrInvalidSignature
+		}
+	}
+	return nil
+}
+
 // Verify checks X-Hub-Signature-256 against each candidate secret in secrets
 // and extracts bounded X-GitHub-Event and X-GitHub-Delivery headers.
 func (v *GitHubV1Verifier) Verify(r *http.Request, body []byte, secrets []string) (VerifiedHeaders, error) {

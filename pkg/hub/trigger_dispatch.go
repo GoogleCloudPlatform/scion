@@ -963,9 +963,9 @@ func verifiedLabelForFireEvent(ev *hubfire.FireEvent) string {
 		return messaging.ExternalVerifiedHMACSHA256Body
 	case store.WebhookSignatureModeScionV1, messaging.ExternalVerifiedScionV1:
 		return messaging.ExternalVerifiedScionV1
-	case store.WebhookSignatureModeGitHubV1:
+	case store.WebhookSignatureModeGitHubV1, messaging.ExternalVerifiedGitHubV1:
 		return messaging.ExternalVerifiedGitHubV1
-	case store.WebhookSignatureModeStripeV1:
+	case store.WebhookSignatureModeStripeV1, messaging.ExternalVerifiedStripeV1:
 		return messaging.ExternalVerifiedStripeV1
 	case store.WebhookAuthModeHubToken, messaging.ExternalVerifiedHubToken:
 		return messaging.ExternalVerifiedHubToken

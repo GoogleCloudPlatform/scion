@@ -71,17 +71,27 @@ var (
 	// eventNamePattern validates X-Scion-Event per §8.1 step 7.
 	eventNamePattern = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)*$`)
 
-	// allowedEventHeaders is the fixed §4.3 request-header allow-list stored on
-	// trigger_events.headers. Secret headers such as X-Scion-Signature,
-	// X-Hub-Signature-256, Stripe-Signature, and Authorization are never stored.
-	allowedEventHeaders = []string{
+	// allowedEventHeadersForMode returns the mode-specific request-header
+	// allow-list stored on trigger_events.headers (§4.3, review O2). Secret
+	// headers (X-Scion-Signature, X-Hub-Signature-256, Stripe-Signature,
+	// Authorization) are never stored, and unsigned X-Scion-* headers are
+	// never stored on github_v1 or stripe_v1 deliveries.
+	allowedEventHeadersScion = []string{
 		"Content-Type",
 		"User-Agent",
 		HeaderEvent,
 		HeaderDelivery,
 		HeaderSubject,
+	}
+	allowedEventHeadersGitHub = []string{
+		"Content-Type",
+		"User-Agent",
 		HeaderGitHubEvent,
 		HeaderGitHubDelivery,
+	}
+	allowedEventHeadersStripe = []string{
+		"Content-Type",
+		"User-Agent",
 	}
 
 	errQueueFull                    = errors.New("trigger event queue full for project")
@@ -663,6 +673,23 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
 			return
 		}
+		// O1: reject missing, duplicated, or syntactically unparseable
+		// signature headers with 401 BEFORE any secret load or rotation
+		// fallback so unsigned requests never receive 503.
+		if pc, ok := verifier.(signaturePrechecker); ok {
+			if pErr := pc.Precheck(r); pErr != nil {
+				h.rejectedBadSig.Add(1)
+				h.recordMetric(IngressResultRejectedSignature)
+				h.counters.RecordRejected(ep.ID)
+				h.audit.RecordSignatureFailure(ctx, SignatureFailureAuditRecord{
+					ProjectID:  ep.ProjectID,
+					EndpointID: ep.ID,
+					RemoteIP:   clientIP,
+				})
+				apierr.WriteError(w, http.StatusUnauthorized, apierr.ErrCodeInvalidSignature, "invalid signature", nil)
+				return
+			}
+		}
 		secret, err := h.cache.LookupSecret(ctx, h.loadSecret, ep.ProjectID, ep.ID, ep.SecretVersion)
 		if err != nil {
 			h.failedSecret.Add(1)
@@ -1209,8 +1236,9 @@ func buildWebhookTriggerEvent(
 		return store.TriggerEvent{}, "", false
 	}
 
-	storedHeaders := make(map[string]string, len(allowedEventHeaders))
-	for _, name := range allowedEventHeaders {
+	allowHeaders := allowedEventHeadersForMode(sigModeAttr)
+	storedHeaders := make(map[string]string, len(allowHeaders))
+	for _, name := range allowHeaders {
 		v := hdr.Get(name)
 		if v == "" {
 			continue
@@ -1242,6 +1270,17 @@ func buildWebhookTriggerEvent(
 		PayloadBytes: len(body),
 		Status:       store.TriggerEventStatusPending,
 	}, eventAttr, true
+}
+
+func allowedEventHeadersForMode(sigMode string) []string {
+	switch sigMode {
+	case store.WebhookSignatureModeGitHubV1:
+		return allowedEventHeadersGitHub
+	case store.WebhookSignatureModeStripeV1:
+		return allowedEventHeadersStripe
+	default:
+		return allowedEventHeadersScion
+	}
 }
 
 func writeRateLimited(w http.ResponseWriter, retryAfter, message string) {

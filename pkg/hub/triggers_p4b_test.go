@@ -252,6 +252,8 @@ func TestTriggers_GitHubV1ReplayProtectionRules(t *testing.T) {
 }
 
 func TestTriggerEventBody_ProviderVerifiedLabelsAndAttributes(t *testing.T) {
+	assert.Equal(t, "github-v1", messaging.ExternalVerifiedGitHubV1)
+	assert.Equal(t, "stripe-v1", messaging.ExternalVerifiedStripeV1)
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		mode     string
@@ -262,14 +264,14 @@ func TestTriggerEventBody_ProviderVerifiedLabelsAndAttributes(t *testing.T) {
 	}{
 		{
 			mode:     store.WebhookSignatureModeGitHubV1,
-			wantVer:  messaging.ExternalVerifiedGitHubV1,
+			wantVer:  "github-v1",
 			delivery: "gh-deliv-1",
 			event:    "pull_request",
 			subject:  "acme/repo",
 		},
 		{
 			mode:     store.WebhookSignatureModeStripeV1,
-			wantVer:  messaging.ExternalVerifiedStripeV1,
+			wantVer:  "stripe-v1",
 			delivery: "evt_123",
 			event:    "invoice.payment_succeeded",
 			subject:  "in_456",

@@ -27,6 +27,22 @@ type ScionV1Verifier struct {
 	ReplayWindow time.Duration
 }
 
+// Precheck rejects missing, duplicated, or unparseable X-Scion-Signature
+// headers (and oversized signed-header totals) before any secret lookup.
+func (v *ScionV1Verifier) Precheck(r *http.Request) error {
+	if r == nil {
+		return ErrInvalidSignature
+	}
+	sigVals := r.Header.Values(HeaderSignature)
+	if len(sigVals) != 1 || !parseTimestampedSignatureHeader(sigVals[0]) {
+		return ErrInvalidSignature
+	}
+	if len(r.Header.Get(HeaderDelivery))+len(r.Header.Get(HeaderEvent))+len(r.Header.Get(HeaderSubject)) > maxSignedHeaderBytes {
+		return ErrInvalidSignature
+	}
+	return nil
+}
+
 // Verify checks X-Scion-Signature against each candidate secret in secrets,
 // then validates the signed X-Scion-* routing header bounds so unsigned
 // callers always receive ErrInvalidSignature (401) rather than 400.

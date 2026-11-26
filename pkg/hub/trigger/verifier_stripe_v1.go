@@ -136,6 +136,19 @@ type StripeV1Verifier struct {
 	ReplayWindow time.Duration
 }
 
+// Precheck rejects missing, duplicated, or unparseable Stripe-Signature
+// headers before any secret lookup.
+func (v *StripeV1Verifier) Precheck(r *http.Request) error {
+	if r == nil {
+		return ErrInvalidSignature
+	}
+	sigVals := r.Header.Values(HeaderStripeSignature)
+	if len(sigVals) != 1 || !parseTimestampedSignatureHeader(sigVals[0]) {
+		return ErrInvalidSignature
+	}
+	return nil
+}
+
 // Verify checks Stripe-Signature against each candidate secret in secrets.
 func (v *StripeV1Verifier) Verify(r *http.Request, body []byte, secrets []string) (VerifiedHeaders, error) {
 	if r == nil || len(secrets) == 0 {
