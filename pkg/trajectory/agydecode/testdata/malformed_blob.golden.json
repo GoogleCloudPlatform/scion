@@ -1,0 +1,55 @@
+{
+  "status": "malformed",
+  "agy_version": "1.5.18",
+  "version_verified": true,
+  "session_id": "fixture-malformed",
+  "cursor": {
+    "gen_metadata_rowid": 1
+  },
+  "records": [
+    {
+      "status": "verified",
+      "session_id": "fixture-malformed",
+      "source": "gen_metadata",
+      "rowid": 0,
+      "idx": 0,
+      "usage_index": 0,
+      "identity": "antigravity:11:req-valid-1",
+      "emission_key": "antigravity:11:req-valid-1#4f51fe0c9857ef6771da64a378816490",
+      "source_identity": "request_id",
+      "identity_keys": [
+        "antigravity:11:req-valid-1"
+      ],
+      "timestamp": "2026-11-26T13:35:00Z",
+      "model": "gemini-4-neon",
+      "model_id": 1466,
+      "model_source": "event",
+      "tokens": {
+        "input": 100,
+        "output": 25,
+        "input_derivation": "reported"
+      }
+    },
+    {
+      "status": "malformed",
+      "session_id": "fixture-malformed",
+      "source": "gen_metadata",
+      "rowid": 1,
+      "idx": 1,
+      "usage_index": 0,
+      "identity": "antigravity:fixture-malformed:malformed:gen_metadata:1",
+      "source_identity": "composite",
+      "model": "unknown",
+      "model_source": "unknown",
+      "error": "field 1 invalid bytes: unexpected EOF"
+    }
+  ],
+  "errors": [
+    {
+      "source": "gen_metadata",
+      "rowid": 1,
+      "idx": 1,
+      "error": "field 1 invalid bytes: unexpected EOF"
+    }
+  ]
+}

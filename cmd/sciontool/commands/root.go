@@ -83,7 +83,7 @@ func isHookInvocation(args []string) bool {
 func isHookSubcommand(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		switch c.Name() {
-		case "hook", "status":
+		case "hook", "status", "internal":
 			return true
 		}
 	}
