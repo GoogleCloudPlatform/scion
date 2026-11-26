@@ -306,6 +306,10 @@ type UsageIngestRowRejection struct {
 // events persisted by IngestUsageBatch, plus any per-row DB rejections and the
 // slice of newly inserted events (from RETURNING) for post-commit consumers
 // such as Hub OTel re-emission.
+//
+// InsertedEvents is guaranteed committed only when the store is not inTx;
+// callers executing inside an outer transaction must defer post-commit effects
+// until that outer transaction commits.
 type UsageIngestBatchResult struct {
 	Accepted       int
 	Duplicates     int

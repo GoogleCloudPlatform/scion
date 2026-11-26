@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"go.opentelemetry.io/otel/attribute"
@@ -46,6 +47,11 @@ const MetricUsageMeterStale = "scion.usage.meter_stale"
 const (
 	defaultMeterStaleCacheTTL     = 30 * time.Second
 	defaultMeterStaleQueryTimeout = 5 * time.Second
+	// defaultMeterStaleZeroHold keeps a recovered project's 0 observation in
+	// the gauge snapshot for two full 60s export intervals so independent GCP
+	// and OTLP periodic readers both observe the return to 0 before the
+	// project is pruned.
+	defaultMeterStaleZeroHold = 2 * time.Minute
 )
 
 // UsageOTelCardinality controls which attribution labels the Hub stamps on
@@ -104,7 +110,9 @@ type usageOTelConfig struct {
 	cardinality UsageOTelCardinality
 	hasSink     bool
 	staleStore  staleMeterCounter
+	enabledFn   func() bool
 	cacheTTL    time.Duration
+	zeroHold    time.Duration
 	now         func() time.Time
 }
 
@@ -134,17 +142,12 @@ func WithUsageOTelStaleStore(st staleMeterCounter) UsageOTelOption {
 	}
 }
 
-// withUsageOTelCacheTTL overrides the meter_stale cache TTL in tests.
-func withUsageOTelCacheTTL(ttl time.Duration) UsageOTelOption {
+// WithUsageOTelEnabled gates the scion.usage.meter_stale observable gauge
+// callback on the tokenomics.usage_ledger experiment (D2). When fn returns
+// false, the callback skips DB queries and records no observations.
+func WithUsageOTelEnabled(fn func() bool) UsageOTelOption {
 	return func(cfg *usageOTelConfig) {
-		cfg.cacheTTL = ttl
-	}
-}
-
-// withUsageOTelClock overrides the cache clock in tests.
-func withUsageOTelClock(now func() time.Time) UsageOTelOption {
-	return func(cfg *usageOTelConfig) {
-		cfg.now = now
+		cfg.enabledFn = fn
 	}
 }
 
@@ -160,15 +163,18 @@ type UsageOTelMetrics struct {
 
 	cardinality UsageOTelCardinality
 	hasSink     bool
+	enabledFn   func() bool
 
 	staleStore staleMeterCounter
 	cacheTTL   time.Duration
+	zeroHold   time.Duration
 	now        func() time.Time
 
 	staleMu        sync.Mutex
 	staleFetchedAt time.Time
 	staleCache     map[string]int64
-	knownProjects  map[string]struct{}
+	staleProjects  map[string]struct{}
+	recoveredUntil map[string]time.Time
 }
 
 // NewUsageOTelMetrics registers the canonical usage counters and optional
@@ -181,6 +187,7 @@ func NewUsageOTelMetrics(mp metric.MeterProvider, opts ...UsageOTelOption) (*Usa
 	cfg := usageOTelConfig{
 		cardinality: UsageOTelCardinalityAgent,
 		cacheTTL:    defaultMeterStaleCacheTTL,
+		zeroHold:    defaultMeterStaleZeroHold,
 		now:         time.Now,
 	}
 	for _, fn := range opts {
@@ -208,14 +215,17 @@ func NewUsageOTelMetrics(mp metric.MeterProvider, opts ...UsageOTelOption) (*Usa
 	}
 
 	u := &UsageOTelMetrics{
-		apiCalls:      apiCalls,
-		usageTokens:   usageTokens,
-		cardinality:   cfg.cardinality,
-		hasSink:       cfg.hasSink,
-		staleStore:    cfg.staleStore,
-		cacheTTL:      cfg.cacheTTL,
-		now:           cfg.now,
-		knownProjects: make(map[string]struct{}),
+		apiCalls:       apiCalls,
+		usageTokens:    usageTokens,
+		cardinality:    cfg.cardinality,
+		hasSink:        cfg.hasSink,
+		enabledFn:      cfg.enabledFn,
+		staleStore:     cfg.staleStore,
+		cacheTTL:       cfg.cacheTTL,
+		zeroHold:       cfg.zeroHold,
+		now:            cfg.now,
+		staleProjects:  make(map[string]struct{}),
+		recoveredUntil: make(map[string]time.Time),
 	}
 
 	if cfg.staleStore != nil {
@@ -358,6 +368,9 @@ func (u *UsageOTelMetrics) observeStaleMeters(ctx context.Context, obs metric.Ob
 	if u == nil || u.staleStore == nil || u.meterStale == nil {
 		return nil
 	}
+	if u.enabledFn != nil && !u.enabledFn() {
+		return nil
+	}
 
 	counts := u.cachedStaleCounts(ctx)
 	for projectID, count := range counts {
@@ -392,20 +405,29 @@ func (u *UsageOTelMetrics) cachedStaleCounts(ctx context.Context) map[string]int
 		return copyInt64Map(u.staleCache)
 	}
 
-	// Emit 0 once for any previously-stale project whose stale count dropped
-	// back to zero, then prune it from knownProjects so retired projects do
-	// not accumulate forever.
-	snapshot := make(map[string]int64, len(fresh)+len(u.knownProjects))
-	for proj := range u.knownProjects {
-		if _, stillStale := fresh[proj]; !stillStale {
-			snapshot[proj] = 0
-			delete(u.knownProjects, proj)
+	// Keep recovered projects at 0 for u.zeroHold (default 2m = 2× export
+	// interval) so independent GCP and OTLP periodic readers both observe the
+	// return to 0 before the project is pruned.
+	for proj := range u.staleProjects {
+		if count := fresh[proj]; count <= 0 {
+			delete(u.staleProjects, proj)
+			u.recoveredUntil[proj] = now.Add(u.zeroHold)
 		}
 	}
+
+	snapshot := make(map[string]int64, len(fresh)+len(u.recoveredUntil))
 	for proj, count := range fresh {
 		if count > 0 {
 			snapshot[proj] = count
-			u.knownProjects[proj] = struct{}{}
+			u.staleProjects[proj] = struct{}{}
+			delete(u.recoveredUntil, proj)
+		}
+	}
+	for proj, expiry := range u.recoveredUntil {
+		if now.Before(expiry) {
+			snapshot[proj] = 0
+		} else {
+			delete(u.recoveredUntil, proj)
 		}
 	}
 
@@ -426,12 +448,16 @@ func copyInt64Map(src map[string]int64) map[string]int64 {
 }
 
 // RegisterUsageOTelMetrics constructs and wires UsageOTelMetrics on mp using
-// s.store for scion.usage.meter_stale computation.
+// s.store for scion.usage.meter_stale computation, gated by
+// tokenomics.usage_ledger (D2).
 func (s *Server) RegisterUsageOTelMetrics(mp metric.MeterProvider, opts ...UsageOTelOption) error {
-	allOpts := make([]UsageOTelOption, 0, len(opts)+1)
+	allOpts := make([]UsageOTelOption, 0, len(opts)+2)
 	if s.store != nil {
 		allOpts = append(allOpts, WithUsageOTelStaleStore(s.store))
 	}
+	allOpts = append(allOpts, WithUsageOTelEnabled(func() bool {
+		return s.experimentEnabled(experiments.TokenomicsUsageLedger)
+	}))
 	allOpts = append(allOpts, opts...)
 	m, err := NewUsageOTelMetrics(mp, allOpts...)
 	if err != nil {

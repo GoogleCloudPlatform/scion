@@ -15,13 +15,20 @@
 package hubmetrics
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/grpc"
@@ -231,4 +238,90 @@ func findResourceAttr(rm *metricpb.ResourceMetrics, key string) string {
 		}
 	}
 	return ""
+}
+
+func TestNewMeterProvider_GCPFailureWithValidOTLPReturnsPartialErrorAndWarns(t *testing.T) {
+	addr, _ := startFakeOTLPMetricsServer(t)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/scion-test-creds.json")
+
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	mp, err := NewMeterProvider(context.Background(), "some-gcp-project",
+		WithInstanceID("hub-partial-err"),
+		WithOTLPConfig(OTLPConfig{
+			Endpoint: addr,
+			Insecure: true,
+		}),
+		WithExportInterval(time.Hour),
+	)
+	if mp == nil {
+		t.Fatalf("expected usable OTLP MeterProvider when GCP exporter fails, got nil (err=%v)", err)
+	}
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	var partialErr *PartialError
+	if !errors.As(err, &partialErr) {
+		t.Fatalf("expected *PartialError when GCP exporter fails and OTLP succeeds, got %T (%v)", err, err)
+	}
+	if partialErr.GCPErr == nil {
+		t.Fatal("expected PartialError.GCPErr to be non-nil")
+	}
+	if partialErr.OTLPErr != nil {
+		t.Fatalf("expected PartialError.OTLPErr to be nil, got %v", partialErr.OTLPErr)
+	}
+	if !strings.Contains(logBuf.String(), "GCP Cloud Monitoring exporter disabled") {
+		t.Fatalf("expected warning log naming GCP exporter failure, got %q", logBuf.String())
+	}
+}
+
+func TestUsageCardinalityLimitAndOverflowDetection(t *testing.T) {
+	if got, ok := ParseUsageOTelCardinalityLimit(""); !ok || got != DefaultUsageOTelCardinalityLimit {
+		t.Fatalf("empty limit = (%d, %v), want (%d, true)", got, ok, DefaultUsageOTelCardinalityLimit)
+	}
+	if got, ok := ParseUsageOTelCardinalityLimit("50000"); !ok || got != 50000 {
+		t.Fatalf("50000 = (%d, %v), want (50000, true)", got, ok)
+	}
+	for _, bad := range []string{"0", "-5", "abc", "9999999"} {
+		if got, ok := ParseUsageOTelCardinalityLimit(bad); ok || got != DefaultUsageOTelCardinalityLimit {
+			t.Fatalf("ParseUsageOTelCardinalityLimit(%q) = (%d, %v), want (%d, false)", bad, got, ok, DefaultUsageOTelCardinalityLimit)
+		}
+	}
+
+	// Verify overflow detection + rate-limited warning using a small limit of 5.
+	reader := sdkmetric.NewManualReader()
+	opts := append([]sdkmetric.Option{sdkmetric.WithReader(reader)}, UsageMetricViews(5)...)
+	mp := sdkmetric.NewMeterProvider(opts...)
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	c, err := mp.Meter(hubUsageInstrumentationScope).Int64Counter("scion.usage.tokens")
+	if err != nil {
+		t.Fatalf("Int64Counter: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		c.Add(context.Background(), 1, otelmetric.WithAttributes(attribute.Int("idx", i)))
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	now := time.Now()
+	tracker := &usageOverflowTracker{now: func() time.Time { return now }}
+	tracker.observe(&rm)
+	tracker.observe(&rm) // rate-limited: should not warn twice within 5m
+	if got := tracker.count.Load(); got != 2 {
+		t.Fatalf("overflow count = %d, want 2", got)
+	}
+	if warnings := strings.Count(logBuf.String(), "otel.metric.overflow=true"); warnings != 1 {
+		t.Fatalf("expected 1 rate-limited overflow warning, got %d in %q", warnings, logBuf.String())
+	}
 }

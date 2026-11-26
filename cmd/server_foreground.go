@@ -655,12 +655,25 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			}
 			mp, mpErr := hubmetrics.NewMeterProvider(ctx, gcpMetricsProjectID, telemetryID.metricsOptions()...)
 			if mpErr != nil {
-				if obs.Metrics.Enabled {
-					obs.Metrics = obs.Metrics.Failed(mpErr)
+				var partialErr *hubmetrics.PartialError
+				if errors.As(mpErr, &partialErr) && mp != nil {
+					if partialErr.GCPErr != nil && obs.Metrics.Enabled {
+						obs.Metrics = obs.Metrics.Failed(partialErr.GCPErr)
+					}
+					if partialErr.OTLPErr != nil {
+						log.Printf("WARNING: hub OTLP metrics export disabled: %v", partialErr.OTLPErr)
+					}
 				} else {
-					log.Printf("WARNING: hub OTLP metrics export disabled: %v", mpErr)
+					if obs.Metrics.Enabled {
+						obs.Metrics = obs.Metrics.Failed(mpErr)
+					} else {
+						log.Printf("WARNING: hub OTLP metrics export disabled: %v", mpErr)
+					}
+					log.Printf("WARNING: hub metrics/OTLP configured but no exporter started; Hub usage OTel re-emission and container suppression are inactive")
+					mp = nil
 				}
-			} else {
+			}
+			if mp != nil {
 				exit.addFlush(mp.Shutdown)
 				lifecycleMeterProvider = mp
 

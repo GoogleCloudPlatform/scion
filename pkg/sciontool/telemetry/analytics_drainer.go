@@ -846,9 +846,6 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 	if a.drainer != nil {
 		return
 	}
-	if a.onSuppressChanged != nil {
-		a.onSuppressChanged(false)
-	}
 	if a.hubSinkCfg == nil && gcp == nil {
 		// Hub-only mode (no GCP exporter) does not late-activate after a
 		// negative init probe: without producers wired at startup, heartbeats

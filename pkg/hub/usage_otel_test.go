@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,9 +35,22 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
+
+func withUsageOTelCacheTTL(ttl time.Duration) UsageOTelOption {
+	return func(cfg *usageOTelConfig) {
+		cfg.cacheTTL = ttl
+	}
+}
+
+func withUsageOTelClock(now func() time.Time) UsageOTelOption {
+	return func(cfg *usageOTelConfig) {
+		cfg.now = now
+	}
+}
 
 func collectUsageOTelMetrics(t *testing.T, reader *sdkmetric.ManualReader) metricdata.ResourceMetrics {
 	t.Helper()
@@ -476,4 +491,169 @@ func TestUsageOTel_MeterStaleGaugeAndReplicaIndependence(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	assert.Equal(t, map[string]int64{proj.ID: 0}, gaugeValues(r1))
+}
+
+func TestUsageOTel_ExceedingSDKDefaultCardinalityLimitNoOverflow(t *testing.T) {
+	ctx := context.Background()
+	reader := sdkmetric.NewManualReader()
+	mpOpts := append(
+		[]sdkmetric.Option{sdkmetric.WithReader(reader)},
+		hubmetrics.UsageMetricViews(hubmetrics.DefaultUsageOTelCardinalityLimit)...,
+	)
+	mp := sdkmetric.NewMeterProvider(mpOpts...)
+	t.Cleanup(func() { _ = mp.Shutdown(ctx) })
+
+	m, err := NewUsageOTelMetrics(mp,
+		WithUsageOTelActiveSink(true),
+		WithUsageOTelCardinality(UsageOTelCardinalityAgent),
+	)
+	require.NoError(t, err)
+
+	// Emit 500 distinct agents × 5 token_types = 2,500 distinct attribute sets
+	// (> 2,000 OTel SDK defaultCardinalityLimit).
+	const numAgents = 500
+	events := make([]*store.UsageEvent, 0, numAgents)
+	attrsByRun := make(map[string]*store.RunAttribution, numAgents)
+	for i := 0; i < numAgents; i++ {
+		runID := fmt.Sprintf("run-card-%04d", i)
+		agID := fmt.Sprintf("ag-card-%04d", i)
+		projID := fmt.Sprintf("proj-card-%02d", i%10)
+		attrsByRun[runID] = &store.RunAttribution{
+			RunID:     runID,
+			ProjectID: projID,
+			AgentID:   agID,
+			AgentSlug: "slug-" + agID,
+			Harness:   "claude",
+		}
+		base := int64(i + 1)
+		events = append(events, &store.UsageEvent{
+			RunID:      runID,
+			Model:      "claude-sonnet-4-6",
+			Status:     telemetrycontract.StatusSuccess,
+			Calls:      1,
+			Input:      usageInt64p(base * 10),
+			Output:     usageInt64p(base * 5),
+			CacheRead:  usageInt64p(base * 3),
+			CacheWrite: usageInt64p(base * 2),
+			Reasoning:  usageInt64p(base),
+		})
+	}
+	m.RecordCommittedEvents(ctx, events, attrsByRun)
+
+	rm := collectUsageOTelMetrics(t, reader)
+	overflowKey := attribute.Key("otel.metric.overflow")
+
+	callsMet := findUsageOTelMetric(rm, telemetrycontract.MetricAPICalls)
+	require.NotNil(t, callsMet)
+	callsSum := callsMet.Data.(metricdata.Sum[int64])
+	require.Len(t, callsSum.DataPoints, numAgents)
+	for _, dp := range callsSum.DataPoints {
+		_, hasOverflow := dp.Attributes.Value(overflowKey)
+		assert.False(t, hasOverflow, "gen_ai.api.calls must not overflow")
+		assert.Equal(t, int64(1), dp.Value)
+	}
+
+	tokMet := findUsageOTelMetric(rm, telemetrycontract.MetricUsageTokens)
+	require.NotNil(t, tokMet)
+	tokSum := tokMet.Data.(metricdata.Sum[int64])
+	require.Len(t, tokSum.DataPoints, numAgents*5)
+
+	gotByAgent := make(map[string]map[string]int64, numAgents)
+	for _, dp := range tokSum.DataPoints {
+		_, hasOverflow := dp.Attributes.Value(overflowKey)
+		assert.False(t, hasOverflow, "scion.usage.tokens must not overflow")
+		am := usageOTelAttrMap(dp.Attributes)
+		agID := am[telemetrycontract.AgentLabel]
+		tt := am[telemetrycontract.TokenTypeLabel]
+		if gotByAgent[agID] == nil {
+			gotByAgent[agID] = make(map[string]int64, 5)
+		}
+		gotByAgent[agID][tt] = dp.Value
+	}
+	for i := 0; i < numAgents; i++ {
+		agID := fmt.Sprintf("ag-card-%04d", i)
+		base := int64(i + 1)
+		assert.Equal(t, map[string]int64{
+			telemetrycontract.TokenTypeInput:      base * 10,
+			telemetrycontract.TokenTypeOutput:     base * 5,
+			telemetrycontract.TokenTypeCacheRead:  base * 3,
+			telemetrycontract.TokenTypeCacheWrite: base * 2,
+			telemetrycontract.TokenTypeReasoning:  base,
+		}, gotByAgent[agID])
+	}
+}
+
+type countingStaleMeterStore struct {
+	calls  atomic.Int64
+	counts map[string]int64
+}
+
+func (c *countingStaleMeterStore) DBNow(context.Context) (time.Time, error) {
+	c.calls.Add(1)
+	return time.Now().UTC(), nil
+}
+
+func (c *countingStaleMeterStore) CountStaleMetersByProject(context.Context, time.Time) (map[string]int64, error) {
+	out := make(map[string]int64, len(c.counts))
+	for k, v := range c.counts {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func TestUsageOTel_MeterStaleGatedOnExperimentAndZeroHeld(t *testing.T) {
+	ctx := context.Background()
+	fakeStore := &countingStaleMeterStore{
+		counts: map[string]int64{"proj-gated": 2},
+	}
+
+	enabled := false
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(ctx) })
+
+	_, err := NewUsageOTelMetrics(mp,
+		WithUsageOTelActiveSink(true),
+		WithUsageOTelStaleStore(fakeStore),
+		WithUsageOTelEnabled(func() bool { return enabled }),
+		withUsageOTelCacheTTL(30*time.Second),
+		withUsageOTelClock(func() time.Time { return now }),
+	)
+	require.NoError(t, err)
+
+	// Experiment OFF: zero DB calls, zero observations (R-C).
+	rmOff := collectUsageOTelMetrics(t, reader)
+	assert.Nil(t, findUsageOTelMetric(rmOff, MetricUsageMeterStale))
+	assert.Equal(t, int64(0), fakeStore.calls.Load(), "must not query store when experiment is off")
+
+	// Experiment ON: queries store and observes 2.
+	enabled = true
+	rmOn := collectUsageOTelMetrics(t, reader)
+	met := findUsageOTelMetric(rmOn, MetricUsageMeterStale)
+	require.NotNil(t, met)
+	assert.Equal(t, int64(1), fakeStore.calls.Load())
+	assert.Equal(t, int64(2), met.Data.(metricdata.Gauge[int64]).DataPoints[0].Value)
+
+	// Project recovers to 0 (O-4): must hold 0 across multiple cache refreshes
+	// for defaultMeterStaleZeroHold (2m) so both 60s readers observe 0, then prune.
+	fakeStore.counts = map[string]int64{}
+	now = now.Add(40 * time.Second)
+	rmZero1 := collectUsageOTelMetrics(t, reader)
+	metZero1 := findUsageOTelMetric(rmZero1, MetricUsageMeterStale)
+	require.NotNil(t, metZero1)
+	assert.Equal(t, int64(0), metZero1.Data.(metricdata.Gauge[int64]).DataPoints[0].Value)
+
+	// Second refresh 60s later (still within 2m hold window): still emits 0.
+	now = now.Add(60 * time.Second)
+	rmZero2 := collectUsageOTelMetrics(t, reader)
+	metZero2 := findUsageOTelMetric(rmZero2, MetricUsageMeterStale)
+	require.NotNil(t, metZero2)
+	assert.Equal(t, int64(0), metZero2.Data.(metricdata.Gauge[int64]).DataPoints[0].Value)
+
+	// Past the 2m hold window: project is pruned.
+	now = now.Add(90 * time.Second)
+	rmPruned := collectUsageOTelMetrics(t, reader)
+	assert.Nil(t, findUsageOTelMetric(rmPruned, MetricUsageMeterStale))
 }

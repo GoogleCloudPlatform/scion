@@ -682,14 +682,18 @@ When the Hub has an active metrics sink, the capability probe (`GET /api/v1/agen
 ### Operator Notes & Switch-Over Semantics
 
 - **Hub OTLP endpoint scope:** Setting `SCION_OTEL_ENDPOINT` on the Hub exports **all** Hub metric groups (not only usage counters) to that OTLP gRPC collector and enables `suppress_direct_otel: true`. Do not point `SCION_OTEL_ENDPOINT` at a logs-only collector. `SCION_OTEL_PROTOCOL` must be `grpc` (or unset); non-gRPC values are rejected at startup so no broken exporter is constructed and suppression stays off.
+- **Uniform fleet configuration:** In multi-replica deployments, all Hub replicas must be uniformly configured with a working metrics sink. During config skew or a rolling upgrade with pre-P2.2 replicas in the pool, any batch stamped `direct_otel_suppressed=true` that lands on a replica without a sink is persisted to the ledger/rollups but not re-emitted (the response then flips the container back to direct export on the next batch/heartbeat).
 - **Bounded toggle windows:** Each outbox event records whether direct OTel was suppressed at write time (`direct_otel_suppressed`), so residual WAL replays across restarts or mid-run toggles are neither double-counted nor dropped. At an experiment toggle mid-run (late activation via periodic re-probe or `404` revocation), a bounded window of up to one loopback periodic reader interval (~60s) remains where in-flight metric deltas recorded immediately before the toggle may be stripped on late activation or double-counted on revocation.
 
-### Cardinality Control (`SCION_HUB_USAGE_OTEL_CARDINALITY`)
+### Cardinality Control (`SCION_HUB_USAGE_OTEL_CARDINALITY` & `SCION_HUB_USAGE_OTEL_CARDINALITY_LIMIT`)
 
-| Value | Stamped Attribution Labels | When to Use |
+Because cumulative OTel counters retain every observed attribute set in memory until the Hub process restarts, the Hub overrides the OTel SDK's default 2,000-series-per-instrument limit for `gen_ai.api.calls` and `scion.usage.tokens` via `SCION_HUB_USAGE_OTEL_CARDINALITY_LIMIT` (default `20000`, max `250000`). At ~200–400 bytes per cumulative entry, `20000` attribute sets across both counters bounds memory to ~8–16 MiB per replica and covers ~4,000 `(agent, model)` pairs × 5 `token_type`s per replica lifetime. If the limit is reached, the OTel SDK folds additional sets into `otel.metric.overflow=true` (dropping `scion_project_id` / `scion_agent_id`) and the Hub logs a rate-limited warning.
+
+| Variable | Value | Behavior & Sizing |
 |---|---|---|
-| `agent` *(default)* | `scion_project_id`, `scion_agent_id`, `scion_agent_slug` | Default. Preserves full parity with per-agent Cloud Monitoring queries and `UniqueAgents`. Roughly ~7 active series per `(agent, model)` per Hub replica (~28k active series for 1,000 agents/day × 2 models × 2 replicas, within Cloud Monitoring's 50k–250k per-descriptor limit). |
-| `project` | `scion_project_id` only | High-cardinality hubs where per-agent series would approach Cloud Monitoring descriptor limits. Emits project-level OTel aggregates only; per-agent breakdowns remain available from Hub DB rollups. |
+| `SCION_HUB_USAGE_OTEL_CARDINALITY` | `agent` *(default)* | Stamps `scion_project_id`, `scion_agent_id`, `scion_agent_slug`. Preserves parity with per-agent Cloud Monitoring queries and `UniqueAgents`. Each `(agent, model)` creates ~7 cumulative series per replica until restart. Suitable for small-to-medium fleets (up to ~4,000 `(agent, model)` pairs per replica restart under the default 20,000 SDK limit; Cloud Monitoring allows 50k–250k active series per descriptor). |
+| `SCION_HUB_USAGE_OTEL_CARDINALITY` | `project` | **Recommended for large fleets.** Stamps `scion_project_id` only, keeping both SDK memory and Cloud Monitoring descriptor cardinality bounded by `(project, model, token_type)` while per-agent views remain available from Hub DB rollups. |
+| `SCION_HUB_USAGE_OTEL_CARDINALITY_LIMIT` | `20000` *(default)* | Per-instrument OTel SDK `AggregationLimit` for Hub-re-emitted `gen_ai.api.calls` and `scion.usage.tokens` (`1`..`250000`). Raise if an `otel.metric.overflow` warning is logged on an `agent`-mode Hub, or switch to `project` mode. |
 
 ## Related Guides
 

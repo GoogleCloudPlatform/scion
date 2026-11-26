@@ -18,6 +18,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -485,7 +486,58 @@ func TestPipeline_SuppressRevalidatedPerResponse(t *testing.T) {
 		t.Fatal("expected SuppressDirectOTel=true after replica A response")
 	}
 
-	// Replica B answers suppress=false (or omits the field): suppression MUST flip to false.
+	// Replica B answers suppress=false (or omits the field) on an event batch
+	// via sendGroup (mutant s8): suppression MUST flip to false.
+	mu.Lock()
+	replicaSuppress = false
+	mu.Unlock()
+	now := time.Now().UTC()
+	inTok := int64(10)
+	supTrue := true
+	ev := telemetrycontract.UsageEvent{
+		Envelope:             telemetrycontract.NewEnvelope(telemetrycontract.EventTypeUsage, "ev-reval-batch", "sciontool/agent/ag1", now, now),
+		UsageSource:          telemetrycontract.UsageSourceNative,
+		SourceKind:           "claude.api_request",
+		SourceSchemaVersion:  "1",
+		SourceEventID:        "rid-reval-batch",
+		SourceIdentity:       telemetrycontract.SourceIdentityRequestID,
+		SourceOccurrence:     1,
+		ProducerEpoch:        "ep-1",
+		ProducerSeq:          1,
+		RunID:                "run-reval",
+		Harness:              "claude",
+		Model:                "claude-sonnet-4-6",
+		ModelSource:          telemetrycontract.ModelSourceEvent,
+		Status:               telemetrycontract.StatusSuccess,
+		Calls:                1,
+		Input:                &inTok,
+		InputDerivation:      telemetrycontract.InputDerivationReported,
+		TokenStatus:          telemetrycontract.TokenStatusReported,
+		MalformedFields:      []string{},
+		DirectOTelSuppressed: &supTrue,
+	}
+	line, err := telemetrycontract.Marshal(&ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := p.analytics.drainer.hubSink.SendBatch(ctx, [][]byte{line}); err != nil {
+		t.Fatalf("SendBatch replica B: %v", err)
+	}
+	if p.SuppressDirectOTel() {
+		t.Fatal("expected SuppressDirectOTel=false after replica B batch response answered false")
+	}
+
+	// Flip back to true via batch response, then flip back to false via heartbeat
+	// to pin both SendBatch (sendGroup) and SendHeartbeat revalidation paths.
+	mu.Lock()
+	replicaSuppress = true
+	mu.Unlock()
+	if _, err := p.analytics.drainer.hubSink.SendBatch(ctx, [][]byte{line}); err != nil {
+		t.Fatalf("SendBatch replica A: %v", err)
+	}
+	if !p.SuppressDirectOTel() {
+		t.Fatal("expected SuppressDirectOTel=true after replica A batch response")
+	}
 	mu.Lock()
 	replicaSuppress = false
 	mu.Unlock()
@@ -493,7 +545,7 @@ func TestPipeline_SuppressRevalidatedPerResponse(t *testing.T) {
 		t.Fatalf("heartbeat replica B: %v", err)
 	}
 	if p.SuppressDirectOTel() {
-		t.Fatal("expected SuppressDirectOTel=false after replica B answered false")
+		t.Fatal("expected SuppressDirectOTel=false after replica B heartbeat answered false")
 	}
 
 	// Canonical counters sent now must be exported directly again.
@@ -593,6 +645,85 @@ func TestPipeline_SuppressClearedOnRevocationAndSetOnLateActivation(t *testing.T
 		}
 		if !isHubOutboxSuppressDir(hubDir) {
 			t.Fatal("expected suppress.hub marker on disk after late probe activation")
+		}
+	})
+
+	// 3. Revocation on the late-activation (GCP-default) path (mutant s6b):
+	// exercises analyticsState.startDrainer's default branch end-to-end.
+	t.Run("late activation followed by revocation clears suppression", func(t *testing.T) {
+		addr, backend := startCaptureOTLPBackend(t)
+		p := NewWithConfig(&Config{
+			Enabled:      true,
+			CloudEnabled: true,
+			Endpoint:     addr,
+			Protocol:     "grpc",
+			Insecure:     true,
+			GRPCPort:     0,
+			HTTPPort:     0,
+		})
+		home := t.TempDir()
+		p.SetAnalyticsOutbox(home, -1, -1)
+		p.SetHubIDResolver(func(context.Context) (string, error) { return "hub-late-rev", nil })
+		p.SetHubUsageProbeInterval(time.Millisecond)
+		var revoke atomic.Bool
+		p.SetHubUsageProbe(func(context.Context) (*HubUsageSinkConfig, error) {
+			return &HubUsageSinkConfig{
+				Post: func(context.Context, telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+					if revoke.Load() {
+						return nil, ErrUsageIngestRevoked
+					}
+					return &telemetrycontract.UsageIngestResponse{SuppressDirectOTel: true}, nil
+				},
+				RunID:              "run-late-rev",
+				HubID:              "hub-late-rev",
+				SuppressDirectOTel: true,
+				DrainInterval:      time.Hour,
+				HeartbeatInterval:  time.Millisecond,
+			}, nil
+		})
+
+		ctx := context.Background()
+		if err := p.Start(ctx); err != nil {
+			t.Fatalf("Pipeline.Start: %v", err)
+		}
+		// Start analyticsState in the default (GCP-only + hubProbe) branch directly
+		// with a non-nil *GCPExporter stub so startDrainer takes default:.
+		p.analytics.startDrainer(ctx, &GCPExporter{})
+		// Wait for the drainer's probe to activate the Hub sink and set suppress=true.
+		deadline := time.Now().Add(2 * time.Second)
+		for !p.SuppressDirectOTel() && time.Now().Before(deadline) {
+			p.analytics.drainer.RunOnce(ctx)
+			if !p.SuppressDirectOTel() {
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		if !p.SuppressDirectOTel() {
+			t.Fatal("expected SuppressDirectOTel=true after late activation")
+		}
+		// Trigger 404 revocation through the drainer's heartbeat -> exercises the
+		// late-activation branch's wired onHubRevoked callback end-to-end.
+		revoke.Store(true)
+		deadline = time.Now().Add(2 * time.Second)
+		for p.SuppressDirectOTel() && time.Now().Before(deadline) {
+			time.Sleep(2 * time.Millisecond)
+			p.analytics.drainer.RunOnce(ctx)
+		}
+		if p.SuppressDirectOTel() {
+			t.Fatal("expected SuppressDirectOTel=false after revocation on late-activation path")
+		}
+		// Canonical counters must now pass through handleMetrics and export directly.
+		if err := p.handleMetrics(ctx, testMixedMetricsBatch()); err != nil {
+			t.Fatalf("handleMetrics after late-activation revocation: %v", err)
+		}
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = p.Stop(stopCtx)
+
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		names := exportedMetricNames(backend.metrics)
+		if names[telemetrycontract.MetricAPICalls] == 0 || names[telemetrycontract.MetricUsageTokens] == 0 {
+			t.Fatalf("expected canonical counters exported after late-activation revocation, got %v", names)
 		}
 	})
 }
