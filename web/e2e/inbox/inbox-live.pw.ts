@@ -196,6 +196,7 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       await expect(inlineLink).toHaveCount(1);
       await expect(inlineLink).toHaveText('1 pending secret');
       await expect(inlineLink).toHaveAttribute('href', '/profile/secrets');
+      await expect(inlineLink).toHaveCSS('text-decoration-line', 'underline');
       await expect(pendingSecretsCard.locator('.card-actions')).toHaveCount(0);
       await expect(profileNavBadge).toHaveText('1', { timeout: 7_000 });
 
