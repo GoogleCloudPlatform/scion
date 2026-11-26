@@ -588,7 +588,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	// env-type secret and the runtime keys win over resolved auth. The
 	// discovery settings are emitted as plain env by buildCloudRunInstance.
 	// Deliver resolved secrets through the instance env: env-type secrets as
-	// plain variables, file/variable secrets, the hub credential, the
+	// plain variables, file secrets, the hub credential, the
 	// harness secrets and the staged resolved-auth entries as the staged
 	// blob that sciontool init writes out.
 	// Done before any provisioning so an oversized blob fails fast; its

@@ -73,7 +73,11 @@ func assertResolvedSecretsInEnv(t *testing.T, env map[string]string) {
 	if _, ok := env["EXAMPLE_REGION"]; ok {
 		t.Error("on_demand secret EXAMPLE_REGION must not be a plain env var")
 	}
-	if raw, err := base64.StdEncoding.DecodeString(blob); err == nil && strings.Contains(string(raw), crTestOnDemandSecretValue) {
+	raw, err := base64.StdEncoding.DecodeString(blob)
+	if err != nil {
+		t.Fatalf("base64 decode %s: %v", stagedsecrets.EnvVar, err)
+	}
+	if strings.Contains(string(raw), crTestOnDemandSecretValue) {
 		t.Error("on_demand secret value must not appear in staged secrets blob")
 	}
 }

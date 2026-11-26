@@ -847,14 +847,16 @@ done`, "sh", home}
 
 // nfsHomeSyncExcludes returns what the home transfer of an NFS-home pod
 // leaves out: the shared home transfer set's excludes (homeTransferExcludes:
-// the link targets and the harness bundle's secrets and outputs). The
-// harness secrets are staged in memory (k8sHarnessSecretsDir) and the
-// outputs are regenerated in the pod (k8sHarnessOutputsDir).
+// the link targets and the harness bundle's secrets and outputs), plus the
+// retired .scion/secrets.json path unconditionally so a stale file from an
+// old run is never synced back. The harness secrets are staged in memory
+// (k8sHarnessSecretsDir) and the outputs are regenerated in the pod
+// (k8sHarnessOutputsDir).
 func (r *KubernetesRuntime) nfsHomeSyncExcludes(config RunConfig) []string {
 	if k8sHomeFileModeFor(config) != k8sHomeFilesLink {
-		return []string{harnessBundleSecretsRel, harnessBundleOutputsRel}
+		return []string{harnessBundleSecretsRel, harnessBundleOutputsRel, cloudRunSecretsJSONHomeRel}
 	}
-	return homeTransferExcludes(config)
+	return append(homeTransferExcludes(config), cloudRunSecretsJSONHomeRel)
 }
 
 // k8sHarnessSecretsDirCommand creates the in-memory harness secrets

@@ -66,11 +66,11 @@ func homeTransferParityConfigs() map[string]RunConfig {
 
 // The Kubernetes NFS-home transfer and the Cloud Run home copy leave out
 // the same classification (one homeTransferExcludes): Kubernetes leaves out
-// exactly its link targets plus the harness bundle's secrets and outputs,
-// and Cloud Run leaves out the same set plus the hub credential file, its
-// staging file, the retired secrets.json path, and the home reset marker.
+// exactly its link targets plus the harness bundle's secrets and outputs and
+// the retired secrets.json path, and Cloud Run leaves out the same set plus
+// the hub credential file, its staging file, and the home reset marker.
 func TestHomeTransferExcludes_ParityWithKubernetes(t *testing.T) {
-	harness := []string{harnessBundleSecretsRel, harnessBundleOutputsRel}
+	harness := []string{harnessBundleSecretsRel, harnessBundleOutputsRel, cloudRunSecretsJSONHomeRel}
 	for name, cfg := range homeTransferParityConfigs() {
 		for _, gke := range []bool{false, true} {
 			r := &KubernetesRuntime{GKEMode: gke}
@@ -78,10 +78,10 @@ func TestHomeTransferExcludes_ParityWithKubernetes(t *testing.T) {
 
 			want := append(slices.Clone(r.k8sHomeLinkTargets(cfg)), harness...)
 			if !slices.Equal(k8s, want) {
-				t.Errorf("%s (gke=%v): kubernetes excludes %v, want link targets plus harness dirs %v", name, gke, k8s, want)
+				t.Errorf("%s (gke=%v): kubernetes excludes %v, want link targets plus harness dirs and retired secrets.json %v", name, gke, k8s, want)
 			}
-			if shared := homeTransferExcludes(cfg); !slices.Equal(k8s, shared) {
-				t.Errorf("%s (gke=%v): kubernetes excludes %v differ from homeTransferExcludes %v", name, gke, k8s, shared)
+			if shared := append(homeTransferExcludes(cfg), cloudRunSecretsJSONHomeRel); !slices.Equal(k8s, shared) {
+				t.Errorf("%s (gke=%v): kubernetes excludes %v differ from homeTransferExcludes+secrets.json %v", name, gke, k8s, shared)
 			}
 		}
 

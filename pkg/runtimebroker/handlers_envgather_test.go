@@ -1260,7 +1260,7 @@ profiles:
     secrets:
       - key: PROFILE_TOKEN
         description: "Profile token"
-        type: on_demand
+        type: file
 `
 	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
@@ -1307,11 +1307,11 @@ profiles:
 		t.Errorf("expected FILE_CERT type='file', got %q", info.Type)
 	}
 
-	// Check PROFILE_TOKEN has type "on_demand"
+	// Check PROFILE_TOKEN has type "file"
 	if info, ok := envReqs.SecretInfo["PROFILE_TOKEN"]; !ok {
 		t.Error("expected PROFILE_TOKEN in SecretInfo")
-	} else if info.Type != "on_demand" {
-		t.Errorf("expected PROFILE_TOKEN type='on_demand', got %q", info.Type)
+	} else if info.Type != "file" {
+		t.Errorf("expected PROFILE_TOKEN type='file', got %q", info.Type)
 	}
 
 	// ANTHROPIC_API_KEY is a harness key — should have no type (empty string)

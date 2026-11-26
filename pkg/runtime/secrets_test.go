@@ -431,6 +431,7 @@ func TestBuildCommonRunArgs_EnvironmentSecrets(t *testing.T) {
 		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user"},
 		{Name: "DB_PASS", Type: "environment", Target: "DATABASE_PASSWORD", Value: "secret", Source: "project"},
 		{Name: "ON_DEMAND", Type: "on_demand", Target: "ON_DEMAND", Value: "must-not-inject", Source: "project"},
+		{Name: "UNKNOWN", Type: "future_type", Target: "UNKNOWN", Value: "must-not-inject-unknown", Source: "project"},
 		{Name: "CERT", Type: "file", Target: "/etc/cert.pem", Value: "data", Source: "user"},
 	}
 
@@ -457,9 +458,15 @@ func TestBuildCommonRunArgs_EnvironmentSecrets(t *testing.T) {
 		t.Errorf("expected environment secret DATABASE_PASSWORD in args, got: %s", argsStr)
 	}
 
-	// Variable and file secrets should NOT be injected as env vars
-	if containsArg(args, "-e", "config=json-data") {
-		t.Errorf("variable secret should not be injected as env var")
+	// on_demand, unknown, and file secrets must NOT be injected as env vars
+	if containsArg(args, "-e", "ON_DEMAND=must-not-inject") || strings.Contains(argsStr, "must-not-inject") {
+		t.Errorf("on_demand secret must not be injected as env var: %s", argsStr)
+	}
+	if containsArg(args, "-e", "UNKNOWN=must-not-inject-unknown") || strings.Contains(argsStr, "must-not-inject-unknown") {
+		t.Errorf("unknown-type secret must not be injected as env var: %s", argsStr)
+	}
+	if containsArg(args, "-e", "/etc/cert.pem=data") {
+		t.Errorf("file secret must not be injected as env var: %s", argsStr)
 	}
 }
 

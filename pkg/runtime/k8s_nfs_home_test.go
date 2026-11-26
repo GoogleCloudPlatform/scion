@@ -639,7 +639,7 @@ func TestRun_NFSHomeExcludesLinksAndVerifies(t *testing.T) {
 				}
 				return
 			}
-			wantEx := []string{".ssh/id_rsa", ".gemini/oauth_creds.json", ".config/gcloud/telemetry.json", ".config/gcloud/application_default_credentials.json", ".scion/harness/secrets", ".scion/harness/outputs"}
+			wantEx := []string{".ssh/id_rsa", ".gemini/oauth_creds.json", ".config/gcloud/telemetry.json", ".config/gcloud/application_default_credentials.json", ".scion/harness/secrets", ".scion/harness/outputs", ".scion/secrets.json"}
 			if !sameStrings(excludes, wantEx) {
 				t.Errorf("sync excludes = %v, want %v", excludes, wantEx)
 			}

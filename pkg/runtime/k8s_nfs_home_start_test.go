@@ -949,7 +949,7 @@ func TestNFSHomeSyncExcludes(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
 	for _, cfg := range []RunConfig{nfsHomeTestConfig(true), withTestHomeStorage(RunConfig{Name: "a", Image: "i", UnixUsername: "scion"})} {
 		ex := rt.nfsHomeSyncExcludes(cfg)
-		want := map[string]bool{".scion/harness/secrets": false, ".scion/harness/outputs": false}
+		want := map[string]bool{".scion/harness/secrets": false, ".scion/harness/outputs": false, ".scion/secrets.json": false}
 		for _, e := range ex {
 			if _, ok := want[e]; ok {
 				want[e] = true

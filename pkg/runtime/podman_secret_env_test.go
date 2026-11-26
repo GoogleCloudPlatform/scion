@@ -34,8 +34,9 @@ import (
 // be told apart the way /proc/<pid>/cmdline and /proc/<pid>/environ are.
 
 const (
-	podmanSecretSentinel = "FAKE-PODMAN-SECRET-not-a-real-credential"
-	podmanAuthSentinel   = "FAKE-PODMAN-AUTH-not-a-real-credential"
+	podmanSecretSentinel   = "FAKE-PODMAN-SECRET-not-a-real-credential"
+	podmanAuthSentinel     = "FAKE-PODMAN-AUTH-not-a-real-credential"
+	podmanOnDemandSentinel = "FAKE-PODMAN-ONDEMAND-not-a-real-credential"
 )
 
 // writeArgvEnvPodman writes a mock podman that records its argv (one
@@ -77,6 +78,8 @@ func TestPodmanRun_SecretEnvNotInArgv(t *testing.T) {
 			{Name: "api", Type: "environment", Target: "FAKE_API_KEY", Value: podmanSecretSentinel},
 			// A file secret travels in the staged blob, SCION_STAGED_SECRETS.
 			{Name: "cred", Type: "file", Target: "~/.cred", Value: podmanSecretSentinel},
+			// An on_demand secret must never reach argv, env, or the staged blob.
+			{Name: "od", Type: "on_demand", Target: "FAKE_ON_DEMAND", Value: podmanOnDemandSentinel},
 		},
 		ResolvedAuth: &api.ResolvedAuth{
 			Method:  "api-key",
@@ -89,10 +92,13 @@ func TestPodmanRun_SecretEnvNotInArgv(t *testing.T) {
 
 	argv := readRecordedLines(t, argvFile)
 	joined := strings.Join(argv, "\n")
-	for _, sentinel := range []string{podmanSecretSentinel, podmanAuthSentinel} {
+	for _, sentinel := range []string{podmanSecretSentinel, podmanAuthSentinel, podmanOnDemandSentinel} {
 		if strings.Contains(joined, sentinel) {
 			t.Errorf("secret %q is in podman's argv:\n%s", sentinel, joined)
 		}
+	}
+	if hasEnvArg(argv, "FAKE_ON_DEMAND") {
+		t.Errorf("on_demand secret FAKE_ON_DEMAND must not appear in podman's argv:\n%s", joined)
 	}
 	for _, name := range []string{"FAKE_API_KEY", "FAKE_OAUTH_TOKEN", stagedsecrets.EnvVar} {
 		if !hasEnvArg(argv, name) {
@@ -119,6 +125,11 @@ func TestPodmanRun_SecretEnvNotInArgv(t *testing.T) {
 		return strings.HasPrefix(e, stagedsecrets.EnvVar+"=") && len(e) > len(stagedsecrets.EnvVar)+1
 	}) {
 		t.Errorf("podman's environment lacks the staged secrets blob %s", stagedsecrets.EnvVar)
+	}
+	for _, e := range env {
+		if strings.HasPrefix(e, "FAKE_ON_DEMAND=") || strings.Contains(e, podmanOnDemandSentinel) {
+			t.Errorf("on_demand secret must not appear in podman's environment: %q", e)
+		}
 	}
 	// podman's own environment is otherwise this process's.
 	if p := os.Getenv("PATH"); p != "" && !slices.Contains(env, "PATH="+p) {
