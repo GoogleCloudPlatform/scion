@@ -230,7 +230,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.lifecycle.reincarnate",
 		Domain:      "agent",
-		Description: "Reincarnate an agent. Patch flags also require agent.update for user callers, and --image requires agent.attach for all callers",
+		Description: "Reincarnate an agent. Patch flags also require agent.update for user callers, and --image or --harness requires agent.attach for all callers",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/reincarnate", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/reincarnate", Method: "POST"},
@@ -246,6 +246,7 @@ var agentOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"},
 			{Package: "pkg/hub", Function: "TestReincarnateAgent_ImageEditRequiresAttach"},
+			{Package: "pkg/hub", Function: "TestReincarnateAgent_HarnessSwitchRequiresAttach"},
 		},
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -355,6 +356,7 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestAgentUpdateToken_PassthroughGateStillApplies"},
 			{Package: "pkg/hub", Function: "TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector"},
 			{Package: "pkg/hub", Function: "TestPatchAgent_ImageEditRequiresAttach"},
+			{Package: "pkg/hub", Function: "TestPendingReauth_ImageEditRequiresAttach"},
 		},
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},

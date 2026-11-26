@@ -5056,12 +5056,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		}
 	}
 
-	// Image writes require agent.attach in addition to agent.update
-	// (ptone/scion#3402): changing another user's agent image follows the
-	// same rule as attaching to that agent. Checked before any
-	// optimistic-lock, phase, or state mutation so a caller without attach
-	// is refused without disclosing whether the image differs.
-	if updates.Config != nil && updates.Config.Image != "" {
+	// Image writes (including setting, echoing, or clearing with "" / null)
+	// require agent.attach in addition to agent.update (ptone/scion#3402):
+	// changing another user's agent image follows the same rule as attaching
+	// to that agent. Checked before any optimistic-lock, phase, or state
+	// mutation so a caller without attach is refused without disclosing
+	// whether the image differs.
+	if updates.Config != nil && (updates.Config.Image != "" || presentConfigKeys["image"]) {
 		if !s.authorize(w, r, agentResource(agent), ActionAttach) {
 			return
 		}

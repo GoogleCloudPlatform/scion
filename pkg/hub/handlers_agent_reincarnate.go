@@ -318,12 +318,14 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	// Changing an agent's image via reincarnate --image requires agent.attach
+	// Changing an agent's image via reincarnate --image or switching its
+	// harness config via --harness (which drops any explicit image and adopts
+	// the target harness config's image) requires agent.attach
 	// (ptone/scion#3402), matching the PATCH config.image gate and the
 	// agent.attach rule for every caller kind (user, UAT, or agent). Runs
-	// before any side effect, for a dry run too, without disclosing whether
-	// the requested image differs from the agent's current image.
-	if req.Image != "" {
+	// before any comparison, plan work, or side effect, for a dry run too,
+	// without disclosing whether the image differs.
+	if req.Image != "" || req.HarnessConfig != "" {
 		if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
 			return
 		}
