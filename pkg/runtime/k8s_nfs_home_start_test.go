@@ -943,11 +943,17 @@ func TestRun_NFSHomeHarnessSecretsStagedInMemory(t *testing.T) {
 	}
 }
 
-// The home transfer of an NFS-home pod never includes the harness bundle's
-// secrets or outputs, whatever the links are.
+// The home transfer of an NFS-home pod (and the non-link fallback branch)
+// never includes the harness bundle's secrets or outputs, nor the retired
+// .scion/secrets.json path, whatever the links are.
 func TestNFSHomeSyncExcludes(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
-	for _, cfg := range []RunConfig{nfsHomeTestConfig(true), withTestHomeStorage(RunConfig{Name: "a", Image: "i", UnixUsername: "scion"})} {
+	for _, cfg := range []RunConfig{
+		nfsHomeTestConfig(true),
+		withTestHomeStorage(RunConfig{Name: "a", Image: "i", UnixUsername: "scion"}),
+		// Non-link branch (plain pod: HomeStorageBackend == "").
+		nfsHomeTestConfig(false),
+	} {
 		ex := rt.nfsHomeSyncExcludes(cfg)
 		want := map[string]bool{".scion/harness/secrets": false, ".scion/harness/outputs": false, ".scion/secrets.json": false}
 		for _, e := range ex {
@@ -957,7 +963,7 @@ func TestNFSHomeSyncExcludes(t *testing.T) {
 		}
 		for k, v := range want {
 			if !v {
-				t.Errorf("excludes %v lack %s", ex, k)
+				t.Errorf("excludes %v lack %s (homeStorageBackend=%q)", ex, k, cfg.HomeStorageBackend)
 			}
 		}
 	}

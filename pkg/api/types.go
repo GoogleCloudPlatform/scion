@@ -961,7 +961,7 @@ type HubSkillInjectionSetting struct {
 type SecretKeyInfo struct {
 	Description string `json:"description,omitempty"`
 	Source      string `json:"source"`         // "harness", "template", "settings"
-	Type        string `json:"type,omitempty"` // "environment" (default), "file", "on_demand"
+	Type        string `json:"type,omitempty"` // "environment" (default), "file"
 }
 
 // ResolvedSecret represents a secret that has been resolved from the Hub
