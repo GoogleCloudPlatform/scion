@@ -22,38 +22,74 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 )
 
 const agySQLiteWakeWriteTimeout = 50 * time.Millisecond
 
-var wakeUmaskMu sync.Mutex
-
 type unixWakeListener struct {
-	conn *net.UnixConn
-	path string
-	done chan struct{}
+	conn  *net.UnixConn
+	path  string
+	owner *OutboxOwner
+	done  chan struct{}
 }
 
 func (l *unixWakeListener) Close() error {
 	err := l.conn.Close()
 	<-l.done
-	_ = os.Remove(l.path)
+	// Re-verify parent dir is still a non-symlink directory owned by the
+	// expected user before unlinking so root never unlinks through a swapped
+	// symlinked .scion directory.
+	if verifyWakeParentDir(filepath.Dir(l.path), l.owner) == nil {
+		_ = os.Remove(l.path)
+	}
 	return err
+}
+
+// verifyWakeParentDir checks via Lstat that dir is a real directory (never a
+// symlink) and, when running as root with an expected agent owner, is owned by
+// owner.UID. Refuses symlinks and unexpected owners so root never binds,
+// chowns, or unlinks inside an attacker-redirected directory.
+func verifyWakeParentDir(dir string, owner *OutboxOwner) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("wake socket parent %s is a symlink", dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("wake socket parent %s is not a directory", dir)
+	}
+	if owner != nil && os.Geteuid() == 0 && owner.UID > 0 {
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("wake socket parent %s: cannot inspect owner", dir)
+		}
+		if int(st.Uid) != owner.UID {
+			return fmt.Errorf("wake socket parent %s owned by uid %d, want %d", dir, st.Uid, owner.UID)
+		}
+	}
+	return nil
 }
 
 // startAgySQLiteWakeListener binds a Unix domain datagram socket at sockPath
 // so short-lived `sciontool hook` processes (running as the agent user) can
 // send a non-blocking 1-byte wake datagram on PostInvocation without polling
 // the filesystem or depending on OTLP export.
+//
+// Security: validates that the parent `.scion` directory is a real directory
+// (not a symlink) owned by the expected agent UID, then binds the socket inside
+// a fresh root-owned 0700 staging directory, sets 0600 + Lchown inside that
+// private staging directory (no process-wide umask mutation and no post-bind
+// chmod symlink race), and atomically renames the socket into place.
 func startAgySQLiteWakeListener(sockPath string, owner *OutboxOwner, onWake func()) (io.Closer, error) {
 	if sockPath == "" {
 		return nil, fmt.Errorf("empty wake socket path")
 	}
 	dir := filepath.Dir(sockPath)
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
+	if _, err := os.Lstat(dir); os.IsNotExist(err) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("mkdir wake socket dir: %w", err)
 		}
@@ -61,27 +97,47 @@ func startAgySQLiteWakeListener(sockPath string, owner *OutboxOwner, onWake func
 			_ = os.Lchown(dir, owner.UID, owner.GID)
 		}
 	}
-	_ = os.Remove(sockPath)
+	if err := verifyWakeParentDir(dir, owner); err != nil {
+		return nil, err
+	}
 
-	addr := &net.UnixAddr{Name: sockPath, Net: "unixgram"}
-	// Tighten umask around bind so the socket inode is created 0600 atomically,
-	// avoiding any post-bind chmod symlink race in the agent-writable .scion dir.
-	wakeUmaskMu.Lock()
-	oldUmask := syscall.Umask(0o177)
-	conn, err := net.ListenUnixgram("unixgram", addr)
-	syscall.Umask(oldUmask)
-	wakeUmaskMu.Unlock()
+	// Stage the socket inside a fresh 0700 directory owned by this process (root
+	// in sciontool init) so the agent user cannot traverse or swap anything
+	// between ListenUnixgram, Chmod, and Lchown, and without touching the
+	// process-wide umask.
+	// Use a short prefix so <dir>/.w<digits>/s stays shorter than sockPath
+	// itself and well within Linux's 108-byte sun_path limit.
+	stageDir, err := os.MkdirTemp(dir, ".w")
+	if err != nil {
+		return nil, fmt.Errorf("create wake staging dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(stageDir) }()
+
+	stagedSock := filepath.Join(stageDir, "s")
+	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: stagedSock, Net: "unixgram"})
 	if err != nil {
 		return nil, fmt.Errorf("listen wake unixgram %s: %w", sockPath, err)
 	}
+	if err := os.Chmod(stagedSock, 0o600); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("chmod staged wake socket: %w", err)
+	}
 	if owner != nil && os.Geteuid() == 0 && owner.UID > 0 {
-		_ = os.Lchown(sockPath, owner.UID, owner.GID)
+		if err := os.Lchown(stagedSock, owner.UID, owner.GID); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("lchown staged wake socket: %w", err)
+		}
+	}
+	if err := os.Rename(stagedSock, sockPath); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("rename wake socket %s: %w", sockPath, err)
 	}
 
 	l := &unixWakeListener{
-		conn: conn,
-		path: sockPath,
-		done: make(chan struct{}),
+		conn:  conn,
+		path:  sockPath,
+		owner: owner,
+		done:  make(chan struct{}),
 	}
 	go func() {
 		defer close(l.done)

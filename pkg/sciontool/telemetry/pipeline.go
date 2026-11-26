@@ -208,6 +208,9 @@ const (
 	UsageActivationAlreadyActive UsageActivation = "native usage derivation is already active"
 	// UsageActivationNoHarnessRule means SCION_HARNESS has no native rule.
 	UsageActivationNoHarnessRule UsageActivation = "harness has no native usage rule"
+	// UsageActivationAnalyticsDisabled means sqlite_native could not start
+	// because no analytics outbox sink is active.
+	UsageActivationAnalyticsDisabled UsageActivation = "analytics outbox is not enabled"
 )
 
 // ActivateUsageSource enables native usage derivation on an already-running
@@ -263,6 +266,9 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 		}
 		if p.agyTailer.Load() != nil {
 			return UsageActivationAlreadyActive, nil
+		}
+		if p.analytics.sqliteNative == nil {
+			return UsageActivationAnalyticsDisabled, nil
 		}
 		if err := p.startAgySQLiteTailerLocked(ctx); err != nil {
 			return "", fmt.Errorf("starting antigravity sqlite tailer: %w", err)

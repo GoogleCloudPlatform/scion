@@ -51,6 +51,7 @@ const (
 	defaultAgySQLitePollInterval = 15 * time.Second
 	agySQLiteStateSchemaVersion  = 1
 	agyVersionDetectTimeout      = 2 * time.Second
+	defaultAgyVersionMaxFailures = 3
 )
 
 // AgySQLiteStatePath returns <agentHome>/.scion/agy-sqlite-state.json, or ""
@@ -123,8 +124,16 @@ type AntigravitySQLiteConfig struct {
 	BusyTimeoutMs int
 	// RunID scopes persisted schema-drift latching to a single agent run.
 	// Defaults to SCION_LAUNCH_ID when empty. A new run with a different RunID
-	// clears any persisted drift latch from an earlier run.
+	// clears any persisted drift latch from an earlier run. When RunID is empty
+	// (e.g. a local workstation run without a Hub-minted run ID), a persisted
+	// drift latch stays active across restarts until either a non-empty RunID
+	// is supplied or agy-sqlite-state.json is removed.
 	RunID string
+	// MaxVersionFailures is the number of consecutive agy version-detection
+	// failures tolerated as transient retries before latching unverified schema
+	// drift and degrading supported_signals to ["calls"] so the Hub never sees
+	// "measured" with zero tokens (default defaultAgyVersionMaxFailures = 3).
+	MaxVersionFailures int
 
 	// DetectVersion returns the installed agy binary version string (or an
 	// error on transient detection failure, which is retried on subsequent
@@ -159,6 +168,7 @@ type AntigravitySQLiteTailer struct {
 	mu              sync.Mutex
 	state           agySQLitePersistedState
 	versionResolved bool
+	versionFailures int
 	agyVersion      string
 	driftEmitted    map[string]bool
 
@@ -195,6 +205,9 @@ func NewAntigravitySQLiteTailer(cfg AntigravitySQLiteConfig) *AntigravitySQLiteT
 	}
 	if cfg.RunID == "" {
 		cfg.RunID = strings.TrimSpace(os.Getenv("SCION_LAUNCH_ID"))
+	}
+	if cfg.MaxVersionFailures <= 0 {
+		cfg.MaxVersionFailures = defaultAgyVersionMaxFailures
 	}
 	if cfg.DetectVersion == nil {
 		cfg.DetectVersion = detectAgyVersionManaged
@@ -409,6 +422,9 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 	}
 
 	var firstErr error
+	versionCheckedThisPoll := false
+	var pollAgyVer string
+	var pollVerErr error
 	for _, name := range dbNames {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -423,16 +439,38 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 			continue
 		}
 
-		agyVer, verr := t.resolveVersionLocked(ctx)
-		if verr != nil {
-			// Transient version-detection failure (e.g. timeout, exec error):
-			// retry on the next poll without advancing cursors or latching drift.
-			log.Debug("Antigravity SQLite tailer version detection failed (will retry): %v", verr)
-			if firstErr == nil {
-				firstErr = verr
+		// Detect agy version at most once per poll (not per file) so a hanging
+		// or missing binary never burns N * 2s across N DB files.
+		if !versionCheckedThisPoll {
+			versionCheckedThisPoll = true
+			pollAgyVer, pollVerErr = t.resolveVersionLocked(ctx)
+			if pollVerErr != nil {
+				t.versionFailures++
+				if t.versionFailures >= t.cfg.MaxVersionFailures {
+					// Persistent detection failure: degrade honestly to
+					// unverified drift (calls_only) so the Hub never sees
+					// "measured" with zero tokens.
+					reason := fmt.Sprintf("agy version detection failed %d consecutive times: %v", t.versionFailures, pollVerErr)
+					if derr := t.latchVersionDetectDriftLocked(reason); derr != nil && firstErr == nil {
+						firstErr = derr
+					}
+					dirty = true
+					if firstErr == nil {
+						firstErr = pollVerErr
+					}
+					break
+				}
+				// Transient version-detection failure: retry on the next poll
+				// without advancing cursors or latching drift.
+				log.Debug("Antigravity SQLite tailer version detection failed (%d/%d, will retry): %v", t.versionFailures, t.cfg.MaxVersionFailures, pollVerErr)
+				if firstErr == nil {
+					firstErr = pollVerErr
+				}
+				break
 			}
-			continue
+			t.versionFailures = 0
 		}
+		agyVer := pollAgyVer
 
 		// Decode against a cloned DedupeState and cloned Cursor so an outbox
 		// append failure never mutates persisted state or suppresses re-emission
@@ -494,17 +532,20 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 				continue
 			}
 			obs := agyRecordToObservation(rec, res.AgyVersion, t.cfg.Now())
-			if t.cfg.Analytics != nil {
-				if _, err := t.cfg.Analytics.RecordUnique(obs); err != nil {
-					log.Debug("Antigravity SQLite tailer outbox append failed for %s (%s): %v", name, rec.EmissionKey, err)
-					if firstErr == nil {
-						firstErr = err
-					}
-					appendFailed = true
-					break
+			outcome, err := t.cfg.Analytics.RecordUnique(obs)
+			if err != nil {
+				log.Debug("Antigravity SQLite tailer outbox append failed for %s (%s): %v", name, rec.EmissionKey, err)
+				if firstErr == nil {
+					firstErr = err
 				}
+				appendFailed = true
+				break
 			}
-			accumulateSessionUsage(&sessionDelta, rec.Tokens)
+			// Only accumulate session usage on an actual append, not on a
+			// replayed AppendCertainDuplicate (O5).
+			if outcome == AppendWritten {
+				accumulateSessionUsage(&sessionDelta, rec.Tokens)
+			}
 		}
 		if appendFailed {
 			// Do not advance cursor or commit candDedupe; next poll will
@@ -578,6 +619,34 @@ func (t *AntigravitySQLiteTailer) handleDriftLocked(res *agydecode.Result) error
 		obs.MalformedFields = []string{"agy_sqlite_protobuf"}
 	} else {
 		obs.TokenStatus = telemetrycontract.TokenStatusUnverified
+	}
+	if _, err := t.cfg.Analytics.RecordUnique(obs); err != nil {
+		return err
+	}
+	t.driftEmitted[sentinelKey] = true
+	return nil
+}
+
+func (t *AntigravitySQLiteTailer) latchVersionDetectDriftLocked(reason string) error {
+	if !t.driftLatched.Swap(true) {
+		log.Warn("Antigravity SQLite tailer degrading to PostInvocation calls_only: %s", reason)
+	}
+	t.state.SchemaDriftDetected = true
+	t.state.DriftReason = reason
+	t.state.DriftRunID = t.cfg.RunID
+
+	sentinelKey := "version_detect_failed|" + t.cfg.RunID
+	if t.driftEmitted[sentinelKey] || t.cfg.Analytics == nil {
+		return nil
+	}
+	obs := UsageObservation{
+		SourceKind:    "antigravity.sqlite_drift",
+		Identity:      telemetrycontract.SourceIdentityComposite,
+		SourceEventID: CompositeSourceEventID("antigravity", "sqlite_drift", "version_detect_failed", t.cfg.RunID),
+		EventTime:     t.cfg.Now().UTC().Truncate(24 * time.Hour),
+		Status:        telemetrycontract.StatusSuccess,
+		Calls:         0,
+		TokenStatus:   telemetrycontract.TokenStatusUnverified,
 	}
 	if _, err := t.cfg.Analytics.RecordUnique(obs); err != nil {
 		return err

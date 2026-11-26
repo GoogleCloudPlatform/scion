@@ -364,10 +364,18 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 	return a.record(obs, false)
 }
 
-// RecordUnique is like Record, except appends use AppendUsageUnique so any
-// replay carrying an already-indexed (namespace, source_kind, source_event_id)
-// is skipped atomically as AppendCertainDuplicate without minting a second
-// event_id.
+// RecordUnique is like Record, except:
+//  1. Appends use AppendUsageUnique so any replay carrying an already-indexed
+//     (namespace, source_kind, source_event_id) is skipped atomically as
+//     AppendCertainDuplicate without minting a second event_id.
+//  2. Policy for dual-sink (GCP + Hub) replayable producers: unlike Record
+//     (used by non-replayable native/hook producers where Hub tee errors are
+//     swallowed so GCP is unaffected), RecordUnique surfaces any active-sink
+//     open or append error via errors.Join(primaryErr, hubErr). Callers then
+//     withhold cursor/dedupe commit and replay on the next poll; whichever
+//     sink already succeeded skips the replay as AppendCertainDuplicate while
+//     the failed sink appends the event once. When both sinks succeed, the
+//     returned outcome is AppendWritten if either sink wrote a new line.
 func (a *UsageAnalytics) RecordUnique(obs UsageObservation) (AppendOutcome, error) {
 	return a.record(obs, true)
 }
@@ -436,8 +444,12 @@ func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (App
 		}
 	}
 
+	var hubOutcome AppendOutcome
+	var hubErr error
+	hubAppended := false
 	if hubOutbox, active, herr := a.resolveHubOutbox(); active {
 		if herr != nil {
+			hubErr = herr
 			a.metaMu.RLock()
 			hDir, hOwner := a.hubDir, a.hubOwner
 			a.metaMu.RUnlock()
@@ -447,8 +459,19 @@ func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (App
 				}
 			}
 		} else if hubOutbox != nil {
-			_, _ = appendFn(hubOutbox, &hubEv)
+			hubAppended = true
+			hubOutcome, hubErr = appendFn(hubOutbox, &hubEv)
 		}
+	}
+
+	if uniqueByEventID {
+		if primaryErr != nil || hubErr != nil {
+			return outcome, errors.Join(primaryErr, hubErr)
+		}
+		if hubAppended && outcome != AppendWritten && hubOutcome == AppendWritten {
+			outcome = AppendWritten
+		}
+		return outcome, nil
 	}
 
 	return outcome, primaryErr

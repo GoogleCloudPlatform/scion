@@ -649,15 +649,22 @@ func TestAntigravitySQLiteTailer_R1_CrashBeforePersistReplayIdempotent(t *testin
 
 			// Replay with a fresh tailer at a later wall-clock time.
 			t1 := t0.Add(3 * time.Minute)
+			var replaySessionInput int64
 			tailer2 := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
 				AgentHome:         home,
 				DisableWakeSocket: true,
 				Analytics:         analytics,
 				DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
 				Now:               func() time.Time { return t1 },
+				SessionUsage: func(u SessionUsage) {
+					replaySessionInput += u.TokensInput
+				},
 			})
 			if err := tailer2.PollOnce(context.Background()); err != nil {
 				t.Fatalf("poll 2 (replay): %v", err)
+			}
+			if replaySessionInput != 0 {
+				t.Fatalf("duplicate replay re-added session input tokens = %d, want 0 (O5)", replaySessionInput)
 			}
 
 			events := drainOutboxEvents(t, outbox)
@@ -1021,5 +1028,207 @@ func TestPipeline_O3_DriftLatchPreservedAfterTailerCleared(t *testing.T) {
 	sigs := p.supportedUsageSignals()
 	if len(sigs) != 1 || sigs[0] != "calls" {
 		t.Fatalf("supportedUsageSignals = %v, want [calls]", sigs)
+	}
+}
+
+func TestAntigravitySQLiteTailer_Rev2_DualSinkHubAndGCPFailureReplay(t *testing.T) {
+	cases := []struct {
+		name    string
+		failHub bool
+	}{
+		{name: "hub_fails_then_recovers", failHub: true},
+		{name: "gcp_fails_then_recovers", failHub: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setTestAgyEnv(t)
+			home := t.TempDir()
+			dbPath := filepath.Join(AgyConversationsDir(home), "conv-dual.db")
+			db := createTestAgyDB(t, dbPath)
+			defer func() { _ = db.Close() }()
+
+			gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795709000, testAgyUsage{
+				modelID: 1466, input: 600, output: 140, id11: "dual-call-1",
+			})
+			if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+				t.Fatalf("insert gen0: %v", err)
+			}
+
+			gcpOutbox, err := OpenAnalyticsOutbox(AnalyticsOutboxDirFor(home))
+			if err != nil {
+				t.Fatalf("open gcp outbox: %v", err)
+			}
+			hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+			if err != nil {
+				t.Fatalf("open hub outbox: %v", err)
+			}
+			dual := NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceSQLiteNative)
+
+			var sessionInput int64
+			tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+				AgentHome:         home,
+				DisableWakeSocket: true,
+				Analytics:         dual,
+				DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+				SessionUsage: func(u SessionUsage) {
+					sessionInput += u.TokensInput
+				},
+			})
+
+			// Inject failure on one sink during poll 1.
+			if tc.failHub {
+				hubOutbox.crashAt = "intent"
+			} else {
+				gcpOutbox.crashAt = "intent"
+			}
+			if err := tailer.PollOnce(context.Background()); err == nil {
+				t.Fatal("expected PollOnce to return error when one dual sink fails")
+			}
+			if sessionInput != 0 {
+				t.Fatalf("session input = %d after failed poll, want 0", sessionInput)
+			}
+
+			// Clear fault and retry: surviving sink deduplicates as AppendCertainDuplicate,
+			// failed sink appends once, cursor commits, and session usage adds once.
+			hubOutbox.crashAt = ""
+			gcpOutbox.crashAt = ""
+			if err := tailer.PollOnce(context.Background()); err != nil {
+				t.Fatalf("retry PollOnce: %v", err)
+			}
+
+			gcpEvents := drainOutboxEvents(t, gcpOutbox)
+			hubEvents := drainOutboxEvents(t, hubOutbox)
+			if len(gcpEvents) != 1 || len(hubEvents) != 1 {
+				t.Fatalf("got gcp=%d hub=%d events, want 1 and 1", len(gcpEvents), len(hubEvents))
+			}
+			if gcpEvents[0].SourceEventID != hubEvents[0].SourceEventID {
+				t.Fatalf("source_event_id mismatch: gcp=%q hub=%q", gcpEvents[0].SourceEventID, hubEvents[0].SourceEventID)
+			}
+			if hubEvents[0].Input == nil || *hubEvents[0].Input != 600 || hubEvents[0].Output == nil || *hubEvents[0].Output != 140 {
+				t.Fatalf("hub tokens = (%v, %v), want (600, 140)", hubEvents[0].Input, hubEvents[0].Output)
+			}
+			if sessionInput != 600 {
+				t.Fatalf("session input = %d, want 600 (counted exactly once)", sessionInput)
+			}
+		})
+	}
+}
+
+func TestStartAgySQLiteWakeListener_RefusesSymlinkParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix wake socket symlink test")
+	}
+	home := t.TempDir()
+	targetDir := t.TempDir()
+	scionLink := filepath.Join(home, ".scion")
+	if err := os.Symlink(targetDir, scionLink); err != nil {
+		t.Fatalf("symlink .scion: %v", err)
+	}
+	closer, err := startAgySQLiteWakeListener(AgySQLiteWakePath(home), nil, func() {})
+	if err == nil {
+		_ = closer.Close()
+		t.Fatal("expected startAgySQLiteWakeListener to refuse symlinked .scion parent")
+	}
+	entries, err := os.ReadDir(targetDir)
+	if err != nil {
+		t.Fatalf("readdir targetDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlink target dir was modified: %v", entries)
+	}
+}
+
+func TestAntigravitySQLiteTailer_Rev2_VersionDetectOncePerPollAndLatchAfterN(t *testing.T) {
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	for _, name := range []string{"conv-a.db", "conv-b.db"} {
+		dbPath := filepath.Join(AgyConversationsDir(home), name)
+		db := createTestAgyDB(t, dbPath)
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795709500, testAgyUsage{
+			modelID: 1466, input: 100, output: 20, id11: "vfail-" + name,
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			_ = db.Close()
+			t.Fatalf("insert %s: %v", name, err)
+		}
+		_ = db.Close()
+	}
+
+	outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	detectCalls := 0
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:          home,
+		DisableWakeSocket:  true,
+		Analytics:          NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative),
+		MaxVersionFailures: 3,
+		DetectVersion: func(context.Context) (string, error) {
+			detectCalls++
+			return "", context.DeadlineExceeded
+		},
+	})
+
+	// Polls 1 and 2: transient retries (1 detection call per poll across 2 DBs, no drift latch yet).
+	for i := 1; i <= 2; i++ {
+		if err := tailer.PollOnce(context.Background()); err == nil {
+			t.Fatalf("poll %d: expected error", i)
+		}
+		if detectCalls != i {
+			t.Fatalf("poll %d: detectCalls = %d, want %d (once per poll, not per file)", i, detectCalls, i)
+		}
+		if tailer.SchemaDriftDetected() {
+			t.Fatalf("poll %d: must not latch drift before MaxVersionFailures", i)
+		}
+	}
+
+	// Poll 3 hits MaxVersionFailures -> latches drift and emits unverified sentinel.
+	if err := tailer.PollOnce(context.Background()); err == nil {
+		t.Fatal("poll 3: expected error")
+	}
+	if detectCalls != 3 {
+		t.Fatalf("poll 3: detectCalls = %d, want 3", detectCalls)
+	}
+	if !tailer.SchemaDriftDetected() {
+		t.Fatal("poll 3: expected SchemaDriftDetected() == true after 3 consecutive failures")
+	}
+	events := drainOutboxEvents(t, outbox)
+	if len(events) != 1 || events[0].TokenStatus != telemetrycontract.TokenStatusUnverified || events[0].Calls != 0 || events[0].Input != nil {
+		t.Fatalf("expected 1 unverified drift sentinel with calls=0 and nil tokens, got %+v", events)
+	}
+}
+
+func TestPipeline_Rev2_ActivateSQLiteNativeWithoutAnalytics(t *testing.T) {
+	t.Setenv("SCION_HARNESS", "antigravity")
+	t.Setenv("SCION_USAGE_SOURCE", "")
+	if err := os.Unsetenv("SCION_USAGE_SOURCE"); err != nil {
+		t.Fatalf("unset SCION_USAGE_SOURCE: %v", err)
+	}
+
+	cfg := &Config{
+		Enabled:      true,
+		GRPCPort:     0,
+		HTTPPort:     0,
+		CloudEnabled: false,
+	}
+	p := NewWithConfig(cfg)
+	p.SetAnalyticsOutbox(t.TempDir(), 0, 0)
+	ctx := context.Background()
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Pipeline.Start: %v", err)
+	}
+	defer func() { _ = p.Stop(ctx) }()
+
+	outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative)
+	if err != nil {
+		t.Fatalf("ActivateUsageSource: %v", err)
+	}
+	if outcome != UsageActivationAnalyticsDisabled {
+		t.Fatalf("ActivateUsageSource outcome = %q, want %q", outcome, UsageActivationAnalyticsDisabled)
+	}
+	if p.agyTailer.Load() != nil {
+		t.Fatal("expected agyTailer to remain nil when analytics is disabled")
 	}
 }

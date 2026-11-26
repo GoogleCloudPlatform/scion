@@ -126,7 +126,12 @@ func deriveUsageCollection(sel UsageSourceSelection, harness string, nativeActiv
 	case telemetrycontract.UsageSourceHooks:
 		return enabledUsage(telemetrycontract.UsageSourceHooks, harness)
 	case telemetrycontract.UsageSourceSQLiteNative:
-		return enabledUsage(telemetrycontract.UsageSourceSQLiteNative, harness)
+		if nativeActive {
+			return enabledUsage(telemetrycontract.UsageSourceSQLiteNative, harness)
+		}
+		u := disabled(telemetrycontract.UsageDisabledDeriverFailed)
+		u.Source = telemetrycontract.UsageSourceSQLiteNative
+		return u
 	default:
 		return disabled(telemetrycontract.UsageDisabledSourceUnrecognized)
 	}
@@ -782,7 +787,11 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 	} else if d := p.usageDeriver.Load(); d != nil {
 		usage, nativeActive = d.Diagnostics(), len(d.rules) > 0
 	}
-	in.Usage = deriveUsageCollection(sel, in.Harness, nativeActive, len(rulesForHarness(in.Harness)) > 0)
+	sourceActive := nativeActive
+	if sel.Source == telemetrycontract.UsageSourceSQLiteNative {
+		sourceActive = p.agyTailer.Load() != nil
+	}
+	in.Usage = deriveUsageCollection(sel, in.Harness, sourceActive, len(rulesForHarness(in.Harness)) > 0)
 	in.SourceOrigin = sel.Origin
 	if !sel.Settled && nativeActive {
 		in.SourceOrigin = telemetrycontract.UsageSourceOriginRuntimeEnv
