@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -507,6 +508,7 @@ func (e *DecisionRetentionRunExecutor) ValidateParams(map[string]string) error {
 	if err != nil {
 		slog.Error("decision retention run: failed to resolve policy", "error", err)
 		return &maintenance.RequestError{
+			Status:  http.StatusInternalServerError,
 			Code:    ErrCodeInternalError,
 			Message: "Failed to verify decision retention policy",
 		}

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
@@ -588,4 +589,68 @@ func TestDecisionRetentionOps_PreviewCrossPageDedup(t *testing.T) {
 	require.Equal(t, store.DecisionRetentionStatusOK, manualRun.Status)
 	assert.Equal(t, previewRun.Counts, manualRun.Counts, "preview ByProject must equal manual-run counts")
 	assert.Equal(t, store.DecisionRetentionCounts{Decisions: 2, Answers: 2}, manualRun.Counts[projStraddle])
+}
+
+type faultyProjectSummariesStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	err   error
+}
+
+func (f *faultyProjectSummariesStore) ListProjectSummaries(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	if !f.fault.Active() {
+		return f.Store.ListProjectSummaries(ctx, filter, opts)
+	}
+	return nil, f.err
+}
+
+// TestDecisionRetentionOps_ManualRunValidateStoreError500 verifies that a store
+// failure during ValidateParams (e.g. ListProjectSummaries) returns HTTP 500
+// internal_error with a generic message, creates no run rows, and deletes nothing.
+func TestDecisionRetentionOps_ManualRunValidateStoreError500(t *testing.T) {
+	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *faultyProjectSummariesStore {
+		return &faultyProjectSummariesStore{
+			Store: inner,
+			fault: f,
+			err:   errors.New("injected store fault: secret details"),
+		}
+	})
+	cs := s.(*entadapter.CompositeStore)
+	srv.SetDecisionRetentionStore(cs.DecisionRetention())
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: projID, Name: "fault-proj", Slug: "fault-proj", Created: time.Now().UTC(),
+	}))
+	_, decID := seedOldSettledDecision(t, ctx, cs, projID, uuid.NewString(), admin.ID, "FLT1", 60*24*time.Hour)
+
+	ops := srv.GetOperationalSettings()
+	_, err := ops.Update(ctx, opsettings.DecisionRetentionSectionName, json.RawMessage(fmt.Sprintf(`{
+		"enabled": true,
+		"retention_days": 30,
+		"project_overrides": {%q: {"mode": "days", "days": 45}}
+	}`, projID)), "test", 0, "managed")
+	require.NoError(t, err)
+
+	// Arm the ListProjectSummaries fault.
+	fault.Arm()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, decisionRetentionOpPath(entadapter.DecisionRetentionRunKey), map[string]any{})
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeInternalError)
+	assert.NotContains(t, rec.Body.String(), "secret details", "internal store error text must not leak to client")
+
+	// No maintenance run row, no decision retention run row, and no deletions.
+	maintRuns, err := cs.ListMaintenanceRuns(ctx, entadapter.DecisionRetentionRunKey, 10)
+	require.NoError(t, err)
+	assert.Empty(t, maintRuns)
+
+	retRuns, err := cs.DecisionRetention().ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, retRuns)
+
+	_, err = cs.GetDecision(ctx, decID)
+	require.NoError(t, err, "seeded decision must survive ValidateParams store fault")
 }

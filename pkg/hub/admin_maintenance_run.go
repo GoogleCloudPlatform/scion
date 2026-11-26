@@ -110,11 +110,7 @@ func rawRequestParams(body map[string]interface{}) map[string]string {
 // status of a *maintenance.RequestError (400 invalid_request otherwise).
 func writeMaintenanceRequestError(w http.ResponseWriter, err error) {
 	if re, ok := maintenance.IsRequestError(err); ok {
-		status := re.HTTPStatus()
-		if re.Code == ErrCodeInternalError {
-			status = http.StatusInternalServerError
-		}
-		writeError(w, status, re.Code, re.Message, re.Details)
+		writeError(w, re.HTTPStatus(), re.Code, re.Message, re.Details)
 		return
 	}
 	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
