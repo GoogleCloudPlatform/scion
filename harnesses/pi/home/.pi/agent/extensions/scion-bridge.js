@@ -44,6 +44,7 @@ export const STATUS_TIMEOUT_MS = 15000;
 const MAX_TOOL_INPUT_BYTES = 8192;
 const MAX_ERROR_CHARS = 200;
 const MAX_SUMMARY_CHARS = 200;
+const MAX_SEEN_MODEL_ENDS = 4096;
 
 export function timeoutFor(args) {
   return args[0] === 'status' ? STATUS_TIMEOUT_MS : HOOK_TIMEOUT_MS;
@@ -117,6 +118,10 @@ function boundedToolInput(args) {
   }
 }
 
+function positiveFinite(v) {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.trunc(v) : undefined;
+}
+
 // createHandlers returns the pi event handlers. `run(argv, stdin)` is
 // injectable for tests; it may throw, which is swallowed.
 export function createHandlers({ run = defaultRun, env = process.env } = {}) {
@@ -127,6 +132,9 @@ export function createHandlers({ run = defaultRun, env = process.env } = {}) {
   // Set when the agent ran `sciontool status ask_user|blocked|idle|limits_exceeded|task_completed`
   // since the last human/RPC input (reset in input()).
   let agentSetStatus = false;
+  // Bounded FIFO dedupe set of (id, responseId, timestamp) keys for assistant
+  // message_end events so repeated deliveries never double-count a model call.
+  const seenModelEnds = new Set();
 
   const safe = (what, fn) => {
     try {
@@ -178,6 +186,72 @@ export function createHandlers({ run = defaultRun, env = process.env } = {}) {
       });
     },
 
+    // Emit one model-end hook event per completed assistant LLM request.
+    // pi 1.3.0 emits message_end once per finalized message (and also fires
+    // turn_end with the same message afterward); subscribing only here and
+    // filtering to role === 'assistant' avoids double-counting turn_end and
+    // skips user/system/toolResult messages.
+    message_end(event) {
+      const msg = event && event.message;
+      if (!msg || msg.role !== 'assistant') return;
+      // Ignore non-terminal partial/deferred placeholders.
+      if (msg.stopReason === 'pending' || msg.stopReason === 'deferred') return;
+
+      const messageId = typeof msg.id === 'string' && msg.id.trim() ? msg.id.trim() : '';
+      const responseId = typeof msg.responseId === 'string' && msg.responseId.trim() ? msg.responseId.trim() : '';
+      const timestamp = typeof msg.timestamp === 'number' && Number.isFinite(msg.timestamp) ? msg.timestamp : undefined;
+
+      if (messageId || responseId || timestamp !== undefined) {
+        const dedupeKey = `${messageId}\0${responseId}\0${timestamp === undefined ? '' : String(timestamp)}`;
+        if (seenModelEnds.has(dedupeKey)) return;
+        seenModelEnds.add(dedupeKey);
+        if (seenModelEnds.size > MAX_SEEN_MODEL_ENDS) {
+          const oldest = seenModelEnds.keys().next().value;
+          seenModelEnds.delete(oldest);
+        }
+      }
+
+      const data = {};
+      if (messageId) data.message_id = messageId;
+      if (responseId) data.response_id = responseId;
+      if (timestamp !== undefined) data.timestamp = timestamp;
+
+      const rawModel =
+        (typeof msg.responseModel === 'string' && msg.responseModel.trim()) ||
+        (typeof msg.model === 'string' && msg.model.trim()) ||
+        '';
+      const provider = typeof msg.provider === 'string' && msg.provider.trim() ? msg.provider.trim() : '';
+      if (rawModel) {
+        data.model = provider && !rawModel.startsWith(`${provider}/`) ? `${provider}/${rawModel}` : rawModel;
+      }
+
+      // pi-ai 1.3.0 Usage already matches Scion's canonical contract:
+      // `input` is exclusive of cacheRead/cacheWrite, and `output` already
+      // includes `reasoning`. Omit unknown/missing/zero fields rather than
+      // fabricating 0.
+      const usage = msg.usage && typeof msg.usage === 'object' ? msg.usage : undefined;
+      if (usage) {
+        const input = positiveFinite(usage.input);
+        const output = positiveFinite(usage.output);
+        const cacheRead = positiveFinite(usage.cacheRead);
+        const cacheWrite = positiveFinite(usage.cacheWrite);
+        const reasoning = positiveFinite(usage.reasoning);
+        if (input !== undefined) data.input_tokens = input;
+        if (output !== undefined) data.output_tokens = output;
+        if (cacheRead !== undefined) data.cached_tokens = cacheRead;
+        if (cacheWrite !== undefined) data.cache_write_tokens = cacheWrite;
+        if (reasoning !== undefined) data.reasoning_tokens = reasoning;
+      }
+
+      if (msg.stopReason === 'error') {
+        data.error = truncate(msg.errorMessage || 'provider error', MAX_ERROR_CHARS);
+      } else if (msg.stopReason === 'aborted') {
+        data.error = truncate(msg.errorMessage || 'aborted', MAX_ERROR_CHARS);
+      }
+
+      emit('message_end', data);
+    },
+
     agent_end(event) {
       lastMessages = event && event.messages;
       const last = lastAssistantMessage(lastMessages);
@@ -217,6 +291,7 @@ export default function scionBridge(pi) {
   pi.on('input', (e) => h.input(e));
   pi.on('tool_execution_start', (e) => h.tool_execution_start(e));
   pi.on('tool_execution_end', (e) => h.tool_execution_end(e));
+  pi.on('message_end', (e) => h.message_end(e));
   pi.on('agent_end', (e) => h.agent_end(e));
   pi.on('agent_settled', (e) => h.agent_settled(e));
   pi.on('project_trust', () => h.project_trust());
