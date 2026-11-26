@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -43,5 +44,23 @@ func TestEmbeddedHarnessConfigs_UsageSidecarStrict(t *testing.T) {
 		if caps == nil {
 			t.Errorf("%s: ParseUsageSidecar returned nil caps without error", name)
 		}
+	}
+}
+
+// newFromEmbedFS wires usage.yaml onto the embedded harness entry.
+func TestNewFromEmbedFS_LoadsUsageSidecar(t *testing.T) {
+	h := newFromEmbedFS("claude")
+	if h == nil {
+		t.Fatal("newFromEmbedFS(\"claude\") returned nil")
+	}
+	d, ok := h.(*DeclarativeGenericHarness)
+	if !ok {
+		t.Fatalf("newFromEmbedFS(\"claude\") returned %T, want *DeclarativeGenericHarness", h)
+	}
+	if d.entry.UsageSidecar == nil {
+		t.Fatal("claude embedded entry has nil UsageSidecar")
+	}
+	if d.entry.UsageSidecar.Live.Source != api.UsageLiveSourceNative {
+		t.Errorf("claude UsageSidecar.Live.Source = %q, want %q", d.entry.UsageSidecar.Live.Source, api.UsageLiveSourceNative)
 	}
 }

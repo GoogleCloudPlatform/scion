@@ -432,10 +432,12 @@ usage:
 - Unknown keys at any level (including the future `usage.trajectory` section)
   are ignored for forward compatibility. An unreadable, invalid, or
   unsupported-version `usage.yaml` — including a newer bundle that introduces a
-  future/unknown `usage.live.source` enum value — logs a warning and causes
-  older runtimes to treat the usage capability as `nil` (unknown) while keeping
-  the harness usable. Every bundled harness must ship a valid `usage.yaml`; CI
-  parses them strictly.
+  future/unknown `usage.live.source` enum value or an unknown `token_types` /
+  `not_applicable_token_types` entry — logs a warning and causes older runtimes
+  to treat the whole usage capability as `nil` (unknown) while keeping the
+  harness usable. Introducing a new token type therefore requires a
+  `schema_version` bump or retirement of older runtimes. Every bundled harness
+  must ship a valid `usage.yaml`; CI parses them strictly.
 
 ### Auth
 
