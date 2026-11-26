@@ -140,9 +140,17 @@ func (s *Server) writeDecisionRetentionResponse(ctx context.Context, w http.Resp
 		cfg = ops.DecisionRetention()
 		rev = ops.SectionRevision(opsettings.DecisionRetentionSectionName)
 	}
-	overrides := make(map[string]opsettings.DecisionRetentionOverride, len(cfg.ProjectOverrides))
-	for k, v := range cfg.ProjectOverrides {
-		overrides[k] = v.Clone()
+	overrides := make(map[string]opsettings.DecisionRetentionOverride)
+	if len(cfg.ProjectOverrides) > 0 {
+		live, err := s.filterLiveProjectOverrides(ctx, cfg.ProjectOverrides)
+		if err != nil {
+			slog.Warn("decision retention: filter live project overrides", "error", err)
+			for k, v := range cfg.ProjectOverrides {
+				overrides[k] = v.Clone()
+			}
+		} else if live != nil {
+			overrides = live
+		}
 	}
 	resp := decisionRetentionResponse{
 		Enabled:          cfg.Enabled,

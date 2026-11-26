@@ -271,8 +271,14 @@ func TestAdminDecisionRetention_ProjectOverridesAndDeletedPruning(t *testing.T) 
 	assert.Contains(t, audits[0].AfterSummary, p1.ID+":keep_forever")
 	assert.Contains(t, audits[0].AfterSummary, p2.ID+":90d")
 
-	// Delete p2, then perform an unrelated save (changing retention_days) -> p2 override dropped.
+	// Delete p2: GET must immediately omit the deleted project's override, and
+	// an unrelated save (changing retention_days) drops it from storage too.
 	require.NoError(t, s.DeleteProject(ctx, p2.ID))
+	gotAfterDelete := decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodGet, decisionRetentionAdminPath, nil))
+	require.Len(t, gotAfterDelete.ProjectOverrides, 1)
+	assert.Contains(t, gotAfterDelete.ProjectOverrides, p1.ID)
+	assert.NotContains(t, gotAfterDelete.ProjectOverrides, p2.ID, "GET must omit override for deleted project")
+
 	got = decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
 		"retention_days":    45,
 		"expected_revision": got.Revision,
