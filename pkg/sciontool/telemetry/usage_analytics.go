@@ -257,6 +257,27 @@ func AnalyticsEnabledForHooks(cfg *Config) bool {
 // would have no stable producer namespace, so it is not written.
 var errNoAgentIdentity = errors.New("analytics: SCION_AGENT_ID is unset; usage event not written")
 
+// Retryable refusal errors returned by RecordUnique when an outbox cannot
+// accept an event temporarily (overflow or relocated hold) so replayable
+// producers withhold cursor commits and retry once space or relocation clears.
+// AppendOversize is deliberately NOT mapped here: a single line over the cap
+// can never succeed and is skipped terminally.
+var (
+	ErrAnalyticsOutboxOverflow         = errors.New("analytics outbox: overflow (retryable)")
+	ErrAnalyticsOutboxRelocatedRefused = errors.New("analytics outbox: refused while relocated (retryable)")
+)
+
+func retryableOutcomeError(outcome AppendOutcome) error {
+	switch outcome {
+	case AppendOverflow:
+		return ErrAnalyticsOutboxOverflow
+	case AppendRefusedRelocated:
+		return ErrAnalyticsOutboxRelocatedRefused
+	default:
+		return nil
+	}
+}
+
 func (a *UsageAnalytics) setRunAndActivity(runID string, onRecord func(time.Time)) {
 	if a == nil {
 		return
@@ -423,6 +444,10 @@ func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (App
 		outcome, err := appendFn(hubOutbox, ev)
 		if err != nil {
 			a.invalid.Add(1)
+		} else if uniqueByEventID {
+			if rerr := retryableOutcomeError(outcome); rerr != nil {
+				return outcome, rerr
+			}
 		}
 		return outcome, err
 	}
@@ -441,6 +466,8 @@ func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (App
 		outcome, primaryErr = appendFn(a.outbox, ev)
 		if primaryErr != nil {
 			a.invalid.Add(1)
+		} else if uniqueByEventID {
+			primaryErr = retryableOutcomeError(outcome)
 		}
 	}
 
@@ -461,6 +488,9 @@ func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (App
 		} else if hubOutbox != nil {
 			hubAppended = true
 			hubOutcome, hubErr = appendFn(hubOutbox, &hubEv)
+			if hubErr == nil && uniqueByEventID {
+				hubErr = retryableOutcomeError(hubOutcome)
+			}
 		}
 	}
 

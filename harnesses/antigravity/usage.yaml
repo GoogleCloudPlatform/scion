@@ -1,9 +1,18 @@
 # Live Track 1 usage metering capability for antigravity.
-# Hooks (PreInvocation/PostInvocation) currently report calls only without token counts or error status.
+# PostInvocation hooks report calls (including failures); sciontool's read-only SQLite
+# protobuf tailer decodes ~/.gemini/antigravity-cli/conversations/*.db for tokens
+# (input, output inclusive of reasoning, cache_read, cache_write, reasoning).
+# Verified against agy 1.5.18; unknown versions or malformed rows degrade to calls-only
+# with schema_drift_detected=true.
 schema_version: 1
 usage:
   live:
-    source: hooks
-    token_types: []
+    source: sqlite_native
+    token_types:
+      - input
+      - output
+      - cache_read
+      - cache_write
+      - reasoning
     not_applicable_token_types: []
-    counts_failed_calls: false
+    counts_failed_calls: true

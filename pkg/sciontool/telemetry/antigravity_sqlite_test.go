@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -197,6 +198,20 @@ func setTestAgyEnv(t *testing.T) {
 	t.Setenv("SCION_USAGE_SOURCE", telemetrycontract.UsageSourceSQLiteNative)
 }
 
+// seedEmptyAgyState writes an initialized empty agy-sqlite-state.json so tests
+// that pre-populate a DB before constructing a tailer exercise decoding rather
+// than first-start historical baselining.
+func seedEmptyAgyState(t *testing.T, home string) {
+	t.Helper()
+	p := AgySQLiteStatePath(home)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatalf("mkdir .scion: %v", err)
+	}
+	if err := os.WriteFile(p, []byte(`{"version":1}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write empty state: %v", err)
+	}
+}
+
 func TestAntigravitySQLiteTailer_GrowthDeltaRestartAndDuplicateSuppression(t *testing.T) {
 	setTestAgyEnv(t)
 	home := t.TempDir()
@@ -210,12 +225,18 @@ func TestAntigravitySQLiteTailer_GrowthDeltaRestartAndDuplicateSuppression(t *te
 	}
 	analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
 
+	seedEmptyAgyState(t, home)
 	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
 		AgentHome:         home,
 		DisableWakeSocket: true,
 		Analytics:         analytics,
 		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
 	})
+
+	// Baseline empty DB before round 1.
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("baseline poll: %v", err)
+	}
 
 	// Round 1: initial partial steps row for call-1.
 	step0 := encodeTestStepMeta(1466, "gemini-4-neon", 1795700000, testAgyUsage{
@@ -331,6 +352,7 @@ func TestAntigravitySQLiteTailer_OutboxAppendFailureReEmitsIdenticalEmissionKey(
 	}
 	analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
 
+	seedEmptyAgyState(t, home)
 	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
 		AgentHome:         home,
 		DisableWakeSocket: true,
@@ -368,6 +390,7 @@ func TestAntigravitySQLiteTailer_DriftLatchesAndDegradesToCallsOnly(t *testing.T
 	t.Run("unverified_version", func(t *testing.T) {
 		setTestAgyEnv(t)
 		home := t.TempDir()
+		seedEmptyAgyState(t, home)
 		dbPath := filepath.Join(AgyConversationsDir(home), "conv-unv.db")
 		db := createTestAgyDB(t, dbPath)
 		defer func() { _ = db.Close() }()
@@ -413,6 +436,7 @@ func TestAntigravitySQLiteTailer_DriftLatchesAndDegradesToCallsOnly(t *testing.T
 	t.Run("malformed_row_latches_across_subsequent_clean_polls", func(t *testing.T) {
 		setTestAgyEnv(t)
 		home := t.TempDir()
+		seedEmptyAgyState(t, home)
 		dbPath := filepath.Join(AgyConversationsDir(home), "conv-mal.db")
 		db := createTestAgyDB(t, dbPath)
 		defer func() { _ = db.Close() }()
@@ -630,6 +654,7 @@ func TestAntigravitySQLiteTailer_R1_CrashBeforePersistReplayIdempotent(t *testin
 			}
 			analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
 
+			seedEmptyAgyState(t, home)
 			t0 := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
 			tailer1 := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
 				AgentHome:         home,
@@ -642,10 +667,9 @@ func TestAntigravitySQLiteTailer_R1_CrashBeforePersistReplayIdempotent(t *testin
 				t.Fatalf("poll 1: %v", err)
 			}
 
-			// Simulate crash after outbox append and before state persist by removing state file.
-			if err := os.Remove(AgySQLiteStatePath(home)); err != nil {
-				t.Fatalf("remove state file: %v", err)
-			}
+			// Simulate crash after outbox append and before state persist by restoring
+			// the pre-poll empty state file so tailer2 replays the exact same DB row.
+			seedEmptyAgyState(t, home)
 
 			// Replay with a fresh tailer at a later wall-clock time.
 			t1 := t0.Add(3 * time.Minute)
@@ -681,6 +705,7 @@ func TestAntigravitySQLiteTailer_R1_CrashBeforePersistReplayIdempotent(t *testin
 func TestAntigravitySQLiteTailer_R1_TwoRecordPartialAppendFailureRetry(t *testing.T) {
 	setTestAgyEnv(t)
 	home := t.TempDir()
+	seedEmptyAgyState(t, home)
 	dbPath := filepath.Join(AgyConversationsDir(home), "conv-partial.db")
 	db := createTestAgyDB(t, dbPath)
 	defer func() { _ = db.Close() }()
@@ -838,6 +863,7 @@ func TestAntigravitySQLiteTailer_R3_RetryableVersionDetectionAndRunScopedLatch(t
 	t.Run("timeout_then_success_emits_tokens", func(t *testing.T) {
 		setTestAgyEnv(t)
 		home := t.TempDir()
+		seedEmptyAgyState(t, home)
 		dbPath := filepath.Join(AgyConversationsDir(home), "conv-ver.db")
 		db := createTestAgyDB(t, dbPath)
 		defer func() { _ = db.Close() }()
@@ -894,6 +920,7 @@ func TestAntigravitySQLiteTailer_R3_RetryableVersionDetectionAndRunScopedLatch(t
 	t.Run("same_run_stays_latched_new_run_unlatches", func(t *testing.T) {
 		setTestAgyEnv(t)
 		home := t.TempDir()
+		seedEmptyAgyState(t, home)
 		dbPath := filepath.Join(AgyConversationsDir(home), "conv-latch.db")
 		db := createTestAgyDB(t, dbPath)
 		defer func() { _ = db.Close() }()
@@ -1044,6 +1071,7 @@ func TestAntigravitySQLiteTailer_Rev2_DualSinkHubAndGCPFailureReplay(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			setTestAgyEnv(t)
 			home := t.TempDir()
+			seedEmptyAgyState(t, home)
 			dbPath := filepath.Join(AgyConversationsDir(home), "conv-dual.db")
 			db := createTestAgyDB(t, dbPath)
 			defer func() { _ = db.Close() }()
@@ -1160,19 +1188,24 @@ func TestAntigravitySQLiteTailer_Rev2_VersionDetectOncePerPollAndLatchAfterN(t *
 		t.Fatalf("open outbox: %v", err)
 	}
 	detectCalls := 0
+	now := time.Date(2026, 11, 26, 15, 0, 0, 0, time.UTC)
+	seedEmptyAgyState(t, home)
 	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
-		AgentHome:          home,
-		DisableWakeSocket:  true,
-		Analytics:          NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative),
-		MaxVersionFailures: 3,
+		AgentHome:               home,
+		DisableWakeSocket:       true,
+		Analytics:               NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative),
+		MaxVersionFailures:      3,
+		MinVersionFailureWindow: 5 * time.Minute,
+		Now:                     func() time.Time { return now },
 		DetectVersion: func(context.Context) (string, error) {
 			detectCalls++
 			return "", context.DeadlineExceeded
 		},
 	})
 
-	// Polls 1 and 2: transient retries (1 detection call per poll across 2 DBs, no drift latch yet).
-	for i := 1; i <= 2; i++ {
+	// Polls 1..3 within 2 minutes (< 5m window): must NOT latch drift yet, and
+	// must call DetectVersion once per poll (not once per DB file).
+	for i := 1; i <= 3; i++ {
 		if err := tailer.PollOnce(context.Background()); err == nil {
 			t.Fatalf("poll %d: expected error", i)
 		}
@@ -1180,23 +1213,155 @@ func TestAntigravitySQLiteTailer_Rev2_VersionDetectOncePerPollAndLatchAfterN(t *
 			t.Fatalf("poll %d: detectCalls = %d, want %d (once per poll, not per file)", i, detectCalls, i)
 		}
 		if tailer.SchemaDriftDetected() {
-			t.Fatalf("poll %d: must not latch drift before MaxVersionFailures", i)
+			t.Fatalf("poll %d: must not latch drift before MinVersionFailureWindow elapses", i)
 		}
+		now = now.Add(1 * time.Minute)
 	}
 
-	// Poll 3 hits MaxVersionFailures -> latches drift and emits unverified sentinel.
+	// Poll 4 at t+5m (>= 3 failures AND >= 5m elapsed): latches drift and emits unverified sentinel.
+	now = now.Add(2 * time.Minute)
 	if err := tailer.PollOnce(context.Background()); err == nil {
-		t.Fatal("poll 3: expected error")
+		t.Fatal("poll 4: expected error")
 	}
-	if detectCalls != 3 {
-		t.Fatalf("poll 3: detectCalls = %d, want 3", detectCalls)
+	if detectCalls != 4 {
+		t.Fatalf("poll 4: detectCalls = %d, want 4", detectCalls)
 	}
 	if !tailer.SchemaDriftDetected() {
-		t.Fatal("poll 3: expected SchemaDriftDetected() == true after 3 consecutive failures")
+		t.Fatal("poll 4: expected SchemaDriftDetected() == true after >=3 failures spanning >=5m")
 	}
 	events := drainOutboxEvents(t, outbox)
 	if len(events) != 1 || events[0].TokenStatus != telemetrycontract.TokenStatusUnverified || events[0].Calls != 0 || events[0].Input != nil {
 		t.Fatalf("expected 1 unverified drift sentinel with calls=0 and nil tokens, got %+v", events)
+	}
+
+	// Poll 5 after latching (with a new DB write): must NOT re-run DetectVersion!
+	dbPath := filepath.Join(AgyConversationsDir(home), "conv-a.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open conv-a.db: %v", err)
+	}
+	gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795709600, testAgyUsage{
+		modelID: 1466, input: 555, output: 66, id11: "post-latch-row",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert gen1: %v", err)
+	}
+	_ = db.Close()
+
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("poll 5 (latched): %v", err)
+	}
+	if detectCalls != 4 {
+		t.Fatalf("poll 5 re-ran DetectVersion after latch: detectCalls = %d, want 4", detectCalls)
+	}
+	if got := drainOutboxEvents(t, outbox); len(got) != 0 {
+		t.Fatalf("poll 5 (latched) emitted %d events, want 0", len(got))
+	}
+}
+
+func TestAntigravitySQLiteTailer_Rev3_OverflowHoldsCursorAndReplaysAfterDrain(t *testing.T) {
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(AgyConversationsDir(home), "conv-overflow.db")
+	db := createTestAgyDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+
+	gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795710000, testAgyUsage{
+		modelID: 1466, input: 888, output: 99, id11: "overflow-call-1",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+		t.Fatalf("insert gen0: %v", err)
+	}
+
+	hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("open hub outbox: %v", err)
+	}
+	// Tiny pending budget so the first append overflows.
+	hubOutbox.maxPending = 128
+
+	seedEmptyAgyState(t, home)
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+	})
+
+	// Poll 1: overflows -> returns ErrAnalyticsOutboxOverflow and holds cursor.
+	err = tailer.PollOnce(context.Background())
+	if !errors.Is(err, ErrAnalyticsOutboxOverflow) {
+		t.Fatalf("poll 1 err = %v, want ErrAnalyticsOutboxOverflow", err)
+	}
+	if got := drainOutboxEvents(t, hubOutbox); len(got) != 0 {
+		t.Fatalf("expected 0 events after overflow, got %d", len(got))
+	}
+
+	// Free space (simulate drain completing) and poll again -> tokens arrive once.
+	hubOutbox.maxPending = analyticsOutboxMaxPending
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("poll 2 after drain: %v", err)
+	}
+	events := drainOutboxEvents(t, hubOutbox)
+	if len(events) != 1 {
+		t.Fatalf("got %d events after replay, want 1", len(events))
+	}
+	if events[0].Input == nil || *events[0].Input != 888 || events[0].Output == nil || *events[0].Output != 99 {
+		t.Fatalf("tokens = (%v, %v), want (888, 99)", events[0].Input, events[0].Output)
+	}
+}
+
+func TestAntigravitySQLiteTailer_Rev3_FirstStartBaselinesExistingHistory(t *testing.T) {
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(AgyConversationsDir(home), "conv-hist.db")
+	db := createTestAgyDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+
+	// Pre-populate historical row BEFORE the fresh tailer starts (no state file).
+	histRow := encodeTestGenMeta(1466, "gemini-4-neon", 1795700000, testAgyUsage{
+		modelID: 1466, input: 9999, output: 8888, id11: "historical-call",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, histRow, len(histRow)); err != nil {
+		t.Fatalf("insert historical row: %v", err)
+	}
+
+	outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative),
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+	})
+
+	// Poll 1 with no state file: baselines existing DB, emits 0 events.
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("baseline PollOnce: %v", err)
+	}
+	if got := drainOutboxEvents(t, outbox); len(got) != 0 {
+		t.Fatalf("first-start baseline emitted %d events, want 0", len(got))
+	}
+
+	// Insert a new row for the current run -> emitted exactly once.
+	newRow := encodeTestGenMeta(1466, "gemini-4-neon", 1795711000, testAgyUsage{
+		modelID: 1466, input: 321, output: 65, id11: "current-run-call",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, newRow, len(newRow)); err != nil {
+		t.Fatalf("insert new row: %v", err)
+	}
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("post-baseline PollOnce: %v", err)
+	}
+	events := drainOutboxEvents(t, outbox)
+	if len(events) != 1 {
+		t.Fatalf("got %d events for new row, want 1", len(events))
+	}
+	if events[0].Input == nil || *events[0].Input != 321 || events[0].Output == nil || *events[0].Output != 65 {
+		t.Fatalf("tokens = (%v, %v), want (321, 65)", events[0].Input, events[0].Output)
 	}
 }
 
@@ -1230,5 +1395,106 @@ func TestPipeline_Rev2_ActivateSQLiteNativeWithoutAnalytics(t *testing.T) {
 	}
 	if p.agyTailer.Load() != nil {
 		t.Fatal("expected agyTailer to remain nil when analytics is disabled")
+	}
+}
+
+func TestPipeline_AgyTailerWithCloudInitDegradedAndNativeMeteringOnly(t *testing.T) {
+	t.Cleanup(SetTelemetryTestSandboxed())
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_USAGE_SOURCE", "")
+	if err := os.Unsetenv("SCION_USAGE_SOURCE"); err != nil {
+		t.Fatalf("unset SCION_USAGE_SOURCE: %v", err)
+	}
+
+	var mu sync.Mutex
+	var gotEvents []telemetrycontract.UsageEvent
+	cfg := &Config{
+		Enabled:              true,
+		GRPCPort:             0,
+		HTTPPort:             0,
+		CloudEnabled:         true,
+		CloudEnabledExplicit: true,
+		CloudProvider:        "gcp",
+		// Missing ProjectID with explicit CloudEnabled forces cloudInitDegraded=true
+		// when Hub usage sink is configured.
+	}
+	p := NewWithConfig(cfg)
+	p.SetAnalyticsOutbox(home, 0, 0)
+	p.SetHubUsageSink(HubUsageSinkConfig{
+		Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+			mu.Lock()
+			gotEvents = append(gotEvents, req.Events...)
+			mu.Unlock()
+			return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)}, nil
+		},
+		RunID:         "run-degraded-metering",
+		HubID:         "hub-test",
+		DrainInterval: 20 * time.Millisecond,
+	})
+	p.SetNativeMeteringOnly(true)
+
+	ctx := context.Background()
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Pipeline.Start: %v", err)
+	}
+	defer func() { _ = p.Stop(ctx) }()
+
+	if !p.cloudInitDegraded {
+		t.Fatal("precondition: expected cloudInitDegraded=true")
+	}
+	if !p.NativeMeteringOnly() {
+		t.Fatal("precondition: expected NativeMeteringOnly()=true")
+	}
+	if got := p.DeliveryState(); got != "degraded" {
+		t.Fatalf("DeliveryState() = %q, want degraded", got)
+	}
+
+	outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative)
+	if err != nil {
+		t.Fatalf("ActivateUsageSource: %v", err)
+	}
+	if outcome != UsageActivated {
+		t.Fatalf("ActivateUsageSource outcome = %q, want %q", outcome, UsageActivated)
+	}
+	tailer := p.agyTailer.Load()
+	if tailer == nil {
+		t.Fatal("expected agyTailer to start under cloudInitDegraded + nativeMeteringOnly")
+	}
+	// Inject deterministic version detector so test does not depend on host agy binary.
+	tailer.mu.Lock()
+	tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
+	tailer.mu.Unlock()
+
+	// Insert a new conversation DB row after tailer startup/baselining.
+	dbPath := filepath.Join(AgyConversationsDir(home), "conv-degraded.db")
+	db := createTestAgyDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+	gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795712000, testAgyUsage{
+		modelID: 1466, input: 777, output: 88, id11: "degraded-metering-call",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+		t.Fatalf("insert gen0: %v", err)
+	}
+
+	if err := tailer.PollOnce(ctx); err != nil {
+		t.Fatalf("tailer.PollOnce: %v", err)
+	}
+	if err := p.Stop(ctx); err != nil {
+		t.Fatalf("Pipeline.Stop: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var found bool
+	for _, ev := range gotEvents {
+		if ev.UsageSource == telemetrycontract.UsageSourceSQLiteNative && ev.Input != nil && *ev.Input == 777 && ev.Output != nil && *ev.Output == 88 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected Hub to receive sqlite_native usage event (in=777 out=88) under cloudInitDegraded+nativeMeteringOnly, got %+v", gotEvents)
 	}
 }

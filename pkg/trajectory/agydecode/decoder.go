@@ -57,6 +57,64 @@ type usageCandidate struct {
 	fallbackIdentity string
 }
 
+// BaselineFile opens an Antigravity conversation SQLite database read-only and
+// returns its current (db, wal) fingerprint and max rowids for gen_metadata and
+// steps without decoding any protobuf payloads. Live tailers use this on first
+// start (when no state file exists) to establish a run baseline so pre-existing
+// historical rows are never backfilled into the current run.
+func BaselineFile(ctx context.Context, dbPath string, busyTimeoutMs int) (FileFingerprint, Cursor, error) {
+	fp, err := Fingerprint(dbPath)
+	if err != nil {
+		return FileFingerprint{}, Cursor{}, err
+	}
+	if busyTimeoutMs <= 0 {
+		busyTimeoutMs = defaultBusyTimeoutMs
+	}
+	dsn, err := buildReadOnlyDSN(dbPath, busyTimeoutMs)
+	if err != nil {
+		return FileFingerprint{}, Cursor{}, err
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return FileFingerprint{}, Cursor{}, fmt.Errorf("open agy db %s: %w", dbPath, err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return FileFingerprint{}, Cursor{}, fmt.Errorf("begin read-only tx %s: %w", dbPath, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	tables, err := listTables(ctx, tx)
+	if err != nil {
+		return FileFingerprint{}, Cursor{}, fmt.Errorf("inspect schema %s: %w", dbPath, err)
+	}
+	var cur Cursor
+	if tables["gen_metadata"] {
+		var maxID sql.NullInt64
+		if err := tx.QueryRowContext(ctx, "SELECT MAX(rowid) FROM gen_metadata").Scan(&maxID); err != nil {
+			return FileFingerprint{}, Cursor{}, fmt.Errorf("baseline gen_metadata %s: %w", dbPath, err)
+		}
+		if maxID.Valid {
+			v := maxID.Int64
+			cur.GenMetadataRowID = &v
+		}
+	}
+	if tables["steps"] {
+		var maxID sql.NullInt64
+		if err := tx.QueryRowContext(ctx, "SELECT MAX(rowid) FROM steps").Scan(&maxID); err != nil {
+			return FileFingerprint{}, Cursor{}, fmt.Errorf("baseline steps %s: %w", dbPath, err)
+		}
+		if maxID.Valid {
+			v := maxID.Int64
+			cur.StepsRowID = &v
+		}
+	}
+	return fp, cur, nil
+}
+
 // DecodeFile opens an Antigravity conversation SQLite database read-only,
 // paginates gen_metadata (1 row per query) and optionally steps, decodes
 // protobuf usage records, deduplicates via union-find over IDs [11, 12, 7],

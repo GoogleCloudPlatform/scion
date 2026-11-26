@@ -47,11 +47,12 @@ const (
 	// wake the live tailer in `sciontool init` immediately on PostInvocation.
 	AgySQLiteWakeSocketName = "agy-sqlite-wake.sock"
 
-	defaultAgySQLiteDebounce     = 500 * time.Millisecond
-	defaultAgySQLitePollInterval = 15 * time.Second
-	agySQLiteStateSchemaVersion  = 1
-	agyVersionDetectTimeout      = 2 * time.Second
-	defaultAgyVersionMaxFailures = 3
+	defaultAgySQLiteDebounce       = 500 * time.Millisecond
+	defaultAgySQLitePollInterval   = 15 * time.Second
+	agySQLiteStateSchemaVersion    = 1
+	agyVersionDetectTimeout        = 2 * time.Second
+	defaultAgyVersionMaxFailures   = 3
+	defaultAgyVersionFailureWindow = 5 * time.Minute
 )
 
 // AgySQLiteStatePath returns <agentHome>/.scion/agy-sqlite-state.json, or ""
@@ -129,11 +130,16 @@ type AntigravitySQLiteConfig struct {
 	// drift latch stays active across restarts until either a non-empty RunID
 	// is supplied or agy-sqlite-state.json is removed.
 	RunID string
-	// MaxVersionFailures is the number of consecutive agy version-detection
-	// failures tolerated as transient retries before latching unverified schema
-	// drift and degrading supported_signals to ["calls"] so the Hub never sees
-	// "measured" with zero tokens (default defaultAgyVersionMaxFailures = 3).
+	// MaxVersionFailures is the minimum number of consecutive agy
+	// version-detection failures (together with MinVersionFailureWindow)
+	// before latching unverified schema drift and degrading supported_signals
+	// to ["calls"] so the Hub never sees "measured" with zero tokens
+	// (default defaultAgyVersionMaxFailures = 3).
 	MaxVersionFailures int
+	// MinVersionFailureWindow is the minimum elapsed duration from the first
+	// consecutive agy version-detection failure before latching drift
+	// (default defaultAgyVersionFailureWindow = 5m).
+	MinVersionFailureWindow time.Duration
 
 	// DetectVersion returns the installed agy binary version string (or an
 	// error on transient detection failure, which is retried on subsequent
@@ -165,12 +171,14 @@ type agySQLiteFileState struct {
 type AntigravitySQLiteTailer struct {
 	cfg AntigravitySQLiteConfig
 
-	mu              sync.Mutex
-	state           agySQLitePersistedState
-	versionResolved bool
-	versionFailures int
-	agyVersion      string
-	driftEmitted    map[string]bool
+	mu                    sync.Mutex
+	state                 agySQLitePersistedState
+	stateInitialized      bool
+	versionResolved       bool
+	versionFailures       int
+	versionFirstFailureAt time.Time
+	agyVersion            string
+	driftEmitted          map[string]bool
 
 	driftLatched atomic.Bool
 
@@ -208,6 +216,9 @@ func NewAntigravitySQLiteTailer(cfg AntigravitySQLiteConfig) *AntigravitySQLiteT
 	}
 	if cfg.MaxVersionFailures <= 0 {
 		cfg.MaxVersionFailures = defaultAgyVersionMaxFailures
+	}
+	if cfg.MinVersionFailureWindow <= 0 {
+		cfg.MinVersionFailureWindow = defaultAgyVersionFailureWindow
 	}
 	if cfg.DetectVersion == nil {
 		cfg.DetectVersion = detectAgyVersionManaged
@@ -258,6 +269,12 @@ func (t *AntigravitySQLiteTailer) Start(ctx context.Context) error {
 	defer t.mu.Unlock()
 	if t.started || t.stopped {
 		return nil
+	}
+
+	if !t.stateInitialized && t.cfg.Analytics != nil {
+		if err := t.baselineExistingLocked(ctx); err != nil {
+			log.Debug("Antigravity SQLite tailer initial baseline failed (will retry on first poll): %v", err)
+		}
 	}
 
 	if !t.cfg.DisableWakeSocket && t.cfg.WakePath != "" {
@@ -412,6 +429,13 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 		t.state.Dedupe = agydecode.NewDedupeState()
 	}
 
+	// On first start with no persisted state file, baseline every existing DB
+	// at its current end (fingerprint + max rowids) without emitting so
+	// pre-existing historical sessions are never charged to the current run.
+	if !t.stateInitialized {
+		return t.baselineFilesLocked(ctx, dbNames)
+	}
+
 	dirty := false
 	// Prune file entries for DBs removed from disk.
 	for name := range t.state.Files {
@@ -439,18 +463,44 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 			continue
 		}
 
+		// Once drift is latched for this run, suppress all token debits and
+		// avoid re-running `agy --version` or decoding rows on subsequent polls,
+		// while advancing the rowid cursor via BaselineFile so rows written
+		// during a latched run are never retroactively billed to the next run.
+		if t.driftLatched.Load() {
+			baseFP, baseCursor, baseErr := agydecode.BaselineFile(ctx, dbPath, 0)
+			if baseErr != nil {
+				if firstErr == nil {
+					firstErr = baseErr
+				}
+				continue
+			}
+			t.state.Files[name] = agySQLiteFileState{
+				Fingerprint: baseFP,
+				Cursor:      baseCursor,
+			}
+			dirty = true
+			continue
+		}
+
 		// Detect agy version at most once per poll (not per file) so a hanging
 		// or missing binary never burns N * 2s across N DB files.
 		if !versionCheckedThisPoll {
 			versionCheckedThisPoll = true
 			pollAgyVer, pollVerErr = t.resolveVersionLocked(ctx)
 			if pollVerErr != nil {
+				now := t.cfg.Now()
+				if t.versionFailures == 0 {
+					t.versionFirstFailureAt = now
+				}
 				t.versionFailures++
-				if t.versionFailures >= t.cfg.MaxVersionFailures {
-					// Persistent detection failure: degrade honestly to
-					// unverified drift (calls_only) so the Hub never sees
-					// "measured" with zero tokens.
-					reason := fmt.Sprintf("agy version detection failed %d consecutive times: %v", t.versionFailures, pollVerErr)
+				elapsed := now.Sub(t.versionFirstFailureAt)
+				if t.versionFailures >= t.cfg.MaxVersionFailures && elapsed >= t.cfg.MinVersionFailureWindow {
+					// Persistent detection failure across both count and time
+					// thresholds: degrade honestly to unverified drift
+					// (calls_only) so the Hub never sees "measured" with zero tokens.
+					reason := fmt.Sprintf("agy version detection failed %d consecutive times over %s: %v",
+						t.versionFailures, elapsed.Round(time.Second), pollVerErr)
 					if derr := t.latchVersionDetectDriftLocked(reason); derr != nil && firstErr == nil {
 						firstErr = derr
 					}
@@ -462,13 +512,15 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 				}
 				// Transient version-detection failure: retry on the next poll
 				// without advancing cursors or latching drift.
-				log.Debug("Antigravity SQLite tailer version detection failed (%d/%d, will retry): %v", t.versionFailures, t.cfg.MaxVersionFailures, pollVerErr)
+				log.Debug("Antigravity SQLite tailer version detection failed (%d/%d, elapsed %s/%s, will retry): %v",
+					t.versionFailures, t.cfg.MaxVersionFailures, elapsed.Round(time.Second), t.cfg.MinVersionFailureWindow, pollVerErr)
 				if firstErr == nil {
 					firstErr = pollVerErr
 				}
 				break
 			}
 			t.versionFailures = 0
+			t.versionFirstFailureAt = time.Time{}
 		}
 		agyVer := pollAgyVer
 
@@ -769,6 +821,7 @@ func (t *AntigravitySQLiteTailer) loadState() {
 		Dedupe:  agydecode.NewDedupeState(),
 	}
 	if t.cfg.StatePath == "" {
+		t.stateInitialized = true
 		return
 	}
 	tree, err := privatefs.OpenTree(filepath.Dir(t.cfg.StatePath), privatefs.TreeOptions{})
@@ -810,6 +863,55 @@ func (t *AntigravitySQLiteTailer) loadState() {
 		}
 	}
 	t.state = loaded
+	t.stateInitialized = true
+}
+
+func (t *AntigravitySQLiteTailer) baselineExistingLocked(ctx context.Context) error {
+	if t.cfg.ConversationsDir == "" {
+		t.stateInitialized = true
+		return nil
+	}
+	entries, err := os.ReadDir(t.cfg.ConversationsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return t.baselineFilesLocked(ctx, nil)
+		}
+		return fmt.Errorf("read antigravity conversations dir for baseline: %w", err)
+	}
+	var dbNames []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".db") {
+			dbNames = append(dbNames, entry.Name())
+		}
+	}
+	sort.Strings(dbNames)
+	return t.baselineFilesLocked(ctx, dbNames)
+}
+
+func (t *AntigravitySQLiteTailer) baselineFilesLocked(ctx context.Context, dbNames []string) error {
+	if t.state.Files == nil {
+		t.state.Files = make(map[string]agySQLiteFileState)
+	}
+	if t.state.Dedupe == nil {
+		t.state.Dedupe = agydecode.NewDedupeState()
+	}
+	for _, name := range dbNames {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		dbPath := filepath.Join(t.cfg.ConversationsDir, name)
+		fp, cur, err := agydecode.BaselineFile(ctx, dbPath, t.cfg.BusyTimeoutMs)
+		if err != nil {
+			log.Debug("Antigravity SQLite tailer baseline error for %s: %v", name, err)
+			return err
+		}
+		t.state.Files[name] = agySQLiteFileState{
+			Fingerprint: fp,
+			Cursor:      cur,
+		}
+	}
+	t.stateInitialized = true
+	return t.saveStateLocked()
 }
 
 func (t *AntigravitySQLiteTailer) saveStateLocked() error {

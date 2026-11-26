@@ -95,6 +95,17 @@ func TestAntigravityLiveTrack1_OnePostInvocationPlusOneGenMetadata(t *testing.T)
 		t.Fatalf("create tables: %v", err)
 	}
 
+	tailer := telemetry.NewAntigravitySQLiteTailer(telemetry.AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         telemetry.NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+	})
+	// Initial baseline poll before agy writes the new row (matching sciontool init startup).
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("tailer initial baseline PollOnce: %v", err)
+	}
+
 	var usagePB []byte
 	usagePB = protowire.AppendTag(usagePB, 1, protowire.VarintType)
 	usagePB = protowire.AppendVarint(usagePB, 1466)
@@ -127,12 +138,6 @@ func TestAntigravityLiveTrack1_OnePostInvocationPlusOneGenMetadata(t *testing.T)
 		t.Fatalf("insert gen_metadata: %v", err)
 	}
 
-	tailer := telemetry.NewAntigravitySQLiteTailer(telemetry.AntigravitySQLiteConfig{
-		AgentHome:         home,
-		DisableWakeSocket: true,
-		Analytics:         telemetry.NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
-		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
-	})
 	if err := tailer.PollOnce(context.Background()); err != nil {
 		t.Fatalf("tailer.PollOnce: %v", err)
 	}

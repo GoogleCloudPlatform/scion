@@ -300,6 +300,17 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 	return UsageActivated, nil
 }
 
+// startAgySQLiteTailerLocked starts the Antigravity local SQLite usage tailer
+// whenever an analytics sink (Hub usage outbox and/or GCP analytics) is active.
+// Neither nativeMeteringOnly nor cloudInitDegraded blocks it:
+//   - nativeMeteringOnly only suppresses forwarding non-sciontool OTLP signals
+//     to the cloud exporter; the SQLite tailer emits only sciontool's own
+//     agent.usage metering events, which are intended to flow under metering
+//     policy.
+//   - cloudInitDegraded means cloud export failed/was misconfigured at Start
+//     while the Hub usage sink kept the pipeline running; Hub-only metering
+//     (including sqlite_native) intentionally continues operating while
+//     deliveryState remains "degraded".
 func (p *Pipeline) startAgySQLiteTailerLocked(ctx context.Context) error {
 	if p.analytics.sqliteNative == nil {
 		log.Debug("Antigravity SQLite tailer not started: analytics outbox is disabled")
