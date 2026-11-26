@@ -452,7 +452,7 @@ func TestTriggerExec_AcceptanceFixture_WebhookStartedJobEndToEnd(t *testing.T) {
 	assert.Empty(t, run.EventID)
 	assert.Equal(t, fire.ID, run.FireID)
 	assert.Empty(t, run.ScheduleID)
-	assert.Equal(t, "trigger:"+tr.ID, run.OverlapKey)
+	assert.Equal(t, "trigger:"+tr.ID+":0", run.OverlapKey)
 	assert.Equal(t, store.ScheduledExecOutcomeOK, run.Outcome)
 
 	// 7. Verify GET /triggers/{id}/history carries execSummary.
@@ -803,7 +803,7 @@ func TestTriggerExec_MissingCapabilityRefusalAndContextBounds(t *testing.T) {
 	now := time.Now().UTC()
 	require.NoError(t, f.store.CreateScheduledExecRun(ctx, &store.ScheduledExecRun{
 		FireID:         f3ID,
-		OverlapKey:     "trigger:" + tr.ID,
+		OverlapKey:     "trigger:" + tr.ID + ":0",
 		ProjectID:      projectID,
 		TargetAgentID:  f.launched.ID,
 		CommandSHA256:  agentcontrol.ExecArgvDigest([]string{"true"}),
@@ -1137,7 +1137,7 @@ func TestTriggerExec_SubjectOptIn_ClaimReleaseOnOverlap_AndFireRateCap(t *testin
 	now := time.Now().UTC()
 	require.NoError(t, f.store.CreateScheduledExecRun(ctx, &store.ScheduledExecRun{
 		FireID:         blockerFireID,
-		OverlapKey:     "trigger:" + tr.ID,
+		OverlapKey:     "trigger:" + tr.ID + ":0",
 		ProjectID:      projectID,
 		TargetAgentID:  f.launched.ID,
 		CommandSHA256:  agentcontrol.ExecArgvDigest([]string{"true"}),

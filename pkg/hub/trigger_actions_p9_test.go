@@ -30,7 +30,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -416,4 +418,284 @@ func TestTriggerActions_RateLimitCountsMatchedEventsNotActions(t *testing.T) {
 	assert.Equal(t, trigger.ErrFireRateLimit, ev2ByIdx[0].Error)
 	assert.Equal(t, store.TriggerFireStatusSkipped, ev2ByIdx[1].Status)
 	assert.Equal(t, trigger.ErrFireRateLimit, ev2ByIdx[1].Error)
+}
+
+// TestTriggerActions_SharedRateDecisionAcrossWindowSlide verifies R2:
+// when a matched event's RateDecision is decided on action 0, action 1 reuses
+// that exact decision even if the 60s window boundary or concurrent events
+// change the DB count between action 0 and action 1.
+func TestTriggerActions_SharedRateDecisionAcrossWindowSlide(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+	trigID := api.NewUUID()
+	now := time.Now().UTC()
+
+	// Seed one fired event in the window so maxFiresPerMinute=1 refuses action 0.
+	priorEv := api.NewUUID()
+	priorFire := &store.TriggerFire{
+		ID:          api.NewUUID(),
+		ProjectID:   f.projectID,
+		TriggerID:   trigID,
+		EventID:     priorEv,
+		Subject:     "sub-prior",
+		ActionType:  store.TriggerActionMessage,
+		ActionIndex: 0,
+		Status:      store.TriggerFireStatusFired,
+		LeaseUntil:  now.Add(10 * time.Minute),
+		StartedAt:   now,
+		CreatedAt:   now,
+	}
+	claimed, _, err := f.store.ClaimTriggerFire(ctx, priorFire)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	decision := &hubfire.EventRateDecision{}
+	evID := api.NewUUID()
+	mkReq := func(idx int) hubfire.FireRequest {
+		return hubfire.FireRequest{
+			ProjectID:  f.projectID,
+			ActionType: store.TriggerActionMessage,
+			Authority: hubfire.RecordedAuthority{
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   trigID,
+				FireID:         api.NewUUID(),
+			},
+			Event: &hubfire.FireEvent{
+				ID:        evID,
+				ProjectID: f.projectID,
+				Trigger: &hubfire.FireTriggerRef{
+					ID:                trigID,
+					ActionIndex:       idx,
+					MaxFiresPerMinute: 1,
+					RateDecision:      decision,
+				},
+			},
+		}
+	}
+
+	// Action 0 sees priorFire -> rate-limited, caches Skipped=true on decision.
+	reason0, err := f.srv.checkTriggerFireLimits(ctx, mkReq(0))
+	require.NoError(t, err)
+	assert.Equal(t, trigger.ErrFireRateLimit, reason0)
+	require.True(t, decision.Decided)
+	require.True(t, decision.Skipped)
+
+	// Simulate window slide: mark priorFire as skipped (so DB count drops to 0).
+	// Action 1 MUST still get the same cached decision (rate-limited), never splitting the event.
+	_, err = f.store.FinishTriggerFire(ctx, priorFire.ID, store.TriggerFireStatusSkipped, "", "", "expired", now)
+	require.NoError(t, err)
+
+	reason1, err := f.srv.checkTriggerFireLimits(ctx, mkReq(1))
+	require.NoError(t, err)
+	assert.Equal(t, trigger.ErrFireRateLimit, reason1, "sibling action 1 must share action 0's rate decision across window slide")
+}
+
+// TestTriggerActions_ExecCapsCountCorruptActiveRowConservatively verifies O3:
+// a corrupt active trigger whose raw actions JSON or scalar action_type
+// indicates exec still counts conservatively as 1 exec toward the project cap.
+func TestTriggerActions_ExecCapsCountCorruptActiveRowConservatively(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableTriggerExecExperiments(t, f.srv)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name:          "p9-o3-cap-ep",
+		SignatureMode: store.WebhookSignatureModeScionV1,
+	})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// Seed (triggerExecMaxActivePerProject - 1) valid exec triggers + 1 corrupt active exec trigger.
+	now := time.Now().UTC()
+	for i := 0; i < triggerExecMaxActivePerProject-1; i++ {
+		require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+			ID:         api.NewUUID(),
+			ProjectID:  f.projectID,
+			Name:       "valid-exec-" + api.NewUUID()[:8],
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   ep.ID,
+			MatchTypes: []string{"webhook.received"},
+			Actions: []store.TriggerAction{
+				{Type: store.TriggerActionExec, Payload: `{"agentId":"` + f.targetAgent.ID + `","command":["true"]}`},
+			},
+			Status:    store.TriggerStatusActive,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}))
+	}
+	// Seed 1 corrupt active trigger with legacy scalar action_type="exec" and truncated payload.
+	require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+		ID:            api.NewUUID(),
+		ProjectID:     f.projectID,
+		Name:          "corrupt-exec-row",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      ep.ID,
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionExec,
+		ActionPayload: `{"command":["truncated"`,
+		Status:        store.TriggerStatusActive,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}))
+
+	// Attempting to add one more exec action must be refused by the project exec cap.
+	err := f.store.WithTx(ctx, func(tx store.Store) error {
+		return checkTriggerExecCapsInTx(ctx, tx, f.projectID, []store.TriggerAction{
+			{Type: store.TriggerActionExec, Payload: `{"agentId":"` + api.NewUUID() + `","command":["true"]}`},
+		}, "")
+	})
+	require.ErrorIs(t, err, errTriggerExecProjectCapExceeded, "corrupt active exec trigger must count conservatively toward project exec cap")
+}
+
+// TestTriggerActions_TwoExecActionsSameAndDifferentTargets verifies R1 end-to-end
+// through execAction: two exec actions on one event targeting the SAME running
+// agent get distinct per-action overlap keys and sciontool ScheduleID UUIDs so
+// both are admitted while action 0 is still running, while a second event
+// firing action 0 is still refused "overlap".
+func TestTriggerActions_TwoExecActionsSameAndDifferentTargets(t *testing.T) {
+	f := newExecRouteFixture(t)
+	enableTriggerExecExperiments(t, f.srv)
+	f.srv.SetHubID("test-hub-p9-r1")
+	f.srv.SetSecretBackend(secret.NewLocalBackendWithCipher(f.store, f.srv.hubID, f.srv.cipher))
+	f.srv.config.HubEndpoint = "https://hub-public.example.com"
+	f.startAgent(t)
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	projectID := f.launched.ProjectID
+
+	// Create webhook endpoint and 2-exec-action trigger through real HTTP authoring
+	// so attribution and ceiling are recorded realistically.
+	epReq := authoredRequest(t, f.owner, http.MethodPost, "/api/v1/projects/"+projectID+"/webhook-endpoints", CreateWebhookEndpointRequest{
+		Name:          "p9-r1-ep",
+		SignatureMode: store.WebhookSignatureModeScionV1,
+	})
+	epRec := httptest.NewRecorder()
+	f.srv.handleWebhookEndpoints(epRec, epReq, projectID, "")
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	twoExecs := []TriggerActionSpec{
+		{Type: store.TriggerActionExec, AgentID: f.launched.ID, Command: []string{"/bin/sleep", "2"}, TimeoutSeconds: 30},
+		{Type: store.TriggerActionExec, AgentID: f.launched.ID, Command: []string{"/bin/echo", "sibling-ok"}, TimeoutSeconds: 30},
+	}
+	trReq := authoredRequest(t, f.owner, http.MethodPost, "/api/v1/projects/"+projectID+"/triggers", CreateTriggerRequest{
+		Name:    "p9-r1-two-exec-same-agent",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:   &TriggerMatchSpec{Types: []string{"webhook.received"}},
+		Actions: &twoExecs,
+	})
+	trRec := httptest.NewRecorder()
+	f.srv.handleTriggers(trRec, trReq, projectID, "")
+	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+	var trResp TriggerResponse
+	require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &trResp))
+
+	tr, err := f.store.GetTrigger(ctx, trResp.ID)
+	require.NoError(t, err)
+	require.Len(t, tr.Actions, 2)
+
+	ev := &store.TriggerEvent{
+		ID:         api.NewUUID(),
+		ProjectID:  projectID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   ep.ID,
+		Type:       "webhook.received",
+		Subject:    "r1-sub",
+		DedupKey:   api.NewUUID(),
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
+
+	fireActionAt := func(evID string, idx int) (string, hubfire.FireOutcome) {
+		tf := &store.TriggerFire{
+			ID:          api.NewUUID(),
+			ProjectID:   projectID,
+			TriggerID:   tr.ID,
+			EventID:     evID,
+			Subject:     "r1-sub",
+			ActionType:  store.TriggerActionExec,
+			ActionIndex: idx,
+			Status:      store.TriggerFireStatusFiring,
+			LeaseUntil:  now.Add(10 * time.Minute),
+			StartedAt:   now,
+			CreatedAt:   now,
+		}
+		ok, _, cErr := f.store.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, cErr)
+		require.True(t, ok)
+
+		out := f.srv.fireAction(ctx, hubfire.FireRequest{
+			ProjectID:  projectID,
+			ActionType: store.TriggerActionExec,
+			Payload:    tr.Actions[idx].Payload,
+			Authority: hubfire.RecordedAuthority{
+				Attribution:    tr.InitiatorAttribution,
+				Ceiling:        tr.AuthorityCeiling,
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   tr.ID,
+				FireID:         tf.ID,
+			},
+			Event: &hubfire.FireEvent{
+				ID:         evID,
+				ProjectID:  projectID,
+				SourceKind: store.TriggerSourceKindWebhook,
+				SourceID:   ep.ID,
+				Type:       "webhook.received",
+				Subject:    "r1-sub",
+				OccurredAt: now,
+				ReceivedAt: now,
+				Attributes: map[string]string{
+					"delivery":       api.NewUUID(),
+					"signature_mode": store.WebhookSignatureModeScionV1,
+					"endpoint_name":  ep.Name,
+				},
+				Trigger: &hubfire.FireTriggerRef{
+					ID:          tr.ID,
+					Name:        tr.Name,
+					ActionIndex: idx,
+				},
+			},
+			FireAt:   now,
+			Attempts: 1,
+		})
+		return tf.ID, out
+	}
+
+	fire0, out0 := fireActionAt(ev.ID, 0)
+	require.Equal(t, hubfire.FireStatusFired, out0.Status, "exec action 0 must be admitted: err=%q", out0.Error)
+	require.True(t, out0.Detached)
+
+	// Action 1 targets the SAME agent while action 0 is still sleeping: must ALSO be admitted!
+	fire1, out1 := fireActionAt(ev.ID, 1)
+	require.Equal(t, hubfire.FireStatusFired, out1.Status, "sibling exec action 1 must be admitted while action 0 runs: err=%q", out1.Error)
+	require.True(t, out1.Detached)
+
+	run0 := f.getRun(t, fire0)
+	assert.Equal(t, "trigger:"+tr.ID+":0", run0.OverlapKey)
+
+	run1 := f.getRun(t, fire1)
+	assert.Equal(t, "trigger:"+tr.ID+":1", run1.OverlapKey)
+
+	// A second event firing action 0 while action 0 is still running MUST still be skipped "overlap".
+	ev2 := &store.TriggerEvent{
+		ID:         api.NewUUID(),
+		ProjectID:  projectID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   ep.ID,
+		Type:       "webhook.received",
+		Subject:    "r1-sub-2",
+		DedupKey:   api.NewUUID(),
+		OccurredAt: now.Add(10 * time.Millisecond),
+		ReceivedAt: now.Add(10 * time.Millisecond),
+		Status:     store.TriggerEventStatusPending,
+	}
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, ev2))
+	_, out0Dup := fireActionAt(ev2.ID, 0)
+	assert.Equal(t, hubfire.FireStatusSkipped, out0Dup.Status)
+	assert.Equal(t, "previous run in progress", out0Dup.Error)
 }

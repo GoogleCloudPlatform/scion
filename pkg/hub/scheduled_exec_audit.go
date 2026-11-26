@@ -345,7 +345,12 @@ func newScheduledExecRunAudit(run store.ScheduledExecRun) *ScheduledExecEvent {
 		Timestamp:               time.Now().UTC(),
 	}
 	if run.IsTriggerOwned() && strings.HasPrefix(run.OverlapKey, "trigger:") {
-		e.TriggerID = strings.TrimPrefix(run.OverlapKey, "trigger:")
+		rest := strings.TrimPrefix(run.OverlapKey, "trigger:")
+		if id, _, ok := strings.Cut(rest, ":"); ok {
+			e.TriggerID = id
+		} else {
+			e.TriggerID = rest
+		}
 	}
 	return e
 }

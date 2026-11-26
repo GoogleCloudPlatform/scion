@@ -3548,7 +3548,30 @@ func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID st
 		q = q.Where(triggerfire.IDNEQ(exID))
 		callerRow, getErr := s.client.TriggerFire.Get(ctx, exID)
 		if getErr == nil {
+			// Use the caller event's canonical ordering key: the earliest
+			// non-skipped fire row for (trigger_id, callerRow.EventID). This
+			// guarantees all sibling actions of one matched event see the exact
+			// same count even if another event's action-0 row is inserted
+			// between this event's action 0 and action 1 (action-arrays §3.5).
 			callerCreated := callerRow.Created.UTC()
+			callerOrderID := exID
+			earliestRow, earErr := s.client.TriggerFire.Query().
+				Where(
+					triggerfire.TriggerIDEQ(tid),
+					triggerfire.EventIDEQ(callerRow.EventID),
+					triggerfire.StatusNEQ(store.TriggerFireStatusSkipped),
+				).
+				Order(
+					ent.Asc(triggerfire.FieldCreated),
+					ent.Asc(triggerfire.FieldID),
+				).
+				First(ctx)
+			if earErr == nil {
+				callerCreated = earliestRow.Created.UTC()
+				callerOrderID = earliestRow.ID
+			} else if !ent.IsNotFound(earErr) {
+				return 0, mapError(earErr)
+			}
 			q = q.Where(
 				triggerfire.EventIDNEQ(callerRow.EventID),
 				triggerfire.Or(
@@ -3556,7 +3579,7 @@ func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID st
 					triggerfire.CreatedLT(callerCreated),
 					triggerfire.And(
 						triggerfire.CreatedEQ(callerCreated),
-						triggerfire.IDLT(exID),
+						triggerfire.IDLT(callerOrderID),
 					),
 				),
 			)

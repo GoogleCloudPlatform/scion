@@ -237,3 +237,153 @@ func TestTriggerActionsStore_FireUniquenessClaimsAndDistinctEventRateCount(t *te
 	require.NotNil(t, ex0Dup)
 	assert.Equal(t, c0.ID, ex0Dup.ID)
 }
+
+func TestTriggerActionsStore_RateLimitDoesNotSplitMatchedEventUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t.Logf("dialect=%s", cs.client.Driver().Dialect())
+
+	projID := uuid.NewString()
+	trigID := uuid.NewString()
+	e1 := uuid.NewString()
+	e2 := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	since := now.Add(-time.Minute)
+
+	mk := func(ev string, idx int, at time.Time) *store.TriggerFire {
+		return &store.TriggerFire{
+			ID:          uuid.NewString(),
+			ProjectID:   projID,
+			TriggerID:   trigID,
+			EventID:     ev,
+			Subject:     "pr-1",
+			ActionType:  store.TriggerActionMessage,
+			ActionIndex: idx,
+			Status:      store.TriggerFireStatusFiring,
+			LeaseUntil:  at.Add(10 * time.Minute),
+			StartedAt:   at,
+			CreatedAt:   at,
+		}
+	}
+
+	// E1 action 0 is claimed and admitted (sees 0 prior events).
+	e1a0 := mk(e1, 0, now)
+	ok, _, err := cs.ClaimTriggerFire(ctx, e1a0)
+	require.NoError(t, err)
+	require.True(t, ok)
+	n0, err := cs.CountRecentTriggerFires(ctx, trigID, since, e1a0.ID)
+	require.NoError(t, err)
+	require.Equal(t, 0, n0, "E1 action 0 must see 0 prior events")
+	_, err = cs.FinishTriggerFire(ctx, e1a0.ID, store.TriggerFireStatusFired, "", "", "", now.Add(time.Millisecond))
+	require.NoError(t, err)
+
+	// Concurrent drainer inserts E2 action 0 (in-flight firing) before E1 action 1 is claimed.
+	e2a0 := mk(e2, 0, now.Add(2*time.Millisecond))
+	ok, _, err = cs.ClaimTriggerFire(ctx, e2a0)
+	require.NoError(t, err)
+	require.True(t, ok)
+	nE2, err := cs.CountRecentTriggerFires(ctx, trigID, since, e2a0.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, nE2, "E2 action 0 must count E1 and be rate-limited when max=1")
+
+	// E1 action 1 is claimed after E2's in-flight row, but must still use E1's
+	// earliest non-skipped ordering key so E1 is never split across siblings.
+	e1a1 := mk(e1, 1, now.Add(3*time.Millisecond))
+	ok, _, err = cs.ClaimTriggerFire(ctx, e1a1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	n1, err := cs.CountRecentTriggerFires(ctx, trigID, since, e1a1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n1, "E1 action 1 must get the same rate decision as E1 action 0")
+}
+
+func TestTriggerActionsStore_SiblingExecOverlapKeysAdmitted(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t.Logf("dialect=%s", cs.client.Driver().Dialect())
+
+	projID := uuid.NewString()
+	agentA := uuid.NewString()
+	agentB := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	tr := &store.Trigger{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		Name:       "two-exec-overlap",
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   uuid.NewString(),
+		MatchTypes: []string{"webhook.received"},
+		Actions: []store.TriggerAction{
+			{Type: store.TriggerActionExec, Payload: `{"agentId":"` + agentA + `","command":["true"]}`},
+			{Type: store.TriggerActionExec, Payload: `{"agentId":"` + agentB + `","command":["true"]}`},
+		},
+		Status: store.TriggerStatusActive,
+	}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+	ev := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   tr.SourceID,
+		Type:       "webhook.received",
+		Subject:    "s",
+		DedupKey:   uuid.NewString(),
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, ev))
+
+	admit := func(evID string, idx int, target string) error {
+		tf := &store.TriggerFire{
+			ID:          uuid.NewString(),
+			ProjectID:   projID,
+			TriggerID:   tr.ID,
+			EventID:     evID,
+			Subject:     "s",
+			ActionType:  store.TriggerActionExec,
+			ActionIndex: idx,
+			Status:      store.TriggerFireStatusFiring,
+			LeaseUntil:  now.Add(10 * time.Minute),
+			StartedAt:   now,
+			CreatedAt:   now,
+		}
+		ok, _, err := cs.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, err)
+		require.True(t, ok)
+		return cs.CreateScheduledExecRun(ctx, &store.ScheduledExecRun{
+			ProjectID:      projID,
+			FireID:         tf.ID,
+			OverlapKey:     "trigger:" + tr.ID + ":" + string(rune('0'+idx)),
+			TargetAgentID:  target,
+			CommandSHA256:  "abc",
+			Argc:           1,
+			TimeoutSeconds: 60,
+			StartedAt:      now,
+			NotAfter:       now.Add(time.Minute),
+			LeaseUntil:     now.Add(5 * time.Minute),
+			Outcome:        store.ScheduledExecOutcomeStarting,
+		})
+	}
+
+	require.NoError(t, admit(ev.ID, 0, agentA), "exec action 0 must be admitted")
+	require.NoError(t, admit(ev.ID, 1, agentB), "sibling exec action 1 must be admitted while action 0 is running")
+
+	// A second event firing action 0 while action 0 is still running MUST still be refused with overlap.
+	ev2 := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   tr.SourceID,
+		Type:       "webhook.received",
+		Subject:    "s2",
+		DedupKey:   uuid.NewString(),
+		OccurredAt: now.Add(time.Second),
+		ReceivedAt: now.Add(time.Second),
+		Status:     store.TriggerEventStatusPending,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, ev2))
+	err := admit(ev2.ID, 0, agentA)
+	require.ErrorIs(t, err, store.ErrScheduledExecOverlap, "repeated fire of the same exec action index must still refuse overlap")
+}

@@ -61,15 +61,24 @@ type FireTracker interface {
 	Admit(ctx context.Context) (context.Context, func(), bool)
 }
 
+// EventRateDecision caches the per-(trigger, event) rate-limit admission
+// decision across all sibling actions of one matched event so siblings never
+// disagree on admission under concurrency (action-arrays §3.5).
+type EventRateDecision struct {
+	Decided bool
+	Skipped bool
+}
+
 // FireTriggerRef identifies the trigger rule that initiated a FireEvent.
 type FireTriggerRef struct {
 	ID                      string
 	Name                    string
-	ActionIndex             int    // 0-based index of the firing action in triggers.actions (action-arrays §1)
-	SubjectMode             string // "new" | "skip" | "reuse" (Stage 2 §5.3, §5.6)
-	FireSubject             string // dispatcher-derived fire subject (subject_rule output or bounded event subject, Stage 1 §6.3 / Stage 2 §5.6)
-	MaxFiresPerMinute       int    // per-trigger fire rate cap (0 = unlimited, Stage 2 §7.4)
-	MaxConcurrentDispatches int    // per-trigger dispatch_agent concurrency cap (0 = default 5, Stage 2 §7.4)
+	ActionIndex             int                // 0-based index of the firing action in triggers.actions (action-arrays §1)
+	SubjectMode             string             // "new" | "skip" | "reuse" (Stage 2 §5.3, §5.6)
+	FireSubject             string             // dispatcher-derived fire subject (subject_rule output or bounded event subject, Stage 1 §6.3 / Stage 2 §5.6)
+	MaxFiresPerMinute       int                // per-trigger fire rate cap (0 = unlimited, Stage 2 §7.4)
+	MaxConcurrentDispatches int                // per-trigger dispatch_agent concurrency cap (0 = default 5, Stage 2 §7.4)
+	RateDecision            *EventRateDecision // optional shared per-(trigger, event) rate-limit decision (action-arrays §3.5)
 }
 
 // FireScheduleRef identifies the schedule and firing event for a schedule.fired

@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // Security inventory for trigger-routed exec (Stage 2 P8, ptone/scion#8241):
@@ -366,8 +367,20 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	var sciontoolScopeID string
 	if isTrigger {
 		if req.Authority.DefinitionID != "" {
-			overlapKey = "trigger:" + req.Authority.DefinitionID
-			sciontoolScopeID = req.Authority.DefinitionID
+			actionIdx := 0
+			if req.Event != nil && req.Event.Trigger != nil && req.Event.Trigger.ActionIndex >= 0 {
+				actionIdx = req.Event.Trigger.ActionIndex
+			}
+			overlapKey = fmt.Sprintf("trigger:%s:%d", req.Authority.DefinitionID, actionIdx)
+			if actionIdx == 0 {
+				sciontoolScopeID = req.Authority.DefinitionID
+			} else {
+				// sciontool requires ScheduleID to be a valid UUID; derive a
+				// deterministic per-(trigger, action_index) UUID so sibling exec
+				// actions targeting the same agent do not collide on agent_overlap,
+				// while repeated fires of the same action index still do (R1).
+				sciontoolScopeID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(overlapKey)).String()
+			}
 		}
 	} else if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule {
 		scheduleID = req.Authority.DefinitionID

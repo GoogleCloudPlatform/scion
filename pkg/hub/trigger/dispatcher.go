@@ -964,10 +964,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		}
 
 		var (
-			trigRecordedCount int
-			trigAggStatus     string
-			trigAggErr        string
-			trigAggTime       time.Time
+			trigRecordedCount   int
+			trigAggStatus       string
+			trigAggErr          string
+			trigAggTime         time.Time
+			alreadyCountedEvent bool
 		)
 		recordTrigOutcome := func(status, errMsg string, at time.Time) {
 			trigRecordedCount++
@@ -994,7 +995,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 		}
 		flushTrigCounters := func() {
-			if trigRecordedCount == 0 {
+			if trigRecordedCount == 0 || alreadyCountedEvent {
 				return
 			}
 			writeCtx, cancelWrite := storeWriteContext(ctx)
@@ -1004,6 +1005,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 			cancelWrite()
 		}
+
+		// Shared per-(trigger, event) rate-limit decision so all sibling actions
+		// of one matched event agree on admission (action-arrays §3.5).
+		var eventRateDecision hubfire.EventRateDecision
+		trigRef.RateDecision = &eventRateDecision
 
 		for actionIdx, act := range actions {
 			if ctx.Err() != nil {
@@ -1039,6 +1045,8 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					}
 					if claimedDirect {
 						recordTrigOutcome(store.TriggerFireStatusRefused, ErrFireStaleEvent, d.now().UTC())
+					} else {
+						alreadyCountedEvent = true
 					}
 					continue
 				}
@@ -1060,6 +1068,8 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					}
 					if claimedDirect {
 						recordTrigOutcome(store.TriggerFireStatusRefused, reason, d.now().UTC())
+					} else {
+						alreadyCountedEvent = true
 					}
 					continue
 				}
@@ -1217,8 +1227,15 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					// attempt's claimed row is still in status "firing" (or transitions to
 					// "fired" after this check), fire_count on trigger_events can
 					// undercount; trigger_fires rows remain the authoritative fire log.
-					if existing != nil && existing.Status == store.TriggerFireStatusFired {
-						fireCount++
+					if existing != nil {
+						if existing.Status == store.TriggerFireStatusFired {
+							fireCount++
+						}
+						if existing.Status != store.TriggerFireStatusCoalescing &&
+							existing.Status != store.TriggerFireStatusDeferred &&
+							existing.Status != store.TriggerFireStatusFiring {
+							alreadyCountedEvent = true
+						}
 					}
 					continue
 				}
