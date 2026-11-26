@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -55,10 +56,15 @@ func hostedExplicitWorkspaceRoots(ctx context.Context, projectPath, projectDir s
 	return hostedExplicitWorkspaceRootsFromGlobal(globalSettings, projectPath, projectDir)
 }
 
+var resolveHostedGlobalDir = config.GetGlobalDir
+
 func hostedExplicitWorkspaceRootsFromGlobal(globalSettings *config.VersionedSettings, projectPath, projectDir string) ([]string, error) {
-	globalDir, err := config.GetGlobalDir()
-	if err != nil || globalDir == "" {
+	globalDir, err := resolveHostedGlobalDir()
+	if err != nil {
 		return nil, fmt.Errorf("resolve global scion dir for hosted workspace validation: %w", err)
+	}
+	if globalDir == "" {
+		return nil, errors.New("resolve global scion dir for hosted workspace validation: empty global directory")
 	}
 
 	roots := []string{

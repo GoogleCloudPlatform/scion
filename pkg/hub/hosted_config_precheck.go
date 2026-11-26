@@ -113,6 +113,18 @@ func (d *HTTPAgentDispatcher) hostedWorkspacePrecheck(ctx context.Context, agent
 			project = p
 		}
 	}
+	if project == nil {
+		slog.Warn("Hosted dispatch refused: stored absolute workspace has no resolvable project",
+			"agent_id", agent.ID,
+			"project_id", agent.ProjectID,
+			"code", api.LaunchCodeWorkspaceNotPermitted)
+		return &RuntimeTargetRefusal{
+			Code:    api.LaunchCodeWorkspaceNotPermitted,
+			Status:  http.StatusBadRequest,
+			Message: "stored absolute workspace does not match the project workspace",
+			Details: map[string]interface{}{"field": "workspace"},
+		}
+	}
 	want, resolveErr := d.hostedWorkspaceResolver(project)
 	if resolveErr != nil || want.HostPath == "" || !sameWorkspacePath(ws, want.HostPath) {
 		slog.Warn("Hosted dispatch refused: stored absolute workspace does not match resolved project workspace",

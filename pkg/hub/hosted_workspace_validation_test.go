@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -326,6 +327,26 @@ func TestDispatch_HostedWorkspacePrecheck(t *testing.T) {
 		assert.ErrorIs(t, err, storeErr)
 		var refusal *RuntimeTargetRefusal
 		assert.False(t, errors.As(err, &refusal), "transient store error must not be masked as RuntimeTargetRefusal")
+	})
+
+	t.Run("nil project is refused without invoking workspace resolver", func(t *testing.T) {
+		d, _, a, _, _ := newSetup(t, true, "/var/tmp/foreign-dir", nil)
+		// Return ErrNotFound on the 2nd GetProject call so project remains nil
+		// inside hostedWorkspacePrecheck.
+		d.store = &getProjectFailNthStore{Store: d.store, failOn: 2, err: store.ErrNotFound}
+		d.SetHostedWorkspaceResolver(func(p *store.Project) (projectfs.Resolved, error) {
+			if p == nil {
+				panic("hostedWorkspaceResolver must not be called with nil project")
+			}
+			return projectfs.Resolved{}, nil
+		})
+		err := d.hostedConfigPrecheck(ctx, a)
+		var refusal *RuntimeTargetRefusal
+		require.True(t, errors.As(err, &refusal), "expected RuntimeTargetRefusal, got: %v", err)
+		assert.Equal(t, http.StatusBadRequest, refusal.Status)
+		assert.Equal(t, api.LaunchCodeWorkspaceNotPermitted, refusal.Code)
+		assert.Equal(t, "stored absolute workspace does not match the project workspace", refusal.Message)
+		assert.Equal(t, "workspace", refusal.Details["field"])
 	})
 }
 

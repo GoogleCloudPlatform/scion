@@ -97,6 +97,29 @@ func TestHostedExplicitWorkspaceRoots_LocalAndShared(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestHostedExplicitWorkspaceRoots_GlobalDirErrors(t *testing.T) {
+	orig := resolveHostedGlobalDir
+	t.Cleanup(func() { resolveHostedGlobalDir = orig })
+
+	t.Run("empty global dir returns clean error without nil wrap", func(t *testing.T) {
+		resolveHostedGlobalDir = func() (string, error) { return "", nil }
+		roots, err := hostedExplicitWorkspaceRootsFromGlobal(nil, "", "")
+		assert.Nil(t, roots)
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "%!w")
+		assert.Contains(t, err.Error(), "empty global directory")
+	})
+
+	t.Run("non-nil lookup error is wrapped", func(t *testing.T) {
+		boom := errors.New("home lookup failed")
+		resolveHostedGlobalDir = func() (string, error) { return "", boom }
+		roots, err := hostedExplicitWorkspaceRootsFromGlobal(nil, "", "")
+		assert.Nil(t, roots)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, boom)
+	})
+}
+
 // TestHostedExplicitWorkspaceRoots_IgnoresProjectSettings verifies that
 // project-level settings.yaml values (server.workspace_storage,
 // server.project_storage, workspace_path) cannot widen the broker's hosted
