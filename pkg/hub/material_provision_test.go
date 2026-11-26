@@ -112,17 +112,27 @@ func TestProvisionCredentials_AllowsOnDemandExcludesUnknownType(t *testing.T) {
 
 	t.Run("unknown_type_not_fetched_or_sent", func(t *testing.T) {
 		m, rec, _ := newProvisionCredsFixture(t, "pc-unknown-excl", ldOptions{})
-		// Stub List to return an unknown-type project GITHUB_TOKEN metadata row
-		// (Ent schema prevents storing unknown enum values directly).
-		unknownMeta := secret.SecretMeta{
-			ID:         "unknown-type-gh-id",
-			Name:       "GITHUB_TOKEN",
-			SecretType: "unknown_future_type",
-			Scope:      store.ScopeProject,
-			ScopeID:    m.agent.ProjectID,
-		}
+		// Seed a real, authorized project GITHUB_TOKEN row.
+		m.secret(t, "GITHUB_TOKEN", "real-authorized-val", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+
+		// Control: with its real environment type, this exact stored row is
+		// authorized, fetched, and sent.
+		ctrl := m.d.resolveProvisionCredentials(context.Background(), m.agent, "DispatchAgentStart")
+		assert.Equal(t, map[string]string{"GITHUB_TOKEN": "real-authorized-val"}, ctrl)
+		assert.Equal(t, []string{"GITHUB_TOKEN"}, fetchedNames(rec))
+
+		// Reset spy and rewrite only SecretType on the real authorized row in
+		// List (preserving its real ID/Scope/ScopeID so authorize would allow
+		// it if the type filter were missing).
+		rec.mu.Lock()
+		rec.fetched = nil
+		rec.mu.Unlock()
 		orig := m.d.secretBackend
-		m.d.SetSecretBackend(&unknownTypeListSecretBackend{SecretBackend: orig, extra: []secret.SecretMeta{unknownMeta}})
+		m.d.SetSecretBackend(&rewriteTypeListSecretBackend{
+			SecretBackend: orig,
+			targetName:    "GITHUB_TOKEN",
+			newType:       "unknown_future_type",
+		})
 
 		got := m.d.resolveProvisionCredentials(context.Background(), m.agent, "DispatchAgentStart")
 		assert.Nil(t, got)
@@ -130,18 +140,23 @@ func TestProvisionCredentials_AllowsOnDemandExcludesUnknownType(t *testing.T) {
 	})
 }
 
-type unknownTypeListSecretBackend struct {
+type rewriteTypeListSecretBackend struct {
 	secret.SecretBackend
-	extra []secret.SecretMeta
+	targetName string
+	newType    string
 }
 
-func (b *unknownTypeListSecretBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+func (b *rewriteTypeListSecretBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
 	metas, err := b.SecretBackend.List(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
 	if filter.Scope == store.ScopeProject {
-		metas = append(metas, b.extra...)
+		for i := range metas {
+			if metas[i].Name == b.targetName {
+				metas[i].SecretType = b.newType
+			}
+		}
 	}
 	return metas, nil
 }

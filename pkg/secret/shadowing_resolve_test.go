@@ -208,3 +208,122 @@ func TestGCPBackend_ResolveOnDemandExcludesAndShadowsByTarget(t *testing.T) {
 		return b, wasFetched
 	})
 }
+
+type listHookSecretStore struct {
+	store.SecretStore
+	onListScope   func(ctx context.Context, filter store.SecretFilter)
+	onListProgeny func(ctx context.Context)
+}
+
+func (s *listHookSecretStore) ListSecrets(ctx context.Context, filter store.SecretFilter) ([]store.Secret, error) {
+	rows, err := s.SecretStore.ListSecrets(ctx, filter)
+	if err == nil && s.onListScope != nil {
+		s.onListScope(ctx, filter)
+	}
+	return rows, err
+}
+
+func (s *listHookSecretStore) ListProgenySecrets(ctx context.Context, ancestry []string) ([]store.Secret, error) {
+	rows, err := s.SecretStore.ListProgenySecrets(ctx, ancestry)
+	if err == nil && s.onListProgeny != nil {
+		s.onListProgeny(ctx)
+	}
+	return rows, err
+}
+
+// runResolveTypeFlipRaceCases verifies security finding L1: if an environment
+// secret (at project scope or progeny) is replaced with on_demand between
+// metadata listing and value read, Resolve skips it rather than delivering the
+// new on_demand value under the stale listed type.
+func runResolveTypeFlipRaceCases(t *testing.T, newBackend func(t *testing.T) (hubScopeResolveBackend, *listHookSecretStore)) {
+	t.Helper()
+	ctx := context.Background()
+	b, hook := newBackend(t)
+
+	const (
+		projectID = "proj-l1-race"
+		parentID  = "parent-l1-race"
+	)
+
+	for _, in := range []*SetSecretInput{
+		{Name: "GITHUB_TOKEN", Value: "OLD-ENV", SecretType: TypeEnvironment, Target: "GITHUB_TOKEN", Scope: ScopeProject, ScopeID: projectID, InjectionMode: store.InjectionModeAlways},
+		{Name: "CTRL_ENV", Value: "ctrl-val", SecretType: TypeEnvironment, Target: "CTRL_ENV", Scope: ScopeProject, ScopeID: projectID, InjectionMode: store.InjectionModeAlways},
+		{Name: "PROGENY_FLIP", Value: "OLD-PROGENY", SecretType: TypeEnvironment, Target: "PROGENY_FLIP", Scope: ScopeUser, ScopeID: parentID, InjectionMode: store.InjectionModeAlways, AllowProgeny: true, CreatedBy: parentID},
+		{Name: "CTRL_PROGENY", Value: "ctrl-progeny-val", SecretType: TypeEnvironment, Target: "CTRL_PROGENY", Scope: ScopeUser, ScopeID: parentID, InjectionMode: store.InjectionModeAlways, AllowProgeny: true, CreatedBy: parentID},
+	} {
+		if _, _, err := b.Set(ctx, in); err != nil {
+			t.Fatalf("Set %s/%s: %v", in.Scope, in.Name, err)
+		}
+	}
+
+	var scopeFired, progenyFired bool
+	hook.onListScope = func(ctx context.Context, filter store.SecretFilter) {
+		if filter.Scope == ScopeProject && !scopeFired {
+			scopeFired = true
+			if _, _, err := b.Set(ctx, &SetSecretInput{
+				Name: "GITHUB_TOKEN", Value: "NEW-ONDEMAND", SecretType: TypeOnDemand, Target: "GITHUB_TOKEN",
+				Scope: ScopeProject, ScopeID: projectID, InjectionMode: store.InjectionModeAsNeeded,
+			}); err != nil {
+				t.Errorf("hook Set project GITHUB_TOKEN: %v", err)
+			}
+		}
+	}
+	hook.onListProgeny = func(ctx context.Context) {
+		if !progenyFired {
+			progenyFired = true
+			if _, _, err := b.Set(ctx, &SetSecretInput{
+				Name: "PROGENY_FLIP", Value: "NEW-PROGENY-ONDEMAND", SecretType: TypeOnDemand, Target: "PROGENY_FLIP",
+				Scope: ScopeUser, ScopeID: parentID, InjectionMode: store.InjectionModeAsNeeded,
+				AllowProgeny: true, CreatedBy: parentID,
+			}); err != nil {
+				t.Errorf("hook Set progeny PROGENY_FLIP: %v", err)
+			}
+		}
+	}
+
+	resolved, err := b.Resolve(ctx, "", projectID, "", &ResolveOpts{
+		AgentAncestry: []string{parentID},
+		AuthzCheck:    func(SecretMeta) bool { return true },
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !scopeFired || !progenyFired {
+		t.Fatalf("expected both hooks to fire (scope=%v progeny=%v)", scopeFired, progenyFired)
+	}
+
+	got := make(map[string]SecretWithValue, len(resolved))
+	for _, sv := range resolved {
+		got[sv.Name] = sv
+	}
+	if sv, ok := got["GITHUB_TOKEN"]; ok {
+		t.Errorf("GITHUB_TOKEN was delivered after flip to on_demand: type=%q value=%q", sv.SecretType, sv.Value)
+	}
+	if sv, ok := got["PROGENY_FLIP"]; ok {
+		t.Errorf("PROGENY_FLIP was delivered after flip to on_demand: type=%q value=%q", sv.SecretType, sv.Value)
+	}
+	if sv, ok := got["CTRL_ENV"]; !ok || sv.Value != "ctrl-val" {
+		t.Errorf("CTRL_ENV = %+v (present=%v), want delivered", sv.SecretMeta, ok)
+	}
+	if sv, ok := got["CTRL_PROGENY"]; !ok || sv.Value != "ctrl-progeny-val" {
+		t.Errorf("CTRL_PROGENY = %+v (present=%v), want delivered", sv.SecretMeta, ok)
+	}
+}
+
+func TestLocalBackend_ResolveSkipsRowChangedToOnDemandAfterList(t *testing.T) {
+	runResolveTypeFlipRaceCases(t, func(t *testing.T) (hubScopeResolveBackend, *listHookSecretStore) {
+		_, baseStore := createTestBackend(t)
+		hook := &listHookSecretStore{SecretStore: baseStore}
+		b := NewLocalBackend(hook, "test-hub-id", "test-signing-key-32-bytes-long!!")
+		return b, hook
+	})
+}
+
+func TestGCPBackend_ResolveSkipsRowChangedToOnDemandAfterList(t *testing.T) {
+	runResolveTypeFlipRaceCases(t, func(t *testing.T) (hubScopeResolveBackend, *listHookSecretStore) {
+		base, _ := createTestGCPBackend(t)
+		hook := &listHookSecretStore{SecretStore: base.store}
+		base.store = hook
+		return base, hook
+	})
+}

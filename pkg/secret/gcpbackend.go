@@ -674,6 +674,20 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			}
 			return nil, b.wrapResolveAccessError(s.Scope, s.Key, err)
 		}
+		// Re-check the stored record after reading the Secret Manager value so
+		// a concurrent type or generation change (e.g. environment -> on_demand
+		// between ListSecrets and AccessSecretVersion) can never deliver the
+		// new value under the stale listed type.
+		cur, err := b.store.GetSecret(ctx, s.Key, s.Scope, s.ScopeID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if recordGenerationChanged(cur, *fromStoreSecretMeta(&s)) || !DeliverableType(cur.SecretType) {
+			continue
+		}
 
 		secretType := s.SecretType
 		if secretType == "" {
@@ -753,6 +767,16 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 					continue
 				}
 				return nil, b.wrapResolveAccessError(s.Scope, s.Key, err)
+			}
+			cur, err := b.store.GetSecret(ctx, s.Key, s.Scope, s.ScopeID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if recordGenerationChanged(cur, *meta) || !DeliverableType(cur.SecretType) {
+				continue
 			}
 
 			secretType := s.SecretType

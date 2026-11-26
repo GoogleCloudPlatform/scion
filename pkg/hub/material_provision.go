@@ -117,6 +117,16 @@ func githubTokenShaped(v string) bool {
 	return false
 }
 
+// isProvisionCredentialSecretType reports whether a secret of type t may be
+// fetched as a broker-side ProvisionCredential for gh:// skill resolution.
+// on_demand is intentionally allowed here alongside environment, "" and file
+// because ProvisionCredentials are a broker-side consumer never forwarded to
+// the agent container environment (see pkg/runtimebroker/handlers.go).
+// Internal and unknown types are excluded on metadata before FetchValues.
+func isProvisionCredentialSecretType(t string) bool {
+	return secret.DeliverableType(t) || t == store.SecretTypeOnDemand
+}
+
 // resolveProvisionCredentials returns the provision credentials for agent:
 // its project-scope secrets whose names are in the key set of its merged
 // skill references (ghCredentialKeysForSkills), each one authorized as a
@@ -136,16 +146,6 @@ func githubTokenShaped(v string) bool {
 // the failure is then the caller's cancel or deadline. callerName prefixes
 // every log message this function writes, at any level; no value is ever
 // logged.
-// isProvisionCredentialSecretType reports whether a secret of type t may be
-// fetched as a broker-side ProvisionCredential for gh:// skill resolution.
-// on_demand is intentionally allowed here alongside environment, "" and file
-// because ProvisionCredentials are a broker-side consumer never forwarded to
-// the agent container environment (see pkg/runtimebroker/handlers.go).
-// Internal and unknown types are excluded on metadata before FetchValues.
-func isProvisionCredentialSecretType(t string) bool {
-	return secret.DeliverableType(t) || t == store.SecretTypeOnDemand
-}
-
 func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, agent *store.Agent, callerName string) map[string]string {
 	if agent == nil || agent.ProjectID == "" || d.secretBackend == nil {
 		return nil

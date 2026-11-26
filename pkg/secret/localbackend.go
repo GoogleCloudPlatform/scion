@@ -283,6 +283,20 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 		if err != nil {
 			return nil, err
 		}
+		// Re-check the stored record after reading the value so a concurrent
+		// type or generation change (e.g. environment -> on_demand between
+		// ListSecrets and GetSecretValue) can never deliver the new value
+		// under the stale listed type.
+		cur, err := b.store.GetSecret(ctx, s.Key, s.Scope, s.ScopeID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if recordGenerationChanged(cur, *fromStoreSecretMeta(&s)) || !DeliverableType(cur.SecretType) {
+			continue
+		}
 		value, err := b.decryptPayload(rawValue, s.SecretRef)
 		if err != nil {
 			failures = append(failures, ResolveFailure{Key: s.Key, Scope: s.Scope, Kind: DecryptFailureKind(err)})
@@ -358,6 +372,16 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			}
 			if err != nil {
 				return nil, err
+			}
+			cur, err := b.store.GetSecret(ctx, s.Key, s.Scope, s.ScopeID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if recordGenerationChanged(cur, *meta) || !DeliverableType(cur.SecretType) {
+				continue
 			}
 			value, err := b.decryptPayload(rawValue, s.SecretRef)
 			if err != nil {
