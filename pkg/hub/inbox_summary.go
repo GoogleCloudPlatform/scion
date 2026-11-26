@@ -210,9 +210,10 @@ type inboxSourceEntry struct {
 }
 
 // publishInboxHint emits an inbox invalidation hint on user.<userID>.inbox
-// when the web.inbox_dashboard experiment is enabled. Waiting hints carry only
-// agent ID and activity, which project members can already observe on the
-// project status stream.
+// when the web.inbox_dashboard experiment is enabled. Owner waiting hints carry
+// agentId and activity; project-member waiting hints are content-free
+// ({category:"waiting"}) so members without read access to a specific agent
+// never learn agent IDs or activity transitions.
 func (s *Server) publishInboxHint(ctx context.Context, userID string, hint InboxHint) {
 	if userID == "" || !s.experimentEnabled(experiments.InboxDashboard) {
 		return
@@ -558,6 +559,16 @@ func (s *Server) waitingLimit() int {
 
 func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previews int, _ string) InboxCategory {
 	const href = "/agents?q=activity%3Awaiting_for_input"
+	if v.token != nil && !v.token.Ceiling().Allows("agent.list") {
+		return InboxCategory{
+			State:             InboxStateUnavailable,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: false,
+			Href:              href,
+			Previews:          []any{},
+		}
+	}
 	limit := s.waitingLimit()
 
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, v.user, "agent.list")

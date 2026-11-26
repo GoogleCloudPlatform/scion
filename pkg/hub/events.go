@@ -821,19 +821,27 @@ func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agen
 	isWaiting := agent.Activity == string(state.ActivityWaitingForInput)
 	wasWaiting := p.trackAgentWaiting(agent.ID, isWaiting)
 	if p.shouldEmitInboxHint() {
-		hint := InboxHint{
+		ownerHint := InboxHint{
 			Category: InboxCategoryWaiting,
 			AgentID:  agent.ID,
 			Activity: agent.Activity,
 		}
 		if isWaiting || wasWaiting {
+			// Project members receive a content-free invalidation hint (no
+			// agentId or activity) so a member denied read on this agent never
+			// learns agent IDs or transitions from the hint stream.
+			memberHint := InboxHint{Category: InboxCategoryWaiting}
 			for _, uid := range p.resolveInboxWaitingRecipients(ctx, agent.ProjectID, agent.OwnerID) {
-				p.PublishUserInboxHint(ctx, uid, hint)
+				if uid == agent.OwnerID {
+					p.PublishUserInboxHint(ctx, uid, ownerHint)
+				} else {
+					p.PublishUserInboxHint(ctx, uid, memberHint)
+				}
 			}
 		} else if agent.OwnerID != "" {
 			// Always deliver the owner hint so a hub restart or cross-replica
 			// leave transition never drops the owner's live refresh.
-			p.PublishUserInboxHint(ctx, agent.OwnerID, hint)
+			p.PublishUserInboxHint(ctx, agent.OwnerID, ownerHint)
 		}
 	}
 }

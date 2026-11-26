@@ -934,19 +934,25 @@ func TestUserMeInboxSummary_WaitingCategory(t *testing.T) {
 	assert.Equal(t, map[string]int{InboxBreakdownProjects: 2}, respZero.Categories[InboxCategoryWaiting].Breakdown)
 	assert.Empty(t, respZero.Categories[InboxCategoryWaiting].Previews)
 
-	// 3. UAT with only inbox:read (no agent:list) sees 0 waiting agents, matching
-	// GET /api/v1/agents?q=activity:waiting_for_input (ptone/scion#9300).
+	// 3. UAT with only inbox:read (ceiling lacks agent.list) receives
+	// state:"unavailable" with countsTowardTotal:false so callers (and scion
+	// inbox) do not see a false "Nothing Waiting" when agents are waiting.
 	tokInboxOnly := f.mint(t, f.member, hubBoundary(), "inbox:read")
 	inboxOnlyResp := decodeInboxSummary(t, f.call(t, tokInboxOnly, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, 0, inboxOnlyResp.Total)
+	assert.Equal(t, InboxStateUnavailable, inboxOnlyResp.Categories[InboxCategoryWaiting].State)
+	assert.False(t, inboxOnlyResp.Categories[InboxCategoryWaiting].CountsTowardTotal)
 	assert.Equal(t, 0, inboxOnlyResp.Categories[InboxCategoryWaiting].Count)
 	assert.Empty(t, inboxOnlyResp.Categories[InboxCategoryWaiting].AgentIDs)
 	assert.Empty(t, inboxOnlyResp.Categories[InboxCategoryWaiting].Previews)
 
-	// 4. UAT with inbox:read + agent:read (still no agent:list) sees 0 waiting agents.
+	// 4. UAT with inbox:read + agent:read (ceiling still lacks agent.list) also
+	// receives state:"unavailable" and is excluded from total.
 	tokInboxAgentRead := f.mint(t, f.member, hubBoundary(), "inbox:read", "agent:read")
 	inboxReadResp := decodeInboxSummary(t, f.call(t, tokInboxAgentRead, http.MethodGet, userMeInboxSummaryPath, nil))
 	assert.Equal(t, 0, inboxReadResp.Total)
+	assert.Equal(t, InboxStateUnavailable, inboxReadResp.Categories[InboxCategoryWaiting].State)
+	assert.False(t, inboxReadResp.Categories[InboxCategoryWaiting].CountsTowardTotal)
 	assert.Equal(t, 0, inboxReadResp.Categories[InboxCategoryWaiting].Count)
 	assert.Empty(t, inboxReadResp.Categories[InboxCategoryWaiting].AgentIDs)
 
@@ -1155,14 +1161,30 @@ func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 	drainNoEvent(teammateCh, "flag off enter waiting teammate")
 	assert.Equal(t, int32(0), memberCounter.listMembers.Load(), "flag off must not look up project members")
 
-	// Flag ON: entering and leaving waiting_for_input emit hints to owner and project members,
-	// but never to non-members (ptone/scion#9300).
+	// Flag ON: entering and leaving waiting_for_input emit the full hint
+	// (agentId + activity) to the owner and a content-free hint ({category:"waiting"}
+	// with no agentId or activity) to project members, and never to non-members.
 	setInboxDashboardExperiment(t, srv, true)
+
+	expectContentFreeWaitingHint := func(ch <-chan Event, wantUserID string) {
+		t.Helper()
+		select {
+		case evt := <-ch:
+			assert.Equal(t, "user."+wantUserID+".inbox", evt.Subject)
+			var hint InboxHint
+			require.NoError(t, json.Unmarshal(evt.Data, &hint))
+			assert.Equal(t, InboxCategoryWaiting, hint.Category)
+			assert.Empty(t, hint.AgentID, "member waiting hint must omit agentId")
+			assert.Empty(t, hint.Activity, "member waiting hint must omit activity")
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for content-free waiting hint for %s", wantUserID)
+		}
+	}
 
 	memberCounter.listMembers.Store(0)
 	pub.PublishAgentStatus(ctx, agent)
 	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityWaitingForInput))
-	expectWaitingHint(teammateCh, teammateID, agent.ID, string(state.ActivityWaitingForInput))
+	expectContentFreeWaitingHint(teammateCh, teammateID)
 	drainNoEvent(otherCh, "non-member on enter")
 	assert.Equal(t, int32(1), memberCounter.listMembers.Load(), "entering waiting_for_input should resolve project members once")
 
@@ -1170,7 +1192,7 @@ func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 	agent.Activity = string(state.ActivityThinking)
 	pub.PublishAgentStatus(ctx, agent)
 	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityThinking))
-	expectWaitingHint(teammateCh, teammateID, agent.ID, string(state.ActivityThinking))
+	expectContentFreeWaitingHint(teammateCh, teammateID)
 	drainNoEvent(otherCh, "non-member on leave")
 	assert.Equal(t, int32(1), memberCounter.listMembers.Load(), "leaving waiting_for_input should resolve project members once")
 
@@ -1206,7 +1228,7 @@ func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 	agent.Activity = string(state.ActivityWaitingForInput)
 	pub.PublishAgentStatus(ctx, agent)
 	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityWaitingForInput))
-	expectWaitingHint(teammateCh, teammateID, agent.ID, string(state.ActivityWaitingForInput))
+	expectContentFreeWaitingHint(teammateCh, teammateID)
 
 	memberCounter.listMembers.Store(0)
 	pub.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
