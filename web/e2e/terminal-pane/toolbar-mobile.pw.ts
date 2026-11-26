@@ -223,6 +223,80 @@ test('phoneChrome does not overflow in connected, disconnected, or reconnecting 
   }
 });
 
+test('phoneChrome preserves Back-to-Project and Back-to-Agent navigation in error and loading states at 320px/390px without overflow', async ({
+  page,
+}) => {
+  await setupNarrowPane(page, { keyBar: false, phoneChrome: true });
+
+  await page.evaluate(() => {
+    const navPaths: string[] = [];
+    (window as unknown as { __navPaths: string[] }).__navPaths = navPaths;
+    window.addEventListener('nav-click', (e) => {
+      const detail = (e as CustomEvent<{ path?: string }>).detail;
+      if (detail?.path) navPaths.push(detail.path);
+    });
+  });
+
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+
+    // Error state with no terminal instance
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        loading: boolean;
+        terminal: unknown;
+        projectId: string;
+        session: { state: { error: string | null } };
+        requestUpdate: () => void;
+      };
+      pane.loading = false;
+      pane.terminal = null;
+      pane.projectId = 'project with space';
+      pane.session.state.error = 'Agent is unavailable';
+      pane.requestUpdate();
+    });
+    await page.waitForTimeout(30);
+    await assertNoToolbarOverflow(page, width);
+
+    const overflowBtn = page.locator('.toolbar-overflow-btn');
+    await expect(overflowBtn).toBeVisible();
+    await overflowBtn.click();
+    const projectItem = page.locator('.toolbar-overflow sl-menu-item[value="project"]');
+    const agentItem = page.locator('.toolbar-overflow sl-menu-item[value="agent"]');
+    await expect(projectItem).toBeVisible();
+    await expect(agentItem).toBeVisible();
+    await projectItem.click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as unknown as { __navPaths: string[] }).__navPaths.at(-1))
+      )
+      .toBe('/projects/project%20with%20space');
+
+    // Loading state
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        loading: boolean;
+        requestUpdate: () => void;
+      };
+      pane.loading = true;
+      pane.requestUpdate();
+    });
+    await page.waitForTimeout(30);
+    await assertNoToolbarOverflow(page, width);
+
+    await expect(overflowBtn).toBeVisible();
+    await overflowBtn.click();
+    await expect(projectItem).toBeVisible();
+    await expect(agentItem).toBeVisible();
+    await agentItem.click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as unknown as { __navPaths: string[] }).__navPaths.at(-1))
+      )
+      .toBe(`/agents/${encodeURIComponent(agentId)}`);
+  }
+});
+
 test('desktop viewport keeps inline controls visible and hides overflow menu', async ({ page }) => {
   await setupNarrowPane(page, { keyBar: false, compactHeader: false });
   await expect(page.locator('.toolbar-overflow-btn')).toBeHidden();

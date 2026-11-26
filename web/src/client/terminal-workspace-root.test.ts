@@ -558,6 +558,25 @@ describe('the phone drawer', () => {
     dropdown.remove();
   });
 
+  it('Escape inside the rail place menu closes the menu while keeping the phone drawer open', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+
+    const placeBtn = rail().querySelector<HTMLButtonElement>('[data-rail-focus-id$=":place"]')!;
+    placeBtn.click();
+    const placeMenu = root.element.querySelector<HTMLElement>('.terminal-place-menu')!;
+    expect(placeMenu.hidden).toBe(false);
+
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    placeMenu.dispatchEvent(esc);
+
+    expect(esc.defaultPrevented).toBe(true);
+    expect(placeMenu.hidden).toBe(true);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+  });
+
   it('re-inserting detached banners while the header is inside the drawer does not throw', async () => {
     mockNarrowViewport();
     await mount();

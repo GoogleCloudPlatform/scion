@@ -3206,8 +3206,13 @@ export class ScionTerminalPane extends LitElement {
   override render() {
     if (this.loading) {
       return html`
-        <div class="toolbar ${this.phoneChrome ? 'phone' : ''}">
-          ${this.renderMenuButton()} ${this.renderBackLinks()}
+        <div class="toolbar-container">
+          <div class="toolbar ${this.phoneChrome ? 'phone' : ''}">
+            ${this.renderMenuButton()} ${this.renderBackLinks()}
+            ${this.phoneChrome && this.agentId
+              ? html`<div class="toolbar-tail">${this.renderToolbarOverflow()}</div>`
+              : nothing}
+          </div>
         </div>
         <div class="loading-state">
           <div class="spinner"></div>
@@ -3221,14 +3226,19 @@ export class ScionTerminalPane extends LitElement {
       const suspendHint =
         this.isSuspended && this.agent ? suspendReasonHint(this.agent) : undefined;
       return html`
-        <div class="toolbar ${this.phoneChrome ? 'phone' : ''}">
-          ${this.renderMenuButton()} ${this.renderBackLinks()}
-          ${this.agentName
-            ? html`
-                <div class="separator"></div>
-                ${this.renderAgentName(this.agentName)}
-              `
-            : ''}
+        <div class="toolbar-container">
+          <div class="toolbar ${this.phoneChrome ? 'phone' : ''}">
+            ${this.renderMenuButton()} ${this.renderBackLinks()}
+            ${this.agentName
+              ? html`
+                  <div class="separator"></div>
+                  ${this.renderAgentName(this.agentName)}
+                `
+              : ''}
+            ${this.phoneChrome && this.agentId
+              ? html`<div class="toolbar-tail">${this.renderToolbarOverflow()}</div>`
+              : nothing}
+          </div>
         </div>
         <div class="error-state">
           <div
