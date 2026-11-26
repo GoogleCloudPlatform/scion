@@ -440,6 +440,15 @@ func TestDecisionsQueryCount_TrayOpenReconcileReuse(t *testing.T) {
 		seedSettledAndOpenHistoryForQueryCount(t, f, cs, numProjects, settledPerProject, openProjects)
 		ctx := context.Background()
 
+		// Prime the user-activity tracker so userActivityMiddleware's async
+		// UpdateUserLastSeen goroutine (UPDATE + SELECT) is throttled and
+		// cannot race into the counted window.
+		if f.srv.userActivity != nil {
+			f.srv.userActivity.mu.Lock()
+			f.srv.userActivity.lastSeen[f.bob.ID] = time.Now()
+			f.srv.userActivity.mu.Unlock()
+		}
+
 		// Full tray open: HTTP limit=0 + bell reconcile (waitDecisionBellIdle).
 		counter.Reset(true)
 		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
